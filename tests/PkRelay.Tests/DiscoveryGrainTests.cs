@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using System.Reflection;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -128,6 +129,57 @@ public sealed class DiscoveryGrainTests
             Assert.Contains(items, x => x["label"]!.GetValue<string>() == "chat-g" && x["machineName"]!.GetValue<string>() == "Ghost");
         }
         finally { await host.StopAsync(); }
+    }
+
+    [Fact]
+    public async Task A_revocation_completing_during_a_validation_leaves_no_stale_cache_entry()
+    {
+        var grain = new GatedDiscoveryGrain();
+        var factory = DispatchProxy.Create<IGrainFactory, FakeGrainFactory>();
+        ((FakeGrainFactory)(object)factory).Grain = grain;
+        var directory = new MachineDirectory(factory);
+        // The revoke is in flight, the validation starts and the grain answers it as valid, then the revoke completes before the validation resumes.
+        var revoke = directory.RevokeAsync(Administrator, "pc-a", CancellationToken.None);
+        await grain.RevokeReached.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        var validate = directory.ValidateAsync("secret-a", CancellationToken.None);
+        await grain.ValidateAnswered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        grain.ReleaseRevoke.SetResult();
+        Assert.True((await revoke.WaitAsync(TimeSpan.FromSeconds(10))).Ok);
+        grain.ReleaseValidate.SetResult();
+        Assert.Equal("pc-a", (await validate.WaitAsync(TimeSpan.FromSeconds(10)))?.MachineId);
+        // The racing call returned what the grain said, but nothing stale may remain cached.
+        Assert.Null(await directory.ValidateAsync("secret-a", CancellationToken.None));
+    }
+
+    /// <summary>Answers validation from the state before the revoke, then holds the answer back until released.</summary>
+    private sealed class GatedDiscoveryGrain : IDiscoveryGrain
+    {
+        private bool revoked;
+        public TaskCompletionSource RevokeReached { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleaseRevoke { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ValidateAnswered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleaseValidate { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task<RelayReply> ExecuteAsync(RelayCaller caller, string operation, string argumentsJson)
+        {
+            if (operation == DiscoveryOperations.Revoke)
+            {
+                RevokeReached.SetResult(); await ReleaseRevoke.Task; revoked = true;
+                return Replies.Ok(new { revoked = true });
+            }
+            Assert.Equal(DiscoveryOperations.Validate, operation);
+            var answer = revoked ? Replies.Error("NotFound") : Replies.Ok(new { machineId = "pc-a", principalId = "machine:pc-a" });
+            if (revoked) return answer;
+            ValidateAnswered.SetResult(); await ReleaseValidate.Task;
+            return answer;
+        }
+    }
+
+    private class FakeGrainFactory : DispatchProxy
+    {
+        public IDiscoveryGrain? Grain { get; set; }
+        protected override object? Invoke(MethodInfo? targetMethod, object?[]? args) =>
+            targetMethod!.Name == "GetGrain" && targetMethod.ReturnType == typeof(IDiscoveryGrain) ? Grain : throw new NotSupportedException(targetMethod.Name);
     }
 
     private static JsonObject Announcement(string machineId, string machineName, string label) => new()

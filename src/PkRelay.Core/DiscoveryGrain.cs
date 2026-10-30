@@ -109,8 +109,10 @@ public sealed class MachineDirectory(IGrainFactory grains, TimeProvider? clock =
         var reply = await CallAsync(Internal, DiscoveryOperations.Validate, new() { ["credentialHash"] = hash }, ct);
         if (!reply.Ok) return null;
         var machine = Identity(reply);
-        // A revocation that ran while the grain was being asked must not be undone by caching its stale answer.
-        if (Interlocked.Read(ref revocations) == generation) cache[hash] = (machine, time.GetUtcNow().Add(CacheLifetime));
+        // Write first, then re-check: a revocation that completed while the grain was being asked must not leave this stale entry behind. This call still returns what the grain said.
+        var entry = (Machine: machine, Expires: time.GetUtcNow().Add(CacheLifetime));
+        cache[hash] = entry;
+        if (Interlocked.Read(ref revocations) != generation) cache.TryRemove(new KeyValuePair<string, (MachineIdentity Machine, DateTimeOffset Expires)>(hash, entry));
         return machine;
     }
 
@@ -126,11 +128,12 @@ public sealed class MachineDirectory(IGrainFactory grains, TimeProvider? clock =
 
     public async Task<RelayReply> RevokeAsync(RelayCaller administrator, string machineId, CancellationToken ct)
     {
-        Interlocked.Increment(ref revocations);
         try { return await CallAsync(administrator with { IsInternal = true }, DiscoveryOperations.Revoke, new() { ["machineId"] = machineId }, ct); }
         finally
         {
-            // Evict even when the call failed: a revocation that may have committed must not leave a usable cached credential.
+            // Bump after the call settles, then evict (even when it failed: a revocation that may have committed must not leave a usable cached credential).
+            // A validation that started before this point re-checks the counter after writing its entry and removes it.
+            Interlocked.Increment(ref revocations);
             foreach (var entry in cache.Where(x => x.Value.Machine.MachineId == machineId)) cache.TryRemove(entry.Key, out _);
         }
     }
