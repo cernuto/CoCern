@@ -241,6 +241,54 @@ public sealed class NodeTests : IDisposable
         Assert.NotNull(state.ReadCredential());
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Unreadable_credential_never_renews_the_identity_or_deletes_the_secret(bool releaseDuringRetries)
+    {
+        await using var host = Hub();
+        var traffic = new HubTraffic();
+        using var state = NodeState.Open(DataDir);
+        using (var stop = new CancellationTokenSource())
+        {
+            var run = NodeRunner.RunAsync(state, InMemoryHub, InMemory(host, traffic), error, stop.Token);
+            await WaitForAsync(() => Count("announced") >= 1, run);
+            stop.Cancel();
+            Assert.Equal(0, await run);
+        }
+        var credentialPath = Path.Combine(DataDir, "credential");
+        var (machineId, credential, before) = (state.MachineId, File.ReadAllBytes(credentialPath), File.ReadAllBytes(NodeJson));
+        var announced = Count("announced");
+
+        // Antivirus, backup or an indexer can hold the file open exclusively for a moment.
+        var holder = new FileStream(credentialPath, FileMode.Open, FileAccess.Read, FileShare.None);
+        using var stopSecond = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var second = NodeRunner.RunAsync(state, null, InMemory(host, traffic, credentialAttempts: releaseDuringRetries ? 40 : 4), error, stopSecond.Token);
+        try
+        {
+            if (releaseDuringRetries)
+            {
+                await Task.Delay(200);
+                Assert.False(second.IsCompleted);
+                holder.Dispose();
+                await WaitForAsync(() => Count("announced") > announced, second);
+                stopSecond.Cancel();
+                Assert.Equal(0, await second);
+            }
+            else
+            {
+                Assert.Equal(1, await second);
+                Assert.Contains("cannot be read", error.ToString());
+                Assert.Equal(before, File.ReadAllBytes(NodeJson));
+            }
+        }
+        finally { holder.Dispose(); }
+        Assert.Equal(1, traffic.Enrolls);
+        Assert.Equal(machineId, state.MachineId);
+        Assert.Equal(credential, File.ReadAllBytes(credentialPath));
+        Assert.DoesNotContain(System.Text.Encoding.ASCII.GetString(credential), error.ToString());
+    }
+
     [Fact]
     public async Task Hub_address_is_fixed_once_enrolled_and_required_on_first_run()
     {
@@ -369,8 +417,10 @@ public sealed class NodeTests : IDisposable
         Trace = events.Enqueue
     };
 
-    private NodeTransport InMemory(RelayHostFixture host, HubTraffic traffic, TimeSpan? interval = null) => new()
+    private NodeTransport InMemory(RelayHostFixture host, HubTraffic traffic, TimeSpan? interval = null, int credentialAttempts = 5) => new()
     {
+        CredentialAttempts = credentialAttempts,
+        CredentialRetryDelay = TimeSpan.FromMilliseconds(25),
         ProbeFingerprint = (_, _) => Task.FromResult(ProbedFingerprint),
         CreateHandler = (_, _) => traffic.Wrap(host.Server.CreateHandler()),
         HubHandler = () => host.Server.CreateHandler(),

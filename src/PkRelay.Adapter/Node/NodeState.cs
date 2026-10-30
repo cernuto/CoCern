@@ -6,6 +6,8 @@ using System.Text.Json.Nodes;
 
 namespace PkRelay.Adapter.Node;
 
+internal enum CredentialRead { Present, Missing, Unreadable }
+
 /// <summary>
 /// The node's folder (<c>%LOCALAPPDATA%\PkRelay\node</c> unless <c>--data-dir</c> says otherwise): <c>node.json</c> <c>{ machineId, hubUrl, fingerprint, enrolled }</c>,
 /// the machine <c>credential</c> (current-user-only), and <c>node.lock</c>, held exclusively for as long as this object lives.
@@ -46,15 +48,23 @@ public sealed class NodeState : IDisposable
         return state;
     }
 
-    /// <summary>The stored machine credential, or null when it is missing or not in the shape the hub issues.</summary>
-    public string? ReadCredential()
+    /// <summary>The stored machine credential, or null when it is missing, unreadable, or not in the shape the hub issues.</summary>
+    public string? ReadCredential() => TryReadCredential(out var credential) == CredentialRead.Present ? credential : null;
+
+    /// <summary>
+    /// Reads the credential and says why when there is none. Only an absent file, or one that cannot be a credential (wrong shape, so it could never authenticate), is <see cref="CredentialRead.Missing"/>.
+    /// Any other failure (a sharing violation from antivirus or backup, a permissions problem) is <see cref="CredentialRead.Unreadable"/>: the secret may be intact, so callers must never renew the identity or delete the file for it.
+    /// </summary>
+    internal CredentialRead TryReadCredential(out string? credential)
     {
-        try
-        {
-            var text = File.ReadAllText(Path.Combine(Folder, CredentialFile)).Trim();
-            return text.Length == 64 && text.All(Uri.IsHexDigit) ? text : null;
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { return null; }
+        credential = null;
+        string text;
+        try { text = File.ReadAllText(Path.Combine(Folder, CredentialFile)).Trim(); }
+        catch (Exception exception) when (exception is FileNotFoundException or DirectoryNotFoundException) { return CredentialRead.Missing; }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { return CredentialRead.Unreadable; }
+        if (text.Length != 64 || !text.All(Uri.IsHexDigit)) return CredentialRead.Missing;
+        credential = text;
+        return CredentialRead.Present;
     }
 
     /// <summary>Records the hub address and its pinned fingerprint (null for loopback HTTP, or not yet probed).</summary>
@@ -118,7 +128,7 @@ public sealed class NodeState : IDisposable
         }
         if (MachineId.Length == 0) { MachineId = NewMachineId(); Save(); }
         // A credential written just before a crash still counts: node.json catches up.
-        if (!Enrolled && HubUrl is not null && ReadCredential() is not null) { Enrolled = true; Save(); }
+        if (!Enrolled && HubUrl is not null && TryReadCredential(out _) == CredentialRead.Present) { Enrolled = true; Save(); }
     }
 
     private static string? Text(JsonObject root, string name) => root[name] switch

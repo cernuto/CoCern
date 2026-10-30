@@ -23,6 +23,9 @@ internal sealed class NodeTransport
     public TimeSpan AnnounceInterval { get; init; } = TimeSpan.FromSeconds(30);
     public TimeSpan FirstRetry { get; init; } = TimeSpan.FromSeconds(1);
     public TimeSpan MaxRetry { get; init; } = DefaultMaxRetry;
+    /// <summary>How many times, and how far apart, a credential file that exists but cannot be read is tried at startup before the node gives up.</summary>
+    public int CredentialAttempts { get; init; } = 5;
+    public TimeSpan CredentialRetryDelay { get; init; } = TimeSpan.FromMilliseconds(500);
     /// <summary>Fixed event names for tests (enrolled, announced, watching, hint, unauthorized); never carries data.</summary>
     public Action<string>? Trace { get; init; }
 }
@@ -97,9 +100,20 @@ public sealed class NodeRunner : IAsyncDisposable
 
     private async Task<int> LoopAsync(CancellationToken ct)
     {
-        _credential = _state.ReadCredential();
-        // The hub issues a new credential on every enrollment, so a lost one cannot be recovered under the old ID.
-        if (_credential is null && _state.Enrolled) _state.RenewMachineId();
+        var read = _state.TryReadCredential(out _credential);
+        // A file that exists but cannot be read now (antivirus, backup, permissions) may still hold a valid secret: wait briefly, and never renew or delete for it.
+        for (var attempt = 1; read == CredentialRead.Unreadable && attempt < _transport.CredentialAttempts; attempt++)
+        {
+            await Task.Delay(_transport.CredentialRetryDelay, ct);
+            read = _state.TryReadCredential(out _credential);
+        }
+        if (read == CredentialRead.Unreadable)
+        {
+            _error.WriteLine($"The machine credential in '{_state.Folder}' exists but cannot be read (another program may hold it open, or its permissions changed). The node stopped and changed nothing; fix access to the file and start it again.");
+            return 1;
+        }
+        // The hub issues a new credential on every enrollment, so a genuinely missing one cannot be recovered under the old ID.
+        if (read == CredentialRead.Missing && _state.Enrolled) _state.RenewMachineId();
         var retry = _transport.FirstRetry;
         while (true)
         {
