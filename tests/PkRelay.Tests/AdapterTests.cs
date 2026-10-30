@@ -166,7 +166,7 @@ public sealed class AdapterTests
     {
         using var client = new HttpClient(new StubHandler((_, _) => throw new Xunit.Sdk.XunitException("Unexpected network request")));
         var tools = CoordinationTools.Create(new RelayForwarder(client, Options()), false).ToArray();
-        Assert.Equal(17, tools.Length);
+        Assert.Equal(18, tools.Length);
         Assert.All(tools, tool => Assert.Equal("object", tool.ProtocolTool.InputSchema.GetProperty("type").GetString()));
         Assert.Contains(tools, tool => tool.ProtocolTool.Name == "check_inbox");
         Assert.DoesNotContain(tools, tool => tool.ProtocolTool.Name == "control_request");

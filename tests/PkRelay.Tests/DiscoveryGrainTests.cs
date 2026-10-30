@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -9,6 +10,7 @@ using Orleans;
 using Orleans.Hosting;
 using Orleans.Runtime;
 using Orleans.Serialization.Configuration;
+using PkRelay.Contracts;
 using PkRelay.Core;
 using PkRelay.Domain;
 using Xunit;
@@ -69,6 +71,56 @@ public sealed class DiscoveryGrainTests
             Assert.False(refused.Ok);
             Assert.Equal("AdministratorRequired", refused.Code);
             Assert.NotNull(await directory.ValidateAsync("secret-a", CancellationToken.None));
+        }
+        finally { await host.StopAsync(); }
+    }
+
+    [Fact]
+    public async Task Chat_directory_returns_only_callers_repositories()
+    {
+        using var host = await StartAsync();
+        try
+        {
+            var directory = host.Services.GetRequiredService<IMachineDirectory>();
+            var a = (await directory.EnrollAsync("pc-a", "PC A", "secret-a", CancellationToken.None))!;
+            var announcement = Announcement("pc-a", "PC A", "chat-open"); var secret = Announcement("pc-a", "PC A", "chat-secret");
+            secret["chats"]![0]!["repositoryId"] = "secret-repo";
+            var chats = announcement["chats"]!.AsArray(); chats.Add(secret["chats"]![0]!.DeepClone());
+            Assert.True((await directory.AnnounceAsync(a, announcement, CancellationToken.None)).Ok);
+            var application = host.Services.GetRequiredService<RelayApplication>();
+            // A caller who may use both repositories still sees only the one it asked for.
+            var both = new RelayCaller("alice", false, ["pkrelay", "secret-repo"]);
+            var listed = await application.ExecuteAsync(both, RelayTools.ChatDirectory, JsonSerializer.SerializeToElement(new { repositoryId = "pkrelay" }));
+            Assert.Equal(["chat-open"], Items(listed).Select(x => x["label"]!.GetValue<string>()));
+            Assert.DoesNotContain("thread-", listed.DataJson);
+            // A caller without access to a repository is refused rather than shown an empty or filtered list.
+            var limited = new RelayCaller("bob", false, ["pkrelay"]);
+            var denied = await application.ExecuteAsync(limited, RelayTools.ChatDirectory, JsonSerializer.SerializeToElement(new { repositoryId = "secret-repo" }));
+            Assert.Equal(RelayErrorCodes.RepositoryDenied, denied.Code);
+            Assert.Equal(["chat-open"], Items(await application.ExecuteAsync(limited, RelayTools.ChatDirectory, JsonSerializer.SerializeToElement(new { repositoryId = "pkrelay" }))).Select(x => x["label"]!.GetValue<string>()));
+        }
+        finally { await host.StopAsync(); }
+    }
+
+    [Fact]
+    public async Task Revoke_machine_command_is_administrator_only()
+    {
+        using var host = await StartAsync();
+        try
+        {
+            var directory = host.Services.GetRequiredService<IMachineDirectory>();
+            await directory.EnrollAsync("pc-a", "PC A", "secret-a", CancellationToken.None);
+            Assert.NotNull(await directory.ValidateAsync("secret-a", CancellationToken.None));
+            var application = host.Services.GetRequiredService<RelayApplication>();
+            var arguments = JsonSerializer.SerializeToElement(new { repositoryId = "pkrelay", requestId = "r-1", command = "revoke_machine", machineId = "pc-a" });
+            var refused = await application.ExecuteAsync(new RelayCaller("machine:pc-a", false, ["pkrelay"]), RelayTools.ControlRequest, arguments);
+            Assert.Equal(RelayErrorCodes.AdministratorRequired, refused.Code);
+            Assert.NotNull(await directory.ValidateAsync("secret-a", CancellationToken.None));
+            var missing = await application.ExecuteAsync(new RelayCaller("admin", true, ["pkrelay"]), RelayTools.ControlRequest, JsonSerializer.SerializeToElement(new { repositoryId = "pkrelay", requestId = "r-2", command = "revoke_machine" }));
+            Assert.Equal(RelayErrorCodes.InvalidArguments, missing.Code);
+            var revoked = await application.ExecuteAsync(new RelayCaller("admin", true, ["pkrelay"]), RelayTools.ControlRequest, arguments);
+            Assert.True(revoked.Ok, revoked.Code);
+            Assert.Null(await directory.ValidateAsync("secret-a", CancellationToken.None));
         }
         finally { await host.StopAsync(); }
     }

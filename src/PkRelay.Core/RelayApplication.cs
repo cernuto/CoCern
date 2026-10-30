@@ -15,8 +15,9 @@ namespace PkRelay.Core;
 /// (session open, task claim with resources, action begin, convenience renewals/acks, next-work offers).
 /// Aggregates enforce the rules; this layer authenticates the session, routes, composes and bounds replies.
 /// </summary>
-public sealed class RelayApplication(IGrainFactory grains) : IRelayApplication
+public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? machines = null) : IRelayApplication
 {
+    private readonly IMachineDirectory directory = machines ?? new MachineDirectory(grains);
     private const int WorkerProbeLimit = 50;
     private readonly string incarnation = Guid.NewGuid().ToString("N");
 
@@ -65,10 +66,16 @@ public sealed class RelayApplication(IGrainFactory grains) : IRelayApplication
         RelayTools.ActionBegin => BeginActionAsync(caller, args, session),
         RelayTools.SendMessage => SendMessageAsync(caller, args),
         RelayTools.GetStatus => StatusAsync(caller, args),
+        RelayTools.ChatDirectory => directory.DirectoryAsync([Text(args, "repositoryId")], CancellationToken.None),
+        RelayTools.ControlRequest when Text(args, "command") == "revoke_machine" => RevokeMachineAsync(caller, args),
         RelayTools.SessionBind or RelayTools.CheckInbox or RelayTools.Ack => CallSession(caller, tool, args),
         RelayTools.WorkerList or RelayTools.ControlRequest => CallControl(caller, tool, args),
         _ => CallBoard(caller, tool, args)
     };
+
+    /// <summary>Revoking a machine is a discovery concern, not a control-aggregate one: it needs the machine ID and is refused for non-administrators by the discovery grain.</summary>
+    private Task<RelayReply> RevokeMachineAsync(RelayCaller caller, JsonObject args) =>
+        Text(args, "machineId").Length == 0 ? Task.FromResult(Error(InvalidArguments)) : directory.RevokeAsync(caller, Text(args, "machineId"), CancellationToken.None);
 
     /// <summary>Records the session in the control directory, initializes its private aggregate, and attaches the requested task packet.</summary>
     private async Task<RelayReply> OpenSessionAsync(RelayCaller caller, JsonObject args)
