@@ -27,6 +27,10 @@ For automatic local Codex follow-up, use the optional [wake adapter mode](docs/w
 
 To find and message chats on other PCs, use [cross-PC discovery](docs/discovery.md). Turn on `Relay:Discovery:Enabled` and `Relay:Network:Enabled` on the hub (the Visual Studio launch profile does), open the one HTTPS firewall port yourself, and run `--setup --hub <address>` once on each PC. A background node on each PC then announces its chats to `chat_directory` and wakes its own Codex chats; a Claude chat waits with `--await-inbox --chat`. Enrollment has no join code, so only expose the hub on a network you trust.
 
+## Live dashboard
+
+Open `/dashboard/` for the real-time activity board, session inspector, correlated request/response/push feed, generic SQL table and row metrics, and sanitized logs. Enable an explicit instance-wide administrator viewer grant before signing in. Other PCs and phones require trusted HTTPS. See [dashboard setup](docs/dashboard.md) and [browser verification](docs/dashboard-verification.md).
+
 ## Code layout
 
 Dependencies point inward only; `PkRelay.Domain` has no framework or storage dependency.

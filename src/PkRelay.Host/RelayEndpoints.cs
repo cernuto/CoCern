@@ -7,12 +7,17 @@ using Serilog;
 
 namespace PkRelay.Host;
 
+using Dashboard;
+
 public static class RelayEndpoints
 {
     public static WebApplication UseRelayPipeline(this WebApplication app)
     {
         app.UseSerilogRequestLogging(options => options.MessageTemplate = "HTTP {RequestMethod} {RequestPath} responded {StatusCode} in {Elapsed:0.0000} ms");
         app.UseRelayErrorEnvelope();
+        app.UseDashboardBoundary();
+        app.UseBlazorFrameworkFiles("/dashboard");
+        app.UseStaticFiles();
         app.UseRouting();
         app.UseRateLimiter();
         app.UseAuthentication();
@@ -29,6 +34,8 @@ public static class RelayEndpoints
             .Accepts<CoordinationRequest>("application/json").Produces<RelayReply>().Produces<RelayReply>(400).Produces(401).Produces<RelayReply>(403).Produces<RelayReply>(404).Produces<RelayReply>(409).Produces<RelayReply>(413)
             .WithDescription("Authenticated repository-scoped coordination. Arguments are the raw tool JSON object. Inspect GET /api/tools for the fixed catalog and required fields; actor identity always comes from authentication. dataJson is a JSON string containing structured domain data.");
         app.MapDiscoveryEndpoints();
+        app.MapRelayDashboard();
+        app.MapFallbackToFile("/dashboard/{*path:nonfile}", "dashboard/index.html");
         app.MapHub<CoordinationHub>("/hubs/coordination").RequireAuthorization();
         app.MapMcp("/mcp").RequireAuthorization();
         app.MapOpenApi();

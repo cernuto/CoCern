@@ -2,10 +2,12 @@
   <ItemGroup>
     <ProjectReference Include="../PkRelay.Core/PkRelay.Core.csproj" />
     <ProjectReference Include="../PkRelay.Storage/PkRelay.Storage.csproj" />
+    <ProjectReference Include="../PkRelay.Dashboard/PkRelay.Dashboard.csproj" ReferenceOutputAssembly="false" />
     <PackageReference Include="Serilog.AspNetCore" />
     <PackageReference Include="Scalar.AspNetCore" />
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" />
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" />
+    <PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly.Server" />
     <PackageReference Include="ModelContextProtocol.AspNetCore" />
   </ItemGroup>
 </Project>

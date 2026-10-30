@@ -20,6 +20,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
     private readonly IMachineDirectory directory = machines ?? new MachineDirectory(grains);
     private const int WorkerProbeLimit = 50;
     private readonly string incarnation = Guid.NewGuid().ToString("N");
+    public string IncarnationId => incarnation;
 
     public async Task<RelayReply> ExecuteAsync(RelayCaller caller, string tool, JsonElement arguments, CancellationToken cancellationToken = default)
     {

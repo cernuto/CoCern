@@ -11,6 +11,8 @@ using Serilog.Events;
 
 namespace PkRelay.Host;
 
+using Dashboard;
+
 public static class RelayHostBuilderExtensions
 {
     private const int DefaultSiloPort = 21111;
@@ -25,11 +27,11 @@ public static class RelayHostBuilderExtensions
             options.Limits.MaxRequestBodySize = RelayLimits.MaxPayloadBytes;
             HubNetwork.Configure(context.Configuration, context.HostingEnvironment, options);
         });
-        builder.Services.AddSerilog(configuration => configuration.MinimumLevel.Information()
+        builder.Services.AddSerilog((services, configuration) => configuration.MinimumLevel.Information()
             .MinimumLevel.Override("Microsoft", LogEventLevel.Warning)
             .MinimumLevel.Override("Orleans", LogEventLevel.Warning)
             .MinimumLevel.Override("ModelContextProtocol", LogEventLevel.Warning)
-            .WriteTo.Console());
+            .WriteTo.Console().WriteTo.Sink(services.GetRequiredService<DashboardLogBuffer>()));
         // Host-level registration sees configuration added later by application factories and tests.
         builder.Host.ConfigureServices((context, services) => services.AddRelayAuthentication(context.Configuration));
         builder.Services.AddHttpContextAccessor();
@@ -38,6 +40,7 @@ public static class RelayHostBuilderExtensions
         builder.Services.AddDiscovery();
         builder.Services.AddPkRelayCore();
         builder.AddRelayOrleans();
+        builder.Services.AddRelayDashboard();
         builder.Services.AddHostedService<DueWorkDispatcher>();
         builder.Services.AddOpenApi();
         builder.Services.AddRelayMcp();

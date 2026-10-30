@@ -1,0 +1,24 @@
+<section class="surface sql-view" aria-labelledby="sql-heading">
+    <div class="section-heading"><div><h2 id="sql-heading">SQL table metrics</h2><p>Table sizes and row counts, as reported by the database provider.</p></div><span class="small-symbol" aria-hidden="true">▤</span></div>
+    <dl class="database-summary"><div><dt>Provider</dt><dd>@Known(Metrics.Provider)</dd></div><div><dt>Database</dt><dd>@Known(Metrics.Name)</dd></div><div><dt>Database size</dt><dd>@DashboardFormat.Bytes(Metrics.SizeBytes)</dd></div><div><dt>Collected</dt><dd title="@DashboardFormat.Timestamp(Metrics.ObservedAt)">@DashboardFormat.Ago(Metrics.ObservedAt, Now)</dd></div></dl>
+    @if (!string.IsNullOrWhiteSpace(Metrics.Warning)) { <p class="warning-note" role="status">@Metrics.Warning</p> }
+    <table class="metrics-table">
+        <caption class="visually-hidden">Database tables and reported row counts</caption>
+        <thead><tr><th scope="col">Table</th><th scope="col">Rows</th><th scope="col">Count quality</th><th scope="col">Size</th></tr></thead>
+        <tbody>
+            @foreach (var table in Metrics.Tables.OrderBy(table => table.Schema).ThenBy(table => table.Name))
+            {
+                <tr><th scope="row">@if (!string.IsNullOrWhiteSpace(table.Schema)) { <small>@table.Schema</small> } @table.Name</th><td class="numeric">@DashboardFormat.Rows(table)</td><td><span class="quality-label">@DashboardFormat.CountQuality(table.CountKind)</span></td><td class="numeric">@DashboardFormat.Bytes(table.SizeBytes)</td></tr>
+            }
+        </tbody>
+    </table>
+    @if (Metrics.Tables.Length == 0) { <p class="empty-copy">No table metrics are available in this observation.</p> }
+    @if (Metrics.Truncated) { <p class="limit-note">The table list is bounded. Additional tables are not shown.</p> }
+    <p class="table-footnote">A lower bound means at least the shown number of rows. A dash means the measurement is unavailable.</p>
+</section>
+
+@code {
+    [Parameter, EditorRequired] public DatabaseMetrics Metrics { get; set; } = new();
+    [Parameter] public DateTimeOffset Now { get; set; }
+    private static string Known(string value) => string.IsNullOrWhiteSpace(value) ? "Not reported" : value;
+}

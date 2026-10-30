@@ -1,0 +1,43 @@
+<aside class="session-inspector surface" aria-labelledby="inspector-heading">
+    <div class="section-heading"><h2 id="inspector-heading">Session inspector</h2><span class="small-symbol" aria-hidden="true">⌖</span></div>
+    @if (Session is null)
+    {
+        <div class="inspector-empty"><span class="empty-node" aria-hidden="true">◇</span><h3>Follow a signal.</h3><p>Select a session on the board or in the list to see its latest reported state.</p></div>
+    }
+    else
+    {
+        <div class="inspector-title"><span class="provider-token" aria-hidden="true">@ProviderInitial</span><div><h3>@Session.Label</h3><p>@Session.Provider</p></div></div>
+        <div class="tag-row"><span class="tag @(Session.Reachable ? "good" : "attention")">@(Session.Reachable ? "Wake path reachable" : "Wake path unavailable")</span><span class="tag neutral">@DashboardFormat.Freshness(Session, Now)</span></div>
+        <p class="inspector-explanation">Wake-path reachability does not report whether a model is running.</p>
+        <dl class="session-facts">
+            <div><dt>Machine</dt><dd>@MachineLabel</dd></div>
+            <div><dt>Repository</dt><dd>@(string.IsNullOrWhiteSpace(Session.RepositoryId) ? "Not reported" : Session.RepositoryId)</dd></div>
+            <div><dt>Mapping</dt><dd>@(Session.IsMapped ? "Mapped" : "Not mapped")</dd></div>
+            <div><dt>Last report</dt><dd title="@DashboardFormat.Timestamp(Session.ReportedAt)">@DashboardFormat.Ago(Session.ReportedAt, Now)</dd></div>
+            <div><dt>Fresh until</dt><dd>@DashboardFormat.Timestamp(Session.FreshUntil)</dd></div>
+            <div><dt>Last activity</dt><dd title="@DashboardFormat.Timestamp(Session.LastActivityAt)">@DashboardFormat.Ago(Session.LastActivityAt, Now)</dd></div>
+        </dl>
+        <div class="inspector-counts"><div><strong>@DashboardFormat.Count(Session.UnreadMessages)</strong><span>Unread messages</span></div><div><strong>@DashboardFormat.Count(Session.PendingEffects)</strong><span>Pending effects</span></div></div>
+        <details class="session-identifiers"><summary>Session identifier</summary><p>@Session.SessionId</p></details>
+        <div class="inspector-events"><h3>Recent log entries</h3>
+            @if (SessionLogEntries.Length == 0)
+            {
+                <p class="muted">No session-specific log entries in this window</p>
+            }
+            @foreach (var entry in SessionLogEntries)
+            {
+                <div class="inspector-event" @key="entry.Sequence"><time title="@DashboardFormat.Timestamp(entry.Timestamp)">@DashboardFormat.Ago(entry.Timestamp, Now)</time><p>@entry.Message</p></div>
+            }
+        </div>
+    }
+</aside>
+
+@code {
+    [Parameter] public DashboardSession? Session { get; set; }
+    [Parameter] public DashboardLogEntry[] Logs { get; set; } = [];
+    [Parameter] public DateTimeOffset Now { get; set; }
+    private string ProviderInitial => string.IsNullOrWhiteSpace(Session?.Provider) ? "S" : Session.Provider[..1].ToUpperInvariant();
+    private string MachineLabel => !string.IsNullOrWhiteSpace(Session?.MachineName) ? Session.MachineName : !string.IsNullOrWhiteSpace(Session?.MachineId) ? Session.MachineId : "Not reported";
+    private DashboardLogEntry[] SessionLogEntries => Logs.Where(entry => entry.SessionId == Session?.SessionId).OrderByDescending(entry => entry.Sequence).Take(4).ToArray();
+}
+

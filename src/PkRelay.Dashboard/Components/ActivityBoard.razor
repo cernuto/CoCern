@@ -1,0 +1,88 @@
+<section class="activity-board @(Live ? "" : "board-paused")" aria-labelledby="board-heading">
+    <div class="board-heading">
+        <div><h2 id="board-heading">Activity board</h2><p>Your machines. Your sessions. Follow a signal.</p></div>
+        <span class="board-key"><span class="key-outpost" aria-hidden="true">◇</span> Machines <span class="key-piece" aria-hidden="true">●</span> Sessions</span>
+    </div>
+    <div class="station-grid">
+        @foreach (var machine in Stations)
+        {
+            var sessions = Snapshot.Sessions.Where(session => session.MachineId == machine.MachineId).OrderBy(session => session.SessionId, StringComparer.Ordinal).ToArray();
+            <article class="machine-station" @key="machine.MachineId">
+                <div class="station-mast">
+                    <span class="station-beacon @(machine.Reachable ? "reachable" : "")" aria-hidden="true">
+                        <svg viewBox="0 0 80 72" class="outpost-glyph">
+                            <path class="outpost-shadow" d="M8 49 40 32 72 49 40 67Z" />
+                            <path class="outpost-base" d="M8 44 40 27 72 44 40 61Z" />
+                            <path class="outpost-side" d="M8 44 40 61 40 67 8 50ZM40 61 72 44 72 50 40 67Z" />
+                            <path class="outpost-tower" d="M28 27 40 20 52 27 52 45 40 52 28 45Z" />
+                            <path class="outpost-roof" d="M28 27 40 20 52 27 40 34Z" />
+                            <path class="outpost-window" d="M34 36 38 38 38 43 34 41ZM43 38 47 36 47 41 43 43Z" />
+                            <path class="outpost-antenna" d="M40 20V10" />
+                            <circle class="outpost-light" cx="40" cy="8" r="4" />
+                        </svg>
+                    </span>
+                    <div class="station-name">
+                        <h3 title="@machine.MachineId">@machine.Name</h3>
+                        <span>@machine.SessionCount @(machine.SessionCount == 1 ? "session" : "sessions")</span>
+                        @if (!IsEnrolled(machine.MachineId)) { <span class="station-registration">Unregistered</span> }
+                    </div>
+                    <span class="station-status"><span class="status-dot @(machine.Reachable ? "teal" : "amber")" aria-hidden="true"></span><span>@(machine.Reachable ? "Wake path reachable" : "Wake path unavailable")</span></span>
+                </div>
+                <div class="station-sessions">
+                    @foreach (var session in sessions)
+                    {
+                        <button type="button" @key="session.SessionId" class="session-node @(SelectedId == session.SessionId ? "selected" : "") @(IsPulsing(session.SessionId) ? "signal" : "")" aria-pressed="@(SelectedId == session.SessionId ? "true" : "false")" @onclick="() => OnSelect.InvokeAsync(session.SessionId)">
+                            <span class="signal-trail" aria-hidden="true"></span>
+                            <span class="session-token" aria-hidden="true"><span class="token-initials">@SessionTokenLetters(session)</span><span class="node-shape @(session.Reachable ? "teal" : "amber")"></span></span>
+                            <span class="node-copy"><strong>@session.Label</strong><span>@(string.IsNullOrWhiteSpace(session.Provider) ? "Session" : session.Provider)</span></span>
+                            <span class="node-meta">@TrafficNote(session)</span>
+                            <span class="node-wake">@(session.Reachable ? "Wake path reachable" : "Wake path unavailable")</span>
+                        </button>
+                    }
+                    @if (sessions.Length == 0)
+                    {
+                        <p class="station-idle">No sessions in this observation.</p>
+                    }
+                </div>
+            </article>
+        }
+        @if (Stations.Length == 0)
+        {
+            <div class="board-empty"><span aria-hidden="true">◎</span><h3>Room for your first station.</h3><p>Enrolled machines and observed sessions will appear here.</p></div>
+        }
+    </div>
+    <div class="board-footer"><span><span class="tiny-ring" aria-hidden="true"></span> Signals mark newly observed activity</span><span>Select a session to inspect it</span></div>
+</section>
+
+@code {
+    [Parameter, EditorRequired] public DashboardSnapshot Snapshot { get; set; } = new();
+    [Parameter] public string? SelectedId { get; set; }
+    [Parameter] public EventCallback<string> OnSelect { get; set; }
+    [Parameter] public DateTimeOffset Now { get; set; }
+    [Parameter] public bool Live { get; set; }
+    [Parameter] public Func<string, bool> IsPulsing { get; set; } = _ => false;
+
+    private bool IsEnrolled(string machineId) => Snapshot.Machines.Any(machine => machine.MachineId == machineId);
+
+    private static string SessionTokenLetters(DashboardSession session)
+    {
+        var name = !string.IsNullOrWhiteSpace(session.Label) ? session.Label : session.Provider ?? string.Empty;
+        var letters = new string(name.Where(char.IsLetterOrDigit).Take(2).ToArray());
+        return string.IsNullOrEmpty(letters) ? "S" : letters.ToUpperInvariant();
+    }
+
+    private string TrafficNote(DashboardSession session)
+    {
+        var latest = Snapshot.Traffic.Where(entry => entry.SessionId == session.SessionId).MaxBy(entry => entry.Sequence);
+        if (latest is null) return DashboardFormat.Ago(session.LastActivityAt, Now);
+        var kind = latest.Kind.ToLowerInvariant() switch { "request" => "Request", "response" => "Response", "push" => "Push", _ => "Event" };
+        return $"{kind} {DashboardFormat.Ago(latest.Timestamp, Now).ToLowerInvariant()}";
+    }
+
+    private DashboardMachine[] Stations => Snapshot.Machines
+        .Concat(Snapshot.Sessions.Where(session => !Snapshot.Machines.Any(machine => machine.MachineId == session.MachineId))
+            .GroupBy(session => session.MachineId)
+            .Select(group => new DashboardMachine { MachineId = group.Key, Name = !string.IsNullOrWhiteSpace(group.First().MachineName) ? group.First().MachineName : !string.IsNullOrWhiteSpace(group.Key) ? group.Key : "Not reported", SessionCount = group.Count(), Reachable = group.Any(session => session.Reachable) }))
+        .OrderBy(machine => machine.MachineId, StringComparer.Ordinal).ToArray();
+}
+

@@ -32,7 +32,11 @@ public sealed class CoordinationHub(IRelayApplication application) : Hub
     internal static string Group(string sessionId) => "session:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sessionId)));
 }
 
-internal sealed class CoordinationNotifier(IHubContext<CoordinationHub> hub) : ICoordinationNotifier
+internal sealed class CoordinationNotifier(IHubContext<CoordinationHub> hub, Dashboard.DashboardTrafficBuffer traffic) : ICoordinationNotifier
 {
-    public Task NotifyAsync(string sessionId, string eventId, CancellationToken cancellationToken = default) => hub.Clients.Group(CoordinationHub.Group(sessionId)).SendAsync("coordination.changed", new { sessionId, eventId }, cancellationToken);
+    public async Task NotifyAsync(string sessionId, string eventId, CancellationToken cancellationToken = default)
+    {
+        await hub.Clients.Group(CoordinationHub.Group(sessionId)).SendAsync("coordination.changed", new { sessionId, eventId }, cancellationToken);
+        traffic.Push(sessionId);
+    }
 }

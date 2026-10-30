@@ -6,7 +6,7 @@ using PkRelay.Domain;
 
 namespace PkRelay.Storage;
 
-public sealed class SqliteStore : IDueWorkSource, IDisposable, IAsyncDisposable
+public sealed partial class SqliteStore : IDueWorkSource, IDisposable, IAsyncDisposable
 {
     private readonly SqliteConnection _connection;
     private readonly FileStream _ownership;

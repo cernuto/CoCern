@@ -1,0 +1,45 @@
+<main class="sign-in-layout">
+    <section class="sign-in-art" aria-label="PkRelay observation deck">
+        <div class="relay-mark">Pk<span class="mark-signal" aria-hidden="true"></span></div>
+        <p class="brand-name">PkRelay</p>
+        <h1>A little closer<br />to the action.</h1>
+        <p class="sign-in-description">Your machines, sessions and relay signals.<br />One quiet place to keep watch.</p>
+        <div class="decorative-stations" aria-hidden="true"><span></span><i></i><span></span><i></i><span></span></div>
+        <p class="read-only-note">An observation deck for your relay.</p>
+    </section>
+    <section class="sign-in-panel">
+        <div class="sign-in-form">
+            <span class="small-symbol" aria-hidden="true">◈</span>
+            <h2>Come aboard.</h2>
+            <p>Sign in with an administrator credential granted dashboard access.</p>
+            <form @onsubmit="SignInAsync" @onsubmit:preventDefault>
+                <label for="viewer-token">Dashboard credential</label>
+                <input id="viewer-token" type="password" autocomplete="off" spellcheck="false" autocapitalize="none" @bind="_token" @bind:event="oninput" disabled="@_busy" required />
+                <p class="field-note">Used once to sign in. Never saved in this browser.</p>
+                @if (!string.IsNullOrEmpty(Notice))
+                {
+                    <p class="form-notice" role="alert">@Notice</p>
+                }
+                <button class="primary-button" type="submit" disabled="@(_busy || string.IsNullOrWhiteSpace(_token))">@(_busy ? "Signing in…" : "Open dashboard")</button>
+            </form>
+            <p class="sign-in-footnote">Instance-wide monitoring. Agent messages and private inboxes stay private.</p>
+        </div>
+    </section>
+</main>
+
+@code {
+    [Parameter] public string? Notice { get; set; }
+    [Parameter] public EventCallback<string> OnSignIn { get; set; }
+    private string _token = "";
+    private bool _busy;
+
+    private async Task SignInAsync()
+    {
+        if (_busy || string.IsNullOrWhiteSpace(_token)) return;
+        var credential = _token;
+        _token = "";
+        _busy = true;
+        try { await OnSignIn.InvokeAsync(credential); }
+        finally { _busy = false; }
+    }
+}

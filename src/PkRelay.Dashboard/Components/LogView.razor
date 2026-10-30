@@ -1,0 +1,24 @@
+<section class="surface log-view" aria-labelledby="logs-heading">
+    <div class="section-heading"><div><h2 id="logs-heading">@(Compact ? "Recent signals" : "Operational logs")</h2><p>Safe relay event summaries.</p></div>
+        @if (!Compact)
+        {
+            <label class="log-filter">Level <select @bind="_level"><option value="">All levels</option><option>Error</option><option>Warning</option><option>Information</option><option>Debug</option></select></label>
+        }
+    </div>
+    <ol class="log-entries @(Compact ? "compact-logs" : "")">
+        @foreach (var entry in VisibleEntries)
+        {
+            <li class="log-entry" @key="entry.Sequence"><time title="@DashboardFormat.Timestamp(entry.Timestamp)">@entry.Timestamp.ToLocalTime().ToString("HH:mm:ss")</time><span class="log-level @LevelClass(entry.Level)">@entry.Level</span><div><p>@entry.Message</p><small>@entry.Category</small></div></li>
+        }
+    </ol>
+    @if (!VisibleEntries.Any()) { <p class="empty-copy">No recent events@(string.IsNullOrEmpty(_level) ? "" : " at this level"). New observations will appear here.</p> }
+    @if (!Compact) { <p class="table-footnote">A bounded window of recent events. Times use your device's local time.</p> }
+</section>
+
+@code {
+    [Parameter] public DashboardLogEntry[] Entries { get; set; } = [];
+    [Parameter] public bool Compact { get; set; }
+    private string _level = "";
+    private IEnumerable<DashboardLogEntry> VisibleEntries => Entries.Where(entry => string.IsNullOrEmpty(_level) || entry.Level.Equals(_level, StringComparison.OrdinalIgnoreCase)).OrderByDescending(entry => entry.Sequence).Take(Compact ? 4 : 200);
+    private static string LevelClass(string level) => level.ToLowerInvariant() switch { "critical" or "error" => "error", "warning" => "warning", _ => "information" };
+}

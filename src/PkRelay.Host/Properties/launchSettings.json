@@ -11,6 +11,7 @@
         "Relay__Clients__0__PrincipalId": "PaulC",
         "Relay__Clients__0__IsAdministrator": "true",
         "Relay__Clients__0__Repositories__0": "pkrelay",
+        "Relay__Dashboard__ViewerPrincipalIds__0": "PaulC",
         "Relay__Discovery__Enabled": "true",
         "Relay__Network__Enabled": "true"
       }

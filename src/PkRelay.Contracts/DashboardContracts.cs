@@ -1,0 +1,102 @@
+namespace PkRelay.Contracts.Dashboard;
+
+public sealed record DashboardSnapshot
+{
+    public string InstanceId { get; init; } = "";
+    public long Revision { get; init; }
+    public DateTimeOffset ObservedAt { get; init; }
+    public DashboardHost Host { get; init; } = new();
+    public DashboardMachine[] Machines { get; init; } = [];
+    public DashboardSession[] Sessions { get; init; } = [];
+    public bool SessionsTruncated { get; init; }
+    public DatabaseMetrics Database { get; init; } = new();
+    public DashboardLogEntry[] Logs { get; init; } = [];
+    public DashboardTrafficEvent[] Traffic { get; init; } = [];
+    public string[] Warnings { get; init; } = [];
+}
+
+public sealed record DashboardHost
+{
+    public string Name { get; init; } = "";
+    public DateTimeOffset StartedAt { get; init; }
+    public string Version { get; init; } = "";
+    public int MachineCount { get; init; }
+    public int SessionCount { get; init; }
+    public int ReachableCount { get; init; }
+}
+
+public sealed record DashboardMachine
+{
+    public string MachineId { get; init; } = "";
+    public string Name { get; init; } = "";
+    public bool Reachable { get; init; }
+    public DateTimeOffset? LastSeenAt { get; init; }
+    public int SessionCount { get; init; }
+}
+
+public sealed record DashboardSession
+{
+    public string SessionId { get; init; } = "";
+    public string Label { get; init; } = "";
+    public string Provider { get; init; } = "";
+    public string MachineId { get; init; } = "";
+    public string MachineName { get; init; } = "";
+    public string RepositoryId { get; init; } = "";
+    public bool IsMapped { get; init; }
+    public bool Reachable { get; init; }
+    public DateTimeOffset? ReportedAt { get; init; }
+    public DateTimeOffset? FreshUntil { get; init; }
+    public bool IncarnationMismatch { get; init; }
+    public int? UnreadMessages { get; init; }
+    public int? PendingEffects { get; init; }
+    public DateTimeOffset? LastActivityAt { get; init; }
+}
+
+public sealed record DatabaseMetrics
+{
+    public string Provider { get; init; } = "";
+    public string Name { get; init; } = "";
+    public DateTimeOffset? ObservedAt { get; init; }
+    public long? SizeBytes { get; init; }
+    public DatabaseTableMetrics[] Tables { get; init; } = [];
+    public bool Truncated { get; init; }
+    public string? Warning { get; init; }
+}
+
+public sealed record DatabaseTableMetrics
+{
+    public string Schema { get; init; } = "";
+    public string Name { get; init; } = "";
+    public long? RowCount { get; init; }
+    public string CountKind { get; init; } = "unavailable";
+    public long? SizeBytes { get; init; }
+}
+
+public sealed record DashboardLogEntry
+{
+    public long Sequence { get; init; }
+    public DateTimeOffset Timestamp { get; init; }
+    public string Level { get; init; } = "";
+    public string Category { get; init; } = "";
+    public string Message { get; init; } = "";
+    public string? SessionId { get; init; }
+}
+
+public sealed record DashboardAuthStatus
+{
+    public bool Authenticated { get; init; }
+    public string? PrincipalId { get; init; }
+}
+
+public sealed record DashboardTrafficEvent
+{
+    public long Sequence { get; init; }
+    public DateTimeOffset Timestamp { get; init; }
+    public string Kind { get; init; } = "";
+    public string Name { get; init; } = "";
+    public string? SessionId { get; init; }
+    public string? Code { get; init; }
+    public string? CorrelationId { get; init; }
+    public double? DurationMilliseconds { get; init; }
+}
+
