@@ -64,11 +64,17 @@ public sealed class DiscoveryGrain([PersistentState("discovery", "relay")] IPers
 /// <summary>An enrolled machine as the hub knows it: its stable ID and the principal its connections act as.</summary>
 public sealed record MachineIdentity(string MachineId, string PrincipalId);
 
+/// <summary>The outcome of an enrollment: the machine, or the reply code explaining the refusal (MachineRevoked, AliasConflict, CapacityExceeded, ...).</summary>
+public sealed record EnrollResult(MachineIdentity? Machine, string? Code);
+
 /// <summary>The hub's view of enrolled machines. Credentials are hashed before they reach the discovery grain and are never stored or cached raw.</summary>
 public interface IMachineDirectory
 {
     /// <summary>Enrolls a machine or re-enrolls it with the same credential; null when the hub refuses (revoked, credential mismatch, capacity).</summary>
     Task<MachineIdentity?> EnrollAsync(string machineId, string machineName, string credential, CancellationToken ct);
+
+    /// <summary>Like <see cref="EnrollAsync"/>, but a refusal carries the reply code so callers can answer precisely.</summary>
+    Task<EnrollResult> TryEnrollAsync(string machineId, string machineName, string credential, CancellationToken ct);
 
     /// <summary>The machine owning the credential, or null. Positive results are cached for 30 seconds.</summary>
     Task<MachineIdentity?> ValidateAsync(string credential, CancellationToken ct);
@@ -90,10 +96,12 @@ public sealed class MachineDirectory(IGrainFactory grains, TimeProvider? clock =
     private readonly ConcurrentDictionary<string, (MachineIdentity Machine, DateTimeOffset Expires)> cache = new(StringComparer.Ordinal);
     private long revocations;
 
-    public async Task<MachineIdentity?> EnrollAsync(string machineId, string machineName, string credential, CancellationToken ct)
+    public async Task<MachineIdentity?> EnrollAsync(string machineId, string machineName, string credential, CancellationToken ct) => (await TryEnrollAsync(machineId, machineName, credential, ct)).Machine;
+
+    public async Task<EnrollResult> TryEnrollAsync(string machineId, string machineName, string credential, CancellationToken ct)
     {
         var reply = await CallAsync(Internal, DiscoveryOperations.Enroll, new() { ["machineId"] = machineId, ["machineName"] = machineName, ["credentialHash"] = Hash(credential) }, ct);
-        return reply.Ok ? Identity(reply) : null;
+        return reply.Ok ? new(Identity(reply), null) : new(null, reply.Code);
     }
 
     public async Task<MachineIdentity?> ValidateAsync(string credential, CancellationToken ct)

@@ -32,6 +32,7 @@ public static class RelayHostBuilderExtensions
         builder.Services.AddHttpContextAccessor();
         builder.Services.AddSignalR(options => { options.EnableDetailedErrors = false; options.MaximumReceiveMessageSize = RelayLimits.MaxPayloadBytes; });
         builder.Services.AddSingleton<ICoordinationNotifier, CoordinationNotifier>();
+        builder.Services.AddDiscovery();
         builder.Services.AddPkRelayCore();
         builder.AddRelayOrleans();
         builder.Services.AddHostedService<DueWorkDispatcher>();

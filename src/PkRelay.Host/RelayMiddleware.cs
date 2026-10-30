@@ -22,7 +22,7 @@ internal static class RelayMiddleware
     {
         var path = context.Request.Path;
         if (path.StartsWithSegments("/api") || path.StartsWithSegments("/mcp") || path.StartsWithSegments("/hubs")) context.Response.Headers.CacheControl = "no-store";
-        if (HttpMethods.IsPost(context.Request.Method) && (path.StartsWithSegments("/api/tools") || path.StartsWithSegments("/mcp")))
+        if (HttpMethods.IsPost(context.Request.Method) && (path.StartsWithSegments("/api/tools") || path.StartsWithSegments("/api/discovery") || path.StartsWithSegments("/mcp")))
         {
             if (context.Request.ContentLength > RelayLimits.MaxPayloadBytes || await TryBufferAsync(context) is not { } buffered)
             {

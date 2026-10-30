@@ -113,8 +113,18 @@ public static class RelayAuthentication
         };
     }
 
-    internal static ClaimsPrincipal Principal(string id, bool admin, IEnumerable<string> repositories, string scheme) => new(new ClaimsIdentity(
-        new[] { new Claim(ClaimTypes.NameIdentifier, id), new Claim("relay_admin", admin ? "true" : "false") }.Concat(repositories.Select(r => new Claim("relay_repository", r))), scheme));
+    internal const string MachineClaim = "relay_machine";
+
+    /// <summary>Builds the authenticated principal. <paramref name="machineId"/> marks an enrolled machine; only the machine-credential path in <see cref="RelayAuthenticationHandler"/> passes it.</summary>
+    internal static ClaimsPrincipal Principal(string id, bool admin, IEnumerable<string> repositories, string scheme, string? machineId = null) => new(new ClaimsIdentity(
+        new[] { new Claim(ClaimTypes.NameIdentifier, id), new Claim("relay_admin", admin ? "true" : "false") }
+            .Concat(machineId is null ? [] : [new Claim(MachineClaim, machineId)])
+            .Concat(repositories.Select(r => new Claim("relay_repository", r))), scheme));
+
+    /// <summary>The enrolled machine behind this principal, or null for configured clients and OAuth subjects. The claim is honoured only on a principal this handler built.</summary>
+    internal static MachineIdentity? Machine(ClaimsPrincipal principal) =>
+        principal.Identity is { IsAuthenticated: true, AuthenticationType: "Relay" } && principal.FindAll(MachineClaim).SingleOrDefault()?.Value is { Length: > 0 } machineId && principal.FindFirstValue(ClaimTypes.NameIdentifier) is { } principalId
+            ? new MachineIdentity(machineId, principalId) : null;
 
     public static RelayCaller Caller(ClaimsPrincipal principal) => new(principal.FindFirstValue(ClaimTypes.NameIdentifier) ?? throw new UnauthorizedAccessException(), principal.HasClaim("relay_admin", "true"), principal.FindAll("relay_repository").Select(c => c.Value).ToArray());
 }
@@ -125,7 +135,7 @@ internal sealed class RelayConfigurationValidator(IConfiguration configuration, 
     public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 }
 
-internal sealed class RelayAuthenticationHandler(IOptionsMonitor<AuthenticationSchemeOptions> options, ILoggerFactory logger, UrlEncoder encoder, RelayClient[] clients, IConfiguration configuration)
+internal sealed class RelayAuthenticationHandler(IOptionsMonitor<AuthenticationSchemeOptions> options, ILoggerFactory logger, UrlEncoder encoder, RelayClient[] clients, IConfiguration configuration, IMachineDirectory machines)
     : AuthenticationHandler<AuthenticationSchemeOptions>(options, logger, encoder)
 {
     protected override async Task<AuthenticateResult> HandleAuthenticateAsync()
@@ -144,6 +154,9 @@ internal sealed class RelayAuthenticationHandler(IOptionsMonitor<AuthenticationS
         {
             return AuthenticateResult.Success(new AuthenticationTicket(RelayAuthentication.Principal(match.PrincipalId, match.IsAdministrator, match.Repositories, Scheme.Name), Scheme.Name));
         }
+        // Enrolled machines come after configured clients and before OAuth. Only well-formed hub-issued credentials reach the discovery grain, so junk tokens cost nothing.
+        if (DiscoverySettings.Enabled(configuration) && DiscoverySettings.IsCredential(token) && await machines.ValidateAsync(token, Context.RequestAborted) is { } machine)
+            return AuthenticateResult.Success(new AuthenticationTicket(RelayAuthentication.Principal(machine.PrincipalId, false, DiscoverySettings.Repositories(configuration), Scheme.Name, machine.MachineId), Scheme.Name));
         if (!string.IsNullOrWhiteSpace(configuration["Relay:OAuth:Authority"])) return await Context.AuthenticateAsync("ExternalJwt");
         return AuthenticateResult.Fail("Invalid credentials.");
     }

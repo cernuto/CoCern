@@ -20,6 +20,15 @@ public sealed class CoordinationHub(IRelayApplication application) : Hub
         await Groups.AddToGroupAsync(Context.ConnectionId, Group(sessionId), Context.ConnectionAborted);
     }
 
+    /// <summary>Subscribes this connection to hints for its own machine. Only a connection authenticated by a machine credential may call it, and only for that machine.</summary>
+    public async Task WatchMachine()
+    {
+        var machine = RelayAuthentication.Machine(Context.User!) ?? throw new HubException("Machine access denied.");
+        await Groups.AddToGroupAsync(Context.ConnectionId, MachineGroup(machine.MachineId), Context.ConnectionAborted);
+    }
+
+    internal static string MachineGroup(string machineId) => "machine:" + machineId;
+
     internal static string Group(string sessionId) => "session:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sessionId)));
 }
 

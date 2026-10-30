@@ -291,8 +291,12 @@ internal sealed class RelayHostFixture : WebApplicationFactory<PkRelay.Host.Rela
     private readonly IPAddress? remoteAddress;
     public const string JwtAuthority = "https://issuer.example";
     private static readonly SymmetricSecurityKey JwtKey = new(Encoding.UTF8.GetBytes("test-only-signing-key-with-at-least-64-bytes-not-production-key-1234567890"));
-    public RelayHostFixture(string? databasePath = null, bool disableDispatcher = false, bool configureJwt = false, IPAddress? remoteAddress = null)
+    private readonly IReadOnlyDictionary<string, string?>? settings;
+    private readonly Action<IServiceCollection>? configureServices;
+    public RelayHostFixture(string? databasePath = null, bool disableDispatcher = false, bool configureJwt = false, IPAddress? remoteAddress = null, IReadOnlyDictionary<string, string?>? settings = null, Action<IServiceCollection>? configureServices = null)
     {
+        this.settings = settings;
+        this.configureServices = configureServices;
         DatabasePath = databasePath ?? Path.Combine(Path.GetTempPath(), "pkrelay-host-" + Guid.NewGuid().ToString("N"), "relay.db");
         this.disableDispatcher = disableDispatcher;
         this.configureJwt = configureJwt;
@@ -311,6 +315,8 @@ internal sealed class RelayHostFixture : WebApplicationFactory<PkRelay.Host.Rela
             ["Relay:Clients:0:PrincipalId"] = "test-user",
             ["Relay:Clients:0:Repositories:0"] = "repo"
         }));
+        if (settings is not null) builder.ConfigureAppConfiguration((_, config) => config.AddInMemoryCollection(settings));
+        if (configureServices is not null) builder.ConfigureServices(configureServices);
         if (configureJwt)
         {
             builder.ConfigureAppConfiguration((_, config) => config.AddInMemoryCollection(new Dictionary<string, string?>
@@ -360,10 +366,10 @@ internal sealed class RelayHostFixture : WebApplicationFactory<PkRelay.Host.Rela
         return (await response.Content.ReadFromJsonAsync<JsonElement>()).Clone();
     }
 
-    public HubConnection Hub() => new HubConnectionBuilder().WithUrl("https://localhost/hubs/coordination", options =>
+    public HubConnection Hub(string? token = null) => new HubConnectionBuilder().WithUrl("https://localhost/hubs/coordination", options =>
     {
         options.Transports = HttpTransportType.LongPolling;
-        options.AccessTokenProvider = () => Task.FromResult<string?>(Token);
+        options.AccessTokenProvider = () => Task.FromResult<string?>(token ?? Token);
         options.HttpMessageHandlerFactory = _ => Server.CreateHandler();
     }).Build();
 
