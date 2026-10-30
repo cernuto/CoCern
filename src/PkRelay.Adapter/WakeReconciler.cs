@@ -24,6 +24,8 @@ public sealed class WakeReconciler(WakeConfiguration configuration, WakeState st
         {
             if (!await Permitted()) return "control-blocked";
             var ids = new HashSet<string>(StringComparer.Ordinal);
+            // Messages sent with wake=false count for coverage but never cause a wake; they are read with the next one.
+            var wakeable = new HashSet<string>(StringComparer.Ordinal);
             var cursor = 0;
             int? total = null;
             var covered = false;
@@ -41,6 +43,7 @@ public sealed class WakeReconciler(WakeConfiguration configuration, WakeState st
                     if (item.ValueKind != JsonValueKind.Object || !item.TryGetProperty("messageId", out var id) || id.ValueKind != JsonValueKind.String ||
                         id.GetString() is not { Length: > 0 and <= 256 } messageId || !ids.Add(messageId) ||
                         !item.TryGetProperty("repositoryId", out var repo) || repo.GetString() != route.RepositoryId) return "invalid-inbox";
+                    if (!item.TryGetProperty("wake", out var wake) || wake.ValueKind != JsonValueKind.False) wakeable.Add(messageId);
                 }
                 if (next.ValueKind == JsonValueKind.Null)
                 {
@@ -55,7 +58,7 @@ public sealed class WakeReconciler(WakeConfiguration configuration, WakeState st
             if (File.Exists(configuration.StopFile)) return "stopped";
             if (!await Permitted()) return "control-blocked";
             cancellationToken.ThrowIfCancellationRequested();
-            var reservation = state.Reserve(key, ids, (clock ?? TimeProvider.System).GetUtcNow(), () => dispatcher.IsBusy(route.ThreadId));
+            var reservation = state.Reserve(key, wakeable, (clock ?? TimeProvider.System).GetUtcNow(), () => dispatcher.IsBusy(route.ThreadId));
             if (reservation.Batch is not { } batch) return reservation.Status;
             var queued = false;
             try

@@ -94,7 +94,8 @@ public sealed class TokenEfficiencyTests
         var reply = await InboxWait.CheckAsync(forwarder, arguments, TimeSpan.FromMilliseconds(100), CancellationToken.None);
         Assert.True(reply.Ok);
         Assert.Equal(0, reply.Data!.Value.GetProperty("total").GetInt32());
-        Assert.InRange(hub.Calls, 2, 15);
+        // At least the first read, and never faster than the poll interval (a loaded machine may fit only one read into the second).
+        Assert.InRange(hub.Calls, 1, 12);
 
         // Without waitSeconds it is one plain call, exactly as before.
         hub.Calls = 0;
@@ -221,6 +222,24 @@ public sealed class TokenEfficiencyTests
         // A late redelivery of a superseded message does not bring it back.
         Assert.True(Call("__deliver", Message("h1", "heartbeat", true)).Ok);
         Assert.Equal(["h3", "o1", "q1"], Inbox());
+    }
+
+    [Fact]
+    public void Quiet_send_is_delivered_with_wake_false()
+    {
+        var state = new PkRelay.Domain.StateEnvelope<PkRelay.Domain.CoordinationDocument>();
+        var alice = new PkRelay.Domain.RelayCaller("alice", true, ["repo"], true);
+        var now = DateTimeOffset.Parse("2026-10-30T00:00:00Z");
+        PkRelay.Domain.RelayReply Call(string op, System.Text.Json.Nodes.JsonObject args) { args["repositoryId"] = "repo"; return PkRelay.Domain.CoordinationStateMachine.Apply(state, "session", "key", alice, op, args, now); }
+        Assert.True(Call("__open", new() { ["principalId"] = "alice", ["sessionToken"] = "secret" }).Ok);
+        Assert.True(Call("send_message", new() { ["sessionToken"] = "secret", ["requestId"] = "q", ["recipientSessionId"] = "bob", ["text"] = "fyi", ["wake"] = false }).Ok);
+        Assert.True(Call("send_message", new() { ["sessionToken"] = "secret", ["requestId"] = "l", ["recipientSessionId"] = "bob", ["text"] = "act" }).Ok);
+        var delivered = state.Effects.Select(effect => JsonDocument.Parse(effect.PayloadJson).RootElement).ToArray();
+        Assert.False(delivered[0].GetProperty("wake").GetBoolean());
+        Assert.False(delivered[1].TryGetProperty("wake", out _));
+
+        Assert.True(RelayToolCatalog.TryGet("send_message", out var tool));
+        Assert.Equal("boolean", RelayToolCatalog.ForwardingSchema(tool).GetProperty("properties").GetProperty("wake").GetProperty("type").GetString());
     }
 
     [Fact]

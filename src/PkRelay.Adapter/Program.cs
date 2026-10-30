@@ -22,20 +22,24 @@ try
         if (args.Length > 1 && args[1] == "--chat")
         {
             // A Claude chat's own waiter on this PC's node credentials (1 also when no relay session on this PC belongs to the chat).
-            const string chatUsage = "Use --await-inbox --chat <claude-session-id> with optional --timeout-minutes 1-1440 and --print-inbox.";
+            const string chatUsage = "Use --await-inbox --chat <claude-session-id> with optional --timeout-minutes 1-1440, --print-inbox and --ack <id,id,...>.";
             if (args.Length < 3) throw new AdapterConfigurationException(chatUsage);
             TimeSpan? limit = null;
             var printInbox = false;
+            string[]? acknowledge = null;
             for (var i = 3; i < args.Length; i++)
             {
                 if (args[i] == "--print-inbox" && !printInbox) printInbox = true;
                 else if (args[i] == "--timeout-minutes" && limit is null && i + 1 < args.Length && int.TryParse(args[i + 1], out var minutes) && minutes is > 0 and <= 1440) { limit = TimeSpan.FromMinutes(minutes); i++; }
+                else if (args[i] == "--ack" && acknowledge is null && i + 1 < args.Length &&
+                         args[i + 1].Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries) is { Length: > 0 and <= 100 } ids && ids.All(id => id.Length <= 256 && id.All(char.IsAsciiLetterOrDigit)))
+                { acknowledge = ids; i++; }
                 else throw new AdapterConfigurationException(chatUsage);
             }
             var folder = Environment.GetEnvironmentVariable("PKRELAY_NODE_DIR") is { Length: > 0 } configured ? configured : NodeState.DefaultFolder;
             using var stopping = new CancellationTokenSource();
             Console.CancelKeyPress += (_, cancel) => { cancel.Cancel = true; stopping.Cancel(); };
-            var waited = await ClaudeWaiter.RunAsync(folder, args[2], Console.Out.WriteLine, limit, stopping.Token, printInbox);
+            var waited = await ClaudeWaiter.RunAsync(folder, args[2], Console.Out.WriteLine, limit, stopping.Token, printInbox, acknowledge);
             return waited switch { "queued" => 0, "timeout" => 2, _ => 3 };
         }
         TimeSpan? timeout = args.Length switch

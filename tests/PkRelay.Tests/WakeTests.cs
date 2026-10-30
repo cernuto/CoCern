@@ -389,6 +389,8 @@ public sealed class WakeTests
         private readonly HttpClient _client;
         private readonly RelayForwarder _forwarder;
         public string[] Messages = [];
+        /// <summary>Messages sent with wake=false.</summary>
+        public readonly HashSet<string> Quiet = [];
         public string Status = "ok";
         public int PageSize = 50;
         public readonly List<int> Cursors = [];
@@ -432,7 +434,7 @@ public sealed class WakeTests
                 Assert.Equal("session-secret", args.RootElement.GetProperty("sessionToken").GetString());
                 if (fixture.Status == "unauthorized") return new(HttpStatusCode.Unauthorized);
                 var cursor = args.RootElement.TryGetProperty("cursor", out var value) ? value.GetInt32() : 0;
-                var items = fixture.Messages.Skip(cursor).Take(fixture.PageSize).Select(id => new { messageId = id, repositoryId = "repo", text = "UNTRUSTED MESSAGE BODY" }).ToArray();
+                var items = fixture.Messages.Skip(cursor).Take(fixture.PageSize).Select(id => new { messageId = id, repositoryId = "repo", text = "UNTRUSTED MESSAGE BODY", wake = fixture.Quiet.Contains(id) ? false : (bool?)null }).ToArray();
                 var more = cursor + items.Length < fixture.Messages.Length;
                 if (request.RequestUri!.AbsolutePath.EndsWith("check_inbox")) fixture.Cursors.Add(cursor);
                 var data = request.RequestUri.AbsolutePath.EndsWith("get_status")
@@ -479,6 +481,23 @@ public sealed class WakeTests
 
         // Once idle, everything still unacknowledged wakes it once.
         fixture.Dispatcher.Busy = false;
+        Assert.Equal("queued", await fixture.Reconcile());
+        Assert.Single(fixture.Dispatcher.Prompts);
+        Assert.Equal("empty", await fixture.Reconcile());
+    }
+
+    [Fact]
+    public async Task Quiet_messages_never_wake_but_ride_along_with_the_next_wake()
+    {
+        using var fixture = new Fixture();
+        fixture.Quiet.Add("status-1");
+        fixture.Quiet.Add("status-2");
+        fixture.Messages = ["status-1", "status-2"];
+        Assert.Equal("empty", await fixture.Reconcile());
+        Assert.Empty(fixture.Dispatcher.Prompts);
+
+        // A message that wants attention wakes the chat once; the quiet ones are simply read with it.
+        fixture.Messages = ["status-1", "status-2", "question"];
         Assert.Equal("queued", await fixture.Reconcile());
         Assert.Single(fixture.Dispatcher.Prompts);
         Assert.Equal("empty", await fixture.Reconcile());

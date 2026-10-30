@@ -941,6 +941,21 @@ public sealed class NodeTests : IDisposable
     }
 
     [Fact]
+    public async Task Claude_waiter_acknowledges_handled_messages_before_waiting()
+    {
+        var chatId = Guid.NewGuid().ToString();
+        EnrollOnLoopback();
+        NodeState.WriteSessionHandle(DataDir, new SessionHandle("s-claude", "synthetic-token-claude", "repo", "Claude chat", DateTimeOffset.UtcNow.AddMinutes(-1), new ChatLocation("claude", chatId), new ChatLocation("claude", chatId)));
+        var inbox = new InboxStub(new string('c', 64), "s-claude", "synthetic-token-claude");
+        // Acknowledging and re-arming are one command, so handling a wake costs the chat one call fewer.
+        Assert.Equal("timeout", await ClaudeWaiter.RunAsync(DataDir, chatId, _ => { }, TimeSpan.FromSeconds(1), CancellationToken.None, inbox, () => new NoHub(), acknowledge: ["m1", "m2"]));
+        using var ack = JsonDocument.Parse(Assert.Single(inbox.Acks));
+        Assert.Equal(["m1", "m2"], ack.RootElement.GetProperty("messageIds").EnumerateArray().Select(x => x.GetString()));
+        Assert.False(string.IsNullOrEmpty(ack.RootElement.GetProperty("requestId").GetString()));
+        Assert.Equal("repo", ack.RootElement.GetProperty("repositoryId").GetString());
+    }
+
+    [Fact]
     public void Claude_waiter_with_several_handles_uses_the_newest()
     {
         var chatId = Guid.NewGuid().ToString();
@@ -1111,10 +1126,14 @@ public sealed class NodeTests : IDisposable
     private sealed class InboxStub(string credential, string sessionId, string sessionToken) : HttpMessageHandler
     {
         public volatile string[] Messages = [];
+        /// <summary>The tool and body of every acknowledgment the stub received.</summary>
+        public readonly System.Collections.Concurrent.ConcurrentQueue<string> Acks = new();
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             if (request.Headers.Authorization?.Parameter != credential) return new(HttpStatusCode.Unauthorized);
-            using var args = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(cancellationToken));
+            var body = await request.Content!.ReadAsStringAsync(cancellationToken);
+            using var args = JsonDocument.Parse(body);
+            if (request.RequestUri!.AbsolutePath.EndsWith("/ack")) Acks.Enqueue(body);
             if (args.RootElement.GetProperty("sessionId").GetString() != sessionId || args.RootElement.GetProperty("sessionToken").GetString() != sessionToken) return new(HttpStatusCode.Forbidden);
             var messages = Messages;
             var data = request.RequestUri!.AbsolutePath.EndsWith("get_status")

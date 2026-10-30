@@ -122,6 +122,8 @@ internal static class SessionAggregate
             ["senderSessionId"] = context.SessionId, ["sentAt"] = context.Now.ToString("O"), ["replyTo"] = args["replyTo"]?.DeepClone()
         };
         if (Flag(args, "supersede")) message["supersede"] = true;
+        // A status or FYI message is stored like any other but never wakes the recipient; it is read with its next wake or inbox check.
+        if (args["wake"] is JsonValue wake && wake.TryGetValue<bool>(out var wakes) && !wakes) message["wake"] = false;
         context.Emit(AggregateKinds.Session, recipient, Operations.Deliver, message);
         return Ok(new { messageId = id, delivery = "pending" });
     }
