@@ -959,6 +959,23 @@ public sealed class NodeTests : IDisposable
     }
 
     [Fact]
+    public void Announced_chats_fit_the_hub_payload_limit_dropping_the_oldest_first()
+    {
+        var now = DateTimeOffset.UtcNow;
+        // Labels of 256 non-ASCII characters serialize as escapes, so 64 of them are far beyond the hub's 32 KB request limit.
+        for (var i = 0; i < NodeChats.MaxChats; i++)
+            NodeState.WriteSessionHandle(DataDir, new SessionHandle($"s-{i:D2}", "synthetic-token", "repo", new string('€', 256), now.AddMinutes(-i), Chat: new ChatLocation("codex", Guid.NewGuid().ToString())));
+
+        var chats = Chats([]).Read(_ => true);
+
+        var body = new JsonObject { ["machineName"] = new string('€', 128), ["clients"] = new JsonArray("codex", "claude"), ["chats"] = chats.DeepClone() };
+        Assert.True(System.Text.Encoding.UTF8.GetByteCount(body.ToJsonString()) <= PkRelay.Contracts.RelayLimits.MaxPayloadBytes);
+        Assert.InRange(chats.Count, 1, NodeChats.MaxChats - 1);
+        // The newest are kept, in order.
+        Assert.Equal(Enumerable.Range(0, chats.Count).Select(i => $"s-{i:D2}"), chats.Select(x => x!["relaySessionId"]!.GetValue<string>()));
+    }
+
+    [Fact]
     public void An_unreadable_holder_transcript_never_lets_a_fork_win_the_match()
     {
         var codex = Path.Combine(root, "codex-sessions");

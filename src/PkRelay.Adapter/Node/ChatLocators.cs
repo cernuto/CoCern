@@ -339,12 +339,24 @@ internal sealed class NodeChats(string nodeFolder, IReadOnlyList<IChatLocator> l
             }
         }
         var codex = codexFound?.Invoke() ?? true;
-        return new JsonArray(Current(handles).Select(handle => (JsonNode)new JsonObject
+        return Fit(new JsonArray(Current(handles).Select(handle => (JsonNode)new JsonObject
         {
             ["provider"] = handle.Chat?.Provider ?? "unknown", ["threadId"] = handle.Chat?.ThreadId ?? "unmapped", ["relaySessionId"] = handle.SessionId,
             ["repositoryId"] = handle.RepositoryId, ["label"] = handle.Label, ["wakeable"] = handle.Chat is { } chat && (chat.Provider != "codex" || codex),
             ["waiterRunning"] = handle.Chat is { Provider: "claude" } claude && waiters.Contains(claude.ThreadId), ["openedAt"] = handle.OpenedAt.ToString("O")
-        }).ToArray());
+        }).ToArray()));
+    }
+
+    /// <summary>
+    /// Room the announcement leaves for everything but the chat list: a machine name of up to 128 characters, even fully escaped, the client list and the envelope.
+    /// </summary>
+    private const int EnvelopeReserveBytes = 2048;
+
+    /// <summary>Bounds the chat list by its serialized size as well as its count, so the announcement never exceeds the hub's request limit; the oldest chats (last, as the list is newest first) are dropped first.</summary>
+    internal static JsonArray Fit(JsonArray chats)
+    {
+        while (chats.Count > 0 && Encoding.UTF8.GetByteCount(chats.ToJsonString()) > PkRelay.Contracts.RelayLimits.MaxPayloadBytes - EnvelopeReserveBytes) chats.RemoveAt(chats.Count - 1);
+        return chats;
     }
 
     /// <summary>
