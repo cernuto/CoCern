@@ -2,11 +2,16 @@
   "profiles": {
     "PkRelay.Host": {
       "commandName": "Project",
-      "launchBrowser": true,
+      "launchBrowser": false,
+      "applicationUrl": "http://127.0.0.1:5271",
       "environmentVariables": {
-        "ASPNETCORE_ENVIRONMENT": "Development"
-      },
-      "applicationUrl": "https://localhost:59809;http://localhost:59810"
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "Relay__DatabasePath": "../../data/relay.db",
+        "Relay__Clients__0__TokenFile": "../../data/local-client-token",
+        "Relay__Clients__0__PrincipalId": "PaulC",
+        "Relay__Clients__0__IsAdministrator": "true",
+        "Relay__Clients__0__Repositories__0": "pkrelay"
+      }
     }
   }
 }

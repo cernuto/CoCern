@@ -15,6 +15,10 @@ namespace PkRelay.Host;
 public sealed class RelayClient
 {
     public string Token { get; set; } = "";
+
+    /// <summary>Reads <see cref="Token"/> from this file when no inline token is configured, so launch profiles need not contain the secret. Relative paths resolve from the content root.</summary>
+    public string? TokenFile { get; set; }
+
     public string PrincipalId { get; set; } = "";
     public bool IsAdministrator { get; set; }
     public string[] Repositories { get; set; } = [];
@@ -32,7 +36,7 @@ public static class RelayAuthentication
 {
     public static void AddRelayAuthentication(this IServiceCollection services, IConfiguration configuration)
     {
-        services.AddSingleton(provider => provider.GetRequiredService<IConfiguration>().GetSection("Relay:Clients").Get<RelayClient[]>() ?? []);
+        services.AddSingleton(provider => LoadClients(provider.GetRequiredService<IConfiguration>(), provider.GetRequiredService<IHostEnvironment>()));
         services.AddHostedService<RelayConfigurationValidator>();
         var auth = services.AddAuthentication("Relay").AddScheme<AuthenticationSchemeOptions, RelayAuthenticationHandler>("Relay", _ => { });
         auth.AddJwtBearer("ExternalJwt", _ => { });
@@ -40,9 +44,33 @@ public static class RelayAuthentication
         services.AddAuthorization();
     }
 
-    internal static void Validate(IConfiguration configuration)
+    internal static RelayClient[] LoadClients(IConfiguration configuration, IHostEnvironment environment)
     {
         var clients = configuration.GetSection("Relay:Clients").Get<RelayClient[]>() ?? [];
+        foreach (var client in clients.Where(c => string.IsNullOrWhiteSpace(c.Token) && !string.IsNullOrWhiteSpace(c.TokenFile)))
+            client.Token = ReadTokenFile(Path.Combine(environment.ContentRootPath, client.TokenFile!));
+        return clients;
+    }
+
+    private static string ReadTokenFile(string path)
+    {
+        try
+        {
+            using var stream = File.OpenRead(path);
+            if (stream.Length > 8192) throw new IOException();
+            using var reader = new StreamReader(stream);
+            return reader.ReadToEnd().Trim();
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            // The path is configuration, not a secret, but the message stays generic like the other startup checks.
+            throw new InvalidOperationException("A relay client token file could not be read.");
+        }
+    }
+
+    internal static void Validate(IConfiguration configuration, IHostEnvironment environment)
+    {
+        var clients = LoadClients(configuration, environment);
         if (clients.Any(c => string.IsNullOrWhiteSpace(c.Token) || string.IsNullOrWhiteSpace(c.PrincipalId) || c.Token.Length > 4096))
             throw new InvalidOperationException("Relay client configuration is invalid.");
         var authority = configuration["Relay:OAuth:Authority"];
@@ -91,9 +119,9 @@ public static class RelayAuthentication
     public static RelayCaller Caller(ClaimsPrincipal principal) => new(principal.FindFirstValue(ClaimTypes.NameIdentifier) ?? throw new UnauthorizedAccessException(), principal.HasClaim("relay_admin", "true"), principal.FindAll("relay_repository").Select(c => c.Value).ToArray());
 }
 
-internal sealed class RelayConfigurationValidator(IConfiguration configuration) : IHostedService
+internal sealed class RelayConfigurationValidator(IConfiguration configuration, IHostEnvironment environment) : IHostedService
 {
-    public Task StartAsync(CancellationToken cancellationToken) { RelayAuthentication.Validate(configuration); return Task.CompletedTask; }
+    public Task StartAsync(CancellationToken cancellationToken) { RelayAuthentication.Validate(configuration, environment); return Task.CompletedTask; }
     public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 }
 

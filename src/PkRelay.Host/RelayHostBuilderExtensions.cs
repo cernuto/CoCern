@@ -45,8 +45,13 @@ public static class RelayHostBuilderExtensions
         builder.UseOrleans(silo => silo.UseLocalhostClustering(siloPort: DefaultSiloPort, gatewayPort: DefaultGatewayPort, serviceId: ServiceId, clusterId: ServiceId)
             .AddPkRelaySqlite(DefaultDatabasePath(builder.Environment)));
         // Resolve final configuration through DI so application-factory and hosting overrides apply before any store/listener opens.
-        builder.Services.Replace(ServiceDescriptor.Singleton<SqliteStore>(services => new SqliteStore(
-            services.GetRequiredService<IConfiguration>()["Relay:DatabasePath"] ?? DefaultDatabasePath(services.GetRequiredService<IHostEnvironment>()))));
+        builder.Services.Replace(ServiceDescriptor.Singleton<SqliteStore>(services =>
+        {
+            var environment = services.GetRequiredService<IHostEnvironment>();
+            // A relative configured path resolves from the content root, so a launch profile can point at the repository's data folder.
+            var configured = services.GetRequiredService<IConfiguration>()["Relay:DatabasePath"];
+            return new SqliteStore(configured is null ? DefaultDatabasePath(environment) : Path.Combine(environment.ContentRootPath, configured));
+        }));
         builder.Services.AddOptions<EndpointOptions>().Configure<IConfiguration>((options, configuration) =>
         {
             options.SiloPort = configuration.GetValue("Relay:SiloPort", DefaultSiloPort);
