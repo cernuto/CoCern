@@ -498,6 +498,37 @@ public sealed class WakeTests
         Assert.Empty(fixture.Dispatcher.Prompts);
     }
 
+    [Fact]
+    public void Codex_turn_stays_busy_however_much_it_writes_and_ends_when_it_completes()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "pkrelay-rollouts-" + Guid.NewGuid().ToString("N"));
+        const string thread = "00000000-0000-0000-0000-0000000000cc";
+        try
+        {
+            var day = Path.Combine(root, "2026", "10", "30");
+            Directory.CreateDirectory(day);
+            var path = Path.Combine(day, $"rollout-2026-10-30T13-00-00-{thread}.jsonl");
+            string Event(string type) => JsonSerializer.Serialize(new { timestamp = "2026-10-30T20:00:00Z", type = "event_msg", payload = new { type } });
+            var output = JsonSerializer.Serialize(new { type = "response_item", payload = new { type = "function_call_output", output = new string('o', 64 * 1024) } });
+            var activity = new CodexActivity(root);
+            File.WriteAllLines(path, [Event("task_complete"), Event("task_started")]);
+            Assert.True(activity.IsBusy(thread, DateTimeOffset.UtcNow));
+
+            // A long turn writes far more than any fixed tail; its start must not be lost.
+            for (var i = 0; i < 300; i++) File.AppendAllLines(path, [output]);
+            Assert.True(activity.IsBusy(thread, DateTimeOffset.UtcNow));
+            Assert.True(new CodexActivity(root).IsBusy(thread, DateTimeOffset.UtcNow), "A fresh reader must find the turn start too.");
+
+            File.AppendAllLines(path, [Event("task_complete")]);
+            Assert.False(activity.IsBusy(thread, DateTimeOffset.UtcNow));
+            File.AppendAllText(path, Event("task_started")[..20]);
+            Assert.False(activity.IsBusy(thread, DateTimeOffset.UtcNow));
+            File.AppendAllText(path, Event("task_started")[20..] + "\n");
+            Assert.True(activity.IsBusy(thread, DateTimeOffset.UtcNow));
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
     [Theory]
     [InlineData("task_started", 0, true)]
     [InlineData("task_complete", 0, false)]
@@ -516,8 +547,8 @@ public sealed class WakeTests
             File.WriteAllLines(path, [Event("task_started"), Event("token_count"), Event("task_complete"), Event(lastEvent), Event("token_count"), "{not json"]);
             var now = DateTimeOffset.UtcNow;
             File.SetLastWriteTimeUtc(path, now.AddMinutes(-minutesSinceWrite).UtcDateTime);
-            Assert.Equal(busy, CodexActivity.IsBusy(root, thread, now));
-            Assert.False(CodexActivity.IsBusy(root, "00000000-0000-0000-0000-0000000000bb", now));
+            Assert.Equal(busy, new CodexActivity(root).IsBusy(thread, now));
+            Assert.False(new CodexActivity(root).IsBusy("00000000-0000-0000-0000-0000000000bb", now));
         }
         finally { Directory.Delete(root, true); }
     }

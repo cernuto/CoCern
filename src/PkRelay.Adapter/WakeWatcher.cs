@@ -31,7 +31,7 @@ public static class WakeWatcher
 {
     /// <summary>Watches every enrolled route until stopped, queueing one fixed inbox-check prompt per new message batch into its Codex chat.</summary>
     public static Task RunAsync(WakeConfiguration config, CancellationToken cancellationToken) =>
-        RunAsync(config, new CodexWakeDispatcher(config.CodexPath, CodexActivity.DefaultSessionsRoot), exitWhenQueued: false, timeout: null, cancellationToken);
+        RunAsync(config, new CodexWakeDispatcher(config.CodexPath, new CodexActivity(CodexActivity.DefaultSessionsRoot)), exitWhenQueued: false, timeout: null, cancellationToken);
 
     /// <summary>
     /// Waits on one enrolled route until a message arrives that has not already woken it, hands the fixed inbox-check
