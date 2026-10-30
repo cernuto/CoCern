@@ -20,6 +20,8 @@ internal static class ToolSchemas
             RelayTools.SendMessage => ["text", "recipientSessionId", "taskId", "replyTo"],
             RelayTools.CheckInbox => ["cursor", "limit"],
             RelayTools.Ack => ["messageId", "messageIds"],
+            RelayTools.ClaimRenew => ["resourceId", "generation", "taskId", "claimGeneration", "leaseSeconds"],
+            RelayTools.ClaimRelease => ["resourceId", "generation", "taskId", "claimGeneration", "expectedVersion"],
             _ => []
         };
         return ForwardingFields.Concat(tool.RequiredFields).Concat(extra).Distinct(StringComparer.Ordinal).ToDictionary(field => field, field => all[field]);
@@ -75,6 +77,7 @@ internal static class ToolSchemas
             case RelayTools.ClaimRelease:
                 Integer("generation", "Required current resource grant generation when resourceId is supplied.");
                 Integer("claimGeneration", "Required current task claim generation when taskId is supplied instead of resourceId.");
+                if (tool == RelayTools.ClaimRelease) Integer("expectedVersion", "Required current task version when releasing taskId; omit for a resource release.");
                 Integer("leaseSeconds", "Renewal lease from 1 to 600 seconds; renew resource and task grants independently."); break;
             case RelayTools.ActionBegin:
                 Text("inputFingerprint", "Stable identity of this action's intended inputs."); Text("triggerId", "Optional delivery trigger consumed by this action."); Integer("attempt", "Explicit next attempt number after a resolved prior attempt.");

@@ -27,6 +27,16 @@ public class ToolDiscoveryTests
     [InlineData("check_inbox", "limit", "integer")]
     [InlineData("ack", "messageId", "string")]
     [InlineData("ack", "messageIds", "array")]
+    [InlineData("claim_renew", "resourceId", "string")]
+    [InlineData("claim_renew", "generation", "integer")]
+    [InlineData("claim_renew", "taskId", "string")]
+    [InlineData("claim_renew", "claimGeneration", "integer")]
+    [InlineData("claim_renew", "leaseSeconds", "integer")]
+    [InlineData("claim_release", "resourceId", "string")]
+    [InlineData("claim_release", "generation", "integer")]
+    [InlineData("claim_release", "taskId", "string")]
+    [InlineData("claim_release", "claimGeneration", "integer")]
+    [InlineData("claim_release", "expectedVersion", "integer")]
     public void Forwarding_tools_advertise_arguments_needed_for_chat_coordination(string toolName, string field, string type)
     {
         Assert.True(RelayToolCatalog.TryGet(toolName, out var tool));

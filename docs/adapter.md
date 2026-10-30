@@ -12,6 +12,8 @@ Each MCP tool accepts the corresponding hub JSON object directly, including `rep
 
 The compact forwarding schemas advertise every catalog-declared required operation field, session machine/label fields, message text and recipient/reply correlation, inbox pagination and acknowledgment IDs as well as task delta/workflow arguments. Only `repositoryId` is required by the forwarding schema; the hub still enforces private session handles, mutation request IDs and operation-specific requirements. `chat_directory` returns a bounded list with a truncation flag and does not support cursor pagination.
 
+For claim renewal or release, supply either `resourceId` with its `generation`, or `taskId` with its `claimGeneration`. A task release also requires its current `expectedVersion`; a resource release does not. `claim_renew` accepts `leaseSeconds` and does not require a task version. These conditional fields are advertised even though neither identity alternative is globally required by the forwarding schema.
+
 Open a fresh session for each chat. Use `task_claim` before direct IDE work, perform that work through the configured Roslyn CodeLens and Visual Studio MCP servers, and report useful milestones with `task_update`. Claims remain advisory. Retry an uncertain mutation with its original request identity after checking authoritative state; the adapter does not automatically replay mutations.
 
 Inbox recovery is explicit: call `check_inbox`, handle each message, then call `ack` for the handled IDs. Reading an inbox does not acknowledge it, and acknowledgment does not complete a task. Task conversations survive replacement chats; another chat's private session inbox does not transfer.
