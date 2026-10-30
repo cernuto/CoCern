@@ -316,7 +316,8 @@ internal sealed class NodeChats(string nodeFolder, IReadOnlyList<IChatLocator> l
     public JsonArray Read(Func<string, bool> allowed)
     {
         var now = clock.GetUtcNow();
-        var handles = Prune(NodeState.ReadSessionHandles(nodeFolder), now).Where(x => allowed(x.RepositoryId)).OrderByDescending(x => x.OpenedAt).Take(MaxChats).ToArray();
+        var waiters = ClaudeWaiter.Running(nodeFolder);
+        var handles = Prune(NodeState.ReadSessionHandles(nodeFolder), now, waiters).Where(x => allowed(x.RepositoryId)).OrderByDescending(x => x.OpenedAt).Take(MaxChats).ToArray();
         for (var i = 0; i < handles.Length; i++)
             if (handles[i] is { Chat: null, Unmapped: false } open && now - open.OpenedAt > locateWindow) handles[i] = Persist(open with { Unmapped = true });
         var pending = handles.Where(x => x is { Chat: null, Unmapped: false }).ToArray();
@@ -334,7 +335,6 @@ internal sealed class NodeChats(string nodeFolder, IReadOnlyList<IChatLocator> l
             }
         }
         var codex = codexFound?.Invoke() ?? true;
-        var waiters = ClaudeWaiter.Running(nodeFolder);
         return new JsonArray(Current(handles).Select(handle => (JsonNode)new JsonObject
         {
             ["provider"] = handle.Chat?.Provider ?? "unknown", ["threadId"] = handle.Chat?.ThreadId ?? "unmapped", ["relaySessionId"] = handle.SessionId,
@@ -365,12 +365,16 @@ internal sealed class NodeChats(string nodeFolder, IReadOnlyList<IChatLocator> l
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { return false; }
     }
 
-    /// <summary>Deletes the node's own handle files for chats that never mapped (or never will) and opened more than <see cref="PruneAfter"/> ago; returns the rest.</summary>
-    private IEnumerable<SessionHandle> Prune(IEnumerable<SessionHandle> handles, DateTimeOffset now)
+    /// <summary>
+    /// Deletes the node's own handle files for chats that never mapped (or never will) and opened more than <see cref="PruneAfter"/> ago; returns the rest.
+    /// A handle carrying the chat ID its client captured, or whose chat has a live waiter, is kept: <c>--await-inbox --chat</c> finds its session through that claim even when it was never located.
+    /// </summary>
+    private IEnumerable<SessionHandle> Prune(IEnumerable<SessionHandle> handles, DateTimeOffset now, HashSet<string> waiters)
     {
         foreach (var handle in handles)
         {
             var age = now - handle.OpenedAt;
+            if (handle.Client is not null || (handle.Client ?? handle.Chat) is { } chat && waiters.Contains(chat.ThreadId)) { yield return handle; continue; }
             // Kept when it could not be deleted now; tried again next cycle.
             if (handle.Chat is null && (handle.Unmapped || age > locateWindow) && age > PruneAfter && Delete(handle)) continue;
             yield return handle;

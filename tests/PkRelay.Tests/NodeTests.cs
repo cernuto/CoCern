@@ -959,6 +959,27 @@ public sealed class NodeTests : IDisposable
     }
 
     [Fact]
+    public void Pruning_keeps_old_unmapped_handles_that_a_claude_waiter_can_still_use()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var (claimed, waited) = (Guid.NewGuid().ToString(), Guid.NewGuid().ToString());
+        // Never located, older than a day: one carries the chat ID Claude Code captured, the other's chat has a live waiter (this test process).
+        NodeState.WriteSessionHandle(DataDir, new SessionHandle("s-claimed", "synthetic-token-claimed", "repo", "Claimed", now.AddHours(-25), Client: new ChatLocation("claude", claimed), Unmapped: true));
+        NodeState.WriteSessionHandle(DataDir, new SessionHandle("s-waited", "synthetic-token-waited", "repo", "Waited", now.AddHours(-26), Client: new ChatLocation("claude", waited)));
+        NodeState.WriteSessionHandle(DataDir, new SessionHandle("s-stale", "synthetic-token-stale", "repo", "Stale", now.AddHours(-25), Unmapped: true));
+        using var self = System.Diagnostics.Process.GetCurrentProcess();
+        ClaudeWaiter.WritePid(DataDir, waited, self.Id, self.StartTime.ToUniversalTime());
+
+        var chats = Announced(Chats([]).Read(_ => true));
+
+        Assert.Equal(["s-claimed", "s-waited"], chats.Keys.Order());
+        Assert.False(File.Exists(Path.Combine(DataDir, "sessions", "s-stale.json")));
+        // --await-inbox --chat finds its handle the same way.
+        Assert.Equal("s-claimed", ClaudeWaiter.FindHandle(DataDir, claimed)?.SessionId);
+        Assert.Equal("s-waited", ClaudeWaiter.FindHandle(DataDir, waited)?.SessionId);
+    }
+
+    [Fact]
     public void A_newer_session_in_the_same_thread_replaces_the_older_handle()
     {
         var now = DateTimeOffset.UtcNow;
