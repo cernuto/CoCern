@@ -75,6 +75,14 @@ Phase 1 uses one coarse exclusive resource group per tool-host PC, covering its 
 
 Do not infer the target from the focused window, a solution basename, or the first free PC. Phase 1 requires existing tool connections and open/usable solutions. Automatic IDE launch, solution switching, and failover are outside scope.
 
+## Discovery grain
+
+Cross-PC discovery adds one more grain beside the board, session and lock grains: a single discovery grain that holds the machine-scoped records. Its state lists the enrolled machines (name, hashed credential, last-seen time, installed clients and announced chats) and a deny list of revoked machine IDs. It decides identity and wiring only: who is enrolled, which chats each PC says it can reach and whether those PCs are alive. It never assigns work, and nothing in it triggers a task transition.
+
+The domain rules live in `DiscoveryAggregate`, applied through the same state machine as the other aggregates, and `RelayApplication` routes `chat_directory` and `revoke_machine` to it. A machine enrolls anonymously over `/api/discovery/enroll` and receives a credential that is shown once and stored only as a hash at the hub. Each announcement over `/api/discovery/announce` replaces that machine's chat list and refreshes its last-seen time; a machine counts as live for 90 seconds after its last announcement. Enrolled machines authenticate as `machine:<machineId>`, never as administrators, and are scoped to the repositories in `Relay:Discovery:Repositories`.
+
+`chat_directory` returns the announced chats of the caller's repositories with the session ID to message and a `reachable` flag: a chat is reachable when its machine is live and the chat is ready (a Codex chat is wakeable, or a Claude chat's inbox waiter is running). Thread IDs, hashes and credentials never leave the aggregate. Messages themselves still travel through the ordinary session inboxes, so a directory entry is only a name and a session ID to send to. Waking is done by each PC's own node from the routes in its announce reply, which keeps every PC waking only its own chats. See [discovery.md](discovery.md) for setup, trust and limits.
+
 ## Task continuity and cross-PC work
 
 1. **Attach or resume the task.** A fresh chat receives a fresh session plus the task goal/version/owner, binding information, decisions, evidence references, unresolved actions and task questions, and next action. Support deltas since a known task version.

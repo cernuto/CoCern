@@ -25,6 +25,8 @@ Each new chat calls `session_open` with a fresh request identity. Keep its retur
 
 For automatic local Codex follow-up, use the optional [wake adapter mode](docs/wake.md). It watches durable inbox changes in ordinary code and queues one bounded inbox-check prompt for an explicitly enrolled chat. The relay host remains coordination-only; existing model, tool and approval settings remain in force. A Claude Code session can instead run the adapter's `--await-inbox` mode as a background command; it exits when a new message arrives, so the session wakes without spending turns while it waits.
 
+To find and message chats on other PCs, use [cross-PC discovery](docs/discovery.md). Turn on `Relay:Discovery:Enabled` and `Relay:Network:Enabled` on the hub (the Visual Studio launch profile does), open the one HTTPS firewall port yourself, and run `--setup --hub <address>` once on each PC. A background node on each PC then announces its chats to `chat_directory` and wakes its own Codex chats; a Claude chat waits with `--await-inbox --chat`. Enrollment has no join code, so only expose the hub on a network you trust.
+
 ## Code layout
 
 Dependencies point inward only; `PkRelay.Domain` has no framework or storage dependency.
@@ -40,7 +42,7 @@ Dependencies point inward only; `PkRelay.Domain` has no framework or storage dep
 
 Claims are cooperative. They cannot stop manual IDE actions or grant device, database, deployment, or account permissions. An invoking/unknown action and unresolved restoration obligation remain blocking even after a lease expires. Reading an inbox does not acknowledge a message; explicit acknowledgment follows handling.
 
-Remote machines require an authenticated HTTPS deployment and enrolled scoped clients. Remote ChatGPT use requires a configured external OAuth issuer and actual account/tunnel onboarding; local token setup does not establish that integration. Optional MCP Events, cross-provider wake mechanisms, automatic source transfer, and multi-hub deployment are outside this first build.
+Remote machines require an authenticated HTTPS deployment and enrolled scoped clients (or, with discovery on, an enrolled machine credential). Remote ChatGPT use requires a configured external OAuth issuer and actual account/tunnel onboarding; local token setup does not establish that integration. Optional MCP Events, cross-provider wake mechanisms, automatic source transfer, and multi-hub deployment are outside this first build.
 
 Read the [architecture](docs/architecture.md), [host setup](docs/host.md), [adapter setup](docs/adapter.md), and [verification results](docs/verification.md) for the durability, pagination, authorization, and recovery contracts.
 

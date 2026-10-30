@@ -1,11 +1,40 @@
 # Cross-PC discovery
 
+Discovery lets every PC that runs a coding chat show up in one place, so a chat on one PC can message a chat on another without anyone copying session IDs. Each PC runs a small background program, the node, that enrolls with the hub once, announces the chats that called `session_open` on that PC, and wakes its own Codex chats when mail arrives. The hub keeps the directory (`chat_directory`) and decides identity and wiring only; it never assigns work, starts a model or reaches into another PC. Each PC wakes only its own chats, with the same fixed prompt as in [wake.md](wake.md), and no message text, token or credential is ever put in a prompt, a log or the directory.
+
+## Joining a PC
+
+On the hub PC, turn discovery and the network listener on (see Network below) and allow the one firewall port. Then, for each PC to join:
+
+1. Copy the published adapter folder (`artifacts\adapter`, produced by `./scripts/Build-PkRelay.ps1 -Publish`) to the PC. Keep the folder where it is afterwards: the PC's startup entry and its client settings point into it.
+2. Close Claude Code on that PC (see Running setup with Claude Code closed below), then run setup once from the copied folder:
+
+```powershell
+dotnet .\PkRelay.Adapter.dll --setup --hub https://<hub-pc-name-or-address>:5273/
+```
+
+The address is typed once and remembered. A PC finds the hub only by that address; there is no beacon, network scan or name lookup. On first contact the node pins the hub's certificate fingerprint (trust on first use), enrolls and announces once, and only then changes anything else on the PC. Setup then:
+
+- adds a `pkrelay` MCP server entry to Codex's `%USERPROFILE%\.codex\config.toml` and Claude Code's `%USERPROFILE%\.claude.json`, keeping a backup of any file it edits and leaving every other setting alone (add `--skip-client-config` to leave both files untouched);
+- writes the one `PkRelayNode` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, so the node starts when the user signs in (current user only, no administrator rights);
+- starts the node now, hidden, and prints the machine ID.
+
+Setup is idempotent: entries that already exist are left as they were. `--data-dir <path>` keeps the node's state somewhere other than `%LOCALAPPDATA%\PkRelay\node`. Setup never changes firewall rules. Exit code 1 is a configuration or enrollment problem, 4 means the hub presented a different certificate than the one pinned, and 5 means a client settings file could not be parsed (nothing is edited in that case).
+
+New chats then call `session_open` as usual. With none of `PKRELAY_URL`, `PKRELAY_TOKEN_FILE` or `PKRELAY_TOKEN` set, the stdio adapter runs on the node's credentials, and the chat appears in `chat_directory` within about a minute.
+
+### Running setup with Claude Code closed
+
+Setup edits `.claude.json`, which Claude Code rewrites from its own memory while it runs, so an edit made under a running Claude Code can be overwritten when that session next saves. Close every Claude Code window on the PC before running setup, and reopen them afterwards. Setup parses the file first and refuses (exit code 5) rather than overwrite one it cannot read.
+
 ## Network
 
 By default the hub listens only on loopback (`http://127.0.0.1:5271`). To let other PCs reach it, set `Relay:Network:Enabled` to `true`. The hub then keeps the loopback HTTP endpoint and also serves HTTPS on every network interface.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
+| `Relay:Discovery:Enabled` | `false` | Turns on enrollment, announcements and the machine credential. Discovery needs this and the network listener to reach other PCs. |
+| `Relay:Discovery:Repositories` | `["pkrelay"]` | The repositories enrolled machines may use. |
 | `Relay:Network:Enabled` | `false` | Turns the HTTPS network listener on. |
 | `Relay:Network:HttpsPort` | `5273` | The HTTPS port. |
 | `Relay:Network:CertificatePath` | `data/hub-certificate.pfx` | The hub's self-signed certificate, relative to the content root. It is created on first start and reused afterwards. The file holds the private key, so it is readable only by the user running the hub. |
@@ -21,6 +50,62 @@ New-NetFirewallRule -DisplayName "PkRelay hub (HTTPS 5273)" -Direction Inbound -
 ```
 
 The rule is limited to the Private network profile; drop `-Profile Private` if your network is classed as Public or Domain and you still want it reachable. Remove it with `Remove-NetFirewallRule -DisplayName "PkRelay hub (HTTPS 5273)"`. If you change `Relay:Network:HttpsPort`, use that port in the rule instead.
+
+## Trust, revocation and stopping
+
+### Open trust
+
+Enrollment has no join code. Any device that can reach the hub's HTTPS port can enroll and becomes a machine with the principal `machine:<machineId>`. An enrolled machine is never an administrator and is refused `control_request`, but it can read and write coordination data in the repositories listed in `Relay:Discovery:Repositories` (default `["pkrelay"]`), including messaging the chats in the directory. Expose the port only on a network you trust, keep the firewall rule on the Private profile, and watch `chat_directory` for machine names you do not recognize. Machine credentials are stored hashed at the hub and in a current-user-only file on each PC.
+
+### Revoking a PC
+
+An administrator revokes a machine with `control_request`, command `revoke_machine`, and the `machineId`:
+
+```json
+{ "repositoryId": "pkrelay", "command": "revoke_machine", "machineId": "<machine id>", "requestId": "<fresh id>" }
+```
+
+The machine ID is printed by setup and held in `node.json` in the PC's node folder; the directory shows machine names, not IDs. Revocation removes the machine and its credential and denies that machine ID from enrolling again. The revoked PC's node notices on its next announcement, says it was revoked, and stops with exit code 1. A machine credential is refused `control_request` (403), so a PC cannot revoke itself or any other PC.
+
+### Stopping a node
+
+Creating a file named `stop` in the node folder stops waking on that PC:
+
+```powershell
+New-Item -ItemType File -Path "$env:LOCALAPPDATA\PkRelay\node\stop" -Force
+```
+
+The node keeps running and announcing, so its chats stay in the directory, but no Codex chat is woken and a Claude chat's waiter exits with code 3. Delete the file to let waking start again at the node's next announcement. To end the node process itself, stop its `dotnet` process; to keep it from starting at sign-in, remove the `PkRelayNode` value from the Run key.
+
+## Claude chats: the in-session waiter
+
+The node never wakes a Claude chat. Instead the chat runs a background command, on the node's credentials, that exits when new mail arrives:
+
+```powershell
+dotnet <adapter folder>\PkRelay.Adapter.dll --await-inbox --chat <this Claude chat's session ID> --timeout-minutes 120
+```
+
+The session ID is the chat's own UUID (Claude Code exports it as `CLAUDE_CODE_SESSION_ID`). The chat must already have called `session_open` on this PC with the adapter on node credentials, so that a relay session belongs to it; otherwise the command exits with code 1. No configuration file or token handling is needed. Exit code 0 means mail arrived and the fixed inbox-check prompt was printed, 2 means the optional timeout elapsed, and 3 means the `stop` file was found. While the waiter runs the node announces the chat as reachable, so a Claude chat with no running waiter shows `reachable: false`. Start the waiter again after handling the inbox. [wake.md](wake.md) describes the waiting behavior itself.
+
+## Migrating from hand-written wake configs
+
+The node replaces hand-written `--wake <config>` and `--await-inbox <config>` setups for any chat that opens its session through the node's credentials; both modes still work unchanged. To move a PC over:
+
+1. Stop the old watcher: create its configured stop file and wait for the process to exit. Two watchers on one chat would queue duplicate prompts.
+2. Remove any scheduled task or startup entry that launched `--wake`.
+3. Run `--setup --hub <address>` once, as above. The chats then need a new `session_open` through the node's credentials (a new chat): an existing session's token lives in the old private session file, which the node does not read.
+4. For a Claude chat, replace `--await-inbox <config>` with `--await-inbox --chat <session ID>`.
+
+Keep the old state database until you have confirmed the node is waking; deleting it only forgets deduplication for the old routes.
+
+## Known limits
+
+- A lost enroll reply or a lost credential gives the PC a new machine ID. The old entry stays at the hub until it is revoked, so revoke it by its old ID.
+- Enrollment is rate limited by client address, and an IPv6 address is limited as its whole /64 prefix, so many PCs behind one prefix share one bucket.
+- A node scans only the newest 64 session handles. Handles beyond the newest 64 are not scanned, mapped or announced.
+- A long-lived Claude chat whose transcript was never located is announced as unmapped and can be pruned after 24 hours.
+- A hard kill of the hub, rather than a normal stop, can leave one orphaned key file behind. It is harmless and can be deleted.
+- Network discovery has been verified only with several nodes on one PC. See [verification.md](verification.md).
 
 ## Connected chats
 

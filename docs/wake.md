@@ -4,6 +4,10 @@ The optional wake mode belongs to the local adapter. The relay hub continues to 
 
 The installed Codex CLI supports `codex queue --thread <UUID> --message <text>`. On this laptop, the open desktop app consumed queued messages and automatically started turns in both enrolled test chats. This behavior was verified against the actual chats, not inferred from a queued receipt. The CLI also offers `--resume`, but that option warned about a missing standalone daemon; it is unnecessary for the verified desktop path. See the [official CLI reference](https://learn.chatgpt.com/docs/cli/reference).
 
+## Node mode supersedes hand-written configs
+
+On a PC set up for [cross-PC discovery](discovery.md), a background node does the work of this mode without a configuration file: it learns which of its own Codex chats to wake from the hub's announce reply, reads their private session handles from its node folder, and queues the same fixed prompt through `codex queue` with the same rate limits and durable deduplication (in the node's own `wake.db`). Claude chats use `--await-inbox --chat <session ID>` instead of `--await-inbox <config>`. The hand-written `--wake` and `--await-inbox <config>` modes remain available and unchanged, but a chat should be watched by only one of them. Before moving a PC to the node, stop the old watcher through its stop file so two watchers never queue prompts for the same chat. Migration steps are in [discovery.md](discovery.md).
+
 ## Enrollment and startup
 
 Publish the adapter to a fresh output directory. Do not overwrite a running executable's output folder. Run its opt-in mode with an absolute private configuration path:

@@ -10,7 +10,9 @@
         "Relay__Clients__0__TokenFile": "../../data/local-client-token",
         "Relay__Clients__0__PrincipalId": "PaulC",
         "Relay__Clients__0__IsAdministrator": "true",
-        "Relay__Clients__0__Repositories__0": "pkrelay"
+        "Relay__Clients__0__Repositories__0": "pkrelay",
+        "Relay__Discovery__Enabled": "true",
+        "Relay__Network__Enabled": "true"
       }
     }
   }
