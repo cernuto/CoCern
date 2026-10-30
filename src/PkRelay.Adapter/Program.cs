@@ -2,6 +2,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using PkRelay.Adapter;
+using PkRelay.Adapter.Node;
 
 try
 {
@@ -28,6 +29,30 @@ try
         Console.CancelKeyPress += (_, cancel) => { cancel.Cancel = true; shutdown.Cancel(); };
         var status = await WakeWatcher.AwaitInboxAsync(configuration, Console.Out.WriteLine, timeout, shutdown.Token);
         return status switch { "queued" => 0, "timeout" => 2, _ => 3 };
+    }
+    if (args.Length > 0 && args[0] == "--node")
+    {
+        // Exit codes: 0 stopped, 1 configuration problem or revoked PC, 4 the hub presented a certificate other than the pinned one.
+        const string usage = "Use --node [--data-dir <path>] [--hub <https-url>].";
+        string? dataDir = null;
+        Uri? hub = null;
+        for (var i = 1; i < args.Length; i += 2)
+        {
+            if (i + 1 >= args.Length || string.IsNullOrWhiteSpace(args[i + 1])) throw new AdapterConfigurationException(usage);
+            switch (args[i])
+            {
+                case "--data-dir" when dataDir is null: dataDir = args[i + 1]; break;
+                case "--hub" when hub is null:
+                    if (!AdapterOptions.TryParseOrigin(args[i + 1], out var typed)) throw new AdapterConfigurationException("--hub must be a root https:// address, or http:// to this PC's loopback, without credentials, query, or fragment.");
+                    hub = typed;
+                    break;
+                default: throw new AdapterConfigurationException(usage);
+            }
+        }
+        using var state = NodeState.Open(dataDir);
+        using var shutdown = new CancellationTokenSource();
+        Console.CancelKeyPress += (_, cancel) => { cancel.Cancel = true; shutdown.Cancel(); };
+        return await NodeRunner.RunAsync(state, hub, shutdown.Token);
     }
     var options = AdapterOptions.FromEnvironment();
     using var http = new HttpClient(RelayForwarder.CreateHandler()) { Timeout = TimeSpan.FromSeconds(60) };

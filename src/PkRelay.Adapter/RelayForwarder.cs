@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using PkRelay.Adapter.Node;
 using PkRelay.Contracts;
 
 namespace PkRelay.Adapter;
@@ -17,6 +18,8 @@ public sealed class RelayForwarder(HttpClient client, AdapterOptions options)
     public const int MaxResponseBytes = 128 * 1024;
 
     public static HttpClientHandler CreateHandler() => new() { AllowAutoRedirect = false, UseCookies = false };
+    /// <summary>The pinned handler when the options carry a certificate fingerprint, otherwise the plain one.</summary>
+    public static HttpClientHandler CreateHandler(AdapterOptions options) => options.PinnedFingerprint is { } fingerprint ? PinnedCertificate.CreateHandler(fingerprint) : CreateHandler();
 
     public async Task<AdapterReply> ForwardAsync(string tool, JsonElement arguments, CancellationToken cancellationToken = default)
     {

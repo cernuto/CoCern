@@ -1,3 +1,5 @@
+using PkRelay.Adapter.Node;
+
 namespace PkRelay.Adapter;
 
 public sealed class AdapterConfigurationException(string message) : Exception(message);
@@ -8,10 +10,7 @@ public sealed class AdapterOptions
 
     public AdapterOptions(string url, string token, bool admin = false, bool signalR = false)
     {
-        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) ||
-            (uri.Scheme != Uri.UriSchemeHttps && (uri.Scheme != Uri.UriSchemeHttp || !uri.IsLoopback)) ||
-            !string.IsNullOrEmpty(uri.UserInfo) || !string.IsNullOrEmpty(uri.Query) ||
-            !string.IsNullOrEmpty(uri.Fragment) || uri.AbsolutePath != "/")
+        if (!TryParseOrigin(url, out var uri))
             throw new AdapterConfigurationException("PKRELAY_URL must be a root HTTPS origin, or HTTP loopback origin, without credentials, query, or fragment.");
 
         var normalized = token.Trim();
@@ -28,6 +27,23 @@ public sealed class AdapterOptions
     public string Token { get; }
     public bool Admin { get; }
     public bool SignalR { get; }
+
+    /// <summary>When set, only a hub certificate with this SHA-256 fingerprint is accepted (stored uppercase).</summary>
+    public string? PinnedFingerprint
+    {
+        get;
+        init => field = value is null ? null : PinnedCertificate.IsFingerprint(value) ? value.ToUpperInvariant() : throw new AdapterConfigurationException("A pinned certificate fingerprint must be 64 hexadecimal characters.");
+    }
+
+    /// <summary>True for a root HTTPS origin, or HTTP to a loopback host, without credentials, query or fragment.</summary>
+    public static bool TryParseOrigin(string url, out Uri uri)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out uri!) ||
+            (uri.Scheme != Uri.UriSchemeHttps && (uri.Scheme != Uri.UriSchemeHttp || !uri.IsLoopback)) ||
+            !string.IsNullOrEmpty(uri.UserInfo) || !string.IsNullOrEmpty(uri.Query) ||
+            !string.IsNullOrEmpty(uri.Fragment) || uri.AbsolutePath != "/") return false;
+        return true;
+    }
 
     public static AdapterOptions FromEnvironment(Func<string, string?>? environment = null, Func<string, string>? readFile = null)
     {
