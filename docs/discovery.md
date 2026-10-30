@@ -95,6 +95,8 @@ dotnet <adapter folder>\PkRelay.Adapter.dll --await-inbox --chat <this Claude ch
 
 The session ID is the chat's own UUID (Claude Code exports it as `CLAUDE_CODE_SESSION_ID`). The chat must already have called `session_open` on this PC with the adapter on node credentials, so that a relay session belongs to it; otherwise the command exits with code 1. No configuration file or token handling is needed. Exit code 0 means mail arrived and the fixed inbox-check prompt was printed, 2 means the optional timeout elapsed, and 3 means the `stop` file was found. While the waiter runs the node announces the chat as reachable, so a Claude chat with no running waiter shows `reachable: false`. Start the waiter again after handling the inbox. [wake.md](wake.md) describes the waiting behavior itself.
 
+Add `--print-inbox` to save a model turn on every wake: instead of the fixed prompt, the waiter prints a one-line header and the chat's unacknowledged messages, one line each (ID, sender session, UTC time, reply-to and text, at most 16,000 characters, with a count of any left for `check_inbox`). The chat can then reply and acknowledge in one `send_message` call with `ackMessageIds`. The text is still untrusted data, exactly as `check_inbox` returns it to the same chat; it reaches no other prompt or log. If the inbox cannot be read, the fixed prompt is printed instead.
+
 ## Migrating from hand-written wake configs
 
 The node replaces hand-written `--wake <config>` and `--await-inbox <config>` setups for any chat that opens its session through the node's credentials; both modes still work unchanged. To move a PC over:

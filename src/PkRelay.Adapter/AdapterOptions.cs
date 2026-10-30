@@ -27,6 +27,8 @@ public sealed class AdapterOptions
     public string Token { get; }
     public bool Admin { get; }
     public bool SignalR { get; }
+    /// <summary><c>PKRELAY_PROFILE=chat</c>: advertise and forward only the messaging tools, which keeps tool definitions small in every turn.</summary>
+    public bool ChatOnly { get; init; }
     /// <summary>Set only when the adapter runs on the node's credentials; successful <c>session_open</c> calls are then handed to the node there.</summary>
     public string? NodeFolder { get; init; }
     /// <summary>The chat ID the client exported to this process, if any (node mode only).</summary>
@@ -58,7 +60,8 @@ public sealed class AdapterOptions
         var processEnvironment = environment is null;
         environment ??= Environment.GetEnvironmentVariable;
         readFile ??= File.ReadAllText;
-        if (environment("PKRELAY_URL") is null && environment("PKRELAY_TOKEN_FILE") is null && environment("PKRELAY_TOKEN") is null && FromNode(environment, processEnvironment) is { } node) return node;
+        var chatOnly = string.Equals(environment("PKRELAY_PROFILE"), "chat", StringComparison.OrdinalIgnoreCase);
+        if (environment("PKRELAY_URL") is null && environment("PKRELAY_TOKEN_FILE") is null && environment("PKRELAY_TOKEN") is null && FromNode(environment, processEnvironment) is { } node) return new(node) { ChatOnly = chatOnly };
         string? token;
         var tokenFile = environment("PKRELAY_TOKEN_FILE");
         if (!string.IsNullOrWhiteSpace(tokenFile))
@@ -73,7 +76,13 @@ public sealed class AdapterOptions
 
         return new AdapterOptions(environment("PKRELAY_URL") ?? DefaultUrl, token ?? "",
             string.Equals(environment("PKRELAY_ROLE"), "admin", StringComparison.OrdinalIgnoreCase),
-            string.Equals(environment("PKRELAY_SIGNALR"), "true", StringComparison.OrdinalIgnoreCase));
+            string.Equals(environment("PKRELAY_SIGNALR"), "true", StringComparison.OrdinalIgnoreCase)) { ChatOnly = chatOnly };
+    }
+
+    /// <summary>A copy of <paramref name="other"/>, so a caller can change one init-only setting.</summary>
+    private AdapterOptions(AdapterOptions other) : this(other.BaseUri.AbsoluteUri, other.Token, other.Admin, other.SignalR)
+    {
+        PinnedFingerprint = other.PinnedFingerprint; NodeFolder = other.NodeFolder; ClientChat = other.ClientChat; ChatOnly = other.ChatOnly;
     }
 
     /// <summary>The chat IDs a client exports to its MCP servers. Only these exact variables are read; Codex exports none (see docs/discovery.md).</summary>

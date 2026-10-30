@@ -921,6 +921,26 @@ public sealed class NodeTests : IDisposable
     }
 
     [Fact]
+    public async Task Claude_waiter_can_print_the_inbox_with_the_wake()
+    {
+        var chatId = Guid.NewGuid().ToString();
+        EnrollOnLoopback();
+        NodeState.WriteSessionHandle(DataDir, new SessionHandle("s-claude", "synthetic-token-claude", "repo", "Claude chat", DateTimeOffset.UtcNow.AddMinutes(-1), new ChatLocation("claude", chatId), new ChatLocation("claude", chatId)));
+        var inbox = new InboxStub(new string('c', 64), "s-claude", "synthetic-token-claude") { Messages = ["m1", "m2"] };
+        var printed = new List<string>();
+        Assert.Equal("queued", await ClaudeWaiter.RunAsync(DataDir, chatId, printed.Add, TimeSpan.FromSeconds(30), CancellationToken.None, inbox, () => new NoHub(), printInbox: true));
+        var output = string.Join("\n", printed);
+        // One short header and one line per message replace the fixed prompt, so the chat needs no check_inbox call.
+        Assert.Contains("untrusted", output);
+        Assert.Contains("ackMessageIds", output);
+        Assert.Contains("m1", output);
+        Assert.Contains("m2", output);
+        Assert.Equal(2, output.Split("UNTRUSTED").Length - 1);
+        Assert.DoesNotContain("Respect existing user authority", output);
+        Assert.DoesNotContain("synthetic-token", output);
+    }
+
+    [Fact]
     public void Claude_waiter_with_several_handles_uses_the_newest()
     {
         var chatId = Guid.NewGuid().ToString();

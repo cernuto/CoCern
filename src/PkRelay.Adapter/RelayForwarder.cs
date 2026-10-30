@@ -27,7 +27,7 @@ public sealed class RelayForwarder(HttpClient client, AdapterOptions options)
     public async Task<AdapterReply> ForwardAsync(string tool, JsonElement arguments, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (!CoordinationTools.IsAllowed(tool, options.Admin)) return new(false, "unknown_tool");
+        if (!CoordinationTools.IsAllowed(tool, options.Admin, options.ChatOnly)) return new(false, "unknown_tool");
         if (arguments.ValueKind != JsonValueKind.Object) return new(false, "invalid_arguments");
         var json = arguments.GetRawText();
         if (Encoding.UTF8.GetByteCount(json) > MaxRequestBytes) return new(false, "request_too_large");

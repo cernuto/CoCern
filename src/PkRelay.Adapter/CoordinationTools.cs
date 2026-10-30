@@ -8,11 +8,17 @@ namespace PkRelay.Adapter;
 
 public static class CoordinationTools
 {
-    public static IReadOnlyList<string> NamesForRole(bool admin) => RelayToolCatalog.ForRole(admin).Select(tool => tool.Name).ToArray();
-    public static bool IsAllowed(string name, bool admin) => RelayToolCatalog.TryGet(name, out var tool) && (admin || !tool.AdministratorOnly);
+    /// <summary>The chat profile: what a chat needs to find peers and exchange messages, and nothing it would carry unused in every turn.</summary>
+    private static readonly HashSet<string> ChatTools = [RelayTools.SessionOpen, RelayTools.SendMessage, RelayTools.CheckInbox, RelayTools.Ack, RelayTools.ChatDirectory];
 
-    public static IEnumerable<McpServerTool> Create(RelayForwarder forwarder, bool admin, SessionHints? hints = null, SessionHandoff? handoff = null) =>
-        RelayToolCatalog.ForRole(admin).Select(tool => new ForwardedTool(tool, forwarder, hints, handoff));
+    public static IReadOnlyList<string> NamesForRole(bool admin, bool chatOnly = false) => Surface(admin, chatOnly).Select(tool => tool.Name).ToArray();
+    public static bool IsAllowed(string name, bool admin, bool chatOnly = false) =>
+        RelayToolCatalog.TryGet(name, out var tool) && (admin || !tool.AdministratorOnly) && (!chatOnly || ChatTools.Contains(tool.Name));
+
+    public static IEnumerable<McpServerTool> Create(RelayForwarder forwarder, bool admin, SessionHints? hints = null, SessionHandoff? handoff = null, bool chatOnly = false) =>
+        Surface(admin, chatOnly).Select(tool => new ForwardedTool(tool, forwarder, hints, handoff));
+
+    private static IEnumerable<RelayTool> Surface(bool admin, bool chatOnly) => RelayToolCatalog.ForRole(admin).Where(tool => !chatOnly || ChatTools.Contains(tool.Name));
 
     private sealed class ForwardedTool : McpServerTool
     {
@@ -27,7 +33,8 @@ public static class CoordinationTools
             ProtocolTool = new Tool
             {
                 Name = tool.Name,
-                Description = tool.Description + " Pass the hub tool's JSON arguments directly; include repositoryId, sessionId/sessionToken for established sessions, requestId for mutations, and applicable expected versions.",
+                // Argument guidance shared by every tool lives once in the server instructions, not in each definition.
+                Description = tool.Description,
                 InputSchema = RelayToolCatalog.ForwardingSchema(tool)
             };
         }

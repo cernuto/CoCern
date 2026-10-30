@@ -17,7 +17,7 @@ internal static class ToolSchemas
             RelayTools.SessionOpen => ["machineId", "label"],
             RelayTools.TaskGet => ["taskId", "section", "sinceRevision", "snapshotRevision", "cursor", "limit"],
             RelayTools.TaskUpdate => ["taskId", "expectedVersion", "workflow", "includeNextWork"],
-            RelayTools.SendMessage => ["text", "recipientSessionId", "taskId", "replyTo"],
+            RelayTools.SendMessage => ["text", "recipientSessionId", "taskId", "replyTo", "ackMessageIds"],
             RelayTools.CheckInbox => ["cursor", "limit"],
             RelayTools.Ack => ["messageId", "messageIds"],
             RelayTools.ClaimRenew => ["resourceId", "generation", "taskId", "claimGeneration", "leaseSeconds"],
@@ -88,7 +88,8 @@ internal static class ToolSchemas
                 properties["report"] = new { description = "Bounded reported evidence; not a claim that the relay performed or verified external execution." }; break;
             case RelayTools.SendMessage:
                 Text("text", "Message text, at most 8 KiB. Supply taskId for shared conversation, otherwise recipientSessionId for private delivery.");
-                Text("replyTo", "Optional ID of the message this replies to."); break;
+                Text("replyTo", "Optional ID of the message this replies to.");
+                properties["ackMessageIds"] = new { type = "array", items = new { type = "string" }, maxItems = RelayLimits.MaxAcknowledgedMessages, description = "Inbox message IDs this reply handles; acknowledged in the same call." }; break;
             case RelayTools.Ack:
                 Text("messageId", "One explicitly handled inbox message ID."); properties["messageIds"] = new { type = "array", items = new { type = "string" }, maxItems = RelayLimits.MaxAcknowledgedMessages }; break;
             case RelayTools.ContextGet: Text("contextId", "Selected shared context ID; omit for a bounded listing."); break;
