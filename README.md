@@ -29,4 +29,8 @@ Claims are cooperative. They cannot stop manual IDE actions or grant device, dat
 
 Remote machines require an authenticated HTTPS deployment and enrolled scoped clients. Remote ChatGPT use requires a configured external OAuth issuer and actual account/tunnel onboarding; local token setup does not establish that integration. Optional MCP Events, cross-provider wake mechanisms, automatic source transfer, and multi-hub deployment are outside this first build.
 
-Read the [architecture](docs/architecture.md), [host setup](docs/host.md), [adapter setup](docs/adapter.md), and [verification results](docs/verification.md) for the durability, pagination, authorization, and recovery contracts. The complete suite passes 95 tests; no token-saving percentage is inferred from test counts.
+Read the [architecture](docs/architecture.md), [host setup](docs/host.md), [adapter setup](docs/adapter.md), and [verification results](docs/verification.md) for the durability, pagination, authorization, and recovery contracts.
+
+## Reduce coordination overhead
+
+Use [collaboration workflow](docs/collaboration.md) for durable board deltas, structured closure packets and reported criteria/blockers, and an optional next-work offer returned with a milestone. Blocked work stays blocked until an explicit evidenced update; offers require ordinary claims before execution. The complete suite now passes 117 tests, including HTTP/MCP, restart, stale-claim and cleanup regressions. These features reduce repeated reads and round trips; actual all-participant token savings remain unmeasured.

@@ -107,6 +107,25 @@ def main():
         _, task = tool("task_get", {"taskId": "continuity"})
         assert "continuity" in json.dumps(task)
 
+        def workflow(state):
+            criterion = {"id": "rest", "description": "REST continuity checked", "result": "not_run"}
+            if state == "completed":
+                criterion.update(result="passed", evidenceRef="smoke:rest-continuity")
+            return {"state": state, "packet": {
+                "goal": "Verify isolated relay continuity", "target": "This temporary smoke hub",
+                "authorityRef": "smoke:owned-process-check", "restoration": "No fixture changes for this read",
+                "stopCondition": "Stop on unexpected target or response"},
+                "criteria": [criterion], "blockers": []}
+
+        tool("task_update", {**session, "requestId": str(uuid.uuid4()), "taskId": "next",
+             "expectedVersion": 0, "workflow": workflow("ready")})
+        reply, milestone = tool("task_update", {**session, "requestId": str(uuid.uuid4()),
+             "taskId": "continuity", "expectedVersion": 1,
+             "workflow": workflow("completed"), "includeNextWork": True})
+        offer = milestone["nextWork"]["offer"]
+        assert offer["taskId"] == "next" and offer["claimRequired"] is True
+        assert reply["version"] == 2
+
         adapter = subprocess.Popen(["dotnet", str(ADAPTER)], env=env, cwd=ROOT,
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                    stderr=adapter_log, text=True, encoding="utf-8")
@@ -145,10 +164,17 @@ def main():
             "params": {"name": "task_get", "arguments": {"repositoryId": "smoke", "taskId": "continuity"}}})
         assert not result.get("isError", False)
         assert "continuity" in json.dumps(result)
+        delta = rpc({"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+            "params": {"name": "task_get", "arguments": {"repositoryId": "smoke", "sinceRevision": 0}}})
+        assert not delta.get("isError", False)
+        delta_body = json.loads(next(c["text"] for c in delta["content"] if c["type"] == "text"))
+        assert delta_body["ok"]
+        assert {t["taskId"] for t in delta_body["data"]["items"]} == {"continuity", "next"}
+        assert delta_body["data"]["snapshotRevision"] >= 3
         adapter.stdin.close()
         adapter.wait(timeout=10)
         assert adapter.returncode == 0
-        print("PASS: local authentication, REST continuity, Scalar/OpenAPI, and real stdio MCP handshake/list/call.")
+        print("PASS: auth, REST report/next-offer, Scalar/OpenAPI, and real stdio MCP handshake/list/call with durable task deltas.")
         print(f"Smoke artifacts retained at {work}; no credentials were printed.")
     finally:
         if adapter is not None:

@@ -5,7 +5,7 @@ using System.Text.Json.Nodes;
 
 namespace PkRelay.Core;
 
-public static class CoordinationStateMachine
+public static partial class CoordinationStateMachine
 {
     public const int MaxPayloadBytes = 32_768;
     public const int MaxPageSize = 50;
@@ -38,6 +38,7 @@ public static class CoordinationStateMachine
                 if (Date(grant, "leaseUntil") <= now) return Error("StaleClaim");
                 if (kind == "lock" && (Text(state, "holder") != Text(arguments, "sessionId") || Number(state, "generation") != Number(grant, "generation"))) return Error("StaleClaim");
                 if (kind == "board" && Object(state, "tasks")[Text(arguments, "taskId")] is JsonObject task && (Text(task, "owner") != Text(arguments, "sessionId") || Number(task, "claimGeneration") != Number(grant, "claimGeneration"))) return Error("StaleClaim");
+                if (kind == "board" && operation == "task_claim" && Object(state, "tasks")[Text(arguments, "taskId")] is JsonObject workflowTask && !WorkflowAllowsExecution(workflowTask, Text(arguments, "sessionId"))) return Error("WorkflowNotReady", new { state = Text(workflowTask["workflow"]!.AsObject(), "state") }, Number(workflowTask, "version"));
             }
             return new(true, Text(prior, "code"), Text(prior, "json"), Number(prior, "version"));
         }
@@ -211,10 +212,17 @@ public static class CoordinationStateMachine
         return Error("UnknownTool");
     }
 
-    private static RelayReply Board(JsonObject state, RelayCaller caller, string operation, JsonObject args, DateTimeOffset now, List<DurableEffect> effects)
+    private static RelayReply BoardCore(JsonObject state, RelayCaller caller, string operation, JsonObject args, DateTimeOffset now, List<DurableEffect> effects)
     {
         var tasks = Object(state, "tasks"); var taskId = Text(args, "taskId");
-        if (operation == "task_get" && taskId.Length == 0) return Page(tasks.Select(x => (JsonNode)TaskSummary(x.Value!.AsObject())), args);
+        if (operation == "__next_work") return NextWork(state, args, now);
+        if (operation == "task_get" && taskId.Length == 0)
+        {
+            if (args.ContainsKey("sinceRevision")) return DeltaPage(state, args);
+            var page = Page(tasks.OrderBy(x => x.Key, StringComparer.Ordinal).Select(x => (JsonNode)TaskSummary(x.Value!.AsObject())), args);
+            var data = JsonNode.Parse(page.DataJson)!.AsObject(); data["boardRevision"] = Number(state, "taskRevision");
+            return Ok(data);
+        }
         if (operation is "context_put" or "context_get")
         {
             var context = Object(state, "context"); var id = Text(args, "contextId");
@@ -240,6 +248,7 @@ public static class CoordinationStateMachine
         if (operation == "task_get")
         {
             var section = Text(args, "section");
+            if (section == "workflow") return task["workflow"] is JsonObject workflow ? Ok(workflow, versionNow) : Error("NotFound");
             if (section is "messages" or "reports" or "attemptHistory") return Page(Array(task, section).Select(x => x!), args) with { Version = versionNow };
             if (section == "actions") return Page(Object(task, "actions").Select(x => x.Value!), args) with { Version = versionNow };
             if (section == "facts")
@@ -272,6 +281,7 @@ public static class CoordinationStateMachine
         }
         if (operation == "task_claim")
         {
+            if (!WorkflowAllowsExecution(task, session)) return Error("WorkflowNotReady", new { state = Text(task["workflow"]!.AsObject(), "state") }, versionNow);
             var owned = Text(task, "owner") == session && Date(task, "leaseUntil") > now;
             if (owned && !(task["resourceIds"] as JsonArray ?? new()).Select(x => x!.GetValue<string>()).Order(StringComparer.Ordinal).SequenceEqual((args["resourceIds"] as JsonArray ?? new()).Select(x => x!.GetValue<string>()).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal), StringComparer.Ordinal)) return Error("ResourceSetConflict", new { resourceIds = task["resourceIds"] }, versionNow);
             if (!owned && HasUnresolved(task)) return Error("Busy", new { holder = Text(task, "owner"), leaseUntil = Text(task, "leaseUntil"), unresolved = true }, versionNow);
@@ -288,6 +298,7 @@ public static class CoordinationStateMachine
         if (operation == "action_begin")
         {
             var id = Required(args, "actionId"); var fingerprint = Required(args, "inputFingerprint"); var actions = Object(task, "actions");
+            JsonObject? previousAttempt = null;
             if (id.Length > 128) return Error("InvalidArguments");
             if (actions[id] is JsonObject prior)
             {
@@ -296,8 +307,10 @@ public static class CoordinationStateMachine
                 if (Text(prior, "restoration") is "pending" or "blocked") return Error("RestorationRequired");
                 if (Text(prior, "status") is not ("completed" or "failed" or "canceled")) return Error("ActionUncertain");
                 if (Number(args, "attempt") != Number(prior, "attempt") + 1) return Error("AttemptConflict");
-                Array(task, "attemptHistory").Add(prior.DeepClone());
+                previousAttempt = prior;
             }
+            if (!WorkflowAllowsExecution(task, session)) return Error("WorkflowNotReady", new { state = Text(task["workflow"]!.AsObject(), "state") }, versionNow);
+            if (previousAttempt is not null) Array(task, "attemptHistory").Add(previousAttempt.DeepClone());
             if (Text(task, "owner") != session || Date(task, "leaseUntil") <= now) return Error("ClaimRequired");
             if (actions.Any(x => x.Key != id && Unresolved(x.Value!.AsObject()))) return Error("ActionUncertain");
             if (!args.ContainsKey("expectedVersion") || Number(args, "expectedVersion") != versionNow) return Error("VersionConflict", new { currentVersion = versionNow }, versionNow);
@@ -316,7 +329,14 @@ public static class CoordinationStateMachine
             if (!args.ContainsKey("expectedVersion") || Number(args, "expectedVersion") != versionNow) return Error("VersionConflict", new { currentVersion = versionNow }, versionNow);
             var reports = args["actionReports"] as JsonArray ?? new JsonArray();
             if (operation == "action_report") reports = new JsonArray(args.DeepClone());
-            if (operation == "task_update" && Text(task, "owner").Length > 0 && Text(task, "owner") != session) return Error("OwnerConflict");
+            if (operation == "task_update" && Text(task, "owner").Length > 0 && Text(task, "owner") != session)
+            {
+                // An administrator may repair an abandoned packet with its own authenticated session.
+                // Action writers and the next worker's ordinary claim remain separately fenced.
+                var packetRecovery = caller.IsAdministrator && task["workflow"] is JsonObject && args["workflow"] is JsonObject && !args.ContainsKey("actionReports") && !args.ContainsKey("patch") && !args.ContainsKey("notes") && !args.ContainsKey("message");
+                if (!packetRecovery || Date(task, "leaseUntil") > now) return Error("OwnerConflict");
+                if (HasUnresolved(task)) return Error("UnresolvedAction");
+            }
             foreach (var report in reports)
             {
                 var update = report!.AsObject(); var id = Required(update, "actionId");
@@ -368,6 +388,13 @@ public static class CoordinationStateMachine
                 Object(task, "facts")["notes"] = notes.DeepClone();
             }
             if (args["message"] is JsonObject message) AddTaskMessage(task, message, caller, session, now, effects, args);
+            if (args.ContainsKey("workflow"))
+            {
+                if (operation != "task_update" || args["workflow"] is not JsonObject workflow) return Error("InvalidWorkflow");
+                var validation = ValidateWorkflow(workflow, task["workflow"] as JsonObject, HasUnresolved(task));
+                if (validation is not null) return Error(validation);
+                task["workflow"] = workflow.DeepClone();
+            }
             task["updatedAt"] = now.ToString("O"); task["updatedBy"] = caller.PrincipalId; task["version"] = ++versionNow;
             return Ok(task, versionNow);
         }
@@ -426,12 +453,14 @@ public static class CoordinationStateMachine
         var recipient = Text(args, "recipientSessionId", Text(task, "owner"));
         if (recipient.Length > 0) Effect(effects, "session", recipient, "__deliver", new JsonObject { ["repositoryId"] = Text(root, "repositoryId"), ["messageId"] = Text(message, "messageId"), ["taskId"] = Text(task, "taskId"), ["boardId"] = Text(root, "boardId", "default"), ["kind"] = "task.changed", ["taskVersion"] = Number(task, "version") + 1 }, now);
     }
-    private static bool HasUnresolved(JsonObject task) => Object(task, "actions").Any(x => Unresolved(x.Value!.AsObject()));
+    private static bool HasUnresolved(JsonObject task) => (task["actions"] as JsonObject ?? new()).Any(x => Unresolved(x.Value!.AsObject()));
     private static JsonObject TaskSummary(JsonObject task)
     {
         var summary = new JsonObject { ["truncated"] = true, ["taskId"] = Text(task, "taskId"), ["version"] = Number(task, "version"), ["owner"] = task["owner"]?.DeepClone(), ["claimGeneration"] = Number(task, "claimGeneration"), ["leaseUntil"] = task["leaseUntil"]?.DeepClone(), ["resourceIds"] = task["resourceIds"]?.DeepClone() };
+        summary["changeRevision"] = Number(task, "changeRevision");
+        if (task["workflow"] is JsonObject workflow) { summary["workflow"] = WorkflowSummary(workflow); summary["workflowDetailFetchRequired"] = true; }
         var unresolved = new JsonArray();
-        foreach (var action in Object(task, "actions").Where(x => Unresolved(x.Value!.AsObject()))) unresolved.Add(new JsonObject { ["actionId"] = action.Key, ["attempt"] = action.Value!["attempt"]?.DeepClone(), ["status"] = action.Value["status"]?.DeepClone(), ["restoration"] = action.Value["restoration"]?.DeepClone(), ["resourceIds"] = action.Value["resourceIds"]?.DeepClone() });
+        foreach (var action in (task["actions"] as JsonObject ?? new()).Where(x => Unresolved(x.Value!.AsObject()))) unresolved.Add(new JsonObject { ["actionId"] = action.Key, ["attempt"] = action.Value!["attempt"]?.DeepClone(), ["status"] = action.Value["status"]?.DeepClone(), ["restoration"] = action.Value["restoration"]?.DeepClone(), ["resourceIds"] = action.Value["resourceIds"]?.DeepClone() });
         summary["unresolvedActions"] = unresolved; summary["sections"] = new JsonArray("facts", "messages", "reports", "actions", "attemptHistory");
         return summary;
     }
@@ -443,7 +472,7 @@ public static class CoordinationStateMachine
     internal static string ActionKey(JsonObject args, string actionId, long attempt) => string.Join("/", new[] { Text(args, "repositoryId"), Text(args, "boardId", "default"), Text(args, "taskId"), actionId, attempt.ToString(System.Globalization.CultureInfo.InvariantCulture) }.Select(Uri.EscapeDataString));
     private static bool Unresolved(JsonObject action) => Text(action, "status") is "invoking" or "started" or "unknown" or "incomplete" || Text(action, "restoration") is "pending" or "blocked";
     private static int Lease(JsonObject args) => (int)Math.Clamp(Number(args, "leaseSeconds", 120), 1, 600);
-    internal static bool IsMutation(string operation) => operation is not ("worker_list" or "get_status" or "task_get" or "context_get" or "check_inbox" or "__verify" or "__resolve");
+    internal static bool IsMutation(string operation) => operation is not ("worker_list" or "get_status" or "task_get" or "context_get" or "check_inbox" or "__verify" or "__resolve" or "__next_work");
     internal static string Text(JsonObject node, string key, string fallback = "") => node[key] is JsonValue value && value.TryGetValue<string>(out var result) ? result : fallback;
     internal static long Number(JsonObject node, string key, long fallback = 0) => long.TryParse(node[key]?.ToString(), out var value) ? value : fallback;
     internal static JsonObject Object(JsonObject node, string key) { if (node[key] is not JsonObject result) node[key] = result = new(); return result; }
@@ -460,12 +489,17 @@ public static class CoordinationStateMachine
     {
         if (FitsWire(reply, maxBytes)) return reply;
         var data = JsonNode.Parse(reply.DataJson)!;
+        // The optional offer is the first detail to shrink; mandatory grant/action fields win.
+        if (data["nextWork"]?["offer"] is JsonObject offer && offer.Remove("workflow")) offer["detailFetchRequired"] = true;
+        var optionalTrimmed = reply with { DataJson = data.ToJsonString() };
+        if (FitsWire(optionalTrimmed, maxBytes)) return optionalTrimmed;
         // Details remain durable and separately retrievable. Authorization, grants, replay
         // decisions, outcomes, attempts, restoration state and resource blockers are retained.
         void Trim(JsonNode node)
         {
             if (node is JsonObject obj)
             {
+                if (obj["workflow"] is JsonObject workflow) { obj["workflow"] = WorkflowSummary(workflow); obj["workflowDetailFetchRequired"] = true; }
                 foreach (var key in new[] { "facts", "messages", "reports", "attemptHistory", "binding", "report", "provenance", "content", "notes" })
                     if (obj.Remove(key)) { obj[key + "Truncated"] = true; obj["truncated"] = true; }
                 foreach (var child in obj.Select(x => x.Value).OfType<JsonNode>().ToArray()) Trim(child);

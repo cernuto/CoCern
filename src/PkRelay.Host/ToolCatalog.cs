@@ -22,6 +22,8 @@ public static class ToolCatalog
         "session_open" => "Open a fresh private chat session; preserve the returned session handle privately.",
         "check_inbox" => "Read this session's durable inbox without acknowledging it.",
         "ack" => "Acknowledge explicitly handled message IDs in this session.",
+        "task_get" => "Read bounded task details or a board list. sinceRevision selects durable task deltas; finish every pinned snapshotRevision/cursor page before saving the checkpoint. Restart on DeltaRestartRequired.",
+        "task_update" => "Commit reported task evidence under expectedVersion and requestId. Optional workflow records structured readiness/completion; includeNextWork returns an advisory offer that still requires task_claim and existing execution permissions.",
         "control_request" => "Administrator coordination control; does not cancel or execute IDE operations.",
         _ => "Coordinate " + name.Replace('_', ' ') + ". Use the current session handle, stable mutation requestId, and applicable expected versions. Claims are advisory."
     };
@@ -56,11 +58,18 @@ public static class ToolCatalog
             case "session_bind":
                 Object("binding", "Reported configured Roslyn/Visual Studio binding; update under expectedVersion."); Text("availability", "Reported current worker availability."); Integer("freshnessSeconds", "Freshness duration, at most 600 seconds."); break;
             case "task_get":
-                properties["section"] = new { type = "string", @enum = new[] { "facts", "messages", "reports", "actions" } }; Text("factKey", "Optional selected task fact key."); break;
+                properties["section"] = new { type = "string", @enum = new[] { "facts", "messages", "reports", "actions", "workflow" } };
+                Integer("sinceRevision", "Board-list delta checkpoint; omit taskId. Save the returned snapshotRevision only after all pages.");
+                Integer("snapshotRevision", "Pinned revision returned by the first delta page. A concurrent task change returns DeltaRestartRequired.");
+                properties["cursor"] = new { type = "integer", minimum = 0, description = "Numeric continuation returned by a bounded list; retain the same delta checkpoint and snapshot revision." };
+                Text("factKey", "Optional selected task fact key."); break;
             case "task_update":
                 Object("patch", "Shared task facts; cannot overwrite coordination ownership/version internals.");
                 properties["notes"] = new { description = "Bounded authored task notes, at most 16 KiB with task patch." };
-                Text("message", "Task conversation message committed with this milestone."); Array("actionReports", "Reported action results committed atomically with this milestone."); break;
+                Text("message", "Task conversation message committed with this milestone."); Array("actionReports", "Reported action results committed atomically with this milestone.");
+                properties["workflow"] = WorkflowSchema();
+                properties["includeNextWork"] = new { type = "boolean", description = "After committing the milestone, include an independent advisory nextWork result. An offer acquires no claim and authorizes no execution." };
+                break;
             case "task_claim":
             case "claim_acquire":
                 Integer("leaseSeconds", "Advisory lease from 1 to 600 seconds; default 120."); break;
@@ -103,12 +112,47 @@ public static class ToolCatalog
         return JsonSerializer.SerializeToElement(new { type = "object", properties, required, additionalProperties = true });
     }
 
+    private static object WorkflowSchema()
+    {
+        static object Text(int maximum, string description) => new { type = "string", minLength = 1, maxLength = maximum, description };
+        static object OptionalText(int maximum, string description) => new { type = new[] { "string", "null" }, minLength = 1, maxLength = maximum, description };
+        return new
+        {
+            type = "object",
+            description = "Optional full structured workflow, at most 12288 UTF-8 serialized bytes. Reported evidence only; completion requires every criterion passed with evidence and no unresolved action/restoration. A blocked-to-ready update requires recheckEvidenceRef.",
+            properties = new
+            {
+                state = new { type = "string", @enum = new[] { "ready", "blocked", "completed" } },
+                packet = new
+                {
+                    type = "object",
+                    properties = new { goal = Text(2048, "Useful completion goal."), target = Text(2048, "Source, workspace or fixture identity."), authorityRef = Text(2048, "Reference to existing human authority; grants no permission."), restoration = Text(2048, "Restoration expectation; actual action restoration remains in action reports."), stopCondition = Text(2048, "Condition requiring the participant to stop.") },
+                    required = new[] { "goal", "target", "authorityRef", "restoration", "stopCondition" }
+                },
+                criteria = new
+                {
+                    type = "array", minItems = 1, maxItems = 32,
+                    items = new { type = "object", properties = new { id = Text(128, "Unique criterion ID."), description = Text(2048, "Acceptance criterion."), result = new { type = "string", @enum = new[] { "not_run", "passed", "failed" } }, evidenceRef = OptionalText(2048, "Nonempty evidence reference required for passed results.") }, required = new[] { "id", "description", "result" } }
+                },
+                blockers = new
+                {
+                    type = "array", maxItems = 16,
+                    items = new { type = "object", properties = new { id = Text(128, "Unique blocker ID."), kind = new { type = "string", @enum = new[] { "coordinator_hold", "provider_rejection", "tool_unavailable", "resource_busy", "missing_fixture", "prerequisite", "other" } }, summary = Text(2048, "Current blocking condition."), recheckCondition = Text(2048, "Evidence needed before clearing the blocker.") }, required = new[] { "id", "kind", "summary", "recheckCondition" } }
+                },
+                targetSessionId = OptionalText(256, "Optional intended worker session ID; never its private token."),
+                priority = new { type = new[] { "integer", "null" }, minimum = -1000, maximum = 1000, description = "Higher priority is offered first, then stable task identity." },
+                recheckEvidenceRef = OptionalText(2048, "Nonempty reference required when explicitly changing blocked to ready. Existing human authority may resolve a coordinator hold; provider approval remains separate.")
+            },
+            required = new[] { "state", "packet", "criteria", "blockers" }
+        };
+    }
+
     public static int Status(RelayReply reply) => reply.Ok ? 200 : reply.Code switch
     {
         "RepositoryDenied" or "SessionDenied" or "Forbidden" or "AdministratorRequired" or "OwnerMismatch" => 403,
         "UnknownTool" or "NotFound" or "TaskNotFound" or "ContextNotFound" => 404,
         "PayloadTooLarge" => 413,
-        "VersionConflict" or "RequestConflict" or "ClaimBusy" or "StaleClaim" or "Paused" or "Busy" or "ActionConflict" => 409,
+        "VersionConflict" or "RequestConflict" or "ClaimBusy" or "StaleClaim" or "Paused" or "Busy" or "ActionConflict" or "DeltaRestartRequired" or "WorkflowRecheckRequired" or "WorkflowIncomplete" or "WorkflowNotReady" => 409,
         _ => 400
     };
 

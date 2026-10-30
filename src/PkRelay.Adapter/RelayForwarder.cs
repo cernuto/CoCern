@@ -12,7 +12,7 @@ public sealed record AdapterReply(bool Ok, string Code, JsonElement? Data = null
 
 public sealed class RelayForwarder(HttpClient client, AdapterOptions options)
 {
-    private static readonly HashSet<string> RecognizedConflicts = ["VersionConflict", "RequestConflict", "ClaimBusy", "StaleClaim", "Paused", "Busy", "ActionConflict", "UnresolvedAction", "version_conflict"];
+    private static readonly HashSet<string> RecognizedConflicts = ["VersionConflict", "RequestConflict", "ClaimBusy", "StaleClaim", "Paused", "Busy", "ActionConflict", "UnresolvedAction", "DeltaRestartRequired", "WorkflowRecheckRequired", "WorkflowIncomplete", "WorkflowNotReady", "version_conflict"];
     public const int MaxRequestBytes = 64 * 1024;
     public const int MaxResponseBytes = 128 * 1024;
 

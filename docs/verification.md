@@ -2,7 +2,7 @@
 
 Verified October 29, 2026 in `C:\Users\PaulC\source\repos\PkRelay`.
 
-## Completed checks
+## Initial build checks
 
 - The complete shared suite passed **95 tests, zero failed, zero skipped** using `dotnet test tests/PkRelay.Tests/PkRelay.Tests.csproj --no-restore --nologo --verbosity minimal`.
 - Roslyn CodeLens reported zero compiler errors and warnings for the loaded five-project PkRelay solution. Optional analyzer execution was not claimed.
@@ -25,3 +25,13 @@ Real off-host TLS, an external OAuth issuer/JWKS lifecycle, ChatGPT account regi
 This is the first continuity and reported-action build. It does not implement optional MCP Events, cross-provider chat bridges, multi-hub clustering, automatic source transfer or an IDE executor. Claims remain advisory, and external execution/restoration is reported by authorized participants. Actual total token savings have not been measured.
 
 The ignored default test database under `src/PkRelay.Host/data` was retained for diagnosis and is not part of source control or the published output. Live test logs and temporary databases are local verification artifacts. No enrolled rig, other chat or application was operated during these checks.
+
+## Collaboration efficiency update
+
+After the Manager retrospective, the existing board/application/tools gained durable task-change checkpoints with pinned delta pagination, opt-in closure packets with reported acceptance criteria and typed blockers, and an advisory next-work offer attached to `task_update`. Existing unstructured task clients remain compatible. See [collaboration.md](collaboration.md) for the request/response contract and boundaries.
+
+The independently run complete suite passed **117 tests, zero failed, zero skipped**. It includes the earlier 95 cases plus 22 collaboration cases, including actual HTTP/MCP, SQLite checkpoint continuation/restart, criteria and blocker validation, report/offer composition, private handle isolation and serialized reply limits. Core's initial missing-feature regressions were observed failing before implementation. Integration setup/cursor mismatches were corrected without counting them as valid missing-feature evidence.
+
+Independent review found two readiness bypasses: cached claim retries and new action reservations could use old readiness after a task became blocked/completed/retargeted. Six cases reproduced those defects before fixing; scoped re-review confirmed both addressed while preserving existing-action reconciliation and cleanup reporting. Compiler diagnostics were clean after the fixes.
+
+The updated live process smoke passed authenticated REST report-plus-offer and actual stdio MCP task delta retrieval, alongside the existing authentication, metadata and protocol checks. Owned test processes were stopped. Release host and adapter binaries were republished. Dedicated PkRelay Visual Studio MCP verification and external onboarding retain the environment limits above. No running rig campaign or remote deployment was changed, and actual aggregate token savings remain unmeasured.

@@ -18,6 +18,7 @@ public sealed class RelayApplication(IGrainFactory grains) : IRelayApplication
         if (arguments.ValueKind != JsonValueKind.Object) return Error("InvalidArguments");
         if (Encoding.UTF8.GetByteCount(arguments.GetRawText()) > CoordinationStateMachine.MaxPayloadBytes) return Error("PayloadTooLarge");
         var args = JsonNode.Parse(arguments.GetRawText())!.AsObject();
+        if (args.ContainsKey("includeNextWork") && (args["includeNextWork"] is not JsonValue include || !include.TryGetValue<bool>(out _))) return Error("InvalidArguments");
         args["hubIncarnation"] = incarnation;
         var repository = Text(args, "repositoryId");
         if (repository.Length == 0 || (!caller.IsAdministrator && !caller.Repositories.Contains(repository, StringComparer.Ordinal))) return Error("RepositoryDenied");
@@ -100,6 +101,7 @@ public sealed class RelayApplication(IGrainFactory grains) : IRelayApplication
                 }
             }
             if (result.Ok) result = await PiggybackAsync(trusted, args, result);
+            if (result.Ok && tool == "task_update" && args["includeNextWork"]?.GetValue<bool>() == true) result = await WithNextWorkAsync(trusted, args, result);
             return Bound(result);
         }
         catch (ArgumentException) { return Error("InvalidArguments"); }
@@ -169,6 +171,26 @@ public sealed class RelayApplication(IGrainFactory grains) : IRelayApplication
             if (!current.Ok || current.Version != result.Version) return Error("ActionChanged", new { actionId = Text(args, "actionId"), replayAllowed = false });
         }
         return result;
+    }
+
+    private async Task<RelayReply> WithNextWorkAsync(RelayCaller caller, JsonObject args, RelayReply committed)
+    {
+        JsonNode next;
+        try
+        {
+            var status = await Call("control", "hub", caller, "get_status", args);
+            if (!status.Ok) next = JsonSerializer.SerializeToNode(new { ok = false, code = status.Code })!;
+            else if (Parse(status)["paused"]?.GetValue<bool>() == true) next = JsonSerializer.SerializeToNode(new { ok = true, code = "Paused" })!;
+            else
+            {
+                var read = args.DeepClone().AsObject(); read.Remove("requestId");
+                var offered = await Call("board", BoardKey(args), caller, "__next_work", read);
+                next = offered.Ok ? JsonNode.Parse(offered.DataJson)! : JsonSerializer.SerializeToNode(new { ok = false, code = offered.Code })!;
+            }
+        }
+        catch (Exception) { next = JsonSerializer.SerializeToNode(new { ok = false, code = "Unavailable" })!; }
+        var data = Parse(committed); data["nextWork"] = next;
+        return CoordinationStateMachine.Ok(data, committed.Version);
     }
 
     private async Task<RelayReply> PiggybackAsync(RelayCaller caller, JsonObject args, RelayReply committed)

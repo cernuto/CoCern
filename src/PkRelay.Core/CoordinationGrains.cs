@@ -21,8 +21,11 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
         if (operation == "__dispatch") return await DispatchAsync(caller, args);
         var candidate = Clone(persistent.State);
         var effectCount = candidate.Effects.Count;
+        var priorTaskRevision = Kind == "board" ? JsonNode.Parse(candidate.Value.Json)?["taskRevision"]?.ToJsonString() : null;
         var reply = CoordinationStateMachine.Apply(candidate, Kind, this.GetPrimaryKeyString(), caller, operation, args, DateTimeOffset.UtcNow);
-        if (!reply.Ok || !CoordinationStateMachine.IsMutation(operation)) return reply;
+        // A legacy board's first read durably seeds current change markers without changing task versions.
+        var migratedTaskMarkers = Kind == "board" && priorTaskRevision != JsonNode.Parse(candidate.Value.Json)?["taskRevision"]?.ToJsonString();
+        if (!reply.Ok || !CoordinationStateMachine.IsMutation(operation) && !migratedTaskMarkers) return reply;
         for (var index = effectCount; index < candidate.Effects.Count; index++)
         {
             var effect = candidate.Effects[index]; var payload = JsonNode.Parse(effect.PayloadJson)!.AsObject();
