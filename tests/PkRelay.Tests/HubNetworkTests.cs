@@ -87,6 +87,24 @@ public sealed class HubNetworkTests : IDisposable
         Assert.Equal(HubCertificate.Fingerprint(stored), HubCertificate.Fingerprint(presented!));
         using var loopback = new HttpClient();
         Assert.Equal(HttpStatusCode.OK, (await loopback.GetAsync($"http://127.0.0.1:{httpPort}/health")).StatusCode);
+        await app.StopAsync();
+    }
+
+    [Fact]
+    public async Task Stopping_the_host_removes_the_key_container_the_hub_certificate_created()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var before = KeyContainers();
+        var (httpPort, httpsPort) = (FreePort(), FreePort());
+        await using (var app = await StartAsync(httpPort, httpsPort, enabled: true))
+        {
+            using var handler = new HttpClientHandler { ServerCertificateCustomValidationCallback = (_, _, _, _) => true };
+            using var client = new HttpClient(handler);
+            Assert.Equal(HttpStatusCode.OK, (await client.GetAsync($"https://127.0.0.1:{httpsPort}/health")).StatusCode);
+            Assert.NotEmpty(KeyContainers().Except(before));
+            await app.StopAsync();
+        }
+        Assert.Empty(KeyContainers().Except(before));
     }
 
     [Fact]
@@ -125,6 +143,13 @@ public sealed class HubNetworkTests : IDisposable
         app.MapRelayEndpoints();
         await app.StartAsync();
         return app;
+    }
+
+    /// <summary>File names in the current user's CNG key store. The assertion compares only names that appeared since the snapshot, so other processes removing keys cannot fail it.</summary>
+    private static HashSet<string> KeyContainers()
+    {
+        var folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Microsoft", "Crypto", "Keys");
+        return Directory.Exists(folder) ? Directory.GetFiles(folder).Select(Path.GetFileName).OfType<string>().ToHashSet() : [];
     }
 
     private static int FreePort()

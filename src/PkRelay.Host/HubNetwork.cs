@@ -102,8 +102,10 @@ internal static class HubNetwork
         var port = configuration.GetValue("Relay:Network:HttpsPort", DefaultHttpsPort);
         var configured = configuration["Relay:Network:CertificatePath"];
         var path = Path.Combine(environment.ContentRootPath, string.IsNullOrWhiteSpace(configured) ? DefaultCertificatePath : configured);
-        var certificate = HubCertificate.LoadOrCreate(path, Environment.MachineName);
         foreach (var url in (configuration["urls"] ?? DefaultUrl).Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)) ListenHttp(options, url);
+        var certificate = HubCertificate.LoadOrCreate(path, Environment.MachineName);
+        // The certificate's private key is a persisted Windows key container that only Dispose removes, so release it when the host stops.
+        options.ApplicationServices.GetRequiredService<IHostApplicationLifetime>().ApplicationStopped.Register(certificate.Dispose);
         options.ListenAnyIP(port, listen => listen.UseHttps(certificate));
         var logger = options.ApplicationServices.GetService<ILoggerFactory>()?.CreateLogger("PkRelay.Host.HubNetwork");
         logger?.LogInformation("Hub listening on https port {Port}; certificate fingerprint {Fingerprint}", port, HubCertificate.Fingerprint(certificate));
