@@ -5,9 +5,11 @@ using System.Text.RegularExpressions;
 namespace PkRelay.Adapter;
 
 /// <param name="activity">Follows Codex's rollouts to hold wakes back while a thread is mid-turn; null never holds them.</param>
-public sealed class CodexWakeDispatcher(string executable, CodexActivity? activity = null, TimeProvider? clock = null) : IWakeDispatcher
+/// <param name="queue">Codex's own queue: while a PkRelay wake for the thread is still pending there, another is never queued; null never holds them.</param>
+public sealed class CodexWakeDispatcher(string executable, CodexActivity? activity = null, TimeProvider? clock = null, CodexQueue? queue = null) : IWakeDispatcher
 {
-    public bool IsBusy(string threadId) => activity is not null && activity.IsBusy(threadId, (clock ?? TimeProvider.System).GetUtcNow());
+    public bool IsBusy(string threadId) =>
+        queue?.HasPendingWake(threadId) == true || activity is not null && activity.IsBusy(threadId, (clock ?? TimeProvider.System).GetUtcNow());
 
     private const int MaximumOutput = 32768;
     public static bool HasQueuedReceipt(int exitCode, string output, string threadId)

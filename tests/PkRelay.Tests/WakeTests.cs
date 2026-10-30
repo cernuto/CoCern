@@ -518,6 +518,49 @@ public sealed class WakeTests
     }
 
     [Fact]
+    public void A_wake_still_pending_in_Codex_queue_holds_the_next_one()
+    {
+        var home = Path.Combine(Path.GetTempPath(), "pkrelay-codex-home-" + Guid.NewGuid().ToString("N"));
+        const string thread = "00000000-0000-0000-0000-0000000000dd";
+        Directory.CreateDirectory(home);
+        try
+        {
+            var queue = new CodexQueue(home);
+            // No queue database at all never blocks a wake.
+            Assert.False(queue.HasPendingWake(thread));
+
+            using (var database = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={Path.Combine(home, "queue_1.sqlite")};Pooling=False"))
+            {
+                database.Open();
+                using var create = database.CreateCommand();
+                create.CommandText = "CREATE TABLE queued_items (id TEXT PRIMARY KEY NOT NULL, thread_id TEXT NOT NULL, payload_json TEXT NOT NULL, queue_order INTEGER NOT NULL, created_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL);" +
+                    "INSERT INTO queued_items VALUES ('a', 'other-thread', '{\"text\":\"PkRelay inbox wake for repository\"}', 1, 0, 0);" +
+                    $"INSERT INTO queued_items VALUES ('b', '{thread}', '{{\"text\":\"an ordinary queued request\"}}', 2, 0, 0);";
+                create.ExecuteNonQuery();
+                // Another thread's wake and this thread's ordinary queued message do not hold it.
+                Assert.False(queue.HasPendingWake(thread));
+
+                using var add = database.CreateCommand();
+                add.CommandText = $"INSERT INTO queued_items VALUES ('c', '{thread}', '{{\"text\":\"PkRelay inbox wake for repository \\\"pkrelay\\\"\"}}', 3, 0, 0);";
+                add.ExecuteNonQuery();
+                Assert.True(queue.HasPendingWake(thread));
+                Assert.True(new CodexWakeDispatcher(Environment.ProcessPath!, queue: queue).IsBusy(thread));
+
+                // Codex delivering the prompt removes it from its queue: that is the acknowledgment.
+                using var delivered = database.CreateCommand();
+                delivered.CommandText = "DELETE FROM queued_items WHERE id = 'c'";
+                delivered.ExecuteNonQuery();
+                Assert.False(queue.HasPendingWake(thread));
+            }
+
+            // A queue database in an unknown shape never blocks waking either.
+            File.WriteAllText(Path.Combine(home, "queue_2.sqlite"), "not a database");
+            Assert.False(queue.HasPendingWake(thread));
+        }
+        finally { Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools(); Directory.Delete(home, true); }
+    }
+
+    [Fact]
     public void Codex_turn_stays_busy_however_much_it_writes_and_ends_when_it_completes()
     {
         var root = Path.Combine(Path.GetTempPath(), "pkrelay-rollouts-" + Guid.NewGuid().ToString("N"));
