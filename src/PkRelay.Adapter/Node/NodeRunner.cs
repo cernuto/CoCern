@@ -70,6 +70,8 @@ public sealed class NodeRunner : IAsyncDisposable
     private readonly NodeChats _chats;
     /// <summary>Repositories the hub refused for this PC; their chats stay out of announcements for this run.</summary>
     private readonly HashSet<string> _denied = new(StringComparer.Ordinal);
+    /// <summary>Relay sessions the hub refused to announce because this machine did not open them; each is reported once.</summary>
+    private readonly HashSet<string> _refusedSessions = new(StringComparer.Ordinal);
     private HttpClient? _http;
     private string? _credential;
     /// <summary>The credential the hub last answered 401 for, kept while re-enrolling: a 409 then means the rejection was ambiguous, and this credential is restored.</summary>
@@ -275,7 +277,9 @@ public sealed class NodeRunner : IAsyncDisposable
             }
             if (!response.IsSuccessStatusCode)
                 return Busy(response.StatusCode) ? Unreachable() : Retry($"The hub at {_hub} refused this PC's announcement ({(int)response.StatusCode} {refusal ?? Code(await ReadAsync(response, ct))}). Retrying.");
-            var routes = Routes(await ReadAsync(response, ct));
+            var accepted = await ReadAsync(response, ct);
+            ReportRefused(accepted);
+            var routes = Routes(accepted);
             if (!routes.SequenceEqual(_routes)) { _routes = routes; _nudge.Pulse(); }
         }
         finally { response.Dispose(); }
@@ -285,6 +289,18 @@ public sealed class NodeRunner : IAsyncDisposable
         EnsureHints();
         EnsureWaking();
         return Next.Wait;
+    }
+
+    /// <summary>
+    /// The hub announces a chat only when this machine opened its relay session; any other chat comes back in <c>refused</c> with a denial code while the rest are announced.
+    /// Each refused session is reported once per run; nothing else changes, since the hub keeps leaving it out.
+    /// </summary>
+    private void ReportRefused(JsonObject? reply)
+    {
+        if (reply?["refused"] is not JsonArray refused) return;
+        foreach (var session in refused.OfType<JsonObject>().Select(x => Text(x, "relaySessionId")).OfType<string>())
+            if (_refusedSessions.Add(session))
+                _error.WriteLine($"The hub at {_hub} did not announce the chat with relay session '{Printable(session)}' because this PC's machine did not open that session (it may predate this PC's current enrollment); open a new session from that chat.");
     }
 
     /// <summary>The well-formed routes in an announce reply; none when it cannot be read.</summary>

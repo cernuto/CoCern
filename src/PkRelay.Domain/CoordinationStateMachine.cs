@@ -110,7 +110,7 @@ public static class CoordinationStateMachine
 
     /// <summary>Mutations are deduplicated by requestId and committed; reads never are.</summary>
     public static bool IsMutation(string operation) =>
-        operation is not (Operations.Verify or Operations.Resolve or Operations.NextWork)
+        operation is not (Operations.Verify or Operations.Resolve or Operations.NextWork or Operations.SessionOwners)
         && (!RelayToolCatalog.TryGet(operation, out var tool) || tool.IsMutation);
 
     /// <summary>Whether a successful operation must be persisted. A legacy board's first read durably seeds current change markers without changing task versions.</summary>

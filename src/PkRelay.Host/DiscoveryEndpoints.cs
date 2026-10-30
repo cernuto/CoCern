@@ -129,7 +129,7 @@ internal static partial class DiscoveryEndpoints
             machineName = Text(document.RootElement, "machineName");
         }
         catch (JsonException) { return Failure(StatusCodes.Status400BadRequest, RelayErrorCodes.InvalidArguments); }
-        if (machineId is null || machineName is null || !MachineIdPattern().IsMatch(machineId) || machineName.Length is 0 or > MaxNameLength || machineName.Any(char.IsControl) || string.IsNullOrWhiteSpace(machineName))
+        if (machineId is null || !MachineIdPattern().IsMatch(machineId) || !ValidMachineName(machineName))
             return Failure(StatusCodes.Status400BadRequest, RelayErrorCodes.InvalidArguments);
         // An enrolled machine must never share a principal with a configured client or OAuth subject.
         var principalId = "machine:" + machineId;
@@ -141,6 +141,9 @@ internal static partial class DiscoveryEndpoints
         return Results.Json(new { machineId = result.Machine.MachineId, credential });
     }
 
+    /// <summary>The enroll rules for a display name: 1 to 128 characters, not blank, no control characters. Announce applies the same rules.</summary>
+    private static bool ValidMachineName(string? name) => name is { Length: > 0 and <= MaxNameLength } && !name.Any(char.IsControl) && !string.IsNullOrWhiteSpace(name);
+
     private static async Task<IResult> AnnounceAsync(HttpContext context, IMachineDirectory machines, IHubContext<CoordinationHub> hub, MachineRouteHints hints)
     {
         if (RelayAuthentication.Machine(context.User) is not { } machine) return Failure(StatusCodes.Status403Forbidden, RelayErrorCodes.MachineRequired);
@@ -148,14 +151,31 @@ internal static partial class DiscoveryEndpoints
         JsonObject? body;
         try { body = (await JsonNode.ParseAsync(context.Request.Body, documentOptions: new JsonDocumentOptions { MaxDepth = 32 }, cancellationToken: context.RequestAborted)) as JsonObject; }
         catch (JsonException) { body = null; }
-        if (body is null) return Failure(StatusCodes.Status400BadRequest, RelayErrorCodes.InvalidArguments);
+        if (body is null || !(body["machineName"] is JsonValue name && name.TryGetValue<string>(out var machineName) && ValidMachineName(machineName))) return Failure(StatusCodes.Status400BadRequest, RelayErrorCodes.InvalidArguments);
+        var refused = new JsonArray();
         if (body["chats"] is { } chats)
         {
             if (chats is not JsonArray list) return Failure(StatusCodes.Status400BadRequest, RelayErrorCodes.InvalidArguments);
+            var bySession = new List<(JsonObject Chat, string Repository, string Session)>();
             foreach (var node in list)
             {
                 if (node is not JsonObject chat || chat["repositoryId"] is not JsonValue value || !value.TryGetValue<string>(out var repository)) return Failure(StatusCodes.Status400BadRequest, RelayErrorCodes.InvalidArguments);
                 if (!allowed.Contains(repository)) return Failure(StatusCodes.Status403Forbidden, RelayErrorCodes.RepositoryDenied);
+                bySession.Add((chat, repository, chat["relaySessionId"] is JsonValue session && session.TryGetValue<string>(out var id) ? id : ""));
+            }
+            // A chat is announced only when the announcing machine opened its relay session, so one device cannot publish chats that impersonate another's.
+            // Only the offending chats are refused; each is named in the reply with the denial code, and the rest are announced.
+            var owned = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var group in bySession.Where(x => x.Session.Length > 0).GroupBy(x => x.Repository, StringComparer.Ordinal))
+            {
+                if (await machines.OwnedSessionsAsync(machine, group.Key, group.Select(x => x.Session).ToArray(), context.RequestAborted) is not { } mine)
+                    return Failure(StatusCodes.Status503ServiceUnavailable, RelayErrorCodes.Unavailable);
+                owned.UnionWith(mine);
+            }
+            foreach (var (chat, _, session) in bySession.Where(x => !owned.Contains(x.Session)))
+            {
+                list.Remove(chat);
+                refused.Add(new JsonObject { ["relaySessionId"] = session, ["code"] = RelayErrorCodes.SessionDenied });
             }
         }
         var reply = await machines.AnnounceAsync(machine, body, context.RequestAborted);
@@ -167,7 +187,10 @@ internal static partial class DiscoveryEndpoints
             try { await hub.Clients.Group(CoordinationHub.MachineGroup(machine.MachineId)).SendAsync("discovery.changed", new { }, context.RequestAborted); }
             catch (Exception exception) when (exception is not OperationCanceledException) { }
         }
-        return Results.Content(reply.DataJson, "application/json");
+        if (refused.Count == 0) return Results.Content(reply.DataJson, "application/json");
+        var data = JsonNode.Parse(reply.DataJson)!.AsObject();
+        data["refused"] = refused;
+        return Results.Content(data.ToJsonString(), "application/json");
     }
 
     private static int EnrollStatus(string? code) => code switch

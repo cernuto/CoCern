@@ -64,6 +64,8 @@ public static class Operations
     public const string Dispatch = "__dispatch";
     public const string TaskUnclaim = "__task_unclaim";
     public const string NextWork = "__next_work";
+    /// <summary>Read-only: which of the given sessions in the repository the caller's principal opened.</summary>
+    public const string SessionOwners = "__session_owners";
 
     public static bool IsInternal(string operation) => operation.StartsWith("__", StringComparison.Ordinal);
 }

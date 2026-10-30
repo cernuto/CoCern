@@ -93,6 +93,9 @@ public interface IMachineDirectory
 
     Task<RelayReply> DirectoryAsync(IReadOnlyList<string> repositories, CancellationToken ct);
 
+    /// <summary>Which of <paramref name="sessionIds"/> the machine's principal opened in <paramref name="repository"/>, read from the control session directory; null when it cannot be read now.</summary>
+    Task<IReadOnlySet<string>?> OwnedSessionsAsync(MachineIdentity machine, string repository, IReadOnlyCollection<string> sessionIds, CancellationToken ct);
+
     /// <summary>Revokes a machine (administrators only) and evicts its cached validations so revocation is immediate.</summary>
     Task<RelayReply> RevokeAsync(RelayCaller administrator, string machineId, CancellationToken ct);
 }
@@ -173,6 +176,14 @@ public sealed class MachineDirectory(IGrainFactory grains, TimeProvider? clock =
 
     public Task<RelayReply> DirectoryAsync(IReadOnlyList<string> repositories, CancellationToken ct) =>
         CallAsync(Internal, DiscoveryOperations.Directory, new() { ["repositories"] = new JsonArray(repositories.Select(x => (JsonNode)JsonValue.Create(x)!).ToArray()) }, ct);
+
+    public async Task<IReadOnlySet<string>?> OwnedSessionsAsync(MachineIdentity machine, string repository, IReadOnlyCollection<string> sessionIds, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        var args = new JsonObject { ["repositoryId"] = repository, ["sessionIds"] = new JsonArray(sessionIds.Select(x => (JsonNode)JsonValue.Create(x)!).ToArray()) };
+        var reply = await grains.GetGrain<IControlGrain>(AggregateKinds.ControlKey).ExecuteAsync(new RelayCaller(machine.PrincipalId, false, [repository], true), Operations.SessionOwners, args.ToJsonString());
+        return reply.Ok ? (JsonNode.Parse(reply.DataJson)?["owned"] as JsonArray ?? []).Select(x => x?.GetValue<string>()).OfType<string>().ToHashSet(StringComparer.Ordinal) : null;
+    }
 
     public async Task<RelayReply> RevokeAsync(RelayCaller administrator, string machineId, CancellationToken ct)
     {

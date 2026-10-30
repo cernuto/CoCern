@@ -56,8 +56,17 @@ public sealed class DiscoveryHostTests
         return body.GetProperty("credential").GetString()!;
     }
 
-    private static object Chat(string repository = "repo", string thread = "t1", bool wakeable = true) =>
-        new { provider = "codex", threadId = thread, relaySessionId = "s-" + thread, repositoryId = repository, label = "Chat " + thread, wakeable, waiterRunning = false };
+    private static object Chat(string repository = "repo", string thread = "t1", bool wakeable = true, string? session = null) =>
+        new { provider = "codex", threadId = thread, relaySessionId = session ?? "s-" + thread, repositoryId = repository, label = "Chat " + thread, wakeable, waiterRunning = false };
+
+    /// <summary>Opens a relay session as the client's principal and returns its ID; announce accepts only chats whose session the announcing machine owns.</summary>
+    private static async Task<string> OpenSessionAsync(HttpClient client, string repository = "repo")
+    {
+        var (status, body) = await PostAsync(client, "/api/tools/session_open", new { repositoryId = repository, requestId = Guid.NewGuid().ToString("N") });
+        Assert.Equal(HttpStatusCode.OK, status);
+        using var data = JsonDocument.Parse(body.GetProperty("dataJson").GetString()!);
+        return data.RootElement.GetProperty("sessionId").GetString()!;
+    }
 
     private static object Announcement(params object[] chats) => new { machineName = "PC", clients = new[] { "codex" }, chats };
 
@@ -155,11 +164,12 @@ public sealed class DiscoveryHostTests
     {
         await using var host = Host();
         using var machine = Client(host, await EnrollAsync(host, "pc-a"));
-        var accepted = await PostAsync(machine, "/api/discovery/announce", Announcement(Chat(thread: "t1"), Chat(thread: "t2", wakeable: false)));
+        var (s1, s2) = (await OpenSessionAsync(machine), await OpenSessionAsync(machine));
+        var accepted = await PostAsync(machine, "/api/discovery/announce", Announcement(Chat(thread: "t1", session: s1), Chat(thread: "t2", wakeable: false, session: s2)));
         Assert.Equal(HttpStatusCode.OK, accepted.Status);
         var route = Assert.Single(accepted.Body.GetProperty("routes").EnumerateArray());
         Assert.Equal("t1", route.GetProperty("threadId").GetString());
-        var denied = await PostAsync(machine, "/api/discovery/announce", Announcement(Chat(thread: "t1"), Chat(repository: "repo-not-listed", thread: "t3")));
+        var denied = await PostAsync(machine, "/api/discovery/announce", Announcement(Chat(thread: "t1", session: s1), Chat(repository: "repo-not-listed", thread: "t3")));
         Assert.Equal(HttpStatusCode.Forbidden, denied.Status);
         Assert.Equal("RepositoryDenied", denied.Body.GetProperty("code").GetString());
         // The refused announcement changed nothing: the earlier chats are still the machine's announced set.
@@ -187,9 +197,9 @@ public sealed class DiscoveryHostTests
         await using var host = Host();
         using var a = Client(host, await EnrollAsync(host, "pc-a", "PC A"));
         using var b = Client(host, await EnrollAsync(host, "pc-b", "PC B"));
-        Assert.Equal(HttpStatusCode.OK, (await PostAsync(b, "/api/discovery/announce", new { machineName = "PC B", chats = new[] { Chat(thread: "tb") } })).Status);
+        Assert.Equal(HttpStatusCode.OK, (await PostAsync(b, "/api/discovery/announce", new { machineName = "PC B", chats = new[] { Chat(thread: "tb", session: await OpenSessionAsync(b)) } })).Status);
         // A claims to be B and tries to replace B's chats.
-        Assert.Equal(HttpStatusCode.OK, (await PostAsync(a, "/api/discovery/announce", new { machineId = "pc-b", machineName = "PC A", chats = new[] { Chat(thread: "ta") } })).Status);
+        Assert.Equal(HttpStatusCode.OK, (await PostAsync(a, "/api/discovery/announce", new { machineId = "pc-b", machineName = "PC A", chats = new[] { Chat(thread: "ta", session: await OpenSessionAsync(a)) } })).Status);
         using var admin = Client(host, AdminToken);
         var directory = await PostAsync(admin, "/api/tools/chat_directory", new { repositoryId = "repo" });
         using var items = JsonDocument.Parse(directory.Body.GetProperty("dataJson").GetString()!);
@@ -312,19 +322,62 @@ public sealed class DiscoveryHostTests
         await Assert.ThrowsAsync<HubException>(() => configuredHub.InvokeAsync("WatchMachine"));
 
         // Empty routes are the starting point, so a first announcement without wakeable chats is not a change.
-        await PostAsync(machine, "/api/discovery/announce", Announcement(Chat(wakeable: false)));
+        var session = await OpenSessionAsync(machine);
+        await PostAsync(machine, "/api/discovery/announce", Announcement(Chat(wakeable: false, session: session)));
         await Task.Delay(300);
         Assert.Empty(hints);
-        await PostAsync(machine, "/api/discovery/announce", Announcement(Chat(wakeable: true)));
+        await PostAsync(machine, "/api/discovery/announce", Announcement(Chat(wakeable: true, session: session)));
         await WaitForAsync(() => hints.Count == 1);
         Assert.DoesNotContain(credential, hints.Single().GetRawText());
-        await PostAsync(machine, "/api/discovery/announce", Announcement(Chat(wakeable: true)));
+        await PostAsync(machine, "/api/discovery/announce", Announcement(Chat(wakeable: true, session: session)));
         await Task.Delay(300);
         Assert.Single(hints);
         await PostAsync(machine, "/api/discovery/announce", Announcement());
         await WaitForAsync(() => hints.Count == 2);
         // Another machine's group never hears about this machine's routes.
         Assert.Empty(otherHints);
+    }
+
+    [Fact]
+    public async Task Announce_refuses_only_the_chats_whose_session_the_machine_does_not_own()
+    {
+        await using var host = Host();
+        using var a = Client(host, await EnrollAsync(host, "pc-a", "PC A"));
+        using var b = Client(host, await EnrollAsync(host, "pc-b", "PC B"));
+        using var configured = Client(host, RelayHostFixture.Token);
+        var (own, others, users) = (await OpenSessionAsync(a), await OpenSessionAsync(b), await OpenSessionAsync(configured));
+        var reply = await PostAsync(a, "/api/discovery/announce", Announcement(Chat(thread: "own", session: own), Chat(thread: "b", session: others), Chat(thread: "user", session: users), Chat(thread: "none", session: "no-such-session")));
+        Assert.Equal(HttpStatusCode.OK, reply.Status);
+        // Each refusal names the session and carries the denial code; the owned chat is still announced.
+        var refused = reply.Body.GetProperty("refused").EnumerateArray().ToDictionary(x => x.GetProperty("relaySessionId").GetString()!, x => x.GetProperty("code").GetString());
+        Assert.Equal(new Dictionary<string, string?> { [others] = "SessionDenied", [users] = "SessionDenied", ["no-such-session"] = "SessionDenied" }, refused);
+        Assert.Equal(own, Assert.Single(reply.Body.GetProperty("routes").EnumerateArray()).GetProperty("relaySessionId").GetString());
+        using var admin = Client(host, AdminToken);
+        var directory = await PostAsync(admin, "/api/tools/chat_directory", new { repositoryId = "repo" });
+        using var items = JsonDocument.Parse(directory.Body.GetProperty("dataJson").GetString()!);
+        Assert.Equal([own], items.RootElement.GetProperty("items").EnumerateArray().Select(x => x.GetProperty("relaySessionId").GetString()));
+    }
+
+    [Theory]
+    [InlineData("\"bad\\nname\"")]
+    [InlineData("\"\"")]
+    [InlineData("\"   \"")]
+    [InlineData("5")]
+    [InlineData("null")]
+    public async Task Announce_applies_the_enroll_rules_to_the_machine_name(string name)
+    {
+        await using var host = Host();
+        using var machine = Client(host, await EnrollAsync(host, "pc-a", "PC A"));
+        var session = await OpenSessionAsync(machine);
+        Assert.Equal(HttpStatusCode.OK, (await PostAsync(machine, "/api/discovery/announce", Announcement(Chat(session: session)))).Status);
+        using var response = await machine.PostAsync("/api/discovery/announce", new StringContent("{\"machineName\":" + name + ",\"chats\":[]}", Encoding.UTF8, "application/json"));
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var tooLong = await PostAsync(machine, "/api/discovery/announce", new { machineName = new string('x', 129), chats = Array.Empty<object>() });
+        Assert.Equal(HttpStatusCode.BadRequest, tooLong.Status);
+        using var admin = Client(host, AdminToken);
+        var directory = await PostAsync(admin, "/api/tools/chat_directory", new { repositoryId = "repo" });
+        using var items = JsonDocument.Parse(directory.Body.GetProperty("dataJson").GetString()!);
+        Assert.Equal(["PC"], items.RootElement.GetProperty("items").EnumerateArray().Select(x => x.GetProperty("machineName").GetString()));
     }
 
     [Theory]

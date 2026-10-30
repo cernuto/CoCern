@@ -327,7 +327,7 @@ public sealed class NodeTests : IDisposable
         using var admin = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{httpPort}/") };
         admin.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", AdminToken);
         using var state = NodeState.Open(DataDir);
-        var transport = Transport();
+        var transport = Transport(() => new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{httpPort}/") });
         using (var stop = new CancellationTokenSource())
         {
             var run = NodeRunner.RunAsync(state, new Uri($"https://127.0.0.1:{httpsPort}/"), transport, error, stop.Token);
@@ -493,6 +493,9 @@ public sealed class NodeTests : IDisposable
         Assert.All(chats.Values, x => Assert.Equal("repo", x["repositoryId"]!.GetValue<string>()));
         Assert.Equal("Chat s-twin", chats["s-twin"]["label"]!.GetValue<string>());
         Assert.Equal(PkRelay.Domain.DiscoveryLimits.MaxChatsPerMachine, NodeChats.MaxChats);
+        // These sessions were never opened by the node's machine, so the hub refuses them; each refusal is reported once, never with a token.
+        Assert.Single(error.ToString().Split('\n'), line => line.Contains("relay session 's-twin'"));
+        Assert.DoesNotContain("synthetic-token", error.ToString());
         Assert.True(Handle("s-twin").Unmapped);
         Assert.Equal((null, false), (Handle("s-missing").Chat, Handle("s-missing").Unmapped));
     }
@@ -806,7 +809,6 @@ public sealed class NodeTests : IDisposable
     public async Task Node_wakes_its_codex_chats_from_hub_routes_until_the_stop_file_appears()
     {
         var thread = Guid.NewGuid().ToString();
-        NodeState.WriteSessionHandle(DataDir, new SessionHandle("s-codex", "synthetic-token-codex", "repo", "Codex chat", DateTimeOffset.UtcNow.AddMinutes(-1), Chat: new ChatLocation("codex", thread)));
         await using var host = Hub();
         var traffic = new HubTraffic();
         using var state = NodeState.Open(DataDir);
@@ -824,6 +826,10 @@ public sealed class NodeTests : IDisposable
         using (var stop = new CancellationTokenSource())
         {
             var run = NodeRunner.RunAsync(state, InMemoryHub, Waking(), error, stop.Token);
+            // The hub announces only sessions this machine opened, so the chat's session is opened with the node's credential once it has enrolled.
+            await WaitForAsync(() => Count("announced") >= 1, run);
+            var (session, token) = await OpenSessionWithTokenAsync(() => host.CreateClient(new() { BaseAddress = InMemoryHub }), state.ReadCredential()!);
+            NodeState.WriteSessionHandle(DataDir, new SessionHandle(session, token, "repo", "Codex chat", DateTimeOffset.UtcNow.AddMinutes(-1), Chat: new ChatLocation("codex", thread)));
             await WaitForAsync(() => Count("wake-target") >= 1, run);
             Assert.True(File.Exists(Path.Combine(DataDir, "wake.db")));
             stop.Cancel();
@@ -1056,10 +1062,10 @@ public sealed class NodeTests : IDisposable
         ["toolUseResult"] = new JsonArray(new JsonObject { ["type"] = "text", ["text"] = text })
     }.ToJsonString();
 
-    private NodeTransport Transport() => new()
+    private NodeTransport Transport(Func<HttpClient>? hub = null) => new()
     {
         MachineName = "Node PC",
-        Chats = _ => Task.FromResult(new JsonArray(Chat())),
+        Chats = hub is null ? _ => Task.FromResult(new JsonArray(Chat())) : OwnedChats(hub),
         FirstRetry = TimeSpan.FromMilliseconds(20),
         Trace = events.Enqueue,
         CodexExecutable = () => null
@@ -1073,7 +1079,7 @@ public sealed class NodeTests : IDisposable
         CreateHandler = (_, _) => traffic.Wrap(host.Server.CreateHandler()),
         HubHandler = () => host.Server.CreateHandler(),
         MachineName = "Node PC",
-        Chats = _ => Task.FromResult(new JsonArray(Chat())),
+        Chats = OwnedChats(() => host.CreateClient(new() { BaseAddress = InMemoryHub })),
         AnnounceInterval = interval ?? TimeSpan.FromSeconds(30),
         FirstRetry = TimeSpan.FromMilliseconds(10),
         MaxRetry = TimeSpan.FromMilliseconds(50),
@@ -1081,6 +1087,41 @@ public sealed class NodeTests : IDisposable
         // Never the real %LOCALAPPDATA% lookup, so no test can reach a real codex.exe.
         CodexExecutable = () => null
     };
+
+    /// <summary>
+    /// The test chat, under a relay session the node's own machine principal opened: the hub announces only chats whose session the announcing machine owns.
+    /// The session is opened with the node's current credential the first time it is needed, and again whenever that credential changes.
+    /// </summary>
+    private Func<CancellationToken, Task<JsonArray>> OwnedChats(Func<HttpClient> hub)
+    {
+        string? openedWith = null, session = null;
+        return async ct =>
+        {
+            var credential = File.Exists(Path.Combine(DataDir, "credential")) ? File.ReadAllText(Path.Combine(DataDir, "credential")).Trim() : null;
+            if (credential is not null && credential != openedWith)
+            {
+                session = await OpenSessionAsync(hub, credential, ct);
+                openedWith = credential;
+            }
+            var chat = Chat();
+            if (session is not null) chat["relaySessionId"] = session;
+            return new JsonArray(chat);
+        };
+    }
+
+    /// <summary>Opens a relay session in <c>repo</c> as the machine that holds <paramref name="credential"/>; returns its ID and token.</summary>
+    private static async Task<string> OpenSessionAsync(Func<HttpClient> hub, string credential, CancellationToken ct = default) => (await OpenSessionWithTokenAsync(hub, credential, ct)).SessionId;
+
+    private static async Task<(string SessionId, string Token)> OpenSessionWithTokenAsync(Func<HttpClient> hub, string credential, CancellationToken ct = default)
+    {
+        using var client = hub();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", credential);
+        using var response = await client.PostAsJsonAsync("api/tools/session_open", new { repositoryId = "repo", requestId = Guid.NewGuid().ToString("N") }, ct);
+        response.EnsureSuccessStatusCode();
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>(ct);
+        using var data = JsonDocument.Parse(body.GetProperty("dataJson").GetString()!);
+        return (data.RootElement.GetProperty("sessionId").GetString()!, data.RootElement.GetProperty("sessionToken").GetString()!);
+    }
 
     private static JsonObject Chat() => new() { ["provider"] = "codex", ["threadId"] = "t1", ["relaySessionId"] = "s-t1", ["repositoryId"] = "repo", ["label"] = "Node chat", ["wakeable"] = true, ["waiterRunning"] = false };
 

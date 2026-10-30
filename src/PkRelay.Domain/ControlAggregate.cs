@@ -25,6 +25,7 @@ internal static class ControlAggregate
             RelayTools.WorkerList => ListWorkers(context),
             RelayTools.GetStatus => Status(context),
             Operations.Resolve => ResolveResource(context),
+            Operations.SessionOwners => OwnedSessions(context),
             RelayTools.ControlRequest => Control(context),
             _ => Error(UnknownTool)
         };
@@ -93,6 +94,15 @@ internal static class ControlAggregate
             cancellations = cancellations.Count,
             requests = sessionId.Length > 0 ? cancellations.Where(x => x.Key.StartsWith(sessionId + ":", StringComparison.Ordinal)).Take(RelayLimits.MaxPageSize).Select(x => new { target = x.Key, request = x.Value }).ToArray() : []
         });
+    }
+
+    /// <summary>The given session IDs that the caller's principal opened in this repository. Read-only; tokens and other principals are never returned.</summary>
+    private static RelayReply OwnedSessions(AggregateContext context)
+    {
+        var sessions = ObjectAt(context.State, "sessions");
+        var owned = Strings(context.Args["sessionIds"]).Distinct(StringComparer.Ordinal)
+            .Where(id => sessions[id] is JsonObject session && Text(session, "principalId") == context.Caller.PrincipalId && Text(session, "repositoryId") == context.Repository).ToArray();
+        return Ok(new { owned });
     }
 
     /// <summary>Maps a resource ID or a machine-scoped alias to its canonical registered resource.</summary>
