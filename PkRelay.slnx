@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/PkRelay.Core/PkRelay.Core.csproj" />
+    <Project Path="src/PkRelay.Storage/PkRelay.Storage.csproj" />
+    <Project Path="src/PkRelay.Host/PkRelay.Host.csproj" />
+    <Project Path="src/PkRelay.Adapter/PkRelay.Adapter.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/PkRelay.Tests/PkRelay.Tests.csproj" />
+  </Folder>
+</Solution>
