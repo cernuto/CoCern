@@ -409,6 +409,255 @@ public sealed class NodeTests : IDisposable
         Assert.Throws<AdapterConfigurationException>(() => new AdapterOptions("https://hub.example/", "token") { PinnedFingerprint = "not-a-fingerprint" });
     }
 
+    [Fact]
+    public void Locator_matches_only_the_session_open_result()
+    {
+        var openedAt = DateTimeOffset.UtcNow.AddMinutes(-1);
+        var (threadA, threadB) = (Guid.NewGuid().ToString(), Guid.NewGuid().ToString());
+        var codex = Path.Combine(root, "codex-sessions");
+        // Chat A opened s-one. Chat B opened s-two, then listed the directory (which names s-one) and was told about s-one in text and code output.
+        Rollout(codex, threadA, UserText("hello"), CodexTool(threadA, "session_open", OpenReply("s-one")));
+        Rollout(codex, threadB, CodexTool(threadB, "session_open", OpenReply("s-two")), CodexTool(threadB, "chat_directory", DirectoryReply("s-one", "s-two")),
+            UserText("please message s-one"), CodeOutput(OpenReply("s-one")));
+        var codexLocator = new CodexChatLocator(codex);
+        Assert.Equal("codex", codexLocator.Provider);
+        Assert.Equal(new ChatLocation("codex", threadA), codexLocator.Locate("s-one", openedAt));
+        Assert.Equal(new ChatLocation("codex", threadB), codexLocator.Locate("s-two", openedAt));
+
+        var claude = Path.Combine(root, "claude-projects");
+        var (sessionA, sessionB) = (Guid.NewGuid().ToString(), Guid.NewGuid().ToString());
+        Transcript(claude, sessionA, ClaudeUse(sessionA, "u1", "mcp__pkrelay__session_open"), ClaudeResult(sessionA, "u1", OpenReply("s-one")));
+        Transcript(claude, sessionB, ClaudeUse(sessionB, "u2", "mcp__pkrelay__session_open"), ClaudeResult(sessionB, "u2", OpenReply("s-two")),
+            ClaudeUse(sessionB, "u3", "mcp__pkrelay__chat_directory"), ClaudeResult(sessionB, "u3", DirectoryReply("s-one", "s-two")),
+            ClaudeUse(sessionB, "u4", "Bash"), ClaudeResult(sessionB, "u4", OpenReply("s-one")));
+        var claudeLocator = new ClaudeChatLocator(claude);
+        Assert.Equal("claude", claudeLocator.Provider);
+        Assert.Equal(new ChatLocation("claude", sessionA), claudeLocator.Locate("s-one", openedAt));
+        Assert.Equal(new ChatLocation("claude", sessionB), claudeLocator.Locate("s-two", openedAt));
+    }
+
+    [Fact]
+    public async Task Ambiguous_or_missing_match_is_announced_unwakeable()
+    {
+        var openedAt = DateTimeOffset.UtcNow.AddMinutes(-1);
+        var codex = Path.Combine(root, "codex-sessions");
+        var (located, twinA, twinB, old) = (Guid.NewGuid().ToString(), Guid.NewGuid().ToString(), Guid.NewGuid().ToString(), Guid.NewGuid().ToString());
+        Rollout(codex, located, CodexTool(located, "session_open", OpenReply("s-located")));
+        Rollout(codex, twinA, CodexTool(twinA, "session_open", OpenReply("s-twin")));
+        Rollout(codex, twinB, CodexTool(twinB, "session_open", OpenReply("s-twin")));
+        // A rollout last written well before the session opened cannot hold its result.
+        File.SetLastWriteTimeUtc(Rollout(codex, old, CodexTool(old, "session_open", OpenReply("s-old"))), openedAt.UtcDateTime.AddMinutes(-10));
+        var locator = new CodexChatLocator(codex);
+        Assert.Equal(new ChatLocation("codex", located), locator.Locate("s-located", openedAt));
+        Assert.Null(locator.Locate("s-twin", openedAt));
+        Assert.Null(locator.Locate("s-missing", openedAt));
+        Assert.Null(locator.Locate("s-old", openedAt));
+        Assert.Null(new ClaudeChatLocator(Path.Combine(root, "no-claude")).Locate("s-located", openedAt));
+
+        await using var host = Hub();
+        var traffic = new HubTraffic();
+        using var state = NodeState.Open(DataDir);
+        var claudeChat = Guid.NewGuid().ToString();
+        foreach (var (id, client) in new[] { ("s-located", (ChatLocation?)null), ("s-twin", null), ("s-missing", null), ("s-claude", new ChatLocation("claude", claudeChat)) })
+            NodeState.WriteSessionHandle(DataDir, new SessionHandle(id, "synthetic-token-" + id, "repo", "Chat " + id, openedAt, client));
+        using var stop = new CancellationTokenSource();
+        var transport = InMemory(host, traffic, TimeSpan.FromMilliseconds(50));
+        var run = NodeRunner.RunAsync(state, InMemoryHub, new NodeTransport
+        {
+            ProbeFingerprint = transport.ProbeFingerprint, CreateHandler = transport.CreateHandler, HubHandler = transport.HubHandler, MachineName = "Node PC",
+            Locators = [locator, new ClaudeChatLocator(Path.Combine(root, "no-claude"))], AnnounceInterval = transport.AnnounceInterval, FirstRetry = transport.FirstRetry, MaxRetry = transport.MaxRetry, Trace = events.Enqueue
+        }, error, stop.Token);
+        await WaitForAsync(() => traffic.Accepted is not null && Count("announced") >= 2, run);
+        stop.Cancel();
+        Assert.Equal(0, await run);
+
+        var accepted = traffic.Accepted!;
+        Assert.DoesNotContain("synthetic-token", accepted);
+        Assert.DoesNotContain("sessionToken", accepted);
+        var chats = JsonNode.Parse(accepted)!["chats"]!.AsArray().Select(x => x!.AsObject()).ToDictionary(x => x["relaySessionId"]!.GetValue<string>());
+        Assert.Equal(4, chats.Count);
+        Assert.Equal(("codex", located, true), Route(chats["s-located"]));
+        Assert.Equal(("claude", claudeChat, true), Route(chats["s-claude"]));
+        Assert.False(chats["s-twin"]["wakeable"]!.GetValue<bool>());
+        Assert.False(chats["s-missing"]["wakeable"]!.GetValue<bool>());
+        Assert.All(chats.Values, x => Assert.Equal("repo", x["repositoryId"]!.GetValue<string>()));
+        Assert.Equal("Chat s-twin", chats["s-twin"]["label"]!.GetValue<string>());
+        Assert.Equal(PkRelay.Domain.DiscoveryLimits.MaxChatsPerMachine, NodeChats.MaxChats);
+        static (string, string, bool) Route(JsonObject chat) => (chat["provider"]!.GetValue<string>(), chat["threadId"]!.GetValue<string>(), chat["wakeable"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public async Task Denied_repository_chats_are_left_out_and_reported_once()
+    {
+        var openedAt = DateTimeOffset.UtcNow.AddMinutes(-1);
+        await using var host = Hub();
+        var traffic = new HubTraffic();
+        using var state = NodeState.Open(DataDir);
+        NodeState.WriteSessionHandle(DataDir, new SessionHandle("s-allowed", "synthetic-token-a", "repo", "Allowed chat", openedAt, new ChatLocation("claude", Guid.NewGuid().ToString())));
+        NodeState.WriteSessionHandle(DataDir, new SessionHandle("s-denied", "synthetic-token-d", "elsewhere", "Denied chat", openedAt, new ChatLocation("claude", Guid.NewGuid().ToString())));
+        using var stop = new CancellationTokenSource();
+        var transport = InMemory(host, traffic, TimeSpan.FromMilliseconds(30));
+        var run = NodeRunner.RunAsync(state, InMemoryHub, new NodeTransport
+        {
+            ProbeFingerprint = transport.ProbeFingerprint, CreateHandler = transport.CreateHandler, HubHandler = transport.HubHandler, MachineName = "Node PC",
+            Locators = [], AnnounceInterval = transport.AnnounceInterval, FirstRetry = transport.FirstRetry, MaxRetry = transport.MaxRetry, Trace = events.Enqueue
+        }, error, stop.Token);
+        await WaitForAsync(() => Count("announced") >= 4, run);
+        stop.Cancel();
+        Assert.Equal(0, await run);
+
+        var chats = JsonNode.Parse(traffic.Accepted!)!["chats"]!.AsArray();
+        Assert.Equal("s-allowed", Assert.Single(chats)!["relaySessionId"]!.GetValue<string>());
+        Assert.Single(error.ToString().Split('\n'), line => line.Contains("elsewhere"));
+        Assert.DoesNotContain("synthetic-token", error.ToString());
+    }
+
+    [Fact]
+    public async Task Session_handle_file_is_private_and_holds_no_machine_credential()
+    {
+        await using var host = Hub();
+        var traffic = new HubTraffic();
+        using var state = NodeState.Open(DataDir);
+        using (var stop = new CancellationTokenSource())
+        {
+            var run = NodeRunner.RunAsync(state, InMemoryHub, InMemory(host, traffic), error, stop.Token);
+            await WaitForAsync(() => Count("announced") >= 1, run);
+            stop.Cancel();
+            Assert.Equal(0, await run);
+        }
+        var credential = state.ReadCredential()!;
+
+        // The node still holds node.lock; the stdio adapter reads the folder without it.
+        var chatId = Guid.NewGuid().ToString();
+        var variables = new Dictionary<string, string?> { ["PKRELAY_NODE_DIR"] = DataDir, ["CLAUDE_CODE_SESSION_ID"] = chatId, ["PKRELAY_ROLE"] = "admin" };
+        var options = AdapterOptions.FromEnvironment(key => variables.GetValueOrDefault(key), _ => throw new Xunit.Sdk.XunitException("No token file in node mode."));
+        Assert.Equal(InMemoryHub, options.BaseUri);
+        Assert.Equal(credential, options.Token);
+        Assert.Equal(ProbedFingerprint, options.PinnedFingerprint);
+        Assert.Equal(Path.GetFullPath(DataDir), options.NodeFolder);
+        Assert.Equal(new ChatLocation("claude", chatId), options.ClientChat);
+        Assert.False(options.Admin);
+
+        using var http = new HttpClient(host.Server.CreateHandler());
+        var arguments = JsonSerializer.SerializeToElement(new { repositoryId = "repo", machineId = "node-pc", workspaceId = "ws", role = "worker", label = "Handle chat", requestId = "open-1" });
+        var reply = await new RelayForwarder(http, options).ForwardAsync("session_open", arguments);
+        Assert.True(reply.Ok, reply.Code);
+        var (sessionId, sessionToken) = (reply.Data!.Value.GetProperty("sessionId").GetString()!, reply.Data!.Value.GetProperty("sessionToken").GetString()!);
+        var handoff = SessionHandoff.For(options, error);
+        Assert.NotNull(handoff);
+        handoff.Record(arguments, reply);
+
+        var path = Path.Combine(DataDir, "sessions", sessionId + ".json");
+        AssertPrivate(path);
+        var text = File.ReadAllText(path);
+        Assert.DoesNotContain(credential, text);
+        var json = JsonNode.Parse(text)!.AsObject();
+        Assert.Equal(["sessionId", "sessionToken", "repositoryId", "label", "openedAt", "client"], json.Select(x => x.Key));
+        Assert.Equal(sessionToken, json["sessionToken"]!.GetValue<string>());
+        Assert.Equal("repo", json["repositoryId"]!.GetValue<string>());
+        Assert.Equal("Handle chat", json["label"]!.GetValue<string>());
+        Assert.Equal("claude", json["client"]!["provider"]!.GetValue<string>());
+        Assert.Equal(chatId, json["client"]!["chatId"]!.GetValue<string>());
+        Assert.True(DateTimeOffset.UtcNow - DateTimeOffset.Parse(json["openedAt"]!.GetValue<string>()) < TimeSpan.FromMinutes(1));
+        var handle = NodeState.ReadSessionHandle(path)!;
+        Assert.Equal((sessionId, "repo", new ChatLocation("claude", chatId)), (handle.SessionId, handle.RepositoryId, handle.Client));
+        Assert.DoesNotContain(sessionToken, handle.ToString());
+        Assert.DoesNotContain(sessionToken, error.ToString());
+        Assert.DoesNotContain(credential, error.ToString());
+    }
+
+    [Fact]
+    public void Explicit_environment_keeps_existing_behaviour()
+    {
+        using (var seed = NodeState.Open(DataDir))
+        {
+            seed.SetHub(InMemoryHub.AbsoluteUri, ProbedFingerprint);
+            seed.SaveCredential(new string('c', 64));
+        }
+        using var held = NodeState.Open(DataDir);
+        var cases = new[]
+        {
+            new Dictionary<string, string?> { ["PKRELAY_TOKEN"] = "env-token" },
+            new Dictionary<string, string?> { ["PKRELAY_TOKEN_FILE"] = "token-file" },
+            new Dictionary<string, string?> { ["PKRELAY_URL"] = "https://hub.example/", ["PKRELAY_TOKEN"] = "env-token" }
+        };
+        foreach (var variables in cases)
+        {
+            variables["PKRELAY_NODE_DIR"] = DataDir;
+            variables["CLAUDE_CODE_SESSION_ID"] = Guid.NewGuid().ToString();
+            var options = AdapterOptions.FromEnvironment(key => variables.GetValueOrDefault(key), _ => "file-token");
+            Assert.Equal(variables.ContainsKey("PKRELAY_TOKEN_FILE") ? "file-token" : "env-token", options.Token);
+            Assert.Equal(new Uri(variables.GetValueOrDefault("PKRELAY_URL") ?? AdapterOptions.DefaultUrl), options.BaseUri);
+            Assert.Null(options.PinnedFingerprint);
+            Assert.Null(options.NodeFolder);
+            Assert.Null(options.ClientChat);
+            Assert.Null(SessionHandoff.For(options, error));
+        }
+        // PKRELAY_URL alone still means "no token", never node credentials.
+        var urlOnly = new Dictionary<string, string?> { ["PKRELAY_URL"] = "https://hub.example/", ["PKRELAY_NODE_DIR"] = DataDir };
+        Assert.Contains("PKRELAY_TOKEN", Assert.Throws<AdapterConfigurationException>(() => AdapterOptions.FromEnvironment(key => urlOnly.GetValueOrDefault(key))).Message);
+        // Without enrolled node state the error is the same as before.
+        var empty = new Dictionary<string, string?> { ["PKRELAY_NODE_DIR"] = Path.Combine(root, "not-a-node") };
+        Assert.Contains("PKRELAY_TOKEN", Assert.Throws<AdapterConfigurationException>(() => AdapterOptions.FromEnvironment(key => empty.GetValueOrDefault(key))).Message);
+        Assert.False(Directory.Exists(Path.Combine(root, "not-a-node")));
+        Assert.False(Directory.Exists(Path.Combine(DataDir, "sessions")));
+    }
+
+    private static string Rollout(string codexRoot, string threadId, params string[] lines)
+    {
+        var folder = Path.Combine(codexRoot, "2026", "10", "30");
+        Directory.CreateDirectory(folder);
+        var path = Path.Combine(folder, $"rollout-2026-10-30T10-00-00-{threadId}.jsonl");
+        File.WriteAllLines(path, [new JsonObject { ["type"] = "session_meta", ["payload"] = new JsonObject { ["id"] = threadId } }.ToJsonString(), .. lines]);
+        return path;
+    }
+
+    private static void Transcript(string claudeRoot, string sessionId, params string[] lines)
+    {
+        var folder = Path.Combine(claudeRoot, "C--synthetic-project");
+        Directory.CreateDirectory(folder);
+        File.WriteAllLines(Path.Combine(folder, sessionId + ".jsonl"), lines);
+    }
+
+    private static string OpenReply(string sessionId) => new JsonObject { ["ok"] = true, ["code"] = "ok", ["data"] = new JsonObject { ["sessionId"] = sessionId, ["sessionToken"] = "synthetic-token-" + sessionId, ["bindingVersion"] = 0 }, ["version"] = 1 }.ToJsonString();
+
+    private static string DirectoryReply(params string[] sessionIds) => new JsonObject
+    {
+        ["ok"] = true, ["code"] = "ok", ["version"] = 1,
+        ["data"] = new JsonObject { ["truncated"] = false, ["items"] = new JsonArray(sessionIds.Select(x => (JsonNode)new JsonObject { ["label"] = "Chat " + x, ["provider"] = "codex", ["machineName"] = "PC", ["relaySessionId"] = x, ["sessionId"] = x, ["repositoryId"] = "repo", ["reachable"] = true }).ToArray()) }
+    }.ToJsonString();
+
+    private static string CodexTool(string threadId, string tool, string resultText) => new JsonObject
+    {
+        ["timestamp"] = "2026-10-30T10:00:01Z", ["type"] = "event_msg",
+        ["payload"] = new JsonObject
+        {
+            ["type"] = "item_completed", ["thread_id"] = threadId, ["turn_id"] = "turn-1",
+            ["item"] = new JsonObject
+            {
+                ["type"] = "McpToolCall", ["id"] = "call-" + tool, ["server"] = "pkrelay", ["tool"] = tool, ["status"] = "completed", ["arguments"] = new JsonObject { ["repositoryId"] = "repo" },
+                ["result"] = new JsonObject { ["content"] = new JsonArray(new JsonObject { ["type"] = "text", ["text"] = resultText }) }
+            }
+        }
+    }.ToJsonString();
+
+    private static string UserText(string text) => new JsonObject { ["type"] = "response_item", ["payload"] = new JsonObject { ["type"] = "message", ["role"] = "user", ["content"] = new JsonArray(new JsonObject { ["type"] = "input_text", ["text"] = text }) } }.ToJsonString();
+
+    private static string CodeOutput(string text) => new JsonObject { ["type"] = "response_item", ["payload"] = new JsonObject { ["type"] = "custom_tool_call_output", ["call_id"] = "exec-1", ["output"] = new JsonArray(new JsonObject { ["type"] = "input_text", ["text"] = text }) } }.ToJsonString();
+
+    private static string ClaudeUse(string sessionId, string id, string name) => new JsonObject
+    {
+        ["type"] = "assistant", ["sessionId"] = sessionId,
+        ["message"] = new JsonObject { ["role"] = "assistant", ["content"] = new JsonArray(new JsonObject { ["type"] = "tool_use", ["id"] = id, ["name"] = name, ["input"] = new JsonObject { ["repositoryId"] = "repo" } }) }
+    }.ToJsonString();
+
+    private static string ClaudeResult(string sessionId, string id, string text) => new JsonObject
+    {
+        ["type"] = "user", ["sessionId"] = sessionId,
+        ["message"] = new JsonObject { ["role"] = "user", ["content"] = new JsonArray(new JsonObject { ["type"] = "tool_result", ["tool_use_id"] = id, ["content"] = new JsonArray(new JsonObject { ["type"] = "text", ["text"] = text }) }) },
+        ["toolUseResult"] = new JsonArray(new JsonObject { ["type"] = "text", ["text"] = text })
+    }.ToJsonString();
+
     private NodeTransport Transport() => new()
     {
         MachineName = "Node PC",
@@ -541,6 +790,9 @@ public sealed class NodeTests : IDisposable
         public int Enrolls, Announces, Failed, FailAnnounces, UnauthorizedAnnounces;
         private readonly ConcurrentQueue<string> enrolledIds = new();
         public string[] EnrolledIds => enrolledIds.ToArray();
+        private string? accepted;
+        /// <summary>The body of the last announcement the hub accepted.</summary>
+        public string? Accepted => Volatile.Read(ref accepted);
 
         public HttpMessageHandler Wrap(HttpMessageHandler inner) => new Counter(this, inner);
 
@@ -568,7 +820,10 @@ public sealed class NodeTests : IDisposable
                         Interlocked.Increment(ref traffic.Announces);
                         if (Take(ref traffic.FailAnnounces)) { Interlocked.Increment(ref traffic.Failed); throw new HttpRequestException("simulated outage"); }
                         if (Take(ref traffic.UnauthorizedAnnounces)) return new HttpResponseMessage(HttpStatusCode.Unauthorized);
-                        break;
+                        var body = await request.Content!.ReadAsStringAsync(cancellationToken);
+                        var response = await base.SendAsync(request, cancellationToken);
+                        if (response.IsSuccessStatusCode) Volatile.Write(ref traffic.accepted, body);
+                        return response;
                 }
                 return await base.SendAsync(request, cancellationToken);
             }

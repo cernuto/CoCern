@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.SignalR.Client;
+using PkRelay.Contracts;
 
 namespace PkRelay.Adapter.Node;
 
@@ -17,7 +18,9 @@ internal sealed class NodeTransport
     public Func<string?, Action<string>, HttpMessageHandler> CreateHandler { get; init; } = (fingerprint, mismatch) => fingerprint is null ? RelayForwarder.CreateHandler() : PinnedCertificate.CreateHandler(fingerprint, mismatch);
     /// <summary>Replaces the hint channel's handler; null keeps SignalR's own handler, pinned to the same fingerprint.</summary>
     public Func<HttpMessageHandler>? HubHandler { get; init; }
-    public Func<CancellationToken, Task<JsonArray>> Chats { get; init; } = _ => Task.FromResult(new JsonArray());
+    /// <summary>Replaces the chat list; null (production) reads the session handles in the node folder and maps them with <see cref="Locators"/>.</summary>
+    public Func<CancellationToken, Task<JsonArray>>? Chats { get; init; }
+    public IReadOnlyList<IChatLocator> Locators { get; init; } = ChatLocators.Default();
     public Func<string[]> Clients { get; init; } = () => NodeRunner.DetectClients(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
     public string MachineName { get; init; } = Environment.MachineName;
     public TimeSpan AnnounceInterval { get; init; } = TimeSpan.FromSeconds(30);
@@ -43,6 +46,9 @@ public sealed class NodeRunner : IAsyncDisposable
     private readonly TextWriter _error;
     private readonly SemaphoreSlim _refresh = new(0, 1);
     private readonly CancellationTokenSource _stopping = new();
+    private readonly NodeChats _chats;
+    /// <summary>Repositories the hub refused for this PC; their chats stay out of announcements for this run.</summary>
+    private readonly HashSet<string> _denied = new(StringComparer.Ordinal);
     private HttpClient? _http;
     private string? _credential;
     private string? _mismatch;
@@ -52,7 +58,11 @@ public sealed class NodeRunner : IAsyncDisposable
     private bool _trouble;
     private int _exitCode;
 
-    private NodeRunner(NodeState state, Uri hub, NodeTransport transport, TextWriter error) => (_state, _hub, _transport, _error) = (state, hub, transport, error);
+    private NodeRunner(NodeState state, Uri hub, NodeTransport transport, TextWriter error)
+    {
+        (_state, _hub, _transport, _error) = (state, hub, transport, error);
+        _chats = new NodeChats(state.Folder, transport.Locators);
+    }
 
     /// <summary>Runs until cancelled (exit 0). Exit 1 for configuration problems or a revoked PC, 4 when the hub presents a certificate other than the pinned one.</summary>
     public static Task<int> RunAsync(NodeState state, Uri? hub, CancellationToken ct) => RunAsync(state, hub, new NodeTransport(), Console.Error, ct);
@@ -201,28 +211,78 @@ public sealed class NodeRunner : IAsyncDisposable
 
     private async Task<Next> AnnounceAsync(CancellationToken ct)
     {
-        var body = new JsonObject
+        var chats = await ChatsAsync(ct);
+        var response = await PostAnnounceAsync(chats, ct);
+        try
         {
-            ["machineName"] = _transport.MachineName,
-            ["clients"] = new JsonArray(_transport.Clients().Select(x => (JsonNode)JsonValue.Create(x)!).ToArray()),
-            ["chats"] = await _transport.Chats(ct)
-        };
-        using var response = await PostAsync("api/discovery/announce", body, _credential, ct);
-        if (response.StatusCode == HttpStatusCode.Unauthorized)
-        {
-            // Only the hub refusing the credential leads to enrolling again; network errors never do.
-            _credential = null;
-            _transport.Trace?.Invoke("unauthorized");
-            _error.WriteLine($"The hub at {_hub} no longer accepts this PC's credential; enrolling again.");
-            return Next.Again;
+            string? refusal = null;
+            if (response.StatusCode == HttpStatusCode.Forbidden)
+            {
+                refusal = Code(await ReadAsync(response, ct));
+                if (refusal == RelayErrorCodes.RepositoryDenied && chats.Count > 0)
+                {
+                    response.Dispose();
+                    response = await LeaveOutDeniedAsync(chats, ct);
+                    refusal = null;
+                }
+            }
+            if (response.StatusCode == HttpStatusCode.Unauthorized)
+            {
+                // Only the hub refusing the credential leads to enrolling again; network errors never do.
+                _credential = null;
+                _transport.Trace?.Invoke("unauthorized");
+                _error.WriteLine($"The hub at {_hub} no longer accepts this PC's credential; enrolling again.");
+                return Next.Again;
+            }
+            if (!response.IsSuccessStatusCode)
+                return Busy(response.StatusCode) ? Unreachable() : Retry($"The hub at {_hub} refused this PC's announcement ({(int)response.StatusCode} {refusal ?? Code(await ReadAsync(response, ct))}). Retrying.");
         }
-        if (!response.IsSuccessStatusCode)
-            return Busy(response.StatusCode) ? Unreachable() : Retry($"The hub at {_hub} refused this PC's announcement ({(int)response.StatusCode} {Code(await ReadAsync(response, ct))}). Retrying.");
+        finally { response.Dispose(); }
         Recovered();
         _transport.Trace?.Invoke("announced");
         EnsureHints();
         return Next.Wait;
     }
+
+    /// <summary>The chats to announce, without any in a repository the hub refused.</summary>
+    private async Task<JsonArray> ChatsAsync(CancellationToken ct)
+    {
+        if (_transport.Chats is null) return _chats.Read(repository => !_denied.Contains(repository));
+        var given = await _transport.Chats(ct);
+        return Only(given, chat => !_denied.Contains(Repository(chat)));
+    }
+
+    private Task<HttpResponseMessage> PostAnnounceAsync(JsonArray chats, CancellationToken ct) => PostAsync("api/discovery/announce", new JsonObject
+    {
+        ["machineName"] = _transport.MachineName,
+        ["clients"] = new JsonArray(_transport.Clients().Select(x => (JsonNode)JsonValue.Create(x)!).ToArray()),
+        ["chats"] = chats.DeepClone()
+    }, _credential, ct);
+
+    /// <summary>
+    /// The hub refuses a whole announcement when one chat names a repository this PC may not use. Adding one repository at a time finds which; each is reported once
+    /// and left out, and the rest are announced. Any other refusal stops the search and is handled like an ordinary failed announcement.
+    /// </summary>
+    private async Task<HttpResponseMessage> LeaveOutDeniedAsync(JsonArray chats, CancellationToken ct)
+    {
+        var allowed = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var repository in chats.Select(Repository).Distinct(StringComparer.Ordinal).ToArray())
+        {
+            using var trial = await PostAnnounceAsync(Only(chats, chat => allowed.Contains(Repository(chat)) || Repository(chat) == repository), ct);
+            if (trial.IsSuccessStatusCode) { allowed.Add(repository); continue; }
+            if (trial.StatusCode != HttpStatusCode.Forbidden || Code(await ReadAsync(trial, ct)) != RelayErrorCodes.RepositoryDenied) break;
+            if (_denied.Add(repository))
+                _error.WriteLine($"The hub at {_hub} does not let this PC announce chats in repository '{Printable(repository)}'; they are left out until the node restarts.");
+        }
+        return await PostAnnounceAsync(Only(chats, chat => allowed.Contains(Repository(chat))), ct);
+    }
+
+    private static JsonArray Only(JsonArray chats, Func<JsonNode?, bool> keep) => new(chats.Where(keep).Select(x => x?.DeepClone()).ToArray());
+
+    private static string Repository(JsonNode? chat) => chat?["repositoryId"] is JsonValue value && value.TryGetValue<string>(out var text) ? text : "";
+
+    /// <summary>A repository ID read from a local file, printed only when it is a plain identifier.</summary>
+    private static string Printable(string repository) => repository.Length is > 0 and <= 256 && repository.All(c => char.IsAsciiLetterOrDigit(c) || c is '.' or '_' or '-' or ':' or '/') ? repository : "(unprintable)";
 
     private async Task<HttpResponseMessage> PostAsync(string path, JsonObject body, string? credential, CancellationToken ct)
     {

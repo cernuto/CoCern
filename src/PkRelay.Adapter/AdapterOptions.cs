@@ -27,6 +27,10 @@ public sealed class AdapterOptions
     public string Token { get; }
     public bool Admin { get; }
     public bool SignalR { get; }
+    /// <summary>Set only when the adapter runs on the node's credentials; successful <c>session_open</c> calls are then handed to the node there.</summary>
+    public string? NodeFolder { get; init; }
+    /// <summary>The chat ID the client exported to this process, if any (node mode only).</summary>
+    public ChatLocation? ClientChat { get; init; }
 
     /// <summary>When set, only a hub certificate with this SHA-256 fingerprint is accepted (stored uppercase).</summary>
     public string? PinnedFingerprint
@@ -45,10 +49,16 @@ public sealed class AdapterOptions
         return true;
     }
 
+    /// <summary>
+    /// Explicit <c>PKRELAY_URL</c>, <c>PKRELAY_TOKEN_FILE</c> or <c>PKRELAY_TOKEN</c> settings work exactly as before. When none is set and this PC's node is enrolled
+    /// (folder <c>PKRELAY_NODE_DIR</c>, else <see cref="NodeState.DefaultFolder"/> for the real process environment), the adapter runs on the node's hub, credential and pinned fingerprint.
+    /// </summary>
     public static AdapterOptions FromEnvironment(Func<string, string?>? environment = null, Func<string, string>? readFile = null)
     {
+        var processEnvironment = environment is null;
         environment ??= Environment.GetEnvironmentVariable;
         readFile ??= File.ReadAllText;
+        if (environment("PKRELAY_URL") is null && environment("PKRELAY_TOKEN_FILE") is null && environment("PKRELAY_TOKEN") is null && FromNode(environment, processEnvironment) is { } node) return node;
         string? token;
         var tokenFile = environment("PKRELAY_TOKEN_FILE");
         if (!string.IsNullOrWhiteSpace(tokenFile))
@@ -64,5 +74,21 @@ public sealed class AdapterOptions
         return new AdapterOptions(environment("PKRELAY_URL") ?? DefaultUrl, token ?? "",
             string.Equals(environment("PKRELAY_ROLE"), "admin", StringComparison.OrdinalIgnoreCase),
             string.Equals(environment("PKRELAY_SIGNALR"), "true", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>The chat IDs a client exports to its MCP servers. Only these exact variables are read; Codex exports none (see docs/discovery.md).</summary>
+    private static readonly (string Provider, string Variable)[] ClientChatVariables = [("claude", "CLAUDE_CODE_SESSION_ID")];
+
+    /// <summary>Node mode: an enrolled machine is never an administrator, whatever <c>PKRELAY_ROLE</c> says.</summary>
+    private static AdapterOptions? FromNode(Func<string, string?> environment, bool processEnvironment)
+    {
+        var configured = environment("PKRELAY_NODE_DIR");
+        var folder = !string.IsNullOrWhiteSpace(configured) ? configured : processEnvironment ? NodeState.DefaultFolder : null;
+        if (folder is null || NodeState.ReadEnrollment(folder) is not { } node) return null;
+        var client = ClientChatVariables.Select(x => (x.Provider, Id: environment(x.Variable))).FirstOrDefault(x => x.Id is not null && ChatLocators.IsUuid(x.Id));
+        return new AdapterOptions(node.Hub.AbsoluteUri, node.Credential, admin: false, string.Equals(environment("PKRELAY_SIGNALR"), "true", StringComparison.OrdinalIgnoreCase))
+        {
+            PinnedFingerprint = node.Fingerprint, NodeFolder = node.Folder, ClientChat = client.Id is null ? null : new ChatLocation(client.Provider, client.Id)
+        };
     }
 }
