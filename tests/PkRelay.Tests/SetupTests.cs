@@ -30,7 +30,7 @@ public sealed class SetupTests : IDisposable
 
     private static RelayHostFixture NewHub() => new(remoteAddress: System.Net.IPAddress.Loopback, settings: new Dictionary<string, string?> { ["Relay:Discovery:Enabled"] = "true", ["Relay:Discovery:Repositories:0"] = "repo" });
 
-    private SetupEnvironment Env(RelayHostFixture host, TimeSpan? timeout = null) => new()
+    private SetupEnvironment Env(RelayHostFixture host, TimeSpan? timeout = null, Action? duringEnrollment = null) => new()
     {
         Profile = Profile,
         DotnetPath = Dotnet,
@@ -39,7 +39,7 @@ public sealed class SetupTests : IDisposable
         StartNode = (dotnet, dll, dataDir) => started.Add($"{dotnet}|{dll}|{dataDir}"),
         Transport = new NodeTransport
         {
-            CreateHandler = (_, _) => host.Server.CreateHandler(),
+            CreateHandler = (_, _) => new HookHandler(host.Server.CreateHandler(), duringEnrollment),
             HubHandler = () => host.Server.CreateHandler(),
             MachineName = "Setup PC",
             Chats = _ => Task.FromResult(new JsonArray()),
@@ -200,6 +200,95 @@ public sealed class SetupTests : IDisposable
         Assert.Empty(Backups);
         Assert.Empty(runKey.Values);
         Assert.Empty(started);
+    }
+
+    [Fact]
+    public async Task A_client_file_changed_during_enrollment_keeps_the_change_and_gets_the_entry()
+    {
+        await using var host = NewHub();
+        Write(ClaudeJson, "{\n  \"numStartups\": 1\n}\n");
+        var env = Env(host, null, () => Write(ClaudeJson, "{\n  \"numStartups\": 2,\n  \"fresh\": true\n}\n"));
+
+        Assert.Equal(0, await SetupCommand.RunAsync(new SetupOptions(Hub, false, DataDir), env, CancellationToken.None));
+
+        var final = JsonNode.Parse(File.ReadAllText(ClaudeJson))!;
+        Assert.Equal(2, final["numStartups"]!.GetValue<int>());
+        Assert.True(final["fresh"]!.GetValue<bool>());
+        Assert.Equal("stdio", final["mcpServers"]!["pkrelay"]!["type"]!.GetValue<string>());
+        // The backup is of the file as it was just before the write, not of the early snapshot.
+        Assert.Contains(Backups, x => File.ReadAllText(x).Contains("\"fresh\""));
+    }
+
+    [Fact]
+    public async Task A_client_file_that_became_malformed_or_gained_the_entry_during_enrollment_is_not_overwritten()
+    {
+        await using var host = NewHub();
+        Write(ClaudeJson, "{}");
+        var env = Env(host, null, () => Write(ClaudeJson, MalformedJson));
+        Assert.Equal(5, await SetupCommand.RunAsync(new SetupOptions(Hub, false, DataDir), env, CancellationToken.None));
+        Assert.Equal(MalformedJson, File.ReadAllText(ClaudeJson));
+        Assert.Empty(Backups);
+        Assert.False(File.Exists(Toml));
+        Assert.Empty(runKey.Values);
+        Assert.Empty(started);
+
+        var mine = "{\"mcpServers\":{\"pkrelay\":{\"command\":\"mine\"}}}";
+        Write(ClaudeJson, "{}");
+        Assert.Equal(0, await SetupCommand.RunAsync(new SetupOptions(Hub, false, DataDir), Env(host, null, () => Write(ClaudeJson, mine)), CancellationToken.None));
+        Assert.Equal(mine, File.ReadAllText(ClaudeJson));
+        Assert.Empty(Backups);
+    }
+
+    [Theory]
+    [InlineData(@"C:\data\")]
+    [InlineData(@"D:\")]
+    [InlineData(@"C:\Program Files\My Node")]
+    [InlineData(@"C:\Program Files\My Node\\")]
+    [InlineData("C:\\odd \"quoted\" dir\\")]
+    public void Command_lines_parse_back_to_exactly_the_intended_arguments(string folder) =>
+        Assert.Equal([Dotnet, Dll, "--node", "--data-dir", folder], ParseCommandLine(LogonStart.Command(Dotnet, Dll, folder)));
+
+    [Theory]
+    [InlineData(@"C:\data\", "--data-dir \"C:\\data\\\\\"")]
+    [InlineData(@"D:\", "--data-dir \"D:\\\\\"")]
+    [InlineData(@"C:\with space\x", "--data-dir \"C:\\with space\\x\"")]
+    public void Command_doubles_backslashes_before_the_closing_quote(string folder, string expectedTail) =>
+        Assert.EndsWith(expectedTail, LogonStart.Command(Dotnet, Dll, folder));
+
+    [Theory]
+    [InlineData(@"C:\data\", @"C:\data")]
+    [InlineData(@"C:\data\sub\\", @"C:\data\sub")]
+    [InlineData(@"D:\", @"D:\")]
+    [InlineData(@"C:\data", @"C:\data")]
+    public void Data_folder_is_normalized_without_a_trailing_separator_except_for_a_drive_root(string typed, string expected) => Assert.Equal(expected, SetupCommand.NormalizeFolder(typed));
+
+    [Fact]
+    public async Task Data_folder_with_trailing_backslash_gives_a_working_logon_value_and_start()
+    {
+        await using var host = NewHub();
+        var typed = DataDir + Path.DirectorySeparatorChar;
+        Assert.Equal(0, await SetupCommand.RunAsync(new SetupOptions(Hub, true, typed), Env(host), CancellationToken.None));
+        Assert.Equal([Dotnet, Dll, "--node", "--data-dir", DataDir], ParseCommandLine(runKey.Values["PkRelayNode"]));
+        Assert.Equal([$"{Dotnet}|{Dll}|{DataDir}"], started);
+    }
+
+    [System.Runtime.InteropServices.DllImport("shell32.dll", SetLastError = true)]
+    private static extern IntPtr CommandLineToArgvW([System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.LPWStr)] string commandLine, out int count);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    private static extern IntPtr LocalFree(IntPtr handle);
+
+    /// <summary>What a Windows program receives as argv for this command line (the real CommandLineToArgvW).</summary>
+    private static string[] ParseCommandLine(string command)
+    {
+        var list = CommandLineToArgvW(command, out var count);
+        try { return Enumerable.Range(0, count).Select(i => System.Runtime.InteropServices.Marshal.PtrToStringUni(System.Runtime.InteropServices.Marshal.ReadIntPtr(list, i * IntPtr.Size))!).ToArray(); }
+        finally { LocalFree(list); }
+    }
+
+    private sealed class HookHandler(HttpMessageHandler inner, Action? onFirst) : DelegatingHandler(inner)
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) { Interlocked.Exchange(ref onFirst, null)?.Invoke(); return base.SendAsync(request, ct); }
     }
 
     [Theory]

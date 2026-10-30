@@ -86,16 +86,15 @@ internal static class SetupCommand
 
     public static async Task<int> RunAsync(SetupOptions options, SetupEnvironment env, CancellationToken ct)
     {
-        var folder = Path.GetFullPath(string.IsNullOrWhiteSpace(options.DataDir) ? NodeState.DefaultFolder : options.DataDir);
-        var plans = new List<ClientPlan>();
-        try
+        var folder = NormalizeFolder(options.DataDir);
+        // Planned once now only to refuse a file we cannot edit before enrolling; each file is planned again from its fresh bytes just before it is written.
+        var planners = new List<Func<ClientPlan>>();
+        if (!options.SkipClientConfig)
         {
-            if (!options.SkipClientConfig)
-            {
-                plans.Add(ClientSettings.PlanCodex(Path.Combine(env.Profile, ".codex", "config.toml"), env.DotnetPath, env.AdapterDll));
-                plans.Add(ClientSettings.PlanClaudeCode(Path.Combine(env.Profile, ".claude.json"), env.DotnetPath, env.AdapterDll));
-            }
+            planners.Add(() => ClientSettings.PlanCodex(Path.Combine(env.Profile, ".codex", "config.toml"), env.DotnetPath, env.AdapterDll));
+            planners.Add(() => ClientSettings.PlanClaudeCode(Path.Combine(env.Profile, ".claude.json"), env.DotnetPath, env.AdapterDll));
         }
+        try { foreach (var planner in planners) planner(); }
         catch (ClientSettingsException exception) { env.Error.WriteLine(exception.Message); return MalformedClientFileExitCode; }
 
         var enrolled = await EnrollAsync(options, env, folder, ct);
@@ -103,11 +102,16 @@ internal static class SetupCommand
 
         try
         {
-            foreach (var plan in plans)
+            // Planned again from the files as they are now, so anything written during enrollment survives; all are checked before any is written.
+            var fresh = planners.Select(planner => planner()).ToList();
+            foreach (var plan in fresh)
+            {
                 env.Out.WriteLine(plan.Apply(env.Clock) switch { ClientChange.Created => $"Created {plan.Path} with the PkRelay entry.", ClientChange.Updated => $"Added the PkRelay entry to {plan.Path} (backup kept next to it).", _ => $"{plan.Path} already has a PkRelay entry; left as it was." });
+            }
             LogonStart.Register(env.DotnetPath, env.AdapterDll, options.DataDir is null ? null : folder, env.RunKey);
             env.StartNode(env.DotnetPath, env.AdapterDll, options.DataDir is null ? null : folder);
         }
+        catch (ClientSettingsException exception) { env.Error.WriteLine(exception.Message); return MalformedClientFileExitCode; }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or Win32Exception or System.Security.SecurityException or AdapterConfigurationException)
         {
             env.Error.WriteLine($"Setup enrolled this PC but could not finish: {exception.Message}");
@@ -119,10 +123,17 @@ internal static class SetupCommand
         return 0;
     }
 
+    /// <summary>The full data folder without a trailing separator (a drive root such as D:\ keeps its one).</summary>
+    internal static string NormalizeFolder(string? dataDir)
+    {
+        var full = Path.GetFullPath(string.IsNullOrWhiteSpace(dataDir) ? NodeState.DefaultFolder : dataDir);
+        return full.Length > (Path.GetPathRoot(full)?.Length ?? 0) ? full.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) : full;
+    }
+
     private static async Task<(int Code, string MachineId, string Hub)> EnrollAsync(SetupOptions options, SetupEnvironment env, string folder, CancellationToken ct)
     {
         NodeState state;
-        try { state = NodeState.Open(options.DataDir); }
+        try { state = NodeState.Open(folder); }
         catch (AdapterConfigurationException exception)
         {
             // A node already runs on this folder (it holds the lock): setup run again on an enrolled PC changes nothing there.

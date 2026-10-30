@@ -37,7 +37,20 @@ internal static class LogonStart
     public static string Command(string dotnetPath, string adapterDll, string? dataDir = null) =>
         $"{Quote(dotnetPath)} {Quote(adapterDll)} --node" + (string.IsNullOrWhiteSpace(dataDir) ? "" : $" --data-dir {Quote(dataDir)}");
 
-    internal static string Quote(string path) => path.Contains('"') ? throw new AdapterConfigurationException($"'{path}' contains a quote character and cannot be used in a start command.") : $"\"{path}\"";
+    /// <summary>One argument in standard Windows command-line form (CommandLineToArgvW): always quoted, with backslashes doubled where they precede a quote and embedded quotes escaped.</summary>
+    internal static string Quote(string argument)
+    {
+        var builder = new System.Text.StringBuilder("\"");
+        for (var i = 0; i < argument.Length; i++)
+        {
+            var slashes = 0;
+            while (i < argument.Length && argument[i] == '\\') { slashes++; i++; }
+            if (i == argument.Length) builder.Append('\\', slashes * 2);
+            else if (argument[i] == '"') builder.Append('\\', slashes * 2 + 1).Append('"');
+            else builder.Append('\\', slashes).Append(argument[i]);
+        }
+        return builder.Append('"').ToString();
+    }
 
     /// <summary>Idempotent: an identical value is not rewritten. Only the <c>PkRelayNode</c> value is ever touched.</summary>
     public static void Register(string dotnetPath, string adapterDll, string? dataDir = null, IRunKey? key = null)
