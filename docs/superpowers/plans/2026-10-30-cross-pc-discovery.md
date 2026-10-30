@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** PCs on the local network find the PkRelay hub, enroll themselves with no code typed, report the chats that have connected to the relay, and wake those chats from routes a discovery grain decides.
+**Goal:** PCs pointed once at the PkRelay hub's address enroll themselves with no join code, report the chats that have connected to the relay, and wake those chats from routes a discovery grain decides.
 
-**Architecture:** A new discovery aggregate in `PkRelay.Domain` and its grain in `PkRelay.Core` own machines, connected chats, machine credentials and wake routes. The host gains an HTTPS listener on all interfaces with a self-generated certificate, a UDP beacon, an anonymous enrollment endpoint and machine-credential authentication. The adapter gains `--node` (find hub, pin its certificate, enroll, announce, map chats, wake local Codex chats) and `--setup` (logon start and client MCP registration); the stdio adapter and `--await-inbox` read the node's state.
+**Architecture:** A new discovery aggregate in `PkRelay.Domain` and its grain in `PkRelay.Core` own machines, connected chats, machine credentials and wake routes. The host gains an HTTPS listener on all interfaces with a self-generated certificate, an anonymous enrollment endpoint and machine-credential authentication. The adapter gains `--node` (connect to the remembered hub address, pin its certificate, enroll, announce, map chats, wake local Codex chats) and `--setup` (logon start and client MCP registration); the stdio adapter and `--await-inbox` read the node's state.
 
 **Tech Stack:** .NET 10, ASP.NET Core (Kestrel, rate limiting), Microsoft Orleans 10, SQLite, System.Text.Json, xUnit.
 
@@ -17,6 +17,7 @@
 - One hub silo and one SQLite file. No Orleans cluster across PCs.
 - The hub listens on all network interfaces; existing loopback HTTP on port 5271 keeps working unchanged.
 - No join code. Any machine that reaches the hub may enroll.
+- The hub is found only by its address, typed once at setup (`--hub <https-url>`) and remembered by the node. No UDP beacon, network scan or name lookup (Paul, Oct 30).
 - Enrolled machines get principal `machine:<machineId>`, `IsAdministrator = false`, and the repositories in `Relay:Discovery:Repositories`, default `["pkrelay"]`. They are refused `control_request`.
 - Only chats that called `session_open` are announced or woken.
 - The discovery grain decides identity and wiring only; nothing assigns work.
@@ -30,7 +31,7 @@
 
 1. **Hub certificate changes** after a node pinned it (data folder wiped, hub moved): the node must stop and report the mismatch, never re-trust silently. Test in Task 6.
 2. **A second node started on the same PC** with the same data folder: it must fail fast on the state lock instead of announcing a duplicate identity. Test in Task 6.
-3. **Hub unreachable** (laptop off the network, hub stopped): the node keeps its identity and retries with backoff; it must not re-enroll under a new machine ID. Test in Task 6.
+3. **Hub unreachable** (laptop off the network, hub stopped, typed address wrong): the node keeps its identity and retries with backoff; it must not re-enroll under a new machine ID. Test in Task 6.
 4. **A chat that cannot be mapped**, or maps to more than one thread: it is announced as connected but not wakeable, never woken by a guess. Test in Task 7.
 5. **A malformed client settings file** (invalid TOML or JSON): setup refuses to edit it, leaves it byte-for-byte unchanged, and reports which file. Test in Task 9.
 
@@ -47,8 +48,8 @@
 | `src/PkRelay.Contracts/RelayToolCatalog.cs`, `ToolSchemas.cs` | `chat_directory` tool; `revoke_machine` command |
 | `src/PkRelay.Host/DiscoveryEndpoints.cs` (new) | Enrollment and announce endpoints, rate limiting |
 | `src/PkRelay.Host/RelayAuthentication.cs` | Machine-credential authentication |
-| `src/PkRelay.Host/HubNetwork.cs` (new) | All-interface HTTPS listener, certificate, UDP beacon |
-| `src/PkRelay.Adapter/Node/*.cs` (new folder) | Node state, hub locator, certificate pinning, enrollment, announce loop, chat locators, route-driven waking |
+| `src/PkRelay.Host/HubNetwork.cs` (new) | All-interface HTTPS listener and its certificate |
+| `src/PkRelay.Adapter/Node/*.cs` (new folder) | Node state, certificate pinning, enrollment, announce loop, chat locators, route-driven waking |
 | `src/PkRelay.Adapter/Setup/*.cs` (new folder) | Logon start, Codex and Claude Code MCP registration |
 | `src/PkRelay.Adapter/AdapterOptions.cs`, `RelayForwarder.cs`, `Program.cs`, `WakeWatcher.cs`, `CoordinationTools.cs` | Node fallback, pinned handler, new modes, dynamic routes, session handle hand-off |
 | `tests/PkRelay.Tests/Discovery*Tests.cs`, `NodeTests.cs`, `SetupTests.cs` (new) | Tests per task |
@@ -162,7 +163,7 @@
 - [ ] **Step 2–4:** run → FAIL, implement, run → PASS; full suite green.
 - [ ] **Step 5: Commit** `feat(host): authenticate enrolled machines and add discovery endpoints`
 
-### Task 5: Hub on the network: HTTPS on all interfaces and UDP beacon
+### Task 5: Hub on the network: HTTPS on all interfaces
 
 **Files:**
 - Create: `src/PkRelay.Host/HubNetwork.cs`
@@ -170,30 +171,28 @@
 - Test: `tests/PkRelay.Tests/HubNetworkTests.cs`
 
 **Interfaces:**
-- Configuration: `Relay:Network:Enabled` (default `false`), `Relay:Network:HttpsPort` (default `5273`), `Relay:Network:BeaconPort` (default `5274`), `Relay:Network:CertificatePath` (default `data/hub-certificate.pfx`, content-root relative).
+- Configuration: `Relay:Network:Enabled` (default `false`), `Relay:Network:HttpsPort` (default `5273`), `Relay:Network:CertificatePath` (default `data/hub-certificate.pfx`, content-root relative).
 - `public static class HubCertificate { public static X509Certificate2 LoadOrCreate(string path, string hostName); public static string Fingerprint(X509Certificate2 certificate); }` — self-signed ECDSA P-256, two-year validity, SAN = host name plus every non-loopback IPv4 address, saved as a PFX with no password and current-user-only file permissions. `Fingerprint` = uppercase hex SHA-256 of the raw certificate.
 - Kestrel, when enabled: keep the existing URLs and add `ListenAnyIP(HttpsPort, o => o.UseHttps(certificate))`.
-- `internal sealed class HubBeacon : BackgroundService` — UDP listener on `BeaconPort`; on datagram `PKRELAY-DISCOVER/1` replies to the sender with JSON `{ "url": "https://<host-or-ip>:<HttpsPort>/", "fingerprint": "<hex>" }`; ignores anything else; replies at most 20 times per second.
 
-- [ ] **Step 1: Failing tests:** `Certificate_is_reused_across_starts` (two `LoadOrCreate` calls → same fingerprint), `Certificate_file_is_private_to_current_user` (single explicit ACL rule for the current user), `Beacon_answers_discover_and_ignores_other_datagrams` (send to the beacon on loopback with a free port; reply parses, fingerprint matches; a garbage datagram gets no reply within 500 ms).
+- [ ] **Step 1: Failing tests:** `Certificate_is_reused_across_starts` (two `LoadOrCreate` calls → same fingerprint), `Certificate_file_is_private_to_current_user` (single explicit ACL rule for the current user), `Network_listener_serves_health_over_https_with_the_generated_certificate` (start the host fixture with networking enabled on a free port; an HTTPS request to `/health` succeeds and the presented certificate's fingerprint equals `HubCertificate.Fingerprint`).
 - [ ] **Step 2–4:** run → FAIL, implement, run → PASS.
-- [ ] **Step 5: Docs:** write the one inbound firewall rule for ports 5273/TCP and 5274/UDP into `docs/discovery.md` as a command Paul runs himself.
-- [ ] **Step 6: Commit** `feat(host): listen on the network over HTTPS and answer discovery beacons`
+- [ ] **Step 5: Docs:** write the one inbound firewall rule for port 5273/TCP into `docs/discovery.md` as a command Paul runs himself.
+- [ ] **Step 6: Commit** `feat(host): listen on the network over HTTPS`
 
-### Task 6: Node: find, pin, enroll, announce
+### Task 6: Node: connect, pin, enroll, announce
 
 **Files:**
-- Create: `src/PkRelay.Adapter/Node/NodeState.cs`, `HubLocator.cs`, `PinnedCertificate.cs`, `NodeRunner.cs`
+- Create: `src/PkRelay.Adapter/Node/NodeState.cs`, `PinnedCertificate.cs`, `NodeRunner.cs`
 - Modify: `src/PkRelay.Adapter/Program.cs`, `RelayForwarder.cs`, `AdapterOptions.cs`
 - Test: `tests/PkRelay.Tests/NodeTests.cs`
 
 **Interfaces:**
 - `NodeState` — folder `%LOCALAPPDATA%\PkRelay\node` (overridable with `--data-dir` for tests and for a simulated second machine). Files: `node.json` `{ machineId, hubUrl, fingerprint }`, `credential` (current-user-only), `node.lock` (exclusive, held while the node runs), `sessions\<relaySessionId>.json` (session handles, current-user-only), `waiters\<threadId>.pid`. `public static NodeState Open(string? dataDir)`; `MachineId` generated once (`Guid.NewGuid().ToString("N")`).
-- `public sealed record HubAdvertisement(Uri Url, string Fingerprint);` `public static Task<HubAdvertisement?> HubLocator.FindAsync(int beaconPort, TimeSpan timeout, CancellationToken ct)` — broadcasts `PKRELAY-DISCOVER/1` to `255.255.255.255:<beaconPort>` and to loopback.
 - `public static HttpClientHandler PinnedCertificate.CreateHandler(string fingerprint)` — accepts the server certificate only when its fingerprint matches; no redirects, no cookies (as `RelayForwarder.CreateHandler`).
 - `AdapterOptions` gains `string? PinnedFingerprint`; `RelayForwarder.CreateHandler(AdapterOptions)` returns the pinned handler when set. `RelayHubConnection.Create` uses the same handler.
-- `NodeRunner.RunAsync(NodeState state, CancellationToken ct)`: locate hub (or use stored `hubUrl`), pin on first use, enroll once, then announce every 30 s and on a `discovery.changed` hint. On fingerprint mismatch: write the reason to stderr and exit code 4. Hub unreachable: keep identity, retry with backoff capped at 60 s.
-- CLI: `--node [--data-dir <path>] [--hub <https-url>]`.
+- `NodeRunner.RunAsync(NodeState state, Uri? hub, CancellationToken ct)`: use the stored `hubUrl`, or `hub` on first run. A typed `--hub` sets the address only before the node has enrolled; afterwards a different address is refused with a message, so a typo cannot silently move a PC to another hub. With neither, exit 1 asking for `--hub`. Pin the presented certificate on first use, enroll once, then announce every 30 s and on a `discovery.changed` hint. On fingerprint mismatch: write the reason to stderr and exit code 4. Hub unreachable: keep identity, retry with backoff capped at 60 s.
+- CLI: `--node [--data-dir <path>] [--hub <https-url>]`. On the hub PC itself, `--hub http://127.0.0.1:5271/` is accepted (loopback HTTP, nothing to pin).
 
 - [ ] **Step 1: Failing tests** (Review Focus 1–3):
 
@@ -205,7 +204,7 @@
 ```
 
 - [ ] **Step 2–4:** run → FAIL, implement, run → PASS.
-- [ ] **Step 5: Commit** `feat(adapter): add node mode that finds, pins, enrolls and announces`
+- [ ] **Step 5: Commit** `feat(adapter): add node mode that connects, pins, enrolls and announces`
 
 ### Task 7: Connected chats: session hand-off and chat mapping
 
@@ -254,12 +253,12 @@
 - Test: `tests/PkRelay.Tests/SetupTests.cs`
 
 **Interfaces:**
-- CLI: `--setup [--skip-client-config] [--data-dir <path>]`, run from the copied published folder.
+- CLI: `--setup --hub <https-url> [--skip-client-config] [--data-dir <path>]`, run from the copied published folder. `--hub` is the one thing typed per PC.
 - `LogonStart.Register(string dotnetPath, string adapterDll)` — `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` value `PkRelayNode` = `"<dotnet>" "<dll>" --node`. No administrator rights. Idempotent.
 - `ClientSettings.RegisterCodex(string configTomlPath, string dotnetPath, string adapterDll)` — adds table `[mcp_servers.pkrelay]` with `command` and `args = ["<dll>"]` if absent.
 - `ClientSettings.RegisterClaudeCode(string claudeJsonPath, string dotnetPath, string adapterDll)` — adds `mcpServers.pkrelay = { "type": "stdio", "command": "<dotnet>", "args": ["<dll>"] }` at the user level if absent.
 - Both: back up to `<file>.pkrelay-backup-<yyyyMMddHHmmss>` before the first change; a missing file is created; an existing `pkrelay` entry is left untouched; an unparseable file is not modified and setup exits 5 naming the file.
-- Setup then starts the node once in the background and prints the machine ID and the hub it found.
+- Setup then starts the node once in the background and prints the machine ID and the hub it enrolled with.
 
 - [ ] **Step 1: Failing tests** (Review Focus 5): `Malformed_settings_file_is_left_unchanged` (bytes identical, exit code 5), `Setup_is_idempotent` (second run → no new backup, identical files), `Existing_settings_are_preserved` (other keys and comments in config.toml unchanged), `Skip_client_config_touches_no_client_files`. Tests use temp files and a test registry path abstraction, never the real user's files or registry.
 - [ ] **Step 2–4:** run → FAIL, implement, run → PASS.
@@ -272,6 +271,6 @@
 - Modify: `README.md`, `docs/wake.md` (node supersedes hand-written configs; migration: stop the old watcher), `docs/architecture.md` (discovery grain section), `src/PkRelay.Host/Properties/launchSettings.json` (`Relay__Discovery__Enabled=true`, `Relay__Network__Enabled=true`)
 
 - [ ] **Step 1:** Write the docs: joining a PC, the firewall rule, revocation, the open-trust warning, stopping the node, and migration from `--wake`/`--await-inbox` configs.
-- [ ] **Step 2: End-to-end on this PC.** Stop the old Claude waiter and hand-written configs. Restart the hub from Visual Studio. Publish the adapter to a fresh `artifacts/adapter-node`. Run `--setup --skip-client-config --data-dir data/node-a`, then a second node with `--data-dir data/node-b` to simulate PC B. Verify against the spec's acceptance list: both machines appear in `chat_directory`; a Codex chat connected through node B's credentials is woken by a message from this Claude chat; a machine credential is refused `control_request`; stopping node B marks it unreachable within 90 s and restarting resumes the same machine ID. Record results in `docs/verification.md`, marking cross-PC network discovery as not yet exercised on a physical second PC.
+- [ ] **Step 2: End-to-end on this PC.** Stop the old Claude waiter and hand-written configs. Restart the hub from Visual Studio. Publish the adapter to a fresh `artifacts/adapter-node`. Run `--setup --hub <hub-address> --skip-client-config --data-dir data/node-a`, then a second node with `--data-dir data/node-b` and the same `--hub` to simulate PC B. Verify against the spec's acceptance list: both machines appear in `chat_directory`; a Codex chat connected through node B's credentials is woken by a message from this Claude chat; a machine credential is refused `control_request`; stopping node B marks it unreachable within 90 s and restarting resumes the same machine ID. Record results in `docs/verification.md`, marking cross-PC network discovery as not yet exercised on a physical second PC.
 - [ ] **Step 3:** Full suite green (all prior tests plus new ones).
 - [ ] **Step 4: Commit** `docs: document cross-PC discovery and record verification`

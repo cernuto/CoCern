@@ -11,7 +11,7 @@ The goal is that chats on any number of PCs on the same network find each other 
 ## Goals
 
 - One PC hosts the hub. Any number of other PCs join and leave over time.
-- A PC joins with no join code, no copied token and no hand-written config: start PkRelay on it and it finds the hub and announces itself.
+- A PC joins with no join code, no copied token and no hand-written config. The only thing typed on a new PC is the hub's address, once, at setup; after that it reconnects and announces itself on its own.
 - PCs announce what they have; the discovery grain decides each machine's identity, each connected chat's relay session, and each chat's wake route, and sends those decisions back.
 - Every PC's watcher takes its wake routes from the grain and picks up new chats without a restart.
 - Agents can see which chats are reachable on which machine and message them.
@@ -40,6 +40,7 @@ The goal is that chats on any number of PCs on the same network find each other 
 5. A PC sends an announcement to the discovery grain, and the grain determines what follows: which session a chat uses, how it is woken, and so on.
 6. The grain decides identity and wiring only. Claude or Codex decide what to do next.
 7. Only chats that have connected to the relay (called `session_open`) are announced and can be woken.
+8. A PC finds the hub only by its address, typed once at setup. There is no automatic hub discovery (no broadcast beacon, network scan or name lookup), because broadcast and scanning are unreliable across firewalls, client-isolated Wi-Fi and VPNs.
 
 ## What exists today
 
@@ -52,8 +53,8 @@ The goal is that chats on any number of PCs on the same network find each other 
 
 ### Parts
 
-- **Hub** (one PC): the existing host, now listening on all interfaces over HTTPS, advertising itself on the local network, accepting machine announcements, and hosting the discovery grain.
-- **Node** (every PC, including the hub's own PC): a new long-running adapter mode, `--node`, that replaces hand-written wake configs. It finds the hub, announces the machine, maps connected chats, keeps private session handles, and wakes this PC's Codex chats from routes the grain returns.
+- **Hub** (one PC): the existing host, now listening on all interfaces over HTTPS, accepting machine announcements, and hosting the discovery grain.
+- **Node** (every PC, including the hub's own PC): a new long-running adapter mode, `--node`, that replaces hand-written wake configs. It connects to the hub at its remembered address, announces the machine, maps connected chats, keeps private session handles, and wakes this PC's Codex chats from routes the grain returns.
 - **Stdio adapter** (per chat, as today): unchanged as an MCP server, except that it finds the hub through the local node's state instead of `PKRELAY_URL`/`PKRELAY_TOKEN_FILE` when those are not set, and it hands each successful `session_open` handle to the node.
 - **Claude waiter** (per Claude chat, as today): `--await-inbox` gets its route from the node instead of a hand-written config.
 
@@ -61,12 +62,11 @@ The goal is that chats on any number of PCs on the same network find each other 
 
 - Kestrel listens on all interfaces over HTTPS, plus the existing loopback HTTP endpoint for local clients.
 - The hub generates its own certificate on first network start and keeps it under `data/`. No CA, no manual install.
-- The hub advertises itself on the local network with its HTTPS address and certificate fingerprint, so nodes find it without configuration.
 - Opening the Windows firewall for the hub's port is a one-time step on the hub PC that Paul performs; the hub or scripts must not change firewall settings themselves. Document the exact rule.
 
 ### Joining: trust on first use
 
-- A node that finds the hub's advertisement connects over HTTPS and pins the advertised certificate fingerprint on first use. Later connections accept only that fingerprint. If the hub's certificate changes, the node stops and reports it rather than silently trusting the new one.
+- At setup the node is given the hub's HTTPS address, connects, and pins the certificate the hub presents on first use. Later connections accept only that fingerprint. If the hub's certificate changes, the node stops and reports it rather than silently trusting the new one.
 - The node sends an **announcement** to an unauthenticated enrollment endpoint. On first contact the discovery grain creates a machine identity, issues a machine credential, and returns it. The node stores the credential privately (current-user-only file permissions) and authenticates every later call with it.
 - A machine is identified by a stable machine ID the node generates once and stores locally, not by its name or IP address, which can change or be duplicated. Re-announcing with the same ID and credential returns the same identity.
 - Credentials are stored hashed at the hub. Revoking a machine is an administrator action at the hub and invalidates its credential; its chats leave the directory.
@@ -128,7 +128,7 @@ Paul asked Claude to choose these two:
 
 ## Left to the builder
 
-- The local-network advertisement mechanism (for example UDP broadcast or mDNS), its port, and the announcement interval and liveness timeout.
+- The announcement interval and liveness timeout.
 - Certificate generation details, key storage and rotation.
 - The exact shapes of the enrollment endpoint, announcement payloads and grain operations, and whether the directory extends `worker_list` or is a new tool.
 - How the stdio adapter hands a session handle to the local node (for example a private local file drop or a loopback-only endpoint).
@@ -140,11 +140,11 @@ Paul asked Claude to choose these two:
 - **Chat mapping depends on client storage.** Matching relay sessions through Codex's and Claude Code's local chat records relies on their internal file layouts, which can change. Isolate it behind one component per provider and fail visibly (chat shown as connected but not wakeable) rather than guess.
 - **Open trust.** Any device on the network can enroll. The limits above reduce the damage, but a hostile device can still message and wake agents within the coordination tools.
 - **Two agents waking each other** can loop. Existing rate limits apply; document how to stop it.
-- **Firewall and network.** The hub PC needs an inbound firewall rule, and advertisement may not cross subnets or VPNs.
+- **Firewall and network.** The hub PC needs one inbound TCP firewall rule. A PC on another subnet or a VPN works as long as it can reach the typed address.
 
 ## Acceptance
 
-- Copying the published folder to a second PC and running setup once, with nothing else typed, enrolls it, and it appears in the directory. After a reboot it rejoins on its own.
+- Copying the published folder to a second PC and running setup once, typing only the hub's address, enrolls it, and it appears in the directory. After a reboot it rejoins on its own.
 - Setup adds the adapter to that PC's Codex and Claude Code MCP settings, keeps a backup of each file, and re-running setup changes nothing further.
 - A Codex chat on PC B that calls `session_open` appears in the directory within one announcement interval, and a message sent to it from a chat on PC A wakes it with no further setup.
 - A Claude Code chat whose waiter is running is shown reachable, and a message to it wakes it.
