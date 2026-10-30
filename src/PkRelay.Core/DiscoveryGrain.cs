@@ -86,7 +86,7 @@ public interface IMachineDirectory
     Task<MachineIdentity?> ValidateAsync(string credential, CancellationToken ct);
 
     /// <summary>Like <see cref="ValidateAsync"/>, but tells an unknown credential (the grain said NotFound) from a grain failure, which must never be treated as a rejection.</summary>
-    Task<CredentialCheck> CheckAsync(string credential, CancellationToken ct);
+    Task<CredentialCheck> CheckAsync(string credential, Func<bool>? mayAskGrain, CancellationToken ct);
 
     /// <summary>Records the machine's announced chats. The machine ID always comes from <paramref name="machine"/>, never from the announcement.</summary>
     Task<RelayReply> AnnounceAsync(MachineIdentity machine, JsonObject announcement, CancellationToken ct);
@@ -102,20 +102,37 @@ public sealed class MachineDirectory(IGrainFactory grains, TimeProvider? clock =
     private static readonly TimeSpan CacheLifetime = TimeSpan.FromSeconds(30);
     private static readonly RelayCaller Internal = new("relay-discovery", false, [], true);
     private readonly TimeProvider time = clock ?? TimeProvider.System;
+    private static readonly TimeSpan NegativeLifetime = TimeSpan.FromSeconds(60);
     private readonly ConcurrentDictionary<string, (MachineIdentity Machine, DateTimeOffset Expires)> cache = new(StringComparer.Ordinal);
+    /// <summary>Credential hashes the grain answered NotFound for, so junk tokens reach it at most once a minute each. Never keyed by the raw token.</summary>
+    private readonly ConcurrentDictionary<string, DateTimeOffset> unknown = new(StringComparer.Ordinal);
+    private readonly ConcurrentQueue<string> unknownOrder = new();
     private long revocations;
+    private long enrollments;
 
     public async Task<MachineIdentity?> EnrollAsync(string machineId, string machineName, string credential, CancellationToken ct) => (await TryEnrollAsync(machineId, machineName, credential, ct)).Machine;
 
     public async Task<EnrollResult> TryEnrollAsync(string machineId, string machineName, string credential, CancellationToken ct)
     {
-        var reply = await CallAsync(Internal, DiscoveryOperations.Enroll, new() { ["machineId"] = machineId, ["machineName"] = machineName, ["credentialHash"] = Hash(credential) }, ct);
-        return reply.Ok ? new(Identity(reply), null) : new(null, reply.Code);
+        var hash = Hash(credential);
+        try
+        {
+            var reply = await CallAsync(Internal, DiscoveryOperations.Enroll, new() { ["machineId"] = machineId, ["machineName"] = machineName, ["credentialHash"] = hash }, ct);
+            return reply.Ok ? new(Identity(reply), null) : new(null, reply.Code);
+        }
+        finally
+        {
+            // A credential just enrolled must work at once, even if its hash was refused moments ago. A validation still in flight re-checks the counter and drops its entry.
+            Interlocked.Increment(ref enrollments);
+            unknown.TryRemove(hash, out _);
+        }
     }
 
-    public async Task<MachineIdentity?> ValidateAsync(string credential, CancellationToken ct) => (await CheckAsync(credential, ct)).Machine;
+    public const int NegativeCacheSize = 4096;
 
-    public async Task<CredentialCheck> CheckAsync(string credential, CancellationToken ct)
+    public async Task<MachineIdentity?> ValidateAsync(string credential, CancellationToken ct) => (await CheckAsync(credential, null, ct)).Machine;
+
+    public async Task<CredentialCheck> CheckAsync(string credential, Func<bool>? mayAskGrain, CancellationToken ct)
     {
         if (string.IsNullOrEmpty(credential)) return new(CredentialStatus.Unknown);
         var hash = Hash(credential);
@@ -124,12 +141,21 @@ public sealed class MachineDirectory(IGrainFactory grains, TimeProvider? clock =
             if (cached.Expires > time.GetUtcNow()) return new(CredentialStatus.Valid, cached.Machine);
             cache.TryRemove(hash, out _);
         }
+        if (unknown.TryGetValue(hash, out var until))
+        {
+            if (until > time.GetUtcNow()) return new(CredentialStatus.Unknown);
+            unknown.TryRemove(new KeyValuePair<string, DateTimeOffset>(hash, until));
+        }
+        // Over its failure budget, the caller is refused without asking the grain; that refusal says nothing about the credential, so it is not cached.
+        if (mayAskGrain is not null && !mayAskGrain()) return new(CredentialStatus.Unknown);
         var generation = Interlocked.Read(ref revocations);
+        var enrolled = Interlocked.Read(ref enrollments);
         RelayReply reply;
         try { reply = await CallAsync(Internal, DiscoveryOperations.Validate, new() { ["credentialHash"] = hash }, ct); }
         catch (Exception exception) when (exception is not OperationCanceledException) { return new(CredentialStatus.Unavailable); }
         // Only NotFound means the hub does not know the credential; any other failure (StorageFailure while a write is uncertain, ...) says nothing about it.
-        if (!reply.Ok) return new(reply.Code == RelayErrorCodes.NotFound ? CredentialStatus.Unknown : CredentialStatus.Unavailable);
+        if (!reply.Ok && reply.Code != RelayErrorCodes.NotFound) return new(CredentialStatus.Unavailable);
+        if (!reply.Ok) { RememberUnknown(hash, enrolled); return new(CredentialStatus.Unknown); }
         var machine = Identity(reply);
         // Write first, then re-check: a revocation that completed while the grain was being asked must not leave this stale entry behind. This call still returns what the grain said.
         var entry = (Machine: machine, Expires: time.GetUtcNow().Add(CacheLifetime));
@@ -158,6 +184,16 @@ public sealed class MachineDirectory(IGrainFactory grains, TimeProvider? clock =
             Interlocked.Increment(ref revocations);
             foreach (var entry in cache.Where(x => x.Value.Machine.MachineId == machineId)) cache.TryRemove(entry.Key, out _);
         }
+    }
+
+    private void RememberUnknown(string hash, long enrolled)
+    {
+        var expires = time.GetUtcNow().Add(NegativeLifetime);
+        if (unknown.TryAdd(hash, expires)) unknownOrder.Enqueue(hash);
+        else unknown[hash] = expires;
+        if (Interlocked.Read(ref enrollments) != enrolled) unknown.TryRemove(new KeyValuePair<string, DateTimeOffset>(hash, expires));
+        // Bounded by the queue, which holds every cached hash at least once: drop the oldest first. A hash cached again later is queued again, so a stale queue entry only evicts it early, costing one extra grain call.
+        while (unknownOrder.Count > NegativeCacheSize && unknownOrder.TryDequeue(out var oldest)) unknown.TryRemove(oldest, out _);
     }
 
     private async Task<RelayReply> CallAsync(RelayCaller caller, string operation, JsonObject args, CancellationToken ct)

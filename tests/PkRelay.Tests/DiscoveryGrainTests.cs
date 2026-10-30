@@ -126,18 +126,62 @@ public sealed class DiscoveryGrainTests
     }
 
     [Fact]
-    public async Task Failed_validation_is_not_cached()
+    public async Task A_failed_validation_never_outlives_the_enrollment_of_that_credential()
     {
         using var host = await StartAsync();
         try
         {
             var directory = host.Services.GetRequiredService<IMachineDirectory>();
             Assert.Null(await directory.ValidateAsync("secret-a", CancellationToken.None));
+            Assert.Null(await directory.ValidateAsync("secret-a", CancellationToken.None));
             Assert.Null(await directory.ValidateAsync("", CancellationToken.None));
             await directory.EnrollAsync("pc-a", "PC A", "secret-a", CancellationToken.None);
             Assert.Equal("pc-a", (await directory.ValidateAsync("secret-a", CancellationToken.None))?.MachineId);
         }
         finally { await host.StopAsync(); }
+    }
+
+    [Fact]
+    public async Task Failed_validations_are_cached_by_hash_for_a_minute_and_bounded()
+    {
+        var grain = new CountingDiscoveryGrain();
+        var factory = DispatchProxy.Create<IGrainFactory, FakeGrainFactory>();
+        ((FakeGrainFactory)(object)factory).Grain = grain;
+        var clock = new SteppedClock();
+        var directory = new MachineDirectory(factory, clock);
+        for (var i = 0; i < 3; i++) Assert.Equal(CredentialStatus.Unknown, (await directory.CheckAsync("junk", null, CancellationToken.None)).Status);
+        Assert.Equal(1, grain.Validations);
+        clock.Advance(TimeSpan.FromSeconds(61));
+        await directory.CheckAsync("junk", null, CancellationToken.None);
+        Assert.Equal(2, grain.Validations);
+        // The cache holds at most 4096 hashes and drops the oldest first.
+        for (var i = 0; i < MachineDirectory.NegativeCacheSize; i++) await directory.CheckAsync("filler-" + i, null, CancellationToken.None);
+        var before = grain.Validations;
+        await directory.CheckAsync("junk", null, CancellationToken.None);
+        await directory.CheckAsync("filler-" + (MachineDirectory.NegativeCacheSize - 1), null, CancellationToken.None);
+        Assert.Equal(before + 1, grain.Validations);
+        // A caller over its failure budget is refused without asking the grain, and that refusal is not cached.
+        Assert.Equal(CredentialStatus.Unknown, (await directory.CheckAsync("limited", () => false, CancellationToken.None)).Status);
+        Assert.Equal(before + 1, grain.Validations);
+        await directory.CheckAsync("limited", null, CancellationToken.None);
+        Assert.Equal(before + 2, grain.Validations);
+    }
+
+    private sealed class CountingDiscoveryGrain : IDiscoveryGrain
+    {
+        public int Validations;
+        public Task<RelayReply> ExecuteAsync(RelayCaller caller, string operation, string argumentsJson)
+        {
+            if (operation == DiscoveryOperations.Validate) Interlocked.Increment(ref Validations);
+            return Task.FromResult(Replies.Error("NotFound"));
+        }
+    }
+
+    private sealed class SteppedClock : TimeProvider
+    {
+        private DateTimeOffset now = DateTimeOffset.UtcNow;
+        public void Advance(TimeSpan by) => now += by;
+        public override DateTimeOffset GetUtcNow() => now;
     }
 
     [Fact]

@@ -37,6 +37,7 @@ public static class RelayAuthentication
     public static void AddRelayAuthentication(this IServiceCollection services, IConfiguration configuration)
     {
         services.AddSingleton(provider => LoadClients(provider.GetRequiredService<IConfiguration>(), provider.GetRequiredService<IHostEnvironment>()));
+        services.AddSingleton<MachineCredentialLimiter>();
         services.AddHostedService<RelayConfigurationValidator>();
         var auth = services.AddAuthentication("Relay").AddScheme<AuthenticationSchemeOptions, RelayAuthenticationHandler>("Relay", _ => { });
         auth.AddJwtBearer("ExternalJwt", _ => { });
@@ -135,7 +136,7 @@ internal sealed class RelayConfigurationValidator(IConfiguration configuration, 
     public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 }
 
-internal sealed class RelayAuthenticationHandler(IOptionsMonitor<AuthenticationSchemeOptions> options, ILoggerFactory logger, UrlEncoder encoder, RelayClient[] clients, IConfiguration configuration, IMachineDirectory machines)
+internal sealed class RelayAuthenticationHandler(IOptionsMonitor<AuthenticationSchemeOptions> options, ILoggerFactory logger, UrlEncoder encoder, RelayClient[] clients, IConfiguration configuration, IMachineDirectory machines, MachineCredentialLimiter limiter)
     : AuthenticationHandler<AuthenticationSchemeOptions>(options, logger, encoder)
 {
     private static readonly object UnavailableKey = new();
@@ -156,10 +157,11 @@ internal sealed class RelayAuthenticationHandler(IOptionsMonitor<AuthenticationS
         {
             return AuthenticateResult.Success(new AuthenticationTicket(RelayAuthentication.Principal(match.PrincipalId, match.IsAdministrator, match.Repositories, Scheme.Name), Scheme.Name));
         }
-        // Enrolled machines come after configured clients and before OAuth. Only well-formed hub-issued credentials reach the discovery grain, so junk tokens cost nothing.
+        // Enrolled machines come after configured clients and before OAuth. Only credential-shaped tokens reach the discovery grain, and failures are cached by hash and limited per address.
         if (DiscoverySettings.Enabled(configuration) && DiscoverySettings.IsCredential(token))
         {
-            var check = await machines.CheckAsync(token, Context.RequestAborted);
+            var check = await machines.CheckAsync(token, () => limiter.MayValidate(Context), Context.RequestAborted);
+            if (check.Status == CredentialStatus.Unknown) limiter.Failed(Context);
             if (check is { Status: CredentialStatus.Valid, Machine: { } machine })
                 return AuthenticateResult.Success(new AuthenticationTicket(RelayAuthentication.Principal(machine.PrincipalId, false, DiscoverySettings.Repositories(configuration), Scheme.Name, machine.MachineId), Scheme.Name));
             // The hub could not decide: answer 503 so a node never mistakes a hub fault for a rejected credential and re-enrolls.

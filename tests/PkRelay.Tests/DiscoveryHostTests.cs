@@ -343,6 +343,34 @@ public sealed class DiscoveryHostTests
         Assert.Equal(HttpStatusCode.Unauthorized, (await machine.GetAsync("/api/tools")).StatusCode);
     }
 
+    [Fact]
+    public async Task Repeated_unknown_credential_reaches_the_grain_once_within_a_minute()
+    {
+        var grain = new ScriptedDiscoveryGrain();
+        await using var host = Host(services: services => services.AddSingleton<IMachineDirectory>(new MachineDirectory(ScriptedFactory.For(grain))));
+        using var junk = Client(host, new string('d', 64));
+        for (var i = 0; i < 5; i++) Assert.Equal(HttpStatusCode.Unauthorized, (await junk.GetAsync("/api/tools")).StatusCode);
+        // Even anonymous endpoints authenticate the header; the cached failure covers them too.
+        for (var i = 0; i < 3; i++) Assert.Equal(HttpStatusCode.OK, (await junk.GetAsync("/health")).StatusCode);
+        Assert.Equal(1, grain.Validations);
+    }
+
+    [Fact]
+    public async Task Failed_credential_validations_are_limited_per_address()
+    {
+        var grain = new ScriptedDiscoveryGrain();
+        await using var host = Host(services: services => services.AddSingleton<IMachineDirectory>(new MachineDirectory(ScriptedFactory.For(grain))));
+        for (var i = 0; i < 30; i++)
+        {
+            using var junk = Client(host, Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(BitConverter.GetBytes(i))));
+            Assert.Equal(HttpStatusCode.Unauthorized, (await junk.GetAsync("/api/tools")).StatusCode);
+        }
+        Assert.Equal(20, grain.Validations);
+        // Configured clients never touch the machine path, so the limit does not lock them out.
+        using var configured = Client(host, RelayHostFixture.Token);
+        Assert.Equal(HttpStatusCode.OK, (await configured.GetAsync("/api/tools")).StatusCode);
+    }
+
     /// <summary>A discovery grain whose validation answer the test sets; null throws, like an unreachable silo. It counts validation calls.</summary>
     internal sealed class ScriptedDiscoveryGrain : IDiscoveryGrain
     {

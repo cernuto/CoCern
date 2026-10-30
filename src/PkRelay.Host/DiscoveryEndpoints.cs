@@ -50,6 +50,27 @@ internal sealed class MachineRouteHints
     }
 }
 
+/// <summary>
+/// Limits failed machine-credential validations to <see cref="FailuresPerMinute"/> per remote address (the enroll limiter's partitioning). Over the limit, a credential-shaped token
+/// fails authentication without reaching the discovery grain; configured clients and credentials already cached as valid are unaffected.
+/// </summary>
+internal sealed class MachineCredentialLimiter : IDisposable
+{
+    public const int FailuresPerMinute = 20;
+    private readonly PartitionedRateLimiter<HttpContext> limiter = PartitionedRateLimiter.Create<HttpContext, string>(context => RateLimitPartition.GetFixedWindowLimiter(DiscoveryEndpoints.Address(context), _ => new FixedWindowRateLimiterOptions
+    {
+        PermitLimit = FailuresPerMinute, Window = TimeSpan.FromMinutes(1), QueueLimit = 0, AutoReplenishment = true
+    }));
+
+    /// <summary>Whether this address may still have a credential checked by the grain; consumes nothing.</summary>
+    public bool MayValidate(HttpContext context) { using var lease = limiter.AttemptAcquire(context, 0); return lease.IsAcquired; }
+
+    /// <summary>Counts one failed validation against the address.</summary>
+    public void Failed(HttpContext context) { using var lease = limiter.AttemptAcquire(context, 1); }
+
+    public void Dispose() => limiter.Dispose();
+}
+
 /// <summary>Anonymous enrollment and machine announcements. Neither endpoint exists unless <c>Relay:Discovery:Enabled</c> is true; neither logs request or response bodies.</summary>
 internal static partial class DiscoveryEndpoints
 {
@@ -86,7 +107,7 @@ internal static partial class DiscoveryEndpoints
     }
 
     /// <summary>One bucket per IPv4 address or IPv6 /64, so a host cannot dodge the limit by rotating addresses inside its own prefix.</summary>
-    private static string Address(HttpContext context)
+    internal static string Address(HttpContext context)
     {
         if (context.Connection.RemoteIpAddress is not { } address) return "unknown";
         if (address.IsIPv4MappedToIPv6) address = address.MapToIPv4();
