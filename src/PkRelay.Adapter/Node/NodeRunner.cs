@@ -42,6 +42,8 @@ internal sealed class NodeTransport
     public TimeSpan WakeInterval { get; init; } = TimeSpan.FromSeconds(15);
     /// <summary>Fixed event names for tests (enrolled, announced, watching, hint, unauthorized, waking, wake-target); never carries data.</summary>
     public Action<string>? Trace { get; init; }
+    /// <summary>Setup's one enrollment-and-first-announce: stop with exit 0 right after the first accepted announcement (and exit 1 if cancelled before it).</summary>
+    public bool SingleCycle { get; set; }
 }
 
 /// <summary>One of this PC's wakeable chats, as the hub's announce reply lists it.</summary>
@@ -100,7 +102,7 @@ public sealed class NodeRunner : IAsyncDisposable
         catch (AdapterConfigurationException exception) { error.WriteLine(exception.Message); return 1; }
         await using var runner = new NodeRunner(state, target, transport, error);
         try { return await runner.LoopAsync(ct); }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested) { return 0; }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { return transport.SingleCycle ? 1 : 0; }
     }
 
     /// <summary>The installed coding clients, found by their usual folders in the user profile.</summary>
@@ -268,6 +270,7 @@ public sealed class NodeRunner : IAsyncDisposable
         finally { response.Dispose(); }
         Recovered();
         _transport.Trace?.Invoke("announced");
+        if (_transport.SingleCycle) return Next.Exit;
         EnsureHints();
         EnsureWaking();
         return Next.Wait;

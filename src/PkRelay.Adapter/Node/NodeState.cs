@@ -201,6 +201,17 @@ public sealed class NodeState : IDisposable
         return new(folder, hub, hub.Scheme == Uri.UriSchemeHttps ? state.Fingerprint : null, credential!);
     }
 
+    /// <summary>The machine ID and hub of an enrolled folder, read without taking <c>node.lock</c>; null unless the folder says it is enrolled.</summary>
+    internal static (string MachineId, string HubUrl)? ReadIdentity(string folder)
+    {
+        try
+        {
+            var state = Parse(File.ReadAllText(Path.Combine(Path.GetFullPath(folder), StateFile)));
+            return state.Enrolled && state.HubUrl is not null ? (state.MachineId, state.HubUrl) : null;
+        }
+        catch (Exception exception) when (exception is JsonException or IOException or UnauthorizedAccessException or InvalidOperationException or FormatException) { return null; }
+    }
+
     /// <summary>Writes <c>sessions\&lt;sessionId&gt;.json</c> current-user-only from creation, replacing any older copy.</summary>
     public static void WriteSessionHandle(string nodeFolder, SessionHandle handle)
     {

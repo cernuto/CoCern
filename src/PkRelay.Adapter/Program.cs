@@ -3,6 +3,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using PkRelay.Adapter;
 using PkRelay.Adapter.Node;
+using PkRelay.Adapter.Setup;
 
 try
 {
@@ -44,6 +45,14 @@ try
         Console.CancelKeyPress += (_, cancel) => { cancel.Cancel = true; shutdown.Cancel(); };
         var status = await WakeWatcher.AwaitInboxAsync(configuration, Console.Out.WriteLine, timeout, shutdown.Token);
         return status switch { "queued" => 0, "timeout" => 2, _ => 3 };
+    }
+    if (args.Length > 0 && args[0] == "--setup")
+    {
+        // Exit codes: 0 done, 1 configuration problem or enrollment failure (the node's code, e.g. 4 for a changed hub certificate), 5 a client settings file could not be parsed.
+        var setup = SetupOptions.Parse(args[1..]);
+        using var shutdown = new CancellationTokenSource();
+        Console.CancelKeyPress += (_, cancel) => { cancel.Cancel = true; shutdown.Cancel(); };
+        return await SetupCommand.RunAsync(setup, SetupEnvironment.Create(), shutdown.Token);
     }
     if (args.Length > 0 && args[0] == "--node")
     {
