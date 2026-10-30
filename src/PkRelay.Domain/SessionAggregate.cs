@@ -47,9 +47,20 @@ internal static class SessionAggregate
         var id = Required(context.Args, "messageId");
         var inbox = ObjectAt(state, "inbox");
         if (inbox.ContainsKey(id) || ObjectAt(state, "acked").ContainsKey(id)) return Ok(new { duplicate = true });
+        // A superseding message replaces its sender's earlier unread superseding message, so a periodic sender (a status request, a
+        // heartbeat) leaves one current entry rather than a pile a busy chat must read through. The replaced one counts as acknowledged,
+        // so a late redelivery of it is ignored.
+        var superseded = 0;
+        if (Flag(context.Args, "supersede") && Text(context.Args, "senderSessionId") is { Length: > 0 } sender)
+            foreach (var old in inbox.Where(x => x.Value is JsonObject m && Flag(m, "supersede") && Text(m, "senderSessionId") == sender).Select(x => x.Key).ToArray())
+            {
+                // The acknowledged set is bounded like explicit acknowledgments; once full, older messages are simply kept.
+                if (ObjectAt(state, "acked").Count >= RelayLimits.MaxRecords) break;
+                inbox.Remove(old); ObjectAt(state, "acked")[old] = true; superseded++;
+            }
         if (inbox.Count >= RelayLimits.MaxRecords) return Error(CapacityExceeded);
         inbox[id] = context.Args.DeepClone();
-        return Ok(new { delivered = true });
+        return Ok(new { delivered = true, superseded });
     }
 
     private static bool Authenticates(AggregateContext context) =>
@@ -110,6 +121,7 @@ internal static class SessionAggregate
             ["messageId"] = id, ["repositoryId"] = context.Repository, ["text"] = MessageText(args), ["author"] = context.Caller.PrincipalId,
             ["senderSessionId"] = context.SessionId, ["sentAt"] = context.Now.ToString("O"), ["replyTo"] = args["replyTo"]?.DeepClone()
         };
+        if (Flag(args, "supersede")) message["supersede"] = true;
         context.Emit(AggregateKinds.Session, recipient, Operations.Deliver, message);
         return Ok(new { messageId = id, delivery = "pending" });
     }

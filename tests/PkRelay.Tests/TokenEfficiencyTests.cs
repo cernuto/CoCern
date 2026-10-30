@@ -146,6 +146,90 @@ public sealed class TokenEfficiencyTests
         Assert.False(tools["check_inbox"].TryGetProperty("ifNoneMatch", out _));
     }
 
+    [Fact]
+    public void Task_update_acknowledges_compactly_however_long_the_conversation()
+    {
+        var state = new PkRelay.Domain.StateEnvelope<PkRelay.Domain.CoordinationDocument>();
+        var caller = new PkRelay.Domain.RelayCaller("alice", true, ["repo"], true);
+        PkRelay.Domain.RelayReply Update(long expected, string request) => PkRelay.Domain.CoordinationStateMachine.Apply(state, "board", "key", caller, "task_update",
+            new System.Text.Json.Nodes.JsonObject { ["repositoryId"] = "repo", ["taskId"] = "t", ["requestId"] = request, ["expectedVersion"] = expected, ["message"] = new System.Text.Json.Nodes.JsonObject { ["text"] = new string('m', 400) } },
+            DateTimeOffset.Parse("2026-10-30T00:00:00Z"));
+        var sizes = new List<int>();
+        for (var i = 0; i < 20; i++)
+        {
+            var reply = Update(i, "r" + i);
+            Assert.True(reply.Ok, reply.Code);
+            Assert.Equal(i + 1, reply.Version);
+            var data = JsonDocument.Parse(reply.DataJson).RootElement;
+            Assert.Equal("t", data.GetProperty("taskId").GetString());
+            Assert.Equal(i + 1, data.GetProperty("version").GetInt64());
+            Assert.True(data.TryGetProperty("changeRevision", out _));
+            sizes.Add(reply.DataJson.Length);
+        }
+        // The reply does not echo the task back, so it does not grow with the conversation it just extended.
+        Assert.True(sizes.Max() < 300, $"task_update replies reached {sizes.Max()} characters.");
+        Assert.InRange(sizes[^1] - sizes[1], 0, 4);
+
+        // The task is still one task_get away.
+        var task = PkRelay.Domain.CoordinationStateMachine.Apply(state, "board", "key", caller, "task_get", new System.Text.Json.Nodes.JsonObject { ["repositoryId"] = "repo", ["taskId"] = "t" }, DateTimeOffset.Parse("2026-10-30T00:00:00Z"));
+        Assert.Equal(20, JsonDocument.Parse(task.DataJson).RootElement.GetProperty("messages").GetArrayLength());
+    }
+
+    [Fact]
+    public void Whole_task_read_keeps_only_the_latest_conversation_and_reports()
+    {
+        var state = new PkRelay.Domain.StateEnvelope<PkRelay.Domain.CoordinationDocument>();
+        var caller = new PkRelay.Domain.RelayCaller("alice", true, ["repo"], true);
+        var now = DateTimeOffset.Parse("2026-10-30T00:00:00Z");
+        for (var i = 0; i < 45; i++)
+            Assert.True(PkRelay.Domain.CoordinationStateMachine.Apply(state, "board", "key", caller, "task_update",
+                new System.Text.Json.Nodes.JsonObject { ["repositoryId"] = "repo", ["taskId"] = "t", ["requestId"] = "r" + i, ["expectedVersion"] = i, ["message"] = new System.Text.Json.Nodes.JsonObject { ["text"] = "update " + i } }, now).Ok);
+        PkRelay.Domain.RelayReply Get(System.Text.Json.Nodes.JsonObject args) { args["repositoryId"] = "repo"; args["taskId"] = "t"; return PkRelay.Domain.CoordinationStateMachine.Apply(state, "board", "key", caller, "task_get", args, now); }
+
+        var whole = JsonDocument.Parse(Get([]).DataJson).RootElement;
+        var messages = whole.GetProperty("messages");
+        Assert.Equal(PkRelay.Contracts.RelayLimits.RecentTaskEntries, messages.GetArrayLength());
+        Assert.Contains("update 44", messages[messages.GetArrayLength() - 1].GetRawText());
+        Assert.DoesNotContain("\"update 0\"", whole.GetRawText());
+        Assert.Equal(45, whole.GetProperty("messagesTotal").GetInt32());
+
+        // Older entries stay readable through the paged section.
+        var first = JsonDocument.Parse(Get(new() { ["section"] = "messages", ["limit"] = 5 }).DataJson).RootElement;
+        Assert.Contains("update 0", first.GetProperty("items")[0].GetRawText());
+        Assert.Equal(45, first.GetProperty("total").GetInt32());
+    }
+
+    [Fact]
+    public void Superseding_message_replaces_the_senders_earlier_unread_one()
+    {
+        var state = new PkRelay.Domain.StateEnvelope<PkRelay.Domain.CoordinationDocument>();
+        var alice = new PkRelay.Domain.RelayCaller("alice", true, ["repo"], true);
+        var now = DateTimeOffset.Parse("2026-10-30T00:00:00Z");
+        PkRelay.Domain.RelayReply Call(string op, System.Text.Json.Nodes.JsonObject args) { args["repositoryId"] = "repo"; return PkRelay.Domain.CoordinationStateMachine.Apply(state, "session", "key", alice, op, args, now); }
+        System.Text.Json.Nodes.JsonObject Message(string id, string sender, bool supersede) => new() { ["messageId"] = id, ["senderSessionId"] = sender, ["text"] = "status?", ["supersede"] = supersede };
+        Assert.True(Call("__open", new() { ["principalId"] = "alice", ["sessionToken"] = "secret" }).Ok);
+
+        Assert.True(Call("__deliver", Message("h1", "heartbeat", true)).Ok);
+        Assert.True(Call("__deliver", Message("q1", "heartbeat", false)).Ok);
+        Assert.True(Call("__deliver", Message("o1", "other", true)).Ok);
+        Assert.True(Call("__deliver", Message("h2", "heartbeat", true)).Ok);
+        Assert.True(Call("__deliver", Message("h3", "heartbeat", true)).Ok);
+
+        string[] Inbox() => JsonDocument.Parse(Call("check_inbox", new() { ["sessionToken"] = "secret" }).DataJson).RootElement.GetProperty("items").EnumerateArray().Select(x => x.GetProperty("messageId").GetString()!).Order().ToArray();
+        // Only the sender's latest superseding message is kept; its ordinary message and another sender's are untouched.
+        Assert.Equal(["h3", "o1", "q1"], Inbox());
+        // A late redelivery of a superseded message does not bring it back.
+        Assert.True(Call("__deliver", Message("h1", "heartbeat", true)).Ok);
+        Assert.Equal(["h3", "o1", "q1"], Inbox());
+    }
+
+    [Fact]
+    public void Send_message_advertises_supersede()
+    {
+        Assert.True(RelayToolCatalog.TryGet("send_message", out var tool));
+        Assert.Equal("boolean", RelayToolCatalog.ForwardingSchema(tool).GetProperty("properties").GetProperty("supersede").GetProperty("type").GetString());
+    }
+
     private static JsonElement Json(string json) => JsonSerializer.Deserialize<JsonElement>(json);
 
     private sealed class FixedReply : HttpMessageHandler

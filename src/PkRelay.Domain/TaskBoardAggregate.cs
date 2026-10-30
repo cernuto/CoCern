@@ -139,8 +139,27 @@ internal static class TaskBoardAggregate
             if (factKey.Length > 0) return facts.ContainsKey(factKey) ? Ok(new { key = factKey, value = facts[factKey] }, version) : Error(NotFound);
             return Page(facts.Select(x => (JsonNode)new JsonObject { ["key"] = x.Key, ["value"] = x.Value?.DeepClone() }), args) with { Version = version };
         }
-        if (ByteSize(task) > RelayLimits.MaxPayloadBytes) return Ok(Summary(task), version);
-        return Ok(task, version);
+        var recent = Recent(task);
+        if (ByteSize(recent) > RelayLimits.MaxPayloadBytes) return Ok(Summary(task), version);
+        return Ok(recent, version);
+    }
+
+    /// <summary>
+    /// The task with only its latest list entries. A chat re-reading a task otherwise takes in its whole history every time, and that read
+    /// grows with every message; each trimmed list gets a <c>&lt;section&gt;Total</c>, and its older entries stay in the paged section.
+    /// </summary>
+    private static JsonObject Recent(JsonObject task)
+    {
+        if (ListSections.All(section => ArrayAt(task, section).Count <= RelayLimits.RecentTaskEntries)) return task;
+        var copy = task.DeepClone().AsObject();
+        foreach (var section in ListSections)
+        {
+            var entries = ArrayAt(task, section);
+            if (entries.Count <= RelayLimits.RecentTaskEntries) continue;
+            copy[section] = new JsonArray(entries.Skip(entries.Count - RelayLimits.RecentTaskEntries).Select(entry => entry!.DeepClone()).ToArray());
+            copy[section + "Total"] = entries.Count;
+        }
+        return copy;
     }
 
     private static RelayReply RenewOrRelease(AggregateContext context, JsonObject task)
@@ -229,7 +248,15 @@ internal static class TaskBoardAggregate
             task["workflow"] = workflow.DeepClone();
         }
         task["updatedAt"] = context.Now.ToString("O"); task["updatedBy"] = context.Caller.PrincipalId; task["version"] = ++version;
-        return Ok(task, version);
+        // An acknowledgment, not the task: echoing the whole task (up to its 256-message conversation) put it into the updater's context again
+        // on every milestone, and the stored replay of each request kept a copy too. task_get still returns the task. The actions this
+        // call reported are included, since the reporter needs their resulting status and restoration.
+        var acknowledgment = new JsonObject { ["taskId"] = Text(task, "taskId"), ["version"] = version, ["updatedAt"] = Text(task, "updatedAt") };
+        var reported = new JsonObject();
+        foreach (var id in reports.Select(report => Text(report!.AsObject(), "actionId")).Where(id => id.Length > 0).Distinct(StringComparer.Ordinal))
+            if (ObjectAt(task, "actions")[id] is JsonNode action) reported[id] = action.DeepClone();
+        if (reported.Count > 0) acknowledgment["actions"] = reported;
+        return Ok(acknowledgment, version);
     }
 
     private static RelayReply SendTaskMessage(AggregateContext context, JsonObject task)
