@@ -3,6 +3,7 @@ using Orleans;
 using Orleans.Hosting;
 using Orleans.Storage;
 using PkRelay.Core;
+using PkRelay.Domain;
 
 namespace PkRelay.Storage;
 

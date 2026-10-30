@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
+  <!-- Application use cases plus their Orleans adapters (grains, surrogates). Coordination rules live in PkRelay.Domain. -->
   <ItemGroup>
-    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <ProjectReference Include="../PkRelay.Domain/PkRelay.Domain.csproj" />
     <PackageReference Include="Microsoft.Orleans.Server" />
     <PackageReference Include="Microsoft.Orleans.Sdk" />
   </ItemGroup>

@@ -2,6 +2,7 @@ using Microsoft.Data.Sqlite;
 using Orleans.Runtime;
 using Orleans.Storage;
 using PkRelay.Core;
+using PkRelay.Domain;
 
 namespace PkRelay.Storage;
 

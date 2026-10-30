@@ -8,6 +8,7 @@ using Microsoft.Extensions.Logging;
 using Orleans;
 using Orleans.Hosting;
 using PkRelay.Core;
+using PkRelay.Domain;
 using Xunit;
 
 namespace PkRelay.Tests;

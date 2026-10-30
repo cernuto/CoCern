@@ -1,0 +1,3 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The shared protocol vocabulary: tool catalog, error codes and wire limits. No package dependencies. -->
+</Project>

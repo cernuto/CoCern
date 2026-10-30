@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup><OutputType>Exe</OutputType></PropertyGroup>
   <ItemGroup>
+    <ProjectReference Include="../PkRelay.Contracts/PkRelay.Contracts.csproj" />
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <PackageReference Include="ModelContextProtocol" />
     <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" />

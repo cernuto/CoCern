@@ -1,0 +1,94 @@
+using System.Text.Json.Nodes;
+using PkRelay.Contracts;
+using static PkRelay.Contracts.RelayErrorCodes;
+using static PkRelay.Domain.JsonFields;
+using static PkRelay.Domain.Replies;
+
+namespace PkRelay.Domain;
+
+/// <summary>
+/// One registered resource's advisory claim. A fenced generation identifies each grant. An unresolved external
+/// action blocks the resource even after its lease expires, until that action is reported resolved.
+/// </summary>
+internal static class LockAggregate
+{
+    private const int RetryAfterSeconds = 5;
+
+    public static RelayReply Handle(AggregateContext context) => context.Operation switch
+    {
+        Operations.Block => Block(context),
+        Operations.Unblock => Unblock(context),
+        RelayTools.ClaimAcquire => Acquire(context),
+        RelayTools.ClaimRenew or RelayTools.ClaimRelease => RenewOrRelease(context),
+        _ => Error(UnknownTool)
+    };
+
+    private static RelayReply Block(AggregateContext context)
+    {
+        var state = context.State;
+        var session = context.SessionId;
+        var blockers = ObjectAt(state, "blockers");
+        var actionKey = Text(context.Args, "actionKey", Required(context.Args, "actionId"));
+        if (ObjectAt(state, "resolvedActions").ContainsKey(actionKey)) return Ok(new { resolved = true });
+        if (Text(state, "holder") != session || Date(state, "leaseUntil") <= context.Now) return Error(ClaimRequired);
+        if (blockers.Count > 0 && !blockers.ContainsKey(actionKey)) return Error(Busy, new { holder = Text(state, "holder"), unresolved = true });
+        blockers[actionKey] = new JsonObject { ["sessionId"] = session, ["principalId"] = context.Caller.PrincipalId };
+        return Ok(new { blocked = true });
+    }
+
+    /// <summary>Only the action's own writer may unblock, or an administrator explicitly accepting its cleanup.</summary>
+    private static RelayReply Unblock(AggregateContext context)
+    {
+        var state = context.State;
+        var blockers = ObjectAt(state, "blockers");
+        var id = Text(context.Args, "actionKey", Required(context.Args, "actionId"));
+        var administrativeAcceptance = context.Caller.IsAdministrator && Flag(context.Args, "administrativeAcceptance");
+        if (blockers[id] is JsonObject blocker && (Text(blocker, "sessionId") != context.SessionId || Text(blocker, "principalId") != context.Caller.PrincipalId && !administrativeAcceptance)) return Error(ActionDenied);
+        var resolved = ObjectAt(state, "resolvedActions");
+        if (!resolved.ContainsKey(id) && resolved.Count >= RelayLimits.MaxRecords) return Error(CapacityExceeded);
+        blockers.Remove(id); resolved[id] = true;
+        return Ok(new { resolved = true });
+    }
+
+    private static RelayReply Acquire(AggregateContext context)
+    {
+        var state = context.State;
+        var holder = Text(state, "holder");
+        var session = context.SessionId;
+        var generation = Number(state, "generation");
+        var blockers = ObjectAt(state, "blockers");
+        if (holder.Length > 0 && holder != session && (Date(state, "leaseUntil") > context.Now || blockers.Count > 0))
+            return Error(Busy, new { holder, leaseUntil = Text(state, "leaseUntil"), blockers = blockers.Count, retryAfterSeconds = RetryAfterSeconds });
+        var owned = holder == session && Date(state, "leaseUntil") > context.Now;
+        if (blockers.Count > 0 && !owned) return Error(Busy, new { holder, blockers = blockers.Count });
+        if (!owned)
+        {
+            state["holder"] = Required(context.Args, "sessionId");
+            state["generation"] = ++generation;
+            state["leaseUntil"] = context.Now.AddSeconds(Leases.Seconds(context.Args)).ToString("O");
+        }
+        return Ok(new { newlyAcquired = !owned, generation, leaseUntil = Text(state, "leaseUntil") }, generation);
+    }
+
+    private static RelayReply RenewOrRelease(AggregateContext context)
+    {
+        var state = context.State;
+        var generation = Number(state, "generation");
+        var blockers = ObjectAt(state, "blockers");
+        if (Text(state, "holder") != context.SessionId || generation != Number(context.Args, "generation") || Date(state, "leaseUntil") <= context.Now) return Error(StaleClaim, new { generation });
+        var release = context.Operation == RelayTools.ClaimRelease;
+        if (!release) state["leaseUntil"] = context.Now.AddSeconds(Leases.Seconds(context.Args)).ToString("O");
+        else
+        {
+            if (blockers.Count > 0) return Error(UnresolvedAction, new { blockers = blockers.Count });
+            state["holder"] = "";
+            state["leaseUntil"] = context.Now.ToString("O");
+        }
+        return Ok(new { generation, leaseUntil = Text(state, "leaseUntil"), released = release }, generation);
+    }
+}
+
+internal static class Leases
+{
+    public static int Seconds(JsonObject args) => (int)Math.Clamp(Number(args, "leaseSeconds", RelayLimits.DefaultLeaseSeconds), 1, RelayLimits.MaxLeaseSeconds);
+}

@@ -3,6 +3,7 @@ using Orleans;
 using Orleans.Runtime;
 using Orleans.Storage;
 using PkRelay.Core;
+using PkRelay.Domain;
 using PkRelay.Storage;
 using Xunit;
 

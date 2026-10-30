@@ -1,0 +1,68 @@
+using System.Net;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Orleans.Configuration;
+using Orleans.Hosting;
+using PkRelay.Contracts;
+using PkRelay.Core;
+using PkRelay.Domain;
+using PkRelay.Storage;
+using Serilog;
+using Serilog.Events;
+
+namespace PkRelay.Host;
+
+public static class RelayHostBuilderExtensions
+{
+    private const string DefaultUrl = "http://127.0.0.1:5271";
+    private const int DefaultSiloPort = 21111;
+    private const int DefaultGatewayPort = 31111;
+    private const string ServiceId = "PkRelay";
+
+    public static WebApplicationBuilder AddRelayHost(this WebApplicationBuilder builder)
+    {
+        if (string.IsNullOrWhiteSpace(builder.Configuration["urls"])) builder.WebHost.UseUrls(DefaultUrl);
+        builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = RelayLimits.MaxPayloadBytes);
+        builder.Services.AddSerilog(configuration => configuration.MinimumLevel.Information()
+            .MinimumLevel.Override("Microsoft", LogEventLevel.Warning)
+            .MinimumLevel.Override("Orleans", LogEventLevel.Warning)
+            .MinimumLevel.Override("ModelContextProtocol", LogEventLevel.Warning)
+            .WriteTo.Console());
+        // Host-level registration sees configuration added later by application factories and tests.
+        builder.Host.ConfigureServices((context, services) => services.AddRelayAuthentication(context.Configuration));
+        builder.Services.AddHttpContextAccessor();
+        builder.Services.AddSignalR(options => { options.EnableDetailedErrors = false; options.MaximumReceiveMessageSize = RelayLimits.MaxPayloadBytes; });
+        builder.Services.AddSingleton<ICoordinationNotifier, CoordinationNotifier>();
+        builder.Services.AddPkRelayCore();
+        builder.AddRelayOrleans();
+        builder.Services.AddHostedService<DueWorkDispatcher>();
+        builder.Services.AddOpenApi();
+        builder.Services.AddRelayMcp();
+        return builder;
+    }
+
+    private static void AddRelayOrleans(this WebApplicationBuilder builder)
+    {
+        builder.UseOrleans(silo => silo.UseLocalhostClustering(siloPort: DefaultSiloPort, gatewayPort: DefaultGatewayPort, serviceId: ServiceId, clusterId: ServiceId)
+            .AddPkRelaySqlite(DefaultDatabasePath(builder.Environment)));
+        // Resolve final configuration through DI so application-factory and hosting overrides apply before any store/listener opens.
+        builder.Services.Replace(ServiceDescriptor.Singleton<SqliteStore>(services => new SqliteStore(
+            services.GetRequiredService<IConfiguration>()["Relay:DatabasePath"] ?? DefaultDatabasePath(services.GetRequiredService<IHostEnvironment>()))));
+        builder.Services.AddOptions<EndpointOptions>().Configure<IConfiguration>((options, configuration) =>
+        {
+            options.SiloPort = configuration.GetValue("Relay:SiloPort", DefaultSiloPort);
+            options.GatewayPort = configuration.GetValue("Relay:GatewayPort", DefaultGatewayPort);
+            options.AdvertisedIPAddress = IPAddress.Loopback;
+            options.SiloListeningEndpoint = new IPEndPoint(IPAddress.Loopback, options.SiloPort);
+            options.GatewayListeningEndpoint = options.GatewayPort == 0 ? null : new IPEndPoint(IPAddress.Loopback, options.GatewayPort);
+        });
+        builder.Services.AddOptions<DevelopmentClusterMembershipOptions>().Configure<IConfiguration>((options, configuration) =>
+            options.PrimarySiloEndpoint = new IPEndPoint(IPAddress.Loopback, configuration.GetValue("Relay:SiloPort", DefaultSiloPort)));
+        builder.Services.AddOptions<ClusterOptions>().Configure<IConfiguration>((options, configuration) =>
+        {
+            options.ServiceId = ServiceId;
+            options.ClusterId = configuration["Relay:ClusterId"] ?? ServiceId;
+        });
+    }
+
+    private static string DefaultDatabasePath(IHostEnvironment environment) => Path.Combine(environment.ContentRootPath, "data", "relay.db");
+}

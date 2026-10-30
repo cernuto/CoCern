@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using PkRelay.Contracts;
 
 namespace PkRelay.Adapter;
 
@@ -12,7 +13,6 @@ public sealed record AdapterReply(bool Ok, string Code, JsonElement? Data = null
 
 public sealed class RelayForwarder(HttpClient client, AdapterOptions options)
 {
-    private static readonly HashSet<string> RecognizedConflicts = ["VersionConflict", "RequestConflict", "ClaimBusy", "StaleClaim", "Paused", "Busy", "ActionConflict", "UnresolvedAction", "DeltaRestartRequired", "WorkflowRecheckRequired", "WorkflowIncomplete", "WorkflowNotReady", "version_conflict"];
     public const int MaxRequestBytes = 64 * 1024;
     public const int MaxResponseBytes = 128 * 1024;
 
@@ -67,7 +67,7 @@ public sealed class RelayForwarder(HttpClient client, AdapterOptions options)
             var codeText = code.GetString()!;
             if (codeText.Length is < 1 or > 100 || codeText.Any(c => !char.IsAsciiLetterOrDigit(c) && c is not '_' and not '-' and not '.'))
                 return new(false, "invalid_hub_reply");
-            if (domainConflict && (ok.GetBoolean() || !RecognizedConflicts.Contains(codeText))) return new(false, "hub_error");
+            if (domainConflict && (ok.GetBoolean() || RelayErrorCodes.Classify(codeText) != RelayErrorKind.Conflict)) return new(false, "hub_error");
             using var data = JsonDocument.Parse(dataJson.GetString()!);
             return new(ok.GetBoolean(), codeText, data.RootElement.Clone(), number);
         }

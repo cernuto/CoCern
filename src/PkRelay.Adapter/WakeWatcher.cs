@@ -1,6 +1,5 @@
 using System.Text.Json;
 using System.Threading.Channels;
-using Microsoft.AspNetCore.Http.Connections;
 using Microsoft.AspNetCore.SignalR.Client;
 
 namespace PkRelay.Adapter;
@@ -23,9 +22,9 @@ public static class WakeWatcher
         {
             foreach (var route in routes)
             {
-                var connection = Connection(options);
+                var connection = RelayHubConnection.Create(options);
                 connections.Add(connection);
-                connection.On<JsonElement>("coordination.changed", hint =>
+                connection.On<JsonElement>(RelayHubConnection.ChangedEvent, hint =>
                 {
                     if (hint.ValueKind == JsonValueKind.Object && hint.TryGetProperty("sessionId", out var session) && session.ValueKind == JsonValueKind.String && session.GetString() == route.Session.SessionId)
                         changed.Writer.TryWrite(true);
@@ -36,7 +35,7 @@ public static class WakeWatcher
                     {
                         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
                         timeout.CancelAfter(TimeSpan.FromSeconds(5));
-                        await Watch(connection, route.Route, route.Session, timeout.Token);
+                        await connection.WatchSessionAsync(route.Session.SessionId, route.Session.SessionToken, route.Route.RepositoryId, timeout.Token);
                         changed.Writer.TryWrite(true);
                     }
                     catch (Exception) { Console.Error.WriteLine("PkRelay wake hints unavailable; fallback reconciliation remains active."); }
@@ -60,7 +59,7 @@ public static class WakeWatcher
                             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
                             timeout.CancelAfter(TimeSpan.FromSeconds(2));
                             await connection.StartAsync(timeout.Token);
-                            await Watch(connection, route.Route, route.Session, timeout.Token);
+                            await connection.WatchSessionAsync(route.Session.SessionId, route.Session.SessionToken, route.Route.RepositoryId, timeout.Token);
                         }
                         catch (Exception) { /* Reconcile on the next fixed fallback even when hints fail. */ }
                     }
@@ -91,29 +90,5 @@ public static class WakeWatcher
                 await Task.Delay(TimeSpan.FromSeconds(1), lifetime.Token);
             }
         }
-    }
-
-    private static Task Watch(HubConnection connection, WakeRoute route, WakeSession session, CancellationToken token) =>
-        connection.InvokeAsync("WatchSession", session.SessionId, session.SessionToken, route.RepositoryId, token);
-
-    private static HubConnection Connection(AdapterOptions options) => new HubConnectionBuilder()
-        .WithUrl(new Uri(options.BaseUri, "hubs/coordination"), connection =>
-        {
-            connection.AccessTokenProvider = () => Task.FromResult<string?>(options.Token);
-            connection.Transports = HttpTransportType.LongPolling;
-            connection.HttpMessageHandlerFactory = handler =>
-            {
-                DisableRedirects(handler);
-                return new PinnedOriginHandler(options.BaseUri, handler);
-            };
-            connection.TransportMaxBufferSize = RelayForwarder.MaxResponseBytes;
-            connection.ApplicationMaxBufferSize = RelayForwarder.MaxResponseBytes;
-        }).WithAutomaticReconnect([TimeSpan.Zero, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(10)]).Build();
-
-    private static void DisableRedirects(HttpMessageHandler handler)
-    {
-        if (handler is HttpClientHandler client) client.AllowAutoRedirect = false;
-        if (handler is SocketsHttpHandler sockets) sockets.AllowAutoRedirect = false;
-        if (handler is DelegatingHandler { InnerHandler: { } inner }) DisableRedirects(inner);
     }
 }

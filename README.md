@@ -25,6 +25,17 @@ Each new chat calls `session_open` with a fresh request identity. Keep its retur
 
 For automatic local Codex follow-up, use the optional [wake adapter mode](docs/wake.md). It watches durable inbox changes in ordinary code and queues one bounded inbox-check prompt for an explicitly enrolled chat. The relay host remains coordination-only; existing model, tool and approval settings remain in force.
 
+## Code layout
+
+Dependencies point inward only; `PkRelay.Domain` has no framework or storage dependency.
+
+- `PkRelay.Contracts` holds the shared protocol vocabulary: the one tool catalog and its argument schemas, the stable error codes and their client classification, and the wire limits. The hub and the stdio adapter both read it, so their tool lists, schemas and conflict handling cannot drift apart.
+- `PkRelay.Domain` holds the coordination rules. `CoordinationStateMachine.Apply` runs the cross-cutting rules every operation shares (payload bound, repository scope, internal-only operations, request idempotency, reply bounds, capacity), then delegates to one handler per aggregate: `ControlAggregate`, `SessionAggregate`, `TaskBoardAggregate` (with `TaskActions` and `TaskWorkflow`) and `LockAggregate`. State stays in the persisted JSON document shape.
+- `PkRelay.Core` holds the application layer and its Orleans adapters. `RelayApplication` validates the public request (`RelayRequestGuard`), authenticates the session, routes each tool to its aggregate, and composes the multi-aggregate use cases (session open, task claim with resource rollback, action begin, piggybacked renewals and acknowledgments, next-work offers). Grains only persist, deliver the outbox and carry domain records across calls through surrogates. `IDueWorkSource` and `ICoordinationNotifier` are the ports that storage and the host implement.
+- `PkRelay.Storage` implements grain persistence and the due-work index on SQLite.
+- `PkRelay.Host` is the composition root plus the delivery mechanisms: REST endpoints, remote MCP, SignalR hints, authentication, middleware and the due-work pump.
+- `PkRelay.Adapter` is the stdio MCP client and the optional wake watcher. It depends only on Contracts.
+
 ## Runtime boundaries
 
 Claims are cooperative. They cannot stop manual IDE actions or grant device, database, deployment, or account permissions. An invoking/unknown action and unresolved restoration obligation remain blocking even after a lease expires. Reading an inbox does not acknowledge a message; explicit acknowledgment follows handling.
@@ -35,4 +46,4 @@ Read the [architecture](docs/architecture.md), [host setup](docs/host.md), [adap
 
 ## Reduce coordination overhead
 
-Use [collaboration workflow](docs/collaboration.md) for durable board deltas, structured closure packets and reported criteria/blockers, and an optional next-work offer returned with a milestone. Blocked work stays blocked until an explicit evidenced update; offers require ordinary claims before execution. The complete suite now passes 117 tests, including HTTP/MCP, restart, stale-claim and cleanup regressions. These features reduce repeated reads and round trips; actual all-participant token savings remain unmeasured.
+Use [collaboration workflow](docs/collaboration.md) for durable board deltas, structured closure packets and reported criteria/blockers, and an optional next-work offer returned with a milestone. Blocked work stays blocked until an explicit evidenced update; offers require ordinary claims before execution. The complete suite now passes 150 tests, including HTTP/MCP, restart, stale-claim and cleanup regressions. These features reduce repeated reads and round trips; actual all-participant token savings remain unmeasured.

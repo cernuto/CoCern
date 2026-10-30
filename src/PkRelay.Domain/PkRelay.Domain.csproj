@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Coordination rules only: no Orleans, ASP.NET Core or storage dependencies. -->
+  <ItemGroup>
+    <ProjectReference Include="../PkRelay.Contracts/PkRelay.Contracts.csproj" />
+  </ItemGroup>
+</Project>

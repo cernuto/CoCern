@@ -14,6 +14,7 @@ using Microsoft.AspNetCore.SignalR.Client;
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
 using PkRelay.Core;
+using PkRelay.Domain;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.IdentityModel.Protocols.OpenIdConnect;

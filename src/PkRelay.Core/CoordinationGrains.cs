@@ -3,55 +3,68 @@ using System.Text.Json.Nodes;
 using Microsoft.Extensions.DependencyInjection;
 using Orleans;
 using Orleans.Runtime;
+using PkRelay.Contracts;
+using PkRelay.Domain;
 
 namespace PkRelay.Core;
 
+public interface IRelayAggregateGrain : IGrainWithStringKey
+{
+    Task<RelayReply> ExecuteAsync(RelayCaller caller, string operation, string argumentsJson);
+}
+
+public interface ISessionGrain : IRelayAggregateGrain;
+public interface ITaskBoardGrain : IRelayAggregateGrain;
+public interface ILockGrain : IRelayAggregateGrain;
+public interface IControlGrain : IRelayAggregateGrain;
+
+/// <summary>
+/// Orleans adapter for one aggregate. It owns activation, persistence and outbox delivery; every rule is applied by
+/// <see cref="CoordinationStateMachine"/> against a working copy that replaces the persisted state only after a successful write.
+/// </summary>
 public abstract class CoordinationGrain(IPersistentState<StateEnvelope<CoordinationDocument>> persistent, IGrainFactory grains, IServiceProvider services) : Grain, IRelayAggregateGrain
 {
+    private static readonly TimeSpan RedeliveryDelay = TimeSpan.FromSeconds(5);
     protected abstract string Kind { get; }
     private bool uncertainCommit;
 
     public async Task<RelayReply> ExecuteAsync(RelayCaller caller, string operation, string argumentsJson)
     {
         JsonObject args;
-        if (uncertainCommit) return CoordinationStateMachine.Error("StorageFailure");
+        if (uncertainCommit) return Replies.Error(RelayErrorCodes.StorageFailure);
         try { args = JsonNode.Parse(argumentsJson)?.AsObject() ?? new(); }
-        catch (JsonException) { return CoordinationStateMachine.Error("InvalidArguments"); }
-        if (!caller.IsInternal) return CoordinationStateMachine.Error("InternalOnly");
-        if (operation == "__dispatch") return await DispatchAsync(caller, args);
+        catch (JsonException) { return Replies.Error(RelayErrorCodes.InvalidArguments); }
+        if (!caller.IsInternal) return Replies.Error(RelayErrorCodes.InternalOnly);
+        if (operation == Operations.Dispatch) return await DispatchAsync(args);
         var candidate = Clone(persistent.State);
-        var effectCount = candidate.Effects.Count;
-        var priorTaskRevision = Kind == "board" ? JsonNode.Parse(candidate.Value.Json)?["taskRevision"]?.ToJsonString() : null;
+        var firstNewEffect = candidate.Effects.Count;
+        var priorTaskRevision = Kind == AggregateKinds.Board ? CoordinationStateMachine.TaskRevision(candidate) : null;
         var reply = CoordinationStateMachine.Apply(candidate, Kind, this.GetPrimaryKeyString(), caller, operation, args, DateTimeOffset.UtcNow);
-        // A legacy board's first read durably seeds current change markers without changing task versions.
-        var migratedTaskMarkers = Kind == "board" && priorTaskRevision != JsonNode.Parse(candidate.Value.Json)?["taskRevision"]?.ToJsonString();
-        if (!reply.Ok || !CoordinationStateMachine.IsMutation(operation) && !migratedTaskMarkers) return reply;
-        for (var index = effectCount; index < candidate.Effects.Count; index++)
-        {
-            var effect = candidate.Effects[index]; var payload = JsonNode.Parse(effect.PayloadJson)!.AsObject();
-            payload["__principalId"] = caller.PrincipalId; payload["__administrator"] = caller.IsAdministrator;
-            payload["__repositories"] = JsonSerializer.SerializeToNode(caller.Repositories);
-            candidate.Effects[index] = effect with { PayloadJson = payload.ToJsonString() };
-        }
-        ScheduleLease(candidate);
-        return await CommitAsync(candidate) ? reply : CoordinationStateMachine.Error("StorageFailure");
+        if (!reply.Ok || !CoordinationStateMachine.RequiresCommit(Kind, operation, priorTaskRevision, candidate)) return reply;
+        CoordinationStateMachine.StampEffects(candidate.Effects, firstNewEffect, caller);
+        CoordinationStateMachine.ScheduleLeases(candidate);
+        return await CommitAsync(candidate) ? reply : Replies.Error(RelayErrorCodes.StorageFailure);
     }
 
-    private async Task<RelayReply> DispatchAsync(RelayCaller caller, JsonObject args)
+    /// <summary>Delivers due outbox effects (optionally one work item, operation or action) and removes each only after its target accepted it.</summary>
+    private async Task<RelayReply> DispatchAsync(JsonObject args)
     {
-        var workId = CoordinationStateMachine.Text(args, "workId");
-        var operation = CoordinationStateMachine.Text(args, "operation"); var actionKey = CoordinationStateMachine.Text(args, "actionKey");
+        var workId = JsonFields.Text(args, "workId");
+        var operation = JsonFields.Text(args, "operation");
+        var actionKey = JsonFields.Text(args, "actionKey");
+        bool Selected(DurableEffect effect) =>
+            (workId.Length == 0 || effect.Id == workId) && (operation.Length == 0 || effect.Operation == operation)
+            && (actionKey.Length == 0 || JsonNode.Parse(effect.PayloadJson)?["actionKey"]?.ToString() == actionKey);
         var now = DateTimeOffset.UtcNow;
         var candidate = Clone(persistent.State);
-        foreach (var effect in candidate.Effects.Where(x => (workId.Length == 0 || x.Id == workId) && (operation.Length == 0 || x.Operation == operation) && (actionKey.Length == 0 || JsonNode.Parse(x.PayloadJson)?["actionKey"]?.ToString() == actionKey) && x.DueAt <= now).ToArray())
+        foreach (var effect in candidate.Effects.Where(x => Selected(x) && x.DueAt <= now).ToArray())
         {
             var payload = JsonNode.Parse(effect.PayloadJson)!.AsObject();
-            var effectCaller = new RelayCaller(CoordinationStateMachine.Text(payload, "__principalId"), payload["__administrator"]?.GetValue<bool>() ?? false, payload["__repositories"]?.Deserialize<string[]>() ?? [], true);
-            payload.Remove("__principalId"); payload.Remove("__administrator"); payload.Remove("__repositories");
+            var effectCaller = CoordinationStateMachine.TakeEffectCaller(payload);
             RelayReply result;
             try
             {
-                if (Kind == "session" && effect.TargetKind == "session" && effect.Operation == "__deliver" && GrainContext is not null && effect.TargetKey == this.GetPrimaryKeyString())
+                if (Kind == AggregateKinds.Session && effect.TargetKind == AggregateKinds.Session && effect.Operation == Operations.Deliver && GrainContext is not null && effect.TargetKey == this.GetPrimaryKeyString())
                 {
                     // A non-reentrant grain cannot await an RPC to itself. Commit its inbox entry
                     // and outbox removal together so a stale dispatch snapshot cannot erase delivery.
@@ -59,26 +72,26 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
                 }
                 else result = await Aggregate(grains, effect.TargetKind, effect.TargetKey).ExecuteAsync(effectCaller, effect.Operation, payload.ToJsonString());
             }
-            catch (Exception) { result = CoordinationStateMachine.Error("DeliveryUnavailable"); }
+            catch (Exception) { result = Replies.Error(RelayErrorCodes.DeliveryUnavailable); }
             if (!result.Ok)
             {
-                candidate.Effects[candidate.Effects.FindIndex(x => x.Id == effect.Id)] = effect with { DueAt = DateTimeOffset.UtcNow.AddSeconds(5) };
-                if (!await CommitAsync(candidate)) return CoordinationStateMachine.Error("StorageFailure");
-                return CoordinationStateMachine.Error("DeliveryPending", new { effectId = effect.Id, reason = result.Code });
+                candidate.Effects[candidate.Effects.FindIndex(x => x.Id == effect.Id)] = effect with { DueAt = DateTimeOffset.UtcNow.Add(RedeliveryDelay) };
+                if (!await CommitAsync(candidate)) return Replies.Error(RelayErrorCodes.StorageFailure);
+                return Replies.Error(RelayErrorCodes.DeliveryPending, new { effectId = effect.Id, reason = result.Code });
             }
             candidate.Effects.RemoveAll(x => x.Id == effect.Id);
-            if (!await CommitAsync(candidate)) return CoordinationStateMachine.Error("StorageFailure");
-            if (effect.TargetKind == "session" && effect.Operation == "__deliver" && services.GetService<ICoordinationNotifier>() is { } notifier)
+            if (!await CommitAsync(candidate)) return Replies.Error(RelayErrorCodes.StorageFailure);
+            if (effect.TargetKind == AggregateKinds.Session && effect.Operation == Operations.Deliver && services.GetService<ICoordinationNotifier>() is { } notifier)
             {
                 // Hints are best effort; the durable inbox remains authoritative.
-                try { await notifier.NotifyAsync(effect.TargetKey, CoordinationStateMachine.Text(payload, "messageId")); }
+                try { await notifier.NotifyAsync(effect.TargetKey, JsonFields.Text(payload, "messageId")); }
                 catch (Exception) { }
             }
             candidate = Clone(persistent.State);
         }
-        if (candidate.DueWork.RemoveAll(x => (workId.Length == 0 || x.Id == workId) && x.DueAt <= now) > 0 && !await CommitAsync(candidate)) return CoordinationStateMachine.Error("StorageFailure");
-        if (candidate.Effects.Any(x => (workId.Length == 0 || x.Id == workId) && (operation.Length == 0 || x.Operation == operation) && (actionKey.Length == 0 || JsonNode.Parse(x.PayloadJson)?["actionKey"]?.ToString() == actionKey))) return CoordinationStateMachine.Error("DeliveryPending");
-        return CoordinationStateMachine.Ok(new { dispatched = true });
+        if (candidate.DueWork.RemoveAll(x => (workId.Length == 0 || x.Id == workId) && x.DueAt <= now) > 0 && !await CommitAsync(candidate)) return Replies.Error(RelayErrorCodes.StorageFailure);
+        if (candidate.Effects.Any(Selected)) return Replies.Error(RelayErrorCodes.DeliveryPending);
+        return Replies.Ok(new { dispatched = true });
     }
 
     private async Task<bool> CommitAsync(StateEnvelope<CoordinationDocument> candidate)
@@ -97,16 +110,6 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
         }
     }
 
-    private static void ScheduleLease(StateEnvelope<CoordinationDocument> envelope)
-    {
-        var state = JsonNode.Parse(envelope.Value.Json)!.AsObject();
-        envelope.DueWork.RemoveAll(x => x.Kind == "lease");
-        if (DateTimeOffset.TryParse(CoordinationStateMachine.Text(state, "leaseUntil"), out var lease)) envelope.DueWork.Add(new("lease", "lease", lease));
-        if (state["tasks"] is JsonObject tasks)
-            foreach (var entry in tasks)
-                if (entry.Value is JsonObject task && DateTimeOffset.TryParse(CoordinationStateMachine.Text(task, "leaseUntil"), out var taskLease)) envelope.DueWork.Add(new("lease:" + entry.Key, "lease", taskLease));
-    }
-
     private static StateEnvelope<CoordinationDocument> Clone(StateEnvelope<CoordinationDocument> state) => new()
     {
         SchemaVersion = state.SchemaVersion, Value = new() { Json = state.Value.Json }, Effects = [.. state.Effects], DueWork = [.. state.DueWork]
@@ -114,26 +117,26 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
 
     internal static IRelayAggregateGrain Aggregate(IGrainFactory factory, string kind, string key) => kind.Replace("pkrelay.", "", StringComparison.Ordinal) switch
     {
-        "session" => factory.GetGrain<ISessionGrain>(key),
-        "board" => factory.GetGrain<ITaskBoardGrain>(key),
-        "lock" => factory.GetGrain<ILockGrain>(key),
-        "control" => factory.GetGrain<IControlGrain>(key),
+        AggregateKinds.Session => factory.GetGrain<ISessionGrain>(key),
+        AggregateKinds.Board => factory.GetGrain<ITaskBoardGrain>(key),
+        AggregateKinds.Lock => factory.GetGrain<ILockGrain>(key),
+        AggregateKinds.Control => factory.GetGrain<IControlGrain>(key),
         _ => throw new ArgumentException("Unknown coordination grain type.", nameof(kind))
     };
 }
 
 [GrainType("pkrelay.session")]
 public sealed class SessionGrain([PersistentState("session", "relay")] IPersistentState<StateEnvelope<CoordinationDocument>> state, IGrainFactory grains, IServiceProvider services) : CoordinationGrain(state, grains, services), ISessionGrain
-{ protected override string Kind => "session"; }
+{ protected override string Kind => AggregateKinds.Session; }
 
 [GrainType("pkrelay.board")]
 public sealed class TaskBoardGrain([PersistentState("board", "relay")] IPersistentState<StateEnvelope<CoordinationDocument>> state, IGrainFactory grains, IServiceProvider services) : CoordinationGrain(state, grains, services), ITaskBoardGrain
-{ protected override string Kind => "board"; }
+{ protected override string Kind => AggregateKinds.Board; }
 
 [GrainType("pkrelay.lock")]
 public sealed class LockGrain([PersistentState("lock", "relay")] IPersistentState<StateEnvelope<CoordinationDocument>> state, IGrainFactory grains, IServiceProvider services) : CoordinationGrain(state, grains, services), ILockGrain
-{ protected override string Kind => "lock"; }
+{ protected override string Kind => AggregateKinds.Lock; }
 
 [GrainType("pkrelay.control")]
 public sealed class ControlGrain([PersistentState("control", "relay")] IPersistentState<StateEnvelope<CoordinationDocument>> state, IGrainFactory grains, IServiceProvider services) : CoordinationGrain(state, grains, services), IControlGrain
-{ protected override string Kind => "control"; }
+{ protected override string Kind => AggregateKinds.Control; }

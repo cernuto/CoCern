@@ -1,0 +1,42 @@
+using System.Text.Json;
+using ModelContextProtocol.AspNetCore;
+using ModelContextProtocol.Protocol;
+using PkRelay.Contracts;
+using PkRelay.Core;
+using PkRelay.Domain;
+
+namespace PkRelay.Host;
+
+/// <summary>Remote MCP surface: the same catalog and application entry point as REST, shaped as MCP tool results.</summary>
+internal static class RelayMcpServer
+{
+    public static IServiceCollection AddRelayMcp(this IServiceCollection services)
+    {
+        services.AddMcpServer(options => options.ServerInfo = new() { Name = "PkRelay", Version = "1.0.0" })
+            .WithHttpTransport(options => options.SessionMode = HttpServerSessionMode.Stateless)
+            .WithListToolsHandler((request, _) =>
+            {
+                var context = HttpContextOf(request.Server.Services!);
+                return ValueTask.FromResult(new ListToolsResult { Tools = ToolResults.Tools(RelayAuthentication.Caller(context.User).IsAdministrator).ToList() });
+            })
+            .WithCallToolHandler(async (request, cancellationToken) =>
+            {
+                var context = HttpContextOf(request.Server.Services!);
+                var reply = await CallAsync(context, request.Params, cancellationToken);
+                return new CallToolResult { IsError = !reply.Ok, Content = [new TextContentBlock { Text = JsonSerializer.Serialize(reply, ToolResults.JsonOptions) }] };
+            });
+        return services;
+    }
+
+    private static async Task<RelayReply> CallAsync(HttpContext context, CallToolRequestParams? parameters, CancellationToken cancellationToken)
+    {
+        if (parameters is null || !RelayToolCatalog.TryGet(parameters.Name, out _)) return ToolResults.Failure(RelayErrorCodes.UnknownTool);
+        var application = context.RequestServices.GetRequiredService<IRelayApplication>();
+        var arguments = JsonSerializer.SerializeToElement(parameters.Arguments ?? new Dictionary<string, JsonElement>());
+        try { return ToolResults.Bound(await application.ExecuteAsync(RelayAuthentication.Caller(context.User), parameters.Name, arguments, cancellationToken)); }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception) { return ToolResults.Failure(RelayErrorCodes.InternalError); }
+    }
+
+    private static HttpContext HttpContextOf(IServiceProvider services) => services.GetRequiredService<IHttpContextAccessor>().HttpContext!;
+}

@@ -2,6 +2,7 @@ using Orleans;
 using Orleans.Runtime;
 using Orleans.Storage;
 using PkRelay.Core;
+using PkRelay.Domain;
 using System.Text.Json;
 
 namespace PkRelay.Storage;

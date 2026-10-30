@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Orleans;
 using PkRelay.Core;
+using PkRelay.Domain;
 using Xunit;
 
 namespace PkRelay.Tests;

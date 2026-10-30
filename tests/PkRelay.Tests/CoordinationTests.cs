@@ -3,6 +3,8 @@ using System.Text.Json;
 using System.Reflection;
 using Orleans;
 using PkRelay.Core;
+using PkRelay.Domain;
+using PkRelay.Contracts;
 using Xunit;
 
 namespace PkRelay.Tests;
@@ -295,10 +297,10 @@ public sealed class CoordinationTests
         {
             var patch = For(); patch["expectedVersion"] = i; patch["patch"] = new JsonObject { ["fact" + i] = new string('"', 2400) };
             var reply = await Invoke("task_update", patch); Assert.True(reply.Ok); Assert.Equal(i + 1, reply.Version);
-            Assert.True(JsonSerializer.SerializeToUtf8Bytes(reply).Length <= CoordinationStateMachine.MaxPayloadBytes, "Full escaped reply exceeded wire bound");
+            Assert.True(JsonSerializer.SerializeToUtf8Bytes(reply).Length <= RelayLimits.MaxPayloadBytes, "Full escaped reply exceeded wire bound");
         }
         var read = await Invoke("task_get", new() { ["taskId"] = "t" }); Assert.True(read.Ok); Assert.Equal(2, read.Version);
-        Assert.True(JsonSerializer.SerializeToUtf8Bytes(read).Length <= CoordinationStateMachine.MaxPayloadBytes);
+        Assert.True(JsonSerializer.SerializeToUtf8Bytes(read).Length <= RelayLimits.MaxPayloadBytes);
         Assert.True(Data(read)["truncated"]!.GetValue<bool>());
     }
 
@@ -433,7 +435,7 @@ public sealed class CoordinationTests
         for (var i = 0; i < 2; i++) Assert.True(Call(state, "board", "task_update", new() { ["taskId"] = "t", ["sessionId"] = "s", ["requestId"] = "fact" + i, ["expectedVersion"] = 3 + i, ["patch"] = new JsonObject { ["fact" + i] = new string('"', 2400) } }).Ok);
         var reply = Call(state, "board", "action_report", ReviewReport(5, "verified"));
         Assert.True(reply.Ok);
-        Assert.True(JsonSerializer.SerializeToUtf8Bytes(reply).Length <= CoordinationStateMachine.MaxPayloadBytes);
+        Assert.True(JsonSerializer.SerializeToUtf8Bytes(reply).Length <= RelayLimits.MaxPayloadBytes);
         var action = Data(reply)["actions"]!["a"]!;
         Assert.Equal("completed", action["status"]!.ToString());
         Assert.Equal("verified", action["restoration"]!.ToString());

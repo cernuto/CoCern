@@ -1,5 +1,7 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/PkRelay.Contracts/PkRelay.Contracts.csproj" />
+    <Project Path="src/PkRelay.Domain/PkRelay.Domain.csproj" />
     <Project Path="src/PkRelay.Core/PkRelay.Core.csproj" />
     <Project Path="src/PkRelay.Storage/PkRelay.Storage.csproj" />
     <Project Path="src/PkRelay.Host/PkRelay.Host.csproj" />

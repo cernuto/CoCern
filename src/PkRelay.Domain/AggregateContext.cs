@@ -1,0 +1,21 @@
+using System.Text.Json.Nodes;
+using static PkRelay.Domain.JsonFields;
+
+namespace PkRelay.Domain;
+
+/// <summary>One operation applied to one aggregate's working copy. Effects emitted here commit atomically with the state.</summary>
+internal sealed class AggregateContext(JsonObject state, RelayCaller caller, string operation, JsonObject args, DateTimeOffset now)
+{
+    public JsonObject State { get; } = state;
+    public RelayCaller Caller { get; } = caller;
+    public string Operation { get; } = operation;
+    public JsonObject Args { get; } = args;
+    public DateTimeOffset Now { get; } = now;
+    public List<DurableEffect> Effects { get; } = [];
+
+    public string Repository => Text(Args, "repositoryId");
+    public string SessionId => Text(Args, "sessionId");
+
+    public void Emit(string targetKind, string targetKey, string operation, JsonObject payload) =>
+        Effects.Add(new(Guid.NewGuid().ToString("N"), targetKind, targetKey, operation, payload.ToJsonString(), Now));
+}

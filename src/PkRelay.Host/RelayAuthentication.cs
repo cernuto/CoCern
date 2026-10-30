@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 using PkRelay.Core;
+using PkRelay.Domain;
 
 namespace PkRelay.Host;
 
@@ -59,29 +60,29 @@ public static class RelayAuthentication
 
     private static void ConfigureJwt(JwtBearerOptions options, IConfiguration configuration)
     {
-            var authority = configuration["Relay:OAuth:Authority"];
-            var audience = configuration["Relay:OAuth:Audience"];
-            var mappings = configuration.GetSection("Relay:OAuth:Principals").Get<OAuthPrincipal[]>() ?? [];
-            var requiredScopes = configuration.GetSection("Relay:OAuth:RequiredScopes").Get<string[]>() ?? ["relay"];
-                options.Authority = authority;
-                options.Audience = audience;
-                options.MapInboundClaims = false;
-                options.RequireHttpsMetadata = true;
-                options.IncludeErrorDetails = false;
-                options.TokenValidationParameters = new TokenValidationParameters { ValidateIssuer = true, ValidateAudience = true, ValidateLifetime = true, ValidateIssuerSigningKey = true, RequireSignedTokens = true, RequireExpirationTime = true, ClockSkew = TimeSpan.FromSeconds(30) };
-                options.Events = new JwtBearerEvents
-                {
-                    OnTokenValidated = context =>
-                    {
-                        var grantedScopes = context.Principal?.FindAll("scope").Concat(context.Principal.FindAll("scp")).SelectMany(claim => claim.Value.Split(' ', StringSplitOptions.RemoveEmptyEntries)).ToHashSet(StringComparer.Ordinal) ?? [];
-                        if (!requiredScopes.All(grantedScopes.Contains)) { context.Fail("Required resource scope is missing."); return Task.CompletedTask; }
-                        var subject = context.Principal?.FindFirstValue("sub");
-                        var mapping = mappings.SingleOrDefault(m => m.Subject == subject);
-                        if (mapping is null || string.IsNullOrWhiteSpace(mapping.PrincipalId)) context.Fail("Subject is not enrolled.");
-                        else context.Principal = Principal(mapping.PrincipalId, mapping.IsAdministrator, mapping.Repositories, "ExternalJwt");
-                        return Task.CompletedTask;
-                    }
-                };
+        var authority = configuration["Relay:OAuth:Authority"];
+        var audience = configuration["Relay:OAuth:Audience"];
+        var mappings = configuration.GetSection("Relay:OAuth:Principals").Get<OAuthPrincipal[]>() ?? [];
+        var requiredScopes = configuration.GetSection("Relay:OAuth:RequiredScopes").Get<string[]>() ?? ["relay"];
+        options.Authority = authority;
+        options.Audience = audience;
+        options.MapInboundClaims = false;
+        options.RequireHttpsMetadata = true;
+        options.IncludeErrorDetails = false;
+        options.TokenValidationParameters = new TokenValidationParameters { ValidateIssuer = true, ValidateAudience = true, ValidateLifetime = true, ValidateIssuerSigningKey = true, RequireSignedTokens = true, RequireExpirationTime = true, ClockSkew = TimeSpan.FromSeconds(30) };
+        options.Events = new JwtBearerEvents
+        {
+            OnTokenValidated = context =>
+            {
+                var grantedScopes = context.Principal?.FindAll("scope").Concat(context.Principal.FindAll("scp")).SelectMany(claim => claim.Value.Split(' ', StringSplitOptions.RemoveEmptyEntries)).ToHashSet(StringComparer.Ordinal) ?? [];
+                if (!requiredScopes.All(grantedScopes.Contains)) { context.Fail("Required resource scope is missing."); return Task.CompletedTask; }
+                var subject = context.Principal?.FindFirstValue("sub");
+                var mapping = mappings.SingleOrDefault(m => m.Subject == subject);
+                if (mapping is null || string.IsNullOrWhiteSpace(mapping.PrincipalId)) context.Fail("Subject is not enrolled.");
+                else context.Principal = Principal(mapping.PrincipalId, mapping.IsAdministrator, mapping.Repositories, "ExternalJwt");
+                return Task.CompletedTask;
+            }
+        };
     }
 
     internal static ClaimsPrincipal Principal(string id, bool admin, IEnumerable<string> repositories, string scheme) => new(new ClaimsIdentity(

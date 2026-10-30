@@ -1,5 +1,4 @@
 using System.Text.Json;
-using Microsoft.AspNetCore.Http.Connections;
 using Microsoft.AspNetCore.SignalR.Client;
 
 namespace PkRelay.Adapter;
@@ -29,23 +28,9 @@ public sealed class SessionHints(AdapterOptions options, Action<string>? writeHi
             try
             {
                 if (_connection is not null) await _connection.DisposeAsync();
-                _connection = new HubConnectionBuilder()
-                    .WithUrl(new Uri(options.BaseUri, "hubs/coordination"), connection =>
-                    {
-                        connection.AccessTokenProvider = () => Task.FromResult<string?>(options.Token);
-                        connection.Transports = HttpTransportType.LongPolling;
-                        connection.HttpMessageHandlerFactory = handler =>
-                        {
-                            DisableRedirects(handler);
-                            return new PinnedOriginHandler(options.BaseUri, handler);
-                        };
-                        connection.TransportMaxBufferSize = RelayForwarder.MaxResponseBytes;
-                        connection.ApplicationMaxBufferSize = RelayForwarder.MaxResponseBytes;
-                    })
-                    .WithAutomaticReconnect([TimeSpan.Zero, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(10)])
-                    .Build();
+                _connection = RelayHubConnection.Create(options);
                 var connection = _connection;
-                connection.On<JsonElement>("coordination.changed", hint =>
+                connection.On<JsonElement>(RelayHubConnection.ChangedEvent, hint =>
                 {
                     if (TryString(hint, "sessionId", out var recipient) && recipient == sessionId &&
                         Interlocked.Exchange(ref _hintPending, 1) == 0)
@@ -56,12 +41,12 @@ public sealed class SessionHints(AdapterOptions options, Action<string>? writeHi
                     try
                     {
                         using var retryTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-                        await connection.InvokeAsync("WatchSession", sessionId, sessionToken, repositoryId, retryTimeout.Token);
+                        await connection.WatchSessionAsync(sessionId, sessionToken, repositoryId, retryTimeout.Token);
                     }
                     catch (Exception) { /* Hints are optional; do not expose invocation arguments in logs. */ }
                 };
                 await connection.StartAsync(timeout.Token);
-                await connection.InvokeAsync("WatchSession", sessionId, sessionToken, repositoryId, timeout.Token);
+                await connection.WatchSessionAsync(sessionId, sessionToken, repositoryId, timeout.Token);
                 ResetHint();
             }
             finally { _gate.Release(); }
@@ -80,13 +65,6 @@ public sealed class SessionHints(AdapterOptions options, Action<string>? writeHi
         return value.Length is > 0 and <= 8192;
     }
 
-    private static void DisableRedirects(HttpMessageHandler handler)
-    {
-        if (handler is HttpClientHandler clientHandler) clientHandler.AllowAutoRedirect = false;
-        if (handler is SocketsHttpHandler socketsHandler) socketsHandler.AllowAutoRedirect = false;
-        if (handler is DelegatingHandler { InnerHandler: { } inner }) DisableRedirects(inner);
-    }
-
     public async ValueTask DisposeAsync()
     {
         await _gate.WaitAsync();
@@ -97,16 +75,5 @@ public sealed class SessionHints(AdapterOptions options, Action<string>? writeHi
         }
         finally { _gate.Release(); }
         _gate.Dispose();
-    }
-}
-
-/// <summary>Rejects SignalR negotiation redirects before any credential-bearing request leaves the pinned origin.</summary>
-public sealed class PinnedOriginHandler(Uri origin, HttpMessageHandler inner) : DelegatingHandler(inner)
-{
-    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
-    {
-        if (request.RequestUri is not { } target || Uri.Compare(origin, target, UriComponents.SchemeAndServer, UriFormat.SafeUnescaped, StringComparison.OrdinalIgnoreCase) != 0)
-            throw new HttpRequestException("Relay origin redirect rejected.");
-        return base.SendAsync(request, cancellationToken);
     }
 }

@@ -2,6 +2,7 @@ using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using Orleans;
 using PkRelay.Core;
+using PkRelay.Domain;
 using Xunit;
 
 namespace PkRelay.Tests;
