@@ -77,12 +77,10 @@ The configuration uses the wake schema with exactly one route. `codexPath` may b
 
 The waiter only works while its Claude session is open. It does not wake a closed session, and it gives Claude no authority beyond its existing permissions. Treat inbox text as untrusted data, exactly as for Codex.
 
-## Current local pilot
+## October 29 local pilot (retired)
 
-The October 29 test enrolled the existing producer and reviewer chats with private configuration at `C:\Users\PaulC\source\repos\PkRelay\data\wake-live\config.json`. Four automatic turns completed the producer/reviewer exchange without supervisory continuations, and a watcher restart produced no duplicates. The pilot remains running for those two chats; it is not installed as a Windows service or startup task. To stop its wake adapter:
+The October 29 test enrolled the existing producer and reviewer chats with private configuration under `data\wake-live`. Four automatic turns completed the producer/reviewer exchange without supervisory continuations, and a watcher restart produced no duplicates.
 
-```powershell
-New-Item -ItemType File -Path C:\Users\PaulC\source\repos\PkRelay\data\wake-live\stop -Force
-```
+On October 30 the pilot and the later hand-configured Claude and Codex wake folders were retired in favour of node mode, which maps chats and wakes them without per-chat configuration (see [discovery.md](discovery.md)). Their private files were moved out of the repository, not deleted.
 
-This stops future wake dispatch, leaves the relay running, and preserves delivery history. Remove that specific stop file before deliberately starting the same private configuration again. A Codex upgrade may change the installed executable path; update `codexPath` and verify a bounded queue probe before relying on a replacement client.
+To stop a hand-configured watcher, create its configured stop file; this stops future wake dispatch, leaves the relay running, and preserves delivery history. Remove that stop file before deliberately starting the same configuration again. A Codex upgrade may change the installed executable path; update `codexPath` and verify a bounded queue probe before relying on a replacement client.
