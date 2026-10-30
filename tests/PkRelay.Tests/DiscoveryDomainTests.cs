@@ -1,0 +1,146 @@
+using System.Text.Json.Nodes;
+using PkRelay.Contracts;
+using PkRelay.Domain;
+using Xunit;
+
+namespace PkRelay.Tests;
+
+public sealed class DiscoveryDomainTests
+{
+    private static readonly RelayCaller Admin = new("hub", true, [], true);
+    private static readonly RelayCaller Plain = new("machine:m1", false, ["pkrelay"], true);
+    private static readonly DateTimeOffset Now = DateTimeOffset.Parse("2026-10-30T00:00:00Z");
+    private const string Hash = "ABCDEF0123456789";
+
+    private static RelayReply Call(StateEnvelope<CoordinationDocument> state, string op, JsonObject args, RelayCaller? caller = null, int seconds = 0) =>
+        DiscoveryStateMachine.Apply(state, caller ?? Admin, op, args, Now.AddSeconds(seconds));
+    private static JsonObject Data(RelayReply reply) => JsonNode.Parse(reply.DataJson)!.AsObject();
+    private static RelayReply Enroll(StateEnvelope<CoordinationDocument> state, string id = "m1", string hash = Hash) =>
+        Call(state, DiscoveryOperations.Enroll, new() { ["machineId"] = id, ["machineName"] = "PC-B", ["credentialHash"] = hash });
+    private static JsonObject Chat(string thread, string repository = "pkrelay", bool wakeable = true, bool waiter = false, string provider = "codex") => new()
+    {
+        ["provider"] = provider, ["threadId"] = thread, ["relaySessionId"] = "rs-" + thread, ["repositoryId"] = repository, ["label"] = "chat " + thread, ["wakeable"] = wakeable, ["waiterRunning"] = waiter
+    };
+    private static RelayReply Announce(StateEnvelope<CoordinationDocument> state, int seconds = 0, params JsonObject[] chats) =>
+        Call(state, DiscoveryOperations.Announce, new() { ["machineId"] = "m1", ["machineName"] = "PC-B", ["clients"] = new JsonArray("codex", "claude"), ["chats"] = new JsonArray(chats.Select(x => (JsonNode)x).ToArray()) }, seconds: seconds);
+    private static JsonArray Items(RelayReply reply) => Data(reply)["items"]!.AsArray();
+    private static RelayReply Directory(StateEnvelope<CoordinationDocument> state, int seconds = 0, params string[] repositories) =>
+        Call(state, DiscoveryOperations.Directory, new() { ["repositories"] = new JsonArray(repositories.Select(x => (JsonNode)x).ToArray()) }, seconds: seconds);
+
+    [Fact]
+    public void Enroll_then_validate_resolves_the_machine_principal()
+    {
+        var state = new StateEnvelope<CoordinationDocument>();
+        var enrolled = Enroll(state);
+        Assert.True(enrolled.Ok);
+        Assert.Equal("machine:m1", Data(enrolled)["principalId"]!.ToString());
+        var validated = Call(state, DiscoveryOperations.Validate, new() { ["credentialHash"] = Hash });
+        Assert.True(validated.Ok);
+        Assert.Equal("machine:m1", Data(validated)["principalId"]!.ToString());
+        Assert.Equal("m1", Data(validated)["machineId"]!.ToString());
+        Assert.Equal("NotFound", Call(state, DiscoveryOperations.Validate, new() { ["credentialHash"] = "unknown" }).Code);
+    }
+
+    [Fact]
+    public void Reenrolling_the_same_id_with_another_hash_is_refused()
+    {
+        var state = new StateEnvelope<CoordinationDocument>();
+        Assert.True(Enroll(state).Ok);
+        Assert.True(Enroll(state).Ok);
+        Assert.Equal("AliasConflict", Enroll(state, hash: "OTHER").Code);
+    }
+
+    [Fact]
+    public void Revoked_machine_id_cannot_enroll_again()
+    {
+        var state = new StateEnvelope<CoordinationDocument>();
+        Assert.True(Enroll(state).Ok);
+        Assert.True(Call(state, DiscoveryOperations.Revoke, new() { ["machineId"] = "m1" }).Ok);
+        Assert.Equal("MachineRevoked", Enroll(state).Code);
+        Assert.Equal(RelayErrorKind.Denied, RelayErrorCodes.Classify("MachineRevoked"));
+        Assert.Equal("NotFound", Call(state, DiscoveryOperations.Validate, new() { ["credentialHash"] = Hash }).Code);
+    }
+
+    [Fact]
+    public void Announce_returns_routes_only_for_wakeable_chats_of_that_machine()
+    {
+        var state = new StateEnvelope<CoordinationDocument>();
+        Assert.True(Enroll(state).Ok);
+        var reply = Announce(state, 0, Chat("t-wake"), Chat("t-quiet", wakeable: false));
+        Assert.True(reply.Ok);
+        var routes = Data(reply)["routes"]!.AsArray();
+        Assert.Single(routes);
+        Assert.Equal("t-wake", routes[0]!["threadId"]!.ToString());
+        Assert.Equal("rs-t-wake", routes[0]!["relaySessionId"]!.ToString());
+        Assert.Equal("pkrelay", routes[0]!["repositoryId"]!.ToString());
+        Assert.Equal("codex", routes[0]!["provider"]!.ToString());
+        Assert.Empty(Data(Announce(state, 1))["routes"]!.AsArray());
+    }
+
+    [Fact]
+    public void Directory_filters_repositories_and_hides_thread_ids()
+    {
+        var state = new StateEnvelope<CoordinationDocument>();
+        Assert.True(Enroll(state).Ok);
+        Assert.True(Announce(state, 0, Chat("t-in"), Chat("t-out", repository: "other")).Ok);
+        var reply = Directory(state, 0, "pkrelay");
+        Assert.True(reply.Ok);
+        var items = Items(reply);
+        Assert.Single(items);
+        Assert.Equal("rs-t-in", items[0]!["relaySessionId"]!.ToString());
+        Assert.Equal("PC-B", items[0]!["machineName"]!.ToString());
+        Assert.True(items[0]!["reachable"]!.GetValue<bool>());
+        Assert.DoesNotContain("threadId", reply.DataJson);
+        Assert.DoesNotContain("t-out", reply.DataJson);
+        Assert.DoesNotContain(Hash, reply.DataJson);
+        Assert.DoesNotContain("credential", reply.DataJson, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Machine_silent_past_liveness_timeout_is_not_reachable()
+    {
+        var state = new StateEnvelope<CoordinationDocument>();
+        Assert.True(Enroll(state).Ok);
+        Assert.True(Announce(state, 0, Chat("t1")).Ok);
+        Assert.True(Items(Directory(state, 90, "pkrelay"))[0]!["reachable"]!.GetValue<bool>());
+        var stale = Items(Directory(state, 91, "pkrelay"));
+        Assert.Single(stale);
+        Assert.False(stale[0]!["reachable"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public void Revoke_requires_administrator()
+    {
+        var state = new StateEnvelope<CoordinationDocument>();
+        Assert.True(Enroll(state).Ok);
+        Assert.Equal("AdministratorRequired", Call(state, DiscoveryOperations.Revoke, new() { ["machineId"] = "m1" }, Plain).Code);
+        Assert.True(Call(state, DiscoveryOperations.Validate, new() { ["credentialHash"] = Hash }).Ok);
+    }
+
+    [Fact]
+    public void Reachability_follows_the_provider_and_only_internal_callers_may_apply()
+    {
+        var state = new StateEnvelope<CoordinationDocument>();
+        Assert.True(Enroll(state).Ok);
+        Assert.True(Announce(state, 0, Chat("cx", wakeable: true, waiter: false), Chat("cl", provider: "claude", wakeable: false, waiter: true), Chat("cl-idle", provider: "claude", wakeable: true, waiter: false)).Ok);
+        var reachable = Items(Directory(state, 0, "pkrelay")).ToDictionary(x => x!["relaySessionId"]!.ToString(), x => x!["reachable"]!.GetValue<bool>());
+        Assert.True(reachable["rs-cx"]); Assert.True(reachable["rs-cl"]); Assert.False(reachable["rs-cl-idle"]);
+        Assert.Equal("InternalOnly", Call(state, DiscoveryOperations.Directory, new() { ["repositories"] = new JsonArray("pkrelay") }, new RelayCaller("machine:m1", false, ["pkrelay"])).Code);
+    }
+
+    [Fact]
+    public void Read_only_operations_leave_the_state_unchanged_and_announcements_are_bounded()
+    {
+        var state = new StateEnvelope<CoordinationDocument>();
+        Assert.True(Enroll(state).Ok);
+        Assert.True(Announce(state, 0, Chat("t1")).Ok);
+        var before = state.Value.Json;
+        Assert.True(Call(state, DiscoveryOperations.Validate, new() { ["credentialHash"] = Hash }, seconds: 5).Ok);
+        Assert.True(Directory(state, 5, "pkrelay").Ok);
+        Assert.Equal(before, state.Value.Json);
+        var tooMany = Enumerable.Range(0, DiscoveryLimits.MaxChatsPerMachine + 1).Select(i => Chat("t" + i)).ToArray();
+        Assert.Equal("CapacityExceeded", Announce(state, 6, tooMany).Code);
+        Assert.Equal("NotFound", Call(state, DiscoveryOperations.Announce, new() { ["machineId"] = "ghost", ["machineName"] = "x", ["clients"] = new JsonArray(), ["chats"] = new JsonArray() }).Code);
+        Assert.Equal(before, state.Value.Json);
+    }
+}

@@ -44,6 +44,9 @@ public static class AggregateKinds
     public const string Board = "board";
     public const string Lock = "lock";
 
+    /// <summary>The machine-scoped discovery aggregate; a hub singleton keyed by <see cref="ControlKey"/>, applied by <see cref="DiscoveryStateMachine"/> rather than the repository-scoped state machine.</summary>
+    public const string Discovery = "discovery";
+
     /// <summary>The control aggregate is a singleton.</summary>
     public const string ControlKey = "hub";
 }
