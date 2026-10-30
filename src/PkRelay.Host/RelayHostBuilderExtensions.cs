@@ -13,15 +13,18 @@ namespace PkRelay.Host;
 
 public static class RelayHostBuilderExtensions
 {
-    private const string DefaultUrl = "http://127.0.0.1:5271";
     private const int DefaultSiloPort = 21111;
     private const int DefaultGatewayPort = 31111;
     private const string ServiceId = "PkRelay";
 
     public static WebApplicationBuilder AddRelayHost(this WebApplicationBuilder builder)
     {
-        if (string.IsNullOrWhiteSpace(builder.Configuration["urls"])) builder.WebHost.UseUrls(DefaultUrl);
-        builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = RelayLimits.MaxPayloadBytes);
+        if (string.IsNullOrWhiteSpace(builder.Configuration["urls"])) builder.WebHost.UseUrls(HubNetwork.DefaultUrl);
+        builder.WebHost.ConfigureKestrel((context, options) =>
+        {
+            options.Limits.MaxRequestBodySize = RelayLimits.MaxPayloadBytes;
+            HubNetwork.Configure(context.Configuration, context.HostingEnvironment, options);
+        });
         builder.Services.AddSerilog(configuration => configuration.MinimumLevel.Information()
             .MinimumLevel.Override("Microsoft", LogEventLevel.Warning)
             .MinimumLevel.Override("Orleans", LogEventLevel.Warning)
