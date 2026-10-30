@@ -23,7 +23,7 @@ Configure an MCP client to run the absolute `PkRelay.Adapter.dll` path with `dot
 
 Each new chat calls `session_open` with a fresh request identity. Keep its returned session token private to that chat. Attach to an existing task for continuity; do not reuse another chat's binding or private inbox. Claim the task and required registered resources, do IDE work through the existing tools, then report meaningful milestones. Native provider chat tools remain responsible for authorized dispatch and waits.
 
-For automatic local Codex follow-up, use the optional [wake adapter mode](docs/wake.md). It watches durable inbox changes in ordinary code and queues one bounded inbox-check prompt for an explicitly enrolled chat. The relay host remains coordination-only; existing model, tool and approval settings remain in force.
+For automatic local Codex follow-up, use the optional [wake adapter mode](docs/wake.md). It watches durable inbox changes in ordinary code and queues one bounded inbox-check prompt for an explicitly enrolled chat. The relay host remains coordination-only; existing model, tool and approval settings remain in force. A Claude Code session can instead run the adapter's `--await-inbox` mode as a background command; it exits when a new message arrives, so the session wakes without spending turns while it waits.
 
 ## Code layout
 
@@ -46,4 +46,4 @@ Read the [architecture](docs/architecture.md), [host setup](docs/host.md), [adap
 
 ## Reduce coordination overhead
 
-Use [collaboration workflow](docs/collaboration.md) for durable board deltas, structured closure packets and reported criteria/blockers, and an optional next-work offer returned with a milestone. Blocked work stays blocked until an explicit evidenced update; offers require ordinary claims before execution. The complete suite now passes 151 tests, including HTTP/MCP, restart, stale-claim and cleanup regressions. These features reduce repeated reads and round trips; actual all-participant token savings remain unmeasured.
+Use [collaboration workflow](docs/collaboration.md) for durable board deltas, structured closure packets and reported criteria/blockers, and an optional next-work offer returned with a milestone. Blocked work stays blocked until an explicit evidenced update; offers require ordinary claims before execution. The complete suite now passes 154 tests, including HTTP/MCP, restart, stale-claim and cleanup regressions. These features reduce repeated reads and round trips; actual all-participant token savings remain unmeasured.

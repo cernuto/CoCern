@@ -198,6 +198,56 @@ public sealed class WakeTests
         Assert.Empty(fixture.Dispatcher.Prompts);
     }
 
+    [Fact]
+    public async Task Inbox_waiter_returns_on_a_new_message_and_rearming_does_not_wake_again_for_it()
+    {
+        using var fixture = new Fixture { Messages = ["first"] };
+        fixture.PrepareEnrollment();
+        var prompts = new List<string>();
+        Assert.Equal("queued", await fixture.Await(prompts, TimeSpan.FromSeconds(30)));
+        var prompt = Assert.Single(prompts);
+        Assert.Contains("inbox", prompt);
+        Assert.DoesNotContain("UNTRUSTED MESSAGE BODY", prompt);
+        Assert.DoesNotContain("session-secret", prompt);
+
+        // The session re-arms the waiter after handling; an unacknowledged message already surfaced stays quiet.
+        Assert.Equal("timeout", await fixture.Await(prompts, TimeSpan.FromSeconds(2)));
+        Assert.Single(prompts);
+        fixture.Clock.Now += TimeSpan.FromSeconds(11);
+        fixture.Messages = ["first", "second"];
+        Assert.Equal("queued", await fixture.Await(prompts, TimeSpan.FromSeconds(30)));
+        Assert.Equal(2, prompts.Count);
+    }
+
+    [Fact]
+    public async Task Inbox_waiter_honors_the_stop_file()
+    {
+        using var fixture = new Fixture { Messages = ["first"] };
+        fixture.PrepareEnrollment();
+        File.WriteAllText(fixture.Configuration.StopFile, "stop");
+        var prompts = new List<string>();
+        Assert.Equal("stopped", await fixture.Await(prompts, TimeSpan.FromSeconds(30)));
+        Assert.Empty(prompts);
+    }
+
+    [Fact]
+    public void Inbox_waiter_configuration_needs_no_codex_and_exactly_one_route()
+    {
+        using var fixture = new Fixture();
+        fixture.PrepareEnrollment();
+        var path = Path.Combine(Path.GetDirectoryName(fixture.Configuration.StatePath)!, "await.json");
+        void Write(WakeConfiguration configuration) => File.WriteAllText(path, JsonSerializer.Serialize(configuration, JsonSerializerOptions.Web));
+        Write(fixture.Configuration with { CodexPath = "" });
+        Assert.Single(WakeConfiguration.LoadForAwait(path).Routes);
+        Assert.Throws<AdapterConfigurationException>(() => WakeConfiguration.Load(path));
+
+        var otherSession = Path.Combine(Path.GetDirectoryName(path)!, "other-session.json");
+        File.WriteAllText(otherSession, "{\"sessionId\":\"other\",\"sessionToken\":\"other-secret\"}");
+        var second = fixture.Route with { SessionFile = otherSession, ThreadId = "00000000-0000-0000-0000-000000000002" };
+        Write(fixture.Configuration with { CodexPath = "", Routes = [fixture.Route, second] });
+        Assert.Throws<AdapterConfigurationException>(() => WakeConfiguration.LoadForAwait(path));
+    }
+
     private sealed class Fixture : IDisposable
     {
         private readonly string _directory = Path.Combine(Path.GetTempPath(), "pkrelay-wake-" + Guid.NewGuid().ToString("N"));
@@ -223,6 +273,17 @@ public sealed class WakeTests
         }
         public Task<string> Reconcile(CancellationToken cancellationToken = default) => new WakeReconciler(Configuration, State, _forwarder, Dispatcher, Clock).ReconcileAsync(Route, new("session", "session-secret"), cancellationToken);
         public void Restart() { State.Dispose(); State = new(Configuration.StatePath); }
+
+        /// <summary>Writes the token and session files a real enrollment has, and releases the state lock so a waiter can own it.</summary>
+        public void PrepareEnrollment()
+        {
+            File.WriteAllText(Configuration.TokenFile, "client-secret");
+            File.WriteAllText(Route.SessionFile, "{\"sessionId\":\"session\",\"sessionToken\":\"session-secret\"}");
+            State.Dispose();
+        }
+
+        public Task<string> Await(List<string> prompts, TimeSpan timeout) =>
+            WakeWatcher.RunAsync(Configuration, new InboxWaitDispatcher(prompts.Add), exitWhenQueued: true, timeout, CancellationToken.None, new Handler(this), Clock);
         public void Dispose() { State.Dispose(); _client.Dispose(); Directory.Delete(_directory, true); }
         private sealed class Handler(Fixture fixture) : HttpMessageHandler
         {

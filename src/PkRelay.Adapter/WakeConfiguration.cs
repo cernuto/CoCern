@@ -13,14 +13,25 @@ public sealed record WakeConfiguration(string RelayUrl, string TokenFile, string
         UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow
     };
 
-    public static WakeConfiguration Load(string path)
+    /// <summary>Loads a Codex wake configuration; the configured Codex executable must exist.</summary>
+    public static WakeConfiguration Load(string path) => Load(path, requireCodex: true);
+
+    /// <summary>Loads an inbox-waiter configuration: exactly one route, and no Codex executable is needed.</summary>
+    public static WakeConfiguration LoadForAwait(string path)
+    {
+        var config = Load(path, requireCodex: false);
+        return config.Routes.Length == 1 ? config : throw new AdapterConfigurationException("An inbox waiter enrolls exactly one route.");
+    }
+
+    private static WakeConfiguration Load(string path, bool requireCodex)
     {
         try
         {
             RequirePath(path);
             var config = JsonSerializer.Deserialize<WakeConfiguration>(ReadBounded(path, 65536), JsonOptions) ?? throw new JsonException();
-            foreach (var file in new[] { config.TokenFile, config.CodexPath, config.StatePath, config.StopFile }) RequirePath(file);
-            if (!File.Exists(config.CodexPath) || config.StatePath == config.StopFile || config.Routes is not { Length: >= 1 and <= 16 }) throw new JsonException();
+            foreach (var file in new[] { config.TokenFile, config.StatePath, config.StopFile }) RequirePath(file);
+            if (requireCodex && (!Path.IsPathFullyQualified(config.CodexPath ?? "") || !File.Exists(config.CodexPath))) throw new JsonException();
+            if (config.StatePath == config.StopFile || config.Routes is not { Length: >= 1 and <= 16 }) throw new JsonException();
             _ = config.AdapterOptions();
             var threads = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var sessions = new HashSet<string>(StringComparer.Ordinal);

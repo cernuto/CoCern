@@ -2,6 +2,7 @@
   <PropertyGroup><OutputType>Exe</OutputType></PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../PkRelay.Contracts/PkRelay.Contracts.csproj" />
+    <InternalsVisibleTo Include="PkRelay.Tests" />
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <PackageReference Include="ModelContextProtocol" />
     <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" />

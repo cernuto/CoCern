@@ -14,6 +14,21 @@ try
         await WakeWatcher.RunAsync(configuration, shutdown.Token);
         return 0;
     }
+    if (args.Length > 0 && args[0] == "--await-inbox")
+    {
+        // Exit codes tell the waiting session what happened: 0 new message, 2 timeout, 3 stopped.
+        TimeSpan? timeout = args.Length switch
+        {
+            2 => null,
+            4 when args[2] == "--timeout-minutes" && int.TryParse(args[3], out var minutes) && minutes is > 0 and <= 1440 => TimeSpan.FromMinutes(minutes),
+            _ => throw new AdapterConfigurationException("Use --await-inbox with one absolute configuration path and optional --timeout-minutes 1-1440.")
+        };
+        var configuration = WakeConfiguration.LoadForAwait(args[1]);
+        using var shutdown = new CancellationTokenSource();
+        Console.CancelKeyPress += (_, cancel) => { cancel.Cancel = true; shutdown.Cancel(); };
+        var status = await WakeWatcher.AwaitInboxAsync(configuration, Console.Out.WriteLine, timeout, shutdown.Token);
+        return status switch { "queued" => 0, "timeout" => 2, _ => 3 };
+    }
     var options = AdapterOptions.FromEnvironment();
     using var http = new HttpClient(RelayForwarder.CreateHandler()) { Timeout = TimeSpan.FromSeconds(60) };
     await using var hints = new SessionHints(options);

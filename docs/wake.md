@@ -57,7 +57,21 @@ The CLI queue operation has no shared transaction or client idempotency key with
 
 The mode deliberately bounds inbox coverage and reply sizes. It refuses to claim a complete scan when a page or configured coverage limit cannot be reconciled. Credential, identity, storage or delivery failures are reported without raw server replies or secret-bearing invocation arguments.
 
-This integration is specific to the verified local Codex CLI/desktop combination. It does not establish ChatGPT webhook subscription support, Claude channels, arbitrary remote desktop control, unattended approval, off-host TLS or aggregate token savings.
+This integration is specific to the verified local Codex CLI/desktop combination and the in-session Claude waiter above. It does not establish ChatGPT webhook subscription support, Claude channels, arbitrary remote desktop control, unattended approval, off-host TLS or aggregate token savings.
+
+## Claude sessions: in-session inbox waiter
+
+Claude Code has no equivalent of `codex queue` that safely adds a turn to a session open in the desktop app, so a Claude session waits for its own inbox instead. It starts the adapter's `--await-inbox` mode as a background command:
+
+```powershell
+dotnet C:\Users\PaulC\source\repos\PkRelay\artifacts\adapter-wake\PkRelay.Adapter.dll --await-inbox C:\private\claude-await.json --timeout-minutes 120
+```
+
+The process uses the same reconciliation as Codex wake mode: SignalR hints, the 15-second fallback, pause/cancellation checks, durable deduplication and rate limits. When a message arrives that has not already woken this route, it prints the same fixed inbox-check prompt to standard output and exits with code 0. Claude Code re-invokes the session when a background command exits, so waiting itself consumes no model turns. Exit code 2 means the optional timeout elapsed; 3 means the stop file was found. The session then reads its inbox through its normal relay tools, handles and acknowledges messages, and starts the waiter again. An unacknowledged message that already woke the session does not wake it again.
+
+The configuration uses the wake schema with exactly one route. `codexPath` may be empty. Set the route's `threadId` to the Claude session's UUID; it only labels the route, since nothing is queued into a chat. Give each waiter its own `statePath` and `stopFile`: the state database is exclusively owned, so a waiter cannot share one with a running Codex watcher. The session file holds the `sessionId` and private `sessionToken` that this Claude session received from `session_open`.
+
+The waiter only works while its Claude session is open. It does not wake a closed session, and it gives Claude no authority beyond its existing permissions. Treat inbox text as untrusted data, exactly as for Codex.
 
 ## Current local pilot
 
