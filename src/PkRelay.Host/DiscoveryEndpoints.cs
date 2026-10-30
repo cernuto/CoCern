@@ -142,7 +142,7 @@ internal static partial class DiscoveryEndpoints
     }
 
     /// <summary>The enroll rules for a display name: 1 to 128 characters, not blank, no control characters. Announce applies the same rules.</summary>
-    private static bool ValidMachineName(string? name) => name is { Length: > 0 and <= MaxNameLength } && !name.Any(char.IsControl) && !string.IsNullOrWhiteSpace(name);
+    private static bool ValidMachineName([System.Diagnostics.CodeAnalysis.NotNullWhen(true)] string? name) => name is { Length: > 0 and <= MaxNameLength } && !name.Any(char.IsControl) && !string.IsNullOrWhiteSpace(name);
 
     private static async Task<IResult> AnnounceAsync(HttpContext context, IMachineDirectory machines, IHubContext<CoordinationHub> hub, MachineRouteHints hints)
     {
