@@ -362,14 +362,17 @@ public sealed class NodeTests : IDisposable
             HubHandler = () => host.Server.CreateHandler(),
             MachineName = "Node PC",
             FirstRetry = TimeSpan.FromMilliseconds(10),
-            Trace = events.Enqueue
+            Trace = events.Enqueue,
+            CodexExecutable = () => null
         };
         using var stop = new CancellationTokenSource();
         var run = NodeRunner.RunAsync(state, new Uri("http://127.0.0.1:5271"), transport, error, stop.Token);
         await WaitForAsync(() => Count("announced") >= 1, run);
         stop.Cancel();
         Assert.Equal(0, await run);
-        Assert.Equal([null], pins);
+        // The announce client and the wake watcher's client: neither is pinned.
+        Assert.NotEmpty(pins);
+        Assert.All(pins, Assert.Null);
         Assert.Null(state.Fingerprint);
         Assert.True(state.Enrolled);
         Assert.Equal("http://127.0.0.1:5271/", state.HubUrl);
@@ -467,7 +470,8 @@ public sealed class NodeTests : IDisposable
         var run = NodeRunner.RunAsync(state, InMemoryHub, new NodeTransport
         {
             ProbeFingerprint = transport.ProbeFingerprint, CreateHandler = transport.CreateHandler, HubHandler = transport.HubHandler, MachineName = "Node PC",
-            Locators = [locator, new ClaudeChatLocator(claude)], AnnounceInterval = transport.AnnounceInterval, FirstRetry = transport.FirstRetry, MaxRetry = transport.MaxRetry, Trace = events.Enqueue
+            Locators = [locator, new ClaudeChatLocator(claude)], AnnounceInterval = transport.AnnounceInterval, FirstRetry = transport.FirstRetry, MaxRetry = transport.MaxRetry, Trace = events.Enqueue,
+            CodexExecutable = () => Path.Combine(root, "codex.exe"), CodexDispatcher = _ => new RecordingDispatcher()
         }, error, stop.Token);
         await WaitForAsync(() => traffic.Accepted is not null && Count("announced") >= 2, run);
         stop.Cancel();
@@ -503,7 +507,7 @@ public sealed class NodeTests : IDisposable
         var run = NodeRunner.RunAsync(state, InMemoryHub, new NodeTransport
         {
             ProbeFingerprint = transport.ProbeFingerprint, CreateHandler = transport.CreateHandler, HubHandler = transport.HubHandler, MachineName = "Node PC",
-            Locators = [], AnnounceInterval = transport.AnnounceInterval, FirstRetry = transport.FirstRetry, MaxRetry = transport.MaxRetry, Trace = events.Enqueue
+            Locators = [], AnnounceInterval = transport.AnnounceInterval, FirstRetry = transport.FirstRetry, MaxRetry = transport.MaxRetry, Trace = events.Enqueue, CodexExecutable = () => null
         }, error, stop.Token);
         await WaitForAsync(() => Count("announced") >= 4, run);
         stop.Cancel();
@@ -738,7 +742,7 @@ public sealed class NodeTests : IDisposable
         {
             ProbeFingerprint = transport.ProbeFingerprint, CreateHandler = transport.CreateHandler, HubHandler = transport.HubHandler, MachineName = "Node PC",
             Locators = [new CodexChatLocator(codex, open: Counting(opens))], LocateBudget = TimeSpan.Zero,
-            AnnounceInterval = transport.AnnounceInterval, FirstRetry = transport.FirstRetry, MaxRetry = transport.MaxRetry, Trace = events.Enqueue
+            AnnounceInterval = transport.AnnounceInterval, FirstRetry = transport.FirstRetry, MaxRetry = transport.MaxRetry, Trace = events.Enqueue, CodexExecutable = () => null
         }, error, stop.Token);
         await WaitForAsync(() => Count("announced") >= 2, run);
         stop.Cancel();
@@ -750,6 +754,232 @@ public sealed class NodeTests : IDisposable
         Assert.Equal((null, false), (Handle("s-slow").Chat, Handle("s-slow").Unmapped));
         // Still pending, so the next cycle with time to spare finds it.
         Assert.Equal(("codex", thread, true), Route(Announced(Chats([new CodexChatLocator(codex)]).Read(_ => true))["s-slow"]));
+    }
+
+    [Fact]
+    public void Missing_codex_executable_marks_routes_unwakeable()
+    {
+        var openedAt = DateTimeOffset.UtcNow.AddMinutes(-1);
+        var (codexThread, claudeThread) = (Guid.NewGuid().ToString(), Guid.NewGuid().ToString());
+        NodeState.WriteSessionHandle(DataDir, new SessionHandle("s-codex", "synthetic-token-codex", "repo", "Codex chat", openedAt, Chat: new ChatLocation("codex", codexThread)));
+        NodeState.WriteSessionHandle(DataDir, new SessionHandle("s-claude", "synthetic-token-claude", "repo", "Claude chat", openedAt, Chat: new ChatLocation("claude", claudeThread)));
+
+        var without = Announced(new NodeChats(DataDir, [], TimeProvider.System, NodeChats.DefaultLocateWindow, NodeChats.DefaultBudget, codexFound: () => false).Read(_ => true));
+        Assert.Equal(("codex", codexThread, false), Route(without["s-codex"]));
+        Assert.Equal(("claude", claudeThread, true), Route(without["s-claude"]));
+        Assert.Equal(("codex", codexThread, true), Route(Announced(Chats([]).Read(_ => true))["s-codex"]));
+
+        // The newest installed codex.exe under %LOCALAPPDATA%\OpenAI\Codex\bin\<version>\ (a temporary stand-in here).
+        var local = Path.Combine(root, "local-app-data");
+        Assert.Null(CodexLocator.Find(local));
+        string Install(string version, DateTime written)
+        {
+            var path = Path.Combine(local, "OpenAI", "Codex", "bin", version, "codex.exe");
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllText(path, "not a program");
+            File.SetLastWriteTimeUtc(path, written);
+            return path;
+        }
+        Install("0.9.0", DateTime.UtcNow.AddDays(-2));
+        var newest = Install("1.0.0", DateTime.UtcNow.AddMinutes(-5));
+        Directory.CreateDirectory(Path.Combine(local, "OpenAI", "Codex", "bin", "empty"));
+        Assert.Equal(newest, CodexLocator.Find(local));
+
+        // Only a codex route whose handle on this PC names the same thread becomes a target, and only when codex.exe was found.
+        var dispatcher = new RecordingDispatcher();
+        NodeRoute[] routes =
+        [
+            new("codex", codexThread, "s-codex", "repo"), new("claude", claudeThread, "s-claude", "repo"), new("codex", Guid.NewGuid().ToString(), "s-elsewhere", "repo"),
+            new("codex", Guid.NewGuid().ToString(), "s-codex", "repo"), new("codex", codexThread, @"..\sessions\s-codex", "repo"), new("codex", codexThread, "s-codex", "other-repo")
+        ];
+        Assert.Empty(NodeRunner.WakeTargets(DataDir, routes, null, _ => dispatcher, "Node PC"));
+        var target = Assert.Single(NodeRunner.WakeTargets(DataDir, routes, newest, path => { Assert.Equal(newest, path); return dispatcher; }, "Node PC"));
+        Assert.Equal((codexThread, "s-codex", "synthetic-token-codex", "repo"), (target.Route.ThreadId, target.Session.SessionId, target.Session.SessionToken, target.Route.RepositoryId));
+        Assert.Same(dispatcher, target.Dispatcher);
+    }
+
+    [Fact]
+    public async Task Node_wakes_its_codex_chats_from_hub_routes_until_the_stop_file_appears()
+    {
+        var thread = Guid.NewGuid().ToString();
+        NodeState.WriteSessionHandle(DataDir, new SessionHandle("s-codex", "synthetic-token-codex", "repo", "Codex chat", DateTimeOffset.UtcNow.AddMinutes(-1), Chat: new ChatLocation("codex", thread)));
+        await using var host = Hub();
+        var traffic = new HubTraffic();
+        using var state = NodeState.Open(DataDir);
+        var dispatcher = new RecordingDispatcher();
+        NodeTransport Waking()
+        {
+            var transport = InMemory(host, traffic, TimeSpan.FromMilliseconds(50));
+            return new NodeTransport
+            {
+                ProbeFingerprint = transport.ProbeFingerprint, CreateHandler = transport.CreateHandler, HubHandler = transport.HubHandler, MachineName = "Node PC", Locators = [],
+                AnnounceInterval = transport.AnnounceInterval, FirstRetry = transport.FirstRetry, MaxRetry = transport.MaxRetry, Trace = events.Enqueue,
+                CodexExecutable = () => Path.Combine(root, "codex.exe"), CodexDispatcher = _ => dispatcher, WakeInterval = TimeSpan.FromMilliseconds(100)
+            };
+        }
+        using (var stop = new CancellationTokenSource())
+        {
+            var run = NodeRunner.RunAsync(state, InMemoryHub, Waking(), error, stop.Token);
+            await WaitForAsync(() => Count("wake-target") >= 1, run);
+            Assert.True(File.Exists(Path.Combine(DataDir, "wake.db")));
+            stop.Cancel();
+            Assert.Equal(0, await run);
+        }
+        Assert.Equal(("codex", thread, true), Route(JsonNode.Parse(traffic.Accepted!)!["chats"]!.AsArray().Single()!.AsObject()));
+
+        // With the stop file the node keeps announcing but never starts waking.
+        File.WriteAllText(Path.Combine(DataDir, "stop"), "");
+        events.Clear();
+        using (var stop = new CancellationTokenSource())
+        {
+            var run = NodeRunner.RunAsync(state, InMemoryHub, Waking(), error, stop.Token);
+            await WaitForAsync(() => Count("announced") >= 3, run);
+            stop.Cancel();
+            Assert.Equal(0, await run);
+        }
+        Assert.Equal(0, Count("waking"));
+        Assert.Equal(0, Count("wake-target"));
+        Assert.Empty(dispatcher.Threads);
+    }
+
+    [Fact]
+    public async Task Claude_waiter_presence_follows_its_process()
+    {
+        var chatId = Guid.NewGuid().ToString();
+        EnrollOnLoopback();
+        NodeState.WriteSessionHandle(DataDir, new SessionHandle("s-claude", "synthetic-token-claude", "repo", "Claude chat", DateTimeOffset.UtcNow.AddMinutes(-1), new ChatLocation("claude", chatId), new ChatLocation("claude", chatId)));
+        var inbox = new InboxStub(new string('c', 64), "s-claude", "synthetic-token-claude");
+        var prompts = new List<string>();
+        var pid = Path.Combine(DataDir, "waiters", chatId + ".pid");
+        bool Waiting() => Announced(Chats([]).Read(_ => true))["s-claude"]["waiterRunning"]!.GetValue<bool>();
+        Assert.False(Waiting());
+
+        // The node folder stays locked by a running node; the waiter never needs node.lock.
+        using (NodeState.Open(DataDir))
+        {
+            var waiting = ClaudeWaiter.RunAsync(DataDir, chatId.ToUpperInvariant(), prompts.Add, TimeSpan.FromSeconds(3), CancellationToken.None, inbox, () => new NoHub());
+            await WaitForAsync(() => File.Exists(pid), waiting);
+            Assert.True(Waiting());
+            AssertPrivate(pid);
+            // A second waiter for the same chat is refused and leaves the live waiter's file alone.
+            await Assert.ThrowsAsync<AdapterConfigurationException>(() => ClaudeWaiter.RunAsync(DataDir, chatId, prompts.Add, TimeSpan.FromSeconds(1), CancellationToken.None, inbox, () => new NoHub()));
+            Assert.True(File.Exists(pid));
+            Assert.True(Waiting());
+            Assert.Equal("timeout", await waiting);
+        }
+        Assert.False(File.Exists(pid));
+        Assert.False(Waiting());
+
+        inbox.Messages = ["m1"];
+        Assert.Equal("queued", await ClaudeWaiter.RunAsync(DataDir, chatId, prompts.Add, TimeSpan.FromSeconds(30), CancellationToken.None, inbox, () => new NoHub()));
+        Assert.Contains("inbox", Assert.Single(prompts));
+        Assert.DoesNotContain("synthetic-token", prompts[0]);
+        Assert.False(File.Exists(pid));
+
+        var missing = await Assert.ThrowsAsync<AdapterConfigurationException>(() => ClaudeWaiter.RunAsync(DataDir, Guid.NewGuid().ToString(), prompts.Add, TimeSpan.FromSeconds(1), CancellationToken.None, inbox, () => new NoHub()));
+        Assert.Contains("session_open", missing.Message);
+        Assert.False(Directory.EnumerateFiles(Path.Combine(DataDir, "waiters"), "*.pid").Any());
+    }
+
+    [Fact]
+    public void Claude_waiter_with_several_handles_uses_the_newest()
+    {
+        var chatId = Guid.NewGuid().ToString();
+        var now = DateTimeOffset.UtcNow;
+        NodeState.WriteSessionHandle(DataDir, new SessionHandle("s-old", "synthetic-token-old", "repo", "Old", now.AddHours(-2), new ChatLocation("claude", chatId)));
+        NodeState.WriteSessionHandle(DataDir, new SessionHandle("s-new", "synthetic-token-new", "repo", "New", now.AddMinutes(-1), Chat: new ChatLocation("claude", chatId)));
+        NodeState.WriteSessionHandle(DataDir, new SessionHandle("s-codex", "synthetic-token-codex", "repo", "Codex", now, Chat: new ChatLocation("codex", chatId)));
+        Assert.Equal("s-new", ClaudeWaiter.FindHandle(DataDir, chatId)?.SessionId);
+        Assert.Null(ClaudeWaiter.FindHandle(DataDir, Guid.NewGuid().ToString()));
+    }
+
+    [Fact]
+    public void Waiter_pid_file_from_a_reused_process_id_is_ignored_and_removed()
+    {
+        var chatId = Guid.NewGuid().ToString();
+        NodeState.WriteSessionHandle(DataDir, new SessionHandle("s-claude", "synthetic-token-claude", "repo", "Claude chat", DateTimeOffset.UtcNow.AddMinutes(-1), Chat: new ChatLocation("claude", chatId)));
+        var pid = Path.Combine(DataDir, "waiters", chatId + ".pid");
+        bool Waiting() => Announced(Chats([]).Read(_ => true))["s-claude"]["waiterRunning"]!.GetValue<bool>();
+        using var current = Process.GetCurrentProcess();
+        var started = current.StartTime.ToUniversalTime();
+
+        // The same process ID, but a process that started at another time: the waiter is gone and the ID was reused.
+        ClaudeWaiter.WritePid(DataDir, chatId, current.Id, started.AddHours(-1));
+        Assert.False(Waiting());
+        Assert.False(File.Exists(pid));
+
+        // A process that has exited.
+        using var exited = Process.Start(OperatingSystem.IsWindows() ? new ProcessStartInfo("cmd.exe", "/c exit 0") { CreateNoWindow = true, UseShellExecute = false } : new ProcessStartInfo("/bin/sh", "-c true"))!;
+        var exitedStart = exited.StartTime.ToUniversalTime();
+        exited.WaitForExit();
+        ClaudeWaiter.WritePid(DataDir, chatId, exited.Id, exitedStart);
+        Assert.False(Waiting());
+        Assert.False(File.Exists(pid));
+
+        // An orphaned file for a chat this PC no longer announces is cleaned up too; the live waiter's file stays.
+        var orphan = Guid.NewGuid().ToString();
+        ClaudeWaiter.WritePid(DataDir, orphan, exited.Id, exitedStart);
+        File.WriteAllText(Path.Combine(DataDir, "waiters", "not-a-pid-file.pid"), "garbage");
+        ClaudeWaiter.WritePid(DataDir, chatId, current.Id, started);
+        Assert.True(Waiting());
+        Assert.True(File.Exists(pid));
+        Assert.False(File.Exists(Path.Combine(DataDir, "waiters", orphan + ".pid")));
+    }
+
+    [Fact]
+    public void Unmapped_handles_older_than_a_day_are_pruned()
+    {
+        var now = DateTimeOffset.UtcNow;
+        NodeState.WriteSessionHandle(DataDir, new SessionHandle("s-stale", "synthetic-token-stale", "repo", "Stale", now.AddHours(-25), Unmapped: true));
+        NodeState.WriteSessionHandle(DataDir, new SessionHandle("s-never-found", "synthetic-token-never", "repo", "Never found", now.AddHours(-25)));
+        NodeState.WriteSessionHandle(DataDir, new SessionHandle("s-recent", "synthetic-token-recent", "repo", "Recent", now.AddHours(-1), Unmapped: true));
+        NodeState.WriteSessionHandle(DataDir, new SessionHandle("s-located", "synthetic-token-located", "repo", "Located", now.AddDays(-3), Chat: new ChatLocation("codex", Guid.NewGuid().ToString())));
+        NodeState.WriteSessionHandle(DataDir, new SessionHandle("s-denied", "synthetic-token-denied", "elsewhere", "Denied", now.AddHours(-25), Unmapped: true));
+
+        var chats = Announced(Chats([]).Read(repository => repository == "repo"));
+
+        Assert.Equal(["s-located", "s-recent"], chats.Keys.Order());
+        string HandlePath(string id) => Path.Combine(DataDir, "sessions", id + ".json");
+        Assert.False(File.Exists(HandlePath("s-stale")));
+        Assert.False(File.Exists(HandlePath("s-never-found")));
+        Assert.False(File.Exists(HandlePath("s-denied")));
+        Assert.True(File.Exists(HandlePath("s-recent")));
+        Assert.True(File.Exists(HandlePath("s-located")));
+    }
+
+    private void EnrollOnLoopback()
+    {
+        using var seed = NodeState.Open(DataDir);
+        seed.SetHub("http://127.0.0.1:5271/", null);
+        seed.SaveCredential(new string('c', 64));
+    }
+
+    private sealed class RecordingDispatcher : IWakeDispatcher
+    {
+        public readonly ConcurrentQueue<string> Threads = new();
+        public Task<bool> QueueAsync(string threadId, string prompt, CancellationToken cancellationToken) { Threads.Enqueue(threadId); return Task.FromResult(true); }
+    }
+
+    private sealed class NoHub : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
+    }
+
+    /// <summary>The hub's get_status and check_inbox for one session, checking the bearer and session token on every call.</summary>
+    private sealed class InboxStub(string credential, string sessionId, string sessionToken) : HttpMessageHandler
+    {
+        public volatile string[] Messages = [];
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            if (request.Headers.Authorization?.Parameter != credential) return new(HttpStatusCode.Unauthorized);
+            using var args = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(cancellationToken));
+            if (args.RootElement.GetProperty("sessionId").GetString() != sessionId || args.RootElement.GetProperty("sessionToken").GetString() != sessionToken) return new(HttpStatusCode.Forbidden);
+            var messages = Messages;
+            var data = request.RequestUri!.AbsolutePath.EndsWith("get_status")
+                ? JsonSerializer.Serialize(new { sessionId, control = new { paused = false, requests = Array.Empty<object>() } })
+                : JsonSerializer.Serialize(new { items = messages.Select(id => new { messageId = id, repositoryId = "repo", text = "UNTRUSTED" }), nextCursor = (int?)null, truncated = false, total = messages.Length });
+            return new(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new { ok = true, code = "ok", dataJson = data, version = 0 }), System.Text.Encoding.UTF8, "application/json") };
+        }
     }
 
     private NodeChats Chats(IChatLocator[] locators, TimeProvider? clock = null) => new(DataDir, locators, clock ?? TimeProvider.System, NodeChats.DefaultLocateWindow, NodeChats.DefaultBudget);
@@ -827,7 +1057,8 @@ public sealed class NodeTests : IDisposable
         MachineName = "Node PC",
         Chats = _ => Task.FromResult(new JsonArray(Chat())),
         FirstRetry = TimeSpan.FromMilliseconds(20),
-        Trace = events.Enqueue
+        Trace = events.Enqueue,
+        CodexExecutable = () => null
     };
 
     private NodeTransport InMemory(RelayHostFixture host, HubTraffic traffic, TimeSpan? interval = null, int credentialAttempts = 5) => new()
@@ -842,7 +1073,9 @@ public sealed class NodeTests : IDisposable
         AnnounceInterval = interval ?? TimeSpan.FromSeconds(30),
         FirstRetry = TimeSpan.FromMilliseconds(10),
         MaxRetry = TimeSpan.FromMilliseconds(50),
-        Trace = events.Enqueue
+        Trace = events.Enqueue,
+        // Never the real %LOCALAPPDATA% lookup, so no test can reach a real codex.exe.
+        CodexExecutable = () => null
     };
 
     private static JsonObject Chat() => new() { ["provider"] = "codex", ["threadId"] = "t1", ["relaySessionId"] = "s-t1", ["repositoryId"] = "repo", ["label"] = "Node chat", ["wakeable"] = true, ["waiterRunning"] = false };

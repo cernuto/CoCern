@@ -248,6 +248,64 @@ public sealed class WakeTests
         Assert.Throws<AdapterConfigurationException>(() => WakeConfiguration.LoadForAwait(path));
     }
 
+    [Fact]
+    public async Task Routes_added_while_running_are_reconciled_without_restart()
+    {
+        using var fixture = new Fixture { Messages = ["first"] };
+        fixture.PrepareEnrollment();
+        var current = Array.Empty<WakeTarget>();
+        var reads = 0;
+        var nudge = new WakeNudge();
+        var run = WakeWatcher.RunAsync(fixture.Runtime(nudge), _ => { Interlocked.Increment(ref reads); return Task.FromResult<IReadOnlyList<WakeTarget>>(Volatile.Read(ref current)); },
+            exitWhenQueued: true, TimeSpan.FromSeconds(30), CancellationToken.None, fixture.CreateHandler(), fixture.Clock);
+        await WaitFor(() => Volatile.Read(ref reads) >= 1, run);
+        Assert.Empty(fixture.Dispatcher.Prompts);
+
+        // A route discovered after start is picked up on the next pass; nothing restarts.
+        Volatile.Write(ref current, [new WakeTarget(fixture.Route, new("session", "session-secret"), fixture.Dispatcher)]);
+        nudge.Pulse();
+        Assert.Equal("queued", await run);
+        Assert.Single(fixture.Dispatcher.Prompts);
+    }
+
+    [Fact]
+    public async Task Removed_route_is_no_longer_woken()
+    {
+        using var fixture = new Fixture { Messages = ["first"] };
+        fixture.PrepareEnrollment();
+        WakeTarget[] current = [new WakeTarget(fixture.Route, new("session", "session-secret"), fixture.Dispatcher)];
+        var reads = 0;
+        var run = WakeWatcher.RunAsync(fixture.Runtime(new WakeNudge()) with { Interval = TimeSpan.FromMilliseconds(100) }, _ => { Interlocked.Increment(ref reads); return Task.FromResult<IReadOnlyList<WakeTarget>>(Volatile.Read(ref current)); },
+            exitWhenQueued: false, TimeSpan.FromSeconds(60), CancellationToken.None, fixture.CreateHandler(), fixture.Clock);
+        await WaitFor(() => fixture.Dispatcher.Prompts.Count == 1, run);
+
+        Volatile.Write(ref current, []);
+        var seen = Volatile.Read(ref reads);
+        await WaitFor(() => Volatile.Read(ref reads) > seen, run);
+        var checks = fixture.Cursors.Count;
+        // A new message that would wake a live route, outside both rate limits.
+        fixture.Clock.Now += TimeSpan.FromMinutes(11);
+        fixture.Messages = ["first", "second"];
+        seen = Volatile.Read(ref reads);
+        await WaitFor(() => Volatile.Read(ref reads) >= seen + 3, run);
+        Assert.Equal(checks, fixture.Cursors.Count);
+        Assert.Single(fixture.Dispatcher.Prompts);
+
+        File.WriteAllText(fixture.Configuration.StopFile, "stop");
+        Assert.Equal("stopped", await run);
+    }
+
+    private static async Task WaitFor(Func<bool> condition, Task run)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(20);
+        while (!condition() && DateTime.UtcNow < deadline)
+        {
+            if (run.IsCompleted) await run;
+            await Task.Delay(25);
+        }
+        Assert.True(condition());
+    }
+
     private sealed class Fixture : IDisposable
     {
         private readonly string _directory = Path.Combine(Path.GetTempPath(), "pkrelay-wake-" + Guid.NewGuid().ToString("N"));
@@ -282,6 +340,14 @@ public sealed class WakeTests
             State.Dispose();
         }
 
+        public HttpMessageHandler CreateHandler() => new Handler(this);
+
+        /// <summary>The same enrollment as a runtime; the hint channel answers 404 so tests never reach a real hub.</summary>
+        public WakeRuntime Runtime(WakeNudge nudge) => new(new AdapterOptions(Configuration.RelayUrl, "client-secret", signalR: true), Configuration.StatePath, Configuration.StopFile, Configuration.RelayUrl)
+        {
+            Nudge = nudge, HubHandler = () => new NoHub()
+        };
+
         public Task<string> Await(List<string> prompts, TimeSpan timeout) =>
             WakeWatcher.RunAsync(Configuration, new InboxWaitDispatcher(prompts.Add), exitWhenQueued: true, timeout, CancellationToken.None, new Handler(this), Clock);
         public void Dispose() { State.Dispose(); _client.Dispose(); Directory.Delete(_directory, true); }
@@ -303,6 +369,10 @@ public sealed class WakeTests
                 return new(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new { ok = true, code = "ok", dataJson = data, version = 0 }), Encoding.UTF8, "application/json") };
             }
         }
+    }
+    private sealed class NoHub : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
     }
     private sealed class Clock : TimeProvider
     {

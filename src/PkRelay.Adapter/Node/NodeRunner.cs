@@ -34,15 +34,29 @@ internal sealed class NodeTransport
     /// <summary>How many times, and how far apart, a credential file that exists but cannot be read is tried at startup before the node gives up.</summary>
     public int CredentialAttempts { get; init; } = 5;
     public TimeSpan CredentialRetryDelay { get; init; } = TimeSpan.FromMilliseconds(500);
-    /// <summary>Fixed event names for tests (enrolled, announced, watching, hint, unauthorized); never carries data.</summary>
+    /// <summary>The Codex executable wakes run; null when none is installed, so Codex chats are announced unwakeable.</summary>
+    public Func<string?> CodexExecutable { get; init; } = CodexLocator.Find;
+    /// <summary>How a wake reaches a Codex chat, given the executable; tests replace it so no real <c>codex.exe</c> ever runs.</summary>
+    public Func<string, IWakeDispatcher> CodexDispatcher { get; init; } = executable => new CodexWakeDispatcher(executable);
+    /// <summary>The wake watcher's fallback pass when no hint arrives.</summary>
+    public TimeSpan WakeInterval { get; init; } = TimeSpan.FromSeconds(15);
+    /// <summary>Fixed event names for tests (enrolled, announced, watching, hint, unauthorized, waking, wake-target); never carries data.</summary>
     public Action<string>? Trace { get; init; }
 }
 
-/// <summary>The long-running node on each PC: pins the hub certificate on first use, enrolls once, then announces every interval and whenever the hub hints that this machine's routes changed.</summary>
+/// <summary>One of this PC's wakeable chats, as the hub's announce reply lists it.</summary>
+public sealed record NodeRoute(string Provider, string ThreadId, string RelaySessionId, string RepositoryId);
+
+/// <summary>
+/// The long-running node on each PC: pins the hub certificate on first use, enrolls once, then announces every interval and whenever the hub hints that this machine's routes changed.
+/// The routes in each announce reply drive waking: every Codex route whose session handle is on this PC is woken through <c>codex queue</c>, with state in <c>wake.db</c>.
+/// A <c>stop</c> file in the node folder stops waking; announcing goes on. Claude chats are never woken here; their own <see cref="ClaudeWaiter"/> waits on their inbox.
+/// </summary>
 public sealed class NodeRunner : IAsyncDisposable
 {
     public const int MismatchExitCode = 4;
     private const int MaxReplyBytes = 64 * 1024;
+    private const string WakeDatabase = "wake.db";
     private enum Next { Wait, Retry, Again, Exit }
 
     private readonly NodeState _state;
@@ -62,11 +76,18 @@ public sealed class NodeRunner : IAsyncDisposable
     private Task _hintsTask = Task.CompletedTask;
     private bool _trouble;
     private int _exitCode;
+    /// <summary>The routes from the last accepted announcement; replaced whole, read by the wake watcher.</summary>
+    private volatile NodeRoute[] _routes = [];
+    private readonly WakeNudge _nudge = new();
+    private Task _wakeTask = Task.CompletedTask;
+    private CancellationTokenSource? _wakeStop;
+    private string? _wakeCredential;
+    private bool _wakeTrouble;
 
     private NodeRunner(NodeState state, Uri hub, NodeTransport transport, TextWriter error)
     {
         (_state, _hub, _transport, _error) = (state, hub, transport, error);
-        _chats = new NodeChats(state.Folder, transport.Locators, transport.Clock, transport.LocateWindow, transport.LocateBudget);
+        _chats = new NodeChats(state.Folder, transport.Locators, transport.Clock, transport.LocateWindow, transport.LocateBudget, () => transport.CodexExecutable() is not null);
     }
 
     /// <summary>Runs until cancelled (exit 0). Exit 1 for configuration problems or a revoked PC, 4 when the hub presents a certificate other than the pinned one.</summary>
@@ -241,12 +262,83 @@ public sealed class NodeRunner : IAsyncDisposable
             }
             if (!response.IsSuccessStatusCode)
                 return Busy(response.StatusCode) ? Unreachable() : Retry($"The hub at {_hub} refused this PC's announcement ({(int)response.StatusCode} {refusal ?? Code(await ReadAsync(response, ct))}). Retrying.");
+            var routes = Routes(await ReadAsync(response, ct));
+            if (!routes.SequenceEqual(_routes)) { _routes = routes; _nudge.Pulse(); }
         }
         finally { response.Dispose(); }
         Recovered();
         _transport.Trace?.Invoke("announced");
         EnsureHints();
+        EnsureWaking();
         return Next.Wait;
+    }
+
+    /// <summary>The well-formed routes in an announce reply; none when it cannot be read.</summary>
+    private static NodeRoute[] Routes(JsonObject? reply) => reply?["routes"] is JsonArray list
+        ? list.OfType<JsonObject>().Select(x => (Provider: Text(x, "provider"), ThreadId: Text(x, "threadId"), Session: Text(x, "relaySessionId"), Repository: Text(x, "repositoryId")))
+            .Where(x => x is { Provider: not null, ThreadId: not null, Session: not null, Repository: not null }).Select(x => new NodeRoute(x.Provider!, x.ThreadId!, x.Session!, x.Repository!)).Take(NodeChats.MaxChats).ToArray()
+        : [];
+
+    /// <summary>
+    /// The chats to wake: each Codex route whose session handle on this PC names that same thread and repository, and only while a Codex executable is installed.
+    /// Every other route (Claude chats, chats not on this PC, a route that disagrees with its handle) is ignored.
+    /// </summary>
+    internal static IReadOnlyList<WakeTarget> WakeTargets(string nodeFolder, IEnumerable<NodeRoute> routes, string? codex, Func<string, IWakeDispatcher> dispatcher, string machineName)
+    {
+        if (codex is null) return [];
+        var targets = new List<WakeTarget>();
+        foreach (var route in routes)
+        {
+            if (route.Provider != "codex" || !ChatLocators.IsUuid(route.ThreadId) || !NodeState.IsFileId(route.RelaySessionId)) continue;
+            var path = NodeState.SessionHandlePath(nodeFolder, route.RelaySessionId);
+            if (NodeState.ReadSessionHandle(path) is not { Chat: { Provider: "codex" } chat } handle || !string.Equals(chat.ThreadId, route.ThreadId, StringComparison.OrdinalIgnoreCase) ||
+                handle.RepositoryId != route.RepositoryId) continue;
+            targets.Add(new(new WakeRoute(handle.RepositoryId, "default", path, chat.ThreadId, machineName), new WakeSession(handle.SessionId, handle.SessionToken), dispatcher(codex)));
+        }
+        return targets;
+    }
+
+    private string StopFile => Path.Combine(_state.Folder, ClaudeWaiter.StopFile);
+
+    /// <summary>Starts the wake watcher after an announcement unless the stop file exists. A watcher still on an old credential is stopped and started again after the next announcement.</summary>
+    private void EnsureWaking()
+    {
+        if (!_wakeTask.IsCompleted)
+        {
+            if (_wakeCredential != _credential) _wakeStop?.Cancel();
+            return;
+        }
+        if (File.Exists(StopFile)) return;
+        _wakeStop?.Dispose();
+        _wakeStop = CancellationTokenSource.CreateLinkedTokenSource(_stopping.Token);
+        _wakeCredential = _credential;
+        var (credential, ct) = (_credential!, _wakeStop.Token);
+        _wakeTask = Task.Run(() => WakeAsync(credential, ct));
+    }
+
+    private async Task WakeAsync(string credential, CancellationToken ct)
+    {
+        var fingerprint = Https ? _state.Fingerprint : null;
+        var options = new AdapterOptions(_hub.AbsoluteUri, credential, signalR: true) { PinnedFingerprint = fingerprint };
+        var runtime = new WakeRuntime(options, Path.Combine(_state.Folder, WakeDatabase), StopFile, _hub.AbsoluteUri) { Nudge = _nudge, HubHandler = _transport.HubHandler, Interval = _transport.WakeInterval };
+        using var handler = _transport.CreateHandler(fingerprint, presented => _mismatch ??= presented);
+        try
+        {
+            _transport.Trace?.Invoke("waking");
+            await WakeWatcher.RunAsync(runtime, _ =>
+            {
+                var targets = WakeTargets(_state.Folder, _routes, _transport.CodexExecutable(), _transport.CodexDispatcher, _transport.MachineName);
+                if (targets.Count > 0) _transport.Trace?.Invoke("wake-target");
+                return Task.FromResult(targets);
+            }, exitWhenQueued: false, timeout: null, ct, handler, _transport.Clock);
+            _wakeTrouble = false;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+        catch (Exception)
+        {
+            if (!_wakeTrouble) _error.WriteLine($"The node could not wake chats from '{Path.Combine(_state.Folder, WakeDatabase)}' (another process may be using it); it tries again after the next announcement.");
+            _wakeTrouble = true;
+        }
     }
 
     /// <summary>The chats to announce, without any in a repository the hub refused.</summary>
@@ -403,6 +495,9 @@ public sealed class NodeRunner : IAsyncDisposable
         await _stopping.CancelAsync();
         try { await _hintsTask; }
         catch (Exception) { /* the hint channel never decides the exit code */ }
+        try { await _wakeTask; }
+        catch (Exception) { /* waking never decides the exit code */ }
+        _wakeStop?.Dispose();
         if (_hints is { } hints) { _hints = null; await hints.DisposeAsync(); }
         _http?.Dispose();
         _stopping.Dispose();

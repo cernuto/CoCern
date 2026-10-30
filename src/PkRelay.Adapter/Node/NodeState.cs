@@ -23,7 +23,7 @@ public sealed class NodeState : IDisposable
     private const string StateFile = "node.json";
     private const string CredentialFile = "credential";
     private const string LockFile = "node.lock";
-    private const string SessionsFolder = "sessions";
+    internal const string SessionsFolder = "sessions";
     /// <summary>The hub's bound on identifiers such as repository IDs and labels.</summary>
     internal const int MaxIdentifierLength = 256;
     private readonly FileStream _lock;
@@ -165,7 +165,7 @@ public sealed class NodeState : IDisposable
     }
 
     /// <summary>The secret is never readable by anyone else: the file is created already restricted to the current user under a temporary name and only then moved over the old one (as the hub's certificate writer does). Shared by the credential and the session handles.</summary>
-    private static void WritePrivately(string path, byte[] content)
+    internal static void WritePrivately(string path, byte[] content)
     {
         var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
@@ -237,12 +237,15 @@ public sealed class NodeState : IDisposable
     private static ChatLocation? Location(JsonNode? node, string idName) =>
         node is JsonObject given && Text(given, "provider") is "codex" or "claude" && Text(given, idName) is { } id && ChatLocators.IsUuid(id) ? new(Text(given, "provider")!, id) : null;
 
+    /// <summary>The handle file for a relay session; the ID must be one that can name a file.</summary>
+    internal static string SessionHandlePath(string nodeFolder, string sessionId) => IsFileId(sessionId) ? Path.Combine(nodeFolder, SessionsFolder, sessionId + ".json") : throw new ArgumentException("Not a session ID that can name a file.", nameof(sessionId));
+
     /// <summary>Every readable handle in the node folder.</summary>
     public static IReadOnlyList<SessionHandle> ReadSessionHandles(string nodeFolder) =>
         ChatLocators.Files(Path.Combine(nodeFolder, SessionsFolder), "*.json", SearchOption.TopDirectoryOnly).Select(ReadSessionHandle).OfType<SessionHandle>().ToArray();
 
     /// <summary>A relay session ID that is safe as a file name: ASCII letters, digits, '.', '_' or '-', starting with a letter or digit.</summary>
-    private static bool IsFileId(string id) => id.Length is > 0 and <= 128 && char.IsAsciiLetterOrDigit(id[0]) && id.All(c => char.IsAsciiLetterOrDigit(c) || c is '.' or '_' or '-');
+    internal static bool IsFileId(string id) => id.Length is > 0 and <= 128 && char.IsAsciiLetterOrDigit(id[0]) && id.All(c => char.IsAsciiLetterOrDigit(c) || c is '.' or '_' or '-');
 
     public void Dispose() => _lock.Dispose();
 }

@@ -301,18 +301,22 @@ public sealed class ClaudeChatLocator(string root, int maxLineBytes = ChatLocato
 /// <summary>
 /// The chats this PC announces: one per session handle a stdio adapter wrote, newest first and at most <see cref="MaxChats"/>.
 /// Each handle is located only within <c>locateWindow</c> of opening, within <c>budget</c> per cycle; the outcome (its chat, or permanently unmapped) is written back into the handle, so it is never searched again, even after a restart.
+/// A located Codex chat is wakeable only while <c>codexFound</c> says the executable is installed; a located Claude chat reports <c>waiterRunning</c> while its own waiter process is alive.
+/// Handles that stay unmapped for <see cref="PruneAfter"/> are deleted. The hub's announce reply does not say when a relay session ends, so that is the only pruning signal.
 /// </summary>
-internal sealed class NodeChats(string nodeFolder, IReadOnlyList<IChatLocator> locators, TimeProvider clock, TimeSpan locateWindow, TimeSpan budget)
+internal sealed class NodeChats(string nodeFolder, IReadOnlyList<IChatLocator> locators, TimeProvider clock, TimeSpan locateWindow, TimeSpan budget, Func<bool>? codexFound = null)
 {
     /// <summary>The hub's <c>DiscoveryLimits.MaxChatsPerMachine</c>; the adapter does not reference the domain layer.</summary>
     public const int MaxChats = 64;
     public static readonly TimeSpan DefaultLocateWindow = TimeSpan.FromMinutes(30);
     public static readonly TimeSpan DefaultBudget = TimeSpan.FromSeconds(5);
+    /// <summary>How long a handle that never mapped to a chat is kept before its file is deleted.</summary>
+    public static readonly TimeSpan PruneAfter = TimeSpan.FromHours(24);
 
     public JsonArray Read(Func<string, bool> allowed)
     {
-        var handles = NodeState.ReadSessionHandles(nodeFolder).Where(x => allowed(x.RepositoryId)).OrderByDescending(x => x.OpenedAt).Take(MaxChats).ToArray();
         var now = clock.GetUtcNow();
+        var handles = Prune(NodeState.ReadSessionHandles(nodeFolder), now).Where(x => allowed(x.RepositoryId)).OrderByDescending(x => x.OpenedAt).Take(MaxChats).ToArray();
         for (var i = 0; i < handles.Length; i++)
             if (handles[i] is { Chat: null, Unmapped: false } open && now - open.OpenedAt > locateWindow) handles[i] = Persist(open with { Unmapped = true });
         var pending = handles.Where(x => x is { Chat: null, Unmapped: false }).ToArray();
@@ -329,11 +333,29 @@ internal sealed class NodeChats(string nodeFolder, IReadOnlyList<IChatLocator> l
                 else if (located.Length == 1) handles[i] = Persist(handle with { Chat = located[0] });
             }
         }
+        var codex = codexFound?.Invoke() ?? true;
+        var waiters = ClaudeWaiter.Running(nodeFolder);
         return new JsonArray(handles.Select(handle => (JsonNode)new JsonObject
         {
             ["provider"] = handle.Chat?.Provider ?? "unknown", ["threadId"] = handle.Chat?.ThreadId ?? "unmapped", ["relaySessionId"] = handle.SessionId,
-            ["repositoryId"] = handle.RepositoryId, ["label"] = handle.Label, ["wakeable"] = handle.Chat is not null, ["waiterRunning"] = false
+            ["repositoryId"] = handle.RepositoryId, ["label"] = handle.Label, ["wakeable"] = handle.Chat is { } chat && (chat.Provider != "codex" || codex),
+            ["waiterRunning"] = handle.Chat is { Provider: "claude" } claude && waiters.Contains(claude.ThreadId)
         }).ToArray());
+    }
+
+    /// <summary>Deletes the node's own handle files for chats that never mapped (or never will) and opened more than <see cref="PruneAfter"/> ago; returns the rest.</summary>
+    private IEnumerable<SessionHandle> Prune(IEnumerable<SessionHandle> handles, DateTimeOffset now)
+    {
+        foreach (var handle in handles)
+        {
+            var age = now - handle.OpenedAt;
+            if (handle.Chat is null && (handle.Unmapped || age > locateWindow) && age > PruneAfter)
+            {
+                try { File.Delete(NodeState.SessionHandlePath(nodeFolder, handle.SessionId)); continue; }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { /* kept; tried again next cycle */ }
+            }
+            yield return handle;
+        }
     }
 
     /// <summary>Writes the outcome back through the private writer, token intact. If that fails the outcome still holds for this cycle and is simply found again later.</summary>

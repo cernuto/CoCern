@@ -18,6 +18,21 @@ try
     if (args.Length > 0 && args[0] == "--await-inbox")
     {
         // Exit codes tell the waiting session what happened: 0 new message, 2 timeout, 3 stopped.
+        if (args.Length > 1 && args[1] == "--chat")
+        {
+            // A Claude chat's own waiter on this PC's node credentials (1 also when no relay session on this PC belongs to the chat).
+            TimeSpan? limit = args.Length switch
+            {
+                3 => null,
+                5 when args[3] == "--timeout-minutes" && int.TryParse(args[4], out var minutes) && minutes is > 0 and <= 1440 => TimeSpan.FromMinutes(minutes),
+                _ => throw new AdapterConfigurationException("Use --await-inbox --chat <claude-session-id> with optional --timeout-minutes 1-1440.")
+            };
+            var folder = Environment.GetEnvironmentVariable("PKRELAY_NODE_DIR") is { Length: > 0 } configured ? configured : NodeState.DefaultFolder;
+            using var stopping = new CancellationTokenSource();
+            Console.CancelKeyPress += (_, cancel) => { cancel.Cancel = true; stopping.Cancel(); };
+            var waited = await ClaudeWaiter.RunAsync(folder, args[2], Console.Out.WriteLine, limit, stopping.Token);
+            return waited switch { "queued" => 0, "timeout" => 2, _ => 3 };
+        }
         TimeSpan? timeout = args.Length switch
         {
             2 => null,
