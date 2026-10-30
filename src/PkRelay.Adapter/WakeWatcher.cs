@@ -16,6 +16,8 @@ public sealed record WakeRuntime(AdapterOptions Options, string StatePath, strin
     public Func<HttpMessageHandler>? HubHandler { get; init; }
     /// <summary>The fallback pass interval when no hint arrives.</summary>
     public TimeSpan Interval { get; init; } = TimeSpan.FromSeconds(15);
+    /// <summary>How often a route may be woken.</summary>
+    public WakeLimits Limits { get; init; } = WakeLimits.Default;
 }
 
 /// <summary>Tells a running watcher that its targets may have changed. Pulses never queue up: one pending pulse is enough.</summary>
@@ -42,7 +44,7 @@ public static class WakeWatcher
     /// <summary>A configuration file's routes are fixed for the run: they are the static targets.</summary>
     internal static async Task<string> RunAsync(WakeConfiguration config, IWakeDispatcher dispatcher, bool exitWhenQueued, TimeSpan? timeout, CancellationToken cancellationToken, HttpMessageHandler? handler = null, TimeProvider? clock = null)
     {
-        var runtime = new WakeRuntime(config.AdapterOptions(), config.StatePath, config.StopFile, config.RelayUrl);
+        var runtime = new WakeRuntime(config.AdapterOptions(), config.StatePath, config.StopFile, config.RelayUrl) { Limits = config.ResolvedLimits() };
         IReadOnlyList<WakeTarget>? targets = null;
         return await RunAsync(runtime, _ => Task.FromResult(targets ??= config.Routes.Select(route => new WakeTarget(route, WakeConfiguration.ReadSession(route), dispatcher)).ToArray()),
             exitWhenQueued, timeout, cancellationToken, handler, clock);
@@ -55,7 +57,7 @@ public static class WakeWatcher
     internal static async Task<string> RunAsync(WakeRuntime runtime, Func<CancellationToken, Task<IReadOnlyList<WakeTarget>>> targets, bool exitWhenQueued, TimeSpan? timeout, CancellationToken cancellationToken, HttpMessageHandler? handler = null, TimeProvider? clock = null)
     {
         var options = runtime.Options;
-        using var state = new WakeState(runtime.StatePath);
+        using var state = new WakeState(runtime.StatePath, runtime.Limits);
         using var http = new HttpClient(handler ?? RelayForwarder.CreateHandler(options), disposeHandler: handler is null) { Timeout = TimeSpan.FromSeconds(15) };
         var forwarder = new RelayForwarder(http, options);
         // The reconciler reads only the relay URL and stop file from its configuration.

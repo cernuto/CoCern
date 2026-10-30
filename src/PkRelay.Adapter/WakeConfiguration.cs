@@ -5,7 +5,9 @@ namespace PkRelay.Adapter;
 
 public sealed record WakeRoute(string RepositoryId, string BoardId, string SessionFile, string ThreadId, string MachineId);
 public sealed record WakeSession(string SessionId, string SessionToken);
-public sealed record WakeConfiguration(string RelayUrl, string TokenFile, string CodexPath, string StatePath, string StopFile, WakeRoute[] Routes)
+/// <summary>The optional <c>wakeLimits</c> object of a wake configuration; any field left out takes its default.</summary>
+public sealed record WakeLimitSettings(int? MinIntervalSeconds = null, int? MaxPerWindow = null, int? WindowMinutes = null);
+public sealed record WakeConfiguration(string RelayUrl, string TokenFile, string CodexPath, string StatePath, string StopFile, WakeRoute[] Routes, [property: JsonPropertyName("wakeLimits")] WakeLimitSettings? Limits = null)
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -33,6 +35,7 @@ public sealed record WakeConfiguration(string RelayUrl, string TokenFile, string
             if (requireCodex && (!Path.IsPathFullyQualified(config.CodexPath ?? "") || !File.Exists(config.CodexPath))) throw new JsonException();
             if (config.StatePath == config.StopFile || config.Routes is not { Length: >= 1 and <= 16 }) throw new JsonException();
             _ = config.AdapterOptions();
+            _ = config.ResolvedLimits();
             var threads = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var sessions = new HashSet<string>(StringComparer.Ordinal);
             foreach (var route in config.Routes)
@@ -50,6 +53,18 @@ public sealed record WakeConfiguration(string RelayUrl, string TokenFile, string
         {
             throw new AdapterConfigurationException("Invalid wake configuration or enrollment files.");
         }
+    }
+
+    /// <summary>The configured wake limits with defaults filled in; a value outside its allowed range makes the configuration invalid.</summary>
+    public WakeLimits ResolvedLimits()
+    {
+        var defaults = WakeLimits.Default;
+        if (Limits is null) return defaults;
+        var interval = Limits.MinIntervalSeconds ?? (int)defaults.MinInterval.TotalSeconds;
+        var count = Limits.MaxPerWindow ?? defaults.MaxPerWindow;
+        var window = Limits.WindowMinutes ?? (int)defaults.Window.TotalMinutes;
+        if (interval is < 0 or > 3600 || count is < 1 or > 1000 || window is < 1 or > 1440) throw new JsonException();
+        return new(TimeSpan.FromSeconds(interval), count, TimeSpan.FromMinutes(window));
     }
 
     public AdapterOptions AdapterOptions() => new(RelayUrl, ReadBounded(TokenFile, 8192), signalR: true);

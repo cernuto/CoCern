@@ -295,6 +295,76 @@ public sealed class WakeTests
         Assert.Equal("stopped", await run);
     }
 
+    [Fact]
+    public void Default_limits_allow_a_wake_three_seconds_after_the_previous_one_and_refuse_two()
+    {
+        using var directory = new TempDirectory();
+        using var state = new WakeState(Path.Combine(directory.Path, "state.db"));
+        var start = new DateTimeOffset(2026, 10, 29, 0, 0, 0, TimeSpan.Zero);
+        Assert.Equal("reserved", Wake(state, "a", start));
+        Assert.Equal("rate-limited", Wake(state, "b", start + TimeSpan.FromSeconds(2)));
+        Assert.Equal("reserved", Wake(state, "b", start + TimeSpan.FromSeconds(3)));
+    }
+
+    [Fact]
+    public void Default_limits_refuse_the_twenty_first_wake_in_ten_minutes_and_allow_it_after_the_window()
+    {
+        using var directory = new TempDirectory();
+        using var state = new WakeState(Path.Combine(directory.Path, "state.db"));
+        var start = new DateTimeOffset(2026, 10, 29, 0, 0, 0, TimeSpan.Zero);
+        for (var i = 0; i < 20; i++) Assert.Equal("reserved", Wake(state, i.ToString(), start + TimeSpan.FromSeconds(4 * i)));
+        Assert.Equal("rate-limited", Wake(state, "extra", start + TimeSpan.FromSeconds(80)));
+        Assert.Equal("reserved", Wake(state, "extra", start + TimeSpan.FromMinutes(10) + TimeSpan.FromSeconds(1)));
+    }
+
+    [Fact]
+    public void Wake_limits_in_the_configuration_are_optional_per_field_and_default_when_absent()
+    {
+        using var fixture = new Fixture();
+        File.WriteAllText(fixture.Configuration.TokenFile, "client-secret");
+        File.WriteAllText(fixture.Route.SessionFile, "{\"sessionId\":\"session\",\"sessionToken\":\"session-secret\"}");
+        var path = Path.Combine(Path.GetDirectoryName(fixture.Configuration.StatePath)!, "limits.json");
+        void Write(WakeLimitSettings? limits) => File.WriteAllText(path, JsonSerializer.Serialize(fixture.Configuration with { Limits = limits }, JsonSerializerOptions.Web));
+
+        Write(null);
+        Assert.Equal(WakeLimits.Default, WakeConfiguration.Load(path).ResolvedLimits());
+        var node = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path))!.AsObject();
+        node.Remove("wakeLimits");
+        File.WriteAllText(path, node.ToJsonString());
+        Assert.Equal(WakeLimits.Default, WakeConfiguration.Load(path).ResolvedLimits());
+
+        Write(new WakeLimitSettings(1, 50, 5));
+        Assert.Equal(new WakeLimits(TimeSpan.FromSeconds(1), 50, TimeSpan.FromMinutes(5)), WakeConfiguration.Load(path).ResolvedLimits());
+        Write(new WakeLimitSettings(null, 7, null));
+        Assert.Equal(new WakeLimits(WakeLimits.Default.MinInterval, 7, WakeLimits.Default.Window), WakeConfiguration.Load(path).ResolvedLimits());
+        Write(new WakeLimitSettings(0, 1, 1));
+        Assert.Equal(new WakeLimits(TimeSpan.Zero, 1, TimeSpan.FromMinutes(1)), WakeConfiguration.Load(path).ResolvedLimits());
+        Write(new WakeLimitSettings(3600, 1000, 1440));
+        Assert.Equal(new WakeLimits(TimeSpan.FromSeconds(3600), 1000, TimeSpan.FromMinutes(1440)), WakeConfiguration.Load(path).ResolvedLimits());
+
+        foreach (var invalid in new[] { new WakeLimitSettings(-1, null, null), new(3601, null, null), new(null, 0, null), new(null, 1001, null), new(null, null, 0), new(null, null, 1441) })
+        {
+            Write(invalid);
+            Assert.Throws<AdapterConfigurationException>(() => WakeConfiguration.Load(path));
+        }
+        File.WriteAllText(path, JsonSerializer.Serialize(fixture.Configuration, JsonSerializerOptions.Web).Replace("\"wakeLimits\":{", "\"wakeLimits\":{\"bogus\":1,"));
+        Assert.Throws<AdapterConfigurationException>(() => WakeConfiguration.Load(path));
+    }
+
+    private static string Wake(WakeState state, string id, DateTimeOffset at)
+    {
+        var (status, batch) = state.Reserve("route", [id], at);
+        if (batch is not null) state.Complete(batch, queued: true);
+        return status;
+    }
+
+    private sealed class TempDirectory : IDisposable
+    {
+        public readonly string Path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "pkrelay-wake-" + Guid.NewGuid().ToString("N"));
+        public TempDirectory() => Directory.CreateDirectory(Path);
+        public void Dispose() => Directory.Delete(Path, true);
+    }
+
     private static async Task WaitFor(Func<bool> condition, Task run)
     {
         var deadline = DateTime.UtcNow.AddSeconds(20);
@@ -309,6 +379,8 @@ public sealed class WakeTests
     private sealed class Fixture : IDisposable
     {
         private readonly string _directory = Path.Combine(Path.GetTempPath(), "pkrelay-wake-" + Guid.NewGuid().ToString("N"));
+        /// <summary>The limits the rate-limit tests were written against: one wake per 10 s and six per 10 minutes.</summary>
+        public static readonly WakeLimits Strict = new(TimeSpan.FromSeconds(10), 6, TimeSpan.FromMinutes(10));
         public readonly Clock Clock = new();
         public readonly Dispatch Dispatcher = new();
         public WakeRoute Route;
@@ -324,13 +396,13 @@ public sealed class WakeTests
         {
             Directory.CreateDirectory(_directory);
             Route = new("repo", "board", Path.Combine(_directory, "session.json"), "00000000-0000-0000-0000-000000000001", Environment.MachineName);
-            Configuration = new("http://127.0.0.1:5271", Path.Combine(_directory, "token"), Environment.ProcessPath!, Path.Combine(_directory, "state.db"), Path.Combine(_directory, "stop"), [Route]);
-            State = new(Configuration.StatePath);
+            Configuration = new("http://127.0.0.1:5271", Path.Combine(_directory, "token"), Environment.ProcessPath!, Path.Combine(_directory, "state.db"), Path.Combine(_directory, "stop"), [Route], new WakeLimitSettings(10, 6, 10));
+            State = new(Configuration.StatePath, Strict);
             _client = new(new Handler(this));
             _forwarder = new(_client, new AdapterOptions(Configuration.RelayUrl, "client-secret"));
         }
         public Task<string> Reconcile(CancellationToken cancellationToken = default) => new WakeReconciler(Configuration, State, _forwarder, Dispatcher, Clock).ReconcileAsync(Route, new("session", "session-secret"), cancellationToken);
-        public void Restart() { State.Dispose(); State = new(Configuration.StatePath); }
+        public void Restart() { State.Dispose(); State = new(Configuration.StatePath, Strict); }
 
         /// <summary>Writes the token and session files a real enrollment has, and releases the state lock so a waiter can own it.</summary>
         public void PrepareEnrollment()
@@ -345,7 +417,7 @@ public sealed class WakeTests
         /// <summary>The same enrollment as a runtime; the hint channel answers 404 so tests never reach a real hub.</summary>
         public WakeRuntime Runtime(WakeNudge nudge) => new(new AdapterOptions(Configuration.RelayUrl, "client-secret", signalR: true), Configuration.StatePath, Configuration.StopFile, Configuration.RelayUrl)
         {
-            Nudge = nudge, HubHandler = () => new NoHub()
+            Nudge = nudge, HubHandler = () => new NoHub(), Limits = Strict
         };
 
         public Task<string> Await(List<string> prompts, TimeSpan timeout) =>

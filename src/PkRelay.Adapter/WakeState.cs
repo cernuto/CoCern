@@ -4,14 +4,22 @@ using Microsoft.Data.Sqlite;
 
 namespace PkRelay.Adapter;
 
+/// <summary>How often a route may be woken: at least <paramref name="MinInterval"/> apart, and at most <paramref name="MaxPerWindow"/> times in any <paramref name="Window"/>.</summary>
+public sealed record WakeLimits(TimeSpan MinInterval, int MaxPerWindow, TimeSpan Window)
+{
+    public static WakeLimits Default { get; } = new(TimeSpan.FromSeconds(3), 20, TimeSpan.FromMinutes(10));
+}
+
 /// <summary>One owned database, with durable reservations deliberately never retried automatically.</summary>
 public sealed class WakeState : IDisposable
 {
     private readonly FileStream _ownership;
     private readonly SqliteConnection _connection;
     private readonly object _gate = new();
-    public WakeState(string path)
+    private readonly WakeLimits _limits;
+    public WakeState(string path, WakeLimits? limits = null)
     {
+        _limits = limits ?? WakeLimits.Default;
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
         _ownership = new FileStream(path + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
         _connection = new(new SqliteConnectionStringBuilder { DataSource = path, Pooling = false }.ToString());
@@ -36,8 +44,8 @@ public sealed class WakeState : IDisposable
             var unseen = ids.Select(id => Key(id)).Distinct().Where(id => Scalar("SELECT COUNT(*) FROM messages WHERE route=$route AND message=$value", route, id) == 0).ToArray();
             if (unseen.Length == 0) return ("empty", null);
             var time = now.ToUnixTimeMilliseconds();
-            if (Scalar("SELECT COUNT(*) FROM batches WHERE route=$route AND at > $value", route, time - 10000) > 0 ||
-                Scalar("SELECT COUNT(*) FROM batches WHERE route=$route AND at > $value", route, time - 600000) >= 6) return ("rate-limited", null);
+            if (Scalar("SELECT COUNT(*) FROM batches WHERE route=$route AND at > $value", route, time - (long)_limits.MinInterval.TotalMilliseconds) > 0 ||
+                Scalar("SELECT COUNT(*) FROM batches WHERE route=$route AND at > $value", route, time - (long)_limits.Window.TotalMilliseconds) >= _limits.MaxPerWindow) return ("rate-limited", null);
             var batch = Guid.NewGuid().ToString("D");
             Execute("INSERT INTO batches(route,batch,status,at) VALUES($route,$value,'reserved',$at)", route, batch, time);
             foreach (var id in unseen) Execute("INSERT INTO messages(route,message,batch) VALUES($route,$value,$batch)", route, id, batch: batch);
