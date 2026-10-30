@@ -209,6 +209,8 @@ public sealed class NodeState : IDisposable
         Directory.CreateDirectory(folder);
         var json = new JsonObject { ["sessionId"] = handle.SessionId, ["sessionToken"] = handle.SessionToken, ["repositoryId"] = handle.RepositoryId, ["label"] = handle.Label, ["openedAt"] = handle.OpenedAt.ToString("O") };
         if (handle.Client is { } client) json["client"] = new JsonObject { ["provider"] = client.Provider, ["chatId"] = client.ThreadId };
+        if (handle.Chat is { } chat) json["chat"] = new JsonObject { ["provider"] = chat.Provider, ["threadId"] = chat.ThreadId };
+        else if (handle.Unmapped) json["unmapped"] = true;
         WritePrivately(Path.Combine(folder, handle.SessionId + ".json"), Encoding.UTF8.GetBytes(json.ToJsonString(new JsonSerializerOptions { WriteIndented = true })));
     }
 
@@ -225,16 +227,15 @@ public sealed class NodeState : IDisposable
             if (sessionId is null || !IsFileId(sessionId) || !string.Equals(Path.GetFileNameWithoutExtension(path), sessionId, StringComparison.Ordinal) || sessionToken is not { Length: > 0 } ||
                 repositoryId is not { Length: > 0 and <= MaxIdentifierLength } || label is not { Length: > 0 and <= MaxIdentifierLength } || label.Any(char.IsControl) ||
                 !DateTimeOffset.TryParse(Text(root, "openedAt"), System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var openedAt)) return null;
-            ChatLocation? client = null;
-            if (root["client"] is JsonObject given)
-            {
-                // A client chat ID is only ever a UUID; anything else is ignored and the node falls back to transcripts.
-                if (Text(given, "provider") is "codex" or "claude" && Text(given, "chatId") is { } chatId && ChatLocators.IsUuid(chatId)) client = new(Text(given, "provider")!, chatId);
-            }
-            return new(sessionId, sessionToken, repositoryId, label, openedAt, client);
+            // Chat IDs are only ever UUIDs; anything else is ignored (a bad claim falls back to transcripts, a bad outcome is located again).
+            return new(sessionId, sessionToken, repositoryId, label, openedAt, Location(root["client"], "chatId"), Location(root["chat"], "threadId"),
+                root["unmapped"] is JsonValue unmapped && unmapped.TryGetValue<bool>(out var value) && value);
         }
         catch (Exception exception) when (exception is JsonException or IOException or UnauthorizedAccessException or InvalidOperationException or FormatException) { return null; }
     }
+
+    private static ChatLocation? Location(JsonNode? node, string idName) =>
+        node is JsonObject given && Text(given, "provider") is "codex" or "claude" && Text(given, idName) is { } id && ChatLocators.IsUuid(id) ? new(Text(given, "provider")!, id) : null;
 
     /// <summary>Every readable handle in the node folder.</summary>
     public static IReadOnlyList<SessionHandle> ReadSessionHandles(string nodeFolder) =>

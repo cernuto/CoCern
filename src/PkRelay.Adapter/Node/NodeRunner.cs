@@ -21,6 +21,11 @@ internal sealed class NodeTransport
     /// <summary>Replaces the chat list; null (production) reads the session handles in the node folder and maps them with <see cref="Locators"/>.</summary>
     public Func<CancellationToken, Task<JsonArray>>? Chats { get; init; }
     public IReadOnlyList<IChatLocator> Locators { get; init; } = ChatLocators.Default();
+    public TimeProvider Clock { get; init; } = TimeProvider.System;
+    /// <summary>How long after opening a session is searched for; after that it is permanently unmapped.</summary>
+    public TimeSpan LocateWindow { get; init; } = NodeChats.DefaultLocateWindow;
+    /// <summary>The most one cycle spends reading transcripts; the announcement goes out with what is known so far.</summary>
+    public TimeSpan LocateBudget { get; init; } = NodeChats.DefaultBudget;
     public Func<string[]> Clients { get; init; } = () => NodeRunner.DetectClients(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
     public string MachineName { get; init; } = Environment.MachineName;
     public TimeSpan AnnounceInterval { get; init; } = TimeSpan.FromSeconds(30);
@@ -61,7 +66,7 @@ public sealed class NodeRunner : IAsyncDisposable
     private NodeRunner(NodeState state, Uri hub, NodeTransport transport, TextWriter error)
     {
         (_state, _hub, _transport, _error) = (state, hub, transport, error);
-        _chats = new NodeChats(state.Folder, transport.Locators);
+        _chats = new NodeChats(state.Folder, transport.Locators, transport.Clock, transport.LocateWindow, transport.LocateBudget);
     }
 
     /// <summary>Runs until cancelled (exit 0). Exit 1 for configuration problems or a revoked PC, 4 when the hub presents a certificate other than the pinned one.</summary>

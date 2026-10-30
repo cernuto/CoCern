@@ -32,11 +32,14 @@ On node credentials, every successful `session_open` is handed to the node as `s
 
 ### Mapping a session to its chat
 
-Each announcement cycle the node reads every handle and finds the chat that opened it:
+Each announcement cycle the node reads every handle and, for those not yet settled, looks for the chat that opened it:
 
-1. A chat ID the client gave the adapter wins. Only `CLAUDE_CODE_SESSION_ID` is read, and only when it is a UUID.
-2. Otherwise the transcript locators look for the one transcript that records the `session_open` result for that session, considering only transcripts written since `openedAt` minus 5 minutes. They match the tool result, never message text, code output or other tools' results (a `chat_directory` reply names other chats' sessions). Only `data.sessionId` of the result is read; the token beside it is never used, and nothing is searched for by token.
-3. Zero or several matches leave the chat unmapped: it is still announced, with `provider: "unknown"`, `threadId: "unmapped"` and `wakeable: false`. Unmapped chats are retried with back-off, up to every 32 cycles.
+1. The transcript locators look for the transcript that records the `session_open` result for that session, considering only transcripts written since `openedAt` minus 5 minutes. They match the tool result, never message text, code output or other tools' results (a `chat_directory` reply names other chats' sessions). Only `ok` and `data.sessionId` of the result are read; the token beside them is never used, and nothing is searched for by token.
+2. A chat ID the client gave the adapter (only `CLAUDE_CODE_SESSION_ID`, only when it is a UUID) is a claim, not an answer: it wins only once its own transcript (exactly one `projects\*\<id>.jsonl`) is seen to hold this session's result. A stale ID, left over after `/clear` or `/resume` while the MCP server kept running, therefore never makes the wrong chat wakeable; the session falls back to the search.
+3. Exactly one holder, with every candidate transcript read to its end, locates the chat. Two or more holders make it permanently unmapped. None leaves it pending.
+4. A session is searched only for 30 minutes after `openedAt`; after that it is permanently unmapped.
+
+The outcome (`chat { provider, threadId }`, or `unmapped: true`) is written back into the handle through the same current-user-only writer, token intact, so a restarted node never searches again. Searching is bounded: each transcript is opened at most once per cycle and read only past what earlier cycles read, checking all pending sessions in that one pass; lines over 1 MB are skipped without being buffered whole; and one cycle spends at most 5 seconds reading, after which the announcement goes out with what is known and the search resumes next cycle. Pending and unmapped chats are announced with `provider: "unknown"`, `threadId: "unmapped"` and `wakeable: false`.
 
 Mapped chats are announced with `wakeable: true`, newest first, at most 64 per PC. If the hub refuses a repository (`403 RepositoryDenied`), the node finds which by adding one repository at a time, reports each refused repository once on standard error, and keeps announcing the others; refused repositories stay out until the node restarts. Handle files are left in place.
 
@@ -56,4 +59,4 @@ These are structural findings only (keys and record kinds), taken with tooling t
 - A tool call is an `assistant` record whose `message.content[]` holds `{ type: "tool_use", id, name, input }`; MCP tools are named `mcp__<server>__<tool>`.
 - Its result is a later `user` record `{ type: "user", sessionId, message: { role: "user", content: [ { type: "tool_result", tool_use_id, content: [ { type: "text", text } ] } ] }, toolUseResult, sourceToolAssistantUUID, uuid, parentUuid, timestamp, cwd, gitBranch, version, ... }`. The locator also accepts a plain-string `content`, which the tool-result format allows though none was observed. Only a `tool_result` whose `tool_use_id` belongs to a `session_open` call counts.
 - The record field `sessionId` equals the file name's UUID in every record checked.
-- Environment: Claude Code exports `CLAUDE_CODE_SESSION_ID` (the session UUID, which names the transcript) to MCP servers it starts, so the adapter records it in the handle and the node uses it before any transcript search. Other `CLAUDE_*` variables include tokens and are never read.
+- Environment: Claude Code exports `CLAUDE_CODE_SESSION_ID` (the session UUID, which names the transcript) to MCP servers it starts, so the adapter records it in the handle as a claim, which the node trusts only once that transcript holds the result (a long-running MCP server can keep a stale ID after `/clear` or `/resume`). Other `CLAUDE_*` variables include tokens and are never read.

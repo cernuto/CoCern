@@ -458,6 +458,8 @@ public sealed class NodeTests : IDisposable
         var traffic = new HubTraffic();
         using var state = NodeState.Open(DataDir);
         var claudeChat = Guid.NewGuid().ToString();
+        var claude = Path.Combine(root, "claude-projects");
+        Transcript(claude, claudeChat, ClaudeUse(claudeChat, "u1", "mcp__pkrelay__session_open"), ClaudeResult(claudeChat, "u1", OpenReply("s-claude")));
         foreach (var (id, client) in new[] { ("s-located", (ChatLocation?)null), ("s-twin", null), ("s-missing", null), ("s-claude", new ChatLocation("claude", claudeChat)) })
             NodeState.WriteSessionHandle(DataDir, new SessionHandle(id, "synthetic-token-" + id, "repo", "Chat " + id, openedAt, client));
         using var stop = new CancellationTokenSource();
@@ -465,7 +467,7 @@ public sealed class NodeTests : IDisposable
         var run = NodeRunner.RunAsync(state, InMemoryHub, new NodeTransport
         {
             ProbeFingerprint = transport.ProbeFingerprint, CreateHandler = transport.CreateHandler, HubHandler = transport.HubHandler, MachineName = "Node PC",
-            Locators = [locator, new ClaudeChatLocator(Path.Combine(root, "no-claude"))], AnnounceInterval = transport.AnnounceInterval, FirstRetry = transport.FirstRetry, MaxRetry = transport.MaxRetry, Trace = events.Enqueue
+            Locators = [locator, new ClaudeChatLocator(claude)], AnnounceInterval = transport.AnnounceInterval, FirstRetry = transport.FirstRetry, MaxRetry = transport.MaxRetry, Trace = events.Enqueue
         }, error, stop.Token);
         await WaitForAsync(() => traffic.Accepted is not null && Count("announced") >= 2, run);
         stop.Cancel();
@@ -483,7 +485,8 @@ public sealed class NodeTests : IDisposable
         Assert.All(chats.Values, x => Assert.Equal("repo", x["repositoryId"]!.GetValue<string>()));
         Assert.Equal("Chat s-twin", chats["s-twin"]["label"]!.GetValue<string>());
         Assert.Equal(PkRelay.Domain.DiscoveryLimits.MaxChatsPerMachine, NodeChats.MaxChats);
-        static (string, string, bool) Route(JsonObject chat) => (chat["provider"]!.GetValue<string>(), chat["threadId"]!.GetValue<string>(), chat["wakeable"]!.GetValue<bool>());
+        Assert.True(Handle("s-twin").Unmapped);
+        Assert.Equal((null, false), (Handle("s-missing").Chat, Handle("s-missing").Unmapped));
     }
 
     [Fact]
@@ -601,6 +604,167 @@ public sealed class NodeTests : IDisposable
         Assert.Contains("PKRELAY_TOKEN", Assert.Throws<AdapterConfigurationException>(() => AdapterOptions.FromEnvironment(key => empty.GetValueOrDefault(key))).Message);
         Assert.False(Directory.Exists(Path.Combine(root, "not-a-node")));
         Assert.False(Directory.Exists(Path.Combine(DataDir, "sessions")));
+    }
+
+    [Fact]
+    public void Captured_claude_id_counts_only_when_its_own_transcript_holds_the_result()
+    {
+        var openedAt = DateTimeOffset.UtcNow.AddMinutes(-1);
+        var claude = Path.Combine(root, "claude-projects");
+        var (stale, holder, verified, fork) = (Guid.NewGuid().ToString(), Guid.NewGuid().ToString(), Guid.NewGuid().ToString(), Guid.NewGuid().ToString());
+        // The captured ID names an earlier conversation (after /clear or /resume): it exists, even lists the sessions, but never opened them.
+        Transcript(claude, stale, ClaudeUse(stale, "d1", "mcp__pkrelay__chat_directory"), ClaudeResult(stale, "d1", DirectoryReply("s-moved", "s-nowhere")));
+        Transcript(claude, holder, ClaudeUse(holder, "o1", "mcp__pkrelay__session_open"), ClaudeResult(holder, "o1", OpenReply("s-moved")));
+        // A verified claim wins even where a forked copy also holds the result.
+        Transcript(claude, verified, ClaudeUse(verified, "o2", "mcp__pkrelay__session_open"), ClaudeResult(verified, "o2", OpenReply("s-verified")));
+        Transcript(claude, fork, ClaudeUse(fork, "o2", "mcp__pkrelay__session_open"), ClaudeResult(fork, "o2", OpenReply("s-verified")));
+        foreach (var (id, claim) in new[] { ("s-moved", stale), ("s-nowhere", stale), ("s-verified", verified) })
+            NodeState.WriteSessionHandle(DataDir, new SessionHandle(id, "synthetic-token-" + id, "repo", "Chat " + id, openedAt, new ChatLocation("claude", claim)));
+
+        var chats = Announced(Chats([new ClaudeChatLocator(claude)]).Read(_ => true));
+
+        Assert.Equal(("claude", holder, true), Route(chats["s-moved"]));
+        Assert.Equal(("unknown", "unmapped", false), Route(chats["s-nowhere"]));
+        Assert.Equal(("claude", verified, true), Route(chats["s-verified"]));
+        Assert.DoesNotContain(chats.Values, x => x["threadId"]!.GetValue<string>() == stale);
+        Assert.Equal(new ChatLocation("claude", holder), Handle("s-moved").Chat);
+    }
+
+    [Fact]
+    public void Handle_older_than_the_locate_window_is_not_scanned_and_is_unwakeable()
+    {
+        var openedAt = DateTimeOffset.UtcNow.AddMinutes(-1);
+        var codex = Path.Combine(root, "codex-sessions");
+        var thread = Guid.NewGuid().ToString();
+        Rollout(codex, thread, CodexTool(thread, "session_open", OpenReply("s-late")));
+        NodeState.WriteSessionHandle(DataDir, new SessionHandle("s-late", "synthetic-token-late", "repo", "Late chat", openedAt));
+        var opens = new ConcurrentDictionary<string, int>();
+        var clock = new ManualClock(openedAt + NodeChats.DefaultLocateWindow + TimeSpan.FromMinutes(1));
+        var chats = Chats([new CodexChatLocator(codex, open: Counting(opens))], clock);
+
+        Assert.Equal(("unknown", "unmapped", false), Route(Announced(chats.Read(_ => true))["s-late"]));
+        Assert.Empty(opens);
+        Assert.True(Handle("s-late").Unmapped);
+        // Permanently unmapped: a later cycle, or a restart, never scans for it.
+        Assert.False(Announced(Chats([new CodexChatLocator(codex, open: Counting(opens))]).Read(_ => true))["s-late"]["wakeable"]!.GetValue<bool>());
+        Assert.Empty(opens);
+    }
+
+    [Fact]
+    public void Located_result_survives_a_restart_without_rescanning()
+    {
+        var openedAt = DateTimeOffset.UtcNow.AddMinutes(-1);
+        var codex = Path.Combine(root, "codex-sessions");
+        var thread = Guid.NewGuid().ToString();
+        Rollout(codex, thread, CodexTool(thread, "session_open", OpenReply("s-kept")));
+        NodeState.WriteSessionHandle(DataDir, new SessionHandle("s-kept", "synthetic-token-kept", "repo", "Kept chat", openedAt));
+        var first = new ConcurrentDictionary<string, int>();
+        Assert.Equal(("codex", thread, true), Route(Announced(Chats([new CodexChatLocator(codex, open: Counting(first))]).Read(_ => true))["s-kept"]));
+        Assert.Single(first);
+
+        var path = Path.Combine(DataDir, "sessions", "s-kept.json");
+        AssertPrivate(path);
+        var json = JsonNode.Parse(File.ReadAllText(path))!;
+        Assert.Equal("synthetic-token-kept", json["sessionToken"]!.GetValue<string>());
+        Assert.Equal(thread, json["chat"]!["threadId"]!.GetValue<string>());
+
+        // A restarted node gets new locators with no memory; the handle alone answers.
+        var second = new ConcurrentDictionary<string, int>();
+        Assert.Equal(("codex", thread, true), Route(Announced(Chats([new CodexChatLocator(codex, open: Counting(second))]).Read(_ => true))["s-kept"]));
+        Assert.Empty(second);
+    }
+
+    [Fact]
+    public void Each_transcript_is_read_once_per_cycle_for_all_pending_handles()
+    {
+        var openedAt = DateTimeOffset.UtcNow.AddMinutes(-1);
+        var codex = Path.Combine(root, "codex-sessions");
+        var (one, two, other) = (Guid.NewGuid().ToString(), Guid.NewGuid().ToString(), Guid.NewGuid().ToString());
+        Rollout(codex, one, CodexTool(one, "session_open", OpenReply("s-a")), CodexTool(one, "session_open", OpenReply("s-b")));
+        Rollout(codex, two, CodexTool(two, "session_open", OpenReply("s-c")));
+        Rollout(codex, other, UserText("unrelated"));
+        foreach (var id in new[] { "s-a", "s-b", "s-c", "s-x" })
+            NodeState.WriteSessionHandle(DataDir, new SessionHandle(id, "synthetic-token-" + id, "repo", "Chat " + id, openedAt));
+        var opens = new ConcurrentDictionary<string, int>();
+        var nodeChats = Chats([new CodexChatLocator(codex, open: Counting(opens))]);
+
+        var chats = Announced(nodeChats.Read(_ => true));
+        Assert.Equal(3, opens.Count);
+        Assert.All(opens.Values, x => Assert.Equal(1, x));
+        Assert.Equal(("codex", one, true), Route(chats["s-a"]));
+        Assert.Equal(("codex", one, true), Route(chats["s-b"]));
+        Assert.Equal(("codex", two, true), Route(chats["s-c"]));
+        Assert.False(chats["s-x"]["wakeable"]!.GetValue<bool>());
+
+        // s-x is still pending, but nothing was appended, so the next cycle reads nothing again.
+        Assert.False(Announced(nodeChats.Read(_ => true))["s-x"]["wakeable"]!.GetValue<bool>());
+        Assert.All(opens.Values, x => Assert.Equal(1, x));
+        Assert.False(Handle("s-x").Unmapped);
+    }
+
+    [Fact]
+    public void Oversize_line_is_skipped()
+    {
+        var openedAt = DateTimeOffset.UtcNow.AddMinutes(-1);
+        var codex = Path.Combine(root, "codex-sessions");
+        var thread = Guid.NewGuid().ToString();
+        var big = JsonNode.Parse(CodexTool(thread, "session_open", OpenReply("s-big")))!;
+        big["payload"]!["item"]!["arguments"]!["padding"] = new string('x', 5000);
+        Rollout(codex, thread, big.ToJsonString(), CodexTool(thread, "session_open", OpenReply("s-after")));
+        var locator = new CodexChatLocator(codex, maxLineBytes: 2048);
+        Assert.Null(locator.Locate("s-big", openedAt));
+        Assert.Equal(new ChatLocation("codex", thread), locator.Locate("s-after", openedAt));
+        Assert.Equal(new ChatLocation("codex", thread), new CodexChatLocator(codex).Locate("s-big", openedAt));
+
+        using var stream = new MemoryStream(System.Text.Encoding.UTF8.GetBytes("short\n" + new string('y', 100) + "\nlast\npartial"));
+        Assert.Equal([("short", 6L), (null, 107L), ("last", 112L)], ChatLocators.ReadLines(stream, 0, 50).ToArray());
+    }
+
+    [Fact]
+    public async Task Budget_stops_scanning_without_blocking_the_announce()
+    {
+        var openedAt = DateTimeOffset.UtcNow.AddMinutes(-1);
+        var codex = Path.Combine(root, "codex-sessions");
+        var thread = Guid.NewGuid().ToString();
+        Rollout(codex, thread, CodexTool(thread, "session_open", OpenReply("s-slow")));
+        NodeState.WriteSessionHandle(DataDir, new SessionHandle("s-slow", "synthetic-token-slow", "repo", "Slow chat", openedAt));
+        var opens = new ConcurrentDictionary<string, int>();
+        await using var host = Hub();
+        var traffic = new HubTraffic();
+        using var state = NodeState.Open(DataDir);
+        using var stop = new CancellationTokenSource();
+        var transport = InMemory(host, traffic, TimeSpan.FromMilliseconds(30));
+        var run = NodeRunner.RunAsync(state, InMemoryHub, new NodeTransport
+        {
+            ProbeFingerprint = transport.ProbeFingerprint, CreateHandler = transport.CreateHandler, HubHandler = transport.HubHandler, MachineName = "Node PC",
+            Locators = [new CodexChatLocator(codex, open: Counting(opens))], LocateBudget = TimeSpan.Zero,
+            AnnounceInterval = transport.AnnounceInterval, FirstRetry = transport.FirstRetry, MaxRetry = transport.MaxRetry, Trace = events.Enqueue
+        }, error, stop.Token);
+        await WaitForAsync(() => Count("announced") >= 2, run);
+        stop.Cancel();
+        Assert.Equal(0, await run);
+
+        var chat = JsonNode.Parse(traffic.Accepted!)!["chats"]!.AsArray().Single()!.AsObject();
+        Assert.Equal(("unknown", "unmapped", false), Route(chat));
+        Assert.Empty(opens);
+        Assert.Equal((null, false), (Handle("s-slow").Chat, Handle("s-slow").Unmapped));
+        // Still pending, so the next cycle with time to spare finds it.
+        Assert.Equal(("codex", thread, true), Route(Announced(Chats([new CodexChatLocator(codex)]).Read(_ => true))["s-slow"]));
+    }
+
+    private NodeChats Chats(IChatLocator[] locators, TimeProvider? clock = null) => new(DataDir, locators, clock ?? TimeProvider.System, NodeChats.DefaultLocateWindow, NodeChats.DefaultBudget);
+
+    private SessionHandle Handle(string sessionId) => NodeState.ReadSessionHandle(Path.Combine(DataDir, "sessions", sessionId + ".json"))!;
+
+    private static Dictionary<string, JsonObject> Announced(JsonArray chats) => chats.Select(x => x!.AsObject()).ToDictionary(x => x["relaySessionId"]!.GetValue<string>());
+
+    private static (string, string, bool) Route(JsonObject chat) => (chat["provider"]!.GetValue<string>(), chat["threadId"]!.GetValue<string>(), chat["wakeable"]!.GetValue<bool>());
+
+    private static Func<string, Stream> Counting(ConcurrentDictionary<string, int> opens) => path => { opens.AddOrUpdate(path, 1, (_, count) => count + 1); return ChatLocators.OpenShared(path); };
+
+    private sealed class ManualClock(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
     }
 
     private static string Rollout(string codexRoot, string threadId, params string[] lines)

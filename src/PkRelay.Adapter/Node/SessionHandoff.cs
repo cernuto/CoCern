@@ -4,11 +4,12 @@ namespace PkRelay.Adapter.Node;
 
 /// <summary>
 /// A chat's relay session as handed to the node in <c>sessions\&lt;sessionId&gt;.json</c>: <c>{ sessionId, sessionToken, repositoryId, label, openedAt }</c>, plus <c>client { provider, chatId }</c> when the client told the adapter its chat ID.
+/// The node adds its outcome: <c>chat { provider, threadId }</c> once located, or <c>unmapped: true</c> once it gave up; either is final.
 /// The file is current-user-only and never holds the machine credential. <see cref="ToString"/> leaves the token out.
 /// </summary>
-public sealed record SessionHandle(string SessionId, string SessionToken, string RepositoryId, string Label, DateTimeOffset OpenedAt, ChatLocation? Client = null)
+public sealed record SessionHandle(string SessionId, string SessionToken, string RepositoryId, string Label, DateTimeOffset OpenedAt, ChatLocation? Client = null, ChatLocation? Chat = null, bool Unmapped = false)
 {
-    public override string ToString() => $"SessionHandle {{ SessionId = {SessionId}, RepositoryId = {RepositoryId}, Client = {Client} }}";
+    public override string ToString() => $"SessionHandle {{ SessionId = {SessionId}, RepositoryId = {RepositoryId}, Client = {Client}, Chat = {Chat}, Unmapped = {Unmapped} }}";
 }
 
 /// <summary>Runs in the stdio adapter on node credentials: after each successful <c>session_open</c> it hands the new session to the node by writing its handle file.</summary>
