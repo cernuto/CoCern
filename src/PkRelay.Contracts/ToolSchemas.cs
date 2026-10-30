@@ -6,19 +6,23 @@ internal static class ToolSchemas
     private static readonly string[] ForwardingFields = ["repositoryId", "sessionId", "sessionToken", "requestId"];
 
     /// <summary>
-    /// The session envelope plus only the fields agents get wrong without a schema (delta paging and the workflow record).
+    /// The session envelope and required operation fields plus common chat coordination, delta paging and workflow arguments.
     /// Tool definitions sit in every agent's context on every turn, so a forwarding client advertises this subset.
     /// </summary>
-    public static Dictionary<string, object> ForwardingProperties(string tool)
+    public static Dictionary<string, object> ForwardingProperties(RelayTool tool)
     {
-        var all = Properties(tool);
-        string[] extra = tool switch
+        var all = Properties(tool.Name);
+        string[] extra = tool.Name switch
         {
+            RelayTools.SessionOpen => ["machineId", "label"],
             RelayTools.TaskGet => ["taskId", "section", "sinceRevision", "snapshotRevision", "cursor", "limit"],
             RelayTools.TaskUpdate => ["taskId", "expectedVersion", "workflow", "includeNextWork"],
+            RelayTools.SendMessage => ["text", "recipientSessionId", "taskId", "replyTo"],
+            RelayTools.CheckInbox => ["cursor", "limit"],
+            RelayTools.Ack => ["messageId", "messageIds"],
             _ => []
         };
-        return ForwardingFields.Concat(extra).ToDictionary(field => field, field => all[field]);
+        return ForwardingFields.Concat(tool.RequiredFields).Concat(extra).Distinct(StringComparer.Ordinal).ToDictionary(field => field, field => all[field]);
     }
 
     public static Dictionary<string, object> Properties(string tool)
@@ -79,7 +83,9 @@ internal static class ToolSchemas
                 properties["outcome"] = new { type = "string", @enum = new[] { "started", "completed", "failed", "canceled", "incomplete", "unknown" } };
                 properties["restoration"] = new { type = "string", @enum = new[] { "pending", "blocked", "verified", "accepted" } };
                 properties["report"] = new { description = "Bounded reported evidence; not a claim that the relay performed or verified external execution." }; break;
-            case RelayTools.SendMessage: Text("text", "Message text, at most 8 KiB. Supply taskId for shared conversation, otherwise recipientSessionId for private delivery."); break;
+            case RelayTools.SendMessage:
+                Text("text", "Message text, at most 8 KiB. Supply taskId for shared conversation, otherwise recipientSessionId for private delivery.");
+                Text("replyTo", "Optional ID of the message this replies to."); break;
             case RelayTools.Ack:
                 Text("messageId", "One explicitly handled inbox message ID."); properties["messageIds"] = new { type = "array", items = new { type = "string" }, maxItems = RelayLimits.MaxAcknowledgedMessages }; break;
             case RelayTools.ContextGet: Text("contextId", "Selected shared context ID; omit for a bounded listing."); break;

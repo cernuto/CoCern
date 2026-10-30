@@ -74,7 +74,7 @@ public static class RelayToolCatalog
     }
 
     /// <summary>A compact schema for clients that forward arguments unchanged: only repositoryId is required and the hub enforces the rest.</summary>
-    public static JsonElement ForwardingSchema(RelayTool tool) => Schema(ToolSchemas.ForwardingProperties(tool.Name), ["repositoryId"]);
+    public static JsonElement ForwardingSchema(RelayTool tool) => Schema(ToolSchemas.ForwardingProperties(tool), ["repositoryId"]);
 
     private static JsonElement Schema(Dictionary<string, object> properties, List<string> required) =>
         JsonSerializer.SerializeToElement(new { type = "object", properties, required, additionalProperties = true });

@@ -35,7 +35,8 @@ public sealed class ContractsTests
         var forwarding = RelayToolCatalog.ForwardingSchema(claim);
         Assert.Contains("resourceIds", strict.GetProperty("required").EnumerateArray().Select(x => x.GetString()));
         Assert.Equal(["repositoryId"], forwarding.GetProperty("required").EnumerateArray().Select(x => x.GetString()));
-        Assert.Equal(["repositoryId", "sessionId", "sessionToken", "requestId"], forwarding.GetProperty("properties").EnumerateObject().Select(x => x.Name));
+        Assert.True(forwarding.GetProperty("properties").TryGetProperty("resourceIds", out _));
+        Assert.False(forwarding.GetProperty("properties").TryGetProperty("boardId", out _));
 
         RelayToolCatalog.TryGet(RelayTools.TaskUpdate, out var update);
         Assert.True(RelayToolCatalog.ForwardingSchema(update).GetProperty("properties").TryGetProperty("workflow", out _));
