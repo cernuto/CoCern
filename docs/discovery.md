@@ -4,6 +4,8 @@ Discovery lets every PC that runs a coding chat show up in one place, so a chat 
 
 ## Joining a PC
 
+Warning: there is no join code. Any device that can reach the hub's HTTPS port may enroll and then send messages that wake agents on other PCs. Open the port only on a network you trust; see [Open trust](#open-trust).
+
 On the hub PC, turn discovery and the network listener on (see Network below) and allow the one firewall port. Then, for each PC to join:
 
 1. Copy the published adapter folder (`artifacts\adapter`, produced by `./scripts/Build-PkRelay.ps1 -Publish`) to the PC. Keep the folder where it is afterwards: the PC's startup entry and its client settings point into it.
@@ -12,6 +14,8 @@ On the hub PC, turn discovery and the network listener on (see Network below) an
 ```powershell
 dotnet .\PkRelay.Adapter.dll --setup --hub https://<hub-pc-name-or-address>:5273/
 ```
+
+5273 is the default `Relay:Network:HttpsPort`; use the hub's configured port if it differs.
 
 The address is typed once and remembered. A PC finds the hub only by that address; there is no beacon, network scan or name lookup. On first contact the node pins the hub's certificate fingerprint (trust on first use), enrolls and announces once, and only then changes anything else on the PC. Setup then:
 
@@ -74,6 +78,8 @@ Creating a file named `stop` in the node folder stops waking on that PC:
 ```powershell
 New-Item -ItemType File -Path "$env:LOCALAPPDATA\PkRelay\node\stop" -Force
 ```
+
+That is the default node folder; `--data-dir` (or `PKRELAY_NODE_DIR` for the adapter) moves it, and the `stop` file then goes in the moved folder.
 
 The node keeps running and announcing, so its chats stay in the directory, but no Codex chat is woken and a Claude chat's waiter exits with code 3. Delete the file to let waking start again at the node's next announcement. To end the node process itself, stop its `dotnet` process; to keep it from starting at sign-in, remove the `PkRelayNode` value from the Run key.
 
