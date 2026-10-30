@@ -695,14 +695,15 @@ public sealed class NodeTests : IDisposable
         Rollout(codex, two, CodexTool(two, "session_open", OpenReply("s-c")));
         Rollout(codex, other, UserText("unrelated"));
         foreach (var id in new[] { "s-a", "s-b", "s-c", "s-x" })
-            NodeState.WriteSessionHandle(DataDir, new SessionHandle(id, "synthetic-token-" + id, "repo", "Chat " + id, openedAt));
+            NodeState.WriteSessionHandle(DataDir, new SessionHandle(id, "synthetic-token-" + id, "repo", "Chat " + id, id == "s-b" ? openedAt.AddSeconds(1) : openedAt));
         var opens = new ConcurrentDictionary<string, int>();
         var nodeChats = Chats([new CodexChatLocator(codex, open: Counting(opens))]);
 
         var chats = Announced(nodeChats.Read(_ => true));
         Assert.Equal(3, opens.Count);
         Assert.All(opens.Values, x => Assert.Equal(1, x));
-        Assert.Equal(("codex", one, true), Route(chats["s-a"]));
+        // Both sessions in thread one were located in the one read; only the newer is that thread's current session.
+        Assert.False(chats.ContainsKey("s-a"));
         Assert.Equal(("codex", one, true), Route(chats["s-b"]));
         Assert.Equal(("codex", two, true), Route(chats["s-c"]));
         Assert.False(chats["s-x"]["wakeable"]!.GetValue<bool>());
@@ -955,6 +956,28 @@ public sealed class NodeTests : IDisposable
         Assert.False(File.Exists(HandlePath("s-denied")));
         Assert.True(File.Exists(HandlePath("s-recent")));
         Assert.True(File.Exists(HandlePath("s-located")));
+    }
+
+    [Fact]
+    public void A_newer_session_in_the_same_thread_replaces_the_older_handle()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var codex = Path.Combine(root, "codex-sessions");
+        var (thread, other) = (Guid.NewGuid().ToString(), Guid.NewGuid().ToString());
+        // The thread opened s-old earlier, then s-new; the rollout holds both results. Another thread's handle is untouched.
+        Rollout(codex, thread, CodexTool(thread, "session_open", OpenReply("s-old")), CodexTool(thread, "session_open", OpenReply("s-new")));
+        NodeState.WriteSessionHandle(DataDir, new SessionHandle("s-old", "synthetic-token-old", "repo", "Old", now.AddMinutes(-20), Chat: new ChatLocation("codex", thread.ToUpperInvariant())));
+        NodeState.WriteSessionHandle(DataDir, new SessionHandle("s-new", "synthetic-token-new", "repo", "New", now.AddMinutes(-1)));
+        NodeState.WriteSessionHandle(DataDir, new SessionHandle("s-other", "synthetic-token-other", "repo", "Other", now.AddMinutes(-30), Chat: new ChatLocation("codex", other)));
+
+        var chats = Announced(Chats([new CodexChatLocator(codex)]).Read(_ => true));
+
+        Assert.Equal(["s-new", "s-other"], chats.Keys.Order());
+        Assert.Equal(("codex", thread, true), Route(chats["s-new"]));
+        // The older handle is deleted, and its token with it.
+        Assert.False(File.Exists(Path.Combine(DataDir, "sessions", "s-old.json")));
+        Assert.DoesNotContain(Directory.EnumerateFiles(Path.Combine(DataDir, "sessions")), path => File.ReadAllText(path).Contains("synthetic-token-old"));
+        Assert.True(File.Exists(Path.Combine(DataDir, "sessions", "s-other.json")));
     }
 
     private void EnrollOnLoopback()

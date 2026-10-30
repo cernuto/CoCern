@@ -62,6 +62,26 @@ public sealed class DiscoveryDomainTests
     }
 
     [Fact]
+    public void Announce_keeps_only_the_newest_chat_per_provider_thread()
+    {
+        var state = new StateEnvelope<CoordinationDocument>();
+        Assert.True(Enroll(state).Ok);
+        JsonObject Session(string thread, string session, int minutesAgo, string provider = "codex")
+        {
+            var chat = Chat(thread, provider: provider);
+            chat["relaySessionId"] = session; chat["openedAt"] = Now.AddMinutes(-minutesAgo).ToString("O"); chat["wakeable"] = provider != "unknown";
+            return chat;
+        }
+        // A stale node lists the superseded session first; the hub still keeps the newest one per thread, comparing thread IDs without case.
+        var reply = Announce(state, 0, Session("t-a", "rs-old", 20), Session("T-A", "rs-new", 1), Session("t-a", "rs-claude", 5, "claude"), Session("t-b", "rs-b", 30),
+            Session("unmapped", "rs-u1", 2, "unknown"), Session("unmapped", "rs-u2", 3, "unknown"));
+        Assert.True(reply.Ok);
+        Assert.Equal(["rs-b", "rs-claude", "rs-new"], Data(reply)["routes"]!.AsArray().Select(x => x!["relaySessionId"]!.ToString()).Order());
+        // Unmapped chats share a placeholder thread, so they are never collapsed.
+        Assert.Equal(["rs-b", "rs-claude", "rs-new", "rs-u1", "rs-u2"], Items(Directory(state, 0, "pkrelay")).Select(x => x!["relaySessionId"]!.ToString()).Order());
+    }
+
+    [Fact]
     public void Announce_returns_routes_only_for_wakeable_chats_of_that_machine()
     {
         var state = new StateEnvelope<CoordinationDocument>();

@@ -335,12 +335,34 @@ internal sealed class NodeChats(string nodeFolder, IReadOnlyList<IChatLocator> l
         }
         var codex = codexFound?.Invoke() ?? true;
         var waiters = ClaudeWaiter.Running(nodeFolder);
-        return new JsonArray(handles.Select(handle => (JsonNode)new JsonObject
+        return new JsonArray(Current(handles).Select(handle => (JsonNode)new JsonObject
         {
             ["provider"] = handle.Chat?.Provider ?? "unknown", ["threadId"] = handle.Chat?.ThreadId ?? "unmapped", ["relaySessionId"] = handle.SessionId,
             ["repositoryId"] = handle.RepositoryId, ["label"] = handle.Label, ["wakeable"] = handle.Chat is { } chat && (chat.Provider != "codex" || codex),
-            ["waiterRunning"] = handle.Chat is { Provider: "claude" } claude && waiters.Contains(claude.ThreadId)
+            ["waiterRunning"] = handle.Chat is { Provider: "claude" } claude && waiters.Contains(claude.ThreadId), ["openedAt"] = handle.OpenedAt.ToString("O")
         }).ToArray());
+    }
+
+    /// <summary>
+    /// One provider thread maps to one current relay session: when several located handles name the same chat, only the newest is kept, and each older handle file is deleted,
+    /// and its session token with it. A handle whose file cannot be deleted now is still left out of the announcement and is tried again next cycle.
+    /// </summary>
+    private IEnumerable<SessionHandle> Current(SessionHandle[] handles)
+    {
+        var newest = handles.Where(x => x.Chat is not null).GroupBy(x => (x.Chat!.Provider.ToLowerInvariant(), x.Chat.ThreadId.ToLowerInvariant()))
+            .Select(group => group.OrderByDescending(x => x.OpenedAt).ThenBy(x => x.SessionId, StringComparer.Ordinal).First().SessionId).ToHashSet(StringComparer.Ordinal);
+        foreach (var handle in handles)
+        {
+            if (handle.Chat is not null && !newest.Contains(handle.SessionId)) { Delete(handle); continue; }
+            yield return handle;
+        }
+    }
+
+    /// <summary>The node's normal delete of one of its own handle files; false when it could not be deleted now.</summary>
+    private bool Delete(SessionHandle handle)
+    {
+        try { File.Delete(NodeState.SessionHandlePath(nodeFolder, handle.SessionId)); return true; }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { return false; }
     }
 
     /// <summary>Deletes the node's own handle files for chats that never mapped (or never will) and opened more than <see cref="PruneAfter"/> ago; returns the rest.</summary>
@@ -349,11 +371,8 @@ internal sealed class NodeChats(string nodeFolder, IReadOnlyList<IChatLocator> l
         foreach (var handle in handles)
         {
             var age = now - handle.OpenedAt;
-            if (handle.Chat is null && (handle.Unmapped || age > locateWindow) && age > PruneAfter)
-            {
-                try { File.Delete(NodeState.SessionHandlePath(nodeFolder, handle.SessionId)); continue; }
-                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { /* kept; tried again next cycle */ }
-            }
+            // Kept when it could not be deleted now; tried again next cycle.
+            if (handle.Chat is null && (handle.Unmapped || age > locateWindow) && age > PruneAfter && Delete(handle)) continue;
             yield return handle;
         }
     }

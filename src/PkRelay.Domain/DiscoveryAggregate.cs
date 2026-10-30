@@ -87,6 +87,13 @@ public static class DiscoveryStateMachine
         return found.Key is null ? Error(NotFound) : Ok(new { machineId = found.Key, principalId = PrincipalOf(found.Key) });
     }
 
+    /// <summary>The provider a node announces for a session it has not mapped to a chat.</summary>
+    private const string UnmappedProvider = "unknown";
+
+    /// <summary>When the announced chat's session was opened, or the earliest time when absent or unreadable.</summary>
+    private static DateTimeOffset OpenedAt(JsonObject chat) =>
+        chat["openedAt"] is JsonValue value && value.TryGetValue<string>(out var text) && DateTimeOffset.TryParse(text, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var at) ? at : DateTimeOffset.MinValue;
+
     private static RelayReply Announce(JsonObject state, JsonObject args, DateTimeOffset now)
     {
         var id = Required(args, "machineId");
@@ -94,16 +101,20 @@ public static class DiscoveryStateMachine
         var clients = StringList(args["clients"]).Select(x => x.Length is > 0 and <= RelayLimits.MaxIdentifierLength ? x : throw new ArgumentException("clients entries must be 1 to 256 characters.")).ToArray();
         var source = args["chats"] is null ? new JsonArray() : args["chats"] as JsonArray ?? throw new ArgumentException("chats must be an array.");
         if (source.Count > DiscoveryLimits.MaxChatsPerMachine) return Error(CapacityExceeded);
-        var chats = new JsonArray();
+        var parsed = new List<(JsonObject Chat, DateTimeOffset OpenedAt, int Order)>();
         foreach (var node in source)
         {
             var chat = node as JsonObject ?? throw new ArgumentException("chats entries must be objects.");
-            chats.Add(new JsonObject
+            parsed.Add((new JsonObject
             {
                 ["provider"] = Required(chat, "provider"), ["threadId"] = Required(chat, "threadId"), ["relaySessionId"] = Required(chat, "relaySessionId"),
                 ["repositoryId"] = Required(chat, "repositoryId"), ["label"] = Required(chat, "label"), ["wakeable"] = Flag(chat, "wakeable"), ["waiterRunning"] = Flag(chat, "waiterRunning")
-            });
+            }, OpenedAt(chat), parsed.Count));
         }
+        // One provider thread maps to one current relay session: keep only the newest chat per (provider, thread), so a stale node cannot announce a superseded route.
+        // Newest is the latest openedAt; without one, the earlier entry wins (the node lists newest first). Unmapped chats share a placeholder thread and are never collapsed.
+        var chats = new JsonArray(parsed.GroupBy(x => Text(x.Chat, "provider") == UnmappedProvider ? "unmapped:" + x.Order : Text(x.Chat, "provider").ToLowerInvariant() + "/" + Text(x.Chat, "threadId").ToLowerInvariant())
+            .Select(group => group.OrderByDescending(x => x.OpenedAt).ThenBy(x => x.Order).First()).OrderBy(x => x.Order).Select(x => (JsonNode)x.Chat).ToArray());
         if (ObjectAt(state, "machines")[id] is not JsonObject machine) return Error(NotFound);
         machine["machineName"] = name; machine["lastSeen"] = now.ToString("O");
         machine["clients"] = new JsonArray(clients.Select(x => (JsonNode)JsonValue.Create(x)!).ToArray()); machine["chats"] = chats;
