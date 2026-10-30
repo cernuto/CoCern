@@ -143,4 +143,75 @@ public sealed class DiscoveryDomainTests
         Assert.Equal("NotFound", Call(state, DiscoveryOperations.Announce, new() { ["machineId"] = "ghost", ["machineName"] = "x", ["clients"] = new JsonArray(), ["chats"] = new JsonArray() }).Code);
         Assert.Equal(before, state.Value.Json);
     }
+
+    [Fact]
+    public void A_full_directory_is_truncated_to_the_reply_budget_without_repeated_serialization()
+    {
+        var state = new StateEnvelope<CoordinationDocument>();
+        for (var machine = 0; machine < DiscoveryLimits.MaxMachines; machine++)
+        {
+            var id = "m" + machine;
+            Assert.True(Call(state, DiscoveryOperations.Enroll, new() { ["machineId"] = id, ["machineName"] = "PC-" + machine, ["credentialHash"] = "H" + machine }).Ok);
+            var chats = Enumerable.Range(0, DiscoveryLimits.MaxChatsPerMachine).Select(i => (JsonNode)Chat(machine + "-" + i)).ToArray();
+            Assert.True(Call(state, DiscoveryOperations.Announce, new() { ["machineId"] = id, ["machineName"] = "PC-" + machine, ["clients"] = new JsonArray(), ["chats"] = new JsonArray(chats) }).Ok);
+        }
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var reply = Directory(state, 0, "pkrelay");
+        clock.Stop();
+        Assert.True(reply.Ok);
+        Assert.True(Data(reply)["truncated"]!.GetValue<bool>());
+        Assert.True(Replies.FitsWire(reply, RelayLimits.AggregateReplyBytes));
+        Assert.InRange(Items(reply).Count, 1, DiscoveryLimits.MaxMachines * DiscoveryLimits.MaxChatsPerMachine - 1);
+        Assert.True(clock.Elapsed < TimeSpan.FromSeconds(2), "Directory took " + clock.Elapsed);
+    }
+
+    [Fact]
+    public void A_directory_that_fits_is_not_truncated()
+    {
+        var state = new StateEnvelope<CoordinationDocument>();
+        Assert.True(Enroll(state).Ok);
+        Assert.True(Announce(state, 0, Chat("t1"), Chat("t2")).Ok);
+        var reply = Directory(state, 0, "pkrelay");
+        Assert.Equal(2, Items(reply).Count);
+        Assert.False(Data(reply)["truncated"]!.GetValue<bool>());
+    }
+
+    [Theory]
+    [InlineData("chats", "null-element")]
+    [InlineData("chats", "string-element")]
+    [InlineData("chats", "not-an-array")]
+    [InlineData("clients", "null-element")]
+    [InlineData("clients", "number-element")]
+    [InlineData("clients", "not-an-array")]
+    public void Announce_rejects_malformed_arrays_as_invalid_arguments(string field, string shape)
+    {
+        var state = new StateEnvelope<CoordinationDocument>();
+        Assert.True(Enroll(state).Ok);
+        Assert.True(Announce(state, 0, Chat("t1")).Ok);
+        var before = state.Value.Json;
+        var args = new JsonObject { ["machineId"] = "m1", ["machineName"] = "PC-B", ["clients"] = new JsonArray("codex"), ["chats"] = new JsonArray(Chat("t2")) };
+        args[field] = shape switch
+        {
+            "null-element" => new JsonArray(new JsonNode?[] { null }),
+            "string-element" => new JsonArray("not-an-object"),
+            "number-element" => new JsonArray(7),
+            _ => JsonValue.Create("not-an-array")
+        };
+        Assert.Equal("InvalidArguments", Call(state, DiscoveryOperations.Announce, args).Code);
+        Assert.Equal(before, state.Value.Json);
+    }
+
+    [Theory]
+    [InlineData("null-element")]
+    [InlineData("number-element")]
+    [InlineData("not-an-array")]
+    public void Directory_rejects_malformed_repositories_as_invalid_arguments(string shape)
+    {
+        var state = new StateEnvelope<CoordinationDocument>();
+        Assert.True(Enroll(state).Ok);
+        var before = state.Value.Json;
+        JsonNode? repositories = shape switch { "null-element" => new JsonArray(new JsonNode?[] { null }), "number-element" => new JsonArray(7), _ => JsonValue.Create("pkrelay") };
+        Assert.Equal("InvalidArguments", Call(state, DiscoveryOperations.Directory, new() { ["repositories"] = repositories }).Code);
+        Assert.Equal(before, state.Value.Json);
+    }
 }

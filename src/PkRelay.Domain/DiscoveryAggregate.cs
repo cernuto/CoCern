@@ -91,13 +91,13 @@ public static class DiscoveryStateMachine
     {
         var id = Required(args, "machineId");
         var name = Required(args, "machineName");
-        var clients = Strings(args["clients"]).Select(x => x.Length is > 0 and <= RelayLimits.MaxIdentifierLength ? x : throw new ArgumentException("clients entries must be 1 to 256 characters.")).ToArray();
-        var source = args["chats"] as JsonArray ?? new JsonArray();
+        var clients = StringList(args["clients"]).Select(x => x.Length is > 0 and <= RelayLimits.MaxIdentifierLength ? x : throw new ArgumentException("clients entries must be 1 to 256 characters.")).ToArray();
+        var source = args["chats"] is null ? new JsonArray() : args["chats"] as JsonArray ?? throw new ArgumentException("chats must be an array.");
         if (source.Count > DiscoveryLimits.MaxChatsPerMachine) return Error(CapacityExceeded);
         var chats = new JsonArray();
         foreach (var node in source)
         {
-            var chat = node!.AsObject();
+            var chat = node as JsonObject ?? throw new ArgumentException("chats entries must be objects.");
             chats.Add(new JsonObject
             {
                 ["provider"] = Required(chat, "provider"), ["threadId"] = Required(chat, "threadId"), ["relaySessionId"] = Required(chat, "relaySessionId"),
@@ -114,7 +114,7 @@ public static class DiscoveryStateMachine
     /// <summary>The announced chats in the given repositories. Thread IDs, hashes and credentials never leave the aggregate.</summary>
     private static RelayReply Directory(JsonObject state, JsonObject args, DateTimeOffset now)
     {
-        var repositories = Strings(args["repositories"]).ToHashSet(StringComparer.Ordinal);
+        var repositories = StringList(args["repositories"]).ToHashSet(StringComparer.Ordinal);
         var items = new List<object>();
         foreach (var (_, node) in ObjectAt(state, "machines"))
         {
@@ -128,10 +128,22 @@ public static class DiscoveryStateMachine
                 items.Add(new { label = Text(chat, "label"), provider, machineName = Text(machine, "machineName"), relaySessionId = Text(chat, "relaySessionId"), repositoryId = Text(chat, "repositoryId"), reachable = live && ready });
             }
         }
-        var truncated = false;
-        while (items.Count > 0 && !FitsWire(Ok(new { items, truncated }), RelayLimits.AggregateReplyBytes)) { items.RemoveAt(items.Count - 1); truncated = true; }
-        return Ok(new { items, truncated });
+        if (Fits(items, items.Count)) return Ok(new { items, truncated = false });
+        // Binary search the largest prefix that fits: the size grows with the count, and each probe serializes once.
+        var low = 0; var high = items.Count;
+        while (low < high) { var middle = (low + high + 1) / 2; if (Fits(items, middle)) low = middle; else high = middle - 1; }
+        return Ok(new { items = items.Take(low), truncated = true });
     }
+
+    private static bool Fits(List<object> items, int count) => FitsWire(Ok(new { items = items.Take(count), truncated = count < items.Count }), RelayLimits.AggregateReplyBytes);
+
+    /// <summary>An absent value is empty; otherwise it must be an array of strings, with no nulls or other kinds of element.</summary>
+    private static string[] StringList(JsonNode? node) => node switch
+    {
+        null => [],
+        JsonArray array => array.Select(x => x is JsonValue value && value.TryGetValue<string>(out var text) ? text : throw new ArgumentException("Expected an array of strings.")).ToArray(),
+        _ => throw new ArgumentException("Expected an array of strings.")
+    };
 
     private static RelayReply Revoke(JsonObject state, RelayCaller caller, JsonObject args)
     {
