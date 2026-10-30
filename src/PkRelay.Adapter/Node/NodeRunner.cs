@@ -72,6 +72,9 @@ public sealed class NodeRunner : IAsyncDisposable
     private readonly HashSet<string> _denied = new(StringComparer.Ordinal);
     private HttpClient? _http;
     private string? _credential;
+    /// <summary>The credential the hub last answered 401 for, kept while re-enrolling: a 409 then means the rejection was ambiguous, and this credential is restored.</summary>
+    private string? _rejected;
+    private bool _rejectionReported;
     private string? _mismatch;
     private HubConnection? _hints;
     private string? _hintsCredential;
@@ -213,7 +216,7 @@ public sealed class NodeRunner : IAsyncDisposable
             if (Text(reply, "machineId") != machineId || Text(reply, "credential") is not { } credential || credential.Length != 64 || !credential.All(Uri.IsHexDigit))
                 return Retry($"The hub at {_hub} sent an unexpected enrollment reply. Retrying.");
             _state.SaveCredential(credential);
-            _credential = credential;
+            (_credential, _rejected) = (credential, null);
             Recovered();
             _error.WriteLine($"PkRelay node enrolled with the hub at {_hub} as machine {machineId}.");
             _transport.Trace?.Invoke("enrolled");
@@ -222,8 +225,16 @@ public sealed class NodeRunner : IAsyncDisposable
         var code = Code(reply);
         switch (response.StatusCode)
         {
+            case HttpStatusCode.Conflict when _rejected is not null:
+                // The hub refused the credential yet still holds this ID under another one. That is ambiguous (a hub fault or a replaced record), so keep both and back off.
+                _credential = _rejected;
+                if (!_rejectionReported)
+                    _error.WriteLine($"The hub at {_hub} rejected this PC's credential but still holds its machine ID {machineId}. The node keeps its identity and retries. If this continues, an administrator should revoke machine {machineId} on the hub and then re-run setup on this PC.");
+                _rejectionReported = true;
+                _trouble = true;
+                return Next.Retry;
             case HttpStatusCode.Conflict:
-                // The hub already holds this ID under another credential, which cannot be recovered: continue under a new ID.
+                // No credential was ever saved for this ID (an earlier enrollment's reply was lost), so it cannot be recovered: continue under a new ID.
                 _state.RenewMachineId();
                 return Next.Retry;
             case HttpStatusCode.Forbidden when code == "MachineRevoked":
@@ -256,8 +267,8 @@ public sealed class NodeRunner : IAsyncDisposable
             }
             if (response.StatusCode == HttpStatusCode.Unauthorized)
             {
-                // Only the hub refusing the credential leads to enrolling again; network errors never do.
-                _credential = null;
+                // Only the hub refusing the credential leads to enrolling again; network errors never do. The credential is kept aside in case the hub turns out to still hold this ID.
+                (_rejected, _credential) = (_credential, null);
                 _transport.Trace?.Invoke("unauthorized");
                 _error.WriteLine($"The hub at {_hub} no longer accepts this PC's credential; enrolling again.");
                 return Next.Again;

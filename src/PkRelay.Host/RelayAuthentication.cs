@@ -138,6 +138,8 @@ internal sealed class RelayConfigurationValidator(IConfiguration configuration, 
 internal sealed class RelayAuthenticationHandler(IOptionsMonitor<AuthenticationSchemeOptions> options, ILoggerFactory logger, UrlEncoder encoder, RelayClient[] clients, IConfiguration configuration, IMachineDirectory machines)
     : AuthenticationHandler<AuthenticationSchemeOptions>(options, logger, encoder)
 {
+    private static readonly object UnavailableKey = new();
+
     protected override async Task<AuthenticateResult> HandleAuthenticateAsync()
     {
         var header = Request.Headers.Authorization.ToString();
@@ -155,14 +157,26 @@ internal sealed class RelayAuthenticationHandler(IOptionsMonitor<AuthenticationS
             return AuthenticateResult.Success(new AuthenticationTicket(RelayAuthentication.Principal(match.PrincipalId, match.IsAdministrator, match.Repositories, Scheme.Name), Scheme.Name));
         }
         // Enrolled machines come after configured clients and before OAuth. Only well-formed hub-issued credentials reach the discovery grain, so junk tokens cost nothing.
-        if (DiscoverySettings.Enabled(configuration) && DiscoverySettings.IsCredential(token) && await machines.ValidateAsync(token, Context.RequestAborted) is { } machine)
-            return AuthenticateResult.Success(new AuthenticationTicket(RelayAuthentication.Principal(machine.PrincipalId, false, DiscoverySettings.Repositories(configuration), Scheme.Name, machine.MachineId), Scheme.Name));
+        if (DiscoverySettings.Enabled(configuration) && DiscoverySettings.IsCredential(token))
+        {
+            var check = await machines.CheckAsync(token, Context.RequestAborted);
+            if (check is { Status: CredentialStatus.Valid, Machine: { } machine })
+                return AuthenticateResult.Success(new AuthenticationTicket(RelayAuthentication.Principal(machine.PrincipalId, false, DiscoverySettings.Repositories(configuration), Scheme.Name, machine.MachineId), Scheme.Name));
+            // The hub could not decide: answer 503 so a node never mistakes a hub fault for a rejected credential and re-enrolls.
+            if (check.Status == CredentialStatus.Unavailable) { Context.Items[UnavailableKey] = true; return AuthenticateResult.Fail("Credential validation is unavailable."); }
+        }
         if (!string.IsNullOrWhiteSpace(configuration["Relay:OAuth:Authority"])) return await Context.AuthenticateAsync("ExternalJwt");
         return AuthenticateResult.Fail("Invalid credentials.");
     }
 
     protected override Task HandleChallengeAsync(AuthenticationProperties properties)
     {
+        if (Context.Items.ContainsKey(UnavailableKey))
+        {
+            Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+            Response.Headers.RetryAfter = "5";
+            return Task.CompletedTask;
+        }
         Response.StatusCode = 401;
         var resource = configuration["Relay:OAuth:Resource"];
         Response.Headers.WWWAuthenticate = Uri.TryCreate(resource, UriKind.Absolute, out var uri) && uri.Scheme == "https"

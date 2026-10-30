@@ -327,6 +327,49 @@ public sealed class DiscoveryHostTests
         Assert.Empty(otherHints);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Grain_failure_during_credential_validation_answers_503_never_401(bool throws)
+    {
+        var grain = new ScriptedDiscoveryGrain { Validate = throws ? null : Replies.Error("StorageFailure") };
+        await using var host = Host(services: services => services.AddSingleton<IMachineDirectory>(new MachineDirectory(ScriptedFactory.For(grain))));
+        using var machine = Client(host, new string('c', 64));
+        using var response = await machine.GetAsync("/api/tools");
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, (await PostAsync(machine, "/api/discovery/announce", Announcement())).Status);
+        // A hub fault is never cached: once the grain answers again, a genuinely unknown credential is 401.
+        grain.Validate = Replies.Error("NotFound");
+        Assert.Equal(HttpStatusCode.Unauthorized, (await machine.GetAsync("/api/tools")).StatusCode);
+    }
+
+    /// <summary>A discovery grain whose validation answer the test sets; null throws, like an unreachable silo. It counts validation calls.</summary>
+    internal sealed class ScriptedDiscoveryGrain : IDiscoveryGrain
+    {
+        private int validations;
+        public volatile RelayReply? Validate = Replies.Error("NotFound");
+        public int Validations => Volatile.Read(ref validations);
+        public Task<RelayReply> ExecuteAsync(RelayCaller caller, string operation, string argumentsJson)
+        {
+            if (operation != DiscoveryOperations.Validate) return Task.FromResult(Replies.Ok(new { }));
+            Interlocked.Increment(ref validations);
+            return Validate is { } reply ? Task.FromResult(reply) : throw new InvalidOperationException("silo unavailable");
+        }
+    }
+
+    internal class ScriptedFactory : System.Reflection.DispatchProxy
+    {
+        private IDiscoveryGrain? grain;
+        public static Orleans.IGrainFactory For(IDiscoveryGrain grain)
+        {
+            var factory = Create<Orleans.IGrainFactory, ScriptedFactory>();
+            ((ScriptedFactory)(object)factory).grain = grain;
+            return factory;
+        }
+        protected override object? Invoke(System.Reflection.MethodInfo? targetMethod, object?[]? args) =>
+            targetMethod!.Name == "GetGrain" && targetMethod.ReturnType == typeof(IDiscoveryGrain) ? grain : throw new NotSupportedException(targetMethod.Name);
+    }
+
     private static async Task WaitForAsync(Func<bool> condition)
     {
         var deadline = DateTime.UtcNow.AddSeconds(5);

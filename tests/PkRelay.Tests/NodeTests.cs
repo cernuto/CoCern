@@ -171,7 +171,7 @@ public sealed class NodeTests : IDisposable
     }
 
     [Fact]
-    public async Task Unauthorized_announcement_reenrolls_under_a_fresh_identity_when_the_old_one_is_taken()
+    public async Task Unauthorized_then_conflict_keeps_the_identity_and_credential_and_asks_for_an_administrator()
     {
         await using var host = Hub();
         var traffic = new HubTraffic();
@@ -179,20 +179,24 @@ public sealed class NodeTests : IDisposable
         using var stop = new CancellationTokenSource();
         var run = NodeRunner.RunAsync(state, InMemoryHub, InMemory(host, traffic, TimeSpan.FromMilliseconds(20)), error, stop.Token);
         await WaitForAsync(() => Count("announced") >= 1, run);
-        var (machineId, credential) = (state.MachineId, state.ReadCredential());
+        var machineId = state.MachineId;
+        var credentialFile = Path.Combine(DataDir, "credential");
+        var bytes = File.ReadAllBytes(credentialFile);
 
-        Volatile.Write(ref traffic.UnauthorizedAnnounces, 1);
+        // Twice, so the message must not repeat: each 401 leads to one enrollment attempt, which the hub answers 409 because it still holds the ID.
+        Volatile.Write(ref traffic.UnauthorizedAnnounces, 2);
         await WaitForAsync(() => traffic.Enrolls == 3, run);
         var successes = Count("announced");
         await WaitForAsync(() => Count("announced") > successes, run);
         stop.Cancel();
         Assert.Equal(0, await run);
 
-        // The same identity is tried first; the hub still holds it under the old credential, so the node moves to a new one.
-        Assert.Equal([machineId, machineId, state.MachineId], traffic.EnrolledIds);
-        Assert.NotEqual(machineId, state.MachineId);
-        Assert.NotEqual(credential, state.ReadCredential());
-        AssertPrivate(Path.Combine(DataDir, "credential"));
+        // A 409 after a 401 is ambiguous (the hub may be faulty), so nothing is renewed or rewritten.
+        Assert.Equal([machineId, machineId, machineId], traffic.EnrolledIds);
+        Assert.Equal(machineId, state.MachineId);
+        Assert.Equal(bytes, File.ReadAllBytes(credentialFile));
+        Assert.Equal(machineId, JsonNode.Parse(File.ReadAllText(NodeJson))!["machineId"]!.GetValue<string>());
+        Assert.Single(error.ToString().Split('\n'), line => line.Contains("revoke", StringComparison.OrdinalIgnoreCase) && line.Contains("setup", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]

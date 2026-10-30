@@ -67,6 +67,12 @@ public sealed record MachineIdentity(string MachineId, string PrincipalId);
 /// <summary>The outcome of an enrollment: the machine, or the reply code explaining the refusal (MachineRevoked, AliasConflict, CapacityExceeded, ...).</summary>
 public sealed record EnrollResult(MachineIdentity? Machine, string? Code);
 
+/// <summary>How a machine credential fared: valid, unknown to the hub (NotFound), or not decidable now because the discovery grain failed.</summary>
+public enum CredentialStatus { Valid, Unknown, Unavailable }
+
+/// <summary>The outcome of checking a machine credential; <see cref="Machine"/> is set only when <see cref="Status"/> is Valid.</summary>
+public sealed record CredentialCheck(CredentialStatus Status, MachineIdentity? Machine = null);
+
 /// <summary>The hub's view of enrolled machines. Credentials are hashed before they reach the discovery grain and are never stored or cached raw.</summary>
 public interface IMachineDirectory
 {
@@ -78,6 +84,9 @@ public interface IMachineDirectory
 
     /// <summary>The machine owning the credential, or null. Positive results are cached for 30 seconds.</summary>
     Task<MachineIdentity?> ValidateAsync(string credential, CancellationToken ct);
+
+    /// <summary>Like <see cref="ValidateAsync"/>, but tells an unknown credential (the grain said NotFound) from a grain failure, which must never be treated as a rejection.</summary>
+    Task<CredentialCheck> CheckAsync(string credential, CancellationToken ct);
 
     /// <summary>Records the machine's announced chats. The machine ID always comes from <paramref name="machine"/>, never from the announcement.</summary>
     Task<RelayReply> AnnounceAsync(MachineIdentity machine, JsonObject announcement, CancellationToken ct);
@@ -104,24 +113,29 @@ public sealed class MachineDirectory(IGrainFactory grains, TimeProvider? clock =
         return reply.Ok ? new(Identity(reply), null) : new(null, reply.Code);
     }
 
-    public async Task<MachineIdentity?> ValidateAsync(string credential, CancellationToken ct)
+    public async Task<MachineIdentity?> ValidateAsync(string credential, CancellationToken ct) => (await CheckAsync(credential, ct)).Machine;
+
+    public async Task<CredentialCheck> CheckAsync(string credential, CancellationToken ct)
     {
-        if (string.IsNullOrEmpty(credential)) return null;
+        if (string.IsNullOrEmpty(credential)) return new(CredentialStatus.Unknown);
         var hash = Hash(credential);
         if (cache.TryGetValue(hash, out var cached))
         {
-            if (cached.Expires > time.GetUtcNow()) return cached.Machine;
+            if (cached.Expires > time.GetUtcNow()) return new(CredentialStatus.Valid, cached.Machine);
             cache.TryRemove(hash, out _);
         }
         var generation = Interlocked.Read(ref revocations);
-        var reply = await CallAsync(Internal, DiscoveryOperations.Validate, new() { ["credentialHash"] = hash }, ct);
-        if (!reply.Ok) return null;
+        RelayReply reply;
+        try { reply = await CallAsync(Internal, DiscoveryOperations.Validate, new() { ["credentialHash"] = hash }, ct); }
+        catch (Exception exception) when (exception is not OperationCanceledException) { return new(CredentialStatus.Unavailable); }
+        // Only NotFound means the hub does not know the credential; any other failure (StorageFailure while a write is uncertain, ...) says nothing about it.
+        if (!reply.Ok) return new(reply.Code == RelayErrorCodes.NotFound ? CredentialStatus.Unknown : CredentialStatus.Unavailable);
         var machine = Identity(reply);
         // Write first, then re-check: a revocation that completed while the grain was being asked must not leave this stale entry behind. This call still returns what the grain said.
         var entry = (Machine: machine, Expires: time.GetUtcNow().Add(CacheLifetime));
         cache[hash] = entry;
         if (Interlocked.Read(ref revocations) != generation) cache.TryRemove(new KeyValuePair<string, (MachineIdentity Machine, DateTimeOffset Expires)>(hash, entry));
-        return machine;
+        return new(CredentialStatus.Valid, machine);
     }
 
     public Task<RelayReply> AnnounceAsync(MachineIdentity machine, JsonObject announcement, CancellationToken ct)
