@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.SignalR.Client;
 using Microsoft.Extensions.DependencyInjection;
 using PkRelay.Core;
 using PkRelay.Domain;
+using PkRelay.Host;
 using Serilog;
 using Serilog.Core;
 using Serilog.Events;
@@ -416,12 +417,99 @@ public sealed class DiscoveryHostTests
         for (var i = 0; i < 30; i++)
         {
             using var junk = Client(host, Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(BitConverter.GetBytes(i))));
-            Assert.Equal(HttpStatusCode.Unauthorized, (await junk.GetAsync("/api/tools")).StatusCode);
+            Assert.Equal(i < 20 ? HttpStatusCode.Unauthorized : HttpStatusCode.TooManyRequests, (await junk.GetAsync("/api/tools")).StatusCode);
         }
         Assert.Equal(20, grain.Validations);
         // Configured clients never touch the machine path, so the limit does not lock them out.
         using var configured = Client(host, RelayHostFixture.Token);
         Assert.Equal(HttpStatusCode.OK, (await configured.GetAsync("/api/tools")).StatusCode);
+    }
+
+    private sealed class ManualClock : TimeProvider
+    {
+        private DateTimeOffset now = new(2026, 10, 30, 12, 0, 0, TimeSpan.Zero);
+        public override DateTimeOffset GetUtcNow() => now;
+        public void Advance(TimeSpan by) => now += by;
+    }
+
+    private static string Junk(int i) => Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(BitConverter.GetBytes(i)));
+
+    private static Action<IServiceCollection> WithClock(ManualClock clock, ScriptedDiscoveryGrain grain, IControlGrain? control = null) => services =>
+    {
+        services.AddSingleton<IMachineDirectory>(new MachineDirectory(ScriptedFactory.For(grain, control), clock));
+        services.AddSingleton(new MachineCredentialLimiter(clock));
+    };
+
+    [Fact]
+    public async Task Address_over_its_failure_budget_gets_429_with_retry_after_and_the_grain_is_not_asked()
+    {
+        var clock = new ManualClock();
+        var grain = new ScriptedDiscoveryGrain();
+        await using var host = Host(services: WithClock(clock, grain));
+        for (var i = 0; i < 20; i++) { using var junk = Client(host, Junk(i)); Assert.Equal(HttpStatusCode.Unauthorized, (await junk.GetAsync("/api/tools")).StatusCode); }
+        using var over = Client(host, Junk(100));
+        using var response = await over.GetAsync("/api/tools");
+        Assert.Equal(HttpStatusCode.TooManyRequests, response.StatusCode);
+        Assert.True(response.Headers.RetryAfter?.Delta is { } delta && delta > TimeSpan.Zero && delta <= TimeSpan.FromMinutes(1));
+        Assert.Equal(20, grain.Validations);
+    }
+
+    [Fact]
+    public async Task Valid_uncached_credential_from_an_exhausted_address_gets_429_not_401_and_works_after_the_window()
+    {
+        var clock = new ManualClock();
+        var grain = new ScriptedDiscoveryGrain();
+        await using var host = Host(services: WithClock(clock, grain));
+        for (var i = 0; i < 20; i++) { using var junk = Client(host, Junk(i)); await junk.GetAsync("/api/tools"); }
+        grain.Validate = Replies.Ok(new { machineId = "pc-v", principalId = "machine:pc-v" });
+        using var valid = Client(host, new string('e', 64));
+        Assert.Equal(HttpStatusCode.TooManyRequests, (await valid.GetAsync("/api/tools")).StatusCode);
+        Assert.Equal(HttpStatusCode.TooManyRequests, (await PostAsync(valid, "/api/discovery/announce", Announcement())).Status);
+        clock.Advance(TimeSpan.FromSeconds(61));
+        Assert.Equal(HttpStatusCode.OK, (await valid.GetAsync("/api/tools")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Repeating_one_cached_junk_token_does_not_exhaust_the_address_budget()
+    {
+        var clock = new ManualClock();
+        var grain = new ScriptedDiscoveryGrain();
+        await using var host = Host(services: WithClock(clock, grain));
+        using var junk = Client(host, Junk(1));
+        for (var i = 0; i < 50; i++) Assert.Equal(HttpStatusCode.Unauthorized, (await junk.GetAsync("/api/tools")).StatusCode);
+        Assert.Equal(1, grain.Validations);
+        using var other = Client(host, Junk(2));
+        Assert.Equal(HttpStatusCode.Unauthorized, (await other.GetAsync("/api/tools")).StatusCode);
+        Assert.Equal(2, grain.Validations);
+    }
+
+    private static Microsoft.AspNetCore.Http.DefaultHttpContext From(string address) => new() { Connection = { RemoteIpAddress = IPAddress.Parse(address) } };
+
+    [Fact]
+    public void Failure_budgets_are_per_address_even_inside_one_ipv6_prefix_and_ipv4_mapped_addresses_normalize()
+    {
+        var limiter = new MachineCredentialLimiter(new ManualClock());
+        var first = From("2001:db8:1:2::1");
+        for (var i = 0; i < MachineCredentialLimiter.FailuresPerMinute; i++) limiter.Failed(first);
+        Assert.False(limiter.MayValidate(first));
+        Assert.True(limiter.MayValidate(From("2001:db8:1:2::2")));
+        for (var i = 0; i < MachineCredentialLimiter.FailuresPerMinute; i++) limiter.Failed(From("::ffff:192.0.2.9"));
+        Assert.False(limiter.MayValidate(From("192.0.2.9")));
+        Assert.True(limiter.MayValidate(From("192.0.2.10")));
+    }
+
+    [Fact]
+    public async Task Grain_exception_during_the_ownership_read_answers_503_not_500()
+    {
+        var grain = new ScriptedDiscoveryGrain { Validate = Replies.Ok(new { machineId = "pc-v", principalId = "machine:pc-v" }) };
+        await using var host = Host(services: WithClock(new ManualClock(), grain, new ThrowingControlGrain()));
+        using var machine = Client(host, new string('f', 64));
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, (await PostAsync(machine, "/api/discovery/announce", Announcement(Chat()))).Status);
+    }
+
+    private sealed class ThrowingControlGrain : IControlGrain
+    {
+        public Task<RelayReply> ExecuteAsync(RelayCaller caller, string operation, string argumentsJson) => throw new InvalidOperationException("silo unavailable");
     }
 
     /// <summary>A discovery grain whose validation answer the test sets; null throws, like an unreachable silo. It counts validation calls.</summary>
@@ -441,14 +529,19 @@ public sealed class DiscoveryHostTests
     internal class ScriptedFactory : System.Reflection.DispatchProxy
     {
         private IDiscoveryGrain? grain;
-        public static Orleans.IGrainFactory For(IDiscoveryGrain grain)
+        private IControlGrain? control;
+        public static Orleans.IGrainFactory For(IDiscoveryGrain grain, IControlGrain? control = null)
         {
             var factory = Create<Orleans.IGrainFactory, ScriptedFactory>();
             ((ScriptedFactory)(object)factory).grain = grain;
+            ((ScriptedFactory)(object)factory).control = control;
             return factory;
         }
         protected override object? Invoke(System.Reflection.MethodInfo? targetMethod, object?[]? args) =>
-            targetMethod!.Name == "GetGrain" && targetMethod.ReturnType == typeof(IDiscoveryGrain) ? grain : throw new NotSupportedException(targetMethod.Name);
+            targetMethod!.Name != "GetGrain" ? throw new NotSupportedException(targetMethod.Name)
+            : targetMethod.ReturnType == typeof(IDiscoveryGrain) ? grain
+            : targetMethod.ReturnType == typeof(IControlGrain) && control is not null ? control
+            : throw new NotSupportedException(targetMethod.Name);
     }
 
     private static async Task WaitForAsync(Func<bool> condition)

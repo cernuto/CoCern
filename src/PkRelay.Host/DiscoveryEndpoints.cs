@@ -51,24 +51,49 @@ internal sealed class MachineRouteHints
 }
 
 /// <summary>
-/// Limits failed machine-credential validations to <see cref="FailuresPerMinute"/> per remote address (the enroll limiter's partitioning). Over the limit, a credential-shaped token
-/// fails authentication without reaching the discovery grain; configured clients and credentials already cached as valid are unaffected.
+/// Limits failed machine-credential validations to <see cref="FailuresPerMinute"/> per remote address, in a fixed one-minute window. Each IPv4 address and each full IPv6 address has its own budget
+/// (an IPv4-mapped IPv6 address counts as IPv4), so one bad device cannot exhaust the budget of its neighbours on a shared /64. Over the limit, a credential-shaped token that is not already cached as valid
+/// is answered 429 without reaching the discovery grain; configured clients and cached credentials are unaffected.
 /// </summary>
-internal sealed class MachineCredentialLimiter : IDisposable
+internal sealed class MachineCredentialLimiter(TimeProvider? clock = null)
 {
     public const int FailuresPerMinute = 20;
-    private readonly PartitionedRateLimiter<HttpContext> limiter = PartitionedRateLimiter.Create<HttpContext, string>(context => RateLimitPartition.GetFixedWindowLimiter(DiscoveryEndpoints.Address(context), _ => new FixedWindowRateLimiterOptions
+    private const int PruneAbove = 4096;
+    private static readonly TimeSpan Window = TimeSpan.FromMinutes(1);
+    private readonly TimeProvider time = clock ?? TimeProvider.System;
+    private readonly Dictionary<string, (DateTimeOffset Started, int Count)> buckets = new(StringComparer.Ordinal);
+
+    /// <summary>The bucket key: the address itself, with an IPv4-mapped IPv6 address normalized to IPv4.</summary>
+    internal static string Key(HttpContext context)
     {
-        PermitLimit = FailuresPerMinute, Window = TimeSpan.FromMinutes(1), QueueLimit = 0, AutoReplenishment = true
-    }));
+        if (context.Connection.RemoteIpAddress is not { } address) return "unknown";
+        if (address.IsIPv4MappedToIPv6) address = address.MapToIPv4();
+        return address.ToString();
+    }
 
     /// <summary>Whether this address may still have a credential checked by the grain; consumes nothing.</summary>
-    public bool MayValidate(HttpContext context) { using var lease = limiter.AttemptAcquire(context, 0); return lease.IsAcquired; }
+    public bool MayValidate(HttpContext context)
+    {
+        lock (buckets) return !(buckets.TryGetValue(Key(context), out var bucket) && time.GetUtcNow() < bucket.Started + Window && bucket.Count >= FailuresPerMinute);
+    }
 
-    /// <summary>Counts one failed validation against the address.</summary>
-    public void Failed(HttpContext context) { using var lease = limiter.AttemptAcquire(context, 1); }
+    /// <summary>Counts one fresh failed validation against the address.</summary>
+    public void Failed(HttpContext context)
+    {
+        var now = time.GetUtcNow();
+        lock (buckets)
+        {
+            var key = Key(context);
+            buckets[key] = buckets.TryGetValue(key, out var bucket) && now < bucket.Started + Window ? (bucket.Started, bucket.Count + 1) : (now, 1);
+            if (buckets.Count > PruneAbove) foreach (var expired in buckets.Where(x => now >= x.Value.Started + Window).Select(x => x.Key).ToArray()) buckets.Remove(expired);
+        }
+    }
 
-    public void Dispose() => limiter.Dispose();
+    /// <summary>Whole seconds, at least 1, until the address's window ends.</summary>
+    public int RetryAfterSeconds(HttpContext context)
+    {
+        lock (buckets) return buckets.TryGetValue(Key(context), out var bucket) ? Math.Max(1, (int)Math.Ceiling((bucket.Started + Window - time.GetUtcNow()).TotalSeconds)) : 1;
+    }
 }
 
 /// <summary>Anonymous enrollment and machine announcements. Neither endpoint exists unless <c>Relay:Discovery:Enabled</c> is true; neither logs request or response bodies.</summary>

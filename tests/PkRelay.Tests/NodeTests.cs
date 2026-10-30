@@ -200,6 +200,34 @@ public sealed class NodeTests : IDisposable
     }
 
     [Fact]
+    public async Task Throttled_announcement_backs_off_and_keeps_the_identity_without_a_revoke_message()
+    {
+        await using var host = Hub();
+        var traffic = new HubTraffic();
+        using var state = NodeState.Open(DataDir);
+        using var stop = new CancellationTokenSource();
+        var run = NodeRunner.RunAsync(state, InMemoryHub, InMemory(host, traffic, TimeSpan.FromMilliseconds(20)), error, stop.Token);
+        await WaitForAsync(() => Count("announced") >= 1, run);
+        var machineId = state.MachineId;
+        var credentialFile = Path.Combine(DataDir, "credential");
+        var bytes = File.ReadAllBytes(credentialFile);
+        var enrolls = traffic.Enrolls;
+
+        Volatile.Write(ref traffic.ThrottledAnnounces, 3);
+        await WaitForAsync(() => Volatile.Read(ref traffic.ThrottledAnnounces) == 0, run);
+        var successes = Count("announced");
+        await WaitForAsync(() => Count("announced") > successes, run);
+        stop.Cancel();
+        Assert.Equal(0, await run);
+
+        Assert.Equal(enrolls, traffic.Enrolls);
+        Assert.Equal(machineId, state.MachineId);
+        Assert.Equal(bytes, File.ReadAllBytes(credentialFile));
+        Assert.DoesNotContain("revoke", error.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("enrolling again", error.ToString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task Revoked_machine_stops_with_a_message()
     {
         await using var host = Hub();
@@ -1313,7 +1341,7 @@ public sealed class NodeTests : IDisposable
     /// <summary>Counts discovery calls on the way to the in-memory hub and can simulate an outage or a rejected credential.</summary>
     private sealed class HubTraffic
     {
-        public int Enrolls, Announces, Failed, FailAnnounces, UnauthorizedAnnounces;
+        public int Enrolls, Announces, Failed, FailAnnounces, UnauthorizedAnnounces, ThrottledAnnounces;
         private readonly ConcurrentQueue<string> enrolledIds = new();
         public string[] EnrolledIds => enrolledIds.ToArray();
         private string? accepted;
@@ -1346,6 +1374,7 @@ public sealed class NodeTests : IDisposable
                         Interlocked.Increment(ref traffic.Announces);
                         if (Take(ref traffic.FailAnnounces)) { Interlocked.Increment(ref traffic.Failed); throw new HttpRequestException("simulated outage"); }
                         if (Take(ref traffic.UnauthorizedAnnounces)) return new HttpResponseMessage(HttpStatusCode.Unauthorized);
+                        if (Take(ref traffic.ThrottledAnnounces)) return new HttpResponseMessage(HttpStatusCode.TooManyRequests);
                         var body = await request.Content!.ReadAsStringAsync(cancellationToken);
                         var response = await base.SendAsync(request, cancellationToken);
                         if (response.IsSuccessStatusCode) Volatile.Write(ref traffic.accepted, body);

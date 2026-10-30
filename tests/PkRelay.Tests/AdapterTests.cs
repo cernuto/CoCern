@@ -91,6 +91,7 @@ public sealed class AdapterTests
     [Theory]
     [InlineData(HttpStatusCode.Unauthorized, "unauthorized")]
     [InlineData(HttpStatusCode.Forbidden, "forbidden")]
+    [InlineData(HttpStatusCode.TooManyRequests, "rate_limited")]
     [InlineData(HttpStatusCode.InternalServerError, "hub_error")]
     [InlineData(HttpStatusCode.Redirect, "redirect_rejected")]
     public async Task ShapesHttpFailuresWithoutLeakingBody(HttpStatusCode status, string code)

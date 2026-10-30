@@ -140,6 +140,7 @@ internal sealed class RelayAuthenticationHandler(IOptionsMonitor<AuthenticationS
     : AuthenticationHandler<AuthenticationSchemeOptions>(options, logger, encoder)
 {
     private static readonly object UnavailableKey = new();
+    private static readonly object ThrottledKey = new();
 
     protected override async Task<AuthenticateResult> HandleAuthenticateAsync()
     {
@@ -161,7 +162,10 @@ internal sealed class RelayAuthenticationHandler(IOptionsMonitor<AuthenticationS
         if (DiscoverySettings.Enabled(configuration) && DiscoverySettings.IsCredential(token))
         {
             var check = await machines.CheckAsync(token, () => limiter.MayValidate(Context), Context.RequestAborted);
-            if (check.Status == CredentialStatus.Unknown) limiter.Failed(Context);
+            // Only a failure the grain has just reported counts; the same junk token served from the negative cache does not.
+            if (check is { Status: CredentialStatus.Unknown, Fresh: true }) limiter.Failed(Context);
+            // Over the failure budget the credential was not checked at all: answer 429, never 401, so a valid PC is not told its credential is unknown.
+            if (check.Status == CredentialStatus.Throttled) { Context.Items[ThrottledKey] = true; return AuthenticateResult.Fail("Too many failed credential checks."); }
             if (check is { Status: CredentialStatus.Valid, Machine: { } machine })
                 return AuthenticateResult.Success(new AuthenticationTicket(RelayAuthentication.Principal(machine.PrincipalId, false, DiscoverySettings.Repositories(configuration), Scheme.Name, machine.MachineId), Scheme.Name));
             // The hub could not decide: answer 503 so a node never mistakes a hub fault for a rejected credential and re-enrolls.
@@ -173,6 +177,12 @@ internal sealed class RelayAuthenticationHandler(IOptionsMonitor<AuthenticationS
 
     protected override Task HandleChallengeAsync(AuthenticationProperties properties)
     {
+        if (Context.Items.ContainsKey(ThrottledKey))
+        {
+            Response.StatusCode = StatusCodes.Status429TooManyRequests;
+            Response.Headers.RetryAfter = limiter.RetryAfterSeconds(Context).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            return Task.CompletedTask;
+        }
         if (Context.Items.ContainsKey(UnavailableKey))
         {
             Response.StatusCode = StatusCodes.Status503ServiceUnavailable;

@@ -161,7 +161,7 @@ public sealed class DiscoveryGrainTests
         await directory.CheckAsync("filler-" + (MachineDirectory.NegativeCacheSize - 1), null, CancellationToken.None);
         Assert.Equal(before + 1, grain.Validations);
         // A caller over its failure budget is refused without asking the grain, and that refusal is not cached.
-        Assert.Equal(CredentialStatus.Unknown, (await directory.CheckAsync("limited", () => false, CancellationToken.None)).Status);
+        Assert.Equal(CredentialStatus.Throttled, (await directory.CheckAsync("limited", () => false, CancellationToken.None)).Status);
         Assert.Equal(before + 1, grain.Validations);
         await directory.CheckAsync("limited", null, CancellationToken.None);
         Assert.Equal(before + 2, grain.Validations);

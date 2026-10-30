@@ -67,11 +67,11 @@ public sealed record MachineIdentity(string MachineId, string PrincipalId);
 /// <summary>The outcome of an enrollment: the machine, or the reply code explaining the refusal (MachineRevoked, AliasConflict, CapacityExceeded, ...).</summary>
 public sealed record EnrollResult(MachineIdentity? Machine, string? Code);
 
-/// <summary>How a machine credential fared: valid, unknown to the hub (NotFound), or not decidable now because the discovery grain failed.</summary>
-public enum CredentialStatus { Valid, Unknown, Unavailable }
+/// <summary>How a machine credential fared: valid, unknown to the hub (NotFound), not decidable now because the discovery grain failed, or not checked because the caller's address is over its failure budget.</summary>
+public enum CredentialStatus { Valid, Unknown, Unavailable, Throttled }
 
-/// <summary>The outcome of checking a machine credential; <see cref="Machine"/> is set only when <see cref="Status"/> is Valid.</summary>
-public sealed record CredentialCheck(CredentialStatus Status, MachineIdentity? Machine = null);
+/// <summary>The outcome of checking a machine credential; <see cref="Machine"/> is set only when <see cref="Status"/> is Valid. <see cref="Fresh"/> is true only for an Unknown the grain has just answered NotFound, not one served from the negative cache.</summary>
+public sealed record CredentialCheck(CredentialStatus Status, MachineIdentity? Machine = null, bool Fresh = false);
 
 /// <summary>The hub's view of enrolled machines. Credentials are hashed before they reach the discovery grain and are never stored or cached raw.</summary>
 public interface IMachineDirectory
@@ -85,7 +85,7 @@ public interface IMachineDirectory
     /// <summary>The machine owning the credential, or null. Positive results are cached for 30 seconds.</summary>
     Task<MachineIdentity?> ValidateAsync(string credential, CancellationToken ct);
 
-    /// <summary>Like <see cref="ValidateAsync"/>, but tells an unknown credential (the grain said NotFound) from a grain failure, which must never be treated as a rejection.</summary>
+    /// <summary>Like <see cref="ValidateAsync"/>, but tells an unknown credential (the grain said NotFound) from a grain failure, which must never be treated as a rejection. When <paramref name="mayAskGrain"/> says no, the grain is not asked and the result is Throttled.</summary>
     Task<CredentialCheck> CheckAsync(string credential, Func<bool>? mayAskGrain, CancellationToken ct);
 
     /// <summary>Records the machine's announced chats. The machine ID always comes from <paramref name="machine"/>, never from the announcement.</summary>
@@ -150,7 +150,7 @@ public sealed class MachineDirectory(IGrainFactory grains, TimeProvider? clock =
             unknown.TryRemove(new KeyValuePair<string, DateTimeOffset>(hash, until));
         }
         // Over its failure budget, the caller is refused without asking the grain; that refusal says nothing about the credential, so it is not cached.
-        if (mayAskGrain is not null && !mayAskGrain()) return new(CredentialStatus.Unknown);
+        if (mayAskGrain is not null && !mayAskGrain()) return new(CredentialStatus.Throttled);
         var generation = Interlocked.Read(ref revocations);
         var enrolled = Interlocked.Read(ref enrollments);
         RelayReply reply;
@@ -158,7 +158,7 @@ public sealed class MachineDirectory(IGrainFactory grains, TimeProvider? clock =
         catch (Exception exception) when (exception is not OperationCanceledException) { return new(CredentialStatus.Unavailable); }
         // Only NotFound means the hub does not know the credential; any other failure (StorageFailure while a write is uncertain, ...) says nothing about it.
         if (!reply.Ok && reply.Code != RelayErrorCodes.NotFound) return new(CredentialStatus.Unavailable);
-        if (!reply.Ok) { RememberUnknown(hash, enrolled); return new(CredentialStatus.Unknown); }
+        if (!reply.Ok) { RememberUnknown(hash, enrolled); return new(CredentialStatus.Unknown, null, true); }
         var machine = Identity(reply);
         // Write first, then re-check: a revocation that completed while the grain was being asked must not leave this stale entry behind. This call still returns what the grain said.
         var entry = (Machine: machine, Expires: time.GetUtcNow().Add(CacheLifetime));
@@ -181,7 +181,10 @@ public sealed class MachineDirectory(IGrainFactory grains, TimeProvider? clock =
     {
         ct.ThrowIfCancellationRequested();
         var args = new JsonObject { ["repositoryId"] = repository, ["sessionIds"] = new JsonArray(sessionIds.Select(x => (JsonNode)JsonValue.Create(x)!).ToArray()) };
-        var reply = await grains.GetGrain<IControlGrain>(AggregateKinds.ControlKey).ExecuteAsync(new RelayCaller(machine.PrincipalId, false, [repository], true), Operations.SessionOwners, args.ToJsonString());
+        RelayReply reply;
+        // A grain fault means "cannot be read now", like a not-Ok reply, so the caller answers 503 rather than 500.
+        try { reply = await grains.GetGrain<IControlGrain>(AggregateKinds.ControlKey).ExecuteAsync(new RelayCaller(machine.PrincipalId, false, [repository], true), Operations.SessionOwners, args.ToJsonString()); }
+        catch (Exception exception) when (exception is not OperationCanceledException) { return null; }
         return reply.Ok ? (JsonNode.Parse(reply.DataJson)?["owned"] as JsonArray ?? []).Select(x => x?.GetValue<string>()).OfType<string>().ToHashSet(StringComparer.Ordinal) : null;
     }
 
