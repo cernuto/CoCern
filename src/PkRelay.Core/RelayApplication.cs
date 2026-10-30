@@ -279,5 +279,5 @@ public sealed class RelayApplication(IGrainFactory grains) : IRelayApplication
 public static class RelayCoreServiceCollectionExtensions
 {
     public static IServiceCollection AddPkRelayCore(this IServiceCollection services) =>
-        services.AddSingleton<RelayApplication>().AddSingleton<IRelayApplication>(provider => provider.GetRequiredService<RelayApplication>());
+        services.AddSingleton<RelayApplication>().AddSingleton<IRelayApplication>(provider => provider.GetRequiredService<RelayApplication>()).AddSingleton<IMachineDirectory, MachineDirectory>();
 }
