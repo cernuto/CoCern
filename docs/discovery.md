@@ -23,9 +23,9 @@ The address is typed once and remembered. A PC finds the hub only by that addres
 - writes the one `PkRelayNode` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, so the node starts when the user signs in (current user only, no administrator rights);
 - starts the node now, hidden, and prints the machine ID.
 
-Setup is idempotent: entries that already exist are left as they were. `--data-dir <path>` keeps the node's state somewhere other than `%LOCALAPPDATA%\PkRelay\node`. Setup never changes firewall rules. Exit code 1 is a configuration or enrollment problem, 4 means the hub presented a different certificate than the one pinned, and 5 means a client settings file could not be parsed (nothing is edited in that case).
+Setup is idempotent: entries that already exist are left as they were. In particular, an existing `pkrelay` MCP server entry in either client is left alone, even if it points somewhere else or sets a token; remove it first if you want setup to write the node entry. `--data-dir <path>` keeps the node's state somewhere other than `%LOCALAPPDATA%\PkRelay\node`. Setup never changes firewall rules. Exit code 1 is a configuration or enrollment problem, 4 means the hub presented a different certificate than the one pinned, and 5 means a client settings file could not be parsed (nothing is edited in that case).
 
-New chats then call `session_open` as usual. With none of `PKRELAY_URL`, `PKRELAY_TOKEN_FILE` or `PKRELAY_TOKEN` set, the stdio adapter runs on the node's credentials, and the chat appears in `chat_directory` within about a minute.
+New chats then call `session_open` as usual. With none of `PKRELAY_URL`, `PKRELAY_TOKEN_FILE` or `PKRELAY_TOKEN` set, the stdio adapter runs on the node's credentials, and the chat appears in `chat_directory` within about a minute. A chat whose adapter uses an explicitly configured token (for example `PKRELAY_TOKEN_FILE`) runs on that token instead: its sessions are not handed to the node, so it is neither discovered nor woken by the node.
 
 ### Running setup with Claude Code closed
 
@@ -34,6 +34,8 @@ Setup edits `.claude.json`, which Claude Code rewrites from its own memory while
 ## Network
 
 By default the hub listens only on loopback (`http://127.0.0.1:5271`). To let other PCs reach it, set `Relay:Network:Enabled` to `true`. The hub then keeps the loopback HTTP endpoint and also serves HTTPS on every network interface.
+
+The Visual Studio launch profile (`src/PkRelay.Host/Properties/launchSettings.json`) turns both `Relay:Network:Enabled` and `Relay:Discovery:Enabled` on, so a hub started from Visual Studio listens on `0.0.0.0:5273` and accepts open enrollment. The first time it does, Windows may ask whether to allow the program through the firewall. Allowing it creates a firewall rule for the program (not just port 5273) on the network types you tick, so any device on those networks can reach the hub, enroll without a join code and message chats (see [Open trust](#open-trust)). Cancelling keeps the hub reachable only from this PC. The [Firewall](#firewall) section below gives a narrower rule for port 5273 on the Private profile only, which you can use instead.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
@@ -69,7 +71,7 @@ An administrator revokes a machine with `control_request`, command `revoke_machi
 { "repositoryId": "pkrelay", "command": "revoke_machine", "machineId": "<machine id>", "requestId": "<fresh id>" }
 ```
 
-The machine ID is printed by setup and held in `node.json` in the PC's node folder; the directory shows machine names, not IDs. Revocation removes the machine and its credential and denies that machine ID from enrolling again. The revoked PC's node notices on its next announcement, says it was revoked, and stops with exit code 1. A machine credential is refused `control_request` (403), so a PC cannot revoke itself or any other PC.
+The machine ID is printed by setup and held in `node.json` in the PC's node folder; the directory shows machine names, not IDs. Revocation removes the machine and its credential and denies that machine ID from enrolling again. The revoked PC's node notices on its next announcement, says it was revoked, and stops with exit code 1. A machine credential is refused `control_request` (403), so a PC cannot revoke itself or any other PC. Trust is open, so revocation stops one identity, not the device: a revoked device can enroll again under a new machine ID. Keep the hub's port closed to devices you do not trust.
 
 ### Stopping a node
 
@@ -106,10 +108,15 @@ Keep the old state database until you have confirmed the node is waking; deletin
 
 ## Known limits
 
-- A lost enroll reply or a lost credential gives the PC a new machine ID. The old entry stays at the hub until it is revoked, so revoke it by its old ID.
+- A lost enroll reply or a lost credential file gives the PC a new machine ID. The old entry stays at the hub until it is revoked, so revoke it by its old ID.
+- If the hub refuses the PC's credential (401) and then refuses to enroll it again under the same ID (409), the node keeps its credential and machine ID, backs off and prints once that an administrator should revoke the machine and re-run setup. It never renews its identity for this, because a hub fault could otherwise rotate every PC. When the hub cannot check a credential at all (a storage fault), it answers 503, never 401.
+- Failed machine-credential checks are cached by the credential's hash for 60 seconds and limited to 20 per client address per minute, so a mistyped or junk credential can take a minute to be checked again.
+- The hub announces a chat only when the announcing machine opened its relay session; any other chat is listed in the reply's `refused` array (`SessionDenied`) and left out, and the node reports each once. A session opened before the PC's current enrollment is therefore not announced until the chat opens a new one.
+- One provider thread has one current relay session. When a chat opens a new session, the node deletes the older handle (and its token) and the hub keeps only the newest chat per thread, so the old session is no longer announced or woken.
 - Enrollment is rate limited by client address, and an IPv6 address is limited as its whole /64 prefix, so many PCs behind one prefix share one bucket.
 - A node scans only the newest 64 session handles. Handles beyond the newest 64 are not scanned, mapped or announced.
-- A long-lived Claude chat whose transcript was never located is announced as unmapped and can be pruned after 24 hours.
+- A long-lived Claude chat whose transcript was never located is announced as unmapped. Its handle is kept while it carries the chat ID Claude Code captured or its waiter is running, so `--await-inbox --chat` keeps working; other unmapped handles are pruned after 24 hours.
+- A transcript that cannot be read (or fails mid-read) does not count as read; sessions it might hold stay pending until it reads cleanly or their 30-minute window ends.
 - A hard kill of the hub, rather than a normal stop, can leave one orphaned key file behind. It is harmless and can be deleted.
 - Network discovery has been verified only with several nodes on one PC. See [verification.md](verification.md).
 
@@ -132,7 +139,7 @@ Each announcement cycle the node reads every handle and, for those not yet settl
 
 The outcome (`chat { provider, threadId }`, or `unmapped: true`) is written back into the handle through the same current-user-only writer, token intact, so a restarted node never searches again. Searching is bounded: each transcript is opened at most once per cycle and read only past what earlier cycles read, checking all pending sessions in that one pass; lines over 1 MB are skipped without being buffered whole; and one cycle spends at most 5 seconds reading, after which the announcement goes out with what is known and the search resumes next cycle. Pending and unmapped chats are announced with `provider: "unknown"`, `threadId: "unmapped"` and `wakeable: false`.
 
-Mapped chats are announced with `wakeable: true`, newest first, at most 64 per PC. If the hub refuses a repository (`403 RepositoryDenied`), the node finds which by adding one repository at a time, reports each refused repository once on standard error, and keeps announcing the others; refused repositories stay out until the node restarts. Handle files are left in place.
+Mapped chats are announced with `wakeable: true`, newest first, at most 64 per PC and never more than fits the hub's 32 KB request limit (the oldest are dropped first). A mapped Claude chat is announced `wakeable` too, but the node never wakes it: only its own `--await-inbox --chat` waiter does, and the directory shows it `reachable` only while that waiter runs. If the hub refuses a repository (`403 RepositoryDenied`), the node finds which by adding one repository at a time, reports each refused repository once on standard error, and keeps announcing the others; refused repositories stay out until the node restarts. Handle files are left in place.
 
 ### Transcript record shapes (spike, Oct 30)
 
