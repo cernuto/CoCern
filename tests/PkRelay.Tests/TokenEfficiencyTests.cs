@@ -242,6 +242,24 @@ public sealed class TokenEfficiencyTests
         Assert.Equal("boolean", RelayToolCatalog.ForwardingSchema(tool).GetProperty("properties").GetProperty("wake").GetProperty("type").GetString());
     }
 
+    [Theory]
+    [InlineData(null, 120)]
+    [InlineData(1800, 1800)]
+    [InlineData(3600, 1800)]
+    [InlineData(0, 1)]
+    public void Leases_may_last_thirty_minutes_so_long_turns_renew_rarely(int? requested, int granted)
+    {
+        var state = new PkRelay.Domain.StateEnvelope<PkRelay.Domain.CoordinationDocument>();
+        var caller = new PkRelay.Domain.RelayCaller("alice", false, ["repo"], true);
+        var now = DateTimeOffset.Parse("2026-10-30T00:00:00Z");
+        var args = new System.Text.Json.Nodes.JsonObject { ["repositoryId"] = "repo", ["sessionId"] = "s", ["requestId"] = "lease" };
+        if (requested is { } seconds) args["leaseSeconds"] = seconds;
+        var reply = PkRelay.Domain.CoordinationStateMachine.Apply(state, "lock", "key", caller, "claim_acquire", args, now);
+        Assert.True(reply.Ok, reply.Code);
+        Assert.Equal(now.AddSeconds(granted), DateTimeOffset.Parse(JsonDocument.Parse(reply.DataJson).RootElement.GetProperty("leaseUntil").GetString()!));
+        Assert.Equal(1800, RelayLimits.MaxLeaseSeconds);
+    }
+
     [Fact]
     public void Send_message_advertises_supersede()
     {

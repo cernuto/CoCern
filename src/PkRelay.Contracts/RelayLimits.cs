@@ -22,6 +22,7 @@ public static class RelayLimits
     public const int MaxReportBytes = 8_192;
     public const int MaxClaimResources = 16;
     public const int MaxAcknowledgedMessages = 50;
-    public const int MaxLeaseSeconds = 600;
+    /// <summary>Thirty minutes, so a chat holding a claim through a long turn renews rarely: each renewal is a model call over its whole context.</summary>
+    public const int MaxLeaseSeconds = 1800;
     public const int DefaultLeaseSeconds = 120;
 }

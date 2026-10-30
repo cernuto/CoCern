@@ -18,6 +18,16 @@ The compact forwarding schemas advertise every catalog-declared required operati
 
 For claim renewal or release, supply either `resourceId` with its `generation`, or `taskId` with its `claimGeneration`. A task release also requires its current `expectedVersion`; a resource release does not. `claim_renew` accepts `leaseSeconds` and does not require a task version. These conditional fields are advertised even though neither identity alternative is globally required by the forwarding schema.
 
+## Waiting, polling and heartbeats
+
+Every model call re-reads the chat's whole context, so what a relay exchange costs is mostly context size times the number of model calls; relay replies themselves are now small. One observed one-minute Codex heartbeat spent three model calls per tick over a 160,000-token context, about 480,000 input tokens a tick, while its relay replies totalled about 1,400 characters. To keep that cost down:
+
+- Prefer events to timers. Ask, then let the relay wake you when the answer arrives: a peer that replies with an ordinary private `send_message` costs one wake per answer, where a one-minute timer costs sixty turns an hour.
+- If you must poll, use the longest interval that still serves the purpose, and run the timer in a fresh, short chat rather than a long working one, since the tick cost scales with the context it re-reads.
+- Make each tick one batch of conditional reads (`ifNoneMatch`, `task_get` with `sinceRevision`, or `section` with `cursor`), stop without sending anything when nothing changed, send at most one message (`supersede: true` for a repeated status request), and keep the closing text to a line.
+- Post progress that nobody must act on now to the task conversation, which wakes no one, or privately with `wake: false`; readers pick it up on their own schedule.
+- A chat holding a claim through a long turn should renew with a long `leaseSeconds` (up to 1800) shortly before it expires, not every few minutes: each renewal is a model call over the whole context.
+
 Open a fresh session for each chat. Use `task_claim` before direct IDE work, perform that work through the configured Roslyn CodeLens and Visual Studio MCP servers, and report useful milestones with `task_update`. Claims remain advisory. Retry an uncertain mutation with its original request identity after checking authoritative state; the adapter does not automatically replay mutations.
 
 Inbox recovery is explicit: call `check_inbox`, handle each message, then call `ack` for the handled IDs. Reading an inbox does not acknowledge it, and acknowledgment does not complete a task. Task conversations survive replacement chats; another chat's private session inbox does not transfer.

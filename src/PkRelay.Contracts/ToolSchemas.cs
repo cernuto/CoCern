@@ -72,13 +72,13 @@ internal static class ToolSchemas
                 break;
             case RelayTools.TaskClaim:
             case RelayTools.ClaimAcquire:
-                Integer("leaseSeconds", "Advisory lease from 1 to 600 seconds; default 120."); break;
+                Integer("leaseSeconds", "Advisory lease from 1 to 1800 seconds; default 120."); break;
             case RelayTools.ClaimRenew:
             case RelayTools.ClaimRelease:
                 Integer("generation", "Required current resource grant generation when resourceId is supplied.");
                 Integer("claimGeneration", "Required current task claim generation when taskId is supplied instead of resourceId.");
                 if (tool == RelayTools.ClaimRelease) Integer("expectedVersion", "Required current task version when releasing taskId; omit for a resource release.");
-                Integer("leaseSeconds", "Renewal lease from 1 to 600 seconds; renew resource and task grants independently."); break;
+                Integer("leaseSeconds", "Renewal lease from 1 to 1800 seconds; renew resource and task grants independently."); break;
             case RelayTools.ActionBegin:
                 Text("inputFingerprint", "Stable identity of this action's intended inputs."); Text("triggerId", "Optional delivery trigger consumed by this action."); Integer("attempt", "Explicit next attempt number after a resolved prior attempt.");
                 properties["requiresRestoration"] = new { type = "boolean" }; properties["explicitRetry"] = new { type = "boolean" }; break;
