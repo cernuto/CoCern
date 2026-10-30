@@ -49,7 +49,8 @@ public sealed class RelayForwarder(HttpClient client, AdapterOptions options)
                 try
                 {
                     var failure = await ReadEnvelopeAsync(response, cancellationToken);
-                    if (failure.Code == ResponseTooLarge) return failure;
+                    // Only the reader's own size error passes; a parsed hub envelope always carries a version.
+                    if (failure is { Code: ResponseTooLarge, Version: null }) return failure;
                     return !failure.Ok && KnownCodes.Contains(failure.Code) && RelayErrorCodes.Classify(failure.Code) == kind ? failure : new(false, TransportCode(response.StatusCode));
                 }
                 catch (JsonException) { return new(false, TransportCode(response.StatusCode)); }

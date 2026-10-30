@@ -73,6 +73,18 @@ public sealed class ForwarderErrorTests
         Assert.Null(result.Data);
     }
 
+    [Theory]
+    [InlineData(HttpStatusCode.BadRequest, "hub_error")]
+    [InlineData(HttpStatusCode.Conflict, "hub_error")]
+    [InlineData(HttpStatusCode.Forbidden, "forbidden")]
+    public async Task Hub_envelope_cannot_claim_the_adapter_size_error(HttpStatusCode status, string expected)
+    {
+        var result = await Forward(status, Envelope(false, "response_too_large", "{\\\"secret\\\":\\\"sensitive\\\"}", 3));
+        Assert.Equal(expected, result.Code);
+        Assert.Null(result.Data);
+        Assert.DoesNotContain("sensitive", JsonSerializer.Serialize(result));
+    }
+
     private static string Envelope(bool ok, string code, string dataJson, long version) =>
         $"{{\"ok\":{(ok ? "true" : "false")},\"code\":\"{code}\",\"dataJson\":\"{dataJson}\",\"version\":{version}}}";
 
