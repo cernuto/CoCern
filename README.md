@@ -46,4 +46,4 @@ Read the [architecture](docs/architecture.md), [host setup](docs/host.md), [adap
 
 ## Reduce coordination overhead
 
-Use [collaboration workflow](docs/collaboration.md) for durable board deltas, structured closure packets and reported criteria/blockers, and an optional next-work offer returned with a milestone. Blocked work stays blocked until an explicit evidenced update; offers require ordinary claims before execution. The complete suite now passes 150 tests, including HTTP/MCP, restart, stale-claim and cleanup regressions. These features reduce repeated reads and round trips; actual all-participant token savings remain unmeasured.
+Use [collaboration workflow](docs/collaboration.md) for durable board deltas, structured closure packets and reported criteria/blockers, and an optional next-work offer returned with a milestone. Blocked work stays blocked until an explicit evidenced update; offers require ordinary claims before execution. The complete suite now passes 151 tests, including HTTP/MCP, restart, stale-claim and cleanup regressions. These features reduce repeated reads and round trips; actual all-participant token savings remain unmeasured.

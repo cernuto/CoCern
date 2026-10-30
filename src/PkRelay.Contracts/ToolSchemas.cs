@@ -3,6 +3,24 @@ namespace PkRelay.Contracts;
 /// <summary>Argument property schemas per tool. Serialized as JSON Schema by <see cref="RelayToolCatalog.InputSchema"/>.</summary>
 internal static class ToolSchemas
 {
+    private static readonly string[] ForwardingFields = ["repositoryId", "sessionId", "sessionToken", "requestId"];
+
+    /// <summary>
+    /// The session envelope plus only the fields agents get wrong without a schema (delta paging and the workflow record).
+    /// Tool definitions sit in every agent's context on every turn, so a forwarding client advertises this subset.
+    /// </summary>
+    public static Dictionary<string, object> ForwardingProperties(string tool)
+    {
+        var all = Properties(tool);
+        string[] extra = tool switch
+        {
+            RelayTools.TaskGet => ["taskId", "section", "sinceRevision", "snapshotRevision", "cursor", "limit"],
+            RelayTools.TaskUpdate => ["taskId", "expectedVersion", "workflow", "includeNextWork"],
+            _ => []
+        };
+        return ForwardingFields.Concat(extra).ToDictionary(field => field, field => all[field]);
+    }
+
     public static Dictionary<string, object> Properties(string tool)
     {
         var properties = new Dictionary<string, object>

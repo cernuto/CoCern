@@ -61,17 +61,19 @@ public static class RelayToolCatalog
 
     public static IEnumerable<RelayTool> ForRole(bool administrator) => All.Where(tool => administrator || !tool.AdministratorOnly);
 
-    /// <summary>JSON Schema for a tool's arguments. A forwarding client may advertise only repositoryId as required and let the hub enforce the rest.</summary>
-    public static JsonElement InputSchema(RelayTool tool, bool enforceRequired = true)
+    /// <summary>The complete JSON Schema for a tool's arguments, as the hub enforces it.</summary>
+    public static JsonElement InputSchema(RelayTool tool)
     {
-        var properties = ToolSchemas.Properties(tool.Name);
         var required = new List<string> { "repositoryId" };
-        if (enforceRequired)
-        {
-            if (tool.IsMutation) required.Add("requestId");
-            if (tool.RequiresSession) required.AddRange(["sessionId", "sessionToken"]);
-            required.AddRange(tool.RequiredFields);
-        }
-        return JsonSerializer.SerializeToElement(new { type = "object", properties, required, additionalProperties = true });
+        if (tool.IsMutation) required.Add("requestId");
+        if (tool.RequiresSession) required.AddRange(["sessionId", "sessionToken"]);
+        required.AddRange(tool.RequiredFields);
+        return Schema(ToolSchemas.Properties(tool.Name), required);
     }
+
+    /// <summary>A compact schema for clients that forward arguments unchanged: only repositoryId is required and the hub enforces the rest.</summary>
+    public static JsonElement ForwardingSchema(RelayTool tool) => Schema(ToolSchemas.ForwardingProperties(tool.Name), ["repositoryId"]);
+
+    private static JsonElement Schema(Dictionary<string, object> properties, List<string> required) =>
+        JsonSerializer.SerializeToElement(new { type = "object", properties, required, additionalProperties = true });
 }

@@ -28,14 +28,25 @@ public sealed class ContractsTests
     }
 
     [Fact]
-    public void Forwarding_schema_documents_every_field_but_requires_only_the_repository()
+    public void Forwarding_schema_stays_compact_and_requires_only_the_repository()
     {
-        RelayToolCatalog.TryGet(RelayTools.TaskClaim, out var tool);
-        var strict = RelayToolCatalog.InputSchema(tool);
-        var loose = RelayToolCatalog.InputSchema(tool, enforceRequired: false);
+        RelayToolCatalog.TryGet(RelayTools.TaskClaim, out var claim);
+        var strict = RelayToolCatalog.InputSchema(claim);
+        var forwarding = RelayToolCatalog.ForwardingSchema(claim);
         Assert.Contains("resourceIds", strict.GetProperty("required").EnumerateArray().Select(x => x.GetString()));
-        Assert.Equal(["repositoryId"], loose.GetProperty("required").EnumerateArray().Select(x => x.GetString()));
-        Assert.True(loose.GetProperty("properties").TryGetProperty("resourceIds", out _));
+        Assert.Equal(["repositoryId"], forwarding.GetProperty("required").EnumerateArray().Select(x => x.GetString()));
+        Assert.Equal(["repositoryId", "sessionId", "sessionToken", "requestId"], forwarding.GetProperty("properties").EnumerateObject().Select(x => x.Name));
+
+        RelayToolCatalog.TryGet(RelayTools.TaskUpdate, out var update);
+        Assert.True(RelayToolCatalog.ForwardingSchema(update).GetProperty("properties").TryGetProperty("workflow", out _));
+    }
+
+    [Fact]
+    public void Forwarding_catalog_stays_within_its_context_budget()
+    {
+        // Every connected agent carries these definitions on every turn; the pre-refactor adapter was about 19,400 characters.
+        var size = RelayToolCatalog.ForRole(true).Sum(tool => tool.Description.Length + RelayToolCatalog.ForwardingSchema(tool).GetRawText().Length);
+        Assert.True(size < 20_000, $"Forwarding catalog grew to {size} characters.");
     }
 
     [Fact]

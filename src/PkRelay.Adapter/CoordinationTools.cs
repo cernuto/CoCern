@@ -25,8 +25,7 @@ public static class CoordinationTools
             {
                 Name = tool.Name,
                 Description = tool.Description + " Pass the hub tool's JSON arguments directly; include repositoryId, sessionId/sessionToken for established sessions, requestId for mutations, and applicable expected versions.",
-                // The hub enforces the complete contract; advertising it loosely keeps the adapter a thin forwarder.
-                InputSchema = RelayToolCatalog.InputSchema(tool, enforceRequired: false)
+                InputSchema = RelayToolCatalog.ForwardingSchema(tool)
             };
         }
 
