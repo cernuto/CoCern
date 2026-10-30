@@ -5,6 +5,15 @@ using PkRelay.Adapter;
 
 try
 {
+    if (args.Length > 0 && args[0] == "--wake")
+    {
+        if (args.Length != 2) throw new AdapterConfigurationException("Use --wake with one absolute configuration path.");
+        var configuration = WakeConfiguration.Load(args[1]);
+        using var shutdown = new CancellationTokenSource();
+        Console.CancelKeyPress += (_, cancel) => { cancel.Cancel = true; shutdown.Cancel(); };
+        await WakeWatcher.RunAsync(configuration, shutdown.Token);
+        return 0;
+    }
     var options = AdapterOptions.FromEnvironment();
     using var http = new HttpClient(RelayForwarder.CreateHandler()) { Timeout = TimeSpan.FromSeconds(60) };
     await using var hints = new SessionHints(options);

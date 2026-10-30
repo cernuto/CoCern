@@ -23,6 +23,8 @@ Configure an MCP client to run the absolute `PkRelay.Adapter.dll` path with `dot
 
 Each new chat calls `session_open` with a fresh request identity. Keep its returned session token private to that chat. Attach to an existing task for continuity; do not reuse another chat's binding or private inbox. Claim the task and required registered resources, do IDE work through the existing tools, then report meaningful milestones. Native provider chat tools remain responsible for authorized dispatch and waits.
 
+For automatic local Codex follow-up, use the optional [wake adapter mode](docs/wake.md). It watches durable inbox changes in ordinary code and queues one bounded inbox-check prompt for an explicitly enrolled chat. The relay host remains coordination-only; existing model, tool and approval settings remain in force.
+
 ## Runtime boundaries
 
 Claims are cooperative. They cannot stop manual IDE actions or grant device, database, deployment, or account permissions. An invoking/unknown action and unresolved restoration obligation remain blocking even after a lease expires. Reading an inbox does not acknowledge a message; explicit acknowledgment follows handling.

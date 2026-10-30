@@ -1,0 +1,69 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
+
+namespace PkRelay.Adapter;
+
+public sealed record WakeRoute(string RepositoryId, string BoardId, string SessionFile, string ThreadId, string MachineId);
+public sealed record WakeSession(string SessionId, string SessionToken);
+public sealed record WakeConfiguration(string RelayUrl, string TokenFile, string CodexPath, string StatePath, string StopFile, WakeRoute[] Routes)
+{
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        PropertyNameCaseInsensitive = false,
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow
+    };
+
+    public static WakeConfiguration Load(string path)
+    {
+        try
+        {
+            RequirePath(path);
+            var config = JsonSerializer.Deserialize<WakeConfiguration>(ReadBounded(path, 65536), JsonOptions) ?? throw new JsonException();
+            foreach (var file in new[] { config.TokenFile, config.CodexPath, config.StatePath, config.StopFile }) RequirePath(file);
+            if (!File.Exists(config.CodexPath) || config.StatePath == config.StopFile || config.Routes is not { Length: >= 1 and <= 16 }) throw new JsonException();
+            _ = config.AdapterOptions();
+            var threads = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var sessions = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var route in config.Routes)
+            {
+                if (route is null || !ValidName(route.RepositoryId) || !ValidName(route.BoardId) ||
+                    !string.Equals(route.MachineId, Environment.MachineName, StringComparison.OrdinalIgnoreCase) ||
+                    !Guid.TryParseExact(route.ThreadId, "D", out var thread) || thread == Guid.Empty ||
+                    !string.Equals(thread.ToString("D"), route.ThreadId, StringComparison.Ordinal) || !threads.Add(route.ThreadId)) throw new JsonException();
+                RequirePath(route.SessionFile);
+                if (!sessions.Add(ReadSession(route).SessionId)) throw new JsonException();
+            }
+            return config;
+        }
+        catch (Exception exception) when (exception is JsonException or IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            throw new AdapterConfigurationException("Invalid wake configuration or enrollment files.");
+        }
+    }
+
+    public AdapterOptions AdapterOptions() => new(RelayUrl, ReadBounded(TokenFile, 8192), signalR: true);
+    public static WakeSession ReadSession(WakeRoute route)
+    {
+        try
+        {
+            var session = JsonSerializer.Deserialize<WakeSession>(ReadBounded(route.SessionFile, 16384), JsonOptions) ?? throw new JsonException();
+            if (!ValidName(session.SessionId) || string.IsNullOrWhiteSpace(session.SessionToken) || session.SessionToken.Length > 8192 || session.SessionToken.Any(char.IsControl)) throw new JsonException();
+            return session;
+        }
+        catch (Exception exception) when (exception is JsonException or IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            throw new AdapterConfigurationException("Invalid wake session enrollment.");
+        }
+    }
+    private static bool ValidName(string? value) => !string.IsNullOrWhiteSpace(value) && value.Length <= 256 && !value.Any(char.IsControl);
+    private static void RequirePath(string? path) { if (string.IsNullOrEmpty(path) || !Path.IsPathFullyQualified(path)) throw new ArgumentException(); }
+    private static string ReadBounded(string path, int maximum)
+    {
+        using var stream = File.OpenRead(path);
+        if (stream.Length > maximum) throw new IOException();
+        using var reader = new StreamReader(stream);
+        var value = reader.ReadToEnd();
+        if (value.Length > maximum) throw new IOException();
+        return value;
+    }
+}

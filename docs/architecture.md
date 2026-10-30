@@ -23,7 +23,7 @@ The first deployment is one relay hub, one Orleans silo, and a local SQLite data
 | Roslyn CodeLens MCP server | Semantic symbol inspection, references, selected source, and compiler diagnostics for its loaded analysis solution |
 | Visual Studio MCP server | State of its connected IDE, documents, supported build/test operations, debugger operations, and cancellation |
 | Agent session | Verifies tool targets, claims work, invokes its configured tools, follows client/user permissions, and reports useful outcomes |
-| Relay MCP adapter | Exposes coordination tools and delivers supported notifications; maps authenticated calls to relay application services |
+| Relay client adapter | Exposes coordination tools and delivers supported notifications; optional local Codex wake mode queues fixed inbox-check prompts for explicitly enrolled chats |
 | Relay hub | Durable coordination, authorization, task/action versions, inboxes, session metadata, advisory claims, and bounded shared context |
 | Orleans and SQLite | Coordination state, optimistic concurrency, durable message effects, and restart recovery |
 
@@ -39,7 +39,7 @@ flowchart LR
     B[Other PC's agent session] <-->|Coordination| M
 ```
 
-HTTP handles coordination requests, reconciliation, and bounded artifact transfer. SignalR supports adapter connections and compact coordination notifications. Both invoke the same authenticated application services and use the same version/idempotency rules. Visual Studio has no relay-specific extension or direct relay connection. No companion process, custom IDE command gateway, build runner, debugger adapter, or semantic tool implementation is part of the relay.
+HTTP handles coordination requests, reconciliation, and bounded artifact transfer. SignalR supports adapter connections and compact coordination notifications. Both invoke the same authenticated application services and use the same version/idempotency rules. Visual Studio has no relay-specific extension or direct relay connection. There is no VS companion process, custom IDE command gateway, build runner, debugger adapter, or semantic tool implementation. An opt-in local client wake mode uses the existing Codex CLI to queue inbox-check prompts; the hub does not start models or invoke native chat runtimes.
 
 ## PCs, sessions, and tool bindings
 
@@ -212,7 +212,8 @@ During a relay outage, agents lose coordinated assignment/claim renewal. The coo
 | Client | Relay connection | Incoming coordination |
 | --- | --- | --- |
 | Claude Code | Local stdio relay MCP adapter, connected to the hub over HTTP/SignalR | Supported Claude channel notification plus durable inbox |
-| Local Codex and other MCP clients | Configured relay MCP adapter | Explicit inbox checks; host wake mechanisms only when actually supported |
+| Local Codex desktop | Configured relay MCP adapter; optional local `--wake` mode | Verified local CLI queue route plus durable inbox, with exact enrolled chat UUIDs |
+| Other MCP clients | Configured relay MCP adapter | Explicit inbox checks; host wake mechanisms only when actually supported |
 | ChatGPT with supported remote tools/events | Authenticated remote relay MCP endpoint | Active-turn inbox checks; optional supported event subscription |
 
 Task-related questions, requests, replies, decisions, and results belong to a durable task conversation. Store a message ID, task ID, optional action ID, reply/request correlation, kind, and task version before notification; the hub stamps author and time from the authenticated call. Replies reference their original request; action completion still uses a typed action report. `send_message` has an explicit task target or session target, so private session messages cannot accidentally become shared task history.
@@ -222,6 +223,8 @@ Notify the current task owner or designated participant with references to the s
 Read inbox items without consuming them; explicit acknowledgment follows handling and acknowledges only delivery/handling, not task completion. Accepted messages are durable before success. Notifications reference stored facts, and duplicates are expected. Offline recipients can recover their session messages, while authorized successor sessions recover task conversations through the task. Coalesce notifications without removing task facts.
 
 Advertise availability separately from registration: active, awaiting interaction, disconnected, revoked, or unknown. A registered account is not a running agent. Pull-only sessions are offered work when they check in; the relay cannot wake them just by storing a message.
+
+Local Codex wake enrollment is trusted configuration on the chat's own PC: exact thread UUID, machine identity, repository/board and private existing session-handle file. The optional adapter watches SignalR and reconciles bounded durable inbox pages without model turns, coalesces new message IDs, and queues a fixed prompt with `codex queue`. Message bodies never become user instructions. Durable SQLite notification records suppress repeated wakes across reconnect/restart; a reserved dispatch with an uncertain CLI outcome blocks automatic replay until operator reconciliation. Relay pause/stop, a local stop file and per-route rate limits suppress dispatch. A queue receipt is not evidence that a model ran; the desktop app must be available, and existing tool/approval policies still apply. See [wake.md](wake.md) for setup and actual verified scope.
 
 Phase 1 sends direct messages. Notify the relevant participant for actionable assignments, results, decisions, or blockers. Coalesce repetitive status updates, suppress unchanged heartbeats from model context, and avoid sending the same full result through both notification and inbox. Do not broadcast repository history or large logs. Role groups and resumable fan-out can be added after the direct workflow is useful.
 

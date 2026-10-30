@@ -22,10 +22,19 @@ if (-not (Test-Path -LiteralPath $tokenPath)) {
 }
 if ($IsWindows) {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent().User
-    $acl = [Security.AccessControl.FileSecurity]::new()
-    $acl.SetAccessRuleProtection($true, $false)
-    $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($identity, 'FullControl', 'Allow'))
-    Set-Acl -LiteralPath $tokenPath -AclObject $acl
+    $existingAcl = Get-Acl -LiteralPath $tokenPath
+    $existingRules = @($existingAcl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+    $alreadyPrivate = $existingAcl.AreAccessRulesProtected -and $existingRules.Count -eq 1 -and
+        $existingRules[0].IdentityReference -eq $identity -and
+        $existingRules[0].AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+        $existingRules[0].FileSystemRights -eq [Security.AccessControl.FileSystemRights]::FullControl -and
+        -not $existingRules[0].IsInherited
+    if (-not $alreadyPrivate) {
+        $acl = [Security.AccessControl.FileSecurity]::new()
+        $acl.SetAccessRuleProtection($true, $false)
+        $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($identity, 'FullControl', 'Allow'))
+        Set-Acl -LiteralPath $tokenPath -AclObject $acl
+    }
 } else {
     [IO.File]::SetUnixFileMode($tokenPath, [IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserWrite)
 }

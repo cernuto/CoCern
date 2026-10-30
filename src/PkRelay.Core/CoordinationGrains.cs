@@ -49,7 +49,16 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
             var effectCaller = new RelayCaller(CoordinationStateMachine.Text(payload, "__principalId"), payload["__administrator"]?.GetValue<bool>() ?? false, payload["__repositories"]?.Deserialize<string[]>() ?? [], true);
             payload.Remove("__principalId"); payload.Remove("__administrator"); payload.Remove("__repositories");
             RelayReply result;
-            try { result = await Aggregate(grains, effect.TargetKind, effect.TargetKey).ExecuteAsync(effectCaller, effect.Operation, payload.ToJsonString()); }
+            try
+            {
+                if (Kind == "session" && effect.TargetKind == "session" && effect.Operation == "__deliver" && GrainContext is not null && effect.TargetKey == this.GetPrimaryKeyString())
+                {
+                    // A non-reentrant grain cannot await an RPC to itself. Commit its inbox entry
+                    // and outbox removal together so a stale dispatch snapshot cannot erase delivery.
+                    result = CoordinationStateMachine.Apply(candidate, Kind, effect.TargetKey, effectCaller, effect.Operation, payload, DateTimeOffset.UtcNow);
+                }
+                else result = await Aggregate(grains, effect.TargetKind, effect.TargetKey).ExecuteAsync(effectCaller, effect.Operation, payload.ToJsonString());
+            }
             catch (Exception) { result = CoordinationStateMachine.Error("DeliveryUnavailable"); }
             if (!result.Ok)
             {
