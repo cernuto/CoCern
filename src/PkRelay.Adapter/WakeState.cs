@@ -35,7 +35,8 @@ public sealed class WakeState : IDisposable
     {
         lock (_gate) return Scalar("SELECT COUNT(*) FROM batches WHERE route=$route AND status IN ('reserved','uncertain')", route) > 0;
     }
-    public (string Status, string? Batch) Reserve(string route, IEnumerable<string> ids, DateTimeOffset now)
+    /// <param name="busy">Asked only when there is unseen mail; while it says the chat is mid-turn nothing is reserved and the status is "busy".</param>
+    public (string Status, string? Batch) Reserve(string route, IEnumerable<string> ids, DateTimeOffset now, Func<bool>? busy = null)
     {
         lock (_gate)
         {
@@ -43,6 +44,7 @@ public sealed class WakeState : IDisposable
             if (IsUncertain(route)) return ("uncertain", null);
             var unseen = ids.Select(id => Key(id)).Distinct().Where(id => Scalar("SELECT COUNT(*) FROM messages WHERE route=$route AND message=$value", route, id) == 0).ToArray();
             if (unseen.Length == 0) return ("empty", null);
+            if (busy?.Invoke() == true) return ("busy", null);
             var time = now.ToUnixTimeMilliseconds();
             if (Scalar("SELECT COUNT(*) FROM batches WHERE route=$route AND at > $value", route, time - (long)_limits.MinInterval.TotalMilliseconds) > 0 ||
                 Scalar("SELECT COUNT(*) FROM batches WHERE route=$route AND at > $value", route, time - (long)_limits.Window.TotalMilliseconds) >= _limits.MaxPerWindow) return ("rate-limited", null);

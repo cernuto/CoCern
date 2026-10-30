@@ -5,6 +5,11 @@ namespace PkRelay.Adapter;
 public interface IWakeDispatcher
 {
     Task<bool> QueueAsync(string threadId, string prompt, CancellationToken cancellationToken);
+    /// <summary>
+    /// True while the chat is mid-turn. A wake queued then only runs after that turn, often to find the inbox already handled, and every such
+    /// turn re-reads the chat's whole context; so new mail waits, unreserved, and wakes the chat once when it is idle.
+    /// </summary>
+    bool IsBusy(string threadId) => false;
 }
 public sealed class WakeReconciler(WakeConfiguration configuration, WakeState state, RelayForwarder forwarder, IWakeDispatcher dispatcher, TimeProvider? clock = null)
 {
@@ -50,7 +55,7 @@ public sealed class WakeReconciler(WakeConfiguration configuration, WakeState st
             if (File.Exists(configuration.StopFile)) return "stopped";
             if (!await Permitted()) return "control-blocked";
             cancellationToken.ThrowIfCancellationRequested();
-            var reservation = state.Reserve(key, ids, (clock ?? TimeProvider.System).GetUtcNow());
+            var reservation = state.Reserve(key, ids, (clock ?? TimeProvider.System).GetUtcNow(), () => dispatcher.IsBusy(route.ThreadId));
             if (reservation.Batch is not { } batch) return reservation.Status;
             var queued = false;
             try

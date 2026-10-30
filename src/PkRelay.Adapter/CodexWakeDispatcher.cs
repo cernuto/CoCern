@@ -4,8 +4,11 @@ using System.Text.RegularExpressions;
 
 namespace PkRelay.Adapter;
 
-public sealed class CodexWakeDispatcher(string executable) : IWakeDispatcher
+/// <param name="sessionsRoot">Codex's rollout folder, read to hold wakes back while a thread is mid-turn; null never holds them.</param>
+public sealed class CodexWakeDispatcher(string executable, string? sessionsRoot = null, TimeProvider? clock = null) : IWakeDispatcher
 {
+    public bool IsBusy(string threadId) => sessionsRoot is not null && CodexActivity.IsBusy(sessionsRoot, threadId, (clock ?? TimeProvider.System).GetUtcNow());
+
     private const int MaximumOutput = 32768;
     public static bool HasQueuedReceipt(int exitCode, string output, string threadId)
     {

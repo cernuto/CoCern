@@ -455,6 +455,70 @@ public sealed class WakeTests
     {
         public readonly List<string> Prompts = [];
         public bool Accept = true;
+        public bool Busy;
+        public int BusyChecks;
         public Task<bool> QueueAsync(string threadId, string prompt, CancellationToken cancellationToken) { Prompts.Add(prompt); return Task.FromResult(Accept); }
+        public bool IsBusy(string threadId) { BusyChecks++; return Busy; }
+    }
+
+    [Fact]
+    public async Task Busy_chat_is_not_woken_and_its_messages_wake_once_when_idle()
+    {
+        using var fixture = new Fixture();
+        // Nothing new: the chat's activity is not even looked at.
+        Assert.Equal("empty", await fixture.Reconcile());
+        Assert.Equal(0, fixture.Dispatcher.BusyChecks);
+
+        // New mail while the chat is mid-turn stacks no wake and reserves nothing.
+        fixture.Dispatcher.Busy = true;
+        fixture.Messages = ["first"];
+        Assert.Equal("busy", await fixture.Reconcile());
+        fixture.Messages = ["first", "second"];
+        Assert.Equal("busy", await fixture.Reconcile());
+        Assert.Empty(fixture.Dispatcher.Prompts);
+
+        // Once idle, everything still unacknowledged wakes it once.
+        fixture.Dispatcher.Busy = false;
+        Assert.Equal("queued", await fixture.Reconcile());
+        Assert.Single(fixture.Dispatcher.Prompts);
+        Assert.Equal("empty", await fixture.Reconcile());
+    }
+
+    [Fact]
+    public async Task Messages_handled_during_a_busy_turn_never_wake()
+    {
+        using var fixture = new Fixture();
+        fixture.Dispatcher.Busy = true;
+        fixture.Messages = ["first"];
+        Assert.Equal("busy", await fixture.Reconcile());
+        // The chat read and acknowledged it in that same turn.
+        fixture.Messages = [];
+        fixture.Dispatcher.Busy = false;
+        Assert.Equal("empty", await fixture.Reconcile());
+        Assert.Empty(fixture.Dispatcher.Prompts);
+    }
+
+    [Theory]
+    [InlineData("task_started", 0, true)]
+    [InlineData("task_complete", 0, false)]
+    [InlineData("turn_aborted", 0, false)]
+    [InlineData("task_started", 20, false)]
+    public void Codex_activity_comes_from_the_rollout_tail(string lastEvent, int minutesSinceWrite, bool busy)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "pkrelay-rollouts-" + Guid.NewGuid().ToString("N"));
+        const string thread = "00000000-0000-0000-0000-0000000000aa";
+        try
+        {
+            var day = Path.Combine(root, "2026", "10", "30");
+            Directory.CreateDirectory(day);
+            var path = Path.Combine(day, $"rollout-2026-10-30T13-00-00-{thread}.jsonl");
+            string Event(string type) => JsonSerializer.Serialize(new { timestamp = "2026-10-30T20:00:00Z", type = "event_msg", payload = new { type } });
+            File.WriteAllLines(path, [Event("task_started"), Event("token_count"), Event("task_complete"), Event(lastEvent), Event("token_count"), "{not json"]);
+            var now = DateTimeOffset.UtcNow;
+            File.SetLastWriteTimeUtc(path, now.AddMinutes(-minutesSinceWrite).UtcDateTime);
+            Assert.Equal(busy, CodexActivity.IsBusy(root, thread, now));
+            Assert.False(CodexActivity.IsBusy(root, "00000000-0000-0000-0000-0000000000bb", now));
+        }
+        finally { Directory.Delete(root, true); }
     }
 }

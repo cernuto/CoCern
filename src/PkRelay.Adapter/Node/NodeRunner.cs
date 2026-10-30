@@ -37,7 +37,7 @@ internal sealed class NodeTransport
     /// <summary>The Codex executable wakes run; null when none is installed, so Codex chats are announced unwakeable.</summary>
     public Func<string?> CodexExecutable { get; init; } = CodexLocator.Find;
     /// <summary>How a wake reaches a Codex chat, given the executable; tests replace it so no real <c>codex.exe</c> ever runs.</summary>
-    public Func<string, IWakeDispatcher> CodexDispatcher { get; init; } = executable => new CodexWakeDispatcher(executable);
+    public Func<string, IWakeDispatcher> CodexDispatcher { get; init; } = executable => new CodexWakeDispatcher(executable, CodexActivity.DefaultSessionsRoot);
     /// <summary>The wake watcher's fallback pass when no hint arrives.</summary>
     public TimeSpan WakeInterval { get; init; } = TimeSpan.FromSeconds(15);
     /// <summary>Fixed event names for tests (enrolled, announced, watching, hint, unauthorized, waking, wake-target); never carries data.</summary>
