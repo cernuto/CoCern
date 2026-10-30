@@ -959,6 +959,29 @@ public sealed class NodeTests : IDisposable
     }
 
     [Fact]
+    public void An_unreadable_holder_transcript_never_lets_a_fork_win_the_match()
+    {
+        var codex = Path.Combine(root, "codex-sessions");
+        var (holder, fork) = (Guid.NewGuid().ToString(), Guid.NewGuid().ToString());
+        var holderPath = Rollout(codex, holder, CodexTool(holder, "session_open", OpenReply("s-x")));
+        Rollout(codex, fork, CodexTool(fork, "session_open", OpenReply("s-x")));
+        NodeState.WriteSessionHandle(DataDir, new SessionHandle("s-x", "synthetic-token-x", "repo", "Forked", DateTimeOffset.UtcNow.AddMinutes(-1)));
+        var locked = true;
+        var nodeChats = Chats([new CodexChatLocator(codex, open: path => locked && string.Equals(path, holderPath, StringComparison.OrdinalIgnoreCase) ? throw new IOException("locked by another process") : ChatLocators.OpenShared(path))]);
+
+        // While the holder cannot be read, the fork is the only holder seen, but the session must stay pending rather than map to it.
+        var chats = Announced(nodeChats.Read(_ => true));
+        Assert.Equal(("unknown", "unmapped", false), Route(chats["s-x"]));
+        Assert.Equal((null, false), (Handle("s-x").Chat, Handle("s-x").Unmapped));
+
+        // Once the holder reads cleanly both transcripts hold the result, which is ambiguous, so the session is never wakeable.
+        locked = false;
+        chats = Announced(nodeChats.Read(_ => true));
+        Assert.False(chats["s-x"]["wakeable"]!.GetValue<bool>());
+        Assert.Equal((null, true), (Handle("s-x").Chat, Handle("s-x").Unmapped));
+    }
+
+    [Fact]
     public void Pruning_keeps_old_unmapped_handles_that_a_claude_waiter_can_still_use()
     {
         var now = DateTimeOffset.UtcNow;

@@ -168,9 +168,11 @@ public abstract class TranscriptLocator(int maxLineBytes, Func<string, Stream>? 
             var start = needing.Min(x => file.Offsets.GetValueOrDefault(x));
             if (start >= transcript.Length) { complete.Add(transcript.Path); continue; }
             if (budget.Exhausted) break;
-            var (position, finished) = Read(transcript, file, start, ids, state, budget);
+            var (position, outcome) = Read(transcript, file, start, ids, state, budget);
             foreach (var id in needing) file.Offsets[id] = Math.Max(file.Offsets.GetValueOrDefault(id), position);
-            if (finished) complete.Add(transcript.Path);
+            if (outcome == ReadOutcome.Finished) complete.Add(transcript.Path);
+            // An unreadable transcript is not complete: the sessions it might hold stay pending until it reads cleanly (or their locate window ends), so a fork never wins by default.
+            else if (outcome == ReadOutcome.Failed) continue;
             else break;
         }
 
@@ -188,8 +190,10 @@ public abstract class TranscriptLocator(int maxLineBytes, Func<string, Stream>? 
         return results;
     }
 
-    /// <summary>Reads one transcript from <paramref name="start"/>; returns where it stopped and whether that was its end rather than the budget.</summary>
-    private (long Position, bool Finished) Read(Transcript transcript, FileState file, long start, HashSet<string> ids, ScanState state, ScanBudget budget)
+    private enum ReadOutcome { Finished, Budget, Failed }
+
+    /// <summary>Reads one transcript from <paramref name="start"/>; returns where it stopped and why: its end, the budget, or a read failure.</summary>
+    private (long Position, ReadOutcome Outcome) Read(Transcript transcript, FileState file, long start, HashSet<string> ids, ScanState state, ScanBudget budget)
     {
         var position = start;
         try
@@ -201,12 +205,12 @@ public abstract class TranscriptLocator(int maxLineBytes, Func<string, Stream>? 
                     foreach (var opened in OpenedSessions(line, file.Calls, ids))
                         if (state.Holders.TryGetValue(opened, out var holders)) holders.Add(transcript.ChatId);
                 position = end;
-                if (budget.Exhausted) return (position, false);
+                if (budget.Exhausted) return (position, ReadOutcome.Budget);
             }
-            return (position, true);
+            return (position, ReadOutcome.Finished);
         }
-        // An unreadable transcript is passed over this time; it holds nothing we can see.
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { return (position, true); }
+        // Passed over this time and read again from here next pass; what it may hold is unknown, so it does not count as read to its end.
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { return (position, ReadOutcome.Failed); }
     }
 
     protected static IEnumerable<Transcript> Describe(IEnumerable<string> paths, Func<string, string?> chatId)
