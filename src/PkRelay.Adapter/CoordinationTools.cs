@@ -35,17 +35,29 @@ public static class CoordinationTools
                 Name = tool.Name,
                 // Argument guidance shared by every tool lives once in the server instructions, not in each definition.
                 Description = tool.Description,
-                InputSchema = RelayToolCatalog.ForwardingSchema(tool)
+                InputSchema = tool.Name == RelayTools.CheckInbox ? With(RelayToolCatalog.ForwardingSchema(tool), "waitSeconds", InboxWait.Schema)
+                    : ConditionalRead.Applies(tool.Name) ? With(RelayToolCatalog.ForwardingSchema(tool), "ifNoneMatch", ConditionalRead.Schema)
+                    : RelayToolCatalog.ForwardingSchema(tool)
             };
         }
 
         public override Tool ProtocolTool { get; }
+
+        /// <summary>A hub schema plus one of the adapter's own options (<see cref="InboxWait"/>, <see cref="ConditionalRead"/>).</summary>
+        private static JsonElement With(JsonElement schema, string property, object definition)
+        {
+            var node = System.Text.Json.Nodes.JsonNode.Parse(schema.GetRawText())!.AsObject();
+            node["properties"]!.AsObject()[property] = JsonSerializer.SerializeToNode(definition);
+            return JsonSerializer.SerializeToElement(node);
+        }
         public override IReadOnlyList<object> Metadata => Array.Empty<object>();
 
         public override async ValueTask<CallToolResult> InvokeAsync(RequestContext<CallToolRequestParams> request, CancellationToken cancellationToken = default)
         {
             var arguments = JsonSerializer.SerializeToElement(request.Params.Arguments ?? new Dictionary<string, JsonElement>());
-            var reply = await _forwarder.ForwardAsync(ProtocolTool.Name, arguments, cancellationToken);
+            var reply = ProtocolTool.Name == RelayTools.CheckInbox
+                ? await InboxWait.CheckAsync(_forwarder, arguments, InboxWait.PollInterval, cancellationToken)
+                : await ConditionalRead.ForwardAsync(_forwarder, ProtocolTool.Name, arguments, cancellationToken);
             if (reply.Ok && ProtocolTool.Name == RelayTools.SessionOpen) _handoff?.Record(arguments, reply);
             if (_hints is not null)
             {
