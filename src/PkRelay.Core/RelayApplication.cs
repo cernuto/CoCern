@@ -19,7 +19,7 @@ namespace PkRelay.Core;
 /// (session open, task claim with resources, action begin, convenience renewals/acks, next-work offers).
 /// Aggregates enforce the rules; this layer authenticates the session, routes, composes and bounds replies.
 /// </summary>
-public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? machines = null, IActivitySink? activity = null, IFullTextSearch? search = null, AttentionOptions? attention = null) : IRelayApplication
+public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? machines = null, IActivitySink? activity = null, IFullTextSearch? search = null, AttentionOptions? attention = null, AnalyticsTool? analytics = null) : IRelayApplication
 {
     private readonly IMachineDirectory directory = machines ?? new MachineDirectory(grains);
     private readonly AttentionOptions attentionOptions = attention ?? new();
@@ -127,6 +127,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         RelayTools.ChatDirectory => directory.DirectoryAsync([Text(args, "repositoryId")], CancellationToken.None),
         RelayTools.ControlRequest when Text(args, "command") == "revoke_machine" => RevokeMachineAsync(caller, args),
         RelayTools.Search => SearchAsync(args, cancellationToken),
+        RelayTools.AnalyticsQuery => AnalyticsAsync(caller, args, cancellationToken),
         RelayTools.SessionBind or RelayTools.CheckInbox or RelayTools.Ack => CallSession(caller, tool, args),
         RelayTools.AttentionRespond => RespondToAttentionAsync(caller, args),
         RelayTools.WorkerList or RelayTools.ControlRequest => CallControl(caller, tool, args),
@@ -167,6 +168,15 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         }
         return Ok(reply);
     }
+
+    /// <summary>
+    /// Administrator only, checked here because no aggregate handles this tool: a session's self-reported role is not an authority.
+    /// An analytics-off hub answers <see cref="AnalyticsUnavailable"/> once the caller is known to be an administrator.
+    /// </summary>
+    private Task<RelayReply> AnalyticsAsync(RelayCaller caller, JsonObject args, CancellationToken cancellationToken) =>
+        !caller.IsAdministrator ? Task.FromResult(Error(AdministratorRequired))
+        : analytics is null ? Task.FromResult(Error(AnalyticsUnavailable, new { message = "Analytics is turned off on this hub (Relay:Analytics:Enabled)." }))
+        : analytics.RunAsync(caller, args, cancellationToken);
 
     /// <summary>The agent's answer to an attention item. "Later" uses the hub's configured snooze; a client cannot set it.</summary>
     private async Task<RelayReply> RespondToAttentionAsync(RelayCaller caller, JsonObject args)

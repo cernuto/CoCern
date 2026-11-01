@@ -400,6 +400,135 @@ public class HostTests
         Assert.True(host.Services.GetRequiredService<IActivitySink>() is ThrowingSink { Calls: > 0 });
     }
 
+    private const string AnalyticsAdminToken = "analytics-admin-test-secret-not-production";
+
+    private static async Task<RelayHostFixture> AnalyticsHost(bool enabled, bool adHoc = false, string? timeout = null)
+    {
+        var settings = new Dictionary<string, string?>
+        {
+            ["Relay:Clients:1:Token"] = AnalyticsAdminToken, ["Relay:Clients:1:PrincipalId"] = "analytics-admin", ["Relay:Clients:1:IsAdministrator"] = "true", ["Relay:Clients:1:Repositories:0"] = "repo",
+            ["Relay:Analytics:Enabled"] = enabled.ToString(), ["Relay:Analytics:AllowAdHocSql"] = adHoc.ToString(), ["Relay:Analytics:SnapshotInterval"] = "1.00:00:00",
+            ["Relay:Analytics:ExtensionDirectory"] = await AnalyticsTestExtension.DirectoryAsync()
+        };
+        if (timeout is not null) settings["Relay:Analytics:QueryTimeout"] = timeout;
+        var host = new RelayHostFixture(settings: settings);
+        if (enabled)
+        {
+            using var warm = host.AuthorizedClient();
+            var analytics = host.Services.GetRequiredService<PkRelay.Analytics.AnalyticsService>();
+            var deadline = DateTimeOffset.UtcNow.AddSeconds(30);
+            while (analytics.SnapshotAt is null && DateTimeOffset.UtcNow < deadline) await Task.Delay(50);
+            Assert.NotNull(analytics.SnapshotAt);
+        }
+        return host;
+    }
+
+    private static async Task<(HttpStatusCode Status, string Code, JsonElement Data)> Analytics(HttpClient client, object arguments)
+    {
+        using var response = await client.PostAsJsonAsync("/api/tools/analytics_query", arguments);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        return (response.StatusCode, body.GetProperty("code").GetString()!, JsonDocument.Parse(body.GetProperty("dataJson").GetString()!).RootElement.Clone());
+    }
+
+    private static async Task<(HttpStatusCode Status, string Code)> AnalyticsStatus(HttpClient client, object arguments)
+    {
+        var (status, code, _) = await Analytics(client, arguments);
+        return (status, code);
+    }
+
+    private static HttpClient AnalyticsAdmin(RelayHostFixture host)
+    {
+        var client = host.AuthorizedClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", AnalyticsAdminToken);
+        return client;
+    }
+
+    [Fact]
+    public async Task Analytics_query_refuses_non_administrators_and_is_unavailable_when_analytics_is_off()
+    {
+        await using (var off = await AnalyticsHost(enabled: false))
+        {
+            using var worker = off.AuthorizedClient();
+            using var admin = AnalyticsAdmin(off);
+            Assert.Null(off.Services.GetService<IAnalyticsQueries>());
+            // The worker learns nothing about the hub's analytics settings.
+            Assert.Equal((HttpStatusCode.Forbidden, "AdministratorRequired"), await AnalyticsStatus(worker, new { repositoryId = "repo", name = "noisiest_tools" }));
+            Assert.Equal((HttpStatusCode.BadRequest, "AnalyticsUnavailable"), await AnalyticsStatus(admin, new { repositoryId = "repo", name = "noisiest_tools" }));
+        }
+
+        await using var on = await AnalyticsHost(enabled: true);
+        using var onWorker = on.AuthorizedClient();
+        // A session that calls itself a manager is still not an administrator.
+        var manager = Data(await on.Call(onWorker, "session_open", new { repositoryId = "repo", requestId = "analytics-manager", role = "manager" }));
+        var asManager = await Analytics(onWorker, new { repositoryId = "repo", name = "noisiest_tools", sessionId = manager.GetProperty("sessionId").GetString(), sessionToken = manager.GetProperty("sessionToken").GetString() });
+        Assert.Equal((HttpStatusCode.Forbidden, "AdministratorRequired"), (asManager.Status, asManager.Code));
+        Assert.Equal((HttpStatusCode.Forbidden, "AdministratorRequired"), await AnalyticsStatus(onWorker, new { repositoryId = "repo", name = "sql", sql = "SELECT 1" }));
+        // Over MCP the worker is not even shown the tool.
+        Assert.DoesNotContain("analytics_query", PkRelay.Host.ToolResults.Tools(false).Select(tool => tool.Name));
+    }
+
+    [Fact]
+    public async Task Analytics_query_runs_named_queries_and_refuses_ad_hoc_sql_unless_enabled()
+    {
+        await using var host = await AnalyticsHost(enabled: true);
+        using var admin = AnalyticsAdmin(host);
+        var named = await Analytics(admin, new { repositoryId = "repo", name = "noisiest_tools", @params = new { days = 3 } });
+        Assert.Equal((HttpStatusCode.OK, "Ok"), (named.Status, named.Code));
+        Assert.Equal(["key", "cur", "prev", "cur_n", "prev_n"], named.Data.GetProperty("cols").EnumerateArray().Select(x => x.GetString()));
+        Assert.Equal(JsonValueKind.Array, named.Data.GetProperty("rows").ValueKind);
+        Assert.True(DateTimeOffset.TryParse(named.Data.GetProperty("at").GetString(), out _));
+
+        var refused = await Analytics(admin, new { repositoryId = "repo", name = "sql", sql = "SELECT 1" });
+        Assert.Equal((HttpStatusCode.BadRequest, "AnalyticsRefused"), (refused.Status, refused.Code));
+        Assert.Contains("turned off", refused.Data.GetProperty("message").GetString());
+
+        foreach (var (arguments, field) in new (object, string)[]
+        {
+            (new { repositoryId = "repo", name = "drop_tables" }, "name"),
+            (new { repositoryId = "repo" }, "name"),
+            (new { repositoryId = "repo", name = "noisiest_tools", sql = "SELECT 1" }, "sql"),
+            (new { repositoryId = "repo", name = "sql" }, "sql"),
+            (new { repositoryId = "repo", name = "noisiest_tools", @params = new { days = 99 } }, "params"),
+            (new { repositoryId = "repo", name = "noisiest_tools", @params = new { since = "yesterday" } }, "params"),
+            (new { repositoryId = "repo", name = "noisiest_tools", @params = 7 }, "params")
+        })
+        {
+            var invalid = await Analytics(admin, arguments);
+            Assert.Equal((HttpStatusCode.BadRequest, "InvalidArguments"), (invalid.Status, invalid.Code));
+            Assert.Equal(field, invalid.Data.GetProperty("field").GetString());
+        }
+    }
+
+    [Fact]
+    public async Task Enabled_ad_hoc_sql_stays_read_only_with_the_timeout_row_cap_and_reply_limit()
+    {
+        await using var host = await AnalyticsHost(enabled: true, adHoc: true, timeout: "00:00:01");
+        using var admin = AnalyticsAdmin(host);
+        object Sql(string sql) => new { repositoryId = "repo", name = "sql", sql };
+
+        var one = await Analytics(admin, Sql("SELECT 42 AS answer, 'x' AS text, NULL AS nothing"));
+        Assert.Equal((HttpStatusCode.OK, "Ok"), (one.Status, one.Code));
+        Assert.Equal("[[42,\"x\",null]]", one.Data.GetProperty("rows").GetRawText());
+        Assert.False(one.Data.TryGetProperty("truncated", out _));
+
+        var capped = await Analytics(admin, Sql("SELECT range AS n FROM range(100)"));
+        Assert.Equal(50, capped.Data.GetProperty("rows").GetArrayLength());
+        Assert.True(capped.Data.GetProperty("truncated").GetBoolean());
+
+        foreach (var write in new[] { "CREATE TABLE copied AS SELECT 1", "DETACH relay", "SET enable_external_access = true", $"ATTACH '{host.DatabasePath}' AS live", "SELECT 1; SELECT 2" })
+            Assert.Equal((HttpStatusCode.BadRequest, "AnalyticsRefused"), await AnalyticsStatus(admin, Sql(write)));
+        var fileRead = await Analytics(admin, Sql($"SELECT * FROM read_text('{host.DatabasePath}')"));
+        Assert.Equal((HttpStatusCode.BadRequest, "AnalyticsFailed"), (fileRead.Status, fileRead.Code));
+        Assert.Contains("disabled", fileRead.Data.GetProperty("message").GetString());
+        Assert.Equal((HttpStatusCode.BadRequest, "AnalyticsTimeout"), await AnalyticsStatus(admin, Sql("SELECT count(*) FROM range(1000000000000) t(a) WHERE a % 7 = 3")));
+
+        var large = await Analytics(admin, Sql("SELECT repeat('x', 1000) AS filler FROM range(20)"));
+        Assert.Equal((HttpStatusCode.RequestEntityTooLarge, "PayloadTooLarge"), (large.Status, large.Code));
+        Assert.Contains("narrower", large.Data.GetProperty("message").GetString());
+        // The interrupted and refused queries left the snapshot usable.
+        Assert.Equal((HttpStatusCode.OK, "Ok"), await AnalyticsStatus(admin, Sql("SELECT count(*) FROM tool_calls")));
+    }
+
     private sealed class ThrowingSink : IActivitySink
     {
         public int Calls;

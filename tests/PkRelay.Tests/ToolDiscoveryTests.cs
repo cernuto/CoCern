@@ -31,6 +31,16 @@ public class ToolDiscoveryTests
     }
 
     [Fact]
+    public void Analytics_query_is_discovered_only_by_administrators()
+    {
+        Assert.Contains(RelayTools.AnalyticsQuery, PkRelay.Adapter.CoordinationTools.NamesForRole(true));
+        Assert.DoesNotContain(RelayTools.AnalyticsQuery, PkRelay.Adapter.CoordinationTools.NamesForRole(false));
+        Assert.True(PkRelay.Adapter.CoordinationTools.IsAllowed(RelayTools.AnalyticsQuery, admin: true));
+        Assert.False(PkRelay.Adapter.CoordinationTools.IsAllowed(RelayTools.AnalyticsQuery, admin: false));
+        Assert.False(PkRelay.Adapter.CoordinationTools.IsAllowed(RelayTools.AnalyticsQuery, admin: true, chatOnly: true));
+    }
+
+    [Fact]
     public void Search_is_discovered_by_every_session_role_but_not_the_chat_profile()
     {
         Assert.Contains(RelayTools.Search, PkRelay.Adapter.CoordinationTools.NamesForRole(true));
@@ -85,6 +95,9 @@ public class ToolDiscoveryTests
     [InlineData("task_update", "attention", "boolean")]
     [InlineData("action_report", "attention", "boolean")]
     [InlineData("task_claim", "attention", "boolean")]
+    [InlineData("analytics_query", "name", "string")]
+    [InlineData("analytics_query", "params", "object")]
+    [InlineData("analytics_query", "sql", "string")]
     public void Forwarding_tools_advertise_arguments_needed_for_chat_coordination(string toolName, string field, string type)
     {
         Assert.True(RelayToolCatalog.TryGet(toolName, out var tool));

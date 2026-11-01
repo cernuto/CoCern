@@ -2,8 +2,6 @@
 
 The hub can copy its database into a snapshot every hour and query that copy with DuckDB. Queries never touch the live database. Analytics is off by default.
 
-The manager's `analytics_query` tool arrives in a later step. Until then the queries are reachable through the `IAnalyticsQueries` port in code and tests.
-
 ## Turn it on
 
 1. Install DuckDB's `sqlite` extension once. It needs internet access the first time:
@@ -22,6 +20,35 @@ The manager's `analytics_query` tool arrives in a later step. Until then the que
 
 The hub takes a snapshot at startup and then on every interval. If a snapshot fails, the hub logs why and keeps the previous one.
 
+## Ask a question
+
+`analytics_query` is for administrators only: the client token must have `IsAdministrator`. A session's `role` (such as `manager`) does not count. Workers are not shown the tool.
+
+```json
+{ "repositoryId": "repo", "name": "tokens_per_task", "params": { "days": 7 } }
+```
+
+Reply:
+
+```json
+{ "cols": ["key", "cur", "prev", "cur_n", "prev_n"], "rows": [["all", 1050.0, 330.0, 1, 1]], "at": "2026-11-01T10:00:00Z" }
+```
+
+- `at` is when the snapshot was taken. `truncated: true` means rows were cut at `MaxRows`.
+- A reply over 8 KB is refused with `PayloadTooLarge`. Ask a narrower query.
+- Named queries read only the request's repository.
+
+Ad hoc SQL is off unless `Relay:Analytics:AllowAdHocSql` is true. Then `"name": "sql", "sql": "SELECT ..."` runs one `SELECT` over the views, on any repository. Every ad hoc query is written to the hub log, run or refused.
+
+| Code | Meaning |
+| --- | --- |
+| `AdministratorRequired` | The caller is not an administrator. |
+| `AnalyticsUnavailable` | Analytics is off, or no snapshot has been taken yet. |
+| `AnalyticsRefused` | Ad hoc SQL is off, or the SQL is not one `SELECT`. |
+| `AnalyticsTimeout` | The query ran past `QueryTimeout`. |
+| `AnalyticsFailed` | DuckDB rejected the query; `message` says why. |
+| `InvalidArguments` | `field` names the bad argument: `name`, `params` or `sql`. |
+
 ## Settings
 
 | Setting | Default | What it does |
@@ -32,6 +59,7 @@ The hub takes a snapshot at startup and then on every interval. If a snapshot fa
 | `Relay:Analytics:ExtensionDirectory` | `duckdb_extensions` next to the hub | Where the `sqlite` extension is installed. |
 | `Relay:Analytics:QueryTimeout` | `00:00:10` | Longest a query may run. At most 5 minutes. |
 | `Relay:Analytics:MaxRows` | 50 | Rows kept per result; the result says when more were cut. At most 500. |
+| `Relay:Analytics:AllowAdHocSql` | false | Accept `sql` on `analytics_query`. |
 
 ## What a snapshot holds
 

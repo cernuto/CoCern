@@ -274,6 +274,53 @@ public class AnalyticsTests
     }
 
     [Fact]
+    public async Task Every_ad_hoc_query_is_logged_whether_it_runs_or_is_refused()
+    {
+        var caller = new PkRelay.Domain.RelayCaller("admin", true, ["repo"]);
+        var queries = new FixedQueries();
+        System.Text.Json.Nodes.JsonObject Args(string name, string? sql = null)
+        {
+            var args = new System.Text.Json.Nodes.JsonObject { ["repositoryId"] = "repo", ["name"] = name };
+            if (sql is not null) args["sql"] = sql;
+            return args;
+        }
+
+        var offLog = new ListLogger();
+        var refused = await new AnalyticsTool(queries, allowAdHocSql: false, offLog).RunAsync(caller, Args("sql", "SELECT secret FROM somewhere"), CancellationToken.None);
+        Assert.Equal("AnalyticsRefused", refused.Code);
+        Assert.Contains(offLog.Lines, line => line.Contains("refused") && line.Contains("SELECT secret FROM somewhere") && line.Contains("admin"));
+        Assert.Equal(0, queries.SqlCalls);
+
+        var onLog = new ListLogger();
+        var tool = new AnalyticsTool(queries, allowAdHocSql: true, onLog);
+        Assert.True((await tool.RunAsync(caller, Args("sql", "SELECT 1"), CancellationToken.None)).Ok);
+        Assert.Contains(onLog.Lines, line => line.Contains("SELECT 1") && line.Contains("admin"));
+        Assert.Equal(1, queries.SqlCalls);
+        var named = await tool.RunAsync(caller, Args(NamedQueries.NoisiestTools), CancellationToken.None);
+        Assert.True(named.Ok);
+        Assert.Single(onLog.Lines);
+        Assert.Equal("{\"cols\":[\"key\",\"cur\"],\"rows\":[[\"all\",1.5]],\"at\":\"2026-11-01T10:00:00Z\"}", named.DataJson);
+    }
+
+    private sealed class FixedQueries : IAnalyticsQueries
+    {
+        public int SqlCalls;
+        private static readonly AnalyticsResult Result = new(["key", "cur"], [["all", 1.5]], false, new DateTimeOffset(2026, 11, 1, 10, 0, 0, TimeSpan.Zero));
+        public IReadOnlyList<string> QueryNames => NamedQueries.Names;
+        public Task<AnalyticsResult> RunNamedAsync(string name, string repositoryId, JsonElement parameters = default, CancellationToken cancellationToken = default) => Task.FromResult(Result);
+        public Task<AnalyticsResult> RunSqlAsync(string sql, CancellationToken cancellationToken = default) { SqlCalls++; return Task.FromResult(Result); }
+    }
+
+    private sealed class ListLogger : Microsoft.Extensions.Logging.ILogger
+    {
+        public List<string> Lines { get; } = [];
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+        public void Log<TState>(Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+            Lines.Add(formatter(state, exception));
+    }
+
+    [Fact]
     public void Plain_values_are_json_friendly()
     {
         Assert.Equal(5L, AnalyticsService.Plain(5));

@@ -93,6 +93,36 @@ public sealed class ContractsTests
     }
 
     [Fact]
+    public void Analytics_query_appears_only_in_the_administrator_catalogs_with_matching_schemas()
+    {
+        using var client = new HttpClient();
+        var forwarder = new PkRelay.Adapter.RelayForwarder(client, new PkRelay.Adapter.AdapterOptions("http://127.0.0.1:5271", "client-secret"));
+        var adapter = PkRelay.Adapter.CoordinationTools.Create(forwarder, admin: true).ToDictionary(tool => tool.ProtocolTool.Name, tool => tool.ProtocolTool.InputSchema.GetRawText());
+        var hub = ToolResults.Tools(true).ToDictionary(tool => tool.Name, tool => tool.InputSchema.GetRawText());
+        Assert.True(RelayToolCatalog.TryGet(RelayTools.AnalyticsQuery, out var analytics));
+        Assert.Equal(RelayToolCatalog.ForwardingSchema(analytics).GetRawText(), adapter[RelayTools.AnalyticsQuery]);
+        Assert.Equal(RelayToolCatalog.InputSchema(analytics).GetRawText(), hub[RelayTools.AnalyticsQuery]);
+        // Administrator only, a read, and no session: the administrator token is the authority.
+        Assert.Equal((false, false, true), (analytics.IsMutation, analytics.RequiresSession, analytics.AdministratorOnly));
+        Assert.DoesNotContain(RelayTools.AnalyticsQuery, ToolResults.Tools(false).Select(tool => tool.Name));
+        Assert.DoesNotContain(RelayTools.AnalyticsQuery, PkRelay.Adapter.CoordinationTools.NamesForRole(false));
+        Assert.Contains(RelayTools.AnalyticsQuery, PkRelay.Adapter.CoordinationTools.NamesForRole(true));
+        Assert.DoesNotContain(RelayTools.AnalyticsQuery, PkRelay.Adapter.CoordinationTools.Create(forwarder, admin: false).Select(tool => tool.ProtocolTool.Name));
+        // One sentence.
+        Assert.DoesNotContain('.', analytics.Description.TrimEnd('.'));
+        var strict = RelayToolCatalog.InputSchema(analytics);
+        Assert.Equal(new[] { "repositoryId", "name" }, strict.GetProperty("required").EnumerateArray().Select(x => x.GetString()));
+        var properties = strict.GetProperty("properties");
+        Assert.Equal(AnalyticsQueryNames.All.Append(AnalyticsQueryNames.AdHocSql), properties.GetProperty("name").GetProperty("enum").EnumerateArray().Select(x => x.GetString()!));
+        Assert.Equal(PkRelay.Analytics.NamedQueries.Names, AnalyticsQueryNames.All);
+        Assert.Equal(RelayLimits.MaxAnalyticsPeriodDays, properties.GetProperty("params").GetProperty("properties").GetProperty("days").GetProperty("maximum").GetInt32());
+        Assert.Equal(RelayLimits.MaxAnalyticsSqlLength, properties.GetProperty("sql").GetProperty("maxLength").GetInt32());
+        Assert.Equal(new[] { "name", "params", "repositoryId", "sql" }, RelayToolCatalog.ForwardingSchema(analytics).GetProperty("properties").EnumerateObject().Select(x => x.Name).Order());
+        foreach (var code in new[] { RelayErrorCodes.AnalyticsUnavailable, RelayErrorCodes.AnalyticsRefused, RelayErrorCodes.AnalyticsTimeout, RelayErrorCodes.AnalyticsFailed })
+            Assert.Equal(RelayErrorKind.Invalid, RelayErrorCodes.Classify(code));
+    }
+
+    [Fact]
     public void Search_tool_appears_in_hub_and_adapter_catalogs_with_matching_schemas()
     {
         using var client = new HttpClient();
