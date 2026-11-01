@@ -195,6 +195,11 @@ public static class RelayLimits
     public const int MaxAnomalyIntervalMinutes = 10_080;
     /// <summary>A value at least this many times its baseline is an anomaly, unless a per-query threshold says otherwise.</summary>
     public const double DefaultAnomalyRatio = 2.0;
+    /// <summary>
+    /// <c>quality_guardrails</c> closures are an anomaly when their baseline is at least this many times the current value (closures
+    /// dropped), unless <c>Relay:Attention:AnomalyThresholds:quality_guardrails:DropRatio</c> says otherwise.
+    /// </summary>
+    public const double DefaultAnomalyDropRatio = 2.0;
     /// <summary>Rows a value and its baseline must each be computed from before either can raise an anomaly, unless set per query.</summary>
     public const int DefaultAnomalyMinSamples = 5;
     /// <summary>Largest allowed per-query minimum sample size.</summary>

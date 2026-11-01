@@ -67,21 +67,25 @@ A successful `check_inbox`, `task_update`, `action_report` or `task_claim` reply
 Each repository has an anomaly monitor. It is off unless [analytics](analytics.md) is on. Attention must be on too.
 
 - The first manager session opened in the repository starts it. After that it checks every hour, and its schedule survives restarts.
-- Each check runs the named queries on the latest snapshot. A row is an anomaly when its current value is at least 2 times its previous value (the baseline). Both values must come from at least 5 rows.
+- Each check runs the named queries on the latest snapshot, in the background, so it never delays other hub work.
+- A row is an anomaly when its current value is at least 2 times its previous value (the baseline). Both values must come from at least 5 rows.
+- `quality_guardrails` closures are checked the other way: they are an anomaly when they drop to half their baseline or less. Only the baseline needs 5 rows.
 - Each query raises at most one item. The item's subject is the query name, and its note gives the metric, value, baseline and sample size:
 
   ```
   anomaly: tokens_per_task all: 1050 vs 330 baseline (n=12)
   ```
 
-- The same query, row and day is never raised twice. A query that raised waits 24 hours before it can raise again.
-- `quality_guardrails` closures (more is better) and `attention_outcomes_by_kind` are not checked.
+- The item closes when a later check measures that row with enough rows and finds it back in range. Too few rows does not close it.
+- The same query, row and day is never raised twice, even after the item closed. A query that raised waits 24 hours before it can raise again.
+- `attention_outcomes_by_kind` is not checked.
 
 | Setting | Default | What it does |
 | --- | --- | --- |
 | `Relay:Attention:AnomalyInterval` | `01:00:00` | Time between checks (1 minute to 7 days). `0` turns the monitor off. |
 | `Relay:Attention:AnomalyThresholds:<query>:Ratio` | 2 | How many times its baseline a value must be. `0` turns off that query's check. |
 | `Relay:Attention:AnomalyThresholds:<query>:MinSamples` | 5 | Rows each value must come from. |
+| `Relay:Attention:AnomalyThresholds:quality_guardrails:DropRatio` | 2 | How many times the current closures the baseline must be. `0` turns the closures check off. |
 
 ## How items are ranked
 

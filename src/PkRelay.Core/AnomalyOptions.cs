@@ -2,8 +2,12 @@ using PkRelay.Contracts;
 
 namespace PkRelay.Core;
 
-/// <summary>When a named query's row is an anomaly: its value is at least <see cref="Ratio"/> times its baseline, both from at least <see cref="MinSamples"/> rows. A ratio of 0 turns the query's check off.</summary>
-public sealed record AnomalyThreshold(double Ratio, int MinSamples)
+/// <summary>
+/// When a named query's row is an anomaly: its value is at least <see cref="Ratio"/> times its baseline, both from at least
+/// <see cref="MinSamples"/> rows. A row that is better when higher (<c>quality_guardrails</c> closures) is instead an anomaly when its
+/// baseline, from at least <see cref="MinSamples"/> rows, is at least <see cref="DropRatio"/> times its value. A ratio of 0 turns that check off.
+/// </summary>
+public sealed record AnomalyThreshold(double Ratio, int MinSamples, double DropRatio = RelayLimits.DefaultAnomalyDropRatio)
 {
     public static readonly AnomalyThreshold Default = new(RelayLimits.DefaultAnomalyRatio, RelayLimits.DefaultAnomalyMinSamples);
 }
@@ -38,7 +42,8 @@ public sealed record AnomalyOptions
 
     /// <summary>The checks to run, in order: each checked query with its threshold, leaving out those turned off.</summary>
     public IEnumerable<(string Query, AnomalyThreshold Threshold)> Checks() =>
-        CheckedQueries.Select(query => (query, Thresholds.TryGetValue(query, out var threshold) ? threshold : AnomalyThreshold.Default)).Where(check => check.Item2.Ratio > 0);
+        CheckedQueries.Select(query => (query, Thresholds.TryGetValue(query, out var threshold) ? threshold : AnomalyThreshold.Default))
+            .Where(check => check.Item2.Ratio > 0 || check.query == AnalyticsQueryNames.QualityGuardrails && check.Item2.DropRatio > 0);
 
     /// <summary>Refuses settings outside their limits with a message that names the setting.</summary>
     public AnomalyOptions Validated()
@@ -50,6 +55,7 @@ public sealed record AnomalyOptions
             var setting = "Relay:Attention:AnomalyThresholds:" + query;
             if (!CheckedQueries.Contains(query)) throw new InvalidOperationException($"{setting} names no checked query. Checked queries: {string.Join(", ", CheckedQueries)}.");
             if (threshold.Ratio != 0 && !(threshold.Ratio > 1 && double.IsFinite(threshold.Ratio))) throw new InvalidOperationException($"{setting}:Ratio must be 0 (off) or more than 1.");
+            if (threshold.DropRatio != 0 && !(threshold.DropRatio > 1 && double.IsFinite(threshold.DropRatio))) throw new InvalidOperationException($"{setting}:DropRatio must be 0 (off) or more than 1.");
             if (threshold.MinSamples is < 1 or > RelayLimits.MaxAnomalyMinSamples) throw new InvalidOperationException($"{setting}:MinSamples must be from 1 to {RelayLimits.MaxAnomalyMinSamples}.");
         }
         return this;

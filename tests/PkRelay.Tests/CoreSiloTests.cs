@@ -320,6 +320,16 @@ public sealed class CoreSiloTests
         }
         StateEnvelope<CoordinationDocument> Monitor() => storage.Envelope("anomaly", GrainId.Create("pkrelay.anomaly", "repo"))!;
         long Revision() => JsonNode.Parse(Monitor().Value.Json)!["attentionRevision"]?.GetValue<long>() ?? 0;
+        // A due check schedules the next one and runs its queries detached; the findings come back to the monitor, then their routes are pumped.
+        async Task RunCheck(IHost host)
+        {
+            var at = clock.GetUtcNow();
+            await Pump(host);
+            var deadline = DateTime.UtcNow.AddSeconds(20);
+            while (JsonFields.Date(JsonNode.Parse(Monitor().Value.Json)!.AsObject(), "findingsAt") < at && DateTime.UtcNow < deadline) await Task.Delay(10);
+            Assert.Equal(at, JsonFields.Date(JsonNode.Parse(Monitor().Value.Json)!.AsObject(), "findingsAt"));
+            await Pump(host);
+        }
 
         JsonObject manager;
         using (var first = Silo())
@@ -333,7 +343,7 @@ public sealed class CoreSiloTests
 
             // A value far above its baseline, but from too few rows, raises nothing.
             analytics.Rows[AnalyticsQueryNames.TokensPerTask] = [["all", 3000.0, 100.0, 2L, 2L]];
-            await Pump(first);
+            await RunCheck(first);
             Assert.Equal(AnomalyOptions.CheckedQueries, analytics.Queries);
             Assert.Empty(Monitor().Effects);
             Assert.Equal(0, Revision());
@@ -349,7 +359,7 @@ public sealed class CoreSiloTests
         {
             clock.Advance(TimeSpan.FromHours(1));
             analytics.Rows[AnalyticsQueryNames.TokensPerTask] = [tokens];
-            await Pump(second);
+            await RunCheck(second);
         }
 
         // After the restart the scheduled check is still in due work, and it runs once its time comes.
@@ -363,7 +373,11 @@ public sealed class CoreSiloTests
         // The same anomaly in the same period is not raised again.
         await Check(["all", 400.0, 100.0, 10L, 10L]);
         Assert.Equal(1, Revision());
-        // Back in range: the item closes.
+        // In range but from too few rows is not back in range: the item stays open.
+        await Check(["all", 110.0, 100.0, 2L, 10L]);
+        Assert.Equal(1, Revision());
+        Assert.Equal(1, await Actionable());
+        // Back in range with enough samples: the item closes.
         await Check(["all", 110.0, 100.0, 10L, 10L]);
         Assert.Equal(2, Revision());
         Assert.Equal(0, await Actionable());
@@ -426,6 +440,63 @@ public sealed class CoreSiloTests
     }
 
     [Fact]
+    public async Task A_slow_anomaly_check_does_not_hold_up_other_due_work()
+    {
+        var storage = new DurableStorage();
+        // The clock is a minute behind, so the monitor's first check is due before the message below.
+        var clock = new ManualClock(DateTimeOffset.UtcNow.AddMinutes(-1));
+        var analytics = new FakeAnalytics(clock) { Gate = new(TaskCreationOptions.RunContinuationsAsynchronously) };
+        analytics.Rows[AnalyticsQueryNames.TokensPerTask] = [["all", 300.0, 100.0, 10L, 10L]];
+        var options = new AnomalyOptions { Time = clock };
+        var caller = new RelayCaller("alice", false, ["repo"]);
+        using var host = new HostBuilder().ConfigureLogging(log => log.ClearProviders()).UseOrleans(silo =>
+            {
+                silo.UseLocalhostClustering(siloPort: FreePort(), gatewayPort: FreePort(), serviceId: "core-anomaly-slow-tests", clusterId: Guid.NewGuid().ToString("N"));
+                silo.Services.AddKeyedSingleton<Orleans.Storage.IGrainStorage>("relay", (_, _) => storage);
+            })
+            .ConfigureServices(services => services.AddPkRelayCore().AddSingleton(options).AddSingleton<IAnalyticsQueries>(analytics)
+                .AddSingleton(provider => new RelayApplication(provider.GetRequiredService<IGrainFactory>(), anomaly: options))).Build();
+        await host.StartAsync();
+        var application = host.Services.GetRequiredService<RelayApplication>();
+        async Task<JsonObject> Call(string tool, JsonObject args)
+        {
+            args["repositoryId"] = "repo"; args["requestId"] = Guid.NewGuid().ToString("N");
+            var reply = await application.ExecuteAsync(caller, tool, JsonSerializer.SerializeToElement(args));
+            Assert.True(reply.Ok, tool + ": " + reply.Code + " " + reply.DataJson);
+            return JsonNode.Parse(reply.DataJson)!.AsObject();
+        }
+        var monitorId = GrainId.Create("pkrelay.anomaly", "repo");
+        var manager = await Call("session_open", new() { ["role"] = "manager" });
+        var worker = await Call("session_open", new() { ["role"] = "worker" });
+        var deadline = DateTime.UtcNow.AddSeconds(20);
+        while (storage.Envelope("anomaly", monitorId) is null && DateTime.UtcNow < deadline) await Task.Delay(25);
+        // Deliver the session openings first, so only the check and the message are due.
+        foreach (var item in await storage.ReadDueAsync(DateTimeOffset.UtcNow, 64)) if (item.Kind != DueWorkKinds.AnomalyCheck) await application.DispatchDueAsync(item);
+        await Call("send_message", new() { ["sessionId"] = worker["sessionId"]!.DeepClone(), ["sessionToken"] = worker["sessionToken"]!.DeepClone(), ["recipientSessionId"] = manager["sessionId"]!.DeepClone(), ["text"] = "same time" });
+
+        // Like the hub's pump, one due item at a time: the check comes first, and its query never returns while the gate is shut.
+        var due = await storage.ReadDueAsync(DateTimeOffset.UtcNow, 64);
+        Assert.Equal(DueWorkKinds.AnomalyCheck, due[0].Kind);
+        var pumped = Task.Run(async () => { foreach (var item in due) await application.DispatchDueAsync(item); });
+        Assert.Same(pumped, await Task.WhenAny(pumped, Task.Delay(TimeSpan.FromSeconds(10))));
+        await pumped;
+        var inbox = await Call("check_inbox", new() { ["sessionId"] = manager["sessionId"]!.DeepClone(), ["sessionToken"] = manager["sessionToken"]!.DeepClone(), ["attention"] = false });
+        Assert.Equal("same time", Assert.Single(inbox["items"]!.AsArray())!["text"]!.GetValue<string>());
+        deadline = DateTime.UtcNow.AddSeconds(20);
+        while (analytics.Queries.Count == 0 && DateTime.UtcNow < deadline) await Task.Delay(10);
+        Assert.Single(analytics.Queries);
+        // The next check was scheduled before any query ran.
+        Assert.Equal(clock.GetUtcNow().AddHours(1), Assert.Single(storage.Envelope("anomaly", monitorId)!.DueWork, work => work.Kind == DueWorkKinds.AnomalyCheck).DueAt);
+
+        // Once the query returns, the findings reach the monitor and the item is raised.
+        analytics.Gate.SetResult();
+        deadline = DateTime.UtcNow.AddSeconds(20);
+        while (JsonNode.Parse(storage.Envelope("anomaly", monitorId)!.Value.Json)!["attentionRevision"] is null && DateTime.UtcNow < deadline) await Task.Delay(10);
+        Assert.Equal(1, JsonNode.Parse(storage.Envelope("anomaly", monitorId)!.Value.Json)!["attentionRevision"]!.GetValue<long>());
+        await host.StopAsync();
+    }
+
+    [Fact]
     public void An_anomaly_needs_enough_samples_on_both_sides_and_a_value_past_the_ratio()
     {
         var at = new DateTimeOffset(2026, 11, 1, 10, 0, 0, TimeSpan.Zero);
@@ -441,6 +512,24 @@ public sealed class CoreSiloTests
         // The worst row (by ratio) is the one reported.
         var worst = Find(AnalyticsQueryNames.NoisiestTools, ["task_get", 900L, 300L, 9L, 9L], ["search", 500L, 100L, 6L, 5L])["anomaly"]!;
         Assert.Equal(("search", 500.0, 100.0, 6L), (worst["key"]!.GetValue<string>(), worst["value"]!.GetValue<double>(), worst["baseline"]!.GetValue<double>(), worst["samples"]!.GetValue<long>()));
+
+        // An open item's row is back in range only when it was measured with enough samples.
+        JsonObject Open(params object?[][] rows) => AnomalyMonitorGrain.Finding(AnalyticsQueryNames.TokensPerTask, new AnalyticsResult(["key", "cur", "prev", "cur_n", "prev_n"], rows, false, at), new AnomalyThreshold(2, 5), "all");
+        Assert.True(Open(["all", 110.0, 100.0, 10L, 10L])["inRange"]!.GetValue<bool>());
+        Assert.Null(Open(["all", 110.0, 100.0, 4L, 10L])["inRange"]);
+        Assert.Null(Open(["all", 110.0, 100.0, 10L, 4L])["inRange"]);
+        Assert.Null(Open()["inRange"]);
+        Assert.Null(Open(["all", 300.0, 100.0, 10L, 10L])["inRange"]);
+
+        // Closures that drop to half their baseline or less are an anomaly; the samples are the baseline's, since few closures is the signal.
+        var dropped = Find(AnalyticsQueryNames.QualityGuardrails, ["closures", 4L, 10L, 4L, 10L], ["reopened", 1L, 1L, 1L, 1L])["anomaly"]!;
+        Assert.Equal(("closures", 4.0, 10.0, 10L), (dropped["key"]!.GetValue<string>(), dropped["value"]!.GetValue<double>(), dropped["baseline"]!.GetValue<double>(), dropped["samples"]!.GetValue<long>()));
+        Assert.Equal("closures", Find(AnalyticsQueryNames.QualityGuardrails, ["closures", 0L, 10L, 0L, 10L])["anomaly"]!["key"]!.GetValue<string>());
+        Assert.Null(Find(AnalyticsQueryNames.QualityGuardrails, ["closures", 6L, 10L, 6L, 10L])["anomaly"]);
+        Assert.Null(Find(AnalyticsQueryNames.QualityGuardrails, ["closures", 0L, 4L, 0L, 4L])["anomaly"]);
+        Assert.Null(AnomalyMonitorGrain.Finding(AnalyticsQueryNames.QualityGuardrails, new AnalyticsResult(["key", "cur", "prev", "cur_n", "prev_n"], [["closures", 0L, 10L, 0L, 10L]], false, at), new AnomalyThreshold(2, 5, 0))["anomaly"]);
+        // With only the drop check on, quality_guardrails is still checked.
+        Assert.Contains(new AnomalyOptions { Thresholds = new Dictionary<string, AnomalyThreshold> { [AnalyticsQueryNames.QualityGuardrails] = new(0, 5) } }.Checks(), check => check.Query == AnalyticsQueryNames.QualityGuardrails);
     }
 
     /// <summary>A clock the test moves by hand.</summary>
@@ -456,11 +545,14 @@ public sealed class CoreSiloTests
     {
         public Dictionary<string, IReadOnlyList<IReadOnlyList<object?>>> Rows { get; } = [];
         public List<string> Queries { get; } = [];
+        /// <summary>When set, every query waits for it, like a slow DuckDB query.</summary>
+        public TaskCompletionSource? Gate { get; init; }
         public IReadOnlyList<string> QueryNames => AnalyticsQueryNames.All;
-        public Task<AnalyticsResult> RunNamedAsync(string name, string repositoryId, JsonElement parameters = default, CancellationToken cancellationToken = default)
+        public async Task<AnalyticsResult> RunNamedAsync(string name, string repositoryId, JsonElement parameters = default, CancellationToken cancellationToken = default)
         {
             lock (Queries) Queries.Add(name);
-            return Task.FromResult(new AnalyticsResult(["key", "cur", "prev", "cur_n", "prev_n"], Rows.TryGetValue(name, out var rows) ? rows : [], false, clock.GetUtcNow()));
+            if (Gate is { } gate) await gate.Task.WaitAsync(cancellationToken);
+            return new AnalyticsResult(["key", "cur", "prev", "cur_n", "prev_n"], Rows.TryGetValue(name, out var rows) ? rows : [], false, clock.GetUtcNow());
         }
         public Task<AnalyticsResult> RunSqlAsync(string sql, CancellationToken cancellationToken = default) => throw new NotSupportedException();
     }

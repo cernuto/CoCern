@@ -14,13 +14,13 @@ namespace PkRelay.Domain;
 /// <list type="bullet">
 /// <item>a query raises at most one <c>anomaly</c> item (subject = the query name), with metric, value, baseline and sample size in the note;</item>
 /// <item>the same query, row key and period is never raised twice, and a query that raised waits <see cref="RelayLimits.AnomalyCooldownHours"/> before raising again;</item>
-/// <item>a later check that finds the query back in range closes its item.</item>
+/// <item>a later check that measures the raised row with enough samples and finds it back in range closes its item.</item>
 /// </list>
 /// Every raise and close carries a rising revision, so a late copy cannot reopen a closed item.
 /// </summary>
-internal static class AnomalyMonitor
+public static class AnomalyMonitor
 {
-    public static RelayReply Handle(AggregateContext context) => context.Operation switch
+    internal static RelayReply Handle(AggregateContext context) => context.Operation switch
     {
         Operations.AnomalyStart => Start(context),
         Operations.AnomalyCheck => Check(context),
@@ -34,13 +34,27 @@ internal static class AnomalyMonitor
         return Ok(new { nextCheckAt = Text(context.State, "nextCheckAt") });
     }
 
-    /// <summary>Applies one check's findings and schedules the next check <c>intervalSeconds</c> from now.</summary>
+    /// <summary>
+    /// Two calls make one check. When the check is due, the grain sends <c>intervalSeconds</c> only: the next check is scheduled and
+    /// nothing else changes, so the due-work pump moves on at once. When the queries are done, it sends <c>checkAt</c> (the due time) and
+    /// the findings; findings for a check no newer than the last applied one are ignored, and a lost run simply skips one check.
+    /// </summary>
     private static RelayReply Check(AggregateContext context)
     {
         var state = context.State;
         var args = context.Args;
-        var interval = Number(args, "intervalSeconds");
-        if (interval < RelayLimits.MinAnomalyIntervalMinutes * 60L || interval > RelayLimits.MaxAnomalyIntervalMinutes * 60L) return Error(InvalidArguments, new { field = "intervalSeconds" });
+        if (args.ContainsKey("intervalSeconds"))
+        {
+            var interval = Number(args, "intervalSeconds");
+            if (interval < RelayLimits.MinAnomalyIntervalMinutes * 60L || interval > RelayLimits.MaxAnomalyIntervalMinutes * 60L) return Error(InvalidArguments, new { field = "intervalSeconds" });
+            state["checkedAt"] = context.Now.ToString("O");
+            state["nextCheckAt"] = context.Now.AddSeconds(interval).ToString("O");
+        }
+        if (!args.ContainsKey("checkAt")) return Ok(new { nextCheckAt = Text(state, "nextCheckAt") });
+        var checkAt = Date(args, "checkAt");
+        if (checkAt == DateTimeOffset.MinValue) return Error(InvalidArguments, new { field = "checkAt" });
+        if (checkAt <= Date(state, "findingsAt")) return Ok(new { applied = false, reason = "stale" });
+        state["findingsAt"] = checkAt.ToString("O");
         var checks = ObjectAt(state, "checks");
         var cooldown = TimeSpan.FromHours(RelayLimits.AnomalyCooldownHours);
         var (raised, closed, suppressed) = (0, 0, 0);
@@ -62,7 +76,8 @@ internal static class AnomalyMonitor
                 checks[query] = new JsonObject { ["open"] = true, ["key"] = key, ["period"] = period, ["raisedAt"] = context.Now.ToString("O") };
                 raised++;
             }
-            else if (Flag(record, "open"))
+            // Only a check that measured the raised row with enough samples, and found it in range, closes the item. Too little data is not "back in range".
+            else if (Flag(record, "open") && finding["inRange"] is JsonValue inRange && inRange.TryGetValue<bool>(out var back) && back)
             {
                 AttentionSources.ToManagers(context, Operations.AttentionClose, new JsonObject
                 {
@@ -72,10 +87,13 @@ internal static class AnomalyMonitor
                 closed++;
             }
         }
-        state["checkedAt"] = context.Now.ToString("O");
-        state["nextCheckAt"] = context.Now.AddSeconds(interval).ToString("O");
         return Ok(new { raised, closed, suppressed, nextCheckAt = Text(state, "nextCheckAt") });
     }
+
+    /// <summary>The row key of each query whose item is open, for the next check to measure.</summary>
+    public static IReadOnlyDictionary<string, string> OpenKeys(string stateJson) =>
+        (System.Text.Json.Nodes.JsonNode.Parse(stateJson)?["checks"] as JsonObject ?? []).Where(x => x.Value is JsonObject record && Flag(record, "open"))
+            .ToDictionary(x => x.Key, x => Text(x.Value!.AsObject(), "key"), StringComparer.Ordinal);
 
     /// <summary>For example "tokens_per_task all: 5400 vs 2100 baseline (n=12)".</summary>
     private static string Note(string query, string key, JsonObject anomaly) =>

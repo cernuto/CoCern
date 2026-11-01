@@ -652,7 +652,8 @@ public class HostTests
             ("Relay:Attention:AnomalyInterval", "00:00:30", "Relay:Attention:AnomalyInterval"),
             ("Relay:Attention:AnomalyThresholds:not_a_query:Ratio", "3", "Relay:Attention:AnomalyThresholds:not_a_query"),
             ("Relay:Attention:AnomalyThresholds:tokens_per_task:Ratio", "1", "Relay:Attention:AnomalyThresholds:tokens_per_task:Ratio"),
-            ("Relay:Attention:AnomalyThresholds:tokens_per_task:MinSamples", "0", "Relay:Attention:AnomalyThresholds:tokens_per_task:MinSamples")
+            ("Relay:Attention:AnomalyThresholds:tokens_per_task:MinSamples", "0", "Relay:Attention:AnomalyThresholds:tokens_per_task:MinSamples"),
+            ("Relay:Attention:AnomalyThresholds:quality_guardrails:DropRatio", "1", "Relay:Attention:AnomalyThresholds:quality_guardrails:DropRatio")
         })
         {
             await using var host = new RelayHostFixture(settings: new Dictionary<string, string?> { [setting] = value });

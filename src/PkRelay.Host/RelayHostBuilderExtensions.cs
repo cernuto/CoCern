@@ -131,13 +131,13 @@ public static class RelayHostBuilderExtensions
 
     /// <summary>
     /// <c>Relay:Attention:AnomalyInterval</c> (default 1 hour; 0 turns the monitor off) and per-query thresholds under
-    /// <c>Relay:Attention:AnomalyThresholds:&lt;query&gt;</c> with <c>Ratio</c> (0 turns that check off) and <c>MinSamples</c>.
+    /// <c>Relay:Attention:AnomalyThresholds:&lt;query&gt;</c> with <c>Ratio</c> (0 turns that check off), <c>MinSamples</c> and, for <c>quality_guardrails</c> closures, <c>DropRatio</c>.
     /// </summary>
     private static AnomalyOptions AnomalySettings(IConfiguration configuration)
     {
         var thresholds = new Dictionary<string, AnomalyThreshold>(StringComparer.Ordinal);
         foreach (var section in configuration.GetSection("Relay:Attention:AnomalyThresholds").GetChildren())
-            thresholds[section.Key] = new(section.GetValue("Ratio", RelayLimits.DefaultAnomalyRatio), section.GetValue("MinSamples", RelayLimits.DefaultAnomalyMinSamples));
+            thresholds[section.Key] = new(section.GetValue("Ratio", RelayLimits.DefaultAnomalyRatio), section.GetValue("MinSamples", RelayLimits.DefaultAnomalyMinSamples), section.GetValue("DropRatio", RelayLimits.DefaultAnomalyDropRatio));
         return new AnomalyOptions
         {
             Interval = configuration.GetValue("Relay:Attention:AnomalyInterval", TimeSpan.FromMinutes(RelayLimits.DefaultAnomalyIntervalMinutes)),
