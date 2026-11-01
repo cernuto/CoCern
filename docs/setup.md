@@ -41,12 +41,18 @@ Every model call re-reads the whole chat, so fewer calls matter most.
 - Acknowledge in your reply: `send_message` with `ackMessageIds`.
 - Use `supersede: true` for a repeated status message, and `wake: false` for a note nobody must act on now.
 - Renew claims rarely: `claim_renew` accepts `leaseSeconds` up to 1800.
+- Send your session handle on `task_get` too. With [tips](monitoring.md#feedback) on, the hub can then point out rereads.
 
 ## Switches and warnings
 
 | Setting | Default | Page |
 | --- | --- | --- |
 | `Relay:Activity:Enabled` | on | [Monitoring](monitoring.md#activity) |
+| `Relay:Tokens:Enabled` | on | [Monitoring](monitoring.md#tokens) |
+| `Relay:Tokens:EnforceTools` | none | [Monitoring](monitoring.md#tokens) |
+| `Relay:Feedback:Tips` | off | [Monitoring](monitoring.md#feedback) |
+| `Relay:Feedback:Alerts` | off | [Monitoring](monitoring.md#feedback) |
+| `Relay:Feedback:ProposeRules` | off | [Monitoring](monitoring.md#feedback) |
 | `Relay:Search:Enabled` | on | [Collaboration](collaboration.md#search) |
 | `Relay:Attention:Enabled` | on | [Collaboration](collaboration.md#attention) |
 | `Relay:Analytics:Enabled` | off | [Monitoring](monitoring.md#analytics) |
@@ -58,6 +64,7 @@ Every model call re-reads the whole chat, so fewer calls matter most.
 
 - **Upgrade adapters together with the hub.** Older adapters use up attention offers the model never sees.
 - **With attention on, messages can wait up to 10 minutes** before they wake a chat. Only urgent items wake at once.
+- **Token counting only measures.** Replies change only for tools you list in `Relay:Tokens:EnforceTools`.
 - **Analytics, ad hoc SQL, orders and the doc cache are off by default.** `analytics_query` and `standing_put` need an administrator token, as do `order_put`, `order_remove`, `control_request` and `doc_sync`.
 
 ## Hub settings

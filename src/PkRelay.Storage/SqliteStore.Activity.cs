@@ -45,7 +45,9 @@ public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
             target TEXT,
             content_hash TEXT,
             workflow_state TEXT,
-            offer_target TEXT
+            offer_target TEXT,
+            request_tokens INTEGER,
+            reply_tokens INTEGER
         );
         CREATE INDEX IF NOT EXISTS ix_activity_log_at ON activity_log(at_ticks);
         CREATE INDEX IF NOT EXISTS ix_activity_log_repository ON activity_log(repository_id, at_ticks);
@@ -67,6 +69,26 @@ public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
 
         """;
 
+    /// <summary>
+    /// Columns added to <c>activity_log</c> after schema 2 was first written. Schema 2 has not shipped, so they join it rather than a
+    /// schema 3; a development database already at 2 gets them here, once, by checking <c>pragma table_info</c>.
+    /// </summary>
+    private static readonly (string Column, string Type)[] LateActivityColumns = [("request_tokens", "INTEGER"), ("reply_tokens", "INTEGER")];
+
+    private void AddLateActivityColumns(SqliteTransaction transaction)
+    {
+        var existing = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        using (var columns = Command("SELECT name FROM pragma_table_info('activity_log');", transaction))
+        using (var reader = columns.ExecuteReader())
+            while (reader.Read()) existing.Add(reader.GetString(0));
+        foreach (var (column, type) in LateActivityColumns.Where(late => !existing.Contains(late.Column)))
+        {
+            // The names are code constants, never caller input.
+            using var alter = Command($"ALTER TABLE activity_log ADD COLUMN {column} {type};", transaction);
+            alter.ExecuteNonQuery();
+        }
+    }
+
     private ActivityOptions _activityOptions = new();
     // Telemetry has its own connection and lock, so it never holds the grain writer's gate; under WAL the two writers wait on each other
     // only for SQLite's write lock, inside busy_timeout, and counter reads never wait on either.
@@ -79,6 +101,12 @@ public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
     private DateTimeOffset _lastRollup = DateTimeOffset.MinValue;
     private long _droppedActivity;
     private long _activityWriterFaults;
+
+    /// <summary>
+    /// The shared token counter, set by the host when <c>Relay:Tokens:Enabled</c> is on. The writer uses it to count the texts a call event
+    /// carries before writing it; without it those texts are dropped uncounted.
+    /// </summary>
+    public ITokenCounter? TokenCounter { get; set; }
 
     /// <summary>Unexpected writer failures this process survived.</summary>
     public long ActivityWriterFaults => Interlocked.Read(ref _activityWriterFaults);
@@ -105,8 +133,8 @@ public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
     /// <summary>Queues one event. Never blocks and never throws: when the queue is full the event is dropped and counted.</summary>
     public void Record(ActivityEvent activity)
     {
-        if (_activity is not { } channel || activity is null) return;
-        if (!channel.Writer.TryWrite(activity)) Interlocked.Increment(ref _droppedActivity);
+        if (_activity is not { } channel || activity is null) { if (activity is not null) TokenTextBudget.Shared.Release(activity); return; }
+        if (!channel.Writer.TryWrite(activity)) { Interlocked.Increment(ref _droppedActivity); TokenTextBudget.Shared.Release(activity); }
     }
 
     /// <summary>Writes every event queued before this call. Snapshots and tests use it; the background writer does the same each second.</summary>
@@ -147,8 +175,12 @@ public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
                 batch.Clear();
                 while (batch.Count < RelayLimits.ActivityBatchSize && channel.Reader.TryRead(out var item)) batch.Add(item);
                 if (batch.Count == 0) return;
-                try { await InsertActivityAsync(batch); }
-                catch (Exception exception) when (exception is SqliteException or ObjectDisposedException or InvalidOperationException) { Interlocked.Add(ref _droppedActivity, batch.Count); }
+                // Token counts are taken here, off every call's path and outside the telemetry lock.
+                var rows = TokenCounter is { } tokens ? batch.SelectMany(item => TokenMeter.Measure(item, tokens)).ToList() : batch;
+                // Without a counter the texts are dropped uncounted, and their room is given back.
+                if (TokenCounter is null) foreach (var item in batch) TokenTextBudget.Shared.Release(item);
+                try { await InsertActivityAsync(rows); }
+                catch (Exception exception) when (exception is SqliteException or ObjectDisposedException or InvalidOperationException) { Interlocked.Add(ref _droppedActivity, rows.Count); }
             }
         }
         finally { _activityDrain.Release(); }
@@ -163,11 +195,11 @@ public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
             using var transaction = connection.BeginTransaction(deferred: false);
             using var insert = ActivityCommand("""
                 INSERT INTO activity_log(at_ticks, kind, repository_id, session_id, role, tool, ok, code, request_bytes, reply_bytes, duration_ms,
-                    input_tokens, output_tokens, request_id, target, content_hash, workflow_state, offer_target)
+                    input_tokens, output_tokens, request_id, target, content_hash, workflow_state, offer_target, request_tokens, reply_tokens)
                 VALUES ($at, $kind, $repository, $session, $role, $tool, $ok, $code, $requestBytes, $replyBytes, $duration,
-                    $input, $output, $request, $target, $hash, $state, $offer);
+                    $input, $output, $request, $target, $hash, $state, $offer, $requestTokens, $replyTokens);
                 """, transaction);
-            string[] names = ["$at", "$kind", "$repository", "$session", "$role", "$tool", "$ok", "$code", "$requestBytes", "$replyBytes", "$duration", "$input", "$output", "$request", "$target", "$hash", "$state", "$offer"];
+            string[] names = ["$at", "$kind", "$repository", "$session", "$role", "$tool", "$ok", "$code", "$requestBytes", "$replyBytes", "$duration", "$input", "$output", "$request", "$target", "$hash", "$state", "$offer", "$requestTokens", "$replyTokens"];
             var parameters = names.Select(name => insert.Parameters.Add(new SqliteParameter { ParameterName = name })).ToArray();
             foreach (var item in batch)
             {
@@ -175,7 +207,7 @@ public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
                 [
                     item.Timestamp.UtcTicks, item.Kind, item.RepositoryId, item.SessionId, item.Role, item.Tool, item.Ok ? 1 : 0, item.Code,
                     item.RequestBytes, item.ReplyBytes, item.DurationMilliseconds, item.InputTokens, item.OutputTokens, item.RequestId, item.Target,
-                    item.ContentHash, item.WorkflowState, item.OfferTarget
+                    item.ContentHash, item.WorkflowState, item.OfferTarget, item.RequestTokens, item.ReplyTokens
                 ];
                 for (var index = 0; index < values.Length; index++) parameters[index].Value = values[index] ?? DBNull.Value;
                 insert.ExecuteNonQuery();

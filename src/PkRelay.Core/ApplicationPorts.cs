@@ -53,6 +53,11 @@ public sealed record ActivityEvent
     public const string Wake = "wake";
     /// <summary>One attention offer outcome: <see cref="Code"/> is shown, accepted, later or dismissed, and <see cref="Tool"/> the item's kind.</summary>
     public const string Attention = "attention";
+    /// <summary>
+    /// One reply over its token budget: <see cref="Code"/> is <c>over</c> (measure-only, sent unchanged), <c>over:attention</c> or
+    /// <c>over:nextWork</c> (that part of the reply), or <c>step1</c> to <c>step3</c> (compacted, and the step reached).
+    /// </summary>
+    public const string Budget = "budget";
 
     public DateTimeOffset Timestamp { get; init; }
     public string Kind { get; init; } = Call;
@@ -67,6 +72,14 @@ public sealed record ActivityEvent
     public double DurationMilliseconds { get; init; }
     public long? InputTokens { get; init; }
     public long? OutputTokens { get; init; }
+    /// <summary>Estimated tokens (o200k) in the request's arguments, counted by the hub; null when token counting is off.</summary>
+    public int? RequestTokens { get; init; }
+    /// <summary>Estimated tokens (o200k) in the reply's data as sent, counted by the hub; null when token counting is off.</summary>
+    public int? ReplyTokens { get; init; }
+    /// <summary>The request's text, to be counted into <see cref="RequestTokens"/> by the activity writer, off the call's path. Never stored.</summary>
+    public string? RequestText { get; init; }
+    /// <summary>The reply's data as sent, to be counted into <see cref="ReplyTokens"/> by the activity writer. Never stored.</summary>
+    public string? ReplyText { get; init; }
     /// <summary>The mutation's requestId, so an exact retry is not counted twice.</summary>
     public string? RequestId { get; init; }
     public string? Target { get; init; }
@@ -173,6 +186,22 @@ public interface ITokenCounter
 
     /// <summary>The length, in characters, of the longest start of <paramref name="text"/> that is at most <paramref name="maxTokens"/> tokens.</summary>
     int PrefixLength(string text, int maxTokens);
+}
+
+/// <summary>One feedback rule's persisted state: whether it is on, and its tip and outcome totals.</summary>
+public sealed record FeedbackRuleState(string Rule, bool Enabled = true, long Tips = 0, long Followed = 0, long Ignored = 0, DateTimeOffset? DisabledAt = null)
+{
+    [System.Text.Json.Serialization.JsonIgnore]
+    public long Outcomes => Followed + Ignored;
+}
+
+/// <summary>Port implemented by storage: each tip rule's on/off state and follow totals, kept across restarts.</summary>
+public interface IFeedbackRuleStore
+{
+    IReadOnlyList<FeedbackRuleState> LoadFeedbackRules();
+
+    /// <summary>Replaces one rule's stored state.</summary>
+    Task SaveFeedbackRuleAsync(FeedbackRuleState state);
 }
 
 /// <summary>One synced document as read from git: its text, the commit it was read at, and its content hash.</summary>

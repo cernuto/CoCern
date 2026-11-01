@@ -4,6 +4,7 @@ using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using PkRelay.Analytics;
+using PkRelay.Contracts;
 using PkRelay.Core;
 using PkRelay.Host;
 using PkRelay.Storage;
@@ -155,7 +156,9 @@ public class AnalyticsTests
         using var store = new SqliteStore(Path.Combine(root, "relay.db"));
         var snapshot = Path.Combine(root, "analytics", "snapshot-limits.db");
         await store.CreateAnalyticsSnapshotAsync(snapshot);
-        using var analytics = await Service(store, timeout: TimeSpan.FromMilliseconds(500));
+        // The size and row-cap checks run under a generous timeout, so a loaded machine cannot turn them into timeouts; only the timeout
+        // case below uses a service with a short one.
+        using var analytics = await Service(store, timeout: TimeSpan.FromSeconds(30));
         Assert.Equal(AnalyticsError.Unavailable, (await Assert.ThrowsAsync<AnalyticsException>(() => analytics.RunSqlAsync("SELECT 1"))).Error);
         await analytics.SwitchSnapshotAsync(snapshot);
 
@@ -184,12 +187,16 @@ public class AnalyticsTests
         Assert.Equal(["n", "n_1"], (await analytics.RunSqlAsync("SELECT 1 AS n, 2 AS n; -- two")).Columns);
         Assert.Equal(1L, Single(await analytics.RunSqlAsync("SELECT 1 AS one -- trailing comment")));
 
+        var shortSnapshot = Path.Combine(root, "analytics", "snapshot-timeout.db");
+        await store.CreateAnalyticsSnapshotAsync(shortSnapshot);
+        using var hurried = await Service(store, timeout: TimeSpan.FromMilliseconds(500));
+        await hurried.SwitchSnapshotAsync(shortSnapshot);
         started = DateTimeOffset.UtcNow;
-        var timedOut = await Assert.ThrowsAsync<AnalyticsException>(() => analytics.RunSqlAsync("SELECT count(*) FROM range(1000000000000) t(a) WHERE a % 7 = 3"));
+        var timedOut = await Assert.ThrowsAsync<AnalyticsException>(() => hurried.RunSqlAsync("SELECT count(*) FROM range(1000000000000) t(a) WHERE a % 7 = 3"));
         Assert.Equal(AnalyticsError.Timeout, timedOut.Error);
         Assert.True(DateTimeOffset.UtcNow - started < TimeSpan.FromSeconds(10));
         // The interrupted connection does not poison the next query.
-        Assert.Equal(1L, Single(await analytics.RunSqlAsync("SELECT 1")));
+        Assert.Equal(1L, Single(await hurried.RunSqlAsync("SELECT 1")));
     }
 
     [Fact]
@@ -283,6 +290,56 @@ public class AnalyticsTests
         Assert.Equal(["T-1", "completed", 1L, 1L, 2L, true, true], task);
         Assert.Equal(1L, Single(await analytics.RunSqlAsync("SELECT count(*) FROM messages WHERE repository_id = 'repo' AND task_id = 'T-1' AND kind IS NOT NULL")));
         Assert.Equal(3L, Single(await analytics.RunSqlAsync("SELECT count(*) FROM claim_conflicts WHERE repository_id = 'past' AND tool = 'claim_acquire' AND resource_id = 'build-agent'")));
+    }
+
+    [Fact]
+    public async Task Alert_queries_run_against_a_snapshot_with_the_monitor_columns_but_stay_out_of_analytics_query()
+    {
+        await using var host = new RelayHostFixture(settings: await Enabled());
+        using var client = host.AuthorizedClient();
+        var store = host.Services.GetRequiredService<SqliteStore>();
+        var now = DateTimeOffset.UtcNow;
+        // Whole hours, so each session's calls fall in one hour.
+        static DateTimeOffset Hour(DateTimeOffset at) => new(at.Year, at.Month, at.Day, at.Hour, 0, 0, TimeSpan.Zero);
+        var old = Hour(now.AddDays(-10)).AddMinutes(5);
+        var recent = Hour(now.AddHours(-3)).AddMinutes(5);
+        void Call(DateTimeOffset at, string session, string tool, string? task, int request, int reply) => store.Record(new ActivityEvent
+        {
+            Timestamp = at, Kind = ActivityEvent.Call, RepositoryId = "alerts", SessionId = session, Role = "worker", Tool = tool, Ok = true, Code = "Ok",
+            Target = task is null ? null : "task:alerts/default/" + task, RequestTokens = request, ReplyTokens = reply
+        });
+        // The week before: two tasks at 200 tokens each, in one hour of one session.
+        Call(old, "w-1", "task_get", "A", 50, 150);
+        Call(old.AddMinutes(1), "w-1", "task_update", "B", 50, 150);
+        // This week: two tasks at 600 tokens each and an inbox read of 200, in one hour of another session; one task read was compacted.
+        Call(recent, "w-2", "task_get", "C", 100, 500);
+        Call(recent.AddMinutes(1), "w-2", "task_get", "D", 100, 500);
+        Call(recent.AddMinutes(2), "w-2", "check_inbox", null, 50, 150);
+        store.Record(new ActivityEvent { Timestamp = recent.AddMinutes(1), Kind = ActivityEvent.Budget, RepositoryId = "alerts", SessionId = "w-2", Role = "worker", Tool = "task_get", Ok = true, Code = "step2", ReplyTokens = 280 });
+        await TakeSnapshot(host);
+        var analytics = host.Services.GetRequiredService<IAnalyticsQueries>();
+        Assert.Empty(analytics.QueryNames.Intersect(AnalyticsQueryNames.Alerts));
+
+        async Task<IReadOnlyList<IReadOnlyList<object?>>> Rows(string query)
+        {
+            var result = await analytics.RunNamedAsync(query, "alerts");
+            Assert.Equal(NamedQueries.Columns, result.Columns);
+            return result.Rows;
+        }
+        // Relay tokens per task: (600 + 600 + 200) / 2 now, against (200 + 200) / 2 the week before.
+        Assert.Equal(["worker", 700.0, 200.0, 2L, 2L], Assert.Single(await Rows(AnalyticsQueryNames.TokensPerTaskByRole)));
+        // One of this week's two task_get replies was compacted; check_inbox and task_update compacted none.
+        var compaction = await Rows(AnalyticsQueryNames.CompactionRateByTool);
+        Assert.Equal(["task_get", 0.5, 0.0, 2L, 1L], compaction[0]);
+        Assert.Equal(3, compaction.Count);
+        // w-2's busiest hour (1,400) against the median worker session-hour (400 and 1,400: 900), from 2 session-hours.
+        Assert.Equal(["w-2", 1400.0, 900.0, 2L, 2L], Assert.Single(await Rows(AnalyticsQueryNames.SessionTokenOutliers)));
+        // The monitor turns that into a finding with the alert's threshold: here too few samples to alert.
+        var outliers = await analytics.RunNamedAsync(AnalyticsQueryNames.SessionTokenOutliers, "alerts");
+        Assert.Null(AnomalyMonitorGrain.Finding(AnalyticsQueryNames.SessionTokenOutliers, outliers, AnomalyOptions.AlertQueries[AnalyticsQueryNames.SessionTokenOutliers])["anomaly"]);
+        Assert.NotNull(AnomalyMonitorGrain.Finding(AnalyticsQueryNames.SessionTokenOutliers, outliers, new AnomalyThreshold(1.5, 2, 0))["anomaly"]);
+        // Every query also runs for a repository with no activity.
+        foreach (var query in AnalyticsQueryNames.Alerts) Assert.Empty((await analytics.RunNamedAsync(query, "nothing-here")).Rows);
     }
 
     [Fact]

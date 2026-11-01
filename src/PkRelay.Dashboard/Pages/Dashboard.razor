@@ -70,7 +70,7 @@ else
                         <LogView Entries="@snapshot.Logs" />
                         break;
                     case "standing":
-                        <StandingView Boards="@snapshot.Standing" Truncated="@snapshot.StandingTruncated" Now="@_now" />
+                        <StandingView Boards="@snapshot.Standing" Truncated="@snapshot.StandingTruncated" Tokens="@snapshot.Tokens" Now="@_now" />
                         break;
                     default:
                         <div class="overview-layout">

@@ -336,6 +336,44 @@ public sealed class DashboardTests
     }
 
     [Fact]
+    public async Task Standing_page_shows_tool_definition_tokens_per_role_and_switched_off_tip_rules()
+    {
+        // A tip rule that switched itself off before the restart.
+        var path = Path.Combine(Path.GetTempPath(), "pkrelay-dashboard-tokens-" + Guid.NewGuid().ToString("N"), "relay.db");
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        using (var seed = new SqliteStore(path))
+            await seed.SaveFeedbackRuleAsync(new FeedbackRuleState(FeedbackRuleNames.InboxPolling, false, 21, 2, 19, DateTimeOffset.UtcNow));
+        await using var host = new RelayHostFixture(path, settings: new Dictionary<string, string?>
+        {
+            ["Relay:Clients:0:IsAdministrator"] = "true", ["Relay:Dashboard:ViewerPrincipalIds:0"] = "test-user", ["Relay:Feedback:Tips"] = "true"
+        });
+        using var agent = host.AuthorizedClient();
+        using var browser = BrowserClient(host);
+        (await browser.PostAsJsonAsync("/dashboard/api/login", new { token = RelayHostFixture.Token })).EnsureSuccessStatusCode();
+        await using var viewer = await StartViewerAsync(host, browser);
+        PkRelay.Contracts.Dashboard.DashboardSnapshot? snapshot = null;
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(15);
+        do
+        {
+            snapshot = await browser.GetFromJsonAsync<PkRelay.Contracts.Dashboard.DashboardSnapshot>("/dashboard/api/snapshot");
+            if (snapshot!.Tokens.WorkerToolTokens is not null) break;
+            await Task.Delay(100);
+        }
+        while (DateTimeOffset.UtcNow < deadline);
+        var tokens = snapshot!.Tokens;
+        var counter = host.Services.GetRequiredService<ITokenCounter>();
+        int Expected(bool administrator) => PkRelay.Contracts.RelayToolCatalog.ForRole(administrator)
+            .Sum(tool => counter.Count(tool.Description) + counter.Count(PkRelay.Contracts.RelayToolCatalog.ForwardingSchema(tool).GetRawText()));
+        Assert.Equal((Expected(false), Expected(true), "o200k_base"), (tokens.WorkerToolTokens, tokens.AdministratorToolTokens, tokens.Encoding));
+        Assert.Equal([FeedbackRuleNames.InboxPolling], tokens.TipRulesOff);
+        // get_status shows the same to the administrator.
+        using var status = JsonDocument.Parse((await host.Call(agent, "get_status", new { repositoryId = "repo" })).GetProperty("dataJson").GetString()!);
+        Assert.Equal(Expected(false), status.RootElement.GetProperty("toolTokens").GetProperty("worker").GetInt32());
+        Assert.Equal(FeedbackRuleNames.InboxPolling, Assert.Single(status.RootElement.GetProperty("tipRulesOff").EnumerateArray()).GetString());
+        Assert.Equal(HttpStatusCode.OK, (await browser.GetAsync("/dashboard/standing")).StatusCode);
+    }
+
+    [Fact]
     public async Task Standing_panel_shows_each_boards_orders_and_order_log()
     {
         await using var host = new RelayHostFixture(settings: new Dictionary<string, string?>

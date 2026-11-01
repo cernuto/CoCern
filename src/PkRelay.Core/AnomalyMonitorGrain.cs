@@ -109,11 +109,16 @@ public sealed class AnomalyMonitorGrain([PersistentState("anomaly", "relay")] IP
             var name = Convert.ToString(row[key], CultureInfo.InvariantCulture) ?? "";
             var down = query == AnalyticsQueryNames.QualityGuardrails && name == "closures";
             var value = Real(row[cur]) ?? (down ? 0 : null);
-            if (value is not { } current || Real(row[prev]) is not { } baseline || Real(row[curN]) is not { } samples || Real(row[prevN]) is not { } baselineSamples) continue;
-            var measured = baselineSamples >= threshold.MinSamples && (down || samples >= threshold.MinSamples) && baseline > 0;
+            if (value is not { } current || (Real(row[prev]) ?? (threshold.Limit > 0 ? 0 : null)) is not { } baseline || Real(row[curN]) is not { } samples) continue;
+            var baselineSamples = Real(row[prevN]) ?? 0;
+            // A fixed limit (compaction rate) needs only enough current rows, and stands in for the baseline.
+            var limited = threshold.Limit > 0;
+            if (limited) baseline = threshold.Limit;
+            var measured = limited ? samples >= threshold.MinSamples : baselineSamples >= threshold.MinSamples && (down || samples >= threshold.MinSamples) && baseline > 0;
             if (name == openKey && measured) openMeasured = true;
             if (!measured) continue;
-            var severity = down ? (threshold.DropRatio > 0 && baseline >= current * threshold.DropRatio ? (current <= 0 ? double.MaxValue : baseline / current) : 0)
+            var severity = limited ? (current > threshold.Limit ? current / threshold.Limit : 0)
+                : down ? (threshold.DropRatio > 0 && baseline >= current * threshold.DropRatio ? (current <= 0 ? double.MaxValue : baseline / current) : 0)
                 : (threshold.Ratio > 0 && current >= baseline * threshold.Ratio ? current / baseline : 0);
             if (severity > 0 && (worst is null || severity > worst.Value.Severity)) worst = (name, current, baseline, (long)(down ? baselineSamples : samples), severity);
         }

@@ -17,9 +17,11 @@ public static class AttentionKinds
     public const string RelatedWork = "related_work";
     public const string NextWork = "next_work";
     public const string Info = "info";
+    /// <summary>A one-line efficiency tip from a feedback rule; lowest tier, so it never wakes a chat.</summary>
+    public const string Tip = "tip";
 
     public static readonly IReadOnlyList<string> All =
-        [Blocked, Failed, Interrupted, ClaimExpiring, Anomaly, OrderFailed, ReviewReady, DuplicateWarning, StandingProposal, RelatedWork, NextWork, Info];
+        [Blocked, Failed, Interrupted, ClaimExpiring, Anomaly, OrderFailed, ReviewReady, DuplicateWarning, StandingProposal, RelatedWork, NextWork, Info, Tip];
 }
 
 /// <summary>The answers to an attention offer. <see cref="Later"/> snoozes the item; the other two close it.</summary>
@@ -61,7 +63,7 @@ public static class AttentionWeights
         [AttentionKinds.Blocked] = 1, [AttentionKinds.Failed] = 1, [AttentionKinds.Interrupted] = 1,
         [AttentionKinds.ClaimExpiring] = 2, [AttentionKinds.Anomaly] = 2, [AttentionKinds.OrderFailed] = 2,
         [AttentionKinds.ReviewReady] = 3, [AttentionKinds.DuplicateWarning] = 3, [AttentionKinds.StandingProposal] = 3,
-        [AttentionKinds.RelatedWork] = 4, [AttentionKinds.NextWork] = 4, [AttentionKinds.Info] = 4
+        [AttentionKinds.RelatedWork] = 4, [AttentionKinds.NextWork] = 4, [AttentionKinds.Info] = 4, [AttentionKinds.Tip] = 4
     }.ToFrozenDictionary(StringComparer.Ordinal);
 
     /// <summary>The kind's tier; a <c>blocked</c> item from a coordinator hold ranks in tier 3. Unknown kinds rank lowest.</summary>

@@ -266,6 +266,37 @@ public sealed class StorageTests : IDisposable
     }
 
     [Fact]
+    public void A_version_2_database_from_before_token_counting_gains_the_token_columns_once()
+    {
+        using (new SqliteStore(Database)) { }
+        // A development database written at schema 2 before request_tokens and reply_tokens existed.
+        Execute(Database, "ALTER TABLE activity_log DROP COLUMN request_tokens; ALTER TABLE activity_log DROP COLUMN reply_tokens; INSERT INTO activity_log(at_ticks, kind, repository_id, ok, code, request_bytes, reply_bytes, duration_ms) VALUES (" + DateTimeOffset.UtcNow.UtcTicks + ", 'call', 'repo', 1, 'Ok', 10, 20, 1.5);");
+        Assert.Equal(0L, Scalar(Database, "SELECT COUNT(*) FROM pragma_table_info('activity_log') WHERE name IN ('request_tokens', 'reply_tokens');"));
+        using (new SqliteStore(Database)) { }
+        Assert.Equal(2L, Scalar(Database, "SELECT COUNT(*) FROM pragma_table_info('activity_log') WHERE name IN ('request_tokens', 'reply_tokens');"));
+        Assert.Equal(2L, Scalar(Database, "PRAGMA user_version;"));
+        // The old row stays, with no counts; no backup is taken, because the schema version did not change.
+        Assert.Equal(1L, Scalar(Database, "SELECT COUNT(*) FROM activity_log WHERE request_tokens IS NULL AND reply_tokens IS NULL AND request_bytes = 10;"));
+        Assert.Empty(Directory.GetFiles(_directory, "*.pre-migration-*"));
+        // Opening again changes nothing.
+        var schema = Text(Database, "SELECT group_concat(sql, ';') FROM (SELECT sql FROM sqlite_schema ORDER BY name);");
+        using (new SqliteStore(Database)) { }
+        Assert.Equal(schema, Text(Database, "SELECT group_concat(sql, ';') FROM (SELECT sql FROM sqlite_schema ORDER BY name);"));
+    }
+
+    [Fact]
+    public async Task Activity_rows_keep_the_hubs_token_counts()
+    {
+        using var store = new SqliteStore(Database);
+        store.Record(new ActivityEvent { Timestamp = Now, Kind = ActivityEvent.Call, RepositoryId = "repo", Tool = "task_get", Ok = true, Code = "Ok", RequestTokens = 42, ReplyTokens = 1_337 });
+        store.Record(new ActivityEvent { Timestamp = Now, Kind = ActivityEvent.Budget, RepositoryId = "repo", Tool = "task_get", Ok = true, Code = "over", ReplyTokens = 1_337 });
+        await store.FlushActivityAsync();
+        Assert.Equal("42|1337", Text(Database, "SELECT request_tokens || '|' || reply_tokens FROM activity_log WHERE kind = 'call';"));
+        // A budget row is not a call, so it never changes the call counters.
+        Assert.Equal(1, (await store.ReadActivityCountersAsync("repo", Now.AddMinutes(-1), Now.AddMinutes(1))).Calls);
+    }
+
+    [Fact]
     public void Version_3_database_is_still_refused()
     {
         using (new SqliteStore(Database)) { }

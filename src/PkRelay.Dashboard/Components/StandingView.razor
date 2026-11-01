@@ -1,5 +1,10 @@
 <section class="surface sql-view standing-view" aria-labelledby="standing-heading">
     <div class="section-heading"><div><h2 id="standing-heading">Standing preferences</h2><p>Each board's settled lines, typed grants and standing orders, who approved them, and recent changes. Read-only.</p></div><span class="small-symbol" aria-hidden="true">✓</span></div>
+    <table class="metrics-table">
+        <caption>Token feedback</caption>
+        <thead><tr><th scope="col">Worker tool definitions</th><th scope="col">Administrator tool definitions</th><th scope="col">Tip rules switched off</th></tr></thead>
+        <tbody><tr><td class="numeric">@Estimated(Tokens.WorkerToolTokens)</td><td class="numeric">@Estimated(Tokens.AdministratorToolTokens)</td><td>@(Tokens.TipRulesOff.Length == 0 ? "None" : string.Join(", ", Tokens.TipRulesOff))</td></tr></tbody>
+    </table>
     @if (Boards.Length == 0) { <p class="empty-copy">No board has standing preferences yet.</p> }
     @foreach (var board in Boards)
     {
@@ -53,5 +58,8 @@
 @code {
     [Parameter, EditorRequired] public DashboardStanding[] Boards { get; set; } = [];
     [Parameter] public bool Truncated { get; set; }
+    [Parameter] public DashboardTokens Tokens { get; set; } = new();
     [Parameter] public DateTimeOffset Now { get; set; }
+
+    private static string Estimated(int? tokens) => tokens is { } count ? $"{count:N0} estimated tokens" : "Not counted";
 }

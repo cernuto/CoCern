@@ -14,6 +14,11 @@ public static class AnalyticsQueryNames
     public const string QualityGuardrails = "quality_guardrails";
     public const string AttentionOutcomesByKind = "attention_outcomes_by_kind";
 
+    // Manager alerts (Relay:Feedback:Alerts): run by the anomaly monitor only, so they stay out of the analytics_query schema.
+    public const string TokensPerTaskByRole = "tokens_per_task_by_role";
+    public const string CompactionRateByTool = "compaction_rate_by_tool";
+    public const string SessionTokenOutliers = "session_token_outliers";
+
     /// <summary>The name that runs the tool's <c>sql</c> field instead, when <c>Relay:Analytics:AllowAdHocSql</c> is on.</summary>
     public const string AdHocSql = "sql";
 
@@ -23,4 +28,10 @@ public static class AnalyticsQueryNames
         TokensPerTask, CallsPerTask, MessagesPerTask, ContextByRole, BlockedTime, ClaimConflictsByResource, NoisiestTools,
         ManagerAssignmentLatency, QualityGuardrails, AttentionOutcomesByKind
     ];
+
+    /// <summary>The alert queries. The anomaly monitor runs them; <c>analytics_query</c> does not list them.</summary>
+    public static readonly IReadOnlyList<string> Alerts = [TokensPerTaskByRole, CompactionRateByTool, SessionTokenOutliers];
+
+    /// <summary>Whether a monitor finding names a query it may run: a named query or an alert query.</summary>
+    public static bool IsKnown(string name) => All.Contains(name) || Alerts.Contains(name);
 }

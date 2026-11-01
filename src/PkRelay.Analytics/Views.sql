@@ -16,10 +16,11 @@ CREATE VIEW task_doc AS
 SELECT b.repository_id, b.board_id, t.key AS task_id, t.value AS task
 FROM board_doc b, json_each(b.doc -> '$.tasks') t;
 
--- Every activity row. Targets are 'task:<repo>/<board>/<task>' and 'resource:<repo>/<resource>', each part escaped.
+-- Every activity row. relay_tokens are the hub's own estimated tokens (o200k) for the request and reply. Targets are 'task:<repo>/<board>/<task>' and 'resource:<repo>/<resource>', each part escaped.
 CREATE VIEW activity AS
 SELECT id, at_ticks, pk_at(at_ticks) AS at_time, kind, repository_id, session_id, role, tool, ok = 1 AS ok, code,
        request_bytes, reply_bytes, duration_ms, input_tokens, output_tokens, request_id, target, workflow_state, offer_target,
+       request_tokens, reply_tokens, coalesce(request_tokens, 0) + coalesce(reply_tokens, 0) AS relay_tokens,
        CASE WHEN target LIKE 'task:%' THEN url_decode(split_part(target, '/', 2)) END AS board_id,
        CASE WHEN target LIKE 'task:%' THEN url_decode(split_part(target, '/', 3)) END AS task_id,
        CASE WHEN target LIKE 'resource:%' THEN url_decode(split_part(target, '/', 2)) END AS resource_id
@@ -27,6 +28,11 @@ FROM relay.activity_log;
 
 -- One row per public tool call.
 CREATE VIEW tool_calls AS SELECT * EXCLUDE (kind) FROM activity WHERE kind = 'call';
+
+-- One row per reply over its token budget: code 'over' (measure-only), 'over:attention' or 'over:nextWork', or 'step1' to 'step3' (compacted).
+CREATE VIEW budget_events AS
+SELECT id, at_ticks, at_time, repository_id, session_id, role, tool, code, reply_tokens
+FROM activity WHERE kind = 'budget';
 
 -- One row per attention offer outcome: shown, accepted, later or dismissed.
 CREATE VIEW attention_outcomes AS

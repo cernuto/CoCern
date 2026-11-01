@@ -19,10 +19,17 @@ namespace PkRelay.Core;
 /// (session open, task claim with resources, action begin, convenience renewals/acks, next-work offers).
 /// Aggregates enforce the rules; this layer authenticates the session, routes, composes and bounds replies.
 /// </summary>
-public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? machines = null, IActivitySink? activity = null, IFullTextSearch? search = null, AttentionOptions? attention = null, AnalyticsTool? analytics = null, AnomalyOptions? anomaly = null, OrderOptions? orders = null, DocCacheTool? docs = null) : IRelayApplication
+public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? machines = null, IActivitySink? activity = null, IFullTextSearch? search = null, AttentionOptions? attention = null, AnalyticsTool? analytics = null, AnomalyOptions? anomaly = null, OrderOptions? orders = null, DocCacheTool? docs = null,
+    ITokenCounter? tokens = null, TokenOptions? tokenOptions = null, FeedbackRules? feedback = null) : IRelayApplication
 {
     private readonly IMachineDirectory directory = machines ?? new MachineDirectory(grains);
     private readonly AttentionOptions attentionOptions = attention ?? new();
+    /// <summary>The shared token counter when <c>Relay:Tokens:Enabled</c> is on; null otherwise, and then nothing is counted or compacted.</summary>
+    private readonly ITokenCounter? counter = tokenOptions?.Enabled == false ? null : tokens;
+    private readonly TokenOptions tokenSettings = tokenOptions ?? new();
+    /// <summary>Estimated tokens of the tool definitions an agent carries, per role, counted once.</summary>
+    private volatile ToolTotals? toolTokens;
+    private sealed record ToolTotals(int Worker, int Administrator);
     private const int WorkerProbeLimit = 50;
     private readonly string incarnation = Guid.NewGuid().ToString("N");
     /// <summary>
@@ -35,12 +42,16 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
     /// <summary>Runs one public tool call and, when a sink is configured, records it once. Recording never changes or fails the call.</summary>
     public async Task<RelayReply> ExecuteAsync(RelayCaller caller, string tool, JsonElement arguments, CancellationToken cancellationToken = default)
     {
-        if (activity is null || !RelayToolCatalog.TryGet(tool, out _)) return await ExecuteCoreAsync(caller, tool, arguments, null, cancellationToken);
+        if (activity is null && feedback is null || !RelayToolCatalog.TryGet(tool, out _)) return await ExecuteCoreAsync(caller, tool, arguments, null, cancellationToken);
         var trace = new CallTrace { At = DateTimeOffset.UtcNow };
         var started = Stopwatch.GetTimestamp();
         RelayReply? reply = null;
         try { return reply = await ExecuteCoreAsync(caller, tool, arguments, trace, cancellationToken); }
-        finally { RecordCall(tool, arguments, trace, reply, Stopwatch.GetElapsedTime(started), cancellationToken.IsCancellationRequested); }
+        finally
+        {
+            if (activity is not null) RecordCall(tool, arguments, trace, reply, Stopwatch.GetElapsedTime(started), cancellationToken.IsCancellationRequested);
+            if (feedback is not null && reply is not null) ObserveFeedback(caller, tool, trace, reply);
+        }
     }
 
     private async Task<RelayReply> ExecuteCoreAsync(RelayCaller caller, string tool, JsonElement arguments, CallTrace? trace, CancellationToken cancellationToken)
@@ -62,6 +73,9 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         // showed: seen (the returned page) or seenMessageIds (the messages it printed), so their info items close.
         var pageSeen = args["seen"] is JsonValue seenFlag && seenFlag.GetValue<bool>();
         var seenIds = args["seenMessageIds"] is JsonArray seenList ? Strings(seenList).ToArray() : [];
+        // The etag the agent passed as ifNoneMatch, forwarded by the adapter only so the feedback rules can tell an unchanged read.
+        if (trace is not null) { trace.ModelVisible = offerWanted && !args.ContainsKey("waitSeconds"); trace.KnownEtag = Bounded(Text(args, "knownEtag"), RelayLimits.MaxKnownEtagLength); }
+        args.Remove("knownEtag");
         args.Remove("attention"); args.Remove("attentionDetail"); args.Remove("attentionStatus"); args.Remove("maxHoldMinutes"); args.Remove("seen"); args.Remove("seenMessageIds");
         args["hubIncarnation"] = incarnation;
         var trusted = caller with { IsInternal = true };
@@ -85,6 +99,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
             }
             if (tool is RelayTools.TaskClaim or RelayTools.ClaimAcquire or RelayTools.ActionBegin && await PausedAsync(trusted, args) is { } paused) return paused;
             var result = tool == RelayTools.GetStatus ? await StatusAsync(trusted, args, statusDetail) : await DispatchAsync(trusted, tool, args, session, cancellationToken);
+            if (result.Ok && tool == RelayTools.GetStatus && caller.IsAdministrator && !statusDetail) result = WithTokenStatus(result);
             if (result.Ok) result = await PiggybackAsync(trusted, args, result);
             if (result.Ok && tool == RelayTools.TaskUpdate && args["includeNextWork"]?.GetValue<bool>() == true) result = await WithNextWorkAsync(trusted, args, session, result);
             if (result.Ok && tool == RelayTools.StandingPut) CacheStanding(BoardKey(args), 0, result.Version, null);
@@ -101,7 +116,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
                 var claimed = result;
                 _ = Task.Run(() => RaiseRelatedWorkAsync(trusted, args, claimed), CancellationToken.None);
             }
-            return BoundWire(result);
+            return Bound(definition, args, result, trace);
         }
         catch (ArgumentException) { return Error(InvalidArguments); }
         catch (InvalidOperationException) { return Error(InvalidArguments); }
@@ -121,6 +136,117 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
             catch (Exception) { /* The next manager session starts it. */ }
         }, CancellationToken.None);
     }
+
+    /// <summary>
+    /// Bounds a reply to the wire. A tool in <c>Relay:Tokens:EnforceTools</c> is first compacted to its token budget; this runs on the
+    /// composed reply, after the aggregate stored its own, and is a pure function of it, so a retried request gets the same compacted reply.
+    /// Every other tool is measure-only and goes out unchanged.
+    /// </summary>
+    private RelayReply Bound(RelayTool tool, JsonObject args, RelayReply result, CallTrace? trace)
+    {
+        if (counter is null || !tokenSettings.Enforces(tool.Name) || !result.Ok) return BoundWire(result);
+        Compaction compaction;
+        try { compaction = ReplyCompactor.Compact(result, tool, counter, enforce: true, Number(args, "cursor")); }
+        catch (Exception) { return BoundWire(result); }
+        var bounded = BoundWire(compaction.Reply);
+        if (trace is not null && ReferenceEquals(bounded, compaction.Reply)) { trace.ReplyTokens = compaction.Tokens; trace.CompactStep = compaction.Step; trace.OverBudget = compaction.OverBudget; }
+        return bounded;
+    }
+
+    /// <summary>
+    /// An administrator's <c>get_status</c> shows the estimated tokens of the tool definitions each role carries, and with tips on the tip
+    /// rules that switched themselves off, for review. Other callers' replies are unchanged.
+    /// </summary>
+    private RelayReply WithTokenStatus(RelayReply status)
+    {
+        try
+        {
+            if ((counter is null || toolTokens is null) && feedback is null) return status;
+            var data = Parse(status);
+            // Shown once the startup warm-up has counted them, so no status read waits for the tokenizer to load.
+            if (counter is not null && toolTokens is { } totals)
+                data["toolTokens"] = new JsonObject { ["worker"] = totals.Worker, ["administrator"] = totals.Administrator, ["encoding"] = counter.Encoding, ["estimated"] = true };
+            if (feedback?.Rules.Where(rule => !rule.Enabled).Select(rule => (JsonNode)rule.Rule).ToArray() is { Length: > 0 } off) data["tipRulesOff"] = new JsonArray(off);
+            return Ok(data, status.Version);
+        }
+        catch (Exception) { return status; }
+    }
+
+    /// <summary>Tokens of each tool's description and forwarding schema for one role: what every connected agent carries on every turn.</summary>
+    private int ToolDefinitionTokens(bool administrator) =>
+        RelayToolCatalog.ForRole(administrator).Sum(tool => counter!.Count(tool.Description) + counter.Count(RelayToolCatalog.ForwardingSchema(tool).GetRawText()));
+
+    /// <summary>The token totals and switched-off tip rules for the dashboard. Totals are null until the startup warm-up has counted them.</summary>
+    public PkRelay.Contracts.Dashboard.DashboardTokens TokenSummary() => new()
+    {
+        WorkerToolTokens = counter is null ? null : toolTokens?.Worker, AdministratorToolTokens = counter is null ? null : toolTokens?.Administrator,
+        Encoding = counter?.Encoding ?? "", TipRulesOff = feedback?.Rules.Where(rule => !rule.Enabled).Select(rule => rule.Rule).ToArray() ?? []
+    };
+
+    /// <summary>Counts the tool definitions once, which also loads the tokenizer, so the first call does not pay for it.</summary>
+    public void WarmTokenCounts()
+    {
+        if (counter is null) return;
+        try { toolTokens ??= new(ToolDefinitionTokens(false), ToolDefinitionTokens(true)); }
+        catch (Exception) { /* Counted on first use instead. */ }
+    }
+
+    /// <summary>
+    /// Feeds a finished call to the feedback rules, off the call's path, and delivers what they decide: a tip as a lowest-tier <c>tip</c>
+    /// attention item at the session, and a proposed standing line through the board's internal hub proposal.
+    /// </summary>
+    private void ObserveFeedback(RelayCaller caller, string tool, CallTrace trace, RelayReply reply)
+    {
+        try
+        {
+            if (trace.Args is not { } args) return;
+            var trusted = caller with { IsInternal = true };
+            FeedbackActions Observe(string sessionId) => feedback!.Observe(new FeedbackCall(feedback.Options.Time.GetUtcNow(), Text(args, "repositoryId"), sessionId, tool, args, reply.DataJson, reply.Ok,
+                trace.ModelVisible, trace.KnownEtag, reply.Ok ? Target(tool, args) : null, reply.Ok ? ContentHash(tool, args) : null, Bounded(Text(args, "requestId"))));
+            if (trace.SessionId is { Length: > 0 } verified)
+            {
+                _ = Task.Run(() => Deliver(trusted, Observe(verified)), CancellationToken.None);
+                return;
+            }
+            // A read that needs no session (task_get) counts only for a session that proves itself, so no caller can run up another
+            // session's counts or send it tips. The check runs off the call's path.
+            if (!reply.Ok || Text(args, "sessionId").Length == 0 || Text(args, "sessionToken").Length == 0) return;
+            _ = Task.Run(async () =>
+            {
+                try { if ((await VerifySessionAsync(trusted, args)).Ok) Deliver(trusted, Observe(Text(args, "sessionId"))); }
+                catch (Exception) { /* Advisory. */ }
+            }, CancellationToken.None);
+        }
+        catch (Exception) { /* Feedback never affects the call. */ }
+    }
+
+    /// <summary>Delivers what the rules decided, off the call's path. Advisory: any failure is ignored.</summary>
+    private void Deliver(RelayCaller trusted, FeedbackActions actions)
+    {
+        if (actions.Tip is null && actions.Proposal is null) return;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                if (actions.Tip is { } tip && attentionOptions.Enabled)
+                    await CallSession(trusted, Operations.AttentionRaise, new JsonObject
+                    {
+                        ["repositoryId"] = tip.RepositoryId, ["sessionId"] = tip.SessionId, ["kind"] = AttentionKinds.Tip, ["subject"] = tip.Rule,
+                        ["priority"] = AttentionWeights.Low, ["note"] = tip.Text, ["revision"] = tip.Revision, ["expiryDays"] = RelayLimits.TipExpiryDays
+                    });
+                if (actions.Proposal is { } proposal)
+                    await Call(AggregateKinds.Board, Uri.EscapeDataString(proposal.RepositoryId) + "/default", HubProposer(proposal.RepositoryId), Operations.StandingProposeHub, new JsonObject
+                    {
+                        ["repositoryId"] = proposal.RepositoryId, ["boardId"] = "default", ["rule"] = proposal.Rule,
+                        ["line"] = new JsonObject { ["id"] = proposal.LineId, ["text"] = proposal.Text }
+                    });
+            }
+            catch (Exception) { /* Advisory: the call stands either way. */ }
+        }, CancellationToken.None);
+    }
+
+    /// <summary>The hub's own identity for proposals: internal, so only this hub can use it, and scoped to the one repository.</summary>
+    private static RelayCaller HubProposer(string repository) => new(SessionRoles.HubProposer, false, [repository], true);
 
     /// <summary>Delivers one aggregate's due outbox effects; called by the hub's due-work pump.</summary>
     public async Task DispatchDueAsync(DueWorkReference reference, CancellationToken cancellationToken = default)
@@ -732,6 +858,13 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         public JsonObject? Usage { get; set; }
         public string? SessionId { get; set; }
         public string? Role { get; set; }
+        /// <summary>False for an adapter's background read (<c>attention: false</c>) or a <c>waitSeconds</c> long-poll.</summary>
+        public bool ModelVisible { get; set; } = true;
+        public string? KnownEtag { get; set; }
+        /// <summary>The reply's tokens when compaction already counted the reply as sent, and the step it reached.</summary>
+        public int? ReplyTokens { get; set; }
+        public int CompactStep { get; set; }
+        public bool OverBudget { get; set; }
     }
 
     /// <summary>Builds and queues the call's activity event. Any failure here is swallowed: telemetry must never fail a call.</summary>
@@ -744,18 +877,35 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
             var repository = args is null ? "" : Text(args, "repositoryId");
             var (target, hash) = args is null || !ok ? (args is null ? null : Target(tool, args), (string?)null) : (Target(tool, args), ContentHash(tool, args));
             var workflow = ok && tool == RelayTools.TaskUpdate && args?["workflow"] is JsonObject flow ? Text(flow, "state") : "";
+            var raw = arguments.ValueKind == JsonValueKind.Undefined ? null : arguments.GetRawText();
+            var role = Bounded(trace.Role?.ToLowerInvariant(), RelayLimits.MaxActivityRoleLength);
+            // The texts wait in the queue until the writer counts them. Past the hub's cap the event goes without them: token counts are
+            // dropped before any activity row is.
+            var (requestText, replyText) = counter is null ? (null, null) : (raw, reply is null || trace.ReplyTokens is not null ? null : reply.DataJson);
+            if (!TokenTextBudget.Shared.TryHold(requestText, replyText)) (requestText, replyText) = (null, null);
             activity!.Record(new ActivityEvent
             {
                 Timestamp = trace.At, Kind = ActivityEvent.Call, RepositoryId = repository.Length <= RelayLimits.MaxIdentifierLength ? repository : "",
-                SessionId = Bounded(trace.SessionId), Role = Bounded(trace.Role?.ToLowerInvariant(), RelayLimits.MaxActivityRoleLength), Tool = tool, Ok = ok,
+                SessionId = Bounded(trace.SessionId), Role = role, Tool = tool, Ok = ok,
                 Code = reply?.Code ?? (canceled ? "Canceled" : Unavailable),
-                RequestBytes = arguments.ValueKind == JsonValueKind.Undefined ? 0 : Encoding.UTF8.GetByteCount(arguments.GetRawText()),
+                RequestBytes = raw is null ? 0 : Encoding.UTF8.GetByteCount(raw),
                 ReplyBytes = reply is null ? 0 : Encoding.UTF8.GetByteCount(reply.DataJson), DurationMilliseconds = elapsed.TotalMilliseconds,
                 // Usage counts only with a committed call: a rejected milestone is usually resent with the same usage.
                 InputTokens = ok ? Tokens(trace.Usage, "inputTokens") : null, OutputTokens = ok ? Tokens(trace.Usage, "outputTokens") : null,
                 RequestId = Bounded(args is null ? null : Text(args, "requestId")), Target = target, ContentHash = hash,
                 WorkflowState = workflow is "ready" or "blocked" or "completed" ? workflow : null,
-                OfferTarget = ok && reply is not null && args is not null ? OfferTarget(args, reply) : null
+                OfferTarget = ok && reply is not null && args is not null ? OfferTarget(args, reply) : null,
+                // Estimated tokens (o200k) of what the agent sent and got back, as sent. The texts are counted by the activity writer, off
+                // the call's path (see TokenMeter); a compacted reply was already counted.
+                RequestText = requestText, ReplyText = replyText,
+                ReplyTokens = counter is null ? null : trace.ReplyTokens
+            });
+            // A compacted reply is counted here, with the step it reached, so analytics shows which tools compact most often; an enforced
+            // reply that no step could shrink is counted as over.
+            if (trace.CompactStep > 0 || trace.OverBudget) activity.Record(new ActivityEvent
+            {
+                Timestamp = trace.At, Kind = ActivityEvent.Budget, RepositoryId = repository.Length <= RelayLimits.MaxIdentifierLength ? repository : "",
+                SessionId = Bounded(trace.SessionId), Role = role, Tool = tool, Ok = true, Code = trace.CompactStep > 0 ? "step" + trace.CompactStep : "over", ReplyTokens = trace.ReplyTokens
             });
         }
         catch (Exception) { /* Never fail or slow the call for telemetry. */ }

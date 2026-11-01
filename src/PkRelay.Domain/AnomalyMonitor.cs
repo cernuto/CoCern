@@ -61,7 +61,7 @@ public static class AnomalyMonitor
         foreach (var finding in (args["findings"] as JsonArray ?? []).OfType<JsonObject>())
         {
             var query = Text(finding, "query");
-            if (!AnalyticsQueryNames.All.Contains(query)) continue;
+            if (!AnalyticsQueryNames.IsKnown(query)) continue;
             var record = ObjectAt(checks, query);
             if (finding["anomaly"] is JsonObject anomaly)
             {
