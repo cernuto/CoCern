@@ -5,7 +5,7 @@ using PkRelay.Core;
 
 namespace PkRelay.Storage;
 
-/// <summary>The dashboard's read-only view of each board's standing preferences (see docs/standing.md).</summary>
+/// <summary>The dashboard's read-only view of each board's standing preferences (see docs/collaboration.md).</summary>
 public sealed partial class SqliteStore
 {
     private const int MaximumStandingBoards = 20;
