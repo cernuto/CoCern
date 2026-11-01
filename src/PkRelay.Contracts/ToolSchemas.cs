@@ -28,6 +28,7 @@ internal static class ToolSchemas
             RelayTools.Search => ["kinds"],
             RelayTools.AttentionRespond => ["until"],
             RelayTools.AnalyticsQuery => ["params", "sql"],
+            RelayTools.OrderPut => ["expiresAt", "expectedRevision"],
             _ => []
         };
         var properties = ForwardingFields.Concat(tool.RequiredFields).Concat(extra).Distinct(StringComparer.Ordinal).ToDictionary(field => field, field => all[field]);
@@ -63,6 +64,20 @@ internal static class ToolSchemas
             properties["name"] = new { type = "string", @enum = AnalyticsQueryNames.All.Append(AnalyticsQueryNames.AdHocSql).ToArray() };
             properties["params"] = new { type = "object", description = "Optional {days}." };
             properties["sql"] = new { type = "string", description = "SELECT, with name sql." };
+        }
+        // Orders are advertised by shape with the trigger and action names; InputSchema gives the limits. The administrator token is the
+        // authority, so the forwarding copy leaves out the session handle.
+        if (tool.Name is RelayTools.OrderPut or RelayTools.OrderRemove)
+        {
+            properties.Remove("sessionId"); properties.Remove("sessionToken");
+            properties["orderId"] = new { type = "string" };
+            if (tool.Name == RelayTools.OrderPut)
+            {
+                properties["trigger"] = new { type = "object", description = "{on:" + string.Join("|", OrderTriggers.All) + ",taskId|resourceId}" };
+                properties["actions"] = new { type = "array", description = "[{do:" + string.Join("|", OrderActions.All) + ",taskId?,sessionId?,note?}]" };
+                properties["expiresAt"] = new { type = "string" };
+                properties["expectedRevision"] = new { type = "integer" };
+            }
         }
         // Each boundary tool advertises the attention opt-out with a short description; InputSchema gives the full one.
         if (properties.ContainsKey("attention")) properties["attention"] = new { type = "boolean", description = "false: no attention offer." };
@@ -169,6 +184,40 @@ internal static class ToolSchemas
                 properties["name"] = new { type = "string", @enum = AnalyticsQueryNames.All.Append(AnalyticsQueryNames.AdHocSql).ToArray(), description = "A named query, or sql to run the sql field." };
                 properties["params"] = new { type = "object", properties = new { days = new { type = "integer", minimum = 1, maximum = RelayLimits.MaxAnalyticsPeriodDays, description = $"Days per compared period; default {RelayLimits.DefaultAnalyticsPeriodDays}." } }, additionalProperties = false, description = "Named query parameters." };
                 properties["sql"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxAnalyticsSqlLength, description = "One SELECT over the analytics views; only with name sql, and only when the hub allows ad hoc SQL." }; break;
+            case RelayTools.OrderPut:
+                properties["orderId"] = OrderId();
+                properties["expectedRevision"] = new { type = "integer", minimum = 0, description = "Optional current order revision, as get_status shows it; a stale one gets VersionConflict." };
+                properties["trigger"] = new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        on = new { type = "string", @enum = OrderTriggers.All, description = "workflow_completed and blocker_cleared name a taskId; claim_released names a resourceId." },
+                        taskId = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxIdentifierLength, description = "A task on this board." },
+                        resourceId = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxIdentifierLength, description = "A registered resource of this repository." }
+                    },
+                    required = new[] { "on" }, additionalProperties = false, description = "When the order runs; one order per trigger."
+                };
+                properties["actions"] = new
+                {
+                    type = "array", minItems = 1, maxItems = RelayLimits.MaxOrderActions,
+                    items = new
+                    {
+                        type = "object",
+                        properties = new
+                        {
+                            @do = new { type = "string", @enum = OrderActions.All, description = "release_claims releases a task's claims; offer offers taskId to sessionId as next work; notify sends sessionId an attention item." },
+                            taskId = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxIdentifierLength, description = "A task on this board; release_claims defaults to the trigger's task." },
+                            sessionId = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxIdentifierLength, description = "The session to offer to or notify." },
+                            note = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxOrderNoteLength, description = "Optional text for notify." }
+                        },
+                        required = new[] { "do" }, additionalProperties = false
+                    },
+                    description = "Coordination actions; never acceptance, grants or blocker changes."
+                };
+                properties["expiresAt"] = new { type = "string", format = "date-time", description = $"Optional future expiry, at most {RelayLimits.MaxOrderExpiryDays} days ahead; the hub's default otherwise." }; break;
+            case RelayTools.OrderRemove:
+                properties["orderId"] = OrderId(); break;
             case RelayTools.ControlRequest:
                 properties["command"] = new { type = "string", @enum = new[] { "pause", "resume", "stop", "cancel", "register_resource", "revoke_machine" } };
                 properties["aliases"] = new { type = "array", items = new { type = "string" } }; Text("reason", "Coordination control explanation."); Text("machineId", "Machine to revoke; required by revoke_machine."); break;
@@ -224,6 +273,8 @@ internal static class ToolSchemas
         required = new[] { "scope", "expiresAt" }.Concat(idRequired ? ["id"] : Array.Empty<string>()).ToArray(),
         description = "Typed authority with a scope and an expiry."
     };
+
+    private static object OrderId() => new { type = "string", minLength = 1, maxLength = RelayLimits.MaxStandingIdLength, description = "Standing order ID on this board." };
 
     private static object AttentionOptOut() => new { type = "boolean", description = "false skips the attention offer on this reply, for work that must not be interrupted." };
 

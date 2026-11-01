@@ -19,7 +19,8 @@ public static class CoordinationStateMachine
 {
     private const int MaxBindingBytes = 8_192;
 
-    public static RelayReply Apply(StateEnvelope<CoordinationDocument> envelope, string kind, string key, RelayCaller caller, string operation, JsonObject arguments, DateTimeOffset now)
+    /// <param name="ordersEnabled">Whether the hub runs standing orders; the grain passes its setting, so the domain stays free of configuration.</param>
+    public static RelayReply Apply(StateEnvelope<CoordinationDocument> envelope, string kind, string key, RelayCaller caller, string operation, JsonObject arguments, DateTimeOffset now, bool ordersEnabled = false)
     {
         if (ByteSize(arguments) > RelayLimits.MaxPayloadBytes) return Error(PayloadTooLarge);
         var repository = Text(arguments, "repositoryId");
@@ -40,7 +41,7 @@ public static class CoordinationStateMachine
         var fingerprint = Fingerprint(arguments);
         if (requestId.Length > 0 && requests[requestKey] is JsonObject prior) return Replay(kind, state, operation, arguments, prior, fingerprint, now);
 
-        var context = new AggregateContext(state, caller, operation, arguments, now) { Key = key };
+        var context = new AggregateContext(state, caller, operation, arguments, now) { Key = key, OrdersEnabled = ordersEnabled };
         RelayReply result;
         try
         {
@@ -113,7 +114,7 @@ public static class CoordinationStateMachine
 
     /// <summary>Mutations are deduplicated by requestId and committed; reads never are.</summary>
     public static bool IsMutation(string operation) =>
-        operation is not (Operations.Verify or Operations.Resolve or Operations.ResolveAll or Operations.NextWork or Operations.ClaimState or Operations.SessionOwners or Operations.Standing)
+        operation is not (Operations.Verify or Operations.Resolve or Operations.ResolveAll or Operations.NextWork or Operations.ClaimState or Operations.SessionOwners or Operations.Standing or Operations.Orders)
         && (!RelayToolCatalog.TryGet(operation, out var tool) || tool.IsMutation);
 
     /// <summary>Whether a successful operation must be persisted. A legacy board's first read durably seeds current change markers without changing task versions.</summary>

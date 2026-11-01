@@ -1,5 +1,5 @@
 <section class="surface sql-view standing-view" aria-labelledby="standing-heading">
-    <div class="section-heading"><div><h2 id="standing-heading">Standing preferences</h2><p>Each board's settled lines and typed grants, who approved them, and recent changes. Read-only.</p></div><span class="small-symbol" aria-hidden="true">✓</span></div>
+    <div class="section-heading"><div><h2 id="standing-heading">Standing preferences</h2><p>Each board's settled lines, typed grants and standing orders, who approved them, and recent changes. Read-only.</p></div><span class="small-symbol" aria-hidden="true">✓</span></div>
     @if (Boards.Length == 0) { <p class="empty-copy">No board has standing preferences yet.</p> }
     @foreach (var board in Boards)
     {
@@ -23,6 +23,22 @@
                     <tbody>@foreach (var proposal in board.Proposals) { <tr><th scope="row">@proposal.Id</th><td>@proposal.Kind@(proposal.Replaces ? " (edit)" : "")</td><td>@proposal.Summary</td><td title="@DashboardFormat.Timestamp(proposal.ProposedAt)">@proposal.ProposedBy</td></tr> }</tbody>
                 </table>
             }
+            @if (board.Orders.Length > 0)
+            {
+                <table class="metrics-table">
+                    <caption>Standing orders</caption>
+                    <thead><tr><th scope="col">ID</th><th scope="col">When</th><th scope="col">Then</th><th scope="col">Approved by</th><th scope="col">Expires</th><th scope="col">Runs</th><th scope="col">Failures</th></tr></thead>
+                    <tbody>@foreach (var order in board.Orders) { <tr><th scope="row">@order.Id@(order.Disabled ? " (disabled)" : "")</th><td>@order.Trigger @order.Target</td><td>@string.Join("; ", order.Actions)</td><td>@order.ApprovedBy</td><td>@(order.ExpiresAt <= Now ? "Expired" : DashboardFormat.Timestamp(order.ExpiresAt))</td><td class="numeric">@order.Runs</td><td class="numeric" title="@order.LastError">@order.Failures</td></tr> }</tbody>
+                </table>
+            }
+            @if (board.OrderLog.Length > 0)
+            {
+                <table class="metrics-table">
+                    <caption>Order log</caption>
+                    <thead><tr><th scope="col">When</th><th scope="col">Order</th><th scope="col">What happened</th></tr></thead>
+                    <tbody>@foreach (var entry in board.OrderLog) { <tr><td title="@DashboardFormat.Timestamp(entry.At)">@DashboardFormat.Ago(entry.At, Now)</td><td>@entry.OrderId</td><td>@entry.What</td></tr> }</tbody>
+                </table>
+            }
             <table class="metrics-table">
                 <caption>Recent changes</caption>
                 <thead><tr><th scope="col">Revision</th><th scope="col">By</th><th scope="col">When</th><th scope="col">Changes</th></tr></thead>
@@ -31,7 +47,7 @@
         </article>
     }
     @if (Truncated) { <p class="limit-note">The board list is bounded. Additional boards are not shown.</p> }
-    <p class="table-footnote">Changes: + added, ~ edited, - removed. An administrator changes standing with standing_put.</p>
+    <p class="table-footnote">Changes: + added, ~ edited, - removed. An administrator changes standing with standing_put, and orders with order_put and order_remove.</p>
 </section>
 
 @code {

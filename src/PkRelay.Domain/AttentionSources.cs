@@ -185,7 +185,7 @@ internal static class AttentionSources
         return close;
     }
 
-    private static void Emit(AggregateContext context, string sessionId, string operation, JsonObject item)
+    internal static void Emit(AggregateContext context, string sessionId, string operation, JsonObject item)
     {
         item["repositoryId"] = context.Repository;
         if (Text(context.Args, "boardId") is { Length: > 0 } board && !item.ContainsKey("boardId")) item["boardId"] = board;

@@ -52,6 +52,16 @@ public static class RelayHostBuilderExtensions
             }.Validated();
         });
         builder.Services.AddSingleton(services => AnomalySettings(services.GetRequiredService<IConfiguration>()));
+        // Standing orders are off by default; the board grains read the same options to decide whether orders run.
+        builder.Services.AddSingleton(services =>
+        {
+            var configuration = services.GetRequiredService<IConfiguration>();
+            return new OrderOptions
+            {
+                Enabled = configuration.GetValue("Relay:Orders:Enabled", false),
+                DefaultExpiryDays = configuration.GetValue("Relay:Orders:DefaultExpiryDays", RelayLimits.DefaultOrderExpiryDays)
+            }.Validated();
+        });
         // The search port is passed only when the store keeps an index; otherwise the search tool answers SearchUnavailable. Likewise
         // analytics_query gets the analytics port only when analytics is on, and answers AnalyticsUnavailable otherwise.
         builder.Services.Replace(ServiceDescriptor.Singleton(services => new RelayApplication(
@@ -61,7 +71,8 @@ public static class RelayHostBuilderExtensions
                 ? new AnalyticsTool(queries, services.GetRequiredService<IConfiguration>().GetValue("Relay:Analytics:AllowAdHocSql", false), services.GetRequiredService<ILoggerFactory>().CreateLogger<AnalyticsTool>())
                 : null,
             // The anomaly monitor runs only with analytics on; its grain checks the same before every check.
-            services.GetService<IAnalyticsQueries>() is not null ? services.GetRequiredService<AnomalyOptions>() : null)));
+            services.GetService<IAnalyticsQueries>() is not null ? services.GetRequiredService<AnomalyOptions>() : null,
+            services.GetRequiredService<OrderOptions>())));
         builder.AddRelayOrleans();
         builder.Services.AddRelayDashboard();
         builder.Services.AddHostedService<DueWorkDispatcher>();

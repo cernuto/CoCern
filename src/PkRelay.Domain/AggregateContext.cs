@@ -14,6 +14,10 @@ internal sealed class AggregateContext(JsonObject state, RelayCaller caller, str
     public List<DurableEffect> Effects { get; } = [];
     /// <summary>The aggregate's own key, such as a lock's resource ID.</summary>
     public string Key { get; init; } = "";
+    /// <summary>Whether this hub runs standing orders (<c>Relay:Orders:Enabled</c>). Off, orders are neither written nor run.</summary>
+    public bool OrdersEnabled { get; init; }
+    /// <summary>Order triggers this operation caused (trigger, task ID), run once the change is marked; see <see cref="StandingOrders"/>.</summary>
+    public List<(string On, string Target)> OrderTriggers { get; } = [];
 
     public string Repository => Text(Args, "repositoryId");
     public string SessionId => Text(Args, "sessionId");

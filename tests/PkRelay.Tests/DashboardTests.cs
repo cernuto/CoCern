@@ -335,6 +335,42 @@ public sealed class DashboardTests
         Assert.Equal(HttpStatusCode.OK, (await browser.GetAsync("/dashboard/standing")).StatusCode);
     }
 
+    [Fact]
+    public async Task Standing_panel_shows_each_boards_orders_and_order_log()
+    {
+        await using var host = new RelayHostFixture(settings: new Dictionary<string, string?>
+        {
+            ["Relay:Clients:0:IsAdministrator"] = "true", ["Relay:Dashboard:ViewerPrincipalIds:0"] = "test-user", ["Relay:Orders:Enabled"] = "true"
+        });
+        using var agent = host.AuthorizedClient();
+        using var openedDocument = JsonDocument.Parse((await host.Call(agent, "session_open", new { repositoryId = "repo", requestId = "orders-session" })).GetProperty("dataJson").GetString()!);
+        var opened = openedDocument.RootElement;
+        Assert.True((await host.Call(agent, "task_update", new { repositoryId = "repo", requestId = "orders-task", taskId = "T-1", expectedVersion = 0, sessionId = opened.GetProperty("sessionId").GetString(), sessionToken = opened.GetProperty("sessionToken").GetString() })).GetProperty("ok").GetBoolean());
+        Assert.True((await host.Call(agent, "order_put", new { repositoryId = "repo", requestId = "orders-put", orderId = "o-1", trigger = new { on = "workflow_completed", taskId = "T-1" }, actions = new object[] { new { @do = "release_claims" }, new { @do = "notify", sessionId = "s-1" } } })).GetProperty("ok").GetBoolean());
+
+        using var browser = BrowserClient(host);
+        (await browser.PostAsJsonAsync("/dashboard/api/login", new { token = RelayHostFixture.Token })).EnsureSuccessStatusCode();
+        await using var viewer = await StartViewerAsync(host, browser);
+        PkRelay.Contracts.Dashboard.DashboardSnapshot? snapshot = null;
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(10);
+        do
+        {
+            snapshot = await browser.GetFromJsonAsync<PkRelay.Contracts.Dashboard.DashboardSnapshot>("/dashboard/api/snapshot");
+            if (snapshot!.Standing is [{ Orders.Length: > 0 }]) break;
+            await Task.Delay(50);
+        }
+        while (DateTimeOffset.UtcNow < deadline);
+        // A board with orders but no standing lines is listed too.
+        var board = Assert.Single(snapshot!.Standing);
+        Assert.Equal(("repo/default", 0L), (board.Board, board.Revision));
+        Assert.Empty(board.Lines);
+        var order = Assert.Single(board.Orders);
+        Assert.Equal(("o-1", "workflow_completed", "T-1", "test-user", 0L, 0L, false), (order.Id, order.Trigger, order.Target, order.ApprovedBy, order.Runs, order.Failures, order.Disabled));
+        Assert.Equal(["release_claims", "notify to s-1"], order.Actions);
+        Assert.True(order.ExpiresAt > DateTimeOffset.UtcNow.AddDays(6));
+        Assert.Equal(("o-1", "put by test-user"), (Assert.Single(board.OrderLog).OrderId, board.OrderLog[0].What));
+    }
+
     private static RelayHostFixture OperatorHost(bool administrator = true, bool grant = true, IPAddress? remoteAddress = null) => new(remoteAddress: remoteAddress, settings: new Dictionary<string, string?>
     {
         ["Relay:Clients:0:IsAdministrator"] = administrator.ToString(),

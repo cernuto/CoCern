@@ -19,7 +19,7 @@ namespace PkRelay.Core;
 /// (session open, task claim with resources, action begin, convenience renewals/acks, next-work offers).
 /// Aggregates enforce the rules; this layer authenticates the session, routes, composes and bounds replies.
 /// </summary>
-public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? machines = null, IActivitySink? activity = null, IFullTextSearch? search = null, AttentionOptions? attention = null, AnalyticsTool? analytics = null, AnomalyOptions? anomaly = null) : IRelayApplication
+public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? machines = null, IActivitySink? activity = null, IFullTextSearch? search = null, AttentionOptions? attention = null, AnalyticsTool? analytics = null, AnomalyOptions? anomaly = null, OrderOptions? orders = null) : IRelayApplication
 {
     private readonly IMachineDirectory directory = machines ?? new MachineDirectory(grains);
     private readonly AttentionOptions attentionOptions = attention ?? new();
@@ -145,6 +145,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         RelayTools.AnalyticsQuery => AnalyticsAsync(caller, args, cancellationToken),
         RelayTools.SessionBind or RelayTools.CheckInbox or RelayTools.Ack => CallSession(caller, tool, args),
         RelayTools.AttentionRespond => RespondToAttentionAsync(caller, args),
+        RelayTools.OrderPut or RelayTools.OrderRemove => OrderAsync(caller, tool, args),
         RelayTools.WorkerList or RelayTools.ControlRequest => CallControl(caller, tool, args),
         _ => CallBoard(caller, tool, args)
     };
@@ -192,6 +193,42 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         !caller.IsAdministrator ? Task.FromResult(Error(AdministratorRequired))
         : analytics is null ? Task.FromResult(Error(AnalyticsUnavailable, new { message = "Analytics is turned off on this hub (Relay:Analytics:Enabled)." }))
         : analytics.RunAsync(caller, args, cancellationToken);
+
+    /// <summary>
+    /// Administrator only, like <c>standing_put</c>: a session's self-reported role is not an authority. An orders-off hub answers
+    /// <see cref="OrdersUnavailable"/> once the caller is known to be an administrator. A <c>claim_released</c> trigger names the resource
+    /// as registered; it is stored under its canonical ID, which is the lock that tells the board.
+    /// </summary>
+    private async Task<RelayReply> OrderAsync(RelayCaller caller, string tool, JsonObject args)
+    {
+        if (!caller.IsAdministrator) return Error(AdministratorRequired);
+        if (orders is not { Enabled: true }) return Error(OrdersUnavailable, new { message = "Standing orders are turned off on this hub (Relay:Orders:Enabled)." });
+        if (tool == RelayTools.OrderPut)
+        {
+            args["defaultExpiryDays"] = orders.DefaultExpiryDays;
+            if (args["trigger"] is JsonObject trigger && Text(trigger, "on") == OrderTriggers.ClaimReleased && Text(trigger, "resourceId") is { Length: > 0 } resource)
+            {
+                var resolved = await Resolve(caller, new JsonObject { ["repositoryId"] = Text(args, "repositoryId") }, resource);
+                if (!resolved.Ok) return resolved;
+                trigger["resourceId"] = Text(Parse(resolved), "resourceId");
+            }
+        }
+        return await CallBoard(caller, tool, args);
+    }
+
+    /// <summary>With orders on, a <c>get_status</c> reply lists the board's standing orders, compactly; a background detail read does not.</summary>
+    private async Task<RelayReply> WithOrdersAsync(RelayCaller caller, JsonObject args, RelayReply status)
+    {
+        if (!status.Ok || orders is not { Enabled: true }) return status;
+        try
+        {
+            var read = await CallBoard(caller, Operations.Orders, new JsonObject { ["repositoryId"] = Text(args, "repositoryId"), ["boardId"] = Text(args, "boardId", "default") });
+            if (!read.Ok || Parse(read)["orders"] is not JsonArray { Count: > 0 } list) return status;
+            var data = Parse(status); data["orders"] = list.DeepClone(); data["ordersRevision"] = Parse(read)["revision"]?.DeepClone();
+            return FitsWire(Ok(data, status.Version)) ? Ok(data, status.Version) : status;
+        }
+        catch (Exception) { return status; }
+    }
 
     /// <summary>The agent's answer to an attention item. "Later" uses the hub's configured snooze; a client cannot set it.</summary>
     private async Task<RelayReply> RespondToAttentionAsync(RelayCaller caller, JsonObject args)
@@ -340,7 +377,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
     /// </summary>
     private async Task<RelayReply> StatusAsync(RelayCaller caller, JsonObject args, bool detail)
     {
-        if (Text(args, "sessionId").Length == 0) return await CallControl(caller, RelayTools.GetStatus, args);
+        if (Text(args, "sessionId").Length == 0) return await WithOrdersAsync(caller, args, await CallControl(caller, RelayTools.GetStatus, args));
         var read = args.DeepClone().AsObject();
         if (attentionOptions.Enabled) { read["attentionStatus"] = detail ? "detail" : "count"; read["maxHoldMinutes"] = attentionOptions.MaxHoldMinutes; }
         var result = await CallSession(caller, RelayTools.GetStatus, read);
@@ -354,7 +391,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
             catch (Exception) { /* The revision is a convenience for the prompt hook. */ }
             if (Text(attention, "wake") is { } wake && wake.StartsWith(AttentionWeights.HoldWakePrefix, StringComparison.Ordinal)) RecordHoldWake(args, wake);
         }
-        return Ok(data, result.Version);
+        return detail ? Ok(data, result.Version) : await WithOrdersAsync(caller, args, Ok(data, result.Version));
     }
 
     /// <summary>Each session's last idle-hold wake ID handed out, so a hold wake is counted once however often watchers ask.</summary>
@@ -524,6 +561,8 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         foreach (var resource in canonical)
         {
             var resourceArgs = args.DeepClone().AsObject(); resourceArgs["requestId"] = Text(args, "requestId") + ":resource:" + resource;
+            // The lock records which task claim its grant serves, so a standing order's release cannot drop a later claim.
+            resourceArgs["taskClaimGeneration"] = Parse(task)["claimGeneration"]?.DeepClone();
             var claim = await Call(AggregateKinds.Lock, resource, caller, RelayTools.ClaimAcquire, resourceArgs);
             if (!claim.Ok)
             {

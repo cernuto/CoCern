@@ -31,12 +31,14 @@ internal static class TaskBoardAggregate
         var result = Dispatch(context, tasks, taskId);
         if (!result.Ok) return result;
         if (mutation && tasks[taskId] is JsonObject changedTask && before != changedTask.ToJsonString()) MarkChanged(state, changedTask);
+        // Standing orders run once the triggering change is marked, so their trigger revision is the task's changeRevision.
+        foreach (var (on, target) in context.OrderTriggers) StandingOrders.Run(context, on, target, "task:" + Number(tasks[target]!.AsObject(), "changeRevision"));
         var data = JsonNode.Parse(result.DataJson)!.AsObject();
         if (Text(data, "taskId") is { Length: > 0 } id && tasks[id] is JsonObject changed) data["changeRevision"] = Number(changed, "changeRevision");
         return result with { DataJson = data.ToJsonString() };
     }
 
-    private static void MarkChanged(JsonObject state, JsonObject task)
+    internal static void MarkChanged(JsonObject state, JsonObject task)
     {
         state["taskRevision"] = Number(state, "taskRevision") + 1;
         task["changeRevision"] = Number(state, "taskRevision");
@@ -54,6 +56,11 @@ internal static class TaskBoardAggregate
             case RelayTools.TaskGet when taskId.Length == 0: return context.Args.ContainsKey("sinceRevision") ? DeltaPage(context.State, context.Args) : ListTasks(context.State, context.Args);
             case RelayTools.ContextGet: return GetContext(context);
             case RelayTools.ContextPut: return PutContext(context);
+            case RelayTools.OrderPut: return StandingOrders.Put(context);
+            case RelayTools.OrderRemove: return StandingOrders.Remove(context);
+            case Operations.Orders: return StandingOrders.Read(context.State, context.Now);
+            case Operations.OrderFire: return StandingOrders.OnFire(context);
+            case Operations.OrderFailed: return StandingOrders.OnFailed(context);
         }
         if (taskId.Length == 0) return Error(InvalidArguments, new { required = "taskId" });
         if (tasks[taskId] is not JsonObject task)
@@ -265,6 +272,7 @@ internal static class TaskBoardAggregate
         // Attention items for this change commit with it: blocked, failed and review_ready to managers, next_work to each unblocked target.
         var failed = ObjectAt(task, "actions").Where(x => x.Value is JsonObject action && Text(action, "status") == "failed" && priorStatus.GetValueOrDefault(x.Key) != "failed").Select(x => x.Key).Order(StringComparer.Ordinal).ToArray();
         AttentionSources.OnTaskUpdate(context, task, priorWorkflow, unblocked, failed);
+        StandingOrders.Detect(context, task, priorWorkflow);
         task["updatedAt"] = context.Now.ToString("O"); task["updatedBy"] = context.Caller.PrincipalId; task["version"] = ++version;
         // An acknowledgment, not the task: echoing the whole task (up to its 256-message conversation) put it into the updater's context again
         // on every milestone, and the stored replay of each request kept a copy too. task_get still returns the task. The actions this

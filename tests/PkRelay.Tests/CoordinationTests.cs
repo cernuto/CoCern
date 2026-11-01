@@ -893,6 +893,253 @@ public sealed class CoordinationTests
         Assert.True(resolved.All(effect => effect.Item["revision"]!.GetValue<long>() > revisions.Max()));
     }
 
+    /// <summary>An operation on a hub that runs standing orders.</summary>
+    private static RelayReply OrderCall(StateEnvelope<CoordinationDocument> state, string kind, string op, JsonObject args, RelayCaller? caller = null, int seconds = 0, string key = "repo/default")
+    {
+        args["repositoryId"] = "repo";
+        return CoordinationStateMachine.Apply(state, kind, key, caller ?? Caller, op, args, Now.AddSeconds(seconds), ordersEnabled: true);
+    }
+
+    private static JsonObject Order(string orderId, JsonObject trigger, params JsonObject[] actions) =>
+        new() { ["requestId"] = Guid.NewGuid().ToString("N"), ["orderId"] = orderId, ["trigger"] = trigger, ["actions"] = new JsonArray(actions.Select(action => (JsonNode)action).ToArray()), ["defaultExpiryDays"] = 7 };
+
+    private static JsonObject OrderTask(StateEnvelope<CoordinationDocument> board, string taskId)
+    {
+        var task = OrderCall(board, "board", "task_get", new() { ["taskId"] = taskId });
+        Assert.True(task.Ok, task.Code);
+        return Data(task);
+    }
+
+    [Fact]
+    public void Standing_order_actions_commit_with_their_trigger_and_never_record_acceptance()
+    {
+        var board = new StateEnvelope<CoordinationDocument>();
+        var worker = new RelayCaller("worker", false, ["repo"], true);
+        Assert.True(OrderCall(board, "board", "task_update", new() { ["taskId"] = "a", ["requestId"] = "a", ["expectedVersion"] = 0, ["workflow"] = DependentWorkflow("ready") }, worker).Ok);
+        Assert.True(OrderCall(board, "board", "task_update", new() { ["taskId"] = "b", ["requestId"] = "b", ["expectedVersion"] = 0, ["workflow"] = DependentWorkflow("ready") }, worker).Ok);
+        Assert.True(OrderCall(board, "board", "task_claim", new() { ["taskId"] = "a", ["requestId"] = "claim", ["expectedVersion"] = 1, ["sessionId"] = "worker-a", ["resourceIds"] = new JsonArray("pc") }, worker).Ok);
+        JsonObject Release() => new() { ["do"] = "release_claims" };
+        JsonObject Offer() => new() { ["do"] = "offer", ["taskId"] = "b", ["sessionId"] = "worker-b" };
+        JsonObject Notify() => new() { ["do"] = "notify", ["sessionId"] = "manager-1", ["note"] = "a is done" };
+        JsonObject Completed(string taskId = "a") => new() { ["on"] = "workflow_completed", ["taskId"] = taskId };
+
+        // Writes need an administrator token and a hub with orders on; a session's role is no authority.
+        Assert.Equal("AdministratorRequired", OrderCall(board, "board", "order_put", Order("o-1", Completed(), Release()), worker).Code);
+        Assert.Equal("OrdersUnavailable", Call(board, "board", "order_put", Order("o-1", Completed(), Release())).Code);
+        // Actions are coordination only: acceptance, unknown tasks, extra fields, a second order on one trigger and long lives are refused.
+        foreach (var (order, field) in new (JsonObject, string)[]
+        {
+            (Order("o-1", Completed(), new JsonObject { ["do"] = "accept" }), "actions[0].do"),
+            (Order("o-1", Completed(), new JsonObject { ["do"] = "release_claims", ["restoration"] = "accepted" }), "actions[0].restoration"),
+            (Order("o-1", Completed("missing"), Release()), "trigger.taskId"),
+            (Order("o-1", new JsonObject { ["on"] = "claim_released", ["taskId"] = "a" }, Release()), "trigger.taskId"),
+            (Order("o-1", Completed(), new JsonObject { ["do"] = "offer", ["taskId"] = "elsewhere", ["sessionId"] = "worker-b" }), "actions[0].taskId"),
+            (Order("o-1", Completed()), "actions"),
+            (Order("o-1", Completed(), Release(), Release(), Release(), Release(), Release()), "actions"),
+        })
+            Assert.Equal(field, Data(OrderCall(board, "board", "order_put", order))["field"]!.GetValue<string>());
+        var tooLong = Order("o-1", Completed(), Release()); tooLong["expiresAt"] = Now.AddDays(RelayLimits.MaxOrderExpiryDays + 1).ToString("O");
+        Assert.Equal("expiresAt", Data(OrderCall(board, "board", "order_put", tooLong))["field"]!.GetValue<string>());
+
+        var put = OrderCall(board, "board", "order_put", Order("o-1", Completed(), Release(), Offer(), Notify()));
+        Assert.True(put.Ok, put.DataJson);
+        Assert.Equal(Now.AddDays(7), DateTimeOffset.Parse(Data(put)["expiresAt"]!.GetValue<string>()));
+        Assert.Equal("o-1", Data(OrderCall(board, "board", "order_put", Order("o-2", Completed(), Notify())))["conflictsWith"]!.GetValue<string>());
+        // An optional expectedRevision must match the write revision, as with standing_put.
+        Assert.Equal(1, put.Version);
+        var stale = Order("o-3", Completed("b"), Notify()); stale["expectedRevision"] = 0;
+        var conflict = OrderCall(board, "board", "order_put", stale);
+        Assert.Equal(("VersionConflict", 1L), (conflict.Code, Data(conflict)["currentRevision"]!.GetValue<long>()));
+        var current = Order("o-3", Completed("b"), Notify()); current["expectedRevision"] = 1;
+        Assert.Equal(2, OrderCall(board, "board", "order_put", current).Version);
+        Assert.True(OrderCall(board, "board", "order_remove", new() { ["requestId"] = "remove-o-3", ["orderId"] = "o-3", ["expectedRevision"] = 2 }).Ok);
+        var seen = board.Effects.Count;
+
+        // A refused completion commits nothing, so no action is emitted without its trigger.
+        Assert.Equal("VersionConflict", OrderCall(board, "board", "task_update", new() { ["taskId"] = "a", ["sessionId"] = "worker-a", ["requestId"] = "stale", ["expectedVersion"] = 1, ["workflow"] = DependentWorkflow("completed") }, worker).Code);
+        Assert.Equal(seen, board.Effects.Count);
+
+        var complete = new JsonObject { ["taskId"] = "a", ["sessionId"] = "worker-a", ["requestId"] = "done", ["expectedVersion"] = 2, ["workflow"] = DependentWorkflow("completed") };
+        var done = OrderCall(board, "board", "task_update", complete.DeepClone().AsObject(), worker);
+        Assert.True(done.Ok, done.DataJson);
+        // The completion and every action commit in the same write: the task claim is released in place, and the resource release,
+        // the offer and the notice are outbox effects in the same envelope.
+        var effects = NewEffects(board, ref seen);
+        var lockRelease = Assert.Single(effects, effect => effect.Operation == "__order_release");
+        Assert.Equal(("pc", "worker-a", "o-1", "repo/default"), (lockRelease.Target, lockRelease.Item["holderSessionId"]!.GetValue<string>(), lockRelease.Item["orderId"]!.GetValue<string>(), lockRelease.Item["boardKey"]!.GetValue<string>()));
+        // The release names the task claim it is for, so the lock never drops a later claim of the same resource.
+        Assert.Equal("default/a#1", lockRelease.Item["claimFor"]!.GetValue<string>());
+        var offer = Assert.Single(effects, effect => effect.Target == "worker-b");
+        Assert.Equal(("__attention_raise", "next_work", "b", "o-1"), (offer.Operation, offer.Item["kind"]!.GetValue<string>(), offer.Item["taskId"]!.GetValue<string>(), offer.Item["subject"]!.GetValue<string>()));
+        var notice = Assert.Single(effects, effect => effect.Target == "manager-1");
+        Assert.Equal(("info", "a is done", "a"), (notice.Item["kind"]!.GetValue<string>(), notice.Item["note"]!.GetValue<string>(), notice.Item["taskId"]!.GetValue<string>()));
+        Assert.All(new[] { lockRelease, offer, notice }, effect => Assert.Equal(lockRelease.Item["run"]!.GetValue<long>(), effect.Item.ContainsKey("run") ? effect.Item["run"]!.GetValue<long>() : effect.Item["revision"]!.GetValue<long>()));
+        var task = OrderTask(board, "a");
+        Assert.False(task.ContainsKey("owner"));
+        Assert.Equal(Data(done)["version"]!.GetValue<long>(), task["version"]!.GetValue<long>());
+
+        // Acceptance stays a manager's decision: the workflow is exactly what the worker reported, no action is accepted, and the
+        // review item still goes to the managers.
+        Assert.Equal(DependentWorkflow("completed").ToJsonString(), task["workflow"]!.ToJsonString());
+        Assert.Empty(task["actions"]!.AsObject());
+        Assert.DoesNotContain("accepted", task.ToJsonString());
+        Assert.Contains(effects, effect => effect.Target == "role:manager" && effect.Item["kind"]?.GetValue<string>() == "review_ready");
+
+        // A retried completion replays its reply and emits nothing again.
+        Assert.Equal(done, OrderCall(board, "board", "task_update", complete.DeepClone().AsObject(), worker));
+        Assert.Empty(NewEffects(board, ref seen));
+        var status = Data(OrderCall(board, "board", "__orders", new()))["orders"]!.AsArray().Single()!.AsObject();
+        Assert.Equal(("o-1", "workflow_completed", "a", 1L, 0L), (status["id"]!.GetValue<string>(), status["on"]!.GetValue<string>(), status["t"]!.GetValue<string>(), status["runs"]!.GetValue<long>(), status["fails"]!.GetValue<long>()));
+
+        // A hub with orders off runs nothing, even for an order written earlier.
+        var reopen = DependentWorkflow("ready");
+        Assert.True(Call(board, "board", "task_update", new() { ["taskId"] = "a", ["requestId"] = "reopen", ["expectedVersion"] = 3, ["workflow"] = reopen }, worker).Ok);
+        Assert.True(Call(board, "board", "task_update", new() { ["taskId"] = "a", ["requestId"] = "again", ["expectedVersion"] = 4, ["workflow"] = DependentWorkflow("completed") }, worker).Ok);
+        Assert.DoesNotContain(NewEffects(board, ref seen), effect => effect.Item.ContainsKey("orderId") || effect.Item["subject"]?.GetValue<string>() == "o-1");
+
+        // Removing an order closes its failure item at the managers; removing it twice is not found.
+        Assert.True(OrderCall(board, "board", "order_remove", new() { ["requestId"] = "remove", ["orderId"] = "o-1" }).Ok);
+        Assert.Contains(NewEffects(board, ref seen), effect => effect is { Target: "role:manager", Operation: "__attention_close" } && effect.Item["subject"]!.GetValue<string>() == "o-1");
+        Assert.Equal("NotFound", OrderCall(board, "board", "order_remove", new() { ["requestId"] = "remove-again", ["orderId"] = "o-1" }).Code);
+    }
+
+    [Fact]
+    public void A_standing_order_offer_applies_the_next_work_checks_and_fails_the_run_otherwise()
+    {
+        var board = new StateEnvelope<CoordinationDocument>();
+        var seen = 0;
+        RelayReply Write(string taskId, JsonObject workflow, long version = 0) => OrderCall(board, "board", "task_update", new() { ["taskId"] = taskId, ["requestId"] = Guid.NewGuid().ToString("N"), ["expectedVersion"] = version, ["workflow"] = workflow });
+        foreach (var id in new[] { "t", "dep", "free" }) Assert.True(Write(id, DependentWorkflow("ready")).Ok);
+        Assert.True(Write("waiting", DependentWorkflow("ready", "dep")).Ok);
+        // A grant named in authorityRef that is later removed.
+        Assert.True(OrderCall(board, "board", "standing_put", new() { ["requestId"] = "grant", ["expectedRevision"] = 0, ["grants"] = new JsonArray(new JsonObject { ["id"] = "g", ["scope"] = "repository", ["expiresAt"] = Now.AddDays(1).ToString("O") }) }).Ok);
+        var granted = DependentWorkflow("ready"); granted["packet"]!["authorityRef"] = "grant:g";
+        Assert.True(Write("granted", granted).Ok);
+        Assert.True(OrderCall(board, "board", "standing_put", new() { ["requestId"] = "ungrant", ["expectedRevision"] = 1, ["remove"] = new JsonArray("g") }).Ok);
+        // Claimed by another session, and claimed by the offered session with an action in flight.
+        Assert.True(Write("taken", DependentWorkflow("ready")).Ok);
+        Assert.True(OrderCall(board, "board", "task_claim", new() { ["taskId"] = "taken", ["requestId"] = "taken", ["expectedVersion"] = 1, ["sessionId"] = "other" }).Ok);
+        Assert.True(Write("busy", DependentWorkflow("ready")).Ok);
+        Assert.True(OrderCall(board, "board", "task_claim", new() { ["taskId"] = "busy", ["requestId"] = "busy", ["expectedVersion"] = 1, ["sessionId"] = "s" }).Ok);
+        Assert.True(OrderCall(board, "board", "action_begin", new() { ["taskId"] = "busy", ["sessionId"] = "s", ["requestId"] = "busy-begin", ["expectedVersion"] = 2, ["actionId"] = "a", ["inputFingerprint"] = "f" }).Ok);
+        Assert.True(OrderCall(board, "board", "task_update", new() { ["taskId"] = "plain", ["requestId"] = "plain", ["expectedVersion"] = 0 }).Ok);
+        JsonObject Offer(string taskId) => new() { ["do"] = "offer", ["taskId"] = taskId, ["sessionId"] = "s" };
+        Assert.True(OrderCall(board, "board", "order_put", Order("o-1", new JsonObject { ["on"] = "workflow_completed", ["taskId"] = "t" }, Offer("waiting"), Offer("granted"), Offer("taken"), Offer("busy"))).Ok);
+        Assert.True(OrderCall(board, "board", "order_put", Order("o-2", new JsonObject { ["on"] = "workflow_completed", ["taskId"] = "free" }, Offer("plain"), Offer("free"))).Ok);
+        NewEffects(board, ref seen);
+
+        Assert.True(Write("t", DependentWorkflow("completed"), 1).Ok);
+        var effects = NewEffects(board, ref seen);
+        // No offer goes out; the run fails with every reason, logged and raised to the managers.
+        Assert.DoesNotContain(effects, effect => effect.Target == "s");
+        var failed = Assert.Single(effects, effect => effect.Item["kind"]?.GetValue<string>() == "order_failed");
+        var note = failed.Item["note"]!.GetValue<string>();
+        foreach (var reason in new[] { "task waiting has dependencies not completed", "task granted names a grant that is unknown", "task taken is claimed by another session", "task busy has an unresolved action" })
+            Assert.Contains(reason, note);
+        Assert.Equal(1L, Data(OrderCall(board, "board", "__orders", new()))["orders"]!.AsArray().Single(order => order!["id"]!.GetValue<string>() == "o-1")!["fails"]!.GetValue<long>());
+
+        // A task without a workflow is never offered; the task that completed is not offered either.
+        Assert.True(Write("free", DependentWorkflow("completed"), 1).Ok);
+        var second = Assert.Single(NewEffects(board, ref seen), effect => effect.Item["kind"]?.GetValue<string>() == "order_failed").Item["note"]!.GetValue<string>();
+        Assert.Contains("task plain has no workflow", second);
+        Assert.Contains("task free is completed", second);
+    }
+
+    [Fact]
+    public void Standing_orders_are_idempotent_on_redelivery_raise_failures_disable_after_three_and_never_fire_expired()
+    {
+        var board = new StateEnvelope<CoordinationDocument>();
+        var printer = new StateEnvelope<CoordinationDocument>();
+        var seen = 0;
+        RelayReply Lock(string op, JsonObject args, int seconds = 0) => OrderCall(printer, "lock", op, args, seconds: seconds, key: "pc");
+        Assert.True(OrderCall(board, "board", "task_update", new() { ["taskId"] = "t", ["requestId"] = "t", ["expectedVersion"] = 0, ["workflow"] = DependentWorkflow("ready") }).Ok);
+        Assert.True(OrderCall(board, "board", "task_claim", new() { ["taskId"] = "t", ["requestId"] = "claim", ["expectedVersion"] = 1, ["sessionId"] = "holder" }).Ok);
+        Assert.True(OrderCall(board, "board", "action_begin", new() { ["taskId"] = "t", ["sessionId"] = "holder", ["requestId"] = "begin", ["expectedVersion"] = 2, ["actionId"] = "print", ["inputFingerprint"] = "f" }).Ok);
+        var put = Order("o-1", new JsonObject { ["on"] = "claim_released", ["resourceId"] = "pc" }, new JsonObject { ["do"] = "release_claims", ["taskId"] = "t" });
+        Assert.True(OrderCall(board, "board", "order_put", put).Ok);
+        // The order asks the lock it watches to tell this board when its claim is released.
+        var watch = Assert.Single(NewEffects(board, ref seen), effect => effect.Operation == "__order_watch");
+        Assert.Equal(("pc", true), (watch.Target, watch.Item["watch"]!.GetValue<bool>()));
+        Assert.True(Lock("__order_watch", watch.Item.DeepClone().AsObject()).Ok);
+
+        // A release tells the board with the lock's generation; delivering that twice runs the order once.
+        var lockSeen = 0;
+        Assert.True(Lock("claim_acquire", new() { ["sessionId"] = "other", ["requestId"] = "acquire" }).Ok);
+        Assert.True(Lock("claim_release", new() { ["sessionId"] = "other", ["requestId"] = "release", ["generation"] = 1 }).Ok);
+        var fire = Assert.Single(NewEffects(printer, ref lockSeen), effect => effect.Operation == "__order_fire");
+        Assert.Equal(("repo/default", "pc", 1L), (fire.Target, fire.Item["resourceId"]!.GetValue<string>(), fire.Item["generation"]!.GetValue<long>()));
+        Assert.True(OrderCall(board, "board", "__order_fire", fire.Item.DeepClone().AsObject()).Ok);
+        // Its task has an action in flight, so the release fails: logged, raised to the managers, never retried.
+        var failed = Assert.Single(NewEffects(board, ref seen));
+        Assert.Equal(("role:manager", "__attention_raise", "order_failed", "o-1"), (failed.Target, failed.Operation, failed.Item["kind"]!.GetValue<string>(), failed.Item["subject"]!.GetValue<string>()));
+        Assert.Contains("unresolved action", failed.Item["note"]!.GetValue<string>());
+        Assert.True(OrderCall(board, "board", "__order_fire", fire.Item.DeepClone().AsObject()).Ok);
+        Assert.Empty(NewEffects(board, ref seen));
+        Assert.Equal("holder", OrderTask(board, "t")["owner"]!.GetValue<string>());
+
+        // Two more failed runs disable the order; a disabled order does not run.
+        for (var generation = 2; generation <= 4; generation++)
+        {
+            var again = fire.Item.DeepClone().AsObject(); again["generation"] = generation;
+            Assert.True(OrderCall(board, "board", "__order_fire", again).Ok);
+            var raised = NewEffects(board, ref seen);
+            if (generation == 4) { Assert.Empty(raised); continue; }
+            Assert.Equal("order_failed", Assert.Single(raised).Item["kind"]!.GetValue<string>());
+            if (generation == 3) Assert.Contains("disabled after 3 failures", raised[0].Item["note"]!.GetValue<string>());
+        }
+        var status = Data(OrderCall(board, "board", "__orders", new()))["orders"]!.AsArray().Single()!.AsObject();
+        Assert.Equal((3L, 3L, true), (status["runs"]!.GetValue<long>(), status["fails"]!.GetValue<long>(), status["off"]!.GetValue<bool>()));
+        Assert.Contains("unresolved action", status["err"]!.GetValue<string>());
+
+        // A lock-side release runs once per order run, leaves a claim the owner no longer holds alone, and reports an unresolved action back.
+        Assert.True(Lock("claim_acquire", new() { ["sessionId"] = "holder", ["requestId"] = "hold", ["taskId"] = "t", ["taskClaimGeneration"] = 1 }).Ok);
+        NewEffects(printer, ref lockSeen);
+        var release = new JsonObject { ["boardKey"] = "repo/default", ["boardId"] = "default", ["holderSessionId"] = "holder", ["claimFor"] = "default/t#1", ["orderId"] = "o-9", ["run"] = 7 };
+        Assert.True(Lock("__block", new() { ["actionId"] = "print", ["sessionId"] = "holder" }).Ok);
+        Assert.True(Data(Lock("__order_release", release.DeepClone().AsObject()))["failed"]!.GetValue<bool>());
+        var back = Assert.Single(NewEffects(printer, ref lockSeen));
+        Assert.Equal(("repo/default", "__order_failed", "o-9", 7L), (back.Target, back.Operation, back.Item["orderId"]!.GetValue<string>(), back.Item["run"]!.GetValue<long>()));
+        Assert.True(Data(Lock("__order_release", release.DeepClone().AsObject()))["repeated"]!.GetValue<bool>());
+        Assert.Empty(NewEffects(printer, ref lockSeen));
+        Assert.True(Lock("__unblock", new() { ["actionId"] = "print", ["sessionId"] = "holder" }).Ok);
+        // Complete, then claim again: the holder took the same resource for its next task (same lock generation) before the order's
+        // release arrived. The late release leaves the new claim alone.
+        Assert.True(Lock("claim_acquire", new() { ["sessionId"] = "holder", ["requestId"] = "hold-next", ["taskId"] = "t2", ["taskClaimGeneration"] = 1 }).Ok);
+        release["run"] = 8;
+        var late = Data(Lock("__order_release", release.DeepClone().AsObject()));
+        Assert.Equal((false, true), (late["released"]!.GetValue<bool>(), late["claimedAgain"]!.GetValue<bool>()));
+        Assert.Equal("Busy", Lock("claim_acquire", new() { ["sessionId"] = "someone", ["requestId"] = "steal" }).Code);
+        Assert.Empty(NewEffects(printer, ref lockSeen));
+        // A release for the claim the grant serves now does release it.
+        release["run"] = 9; release["claimFor"] = "default/t2#1";
+        Assert.True(Data(Lock("__order_release", release.DeepClone().AsObject()))["released"]!.GetValue<bool>());
+        Assert.Contains(NewEffects(printer, ref lockSeen), effect => effect.Operation == "__order_fire");
+        release["run"] = 10;
+        Assert.False(Data(Lock("__order_release", release.DeepClone().AsObject()))["released"]!.GetValue<bool>());
+        // A late failure report for an order run that is not the latest is logged but not counted.
+        Assert.False(Data(OrderCall(board, "board", "__order_failed", new() { ["orderId"] = "o-1", ["run"] = 1, ["reason"] = "late" }))["counted"]!.GetValue<bool>());
+
+        // An expired order never runs.
+        Assert.True(OrderCall(board, "board", "task_update", new() { ["taskId"] = "u", ["requestId"] = "u", ["expectedVersion"] = 0, ["workflow"] = DependentWorkflow("ready") }).Ok);
+        var brief = Order("o-2", new JsonObject { ["on"] = "workflow_completed", ["taskId"] = "u" }, new JsonObject { ["do"] = "notify", ["sessionId"] = "manager-1" });
+        brief["expiresAt"] = Now.AddHours(1).ToString("O");
+        Assert.True(OrderCall(board, "board", "order_put", brief).Ok);
+        NewEffects(board, ref seen);
+        Assert.True(OrderCall(board, "board", "task_update", new() { ["taskId"] = "u", ["requestId"] = "u-done", ["expectedVersion"] = 1, ["workflow"] = DependentWorkflow("completed") }, seconds: 7200).Ok);
+        Assert.DoesNotContain(NewEffects(board, ref seen), effect => effect.Target == "manager-1");
+        Assert.True(Data(OrderCall(board, "board", "__orders", new(), seconds: 7200))["orders"]!.AsArray().Single(order => order!["id"]!.GetValue<string>() == "o-2")!["expired"]!.GetValue<bool>());
+
+        // A board with no order on a lock any more asks the lock to stop telling it.
+        Assert.True(OrderCall(board, "board", "order_remove", new() { ["requestId"] = "remove", ["orderId"] = "o-1" }).Ok);
+        var unwatch = Assert.Single(NewEffects(board, ref seen), effect => effect.Operation == "__order_watch");
+        Assert.False(unwatch.Item["watch"]!.GetValue<bool>());
+        Assert.False(Data(OrderCall(board, "board", "__order_fire", fire.Item.DeepClone().AsObject()))["ran"]!.GetValue<bool>());
+        Assert.True(Lock("__order_watch", unwatch.Item.DeepClone().AsObject()).Ok);
+        Assert.True(Lock("claim_acquire", new() { ["sessionId"] = "next", ["requestId"] = "next" }).Ok);
+        Assert.True(Lock("claim_release", new() { ["sessionId"] = "next", ["requestId"] = "next-release", ["generation"] = 3 }).Ok);
+        Assert.DoesNotContain(NewEffects(printer, ref lockSeen), effect => effect.Operation == "__order_fire");
+    }
+
     public class TestGrainFactory : DispatchProxy
     {
         private readonly Dictionary<string, TestAggregate> aggregates = [];

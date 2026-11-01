@@ -41,6 +41,19 @@ public class ToolDiscoveryTests
     }
 
     [Fact]
+    public void Order_tools_are_discovered_only_by_administrators()
+    {
+        foreach (var name in new[] { RelayTools.OrderPut, RelayTools.OrderRemove })
+        {
+            Assert.Contains(name, PkRelay.Adapter.CoordinationTools.NamesForRole(true));
+            Assert.DoesNotContain(name, PkRelay.Adapter.CoordinationTools.NamesForRole(false));
+            Assert.True(PkRelay.Adapter.CoordinationTools.IsAllowed(name, admin: true));
+            Assert.False(PkRelay.Adapter.CoordinationTools.IsAllowed(name, admin: false));
+            Assert.False(PkRelay.Adapter.CoordinationTools.IsAllowed(name, admin: true, chatOnly: true));
+        }
+    }
+
+    [Fact]
     public void Search_is_discovered_by_every_session_role_but_not_the_chat_profile()
     {
         Assert.Contains(RelayTools.Search, PkRelay.Adapter.CoordinationTools.NamesForRole(true));
@@ -98,6 +111,11 @@ public class ToolDiscoveryTests
     [InlineData("analytics_query", "name", "string")]
     [InlineData("analytics_query", "params", "object")]
     [InlineData("analytics_query", "sql", "string")]
+    [InlineData("order_put", "orderId", "string")]
+    [InlineData("order_put", "trigger", "object")]
+    [InlineData("order_put", "actions", "array")]
+    [InlineData("order_put", "expiresAt", "string")]
+    [InlineData("order_remove", "orderId", "string")]
     public void Forwarding_tools_advertise_arguments_needed_for_chat_coordination(string toolName, string field, string type)
     {
         Assert.True(RelayToolCatalog.TryGet(toolName, out var tool));

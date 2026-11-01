@@ -468,6 +468,80 @@ public class HostTests
     }
 
     [Fact]
+    public async Task Standing_orders_are_off_by_default_need_an_administrator_and_run_through_the_pump_when_on()
+    {
+        static async Task<(HttpStatusCode Status, string Code, JsonElement Data)> Tool(HttpClient client, string tool, object arguments)
+        {
+            using var response = await client.PostAsJsonAsync("/api/tools/" + tool, arguments);
+            var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+            return (response.StatusCode, body.GetProperty("code").GetString()!, JsonDocument.Parse(body.GetProperty("dataJson").GetString()!).RootElement.Clone());
+        }
+        static async Task<(HttpStatusCode Status, string Code)> Outcome(HttpClient client, string tool, object arguments) { var (status, code, _) = await Tool(client, tool, arguments); return (status, code); }
+        Dictionary<string, string?> Settings(bool? enabled) => new()
+        {
+            ["Relay:Clients:1:Token"] = AnalyticsAdminToken, ["Relay:Clients:1:PrincipalId"] = "orders-admin", ["Relay:Clients:1:IsAdministrator"] = "true", ["Relay:Clients:1:Repositories:0"] = "repo",
+            ["Relay:Orders:Enabled"] = enabled?.ToString()
+        };
+        var order = new { repositoryId = "repo", requestId = "order", orderId = "o-1", trigger = new { on = "workflow_completed", taskId = "T-1" }, actions = new object[] { new { @do = "notify", sessionId = "s" } } };
+        await using (var off = new RelayHostFixture(settings: Settings(null)))
+        {
+            using var worker = off.AuthorizedClient();
+            using var admin = AnalyticsAdmin(off);
+            Assert.False(off.Services.GetRequiredService<OrderOptions>().Enabled);
+            Assert.Equal(RelayLimits.DefaultOrderExpiryDays, off.Services.GetRequiredService<OrderOptions>().DefaultExpiryDays);
+            // The worker learns nothing about the hub's settings; an administrator is told orders are off.
+            Assert.Equal((HttpStatusCode.Forbidden, "AdministratorRequired"), await Outcome(worker, "order_put", order));
+            var refused = await Tool(admin, "order_put", order);
+            Assert.Equal((HttpStatusCode.BadRequest, "OrdersUnavailable"), (refused.Status, refused.Code));
+            Assert.Contains("Relay:Orders:Enabled", refused.Data.GetProperty("message").GetString());
+            Assert.Equal((HttpStatusCode.BadRequest, "OrdersUnavailable"), await Outcome(admin, "order_remove", new { repositoryId = "repo", requestId = "remove", orderId = "o-1" }));
+            Assert.DoesNotContain("order_put", PkRelay.Host.ToolResults.Tools(false).Select(tool => tool.Name));
+            Assert.Contains("order_remove", PkRelay.Host.ToolResults.Tools(true).Select(tool => tool.Name));
+        }
+        foreach (var value in new[] { "0", "31" })
+        {
+            await using var bad = new RelayHostFixture(settings: new Dictionary<string, string?> { ["Relay:Orders:DefaultExpiryDays"] = value });
+            Assert.Contains("Relay:Orders:DefaultExpiryDays", Assert.ThrowsAny<Exception>(() => bad.Services.GetRequiredService<OrderOptions>()).ToString());
+        }
+
+        await using var on = new RelayHostFixture(settings: Settings(true));
+        using var onAdmin = AnalyticsAdmin(on);
+        var manager = Data(await on.Call(onAdmin, "session_open", new { repositoryId = "repo", requestId = "orders-manager", role = "manager" }));
+        var session = new { sessionId = manager.GetProperty("sessionId").GetString(), sessionToken = manager.GetProperty("sessionToken").GetString() };
+        var workflow = new Dictionary<string, object?>
+        {
+            ["state"] = "ready", ["packet"] = new { goal = "g", target = "t", authorityRef = "a", restoration = "r", stopCondition = "s" },
+            ["criteria"] = new[] { new { id = "c", description = "d", result = "not_run" } }, ["blockers"] = Array.Empty<object>()
+        };
+        Data(await on.Call(onAdmin, "task_update", new { repositoryId = "repo", requestId = "t1", taskId = "T-1", expectedVersion = 0, workflow, session.sessionId, session.sessionToken, attention = false }));
+        var put = await Tool(onAdmin, "order_put", new { repositoryId = "repo", requestId = "order", orderId = "o-1", trigger = new { on = "workflow_completed", taskId = "T-1" }, actions = new object[] { new { @do = "notify", sessionId = session.sessionId, note = "T-1 done" } } });
+        Assert.Equal((HttpStatusCode.OK, "Ok"), (put.Status, put.Code));
+        workflow["state"] = "completed"; workflow["criteria"] = new[] { new { id = "c", description = "d", result = "passed", evidenceRef = "artifact:1" } };
+        Data(await on.Call(onAdmin, "task_update", new { repositoryId = "repo", requestId = "t1-done", taskId = "T-1", expectedVersion = 1, workflow, session.sessionId, session.sessionToken, attention = false }));
+        // The hub's due-work pump delivers the notice; get_status lists the order with its run.
+        var deadline = DateTime.UtcNow.AddSeconds(20);
+        var status = Data(await on.Call(onAdmin, "get_status", new { repositoryId = "repo", session.sessionId, session.sessionToken }));
+        while (status.GetProperty("attention").GetProperty("actionable").GetInt32() < 1 && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(50);
+            status = Data(await on.Call(onAdmin, "get_status", new { repositoryId = "repo", session.sessionId, session.sessionToken }));
+        }
+        var listed = Assert.Single(status.GetProperty("orders").EnumerateArray());
+        Assert.Equal(("o-1", 1), (listed.GetProperty("id").GetString(), listed.GetProperty("runs").GetInt32()));
+        var notes = new List<string>();
+        for (var turn = 0; turn < 4; turn++)
+        {
+            var inbox = Data(await on.Call(onAdmin, "check_inbox", new { repositoryId = "repo", session.sessionId, session.sessionToken }));
+            if (!inbox.TryGetProperty("attention", out var item)) break;
+            notes.Add(item.GetProperty("x").GetString()!);
+            Data(await on.Call(onAdmin, "attention_respond", new { repositoryId = "repo", requestId = "dismiss-" + turn, session.sessionId, session.sessionToken, itemId = item.GetProperty("id").GetString(), action = "dismiss" }));
+        }
+        Assert.Contains(notes, note => note.Contains("T-1 done"));
+        Assert.Equal((HttpStatusCode.OK, "Ok"), await Outcome(onAdmin, "order_remove", new { repositoryId = "repo", requestId = "remove", orderId = "o-1" }));
+        Assert.False(Data(await on.Call(onAdmin, "get_status", new { repositoryId = "repo" })).TryGetProperty("orders", out _));
+    }
+
+    [Fact]
     public async Task Analytics_query_runs_named_queries_and_refuses_ad_hoc_sql_unless_enabled()
     {
         await using var host = await AnalyticsHost(enabled: true);
