@@ -16,7 +16,8 @@ internal static class ToolSchemas
         {
             RelayTools.SessionOpen => ["machineId", "label"],
             RelayTools.TaskGet => ["taskId", "section", "sinceRevision", "snapshotRevision", "cursor", "limit"],
-            RelayTools.TaskUpdate => ["taskId", "expectedVersion", "workflow", "includeNextWork", "usage"],
+            RelayTools.TaskUpdate => ["taskId", "expectedVersion", "workflow", "includeNextWork", "usage", "attention"],
+            RelayTools.TaskClaim or RelayTools.ActionReport => ["attention"],
             RelayTools.SendMessage => ["text", "recipientSessionId", "taskId", "replyTo", "ackMessageIds", "supersede", "wake"],
             RelayTools.CheckInbox => ["cursor", "limit"],
             RelayTools.Ack => ["messageId", "messageIds"],
@@ -53,6 +54,8 @@ internal static class ToolSchemas
             properties["action"] = new { type = "string", @enum = AttentionActions.All };
             properties["until"] = new { type = "string", description = "Optional ISO time for later." };
         }
+        // Each boundary tool advertises the attention opt-out with a short description; InputSchema gives the full one.
+        if (properties.ContainsKey("attention")) properties["attention"] = new { type = "boolean", description = "false: no attention offer." };
         // The same budget leaves room only for typed names of workflow dependsOn and packet.resources; InputSchema describes them in full.
         if (properties.ContainsKey("workflow")) properties["workflow"] = WorkflowSchema(compact: true);
         return properties;
@@ -101,10 +104,13 @@ internal static class ToolSchemas
                 properties["workflow"] = WorkflowSchema();
                 properties["includeNextWork"] = new { type = "boolean", description = "Also return an advisory nextWork offer; it acquires no claim and authorizes no execution." };
                 properties["usage"] = UsageSchema();
+                properties["attention"] = AttentionOptOut();
                 break;
             case RelayTools.TaskClaim:
             case RelayTools.ClaimAcquire:
-                Integer("leaseSeconds", "Advisory lease from 1 to 1800 seconds; default 120."); break;
+                Integer("leaseSeconds", "Advisory lease from 1 to 1800 seconds; default 120.");
+                if (tool == RelayTools.TaskClaim) properties["attention"] = AttentionOptOut();
+                break;
             case RelayTools.ClaimRenew:
             case RelayTools.ClaimRelease:
                 Integer("generation", "Required current resource grant generation when resourceId is supplied.");
@@ -118,7 +124,7 @@ internal static class ToolSchemas
                 properties["outcome"] = new { type = "string", @enum = new[] { "started", "completed", "failed", "canceled", "incomplete", "unknown" } };
                 properties["restoration"] = new { type = "string", @enum = new[] { "pending", "blocked", "verified", "accepted" } };
                 properties["report"] = new { description = "Bounded reported evidence; not a claim that the relay performed or verified external execution." };
-                properties["usage"] = UsageSchema(); break;
+                properties["usage"] = UsageSchema(); properties["attention"] = AttentionOptOut(); break;
             case RelayTools.SendMessage:
                 Text("text", "Message text, at most 8 KiB. Supply taskId for shared conversation, otherwise recipientSessionId for private delivery.");
                 Text("replyTo", "Optional ID of the message this replies to.");
@@ -204,6 +210,8 @@ internal static class ToolSchemas
         required = new[] { "scope", "expiresAt" }.Concat(idRequired ? ["id"] : Array.Empty<string>()).ToArray(),
         description = "Typed authority with a scope and an expiry."
     };
+
+    private static object AttentionOptOut() => new { type = "boolean", description = "false skips the attention offer on this reply, for work that must not be interrupted." };
 
     private static object UsageSchema()
     {

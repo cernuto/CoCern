@@ -210,6 +210,7 @@ internal static class TaskBoardAggregate
             task["owner"] = Required(args, "sessionId"); task["claimGeneration"] = Number(task, "claimGeneration") + 1; task["claimRequestId"] = Text(args, "requestId");
             task["leaseUntil"] = context.Now.AddSeconds(Leases.Seconds(args)).ToString("O"); task["version"] = ++version;
             task["resourceIds"] = args["resourceIds"]?.DeepClone() ?? new JsonArray();
+            AttentionSources.OnClaim(context, task);
         }
         return Ok(new { taskId = Text(args, "taskId"), newlyAcquired = !owned, claimGeneration = Number(task, "claimGeneration"), leaseUntil = Text(task, "leaseUntil"), resourceIds = task["resourceIds"] }, version);
     }
@@ -232,6 +233,7 @@ internal static class TaskBoardAggregate
             if (!packetRecovery || Date(task, "leaseUntil") > context.Now) return Error(OwnerConflict);
             if (TaskActions.HasUnresolved(task)) return Error(UnresolvedAction);
         }
+        var priorStatus = ObjectAt(task, "actions").ToDictionary(x => x.Key, x => x.Value is JsonObject action ? Text(action, "status") : "", StringComparer.Ordinal);
         foreach (var report in reports)
             if (TaskActions.ApplyReport(context, task, report!.AsObject()) is { } failure) return failure;
         if (args["patch"] is JsonObject patch)
@@ -246,6 +248,7 @@ internal static class TaskBoardAggregate
         }
         if (args["message"] is JsonObject message) AddMessage(context, task, message);
         IReadOnlyList<string> unblocked = [];
+        var priorWorkflow = task["workflow"]?.DeepClone() as JsonObject;
         if (args.ContainsKey("workflow"))
         {
             if (context.Operation != RelayTools.TaskUpdate || args["workflow"] is not JsonObject workflow) return Error(InvalidWorkflow);
@@ -257,10 +260,11 @@ internal static class TaskBoardAggregate
             if (TaskWorkflow.CheckDependencies(tasks, Text(task, "taskId"), workflow) is { } dependency) return Error(dependency);
             var completing = Text(workflow, "state") == "completed" && (task["workflow"] is not JsonObject prior || Text(prior, "state") != "completed");
             task["workflow"] = workflow.DeepClone();
-            // Seam for attention (build steps 7-8): raise a next_work item to each unblocked task's targetSessionId here.
-            // Always send a revision (the task's changeRevision) so a late or repeated raise can never reopen a closed item.
             if (completing) unblocked = TaskWorkflow.Unblocked(tasks, Text(task, "taskId"));
         }
+        // Attention items for this change commit with it: blocked, failed and review_ready to managers, next_work to each unblocked target.
+        var failed = ObjectAt(task, "actions").Where(x => x.Value is JsonObject action && Text(action, "status") == "failed" && priorStatus.GetValueOrDefault(x.Key) != "failed").Select(x => x.Key).Order(StringComparer.Ordinal).ToArray();
+        AttentionSources.OnTaskUpdate(context, task, priorWorkflow, unblocked, failed);
         task["updatedAt"] = context.Now.ToString("O"); task["updatedBy"] = context.Caller.PrincipalId; task["version"] = ++version;
         // An acknowledgment, not the task: echoing the whole task (up to its 256-message conversation) put it into the updater's context again
         // on every milestone, and the stored replay of each request kept a copy too. task_get still returns the task. The actions this

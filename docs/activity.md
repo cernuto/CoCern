@@ -6,7 +6,7 @@ The hub records every tool call in the `activity_log` table, so you can measure 
 
 One row per public tool call, from REST, MCP and SignalR alike: time, repository, session, the session's `role` from `session_open`, tool, result code, request and reply size, and duration. A row never holds arguments or reply text. It keeps only the task or note the call wrote, and a short fingerprint of the status text it wrote there.
 
-The hub also adds one `wake` row each time a message that can wake its chat lands in a session inbox.
+The hub also adds one `wake` row each time a message that can wake its chat lands in a session inbox, or a new tier 1 [attention](attention.md) item is stored. Each attention offer shown and each answer adds one `attention` row: `tool` is the item's kind and `code` is `shown`, `accepted`, `later` or `dismissed`. Expired items are not recorded.
 
 A background writer saves rows about once a second, in its own short transaction. Once a day it rolls rows older than the retention period into `activity_daily` (one row per day, repository, role and tool) and deletes them.
 
@@ -27,7 +27,7 @@ Counters are read per repository and time window from `activity_log`.
 | Counter | Exact definition |
 | --- | --- |
 | Tokens | Sum of reported `inputTokens` and `outputTokens` on successful calls. An exact retry (same session, tool and `requestId`) counts once. |
-| Wakes | New messages stored in a session inbox without `wake: false`. Redeliveries do not count. Whether the chat's model actually ran is up to the adapter and is not seen here. |
+| Wakes | New messages stored in a session inbox without `wake: false`, and new tier 1 attention items. Redeliveries do not count. A wake an idle chat gets after the attention hold is not counted. Whether the chat's model actually ran is up to the adapter and is not seen here. |
 | Inbox reads | Bursts of successful first-page `check_inbox` calls (`cursor` 0 or absent) by one session. A burst ends after 60 seconds with no such read, so one adapter wait that polls every 2 seconds is one read, and so are back-to-back waits. Later pages belong to the same read. |
 | Offers made | Replies to `task_update` with `includeNextWork` that offered a task. |
 | Offers that ended blocked | An offer of task X to session S that ended in S's next `task_claim` of X failing, or in X's workflow being set to `blocked` before S claimed it or it completed. Offers still open are not counted. |
@@ -54,7 +54,7 @@ GROUP BY role, tool ORDER BY calls DESC;
 SELECT day, role, tool, calls, input_tokens, output_tokens FROM activity_daily ORDER BY day DESC LIMIT 50;
 ```
 
-`at_ticks` is .NET UTC ticks. `kind` is `call` or `wake`.
+`at_ticks` is .NET UTC ticks. `kind` is `call`, `wake` or `attention`.
 
 ## Settings
 

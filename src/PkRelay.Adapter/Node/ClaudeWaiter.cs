@@ -39,7 +39,10 @@ public static class ClaudeWaiter
         string? prompt = null;
         var status = await WaitAsync(nodeFolder, claudeSessionId, text => prompt = text, timeout, cancellationToken, handler, hubHandler, clock);
         if (status != "queued") return status;
-        deliver(await ReadInboxAsync(nodeFolder, claudeSessionId, handler, cancellationToken) ?? prompt!);
+        var printed = await ReadInboxAsync(nodeFolder, claudeSessionId, handler, cancellationToken);
+        // An attention line in the prompt names the waiting item; it is kept when the inbox replaces the prompt.
+        var attention = prompt!.Split('\n').FirstOrDefault(line => line.StartsWith(WakeReconciler.AttentionLinePrefix, StringComparison.Ordinal));
+        deliver(printed is null ? prompt : attention is null ? printed : printed + "\n" + attention);
         return status;
     }
 

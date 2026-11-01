@@ -224,6 +224,97 @@ public sealed class AdapterTests
     private static JsonElement Parse(string json) => JsonSerializer.Deserialize<JsonElement>(json);
     private static HttpResponseMessage Json(string json) => new(HttpStatusCode.OK) { Content = new StringContent(json, Encoding.UTF8, "application/json") };
 
+    /// <summary>An enrolled loopback node folder with one session handle for <paramref name="chatId"/>.</summary>
+    private static string HookNode(string chatId)
+    {
+        var folder = Path.Combine(Path.GetTempPath(), "pkrelay-hook-" + Guid.NewGuid().ToString("N"));
+        using (var seed = PkRelay.Adapter.Node.NodeState.Open(folder)) { seed.SetHub("http://127.0.0.1:5271/", null); seed.SaveCredential(new string('c', 64)); }
+        PkRelay.Adapter.Node.NodeState.WriteSessionHandle(folder, new PkRelay.Adapter.Node.SessionHandle("s-hook", "synthetic-token-hook", "repo", "Hook chat", DateTimeOffset.UtcNow.AddMinutes(-1), Chat: new PkRelay.Adapter.Node.ChatLocation("claude", chatId)));
+        return folder;
+    }
+
+    private static HttpResponseMessage StatusReply(string attention) => new(HttpStatusCode.OK)
+    {
+        Content = new StringContent(JsonSerializer.Serialize(new { ok = true, code = "ok", dataJson = "{\"sessionId\":\"s-hook\",\"attention\":" + attention + "}", version = 0 }), Encoding.UTF8, "application/json")
+    };
+
+    private sealed class HookClock : TimeProvider
+    {
+        public DateTimeOffset Now = new(2026, 11, 1, 9, 0, 0, TimeSpan.Zero);
+        public override DateTimeOffset GetUtcNow() => Now;
+    }
+
+    [Fact]
+    public async Task Prompt_hook_prints_one_line_and_reuses_it_for_thirty_seconds()
+    {
+        var chatId = Guid.NewGuid().ToString();
+        var folder = HookNode(chatId);
+        try
+        {
+            var calls = 0;
+            string? sent = null;
+            using var hub = new StubHandler(async (request, ct) =>
+            {
+                calls++;
+                sent = await request.Content!.ReadAsStringAsync(ct);
+                Assert.EndsWith("/get_status", request.RequestUri!.AbsolutePath);
+                return StatusReply("{\"actionable\":3,\"urgent\":1,\"inbox\":2,\"standing\":4,\"top\":{\"id\":\"a-91\",\"k\":\"blocked\",\"t\":\"T-12\"},\"wake\":\"a-91\"}");
+            });
+            var clock = new HookClock();
+            var input = JsonSerializer.Serialize(new { session_id = chatId, hook_event_name = "UserPromptSubmit", prompt = "UNTRUSTED PROMPT" });
+            var line = await PkRelay.Adapter.Node.PromptHook.LineAsync(input, folder, TimeSpan.FromSeconds(5), hub, clock);
+            Assert.Equal("PkRelay: 3 attention items (1 urgent), 2 inbox, standing r4; top a-91 blocked \"T-12\".", line);
+            Assert.DoesNotContain('\n', line);
+            // It asks as the chat's own session for the detail, and never sends the prompt.
+            using (var body = JsonDocument.Parse(sent!))
+            {
+                Assert.Equal(("s-hook", "synthetic-token-hook", true), (body.RootElement.GetProperty("sessionId").GetString(), body.RootElement.GetProperty("sessionToken").GetString(), body.RootElement.GetProperty("attentionDetail").GetBoolean()));
+                Assert.DoesNotContain("UNTRUSTED", sent);
+            }
+            // Within 30 seconds the cached line is printed without calling the hub; after that the hub is asked again.
+            clock.Now += TimeSpan.FromSeconds(29);
+            Assert.Equal(line, await PkRelay.Adapter.Node.PromptHook.LineAsync(input, folder, TimeSpan.FromSeconds(5), hub, clock));
+            Assert.Equal(1, calls);
+            clock.Now += TimeSpan.FromSeconds(2);
+            Assert.Equal(line, await PkRelay.Adapter.Node.PromptHook.LineAsync(input, folder, TimeSpan.FromSeconds(5), hub, clock));
+            Assert.Equal(2, calls);
+            // The whole command prints exactly one line and exits 0.
+            using var output = new StringWriter();
+            Assert.Equal(0, await PkRelay.Adapter.Node.PromptHook.RunAsync(new StringReader(input), output, folder, hub, clock));
+            Assert.Equal(line + Environment.NewLine, output.ToString());
+        }
+        finally { Directory.Delete(folder, true); }
+    }
+
+    [Fact]
+    public async Task Prompt_hook_prints_nothing_on_hub_error_timeout_or_unknown_chat()
+    {
+        var chatId = Guid.NewGuid().ToString();
+        var folder = HookNode(chatId);
+        try
+        {
+            var input = JsonSerializer.Serialize(new { session_id = chatId });
+            using var failing = new StubHandler((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.InternalServerError)));
+            Assert.Equal("", await PkRelay.Adapter.Node.PromptHook.LineAsync(input, folder, TimeSpan.FromSeconds(5), failing));
+            // A hub that does not answer within the timeout: nothing is printed, and quickly.
+            using var hanging = new StubHandler(async (_, ct) => { await Task.Delay(TimeSpan.FromSeconds(30), ct); return StatusReply("{}"); });
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            Assert.Equal("", await PkRelay.Adapter.Node.PromptHook.LineAsync(input, folder, TimeSpan.FromMilliseconds(200), hanging));
+            Assert.True(watch.Elapsed < TimeSpan.FromSeconds(5));
+            // An older hub without attention, a chat with no session here, and input that is not hook JSON print nothing.
+            using var older = new StubHandler((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{\"ok\":true,\"code\":\"ok\",\"dataJson\":\"{}\",\"version\":0}", Encoding.UTF8, "application/json") }));
+            Assert.Equal("", await PkRelay.Adapter.Node.PromptHook.LineAsync(input, folder, TimeSpan.FromSeconds(5), older));
+            Assert.Equal("", await PkRelay.Adapter.Node.PromptHook.LineAsync(JsonSerializer.Serialize(new { session_id = Guid.NewGuid().ToString() }), folder, TimeSpan.FromSeconds(5), older));
+            Assert.Equal("", await PkRelay.Adapter.Node.PromptHook.LineAsync("not json", folder, TimeSpan.FromSeconds(5), older));
+            // Errors are not cached, so the next message asks again.
+            Assert.False(Directory.Exists(Path.Combine(folder, "hooks")) && Directory.EnumerateFiles(Path.Combine(folder, "hooks")).Any());
+            Assert.Equal(TimeSpan.FromMilliseconds(1000), PkRelay.Adapter.Node.PromptHook.Timeout(null));
+            Assert.Equal(TimeSpan.FromMilliseconds(250), PkRelay.Adapter.Node.PromptHook.Timeout("250"));
+            Assert.Equal(TimeSpan.FromMilliseconds(1000), PkRelay.Adapter.Node.PromptHook.Timeout("999999"));
+        }
+        finally { Directory.Delete(folder, true); }
+    }
+
     private sealed class StubHandler(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> response) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) => response(request, cancellationToken);

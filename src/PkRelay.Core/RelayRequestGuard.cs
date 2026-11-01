@@ -21,7 +21,8 @@ internal static class RelayRequestGuard
         var raw = arguments.GetRawText();
         if (Encoding.UTF8.GetByteCount(raw) > RelayLimits.MaxPayloadBytes) return Replies.Error(PayloadTooLarge);
         args = JsonNode.Parse(raw)!.AsObject();
-        if (args.ContainsKey("includeNextWork") && (args["includeNextWork"] is not JsonValue include || !include.TryGetValue<bool>(out _))) return Replies.Error(InvalidArguments);
+        foreach (var flag in new[] { "includeNextWork", "attention", "attentionDetail" })
+            if (args.ContainsKey(flag) && (args[flag] is not JsonValue value || !value.TryGetValue<bool>(out _))) return Replies.Error(InvalidArguments, new { field = flag });
         if (!caller.MayAccess(Text(args, "repositoryId"))) return Replies.Error(RepositoryDenied);
         if (tool.IsMutation && Text(args, "requestId").Length == 0) return Replies.Error(RequestIdRequired);
         if (!IdentifiersFit(args)) return Replies.Error(InvalidArguments);

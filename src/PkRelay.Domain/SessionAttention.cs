@@ -101,6 +101,8 @@ internal static class SessionAttention
         var now = context.Now;
         var items = ObjectAt(state, "attention");
         RemoveExpired(items, now);
+        // An idle chat is one with no boundary for a while; see Status.
+        state["attentionBoundaryAt"] = now.ToString("O");
         var boundaries = SnoozeBoundaries(args);
         foreach (var item in items.Select(x => x.Value).OfType<JsonObject>())
             if (item["shownAt"] is JsonValue)
@@ -130,6 +132,39 @@ internal static class SessionAttention
         return Ok(new JsonObject { ["attention"] = OfferJson(picked, offerable.Length - 1), ["actionable"] = actionable });
     }
 
+    /// <summary>
+    /// Read-only, for <c>get_status</c>: the count of actionable items (never snoozed or expired ones). With <paramref name="detail"/>
+    /// it also gives the top item (ID, kind, task), the count of top-tier items, and <c>wake</c>: the item that may wake the chat now.
+    /// That is the newest top-tier item, or else, when the chat has had no boundary for <c>maxHoldMinutes</c>, the oldest item that has
+    /// waited that long, so an idle chat gets one wake. The adapter wakes at most once per item ID.
+    /// </summary>
+    public static JsonObject Status(JsonObject state, JsonObject args, DateTimeOffset now, bool detail)
+    {
+        var eligible = AttentionScheduler.Eligible(AttentionScheduler.Items(state["attention"] as JsonObject ?? new JsonObject()), now).ToArray();
+        var status = new JsonObject { ["actionable"] = eligible.Length };
+        if (!detail) return status;
+        var urgent = eligible.Where(item => AttentionWeights.Wakes(item.Tier)).ToArray();
+        status["urgent"] = urgent.Length;
+        status["inbox"] = (state["inbox"] as JsonObject)?.Count ?? 0;
+        if (AttentionScheduler.Pick(eligible, now) is { } top)
+        {
+            var shown = new JsonObject { ["id"] = top.Id, ["k"] = top.Kind };
+            if (top.TaskId.Length > 0) shown["t"] = top.TaskId;
+            if (top.BoardId != "default") shown["b"] = top.BoardId;
+            status["top"] = shown;
+        }
+        var hold = TimeSpan.FromMinutes(Math.Clamp(Number(args, "maxHoldMinutes", RelayLimits.DefaultAttentionMaxHoldMinutes), 1, RelayLimits.MaxAttentionMaxHoldMinutes));
+        var boundary = OptionalDate(state, "attentionBoundaryAt");
+        DateTimeOffset Waiting(AttentionItem item) => boundary is { } at && at > item.CreatedAt ? at : item.CreatedAt;
+        var wake = urgent.OrderByDescending(item => item.CreatedAt).ThenByDescending(item => item.Id, StringComparer.Ordinal).FirstOrDefault()
+            ?? eligible.Where(item => now - Waiting(item) >= hold).OrderBy(item => item.CreatedAt).ThenBy(item => item.Id, StringComparer.Ordinal).FirstOrDefault();
+        if (wake is not null) status["wake"] = wake.Id;
+        return status;
+    }
+
+    private static DateTimeOffset? OptionalDate(JsonObject node, string key) =>
+        DateTimeOffset.TryParse(Text(node, key), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var date) ? date : null;
+
     /// <summary>The agent's answer: accept and dismiss close the item; later snoozes it for a number of boundaries or until a time.</summary>
     public static RelayReply Respond(AggregateContext context)
     {
@@ -147,7 +182,7 @@ internal static class SessionAttention
                 RememberClosed(state, AttentionItem.From(id, item).Key, Number(item, "revision"));
                 Tombstone(state, AttentionItem.From(id, item).Key, item, now);
                 items.Remove(id);
-                return Ok(new { itemId = id, outcome = action == AttentionActions.Accept ? "accepted" : "dismissed" });
+                return Ok(new { itemId = id, outcome = action == AttentionActions.Accept ? "accepted" : "dismissed", kind = Text(item, "kind") });
             case AttentionActions.Later:
                 DateTimeOffset? until = null;
                 if (args.ContainsKey("until"))
@@ -159,7 +194,7 @@ internal static class SessionAttention
                 if (!Snooze(item, now, SnoozeBoundaries(args), until))
                     return Error(SnoozeLimit, new { itemId = id, maxSnoozes = RelayLimits.MaxBlockingSnoozes, maxMinutes = RelayLimits.MaxBlockingSnoozeMinutes });
                 var snoozed = AttentionItem.From(id, item);
-                var reply = new JsonObject { ["itemId"] = id, ["outcome"] = "later" };
+                var reply = new JsonObject { ["itemId"] = id, ["outcome"] = "later", ["kind"] = Text(item, "kind") };
                 if (snoozed.SnoozeBoundaries > 0) reply["snoozeBoundaries"] = snoozed.SnoozeBoundaries;
                 if (snoozed.SnoozeUntil is { } end) reply["snoozeUntil"] = end.ToString("O");
                 return Ok(reply);

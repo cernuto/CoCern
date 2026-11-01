@@ -12,6 +12,8 @@ internal sealed class AggregateContext(JsonObject state, RelayCaller caller, str
     public JsonObject Args { get; } = args;
     public DateTimeOffset Now { get; } = now;
     public List<DurableEffect> Effects { get; } = [];
+    /// <summary>The aggregate's own key, such as a lock's resource ID.</summary>
+    public string Key { get; init; } = "";
 
     public string Repository => Text(Args, "repositoryId");
     public string SessionId => Text(Args, "sessionId");

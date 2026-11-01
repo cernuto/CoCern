@@ -32,7 +32,7 @@ Nothing changes until an administrator writes standing for a board. A board with
 
 ## Propose standing (any session)
 
-`standing_propose` takes a `line` (`{id?, text}`) or a `grant` (`{id?, scope, targets, expiresAt}`) and returns a `proposalId`. A proposal changes nothing until an administrator approves it. It does not change the revision and is not sent to chats. A board keeps up to 20 pending proposals, and at most 5 from one session.
+`standing_propose` takes a `line` (`{id?, text}`) or a `grant` (`{id?, scope, targets, expiresAt}`) and returns a `proposalId`. A proposal changes nothing until an administrator approves it. It does not change the revision and is not sent to chats. Each manager session gets a `standing_proposal` [attention](attention.md) item for it, closed when an administrator approves or rejects it. A board keeps up to 20 pending proposals, and at most 5 from one session.
 
 ## Read standing
 
@@ -48,6 +48,7 @@ The dashboard's **Standing** page (`/dashboard/standing`) shows the same, read-o
 - If a reply would be too large, it carries only `{"revision": N, "detailFetchRequired": true}`, and the full text comes with a later reply.
 - Standing counts as received when the reply carrying it is sent. If that reply is lost, the chat gets the text again only at the next revision; it can read it any time with `task_get`.
 - Expired grants are left out of what chats receive. Expiry does not change the revision, so a chat is not told when a grant lapses; each grant carries its `expiresAt`.
+- The [prompt hook](adapter.md#prompt-hook) shows the revision on each human message; the text still comes only with a reply.
 - The hub reuses a board's standing for up to 5 seconds. A write through the same hub is seen at once, and a read that started before the write cannot bring back the older standing.
 
 ## Grants in readiness

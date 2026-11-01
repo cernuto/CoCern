@@ -90,6 +90,9 @@ internal static class SessionAggregate
         if (context.Operation == Operations.Verify && Text(state, "machineId") is { Length: > 0 } machine) description["machineId"] = machine;
         // The standing revision this session last received per board, so replies carry standing only when it changed; internal only.
         if (context.Operation == Operations.Verify && state["standingSeen"] is JsonObject seen) description["standingSeen"] = seen.DeepClone();
+        // The hub asks for the attention count (and, for the adapter, the top item and wake candidate) with an internal argument.
+        if (context.Operation == RelayTools.GetStatus && Text(context.Args, "attentionStatus") is "count" or "detail")
+            description["attention"] = SessionAttention.Status(state, context.Args, context.Now, Text(context.Args, "attentionStatus") == "detail");
         return Ok(description);
     }
 
@@ -116,7 +119,7 @@ internal static class SessionAggregate
         state["availability"] = Text(args, "availability", "unknown");
         state["hubIncarnation"] = Text(args, "hubIncarnation");
         var registration = state.DeepClone().AsObject();
-        foreach (var secretOrPrivate in new[] { "sessionToken", "requests", "inbox", "acked", "attention", "attentionClosed", "attentionRecent", "attentionSeq" }) registration.Remove(secretOrPrivate);
+        foreach (var secretOrPrivate in new[] { "sessionToken", "requests", "inbox", "acked", "attention", "attentionClosed", "attentionRecent", "attentionSeq", "attentionBoundaryAt" }) registration.Remove(secretOrPrivate);
         context.Emit(AggregateKinds.Control, AggregateKinds.ControlKey, Operations.Register, registration);
         return Ok(new { bindingVersion = current + 1 }, current + 1);
     }

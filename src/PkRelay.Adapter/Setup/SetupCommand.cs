@@ -5,9 +5,9 @@ using PkRelay.Adapter.Node;
 namespace PkRelay.Adapter.Setup;
 
 /// <summary>What <c>--setup</c> was asked to do.</summary>
-internal sealed record SetupOptions(Uri Hub, bool SkipClientConfig, string? DataDir)
+internal sealed record SetupOptions(Uri Hub, bool SkipClientConfig, string? DataDir, bool PromptHook = false)
 {
-    private const string Usage = "Use --setup --hub <https-url> [--skip-client-config] [--data-dir <path>].";
+    private const string Usage = "Use --setup --hub <https-url> [--skip-client-config] [--prompt-hook] [--data-dir <path>].";
 
     /// <summary>Parses the arguments after <c>--setup</c>. <c>--hub</c> is required.</summary>
     public static SetupOptions Parse(IReadOnlyList<string> args)
@@ -15,11 +15,13 @@ internal sealed record SetupOptions(Uri Hub, bool SkipClientConfig, string? Data
         Uri? hub = null;
         string? dataDir = null;
         var skip = false;
+        var hook = false;
         for (var i = 0; i < args.Count; i++)
         {
             switch (args[i])
             {
                 case "--skip-client-config" when !skip: skip = true; break;
+                case "--prompt-hook" when !hook: hook = true; break;
                 case "--hub" when hub is null && i + 1 < args.Count && !string.IsNullOrWhiteSpace(args[i + 1]):
                     if (!AdapterOptions.TryParseOrigin(args[++i], out var typed)) throw new AdapterConfigurationException("--hub must be a root https:// address, or http:// to this PC's loopback, without credentials, query, or fragment.");
                     hub = typed;
@@ -28,7 +30,7 @@ internal sealed record SetupOptions(Uri Hub, bool SkipClientConfig, string? Data
                 default: throw new AdapterConfigurationException(Usage);
             }
         }
-        return new(hub ?? throw new AdapterConfigurationException(Usage), skip, dataDir);
+        return new(hub ?? throw new AdapterConfigurationException(Usage), skip, dataDir, hook);
     }
 }
 
@@ -93,6 +95,13 @@ internal static class SetupCommand
         {
             planners.Add(() => ClientSettings.PlanCodex(Path.Combine(env.Profile, ".codex", "config.toml"), env.DotnetPath, env.AdapterDll));
             planners.Add(() => ClientSettings.PlanClaudeCode(Path.Combine(env.Profile, ".claude.json"), env.DotnetPath, env.AdapterDll));
+            // The prompt hook is opt-in: one status line per human message, at no tool call for the model.
+            if (options.PromptHook)
+            {
+                var command = $"{LogonStart.Quote(env.DotnetPath)} {LogonStart.Quote(env.AdapterDll)} --prompt-hook" + (options.DataDir is null ? "" : $" --data-dir {LogonStart.Quote(folder)}");
+                planners.Add(() => ClientSettings.PlanPromptHook(Path.Combine(env.Profile, ".claude", "settings.json"), command));
+                planners.Add(() => ClientSettings.PlanPromptHook(Path.Combine(env.Profile, ".codex", "hooks.json"), command));
+            }
         }
         try { foreach (var planner in planners) planner(); }
         catch (ClientSettingsException exception) { env.Error.WriteLine(exception.Message); return MalformedClientFileExitCode; }

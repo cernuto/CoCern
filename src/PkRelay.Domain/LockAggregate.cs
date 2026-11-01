@@ -19,6 +19,7 @@ internal static class LockAggregate
         Operations.Block => Block(context),
         Operations.Unblock => Unblock(context),
         Operations.ClaimState => ClaimState(context),
+        Operations.LeaseCheck => LeaseCheck(context),
         RelayTools.ClaimAcquire => Acquire(context),
         RelayTools.ClaimRenew or RelayTools.ClaimRelease => RenewOrRelease(context),
         _ => Error(UnknownTool)
@@ -48,7 +49,16 @@ internal static class LockAggregate
         var resolved = ObjectAt(state, "resolvedActions");
         if (!resolved.ContainsKey(id) && resolved.Count >= RelayLimits.MaxRecords) return Error(CapacityExceeded);
         blockers.Remove(id); resolved[id] = true;
+        // With no action left in flight, a lease nearing its end is no longer worth a claim_expiring item.
+        if (blockers.Count == 0) AttentionSources.OnLeaseSettled(context, Text(state, "holder"), context.Key);
         return Ok(new { resolved = true });
+    }
+
+    /// <summary>Due work: raises <c>claim_expiring</c> to the holder when the lease nears its end with an action in flight.</summary>
+    private static RelayReply LeaseCheck(AggregateContext context)
+    {
+        AttentionSources.OnLeaseCheck(context, context.Key);
+        return Ok(new { checkedLease = true });
     }
 
     /// <summary>Read-only: whether <see cref="Acquire"/> would refuse this session now. It changes nothing and acquires nothing.</summary>
@@ -97,6 +107,7 @@ internal static class LockAggregate
             state["holder"] = "";
             state["leaseUntil"] = context.Now.ToString("O");
         }
+        AttentionSources.OnLeaseSettled(context, context.SessionId, context.Key);
         return Ok(new { generation, leaseUntil = Text(state, "leaseUntil"), released = release }, generation);
     }
 }

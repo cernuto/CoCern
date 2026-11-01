@@ -16,9 +16,28 @@ The hub keeps its own replies small in the same way. `task_update` and `action_r
 
 Each MCP tool accepts the corresponding hub JSON object directly, including `repositoryId`, the session handle where required, `requestId` for mutations, and expected versions. The adapter posts that object to `/api/tools/{tool}` without accepting an arbitrary route or a caller identity. Results contain `ok`, `code`, `data` (the parsed hub `dataJson`), and `version`. Failed operations set MCP `isError`; recognized structured HTTP 400, 403, 404, 409 and 413 domain failures preserve their code, data and version when the published code agrees with the status. This includes actionable failures such as `RequestIdRequired`, `ResourceUnknown` and `VersionConflict`. Authentication middleware failures, malformed or unrecognized error bodies, and other transport failures return stable generic codes without raw response bodies or exception details. Caller cancellation reaches HTTP and is not converted to success. Adapter requests are limited to 64 KiB and hub replies to 128 KiB, including replies without a declared content length; the host imposes its stricter 32 KiB public request/reply envelope bound. Oversized results fail explicitly and should be retried with narrower pagination or context scope.
 
-The compact forwarding schemas advertise every catalog-declared required operation field, session machine/label fields, message text and recipient/reply correlation, inbox pagination and acknowledgment IDs as well as task delta/workflow arguments. The workflow's optional `dependsOn` and `packet.resources` appear by name only, to stay within the definition budget; see [dependencies.md](dependencies.md). The shared envelope (`repositoryId`, `sessionId`, `sessionToken`, `requestId`) is advertised without its length limits, and the standing tools' items by shape only; see [standing.md](standing.md). `search` advertises only `query` and `kinds`, without `requestId` (it is a read); the hub still accepts `status` and `limit`; see [search.md](search.md). `attention_respond` advertises `itemId`, `action` and `until` by type; see [attention.md](attention.md). It is not in the chat-only profile. Only `repositoryId` is required by the forwarding schema; the hub still enforces private session handles, mutation request IDs and operation-specific requirements. `chat_directory` returns a bounded list with a truncation flag and does not support cursor pagination.
+The compact forwarding schemas advertise every catalog-declared required operation field, session machine/label fields, message text and recipient/reply correlation, inbox pagination and acknowledgment IDs as well as task delta/workflow arguments. The workflow's optional `dependsOn` and `packet.resources` appear by name only, to stay within the definition budget; see [dependencies.md](dependencies.md). The shared envelope (`repositoryId`, `sessionId`, `sessionToken`, `requestId`) is advertised without its length limits, and the standing tools' items by shape only; see [standing.md](standing.md). `search` advertises only `query` and `kinds`, without `requestId` (it is a read); the hub still accepts `status` and `limit`; see [search.md](search.md). `attention_respond` advertises `itemId`, `action` and `until` by type; see [attention.md](attention.md). It is not in the chat-only profile. `task_update`, `action_report` and `task_claim` advertise `attention` (a boolean; `false` skips the offer on that reply). Only `repositoryId` is required by the forwarding schema; the hub still enforces private session handles, mutation request IDs and operation-specific requirements. `chat_directory` returns a bounded list with a truncation flag and does not support cursor pagination.
 
 For claim renewal or release, supply either `resourceId` with its `generation`, or `taskId` with its `claimGeneration`. A task release also requires its current `expectedVersion`; a resource release does not. `claim_renew` accepts `leaseSeconds` and does not require a task version. These conditional fields are advertised even though neither identity alternative is globally required by the forwarding schema.
+
+## Prompt hook
+
+`--prompt-hook` prints one line for each human message in a Claude Code or Codex chat, for example:
+
+```
+PkRelay: 3 attention items (1 urgent), 2 inbox, standing r4; top a-91 blocked "T-12".
+```
+
+It costs the model no tool call. It reads the hook's JSON on standard input, finds the chat's relay session among this PC's node session handles, and asks the hub with `get_status`. It only reads: nothing is marked shown or acknowledged.
+
+- It never blocks a message: it always exits 0, gives up after `PKRELAY_HOOK_TIMEOUT_MS` (default 1000), and prints nothing on any error.
+- It reuses its last line for 30 seconds.
+- It uses the node folder (`PKRELAY_NODE_DIR`, or `--prompt-hook --data-dir <path>`).
+- It is meant for chats a person types into, such as the manager's. Worker chats driven by other agents get offers on their replies instead.
+
+To install it, run setup with `--prompt-hook`. Setup adds a `UserPromptSubmit` command hook to `~/.claude/settings.json` and `~/.codex/hooks.json`, keeping every other entry. It is off unless you ask for it. Codex asks you to review a new hook in `/hooks` before it runs.
+
+The hook and the wake watchers pass `attentionDetail: true` to `get_status`. The hub then adds the top item, the urgent and inbox counts, the wake candidate and the board's standing revision. Chats are not shown this argument.
 
 ## Waiting, polling and heartbeats
 

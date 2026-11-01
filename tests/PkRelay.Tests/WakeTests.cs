@@ -392,6 +392,8 @@ public sealed class WakeTests
         /// <summary>Messages sent with wake=false.</summary>
         public readonly HashSet<string> Quiet = [];
         public string Status = "ok";
+        /// <summary>The hub's attention block on get_status, as JSON, or null for a hub with nothing waiting.</summary>
+        public string? Attention;
         public int PageSize = 50;
         public readonly List<int> Cursors = [];
         public Fixture()
@@ -440,6 +442,12 @@ public sealed class WakeTests
                 var data = request.RequestUri.AbsolutePath.EndsWith("get_status")
                     ? fixture.Status == "missing-pause" ? "{\"sessionId\":\"session\",\"control\":{}}" : JsonSerializer.Serialize(new { sessionId = fixture.Status == "wrong-session" ? "other" : "session", control = new { paused = fixture.Status == "paused", requests = fixture.Status.EndsWith("cancelled") ? new object[] { new { target = fixture.Status == "other-cancelled" ? "other:" : "session:", request = new { status = "requested_unknown" } } } : [] } })
                     : JsonSerializer.Serialize(new { items, nextCursor = more ? (int?)(cursor + items.Length) : null, truncated = more, total = fixture.Messages.Length });
+                // The hub gives its attention block only to a reader that asks for the detail.
+                if (request.RequestUri.AbsolutePath.EndsWith("get_status") && fixture.Attention is { } attention && args.RootElement.TryGetProperty("attentionDetail", out var detail) && detail.GetBoolean())
+                {
+                    var withAttention = System.Text.Json.Nodes.JsonNode.Parse(data)!.AsObject(); withAttention["attention"] = System.Text.Json.Nodes.JsonNode.Parse(attention);
+                    data = withAttention.ToJsonString();
+                }
                 return new(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new { ok = true, code = "ok", dataJson = data, version = 0 }), Encoding.UTF8, "application/json") };
             }
         }
@@ -461,6 +469,63 @@ public sealed class WakeTests
         public int BusyChecks;
         public Task<bool> QueueAsync(string threadId, string prompt, CancellationToken cancellationToken) { Prompts.Add(prompt); return Task.FromResult(Accept); }
         public bool IsBusy(string threadId) { BusyChecks++; return Busy; }
+    }
+
+    [Fact]
+    public async Task Top_tier_attention_wakes_once_per_item_and_lower_tiers_wait()
+    {
+        using var fixture = new Fixture();
+        // Lower-tier items only: the hub names no wake candidate, so nothing wakes.
+        fixture.Attention = "{\"actionable\":2,\"urgent\":0,\"top\":{\"id\":\"a-1\",\"k\":\"review_ready\",\"t\":\"T-1\"}}";
+        Assert.Equal("empty", await fixture.Reconcile());
+        // A top-tier item wakes the chat once, with a line naming it; the fixed prompt is otherwise unchanged.
+        fixture.Attention = "{\"actionable\":3,\"urgent\":1,\"top\":{\"id\":\"a-2\",\"k\":\"blocked\",\"t\":\"T-1\"},\"wake\":\"a-2\"}";
+        Assert.Equal("queued", await fixture.Reconcile());
+        var prompt = Assert.Single(fixture.Dispatcher.Prompts);
+        Assert.Contains("PkRelay attention: 3 items wait; top a-2 blocked on task \"T-1\".", prompt);
+        Assert.StartsWith("PkRelay inbox wake", prompt);
+        Assert.Equal("empty", await fixture.Reconcile());
+        // A new candidate wakes again; a malformed one never does.
+        fixture.Clock.Now += TimeSpan.FromSeconds(11);
+        fixture.Attention = "{\"actionable\":1,\"wake\":\"a-3\"}";
+        Assert.Equal("queued", await fixture.Reconcile());
+        fixture.Clock.Now += TimeSpan.FromSeconds(11);
+        fixture.Attention = "{\"actionable\":1,\"wake\":\"../../etc\"}";
+        Assert.Equal("empty", await fixture.Reconcile());
+        Assert.Equal(2, fixture.Dispatcher.Prompts.Count);
+    }
+
+    [Fact]
+    public void Hub_names_top_tier_items_at_once_and_an_idle_chat_gets_one_wake_after_the_hold()
+    {
+        var session = new PkRelay.Domain.StateEnvelope<PkRelay.Domain.CoordinationDocument>();
+        var caller = new PkRelay.Domain.RelayCaller("alice", false, ["repo"], true);
+        var start = new DateTimeOffset(2026, 10, 29, 0, 0, 0, TimeSpan.Zero);
+        System.Text.Json.Nodes.JsonObject Apply(string operation, System.Text.Json.Nodes.JsonObject args, TimeSpan at)
+        {
+            args["repositoryId"] = "repo"; args["sessionId"] = "s1"; args["sessionToken"] = "secret";
+            var reply = PkRelay.Domain.CoordinationStateMachine.Apply(session, "session", "s1", caller, operation, args, start + at);
+            Assert.True(reply.Ok, reply.Code);
+            return System.Text.Json.Nodes.JsonNode.Parse(reply.DataJson)!.AsObject();
+        }
+        string? Wake(TimeSpan at) => Apply("get_status", new() { ["attentionStatus"] = "detail", ["maxHoldMinutes"] = 10 }, at)["attention"]!["wake"]?.GetValue<string>();
+        Apply("__open", new() { ["principalId"] = "alice" }, TimeSpan.Zero);
+        var review = Apply("__attention_raise", new() { ["kind"] = "review_ready", ["taskId"] = "T-1" }, TimeSpan.Zero)["itemId"]!.GetValue<string>();
+        // A lower tier waits for a boundary reply.
+        Assert.Null(Wake(TimeSpan.FromMinutes(1)));
+        // A top-tier item is the wake candidate at once.
+        var blocked = Apply("__attention_raise", new() { ["kind"] = "failed", ["taskId"] = "T-2" }, TimeSpan.FromMinutes(2))["itemId"]!.GetValue<string>();
+        Assert.Equal(blocked, Wake(TimeSpan.FromMinutes(2)));
+        Apply("attention_respond", new() { ["itemId"] = blocked, ["action"] = "dismiss" }, TimeSpan.FromMinutes(3));
+        Assert.Null(Wake(TimeSpan.FromMinutes(9)));
+        // With no boundary for the 10-minute hold, the oldest waiting item may wake the idle chat; the adapter wakes once per ID.
+        Assert.Equal(review, Wake(TimeSpan.FromMinutes(10)));
+        // A boundary shows the chat is active, so the hold starts again from it.
+        Apply("__attention_offer", new(), TimeSpan.FromMinutes(11));
+        Apply("attention_respond", new() { ["itemId"] = review, ["action"] = "later", ["snoozeBoundaries"] = 1 }, TimeSpan.FromMinutes(11));
+        Apply("__attention_offer", new(), TimeSpan.FromMinutes(12));
+        Assert.Null(Wake(TimeSpan.FromMinutes(21)));
+        Assert.Equal(review, Wake(TimeSpan.FromMinutes(22)));
     }
 
     [Fact]

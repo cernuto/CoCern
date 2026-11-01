@@ -53,7 +53,18 @@ Duplicate hints and messages already notified are suppressed durably. New messag
 
 The hub counts each newly stored message that can wake its chat as one wake, and each first-page `check_inbox` as one inbox read, in its [activity log](activity.md). These counters see what the hub stores, not whether the adapter actually queued a turn. If a message is stored but the sender's outbox commit then fails, the retry finds it already stored and is not counted, so wakes can be slightly undercounted.
 
-`check_inbox` replies never carry [standing preferences](standing.md): the watcher's and waiter's background reads would otherwise mark them received before the chat sees them.
+`check_inbox` replies never carry [standing preferences](standing.md) or [attention](attention.md) offers: the watcher's and waiter's background reads would otherwise mark them received before the chat sees them.
+
+## Attention wakes
+
+The watcher and the Claude waiter also wake a chat for [attention](attention.md) items. Messages wake as before.
+
+- A tier 1 item (`blocked`, `failed`, `interrupted`) wakes the chat at once.
+- Other items wait for the chat's next `task_update`, `action_report` or `task_claim` reply.
+- A chat with no such reply for `Relay:Attention:MaxHoldMinutes` (default 10) gets one wake for its oldest waiting item.
+- Each item wakes a chat at most once, with the same deduplication and rate limits as messages.
+- The wake prompt gets one more line naming the top item's ID, kind and task, for example `PkRelay attention: 1 item waits; top a-91 blocked on task "T-12".` No note text is included.
+- The hub counts a new tier 1 item as a wake. It does not see the wake after the hold.
 
 ## Pause, stop and uncertain delivery
 

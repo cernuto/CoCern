@@ -82,6 +82,9 @@ public class ToolDiscoveryTests
     [InlineData("attention_respond", "itemId", "string")]
     [InlineData("attention_respond", "action", "string")]
     [InlineData("attention_respond", "until", "string")]
+    [InlineData("task_update", "attention", "boolean")]
+    [InlineData("action_report", "attention", "boolean")]
+    [InlineData("task_claim", "attention", "boolean")]
     public void Forwarding_tools_advertise_arguments_needed_for_chat_coordination(string toolName, string field, string type)
     {
         Assert.True(RelayToolCatalog.TryGet(toolName, out var tool));

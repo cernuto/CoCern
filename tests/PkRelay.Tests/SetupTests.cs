@@ -133,6 +133,35 @@ public sealed class SetupTests : IDisposable
     }
 
     [Fact]
+    public async Task Prompt_hook_is_installed_only_when_asked_keeping_other_hooks_and_only_once()
+    {
+        await using var host = NewHub();
+        var claudeSettings = Path.Combine(Profile, ".claude", "settings.json");
+        var codexHooks = Path.Combine(Profile, ".codex", "hooks.json");
+        Assert.Equal(0, await Run(host));
+        // Off by default: no hook file is created or changed.
+        Assert.False(File.Exists(claudeSettings));
+        Assert.False(File.Exists(codexHooks));
+
+        Write(claudeSettings, "{\n  \"model\": \"opus\",\n  \"hooks\": { \"UserPromptSubmit\": [ { \"hooks\": [ { \"type\": \"command\", \"command\": \"echo mine\" } ] } ] }\n}\n");
+        var options = SetupOptions.Parse(["--hub", Hub.AbsoluteUri, "--prompt-hook", "--data-dir", DataDir]);
+        Assert.True(options.PromptHook);
+        Assert.Equal(0, await SetupCommand.RunAsync(options, Env(host), CancellationToken.None));
+        foreach (var path in new[] { claudeSettings, codexHooks })
+        {
+            var groups = JsonNode.Parse(File.ReadAllText(path))!["hooks"]!["UserPromptSubmit"]!.AsArray();
+            var command = groups.Select(group => group!["hooks"]![0]!["command"]!.GetValue<string>()).Single(text => text.Contains("--prompt-hook"));
+            Assert.Equal($"{LogonStart.Quote(Dotnet)} {LogonStart.Quote(Dll)} --prompt-hook --data-dir {LogonStart.Quote(SetupCommand.NormalizeFolder(DataDir))}", command);
+            Assert.Equal(ClientSettings.PromptHookTimeoutSeconds, groups.Last()!["hooks"]![0]!["timeout"]!.GetValue<int>());
+        }
+        Assert.Contains("echo mine", File.ReadAllText(claudeSettings));
+        Assert.Contains("\"model\": \"opus\"", File.ReadAllText(claudeSettings));
+        var once = File.ReadAllBytes(claudeSettings);
+        Assert.Equal(0, await SetupCommand.RunAsync(options, Env(host), CancellationToken.None));
+        Assert.Equal(once, File.ReadAllBytes(claudeSettings));
+    }
+
+    [Fact]
     public async Task Skip_client_config_touches_no_client_files()
     {
         await using var host = NewHub();

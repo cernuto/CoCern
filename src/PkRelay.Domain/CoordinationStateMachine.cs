@@ -40,7 +40,7 @@ public static class CoordinationStateMachine
         var fingerprint = Fingerprint(arguments);
         if (requestId.Length > 0 && requests[requestKey] is JsonObject prior) return Replay(kind, state, operation, arguments, prior, fingerprint, now);
 
-        var context = new AggregateContext(state, caller, operation, arguments, now);
+        var context = new AggregateContext(state, caller, operation, arguments, now) { Key = key };
         RelayReply result;
         try
         {
@@ -131,8 +131,10 @@ public static class CoordinationStateMachine
     public static void ScheduleLeases(StateEnvelope<CoordinationDocument> envelope)
     {
         var state = JsonNode.Parse(envelope.Value.Json)!.AsObject();
-        envelope.DueWork.RemoveAll(x => x.Kind == "lease");
+        envelope.DueWork.RemoveAll(x => x.Kind is "lease" or DueWorkKinds.LeaseWarning);
         if (DateTimeOffset.TryParse(Text(state, "leaseUntil"), out var lease)) envelope.DueWork.Add(new("lease", "lease", lease));
+        // A lock whose holder has an action in flight checks its lease shortly before it ends (claim_expiring).
+        if (AttentionSources.LeaseWarningAt(state) is { } warning) envelope.DueWork.Add(new(DueWorkKinds.LeaseWarning, DueWorkKinds.LeaseWarning, warning));
         if (state["tasks"] is JsonObject tasks)
             foreach (var entry in tasks)
                 if (entry.Value is JsonObject task && DateTimeOffset.TryParse(Text(task, "leaseUntil"), out var taskLease)) envelope.DueWork.Add(new("lease:" + entry.Key, "lease", taskLease));

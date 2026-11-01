@@ -126,4 +126,22 @@ public static class RelayLimits
     public const int MaxAttentionTombstones = 100;
     /// <summary>Longest blocker kind an attention item records.</summary>
     public const int MaxAttentionBlockerLength = 64;
+    /// <summary>Largest offer a boundary reply carries, in UTF-8 bytes; the offer is skipped when the reply has less room left.</summary>
+    public const int MaxAttentionOfferBytes = 2_048;
+    /// <summary>Minutes an idle chat waits with lower-tier items before one wake, unless <c>Relay:Attention:MaxHoldMinutes</c> says otherwise.</summary>
+    public const int DefaultAttentionMaxHoldMinutes = 10;
+    /// <summary>Largest allowed <c>Relay:Attention:MaxHoldMinutes</c>.</summary>
+    public const int MaxAttentionMaxHoldMinutes = 1_440;
+    /// <summary>Most sessions with one role (such as manager) that a routed attention item reaches, newest first.</summary>
+    public const int MaxAttentionRouteTargets = 16;
+    /// <summary>Seconds before a lease ends, with an action in flight, when the holder gets a <c>claim_expiring</c> item.</summary>
+    public const int ClaimExpiringLeadSeconds = 60;
+    /// <summary>Most task IDs a <c>related_work</c> or <c>duplicate_warning</c> item lists after a claim.</summary>
+    public const int MaxRelatedWorkHits = 3;
+    /// <summary>Seconds the prompt hook reuses its last answer.</summary>
+    public const int PromptHookCacheSeconds = 30;
+    /// <summary>The prompt hook's hub timeout, in milliseconds, unless <c>PKRELAY_HOOK_TIMEOUT_MS</c> says otherwise.</summary>
+    public const int DefaultPromptHookTimeoutMs = 1_000;
+    /// <summary>Largest allowed <c>PKRELAY_HOOK_TIMEOUT_MS</c>.</summary>
+    public const int MaxPromptHookTimeoutMs = 10_000;
 }

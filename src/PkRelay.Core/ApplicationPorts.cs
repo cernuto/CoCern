@@ -43,6 +43,8 @@ public sealed record ActivityEvent
 {
     public const string Call = "call";
     public const string Wake = "wake";
+    /// <summary>One attention offer outcome: <see cref="Code"/> is shown, accepted, later or dismissed, and <see cref="Tool"/> the item's kind.</summary>
+    public const string Attention = "attention";
 
     public DateTimeOffset Timestamp { get; init; }
     public string Kind { get; init; } = Call;

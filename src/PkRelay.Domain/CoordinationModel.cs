@@ -114,6 +114,13 @@ public static class AggregateKinds
     public const string ControlKey = "hub";
 }
 
+/// <summary>Kinds of an aggregate's own timers (due work), besides lease expiry.</summary>
+public static class DueWorkKinds
+{
+    /// <summary>A lock's check, shortly before its lease ends, for an action still in flight (raises <c>claim_expiring</c>).</summary>
+    public const string LeaseWarning = "lease_warning";
+}
+
 /// <summary>Hub-internal operations. They compose public tools across aggregates and are never accepted from clients.</summary>
 public static class Operations
 {
@@ -146,9 +153,16 @@ public static class Operations
     public const string AttentionClose = "__attention_close";
     /// <summary>One boundary: an unanswered shown item counts as later, snoozes count down, the best item is picked and marked shown.</summary>
     public const string AttentionOffer = "__attention_offer";
+    /// <summary>
+    /// Sent to the control aggregate through the outbox: raises or closes an attention item at every session of one role (such as manager)
+    /// in the repository, found in the session directory by the role given at <c>session_open</c>.
+    /// </summary>
+    public const string AttentionRoute = "__attention_route";
+    /// <summary>A lock's due-work check: when its lease nears expiry with an action in flight, the holder gets a <c>claim_expiring</c> item.</summary>
+    public const string LeaseCheck = "__lease_check";
 
     public static bool IsInternal(string operation) => operation.StartsWith("__", StringComparison.Ordinal);
 
     /// <summary>Attention effects are advisory: a target that refuses one is not asked again.</summary>
-    public static bool IsAttention(string operation) => operation is AttentionRaise or AttentionClose;
+    public static bool IsAttention(string operation) => operation is AttentionRaise or AttentionClose or AttentionRoute;
 }
