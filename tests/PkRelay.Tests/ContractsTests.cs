@@ -123,8 +123,13 @@ public sealed class ContractsTests
     public void Forwarding_catalog_stays_within_its_context_budget()
     {
         // Every connected agent carries these definitions on every turn; the pre-refactor adapter was about 19,400 characters.
-        var size = RelayToolCatalog.ForRole(true).Sum(tool => tool.Description.Length + RelayToolCatalog.ForwardingSchema(tool).GetRawText().Length);
-        Assert.True(size < 20_000, $"Forwarding catalog grew to {size} characters.");
+        // Workers are most agents, so their surface keeps the original 20,000-character budget.
+        Assert.True(Size(administrator: false) < 20_000, $"Worker forwarding catalog grew to {Size(administrator: false)} characters.");
+        // Role-specific lists keep administrator-only tools (standing_put, control_request, and later analytics_query and the order
+        // tools) away from workers, so only the few administrator chats pay for them; that surface has its own, larger cap.
+        Assert.True(Size(administrator: true) < 22_000, $"Administrator forwarding catalog grew to {Size(administrator: true)} characters.");
+
+        static int Size(bool administrator) => RelayToolCatalog.ForRole(administrator).Sum(tool => tool.Description.Length + RelayToolCatalog.ForwardingSchema(tool).GetRawText().Length);
     }
 
     [Fact]

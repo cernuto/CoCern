@@ -73,7 +73,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
                 if (trace is not null) { trace.SessionId = Text(args, "sessionId"); trace.Role = Text(session, "role"); }
             }
             if (tool is RelayTools.TaskClaim or RelayTools.ClaimAcquire or RelayTools.ActionBegin && await PausedAsync(trusted, args) is { } paused) return paused;
-            var result = await DispatchAsync(trusted, tool, args, session);
+            var result = await DispatchAsync(trusted, tool, args, session, cancellationToken);
             if (result.Ok) result = await PiggybackAsync(trusted, args, result);
             if (result.Ok && tool == RelayTools.TaskUpdate && args["includeNextWork"]?.GetValue<bool>() == true) result = await WithNextWorkAsync(trusted, args, session, result);
             if (result.Ok && tool == RelayTools.StandingPut) CacheStanding(BoardKey(args), 0, result.Version, null);
@@ -94,7 +94,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         if (!reply.Ok) throw new InvalidOperationException("Durable dispatch remains pending: " + reply.Code);
     }
 
-    private Task<RelayReply> DispatchAsync(RelayCaller caller, string tool, JsonObject args, JsonObject? session) => tool switch
+    private Task<RelayReply> DispatchAsync(RelayCaller caller, string tool, JsonObject args, JsonObject? session, CancellationToken cancellationToken = default) => tool switch
     {
         RelayTools.TaskClaim => ClaimTaskAsync(caller, args),
         RelayTools.ClaimRenew or RelayTools.ClaimRelease when Text(args, "taskId").Length > 0 && Text(args, "resourceId").Length == 0 => CallBoard(caller, tool, args),
@@ -104,7 +104,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         RelayTools.GetStatus => StatusAsync(caller, args),
         RelayTools.ChatDirectory => directory.DirectoryAsync([Text(args, "repositoryId")], CancellationToken.None),
         RelayTools.ControlRequest when Text(args, "command") == "revoke_machine" => RevokeMachineAsync(caller, args),
-        RelayTools.Search => SearchAsync(args),
+        RelayTools.Search => SearchAsync(args, cancellationToken),
         RelayTools.SessionBind or RelayTools.CheckInbox or RelayTools.Ack => CallSession(caller, tool, args),
         RelayTools.WorkerList or RelayTools.ControlRequest => CallControl(caller, tool, args),
         _ => CallBoard(caller, tool, args)
@@ -115,17 +115,24 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
     /// session's own inbox. The reply is compact: per hit its ID, kind, status, date and snippet, and its board when not default. The
     /// agent opens a hit with task_get, context_get or check_inbox. Weakest hits give way until the reply fits its byte budget.
     /// </summary>
-    private async Task<RelayReply> SearchAsync(JsonObject args)
+    private async Task<RelayReply> SearchAsync(JsonObject args, CancellationToken cancellationToken)
     {
         if (search is null) return Error(SearchUnavailable);
         var limit = args["limit"] is null ? RelayLimits.DefaultSearchResults : (int)Math.Clamp(Number(args, "limit", RelayLimits.DefaultSearchResults), 1, RelayLimits.MaxSearchResults);
         var kinds = args["kinds"] is JsonArray requested ? Strings(requested).Distinct(StringComparer.Ordinal).ToArray() : [];
         var status = Text(args, "status");
-        var hits = await search.SearchAsync(Text(args, "repositoryId"), Text(args, "sessionId"), Text(args, "query"), kinds, limit, status.Length > 0 ? status : null);
+        IReadOnlyList<SearchHit> hits;
+        // The index is a read-only copy of committed state: a database fault, or a store closing during shutdown, makes search unavailable
+        // for this call, never an argument error or an internal error.
+        try { hits = await search.SearchAsync(Text(args, "repositoryId"), Text(args, "sessionId"), Text(args, "query"), kinds, limit, status.Length > 0 ? status : null, cancellationToken); }
+        catch (Exception exception) when (exception is System.Data.Common.DbException or ObjectDisposedException) { return Error(Unavailable); }
         var items = new JsonArray();
         foreach (var hit in hits)
         {
-            var item = new JsonObject { ["id"] = hit.DocId, ["k"] = hit.Kind, ["s"] = hit.Status, ["at"] = hit.UpdatedAt.UtcDateTime.ToString("yyyy-MM-dd"), ["x"] = hit.Snippet };
+            var item = new JsonObject { ["id"] = hit.DocId, ["k"] = hit.Kind, ["s"] = hit.Status };
+            // A document with no recorded time has no date to show.
+            if (hit.UpdatedAt > DateTimeOffset.MinValue) item["at"] = hit.UpdatedAt.UtcDateTime.ToString("yyyy-MM-dd");
+            item["x"] = hit.Snippet;
             if (hit.BoardId is { } board) item["b"] = board;
             items.Add(item);
         }
