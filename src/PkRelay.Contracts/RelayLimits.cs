@@ -182,4 +182,6 @@ public static class RelayLimits
     public const int AnalyticsMemoryLimitMegabytes = 512;
     /// <summary>Threads DuckDB may use for analytics.</summary>
     public const int AnalyticsThreads = 2;
+    /// <summary>Largest DuckDB extension the installer accepts once decompressed, in bytes (the sqlite extension is about 35 MB).</summary>
+    public const long MaxAnalyticsExtensionBytes = 64L * 1024 * 1024;
 }

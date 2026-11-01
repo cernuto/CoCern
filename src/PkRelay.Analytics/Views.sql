@@ -72,8 +72,9 @@ SELECT repository_id, coalesce(role, '') AS role, CAST(at_time AS DATE) AS day, 
        coalesce(sum(input_tokens), 0) AS input_tokens, coalesce(sum(output_tokens), 0) AS output_tokens
 FROM tool_calls GROUP BY ALL;
 
--- One row per refused claim and resource. A refused claim_acquire names its resource. A refused task_claim counts against each
--- resource in the task's packet.resources, or against the task itself ('task:<id>') when it lists none.
+-- One row per refused claim and resource: a claim refused because someone else holds it (Busy, or OwnerConflict). A stale
+-- expectedVersion (VersionConflict) is not a conflict. A refused claim_acquire names its resource. A refused task_claim counts once
+-- for each resource listed in the task's packet.resources, or once against the task itself ('task:<id>') when it lists none.
 CREATE VIEW claim_conflicts AS
 WITH expected AS (
     SELECT repository_id, board_id, task_id, unnest(json_extract_string(task, '$.workflow.packet.resources[*]')) AS resource_id FROM task_doc)
@@ -81,4 +82,4 @@ SELECT c.id, c.at_ticks, c.at_time, c.repository_id, c.session_id, c.tool, c.cod
        coalesce(c.resource_id, e.resource_id, 'task:' || c.task_id) AS resource_id
 FROM tool_calls c
 LEFT JOIN expected e ON c.tool = 'task_claim' AND e.repository_id = c.repository_id AND e.board_id = c.board_id AND e.task_id = c.task_id
-WHERE c.tool IN ('task_claim', 'claim_acquire') AND NOT c.ok AND c.code IN ('Busy', 'VersionConflict');
+WHERE c.tool IN ('task_claim', 'claim_acquire') AND NOT c.ok AND c.code IN ('Busy', 'OwnerConflict');

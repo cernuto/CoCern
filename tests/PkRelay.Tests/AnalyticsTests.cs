@@ -68,13 +68,43 @@ public class AnalyticsTests
         // Queries run without the sqlite extension, whose sqlite_scan could otherwise read the live file.
         Assert.Equal(0L, Single(await analytics.RunSqlAsync("SELECT count(*) FROM duckdb_functions() WHERE function_name LIKE 'sqlite%'")));
 
-        // Control and discovery state, session tokens and idempotency caches stay in the live database only.
+        // Session state (private inboxes, attention notes, bindings), control and discovery state, session tokens and idempotency
+        // caches stay in the live database only.
         var token = session.GetProperty("sessionToken").GetString()!;
         Assert.True(Count(host.DatabasePath, "SELECT count(*) FROM grain_state WHERE state_name = 'control'") > 0);
+        Assert.True(Count(host.DatabasePath, "SELECT count(*) FROM grain_state WHERE state_name = 'session'") > 0);
         Assert.True(Count(host.DatabasePath, $"SELECT count(*) FROM grain_state WHERE payload LIKE '%{token}%'") > 0);
-        Assert.Equal(0L, Single(await analytics.RunSqlAsync("SELECT count(*) FROM relay.grain_state WHERE state_name NOT IN ('board', 'session', 'lock')")));
+        Assert.Equal(0L, Single(await analytics.RunSqlAsync("SELECT count(*) FROM relay.grain_state WHERE state_name = 'session'")));
+        Assert.Equal(0L, Single(await analytics.RunSqlAsync("SELECT count(*) FROM relay.grain_state WHERE state_name NOT IN ('board', 'lock')")));
+        Assert.Equal(0L, Single(await analytics.RunSqlAsync("SELECT count(*) FROM relay.due_work WHERE state_name NOT IN ('board', 'lock')")));
         Assert.Equal(0L, Single(await analytics.RunSqlAsync($"SELECT count(*) FROM relay.grain_state WHERE payload LIKE '%{token}%' OR payload LIKE '%requests%'")));
-        Assert.Equal(1L, Single(await analytics.RunSqlAsync("SELECT count(*) FROM relay.grain_state WHERE state_name = 'session'")));
+    }
+
+    [Fact]
+    public async Task A_snapshot_completes_while_a_long_write_holds_the_writer_and_holds_only_committed_state()
+    {
+        var root = TempDirectory();
+        using var store = new SqliteStore(Path.Combine(root, "relay.db"));
+        var snapshot = Path.Combine(root, "analytics", "snapshot-busy.db");
+        await store.WriterGate.WaitAsync();
+        using var writer = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = store.DatabasePath, Pooling = false }.ToString());
+        writer.Open();
+        using var transaction = writer.BeginTransaction(deferred: false);
+        try
+        {
+            using (var write = writer.CreateCommand())
+            {
+                write.Transaction = transaction;
+                write.CommandText = "INSERT INTO activity_log(at_ticks, kind, repository_id, ok, code, request_bytes, reply_bytes, duration_ms) VALUES (1, 'call', 'uncommitted', 1, 'Ok', 0, 0, 0);";
+                write.ExecuteNonQuery();
+            }
+            var copy = store.CreateAnalyticsSnapshotAsync(snapshot);
+            Assert.Same(copy, await Task.WhenAny(copy, Task.Delay(TimeSpan.FromSeconds(10))));
+            await copy;
+        }
+        finally { transaction.Rollback(); store.WriterGate.Release(); }
+        Assert.Equal(0L, Count(snapshot, "SELECT count(*) FROM activity_log WHERE repository_id = 'uncommitted'"));
+        Assert.Equal(2L, Count(snapshot, "SELECT count(*) FROM pragma_table_list WHERE name IN ('grain_state', 'activity_log')"));
     }
 
     [Fact]
@@ -177,14 +207,17 @@ public class AnalyticsTests
         void Row(string query, string key, object? cur, object? prev, long curN, long prevN) =>
             Assert.Equal([key, cur, prev, curN, prevN], results[query][key]);
         Row(NamedQueries.TokensPerTask, "all", 1050.0, 330.0, 1, 1);
-        Row(NamedQueries.CallsPerTask, "all", 4.0, 9.0, 1, 1);
-        Row(NamedQueries.MessagesPerTask, "all", 0.0, 0.0, 1, 1);
-        Row(NamedQueries.ContextByRole, "worker", 300.0, 1000.0, 2, 1);
+        Row(NamedQueries.CallsPerTask, "all", 5.0, 5.0, 1, 2);
+        Row(NamedQueries.MessagesPerTask, "all", 0.0, 0.0, 1, 2);
+        Row(NamedQueries.ContextByRole, "worker", 350.0, 1100.0, 2, 1);
         Row(NamedQueries.BlockedTime, "all", null, 3.0, 0, 1);
+        // P-2 has been blocked since the previous period, so it is open at the end of both.
+        Row(NamedQueries.BlockedTime, "open", 1.0, 1.0, 1, 1);
         Row(NamedQueries.ClaimConflictsByResource, "build-agent", 2L, 1L, 2, 1);
         Row(NamedQueries.ClaimConflictsByResource, "task:C-1", 1L, 0L, 1, 0);
+        // A stale version (VersionConflict) is not a conflict, so C-1 counts once.
         Assert.Equal("build-agent", (await analytics.RunNamedAsync(NamedQueries.ClaimConflictsByResource, "past")).Rows[0][0]);
-        Row(NamedQueries.NoisiestTools, "task_update", 200L, 800L, 2, 8);
+        Row(NamedQueries.NoisiestTools, "task_update", 200L, 900L, 2, 9);
         Row(NamedQueries.ManagerAssignmentLatency, "all", 20.0, 30.0, 1, 1);
         Row(NamedQueries.QualityGuardrails, "closures", 0L, 1L, 0, 1);
         Row(NamedQueries.QualityGuardrails, "reopened", 0L, 1L, 0, 1);
@@ -254,7 +287,8 @@ public class AnalyticsTests
 
     /// <summary>
     /// Activity for repository "past" at fixed offsets from <paramref name="now"/>: task P-1 ten days ago (the previous period) and C-1
-    /// three hours ago (the current one), with tokens, claims, refused claims and attention outcomes. Each row has 100 reply bytes.
+    /// three hours ago (the current one), with tokens, claims, refused claims and attention outcomes. P-2 is blocked ten days ago and
+    /// never unblocked. Each row has 100 reply bytes.
     /// </summary>
     private static void RecordPastActivity(IActivitySink sink, DateTimeOffset now)
     {
@@ -269,6 +303,7 @@ public class AnalyticsTests
         Call(old, "task_update", P1, "ready");
         Call(old.AddMinutes(30), "task_claim", P1);
         Call(old.AddHours(1), "task_update", P1, "blocked");
+        Call(old.AddHours(2), "task_update", "task:past/default/P-2", "blocked");
         Call(old.AddHours(4), "task_update", P1, "ready");
         Call(old.AddHours(5), "task_update", P1, "completed");
         Call(old.AddHours(6), "task_update", P1, "ready");
@@ -281,7 +316,8 @@ public class AnalyticsTests
         Call(recent, "task_update", C1, "ready");
         Call(recent.AddMinutes(20), "task_claim", C1);
         Call(recent.AddMinutes(21), "task_update", C1, input: 1000, output: 50, requestId: "r3");
-        Call(recent.AddMinutes(25), "task_claim", C1, ok: false, code: "VersionConflict", session: "w-2");
+        Call(recent.AddMinutes(25), "task_claim", C1, ok: false, code: "Busy", session: "w-2");
+        Call(recent.AddMinutes(26), "task_claim", C1, ok: false, code: "VersionConflict", session: "w-2");
         Call(recent.AddMinutes(30), "claim_acquire", Agent, ok: false, code: "Busy");
         Call(recent.AddMinutes(40), "claim_acquire", Agent, ok: false, code: "Busy");
         Outcome(recent.AddMinutes(50), "blocked", "shown");
@@ -331,6 +367,17 @@ public class AnalyticsTests
         criteria = new[] { state == "completed" ? (object)new { id = "build", description = "Build passes", result = "passed", evidenceRef = "build-log:9" } : new { id = "build", description = "Build passes", result = "not_run" } },
         blockers = Array.Empty<object>()
     };
+
+    [Fact]
+    public async Task The_installer_caps_the_decompressed_extension_size()
+    {
+        using var small = new MemoryStream(new byte[100]);
+        using var copied = new MemoryStream();
+        await AnalyticsExtension.CopyCappedAsync(small, copied, 100, CancellationToken.None);
+        Assert.Equal(100, copied.Length);
+        using var large = new MemoryStream(new byte[101]);
+        await Assert.ThrowsAsync<InvalidDataException>(() => AnalyticsExtension.CopyCappedAsync(large, Stream.Null, 100, CancellationToken.None));
+    }
 
     private static async Task<JsonElement> Open(RelayHostFixture host, HttpClient client, string requestId, string role)
     {

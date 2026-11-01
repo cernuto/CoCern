@@ -81,7 +81,8 @@ public static class NamedQueries
                    count(*) FILTER (WHERE in_cur) AS cur_n, count(*) FILTER (WHERE NOT in_cur) AS prev_n
             FROM per_session GROUP BY role ORDER BY coalesce(cur, 0) DESC, key
             """,
-        // Hours a task stayed blocked, for spells that ended in the period.
+        // 'all': hours a task stayed blocked, for spells that ended in the period; spells still open are left out.
+        // 'open': blocked spells still open at the end of each period ($now and $from).
         [BlockedTime] = $"""
             WITH {WorkflowStates},
             changes AS (
@@ -89,8 +90,13 @@ public static class NamedQueries
                 FROM states WHERE before IS DISTINCT FROM workflow_state),
             spells AS (
                 SELECT ended >= $from AS in_cur, (ended - at_ticks) / 36000000000.0 AS v FROM changes
-                WHERE workflow_state = 'blocked' AND ended >= $prev)
+                WHERE workflow_state = 'blocked' AND ended >= $prev),
+            blocked AS (SELECT at_ticks, ended FROM changes WHERE workflow_state = 'blocked')
             {Average("spells")}
+            UNION ALL
+            SELECT 'open', count(*) FILTER (WHERE ended IS NULL), count(*) FILTER (WHERE at_ticks < $from AND (ended IS NULL OR ended >= $from)),
+                   count(*) FILTER (WHERE ended IS NULL), count(*) FILTER (WHERE at_ticks < $from AND (ended IS NULL OR ended >= $from))
+            FROM blocked
             """,
         // Refused claims per resource (see the claim_conflicts view).
         [ClaimConflictsByResource] = $"""
@@ -104,7 +110,8 @@ public static class NamedQueries
                    count(*) FILTER (WHERE at_ticks >= $from) AS cur_n, count(*) FILTER (WHERE at_ticks < $from) AS prev_n
             FROM tool_calls WHERE {Window} GROUP BY tool ORDER BY coalesce(cur, 0) DESC, key
             """,
-        // Minutes from a task's workflow becoming ready to its first claim, for claims in the period.
+        // Minutes from a task's workflow becoming ready to its first claim, for claims in the period: a proxy for how long ready work
+        // waits for an owner, since the hub records no assignment.
         [ManagerAssignmentLatency] = $"""
             WITH events AS (
                 SELECT board_id, task_id, id, at_ticks, CASE WHEN tool = 'task_claim' THEN 'claim' ELSE workflow_state END AS ev

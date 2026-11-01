@@ -2,29 +2,55 @@ using Microsoft.Data.Sqlite;
 
 namespace PkRelay.Storage;
 
-/// <summary>Analytics snapshots: a consistent copy of the database with credentials and caches removed, for DuckDB to read.</summary>
+/// <summary>Analytics snapshots: a consistent copy of the database with private and credential data removed, for DuckDB to read.</summary>
 public sealed partial class SqliteStore
 {
-    /// <summary>The states an analytics snapshot keeps. Control and discovery hold session directories and machine credentials.</summary>
-    private const string SnapshotStates = "('board', 'session', 'lock')";
+    /// <summary>
+    /// The states an analytics snapshot keeps. Session state (private inboxes, attention notes, bindings), control (the session
+    /// directory) and discovery (machine credentials) never leave the live database; analytics reads sessions only through
+    /// <c>activity_log</c>.
+    /// </summary>
+    private const string SnapshotStates = "('board', 'lock')";
 
     /// <summary>
     /// Writes queued activity, copies the database to <paramref name="destination"/> with the backup API, then scrubs the copy: it keeps only
-    /// board, session and lock state, removes session tokens and idempotency caches (<c>requests</c>, which hold earlier replies), drops the
-    /// search index, and vacuums so removed data does not stay in free pages. The live database is never changed.
+    /// board and lock state, removes idempotency caches (<c>requests</c>, which hold earlier replies) and any session token, drops the search
+    /// index, and vacuums so removed data does not stay in free pages. The live database is never changed.
     /// </summary>
+    /// <remarks>
+    /// The copy is read on its own read-only connection, not under the grain writer's gate: under WAL it reads the last committed
+    /// state as one consistent snapshot, and commits keep going while it runs.
+    /// </remarks>
     public async Task CreateAnalyticsSnapshotAsync(string destination, CancellationToken cancellationToken = default)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(destination);
+        var target = Path.GetFullPath(destination);
+        if (string.Equals(target, DatabasePath, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+            throw new ArgumentException("Snapshot destination must differ from the live database.", nameof(destination));
+        ObjectDisposedException.ThrowIf(_disposed, this);
         await FlushActivityAsync(cancellationToken);
-        await BackupAsync(destination, cancellationToken);
+        Directory.CreateDirectory(Path.GetDirectoryName(target)!);
         try
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            ScrubSnapshot(Path.GetFullPath(destination));
+            await Task.Run(() =>
+            {
+                using (AcquireOwnership(target))
+                {
+                    using var source = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = DatabasePath, Mode = SqliteOpenMode.ReadOnly, Pooling = false, DefaultTimeout = 5 }.ToString());
+                    source.Open();
+                    using var copy = new SqliteConnection(ConnectionString(target));
+                    copy.Open();
+                    cancellationToken.ThrowIfCancellationRequested();
+                    // One backup step holds one read transaction, so the copy is a single committed state.
+                    source.BackupDatabase(copy);
+                }
+                cancellationToken.ThrowIfCancellationRequested();
+                ScrubSnapshot(target);
+            }, cancellationToken);
         }
         catch
         {
-            try { File.Delete(destination); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+            try { File.Delete(target); } catch (IOException) { } catch (UnauthorizedAccessException) { }
             throw;
         }
     }

@@ -9,10 +9,14 @@ The manager's `analytics_query` tool arrives in a later step. Until then the que
 1. Install DuckDB's `sqlite` extension once. It needs internet access the first time:
 
    ```
-   dotnet PkRelay.Host.dll --install-analytics-extension <folder>
+   dotnet PkRelay.Host.dll --install-analytics-extension <folder> [platform]
    ```
 
-   `Build-PkRelay.ps1` does this for you. It installs into `artifacts/duckdb_extensions` and, with `-Publish`, copies that folder to `artifacts/host/duckdb_extensions`, where the hub looks by default. The folder only works for the same DuckDB version and platform, such as `windows_amd64`.
+   The platform defaults to this machine's, such as `windows_amd64` or `linux_amd64`. A folder only works for the same DuckDB version and platform. The download is refused if it is larger than 64 MB unpacked.
+
+   `Build-PkRelay.ps1` does this for you. For the tests it installs this machine's build into `artifacts/duckdb_extensions`. With `-Publish` it publishes the hub for `win-x64` and installs the `windows_amd64` build into `artifacts/host/duckdb_extensions`, where the hub looks by default. Loading it offline on a Windows hub has not been tested yet.
+
+   For CI, install into a cached folder and set `PKRELAY_DUCKDB_EXTENSIONS` to it before `dotnet test`. Without it, the tests download the extension once into the temp folder.
 
 2. Set `Relay:Analytics:Enabled` to `true` and restart the hub.
 
@@ -31,11 +35,16 @@ The hub takes a snapshot at startup and then on every interval. If a snapshot fa
 
 ## What a snapshot holds
 
-A snapshot is a backup of `relay.db` with these things removed:
+A snapshot is a backup of `relay.db` that keeps only board and lock state. These stay in the live database:
 
-- control and discovery state (session directories and machine credentials)
-- session tokens and the `requests` replay caches
+- session state (private inboxes, attention notes and bindings)
+- control and discovery state (the session directory and machine credentials)
+- the `requests` replay caches and any session token
 - the search index
+
+Sessions show up only through `activity_log`. Attention outcomes come from there as well.
+
+The backup reads the last committed state on its own read-only connection, so the hub keeps committing while it runs.
 
 The copy is then turned into a DuckDB file. It is deleted once a newer snapshot has replaced it and no query is still using it. Old snapshots from an earlier run are deleted at startup.
 
@@ -50,7 +59,7 @@ Queries run with file access turned off and settings locked. Ad hoc SQL must be 
 | `context_by_role` | Role and day: calls, sessions, bytes and tokens |
 | `messages` | Task message |
 | `action_reports` | Action report on a task |
-| `claim_conflicts` | Refused claim (`Busy` or `VersionConflict`) per resource |
+| `claim_conflicts` | Claim refused because someone else holds it (`Busy` or `OwnerConflict`), per resource |
 | `attention_outcomes` | Attention offer outcome |
 | `board_doc`, `task_doc`, `activity` | Board document, task document and activity row, for ad hoc queries |
 
@@ -72,11 +81,11 @@ Every named query takes the repository and an optional `days` (1 to 14, default 
 | `calls_per_task` | `all` | Average tool calls per task touched |
 | `messages_per_task` | `all` | Average task messages per task touched |
 | `context_by_role` | role | Average reply bytes per session |
-| `blocked_time` | `all` | Average hours blocked, for spells that ended in the period |
+| `blocked_time` | `all`, `open` | `all`: average hours blocked, for spells that ended in the period; spells still open are left out. `open`: blocked spells still open at the end of each period |
 | `claim_conflicts_by_resource` | resource | Refused claims |
 | `noisiest_tools` | tool | Reply bytes; `cur_n` is the number of calls |
-| `manager_assignment_latency` | `all` | Average minutes from `ready` to the first claim |
+| `manager_assignment_latency` | `all` | Average minutes from a task becoming `ready` to its first claim. This stands in for assignment time, which the hub does not record |
 | `quality_guardrails` | `closures`, `reopened`, `failed_actions`, `retried_actions` | Counts |
 | `attention_outcomes_by_kind` | `<kind>:<outcome>` | Outcomes; `cur_n` is all outcomes of that kind |
 
-A refused `task_claim` counts against each resource in the task's `packet.resources`, or against `task:<id>` when the task lists none.
+A refused `task_claim` counts once for each resource listed in the task's `packet.resources`, or once against `task:<id>` when the task lists none. A stale `expectedVersion` (`VersionConflict`) is not counted.
