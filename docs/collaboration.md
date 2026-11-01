@@ -42,6 +42,10 @@ If a previous owner's task lease has expired, an administrator may make a workfl
 
 Workflow JSON is bounded to 12,288 serialized UTF-8 bytes. Packet strings, criterion descriptions/evidence references, blocker summaries/recheck conditions and `recheckEvidenceRef` are at most 2,048 characters; criterion/blocker IDs are at most 128 characters. There are at most 16 blockers. Optional `targetSessionId` is at most 256 characters and names an intended session, never a private token. Optional integer `priority` ranges from -1,000 to 1,000.
 
+## Report tokens
+
+Add an optional `usage` object, `{ "inputTokens": n, "outputTokens": n }`, to `task_update` or `action_report` with the tokens used since your last report. It goes to the [activity log](activity.md) only and is never stored in the task.
+
 ## Report and request an advisory offer
 
 Add `includeNextWork: true` to an authenticated `task_update` using the normal private session handle, stable mutation `requestId` and `expectedVersion`. The milestone commits normally and its result includes an independent `nextWork` object with `ok`, `code` and, when available, `offer`. Inspect both the milestone result and the optional convenience outcome.

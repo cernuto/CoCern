@@ -25,4 +25,15 @@ public static class RelayLimits
     /// <summary>Thirty minutes, so a chat holding a claim through a long turn renews rarely: each renewal is a model call over its whole context.</summary>
     public const int MaxLeaseSeconds = 1800;
     public const int DefaultLeaseSeconds = 120;
+
+    /// <summary>Activity events waiting for the background writer. When full, new events are dropped; a call never waits.</summary>
+    public const int ActivityQueueCapacity = 4_096;
+    /// <summary>Most activity rows inserted in one short transaction.</summary>
+    public const int ActivityBatchSize = 512;
+    /// <summary>How long the activity writer collects events before inserting a batch.</summary>
+    public const int ActivityBatchMilliseconds = 1_000;
+    /// <summary>A gap this long between one manager session's calls starts a new counted manager turn.</summary>
+    public const int ActivityTurnGapSeconds = 60;
+    /// <summary>Largest token count accepted in one <c>usage</c> report field.</summary>
+    public const long MaxReportedTokens = 1_000_000_000;
 }

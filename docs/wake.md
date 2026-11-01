@@ -51,6 +51,8 @@ One fixed prompt asks the enrolled chat to read its own inbox and handle applica
 
 Duplicate hints and messages already notified are suppressed durably. New messages are coalesced, with by default at most one wake per route per 3 seconds and 20 wakes per 10 minutes. A configuration can change this with an optional `wakeLimits` object, `{ "minIntervalSeconds": 3, "maxPerWindow": 20, "windowMinutes": 10 }`, in which every field is optional and falls back to the default shown; `minIntervalSeconds` must be 0 to 3600, `maxPerWindow` 1 to 1000 and `windowMinutes` 1 to 1440, and anything else makes the configuration invalid. A wake refused by a limit is not lost: the next pass retries it. Background nodes always use the defaults. Rate limits bound prompt traffic, not the amount of model work authorized by the user. A newly delivered private message is a wake candidate; the adapter does not infer semantic actionability from arbitrary prose. Workflow instructions must avoid acknowledgment-only reply loops. Queueing preserves a busy chat's current turn and lets its client schedule the follow-up.
 
+The hub counts each newly stored message that can wake its chat as one wake, and each first-page `check_inbox` as one inbox read, in its [activity log](activity.md). These counters see what the hub stores, not whether the adapter actually queued a turn.
+
 ## Pause, stop and uncertain delivery
 
 Relay pause/stop suppresses new dispatch. Creating the configured stop file stops the local watcher; this does not stop an already running model turn or external operation. Stopping a model, tool or device operation remains the client's or user's responsibility.

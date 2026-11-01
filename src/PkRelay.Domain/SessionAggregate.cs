@@ -70,14 +70,17 @@ internal static class SessionAggregate
     {
         var state = context.State;
         var current = Date(state, "freshUntil") > context.Now && Text(state, "hubIncarnation") == Text(context.Args, "hubIncarnation");
-        return Ok(new
+        var description = new JsonObject
         {
-            sessionId = Text(state, "sessionId"),
-            bindingVersion = Number(state, "bindingVersion"),
-            binding = state["binding"],
-            availability = current ? Text(state, "availability") : "unknown",
-            observedAt = Text(state, "observedAt")
-        });
+            ["sessionId"] = Text(state, "sessionId"),
+            ["bindingVersion"] = Number(state, "bindingVersion"),
+            ["binding"] = state["binding"]?.DeepClone(),
+            ["availability"] = current ? Text(state, "availability") : "unknown",
+            ["observedAt"] = Text(state, "observedAt")
+        };
+        // The role reported at session_open labels this session's activity; only the hub's internal verification sees it.
+        if (context.Operation == Operations.Verify && Text(state, "role") is { Length: > 0 } role) description["role"] = role;
+        return Ok(description);
     }
 
     private static RelayReply Bind(AggregateContext context)

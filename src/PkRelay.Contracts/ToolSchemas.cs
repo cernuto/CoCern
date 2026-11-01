@@ -16,7 +16,7 @@ internal static class ToolSchemas
         {
             RelayTools.SessionOpen => ["machineId", "label"],
             RelayTools.TaskGet => ["taskId", "section", "sinceRevision", "snapshotRevision", "cursor", "limit"],
-            RelayTools.TaskUpdate => ["taskId", "expectedVersion", "workflow", "includeNextWork"],
+            RelayTools.TaskUpdate => ["taskId", "expectedVersion", "workflow", "includeNextWork", "usage"],
             RelayTools.SendMessage => ["text", "recipientSessionId", "taskId", "replyTo", "ackMessageIds", "supersede", "wake"],
             RelayTools.CheckInbox => ["cursor", "limit"],
             RelayTools.Ack => ["messageId", "messageIds"],
@@ -24,7 +24,10 @@ internal static class ToolSchemas
             RelayTools.ClaimRelease => ["resourceId", "generation", "taskId", "claimGeneration", "expectedVersion"],
             _ => []
         };
-        return ForwardingFields.Concat(tool.RequiredFields).Concat(extra).Distinct(StringComparer.Ordinal).ToDictionary(field => field, field => all[field]);
+        var properties = ForwardingFields.Concat(tool.RequiredFields).Concat(extra).Distinct(StringComparer.Ordinal).ToDictionary(field => field, field => all[field]);
+        // The milestone call carries a compact usage entry; the hub also accepts it on action_report, with the full schema in InputSchema.
+        if (properties.ContainsKey("usage")) properties["usage"] = new { type = "object", description = "Optional {inputTokens,outputTokens}." };
+        return properties;
     }
 
     public static Dictionary<string, object> Properties(string tool)
@@ -69,6 +72,7 @@ internal static class ToolSchemas
                 Text("message", "Task conversation message committed with this milestone."); Array("actionReports", "Reported action results committed atomically with this milestone.");
                 properties["workflow"] = WorkflowSchema();
                 properties["includeNextWork"] = new { type = "boolean", description = "After committing the milestone, include an independent advisory nextWork result. An offer acquires no claim and authorizes no execution." };
+                properties["usage"] = UsageSchema();
                 break;
             case RelayTools.TaskClaim:
             case RelayTools.ClaimAcquire:
@@ -85,7 +89,8 @@ internal static class ToolSchemas
             case RelayTools.ActionReport:
                 properties["outcome"] = new { type = "string", @enum = new[] { "started", "completed", "failed", "canceled", "incomplete", "unknown" } };
                 properties["restoration"] = new { type = "string", @enum = new[] { "pending", "blocked", "verified", "accepted" } };
-                properties["report"] = new { description = "Bounded reported evidence; not a claim that the relay performed or verified external execution." }; break;
+                properties["report"] = new { description = "Bounded reported evidence; not a claim that the relay performed or verified external execution." };
+                properties["usage"] = UsageSchema(); break;
             case RelayTools.SendMessage:
                 Text("text", "Message text, at most 8 KiB. Supply taskId for shared conversation, otherwise recipientSessionId for private delivery.");
                 Text("replyTo", "Optional ID of the message this replies to.");
@@ -102,6 +107,12 @@ internal static class ToolSchemas
                 properties["aliases"] = new { type = "array", items = new { type = "string" } }; Text("reason", "Coordination control explanation."); Text("machineId", "Machine to revoke; required by revoke_machine."); break;
         }
         return properties;
+    }
+
+    private static object UsageSchema()
+    {
+        static object Tokens() => new { type = "integer", minimum = 0, maximum = RelayLimits.MaxReportedTokens };
+        return new { type = "object", properties = new { inputTokens = Tokens(), outputTokens = Tokens() }, additionalProperties = false, description = "Optional tokens you used since your last report; recorded for measurement only." };
     }
 
     private static object WorkflowSchema()

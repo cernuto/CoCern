@@ -81,6 +81,7 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
             }
             candidate.Effects.RemoveAll(x => x.Id == effect.Id);
             if (!await CommitAsync(candidate)) return Replies.Error(RelayErrorCodes.StorageFailure);
+            if (effect.TargetKind == AggregateKinds.Session && effect.Operation == Operations.Deliver) RecordWake(effect.TargetKey, payload, result);
             if (effect.TargetKind == AggregateKinds.Session && effect.Operation == Operations.Deliver && services.GetService<ICoordinationNotifier>() is { } notifier)
             {
                 // Hints are best effort; the durable inbox remains authoritative.
@@ -92,6 +93,23 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
         if (candidate.DueWork.RemoveAll(x => (workId.Length == 0 || x.Id == workId) && x.DueAt <= now) > 0 && !await CommitAsync(candidate)) return Replies.Error(RelayErrorCodes.StorageFailure);
         if (candidate.Effects.Any(Selected)) return Replies.Error(RelayErrorCodes.DeliveryPending);
         return Replies.Ok(new { dispatched = true });
+    }
+
+    /// <summary>Counts one wake: a message newly stored in a session inbox that may wake its chat. Redeliveries and <c>wake: false</c> messages are not wakes.</summary>
+    private void RecordWake(string sessionId, JsonObject payload, RelayReply delivered)
+    {
+        if (services.GetService<IActivitySink>() is not { } sink) return;
+        try
+        {
+            if (payload["wake"] is JsonValue wake && wake.TryGetValue<bool>(out var wakes) && !wakes) return;
+            if (JsonNode.Parse(delivered.DataJson)?["delivered"] is not JsonValue stored || !stored.TryGetValue<bool>(out var isNew) || !isNew) return;
+            sink.Record(new ActivityEvent
+            {
+                Timestamp = DateTimeOffset.UtcNow, Kind = ActivityEvent.Wake, RepositoryId = JsonFields.Text(payload, "repositoryId"), SessionId = sessionId,
+                Ok = true, Code = "Ok", Target = JsonFields.Text(payload, "taskId") is { Length: > 0 } taskId ? "task:" + Uri.EscapeDataString(JsonFields.Text(payload, "repositoryId")) + "/" + Uri.EscapeDataString(JsonFields.Text(payload, "boardId", "default")) + "/" + Uri.EscapeDataString(taskId) : null
+            });
+        }
+        catch (Exception) { /* Telemetry never affects delivery. */ }
     }
 
     private async Task<bool> CommitAsync(StateEnvelope<CoordinationDocument> candidate)

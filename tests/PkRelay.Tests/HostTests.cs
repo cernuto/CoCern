@@ -278,6 +278,67 @@ public class HostTests
         Assert.Contains("resource_metadata", denied.Headers.WwwAuthenticate.ToString());
     }
 
+    [Fact]
+    public async Task Activity_counts_each_real_call_wake_and_inbox_read_once_and_keeps_usage_out_of_state()
+    {
+        await using var host = new RelayHostFixture();
+        using var client = host.AuthorizedClient();
+        var started = DateTimeOffset.UtcNow.AddMinutes(-1);
+        var manager = Data(await host.Call(client, "session_open", new { repositoryId = "repo", requestId = "activity-manager", role = "Manager" }));
+        var worker = Data(await host.Call(client, "session_open", new { repositoryId = "repo", requestId = "activity-worker", role = "worker" }));
+        string Id(JsonElement session) => session.GetProperty("sessionId").GetString()!;
+        string Token(JsonElement session) => session.GetProperty("sessionToken").GetString()!;
+        Assert.True((await host.Call(client, "task_update", new { repositoryId = "repo", requestId = "activity-create", sessionId = Id(worker), sessionToken = Token(worker), taskId = "T1", expectedVersion = 0, patch = new { status = "started" }, usage = new { inputTokens = 1200, outputTokens = 80 } })).GetProperty("ok").GetBoolean());
+        // The same status again under a new request is a duplicate status write.
+        Assert.True((await host.Call(client, "task_update", new { repositoryId = "repo", requestId = "activity-repeat", sessionId = Id(worker), sessionToken = Token(worker), taskId = "T1", expectedVersion = 1, patch = new { status = "started" } })).GetProperty("ok").GetBoolean());
+        await host.Call(client, "send_message", new { repositoryId = "repo", requestId = "activity-wake", sessionId = Id(manager), sessionToken = Token(manager), recipientSessionId = Id(worker), text = "please look" });
+        await host.Call(client, "send_message", new { repositoryId = "repo", requestId = "activity-quiet", sessionId = Id(manager), sessionToken = Token(manager), recipientSessionId = Id(worker), text = "fyi", wake = false });
+        JsonElement inbox = default;
+        for (var retry = 0; retry < 40; retry++)
+        {
+            inbox = Data(await host.Call(client, "check_inbox", SessionArgs(worker)));
+            if (inbox.GetProperty("items").GetArrayLength() == 2) break;
+            await Task.Delay(100);
+        }
+        Assert.Equal(2, inbox.GetProperty("items").GetArrayLength());
+
+        var store = host.Services.GetRequiredService<SqliteStore>();
+        await store.FlushActivityAsync();
+        var counters = await host.Services.GetRequiredService<IActivityCounterSource>().ReadActivityCountersAsync("repo", started, DateTimeOffset.UtcNow.AddMinutes(1));
+        Assert.Equal(1, counters.Wakes);
+        Assert.InRange(counters.InboxReads, 1, 40);
+        Assert.Equal(1, counters.DuplicateStatusWrites);
+        Assert.Equal(1200, counters.InputTokens);
+        Assert.Equal(80, counters.OutputTokens);
+        Assert.True(counters.ManagerTurns >= 1);
+
+        using var connection = new Microsoft.Data.Sqlite.SqliteConnection(new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder { DataSource = store.DatabasePath, Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly, Pooling = false }.ToString());
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT role || '|' || code FROM activity_log WHERE tool = 'send_message' LIMIT 1;";
+        Assert.Equal("manager|Ok", command.ExecuteScalar());
+        command.CommandText = "SELECT COUNT(*) FROM grain_state WHERE payload LIKE '%inputTokens%';";
+        Assert.Equal(0L, command.ExecuteScalar());
+    }
+
+    [Fact]
+    public async Task A_failing_activity_sink_never_fails_or_changes_a_call()
+    {
+        await using var host = new RelayHostFixture(configureServices: services => services.AddSingleton<IActivitySink, ThrowingSink>());
+        using var client = host.AuthorizedClient();
+        var opened = await host.Call(client, "session_open", new { repositoryId = "repo", requestId = "throwing-sink" });
+        Assert.True(opened.GetProperty("ok").GetBoolean());
+        var status = await host.Call(client, "get_status", SessionArgs(Data(opened)));
+        Assert.True(status.GetProperty("ok").GetBoolean());
+        Assert.True(host.Services.GetRequiredService<IActivitySink>() is ThrowingSink { Calls: > 0 });
+    }
+
+    private sealed class ThrowingSink : IActivitySink
+    {
+        public int Calls;
+        public void Record(ActivityEvent activity) { Interlocked.Increment(ref Calls); throw new InvalidOperationException("Telemetry unavailable."); }
+    }
+
     private static JsonElement Data(JsonElement reply) { using var document = JsonDocument.Parse(reply.GetProperty("dataJson").GetString()!); return document.RootElement.Clone(); }
     private static object SessionArgs(JsonElement session) => new { repositoryId = "repo", sessionId = session.GetProperty("sessionId").GetString(), sessionToken = session.GetProperty("sessionToken").GetString() };
 }
