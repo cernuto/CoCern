@@ -28,10 +28,26 @@ public sealed record SearchDocument(
     string DocId, string Kind, string RepositoryId, string? OwnerSessionId,
     string Title, string Body, string Status, DateTimeOffset UpdatedAt);
 
+/// <summary>Identifies one search document within its grain: storage keys rows by (grain, kind, doc_id).</summary>
+public sealed record SearchDocumentKey(string Kind, string DocId);
+
+/// <summary>
+/// The search rows a commit must change for one grain: delete <see cref="Removed"/>, and replace or insert each of <see cref="Upserts"/>
+/// by its key. With <see cref="ReplaceAll"/>, delete every row of the grain first instead (first write, backfill, or a cleared state).
+/// </summary>
+public sealed record SearchDelta(IReadOnlyList<SearchDocument> Upserts, IReadOnlyList<SearchDocumentKey> Removed, bool ReplaceAll)
+{
+    /// <summary>Nothing to change; the state name is not indexed.</summary>
+    public static readonly SearchDelta None = new([], [], false);
+}
+
 /// <summary>State that describes its own searchable text, as <see cref="IHasDueWork"/> describes its timers. Storage decides how to index it.</summary>
 public interface IHasSearchDocuments
 {
     IReadOnlyList<SearchDocument> GetSearchDocuments(string stateName);
+
+    /// <summary>Only what changed since <paramref name="previous"/>, the state this one replaces (null when there is none).</summary>
+    SearchDelta GetSearchChanges(string stateName, IHasSearchDocuments? previous);
 }
 
 /// <summary>An aggregate's persisted state plus its pending outbox and timers, committed atomically.</summary>
@@ -43,6 +59,10 @@ public sealed class StateEnvelope<T> : IHasDueWork, IHasSearchDocuments where T 
     public List<DueWorkItem> DueWork { get; set; } = [];
     public IReadOnlyList<DueWorkItem> GetDueWork() => DueWork.Concat(Effects.Select(e => new DueWorkItem(e.Id, "effect", e.DueAt))).ToArray();
     public IReadOnlyList<SearchDocument> GetSearchDocuments(string stateName) => Value is CoordinationDocument document ? SearchExtraction.Extract(stateName, document.Json) : [];
+    public SearchDelta GetSearchChanges(string stateName, IHasSearchDocuments? previous) =>
+        Value is CoordinationDocument document
+            ? SearchExtraction.Changes(stateName, previous is StateEnvelope<T> { Value: CoordinationDocument prior } ? prior.Json : null, document.Json)
+            : SearchDelta.None;
 }
 
 /// <summary>An aggregate's state document. Its JSON shape is the persisted format.</summary>

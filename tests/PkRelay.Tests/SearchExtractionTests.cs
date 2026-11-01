@@ -36,7 +36,7 @@ public sealed class SearchExtractionTests
     private static SearchDocument Single(IReadOnlyList<SearchDocument> documents, string kind, string id) => Assert.Single(documents, x => x.Kind == kind && x.DocId == id);
 
     [Fact]
-    public void Board_gives_one_document_per_task_context_note_and_approved_standing_item()
+    public void Board_gives_one_document_per_task_and_context_note_and_none_for_standing()
     {
         var state = new StateEnvelope<CoordinationDocument>();
         Assert.True(Call(state, "board", "task_update", new() { ["taskId"] = "T-1", ["expectedVersion"] = 0, ["workflow"] = Workflow("ready") }).Ok);
@@ -55,7 +55,9 @@ public sealed class SearchExtractionTests
 
         var documents = state.GetSearchDocuments("board");
 
-        Assert.Equal(6, documents.Count);
+        Assert.Equal(4, documents.Count);
+        Assert.Equal(SearchKinds.All.Order().ToArray(), new[] { "context", "message", "task" });
+        Assert.Equal(documents, SearchExtraction.Extract("board", JsonNode.Parse(state.Value.Json)!.AsObject()));
         Assert.All(documents, x => { Assert.Equal("repo", x.RepositoryId); Assert.Null(x.OwnerSessionId); });
         var ready = Single(documents, SearchKinds.Task, "T-1");
         Assert.Equal("Fix the refresh timeout", ready.Title);
@@ -73,14 +75,8 @@ public sealed class SearchExtractionTests
         Assert.Equal(("plain", "open", ""), (plain.Title, plain.Status, plain.Body));
         var note = Single(documents, SearchKinds.Context, "conventions");
         Assert.Equal(("conventions", "note", "run Build-PkRelay.ps1 first"), (note.Title, note.Status, note.Body));
-        var line = Single(documents, SearchKinds.Standing, "css");
-        Assert.Equal(("line", "Never deploy CSS without a restoration receipt"), (line.Status, line.Body));
-        var grant = Single(documents, SearchKinds.Standing, "rigs");
-        Assert.Equal("grant", grant.Status);
-        Assert.Contains("resource grant for rig-1 expires", grant.Body);
-        Assert.Equal(Now, grant.UpdatedAt);
-        // A proposal is not in effect until an administrator approves it, so it is not searchable.
-        Assert.DoesNotContain(documents, x => x.DocId == "pending" || x.Body.Contains("Unapproved"));
+        // Standing already reaches every chat with session_open and milestone replies, so lines, grants and proposals are not indexed.
+        Assert.DoesNotContain(documents, x => x.DocId is "css" or "rigs" or "pending" || x.Body.Contains("CSS") || x.Body.Contains("Unapproved"));
     }
 
     [Fact]
@@ -207,9 +203,95 @@ public sealed class SearchExtractionTests
 
         var documents = SearchExtraction.Extract("board", Board(tasks, new JsonObject { ["c"] = 3 }, standing));
 
-        Assert.Equal(new[] { "flow", "g", "legacy" }, documents.Select(x => x.DocId).Order().ToArray());
+        Assert.Equal(new[] { "flow", "legacy" }, documents.Select(x => x.DocId).Order().ToArray());
         var legacy = Single(documents, SearchKinds.Task, "legacy");
         Assert.Equal(("legacy", "ready", "1\nkept"), (legacy.Title, legacy.Status, legacy.Body));
         Assert.Equal(("open", DateTimeOffset.MinValue), (Single(documents, SearchKinds.Task, "flow").Status, Single(documents, SearchKinds.Task, "flow").UpdatedAt));
+    }
+
+    [Fact]
+    public void Reports_and_messages_share_the_body_newest_first_across_both()
+    {
+        var large = new string('r', RelayLimits.MaxSearchFieldBytes);
+        var task = new JsonObject
+        {
+            ["taskId"] = "t",
+            ["reports"] = new JsonArray(new[] { 1, 3, 5, 7 }.Select(minute => (JsonNode)new JsonObject { ["actionId"] = $"act{minute}", ["outcome"] = "completed", ["report"] = large, ["at"] = Now.AddMinutes(minute).ToString("O") }).ToArray()),
+            ["messages"] = new JsonArray(new[] { 2, 4, 6, 8 }.Select(minute => (JsonNode)new JsonObject { ["text"] = $"message at {minute}", ["at"] = Now.AddMinutes(minute).ToString("O") }).ToArray())
+        };
+
+        var body = Assert.Single(SearchExtraction.Extract("board", Board(new JsonObject { ["t"] = task }))).Body;
+
+        // Four 1 KB reports would fill the 4 KB body on their own; interleaved by time, every newer message still gets in.
+        var order = new[] { "message at 8", "act7", "message at 6", "act5", "message at 4", "act3", "message at 2" }.Select(text => body.IndexOf(text, StringComparison.Ordinal)).ToArray();
+        Assert.DoesNotContain(-1, order);
+        Assert.Equal(order.Order().ToArray(), order);
+        Assert.True(Encoding.UTF8.GetByteCount(body) <= RelayLimits.MaxSearchBodyBytes);
+    }
+
+    [Fact]
+    public void Changes_rewrite_only_changed_documents_and_list_removed_keys()
+    {
+        var board = new StateEnvelope<CoordinationDocument>();
+        foreach (var id in new[] { "T-1", "T-2", "T-3" }) Assert.True(Call(board, "board", "task_update", new() { ["taskId"] = id, ["expectedVersion"] = 0, ["notes"] = "first " + id }).Ok);
+        Assert.True(Call(board, "board", "context_put", new() { ["contextId"] = "n1", ["expectedVersion"] = 0, ["content"] = "note one" }).Ok);
+        Assert.True(Call(board, "board", "context_put", new() { ["contextId"] = "n2", ["expectedVersion"] = 0, ["content"] = "note two" }).Ok);
+        var initial = board.Value.Json;
+
+        var first = SearchExtraction.Changes("board", null, initial);
+        Assert.True(first.ReplaceAll);
+        Assert.Equal(SearchExtraction.Extract("board", initial), first.Upserts);
+
+        var before = board.Value.Json;
+        var snapshot = new StateEnvelope<CoordinationDocument> { Value = new() { Json = before } };
+        Assert.True(Call(board, "board", "send_message", new() { ["taskId"] = "T-2", ["text"] = "a new finding" }).Ok);
+        Assert.True(Call(board, "board", "context_put", new() { ["contextId"] = "n2", ["expectedVersion"] = 1, ["content"] = "note two, revised" }).Ok);
+        Assert.True(Call(board, "board", "task_get", new() { ["taskId"] = "T-1" }).Ok);
+
+        var delta = board.GetSearchChanges("board", snapshot);
+        Assert.False(delta.ReplaceAll);
+        Assert.Equal(new[] { "context:n2", "task:T-2" }, delta.Upserts.Select(x => x.Kind + ":" + x.DocId).Order().ToArray());
+        Assert.Empty(delta.Removed);
+        Assert.Contains("a new finding", Single(delta.Upserts, SearchKinds.Task, "T-2").Body);
+        Assert.Equal(SearchExtraction.ExtractTasks(JsonNode.Parse(board.Value.Json)!.AsObject(), ["T-2", "missing", "T-2"]), delta.Upserts.Where(x => x.Kind == SearchKinds.Task).ToArray());
+        AssertApplies("board", before, board.Value.Json, delta);
+        Assert.Empty(SearchExtraction.Changes("board", board.Value.Json, board.Value.Json).Upserts);
+
+        // A task or note without its change marker (a legacy board) is compared whole, so an unchanged one is not rewritten.
+        var legacy = JsonNode.Parse(board.Value.Json)!.AsObject();
+        legacy["tasks"]!["T-3"]!.AsObject().Remove("changeRevision");
+        legacy["context"]!["n1"]!.AsObject().Remove("version");
+        Assert.Empty(SearchExtraction.Changes("board", legacy, legacy.DeepClone().AsObject()).Upserts);
+        var edited = legacy.DeepClone().AsObject();
+        edited["tasks"]!["T-3"]!["facts"]!["notes"] = "edited";
+        Assert.Equal("T-3", Assert.Single(SearchExtraction.Changes("board", legacy, edited).Upserts).DocId);
+
+        var session = new StateEnvelope<CoordinationDocument>();
+        Assert.True(Call(session, "session", "__open", new() { ["sessionId"] = "s1", ["principalId"] = "alice", ["sessionToken"] = "secret" }).Ok);
+        foreach (var id in new[] { "m1", "m2" }) Assert.True(Call(session, "session", "__deliver", new() { ["messageId"] = id, ["text"] = "text " + id }).Ok);
+        var inbox = session.Value.Json;
+        Assert.True(Call(session, "session", "ack", new() { ["sessionId"] = "s1", ["sessionToken"] = "secret", ["messageId"] = "m1" }).Ok);
+        Assert.True(Call(session, "session", "__deliver", new() { ["messageId"] = "m3", ["text"] = "text m3" }).Ok);
+        Assert.True(Call(session, "session", "__deliver", new() { ["messageId"] = "n1", ["taskId"] = "T-1", ["kind"] = "task.changed" }).Ok);
+        var messages = SearchExtraction.Changes("session", inbox, session.Value.Json);
+        Assert.False(messages.ReplaceAll);
+        Assert.Equal("m3", Assert.Single(messages.Upserts).DocId);
+        Assert.Equal(new SearchDocumentKey(SearchKinds.Message, "m1"), Assert.Single(messages.Removed));
+        AssertApplies("session", inbox, session.Value.Json, messages);
+
+        // Clearing a state, or a state whose repository cannot be read, replaces every row with nothing.
+        foreach (var cleared in new[] { SearchExtraction.Changes("board", before, null), SearchExtraction.Changes("board", before, "{}") })
+            Assert.Equal((true, 0, 0), (cleared.ReplaceAll, cleared.Upserts.Count, cleared.Removed.Count));
+        Assert.Equal(SearchDelta.None, SearchExtraction.Changes("lock", before, board.Value.Json));
+    }
+
+    /// <summary>Applying the delta to an index built from the previous state gives exactly the index of the current state.</summary>
+    private static void AssertApplies(string stateName, string previous, string current, SearchDelta delta)
+    {
+        var index = SearchExtraction.Extract(stateName, previous).ToDictionary(x => new SearchDocumentKey(x.Kind, x.DocId));
+        foreach (var key in delta.Removed) Assert.True(index.Remove(key));
+        foreach (var document in delta.Upserts) index[new SearchDocumentKey(document.Kind, document.DocId)] = document;
+        var expected = SearchExtraction.Extract(stateName, current).ToDictionary(x => new SearchDocumentKey(x.Kind, x.DocId));
+        Assert.Equal(expected.OrderBy(x => x.Key.Kind + ":" + x.Key.DocId).ToArray(), index.OrderBy(x => x.Key.Kind + ":" + x.Key.DocId).ToArray());
     }
 }
