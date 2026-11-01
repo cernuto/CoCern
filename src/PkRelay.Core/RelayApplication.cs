@@ -1,3 +1,6 @@
+using System.Diagnostics;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.DependencyInjection;
@@ -15,29 +18,53 @@ namespace PkRelay.Core;
 /// (session open, task claim with resources, action begin, convenience renewals/acks, next-work offers).
 /// Aggregates enforce the rules; this layer authenticates the session, routes, composes and bounds replies.
 /// </summary>
-public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? machines = null) : IRelayApplication
+public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? machines = null, IActivitySink? activity = null) : IRelayApplication
 {
     private readonly IMachineDirectory directory = machines ?? new MachineDirectory(grains);
     private const int WorkerProbeLimit = 50;
     private readonly string incarnation = Guid.NewGuid().ToString("N");
     public string IncarnationId => incarnation;
 
+    /// <summary>Runs one public tool call and, when a sink is configured, records it once. Recording never changes or fails the call.</summary>
     public async Task<RelayReply> ExecuteAsync(RelayCaller caller, string tool, JsonElement arguments, CancellationToken cancellationToken = default)
+    {
+        if (activity is null || !RelayToolCatalog.TryGet(tool, out _)) return await ExecuteCoreAsync(caller, tool, arguments, null, cancellationToken);
+        var trace = new CallTrace { At = DateTimeOffset.UtcNow };
+        var started = Stopwatch.GetTimestamp();
+        RelayReply? reply = null;
+        try { return reply = await ExecuteCoreAsync(caller, tool, arguments, trace, cancellationToken); }
+        finally { RecordCall(tool, arguments, trace, reply, Stopwatch.GetElapsedTime(started), cancellationToken.IsCancellationRequested); }
+    }
+
+    private async Task<RelayReply> ExecuteCoreAsync(RelayCaller caller, string tool, JsonElement arguments, CallTrace? trace, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (!RelayToolCatalog.TryGet(tool, out var definition)) return Error(UnknownTool);
         if (RelayRequestGuard.Validate(caller, definition, arguments, out var args) is { } rejected) return rejected;
+        // Reported usage is telemetry only: it is recorded with the call and never reaches aggregate state.
+        if (args.TryGetPropertyValue("usage", out var usage))
+        {
+            args.Remove("usage");
+            if (trace is not null && tool is RelayTools.TaskUpdate or RelayTools.ActionReport) trace.Usage = usage as JsonObject;
+        }
+        if (trace is not null) trace.Args = args;
         args["hubIncarnation"] = incarnation;
         var trusted = caller with { IsInternal = true };
         try
         {
-            if (tool == RelayTools.SessionOpen) return BoundWire(await OpenSessionAsync(trusted, args));
+            if (tool == RelayTools.SessionOpen)
+            {
+                var opened = BoundWire(await OpenSessionAsync(trusted, args));
+                if (trace is not null && opened.Ok) { trace.SessionId = Text(Parse(opened), "sessionId"); trace.Role = Text(args, "role"); }
+                return opened;
+            }
             JsonObject? session = null;
             if (definition.RequiresSession || tool == RelayTools.GetStatus && Text(args, "sessionId").Length > 0)
             {
                 var verified = await VerifySessionAsync(trusted, args);
                 if (!verified.Ok) return verified;
                 session = Parse(verified);
+                if (trace is not null) { trace.SessionId = Text(args, "sessionId"); trace.Role = Text(session, "role"); }
             }
             if (tool is RelayTools.TaskClaim or RelayTools.ClaimAcquire or RelayTools.ActionBegin && await PausedAsync(trusted, args) is { } paused) return paused;
             var result = await DispatchAsync(trusted, tool, args, session);
@@ -278,6 +305,86 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
     private Task<RelayReply> CallSession(RelayCaller caller, string operation, JsonObject args) => Call(AggregateKinds.Session, Text(args, "sessionId"), caller, operation, args);
     private Task<RelayReply> CallBoard(RelayCaller caller, string operation, JsonObject args) => Call(AggregateKinds.Board, BoardKey(args), caller, operation, args);
     private Task<RelayReply> Call(string kind, string key, RelayCaller caller, string operation, JsonObject args) => CoordinationGrain.Aggregate(grains, kind, key).ExecuteAsync(caller, operation, args.ToJsonString());
+
+    private sealed class CallTrace
+    {
+        public DateTimeOffset At { get; init; }
+        public JsonObject? Args { get; set; }
+        public JsonObject? Usage { get; set; }
+        public string? SessionId { get; set; }
+        public string? Role { get; set; }
+    }
+
+    /// <summary>Builds and queues the call's activity event. Any failure here is swallowed: telemetry must never fail a call.</summary>
+    private void RecordCall(string tool, JsonElement arguments, CallTrace trace, RelayReply? reply, TimeSpan elapsed, bool canceled)
+    {
+        try
+        {
+            var args = trace.Args;
+            var ok = reply?.Ok == true;
+            var repository = args is null ? "" : Text(args, "repositoryId");
+            var (target, hash) = args is null || !ok ? (args is null ? null : Target(tool, args), (string?)null) : (Target(tool, args), ContentHash(tool, args));
+            var workflow = ok && tool == RelayTools.TaskUpdate && args?["workflow"] is JsonObject flow ? Text(flow, "state") : "";
+            activity!.Record(new ActivityEvent
+            {
+                Timestamp = trace.At, Kind = ActivityEvent.Call, RepositoryId = repository.Length <= RelayLimits.MaxIdentifierLength ? repository : "",
+                SessionId = Bounded(trace.SessionId), Role = Bounded(trace.Role?.ToLowerInvariant(), RelayLimits.MaxActivityRoleLength), Tool = tool, Ok = ok,
+                Code = reply?.Code ?? (canceled ? "Canceled" : Unavailable),
+                RequestBytes = arguments.ValueKind == JsonValueKind.Undefined ? 0 : Encoding.UTF8.GetByteCount(arguments.GetRawText()),
+                ReplyBytes = reply is null ? 0 : Encoding.UTF8.GetByteCount(reply.DataJson), DurationMilliseconds = elapsed.TotalMilliseconds,
+                // Usage counts only with a committed call: a rejected milestone is usually resent with the same usage.
+                InputTokens = ok ? Tokens(trace.Usage, "inputTokens") : null, OutputTokens = ok ? Tokens(trace.Usage, "outputTokens") : null,
+                RequestId = Bounded(args is null ? null : Text(args, "requestId")), Target = target, ContentHash = hash,
+                WorkflowState = workflow is "ready" or "blocked" or "completed" ? workflow : null,
+                OfferTarget = ok && reply is not null && args is not null ? OfferTarget(args, reply) : null
+            });
+        }
+        catch (Exception) { /* Never fail or slow the call for telemetry. */ }
+    }
+
+    /// <summary>The record a call wrote or claimed: a task, a context note, or a private conversation. Status repeats are counted per target.</summary>
+    private static string? Target(string tool, JsonObject args)
+    {
+        var taskId = Text(args, "taskId");
+        return tool switch
+        {
+            RelayTools.TaskUpdate or RelayTools.ActionReport or RelayTools.TaskClaim or RelayTools.ActionBegin when taskId.Length > 0 => TaskTarget(args, taskId),
+            RelayTools.SendMessage when taskId.Length > 0 => TaskTarget(args, taskId),
+            RelayTools.SendMessage when Text(args, "recipientSessionId").Length > 0 => "message:" + Uri.EscapeDataString(Text(args, "sessionId")) + ">" + Uri.EscapeDataString(Text(args, "recipientSessionId")),
+            RelayTools.ContextPut when Text(args, "contextId").Length > 0 => "context:" + BoardKey(args) + "/" + Uri.EscapeDataString(Text(args, "contextId")),
+            // Only a first page counts as an inbox read; continuation pages belong to the same read.
+            RelayTools.CheckInbox when Number(args, "cursor") == 0 => "inbox:" + Uri.EscapeDataString(Text(args, "sessionId")),
+            _ => null
+        };
+    }
+
+    private static string TaskTarget(JsonObject args, string taskId) => "task:" + BoardKey(args) + "/" + Uri.EscapeDataString(taskId);
+
+    /// <summary>A fingerprint of the status text a call wrote: task facts, notes, message and workflow; a message's text; a note's content.</summary>
+    private static string? ContentHash(string tool, JsonObject args)
+    {
+        JsonNode? content = tool switch
+        {
+            RelayTools.TaskUpdate when args.ContainsKey("patch") || args.ContainsKey("notes") || args.ContainsKey("message") || args.ContainsKey("workflow") =>
+                new JsonObject { ["patch"] = args["patch"]?.DeepClone(), ["notes"] = args["notes"]?.DeepClone(), ["message"] = args["message"]?.DeepClone(), ["workflow"] = args["workflow"]?.DeepClone() },
+            RelayTools.SendMessage => args["text"]?.DeepClone(),
+            RelayTools.ContextPut => args["content"]?.DeepClone(),
+            _ => null
+        };
+        return content is null ? null : Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(content.ToJsonString())), 0, 16);
+    }
+
+    private static string? OfferTarget(JsonObject args, RelayReply reply)
+    {
+        if (args["includeNextWork"] is null) return null;
+        var offered = JsonNode.Parse(reply.DataJson)?["nextWork"]?["offer"]?["taskId"];
+        return offered is JsonValue value && value.TryGetValue<string>(out var taskId) && taskId.Length is > 0 and <= RelayLimits.MaxIdentifierLength ? TaskTarget(args, taskId) : null;
+    }
+
+    /// <summary>A reported count, or null when absent or malformed. A bad usage report is ignored rather than failing the milestone.</summary>
+    private static long? Tokens(JsonObject? usage, string key) =>
+        usage?[key] is JsonValue value && value.GetValueKind() == JsonValueKind.Number && long.TryParse(value.ToJsonString(), out var tokens) && tokens is >= 0 and <= RelayLimits.MaxReportedTokens ? tokens : null;
+    private static string? Bounded(string? value, int maximum = RelayLimits.MaxIdentifierLength) => string.IsNullOrEmpty(value) || value.Length > maximum ? null : value;
 
     private static string BoardKey(JsonObject args) => Uri.EscapeDataString(Text(args, "repositoryId")) + "/" + Uri.EscapeDataString(Text(args, "boardId", "default"));
     private static JsonObject Parse(RelayReply reply) => JsonNode.Parse(reply.DataJson)!.AsObject();

@@ -56,8 +56,14 @@ public static class RelayHostBuilderExtensions
         {
             var environment = services.GetRequiredService<IHostEnvironment>();
             // A relative configured path resolves from the content root, so a launch profile can point at the repository's data folder.
-            var configured = services.GetRequiredService<IConfiguration>()["Relay:DatabasePath"];
-            return new SqliteStore(configured is null ? DefaultDatabasePath(environment) : Path.Combine(environment.ContentRootPath, configured));
+            var configuration = services.GetRequiredService<IConfiguration>();
+            var configured = configuration["Relay:DatabasePath"];
+            var activity = new ActivityOptions
+            {
+                Enabled = configuration.GetValue("Relay:Activity:Enabled", true),
+                RetentionDays = configuration.GetValue("Relay:Activity:RetentionDays", 30) is var days and >= 1 ? days : throw new InvalidOperationException("Relay:Activity:RetentionDays must be at least 1.")
+            };
+            return new SqliteStore(configured is null ? DefaultDatabasePath(environment) : Path.Combine(environment.ContentRootPath, configured), activity);
         }));
         builder.Services.AddOptions<EndpointOptions>().Configure<IConfiguration>((options, configuration) =>
         {

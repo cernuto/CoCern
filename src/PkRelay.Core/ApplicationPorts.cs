@@ -17,6 +17,69 @@ public interface IDueWorkSource
     Task<IReadOnlyList<DueWorkReference>> ReadDueAsync(DateTimeOffset now, int limit, CancellationToken cancellationToken = default, int offset = 0);
 }
 
+/// <summary>
+/// One telemetry row. Kind <c>call</c> is one public tool call; kind <c>wake</c> is one new waking message stored in a session inbox.
+/// <see cref="Target"/> names the task, context note or message thread the call wrote; <see cref="ContentHash"/> fingerprints the status
+/// text it wrote there, so a repeat of the same status can be counted. Field names follow the dashboard traffic feed where they overlap.
+/// </summary>
+public sealed record ActivityEvent
+{
+    public const string Call = "call";
+    public const string Wake = "wake";
+
+    public DateTimeOffset Timestamp { get; init; }
+    public string Kind { get; init; } = Call;
+    public string RepositoryId { get; init; } = "";
+    public string? SessionId { get; init; }
+    public string? Role { get; init; }
+    public string? Tool { get; init; }
+    public bool Ok { get; init; }
+    public string Code { get; init; } = "";
+    public int RequestBytes { get; init; }
+    public int ReplyBytes { get; init; }
+    public double DurationMilliseconds { get; init; }
+    public long? InputTokens { get; init; }
+    public long? OutputTokens { get; init; }
+    /// <summary>The mutation's requestId, so an exact retry is not counted twice.</summary>
+    public string? RequestId { get; init; }
+    public string? Target { get; init; }
+    public string? ContentHash { get; init; }
+    public string? WorkflowState { get; init; }
+    /// <summary>The task a next-work offer in this call's reply pointed at, as a <see cref="Target"/>.</summary>
+    public string? OfferTarget { get; init; }
+}
+
+/// <summary>Port implemented by storage: records telemetry without waiting. It never throws and drops events rather than slow a call.</summary>
+public interface IActivitySink
+{
+    void Record(ActivityEvent activity);
+}
+
+/// <summary>Port implemented by storage: the counters derived from recorded activity.</summary>
+public interface IActivityCounterSource
+{
+    Task<ActivityCounters> ReadActivityCountersAsync(string repositoryId, DateTimeOffset from, DateTimeOffset to, CancellationToken cancellationToken = default);
+}
+
+/// <summary>Hub-side efficiency counters for one repository and time window. Definitions are in docs/activity.md.</summary>
+public sealed record ActivityCounters
+{
+    public long Calls { get; init; }
+    public long InputTokens { get; init; }
+    public long OutputTokens { get; init; }
+    public long InboxReads { get; init; }
+    public long Wakes { get; init; }
+    public long OffersMade { get; init; }
+    public long OffersEndedBlocked { get; init; }
+    public long DuplicateStatusWrites { get; init; }
+    public long ManagerTurns { get; init; }
+    public long Closures { get; init; }
+    public double? ManagerTurnsPerClosure { get; init; }
+    public double? MedianSecondsToAcceptedResult { get; init; }
+    /// <summary>Events this process dropped because the writer queue was full.</summary>
+    public long DroppedEvents { get; init; }
+}
+
 /// <summary>Port implemented by the host: best-effort change hints. The durable inbox stays authoritative.</summary>
 public interface ICoordinationNotifier
 {

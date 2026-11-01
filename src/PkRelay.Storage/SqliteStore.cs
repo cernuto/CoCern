@@ -17,7 +17,10 @@ public sealed partial class SqliteStore : IDueWorkSource, IDisposable, IAsyncDis
     public string ServiceId { get; private set; } = "";
     public string IncarnationId { get; private set; } = "";
 
-    public SqliteStore(string databasePath)
+    public SqliteStore(string databasePath, ActivityOptions? activity = null) : this(databasePath, activity, SearchModule) { }
+
+    /// <summary>Tests name a missing module here to exercise the startup check.</summary>
+    internal SqliteStore(string databasePath, ActivityOptions? activity, string searchModule)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         DatabasePath = Path.GetFullPath(databasePath);
@@ -28,10 +31,12 @@ public sealed partial class SqliteStore : IDueWorkSource, IDisposable, IAsyncDis
         try
         {
             _connection.Open();
-            Initialize(existingDatabase);
+            Initialize(existingDatabase, searchModule);
+            StartActivity(activity ?? new());
         }
         catch
         {
+            StopActivity();
             _connection.Dispose();
             _ownership.Dispose();
             throw;
@@ -50,13 +55,18 @@ public sealed partial class SqliteStore : IDueWorkSource, IDisposable, IAsyncDis
     private static FileStream AcquireOwnership(string path) =>
         new(path + ".hub.lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
 
-    private void Initialize(bool existingDatabase)
+    /// <summary>The schema this hub writes. Version 1 databases are upgraded in place after a backup; newer ones are refused.</summary>
+    public const int SchemaVersion = 2;
+    private const string SearchModule = "fts5";
+
+    private void Initialize(bool existingDatabase, string searchModule)
     {
         using var versionCommand = Command("PRAGMA user_version;");
         var version = Convert.ToInt32(versionCommand.ExecuteScalar());
-        if (version > 1)
+        if (version > SchemaVersion)
             throw new InvalidOperationException($"SQLite schema version {version} is newer than this hub supports.");
-        if (version < 1 && existingDatabase)
+        RequireModule(_connection, searchModule);
+        if (version < SchemaVersion && existingDatabase)
         {
             using var backup = new SqliteConnection(ConnectionString(DatabasePath + ".pre-migration-" + Guid.NewGuid().ToString("N") + ".db"));
             backup.Open();
@@ -87,7 +97,14 @@ public sealed partial class SqliteStore : IDueWorkSource, IDisposable, IAsyncDis
             );
             CREATE INDEX IF NOT EXISTS ix_due_work_due ON due_work(due_ticks, state_name, grain_type, grain_key, work_id);
             CREATE TABLE IF NOT EXISTS hub_metadata (name TEXT PRIMARY KEY, value TEXT NOT NULL);
-            PRAGMA user_version=1;
+            """ + ActivitySchema + """
+            CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
+                state_name UNINDEXED, grain_key UNINDEXED, doc_id UNINDEXED,
+                kind UNINDEXED, repository_id UNINDEXED, owner_session UNINDEXED,
+                status UNINDEXED, updated_ticks UNINDEXED,
+                title, body,
+                tokenize = 'porter unicode61');
+            PRAGMA user_version=2;
             """, transaction))
             schema.ExecuteNonQuery();
         using (var createService = Command("INSERT OR IGNORE INTO hub_metadata(name, value) VALUES ('service_id', $value);", transaction))
@@ -104,6 +121,19 @@ public sealed partial class SqliteStore : IDueWorkSource, IDisposable, IAsyncDis
             incarnation.ExecuteNonQuery();
         }
         transaction.Commit();
+    }
+
+    /// <summary>Fails with a clear message when this host's SQLite build lacks a required virtual-table module, before anything is migrated.</summary>
+    internal static void RequireModule(SqliteConnection connection, string module)
+    {
+        using var probe = connection.CreateCommand();
+        // The module name is a code constant, never caller input.
+        probe.CommandText = $"CREATE VIRTUAL TABLE temp.pkrelay_module_probe USING {module}(probe); DROP TABLE temp.pkrelay_module_probe;";
+        try { probe.ExecuteNonQuery(); }
+        catch (SqliteException exception)
+        {
+            throw new InvalidOperationException($"The SQLite library loaded by this hub lacks the {module.ToUpperInvariant()} module, which PkRelay requires for search. Use a SQLite build with {module.ToUpperInvariant()} enabled; the database was not changed.", exception);
+        }
     }
 
     internal async Task<StoredState?> ReadAsync(string stateName, GrainId grainId, CancellationToken cancellationToken)
@@ -234,6 +264,8 @@ public sealed partial class SqliteStore : IDueWorkSource, IDisposable, IAsyncDis
 
     public void Dispose()
     {
+        // Drain queued telemetry before closing; the writer takes the gate itself.
+        StopActivity();
         _gate.Wait();
         try
         {

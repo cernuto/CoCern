@@ -2,6 +2,7 @@ using Microsoft.Data.Sqlite;
 using Orleans;
 using Orleans.Runtime;
 using Orleans.Storage;
+using PkRelay.Contracts;
 using PkRelay.Core;
 using PkRelay.Domain;
 using PkRelay.Storage;
@@ -223,6 +224,205 @@ public sealed class StorageTests : IDisposable
         Assert.Null(state.ETag);
         Assert.Equal("", state.State.Value.Text);
     }
+
+    [Fact]
+    public async Task Version_1_database_upgrades_to_version_2_after_a_backup()
+    {
+        CreateVersion1Database("kept");
+        using (var store = new SqliteStore(Database))
+        {
+            var loaded = State("");
+            await new SqliteGrainStorage(store).ReadStateAsync("board", Grain, loaded);
+            Assert.Equal("kept", loaded.State.Value.Text);
+        }
+        var backup = Assert.Single(Directory.GetFiles(_directory, "relay.db.pre-migration-*.db"));
+        Assert.Equal(1L, Scalar(backup, "PRAGMA user_version;"));
+        Assert.Equal(0L, Scalar(backup, "SELECT COUNT(*) FROM sqlite_schema WHERE name IN ('activity_log', 'search_index');"));
+        Assert.Equal(2L, Scalar(Database, "PRAGMA user_version;"));
+        Assert.Equal(3L, Scalar(Database, "SELECT COUNT(*) FROM sqlite_schema WHERE name IN ('activity_log', 'activity_daily', 'search_index');"));
+        // The index table exists from this step; it starts filling when search writes arrive.
+        Assert.Equal(0L, Scalar(Database, "SELECT COUNT(*) FROM search_index;"));
+    }
+
+    [Fact]
+    public async Task Version_2_database_reopens_unchanged_without_another_backup()
+    {
+        using (var store = new SqliteStore(Database))
+            await new SqliteGrainStorage(store).WriteStateAsync("board", Grain, State("first"));
+        var schema = Text(Database, "SELECT group_concat(sql, ';') FROM (SELECT sql FROM sqlite_schema ORDER BY name);");
+        using (var reopened = new SqliteStore(Database))
+        {
+            var loaded = State("");
+            await new SqliteGrainStorage(reopened).ReadStateAsync("board", Grain, loaded);
+            Assert.Equal("first", loaded.State.Value.Text);
+        }
+        Assert.Empty(Directory.GetFiles(_directory, "*.pre-migration-*"));
+        Assert.Equal(2L, Scalar(Database, "PRAGMA user_version;"));
+        Assert.Equal(schema, Text(Database, "SELECT group_concat(sql, ';') FROM (SELECT sql FROM sqlite_schema ORDER BY name);"));
+    }
+
+    [Fact]
+    public void Version_3_database_is_still_refused()
+    {
+        using (new SqliteStore(Database)) { }
+        Execute(Database, "PRAGMA user_version=3;");
+        var refused = Assert.Throws<InvalidOperationException>(() => new SqliteStore(Database));
+        Assert.Contains("newer", refused.Message);
+        Assert.Equal(3L, Scalar(Database, "PRAGMA user_version;"));
+    }
+
+    [Fact]
+    public void Missing_search_module_fails_clearly_before_migrating()
+    {
+        CreateVersion1Database("untouched");
+        var failure = Assert.Throws<InvalidOperationException>(() => new SqliteStore(Database, null, "pkrelay_missing_module"));
+        Assert.Contains("PKRELAY_MISSING_MODULE module", failure.Message);
+        Assert.Contains("search", failure.Message);
+        Assert.Equal(1L, Scalar(Database, "PRAGMA user_version;"));
+        Assert.Empty(Directory.GetFiles(_directory, "*.pre-migration-*"));
+        // The failed start released ownership, and the real module check passes.
+        using var store = new SqliteStore(Database);
+    }
+
+    [Fact]
+    public async Task Activity_events_are_batched_and_written_in_their_own_transaction()
+    {
+        using (var store = new SqliteStore(Database))
+        {
+            for (var index = 0; index < 700; index++) store.Record(Call(Now.AddSeconds(index), "get_status", session: "s" + index % 3));
+            await store.FlushActivityAsync();
+            Assert.Equal(700L, Scalar(Database, "SELECT COUNT(*) FROM activity_log;"));
+            store.Record(Call(Now, "task_update", inputTokens: 5));
+        }
+        // Disposal drains what is still queued.
+        Assert.Equal(701L, Scalar(Database, "SELECT COUNT(*) FROM activity_log;"));
+        Assert.Equal(5L, Scalar(Database, "SELECT input_tokens FROM activity_log WHERE tool = 'task_update';"));
+    }
+
+    [Fact]
+    public async Task Full_activity_queue_drops_events_instead_of_blocking_calls()
+    {
+        using var store = new SqliteStore(Database, new ActivityOptions { QueueCapacity = 4, BatchInterval = TimeSpan.FromHours(1) });
+        var timer = System.Diagnostics.Stopwatch.StartNew();
+        for (var index = 0; index < 1_000; index++) store.Record(Call(Now, "get_status"));
+        Assert.True(timer.Elapsed < TimeSpan.FromSeconds(1), $"Recording took {timer.Elapsed}.");
+        Assert.InRange(store.DroppedActivityEvents, 995, 996);
+        await store.FlushActivityAsync();
+        Assert.InRange(Scalar(Database, "SELECT COUNT(*) FROM activity_log;"), 4, 5);
+    }
+
+    [Fact]
+    public async Task Retention_rolls_old_rows_into_daily_totals_and_deletes_them()
+    {
+        using var store = new SqliteStore(Database, new ActivityOptions { RetentionDays = 30 });
+        var old = Now.AddDays(-40);
+        store.Record(Call(old, "task_update", inputTokens: 10, outputTokens: 2));
+        store.Record(Call(old.AddMinutes(1), "task_update", inputTokens: 20, outputTokens: 3));
+        store.Record(Call(old.AddMinutes(2), "task_update", ok: false));
+        store.Record(Call(Now.AddDays(-1), "task_update", inputTokens: 7));
+        await store.FlushActivityAsync();
+        Assert.Equal(3, await store.RollUpActivityAsync(Now));
+        Assert.Equal(1L, Scalar(Database, "SELECT COUNT(*) FROM activity_log;"));
+        Assert.Equal("2026-09-19|task_update|3|1|30|5", Text(Database, "SELECT day || '|' || tool || '|' || calls || '|' || errors || '|' || input_tokens || '|' || output_tokens FROM activity_daily;"));
+        Assert.Equal(0, await store.RollUpActivityAsync(Now));
+        Assert.Equal(3L, Scalar(Database, "SELECT calls FROM activity_daily;"));
+    }
+
+    [Fact]
+    public async Task Each_counter_increments_once_per_event()
+    {
+        using var store = new SqliteStore(Database);
+        var task = "task:repo/default/T1";
+        var offered = "task:repo/default/T2";
+        ActivityEvent[] events =
+        [
+            // Manager turns: a burst of calls is one turn; a call after a 60-second gap starts another.
+            Call(Now, "get_status", session: "manager", role: "manager"),
+            Call(Now.AddSeconds(10), "task_get", session: "manager", role: "manager"),
+            Call(Now.AddSeconds(200), "task_update", session: "manager", role: "manager", target: task, state: "ready", request: "ready"),
+            // Inbox reads: a first page counts; a continuation page and a failed read do not.
+            Call(Now.AddSeconds(1), "check_inbox", session: "worker", target: "inbox:worker"),
+            Call(Now.AddSeconds(2), "check_inbox", session: "worker"),
+            Call(Now.AddSeconds(3), "check_inbox", session: "worker", target: "inbox:worker", ok: false),
+            // Wakes are explicit events from inbox delivery.
+            new() { Timestamp = Now.AddSeconds(4), Kind = ActivityEvent.Wake, RepositoryId = "repo", SessionId = "worker", Ok = true, Code = "Ok" },
+            // Duplicate status writes: the same status text to the same task again; an exact retry and a changed status are not duplicates.
+            Call(Now.AddSeconds(300), "task_update", session: "worker", target: task, hash: "A", request: "a1"),
+            Call(Now.AddSeconds(301), "task_update", session: "worker", target: task, hash: "A", request: "a1"),
+            Call(Now.AddSeconds(302), "task_update", session: "worker", target: task, hash: "A", request: "a2"),
+            Call(Now.AddSeconds(303), "task_update", session: "worker", target: task, hash: "B", request: "b1"),
+            // An offer that the task becoming blocked ends, and one the session claims successfully.
+            Call(Now.AddSeconds(400), "task_update", session: "worker", target: task, offer: offered, request: "o1"),
+            Call(Now.AddSeconds(401), "task_update", session: "manager", role: "manager", target: offered, state: "blocked", request: "block"),
+            Call(Now.AddSeconds(402), "task_update", session: "other", target: task, offer: "task:repo/default/T3", request: "o2"),
+            Call(Now.AddSeconds(403), "task_claim", session: "other", target: "task:repo/default/T3"),
+            // Closure and time to accepted result: ready at +200 s, completed at +800 s; a repeated completed write is not a second closure.
+            Call(Now.AddSeconds(800), "task_update", session: "worker", target: task, state: "completed", request: "done", inputTokens: 100, outputTokens: 10),
+            Call(Now.AddSeconds(801), "task_update", session: "worker", target: task, state: "completed", request: "done", inputTokens: 100, outputTokens: 10),
+        ];
+        foreach (var item in events) store.Record(item);
+        await store.FlushActivityAsync();
+        var counters = await store.ReadActivityCountersAsync("repo", Now, Now.AddHours(1));
+        Assert.Equal(1, counters.InboxReads);
+        Assert.Equal(1, counters.Wakes);
+        Assert.Equal(1, counters.DuplicateStatusWrites);
+        Assert.Equal(2, counters.OffersMade);
+        Assert.Equal(1, counters.OffersEndedBlocked);
+        Assert.Equal(3, counters.ManagerTurns);
+        Assert.Equal(1, counters.Closures);
+        Assert.Equal(3.0, counters.ManagerTurnsPerClosure);
+        Assert.Equal(600.0, counters.MedianSecondsToAcceptedResult);
+        Assert.Equal(100, counters.InputTokens);
+        Assert.Equal(10, counters.OutputTokens);
+        Assert.Equal(0, (await store.ReadActivityCountersAsync("other-repo", Now, Now.AddHours(1))).Calls);
+    }
+
+    [Fact]
+    public async Task One_burst_of_inbox_reads_by_a_session_counts_as_one_read()
+    {
+        using var store = new SqliteStore(Database);
+        // One adapter wait: a first-page read every 2 seconds for 50 seconds.
+        for (var second = 0; second <= 50; second += 2) store.Record(Call(Now.AddSeconds(second), "check_inbox", session: "worker", target: "inbox:worker"));
+        // Another session reading at the same time is its own read.
+        store.Record(Call(Now.AddSeconds(10), "check_inbox", session: "other", target: "inbox:other"));
+        // A read after a full gap starts a new burst.
+        store.Record(Call(Now.AddSeconds(50 + RelayLimits.ActivityTurnGapSeconds), "check_inbox", session: "worker", target: "inbox:worker"));
+        await store.FlushActivityAsync();
+        Assert.Equal(3, (await store.ReadActivityCountersAsync("repo", Now, Now.AddHours(1))).InboxReads);
+    }
+
+    private static ActivityEvent Call(DateTimeOffset at, string tool, string? session = null, string? role = null, bool ok = true, string? target = null, string? hash = null,
+        string? state = null, string? offer = null, string? request = null, long? inputTokens = null, long? outputTokens = null) => new()
+    {
+        Timestamp = at, RepositoryId = "repo", SessionId = session, Role = role, Tool = tool, Ok = ok, Code = ok ? "Ok" : "Busy", RequestBytes = 10, ReplyBytes = 20,
+        DurationMilliseconds = 1.5, Target = target, ContentHash = hash, WorkflowState = state, OfferTarget = offer, RequestId = request, InputTokens = inputTokens, OutputTokens = outputTokens
+    };
+
+    private void CreateVersion1Database(string text)
+    {
+        var payload = System.Text.Json.JsonSerializer.Serialize(new StateEnvelope<Payload> { Value = new() { Text = text } }, new System.Text.Json.JsonSerializerOptions { IncludeFields = true });
+        Execute(Database, $"""
+            CREATE TABLE grain_state (state_name TEXT NOT NULL, grain_type TEXT NOT NULL, grain_key TEXT NOT NULL, generation INTEGER NOT NULL, etag TEXT NOT NULL, payload TEXT, PRIMARY KEY (state_name, grain_type, grain_key));
+            CREATE TABLE due_work (state_name TEXT NOT NULL, grain_type TEXT NOT NULL, grain_key TEXT NOT NULL, work_id TEXT NOT NULL, kind TEXT NOT NULL, due_ticks INTEGER NOT NULL,
+                PRIMARY KEY (state_name, grain_type, grain_key, work_id), FOREIGN KEY (state_name, grain_type, grain_key) REFERENCES grain_state(state_name, grain_type, grain_key));
+            CREATE INDEX ix_due_work_due ON due_work(due_ticks, state_name, grain_type, grain_key, work_id);
+            CREATE TABLE hub_metadata (name TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO hub_metadata(name, value) VALUES ('service_id', 'version-one');
+            INSERT INTO grain_state VALUES ('board', '{Grain.Type}', '{Grain.Key}', 1, 'etag-one', '{payload.Replace("'", "''")}');
+            PRAGMA user_version=1;
+            """);
+    }
+
+    private static SqliteConnection Open(string path)
+    {
+        var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Pooling = false }.ToString());
+        connection.Open();
+        return connection;
+    }
+
+    private static void Execute(string path, string sql) { using var connection = Open(path); using var command = connection.CreateCommand(); command.CommandText = sql; command.ExecuteNonQuery(); }
+    private static long Scalar(string path, string sql) { using var connection = Open(path); using var command = connection.CreateCommand(); command.CommandText = sql; return Convert.ToInt64(command.ExecuteScalar()); }
+    private static string Text(string path, string sql) { using var connection = Open(path); using var command = connection.CreateCommand(); command.CommandText = sql; return Convert.ToString(command.ExecuteScalar())!; }
 
     private static TestGrainState<StateEnvelope<Payload>> State(string text, params DueWorkItem[] work) =>
         new() { State = new() { Value = new() { Text = text }, DueWork = work.ToList() } };

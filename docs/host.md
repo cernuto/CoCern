@@ -19,6 +19,8 @@ ASP.NET Core configuration files, protected environment settings and command-lin
 | `Relay:Clients:<index>:PrincipalId` | Trusted identity supplied to the application service. |
 | `Relay:Clients:<index>:IsAdministrator` | Administrator permissions; default false. |
 | `Relay:Clients:<index>:Repositories:<index>` | Exact authorized repository identities. |
+| `Relay:Activity:Enabled` | Record tool calls and wakes in `activity_log`; default true. See [activity.md](activity.md). |
+| `Relay:Activity:RetentionDays` | Raw activity rows kept before the daily rollup; default 30. |
 
 Client token comparison uses fixed-time comparison of SHA-256 digests. All bearer credentials, including external JWTs, are accepted over HTTPS or an actual loopback TCP connection. An off-host plaintext request fails even if it supplies `X-Forwarded-For` or `X-Forwarded-Proto`. The host does not trust forwarded headers. Use HTTPS to the host for remote deployments; configure any tunnel or proxy separately and keep its upstream access protected. Browser CORS access is denied by default. SignalR clients should send the bearer token in authorization headers, as the supplied adapter does with long polling; query-string access tokens are not accepted.
 

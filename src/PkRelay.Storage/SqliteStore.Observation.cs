@@ -157,7 +157,8 @@ public sealed partial class SqliteStore : IRelayObservationSource
             ObjectDisposedException.ThrowIf(_disposed, this);
             var started = Stopwatch.GetTimestamp();
             var names = new List<string>();
-            using (var command = Command("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name LIMIT 33;"))
+            // FTS5 shadow tables are storage internals of their virtual table, so they are left out of the inventory.
+            using (var command = Command("SELECT name FROM pragma_table_list WHERE schema='main' AND type IN ('table', 'virtual') AND name NOT LIKE 'sqlite_%' ORDER BY name LIMIT 33;"))
             using (var reader = command.ExecuteReader())
                 while (reader.Read()) names.Add(reader.GetString(0));
             var tables = new List<DatabaseTableMetrics>();
