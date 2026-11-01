@@ -20,14 +20,29 @@ public interface IHasDueWork
     IReadOnlyList<DueWorkItem> GetDueWork();
 }
 
+/// <summary>
+/// One searchable piece of an aggregate's state. <see cref="DocId"/> is the ID the agent opens it with (task, context, message,
+/// line or grant ID); it is unique per kind within one grain. <see cref="OwnerSessionId"/> is set only for private inbox messages.
+/// </summary>
+public sealed record SearchDocument(
+    string DocId, string Kind, string RepositoryId, string? OwnerSessionId,
+    string Title, string Body, string Status, DateTimeOffset UpdatedAt);
+
+/// <summary>State that describes its own searchable text, as <see cref="IHasDueWork"/> describes its timers. Storage decides how to index it.</summary>
+public interface IHasSearchDocuments
+{
+    IReadOnlyList<SearchDocument> GetSearchDocuments(string stateName);
+}
+
 /// <summary>An aggregate's persisted state plus its pending outbox and timers, committed atomically.</summary>
-public sealed class StateEnvelope<T> : IHasDueWork where T : new()
+public sealed class StateEnvelope<T> : IHasDueWork, IHasSearchDocuments where T : new()
 {
     public int SchemaVersion { get; set; } = 1;
     public T Value { get; set; } = new();
     public List<DurableEffect> Effects { get; set; } = [];
     public List<DueWorkItem> DueWork { get; set; } = [];
     public IReadOnlyList<DueWorkItem> GetDueWork() => DueWork.Concat(Effects.Select(e => new DueWorkItem(e.Id, "effect", e.DueAt))).ToArray();
+    public IReadOnlyList<SearchDocument> GetSearchDocuments(string stateName) => Value is CoordinationDocument document ? SearchExtraction.Extract(stateName, document.Json) : [];
 }
 
 /// <summary>An aggregate's state document. Its JSON shape is the persisted format.</summary>
