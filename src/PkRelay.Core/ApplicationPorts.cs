@@ -159,6 +159,65 @@ public interface IAnalyticsQueries
     Task<AnalyticsResult> RunSqlAsync(string sql, CancellationToken cancellationToken = default);
 }
 
+/// <summary>
+/// Port implemented by the host: one shared tokenizer that counts model tokens, loaded once and safe to share. Counts are exact for
+/// models that use <see cref="Encoding"/> and estimates for others.
+/// </summary>
+public interface ITokenCounter
+{
+    /// <summary>The encoding's name, such as <c>o200k_base</c>.</summary>
+    string Encoding { get; }
+
+    /// <summary>The number of tokens in <paramref name="text"/>.</summary>
+    int Count(string text);
+
+    /// <summary>The length, in characters, of the longest start of <paramref name="text"/> that is at most <paramref name="maxTokens"/> tokens.</summary>
+    int PrefixLength(string text, int maxTokens);
+}
+
+/// <summary>One synced document as read from git: its text, the commit it was read at, and its content hash.</summary>
+public sealed record DocContent(string Text, string Commit, string Hash);
+
+/// <summary>
+/// Port implemented by the host: reads a synced document with <c>git show &lt;commit&gt;:&lt;path&gt;</c>, never from a working tree.
+/// Only configured repositories and paths their patterns include (and do not exclude) are read; anything else, a missing commit or path,
+/// or a file over its type's size limit reads as null.
+/// </summary>
+public interface IDocSource
+{
+    Task<DocContent?> ReadAsync(string repositoryId, string path, string commit, CancellationToken cancellationToken = default);
+
+    /// <summary>Reads the file at the head of <paramref name="branch"/>, for a document whose recorded commit is gone.</summary>
+    Task<DocContent?> ReadHeadAsync(string repositoryId, string path, string branch, CancellationToken cancellationToken = default);
+}
+
+/// <summary>What one doc sync did: the commit the directory now follows, the files it re-indexed or removed, and the files it skipped.</summary>
+public sealed record DocSyncOutcome(string Commit, int Changed, int Skipped, bool Fetched);
+
+public enum DocSyncError
+{
+    /// <summary>The repository has no doc cache settings on this hub.</summary>
+    NotConfigured,
+    /// <summary>A manual sync ran for this repository too recently.</summary>
+    RateLimited,
+    /// <summary>The branch name is malformed, or the clone has no such branch from its remote.</summary>
+    UnknownBranch,
+    /// <summary>A git command failed or timed out.</summary>
+    Failed
+}
+
+public sealed class DocSyncException(DocSyncError error, string message, int retryAfterSeconds = 0) : Exception(message)
+{
+    public DocSyncError Error { get; } = error;
+    public int RetryAfterSeconds { get; } = retryAfterSeconds;
+}
+
+/// <summary>Port implemented by the host: runs the doc sync for one repository now, sharing the timer's per-repository lock.</summary>
+public interface IDocSync
+{
+    Task<DocSyncOutcome> SyncNowAsync(string repositoryId, string? branch, CancellationToken cancellationToken = default);
+}
+
 /// <summary>Port implemented by the host: best-effort change hints. The durable inbox stays authoritative.</summary>
 public interface ICoordinationNotifier
 {

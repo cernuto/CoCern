@@ -1,0 +1,995 @@
+using System.Diagnostics;
+using System.Net;
+using System.Net.Http.Headers;
+using System.Net.Http.Json;
+using System.Text;
+using System.Text.Json;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Hosting;
+using ModelContextProtocol.Client;
+using ModelContextProtocol.Protocol;
+using Orleans;
+using Orleans.Runtime;
+using PkRelay.Contracts;
+using PkRelay.Core;
+using PkRelay.Host;
+using Xunit;
+
+namespace PkRelay.Tests;
+
+/// <summary>These tests start many git processes and hubs; they run on their own so other classes' timing checks keep their margin.</summary>
+[CollectionDefinition(nameof(DocCacheTests), DisableParallelization = true)]
+public sealed class DocCacheCollection;
+
+[Collection(nameof(DocCacheTests))]
+public sealed class DocCacheTests
+{
+    private static readonly ITokenCounter Tokens = new O200kTokenCounter();
+    private const string AdminToken = "doc-cache-admin-test-secret-not-production";
+
+    // ---- Analyzer and query escaping ----
+
+    [Fact]
+    public void The_analyzer_splits_api_words_and_keeps_verbs_and_status_codes_exact()
+    {
+        using var analyzer = new ApiDocAnalyzer();
+        var terms = DocQuery.Terms(analyzer, "taskClaim task_claim /v1/tasks/{id}/claim GET returns 404; get the claims");
+        foreach (var term in new[] { "task", "claim", "v1", "id", "GET", "404", "get", "return" }) Assert.Contains(term, terms);
+        // Upper-case verbs stay exact; the English word "get" is a different term.
+        Assert.DoesNotContain("tasks", terms);
+        Assert.Equal(["GET"], DocQuery.Terms(analyzer, "GET").ToArray());
+        Assert.Equal(["get"], DocQuery.Terms(analyzer, "get").ToArray());
+        Assert.True(ApiDocAnalyzer.IsExactTerm("503"));
+        Assert.False(ApiDocAnalyzer.IsExactTerm("600"));
+    }
+
+    [Theory]
+    [InlineData("/v1/tasks/{id}")]
+    [InlineData("a:b")]
+    [InlineData("\"quoted\" claim")]
+    [InlineData("{}")]
+    [InlineData("claim AND")]
+    [InlineData("OR")]
+    [InlineData("NOT claim")]
+    [InlineData("(unbalanced [range TO")]
+    [InlineData("*?~^!&&||\\")]
+    public void Query_text_with_syntax_characters_is_read_as_words_and_never_fails(string text)
+    {
+        using var analyzer = new ApiDocAnalyzer();
+        var query = DocQuery.Parse(analyzer, text);
+        if (query is not null) Assert.DoesNotContain(":[", query.ToString());
+        Assert.Null(DocQuery.Parse(analyzer, "   "));
+    }
+
+    // ---- Splitting ----
+
+    [Fact]
+    public void Markdown_splits_at_headings_outside_code_blocks_with_unique_anchors_and_exact_text()
+    {
+        const string markdown = "Preamble line.\n\n# Tasks\n\nIntro.\n\n## Claim\n\n```bash\n# not a heading\ncurl -X POST /v1/tasks/1/claim\n```\n\n## Claim\n\nAgain.\n### Errors ###\n\nE1\n# Other\n";
+        var sections = MarkdownSections.Split(markdown);
+        Assert.Equal(new[] { "top", "tasks", "claim", "claim-1", "errors", "other" }, sections.Select(section => section.Anchor));
+        Assert.Equal(new[] { "", "Tasks", "Tasks > Claim", "Tasks > Claim", "Tasks > Claim > Errors", "Other" }, sections.Select(section => section.HeadingPath));
+        Assert.Equal(markdown, string.Concat(sections.Select(section => section.Text)));
+        // The code block, including its "# not a heading" line, stays in its section.
+        Assert.Contains("# not a heading\ncurl -X POST /v1/tasks/1/claim\n```", sections[2].Text);
+        Assert.Equal("## Claim\n".Length, sections[2].HeadingLength);
+    }
+
+    [Fact]
+    public void Long_sections_are_chunked_at_paragraphs_and_the_chunks_rebuild_the_section_exactly()
+    {
+        var paragraph = string.Join(' ', Enumerable.Repeat("The claim endpoint takes a task for one session.", 12)) + "\n\n";
+        var code = "```\n" + string.Join("\n", Enumerable.Range(0, 30).Select(i => $"line {i}")) + "\n\n\nend\n```\n\n";
+        var text = "## Long\n\n" + string.Concat(Enumerable.Repeat(paragraph, 20)) + code + paragraph + new string('x', 7_000) + "\n";
+        var chunks = DocChunks.Chunk(text, Tokens);
+        Assert.True(chunks.Count > 5);
+        Assert.Equal(text, string.Concat(chunks.Select(chunk => chunk.Text)));
+        Assert.All(chunks, chunk => Assert.True(chunk.Tokens <= RelayLimits.DocChunkTokens && chunk.Text.Length <= RelayLimits.DocChunkChars, $"{chunk.Tokens} tokens, {chunk.Text.Length} chars"));
+        // The code block with blank lines inside is one piece, not split at its blank lines.
+        Assert.Contains(chunks, chunk => chunk.Text.Contains("line 29\n\n\nend\n```"));
+    }
+
+    [Fact]
+    public void Text_files_split_into_paragraph_chunks_named_after_the_file()
+    {
+        var text = string.Concat(Enumerable.Range(1, 40).Select(i => $"Paragraph {i} first line about refunds and orders\n" + string.Join(' ', Enumerable.Repeat("words", 60)) + "\n\n"));
+        var sections = DocFormats.Build("notes/runbook.txt", text, Tokens, out var reason)!;
+        Assert.Equal(DocSkipReason.None, reason);
+        Assert.True(sections.Count > 3);
+        Assert.Equal(Enumerable.Range(1, sections.Count).Select(i => "p" + i), sections.Select(section => section.Anchor));
+        Assert.Equal("runbook.txt > Paragraph 1 first line about refunds and orders", sections[0].HeadingPath);
+        Assert.Equal(text, string.Concat(sections.Select(section => section.Text)));
+        Assert.All(sections, section => Assert.True(section.Tokens <= RelayLimits.DocChunkTokens + 2));
+        var longLine = DocFormats.Build("a.txt", new string('y', 200) + "\n", Tokens, out _)!;
+        Assert.Equal("a.txt > " + new string('y', RelayLimits.MaxTextHeadingChars) + "…", longLine[0].HeadingPath);
+    }
+
+    private const string OpenApiJson = """
+    {
+      "openapi": "3.0.1",
+      "info": { "title": "Orders", "version": "1" },
+      "paths": {
+        "/v1/orders": {
+          "post": {
+            "tags": ["orders"], "operationId": "createOrder", "summary": "Create an order",
+            "parameters": [ { "name": "X-Request-Id", "in": "header", "required": true, "schema": { "type": "string", "format": "uuid" } } ],
+            "requestBody": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/NewOrder" } } } },
+            "responses": { "201": { "description": "Created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Order" } } } },
+                           "409": { "description": "Duplicate request" } }
+          },
+          "get": { "tags": ["orders"], "summary": "List orders", "responses": { "200": { "description": "Orders", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Order" } } } } } } }
+        },
+        "/v1/orders/{id}": {
+          "parameters": [ { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } } ],
+          "get": { "summary": "Read one order", "responses": { "200": { "description": "The order" }, "404": { "description": "No such order" } } },
+          "delete": { "tags": ["admin"], "responses": { "204": { "description": "Deleted" }, "default": { "$ref": "#/components/responses/Problem" } } }
+        }
+      },
+      "components": {
+        "schemas": {
+          "Order": { "description": "A placed order.", "required": ["id"], "properties": { "id": { "type": "string" }, "lines": { "type": "array", "items": { "$ref": "#/components/schemas/Line" } }, "status": { "$ref": "#/components/schemas/Status" } } },
+          "NewOrder": { "properties": { "lines": { "type": "array", "items": { "type": "object" } } } },
+          "Line": { "allOf": [ { "$ref": "#/components/schemas/Base" } ] }
+        }
+      }
+    }
+    """;
+
+    private const string OpenApiYaml = """
+    openapi: 3.0.1
+    info: { title: Orders, version: "1" }
+    paths:
+      /v1/orders:
+        post:
+          tags: [orders]
+          operationId: createOrder
+          summary: Create an order
+          parameters:
+            - name: X-Request-Id
+              in: header
+              required: true
+              schema: { type: string, format: uuid }
+          requestBody:
+            content:
+              application/json:
+                schema: { $ref: '#/components/schemas/NewOrder' }
+          responses:
+            "201":
+              description: Created
+              content:
+                application/json:
+                  schema: { $ref: '#/components/schemas/Order' }
+            "409": { description: Duplicate request }
+        get:
+          tags: [orders]
+          summary: List orders
+          responses:
+            "200":
+              description: Orders
+              content:
+                application/json:
+                  schema:
+                    type: array
+                    items: { $ref: '#/components/schemas/Order' }
+      /v1/orders/{id}:
+        parameters:
+          - &id { name: id, in: path, required: true, schema: { type: string } }
+        get:
+          summary: Read one order
+          responses:
+            "200": { description: The order }
+            "404": { description: No such order }
+        delete:
+          tags: [admin]
+          responses:
+            "204": { description: Deleted }
+            default: { $ref: '#/components/responses/Problem' }
+    components:
+      schemas:
+        Order:
+          description: A placed order.
+          required: [id]
+          properties:
+            id: { type: string }
+            lines: { type: array, items: { $ref: '#/components/schemas/Line' } }
+            status: { $ref: '#/components/schemas/Status' }
+        NewOrder:
+          properties:
+            lines: { type: array, items: { type: object } }
+        Line:
+          allOf:
+            - $ref: '#/components/schemas/Base'
+    """;
+
+    [Fact]
+    public void OpenApi_gives_one_section_per_operation_and_per_schema_with_ref_names_only()
+    {
+        var sections = DocFormats.Build("api/orders.json", OpenApiJson, Tokens, out var reason)!;
+        Assert.Equal(DocSkipReason.None, reason);
+        Assert.Equal(new[] { "orders > GET /v1/orders", "orders > POST /v1/orders", "untagged > GET /v1/orders/{id}", "admin > DELETE /v1/orders/{id}", "Schemas > Order", "Schemas > NewOrder", "Schemas > Line" },
+            sections.Select(section => section.HeadingPath));
+        Assert.Equal(new[] { "get--v1-orders", "createOrder", "get--v1-orders-id", "delete--v1-orders-id", "schema-order", "schema-neworder", "schema-line" }, sections.Select(section => section.Anchor));
+        var post = sections[1].Text;
+        Assert.StartsWith("POST /v1/orders\nSummary: Create an order\n", post);
+        Assert.Contains("- X-Request-Id (header, required): string (uuid)", post);
+        Assert.Contains("Request body: application/json NewOrder", post);
+        Assert.Contains("- 201: Created (Order)", post);
+        Assert.Contains("- 409: Duplicate request", post);
+        Assert.Contains("- 200: Orders (array of Order)", sections[0].Text);
+        // Path-level parameters apply to each operation; a referenced response is named, never expanded.
+        Assert.Contains("- id (path, required): string", sections[2].Text);
+        Assert.Contains("- default: Problem", sections[3].Text);
+        Assert.Contains("A placed order.", sections[4].Text);
+        Assert.Contains("- id: string (required)", sections[4].Text);
+        Assert.Contains("- lines: array of Line", sections[4].Text);
+        Assert.Contains("- status: Status", sections[4].Text);
+        Assert.Contains("allOf Base", sections[6].Text);
+    }
+
+    [Fact]
+    public void A_yaml_spec_gives_the_same_sections_as_the_same_json_spec()
+    {
+        var json = DocFormats.Build("orders.json", OpenApiJson, Tokens, out _)!;
+        var yaml = DocFormats.Build("orders.yaml", OpenApiYaml, Tokens, out var reason)!;
+        Assert.Equal(DocSkipReason.None, reason);
+        Assert.Equal(json.Select(section => (section.Anchor, section.HeadingPath, section.Text)), yaml.Select(section => (section.Anchor, section.HeadingPath, section.Text)));
+        Assert.Equal(json.Count, DocFormats.Build("orders.yml", OpenApiYaml, Tokens, out _)!.Count);
+    }
+
+    [Theory]
+    [InlineData("package.json", """{ "name": "x", "version": "1.0.0" }""", DocSkipReason.NotOpenApi)]
+    [InlineData("list.json", """[ { "openapi": "3.0.0" } ]""", DocSkipReason.NotOpenApi)]
+    [InlineData("broken.json", """{ "openapi": "3.0.0", "paths": { """, DocSkipReason.Malformed)]
+    [InlineData("config.yaml", "name: app\nreplicas: 3\n", DocSkipReason.NotOpenApi)]
+    [InlineData("broken.yaml", "openapi: 3.0.0\npaths: [unclosed\n  - : :\n", DocSkipReason.Malformed)]
+    [InlineData("repeat.yml", "openapi: 3.0.0\nopenapi: 3.1.0\n", DocSkipReason.Malformed)]
+    [InlineData("picture.png", "not text", DocSkipReason.Unsupported)]
+    public void Non_openapi_and_malformed_files_are_skipped_with_a_reason(string path, string content, DocSkipReason expected)
+    {
+        Assert.Null(DocFormats.Build(path, content, Tokens, out var reason));
+        Assert.Equal(expected, reason);
+    }
+
+    [Fact]
+    public void Deep_json_and_an_alias_bomb_are_refused_within_the_limits()
+    {
+        var deep = "{\"openapi\":\"3.0.0\",\"x\":" + string.Concat(Enumerable.Repeat("[", 200)) + string.Concat(Enumerable.Repeat("]", 200)) + "}";
+        Assert.Null(DocFormats.Build("deep.json", deep, Tokens, out var reason));
+        Assert.Equal(DocSkipReason.Malformed, reason);
+        // Ten levels of nine aliases each would expand to 9^10 nodes.
+        var bomb = new StringBuilder("openapi: 3.0.0\na0: &a0 [x, x, x, x, x, x, x, x, x]\n");
+        for (var level = 1; level <= 10; level++) bomb.Append($"a{level}: &a{level} [{string.Join(", ", Enumerable.Repeat($"*a{level - 1}", 9))}]\n");
+        var timer = Stopwatch.StartNew();
+        Assert.Null(DocFormats.Build("bomb.yaml", bomb.ToString(), Tokens, out reason));
+        Assert.Equal(DocSkipReason.Malformed, reason);
+        Assert.True(timer.Elapsed < TimeSpan.FromSeconds(10), $"The alias bomb took {timer.Elapsed}.");
+        // An ordinary alias expands normally.
+        Assert.NotNull(OpenApiSections.ParseYaml("a: &x {b: 1}\nc: *x\n")?["c"]?["b"]);
+    }
+
+    // ---- Search, ranking, fan-out and budgets, end to end against a temporary git repository ----
+
+    [Fact]
+    public async Task Search_finds_api_word_forms_ranks_headings_first_and_carries_the_indexed_commit()
+    {
+        using var git = GitRepositories.Create(new()
+        {
+            ["docs/camel.md"] = "# Fields\n\nThe taskClaim flag is set.\n",
+            ["docs/snake.md"] = "# Columns\n\nThe task_claim column holds it.\n",
+            ["docs/url.md"] = "# Routes\n\nCall /v1/tasks/{id}/claim to hold a task.\n",
+            ["docs/rank.md"] = "# Guide\n\n## Other\n\nThis mentions claim in passing among many other words about something else.\n\n## Claim\n\nTake a task.\n"
+        });
+        await using var host = DocHost(git);
+        using var client = host.AuthorizedClient();
+        await SyncAsync(host);
+        var hits = Hits(await Tool(client, "doc_search", new { repositoryId = "repo", query = "claim", limit = 10 }));
+        foreach (var path in new[] { "docs/camel.md", "docs/snake.md", "docs/url.md" }) Assert.Contains(hits, hit => hit.GetProperty("path").GetString() == path);
+        var rank = hits.Where(hit => hit.GetProperty("path").GetString() == "docs/rank.md").Select(hit => hit.GetProperty("anchor").GetString()).ToArray();
+        Assert.Equal(new[] { "claim", "other" }, rank);
+        Assert.Equal("Guide > Claim", hits[0].GetProperty("heading").GetString());
+        var head = git.Head();
+        Assert.All(hits, hit => Assert.Equal(head[..12], hit.GetProperty("commit").GetString()));
+        Assert.All(hits, hit => Assert.True(hit.GetProperty("tokens").GetInt32() > 0));
+        Assert.Contains("[claim]", hits.Single(hit => hit.GetProperty("path").GetString() == "docs/url.md").GetProperty("snippet").GetString());
+        // Search syntax is read as words.
+        foreach (var query in new[] { "/v1/tasks/{id}: \"claim\"", "a:b", "{}", "claim AND", "\"" })
+            Assert.Equal((HttpStatusCode.OK, "Ok"), Status(await Tool(client, "doc_search", new { repositoryId = "repo", query })));
+        // spec and path narrow the search.
+        Assert.Single(Hits(await Tool(client, "doc_search", new { repositoryId = "repo", query = "claim", path = "docs/snake.md" })));
+        Assert.Empty(Hits(await Tool(client, "doc_search", new { repositoryId = "repo", query = "claim", spec = "nothing" })));
+        Assert.Equal((HttpStatusCode.NotFound, "NotFound"), Status(await Tool(client, "doc_search", new { repositoryId = "repo", query = "claim", path = "docs/none.md" })));
+    }
+
+    [Fact]
+    public async Task OpenApi_operations_are_found_by_verb_and_path_and_by_status_code_and_large_specs_are_indexed()
+    {
+        // Pad the spec past MaxDocBytes but under MaxOpenApiBytes.
+        var padded = OpenApiJson.Replace("\"A placed order.\"", "\"A placed order. " + string.Concat(Enumerable.Repeat("Orders are placed by customers. ", 9_000)) + "\"");
+        Assert.True(Encoding.UTF8.GetByteCount(padded) is > RelayLimits.MaxDocBytes and < RelayLimits.MaxOpenApiBytes);
+        using var git = GitRepositories.Create(new() { ["api/orders.json"] = padded, ["api/orders-v2.yaml"] = OpenApiYaml.Replace("/v1/", "/v2/"), ["docs/intro.md"] = "# Orders\n\nPOST requests to the orders API return 404 when the order is gone.\n" });
+        await using var host = DocHost(git);
+        using var client = host.AuthorizedClient();
+        var outcome = await SyncAsync(host);
+        Assert.Equal(0, outcome.Skipped);
+        var post = Hits(await Tool(client, "doc_search", new { repositoryId = "repo", query = "POST /v1/orders" }));
+        Assert.Equal(("api/orders.json", "createOrder"), (post[0].GetProperty("path").GetString(), post[0].GetProperty("anchor").GetString()));
+        var notFound = Hits(await Tool(client, "doc_search", new { repositoryId = "repo", query = "404", path = "api/orders.json" }));
+        Assert.Equal("untagged > GET /v1/orders/{id}", notFound[0].GetProperty("heading").GetString());
+        var v2 = Hits(await Tool(client, "doc_search", new { repositoryId = "repo", query = "DELETE /v2/orders/{id}" }));
+        Assert.Equal(("api/orders-v2.yaml", "admin > DELETE /v2/orders/{id}"), (v2[0].GetProperty("path").GetString(), v2[0].GetProperty("heading").GetString()));
+        var section = Data(await Tool(client, "doc_section", new { repositoryId = "repo", path = "api/orders.json", anchor = "createOrder" }));
+        Assert.StartsWith("POST /v1/orders\n", section.GetProperty("text").GetString());
+    }
+
+    [Fact]
+    public async Task A_search_over_more_documents_than_the_fan_out_asks_them_all_at_most_32_at_a_time()
+    {
+        var files = Enumerable.Range(0, RelayLimits.MaxDocFanOut + 8).ToDictionary(i => $"docs/d{i:00}.md", i => $"# Doc {i}\n\nRefunds are described here{(i == 39 ? " with refunds refunds refunds" : "")}.\n");
+        using var git = GitRepositories.Create(files);
+        var watcher = new WatchingGit { ShowDelay = TimeSpan.FromMilliseconds(150) };
+        await using var host = DocHost(git, watcher);
+        using var client = host.AuthorizedClient();
+        await SyncAsync(host);
+        var grains = host.Services.GetRequiredService<IGrainFactory>();
+        var outcome = await grains.GetGrain<IDocDirectoryGrain>("repo").SearchAsync("refunds", null, null, 3, TimeSpan.FromSeconds(30));
+        Assert.Equal(40, outcome.Documents);
+        Assert.Equal(0, outcome.NotSearched);
+        Assert.InRange(outcome.PeakConcurrency, 2, RelayLimits.MaxDocFanOut);
+        Assert.InRange(watcher.PeakShows, 2, RelayLimits.MaxDocFanOut);
+        // The best section is in a document past the first 32.
+        Assert.Equal("docs/d39.md", outcome.Hits[0].Path);
+        var reply = Data(await Tool(client, "doc_search", new { repositoryId = "repo", query = "refunds" }));
+        Assert.Equal(RelayLimits.DefaultDocSearchResults, reply.GetProperty("hits").GetArrayLength());
+        Assert.False(reply.TryGetProperty("partial", out _));
+    }
+
+    [Fact]
+    public async Task A_search_past_its_timeout_returns_the_hits_so_far_as_partial()
+    {
+        using var git = GitRepositories.Create(new() { ["docs/fast.md"] = "# Refunds\n\nFast refunds.\n", ["docs/slow.md"] = "# Refunds\n\nSlow refunds.\n" });
+        var watcher = new WatchingGit { SlowPath = "docs/slow.md", ShowDelay = TimeSpan.FromSeconds(20) };
+        await using var host = DocHost(git, watcher);
+        using var client = host.AuthorizedClient();
+        await SyncAsync(host);
+        host.Services.GetRequiredService<DocCacheTool>().SearchTimeout = TimeSpan.FromSeconds(1);
+        var timer = Stopwatch.StartNew();
+        var reply = Data(await Tool(client, "doc_search", new { repositoryId = "repo", query = "refunds" }));
+        Assert.True(timer.Elapsed < TimeSpan.FromSeconds(10));
+        Assert.True(reply.GetProperty("partial").GetBoolean());
+        Assert.Equal(1, reply.GetProperty("notSearched").GetInt32());
+        Assert.Equal("docs/fast.md", Assert.Single(reply.GetProperty("hits").EnumerateArray()).GetProperty("path").GetString());
+        watcher.ShowDelay = TimeSpan.Zero;
+    }
+
+    [Fact]
+    public async Task Replies_stay_within_the_token_budget_and_report_what_did_not_fit_as_a_count()
+    {
+        var heading = string.Join(' ', Enumerable.Repeat("refund", 60));
+        var many = string.Concat(Enumerable.Range(0, 12).Select(i => $"# {heading} {i}\n\n## {heading} part\n\n### {heading} detail\n\nRefund body {i}.\n\n"));
+        var paragraph = string.Join(' ', Enumerable.Repeat("Each refund needs an order and a reason.", 15)) + "\n\n";
+        var longSection = "# Policy\n\n" + string.Concat(Enumerable.Repeat(paragraph, 60)) + "```\ncode stays\n```\n";
+        using var git = GitRepositories.Create(new() { ["docs/many.md"] = many, ["docs/long.md"] = longSection });
+        await using var host = DocHost(git);
+        using var client = host.AuthorizedClient();
+        await SyncAsync(host);
+        var search = Data(await Tool(client, "doc_search", new { repositoryId = "repo", query = "refund", path = "docs/many.md", limit = 10 }));
+        Assert.True(Tokens.Count(search.GetRawText()) <= RelayLimits.MaxDocReplyTokens);
+        Assert.True(search.GetProperty("more").GetInt32() > 0);
+        Assert.Equal(10, search.GetProperty("hits").GetArrayLength() + search.GetProperty("more").GetInt32());
+        // A section over the budget comes in whole chunks; following next rebuilds it exactly, code block included.
+        var text = new StringBuilder();
+        var anchor = "policy";
+        var total = 0;
+        for (var page = 0; anchor is not null; page++)
+        {
+            var section = Data(await Tool(client, "doc_section", new { repositoryId = "repo", path = "docs/long.md", anchor }));
+            Assert.True(Tokens.Count(section.GetRawText()) <= RelayLimits.MaxDocReplyTokens);
+            Assert.Equal("Policy", section.GetProperty("heading").GetString());
+            total = section.GetProperty("tokens").GetInt32();
+            text.Append(section.GetProperty("text").GetString());
+            anchor = section.TryGetProperty("next", out var next) ? next.GetString() : null;
+            if (anchor is not null) Assert.True(section.GetProperty("moreTokens").GetInt32() > 0);
+            Assert.True(page < 50);
+        }
+        Assert.Equal(longSection, text.ToString());
+        Assert.True(total > RelayLimits.MaxDocReplyTokens);
+        Assert.Equal((HttpStatusCode.NotFound, "NotFound"), Status(await Tool(client, "doc_section", new { repositoryId = "repo", path = "docs/long.md", anchor = "policy~999" })));
+        Assert.Equal((HttpStatusCode.NotFound, "NotFound"), Status(await Tool(client, "doc_section", new { repositoryId = "repo", path = "docs/long.md", anchor = "nope" })));
+    }
+
+    [Fact]
+    public async Task Doc_section_returns_exactly_the_section_text_with_code_blocks()
+    {
+        const string markdown = "# Tasks\n\nIntro.\n\n## Claim\n\nUse it:\n\n```json\n{ \"taskClaim\": true }\n\n# still code\n```\n\nAfter.\n\n## Errors\n\nE.\n";
+        using var git = GitRepositories.Create(new() { ["docs/tasks.md"] = markdown });
+        await using var host = DocHost(git);
+        using var client = host.AuthorizedClient();
+        await SyncAsync(host);
+        var section = Data(await Tool(client, "doc_section", new { repositoryId = "repo", path = "docs/tasks.md", anchor = "claim" }));
+        Assert.Equal("## Claim\n\nUse it:\n\n```json\n{ \"taskClaim\": true }\n\n# still code\n```\n\nAfter.\n\n", section.GetProperty("text").GetString());
+        Assert.Equal("Tasks > Claim", section.GetProperty("heading").GetString());
+        Assert.Equal(git.Head()[..12], section.GetProperty("commit").GetString());
+        Assert.False(section.TryGetProperty("next", out _));
+    }
+
+    [Fact]
+    public async Task After_idle_deactivation_the_next_search_reloads_the_file_at_the_recorded_commit()
+    {
+        using var git = GitRepositories.Create(new() { ["docs/a.md"] = "# Refunds\n\nRefunds take five days.\n" });
+        var watcher = new WatchingGit();
+        await using var host = DocHost(git, watcher);
+        using var client = host.AuthorizedClient();
+        await SyncAsync(host);
+        var recorded = git.Head();
+        Assert.Single(Hits(await Tool(client, "doc_search", new { repositoryId = "repo", query = "refunds" })));
+        var grains = host.Services.GetRequiredService<IGrainFactory>();
+        var document = grains.GetGrain<IDocumentGrain>(DocKeys.Document("repo", "docs/a.md"));
+        Assert.Equal(1, (await document.StatsAsync()).IndexRuns);
+        // A newer commit in the clone's working tree and branch must not leak into the reload: it reads the recorded commit.
+        git.WriteInClone("docs/a.md", "# Refunds\n\nUncommitted refunds text.\n");
+        await grains.GetGrain<IManagementGrain>(0).ForceActivationCollection(TimeSpan.Zero);
+        await WaitUntilAsync(async () => !(await grains.GetGrain<IManagementGrain>(0).GetActiveGrains(DocKeys.DocumentType)).Any(id => id.Key.ToString() == DocKeys.Document("repo", "docs/a.md")));
+        var shows = watcher.Shows.Count;
+        var hits = Hits(await Tool(client, "doc_search", new { repositoryId = "repo", query = "refunds" }));
+        Assert.Contains("five days", Assert.Single(hits).GetProperty("snippet").GetString());
+        Assert.Contains(watcher.Shows.Skip(shows), argument => argument == recorded + ":docs/a.md");
+        var stats = await document.StatsAsync();
+        Assert.Equal((true, recorded, 1, 1), (stats.Loaded, stats.Commit, stats.IndexRuns, stats.Reads));
+    }
+
+    // ---- Sync ----
+
+    [Fact]
+    public async Task Sync_indexes_only_what_changed_and_drops_deleted_and_renamed_files()
+    {
+        using var git = GitRepositories.Create(new()
+        {
+            ["docs/a.md"] = "# Alpha\n\nAlpha refunds.\n\n## Gone soon\n\nObsolete refunds.\n",
+            ["docs/b.md"] = "# Beta\n\nBeta refunds.\n",
+            ["docs/c.md"] = "# Gamma\n\nGamma refunds.\n",
+            ["docs/old.md"] = "# Old name\n\nRenamed refunds.\n"
+        });
+        await using var host = DocHost(git);
+        using var client = host.AuthorizedClient();
+        var service = host.Services.GetServices<IHostedService>().OfType<SpecSyncService>().Single();
+        await service.RunOnceAsync(CancellationToken.None);
+        var grains = host.Services.GetRequiredService<IGrainFactory>();
+        Assert.Equal(4, Hits(await Tool(client, "doc_search", new { repositoryId = "repo", query = "refunds", limit = 10 })).Count(hit => hit.GetProperty("anchor").GetString() != "gone-soon"));
+        async Task<int> Runs(string path) => (await grains.GetGrain<IDocumentGrain>(DocKeys.Document("repo", path)).StatsAsync()).IndexRuns;
+        var runs = new[] { await Runs("docs/a.md"), await Runs("docs/b.md"), await Runs("docs/c.md"), await Runs("docs/old.md") };
+        Assert.Equal(new[] { 1, 1, 1, 1 }, runs);
+
+        // A timer run with no new commits indexes nothing.
+        var runner = host.Services.GetRequiredService<DocSyncRunner>();
+        Assert.Equal(0, (await runner.SyncAsync("repo", null, CancellationToken.None)).Changed);
+        await service.RunOnceAsync(CancellationToken.None);
+        Assert.Equal(1, await Runs("docs/a.md"));
+
+        // One changed file is re-indexed alone, and loses the section it no longer has; an unchanged rewrite is not re-indexed.
+        git.Commit(new() { ["docs/a.md"] = "# Alpha\n\nAlpha refunds, revised.\n", ["docs/b.md"] = "# Beta\n\nBeta refunds.\n" });
+        var changed = await runner.SyncAsync("repo", null, CancellationToken.None);
+        Assert.Equal((git.Head(), 1), (changed.Commit, changed.Changed));
+        runs = [await Runs("docs/a.md"), await Runs("docs/b.md"), await Runs("docs/c.md")];
+        Assert.Equal(new[] { 2, 1, 1 }, runs);
+        var alpha = Hits(await Tool(client, "doc_search", new { repositoryId = "repo", query = "refunds", path = "docs/a.md" }));
+        Assert.Equal(new[] { "alpha" }, alpha.Select(hit => hit.GetProperty("anchor").GetString()));
+        Assert.Equal(git.Head()[..12], alpha[0].GetProperty("commit").GetString());
+        // b keeps the commit it was indexed from.
+        var view = await grains.GetGrain<IDocDirectoryGrain>("repo").ReadAsync();
+        Assert.NotEqual(git.Head(), view.Entries.Single(entry => entry.Path == "docs/b.md").Commit);
+
+        // A deleted and a renamed file: their old sections stop appearing.
+        git.Delete("docs/c.md");
+        git.Move("docs/old.md", "docs/new.md");
+        var moved = await runner.SyncAsync("repo", null, CancellationToken.None);
+        Assert.Equal(3, moved.Changed);
+        var paths = Hits(await Tool(client, "doc_search", new { repositoryId = "repo", query = "refunds", limit = 10 })).Select(hit => hit.GetProperty("path").GetString()).ToArray();
+        Assert.DoesNotContain("docs/c.md", paths);
+        Assert.DoesNotContain("docs/old.md", paths);
+        Assert.Contains("docs/new.md", paths);
+        Assert.Equal((HttpStatusCode.NotFound, "NotFound"), Status(await Tool(client, "doc_section", new { repositoryId = "repo", path = "docs/old.md", anchor = "old-name" })));
+        await WaitUntilAsync(async () => !(await grains.GetGrain<IManagementGrain>(0).GetActiveGrains(DocKeys.DocumentType)).Any(id => id.Key.ToString() == DocKeys.Document("repo", "docs/c.md")));
+    }
+
+    [Fact]
+    public async Task Uncommitted_edits_and_unpushed_commits_in_the_clone_never_reach_the_index()
+    {
+        using var git = GitRepositories.Create(new() { ["docs/a.md"] = "# Alpha\n\nCommitted text.\n" });
+        await using var host = DocHost(git);
+        using var client = host.AuthorizedClient();
+        await SyncAsync(host);
+        git.WriteInClone("docs/a.md", "# Alpha\n\nSecretdraft text.\n");
+        git.WriteInClone("docs/untracked.md", "# Untracked\n\nSecretdraft too.\n");
+        git.CommitInCloneOnly("docs/local.md", "# Local\n\nSecretdraft committed locally.\n");
+        git.Commit(new() { ["docs/b.md"] = "# Beta\n\nPushed text.\n" });
+        var runner = host.Services.GetRequiredService<DocSyncRunner>();
+        Assert.Equal(1, (await runner.SyncAsync("repo", null, CancellationToken.None)).Changed);
+        Assert.Empty(Hits(await Tool(client, "doc_search", new { repositoryId = "repo", query = "secretdraft", limit = 10 })));
+        Assert.Single(Hits(await Tool(client, "doc_search", new { repositoryId = "repo", query = "pushed" })));
+        Assert.Contains("Committed", Data(await Tool(client, "doc_section", new { repositoryId = "repo", path = "docs/a.md", anchor = "alpha" })).GetProperty("text").GetString());
+    }
+
+    [Fact]
+    public async Task Only_configured_repositories_patterns_and_supported_files_are_synced_and_skips_are_counted()
+    {
+        using var git = GitRepositories.Create(new()
+        {
+            ["docs/in.md"] = "# In\n\nIncluded refunds.\n",
+            ["docs/node_modules/pkg/readme.md"] = "# Dependency\n\nExcluded refunds.\n",
+            ["docs/private/secret.md"] = "# Private\n\nExcluded refunds.\n",
+            ["docs/notes.txt"] = "Text refunds.\n",
+            ["docs/package.json"] = """{ "name": "refunds" }""",
+            ["docs/broken.json"] = """{ "openapi": "3.0.0", """,
+            ["docs/broken.yaml"] = "openapi: [\n",
+            ["docs/huge.md"] = "# Huge\n\n" + new string('r', RelayLimits.MaxDocBytes),
+            ["src/code.md"] = "# Code\n\nOutside the pattern refunds.\n",
+            ["docs/image.png"] = "png"
+        });
+        await using var host = DocHost(git, settings: new()
+        {
+            ["Relay:DocCache:Repositories:0:Patterns:0:Glob"] = "docs/**",
+            ["Relay:DocCache:Repositories:0:Patterns:0:Spec"] = "guide",
+            ["Relay:DocCache:Repositories:0:Exclude:0"] = "docs/private/**"
+        });
+        using var client = host.AuthorizedClient();
+        var outcome = await SyncAsync(host);
+        Assert.Equal(4, outcome.Skipped);
+        var view = await host.Services.GetRequiredService<IGrainFactory>().GetGrain<IDocDirectoryGrain>("repo").ReadAsync();
+        Assert.Equal(new[] { "docs/in.md", "docs/notes.txt" }, view.Entries.Select(entry => entry.Path));
+        Assert.All(view.Entries, entry => Assert.Equal("guide", entry.Spec));
+        Assert.Equal(new[] { "docs/broken.json", "docs/broken.yaml", "docs/huge.md", "docs/package.json" }, view.Skipped);
+        var hits = Hits(await Tool(client, "doc_search", new { repositoryId = "repo", query = "refunds", limit = 10, spec = "guide" }));
+        Assert.Equal(new[] { "docs/in.md", "docs/notes.txt" }, hits.Select(hit => hit.GetProperty("path").GetString()).Order());
+        // A path the patterns do not cover is never read, even when asked for directly.
+        Assert.Null(await host.Services.GetRequiredService<IDocSource>().ReadAsync("repo", "src/code.md", git.Head()));
+        Assert.Null(await host.Services.GetRequiredService<IDocSource>().ReadAsync("repo", "docs/private/secret.md", git.Head()));
+        Assert.Null(await host.Services.GetRequiredService<IDocSource>().ReadAsync("other", "docs/in.md", git.Head()));
+        // A repository without settings has no docs.
+        using var admin = Admin(host);
+        Assert.Equal((HttpStatusCode.BadRequest, "DocCacheUnavailable"), Status(await Tool(admin, "doc_search", new { repositoryId = "repo2", query = "refunds" })));
+        Assert.Equal((HttpStatusCode.BadRequest, "DocCacheUnavailable"), Status(await Tool(admin, "doc_sync", new { repositoryId = "repo2" })));
+    }
+
+    [Fact]
+    public async Task The_document_limit_is_configurable_and_files_past_it_are_skipped_and_counted()
+    {
+        using var git = GitRepositories.Create(Enumerable.Range(0, 5).ToDictionary(i => $"docs/{i}.md", i => $"# D{i}\n\nText.\n"));
+        await using var host = DocHost(git, settings: new() { ["Relay:DocCache:MaxDocuments"] = "3" });
+        var outcome = await SyncAsync(host);
+        Assert.Equal(2, outcome.Skipped);
+        var view = await host.Services.GetRequiredService<IGrainFactory>().GetGrain<IDocDirectoryGrain>("repo").ReadAsync();
+        Assert.Equal(3, view.Entries.Length);
+        Assert.Equal(new[] { "docs/3.md", "docs/4.md" }, view.Skipped);
+        foreach (var bad in new[] { "0", (RelayLimits.MaxDocsPerRepositoryCeiling + 1).ToString() })
+            Assert.Contains("MaxDocuments", Assert.Throws<InvalidOperationException>(() => DocCacheSettings.From(Configuration(new() { ["Relay:DocCache:MaxDocuments"] = bad }), new FakeEnvironment())).Message);
+    }
+
+    [Fact]
+    public async Task A_timer_run_and_doc_sync_never_run_at_once_for_one_repository_and_doc_sync_is_rate_limited()
+    {
+        using var git = GitRepositories.Create(new() { ["docs/a.md"] = "# Alpha\n\nText.\n" });
+        var watcher = new WatchingGit();
+        await using var host = DocHost(git, watcher);
+        using var admin = Admin(host);
+        var service = host.Services.GetServices<IHostedService>().OfType<SpecSyncService>().Single();
+        watcher.HoldFetch();
+        var timerRun = service.RunOnceAsync(CancellationToken.None);
+        await WaitUntilAsync(() => Task.FromResult(watcher.FetchesStarted == 1));
+        var manual = Tool(admin, "doc_sync", new { repositoryId = "repo" });
+        await Task.Delay(500);
+        Assert.Equal(1, watcher.FetchesStarted);
+        Assert.False(manual.IsCompleted);
+        watcher.ReleaseFetch();
+        await timerRun;
+        var reply = await manual;
+        Assert.Equal((HttpStatusCode.OK, "Ok"), Status(reply));
+        Assert.Equal(1, watcher.PeakFetches);
+        var data = Data(reply);
+        Assert.Equal((git.Head(), 0, true), (data.GetProperty("commit").GetString(), data.GetProperty("changed").GetInt32(), data.GetProperty("fetched").GetBoolean()));
+        // A second doc_sync right away is refused.
+        var limited = await Tool(admin, "doc_sync", new { repositoryId = "repo" });
+        Assert.Equal((HttpStatusCode.BadRequest, "RateLimited"), Status(limited));
+        Assert.InRange(Data(limited).GetProperty("retryAfterSeconds").GetInt32(), 1, RelayLimits.DocSyncMinIntervalSeconds);
+    }
+
+    [Fact]
+    public async Task Doc_sync_follows_a_given_branch_and_refuses_bad_ones()
+    {
+        using var git = GitRepositories.Create(new() { ["docs/a.md"] = "# Alpha\n\nMain text.\n" });
+        git.CommitOnBranch("feature", "docs/a.md", "# Alpha\n\nFeature text.\n");
+        await using var host = DocHost(git);
+        using var admin = Admin(host);
+        var synced = Data(await Tool(admin, "doc_sync", new { repositoryId = "repo", branch = "feature" }));
+        Assert.Equal(git.Head("feature"), synced.GetProperty("commit").GetString());
+        Assert.Single(Hits(await Tool(admin, "doc_search", new { repositoryId = "repo", query = "feature" })));
+        Assert.Equal("feature", (await host.Services.GetRequiredService<IGrainFactory>().GetGrain<IDocDirectoryGrain>("repo").ReadAsync()).Branch);
+        var runner = host.Services.GetRequiredService<DocSyncRunner>();
+        foreach (var bad in new[] { "-delete", "a..b", "nope" })
+            Assert.Equal(DocSyncError.UnknownBranch, (await Assert.ThrowsAsync<DocSyncException>(() => runner.SyncAsync("repo", bad, CancellationToken.None))).Error);
+    }
+
+    // ---- Access, limits and the off switch ----
+
+    [Fact]
+    public async Task Every_tool_checks_the_repository_scope_and_doc_sync_needs_an_administrator()
+    {
+        using var git = GitRepositories.Create(new() { ["docs/a.md"] = "# Alpha\n\nText.\n" });
+        await using var host = DocHost(git);
+        using var worker = host.AuthorizedClient();
+        await SyncAsync(host);
+        Assert.Equal((HttpStatusCode.Forbidden, "RepositoryDenied"), Status(await Tool(worker, "doc_search", new { repositoryId = "other", query = "text" })));
+        Assert.Equal((HttpStatusCode.Forbidden, "RepositoryDenied"), Status(await Tool(worker, "doc_section", new { repositoryId = "other", path = "docs/a.md", anchor = "alpha" })));
+        Assert.Equal((HttpStatusCode.Forbidden, "RepositoryDenied"), Status(await Tool(worker, "doc_sync", new { repositoryId = "other" })));
+        Assert.Equal((HttpStatusCode.Forbidden, "AdministratorRequired"), Status(await Tool(worker, "doc_sync", new { repositoryId = "repo" })));
+        Assert.Equal((HttpStatusCode.OK, "Ok"), Status(await Tool(worker, "doc_section", new { repositoryId = "repo", path = "docs/a.md", anchor = "alpha" })));
+    }
+
+    [Fact]
+    public async Task Inputs_over_a_limit_get_the_standard_errors()
+    {
+        using var git = GitRepositories.Create(new() { ["docs/a.md"] = "# Alpha\n\nText.\n" });
+        await using var host = DocHost(git);
+        using var admin = Admin(host);
+        async Task Refused(string tool, object arguments, string field)
+        {
+            var reply = await Tool(admin, tool, arguments);
+            Assert.Equal((HttpStatusCode.BadRequest, "InvalidArguments"), Status(reply));
+            Assert.Equal(field, Data(reply).GetProperty("field").GetString());
+        }
+        await Refused("doc_search", new { repositoryId = "repo", query = new string('q', RelayLimits.MaxDocQueryLength + 1) }, "query");
+        await Refused("doc_search", new { repositoryId = "repo", query = " " }, "query");
+        await Refused("doc_search", new { repositoryId = "repo" }, "query");
+        await Refused("doc_search", new { repositoryId = "repo", query = "x", spec = new string('s', RelayLimits.MaxDocSpecLength + 1) }, "spec");
+        await Refused("doc_search", new { repositoryId = "repo", query = "x", path = new string('p', RelayLimits.MaxDocPathLength + 1) }, "path");
+        await Refused("doc_search", new { repositoryId = "repo", query = "x", path = "../etc/passwd" }, "path");
+        await Refused("doc_search", new { repositoryId = "repo", query = "x", limit = "five" }, "limit");
+        await Refused("doc_section", new { repositoryId = "repo", path = "docs/a.md", anchor = new string('a', RelayLimits.MaxDocAnchorLength + 1) }, "anchor");
+        await Refused("doc_section", new { repositoryId = "repo", path = "docs/a.md" }, "anchor");
+        await Refused("doc_sync", new { repositoryId = "repo", branch = new string('b', RelayLimits.MaxDocBranchLength + 1) }, "branch");
+        await Refused("doc_sync", new { repositoryId = "repo", branch = "--upload-pack=evil" }, "branch");
+        using var huge = await admin.PostAsync("/api/tools/doc_search", new StringContent("{\"repositoryId\":\"repo\",\"query\":\"" + new string('x', RelayLimits.MaxPayloadBytes) + "\"}", Encoding.UTF8, "application/json"));
+        Assert.Equal(HttpStatusCode.RequestEntityTooLarge, huge.StatusCode);
+    }
+
+    [Fact]
+    public async Task With_the_doc_cache_off_the_tools_answer_DocCacheUnavailable_and_nothing_syncs()
+    {
+        var git = new WatchingGit();
+        await using var host = new RelayHostFixture(settings: new Dictionary<string, string?>
+        {
+            ["Relay:Clients:1:Token"] = AdminToken, ["Relay:Clients:1:PrincipalId"] = "doc-admin", ["Relay:Clients:1:IsAdministrator"] = "true", ["Relay:Clients:1:Repositories:0"] = "repo",
+            ["Relay:DocCache:Repositories:0:Id"] = "repo", ["Relay:DocCache:Repositories:0:ClonePath"] = "/nonexistent", ["Relay:DocCache:SyncMinutes"] = "1"
+        }, configureServices: services => { services.RemoveAll<GitCli>(); services.AddSingleton<GitCli>(git); });
+        using var worker = host.AuthorizedClient();
+        using var admin = Admin(host);
+        Assert.Equal((HttpStatusCode.BadRequest, "DocCacheUnavailable"), Status(await Tool(worker, "doc_search", new { repositoryId = "repo", query = "x" })));
+        Assert.Equal((HttpStatusCode.BadRequest, "DocCacheUnavailable"), Status(await Tool(worker, "doc_section", new { repositoryId = "repo", path = "a.md", anchor = "a" })));
+        Assert.Equal((HttpStatusCode.Forbidden, "AdministratorRequired"), Status(await Tool(worker, "doc_sync", new { repositoryId = "repo" })));
+        Assert.Equal((HttpStatusCode.BadRequest, "DocCacheUnavailable"), Status(await Tool(admin, "doc_sync", new { repositoryId = "repo" })));
+        // Nothing of the cache runs: the sync service returns at once, git never runs, and the tool and source resolve to null.
+        await host.Services.GetServices<IHostedService>().OfType<SpecSyncService>().Single().ExecuteTask!;
+        Assert.Equal(0, git.Commands);
+        Assert.Null(host.Services.GetService<DocCacheTool>());
+        Assert.Null(host.Services.GetService<IDocSource>());
+        // The shared token counter is registered either way, for other features to reuse.
+        Assert.Equal("o200k_base", host.Services.GetRequiredService<ITokenCounter>().Encoding);
+        Assert.Equal(RelayErrorKind.Invalid, RelayErrorCodes.Classify(RelayErrorCodes.DocCacheUnavailable));
+    }
+
+    [Fact]
+    public void Bad_settings_fail_clearly_and_defaults_cover_every_supported_type()
+    {
+        void Fails(string key, string value, string expected) =>
+            Assert.Contains(expected, Assert.Throws<InvalidOperationException>(() => DocCacheSettings.From(Configuration(new() { [key] = value }), new FakeEnvironment())).Message);
+        Fails("Relay:DocCache:SyncMinutes", "-1", "SyncMinutes");
+        Fails("Relay:DocCache:IdleMinutes", "0", "IdleMinutes");
+        Fails("Relay:DocCache:Repositories:0:Patterns:0:Glob", "../**/*.md", "Patterns");
+        Fails("Relay:DocCache:Repositories:0:Patterns:0:Glob", ":(top)*.md", "Patterns");
+        Fails("Relay:DocCache:Repositories:0:Branch", "-x", "Branch");
+        Fails("Relay:DocCache:Repositories:0:Exclude:0", "/abs/**", "Exclude");
+        var settings = DocCacheSettings.From(Configuration([]), new FakeEnvironment());
+        var repository = settings.Repositories.Single();
+        Assert.Equal(DocFormats.DefaultPatterns, repository.Patterns.Select(pattern => pattern.Glob));
+        Assert.Equal(DocFormats.DefaultExcludes, repository.Excludes);
+        Assert.Equal((RelayLimits.DefaultDocSyncMinutes, RelayLimits.DefaultDocIdleMinutes, RelayLimits.MaxDocsPerRepository, true), (settings.SyncMinutes, settings.IdleMinutes, settings.MaxDocuments, settings.Enabled));
+        // Off reads nothing more, so bad settings for a cache that is off never stop the hub.
+        Assert.Empty(DocCacheSettings.From(Configuration(new() { ["Relay:DocCache:Enabled"] = "false", ["Relay:DocCache:SyncMinutes"] = "-1" }), new FakeEnvironment()).Repositories);
+        foreach (var path in new[] { "README.md", "a/b/c.txt", "api/v1.json", "api/v1.yaml", "api/v1.yml" }) Assert.Equal("docs", repository.SpecOf(path));
+        foreach (var path in new[] { "node_modules/x.md", "a/bin/x.md", "a/obj/x.json", ".git/x.txt", "x.cs", "../x.md", "/x.md" }) Assert.Null(repository.SpecOf(path));
+    }
+
+    // ---- The tools over HTTP and MCP, and the catalog ----
+
+    [Fact]
+    public async Task The_tools_work_over_mcp_and_are_listed_by_role()
+    {
+        using var git = GitRepositories.Create(new() { ["docs/a.md"] = "# Refunds\n\nRefunds take five days.\n" });
+        await using var host = DocHost(git);
+        await SyncAsync(host);
+        using var http = host.AuthorizedClient();
+        await using var transport = new HttpClientTransport(new HttpClientTransportOptions { Endpoint = new Uri("https://localhost/mcp"), TransportMode = HttpTransportMode.StreamableHttp, EnableStandaloneGetStream = false }, http);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        await using var mcp = await McpClient.CreateAsync(transport, cancellationToken: timeout.Token);
+        var tools = (await mcp.ListToolsAsync(cancellationToken: timeout.Token)).Select(tool => tool.Name).ToArray();
+        Assert.Contains("doc_search", tools);
+        Assert.Contains("doc_section", tools);
+        Assert.DoesNotContain("doc_sync", tools);
+        var search = await mcp.CallToolAsync("doc_search", new Dictionary<string, object?> { ["repositoryId"] = "repo", ["query"] = "refunds" }, cancellationToken: timeout.Token);
+        Assert.NotEqual(true, search.IsError);
+        using var reply = JsonDocument.Parse(Assert.IsType<TextContentBlock>(Assert.Single(search.Content)).Text);
+        var data = JsonDocument.Parse(reply.RootElement.GetProperty("dataJson").GetString()!).RootElement;
+        Assert.Equal("refunds", data.GetProperty("hits")[0].GetProperty("anchor").GetString());
+        var sync = await mcp.CallToolAsync("doc_sync", new Dictionary<string, object?> { ["repositoryId"] = "repo" }, cancellationToken: timeout.Token);
+        Assert.True(sync.IsError);
+    }
+
+    [Fact]
+    public void Doc_tools_appear_in_hub_and_adapter_catalogs_with_matching_compact_schemas_within_budget()
+    {
+        using var client = new HttpClient();
+        var forwarder = new PkRelay.Adapter.RelayForwarder(client, new PkRelay.Adapter.AdapterOptions("http://127.0.0.1:5271", "client-secret"));
+        var adapter = PkRelay.Adapter.CoordinationTools.Create(forwarder, admin: true).ToDictionary(tool => tool.ProtocolTool.Name, tool => tool.ProtocolTool.InputSchema.GetRawText());
+        var hub = ToolResults.Tools(true).ToDictionary(tool => tool.Name, tool => tool.InputSchema.GetRawText());
+        foreach (var (name, administrator, required, forwarded) in new[]
+        {
+            (RelayTools.DocSearch, false, new[] { "repositoryId", "query" }, new[] { "path", "query", "repositoryId", "spec" }),
+            (RelayTools.DocSection, false, ["repositoryId", "path", "anchor"], ["anchor", "path", "repositoryId"]),
+            (RelayTools.DocSync, true, ["repositoryId"], ["branch", "repositoryId"])
+        })
+        {
+            Assert.True(RelayToolCatalog.TryGet(name, out var tool));
+            Assert.Equal(RelayToolCatalog.ForwardingSchema(tool).GetRawText(), adapter[name]);
+            Assert.Equal(RelayToolCatalog.InputSchema(tool).GetRawText(), hub[name]);
+            // Reads by the client token: no requestId or session handle.
+            Assert.Equal((false, false, administrator), (tool.IsMutation, tool.RequiresSession, tool.AdministratorOnly));
+            Assert.DoesNotContain('.', tool.Description.TrimEnd('.'));
+            if (!administrator) Assert.Contains("untrusted", tool.Description);
+            Assert.Equal(required, RelayToolCatalog.InputSchema(tool).GetProperty("required").EnumerateArray().Select(x => x.GetString()));
+            Assert.Equal(forwarded, RelayToolCatalog.ForwardingSchema(tool).GetProperty("properties").EnumerateObject().Select(x => x.Name).Order());
+            Assert.Equal(!administrator, PkRelay.Adapter.CoordinationTools.NamesForRole(false).Contains(name));
+            Assert.False(PkRelay.Adapter.CoordinationTools.IsAllowed(name, admin: true, chatOnly: true));
+        }
+        var properties = RelayToolCatalog.InputSchema(RelayToolCatalog.All.Single(tool => tool.Name == RelayTools.DocSearch)).GetProperty("properties");
+        Assert.Equal(RelayLimits.MaxDocQueryLength, properties.GetProperty("query").GetProperty("maxLength").GetInt32());
+        Assert.Equal(RelayLimits.MaxDocSearchResults, properties.GetProperty("limit").GetProperty("maximum").GetInt32());
+        static int Size(bool administrator) => RelayToolCatalog.ForRole(administrator).Sum(tool => tool.Description.Length + RelayToolCatalog.ForwardingSchema(tool).GetRawText().Length);
+        Assert.True(Size(false) < 20_000 && Size(true) < 22_000, $"worker {Size(false)}, administrator {Size(true)}");
+        // Chunks always fit a reply, with room for its fields.
+        Assert.True(RelayLimits.DocChunkTokens * 2 < RelayLimits.MaxDocReplyTokens && RelayLimits.DocChunkChars * 2 < RelayLimits.MaxDocReplyBytes);
+    }
+
+    // ---- Helpers ----
+
+    private static RelayHostFixture DocHost(GitRepositories git, GitCli? cli = null, Dictionary<string, string?>? settings = null)
+    {
+        var all = new Dictionary<string, string?>
+        {
+            ["Relay:Clients:1:Token"] = AdminToken, ["Relay:Clients:1:PrincipalId"] = "doc-admin", ["Relay:Clients:1:IsAdministrator"] = "true", ["Relay:Clients:1:Repositories:0"] = "repo",
+            ["Relay:Clients:1:Repositories:1"] = "repo2",
+            ["Relay:DocCache:Enabled"] = "true", ["Relay:DocCache:SyncMinutes"] = "0",
+            ["Relay:DocCache:Repositories:0:Id"] = "repo", ["Relay:DocCache:Repositories:0:ClonePath"] = git.Clone
+        };
+        foreach (var (key, value) in settings ?? []) all[key] = value;
+        return new RelayHostFixture(settings: all, configureServices: cli is null ? null : services => { services.RemoveAll<GitCli>(); services.AddSingleton(cli); });
+    }
+
+    private static Task<DocSyncOutcome> SyncAsync(RelayHostFixture host)
+    {
+        _ = host.Services;
+        return host.Services.GetRequiredService<DocSyncRunner>().SyncAsync("repo", null, CancellationToken.None);
+    }
+
+    private static HttpClient Admin(RelayHostFixture host)
+    {
+        var client = host.AuthorizedClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", AdminToken);
+        return client;
+    }
+
+    private static async Task<(HttpStatusCode Status, JsonElement Body)> Tool(HttpClient client, string tool, object arguments)
+    {
+        using var response = await client.PostAsJsonAsync("/api/tools/" + tool, arguments);
+        return (response.StatusCode, (await response.Content.ReadFromJsonAsync<JsonElement>()).Clone());
+    }
+
+    private static (HttpStatusCode, string) Status((HttpStatusCode Status, JsonElement Body) reply) => (reply.Status, reply.Body.GetProperty("code").GetString()!);
+
+    private static JsonElement Data((HttpStatusCode Status, JsonElement Body) reply)
+    {
+        using var document = JsonDocument.Parse(reply.Body.GetProperty("dataJson").GetString()!);
+        return document.RootElement.Clone();
+    }
+
+    private static JsonElement[] Hits((HttpStatusCode Status, JsonElement Body) reply)
+    {
+        Assert.Equal((HttpStatusCode.OK, "Ok"), Status(reply));
+        return Data(reply).GetProperty("hits").EnumerateArray().ToArray();
+    }
+
+    private static async Task WaitUntilAsync(Func<Task<bool>> condition)
+    {
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(30);
+        while (!await condition())
+        {
+            Assert.True(DateTimeOffset.UtcNow < deadline, "The condition was not met in time.");
+            await Task.Delay(50);
+        }
+    }
+
+    private static Microsoft.Extensions.Configuration.IConfiguration Configuration(Dictionary<string, string?> extra)
+    {
+        var values = new Dictionary<string, string?> { ["Relay:DocCache:Enabled"] = "true", ["Relay:DocCache:Repositories:0:Id"] = "repo", ["Relay:DocCache:Repositories:0:ClonePath"] = "clone" };
+        foreach (var (key, value) in extra) values[key] = value;
+        return new Microsoft.Extensions.Configuration.ConfigurationBuilder().AddInMemoryCollection(values).Build();
+    }
+
+    private sealed class FakeEnvironment : IHostEnvironment
+    {
+        public string EnvironmentName { get; set; } = "Test";
+        public string ApplicationName { get; set; } = "Test";
+        public string ContentRootPath { get; set; } = Path.GetTempPath();
+        public Microsoft.Extensions.FileProviders.IFileProvider ContentRootFileProvider { get; set; } = null!;
+    }
+
+    /// <summary>Watches git commands: counts concurrent fetches and shows, can hold fetches, and can slow every show or one path's.</summary>
+    private sealed class WatchingGit : GitCli
+    {
+        private int fetches, shows;
+        public int Commands;
+        private TaskCompletionSource? hold;
+        public int FetchesStarted;
+        public int PeakFetches;
+        public int PeakShows;
+        public TimeSpan ShowDelay { get; set; }
+        public string? SlowPath { get; init; }
+        public System.Collections.Concurrent.ConcurrentQueue<string> Shows { get; } = new();
+
+        public void HoldFetch() => hold = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public void ReleaseFetch() => hold?.TrySetResult();
+
+        public override async Task<GitResult> RunAsync(string directory, IReadOnlyList<string> arguments, int maxOutputBytes, IReadOnlyDictionary<string, string>? environment, CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref Commands);
+            if (arguments[0] == "fetch")
+            {
+                Interlocked.Increment(ref FetchesStarted);
+                Max(ref PeakFetches, Interlocked.Increment(ref fetches));
+                try { if (hold is { } wait) await wait.Task; return await base.RunAsync(directory, arguments, maxOutputBytes, environment, cancellationToken); }
+                finally { Interlocked.Decrement(ref fetches); }
+            }
+            if (arguments[0] == "show")
+            {
+                Shows.Enqueue(arguments[^1]);
+                Max(ref PeakShows, Interlocked.Increment(ref shows));
+                try
+                {
+                    if (ShowDelay > TimeSpan.Zero && (SlowPath is null || arguments[^1].EndsWith(":" + SlowPath, StringComparison.Ordinal))) await Task.Delay(ShowDelay, cancellationToken);
+                    return await base.RunAsync(directory, arguments, maxOutputBytes, environment, cancellationToken);
+                }
+                finally { Interlocked.Decrement(ref shows); }
+            }
+            return await base.RunAsync(directory, arguments, maxOutputBytes, environment, cancellationToken);
+        }
+
+        private static void Max(ref int target, int value)
+        {
+            for (var seen = Volatile.Read(ref target); value > seen; seen = Volatile.Read(ref target))
+                if (Interlocked.CompareExchange(ref target, value, seen) == seen) return;
+        }
+    }
+
+    /// <summary>
+    /// A temporary origin (bare), a work clone that commits and pushes, and the hub's clone. Everything is local: git fetches from a path,
+    /// with no network.
+    /// </summary>
+    private sealed class GitRepositories : IDisposable
+    {
+        private readonly string root = Path.Combine(Path.GetTempPath(), "pkrelay-doc-" + Guid.NewGuid().ToString("N"));
+        private string Work => Path.Combine(root, "work");
+        private string Origin => Path.Combine(root, "origin.git");
+        public string Clone => Path.Combine(root, "clone");
+
+        public static GitRepositories Create(Dictionary<string, string> files)
+        {
+            var repositories = new GitRepositories();
+            Directory.CreateDirectory(repositories.Work);
+            Run(repositories.Work, "init", "-q", "-b", "main");
+            repositories.Write(files);
+            Run(repositories.Work, "add", "-A");
+            Run(repositories.Work, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "first");
+            Run(repositories.root, "clone", "-q", "--bare", repositories.Work, repositories.Origin);
+            Run(repositories.Work, "remote", "add", "origin", repositories.Origin);
+            Run(repositories.Work, "fetch", "-q", "origin");
+            Run(repositories.root, "clone", "-q", repositories.Origin, repositories.Clone);
+            return repositories;
+        }
+
+        public string Head(string branch = "main") => Run(Work, "rev-parse", branch).Trim();
+
+        public void Commit(Dictionary<string, string> files)
+        {
+            Write(files);
+            Push("change");
+        }
+
+        public void Delete(string path)
+        {
+            Run(Work, "rm", "-q", path);
+            Push("delete");
+        }
+
+        public void Move(string from, string to)
+        {
+            Run(Work, "mv", from, to);
+            Push("move");
+        }
+
+        public void CommitOnBranch(string branch, string path, string text)
+        {
+            Run(Work, "checkout", "-q", "-b", branch);
+            Write(new() { [path] = text });
+            Run(Work, "add", "-A");
+            Run(Work, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", branch);
+            Run(Work, "push", "-q", "origin", branch);
+            Run(Work, "checkout", "-q", "main");
+        }
+
+        public void WriteInClone(string path, string text)
+        {
+            var full = Path.Combine(Clone, path);
+            Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+            File.WriteAllText(full, text);
+        }
+
+        public void CommitInCloneOnly(string path, string text)
+        {
+            WriteInClone(path, text);
+            Run(Clone, "add", path);
+            Run(Clone, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "local only");
+        }
+
+        private void Push(string message)
+        {
+            Run(Work, "add", "-A");
+            Run(Work, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", message);
+            Run(Work, "push", "-q", "origin", "main");
+        }
+
+        private void Write(Dictionary<string, string> files)
+        {
+            foreach (var (path, text) in files)
+            {
+                var full = Path.Combine(Work, path);
+                Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+                File.WriteAllText(full, text);
+            }
+        }
+
+        private static string Run(string directory, params string[] arguments)
+        {
+            var start = new ProcessStartInfo("git") { WorkingDirectory = directory, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
+            foreach (var argument in arguments) start.ArgumentList.Add(argument);
+            start.Environment["GIT_TERMINAL_PROMPT"] = "0";
+            using var process = Process.Start(start)!;
+            var output = process.StandardOutput.ReadToEndAsync();
+            var error = process.StandardError.ReadToEnd();
+            process.WaitForExit();
+            if (process.ExitCode != 0) throw new InvalidOperationException($"git {string.Join(' ', arguments)} failed: {error}");
+            return output.Result;
+        }
+
+        public void Dispose()
+        {
+            try
+            {
+                foreach (var file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)) File.SetAttributes(file, FileAttributes.Normal);
+                Directory.Delete(root, recursive: true);
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+    }
+}

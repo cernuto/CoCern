@@ -19,7 +19,7 @@ namespace PkRelay.Core;
 /// (session open, task claim with resources, action begin, convenience renewals/acks, next-work offers).
 /// Aggregates enforce the rules; this layer authenticates the session, routes, composes and bounds replies.
 /// </summary>
-public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? machines = null, IActivitySink? activity = null, IFullTextSearch? search = null, AttentionOptions? attention = null, AnalyticsTool? analytics = null, AnomalyOptions? anomaly = null, OrderOptions? orders = null) : IRelayApplication
+public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? machines = null, IActivitySink? activity = null, IFullTextSearch? search = null, AttentionOptions? attention = null, AnalyticsTool? analytics = null, AnomalyOptions? anomaly = null, OrderOptions? orders = null, DocCacheTool? docs = null) : IRelayApplication
 {
     private readonly IMachineDirectory directory = machines ?? new MachineDirectory(grains);
     private readonly AttentionOptions attentionOptions = attention ?? new();
@@ -146,6 +146,10 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         RelayTools.SessionBind or RelayTools.CheckInbox or RelayTools.Ack => CallSession(caller, tool, args),
         RelayTools.AttentionRespond => RespondToAttentionAsync(caller, args),
         RelayTools.OrderPut or RelayTools.OrderRemove => OrderAsync(caller, tool, args),
+        RelayTools.DocSearch => docs is null ? DocCacheOff() : docs.SearchAsync(args),
+        RelayTools.DocSection => docs is null ? DocCacheOff() : docs.SectionAsync(args),
+        // Administrator only, checked first, so a worker learns nothing about the hub's doc cache settings.
+        RelayTools.DocSync => !caller.IsAdministrator ? Task.FromResult(Error(AdministratorRequired)) : docs is null ? DocCacheOff() : docs.SyncAsync(args, cancellationToken),
         RelayTools.WorkerList or RelayTools.ControlRequest => CallControl(caller, tool, args),
         _ => CallBoard(caller, tool, args)
     };
@@ -184,6 +188,9 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         }
         return Ok(reply);
     }
+
+    private static Task<RelayReply> DocCacheOff() =>
+        Task.FromResult(Error(DocCacheUnavailable, new { message = "The doc cache is turned off on this hub (Relay:DocCache:Enabled)." }));
 
     /// <summary>
     /// Administrator only, checked here because no aggregate handles this tool: a session's self-reported role is not an authority.

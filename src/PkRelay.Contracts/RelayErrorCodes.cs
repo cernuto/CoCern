@@ -98,6 +98,8 @@ public static class RelayErrorCodes
     public const string AnalyticsFailed = "AnalyticsFailed";
     /// <summary>Standing orders are turned off on this hub (<c>Relay:Orders:Enabled</c>).</summary>
     public const string OrdersUnavailable = "OrdersUnavailable";
+    /// <summary>The doc cache is turned off on this hub (<c>Relay:DocCache:Enabled</c>), or the repository has no synced docs.</summary>
+    public const string DocCacheUnavailable = "DocCacheUnavailable";
     public const string InternalError = "InternalError";
 
     private static readonly FrozenSet<string> Conflicts = new[]

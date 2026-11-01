@@ -28,6 +28,7 @@ internal static class RelayRequestGuard
         if (!IdentifiersFit(args)) return Replies.Error(InvalidArguments);
         if (tool.Name == RelayTools.Search && SearchProblem(args) is { } field) return Replies.Error(InvalidArguments, new { field });
         if (tool.Name == RelayTools.AnalyticsQuery && AnalyticsProblem(args) is { } analyticsField) return Replies.Error(InvalidArguments, new { field = analyticsField });
+        if (tool.Name is RelayTools.DocSearch or RelayTools.DocSection or RelayTools.DocSync && DocProblem(tool.Name, args) is { } docField) return Replies.Error(InvalidArguments, new { field = docField });
         if (args.ContainsKey("seenMessageIds") && (args["seenMessageIds"] is not JsonArray seen || seen.Count > RelayLimits.MaxAcknowledgedMessages
             || seen.Any(id => id is not JsonValue value || !value.TryGetValue<string>(out var text) || text.Length is 0 or > RelayLimits.MaxIdentifierLength))) return Replies.Error(InvalidArguments, new { field = "seenMessageIds" });
         if (Count(args, "resourceIds") > RelayLimits.MaxClaimResources || Count(args, "messageIds") > RelayLimits.MaxAcknowledgedMessages || Count(args, "ackMessageIds") > RelayLimits.MaxAcknowledgedMessages) return Replies.Error(PayloadTooLarge);
@@ -63,6 +64,29 @@ internal static class RelayRequestGuard
         if (adHoc != args.ContainsKey("sql")) return "sql";
         if (adHoc && (args["sql"] is not JsonValue sql || !sql.TryGetValue<string>(out var statement) || string.IsNullOrWhiteSpace(statement) || statement.Length > RelayLimits.MaxAnalyticsSqlLength)) return "sql";
         if (args["params"] is not null && (adHoc || args["params"] is not JsonObject)) return "params";
+        return null;
+    }
+
+    /// <summary>
+    /// The first invalid doc cache argument, or null: a nonempty query, spec, path, anchor and branch within their lengths (each required
+    /// one present), and an integer limit. A path never starts with <c>/</c> or holds <c>..</c>, and a branch is checked again before git sees it.
+    /// </summary>
+    private static string? DocProblem(string tool, JsonObject args)
+    {
+        string? Field(string field, int maximum, bool required)
+        {
+            if (args[field] is null) return required ? field : null;
+            return args[field] is JsonValue value && value.TryGetValue<string>(out var text) && !string.IsNullOrWhiteSpace(text) && text.Length <= maximum ? null : field;
+        }
+        var problem = tool switch
+        {
+            RelayTools.DocSearch => Field("query", RelayLimits.MaxDocQueryLength, true) ?? Field("spec", RelayLimits.MaxDocSpecLength, false) ?? Field("path", RelayLimits.MaxDocPathLength, false),
+            RelayTools.DocSection => Field("path", RelayLimits.MaxDocPathLength, true) ?? Field("anchor", RelayLimits.MaxDocAnchorLength, true),
+            _ => Field("branch", RelayLimits.MaxDocBranchLength, false)
+        };
+        if (problem is not null) return problem;
+        if (Text(args, "path") is { Length: > 0 } path && (path.StartsWith('/') || path.Contains('\\') || path.Split('/').Contains(".."))) return "path";
+        if (args["limit"] is not null && (args["limit"] is not JsonValue limit || limit.GetValueKind() != JsonValueKind.Number || !long.TryParse(limit.ToJsonString(), out _))) return "limit";
         return null;
     }
 

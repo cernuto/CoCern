@@ -167,8 +167,9 @@ public sealed class AdapterTests
     {
         using var client = new HttpClient(new StubHandler((_, _) => throw new Xunit.Sdk.XunitException("Unexpected network request")));
         var tools = CoordinationTools.Create(new RelayForwarder(client, Options()), false).ToArray();
-        // 18 before standing_propose, 19 before search, 20 before attention_respond; the administrator-only standing_put stays out of a worker's list.
-        Assert.Equal(21, tools.Length);
+        // 18 before standing_propose, 19 before search, 20 before attention_respond, 21 before doc_search and doc_section; the administrator-only
+        // standing_put and doc_sync stay out of a worker's list.
+        Assert.Equal(23, tools.Length);
         Assert.All(tools, tool => Assert.Equal("object", tool.ProtocolTool.InputSchema.GetProperty("type").GetString()));
         Assert.Contains(tools, tool => tool.ProtocolTool.Name == "check_inbox");
         Assert.DoesNotContain(tools, tool => tool.ProtocolTool.Name == "control_request");

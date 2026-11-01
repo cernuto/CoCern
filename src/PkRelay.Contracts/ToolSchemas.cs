@@ -29,6 +29,8 @@ internal static class ToolSchemas
             RelayTools.AttentionRespond => ["until"],
             RelayTools.AnalyticsQuery => ["params", "sql"],
             RelayTools.OrderPut => ["expiresAt", "expectedRevision"],
+            RelayTools.DocSearch => ["spec", "path"],
+            RelayTools.DocSync => ["branch"],
             _ => []
         };
         var properties = ForwardingFields.Concat(tool.RequiredFields).Concat(extra).Distinct(StringComparer.Ordinal).ToDictionary(field => field, field => all[field]);
@@ -78,6 +80,20 @@ internal static class ToolSchemas
                 properties["expiresAt"] = new { type = "string" };
                 properties["expectedRevision"] = new { type = "integer" };
             }
+        }
+        // Doc tools are reads by the client token, scoped by its repositories: no requestId or session handle, and fields by type only.
+        // doc_search leaves out limit (default 5); InputSchema gives it and every length bound.
+        if (tool.Name is RelayTools.DocSearch or RelayTools.DocSection or RelayTools.DocSync)
+        {
+            properties.Remove("requestId"); properties.Remove("sessionId"); properties.Remove("sessionToken");
+            foreach (var field in properties.Keys.Where(field => field != "repositoryId").ToArray()) properties[field] = new { type = "string" };
+        }
+        // Administrator-only tools are listed only beside every worker tool, which already describes the envelope, so they advertise it by
+        // type only. Without a session they leave out the session token; control_request keeps sessionId, the session a cancel targets.
+        if (tool.AdministratorOnly)
+        {
+            foreach (var field in ForwardingFields.Where(properties.ContainsKey)) properties[field] = new { type = "string" };
+            if (!tool.RequiresSession) { properties.Remove("sessionToken"); if (tool.Name != RelayTools.ControlRequest) properties.Remove("sessionId"); }
         }
         // Each boundary tool advertises the attention opt-out with a short description; InputSchema gives the full one.
         if (properties.ContainsKey("attention")) properties["attention"] = new { type = "boolean", description = "false: no attention offer." };
@@ -218,6 +234,16 @@ internal static class ToolSchemas
                 properties["expiresAt"] = new { type = "string", format = "date-time", description = $"Optional future expiry, at most {RelayLimits.MaxOrderExpiryDays} days ahead; the hub's default otherwise." }; break;
             case RelayTools.OrderRemove:
                 properties["orderId"] = OrderId(); break;
+            case RelayTools.DocSearch:
+                properties["query"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxDocQueryLength, description = "Words to find; search syntax is read as plain words." };
+                properties["spec"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxDocSpecLength, description = "Only documents of this spec." };
+                properties["path"] = DocPath("Only this document.");
+                properties["limit"] = new { type = "integer", minimum = 1, maximum = RelayLimits.MaxDocSearchResults, description = $"Most sections; default {RelayLimits.DefaultDocSearchResults}." }; break;
+            case RelayTools.DocSection:
+                properties["path"] = DocPath("Document path from a doc_search hit.");
+                properties["anchor"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxDocAnchorLength, description = "Section anchor from a hit, or the next anchor of a long section." }; break;
+            case RelayTools.DocSync:
+                properties["branch"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxDocBranchLength, description = "Branch to follow from now on; default the configured one." }; break;
             case RelayTools.ControlRequest:
                 properties["command"] = new { type = "string", @enum = new[] { "pause", "resume", "stop", "cancel", "register_resource", "revoke_machine" } };
                 properties["aliases"] = new { type = "array", items = new { type = "string" } }; Text("reason", "Coordination control explanation."); Text("machineId", "Machine to revoke; required by revoke_machine."); break;
@@ -273,6 +299,8 @@ internal static class ToolSchemas
         required = new[] { "scope", "expiresAt" }.Concat(idRequired ? ["id"] : Array.Empty<string>()).ToArray(),
         description = "Typed authority with a scope and an expiry."
     };
+
+    private static object DocPath(string description) => new { type = "string", minLength = 1, maxLength = RelayLimits.MaxDocPathLength, description };
 
     private static object OrderId() => new { type = "string", minLength = 1, maxLength = RelayLimits.MaxStandingIdLength, description = "Standing order ID on this board." };
 
