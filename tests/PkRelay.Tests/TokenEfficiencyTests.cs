@@ -1,13 +1,23 @@
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
+using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.DependencyInjection;
 using PkRelay.Adapter;
 using PkRelay.Contracts;
+using PkRelay.Core;
+using PkRelay.Domain;
+using PkRelay.Host;
+using PkRelay.Storage;
 using Xunit;
+using Xunit.Abstractions;
+using ActivityEvent = PkRelay.Core.ActivityEvent;
 
 namespace PkRelay.Tests;
 
 /// <summary>Tool definitions sit in every turn's context, so the adapter keeps them as small as the chosen surface allows.</summary>
-public sealed class TokenEfficiencyTests
+public sealed class TokenEfficiencyTests(ITestOutputHelper output)
 {
     private static readonly string[] ChatTools = ["session_open", "send_message", "check_inbox", "ack", "chat_directory"];
 
@@ -336,6 +346,203 @@ public sealed class TokenEfficiencyTests
     {
         Assert.True(RelayToolCatalog.TryGet("send_message", out var tool));
         Assert.Equal("boolean", RelayToolCatalog.ForwardingSchema(tool).GetProperty("properties").GetProperty("supersede").GetProperty("type").GetString());
+    }
+
+    [Fact]
+    public async Task Every_call_records_estimated_request_and_reply_tokens_with_tool_session_and_role()
+    {
+        await using var host = new RelayHostFixture();
+        using var client = host.AuthorizedClient();
+        var session = Data(await host.Call(client, "session_open", new { repositoryId = "repo", requestId = "tokens-open", role = "Worker" }));
+        var handle = new { repositoryId = "repo", sessionId = session.GetProperty("sessionId").GetString(), sessionToken = session.GetProperty("sessionToken").GetString() };
+        Data(await host.Call(client, "task_update", new { handle.repositoryId, handle.sessionId, handle.sessionToken, requestId = "tokens-create", taskId = "T1", expectedVersion = 0, notes = "first note" }));
+        var inbox = await host.Call(client, "check_inbox", handle);
+        var store = host.Services.GetRequiredService<SqliteStore>();
+        await store.FlushActivityAsync();
+        var rows = Rows(store, "SELECT tool, session_id, role, request_tokens, reply_tokens FROM activity_log WHERE kind = 'call' ORDER BY id");
+        Assert.Equal(["session_open", "task_update", "check_inbox"], rows.Select(row => (string)row[0]!));
+        Assert.All(rows, row =>
+        {
+            Assert.Equal(handle.sessionId, row[1]);
+            Assert.Equal("worker", row[2]);
+            Assert.True((long)row[3]! > 0 && (long)row[4]! > 0);
+        });
+        // The reply count is the shared counter's count of the reply as sent.
+        var counter = host.Services.GetRequiredService<ITokenCounter>();
+        Assert.Equal("o200k_base", counter.Encoding);
+        Assert.Equal(counter.Count(inbox.GetProperty("dataJson").GetString()!), (long)rows[2][4]!);
+        // Counting is measure-only: no reply says it was compacted.
+        Assert.DoesNotContain("compacted", inbox.GetProperty("dataJson").GetString()!);
+
+        // With Relay:Tokens:Enabled off nothing is counted and nothing is recorded as over budget.
+        await using var off = new RelayHostFixture(settings: new Dictionary<string, string?> { ["Relay:Tokens:Enabled"] = "false", ["Relay:Clients:0:IsAdministrator"] = "true" });
+        using var offClient = off.AuthorizedClient();
+        var quiet = Data(await off.Call(offClient, "session_open", new { repositoryId = "repo", requestId = "tokens-off", role = "worker" }));
+        await off.Call(offClient, "check_inbox", new { repositoryId = "repo", sessionId = quiet.GetProperty("sessionId").GetString(), sessionToken = quiet.GetProperty("sessionToken").GetString() });
+        Assert.False(Data(await off.Call(offClient, "get_status", new { repositoryId = "repo" })).TryGetProperty("toolTokens", out _));
+        var offStore = off.Services.GetRequiredService<SqliteStore>();
+        await offStore.FlushActivityAsync();
+        Assert.Equal(3, Rows(offStore, "SELECT id FROM activity_log WHERE kind = 'call'").Count);
+        Assert.Empty(Rows(offStore, "SELECT id FROM activity_log WHERE request_tokens IS NOT NULL OR reply_tokens IS NOT NULL OR kind = 'budget'"));
+    }
+
+    [Fact]
+    public async Task Administrators_see_tool_definition_token_totals_per_role_in_get_status()
+    {
+        await using var host = new RelayHostFixture(settings: new Dictionary<string, string?> { ["Relay:Clients:0:IsAdministrator"] = "true" });
+        using var client = host.AuthorizedClient();
+        var status = Data(await host.Call(client, "get_status", new { repositoryId = "repo" }));
+        var totals = status.GetProperty("toolTokens");
+        var counter = new O200kTokenCounter();
+        int Expected(bool administrator) => RelayToolCatalog.ForRole(administrator).Sum(tool => counter.Count(tool.Description) + counter.Count(RelayToolCatalog.ForwardingSchema(tool).GetRawText()));
+        Assert.Equal(Expected(false), totals.GetProperty("worker").GetInt32());
+        Assert.Equal(Expected(true), totals.GetProperty("administrator").GetInt32());
+        Assert.True(totals.GetProperty("administrator").GetInt32() > totals.GetProperty("worker").GetInt32());
+        Assert.True(totals.GetProperty("estimated").GetBoolean());
+        Assert.Equal("o200k_base", totals.GetProperty("encoding").GetString());
+        int Characters(bool administrator) => RelayToolCatalog.ForRole(administrator).Sum(tool => tool.Description.Length + RelayToolCatalog.ForwardingSchema(tool).GetRawText().Length);
+        output.WriteLine($"Tool definitions: worker {Characters(false)} characters, {Expected(false)} estimated tokens; administrator {Characters(true)} characters, {Expected(true)} estimated tokens.");
+
+        // A worker's status is unchanged.
+        await using var workerHost = new RelayHostFixture();
+        using var workerClient = workerHost.AuthorizedClient();
+        Assert.False(Data(await workerHost.Call(workerClient, "get_status", new { repositoryId = "repo" })).TryGetProperty("toolTokens", out _));
+    }
+
+    [Fact]
+    public async Task Measure_only_tools_are_counted_but_sent_unchanged_and_enforced_tools_stay_under_budget()
+    {
+        async Task<(string Reply, string[] Budget)> Search(Dictionary<string, string?>? settings)
+        {
+            await using var host = new RelayHostFixture(settings: settings);
+            using var client = host.AuthorizedClient();
+            var session = Data(await host.Call(client, "session_open", new { repositoryId = "repo", requestId = "budget-open" }));
+            var (id, token) = (session.GetProperty("sessionId").GetString(), session.GetProperty("sessionToken").GetString());
+            for (var i = 0; i < 10; i++)
+                Data(await host.Call(client, "task_update", new { repositoryId = "repo", requestId = $"budget-{i}", sessionId = id, sessionToken = token, taskId = $"deploy-{i}", expectedVersion = 0, notes = $"deploy rollback runbook step {i} for the staging bench" }));
+            var reply = Data(await host.Call(client, "search", new { repositoryId = "repo", sessionId = id, sessionToken = token, query = "deploy rollback runbook", limit = 10 }));
+            var store = host.Services.GetRequiredService<SqliteStore>();
+            await store.FlushActivityAsync();
+            return (reply.GetRawText(), Rows(store, "SELECT code FROM activity_log WHERE kind = 'budget' AND tool = 'search'").Select(row => (string)row[0]!).ToArray());
+        }
+
+        var counter = new O200kTokenCounter();
+        var uncounted = await Search(new() { ["Relay:Tokens:Enabled"] = "false" });
+        var measured = await Search(null);
+        // Over its 300-token budget, the measure-only reply is counted as over and sent byte for byte as without counting.
+        Assert.True(counter.Count(measured.Reply) > RelayLimits.SearchReplyTokens, counter.Count(measured.Reply).ToString());
+        Assert.Equal(uncounted.Reply, measured.Reply);
+        Assert.Equal(["over"], measured.Budget);
+        Assert.Empty(uncounted.Budget);
+
+        var enforced = await Search(new() { ["Relay:Tokens:EnforceTools:0"] = "search" });
+        var data = JsonDocument.Parse(enforced.Reply).RootElement;
+        Assert.True(counter.Count(enforced.Reply) <= RelayLimits.SearchReplyTokens, counter.Count(enforced.Reply).ToString());
+        Assert.True(data.GetProperty("compacted").GetBoolean());
+        Assert.Equal(2, data.GetProperty("compactStep").GetInt32());
+        var all = JsonDocument.Parse(measured.Reply).RootElement.GetProperty("hits").GetArrayLength();
+        Assert.Equal(all - data.GetProperty("hits").GetArrayLength(), data.GetProperty("more").GetInt32());
+        // The strongest hits are the ones kept.
+        Assert.Equal(JsonDocument.Parse(measured.Reply).RootElement.GetProperty("hits")[0].GetRawText(), data.GetProperty("hits")[0].GetRawText());
+        Assert.Equal(["step2"], enforced.Budget);
+    }
+
+    [Fact]
+    public async Task Bad_token_settings_fail_clearly()
+    {
+        foreach (var (tool, named) in new[] { ("no_such_tool", "unknown tool"), ("doc_search", "own token budget") })
+        {
+            await using var host = new RelayHostFixture(settings: new Dictionary<string, string?> { ["Relay:Tokens:EnforceTools:0"] = tool });
+            var failure = Assert.ThrowsAny<Exception>(() => host.Services.GetRequiredService<TokenOptions>());
+            Assert.Contains("Relay:Tokens:EnforceTools", failure.ToString());
+            Assert.Contains(named, failure.ToString());
+        }
+    }
+
+    /// <summary>
+    /// Counting runs in the activity writer, so a call only hands over its request and reply text. The median added latency per call,
+    /// measured in process with counting on and off, must stay under a millisecond. The writer's own cost of counting a typical call and a
+    /// large reply is measured and reported too.
+    /// </summary>
+    [Fact]
+    public async Task Token_counting_adds_well_under_a_millisecond_per_call()
+    {
+        static double Median(double[] samples) { Array.Sort(samples); return samples[samples.Length / 2]; }
+        async Task<double> CallMedian(Dictionary<string, string?>? settings)
+        {
+            await using var host = new RelayHostFixture(settings: settings);
+            using var client = host.AuthorizedClient();
+            var application = host.Services.GetRequiredService<IRelayApplication>();
+            var caller = new RelayCaller("test-user", false, ["repo"]);
+            var opened = await application.ExecuteAsync(caller, RelayTools.SessionOpen, JsonSerializer.SerializeToElement(new { repositoryId = "repo", requestId = "latency-open", role = "worker" }));
+            var session = JsonDocument.Parse(opened.DataJson).RootElement;
+            var read = JsonSerializer.SerializeToElement(new { repositoryId = "repo", sessionId = session.GetProperty("sessionId").GetString(), sessionToken = session.GetProperty("sessionToken").GetString(), attention = false });
+            for (var i = 0; i < 100; i++) await application.ExecuteAsync(caller, RelayTools.CheckInbox, read);
+            var samples = new double[400];
+            for (var i = 0; i < samples.Length; i++)
+            {
+                var started = Stopwatch.GetTimestamp();
+                Assert.True((await application.ExecuteAsync(caller, RelayTools.CheckInbox, read)).Ok);
+                samples[i] = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+            }
+            return Median(samples);
+        }
+        // A first host warms up the JIT and the shared tokenizer, so neither measured host pays for it.
+        await CallMedian(null);
+        var off = await CallMedian(new() { ["Relay:Tokens:Enabled"] = "false" });
+        var on = await CallMedian(null);
+        output.WriteLine($"Median in-process call: {on:0.000} ms with counting, {off:0.000} ms without; added {on - off:0.000} ms.");
+        Assert.True(on - off < 1.0, $"{on} ms with counting, {off} ms without");
+
+        // The writer's cost per event, off the call's path.
+        var counter = new O200kTokenCounter();
+        var request = JsonSerializer.Serialize(new
+        {
+            repositoryId = "pkrelay", sessionId = "s-" + new string('a', 32), sessionToken = new string('b', 43), requestId = "milestone-42", taskId = "T12", expectedVersion = 7,
+            notes = "Built the token counter and the compactor; tests pass on Linux.", workflow = new { state = "ready" }, includeNextWork = true
+        });
+        var reply = Replies.Page(Enumerable.Range(1, 12).Select(i => (JsonNode)new JsonObject { ["taskId"] = $"T{i}", ["title"] = $"Task {i}: wire the dashboard view for budget events", ["state"] = "ready", ["version"] = i }),
+            new JsonObject { ["limit"] = 12 }).DataJson;
+        var large = Replies.Ok(new { items = Enumerable.Range(1, 260).Select(i => new { messageId = $"m{i}", text = "Status: build " + i + " passed on the bench; next is the review." }) }).DataJson;
+        double Counting(string replyText)
+        {
+            var call = new ActivityEvent { Kind = ActivityEvent.Call, RepositoryId = "pkrelay", Tool = RelayTools.TaskGet, Ok = true, RequestText = request, ReplyText = replyText };
+            for (var i = 0; i < 50; i++) TokenMeter.Measure(call, counter).ToList();
+            var samples = new double[300];
+            for (var i = 0; i < samples.Length; i++)
+            {
+                var started = Stopwatch.GetTimestamp();
+                TokenMeter.Measure(call, counter).ToList();
+                samples[i] = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+            }
+            return Median(samples);
+        }
+        var typical = Counting(reply);
+        var worst = Counting(large);
+        output.WriteLine($"Writer, per event (median): {typical:0.000} ms for a {Encoding.UTF8.GetByteCount(request)}-byte request and {Encoding.UTF8.GetByteCount(reply)}-byte reply; {worst:0.000} ms with a {Encoding.UTF8.GetByteCount(large)}-byte reply.");
+        Assert.True(typical < 1.0, $"{typical} ms");
+        var measured = TokenMeter.Measure(new ActivityEvent { Kind = ActivityEvent.Call, Tool = RelayTools.TaskGet, Ok = true, RequestText = request, ReplyText = large }, counter).ToList();
+        Assert.Equal((counter.Count(request), counter.Count(large)), (measured[0].RequestTokens, measured[0].ReplyTokens));
+        Assert.Null(measured[0].ReplyText);
+        Assert.Equal("over", Assert.Single(measured, row => row.Kind == ActivityEvent.Budget).Code);
+    }
+
+    private static JsonElement Data(JsonElement reply)
+    {
+        Assert.True(reply.GetProperty("ok").GetBoolean(), reply.ToString());
+        return JsonDocument.Parse(reply.GetProperty("dataJson").GetString()!).RootElement.Clone();
+    }
+
+    private static List<object?[]> Rows(SqliteStore store, string sql)
+    {
+        using var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = store.DatabasePath, Mode = SqliteOpenMode.ReadOnly, Pooling = false }.ToString());
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        using var reader = command.ExecuteReader();
+        var rows = new List<object?[]>();
+        while (reader.Read()) rows.Add(Enumerable.Range(0, reader.FieldCount).Select(index => reader.IsDBNull(index) ? null : reader.GetValue(index)).ToArray());
+        return rows;
     }
 
     private static JsonElement Json(string json) => JsonSerializer.Deserialize<JsonElement>(json);

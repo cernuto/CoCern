@@ -56,6 +56,60 @@ FROM activity_log GROUP BY role, tool ORDER BY calls DESC;
 | `Relay:Activity:Enabled` | `true` | Log activity. |
 | `Relay:Activity:RetentionDays` | 30 | Days of raw rows kept. Older rows roll up into `activity_daily`. |
 
+## Tokens
+
+The hub counts the tokens in every request and reply, with the o200k tokenizer. The counts go into `activity_log` as `request_tokens` and `reply_tokens`. They match Codex exactly. For Claude they are estimates, so they are labeled "estimated tokens". Counting runs in the background and never changes a reply. On by default.
+
+Administrators see the tokens of the tool definitions each role carries in `get_status`, as `toolTokens`.
+
+Each tool has a token budget. A reply over budget is logged as a `budget` row with code `over`, and sent unchanged. Tools you list in `Relay:Tokens:EnforceTools` are compacted to their budget instead:
+
+1. Drop optional detail (such as full task messages) and set `detailFetchRequired`.
+2. Shorten lists to their first items, with `truncated`, a `more` count and `nextCursor`.
+3. Cut long text to its first line. The ID stays, so you can fetch the rest.
+
+A compacted reply says `compacted: true` and `compactStep`. IDs, versions, codes, grants and errors are never removed. A mutation only loses its optional detail. The 32 KB byte limit still applies.
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `Relay:Tokens:Enabled` | `true` | Count tokens. It only measures. |
+| `Relay:Tokens:EnforceTools` | none | Tools to compact to their budget. Every other tool is measure-only. The doc cache keeps its own budget and cannot be listed. |
+
+## Feedback
+
+Fixed rules spot wasteful patterns and send a short nudge. No AI runs in the hub. **Off by default.**
+
+**Tips** (`Relay:Feedback:Tips`) go to the agent as a lowest-tier `tip` attention item on its next milestone or inbox reply. They never wake a chat.
+
+| Rule | Fires when |
+| --- | --- |
+| `board_reread` | 3 full board reads without `sinceRevision` in an hour. |
+| `task_reread` | 4 full reads of one task in 30 minutes. A read that came back unchanged for `ifNoneMatch` does not count. |
+| `long_messages` | Your last 5 messages average over 150 tokens. |
+| `inbox_polling` | 6 `check_inbox` reads with nothing new in an hour. Background reads and `waitSeconds` waits do not count. |
+| `repeated_status` | A duplicate status write (see the counters above). |
+
+A session gets at most one tip an hour, and each rule at most once a day. If the pattern comes back within an hour, the tip counts as ignored. A rule followed less than `MinFollowRate` of the time, over 20 or more tips, switches itself off and stays off after a restart. Administrators see switched-off rules in `get_status`, as `tipRulesOff`.
+
+`task_get` counts toward tips only when it carries your session handle.
+
+**Alerts** (`Relay:Feedback:Alerts`) are extra checks for the [anomaly monitor](collaboration.md#anomaly-monitor), so they also need analytics. They reach manager sessions as `anomaly` items, at most once a day per kind.
+
+| Check | Alerts when |
+| --- | --- |
+| `tokens_per_task_by_role` | A role's tokens per task are more than double the week before, over at least 20 tasks. |
+| `compaction_rate_by_tool` | A tool compacts more than 30% of at least 20 replies. |
+| `session_token_outliers` | A session's busiest hour is 5 times its role's median hour, over at least 10 hours. |
+
+**Team rules** (`Relay:Feedback:ProposeRules`): when one rule fires for 5 different sessions in 7 days, the hub proposes that rule's line as a standing line, from `pkrelay-hub`. It changes nothing until an administrator approves it with `standing_put`.
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `Relay:Feedback:Tips` | `false` | Send tips to agents. |
+| `Relay:Feedback:Alerts` | `false` | Alert managers. Needs `Relay:Analytics:Enabled`. |
+| `Relay:Feedback:ProposeRules` | `false` | Propose standing lines. |
+| `Relay:Feedback:MinFollowRate` | 0.2 | Below this, a tip rule switches itself off. |
+
 ## Analytics
 
 Hourly snapshots of the database, queried with DuckDB. Queries never touch the live database. **Off by default.**
@@ -95,7 +149,7 @@ Each named query compares the last `days` days (`cur`, 1 to 14, default 7) with 
 | `quality_guardrails` | Closures, reopened tasks, failed and retried actions. |
 | `attention_outcomes_by_kind` | Attention answers, by kind. |
 
-With ad hoc SQL on, `"name": "sql", "sql": "SELECT ..."` runs one `SELECT` over the views: `tasks`, `tool_calls`, `context_by_role`, `messages`, `action_reports`, `claim_conflicts`, `attention_outcomes`, `board_doc`, `task_doc`, `activity`. Every ad hoc query is written to the hub log.
+With ad hoc SQL on, `"name": "sql", "sql": "SELECT ..."` runs one `SELECT` over the views: `tasks`, `tool_calls`, `context_by_role`, `messages`, `action_reports`, `claim_conflicts`, `attention_outcomes`, `budget_events`, `board_doc`, `task_doc`, `activity`. `relay_tokens` in `activity` is the hub's own token count for a call. Every ad hoc query is written to the hub log.
 
 Errors: `AdministratorRequired`, `AnalyticsUnavailable` (off, or no snapshot yet), `AnalyticsRefused` (ad hoc SQL off, or not one `SELECT`), `AnalyticsTimeout`, `AnalyticsFailed`, `InvalidArguments`, `PayloadTooLarge` (reply over 8 KB).
 

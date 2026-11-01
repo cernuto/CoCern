@@ -3,6 +3,7 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
@@ -740,6 +741,88 @@ public class HostTests
             Assert.False(options.Enabled);
             Assert.DoesNotContain(options.Checks(), check => check.Query == AnalyticsQueryNames.NoisiestTools);
         }
+    }
+
+    [Fact]
+    public async Task Manager_alerts_are_extra_anomaly_checks_with_their_own_thresholds_and_minimum_samples()
+    {
+        // Off by default: the monitor checks only the nine named queries.
+        Assert.DoesNotContain(new AnomalyOptions().Checks(), check => AnalyticsQueryNames.Alerts.Contains(check.Query));
+        var checks = new AnomalyOptions { Alerts = true }.Checks().Where(check => AnalyticsQueryNames.Alerts.Contains(check.Query)).ToDictionary(check => check.Query, check => check.Threshold);
+        Assert.Equal(AnalyticsQueryNames.Alerts, checks.Keys);
+        // The alerts are not analytics_query names, so the administrator tool surface did not grow.
+        Assert.Empty(AnalyticsQueryNames.Alerts.Intersect(AnalyticsQueryNames.All));
+
+        var at = new DateTimeOffset(2026, 11, 1, 10, 0, 0, TimeSpan.Zero);
+        JsonObject Finding(string query, params object?[] row) => AnomalyMonitorGrain.Finding(query, new AnalyticsResult(["key", "cur", "prev", "cur_n", "prev_n"], [row], false, at), checks[query]);
+        void Raised(JsonObject finding, string key, double value, double baseline, long samples) =>
+            Assert.Equal((key, value, baseline, samples), (Text(finding, "key"), (double)finding["anomaly"]!["value"]!, (double)finding["anomaly"]!["baseline"]!, (long)finding["anomaly"]!["samples"]!));
+        static string Text(JsonObject finding, string field) => finding["anomaly"]![field]!.GetValue<string>();
+
+        // A role's relay tokens per task: more than double its baseline, from at least 20 tasks on both sides.
+        Raised(Finding(AnalyticsQueryNames.TokensPerTaskByRole, "worker", 2100.0, 1000.0, 20L, 20L), "worker", 2100, 1000, 20);
+        Assert.Null(Finding(AnalyticsQueryNames.TokensPerTaskByRole, "worker", 1900.0, 1000.0, 40L, 40L)["anomaly"]);
+        Assert.Null(Finding(AnalyticsQueryNames.TokensPerTaskByRole, "worker", 9000.0, 1000.0, 19L, 40L)["anomaly"]);
+        Assert.Null(Finding(AnalyticsQueryNames.TokensPerTaskByRole, "worker", 9000.0, 1000.0, 40L, 19L)["anomaly"]);
+        // A tool's compaction rate: over the fixed 30% limit, from at least 20 replies; it needs no baseline.
+        Raised(Finding(AnalyticsQueryNames.CompactionRateByTool, "task_get", 0.35, null, 20L, 0L), "task_get", 0.35, RelayLimits.CompactionAlertRate, 20);
+        Assert.Null(Finding(AnalyticsQueryNames.CompactionRateByTool, "task_get", 0.3, 0.1, 50L, 50L)["anomaly"]);
+        Assert.Null(Finding(AnalyticsQueryNames.CompactionRateByTool, "task_get", 0.9, 0.1, 19L, 50L)["anomaly"]);
+        // A session's busiest hour: at least 5 times its role's median session-hour, from at least 10 session-hours.
+        Raised(Finding(AnalyticsQueryNames.SessionTokenOutliers, "s-1", 5000.0, 1000.0, 10L, 10L), "s-1", 5000, 1000, 10);
+        Assert.Null(Finding(AnalyticsQueryNames.SessionTokenOutliers, "s-1", 4900.0, 1000.0, 50L, 50L)["anomaly"]);
+        Assert.Null(Finding(AnalyticsQueryNames.SessionTokenOutliers, "s-1", 9000.0, 1000.0, 9L, 9L)["anomaly"]);
+
+        // Alerts need analytics: with Relay:Feedback:Alerts on and analytics off the monitor never starts.
+        await using (var host = new RelayHostFixture(settings: new Dictionary<string, string?> { ["Relay:Feedback:Alerts"] = "true" }))
+        {
+            using var client = host.AuthorizedClient();
+            Assert.True(host.Services.GetRequiredService<AnomalyOptions>().Alerts);
+            Assert.Null(host.Services.GetService<IAnalyticsQueries>());
+            Data(await host.Call(client, "session_open", new { repositoryId = "repo", requestId = "alerts-manager", role = "manager" }));
+            await Task.Delay(300);
+            Assert.DoesNotContain(await host.Services.GetRequiredService<SqliteStore>().ReadDueAsync(DateTimeOffset.UtcNow.AddDays(30), 64), work => work.GrainType == "pkrelay.anomaly");
+        }
+        // An alert's threshold can be tuned like any check, keeping the alert's own defaults for the rest.
+        await using (var tuned = new RelayHostFixture(settings: new Dictionary<string, string?> { ["Relay:Attention:AnomalyThresholds:compaction_rate_by_tool:MinSamples"] = "50" }))
+        {
+            var options = tuned.Services.GetRequiredService<AnomalyOptions>() with { Alerts = true };
+            var compaction = options.Checks().Single(check => check.Query == AnalyticsQueryNames.CompactionRateByTool).Threshold;
+            Assert.Equal((50, RelayLimits.CompactionAlertRate), (compaction.MinSamples, compaction.Limit));
+        }
+    }
+
+    [Fact]
+    public void Manager_alerts_reach_only_manager_sessions_with_a_24_hour_cooldown_per_kind()
+    {
+        var envelope = new StateEnvelope<CoordinationDocument>();
+        var monitor = new RelayCaller("relay-anomaly-monitor", false, ["repo"], true);
+        var now = new DateTimeOffset(2026, 11, 1, 10, 0, 0, TimeSpan.Zero);
+        JsonObject Alert(string query, string key, double value) => new()
+        {
+            ["query"] = query, ["period"] = now.ToString("yyyy-MM-dd"),
+            ["anomaly"] = new JsonObject { ["key"] = key, ["value"] = value, ["baseline"] = 1000.0, ["samples"] = 25 }
+        };
+        List<JsonObject> Check(DateTimeOffset at, params JsonObject[] findings)
+        {
+            var before = envelope.Effects.Count;
+            var reply = CoordinationStateMachine.Apply(envelope, AggregateKinds.Anomaly, "repo", monitor, Operations.AnomalyCheck,
+                new JsonObject { ["repositoryId"] = "repo", ["checkAt"] = at.ToString("O"), ["findings"] = new JsonArray(findings) }, at);
+            Assert.True(reply.Ok, reply.Code);
+            return envelope.Effects.Skip(before).Select(effect => (effect, JsonNode.Parse(effect.PayloadJson)!.AsObject()))
+                .Select(x => { Assert.Equal((AggregateKinds.Control, Operations.AttentionRoute), (x.effect.TargetKind, x.effect.Operation)); return x.Item2; }).ToList();
+        }
+
+        var first = Assert.Single(Check(now, Alert(AnalyticsQueryNames.TokensPerTaskByRole, "worker", 2500)));
+        // Routed by role to the repository's manager sessions only, as an anomaly item named after its query.
+        Assert.Equal(SessionRoles.Manager, first["role"]!.GetValue<string>());
+        Assert.Equal((AttentionKinds.Anomaly, AnalyticsQueryNames.TokensPerTaskByRole), (first["item"]!["kind"]!.GetValue<string>(), first["item"]!["subject"]!.GetValue<string>()));
+        Assert.Equal("tokens_per_task_by_role worker: 2500 vs 1000 baseline (n=25)", first["item"]!["note"]!.GetValue<string>());
+        // Within 24 hours the same kind stays quiet, whichever row it is; another kind has its own cooldown.
+        var later = Check(now.AddHours(1), Alert(AnalyticsQueryNames.TokensPerTaskByRole, "manager", 9000), Alert(AnalyticsQueryNames.SessionTokenOutliers, "s-1", 8000));
+        Assert.Equal(AnalyticsQueryNames.SessionTokenOutliers, Assert.Single(later)["item"]!["subject"]!.GetValue<string>());
+        Assert.Empty(Check(now.AddHours(23), Alert(AnalyticsQueryNames.TokensPerTaskByRole, "manager", 9000)));
+        Assert.Single(Check(now.AddHours(25), Alert(AnalyticsQueryNames.TokensPerTaskByRole, "manager", 9000)));
     }
 
     /// <summary>A ready workflow, or a blocked one with one blocker, as the board accepts it.</summary>

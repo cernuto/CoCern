@@ -12,6 +12,71 @@ public static class RelayLimits
     /// <summary>Largest reply a single aggregate may produce before composition.</summary>
     public const int AggregateReplyBytes = MaxPayloadBytes - CompositionReserveBytes;
 
+    // Token budgets (o200k, labeled estimated tokens for Claude). A tool in Relay:Tokens:EnforceTools is compacted to its budget; every
+    // other tool is measure-only: an overrun is counted and the reply goes out unchanged. The byte limits above stay the hard safety net.
+    /// <summary>Reply budget of a tool without its own, in tokens.</summary>
+    public const int DefaultReplyTokens = 1_000;
+    /// <summary>Budget of a <c>search</c> reply. Its 2,048-byte cap is about 500 to 600 tokens, so this budget is measure-only.</summary>
+    public const int SearchReplyTokens = 300;
+    /// <summary>Budget of a <c>doc_search</c> reply. The doc cache keeps its own <see cref="MaxDocReplyTokens"/>, so this one is measure-only.</summary>
+    public const int DocSearchReplyTokens = 300;
+    /// <summary>Budget of a whole-task or board <c>task_get</c> reply.</summary>
+    public const int TaskReadReplyTokens = 2_000;
+    /// <summary>Budget of one <c>check_inbox</c> page.</summary>
+    public const int InboxReplyTokens = 1_500;
+    /// <summary>Budget of the attention offer a boundary reply carries.</summary>
+    public const int AttentionOfferTokens = 60;
+    /// <summary>Budget of the next-work offer a <c>task_update</c> reply carries.</summary>
+    public const int NextWorkOfferTokens = 400;
+    /// <summary>Compaction step 3 shortens text values longer than this, in characters, to their first line.</summary>
+    public const int CompactTextChars = 200;
+
+    // Feedback rules (tips to agents, proposed team rules).
+    /// <summary>Most tips one session gets in an hour.</summary>
+    public const int TipsPerSessionPerHour = 1;
+    /// <summary>Hours before the same rule may tip the same session again.</summary>
+    public const int TipRuleCooldownHours = 24;
+    /// <summary>Every tip is shorter than this, in tokens.</summary>
+    public const int MaxTipTokens = 40;
+    /// <summary>Minutes after a tip in which a repeat of its pattern counts as not followed.</summary>
+    public const int TipOutcomeMinutes = 60;
+    /// <summary>Recorded tip outcomes a rule needs before a low follow rate can switch it off.</summary>
+    public const int MinTipOutcomes = 20;
+    /// <summary>Follow rate below which a tip rule switches itself off, unless <c>Relay:Feedback:MinFollowRate</c> says otherwise.</summary>
+    public const double DefaultMinFollowRate = 0.2;
+    /// <summary>Board reads without <c>sinceRevision</c> in an hour that fire the board reread rule.</summary>
+    public const int BoardRereadsPerHour = 3;
+    /// <summary>Full reads of one task in <see cref="TaskRereadMinutes"/> that fire the task reread rule.</summary>
+    public const int TaskRereads = 4;
+    public const int TaskRereadMinutes = 30;
+    /// <summary>Messages averaged by the long message rule, and the average, in tokens, that fires it.</summary>
+    public const int LongMessageWindow = 5;
+    public const int LongMessageTokens = 150;
+    /// <summary>Model-visible <c>check_inbox</c> reads with nothing new in an hour that fire the inbox polling rule.</summary>
+    public const int InboxPollsPerHour = 6;
+    /// <summary>Different sessions one rule must fire for, within <see cref="TeamRuleDays"/>, before the hub proposes its standing line.</summary>
+    public const int TeamRuleSessions = 5;
+    public const int TeamRuleDays = 7;
+    /// <summary>Sessions whose feedback counts the hub keeps in memory; past it the oldest are forgotten.</summary>
+    public const int MaxFeedbackSessions = 4_096;
+    /// <summary>Message IDs per session the inbox polling rule remembers as already seen.</summary>
+    public const int MaxFeedbackSeenMessages = 200;
+    /// <summary>Targets whose last status fingerprint the repeated status rule remembers.</summary>
+    public const int MaxFeedbackTargets = 4_096;
+    /// <summary>Days a tip attention item lives before it expires unoffered.</summary>
+    public const int TipExpiryDays = 1;
+
+    // Manager alerts: named queries the anomaly monitor runs with Relay:Feedback:Alerts on.
+    /// <summary>A role's relay tokens per task are an alert at this many times their baseline, from at least <see cref="TokensPerTaskAlertSamples"/> tasks.</summary>
+    public const double TokensPerTaskAlertRatio = 2.0;
+    public const int TokensPerTaskAlertSamples = 20;
+    /// <summary>A tool compacting more than this share of its replies is an alert, from at least <see cref="CompactionAlertSamples"/> replies.</summary>
+    public const double CompactionAlertRate = 0.3;
+    public const int CompactionAlertSamples = 20;
+    /// <summary>A session's relay tokens in one hour are an alert at this many times its role's median session-hour, from at least <see cref="SessionOutlierAlertSamples"/> session-hours.</summary>
+    public const double SessionOutlierAlertRatio = 5.0;
+    public const int SessionOutlierAlertSamples = 10;
+
     public const int MaxIdentifierLength = 256;
     public const int MaxPageSize = 50;
     public const int DefaultPageSize = 20;

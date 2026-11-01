@@ -122,6 +122,12 @@ public static class SessionRoles
 {
     /// <summary>Sessions that receive manager-bound attention items; a manager session also starts its repository's anomaly monitor.</summary>
     public const string Manager = "manager";
+
+    /// <summary>
+    /// The hub's own identity for proposed team rules. Only the internal <see cref="Operations.StandingProposeHub"/> proposes under it,
+    /// so no client can, whatever principal or role it claims.
+    /// </summary>
+    public const string HubProposer = "pkrelay-hub";
 }
 
 /// <summary>Kinds of an aggregate's own timers (due work), besides lease expiry.</summary>
@@ -155,6 +161,11 @@ public static class Operations
     public const string Standing = "__standing";
     /// <summary>Records the standing revision a session received for a board, so later replies carry standing only when it changed.</summary>
     public const string StandingSeen = "__standing_seen";
+    /// <summary>
+    /// The hub's own standing proposal for a feedback rule that fires across many sessions. Internal only, so no client can propose as the
+    /// hub; it is outside the per-session proposal cap.
+    /// </summary>
+    public const string StandingProposeHub = "__standing_propose_hub";
     /// <summary>Read-only: which of the given sessions in the repository the caller's principal opened.</summary>
     public const string SessionOwners = "__session_owners";
     /// <summary>

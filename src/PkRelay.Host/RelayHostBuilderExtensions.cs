@@ -64,7 +64,9 @@ public static class RelayHostBuilderExtensions
         });
         // The search port is passed only when the store keeps an index; otherwise the search tool answers SearchUnavailable. Likewise
         // analytics_query gets the analytics port only when analytics is on, and answers AnalyticsUnavailable otherwise.
-        builder.Services.Replace(ServiceDescriptor.Singleton(services => new RelayApplication(
+        builder.Services.AddSingleton(services => TokenSettings(services.GetRequiredService<IConfiguration>()));
+        builder.Services.AddSingleton(services => FeedbackSettings(services.GetRequiredService<IConfiguration>()));
+        builder.Services.Replace(ServiceDescriptor.Singleton(services => Warmed(new RelayApplication(
             services.GetRequiredService<Orleans.IGrainFactory>(), services.GetService<IMachineDirectory>(), services.GetService<IActivitySink>(),
             services.GetService<SqliteStore>() is { SearchEnabled: true } store ? store : null, services.GetRequiredService<AttentionOptions>(),
             services.GetService<IAnalyticsQueries>() is { } queries
@@ -74,7 +76,13 @@ public static class RelayHostBuilderExtensions
             services.GetService<IAnalyticsQueries>() is not null ? services.GetRequiredService<AnomalyOptions>() : null,
             services.GetRequiredService<OrderOptions>(),
             // The doc cache tools get their port only when Relay:DocCache:Enabled is on, and answer DocCacheUnavailable otherwise.
-            services.GetService<DocCacheTool>())));
+            services.GetService<DocCacheTool>(),
+            // Token counting is on by default and only measures; tools in Relay:Tokens:EnforceTools are compacted to their budget.
+            services.GetRequiredService<ITokenCounter>(), services.GetRequiredService<TokenOptions>(),
+            // The feedback rules exist only with tips or proposed team rules on, both off by default.
+            services.GetRequiredService<FeedbackOptions>() is { Enabled: true } feedback
+                ? new FeedbackRules(feedback, services.GetRequiredService<ITokenCounter>(), services.GetService<SqliteStore>())
+                : null))));
         // One shared tokenizer for every token count; it loads its vocabulary on first use.
         builder.Services.AddSingleton<ITokenCounter, O200kTokenCounter>();
         builder.Services.AddDocCache();
@@ -104,7 +112,11 @@ public static class RelayHostBuilderExtensions
                 RetentionDays = configuration.GetValue("Relay:Activity:RetentionDays", 30) is var days and >= 1 ? days : throw new InvalidOperationException("Relay:Activity:RetentionDays must be at least 1.")
             };
             var search = new SearchOptions { Enabled = configuration.GetValue("Relay:Search:Enabled", true) };
-            return new SqliteStore(configured is null ? DefaultDatabasePath(environment) : Path.Combine(environment.ContentRootPath, configured), activity, search);
+            return new SqliteStore(configured is null ? DefaultDatabasePath(environment) : Path.Combine(environment.ContentRootPath, configured), activity, search)
+            {
+                // The activity writer counts each call's request and reply tokens, so counting never slows a call.
+                TokenCounter = services.GetRequiredService<TokenOptions>().Enabled ? services.GetRequiredService<ITokenCounter>() : null
+            };
         }));
         builder.Services.AddOptions<EndpointOptions>().Configure<IConfiguration>((options, configuration) =>
         {
@@ -173,15 +185,43 @@ public static class RelayHostBuilderExtensions
     /// <c>Relay:Attention:AnomalyInterval</c> (default 1 hour; 0 turns the monitor off) and per-query thresholds under
     /// <c>Relay:Attention:AnomalyThresholds:&lt;query&gt;</c> with <c>Ratio</c> (0 turns that check off), <c>MinSamples</c> and, for <c>quality_guardrails</c> closures, <c>DropRatio</c>.
     /// </summary>
+    /// <summary>Counts the tool definitions (and loads the tokenizer) in the background at startup, so no call waits for it.</summary>
+    private static RelayApplication Warmed(RelayApplication application)
+    {
+        _ = Task.Run(application.WarmTokenCounts);
+        return application;
+    }
+
+    /// <summary><c>Relay:Tokens:Enabled</c> (default true; it only measures) and <c>Relay:Tokens:EnforceTools</c> (default none).</summary>
+    private static TokenOptions TokenSettings(IConfiguration configuration) => new TokenOptions
+    {
+        Enabled = configuration.GetValue("Relay:Tokens:Enabled", true),
+        EnforceTools = configuration.GetSection("Relay:Tokens:EnforceTools").GetChildren().Select(tool => tool.Value ?? "").Where(tool => tool.Length > 0).ToHashSet(StringComparer.Ordinal)
+    }.Validated();
+
+    /// <summary><c>Relay:Feedback:Tips</c>, <c>ProposeRules</c> (both default false) and <c>MinFollowRate</c> (default 0.2).</summary>
+    private static FeedbackOptions FeedbackSettings(IConfiguration configuration) => new FeedbackOptions
+    {
+        Tips = configuration.GetValue("Relay:Feedback:Tips", false),
+        ProposeRules = configuration.GetValue("Relay:Feedback:ProposeRules", false),
+        MinFollowRate = configuration.GetValue("Relay:Feedback:MinFollowRate", RelayLimits.DefaultMinFollowRate)
+    }.Validated();
+
     private static AnomalyOptions AnomalySettings(IConfiguration configuration)
     {
         var thresholds = new Dictionary<string, AnomalyThreshold>(StringComparer.Ordinal);
         foreach (var section in configuration.GetSection("Relay:Attention:AnomalyThresholds").GetChildren())
-            thresholds[section.Key] = new(section.GetValue("Ratio", RelayLimits.DefaultAnomalyRatio), section.GetValue("MinSamples", RelayLimits.DefaultAnomalyMinSamples), section.GetValue("DropRatio", RelayLimits.DefaultAnomalyDropRatio));
+        {
+            // An alert query keeps its own defaults (and a compaction rate its fixed limit) for whatever the section leaves out.
+            var defaults = AnomalyOptions.AlertQueries.TryGetValue(section.Key, out var alert) ? alert : new AnomalyThreshold(RelayLimits.DefaultAnomalyRatio, RelayLimits.DefaultAnomalyMinSamples);
+            thresholds[section.Key] = new(section.GetValue("Ratio", defaults.Ratio), section.GetValue("MinSamples", defaults.MinSamples), section.GetValue("DropRatio", defaults.DropRatio), defaults.Limit);
+        }
         return new AnomalyOptions
         {
             Interval = configuration.GetValue("Relay:Attention:AnomalyInterval", TimeSpan.FromMinutes(RelayLimits.DefaultAnomalyIntervalMinutes)),
-            Thresholds = thresholds
+            Thresholds = thresholds,
+            // Manager alerts are extra anomaly checks; like every check they run only with analytics on.
+            Alerts = configuration.GetValue("Relay:Feedback:Alerts", false)
         }.Validated();
     }
 

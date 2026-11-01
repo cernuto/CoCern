@@ -255,6 +255,66 @@ public sealed class CollaborationHostTests
         ["blockers"] = new JsonArray()
     };
 
+    [Fact]
+    public async Task A_tip_rule_firing_for_five_sessions_in_a_week_is_proposed_as_a_team_rule_that_changes_nothing_until_approved()
+    {
+        await using var host = new RelayHostFixture(settings: new Dictionary<string, string?> { ["Relay:Feedback:ProposeRules"] = "true", ["Relay:Clients:0:IsAdministrator"] = "true" });
+        using var http = host.AuthorizedClient();
+        async Task<JsonElement> Open(string name) => Data(await host.Call(http, "session_open", new { repositoryId = "repo", requestId = "team-" + name, role = "worker" }));
+        async Task ReadBoardThreeTimes(JsonElement session)
+        {
+            for (var i = 0; i < 3; i++)
+                Assert.True((await host.Call(http, "task_get", new { repositoryId = "repo", sessionId = session.GetProperty("sessionId").GetString(), sessionToken = session.GetProperty("sessionToken").GetString() })).GetProperty("ok").GetBoolean());
+        }
+        async Task<JsonElement[]> Proposals()
+        {
+            var view = Data(await host.Call(http, "task_get", new { repositoryId = "repo", section = "standing" }));
+            return view.GetProperty("proposals").EnumerateArray().ToArray();
+        }
+
+        // A worker fills its own per-session proposal cap first: the hub's proposal is outside it.
+        var proposer = await Open("proposer");
+        for (var i = 0; i < 5; i++)
+            Assert.True((await host.Call(http, "standing_propose", new { repositoryId = "repo", requestId = "own-" + i, sessionId = proposer.GetProperty("sessionId").GetString(), sessionToken = proposer.GetProperty("sessionToken").GetString(), line = new { text = "Own idea " + i }, proposedBy = SessionRolesHub, hub = true })).GetProperty("ok").GetBoolean());
+        // Nothing a client sends makes its proposal the hub's.
+        Assert.All(await Proposals(), proposal => { Assert.Equal("test-user", proposal.GetProperty("proposedBy").GetString()); Assert.False(proposal.TryGetProperty("hub", out _)); });
+        // The hub's own operation is internal: no tool reaches it.
+        using (var internalCall = await http.PostAsJsonAsync("/api/tools/__standing_propose_hub", new { repositoryId = "repo", line = new { id = "tip-x", text = "x" } }))
+            Assert.False((await internalCall.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("ok").GetBoolean());
+
+        // Four sessions are not enough.
+        for (var i = 0; i < 4; i++) await ReadBoardThreeTimes(await Open("reader-" + i));
+        await Task.Delay(500);
+        Assert.Equal(5, (await Proposals()).Length);
+        // The fifth different session in the week makes the hub propose the rule's standing line, once.
+        await ReadBoardThreeTimes(await Open("reader-4"));
+        JsonElement[] hub = [];
+        for (var retry = 0; retry < 50 && hub.Length == 0; retry++)
+        {
+            await Task.Delay(100);
+            hub = (await Proposals()).Where(proposal => proposal.TryGetProperty("hub", out _)).ToArray();
+        }
+        var proposal = Assert.Single(hub);
+        Assert.Equal("pkrelay-hub", proposal.GetProperty("proposedBy").GetString());
+        Assert.Equal("tip-board-reread", proposal.GetProperty("line").GetProperty("id").GetString());
+        Assert.Equal("Read the board as changes since your last revision.", proposal.GetProperty("line").GetProperty("text").GetString());
+        Assert.False(proposal.TryGetProperty("sessionId", out _));
+        await ReadBoardThreeTimes(await Open("reader-5"));
+        await Task.Delay(300);
+        Assert.Single(await Proposals(), item => item.TryGetProperty("hub", out _));
+
+        // Nothing changes until an administrator approves it: a new chat gets no standing.
+        var before = Data(await host.Call(http, "session_open", new { repositoryId = "repo", requestId = "team-before" }));
+        Assert.False(before.TryGetProperty("standing", out _));
+        var approved = Data(await host.Call(http, "standing_put", new { repositoryId = "repo", requestId = "team-approve", expectedRevision = 0, approve = new[] { proposal.GetProperty("id").GetString() } }));
+        Assert.Equal(1, approved.GetProperty("revision").GetInt64());
+        var after = Data(await host.Call(http, "session_open", new { repositoryId = "repo", requestId = "team-after" }));
+        var line = Assert.Single(after.GetProperty("standing").GetProperty("lines").EnumerateArray());
+        Assert.Equal(("tip-board-reread", "Read the board as changes since your last revision."), (line.GetProperty("id").GetString(), line.GetProperty("text").GetString()));
+    }
+
+    private const string SessionRolesHub = "pkrelay-hub";
+
     private static JsonObject Arguments(JsonElement session, string taskId, long version, JsonObject workflow, bool includeNextWork = false) => new()
     {
         ["repositoryId"] = "repo", ["sessionId"] = session.GetProperty("sessionId").GetString(), ["sessionToken"] = session.GetProperty("sessionToken").GetString(), ["requestId"] = Guid.NewGuid().ToString("N"), ["taskId"] = taskId, ["expectedVersion"] = version, ["workflow"] = workflow, ["includeNextWork"] = includeNextWork

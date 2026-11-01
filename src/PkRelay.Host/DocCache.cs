@@ -10,10 +10,10 @@ using PkRelay.Core;
 
 namespace PkRelay.Host;
 
-/// <summary>The shared token counter: the o200k vocabulary, loaded once on first use and shared by every caller.</summary>
+/// <summary>The shared token counter: the o200k vocabulary, loaded once per process on first use and shared by every caller.</summary>
 internal sealed class O200kTokenCounter : ITokenCounter
 {
-    private readonly Lazy<Tokenizer> tokenizer = new(() => TiktokenTokenizer.CreateForEncoding("o200k_base"), LazyThreadSafetyMode.ExecutionAndPublication);
+    private static readonly Lazy<Tokenizer> tokenizer = new(() => TiktokenTokenizer.CreateForEncoding("o200k_base"), LazyThreadSafetyMode.ExecutionAndPublication);
 
     public string Encoding => "o200k_base";
 

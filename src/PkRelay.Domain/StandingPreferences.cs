@@ -168,6 +168,37 @@ internal static class StandingPreferences
         return Ok(new { proposalId = id, pending = true }, Number(standing, "revision"));
     }
 
+    /// <summary>
+    /// The hub proposes a feedback rule's standing line. It reaches the board only through the internal operation, which the state machine
+    /// refuses to any public caller, so no session can propose as the hub or skip its own cap. It has no session, so it never counts
+    /// against a session's cap; the board's cap still applies. It proposes nothing while that line exists or is pending, or within
+    /// <see cref="RelayLimits.TeamRuleDays"/> days of its last proposal of that line, so a rejected line is not proposed again at once.
+    /// Like every proposal it changes nothing until an administrator approves it.
+    /// </summary>
+    public static RelayReply ProposeFromHub(AggregateContext context)
+    {
+        if (ReadLine(context.Args["line"], idRequired: true, out var lineId, out var text) is { } field) return Invalid("line." + field);
+        var standing = context.State["standing"] as JsonObject ?? new JsonObject();
+        var revision = Number(standing, "revision");
+        var proposals = standing["proposals"] as JsonObject ?? new JsonObject();
+        if ((standing["lines"] as JsonObject)?.ContainsKey(lineId) == true) return Ok(new { pending = false, reason = "exists" }, revision);
+        if (proposals.Any(x => x.Value is JsonObject pending && pending["line"] is JsonObject line && Text(line, "id") == lineId)) return Ok(new { pending = false, reason = "pending" }, revision);
+        var recent = standing["hubProposals"] as JsonObject ?? new JsonObject();
+        if (Date(recent, lineId) > context.Now.AddDays(-RelayLimits.TeamRuleDays)) return Ok(new { pending = false, reason = "recent" }, revision);
+        if (proposals.Count >= RelayLimits.MaxStandingProposals) return Error(CapacityExceeded);
+        var id = "p-" + Guid.NewGuid().ToString("N")[..12];
+        var proposal = new JsonObject
+        {
+            ["id"] = id, ["proposedBy"] = SessionRoles.HubProposer, ["hub"] = true, ["proposedAt"] = context.Now.ToString("O"),
+            ["line"] = new JsonObject { ["id"] = lineId, ["text"] = text }
+        };
+        ObjectAt(standing, "proposals")[id] = proposal;
+        ObjectAt(standing, "hubProposals")[lineId] = context.Now.ToString("O");
+        context.State["standing"] = standing;
+        AttentionSources.OnProposal(context, id, "line: " + text);
+        return Ok(new { proposalId = id, pending = true }, revision);
+    }
+
     /// <summary>The standing a chat receives: lines and active grants without provenance, and settings when any are set.</summary>
     public static JsonObject Delivered(JsonObject board, DateTimeOffset now)
     {

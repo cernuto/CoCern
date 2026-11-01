@@ -154,6 +154,35 @@ public static class NamedQueries
                    sum(count(*) FILTER (WHERE at_ticks >= $from)) OVER (PARTITION BY item_kind) AS cur_n,
                    sum(count(*) FILTER (WHERE at_ticks < $from)) OVER (PARTITION BY item_kind) AS prev_n
             FROM attention_outcomes WHERE {Window} GROUP BY item_kind, outcome ORDER BY key
+            """,
+        // Manager alerts (Relay:Feedback:Alerts), run by the anomaly monitor only.
+        // A role's relay tokens (the hub's own counts of requests and replies) per task its sessions touched.
+        [AnalyticsQueryNames.TokensPerTaskByRole] = $"""
+            WITH per_role AS (
+                SELECT at_ticks >= $from AS in_cur, coalesce(role, '') AS role, CAST(sum(relay_tokens) AS DOUBLE) AS tokens,
+                       count(DISTINCT board_id || '/' || task_id) AS tasks
+                FROM tool_calls WHERE {Window} AND (request_tokens IS NOT NULL OR reply_tokens IS NOT NULL) GROUP BY ALL)
+            SELECT role AS key, max(tokens / nullif(tasks, 0)) FILTER (WHERE in_cur) AS cur, max(tokens / nullif(tasks, 0)) FILTER (WHERE NOT in_cur) AS prev,
+                   coalesce(max(tasks) FILTER (WHERE in_cur), 0) AS cur_n, coalesce(max(tasks) FILTER (WHERE NOT in_cur), 0) AS prev_n
+            FROM per_role GROUP BY role ORDER BY coalesce(cur, 0) DESC, key
+            """,
+        // The share of a tool's replies that were compacted to their token budget.
+        [AnalyticsQueryNames.CompactionRateByTool] = $"""
+            SELECT tool AS key,
+                   count(*) FILTER (WHERE kind = 'budget' AND code LIKE 'step%' AND at_ticks >= $from) / nullif(count(*) FILTER (WHERE kind = 'call' AND at_ticks >= $from), 0) AS cur,
+                   count(*) FILTER (WHERE kind = 'budget' AND code LIKE 'step%' AND at_ticks < $from) / nullif(count(*) FILTER (WHERE kind = 'call' AND at_ticks < $from), 0) AS prev,
+                   count(*) FILTER (WHERE kind = 'call' AND at_ticks >= $from) AS cur_n, count(*) FILTER (WHERE kind = 'call' AND at_ticks < $from) AS prev_n
+            FROM activity WHERE {Window} AND kind IN ('call', 'budget') AND tool IS NOT NULL GROUP BY tool ORDER BY coalesce(cur, 0) DESC, key
+            """,
+        // Each session's busiest hour of relay tokens in the current period, against the median session-hour of its role over both periods.
+        [AnalyticsQueryNames.SessionTokenOutliers] = $"""
+            WITH hours AS (
+                SELECT at_ticks >= $from AS in_cur, coalesce(role, '') AS role, session_id, at_ticks // 36000000000 AS hour, CAST(sum(relay_tokens) AS DOUBLE) AS v
+                FROM tool_calls WHERE {Window} AND session_id IS NOT NULL AND (request_tokens IS NOT NULL OR reply_tokens IS NOT NULL) GROUP BY ALL),
+            medians AS (SELECT role, median(v) AS m, count(*) AS n FROM hours GROUP BY role),
+            peaks AS (SELECT role, session_id, max(v) AS v FROM hours WHERE in_cur GROUP BY ALL)
+            SELECT p.session_id AS key, p.v AS cur, m.m AS prev, m.n AS cur_n, m.n AS prev_n
+            FROM peaks p JOIN medians m USING (role) ORDER BY p.v / nullif(m.m, 0) DESC NULLS LAST, key
             """
     }.ToFrozenDictionary(StringComparer.Ordinal);
 
