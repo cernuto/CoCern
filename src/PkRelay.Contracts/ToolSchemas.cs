@@ -27,6 +27,7 @@ internal static class ToolSchemas
             RelayTools.StandingPut => ["lines", "grants", "remove", "approve", "settings"],
             RelayTools.Search => ["kinds"],
             RelayTools.AttentionRespond => ["until"],
+            RelayTools.AnalyticsQuery => ["params", "sql"],
             _ => []
         };
         var properties = ForwardingFields.Concat(tool.RequiredFields).Concat(extra).Distinct(StringComparer.Ordinal).ToDictionary(field => field, field => all[field]);
@@ -53,6 +54,15 @@ internal static class ToolSchemas
             properties["itemId"] = new { type = "string" };
             properties["action"] = new { type = "string", @enum = AttentionActions.All };
             properties["until"] = new { type = "string", description = "Optional ISO time for later." };
+        }
+        // Analytics is advertised by shape with the query names; InputSchema gives the limits. It is a read by the administrator token,
+        // so its forwarding copy leaves out requestId and the session handle.
+        if (tool.Name == RelayTools.AnalyticsQuery)
+        {
+            properties.Remove("requestId"); properties.Remove("sessionId"); properties.Remove("sessionToken");
+            properties["name"] = new { type = "string", @enum = AnalyticsQueryNames.All.Append(AnalyticsQueryNames.AdHocSql).ToArray() };
+            properties["params"] = new { type = "object", description = "Optional {days}." };
+            properties["sql"] = new { type = "string", description = "SELECT, with name sql." };
         }
         // Each boundary tool advertises the attention opt-out with a short description; InputSchema gives the full one.
         if (properties.ContainsKey("attention")) properties["attention"] = new { type = "boolean", description = "false: no attention offer." };
@@ -155,6 +165,10 @@ internal static class ToolSchemas
                 properties["itemId"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxIdentifierLength, description = "Attention item ID from an offer." };
                 properties["action"] = new { type = "string", @enum = AttentionActions.All, description = "later hides the item for a few replies, or until a time; accept and dismiss close it." };
                 properties["until"] = new { type = "string", format = "date-time", description = "Optional future time when a later item returns." }; break;
+            case RelayTools.AnalyticsQuery:
+                properties["name"] = new { type = "string", @enum = AnalyticsQueryNames.All.Append(AnalyticsQueryNames.AdHocSql).ToArray(), description = "A named query, or sql to run the sql field." };
+                properties["params"] = new { type = "object", properties = new { days = new { type = "integer", minimum = 1, maximum = RelayLimits.MaxAnalyticsPeriodDays, description = $"Days per compared period; default {RelayLimits.DefaultAnalyticsPeriodDays}." } }, additionalProperties = false, description = "Named query parameters." };
+                properties["sql"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxAnalyticsSqlLength, description = "One SELECT over the analytics views; only with name sql, and only when the hub allows ad hoc SQL." }; break;
             case RelayTools.ControlRequest:
                 properties["command"] = new { type = "string", @enum = new[] { "pause", "resume", "stop", "cancel", "register_resource", "revoke_machine" } };
                 properties["aliases"] = new { type = "array", items = new { type = "string" } }; Text("reason", "Coordination control explanation."); Text("machineId", "Machine to revoke; required by revoke_machine."); break;

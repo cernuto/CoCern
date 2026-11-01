@@ -1,4 +1,5 @@
 using System.Collections.Frozen;
+using PkRelay.Contracts;
 
 namespace PkRelay.Analytics;
 
@@ -10,16 +11,16 @@ namespace PkRelay.Analytics;
 /// </summary>
 public static class NamedQueries
 {
-    public const string TokensPerTask = "tokens_per_task";
-    public const string CallsPerTask = "calls_per_task";
-    public const string MessagesPerTask = "messages_per_task";
-    public const string ContextByRole = "context_by_role";
-    public const string BlockedTime = "blocked_time";
-    public const string ClaimConflictsByResource = "claim_conflicts_by_resource";
-    public const string NoisiestTools = "noisiest_tools";
-    public const string ManagerAssignmentLatency = "manager_assignment_latency";
-    public const string QualityGuardrails = "quality_guardrails";
-    public const string AttentionOutcomesByKind = "attention_outcomes_by_kind";
+    public const string TokensPerTask = AnalyticsQueryNames.TokensPerTask;
+    public const string CallsPerTask = AnalyticsQueryNames.CallsPerTask;
+    public const string MessagesPerTask = AnalyticsQueryNames.MessagesPerTask;
+    public const string ContextByRole = AnalyticsQueryNames.ContextByRole;
+    public const string BlockedTime = AnalyticsQueryNames.BlockedTime;
+    public const string ClaimConflictsByResource = AnalyticsQueryNames.ClaimConflictsByResource;
+    public const string NoisiestTools = AnalyticsQueryNames.NoisiestTools;
+    public const string ManagerAssignmentLatency = AnalyticsQueryNames.ManagerAssignmentLatency;
+    public const string QualityGuardrails = AnalyticsQueryNames.QualityGuardrails;
+    public const string AttentionOutcomesByKind = AnalyticsQueryNames.AttentionOutcomesByKind;
 
     /// <summary>The columns every named query returns, in order.</summary>
     public static readonly IReadOnlyList<string> Columns = ["key", "cur", "prev", "cur_n", "prev_n"];
@@ -157,11 +158,7 @@ public static class NamedQueries
     }.ToFrozenDictionary(StringComparer.Ordinal);
 
     /// <summary>Every name, in the order the documentation lists them.</summary>
-    public static readonly IReadOnlyList<string> Names =
-    [
-        TokensPerTask, CallsPerTask, MessagesPerTask, ContextByRole, BlockedTime, ClaimConflictsByResource, NoisiestTools,
-        ManagerAssignmentLatency, QualityGuardrails, AttentionOutcomesByKind
-    ];
+    public static IReadOnlyList<string> Names => AnalyticsQueryNames.All;
 
     /// <summary>Parameters a named query accepts besides the repository, which the hub always supplies.</summary>
     public static readonly IReadOnlyList<string> Parameters = ["days"];

@@ -257,6 +257,7 @@ Batch compatible task-state, note, task-message/reply, and action-report changes
 | `control_request` | Pause/resume dispatch and request cancellation, without claiming IDE enforcement |
 | `standing_propose`, `standing_put` | Propose, or as an administrator change, the board's standing lines, grants and settings |
 | `search` | Find tasks, notes and your own inbox messages by words; returns IDs and snippets to open with the read tools |
+| `analytics_query` | Administrator: run a named DuckDB query, or ad hoc SQL when allowed, against the latest analytics snapshot |
 | `attention_respond` | Accept, dismiss or postpone an attention offer; postponing never acknowledges the message |
 
 These are logical groups; expose a small role-appropriate subset to each client. Authenticate and authorize every call. Use expected versions for updates, action/trigger identity for business deduplication, and request IDs for transport retries. A stale update returns current version/change information instead of silently overwriting another participant's work.

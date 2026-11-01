@@ -27,6 +27,7 @@ internal static class RelayRequestGuard
         if (tool.IsMutation && Text(args, "requestId").Length == 0) return Replies.Error(RequestIdRequired);
         if (!IdentifiersFit(args)) return Replies.Error(InvalidArguments);
         if (tool.Name == RelayTools.Search && SearchProblem(args) is { } field) return Replies.Error(InvalidArguments, new { field });
+        if (tool.Name == RelayTools.AnalyticsQuery && AnalyticsProblem(args) is { } analyticsField) return Replies.Error(InvalidArguments, new { field = analyticsField });
         if (args.ContainsKey("seenMessageIds") && (args["seenMessageIds"] is not JsonArray seen || seen.Count > RelayLimits.MaxAcknowledgedMessages
             || seen.Any(id => id is not JsonValue value || !value.TryGetValue<string>(out var text) || text.Length is 0 or > RelayLimits.MaxIdentifierLength))) return Replies.Error(InvalidArguments, new { field = "seenMessageIds" });
         if (Count(args, "resourceIds") > RelayLimits.MaxClaimResources || Count(args, "messageIds") > RelayLimits.MaxAcknowledgedMessages || Count(args, "ackMessageIds") > RelayLimits.MaxAcknowledgedMessages) return Replies.Error(PayloadTooLarge);
@@ -48,6 +49,20 @@ internal static class RelayRequestGuard
             || kinds.Any(kind => kind is not JsonValue value || !value.TryGetValue<string>(out var name) || !SearchKinds.All.Contains(name)))) return "kinds";
         if (args["status"] is not null && (args["status"] is not JsonValue status || !status.TryGetValue<string>(out var state) || state.Length > RelayLimits.MaxSearchStatusLength)) return "status";
         if (args["limit"] is not null && (args["limit"] is not JsonValue limit || limit.GetValueKind() != JsonValueKind.Number || !long.TryParse(limit.ToJsonString(), out _))) return "limit";
+        return null;
+    }
+
+    /// <summary>
+    /// The first invalid analytics argument, or null: a known name (or <c>sql</c> with SQL text within its length, and SQL only then) and an
+    /// optional params object. The analytics service checks the parameter values.
+    /// </summary>
+    private static string? AnalyticsProblem(JsonObject args)
+    {
+        if (args["name"] is not JsonValue name || !name.TryGetValue<string>(out var text) || text != AnalyticsQueryNames.AdHocSql && !AnalyticsQueryNames.All.Contains(text)) return "name";
+        var adHoc = text == AnalyticsQueryNames.AdHocSql;
+        if (adHoc != args.ContainsKey("sql")) return "sql";
+        if (adHoc && (args["sql"] is not JsonValue sql || !sql.TryGetValue<string>(out var statement) || string.IsNullOrWhiteSpace(statement) || statement.Length > RelayLimits.MaxAnalyticsSqlLength)) return "sql";
+        if (args["params"] is not null && (adHoc || args["params"] is not JsonObject)) return "params";
         return null;
     }
 

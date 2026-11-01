@@ -51,10 +51,14 @@ public static class RelayHostBuilderExtensions
                 ItemExpiryDays = configuration.GetValue("Relay:Attention:ItemExpiryDays", RelayLimits.DefaultAttentionExpiryDays)
             }.Validated();
         });
-        // The search port is passed only when the store keeps an index; otherwise the search tool answers SearchUnavailable.
+        // The search port is passed only when the store keeps an index; otherwise the search tool answers SearchUnavailable. Likewise
+        // analytics_query gets the analytics port only when analytics is on, and answers AnalyticsUnavailable otherwise.
         builder.Services.Replace(ServiceDescriptor.Singleton(services => new RelayApplication(
             services.GetRequiredService<Orleans.IGrainFactory>(), services.GetService<IMachineDirectory>(), services.GetService<IActivitySink>(),
-            services.GetService<SqliteStore>() is { SearchEnabled: true } store ? store : null, services.GetRequiredService<AttentionOptions>())));
+            services.GetService<SqliteStore>() is { SearchEnabled: true } store ? store : null, services.GetRequiredService<AttentionOptions>(),
+            services.GetService<IAnalyticsQueries>() is { } queries
+                ? new AnalyticsTool(queries, services.GetRequiredService<IConfiguration>().GetValue("Relay:Analytics:AllowAdHocSql", false), services.GetRequiredService<ILoggerFactory>().CreateLogger<AnalyticsTool>())
+                : null)));
         builder.AddRelayOrleans();
         builder.Services.AddRelayDashboard();
         builder.Services.AddHostedService<DueWorkDispatcher>();

@@ -88,6 +88,14 @@ public static class RelayErrorCodes
     public const string Unavailable = "Unavailable";
     /// <summary>The hub keeps no search index (search is turned off, or the store has none).</summary>
     public const string SearchUnavailable = "SearchUnavailable";
+    /// <summary>Analytics is turned off, or no snapshot has been taken yet.</summary>
+    public const string AnalyticsUnavailable = "AnalyticsUnavailable";
+    /// <summary>Ad hoc SQL is turned off on this hub, or the SQL is not exactly one SELECT.</summary>
+    public const string AnalyticsRefused = "AnalyticsRefused";
+    /// <summary>The query ran past the hub's per-query timeout; ask a narrower question.</summary>
+    public const string AnalyticsTimeout = "AnalyticsTimeout";
+    /// <summary>DuckDB rejected the query, for example an unknown column or a file read; the reply says why.</summary>
+    public const string AnalyticsFailed = "AnalyticsFailed";
     public const string InternalError = "InternalError";
 
     private static readonly FrozenSet<string> Conflicts = new[]

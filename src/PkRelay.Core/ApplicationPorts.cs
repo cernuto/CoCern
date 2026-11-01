@@ -126,8 +126,10 @@ public enum AnalyticsError
     Refused,
     /// <summary>The query ran past the per-query timeout and was interrupted.</summary>
     Timeout,
-    /// <summary>The database rejected the query, for example a file read or an unknown column.</summary>
-    Failed
+    /// <summary>The database rejected the query, for example a file read, an unknown column, or running out of its memory limit.</summary>
+    Failed,
+    /// <summary>The rows read so far already pass the reply size limit; the rest are not read.</summary>
+    TooLarge
 }
 
 public sealed class AnalyticsException(AnalyticsError error, string message, Exception? inner = null) : Exception(message, inner)

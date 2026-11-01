@@ -170,6 +170,8 @@ public static class RelayLimits
     public const int DefaultAnalyticsMaxRows = 50;
     /// <summary>Largest allowed <c>Relay:Analytics:MaxRows</c>.</summary>
     public const int MaxAnalyticsMaxRows = 500;
+    /// <summary>Largest <c>analytics_query</c> reply, in UTF-8 bytes; a larger result is refused with a request for a narrower query.</summary>
+    public const int MaxAnalyticsReplyBytes = 8_192;
     /// <summary>Longest ad hoc analytics SQL, in characters.</summary>
     public const int MaxAnalyticsSqlLength = 4_096;
     /// <summary>Days in each period a named query compares (current against previous), when it gives no <c>days</c>.</summary>
