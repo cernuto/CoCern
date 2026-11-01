@@ -27,6 +27,7 @@ internal static class ControlAggregate
             Operations.Resolve => ResolveResource(context),
             Operations.ResolveAll => ResolveAll(context),
             Operations.SessionOwners => OwnedSessions(context),
+            Operations.AttentionRoute => RouteAttention(context),
             RelayTools.ControlRequest => Control(context),
             _ => Error(UnknownTool)
         };
@@ -47,6 +48,8 @@ internal static class ControlAggregate
             ["observedAt"] = context.Now.ToString("O"), ["freshUntil"] = context.Now.Add(InitialFreshness).ToString("O"), ["availability"] = "unknown"
         };
         session["hubIncarnation"] = Text(args, "hubIncarnation");
+        // The role given at session_open routes manager-bound attention items; it grants nothing.
+        if (Text(args, "role") is { Length: > 0 and <= RelayLimits.MaxActivityRoleLength } role) session["role"] = role;
         sessions[id] = session;
         context.Emit(AggregateKinds.Session, id, Operations.Open, session);
         return Ok(new { sessionId = id, sessionToken = token, bindingVersion = 0, binding = args["binding"] });
@@ -56,7 +59,7 @@ internal static class ControlAggregate
     {
         var id = Required(context.Args, "sessionId");
         if (ObjectAt(context.State, "sessions")[id] is not JsonObject session || Text(session, "repositoryId") != context.Repository) return Error(SessionDenied);
-        foreach (var property in new[] { "binding", "bindingVersion", "observedAt", "freshUntil", "availability", "machineId", "label", "hubIncarnation" })
+        foreach (var property in new[] { "binding", "bindingVersion", "observedAt", "freshUntil", "availability", "machineId", "label", "hubIncarnation", "activeAt" })
             if (context.Args.ContainsKey(property)) session[property] = context.Args[property]?.DeepClone();
         return Ok(new { registered = true });
     }
@@ -96,6 +99,32 @@ internal static class ControlAggregate
             requests = sessionId.Length > 0 ? cancellations.Where(x => x.Key.StartsWith(sessionId + ":", StringComparison.Ordinal)).Take(RelayLimits.MaxPageSize).Select(x => new { target = x.Key, request = x.Value }).ToArray() : []
         });
     }
+
+    /// <summary>
+    /// Passes one attention raise or close to every session in the repository whose role (from <c>session_open</c>, ignoring case) matches,
+    /// except the session that caused it and sessions neither fresh nor active (a boundary reply, reported hourly as <c>activeAt</c>) for
+    /// more than <see cref="RelayLimits.MaxAttentionRouteIdleHours"/> (closed chats); at most <see cref="RelayLimits.MaxAttentionRouteTargets"/>, most recently seen first.
+    /// </summary>
+    private static RelayReply RouteAttention(AggregateContext context)
+    {
+        var args = context.Args;
+        var operation = Text(args, "operation");
+        if (operation is not (Operations.AttentionRaise or Operations.AttentionClose) || args["item"] is not JsonObject item) return Error(InvalidArguments, new { field = "item" });
+        var role = Required(args, "role");
+        var except = Text(args, "exceptSessionId");
+        var targets = ObjectAt(context.State, "sessions").Select(x => x.Value).OfType<JsonObject>()
+            .Where(session => Text(session, "repositoryId") == context.Repository && string.Equals(Text(session, "role"), role, StringComparison.OrdinalIgnoreCase) && Text(session, "sessionId") != except
+                && Max(Date(session, "freshUntil"), Date(session, "activeAt")) > context.Now.AddHours(-RelayLimits.MaxAttentionRouteIdleHours))
+            .OrderByDescending(session => Date(session, "observedAt")).Take(RelayLimits.MaxAttentionRouteTargets).Select(session => Text(session, "sessionId")).ToArray();
+        foreach (var target in targets)
+        {
+            var copy = item.DeepClone().AsObject(); copy["repositoryId"] = context.Repository;
+            context.Emit(AggregateKinds.Session, target, operation, copy);
+        }
+        return Ok(new { routed = targets.Length });
+    }
+
+    private static DateTimeOffset Max(DateTimeOffset first, DateTimeOffset second) => first > second ? first : second;
 
     /// <summary>The given session IDs that the caller's principal opened in this repository. Read-only; tokens and other principals are never returned.</summary>
     private static RelayReply OwnedSessions(AggregateContext context)

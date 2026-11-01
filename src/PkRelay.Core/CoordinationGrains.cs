@@ -57,13 +57,31 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
             && (actionKey.Length == 0 || JsonNode.Parse(effect.PayloadJson)?["actionKey"]?.ToString() == actionKey);
         var now = DateTimeOffset.UtcNow;
         var candidate = Clone(persistent.State);
+        var attention = services.GetService<AttentionOptions>();
+        if (Kind == AggregateKinds.Lock && operation.Length == 0 && actionKey.Length == 0 && candidate.DueWork.Any(x => x.Kind == DueWorkKinds.LeaseWarning && x.DueAt <= now && (workId.Length == 0 || x.Id == workId)))
+        {
+            // The lease check commits its claim_expiring raise in the lock's own outbox; the pump delivers it next.
+            if (!await CheckLeaseAsync(candidate, now)) return Replies.Error(RelayErrorCodes.StorageFailure);
+            candidate = Clone(persistent.State);
+        }
         foreach (var effect in candidate.Effects.Where(x => Selected(x) && x.DueAt <= now).ToArray())
         {
             var payload = JsonNode.Parse(effect.PayloadJson)!.AsObject();
             var effectCaller = CoordinationStateMachine.TakeEffectCaller(payload);
+            // With attention turned off, items are neither stored nor routed: the effect is dropped.
+            if (Operations.IsAttention(effect.Operation) && attention is { Enabled: false })
+            {
+                candidate.Effects.RemoveAll(x => x.Id == effect.Id);
+                if (!await CommitAsync(candidate)) return Replies.Error(RelayErrorCodes.StorageFailure);
+                candidate = Clone(persistent.State);
+                continue;
+            }
             // A raised item takes the hub's configured lifetime unless its source set one.
-            if (effect.Operation == Operations.AttentionRaise && !payload.ContainsKey("expiryDays") && !payload.ContainsKey("expiresAt") && services.GetService<AttentionOptions>() is { } attention)
+            if (effect.Operation == Operations.AttentionRaise && !payload.ContainsKey("expiryDays") && !payload.ContainsKey("expiresAt") && attention is not null)
                 payload["expiryDays"] = attention.ItemExpiryDays;
+            // With attention on, a message is an info item: it waits for a boundary or the idle-hold wake instead of waking its chat.
+            if (effect.Operation == Operations.Deliver && effect.TargetKind == AggregateKinds.Session && attention is not { Enabled: false })
+                payload["attentionExpiryDays"] = attention?.ItemExpiryDays ?? RelayLimits.DefaultAttentionExpiryDays;
             RelayReply result;
             try
             {
@@ -86,11 +104,15 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
             }
             candidate.Effects.RemoveAll(x => x.Id == effect.Id);
             if (!await CommitAsync(candidate)) return Replies.Error(RelayErrorCodes.StorageFailure);
-            if (effect.TargetKind == AggregateKinds.Session && effect.Operation == Operations.Deliver) RecordWake(effect.TargetKey, payload, result);
-            if (effect.TargetKind == AggregateKinds.Session && effect.Operation == Operations.Deliver && services.GetService<ICoordinationNotifier>() is { } notifier)
+            // A message wakes its chat only with attention off; with it on, only top-tier items (and the idle hold) wake.
+            if (effect.TargetKind == AggregateKinds.Session && effect.Operation == Operations.Deliver && attention is { Enabled: false }) RecordWake(effect.TargetKey, payload, result);
+            // Only a new top-tier attention item may wake its chat, so only that one counts as a wake and sends a hint.
+            var urgent = effect.TargetKind == AggregateKinds.Session && effect.Operation == Operations.AttentionRaise && result.Ok && UrgentRaise(payload, result);
+            if (urgent) RecordWake(effect.TargetKey, payload, Replies.Ok(new { delivered = true }));
+            if (effect.TargetKind == AggregateKinds.Session && (effect.Operation == Operations.Deliver || urgent) && services.GetService<ICoordinationNotifier>() is { } notifier)
             {
                 // Hints are best effort; the durable inbox remains authoritative.
-                try { await notifier.NotifyAsync(effect.TargetKey, JsonFields.Text(payload, "messageId")); }
+                try { await notifier.NotifyAsync(effect.TargetKey, urgent ? "attention:" + JsonFields.Text(JsonNode.Parse(result.DataJson)!.AsObject(), "itemId") : JsonFields.Text(payload, "messageId")); }
                 catch (Exception) { }
             }
             candidate = Clone(persistent.State);
@@ -98,6 +120,28 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
         if (candidate.DueWork.RemoveAll(x => (workId.Length == 0 || x.Id == workId) && x.DueAt <= now) > 0 && !await CommitAsync(candidate)) return Replies.Error(RelayErrorCodes.StorageFailure);
         if (candidate.Effects.Any(Selected)) return Replies.Error(RelayErrorCodes.DeliveryPending);
         return Replies.Ok(new { dispatched = true });
+    }
+
+    /// <summary>Applies a lock's due lease check and commits what it raised, with the lock's repository as the effects' authority.</summary>
+    private async Task<bool> CheckLeaseAsync(StateEnvelope<CoordinationDocument> candidate, DateTimeOffset now)
+    {
+        var repository = JsonFields.Text(JsonNode.Parse(candidate.Value.Json)!.AsObject(), "repositoryId");
+        var first = candidate.Effects.Count;
+        var checker = new RelayCaller("relay-dispatcher", false, [repository], true);
+        CoordinationStateMachine.Apply(candidate, Kind, this.GetPrimaryKeyString(), checker, Operations.LeaseCheck, new JsonObject { ["repositoryId"] = repository }, now);
+        CoordinationStateMachine.StampEffects(candidate.Effects, first, checker);
+        candidate.DueWork.RemoveAll(x => x.Kind == DueWorkKinds.LeaseWarning && x.DueAt <= now);
+        CoordinationStateMachine.ScheduleLeases(candidate);
+        return await CommitAsync(candidate);
+    }
+
+    /// <summary>Whether a delivered raise stored a new item whose tier may wake a chat.</summary>
+    private static bool UrgentRaise(JsonObject payload, RelayReply result)
+    {
+        var data = JsonNode.Parse(result.DataJson) as JsonObject;
+        if (data?["raised"] is not JsonValue raised || !raised.TryGetValue<bool>(out var isRaised) || !isRaised || data["refreshed"] is not JsonValue refreshed || !refreshed.TryGetValue<bool>(out var isRefresh) || isRefresh) return false;
+        var blocking = payload["blocking"] is JsonValue flag && flag.TryGetValue<bool>(out var value) && value;
+        return AttentionWeights.Wakes(AttentionWeights.Tier(JsonFields.Text(payload, "kind"), JsonFields.Text(payload, "blocker") is { Length: > 0 } blocker ? blocker : null, blocking));
     }
 
     /// <summary>Failures a later attempt can succeed past: the target's storage or the grain call itself failed.</summary>

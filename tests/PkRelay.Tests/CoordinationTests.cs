@@ -487,7 +487,7 @@ public sealed class CoordinationTests
     }
 
     [Fact]
-    public void Dependencies_refuse_cycles_and_unknown_tasks_gate_offers_and_report_what_completion_unblocks()
+    public void Dependencies_refuse_cycles_and_unknown_tasks_gate_offers_and_completion_raises_next_work_to_each_unblocked_target()
     {
         var state = new StateEnvelope<CoordinationDocument>();
         Assert.Equal("DependencyUnknown", WriteWorkflow(state, "b", 0, DependentWorkflow("ready", "a")).Code);
@@ -509,7 +509,19 @@ public sealed class CoordinationTests
         Assert.True(completed.Ok, completed.Code);
         // Only tasks whose every dependency is now completed are unblocked; c still waits on b.
         Assert.Equal(["b", "d"], Data(completed)["unblocked"]!.AsArray().Select(x => x!.GetValue<string>()));
-        Assert.Empty(state.Effects);
+        // Completion raises next_work to each unblocked task's target, in the same commit, with the completing change's revision.
+        var raises = state.Effects.Where(effect => effect.Operation == "__attention_raise").ToArray();
+        Assert.Equal(["worker-b", "worker-d"], raises.Select(effect => effect.TargetKey).Order());
+        Assert.All(raises, effect =>
+        {
+            var item = JsonNode.Parse(effect.PayloadJson)!.AsObject();
+            Assert.Equal(("session", "next_work", "repo"), (effect.TargetKind, item["kind"]!.GetValue<string>(), item["repositoryId"]!.GetValue<string>()));
+            Assert.Equal(effect.TargetKey == "worker-b" ? "b" : "d", item["taskId"]!.GetValue<string>());
+            Assert.Equal(["a"], item["refs"]!.AsArray().Select(x => x!.GetValue<string>()));
+            Assert.Equal(Data(completed)["changeRevision"]!.GetValue<long>(), item["revision"]!.GetValue<long>());
+        });
+        // The task still waiting on b gets nothing yet.
+        Assert.DoesNotContain(state.Effects, effect => effect.TargetKey == "worker-c");
         Assert.Equal("b", Offered("worker-b"));
         Assert.Equal("d", Offered("worker-d"));
         Assert.Null(Offered("worker-c"));
@@ -669,6 +681,216 @@ public sealed class CoordinationTests
         var refused = Data(RaiseAttention(session, "info", "I-1", seconds: 700));
         Assert.Equal(("full", false), (refused["reason"]!.GetValue<string>(), refused["raised"]!.GetValue<bool>()));
         Assert.DoesNotContain(AttentionScheduler.Items(AttentionItems(session)), item => item.TaskId == "I-1");
+    }
+
+    private static JsonObject BlockedWorkflow(params (string Id, string Kind)[] blockers)
+    {
+        var workflow = DependentWorkflow("blocked");
+        workflow["blockers"] = new JsonArray(blockers.Select(blocker => (JsonNode)new JsonObject { ["id"] = blocker.Id, ["kind"] = blocker.Kind, ["summary"] = "waiting on " + blocker.Id, ["recheckCondition"] = "r" }).ToArray());
+        return workflow;
+    }
+
+    /// <summary>The outbox effects a board write added, read as (target, operation, payload); a manager-bound item is unwrapped from its route.</summary>
+    private static List<(string Target, string Operation, JsonObject Item)> NewEffects(StateEnvelope<CoordinationDocument> state, ref int seen)
+    {
+        var added = state.Effects.Skip(seen).Select(effect =>
+        {
+            var payload = JsonNode.Parse(effect.PayloadJson)!.AsObject();
+            return effect.Operation == "__attention_route"
+                ? ("role:" + payload["role"]!.GetValue<string>(), payload["operation"]!.GetValue<string>(), payload["item"]!.AsObject())
+                : (effect.TargetKey, effect.Operation, payload);
+        }).ToList();
+        seen = state.Effects.Count;
+        return added;
+    }
+
+    [Fact]
+    public void Board_sources_raise_and_close_attention_items_with_their_cause()
+    {
+        var state = new StateEnvelope<CoordinationDocument>();
+        var seen = 0;
+        Assert.True(WriteWorkflow(state, "a", 0, DependentWorkflow("ready")).Ok);
+        Assert.True(WriteWorkflow(state, "b", 0, DependentWorkflow("ready", "a"), "worker-b").Ok);
+        Assert.Empty(NewEffects(state, ref seen));
+        // b's worker claims it; a's claim by another worker means a blocks someone else's claimed task.
+        Assert.True(Call(state, "board", "task_claim", new() { ["taskId"] = "b", ["sessionId"] = "worker-b", ["requestId"] = "claim-b", ["expectedVersion"] = 1 }).Ok);
+        var claimed = NewEffects(state, ref seen);
+        Assert.Equal(("worker-b", "__attention_close", "next_work"), (claimed.Single().Target, claimed.Single().Operation, claimed.Single().Item["kinds"]![0]!.GetValue<string>()));
+        Assert.True(Call(state, "board", "task_claim", new() { ["taskId"] = "a", ["sessionId"] = "worker-a", ["requestId"] = "claim-a", ["expectedVersion"] = 1 }).Ok);
+        Assert.Empty(NewEffects(state, ref seen));
+
+        // Blocking: raised to managers, ranked by the most urgent blocker kind, marked blocking, with the waiting task as a ref.
+        var blocked = Call(state, "board", "task_update", new() { ["taskId"] = "a", ["sessionId"] = "worker-a", ["requestId"] = "block", ["expectedVersion"] = 2, ["workflow"] = BlockedWorkflow(("hold", "coordinator_hold"), ("p", "provider_rejection")) });
+        Assert.True(blocked.Ok, blocked.Code);
+        var raise = Assert.Single(NewEffects(state, ref seen));
+        Assert.Equal(("role:manager", "__attention_raise"), (raise.Target, raise.Operation));
+        Assert.Equal(("blocked", "a", "provider_rejection", "waiting on p", true), (raise.Item["kind"]!.GetValue<string>(), raise.Item["taskId"]!.GetValue<string>(), raise.Item["blocker"]!.GetValue<string>(), raise.Item["note"]!.GetValue<string>(), raise.Item["blocking"]!.GetValue<bool>()));
+        Assert.Equal(["b"], raise.Item["refs"]!.AsArray().Select(x => x!.GetValue<string>()));
+        Assert.Equal(Data(blocked)["changeRevision"]!.GetValue<long>(), raise.Item["revision"]!.GetValue<long>());
+        Assert.Equal("worker-a", JsonNode.Parse(state.Effects.Last().PayloadJson)!["exceptSessionId"]!.GetValue<string>());
+        // Rewriting the same blockers raises nothing new; the item is still open at the managers.
+        Assert.True(Call(state, "board", "task_update", new() { ["taskId"] = "a", ["sessionId"] = "worker-a", ["requestId"] = "block-again", ["expectedVersion"] = 3, ["workflow"] = BlockedWorkflow(("hold", "coordinator_hold"), ("p", "provider_rejection")) }).Ok);
+        Assert.Empty(NewEffects(state, ref seen));
+
+        // Clearing the blocker closes the blocked item.
+        var ready = DependentWorkflow("ready"); ready["recheckEvidenceRef"] = "evidence:1";
+        Assert.True(Call(state, "board", "task_update", new() { ["taskId"] = "a", ["sessionId"] = "worker-a", ["requestId"] = "clear", ["expectedVersion"] = 4, ["workflow"] = ready }).Ok);
+        var cleared = Assert.Single(NewEffects(state, ref seen));
+        Assert.Equal(("role:manager", "__attention_close", "a"), (cleared.Target, cleared.Operation, cleared.Item["taskId"]!.GetValue<string>()));
+        Assert.Equal(["blocked"], cleared.Item["kinds"]!.AsArray().Select(x => x!.GetValue<string>()));
+
+        // A failed action raises failed to the managers.
+        Assert.True(Call(state, "board", "action_begin", new() { ["taskId"] = "a", ["sessionId"] = "worker-a", ["requestId"] = "begin", ["expectedVersion"] = 5, ["actionId"] = "deploy", ["inputFingerprint"] = "f" }).Ok);
+        NewEffects(state, ref seen);
+        Assert.True(Call(state, "board", "action_report", new() { ["taskId"] = "a", ["sessionId"] = "worker-a", ["requestId"] = "fail", ["expectedVersion"] = 6, ["actionId"] = "deploy", ["attempt"] = 1, ["outcome"] = "failed" }).Ok);
+        var failed = Assert.Single(NewEffects(state, ref seen), effect => effect.Operation == "__attention_raise");
+        Assert.Equal(("role:manager", "failed", "action deploy failed"), (failed.Target, failed.Item["kind"]!.GetValue<string>(), failed.Item["note"]!.GetValue<string>()));
+
+        // Completion closes blocked and failed, raises review_ready, closes the claimer's related work, and raises next_work to b's target.
+        var done = Call(state, "board", "task_update", new() { ["taskId"] = "a", ["sessionId"] = "worker-a", ["requestId"] = "done", ["expectedVersion"] = 7, ["workflow"] = DependentWorkflow("completed") });
+        Assert.True(done.Ok, done.Code);
+        var completion = NewEffects(state, ref seen);
+        Assert.Contains(completion, effect => effect is { Target: "role:manager", Operation: "__attention_close" } && effect.Item["kinds"]!.AsArray().Select(x => x!.GetValue<string>()).SequenceEqual(["blocked", "failed"]));
+        Assert.Contains(completion, effect => effect is { Target: "role:manager", Operation: "__attention_raise" } && effect.Item["kind"]!.GetValue<string>() == "review_ready");
+        Assert.Contains(completion, effect => effect is { Target: "worker-a", Operation: "__attention_close" } && effect.Item["subject"]!.GetValue<string>() == "a");
+        Assert.Contains(completion, effect => effect is { Target: "worker-b", Operation: "__attention_raise" } && effect.Item["kind"]!.GetValue<string>() == "next_work");
+        Assert.All(completion, effect => Assert.Equal(Data(done)["changeRevision"]!.GetValue<long>(), effect.Item["revision"]!.GetValue<long>()));
+
+        // Reopening a completed task closes its review item.
+        Assert.True(Call(state, "board", "task_update", new() { ["taskId"] = "a", ["sessionId"] = "worker-a", ["requestId"] = "reopen", ["expectedVersion"] = 8, ["workflow"] = DependentWorkflow("ready") }).Ok);
+        var reopened = Assert.Single(NewEffects(state, ref seen));
+        Assert.Equal(["review_ready"], reopened.Item["kinds"]!.AsArray().Select(x => x!.GetValue<string>()));
+
+        // A standing proposal is raised to the managers and closed when an administrator decides it.
+        var proposed = Data(Call(state, "board", "standing_propose", new() { ["sessionId"] = "worker-a", ["requestId"] = "propose", ["line"] = new JsonObject { ["text"] = "Run tests first" } }));
+        var proposal = Assert.Single(NewEffects(state, ref seen));
+        Assert.Equal(("standing_proposal", proposed["proposalId"]!.GetValue<string>(), "line: Run tests first"), (proposal.Item["kind"]!.GetValue<string>(), proposal.Item["subject"]!.GetValue<string>(), proposal.Item["note"]!.GetValue<string>()));
+        Assert.True(Call(state, "board", "standing_put", new() { ["sessionId"] = "admin", ["requestId"] = "approve", ["expectedRevision"] = 0, ["approve"] = new JsonArray(proposed["proposalId"]!.GetValue<string>()) }).Ok);
+        var decided = Assert.Single(NewEffects(state, ref seen));
+        Assert.Equal(("__attention_close", proposed["proposalId"]!.GetValue<string>()), (decided.Operation, decided.Item["subject"]!.GetValue<string>()));
+    }
+
+    [Fact]
+    public void Control_routes_attention_to_the_repositorys_managers_by_role()
+    {
+        var control = new StateEnvelope<CoordinationDocument>();
+        string Open(string role, string repository = "repo", int daysAgo = 0)
+        {
+            var args = new JsonObject { ["requestId"] = Guid.NewGuid().ToString("N"), ["repositoryId"] = repository, ["role"] = role };
+            return Data(CoordinationStateMachine.Apply(control, "control", "hub", new("alice", true, ["repo", "other"], true), "session_open", args, Now.AddDays(-daysAgo)))["sessionId"]!.GetValue<string>();
+        }
+        var manager = Open("Manager");
+        var cause = Open("manager");
+        Open("worker");
+        Open("manager", "other");
+        // A manager chat neither fresh nor active for over a day (a closed chat) is skipped, unless it reported activity since.
+        Open("manager", daysAgo: 2);
+        var active = Open("manager", daysAgo: 3);
+        Assert.True(Call(control, "control", "__register", new() { ["sessionId"] = active, ["activeAt"] = Now.AddHours(-1).ToString("O") }).Ok);
+        var before = control.Effects.Count;
+        var routed = Call(control, "control", "__attention_route", new()
+        {
+            ["role"] = "manager", ["operation"] = "__attention_raise", ["exceptSessionId"] = cause,
+            ["item"] = new JsonObject { ["kind"] = "blocked", ["taskId"] = "T-1", ["revision"] = 3 }
+        });
+        Assert.Equal(2, Data(routed)["routed"]!.GetValue<int>());
+        var effects = control.Effects.Skip(before).ToArray();
+        Assert.Equal([manager, active], effects.Select(item => item.TargetKey));
+        var effect = effects.Single(item => item.TargetKey == manager);
+        Assert.Equal(("session", manager, "__attention_raise"), (effect.TargetKind, effect.TargetKey, effect.Operation));
+        Assert.Equal(("blocked", "repo"), (JsonNode.Parse(effect.PayloadJson)!["kind"]!.GetValue<string>(), JsonNode.Parse(effect.PayloadJson)!["repositoryId"]!.GetValue<string>()));
+        // Only raises and closes are routed.
+        Assert.False(Call(control, "control", "__attention_route", new() { ["role"] = "manager", ["operation"] = "__deliver", ["item"] = new JsonObject() }).Ok);
+    }
+
+    [Fact]
+    public void A_lease_nearing_expiry_with_an_action_in_flight_raises_claim_expiring_until_renewed()
+    {
+        var resource = new StateEnvelope<CoordinationDocument>();
+        RelayReply Lock(string op, JsonObject args, int seconds = 0)
+        {
+            args["repositoryId"] = "repo";
+            var reply = CoordinationStateMachine.Apply(resource, "lock", "printer", Caller, op, args, Now.AddSeconds(seconds));
+            CoordinationStateMachine.ScheduleLeases(resource);
+            return reply;
+        }
+        Assert.True(Lock("claim_acquire", new() { ["sessionId"] = "worker", ["requestId"] = "acquire", ["leaseSeconds"] = 300 }).Ok);
+        // No action in flight: no check is scheduled.
+        Assert.DoesNotContain(resource.DueWork, work => work.Kind == "lease_warning");
+        var key = CoordinationStateMachine.ActionKey(new JsonObject { ["repositoryId"] = "repo", ["boardId"] = "ops", ["taskId"] = "T-9" }, "deploy", 1);
+        Assert.True(Lock("__block", new() { ["sessionId"] = "worker", ["actionId"] = "deploy", ["actionKey"] = key }).Ok);
+        var warning = Assert.Single(resource.DueWork, work => work.Kind == "lease_warning");
+        Assert.Equal(Now.AddSeconds(300 - RelayLimits.ClaimExpiringLeadSeconds), warning.DueAt);
+
+        Assert.True(Lock("__lease_check", new(), seconds: 250).Ok);
+        var raise = JsonNode.Parse(Assert.Single(resource.Effects).PayloadJson)!.AsObject();
+        Assert.Equal(("worker", "__attention_raise"), (resource.Effects[0].TargetKey, resource.Effects[0].Operation));
+        Assert.Equal(("claim_expiring", "T-9", "ops", "printer", "high"), (raise["kind"]!.GetValue<string>(), raise["taskId"]!.GetValue<string>(), raise["boardId"]!.GetValue<string>(), raise["subject"]!.GetValue<string>(), raise["priority"]!.GetValue<string>()));
+        // One item per lease: a second check before the end raises nothing; the next check is due when the lease ends.
+        Assert.True(Lock("__lease_check", new(), seconds: 260).Ok);
+        Assert.Single(resource.Effects);
+        Assert.Equal(Now.AddSeconds(300), Assert.Single(resource.DueWork, work => work.Kind == "lease_warning").DueAt);
+
+        // Renewing closes it with a newer revision and schedules a check for the new lease.
+        Assert.True(Lock("claim_renew", new() { ["sessionId"] = "worker", ["requestId"] = "renew", ["generation"] = 1, ["leaseSeconds"] = 300 }, seconds: 270).Ok);
+        var close = JsonNode.Parse(resource.Effects[1].PayloadJson)!.AsObject();
+        Assert.Equal(("__attention_close", "printer"), (resource.Effects[1].Operation, close["subject"]!.GetValue<string>()));
+        Assert.True(close["revision"]!.GetValue<long>() > raise["revision"]!.GetValue<long>());
+        Assert.Single(resource.DueWork, work => work.Kind == "lease_warning");
+        // A renewal with no warning raised closes nothing.
+        Assert.True(Lock("claim_renew", new() { ["sessionId"] = "worker", ["requestId"] = "renew-2", ["generation"] = 1, ["leaseSeconds"] = 300 }, seconds: 280).Ok);
+        Assert.Equal(2, resource.Effects.Count);
+    }
+
+    [Fact]
+    public void A_lease_that_ends_with_an_action_unresolved_closes_claim_expiring_and_raises_interrupted()
+    {
+        var resource = new StateEnvelope<CoordinationDocument>();
+        RelayReply Lock(string op, JsonObject args, int seconds = 0)
+        {
+            args["repositoryId"] = "repo";
+            var reply = CoordinationStateMachine.Apply(resource, "lock", "printer", Caller, op, args, Now.AddSeconds(seconds));
+            CoordinationStateMachine.ScheduleLeases(resource);
+            return reply;
+        }
+        List<(string Target, string Operation, JsonObject Item)> Effects(int from) => resource.Effects.Skip(from).Select(effect =>
+        {
+            var payload = JsonNode.Parse(effect.PayloadJson)!.AsObject();
+            return effect.Operation == "__attention_route" ? ("role:" + payload["role"]!.GetValue<string>(), payload["operation"]!.GetValue<string>(), payload["item"]!.AsObject()) : (effect.TargetKey, effect.Operation, payload);
+        }).ToList();
+        Assert.True(Lock("claim_acquire", new() { ["sessionId"] = "worker", ["requestId"] = "acquire", ["leaseSeconds"] = 300 }).Ok);
+        var key = CoordinationStateMachine.ActionKey(new JsonObject { ["repositoryId"] = "repo", ["boardId"] = "ops", ["taskId"] = "T-9" }, "deploy", 1);
+        Assert.True(Lock("__block", new() { ["sessionId"] = "worker", ["actionId"] = "deploy", ["actionKey"] = key }).Ok);
+        Assert.True(Lock("__lease_check", new(), seconds: 250).Ok);
+        var warned = Assert.Single(Effects(0));
+        Assert.Equal("claim_expiring", warned.Item["kind"]!.GetValue<string>());
+
+        // The lease ends with the action still unresolved: claim_expiring closes, and interrupted goes to the holder and the managers.
+        Assert.True(Lock("__lease_check", new(), seconds: 301).Ok);
+        var ended = Effects(1);
+        Assert.Equal(3, ended.Count);
+        Assert.Equal(("worker", "__attention_close", "claim_expiring"), (ended[0].Target, ended[0].Operation, ended[0].Item["kinds"]![0]!.GetValue<string>()));
+        foreach (var (target, item) in new[] { ("worker", ended[1].Item), ("role:manager", ended[2].Item) })
+        {
+            Assert.Equal(target, ended.Single(effect => effect.Item == item).Target);
+            Assert.Equal(("interrupted", "T-9", "ops", "printer"), (item["kind"]!.GetValue<string>(), item["taskId"]!.GetValue<string>(), item["boardId"]!.GetValue<string>(), item["subject"]!.GetValue<string>()));
+            Assert.Contains("deploy unresolved", item["note"]!.GetValue<string>());
+        }
+        // Every effect has its own, rising revision; nothing more is due for this lease, and a repeated check raises nothing.
+        var revisions = Effects(0).Select(effect => effect.Item["revision"]!.GetValue<long>()).ToArray();
+        Assert.Equal(revisions.Order(), revisions);
+        Assert.Equal(revisions.Length, revisions.Distinct().Count());
+        Assert.DoesNotContain(resource.DueWork, work => work.Kind == "lease_warning");
+        Assert.True(Lock("__lease_check", new(), seconds: 400).Ok);
+        Assert.Equal(4, resource.Effects.Count);
+
+        // Reporting the action resolved closes interrupted at the holder and the managers.
+        Assert.True(Lock("__unblock", new() { ["sessionId"] = "worker", ["actionId"] = "deploy", ["actionKey"] = key }, seconds: 500).Ok);
+        var resolved = Effects(4);
+        Assert.Equal(("worker", "__attention_close"), (resolved[0].Target, resolved[0].Operation));
+        Assert.Contains("interrupted", resolved[0].Item["kinds"]!.AsArray().Select(x => x!.GetValue<string>()));
+        Assert.Equal(("role:manager", "__attention_close", "interrupted"), (resolved[1].Target, resolved[1].Operation, resolved[1].Item["kinds"]![0]!.GetValue<string>()));
+        Assert.True(resolved.All(effect => effect.Item["revision"]!.GetValue<long>() > revisions.Max()));
     }
 
     public class TestGrainFactory : DispatchProxy

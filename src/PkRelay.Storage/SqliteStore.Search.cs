@@ -192,6 +192,23 @@ public sealed partial class SqliteStore : IFullTextSearch
         finally { _searchGate.Release(); }
     }
 
+    /// <summary>Only documents with every phrase of the query, best first, with their relevance scores; no any-word fallback.</summary>
+    public async Task<IReadOnlyList<SearchHit>> SearchAllWordsAsync(string repositoryId, string sessionId, string query, IReadOnlyList<string> kinds, int limit, CancellationToken ct = default)
+    {
+        if (!_searchOptions.Enabled || string.IsNullOrEmpty(repositoryId) || Phrases(query) is not { Count: > 0 } phrases) return [];
+        limit = Math.Clamp(limit, 1, RelayLimits.MaxSearchResults);
+        var wanted = kinds.Where(kind => SearchKinds.All.Contains(kind)).Distinct(StringComparer.Ordinal).ToArray();
+        await _searchGate.WaitAsync(ct);
+        try
+        {
+            if (_searchConnection is not { } connection) return [];
+            var hits = new List<SearchHit>();
+            await ReadHitsAsync(connection, MatchAll(phrases), repositoryId, sessionId, wanted, null, limit, hits, [], ct);
+            return hits;
+        }
+        finally { _searchGate.Release(); }
+    }
+
     /// <summary>Appends the best hits for one match expression until <paramref name="limit"/>, skipping weak hits and ones already found.</summary>
     private static async Task ReadHitsAsync(SqliteConnection connection, string match, string repositoryId, string? sessionId, string[] kinds, string? status, int limit,
         List<SearchHit> hits, HashSet<(string, string, string, string)> seen, CancellationToken ct)
@@ -233,7 +250,7 @@ public sealed partial class SqliteStore : IFullTextSearch
             var (stateName, grainKey, docId, kind) = (reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3));
             // Each (grain, kind, doc_id) has one row, so this only drops what the AND pass already returned when the OR pass runs.
             if (!seen.Add((stateName, grainKey, kind, docId))) continue;
-            hits.Add(new SearchHit(docId, kind, reader.GetString(4), new DateTimeOffset(reader.GetInt64(5), TimeSpan.Zero), reader.GetString(6), BoardId(stateName, grainKey)));
+            hits.Add(new SearchHit(docId, kind, reader.GetString(4), new DateTimeOffset(reader.GetInt64(5), TimeSpan.Zero), reader.GetString(6), BoardId(stateName, grainKey), -score));
         }
     }
 

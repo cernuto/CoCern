@@ -54,6 +54,31 @@ public sealed class TokenEfficiencyTests
     }
 
     [Fact]
+    public async Task A_worst_case_attention_offer_fits_the_composition_reserve()
+    {
+        await using var host = new RelayHostFixture();
+        using var client = host.AuthorizedClient();
+        var session = JsonDocument.Parse((await host.Call(client, "session_open", new { repositoryId = "repo", requestId = "offer-budget" })).GetProperty("dataJson").GetString()!).RootElement;
+        var (id, token) = (session.GetProperty("sessionId").GetString()!, session.GetProperty("sessionToken").GetString()!);
+        var longId = new string('t', RelayLimits.MaxIdentifierLength);
+        var grains = Microsoft.Extensions.DependencyInjection.ServiceProviderServiceExtensions.GetRequiredService<Orleans.IGrainFactory>(host.Services);
+        var raised = await grains.GetGrain<PkRelay.Core.ISessionGrain>(id).ExecuteAsync(new PkRelay.Domain.RelayCaller("test-user", false, ["repo"], true), "__attention_raise", JsonSerializer.Serialize(new
+        {
+            repositoryId = "repo", kind = "blocked", taskId = longId, boardId = new string('b', RelayLimits.MaxIdentifierLength), note = new string('\u00e9', 1_000),
+            refs = Enumerable.Range(0, 20).Select(index => index + new string('r', 250)).ToArray()
+        }));
+        Assert.True(raised.Ok, raised.Code);
+        var reply = await host.Call(client, "task_update", new { repositoryId = "repo", requestId = "offer-budget-1", sessionId = id, sessionToken = token, taskId = longId, expectedVersion = 0, notes = new string('n', 16_000) });
+        var data = reply.GetProperty("dataJson").GetString()!;
+        using var document = JsonDocument.Parse(data);
+        var offer = document.RootElement.GetProperty("attention");
+        Assert.Equal(RelayLimits.MaxAttentionTextLength, offer.GetProperty("x").GetString()!.Length);
+        Assert.True(Encoding.UTF8.GetByteCount(offer.GetRawText()) <= RelayLimits.MaxAttentionOfferBytes);
+        Assert.True(Encoding.UTF8.GetByteCount(reply.GetRawText()) <= RelayLimits.MaxPayloadBytes);
+        Assert.True(RelayLimits.MaxAttentionOfferBytes <= RelayLimits.CompositionReserveBytes);
+    }
+
+    [Fact]
     public void Chat_profile_advertises_only_the_messaging_tools()
     {
         Assert.Equal(ChatTools.Order(), CoordinationTools.NamesForRole(false, chatOnly: true).Order());
@@ -123,8 +148,11 @@ public sealed class TokenEfficiencyTests
         Assert.True(reply.Ok);
         Assert.Equal(1, reply.Data!.Value.GetProperty("total").GetInt32());
         Assert.Equal(3, hub.Calls);
-        // The adapter-only option never reaches the hub.
+        // The adapter-only option never reaches the hub, and the polls, mostly discarded unseen, take no attention offer.
         Assert.DoesNotContain("waitSeconds", hub.LastBody);
+        Assert.Contains("\"attention\":false", hub.LastBody);
+        // The poll that returns reaches the model, so the hub closes the info items of the messages it lists.
+        Assert.Contains("\"seen\":true", hub.LastBody);
     }
 
     [Fact]

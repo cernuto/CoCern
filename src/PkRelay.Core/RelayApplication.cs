@@ -55,6 +55,14 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
             if (trace is not null && tool is RelayTools.TaskUpdate or RelayTools.ActionReport) trace.Usage = usage as JsonObject;
         }
         if (trace is not null) trace.Args = args;
+        // The attention opt-out and the adapter's status detail are read here and never reach an aggregate.
+        var offerWanted = args["attention"] is not JsonValue optOut || optOut.GetValue<bool>();
+        var statusDetail = args["attentionDetail"] is JsonValue detail && detail.GetValue<bool>();
+        // An adapter reader whose reply reaches the model without an offer (a waiting read, the waiter's printed inbox) reports what it
+        // showed: seen (the returned page) or seenMessageIds (the messages it printed), so their info items close.
+        var pageSeen = args["seen"] is JsonValue seenFlag && seenFlag.GetValue<bool>();
+        var seenIds = args["seenMessageIds"] is JsonArray seenList ? Strings(seenList).ToArray() : [];
+        args.Remove("attention"); args.Remove("attentionDetail"); args.Remove("attentionStatus"); args.Remove("maxHoldMinutes"); args.Remove("seen"); args.Remove("seenMessageIds");
         args["hubIncarnation"] = incarnation;
         var trusted = caller with { IsInternal = true };
         try
@@ -71,16 +79,27 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
                 var verified = await VerifySessionAsync(trusted, args);
                 if (!verified.Ok) return verified;
                 session = Parse(verified);
-                if (trace is not null) { trace.SessionId = Text(args, "sessionId"); trace.Role = Text(session, "role"); }
+                // A background status read (the prompt hook, a wake watcher) is not the session's own turn, so it carries no role.
+                if (trace is not null) { trace.SessionId = Text(args, "sessionId"); trace.Role = statusDetail && tool == RelayTools.GetStatus ? null : Text(session, "role"); }
             }
             if (tool is RelayTools.TaskClaim or RelayTools.ClaimAcquire or RelayTools.ActionBegin && await PausedAsync(trusted, args) is { } paused) return paused;
-            var result = await DispatchAsync(trusted, tool, args, session, cancellationToken);
+            var result = tool == RelayTools.GetStatus ? await StatusAsync(trusted, args, statusDetail) : await DispatchAsync(trusted, tool, args, session, cancellationToken);
             if (result.Ok) result = await PiggybackAsync(trusted, args, result);
             if (result.Ok && tool == RelayTools.TaskUpdate && args["includeNextWork"]?.GetValue<bool>() == true) result = await WithNextWorkAsync(trusted, args, session, result);
             if (result.Ok && tool == RelayTools.StandingPut) CacheStanding(BoardKey(args), 0, result.Version, null);
             if (result.Ok && session is not null && CarriesStanding(tool)) result = await WithStandingAsync(trusted, args, session, result);
-            // Seam for attention delivery (build step 8): on a successful boundary reply, call the session's __attention_offer here and
-            // attach at most one compact offer. Until then no reply carries attention, so existing replies are unchanged.
+            if (result.Ok && session is not null && offerWanted && attentionOptions.Enabled && IsBoundary(tool)) result = await WithAttentionAsync(trusted, args, tool, result);
+            else if (result.Ok && session is not null && attentionOptions.Enabled && tool == RelayTools.CheckInbox && (pageSeen || seenIds.Length > 0)) await MarkSeenAsync(trusted, args, result, pageSeen, seenIds);
+            // The next-work offer this reply carries becomes a next_work item too, raised after the reply's own attention offer was chosen.
+            if (result.Ok && tool == RelayTools.TaskUpdate && attentionOptions.Enabled) await RaiseOfferedWorkAsync(trusted, args, result);
+            // The claimer's own next_work item for the task (from a next-work offer) closes with the claim.
+            if (result.Ok && tool == RelayTools.TaskClaim && attentionOptions.Enabled) await CloseClaimedWorkAsync(trusted, args, result);
+            // Related work is looked up after the reply, off the claim's path; the items are offered from the next boundary.
+            if (result.Ok && tool == RelayTools.TaskClaim && attentionOptions.Enabled && search is not null)
+            {
+                var claimed = result;
+                _ = Task.Run(() => RaiseRelatedWorkAsync(trusted, args, claimed), CancellationToken.None);
+            }
             return BoundWire(result);
         }
         catch (ArgumentException) { return Error(InvalidArguments); }
@@ -104,7 +123,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         RelayTools.ClaimAcquire or RelayTools.ClaimRenew or RelayTools.ClaimRelease => ResourceClaimAsync(caller, tool, args),
         RelayTools.ActionBegin => BeginActionAsync(caller, args, session),
         RelayTools.SendMessage => SendMessageAsync(caller, args),
-        RelayTools.GetStatus => StatusAsync(caller, args),
+        RelayTools.GetStatus => StatusAsync(caller, args, false),
         RelayTools.ChatDirectory => directory.DirectoryAsync([Text(args, "repositoryId")], CancellationToken.None),
         RelayTools.ControlRequest when Text(args, "command") == "revoke_machine" => RevokeMachineAsync(caller, args),
         RelayTools.Search => SearchAsync(args, cancellationToken),
@@ -150,10 +169,27 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
     }
 
     /// <summary>The agent's answer to an attention item. "Later" uses the hub's configured snooze; a client cannot set it.</summary>
-    private Task<RelayReply> RespondToAttentionAsync(RelayCaller caller, JsonObject args)
+    private async Task<RelayReply> RespondToAttentionAsync(RelayCaller caller, JsonObject args)
     {
         args["snoozeBoundaries"] = attentionOptions.SnoozeBoundaries;
-        return CallSession(caller, RelayTools.AttentionRespond, args);
+        var reply = await CallSession(caller, RelayTools.AttentionRespond, args);
+        if (reply.Ok) { var data = Parse(reply); RecordOutcome(args, Text(data, "kind"), Text(data, "outcome"), Text(data, "itemId")); }
+        return reply;
+    }
+
+    /// <summary>Records one offer outcome for later analysis of which kinds are mostly dismissed. Never fails the call.</summary>
+    private void RecordOutcome(JsonObject args, string kind, string outcome, string itemId)
+    {
+        if (activity is null) return;
+        try
+        {
+            activity.Record(new ActivityEvent
+            {
+                Timestamp = DateTimeOffset.UtcNow, Kind = ActivityEvent.Attention, RepositoryId = Text(args, "repositoryId"), SessionId = Bounded(Text(args, "sessionId")),
+                Tool = Bounded(kind), Ok = true, Code = outcome, Target = Bounded(itemId)
+            });
+        }
+        catch (Exception) { /* Telemetry never affects the call. */ }
     }
 
     /// <summary>Revoking a machine is a discovery concern, not a control-aggregate one: it needs the machine ID and is refused for non-administrators by the discovery grain.</summary>
@@ -191,7 +227,8 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
 
     /// <summary>
     /// Successful calls whose reply carries changed standing. <c>check_inbox</c> is left out: the adapter's background wake readers and
-    /// <c>waitSeconds</c> polls discard most inbox replies unseen, so standing attached there could be recorded as received without reaching the model.
+    /// <c>waitSeconds</c> polls discard inbox replies unseen and send no opt-out for standing, so standing attached there could be recorded
+    /// as received without reaching the model. Attention offers do ride <c>check_inbox</c>, because those readers send <c>attention: false</c>.
     /// </summary>
     private static bool CarriesStanding(string tool) => tool is RelayTools.TaskUpdate or RelayTools.ActionReport or RelayTools.TaskClaim;
 
@@ -272,15 +309,172 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         return Text(args, "taskId").Length > 0 ? await CallBoard(caller, RelayTools.SendMessage, args) : await CallSession(caller, RelayTools.SendMessage, args);
     }
 
-    private async Task<RelayReply> StatusAsync(RelayCaller caller, JsonObject args)
+    /// <summary>
+    /// Control status, and with a session its own status. With attention on, the session part carries the count of actionable items;
+    /// the adapter's <c>attentionDetail</c> adds the top item, the wake candidate, the inbox count and the board's standing revision.
+    /// </summary>
+    private async Task<RelayReply> StatusAsync(RelayCaller caller, JsonObject args, bool detail)
     {
         if (Text(args, "sessionId").Length == 0) return await CallControl(caller, RelayTools.GetStatus, args);
-        var result = await CallSession(caller, RelayTools.GetStatus, args);
+        var read = args.DeepClone().AsObject();
+        if (attentionOptions.Enabled) { read["attentionStatus"] = detail ? "detail" : "count"; read["maxHoldMinutes"] = attentionOptions.MaxHoldMinutes; }
+        var result = await CallSession(caller, RelayTools.GetStatus, read);
         if (!result.Ok) return result;
         var control = await CallControl(caller, RelayTools.GetStatus, args);
         if (!control.Ok) return control;
         var data = Parse(result); data["control"] = JsonNode.Parse(control.DataJson);
+        if (detail && attentionOptions.Enabled && data["attention"] is JsonObject attention)
+        {
+            try { if (await StandingAsync(caller, args) is { } standing) attention["standing"] = Number(standing, "revision"); }
+            catch (Exception) { /* The revision is a convenience for the prompt hook. */ }
+            if (Text(attention, "wake") is { } wake && wake.StartsWith(AttentionWeights.HoldWakePrefix, StringComparison.Ordinal)) RecordHoldWake(args, wake);
+        }
         return Ok(data, result.Version);
+    }
+
+    /// <summary>Each session's last idle-hold wake ID handed out, so a hold wake is counted once however often watchers ask.</summary>
+    private readonly ConcurrentDictionary<string, string> holdWakes = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Counts an idle-hold wake the first time its ID is handed to a reader. The hub cannot see whether the adapter then queued a turn,
+    /// and a hub restart may count one period again; the count is telemetry only.
+    /// </summary>
+    private void RecordHoldWake(JsonObject args, string wake)
+    {
+        var sessionId = Text(args, "sessionId");
+        if (activity is null || holdWakes.TryGetValue(sessionId, out var last) && last == wake) return;
+        if (holdWakes.Count >= RelayLimits.MaxHoldWakeSessions) holdWakes.Clear();
+        holdWakes[sessionId] = wake;
+        try { activity.Record(new ActivityEvent { Timestamp = DateTimeOffset.UtcNow, Kind = ActivityEvent.Wake, RepositoryId = Text(args, "repositoryId"), SessionId = Bounded(sessionId), Ok = true, Code = "Ok" }); }
+        catch (Exception) { /* Telemetry never affects the call. */ }
+    }
+
+    /// <summary>
+    /// Successful calls that carry an attention offer. <c>check_inbox</c> is one, so a manager that mostly reads its inbox still gets offers;
+    /// the adapter's background readers (wake watchers, the Claude waiter, <c>waitSeconds</c> polls) send <c>attention: false</c>, so they
+    /// never mark an offer shown that the model does not see.
+    /// </summary>
+    private static bool IsBoundary(string tool) => tool is RelayTools.TaskUpdate or RelayTools.ActionReport or RelayTools.TaskClaim or RelayTools.CheckInbox;
+
+    /// <summary>
+    /// Runs one boundary at the caller's session and attaches at most one compact offer. The committed result never changes, and the
+    /// boundary is skipped when the reply has no room left for an offer, so an item is marked shown only when its offer is delivered.
+    /// </summary>
+    private async Task<RelayReply> WithAttentionAsync(RelayCaller caller, JsonObject args, string tool, RelayReply committed)
+    {
+        try
+        {
+            var data = Parse(committed);
+            // A model-visible inbox page shows its messages, so their info items are closed rather than offered.
+            var seen = tool == RelayTools.CheckInbox && data["items"] is JsonArray page
+                ? new JsonArray(page.OfType<JsonObject>().Select(message => Text(message, "messageId")).Where(id => id.Length > 0).Select(id => (JsonNode)id).ToArray()) : null;
+            data["attention"] = new string('x', RelayLimits.MaxAttentionOfferBytes);
+            if (!FitsWire(Ok(data, long.MaxValue))) return committed;
+            var request = new JsonObject
+            {
+                ["repositoryId"] = Text(args, "repositoryId"), ["sessionId"] = Text(args, "sessionId"), ["sessionToken"] = Text(args, "sessionToken"),
+                ["focusTaskId"] = Text(args, "taskId"), ["focusBoardId"] = Text(args, "boardId", "default"), ["snoozeBoundaries"] = attentionOptions.SnoozeBoundaries
+            };
+            if (seen is { Count: > 0 }) request["seenMessageIds"] = seen;
+            var offer = await CallSession(caller, Operations.AttentionOffer, request);
+            if (!offer.Ok || Parse(offer)["attention"] is not JsonObject item) return committed;
+            data["attention"] = item.DeepClone();
+            RecordOutcome(args, Text(item, "k"), "shown", Text(item, "id"));
+            return Ok(data, committed.Version);
+        }
+        catch (Exception) { return committed; }
+    }
+
+    /// <summary>Closes the info items of messages an adapter reader showed the model without an offer. Advisory: the read stands either way.</summary>
+    private async Task MarkSeenAsync(RelayCaller caller, JsonObject args, RelayReply read, bool pageSeen, string[] seenIds)
+    {
+        try
+        {
+            var ids = seenIds.ToList();
+            if (pageSeen && Parse(read)["items"] is JsonArray page) ids.AddRange(page.OfType<JsonObject>().Select(message => Text(message, "messageId")).Where(id => id.Length > 0));
+            if (ids.Count == 0) return;
+            await CallSession(caller, Operations.AttentionSeen, new JsonObject
+            {
+                ["repositoryId"] = Text(args, "repositoryId"), ["sessionId"] = Text(args, "sessionId"), ["sessionToken"] = Text(args, "sessionToken"),
+                ["messageIds"] = new JsonArray(ids.Distinct(StringComparer.Ordinal).Take(RelayLimits.MaxAcknowledgedMessages + RelayLimits.MaxPageSize).Select(id => (JsonNode)id).ToArray())
+            });
+        }
+        catch (Exception) { /* The read stands either way. */ }
+    }
+
+    /// <summary>
+    /// The task a reply's <c>nextWork</c> offered becomes a <c>next_work</c> item at the caller, at the board revision the offer was read at,
+    /// so the claim that closes next_work items closes it too. It expires after a day, since a claim by another session cannot reach it.
+    /// </summary>
+    private async Task RaiseOfferedWorkAsync(RelayCaller caller, JsonObject args, RelayReply reply)
+    {
+        try
+        {
+            if (Parse(reply)["nextWork"]?["offer"] is not JsonObject offer || Text(offer, "taskId") is not { Length: > 0 } taskId) return;
+            await CallSession(caller, Operations.AttentionRaise, new JsonObject
+            {
+                ["repositoryId"] = Text(args, "repositoryId"), ["sessionId"] = Text(args, "sessionId"), ["kind"] = AttentionKinds.NextWork, ["taskId"] = taskId,
+                ["boardId"] = Text(args, "boardId", "default"), ["priority"] = offer["workflow"]?["priority"]?.DeepClone(), ["note"] = "offered as your next work; claim it with task_claim",
+                ["revision"] = Math.Max(1, Number(offer, "snapshotRevision")), ["expiryDays"] = RelayLimits.OfferedWorkExpiryDays
+            });
+        }
+        catch (Exception) { /* The offer in the reply stands either way. */ }
+    }
+
+    /// <summary>Closes the caller's <c>next_work</c> item for the task it just claimed, at the claim's revision. Advisory.</summary>
+    private async Task CloseClaimedWorkAsync(RelayCaller caller, JsonObject args, RelayReply claimed)
+    {
+        try
+        {
+            var claim = Parse(claimed);
+            if (claim["newlyAcquired"]?.GetValue<bool>() != true) return;
+            await CallSession(caller, Operations.AttentionClose, new JsonObject
+            {
+                ["repositoryId"] = Text(args, "repositoryId"), ["sessionId"] = Text(args, "sessionId"), ["taskId"] = Text(args, "taskId"), ["boardId"] = Text(args, "boardId", "default"),
+                ["kinds"] = new JsonArray(AttentionKinds.NextWork), ["revision"] = Number(claim, "changeRevision")
+            });
+        }
+        catch (Exception) { /* The claim stands either way. */ }
+    }
+
+    /// <summary>
+    /// After a new task claim, searches the repository for tasks like it and raises, to the claiming session, <c>duplicate_warning</c>
+    /// for open look-alikes and <c>related_work</c> for completed ones, IDs only. A hit must match every word of the title or goal and
+    /// score at least <see cref="RelayLimits.RelatedWorkMinScore"/>, so one shared word is not enough. Both close when the claimed task
+    /// completes. It runs after the claim reply, so any failure is ignored and the claim stands.
+    /// </summary>
+    private async Task RaiseRelatedWorkAsync(RelayCaller caller, JsonObject args, RelayReply claimed)
+    {
+        if (search is null) return;
+        try
+        {
+            var claim = Parse(claimed);
+            if (claim["newlyAcquired"]?.GetValue<bool>() != true) return;
+            var taskId = Text(args, "taskId");
+            var read = await CallBoard(caller, RelayTools.TaskGet, new JsonObject { ["repositoryId"] = Text(args, "repositoryId"), ["boardId"] = Text(args, "boardId", "default"), ["taskId"] = taskId });
+            if (!read.Ok) return;
+            var task = Parse(read);
+            var query = task["facts"]?["title"] is JsonValue title && title.TryGetValue<string>(out var named) && named.Length > 0 ? named : Text(task["workflow"]?["packet"] as JsonObject ?? new JsonObject(), "goal");
+            if (query.Length == 0) return;
+            if (query.Length > RelayLimits.MaxSearchQueryLength) query = query[..RelayLimits.MaxSearchQueryLength];
+            var board = Text(args, "boardId", "default");
+            var hits = (await search.SearchAllWordsAsync(Text(args, "repositoryId"), Text(args, "sessionId"), query, [SearchKinds.Task], RelayLimits.MaxRelatedWorkHits + 1))
+                .Where(hit => (hit.DocId != taskId || (hit.BoardId ?? "default") != board) && hit.Score >= RelayLimits.RelatedWorkMinScore).ToArray();
+            async Task Raise(string kind, IEnumerable<SearchHit> found)
+            {
+                var ids = found.Select(hit => hit.DocId).Distinct(StringComparer.Ordinal).Take(RelayLimits.MaxRelatedWorkHits).ToArray();
+                if (ids.Length == 0) return;
+                await CallSession(caller, Operations.AttentionRaise, new JsonObject
+                {
+                    ["repositoryId"] = Text(args, "repositoryId"), ["sessionId"] = Text(args, "sessionId"), ["kind"] = kind, ["boardId"] = board, ["subject"] = taskId,
+                    ["note"] = (kind == AttentionKinds.DuplicateWarning ? "may duplicate " : "related to ") + taskId,
+                    ["refs"] = new JsonArray(ids.Select(id => (JsonNode)id).ToArray()), ["revision"] = Number(claim, "changeRevision"), ["expiryDays"] = attentionOptions.ItemExpiryDays
+                });
+            }
+            await Raise(AttentionKinds.DuplicateWarning, hits.Where(hit => hit.Status != "completed"));
+            await Raise(AttentionKinds.RelatedWork, hits.Where(hit => hit.Status == "completed"));
+        }
+        catch (Exception) { /* Related work is advisory, and the reply has already gone. */ }
     }
 
     /// <summary>

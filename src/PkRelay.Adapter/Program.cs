@@ -54,6 +54,13 @@ try
         var status = await WakeWatcher.AwaitInboxAsync(configuration, Console.Out.WriteLine, timeout, shutdown.Token);
         return status switch { "queued" => 0, "timeout" => 2, _ => 3 };
     }
+    if (args.Length > 0 && args[0] == "--prompt-hook")
+    {
+        // A UserPromptSubmit hook: one line on standard output, or nothing; it always exits 0 so it can never block a message.
+        var folder = args.Length == 3 && args[1] == "--data-dir" && !string.IsNullOrWhiteSpace(args[2]) ? args[2]
+            : Environment.GetEnvironmentVariable("PKRELAY_NODE_DIR") is { Length: > 0 } configured ? configured : NodeState.DefaultFolder;
+        return await PromptHook.RunAsync(Console.In, Console.Out, folder);
+    }
     if (args.Length > 0 && args[0] == "--setup")
     {
         // Exit codes: 0 done, 1 configuration problem or enrollment failure (the node's code, e.g. 4 for a changed hub certificate), 5 a client settings file could not be parsed.

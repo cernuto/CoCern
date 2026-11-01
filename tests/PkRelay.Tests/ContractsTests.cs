@@ -150,6 +150,28 @@ public sealed class ContractsTests
     }
 
     [Fact]
+    public void Boundary_tools_advertise_the_attention_opt_out_in_hub_and_adapter_catalogs()
+    {
+        using var client = new HttpClient();
+        var adapter = PkRelay.Adapter.CoordinationTools.Create(new PkRelay.Adapter.RelayForwarder(client, new PkRelay.Adapter.AdapterOptions("http://127.0.0.1:5271", "client-secret")), admin: false)
+            .ToDictionary(tool => tool.ProtocolTool.Name, tool => tool.ProtocolTool.InputSchema.GetRawText());
+        var hub = ToolResults.Tools(false).ToDictionary(tool => tool.Name, tool => tool.InputSchema.GetRawText());
+        foreach (var name in new[] { RelayTools.TaskUpdate, RelayTools.ActionReport, RelayTools.TaskClaim })
+        {
+            Assert.True(RelayToolCatalog.TryGet(name, out var tool));
+            Assert.Equal(RelayToolCatalog.ForwardingSchema(tool).GetRawText(), adapter[name]);
+            Assert.Equal(RelayToolCatalog.InputSchema(tool).GetRawText(), hub[name]);
+            Assert.Equal("boolean", RelayToolCatalog.ForwardingSchema(tool).GetProperty("properties").GetProperty("attention").GetProperty("type").GetString());
+            Assert.Equal("boolean", RelayToolCatalog.InputSchema(tool).GetProperty("properties").GetProperty("attention").GetProperty("type").GetString());
+        }
+        // check_inbox is not a boundary, so it has no opt-out; and no new tool was added for delivery.
+        Assert.True(RelayToolCatalog.TryGet(RelayTools.CheckInbox, out var inbox));
+        Assert.False(RelayToolCatalog.InputSchema(inbox).GetProperty("properties").TryGetProperty("attention", out _));
+        // An offer always fits the room the hub keeps for composing replies.
+        Assert.True(RelayLimits.MaxAttentionOfferBytes <= RelayLimits.CompositionReserveBytes / 2);
+    }
+
+    [Fact]
     public void Forwarding_catalog_stays_within_its_context_budget()
     {
         // Every connected agent carries these definitions on every turn; the pre-refactor adapter was about 19,400 characters.

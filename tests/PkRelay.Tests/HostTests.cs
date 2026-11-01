@@ -282,7 +282,8 @@ public class HostTests
     [Fact]
     public async Task Activity_counts_each_real_call_wake_and_inbox_read_once_and_keeps_usage_out_of_state()
     {
-        await using var host = new RelayHostFixture();
+        // With attention on, a message no longer wakes its chat (it waits as an info item), so message wakes are counted with it off.
+        await using var host = new RelayHostFixture(settings: new Dictionary<string, string?> { ["Relay:Attention:Enabled"] = "false" });
         using var client = host.AuthorizedClient();
         var started = DateTimeOffset.UtcNow.AddMinutes(-1);
         var manager = Data(await host.Call(client, "session_open", new { repositoryId = "repo", requestId = "activity-manager", role = "Manager" }));
@@ -470,7 +471,7 @@ public class HostTests
         var sessionId = session.GetProperty("sessionId").GetString()!;
         var sessionToken = session.GetProperty("sessionToken").GetString()!;
         Assert.Equal(new AttentionOptions { SnoozeBoundaries = 4, ItemExpiryDays = 3 }, host.Services.GetRequiredService<AttentionOptions>());
-        // Nothing raises items or attaches offers yet, so a milestone reply carries no attention.
+        // No item is waiting, so a milestone reply carries no attention.
         var created = Data(await host.Call(client, "task_update", new { repositoryId = "repo", requestId = "attention-task", sessionId, sessionToken, taskId = "T-1", expectedVersion = 0 }));
         Assert.False(created.TryGetProperty("attention", out _));
         var hub = new RelayCaller("test-user", false, ["repo"], true);
@@ -497,6 +498,189 @@ public class HostTests
         await using var host = new RelayHostFixture(settings: new Dictionary<string, string?> { ["Relay:Attention:SnoozeBoundaries"] = "0" });
         var failure = Assert.ThrowsAny<Exception>(() => host.Services.GetRequiredService<AttentionOptions>());
         Assert.Contains("Relay:Attention:SnoozeBoundaries", failure.ToString());
+    }
+
+    /// <summary>A ready workflow, or a blocked one with one blocker, as the board accepts it.</summary>
+    internal static object Workflow(string state, string blockerSummary = "waiting on schema review") => new
+    {
+        state,
+        packet = new { goal = "g", target = "t", authorityRef = "human-grant:1", restoration = "r", stopCondition = "s" },
+        criteria = new[] { new { id = "c", description = "d", result = "not_run" } },
+        blockers = state == "blocked" ? new[] { new { id = "b1", kind = "prerequisite", summary = blockerSummary, recheckCondition = "r" } } : []
+    };
+
+    [Fact]
+    public async Task Attention_offers_ride_boundary_replies_including_model_visible_check_inbox_and_attention_false_skips_them()
+    {
+        await using var host = new RelayHostFixture();
+        using var client = host.AuthorizedClient();
+        var manager = Data(await host.Call(client, "session_open", new { repositoryId = "repo", requestId = "delivery-manager", role = "Manager" }));
+        var worker = Data(await host.Call(client, "session_open", new { repositoryId = "repo", requestId = "delivery-worker", role = "worker" }));
+        object As(JsonElement session, object extra)
+        {
+            var arguments = JsonSerializer.SerializeToNode(extra)!.AsObject();
+            arguments["repositoryId"] = "repo"; arguments["sessionId"] = session.GetProperty("sessionId").GetString(); arguments["sessionToken"] = session.GetProperty("sessionToken").GetString();
+            return arguments;
+        }
+        Assert.True(Data(await host.Call(client, "task_update", As(worker, new { requestId = "d-1", taskId = "T-1", expectedVersion = 0, workflow = Workflow("ready") }))).TryGetProperty("version", out _));
+        Data(await host.Call(client, "task_claim", As(worker, new { requestId = "d-2", taskId = "T-1", expectedVersion = 1 })));
+        // The worker's blocked milestone raises a blocked item to the manager through the board's and the control's outboxes.
+        var blocked = Data(await host.Call(client, "task_update", As(worker, new { requestId = "d-3", taskId = "T-1", expectedVersion = 2, workflow = Workflow("blocked") })));
+        Assert.False(blocked.TryGetProperty("attention", out _));
+        async Task<JsonElement> Status(bool detail = false) => Data(await host.Call(client, "get_status", As(manager, detail ? new { attentionDetail = true } : new { attentionDetail = false })));
+        var deadline = DateTime.UtcNow.AddSeconds(20);
+        while ((await Status()).GetProperty("attention").GetProperty("actionable").GetInt32() == 0 && DateTime.UtcNow < deadline) await Task.Delay(50);
+        // get_status shows only the count; the adapter's detail adds the top item and the wake candidate (blocked is top tier).
+        var status = (await Status()).GetProperty("attention");
+        Assert.Equal(["actionable"], status.EnumerateObject().Select(property => property.Name));
+        Assert.Equal(1, status.GetProperty("actionable").GetInt32());
+        var detail = (await Status(detail: true)).GetProperty("attention");
+        Assert.Equal(("blocked", "T-1", 1), (detail.GetProperty("top").GetProperty("k").GetString(), detail.GetProperty("top").GetProperty("t").GetString(), detail.GetProperty("urgent").GetInt32()));
+        Assert.Equal(detail.GetProperty("top").GetProperty("id").GetString(), detail.GetProperty("wake").GetString());
+
+        // A background inbox read (the adapter's watchers and waits send attention: false) takes no offer.
+        Assert.False(Data(await host.Call(client, "check_inbox", As(manager, new { attention = false }))).TryGetProperty("attention", out _));
+        // attention: false skips the offer and leaves the item unshown.
+        var quiet = Data(await host.Call(client, "task_update", As(manager, new { requestId = "d-4", taskId = "M-1", expectedVersion = 0, attention = false })));
+        Assert.False(quiet.TryGetProperty("attention", out _));
+        // The next boundary reply carries exactly one compact offer.
+        var milestone = Data(await host.Call(client, "task_update", As(manager, new { requestId = "d-5", taskId = "M-1", expectedVersion = 1 })));
+        var offer = milestone.GetProperty("attention");
+        Assert.Equal(["id", "k", "more", "t", "x"], offer.EnumerateObject().Select(property => property.Name).Order());
+        Assert.Equal(("blocked", "T-1", "T-1 blocked: waiting on schema review", 0), (offer.GetProperty("k").GetString(), offer.GetProperty("t").GetString(), offer.GetProperty("x").GetString(), offer.GetProperty("more").GetInt32()));
+        // The offer is not repeated on the worker's replies, and a non-boolean opt-out is refused.
+        Assert.False(Data(await host.Call(client, "task_update", As(worker, new { requestId = "d-6", taskId = "W-1", expectedVersion = 0 }))).TryGetProperty("attention", out _));
+        using var bad = await client.PostAsJsonAsync("/api/tools/task_update", As(manager, new { requestId = "d-7", taskId = "M-1", expectedVersion = 2, attention = "no" }));
+        Assert.Equal(HttpStatusCode.BadRequest, bad.StatusCode);
+
+        // A model-visible check_inbox is a boundary too, so a manager that mostly reads its inbox still gets offers.
+        Assert.True((await host.Services.GetRequiredService<Orleans.IGrainFactory>().GetGrain<ISessionGrain>(manager.GetProperty("sessionId").GetString()!)
+            .ExecuteAsync(new RelayCaller("test-user", false, ["repo"], true), "__attention_raise", JsonSerializer.Serialize(new { repositoryId = "repo", kind = "review_ready", taskId = "T-9" }))).Ok);
+        var inboxOffer = Data(await host.Call(client, "check_inbox", As(manager, new { }))).GetProperty("attention");
+        Assert.Equal(("review_ready", "T-9"), (inboxOffer.GetProperty("k").GetString(), inboxOffer.GetProperty("t").GetString()));
+        Data(await host.Call(client, "attention_respond", As(manager, new { requestId = "d-review", itemId = inboxOffer.GetProperty("id").GetString(), action = "dismiss" })));
+
+        // Postponed, the item leaves the count; get_status never counts snoozed items.
+        Data(await host.Call(client, "attention_respond", As(manager, new { requestId = "d-8", itemId = offer.GetProperty("id").GetString(), action = "later" })));
+        Assert.Equal(0, (await Status()).GetProperty("attention").GetProperty("actionable").GetInt32());
+        Assert.False((await Status(detail: true)).GetProperty("attention").TryGetProperty("wake", out _));
+
+        // Clearing the blocker closes the manager's item.
+        var ready = JsonSerializer.SerializeToNode(Workflow("ready"))!.AsObject(); ready["recheckEvidenceRef"] = "evidence:1";
+        Data(await host.Call(client, "task_update", As(worker, new { requestId = "d-9", taskId = "T-1", expectedVersion = 3, workflow = ready })));
+        // The adapter's detailed status reads are background reads: they carry no role, so they never count as manager turns.
+        var store = host.Services.GetRequiredService<SqliteStore>();
+        await store.FlushActivityAsync();
+        using (var connection = new Microsoft.Data.Sqlite.SqliteConnection(new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder { DataSource = store.DatabasePath, Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly, Pooling = false }.ToString()))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "SELECT COUNT(*) FROM activity_log WHERE tool = 'get_status' AND role IS NULL;";
+            Assert.True((long)command.ExecuteScalar()! >= 2);
+            command.CommandText = "SELECT COUNT(*) FROM activity_log WHERE tool = 'get_status' AND role = 'manager';";
+            Assert.True((long)command.ExecuteScalar()! >= 1);
+        }
+
+        // Once the close is delivered the item is gone, so answering it is NotFound; until then "later" just keeps it snoozed.
+        var gone = DateTime.UtcNow.AddSeconds(20);
+        for (var attempt = 0; ; attempt++)
+        {
+            using var answer = await client.PostAsJsonAsync("/api/tools/attention_respond", As(manager, new { requestId = "d-close-" + attempt, itemId = offer.GetProperty("id").GetString(), action = "later" }));
+            if (answer.StatusCode == HttpStatusCode.NotFound) break;
+            Assert.True(DateTime.UtcNow < gone, "The blocked item was not closed when its blocker cleared.");
+            await Task.Delay(50);
+        }
+    }
+
+    [Fact]
+    public async Task Messages_shown_by_adapter_readers_close_their_info_items_without_an_offer()
+    {
+        await using var host = new RelayHostFixture();
+        using var client = host.AuthorizedClient();
+        var sender = Data(await host.Call(client, "session_open", new { repositoryId = "repo", requestId = "seen-sender" }));
+        var reader = Data(await host.Call(client, "session_open", new { repositoryId = "repo", requestId = "seen-reader" }));
+        async Task<int> Actionable() => Data(await host.Call(client, "get_status", SessionArgs(reader))).GetProperty("attention").GetProperty("actionable").GetInt32();
+        async Task<string> Send(string requestId)
+        {
+            var sent = Data(await host.Call(client, "send_message", new { repositoryId = "repo", requestId, sessionId = sender.GetProperty("sessionId").GetString(), sessionToken = sender.GetProperty("sessionToken").GetString(), recipientSessionId = reader.GetProperty("sessionId").GetString(), text = "please look" }));
+            var deadline = DateTime.UtcNow.AddSeconds(20);
+            while (await Actionable() == 0 && DateTime.UtcNow < deadline) await Task.Delay(50);
+            return sent.GetProperty("messageId").GetString()!;
+        }
+        object Read(object extra)
+        {
+            var arguments = JsonSerializer.SerializeToNode(extra)!.AsObject();
+            arguments["repositoryId"] = "repo"; arguments["sessionId"] = reader.GetProperty("sessionId").GetString(); arguments["sessionToken"] = reader.GetProperty("sessionToken").GetString();
+            return arguments;
+        }
+        // A message is an info item until the model has seen it.
+        await Send("seen-1");
+        Assert.Equal(1, await Actionable());
+        // A background read that showed nothing to the model leaves it open.
+        Assert.False(Data(await host.Call(client, "check_inbox", Read(new { attention = false }))).TryGetProperty("attention", out _));
+        Assert.Equal(1, await Actionable());
+        // A waiting read whose page reached the model (seen) closes it, with no offer.
+        Assert.False(Data(await host.Call(client, "check_inbox", Read(new { attention = false, seen = true }))).TryGetProperty("attention", out _));
+        Assert.Equal(0, await Actionable());
+        // The waiter names the messages it printed.
+        var second = await Send("seen-2");
+        Assert.Equal(1, await Actionable());
+        await host.Call(client, "check_inbox", Read(new { attention = false, limit = 1, seenMessageIds = new[] { second } }));
+        Assert.Equal(0, await Actionable());
+        using var bad = await client.PostAsJsonAsync("/api/tools/check_inbox", Read(new { seenMessageIds = new[] { 1 } }));
+        Assert.Equal(HttpStatusCode.BadRequest, bad.StatusCode);
+    }
+
+    [Fact]
+    public async Task A_claim_raises_look_alikes_only_on_an_all_words_match_after_the_reply()
+    {
+        await using var host = new RelayHostFixture();
+        using var client = host.AuthorizedClient();
+        var session = Data(await host.Call(client, "session_open", new { repositoryId = "repo", requestId = "alike-open" }));
+        object As(object extra)
+        {
+            var arguments = JsonSerializer.SerializeToNode(extra)!.AsObject();
+            arguments["repositoryId"] = "repo"; arguments["sessionId"] = session.GetProperty("sessionId").GetString(); arguments["sessionToken"] = session.GetProperty("sessionToken").GetString();
+            if (arguments["workflow"] is null) arguments.Remove("workflow");
+            return arguments;
+        }
+        async Task Task(string taskId, string title, object? workflow = null) =>
+            Assert.True((await host.Call(client, "task_update", As(new { requestId = "alike-" + taskId, taskId, expectedVersion = 0, patch = new { title }, workflow, attention = false }))).GetProperty("ok").GetBoolean());
+        // Enough unrelated tasks that the shared words are rare, as on a real board.
+        for (var i = 0; i < 12; i++) await Task("F-" + i, "unrelated chore number " + i);
+        await Task("T-A", "rotate printer firmware keys");
+        await Task("T-B", "rotate printer firmware keys again");
+        await Task("T-C", "printer paper");
+        var completed = JsonSerializer.SerializeToNode(Workflow("ready"))!.AsObject();
+        completed["state"] = "completed"; completed["criteria"] = new System.Text.Json.Nodes.JsonArray(new System.Text.Json.Nodes.JsonObject { ["id"] = "c", ["description"] = "d", ["result"] = "passed", ["evidenceRef"] = "e:1" });
+        await Task("T-D", "rotate printer firmware keys for the lab", completed);
+
+        var claim = Data(await host.Call(client, "task_claim", As(new { requestId = "alike-claim", taskId = "T-A", expectedVersion = 1 })));
+        // The lookup runs after the reply, so the claim reply carries none of it.
+        Assert.False(claim.TryGetProperty("attention", out _));
+        var deadline = DateTime.UtcNow.AddSeconds(20);
+        while (Data(await host.Call(client, "get_status", As(new { }))).GetProperty("attention").GetProperty("actionable").GetInt32() < 2 && DateTime.UtcNow < deadline) await System.Threading.Tasks.Task.Delay(50);
+        var first = Data(await host.Call(client, "check_inbox", As(new { }))).GetProperty("attention");
+        var second = Data(await host.Call(client, "check_inbox", As(new { }))).GetProperty("attention");
+        // An open look-alike is a possible duplicate, a completed one related work; a task sharing one word (T-C) is neither.
+        Assert.Equal(("duplicate_warning", "duplicate_warning: may duplicate T-A refs T-B"), (first.GetProperty("k").GetString(), first.GetProperty("x").GetString()));
+        Assert.Equal(("related_work", "related_work: related to T-A refs T-D"), (second.GetProperty("k").GetString(), second.GetProperty("x").GetString()));
+    }
+
+    [Fact]
+    public async Task Attention_turned_off_attaches_no_offers_or_counts()
+    {
+        await using var host = new RelayHostFixture(settings: new Dictionary<string, string?> { ["Relay:Attention:Enabled"] = "false", ["Relay:Attention:MaxHoldMinutes"] = "5" });
+        using var client = host.AuthorizedClient();
+        Assert.Equal(new AttentionOptions { Enabled = false, MaxHoldMinutes = 5 }, host.Services.GetRequiredService<AttentionOptions>());
+        var manager = Data(await host.Call(client, "session_open", new { repositoryId = "repo", requestId = "off-manager", role = "manager" }));
+        var args = new { repositoryId = "repo", sessionId = manager.GetProperty("sessionId").GetString(), sessionToken = manager.GetProperty("sessionToken").GetString() };
+        var raised = await host.Services.GetRequiredService<Orleans.IGrainFactory>().GetGrain<ISessionGrain>(args.sessionId!)
+            .ExecuteAsync(new RelayCaller("test-user", false, ["repo"], true), "__attention_raise", JsonSerializer.Serialize(new { repositoryId = "repo", kind = "blocked", taskId = "T-1" }));
+        Assert.True(raised.Ok);
+        var reply = Data(await host.Call(client, "task_update", new { args.repositoryId, args.sessionId, args.sessionToken, requestId = "off-1", taskId = "T-2", expectedVersion = 0 }));
+        Assert.False(reply.TryGetProperty("attention", out _));
+        Assert.False(Data(await host.Call(client, "get_status", args)).TryGetProperty("attention", out _));
     }
 
     private static JsonElement Data(JsonElement reply) { using var document = JsonDocument.Parse(reply.GetProperty("dataJson").GetString()!); return document.RootElement.Clone(); }

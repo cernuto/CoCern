@@ -49,11 +49,29 @@ The adapter reconciles durable inboxes at startup, after session-scoped SignalR 
 
 One fixed prompt asks the enrolled chat to read its own inbox and handle applicable work under its existing permissions. No relay message text or secret is inserted into user instructions. The chat obtains message contents through its normal authenticated relay tools, treats them as untrusted data, and acknowledges explicitly handled IDs. The watcher never acknowledges on the chat's behalf or claims/completes its tasks.
 
-Duplicate hints and messages already notified are suppressed durably. New messages are coalesced, with by default at most one wake per route per 3 seconds and 20 wakes per 10 minutes. A configuration can change this with an optional `wakeLimits` object, `{ "minIntervalSeconds": 3, "maxPerWindow": 20, "windowMinutes": 10 }`, in which every field is optional and falls back to the default shown; `minIntervalSeconds` must be 0 to 3600, `maxPerWindow` 1 to 1000 and `windowMinutes` 1 to 1440, and anything else makes the configuration invalid. A wake refused by a limit is not lost: the next pass retries it. Background nodes always use the defaults. Rate limits bound prompt traffic, not the amount of model work authorized by the user. A newly delivered private message is a wake candidate; the adapter does not infer semantic actionability from arbitrary prose. Workflow instructions must avoid acknowledgment-only reply loops. Queueing preserves a busy chat's current turn and lets its client schedule the follow-up.
+Duplicate hints and messages already notified are suppressed durably. New messages are coalesced, with by default at most one wake per route per 3 seconds and 20 wakes per 10 minutes. A configuration can change this with an optional `wakeLimits` object, `{ "minIntervalSeconds": 3, "maxPerWindow": 20, "windowMinutes": 10 }`, in which every field is optional and falls back to the default shown; `minIntervalSeconds` must be 0 to 3600, `maxPerWindow` 1 to 1000 and `windowMinutes` 1 to 1440, and anything else makes the configuration invalid. A wake refused by a limit is not lost: the next pass retries it. Background nodes always use the defaults. Rate limits bound prompt traffic, not the amount of model work authorized by the user. A newly delivered private message is a wake candidate when attention is off (see "Urgent-only wakes"); the adapter does not infer semantic actionability from arbitrary prose. Workflow instructions must avoid acknowledgment-only reply loops. Queueing preserves a busy chat's current turn and lets its client schedule the follow-up.
 
-The hub counts each newly stored message that can wake its chat as one wake, and each first-page `check_inbox` as one inbox read, in its [activity log](activity.md). These counters see what the hub stores, not whether the adapter actually queued a turn. If a message is stored but the sender's outbox commit then fails, the retry finds it already stored and is not counted, so wakes can be slightly undercounted.
+With attention off, the hub counts each newly stored message that can wake its chat as one wake (with it on, see "Urgent-only wakes" below), and each first-page `check_inbox` as one inbox read, in its [activity log](activity.md). These counters see what the hub stores, not whether the adapter actually queued a turn. If a message is stored but the sender's outbox commit then fails, the retry finds it already stored and is not counted, so wakes can be slightly undercounted.
 
-`check_inbox` replies never carry [standing preferences](standing.md): the watcher's and waiter's background reads would otherwise mark them received before the chat sees them.
+`check_inbox` replies never carry [standing preferences](standing.md): the watcher's and waiter's background reads would otherwise mark them received before the chat sees them. Those reads send `attention: false`, so they never take an [attention](attention.md) offer either.
+
+## Urgent-only wakes
+
+With [attention](attention.md) on (the default), only urgent things wake a chat. This replaces "every message wakes" described above.
+
+- A tier 1 item (`blocked`, `failed`, `interrupted`) wakes the chat at once.
+- A message no longer wakes the chat by itself. It is an `info` item and waits, like every lower-tier item.
+- Waiting items are offered on the chat's next `check_inbox`, `task_update`, `action_report` or `task_claim` reply.
+- A chat with no such reply for `Relay:Attention:MaxHoldMinutes` (default 10) gets one wake, however many items and messages wait. The next such wake can come 10 minutes after its next reply.
+- Each wake happens at most once, with the same deduplication and rate limits as before.
+- The wake prompt gets one more line naming the top item's ID, kind and task, for example `PkRelay attention: 1 item waits; top a-91 blocked on task "T-12".` No note or message text is included.
+- The hub counts a new tier 1 item, and the first time it hands out an idle-hold wake, as wakes. A message is not a wake.
+
+With attention on, a message between agents can wait up to `MaxHoldMinutes` (10) before its recipient is woken, and `wake: true` on `send_message` has no effect. Send something urgent as a task blocker or failure instead, which is tier 1.
+
+**Upgrade adapters before or together with the hub.** Older adapters' background reads do not send `attention: false`, so they consume attention offers the model never sees.
+
+Set `Relay:Attention:Enabled` to `false` for the old behaviour: every message without `wake: false` wakes the chat, and messages count as wakes. A watcher talking to a hub without attention behaves the same way.
 
 ## Pause, stop and uncertain delivery
 
@@ -75,7 +93,7 @@ Claude Code has no equivalent of `codex queue` that safely adds a turn to a sess
 dotnet C:\Users\PaulC\source\repos\PkRelay\artifacts\adapter-wake\PkRelay.Adapter.dll --await-inbox C:\private\claude-await.json --timeout-minutes 120
 ```
 
-The process uses the same reconciliation as Codex wake mode: SignalR hints, the 15-second fallback, pause/cancellation checks, durable deduplication and rate limits. When a message arrives that has not already woken this route, it prints the same fixed inbox-check prompt to standard output and exits with code 0. Claude Code re-invokes the session when a background command exits, so waiting itself consumes no model turns. Exit code 2 means the optional timeout elapsed; 3 means the stop file was found. The session then reads its inbox through its normal relay tools, handles and acknowledges messages, and starts the waiter again. An unacknowledged message that already woke the session does not wake it again.
+The process uses the same reconciliation as Codex wake mode: SignalR hints, the 15-second fallback, pause/cancellation checks, durable deduplication and rate limits. When a message arrives that has not already woken this route (with attention on: when an urgent item or the idle-hold wake is due, see above), it prints the same fixed inbox-check prompt to standard output and exits with code 0. Claude Code re-invokes the session when a background command exits, so waiting itself consumes no model turns. Exit code 2 means the optional timeout elapsed; 3 means the stop file was found. The session then reads its inbox through its normal relay tools, handles and acknowledges messages, and starts the waiter again. An unacknowledged message that already woke the session does not wake it again.
 
 The configuration uses the wake schema with exactly one route. `codexPath` may be empty. Set the route's `threadId` to the Claude session's UUID; it only labels the route, since nothing is queued into a chat. Give each waiter its own `statePath` and `stopFile`: the state database is exclusively owned, so a waiter cannot share one with a running Codex watcher. The session file holds the `sessionId` and private `sessionToken` that this Claude session received from `session_open`.
 

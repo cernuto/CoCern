@@ -7,7 +7,7 @@ namespace PkRelay.Adapter;
 /// <summary>
 /// <c>check_inbox</c> with <c>waitSeconds</c>: the adapter re-reads the inbox itself until mail arrives or the wait ends, inside one tool call.
 /// A chat that is mid-turn cannot be woken, so without this it polls, and every poll is a model call that re-reads its whole context.
-/// The option is the adapter's own and never reaches the hub.
+/// The option is the adapter's own and never reaches the hub. Its polls send <c>attention: false</c>, so a waiting read never takes an offer.
 /// </summary>
 public static class InboxWait
 {
@@ -25,6 +25,10 @@ public static class InboxWait
             return await forwarder.ForwardAsync(RelayTools.CheckInbox, arguments, cancellationToken);
         var forwarded = JsonNode.Parse(arguments.GetRawText())!.AsObject();
         forwarded.Remove("waitSeconds");
+        // Most polls are discarded unseen, so none of them takes an attention offer: a waiting read carries none. The poll that returns
+        // reaches the model, so the hub closes the info items of the messages on its page (seen); an empty poll lists none.
+        forwarded["attention"] = false;
+        forwarded["seen"] = true;
         var request = JsonSerializer.SerializeToElement(forwarded);
         var duration = TimeSpan.FromSeconds(wait.TryGetInt32(out var value) ? Math.Clamp(value, 0, MaxSeconds) : 0);
         // A monotonic clock, and no read for a remainder shorter than a timer tick: the wall clock and the delay timer disagree by a

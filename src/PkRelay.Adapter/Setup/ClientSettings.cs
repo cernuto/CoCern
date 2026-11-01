@@ -109,6 +109,43 @@ internal static class ClientSettings
         return ClientPlan.Write(path, bytes, existed: true);
     }
 
+    /// <summary>
+    /// Adds the PkRelay prompt hook as a <c>UserPromptSubmit</c> command hook to a JSON hooks file (Claude Code's settings.json, Codex's
+    /// hooks.json; both use <c>{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command",...}]}]}}</c>). Every other entry is kept; a file
+    /// that already runs <c>--prompt-hook</c> is left as it was.
+    /// </summary>
+    public static ClientPlan PlanPromptHook(string path, string command)
+    {
+        const string Event = "UserPromptSubmit";
+        var original = ReadAll(path);
+        var handler = new JsonObject { ["type"] = "command", ["command"] = command, ["timeout"] = PromptHookTimeoutSeconds };
+        var group = new JsonObject { ["hooks"] = new JsonArray(handler) };
+        if (original is null) return ClientPlan.Write(path, Encoding.UTF8.GetBytes(Render(new JsonObject { ["hooks"] = new JsonObject { [Event] = new JsonArray(group) } }, "\n") + "\n"), existed: false);
+        JsonObject root;
+        try
+        {
+            var text = Strict.GetString(original, Bom(original), original.Length - Bom(original));
+            root = (text.Trim().Length == 0 ? new JsonObject() : JsonNode.Parse(text, null, new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Disallow, AllowTrailingCommas = false }) as JsonObject) ?? throw new JsonException("the top level is not an object");
+        }
+        catch (Exception exception) when (exception is JsonException or DecoderFallbackException or ArgumentException) { throw Malformed(path, exception is DecoderFallbackException ? "it is not valid UTF-8" : "it is not valid JSON"); }
+        if (root["hooks"] is { } hooksNode && hooksNode is not JsonObject) throw Malformed(path, "'hooks' is not an object");
+        var hooks = root["hooks"] as JsonObject ?? (JsonObject)(root["hooks"] = new JsonObject());
+        if (hooks[Event] is { } eventNode && eventNode is not JsonArray) throw Malformed(path, $"'hooks.{Event}' is not an array");
+        var groups = hooks[Event] as JsonArray ?? (JsonArray)(hooks[Event] = new JsonArray());
+        var present = groups.OfType<JsonObject>().SelectMany(entry => entry["hooks"] as JsonArray ?? []).OfType<JsonObject>()
+            .Any(entry => entry["command"] is JsonValue existing && existing.TryGetValue<string>(out var text) && text.Contains("--prompt-hook", StringComparison.Ordinal));
+        if (present) return ClientPlan.Unchanged(path);
+        groups.Add(group);
+        var crlf = Strict.GetString(original).Contains("\r\n");
+        var rendered = Render(root, crlf ? "\r\n" : "\n");
+        var trailing = original.Length > 0 && original[^1] == (byte)'\n' ? (crlf ? "\r\n" : "\n") : "";
+        var bytes = (Bom(original) == 3 ? new byte[] { 0xEF, 0xBB, 0xBF } : []).Concat(Encoding.UTF8.GetBytes(rendered + trailing)).ToArray();
+        return ClientPlan.Write(path, bytes, existed: true);
+    }
+
+    /// <summary>The client-side limit on one prompt hook run; the hook itself gives up on the hub much sooner (about one second).</summary>
+    internal const int PromptHookTimeoutSeconds = 5;
+
     private static string Render(JsonObject root, string eol)
     {
         var text = root.ToJsonString(Pretty).Replace("\r\n", "\n");

@@ -126,4 +126,35 @@ public static class RelayLimits
     public const int MaxAttentionTombstones = 100;
     /// <summary>Longest blocker kind an attention item records.</summary>
     public const int MaxAttentionBlockerLength = 64;
+    /// <summary>Largest offer a boundary reply carries, in UTF-8 bytes; the offer is skipped when the reply has less room left.</summary>
+    public const int MaxAttentionOfferBytes = 2_048;
+    /// <summary>Minutes an idle chat waits with lower-tier items before one wake, unless <c>Relay:Attention:MaxHoldMinutes</c> says otherwise.</summary>
+    public const int DefaultAttentionMaxHoldMinutes = 10;
+    /// <summary>Largest allowed <c>Relay:Attention:MaxHoldMinutes</c>.</summary>
+    public const int MaxAttentionMaxHoldMinutes = 1_440;
+    /// <summary>Most sessions with one role (such as manager) that a routed attention item reaches, newest first.</summary>
+    public const int MaxAttentionRouteTargets = 16;
+    /// <summary>Seconds before a lease ends, with an action in flight, when the holder gets a <c>claim_expiring</c> item.</summary>
+    public const int ClaimExpiringLeadSeconds = 60;
+    /// <summary>Most task IDs a <c>related_work</c> or <c>duplicate_warning</c> item lists after a claim.</summary>
+    public const int MaxRelatedWorkHits = 3;
+    /// <summary>
+    /// Least relevance (the negated bm25 score, title weighted 4) a look-alike task needs before a claim raises <c>related_work</c> or
+    /// <c>duplicate_warning</c> for it; every word must match as well.
+    /// </summary>
+    public const double RelatedWorkMinScore = 1.0;
+    /// <summary>Days a <c>next_work</c> item raised from a next-work offer stays open if no claim closes it.</summary>
+    public const int OfferedWorkExpiryDays = 1;
+    /// <summary>Hours a session may go without freshness or activity before it no longer receives routed (manager) attention items.</summary>
+    public const int MaxAttentionRouteIdleHours = 24;
+    /// <summary>Least minutes between a session's reports to the control directory that it is still active (made at boundary replies).</summary>
+    public const int AttentionActivityReportMinutes = 60;
+    /// <summary>Sessions whose last idle-hold wake the hub remembers for counting; past this the memory is cleared.</summary>
+    public const int MaxHoldWakeSessions = 1_024;
+    /// <summary>Seconds the prompt hook reuses its last answer.</summary>
+    public const int PromptHookCacheSeconds = 30;
+    /// <summary>The prompt hook's hub timeout, in milliseconds, unless <c>PKRELAY_HOOK_TIMEOUT_MS</c> says otherwise.</summary>
+    public const int DefaultPromptHookTimeoutMs = 1_000;
+    /// <summary>Largest allowed <c>PKRELAY_HOOK_TIMEOUT_MS</c>.</summary>
+    public const int MaxPromptHookTimeoutMs = 10_000;
 }

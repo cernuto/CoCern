@@ -44,6 +44,8 @@ public static class RelayHostBuilderExtensions
             var configuration = services.GetRequiredService<IConfiguration>();
             return new AttentionOptions
             {
+                Enabled = configuration.GetValue("Relay:Attention:Enabled", true),
+                MaxHoldMinutes = configuration.GetValue("Relay:Attention:MaxHoldMinutes", RelayLimits.DefaultAttentionMaxHoldMinutes),
                 SnoozeBoundaries = configuration.GetValue("Relay:Attention:SnoozeBoundaries", RelayLimits.DefaultAttentionSnoozeBoundaries),
                 ItemExpiryDays = configuration.GetValue("Relay:Attention:ItemExpiryDays", RelayLimits.DefaultAttentionExpiryDays)
             }.Validated();

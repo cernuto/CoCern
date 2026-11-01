@@ -190,15 +190,119 @@ public sealed class CoreSiloTests
         finally { await host.StopAsync(); }
     }
 
+    [Fact]
+    public async Task Attention_sources_reach_claimers_holders_and_managers_through_real_grains()
+    {
+        var siloPort = FreePort(); var gatewayPort = FreePort();
+        var search = new FakeSearch();
+        using var host = new HostBuilder().ConfigureLogging(log => log.ClearProviders()).UseOrleans(silo => silo
+            .UseLocalhostClustering(siloPort: siloPort, gatewayPort: gatewayPort, serviceId: "core-sources-tests", clusterId: Guid.NewGuid().ToString("N"))
+            .AddMemoryGrainStorage("relay"))
+            .ConfigureServices(services => services.AddPkRelayCore().AddSingleton(provider => new RelayApplication(provider.GetRequiredService<IGrainFactory>(), search: search))).Build();
+        await host.StartAsync();
+        try
+        {
+            var application = host.Services.GetRequiredService<RelayApplication>();
+            var factory = host.Services.GetRequiredService<IGrainFactory>();
+            var caller = new RelayCaller("alice", true, ["repo"]);
+            var hub = caller with { IsInternal = true };
+            async Task<JsonObject> Call(string tool, JsonObject args)
+            {
+                args["repositoryId"] = "repo"; if (!args.ContainsKey("requestId")) args["requestId"] = Guid.NewGuid().ToString("N");
+                var reply = await application.ExecuteAsync(caller, tool, JsonSerializer.SerializeToElement(args));
+                Assert.True(reply.Ok, tool + ": " + reply.Code + " " + reply.DataJson);
+                return JsonNode.Parse(reply.DataJson)!.AsObject();
+            }
+            async Task Dispatch(IRelayAggregateGrain grain, string workId = "") =>
+                Assert.True((await grain.ExecuteAsync(hub, Operations.Dispatch, new JsonObject { ["workId"] = workId }.ToJsonString())).Ok);
+            var manager = await Call("session_open", new() { ["role"] = "manager" });
+            var worker = await Call("session_open", new() { ["role"] = "worker" });
+            JsonObject As(JsonObject session, JsonObject args) { args["sessionId"] = session["sessionId"]!.DeepClone(); args["sessionToken"] = session["sessionToken"]!.DeepClone(); return args; }
+            JsonObject Workflow(string state)
+            {
+                var workflow = new JsonObject
+                {
+                    ["state"] = state, ["packet"] = new JsonObject { ["goal"] = "print the label", ["target"] = "t", ["authorityRef"] = "human-grant:1", ["restoration"] = "r", ["stopCondition"] = "s" },
+                    ["criteria"] = new JsonArray(new JsonObject { ["id"] = "c", ["description"] = "d", ["result"] = "not_run" }), ["blockers"] = new JsonArray()
+                };
+                if (state == "blocked") workflow["blockers"] = new JsonArray(new JsonObject { ["id"] = "b", ["kind"] = "tool_unavailable", ["summary"] = "printer offline", ["recheckCondition"] = "r" });
+                return workflow;
+            }
+            await Call("control_request", new() { ["command"] = "register_resource", ["resourceId"] = "pc", ["machineId"] = "pc" });
+            await Call("task_update", As(worker, new() { ["taskId"] = "T-1", ["expectedVersion"] = 0, ["workflow"] = Workflow("ready") }));
+
+            // After the claim reply, an all-words search finds look-alikes: an open one is a possible duplicate, a completed one related
+            // work; IDs only, never the task itself, and never a weak match.
+            search.AllWords = [new SearchHit("T-1", "task", "ready", DateTimeOffset.UtcNow, "[print]", Score: 9), new SearchHit("T-7", "task", "completed", DateTimeOffset.UtcNow, "[print]", Score: 5),
+                new SearchHit("T-8", "task", "ready", DateTimeOffset.UtcNow, "[print]", Score: 4), new SearchHit("T-9", "task", "ready", DateTimeOffset.UtcNow, "[print]", Score: RelayLimits.RelatedWorkMinScore / 2)];
+            var claim = await Call("task_claim", As(worker, new() { ["taskId"] = "T-1", ["expectedVersion"] = 1, ["resourceIds"] = new JsonArray("pc"), ["leaseSeconds"] = 30 }));
+            Assert.False(claim.ContainsKey("attention"));
+            var deadline = DateTime.UtcNow.AddSeconds(20);
+            while ((await Call("get_status", As(worker, new())))["attention"]!["actionable"]!.GetValue<int>() < 2 && DateTime.UtcNow < deadline) await Task.Delay(25);
+            Assert.Equal("print the label", search.Query);
+            var duplicate = (await Call("check_inbox", As(worker, new())))["attention"]!.AsObject();
+            Assert.Equal(("duplicate_warning", 1), (duplicate["k"]!.GetValue<string>(), duplicate["more"]!.GetValue<int>()));
+            Assert.Equal("duplicate_warning: may duplicate T-1 refs T-8", duplicate["x"]!.GetValue<string>());
+
+            // An action in flight on a lease about to end: the lock's due check raises claim_expiring to the holder.
+            await Call("action_begin", As(worker, new() { ["taskId"] = "T-1", ["expectedVersion"] = 2, ["actionId"] = "print", ["inputFingerprint"] = "f" }));
+            var printer = factory.GetGrain<ILockGrain>("pc");
+            await Dispatch(printer, "lease_warning");
+            await Dispatch(printer);
+            var status = (await Call("get_status", As(worker, new() { ["attentionDetail"] = true })))["attention"]!.AsObject();
+            Assert.Equal(3, status["actionable"]!.GetValue<int>());
+            var worked = await Call("action_report", As(worker, new() { ["taskId"] = "T-1", ["expectedVersion"] = 3, ["actionId"] = "print", ["attempt"] = 1, ["outcome"] = "started", ["attention"] = false }));
+            Assert.False(worked.ContainsKey("attention"));
+
+            // The worker blocks the task: the board routes a blocked item through the control aggregate to the manager.
+            await Call("task_update", As(worker, new() { ["taskId"] = "T-1", ["expectedVersion"] = 4, ["workflow"] = Workflow("blocked"), ["attention"] = false }));
+            await Dispatch(factory.GetGrain<ITaskBoardGrain>("repo/default"));
+            await Dispatch(factory.GetGrain<IControlGrain>(AggregateKinds.ControlKey));
+            var managed = await Call("task_update", As(manager, new() { ["taskId"] = "M-1", ["expectedVersion"] = 0 }));
+            Assert.Equal(("blocked", "T-1", "T-1 blocked: printer offline"), (managed["attention"]!["k"]!.GetValue<string>(), managed["attention"]!["t"]!.GetValue<string>(), managed["attention"]!["x"]!.GetValue<string>()));
+            // A background inbox read takes no offer, and the worker (not a manager) got no copy.
+            Assert.False((await Call("check_inbox", As(manager, new() { ["attention"] = false }))).ContainsKey("attention"));
+            Assert.Equal(3, (await Call("get_status", As(worker, new())))["attention"]!["actionable"]!.GetValue<int>());
+
+            // A next-work offer on a milestone becomes a next_work item at the caller once the reply's own offer was chosen, and the
+            // caller's own claim closes it.
+            await Call("task_update", As(manager, new() { ["taskId"] = "N-1", ["expectedVersion"] = 0, ["workflow"] = Workflow("ready"), ["attention"] = false }));
+            var offered = await Call("task_update", As(manager, new() { ["taskId"] = "M-1", ["expectedVersion"] = 1, ["includeNextWork"] = true, ["attention"] = false }));
+            Assert.Equal("N-1", offered["nextWork"]!["offer"]!["taskId"]!.GetValue<string>());
+            var managerStatus = (await Call("get_status", As(manager, new() { ["attentionDetail"] = true })))["attention"]!.AsObject();
+            Assert.Equal(2, managerStatus["actionable"]!.GetValue<int>());
+            await Call("attention_respond", As(manager, new() { ["itemId"] = managed["attention"]!["id"]!.DeepClone(), ["action"] = "dismiss" }));
+            var next = (await Call("check_inbox", As(manager, new())))["attention"]!.AsObject();
+            Assert.Equal(("next_work", "N-1"), (next["k"]!.GetValue<string>(), next["t"]!.GetValue<string>()));
+            await Call("task_claim", As(manager, new() { ["taskId"] = "N-1", ["expectedVersion"] = 1, ["attention"] = false }));
+            Assert.Equal(0, (await Call("get_status", As(manager, new())))["attention"]!["actionable"]!.GetValue<int>());
+
+            // Renewing the lease closes claim_expiring.
+            var grant = claim["grants"]![0]!;
+            await Call("claim_renew", As(worker, new() { ["resourceId"] = "pc", ["generation"] = grant["generation"]!.DeepClone(), ["leaseSeconds"] = 600 }));
+            await Dispatch(printer);
+            Assert.Equal(2, (await Call("get_status", As(worker, new())))["attention"]!["actionable"]!.GetValue<int>());
+        }
+        finally { await host.StopAsync(); }
+    }
+
     private sealed class FakeSearch : IFullTextSearch
     {
         public IReadOnlyList<SearchHit> Result { get; set; } = [];
         public Exception? Failure { get; set; }
         public CancellationToken Token { get; private set; }
+        public string? Query { get; private set; }
+        public IReadOnlyList<SearchHit> AllWords { get; set; } = [];
+
+        public Task<IReadOnlyList<SearchHit>> SearchAllWordsAsync(string repositoryId, string sessionId, string query, IReadOnlyList<string> kinds, int limit, CancellationToken ct = default)
+        {
+            Query = query;
+            return Task.FromResult(AllWords);
+        }
 
         public Task<IReadOnlyList<SearchHit>> SearchAsync(string repositoryId, string sessionId, string query, IReadOnlyList<string> kinds, int limit, string? status = null, CancellationToken ct = default)
         {
-            Token = ct;
+            Token = ct; Query = query;
             return Failure is { } failure ? Task.FromException<IReadOnlyList<SearchHit>>(failure) : Task.FromResult(Result);
         }
     }

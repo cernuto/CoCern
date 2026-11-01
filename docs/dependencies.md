@@ -27,6 +27,8 @@ When a task's workflow becomes `completed`, the `task_update` reply lists the re
 
 The list holds at most 50 IDs; `unblockedTotal` appears when there are more.
 
+Each unblocked task with a `targetSessionId` also raises a `next_work` [attention](attention.md) item to that session, unless it is the one completing. The item closes when anyone claims the task.
+
 ## Resources
 
 Add `resources` to the workflow `packet` with the resource IDs the task expects to claim (up to 16, the same limit as `task_claim`):

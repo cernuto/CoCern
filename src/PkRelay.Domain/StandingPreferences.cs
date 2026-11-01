@@ -131,6 +131,8 @@ internal static class StandingPreferences
         history.Add(entry);
         while (history.Count > RelayLimits.StandingHistoryEntries) history.RemoveAt(0);
         context.State["standing"] = next;
+        foreach (var decided in changes.Where(change => change.StartsWith("approve:", StringComparison.Ordinal) || change.StartsWith("-proposal:", StringComparison.Ordinal)))
+            AttentionSources.OnProposalDecided(context, decided[(decided.IndexOf(':') + 1)..]);
         return Ok(new { revision = updated, changed = standingChanged, lines = lines.Count, grants = grants.Count, pending = proposals.Count }, updated);
     }
 
@@ -161,8 +163,8 @@ internal static class StandingPreferences
         }
         proposals[id] = proposal;
         context.State["standing"] = standing;
-        // Seam for attention (build steps 7-8): raise a standing_proposal item to the repository's manager sessions here.
-        // Always send a revision so a late or repeated raise can never reopen a closed item.
+        AttentionSources.OnProposal(context, id, proposal["line"] is JsonObject proposed ? "line: " + Text(proposed, "text")
+            : "grant: " + Text(proposal["grant"]!.AsObject(), "scope") + " " + string.Join(",", Strings(proposal["grant"]!["targets"])));
         return Ok(new { proposalId = id, pending = true }, Number(standing, "revision"));
     }
 

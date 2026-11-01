@@ -936,6 +936,9 @@ public sealed class NodeTests : IDisposable
         Assert.Contains("m1", output);
         Assert.Contains("m2", output);
         Assert.Equal(2, output.Split("UNTRUSTED").Length - 1);
+        // The printed messages reached the chat, so the waiter reports them seen (closing their info items) with reads that take no offer.
+        Assert.All(inbox.InboxReads, read => Assert.Contains("\"attention\":false", read));
+        Assert.Contains(inbox.InboxReads, read => read.Contains("\"seenMessageIds\":[\"m1\",\"m2\"]"));
         Assert.DoesNotContain("Respect existing user authority", output);
         Assert.DoesNotContain("synthetic-token", output);
     }
@@ -1128,12 +1131,15 @@ public sealed class NodeTests : IDisposable
         public volatile string[] Messages = [];
         /// <summary>The tool and body of every acknowledgment the stub received.</summary>
         public readonly System.Collections.Concurrent.ConcurrentQueue<string> Acks = new();
+        /// <summary>The body of every inbox read the stub received.</summary>
+        public readonly System.Collections.Concurrent.ConcurrentQueue<string> InboxReads = new();
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             if (request.Headers.Authorization?.Parameter != credential) return new(HttpStatusCode.Unauthorized);
             var body = await request.Content!.ReadAsStringAsync(cancellationToken);
             using var args = JsonDocument.Parse(body);
             if (request.RequestUri!.AbsolutePath.EndsWith("/ack")) Acks.Enqueue(body);
+            if (request.RequestUri!.AbsolutePath.EndsWith("/check_inbox")) InboxReads.Enqueue(body);
             if (args.RootElement.GetProperty("sessionId").GetString() != sessionId || args.RootElement.GetProperty("sessionToken").GetString() != sessionToken) return new(HttpStatusCode.Forbidden);
             var messages = Messages;
             var data = request.RequestUri!.AbsolutePath.EndsWith("get_status")
