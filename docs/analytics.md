@@ -35,10 +35,10 @@ Reply:
 ```
 
 - `at` is when the snapshot was taken. `truncated: true` means rows were cut at `MaxRows`.
-- A reply over 8 KB is refused with `PayloadTooLarge`. Ask a narrower query.
+- A reply over 8 KB is refused with `PayloadTooLarge`. Ask a narrower query. Sizes are measured inside DuckDB, so a huge value is refused before the hub reads it.
 - Named queries read only the request's repository.
 
-Ad hoc SQL is off unless `Relay:Analytics:AllowAdHocSql` is true. Then `"name": "sql", "sql": "SELECT ..."` runs one `SELECT` over the views, on any repository. Every ad hoc query is written to the hub log, run or refused.
+Ad hoc SQL is off unless `Relay:Analytics:AllowAdHocSql` is true. Then `"name": "sql", "sql": "SELECT ..."` runs one `SELECT` over the views, on any repository. Every ad hoc query is written to the hub log, run or refused, as an escaped string.
 
 | Code | Meaning |
 | --- | --- |
@@ -76,7 +76,7 @@ The backup reads the last committed state on its own read-only connection, so th
 
 The copy is then turned into a DuckDB file. It is deleted once a newer snapshot has replaced it and no query is still using it. Old snapshots from an earlier run are deleted at startup.
 
-Queries run with file access turned off and settings locked. Ad hoc SQL must be one `SELECT`, and anything else is refused. DuckDB's `sqlite` extension is used only to copy the snapshot, never while queries run, because its `sqlite_scan` can read any SQLite file even with file access off.
+Queries run with file access turned off and settings locked. DuckDB gets 512 MB of memory and no temp folder, so a query that needs more fails instead of spilling to disk. Ad hoc SQL must be one `SELECT`, and anything else is refused. DuckDB's `sqlite` extension is used only to copy the snapshot, never while queries run, because its `sqlite_scan` can read any SQLite file even with file access off.
 
 ## Views
 

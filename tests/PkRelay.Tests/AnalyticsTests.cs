@@ -129,7 +129,7 @@ public class AnalyticsTests
             Assert.Equal(AnalyticsError.Refused, (await Assert.ThrowsAsync<AnalyticsException>(() => analytics.RunSqlAsync(sql))).Error);
 
         // A SELECT that reads a file is refused by DuckDB itself: file access is off.
-        foreach (var sql in new[] { $"SELECT * FROM read_text({live})", $"SELECT * FROM read_csv({live})", $"SELECT * FROM sqlite_scan({live}, 'grain_state')" })
+        foreach (var sql in new[] { $"SELECT * FROM read_text({live})", $"SELECT * FROM read_csv({live})", $"SELECT * FROM sqlite_scan({live}, 'grain_state')", "SELECT getenv('HOME')" })
         {
             var failed = await Assert.ThrowsAsync<AnalyticsException>(() => analytics.RunSqlAsync(sql));
             Assert.Equal(AnalyticsError.Failed, failed.Error);
@@ -168,11 +168,50 @@ public class AnalyticsTests
         Assert.Equal(["n"], exact.Columns);
         Assert.Equal(49L, exact.Rows[^1][0]);
 
+        // A trillion-row result streams: only the capped rows are read.
         var started = DateTimeOffset.UtcNow;
+        var trillion = await analytics.RunSqlAsync("SELECT range AS n FROM range(1000000000000);");
+        Assert.Equal(50, trillion.Rows.Count);
+        Assert.True(trillion.Truncated);
+        Assert.True(DateTimeOffset.UtcNow - started < TimeSpan.FromSeconds(5));
+
+        // A large value is refused by its size, measured inside DuckDB, before it is read into this process.
+        var large = await Assert.ThrowsAsync<AnalyticsException>(() => analytics.RunSqlAsync("SELECT repeat('x', 10000000) AS filler"));
+        Assert.Equal(AnalyticsError.TooLarge, large.Error);
+        var many = await Assert.ThrowsAsync<AnalyticsException>(() => analytics.RunSqlAsync("SELECT repeat('x', 1000) AS filler FROM range(40)"));
+        Assert.Equal(AnalyticsError.TooLarge, many.Error);
+        // A trailing line comment and semicolon still parse, and duplicate column names are kept apart.
+        Assert.Equal(["n", "n_1"], (await analytics.RunSqlAsync("SELECT 1 AS n, 2 AS n; -- two")).Columns);
+        Assert.Equal(1L, Single(await analytics.RunSqlAsync("SELECT 1 AS one -- trailing comment")));
+
+        started = DateTimeOffset.UtcNow;
         var timedOut = await Assert.ThrowsAsync<AnalyticsException>(() => analytics.RunSqlAsync("SELECT count(*) FROM range(1000000000000) t(a) WHERE a % 7 = 3"));
         Assert.Equal(AnalyticsError.Timeout, timedOut.Error);
         Assert.True(DateTimeOffset.UtcNow - started < TimeSpan.FromSeconds(10));
         // The interrupted connection does not poison the next query.
+        Assert.Equal(1L, Single(await analytics.RunSqlAsync("SELECT 1")));
+    }
+
+    [Fact]
+    public async Task A_query_past_the_memory_limit_fails_instead_of_spilling_to_disk()
+    {
+        var root = TempDirectory();
+        using var store = new SqliteStore(Path.Combine(root, "relay.db"));
+        var snapshot = Path.Combine(root, "analytics", "snapshot-spill.db");
+        await store.CreateAnalyticsSnapshotAsync(snapshot);
+        using var analytics = await Service(store, timeout: TimeSpan.FromSeconds(60));
+        await analytics.SwitchSnapshotAsync(snapshot);
+        Assert.Equal("", (await analytics.RunSqlAsync("SELECT current_setting('temp_directory')")).Rows[0][0]);
+        var entries = Directory.EnumerateFileSystemEntries(Directory.GetCurrentDirectory()).ToHashSet();
+
+        // A sort of 100 million rows needs more than the 512 MB limit; without a temp directory DuckDB cannot spill it.
+        var spill = await Assert.ThrowsAsync<AnalyticsException>(() => analytics.RunSqlAsync("SELECT count(*) FROM (SELECT * FROM range(100000000) t(a) ORDER BY a DESC, random())"));
+        Assert.Equal(AnalyticsError.Failed, spill.Error);
+        Assert.Contains("Out of Memory", spill.Message);
+        Assert.Equal(entries, Directory.EnumerateFileSystemEntries(Directory.GetCurrentDirectory()).ToHashSet());
+        // A 300 MB value is built inside DuckDB's own memory limit and refused by its size; it never reaches this process's heap.
+        Assert.Equal(AnalyticsError.TooLarge, (await Assert.ThrowsAsync<AnalyticsException>(() => analytics.RunSqlAsync("SELECT repeat('x', 300000000) AS filler"))).Error);
+        Assert.Equal([Path.GetFullPath(snapshot) + ".duckdb"], Directory.EnumerateFileSystemEntries(Path.Combine(root, "analytics")));
         Assert.Equal(1L, Single(await analytics.RunSqlAsync("SELECT 1")));
     }
 
@@ -295,7 +334,11 @@ public class AnalyticsTests
         var tool = new AnalyticsTool(queries, allowAdHocSql: true, onLog);
         Assert.True((await tool.RunAsync(caller, Args("sql", "SELECT 1"), CancellationToken.None)).Ok);
         Assert.Contains(onLog.Lines, line => line.Contains("SELECT 1") && line.Contains("admin"));
-        Assert.Equal(1, queries.SqlCalls);
+        // A query cannot forge log lines: newlines and control characters are escaped.
+        Assert.True((await tool.RunAsync(caller, Args("sql", "SELECT 2\n[INF] forged line\u001b[2J"), CancellationToken.None)).Ok);
+        Assert.Contains(onLog.Lines, line => line.Contains("SELECT 2\\n[INF] forged line\\u001B[2J") && !line.Contains('\n') && !line.Contains('\u001b'));
+        onLog.Lines.RemoveAt(onLog.Lines.Count - 1);
+        Assert.Equal(2, queries.SqlCalls);
         var named = await tool.RunAsync(caller, Args(NamedQueries.NoisiestTools), CancellationToken.None);
         Assert.True(named.Ok);
         Assert.Single(onLog.Lines);
@@ -432,11 +475,17 @@ public class AnalyticsTests
         return JsonDocument.Parse(reply.GetProperty("dataJson").GetString()!).RootElement.Clone();
     }
 
-    /// <summary>Takes one snapshot now through the host's snapshot service and returns its path.</summary>
+    /// <summary>
+    /// Takes one snapshot now through the host's snapshot service and returns its path. It first waits for the startup snapshot, which
+    /// could otherwise finish later and replace this one.
+    /// </summary>
     private static async Task<string> TakeSnapshot(RelayHostFixture host)
     {
         var service = host.Services.GetServices<IHostedService>().OfType<AnalyticsSnapshotService>().Single();
-        var path = await service.TakeSnapshotAsync(host.Services.GetRequiredService<AnalyticsService>(), CancellationToken.None);
+        var analytics = host.Services.GetRequiredService<AnalyticsService>();
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(30);
+        while (analytics.SnapshotAt is null && DateTimeOffset.UtcNow < deadline) await Task.Delay(50);
+        var path = await service.TakeSnapshotAsync(analytics, CancellationToken.None);
         return Assert.IsType<string>(path);
     }
 

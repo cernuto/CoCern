@@ -30,10 +30,10 @@ public sealed class AnalyticsTool(IAnalyticsQueries queries, bool allowAdHocSql,
                 var sql = Text(args, "sql");
                 if (!allowAdHocSql)
                 {
-                    logger?.LogWarning("Ad hoc analytics SQL refused (Relay:Analytics:AllowAdHocSql is off) for {Principal}: {Sql}", caller.PrincipalId, sql);
+                    logger?.LogWarning("Ad hoc analytics SQL refused (Relay:Analytics:AllowAdHocSql is off) for {Principal}: {Sql}", caller.PrincipalId, Escaped(sql));
                     return Error(AnalyticsRefused, new { message = "Ad hoc SQL is turned off on this hub; use a named query." });
                 }
-                logger?.LogInformation("Ad hoc analytics SQL by {Principal}: {Sql}", caller.PrincipalId, sql);
+                logger?.LogInformation("Ad hoc analytics SQL by {Principal}: {Sql}", caller.PrincipalId, Escaped(sql));
                 result = await queries.RunSqlAsync(sql, cancellationToken);
             }
             else
@@ -51,6 +51,7 @@ public sealed class AnalyticsTool(IAnalyticsQueries queries, bool allowAdHocSql,
                 AnalyticsError.InvalidArguments => Error(InvalidArguments, new { field = name == AnalyticsQueryNames.AdHocSql ? "sql" : "params", message = exception.Message }),
                 AnalyticsError.Refused => Error(AnalyticsRefused, new { message = exception.Message }),
                 AnalyticsError.Timeout => Error(AnalyticsTimeout, new { message = exception.Message }),
+                AnalyticsError.TooLarge => Error(PayloadTooLarge, new { message = exception.Message }),
                 _ => Error(AnalyticsFailed, new { message = exception.Message })
             };
         }
@@ -67,4 +68,7 @@ public sealed class AnalyticsTool(IAnalyticsQueries queries, bool allowAdHocSql,
             return Error(PayloadTooLarge, new { message = $"The result is {size} bytes, more than {RelayLimits.MaxAnalyticsReplyBytes}; ask a narrower query (fewer rows or columns, shorter values)." });
         return Ok(reply);
     }
+
+    /// <summary>The SQL as one JSON string literal: newlines and control characters are escaped, so a query cannot forge log lines.</summary>
+    internal static string Escaped(string sql) => JsonSerializer.Serialize(sql);
 }

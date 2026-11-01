@@ -517,6 +517,11 @@ public class HostTests
 
         foreach (var write in new[] { "CREATE TABLE copied AS SELECT 1", "DETACH relay", "SET enable_external_access = true", $"ATTACH '{host.DatabasePath}' AS live", "SELECT 1; SELECT 2" })
             Assert.Equal((HttpStatusCode.BadRequest, "AnalyticsRefused"), await AnalyticsStatus(admin, Sql(write)));
+        Assert.Equal((HttpStatusCode.BadRequest, "AnalyticsFailed"), await AnalyticsStatus(admin, Sql("SELECT getenv('HOME')")));
+        var trillion = await Analytics(admin, Sql("SELECT range AS n FROM range(1000000000000)"));
+        Assert.Equal(50, trillion.Data.GetProperty("rows").GetArrayLength());
+        Assert.True(trillion.Data.GetProperty("truncated").GetBoolean());
+        Assert.Equal((HttpStatusCode.RequestEntityTooLarge, "PayloadTooLarge"), await AnalyticsStatus(admin, Sql("SELECT repeat('x', 10000000) AS filler")));
         var fileRead = await Analytics(admin, Sql($"SELECT * FROM read_text('{host.DatabasePath}')"));
         Assert.Equal((HttpStatusCode.BadRequest, "AnalyticsFailed"), (fileRead.Status, fileRead.Code));
         Assert.Contains("disabled", fileRead.Data.GetProperty("message").GetString());

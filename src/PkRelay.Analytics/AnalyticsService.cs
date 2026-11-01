@@ -90,7 +90,7 @@ public sealed class AnalyticsService(AnalyticsOptions options) : IAnalyticsQueri
 
     /// <summary>Runs SQL without the one-SELECT check. Tests use it to show the locked settings hold even without that check.</summary>
     internal Task<AnalyticsResult> RunUncheckedAsync(string sql, CancellationToken cancellationToken = default) =>
-        RunAsync(Acquire(), sql, [], checkSelect: false, cancellationToken);
+        RunAsync(Acquire(), sql, [], checkSelect: false, cancellationToken, bounded: false);
 
     private static int Days(JsonElement parameters)
     {
@@ -119,13 +119,13 @@ public sealed class AnalyticsService(AnalyticsOptions options) : IAnalyticsQueri
     }
 
     /// <summary>Runs one query on its own connection on the thread pool, never on the caller's (Orleans) scheduler. Releases the reference.</summary>
-    private async Task<AnalyticsResult> RunAsync(Snapshot snapshot, string sql, DuckDBParameter[] parameters, bool checkSelect, CancellationToken cancellationToken)
+    private async Task<AnalyticsResult> RunAsync(Snapshot snapshot, string sql, DuckDBParameter[] parameters, bool checkSelect, CancellationToken cancellationToken, bool bounded = true)
     {
-        try { return await Task.Run(() => Execute(snapshot, sql, parameters, checkSelect, cancellationToken), CancellationToken.None); }
+        try { return await Task.Run(() => Execute(snapshot, sql, parameters, checkSelect, bounded, cancellationToken), CancellationToken.None); }
         finally { snapshot.Release(); }
     }
 
-    private AnalyticsResult Execute(Snapshot snapshot, string sql, DuckDBParameter[] parameters, bool checkSelect, CancellationToken cancellationToken)
+    private AnalyticsResult Execute(Snapshot snapshot, string sql, DuckDBParameter[] parameters, bool checkSelect, bool bounded, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         using var connection = snapshot.Connect();
@@ -133,20 +133,26 @@ public sealed class AnalyticsService(AnalyticsOptions options) : IAnalyticsQueri
         timeout.CancelAfter(_options.QueryTimeout);
         try
         {
-            if (checkSelect) RequireOneSelect(connection, sql, timeout.Token);
+            if (checkSelect) sql = RequireOneSelect(connection, sql, timeout.Token);
+            // A bounded query carries one more column, its row's size in bytes computed inside DuckDB, so a huge value is refused before
+            // it is copied into this process.
             using var command = connection.CreateCommand();
-            command.CommandText = sql;
+            command.CommandText = bounded ? Bounded(connection, sql, parameters, timeout.Token) : sql;
             command.UseStreamingMode = true;
-            foreach (var parameter in parameters) command.Parameters.Add(parameter);
+            foreach (var parameter in parameters) command.Parameters.Add(new DuckDBParameter(parameter.ParameterName, parameter.Value));
             // Cancel interrupts the running query in DuckDB.
             using var interrupt = timeout.Token.Register(() => { try { command.Cancel(); } catch (Exception) { } });
             using var reader = command.ExecuteReader();
-            var columns = Enumerable.Range(0, reader.FieldCount).Select(reader.GetName).ToArray();
+            var width = bounded ? reader.FieldCount - 1 : reader.FieldCount;
+            var columns = Enumerable.Range(0, width).Select(reader.GetName).ToArray();
             var rows = new List<IReadOnlyList<object?>>();
             var truncated = false;
+            long bytes = 0;
             while (reader.Read())
             {
                 if (rows.Count == _options.MaxRows) { truncated = true; break; }
+                if (bounded && (bytes += reader.GetInt64(width)) > RelayLimits.MaxAnalyticsReplyBytes)
+                    throw new AnalyticsException(AnalyticsError.TooLarge, $"The result is larger than {RelayLimits.MaxAnalyticsReplyBytes} bytes; ask a narrower query (fewer rows or columns, shorter values).");
                 var row = new object?[columns.Length];
                 for (var index = 0; index < row.Length; index++) row[index] = reader.IsDBNull(index) ? null : Plain(reader.GetValue(index));
                 rows.Add(row);
@@ -162,16 +168,49 @@ public sealed class AnalyticsService(AnalyticsOptions options) : IAnalyticsQueri
         catch (DuckDBException exception) { throw new AnalyticsException(AnalyticsError.Failed, FirstLine(exception.Message), exception); }
     }
 
+    private const string RowBytesColumn = "__pkrelay_row_bytes";
+
     /// <summary>
-    /// Accepts exactly one SELECT statement. DuckDB's parser decides: <c>json_serialize_sql</c> serializes SELECT statements only, so any
-    /// write, ATTACH, SET, PRAGMA or COPY is refused before it runs.
+    /// Wraps <paramref name="sql"/> so each row also reports its size: the byte length of each text value (read from DuckDB's string
+    /// header, without copying), a BLOB's length, and the text length of any other value, plus a few bytes per value for the JSON around
+    /// it. The column names and types come from a LIMIT 0 run of the same query.
     /// </summary>
-    private static void RequireOneSelect(DuckDBConnection connection, string sql, CancellationToken cancellationToken)
+    private static string Bounded(DuckDBConnection connection, string sql, DuckDBParameter[] parameters, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        // Ad hoc SQL arrives here as DuckDB printed it back (one statement, no comments); the newline still guards a named query.
+        var from = $"FROM ({sql}\n) pkrelay_q";
+        using var probe = connection.CreateCommand();
+        probe.CommandText = $"SELECT pkrelay_q.* {from} LIMIT 0";
+        foreach (var parameter in parameters) probe.Parameters.Add(new DuckDBParameter(parameter.ParameterName, parameter.Value));
+        using var interrupt = cancellationToken.Register(() => { try { probe.Cancel(); } catch (Exception) { } });
+        using var reader = probe.ExecuteReader();
+        var sizes = Enumerable.Range(0, reader.FieldCount).Select(index =>
+        {
+            var column = "pkrelay_q.\"" + reader.GetName(index).Replace("\"", "\"\"") + "\"";
+            var length = reader.GetDataTypeName(index) switch
+            {
+                "Varchar" => $"strlen({column})",
+                "Blob" => $"octet_length({column})",
+                _ => $"strlen(CAST({column} AS VARCHAR))"
+            };
+            return $"coalesce({length}, 0) + 8";
+        }).ToArray();
+        return $"SELECT pkrelay_q.*, CAST({(sizes.Length == 0 ? "0" : string.Join(" + ", sizes))} AS BIGINT) AS {RowBytesColumn} {from}";
+    }
+
+    /// <summary>
+    /// Accepts exactly one SELECT statement and returns it as DuckDB prints it back, without comments or a trailing semicolon, so it can
+    /// be wrapped. DuckDB's parser decides: <c>json_serialize_sql</c> serializes SELECT statements only, so any write, ATTACH, SET,
+    /// PRAGMA or COPY is refused before it runs.
+    /// </summary>
+    private static string RequireOneSelect(DuckDBConnection connection, string sql, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         using var check = connection.CreateCommand();
         check.CommandText = "SELECT json_serialize_sql(" + Literal(sql) + ")";
-        using var parsed = JsonDocument.Parse((string)check.ExecuteScalar()!);
+        var serialized = (string)check.ExecuteScalar()!;
+        using var parsed = JsonDocument.Parse(serialized);
         var root = parsed.RootElement;
         if (root.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.True)
         {
@@ -181,6 +220,9 @@ public sealed class AnalyticsService(AnalyticsOptions options) : IAnalyticsQueri
         }
         if (!root.TryGetProperty("statements", out var statements) || statements.GetArrayLength() != 1)
             throw new AnalyticsException(AnalyticsError.Refused, "Only one SELECT statement is allowed.");
+        using var canonical = connection.CreateCommand();
+        canonical.CommandText = "SELECT json_deserialize_sql(" + Literal(serialized) + ")";
+        return (string)canonical.ExecuteScalar()!;
     }
 
     /// <summary>A DuckDB value as a plain JSON-friendly value: bool, long, double (3 decimals), string or null.</summary>
@@ -275,6 +317,7 @@ public sealed class AnalyticsService(AnalyticsOptions options) : IAnalyticsQueri
             SET autoload_known_extensions = false;
             SET allow_community_extensions = false;
             SET memory_limit = '{RelayLimits.AnalyticsMemoryLimitMegabytes}MB';
+            SET temp_directory = '';
             SET threads = {RelayLimits.AnalyticsThreads};
             """;
 
