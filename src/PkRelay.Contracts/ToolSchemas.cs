@@ -28,6 +28,8 @@ internal static class ToolSchemas
         // Only the milestone call advertises a compact usage entry: adding it to action_report too would exceed the 20,000-character
         // forwarding budget (20,034). The hub still accepts usage on action_report, and InputSchema lists it there in full.
         if (properties.ContainsKey("usage")) properties["usage"] = new { type = "object", description = "Optional {inputTokens,outputTokens}." };
+        // The same budget leaves room only for the names of workflow dependsOn and packet.resources; InputSchema describes them in full.
+        if (properties.ContainsKey("workflow")) properties["workflow"] = WorkflowSchema(compact: true);
         return properties;
     }
 
@@ -116,10 +118,11 @@ internal static class ToolSchemas
         return new { type = "object", properties = new { inputTokens = Tokens(), outputTokens = Tokens() }, additionalProperties = false, description = "Optional tokens you used since your last report; recorded for measurement only." };
     }
 
-    private static object WorkflowSchema()
+    private static object WorkflowSchema(bool compact = false)
     {
         static object Text(int maximum, string description) => new { type = "string", minLength = 1, maxLength = maximum, description };
         static object OptionalText(int maximum, string description) => new { type = new[] { "string", "null" }, minLength = 1, maxLength = maximum, description };
+        object Identifiers(int maximum, string description) => compact ? new { } : (object)new { type = new[] { "array", "null" }, items = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxIdentifierLength }, maxItems = maximum, uniqueItems = true, description };
         return new
         {
             type = "object",
@@ -130,7 +133,7 @@ internal static class ToolSchemas
                 packet = new
                 {
                     type = "object",
-                    properties = new { goal = Text(2048, "Useful completion goal."), target = Text(2048, "Source, workspace or fixture identity."), authorityRef = Text(2048, "Reference to existing human authority; grants no permission."), restoration = Text(2048, "Restoration expectation; actual action restoration remains in action reports."), stopCondition = Text(2048, "Condition requiring the participant to stop.") },
+                    properties = new { goal = Text(2048, "Useful completion goal."), target = Text(2048, "Source, workspace or fixture identity."), authorityRef = Text(2048, "Reference to existing human authority; grants no permission."), restoration = Text(2048, "Restoration expectation; actual action restoration remains in action reports."), stopCondition = Text(2048, "Condition requiring the participant to stop."), resources = Identifiers(RelayLimits.MaxClaimResources, "Resource IDs this task expects to claim.") },
                     required = new[] { "goal", "target", "authorityRef", "restoration", "stopCondition" }
                 },
                 criteria = new
@@ -144,8 +147,9 @@ internal static class ToolSchemas
                     items = new { type = "object", properties = new { id = Text(128, "Unique blocker ID."), kind = new { type = "string", @enum = new[] { "coordinator_hold", "provider_rejection", "tool_unavailable", "resource_busy", "missing_fixture", "prerequisite", "other" } }, summary = Text(2048, "Current blocking condition."), recheckCondition = Text(2048, "Evidence needed before clearing the blocker.") }, required = new[] { "id", "kind", "summary", "recheckCondition" } }
                 },
                 targetSessionId = OptionalText(256, "Optional intended worker session ID; never its private token."),
-                priority = new { type = new[] { "integer", "null" }, minimum = -1000, maximum = 1000, description = "Higher priority is offered first, then stable task identity." },
-                recheckEvidenceRef = OptionalText(2048, "Nonempty reference required when explicitly changing blocked to ready. Existing human authority may resolve a coordinator hold; provider approval remains separate.")
+                priority = new { type = new[] { "integer", "null" }, minimum = -1000, maximum = 1000, description = "Higher is offered first; ties prefer free resources, then task ID." },
+                recheckEvidenceRef = OptionalText(2048, "Nonempty reference required when explicitly changing blocked to ready. Existing human authority may resolve a coordinator hold; provider approval remains separate."),
+                dependsOn = Identifiers(RelayLimits.MaxDependencies, "Task IDs on this board that must be completed before this task is offered.")
             },
             required = new[] { "state", "packet", "criteria", "blockers" }
         };

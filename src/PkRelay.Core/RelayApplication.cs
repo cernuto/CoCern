@@ -257,14 +257,48 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
             else if (Parse(status)["paused"]?.GetValue<bool>() == true) next = Outcome(true, Paused);
             else
             {
-                var read = args.DeepClone().AsObject(); read.Remove("requestId");
+                var read = args.DeepClone().AsObject(); read.Remove("requestId"); read.Remove("busyResources"); read["limit"] = RelayLimits.NextWorkCandidates;
                 var offered = await CallBoard(caller, Operations.NextWork, read);
-                next = offered.Ok ? JsonNode.Parse(offered.DataJson)! : Outcome(false, offered.Code);
+                var offer = offered.Ok ? Parse(offered) : null;
+                var busy = offer?["candidates"] is JsonArray candidates ? await BusyResourcesAsync(caller, args, candidates) : [];
+                if (busy.Count > 0)
+                {
+                    // Ask again so that, within equal priority, a task whose listed resources are all free is offered first.
+                    read.Remove("limit"); read["busyResources"] = JsonSerializer.SerializeToNode(busy);
+                    offered = await CallBoard(caller, Operations.NextWork, read);
+                    offer = offered.Ok ? Parse(offered) : null;
+                }
+                offer?.Remove("candidates");
+                next = offer ?? Outcome(false, offered.Code);
             }
         }
         catch (Exception) { next = Outcome(false, Unavailable); }
         var data = Parse(committed); data["nextWork"] = next;
         return Ok(data, committed.Version);
+    }
+
+    /// <summary>
+    /// The candidates' listed resources that another session holds now, in their listed spelling. At most
+    /// <see cref="RelayLimits.MaxOfferResourceLookups"/> are looked up; unknown or unchecked resources count as free. Advisory only.
+    /// </summary>
+    private async Task<List<string>> BusyResourcesAsync(RelayCaller caller, JsonObject args, JsonArray candidates)
+    {
+        try
+        {
+            var listed = candidates.SelectMany(candidate => Strings(candidate?["resources"])).Distinct(StringComparer.Ordinal).Take(RelayLimits.MaxOfferResourceLookups).ToArray();
+            if (listed.Length == 0) return [];
+            var lookup = new JsonObject { ["repositoryId"] = Text(args, "repositoryId"), ["sessionId"] = Text(args, "sessionId"), ["machineId"] = Text(args, "machineId") };
+            async Task<bool> IsBusy(string resource)
+            {
+                var resolved = await Resolve(caller, lookup, resource);
+                if (!resolved.Ok) return false;
+                var claim = await Call(AggregateKinds.Lock, Text(Parse(resolved), "resourceId"), caller, Operations.ClaimState, lookup);
+                return claim.Ok && Parse(claim)["busy"]?.GetValue<bool>() == true;
+            }
+            var busy = await Task.WhenAll(listed.Select(IsBusy));
+            return listed.Where((_, index) => busy[index]).ToList();
+        }
+        catch (Exception) { return []; }
     }
 
     /// <summary>Optional claim renewals and inbox acknowledgments riding on another call. Their outcomes never change the committed result.</summary>

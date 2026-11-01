@@ -241,11 +241,18 @@ internal static class TaskBoardAggregate
             ObjectAt(task, "facts")["notes"] = notes.DeepClone();
         }
         if (args["message"] is JsonObject message) AddMessage(context, task, message);
+        IReadOnlyList<string> unblocked = [];
         if (args.ContainsKey("workflow"))
         {
             if (context.Operation != RelayTools.TaskUpdate || args["workflow"] is not JsonObject workflow) return Error(InvalidWorkflow);
             if (TaskWorkflow.Validate(workflow, task["workflow"] as JsonObject, TaskActions.HasUnresolved(task)) is { } invalid) return Error(invalid);
+            if (Text(workflow, "state") == "ready" && TaskWorkflow.RequiresResources(context.State) && workflow["packet"]?["resources"] is not JsonArray) return Error(InvalidWorkflow, new { required = "packet.resources" });
+            var tasks = ObjectAt(context.State, "tasks");
+            if (TaskWorkflow.CheckDependencies(tasks, Text(task, "taskId"), workflow) is { } dependency) return Error(dependency);
+            var completing = Text(workflow, "state") == "completed" && (task["workflow"] is not JsonObject prior || Text(prior, "state") != "completed");
             task["workflow"] = workflow.DeepClone();
+            // Seam for attention (build steps 7-8): raise a next_work item to each unblocked task's targetSessionId here.
+            if (completing) unblocked = TaskWorkflow.Unblocked(tasks, Text(task, "taskId"));
         }
         task["updatedAt"] = context.Now.ToString("O"); task["updatedBy"] = context.Caller.PrincipalId; task["version"] = ++version;
         // An acknowledgment, not the task: echoing the whole task (up to its 256-message conversation) put it into the updater's context again
@@ -256,6 +263,8 @@ internal static class TaskBoardAggregate
         foreach (var id in reports.Select(report => Text(report!.AsObject(), "actionId")).Where(id => id.Length > 0).Distinct(StringComparer.Ordinal))
             if (ObjectAt(task, "actions")[id] is JsonNode action) reported[id] = action.DeepClone();
         if (reported.Count > 0) acknowledgment["actions"] = reported;
+        if (unblocked.Count > 0) acknowledgment["unblocked"] = new JsonArray(unblocked.Take(RelayLimits.MaxPageSize).Select(id => (JsonNode)id).ToArray());
+        if (unblocked.Count > RelayLimits.MaxPageSize) acknowledgment["unblockedTotal"] = unblocked.Count;
         return Ok(acknowledgment, version);
     }
 

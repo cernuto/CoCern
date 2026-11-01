@@ -73,6 +73,8 @@ public static class RelayErrorCodes
     public const string WorkflowRecheckRequired = "WorkflowRecheckRequired";
     public const string WorkflowIncomplete = "WorkflowIncomplete";
     public const string WorkflowNotReady = "WorkflowNotReady";
+    public const string DependencyCycle = "DependencyCycle";
+    public const string DependencyUnknown = "DependencyUnknown";
 
     // Infrastructure
     public const string StorageFailure = "StorageFailure";

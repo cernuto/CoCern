@@ -64,6 +64,8 @@ public static class Operations
     public const string Dispatch = "__dispatch";
     public const string TaskUnclaim = "__task_unclaim";
     public const string NextWork = "__next_work";
+    /// <summary>Read-only: whether another session holds a resource now, so a next-work offer can prefer tasks whose resources are free.</summary>
+    public const string ClaimState = "__claim_state";
     /// <summary>Read-only: which of the given sessions in the repository the caller's principal opened.</summary>
     public const string SessionOwners = "__session_owners";
 
