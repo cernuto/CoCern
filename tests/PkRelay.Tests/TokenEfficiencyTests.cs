@@ -148,8 +148,9 @@ public sealed class TokenEfficiencyTests
         Assert.True(reply.Ok);
         Assert.Equal(1, reply.Data!.Value.GetProperty("total").GetInt32());
         Assert.Equal(3, hub.Calls);
-        // The adapter-only option never reaches the hub.
+        // The adapter-only option never reaches the hub, and the polls, mostly discarded unseen, take no attention offer.
         Assert.DoesNotContain("waitSeconds", hub.LastBody);
+        Assert.Contains("\"attention\":false", hub.LastBody);
     }
 
     [Fact]

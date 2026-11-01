@@ -238,6 +238,13 @@ public sealed class AdapterTests
         Content = new StringContent(JsonSerializer.Serialize(new { ok = true, code = "ok", dataJson = "{\"sessionId\":\"s-hook\",\"attention\":" + attention + "}", version = 0 }), Encoding.UTF8, "application/json")
     };
 
+    /// <summary>Hook input that never arrives, like a client that keeps standard input open.</summary>
+    private sealed class NeverEnding : TextReader
+    {
+        public override async ValueTask<int> ReadAsync(Memory<char> buffer, CancellationToken cancellationToken = default) { await Task.Delay(Timeout.Infinite, cancellationToken); return 0; }
+        public override Task<int> ReadAsync(char[] buffer, int index, int count) => ReadAsync(buffer.AsMemory(index, count)).AsTask();
+    }
+
     private sealed class HookClock : TimeProvider
     {
         public DateTimeOffset Now = new(2026, 11, 1, 9, 0, 0, TimeSpan.Zero);
@@ -308,6 +315,14 @@ public sealed class AdapterTests
             Assert.Equal("", await PkRelay.Adapter.Node.PromptHook.LineAsync("not json", folder, TimeSpan.FromSeconds(5), older));
             // Errors are not cached, so the next message asks again.
             Assert.False(Directory.Exists(Path.Combine(folder, "hooks")) && Directory.EnumerateFiles(Path.Combine(folder, "hooks")).Any());
+            // Input that never ends shares the one deadline with the hub call: nothing is printed, within about the timeout.
+            using (var silent = new StringWriter())
+            {
+                var started = System.Diagnostics.Stopwatch.StartNew();
+                Assert.Equal(0, await PkRelay.Adapter.Node.PromptHook.RunAsync(new NeverEnding(), silent, folder, older, null));
+                Assert.Equal("", silent.ToString());
+                Assert.True(started.Elapsed < TimeSpan.FromSeconds(5));
+            }
             Assert.Equal(TimeSpan.FromMilliseconds(1000), PkRelay.Adapter.Node.PromptHook.Timeout(null));
             Assert.Equal(TimeSpan.FromMilliseconds(250), PkRelay.Adapter.Node.PromptHook.Timeout("250"));
             Assert.Equal(TimeSpan.FromMilliseconds(1000), PkRelay.Adapter.Node.PromptHook.Timeout("999999"));

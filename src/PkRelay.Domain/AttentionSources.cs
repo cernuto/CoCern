@@ -74,7 +74,10 @@ internal static class AttentionSources
         else if (was == "completed" && now != "completed") ToManagers(context, Operations.AttentionClose, Kinds(Item(AttentionKinds.ReviewReady), AttentionKinds.ReviewReady));
     }
 
-    /// <summary>A new claim closes the task's <c>next_work</c> item at its target, whoever claimed it.</summary>
+    /// <summary>
+    /// A new claim closes the task's <c>next_work</c> item at its target, whoever claimed it. (The hub closes the claimer's own item, from a
+    /// next-work offer, after the claim.)
+    /// </summary>
     public static void OnClaim(AggregateContext context, JsonObject task)
     {
         if (task["workflow"] is not JsonObject workflow || Text(workflow, "targetSessionId") is not { Length: > 0 } target) return;
@@ -93,40 +96,65 @@ internal static class AttentionSources
         ToManagers(context, Operations.AttentionClose, new JsonObject { ["subject"] = proposalId, ["kinds"] = new JsonArray(AttentionKinds.StandingProposal), ["revision"] = 2 });
 
     /// <summary>
-    /// A lock's due check: while its holder has an action in flight and the lease has not ended, the holder gets one <c>claim_expiring</c>
-    /// item per lease. <paramref name="resourceId"/> is the lock's key.
+    /// A lock's due check, run twice per lease while its holder has an action in flight. Shortly before the lease ends the holder gets one
+    /// <c>claim_expiring</c> item. When the lease has ended with the action still unresolved, that item closes and an <c>interrupted</c>
+    /// item goes to the holder and to the managers. <paramref name="resourceId"/> is the lock's key.
     /// </summary>
     public static void OnLeaseCheck(AggregateContext context, string resourceId)
     {
         var state = context.State;
         var holder = Text(state, "holder");
         var lease = Text(state, "leaseUntil");
-        if (holder.Length == 0 || Date(state, "leaseUntil") <= context.Now || Text(state, "warnedLease") == lease) return;
+        if (holder.Length == 0 || lease.Length == 0) return;
         var action = (state["blockers"] as JsonObject ?? new JsonObject()).FirstOrDefault(x => x.Value is JsonObject blocker && Text(blocker, "sessionId") == holder);
         if (action.Key is null) return;
-        var (boardId, taskId) = ActionTask(action.Key);
-        state["warnedLease"] = lease;
-        Emit(context, holder, Operations.AttentionRaise, new JsonObject
+        var (boardId, taskId, actionId) = ActionTask(action.Key);
+        JsonObject Item(string kind, string note) => new()
         {
-            ["kind"] = AttentionKinds.ClaimExpiring, ["taskId"] = taskId, ["boardId"] = boardId, ["subject"] = resourceId, ["priority"] = AttentionWeights.High,
-            ["note"] = "claim on " + resourceId + " ends " + lease + " with an action in flight; renew it", ["revision"] = NextLockRevision(state)
-        });
+            ["kind"] = kind, ["taskId"] = taskId, ["boardId"] = boardId, ["subject"] = resourceId, ["priority"] = AttentionWeights.High, ["note"] = note, ["revision"] = NextLockRevision(state)
+        };
+        if (Date(state, "leaseUntil") > context.Now)
+        {
+            if (Text(state, "warnedLease") == lease) return;
+            state["warnedLease"] = lease;
+            Emit(context, holder, Operations.AttentionRaise, Item(AttentionKinds.ClaimExpiring, "claim on " + resourceId + " ends " + lease + " with an action in flight; renew it"));
+            return;
+        }
+        if (Text(state, "interruptedLease") == lease) return;
+        state["interruptedLease"] = lease;
+        if (state.ContainsKey("warnedLease"))
+            Emit(context, holder, Operations.AttentionClose, new JsonObject { ["subject"] = resourceId, ["kinds"] = new JsonArray(AttentionKinds.ClaimExpiring), ["revision"] = NextLockRevision(state) });
+        state["warnedLease"] = lease;
+        var note = "claim on " + resourceId + " ended with action " + actionId + " unresolved; report its outcome";
+        Emit(context, holder, Operations.AttentionRaise, Item(AttentionKinds.Interrupted, note));
+        ToManagers(context, Operations.AttentionRaise, Item(AttentionKinds.Interrupted, note));
     }
 
-    /// <summary>A renewed or released lease, or a resolved action, closes the holder's <c>claim_expiring</c> item, if one was raised.</summary>
+    /// <summary>
+    /// A renewed or released lease, or a resolved action, closes the holder's <c>claim_expiring</c> item, if one was raised; a resolved
+    /// action also closes the <c>interrupted</c> items at the holder and the managers.
+    /// </summary>
     public static void OnLeaseSettled(AggregateContext context, string holder, string resourceId)
     {
         var state = context.State;
-        if (!state.ContainsKey("warnedLease") || holder.Length == 0) return;
-        state.Remove("warnedLease");
-        Emit(context, holder, Operations.AttentionClose, new JsonObject { ["subject"] = resourceId, ["kinds"] = new JsonArray(AttentionKinds.ClaimExpiring), ["revision"] = NextLockRevision(state) });
+        var interrupted = state.Remove("interruptedLease");
+        if (!state.Remove("warnedLease") || holder.Length == 0) return;
+        Emit(context, holder, Operations.AttentionClose, new JsonObject { ["subject"] = resourceId, ["kinds"] = new JsonArray(AttentionKinds.ClaimExpiring, AttentionKinds.Interrupted), ["revision"] = NextLockRevision(state) });
+        if (interrupted)
+            ToManagers(context, Operations.AttentionClose, new JsonObject { ["subject"] = resourceId, ["kinds"] = new JsonArray(AttentionKinds.Interrupted), ["revision"] = NextLockRevision(state) });
     }
 
-    /// <summary>When a lock with an action in flight should check its lease, or null when there is nothing to warn about.</summary>
+    /// <summary>
+    /// When a lock with an action in flight should run its next lease check: shortly before the lease ends, then when it ends; null when
+    /// both are done for this lease or nothing is in flight.
+    /// </summary>
     public static DateTimeOffset? LeaseWarningAt(JsonObject lockState)
     {
         if (Text(lockState, "holder").Length == 0 || lockState["blockers"] is not JsonObject { Count: > 0 } || !DateTimeOffset.TryParse(Text(lockState, "leaseUntil"), out var lease)) return null;
-        return Text(lockState, "warnedLease") == Text(lockState, "leaseUntil") ? null : lease.AddSeconds(-RelayLimits.ClaimExpiringLeadSeconds);
+        var current = Text(lockState, "leaseUntil");
+        return Text(lockState, "warnedLease") != current ? lease.AddSeconds(-RelayLimits.ClaimExpiringLeadSeconds)
+            : Text(lockState, "interruptedLease") != current ? lease
+            : null;
     }
 
     private static long NextLockRevision(JsonObject state)
@@ -137,10 +165,11 @@ internal static class AttentionSources
     }
 
     /// <summary>The board and task of an action key (<see cref="CoordinationStateMachine.ActionKey"/>): repository/board/task/action/attempt, each escaped.</summary>
-    private static (string BoardId, string TaskId) ActionTask(string actionKey)
+    private static (string BoardId, string TaskId, string ActionId) ActionTask(string actionKey)
     {
         var parts = actionKey.Split('/');
-        return parts.Length >= 3 ? (Uri.UnescapeDataString(parts[1]), Uri.UnescapeDataString(parts[2])) : ("default", "");
+        return parts.Length >= 4 ? (Uri.UnescapeDataString(parts[1]), Uri.UnescapeDataString(parts[2]), Uri.UnescapeDataString(parts[3]))
+            : parts.Length >= 3 ? (Uri.UnescapeDataString(parts[1]), Uri.UnescapeDataString(parts[2]), "") : ("default", "", actionKey);
     }
 
     /// <summary>A provider rejection ranks first and a coordinator hold last, so the item takes the most urgent blocker's kind.</summary>

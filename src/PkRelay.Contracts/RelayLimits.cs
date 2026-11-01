@@ -138,6 +138,17 @@ public static class RelayLimits
     public const int ClaimExpiringLeadSeconds = 60;
     /// <summary>Most task IDs a <c>related_work</c> or <c>duplicate_warning</c> item lists after a claim.</summary>
     public const int MaxRelatedWorkHits = 3;
+    /// <summary>
+    /// Least relevance (the negated bm25 score, title weighted 4) a look-alike task needs before a claim raises <c>related_work</c> or
+    /// <c>duplicate_warning</c> for it; every word must match as well.
+    /// </summary>
+    public const double RelatedWorkMinScore = 1.0;
+    /// <summary>Days a <c>next_work</c> item raised from a next-work offer stays open if no claim closes it.</summary>
+    public const int OfferedWorkExpiryDays = 1;
+    /// <summary>Hours a session may go without freshness or activity before it no longer receives routed (manager) attention items.</summary>
+    public const int MaxAttentionRouteIdleHours = 24;
+    /// <summary>Least minutes between a session's reports to the control directory that it is still active (made at boundary replies).</summary>
+    public const int AttentionActivityReportMinutes = 60;
     /// <summary>Seconds the prompt hook reuses its last answer.</summary>
     public const int PromptHookCacheSeconds = 30;
     /// <summary>The prompt hook's hub timeout, in milliseconds, unless <c>PKRELAY_HOOK_TIMEOUT_MS</c> says otherwise.</summary>

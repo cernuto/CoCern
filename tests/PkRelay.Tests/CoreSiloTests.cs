@@ -231,13 +231,18 @@ public sealed class CoreSiloTests
             await Call("control_request", new() { ["command"] = "register_resource", ["resourceId"] = "pc", ["machineId"] = "pc" });
             await Call("task_update", As(worker, new() { ["taskId"] = "T-1", ["expectedVersion"] = 0, ["workflow"] = Workflow("ready") }));
 
-            // A claim searches for look-alikes: an open one is a possible duplicate, a completed one related work; IDs only, never itself.
-            search.Result = [new SearchHit("T-1", "task", "ready", DateTimeOffset.UtcNow, "[print]"), new SearchHit("T-7", "task", "completed", DateTimeOffset.UtcNow, "[print]"), new SearchHit("T-8", "task", "ready", DateTimeOffset.UtcNow, "[print]")];
+            // After the claim reply, an all-words search finds look-alikes: an open one is a possible duplicate, a completed one related
+            // work; IDs only, never the task itself, and never a weak match.
+            search.AllWords = [new SearchHit("T-1", "task", "ready", DateTimeOffset.UtcNow, "[print]", Score: 9), new SearchHit("T-7", "task", "completed", DateTimeOffset.UtcNow, "[print]", Score: 5),
+                new SearchHit("T-8", "task", "ready", DateTimeOffset.UtcNow, "[print]", Score: 4), new SearchHit("T-9", "task", "ready", DateTimeOffset.UtcNow, "[print]", Score: RelayLimits.RelatedWorkMinScore / 2)];
             var claim = await Call("task_claim", As(worker, new() { ["taskId"] = "T-1", ["expectedVersion"] = 1, ["resourceIds"] = new JsonArray("pc"), ["leaseSeconds"] = 30 }));
-            var duplicate = claim["attention"]!.AsObject();
+            Assert.False(claim.ContainsKey("attention"));
+            var deadline = DateTime.UtcNow.AddSeconds(20);
+            while ((await Call("get_status", As(worker, new())))["attention"]!["actionable"]!.GetValue<int>() < 2 && DateTime.UtcNow < deadline) await Task.Delay(25);
+            Assert.Equal("print the label", search.Query);
+            var duplicate = (await Call("check_inbox", As(worker, new())))["attention"]!.AsObject();
             Assert.Equal(("duplicate_warning", 1), (duplicate["k"]!.GetValue<string>(), duplicate["more"]!.GetValue<int>()));
             Assert.Equal("duplicate_warning: may duplicate T-1 refs T-8", duplicate["x"]!.GetValue<string>());
-            Assert.Equal("print the label", search.Query);
 
             // An action in flight on a lease about to end: the lock's due check raises claim_expiring to the holder.
             await Call("action_begin", As(worker, new() { ["taskId"] = "T-1", ["expectedVersion"] = 2, ["actionId"] = "print", ["inputFingerprint"] = "f" }));
@@ -255,9 +260,22 @@ public sealed class CoreSiloTests
             await Dispatch(factory.GetGrain<IControlGrain>(AggregateKinds.ControlKey));
             var managed = await Call("task_update", As(manager, new() { ["taskId"] = "M-1", ["expectedVersion"] = 0 }));
             Assert.Equal(("blocked", "T-1", "T-1 blocked: printer offline"), (managed["attention"]!["k"]!.GetValue<string>(), managed["attention"]!["t"]!.GetValue<string>(), managed["attention"]!["x"]!.GetValue<string>()));
-            // The worker that caused it gets no copy, and check_inbox carries no offer.
-            Assert.False((await Call("check_inbox", As(manager, new()))).ContainsKey("attention"));
+            // A background inbox read takes no offer, and the worker (not a manager) got no copy.
+            Assert.False((await Call("check_inbox", As(manager, new() { ["attention"] = false }))).ContainsKey("attention"));
             Assert.Equal(3, (await Call("get_status", As(worker, new())))["attention"]!["actionable"]!.GetValue<int>());
+
+            // A next-work offer on a milestone becomes a next_work item at the caller once the reply's own offer was chosen, and the
+            // caller's own claim closes it.
+            await Call("task_update", As(manager, new() { ["taskId"] = "N-1", ["expectedVersion"] = 0, ["workflow"] = Workflow("ready"), ["attention"] = false }));
+            var offered = await Call("task_update", As(manager, new() { ["taskId"] = "M-1", ["expectedVersion"] = 1, ["includeNextWork"] = true, ["attention"] = false }));
+            Assert.Equal("N-1", offered["nextWork"]!["offer"]!["taskId"]!.GetValue<string>());
+            var managerStatus = (await Call("get_status", As(manager, new() { ["attentionDetail"] = true })))["attention"]!.AsObject();
+            Assert.Equal(2, managerStatus["actionable"]!.GetValue<int>());
+            await Call("attention_respond", As(manager, new() { ["itemId"] = managed["attention"]!["id"]!.DeepClone(), ["action"] = "dismiss" }));
+            var next = (await Call("check_inbox", As(manager, new())))["attention"]!.AsObject();
+            Assert.Equal(("next_work", "N-1"), (next["k"]!.GetValue<string>(), next["t"]!.GetValue<string>()));
+            await Call("task_claim", As(manager, new() { ["taskId"] = "N-1", ["expectedVersion"] = 1, ["attention"] = false }));
+            Assert.Equal(0, (await Call("get_status", As(manager, new())))["attention"]!["actionable"]!.GetValue<int>());
 
             // Renewing the lease closes claim_expiring.
             var grant = claim["grants"]![0]!;
@@ -274,6 +292,13 @@ public sealed class CoreSiloTests
         public Exception? Failure { get; set; }
         public CancellationToken Token { get; private set; }
         public string? Query { get; private set; }
+        public IReadOnlyList<SearchHit> AllWords { get; set; } = [];
+
+        public Task<IReadOnlyList<SearchHit>> SearchAllWordsAsync(string repositoryId, string sessionId, string query, IReadOnlyList<string> kinds, int limit, CancellationToken ct = default)
+        {
+            Query = query;
+            return Task.FromResult(AllWords);
+        }
 
         public Task<IReadOnlyList<SearchHit>> SearchAsync(string repositoryId, string sessionId, string query, IReadOnlyList<string> kinds, int limit, string? status = null, CancellationToken ct = default)
         {

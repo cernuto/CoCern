@@ -52,7 +52,8 @@ public static class ClaudeWaiter
     /// <summary>The chat's unacknowledged messages as one compact block, or null when the inbox cannot be read.</summary>
     private static async Task<string?> ReadInboxAsync(string nodeFolder, string claudeSessionId, HttpMessageHandler? handler, CancellationToken cancellationToken)
     {
-        var reply = await CallAsSessionAsync(nodeFolder, claudeSessionId, handler, PkRelay.Contracts.RelayTools.CheckInbox, [], cancellationToken);
+        // The printed inbox shows messages only, so this read takes no attention offer; the attention line names the waiting item instead.
+        var reply = await CallAsSessionAsync(nodeFolder, claudeSessionId, handler, PkRelay.Contracts.RelayTools.CheckInbox, new() { ["attention"] = false }, cancellationToken);
         return reply is { Ok: true, Data: { } data } && FindHandle(Path.GetFullPath(nodeFolder), Normalize(claudeSessionId)) is { } handle ? FormatInbox(data, handle.RepositoryId) : null;
     }
 

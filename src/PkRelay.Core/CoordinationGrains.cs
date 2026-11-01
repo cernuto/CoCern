@@ -79,6 +79,9 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
             // A raised item takes the hub's configured lifetime unless its source set one.
             if (effect.Operation == Operations.AttentionRaise && !payload.ContainsKey("expiryDays") && !payload.ContainsKey("expiresAt") && attention is not null)
                 payload["expiryDays"] = attention.ItemExpiryDays;
+            // With attention on, a message is an info item: it waits for a boundary or the idle-hold wake instead of waking its chat.
+            if (effect.Operation == Operations.Deliver && effect.TargetKind == AggregateKinds.Session && attention is not { Enabled: false })
+                payload["attentionExpiryDays"] = attention?.ItemExpiryDays ?? RelayLimits.DefaultAttentionExpiryDays;
             RelayReply result;
             try
             {
@@ -101,7 +104,8 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
             }
             candidate.Effects.RemoveAll(x => x.Id == effect.Id);
             if (!await CommitAsync(candidate)) return Replies.Error(RelayErrorCodes.StorageFailure);
-            if (effect.TargetKind == AggregateKinds.Session && effect.Operation == Operations.Deliver) RecordWake(effect.TargetKey, payload, result);
+            // A message wakes its chat only with attention off; with it on, only top-tier items (and the idle hold) wake.
+            if (effect.TargetKind == AggregateKinds.Session && effect.Operation == Operations.Deliver && attention is { Enabled: false }) RecordWake(effect.TargetKey, payload, result);
             // Only a new top-tier attention item may wake its chat, so only that one counts as a wake and sends a hint.
             var urgent = effect.TargetKind == AggregateKinds.Session && effect.Operation == Operations.AttentionRaise && result.Ok && UrgentRaise(payload, result);
             if (urgent) RecordWake(effect.TargetKey, payload, Replies.Ok(new { delivered = true }));

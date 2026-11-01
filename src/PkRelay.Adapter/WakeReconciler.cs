@@ -22,6 +22,9 @@ public sealed class WakeReconciler(WakeConfiguration configuration, WakeState st
         if (state.IsUncertain(key)) return "uncertain";
         // The attention item that may wake the chat now (top tier, or one held past the hub's idle limit), and a line naming the top item.
         string? attentionWake = null, attentionLine = null;
+        // A hub with attention on answers with an attention block. Then only its wake candidate wakes the chat: a message is an info
+        // item that waits for a reply or the idle-hold wake. A hub without one (attention off, or older) keeps the message wakes.
+        var urgentOnly = false;
         try
         {
             if (!await Permitted(readAttention: true)) return "control-blocked";
@@ -45,7 +48,7 @@ public sealed class WakeReconciler(WakeConfiguration configuration, WakeState st
                     if (item.ValueKind != JsonValueKind.Object || !item.TryGetProperty("messageId", out var id) || id.ValueKind != JsonValueKind.String ||
                         id.GetString() is not { Length: > 0 and <= 256 } messageId || !ids.Add(messageId) ||
                         !item.TryGetProperty("repositoryId", out var repo) || repo.GetString() != route.RepositoryId) return "invalid-inbox";
-                    if (!item.TryGetProperty("wake", out var wake) || wake.ValueKind != JsonValueKind.False) wakeable.Add(messageId);
+                    if (!urgentOnly && (!item.TryGetProperty("wake", out var wake) || wake.ValueKind != JsonValueKind.False)) wakeable.Add(messageId);
                 }
                 if (next.ValueKind == JsonValueKind.Null)
                 {
@@ -76,12 +79,13 @@ public sealed class WakeReconciler(WakeConfiguration configuration, WakeState st
         }
         catch (Exception exception) when (exception is JsonException or InvalidOperationException or FormatException) { return "invalid-inbox"; }
 
-        JsonElement Arguments(int? cursor = null) => JsonSerializer.SerializeToElement(new { repositoryId = route.RepositoryId, boardId = route.BoardId, sessionId = session.SessionId, sessionToken = session.SessionToken, cursor = cursor ?? 0, limit = 50 });
+        // This read is the watcher's, never the model's, so it must not take an attention offer.
+        JsonElement Arguments(int? cursor = null) => JsonSerializer.SerializeToElement(new { repositoryId = route.RepositoryId, boardId = route.BoardId, sessionId = session.SessionId, sessionToken = session.SessionToken, cursor = cursor ?? 0, limit = 50, attention = false });
         async Task<bool> Permitted(bool readAttention = false)
         {
             var arguments = readAttention ? JsonSerializer.SerializeToElement(new { repositoryId = route.RepositoryId, boardId = route.BoardId, sessionId = session.SessionId, sessionToken = session.SessionToken, attentionDetail = true }) : Arguments();
             var status = await forwarder.ForwardAsync("get_status", arguments, cancellationToken);
-            if (readAttention && status.Ok && status.Data is { ValueKind: JsonValueKind.Object } detail) (attentionWake, attentionLine) = Attention(detail);
+            if (readAttention && status.Ok && status.Data is { ValueKind: JsonValueKind.Object } detail) (urgentOnly, attentionWake, attentionLine) = Attention(detail);
             if (!status.Ok || status.Data is not { ValueKind: JsonValueKind.Object } data ||
                 !data.TryGetProperty("sessionId", out var identity) || identity.GetString() != session.SessionId ||
                 !data.TryGetProperty("control", out var control) || control.ValueKind != JsonValueKind.Object ||
@@ -101,15 +105,18 @@ public sealed class WakeReconciler(WakeConfiguration configuration, WakeState st
     internal const string AttentionLinePrefix = "PkRelay attention:";
 
     /// <summary>
-    /// The wake candidate and prompt line from a <c>get_status</c> reply's <c>attention</c> block. Only hub-made identifiers and known kinds
-    /// are used; the task ID is quoted. Anything unexpected gives no attention wake.
+    /// Whether the hub has attention on, and the wake candidate and prompt line from a <c>get_status</c> reply's <c>attention</c> block.
+    /// Only hub-made identifiers (an item ID, or an idle-hold ID) and known kinds are used; the task ID is quoted. Anything unexpected gives
+    /// no attention wake.
     /// </summary>
-    internal static (string? Wake, string? Line) Attention(JsonElement status)
+    internal static (bool Enabled, string? Wake, string? Line) Attention(JsonElement status)
     {
-        if (!status.TryGetProperty("attention", out var attention) || attention.ValueKind != JsonValueKind.Object) return (null, null);
-        static bool ItemId(string? id) => id is { Length: > 2 and <= 24 } && id.StartsWith("a-", StringComparison.Ordinal) && id[2..].All(char.IsAsciiDigit);
-        var wake = attention.TryGetProperty("wake", out var candidate) && candidate.ValueKind == JsonValueKind.String && ItemId(candidate.GetString()) ? candidate.GetString() : null;
-        if (wake is null) return (null, null);
+        if (!status.TryGetProperty("attention", out var attention) || attention.ValueKind != JsonValueKind.Object) return (false, null, null);
+        static bool Digits(string text, int from) => text.Length > from && text.Length <= from + 20 && text[from..].All(char.IsAsciiDigit);
+        static bool ItemId(string? id) => id is not null && id.StartsWith("a-", StringComparison.Ordinal) && Digits(id, 2);
+        static bool WakeId(string? id) => ItemId(id) || id is not null && id.StartsWith(PkRelay.Contracts.AttentionWeights.HoldWakePrefix, StringComparison.Ordinal) && Digits(id, PkRelay.Contracts.AttentionWeights.HoldWakePrefix.Length);
+        var wake = attention.TryGetProperty("wake", out var candidate) && candidate.ValueKind == JsonValueKind.String && WakeId(candidate.GetString()) ? candidate.GetString() : null;
+        if (wake is null) return (true, null, null);
         var count = attention.TryGetProperty("actionable", out var actionable) && actionable.TryGetInt32(out var n) && n > 0 ? n : 1;
         var line = new System.Text.StringBuilder(AttentionLinePrefix).Append(' ').Append(count).Append(count == 1 ? " item waits" : " items wait");
         if (attention.TryGetProperty("top", out var top) && top.ValueKind == JsonValueKind.Object && top.TryGetProperty("id", out var topId) && topId.ValueKind == JsonValueKind.String && ItemId(topId.GetString()) &&
@@ -118,8 +125,8 @@ public sealed class WakeReconciler(WakeConfiguration configuration, WakeState st
             line.Append("; top ").Append(topId.GetString()).Append(' ').Append(kind.GetString());
             if (top.TryGetProperty("t", out var task) && task.ValueKind == JsonValueKind.String && task.GetString() is { Length: > 0 and <= 256 } taskId) line.Append(" on task ").Append(JsonSerializer.Serialize(taskId));
         }
-        line.Append(". Your next task_update, action_report or task_claim reply offers it; answer with attention_respond.");
-        return (wake, line.ToString());
+        line.Append(". Your next check_inbox, task_update, action_report or task_claim reply offers it; answer with attention_respond.");
+        return (true, wake, line.ToString());
     }
 
     private static string Prompt(WakeRoute route, string batch) =>

@@ -20,8 +20,9 @@ public interface IDueWorkSource
 /// <summary>
 /// One search result: the ID to open with <c>task_get</c>, <c>context_get</c> or <c>check_inbox</c>, its kind, status and date, and a
 /// short snippet with matches in brackets. <see cref="BoardId"/> is set for a task or note on a board other than <c>default</c>.
+/// <see cref="Score"/> is the relevance (the negated bm25 score; higher is better), or 0 when the source gives none.
 /// </summary>
-public sealed record SearchHit(string DocId, string Kind, string Status, DateTimeOffset UpdatedAt, string Snippet, string? BoardId = null);
+public sealed record SearchHit(string DocId, string Kind, string Status, DateTimeOffset UpdatedAt, string Snippet, string? BoardId = null, double Score = 0);
 
 /// <summary>Port implemented by storage: full-text search over committed state, scoped to one repository and one session's inbox.</summary>
 public interface IFullTextSearch
@@ -32,6 +33,13 @@ public interface IFullTextSearch
     /// </summary>
     Task<IReadOnlyList<SearchHit>> SearchAsync(string repositoryId, string sessionId, string query, IReadOnlyList<string> kinds, int limit,
         string? status = null, CancellationToken ct = default);
+
+    /// <summary>
+    /// Like <see cref="SearchAsync"/>, but only documents that contain every word of <paramref name="query"/>, with their scores. A source
+    /// without scores returns its ordinary hits with score 0, which a caller asking for a minimum score then ignores.
+    /// </summary>
+    Task<IReadOnlyList<SearchHit>> SearchAllWordsAsync(string repositoryId, string sessionId, string query, IReadOnlyList<string> kinds, int limit, CancellationToken ct = default) =>
+        SearchAsync(repositoryId, sessionId, query, kinds, limit, null, ct);
 }
 
 /// <summary>

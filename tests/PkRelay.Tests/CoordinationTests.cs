@@ -774,23 +774,29 @@ public sealed class CoordinationTests
     public void Control_routes_attention_to_the_repositorys_managers_by_role()
     {
         var control = new StateEnvelope<CoordinationDocument>();
-        string Open(string role, string repository = "repo")
+        string Open(string role, string repository = "repo", int daysAgo = 0)
         {
             var args = new JsonObject { ["requestId"] = Guid.NewGuid().ToString("N"), ["repositoryId"] = repository, ["role"] = role };
-            return Data(CoordinationStateMachine.Apply(control, "control", "hub", new("alice", true, ["repo", "other"], true), "session_open", args, Now))["sessionId"]!.GetValue<string>();
+            return Data(CoordinationStateMachine.Apply(control, "control", "hub", new("alice", true, ["repo", "other"], true), "session_open", args, Now.AddDays(-daysAgo)))["sessionId"]!.GetValue<string>();
         }
         var manager = Open("Manager");
         var cause = Open("manager");
         Open("worker");
         Open("manager", "other");
+        // A manager chat neither fresh nor active for over a day (a closed chat) is skipped, unless it reported activity since.
+        Open("manager", daysAgo: 2);
+        var active = Open("manager", daysAgo: 3);
+        Assert.True(Call(control, "control", "__register", new() { ["sessionId"] = active, ["activeAt"] = Now.AddHours(-1).ToString("O") }).Ok);
         var before = control.Effects.Count;
         var routed = Call(control, "control", "__attention_route", new()
         {
             ["role"] = "manager", ["operation"] = "__attention_raise", ["exceptSessionId"] = cause,
             ["item"] = new JsonObject { ["kind"] = "blocked", ["taskId"] = "T-1", ["revision"] = 3 }
         });
-        Assert.Equal(1, Data(routed)["routed"]!.GetValue<int>());
-        var effect = Assert.Single(control.Effects.Skip(before));
+        Assert.Equal(2, Data(routed)["routed"]!.GetValue<int>());
+        var effects = control.Effects.Skip(before).ToArray();
+        Assert.Equal([manager, active], effects.Select(item => item.TargetKey));
+        var effect = effects.Single(item => item.TargetKey == manager);
         Assert.Equal(("session", manager, "__attention_raise"), (effect.TargetKind, effect.TargetKey, effect.Operation));
         Assert.Equal(("blocked", "repo"), (JsonNode.Parse(effect.PayloadJson)!["kind"]!.GetValue<string>(), JsonNode.Parse(effect.PayloadJson)!["repositoryId"]!.GetValue<string>()));
         // Only raises and closes are routed.
@@ -820,10 +826,10 @@ public sealed class CoordinationTests
         var raise = JsonNode.Parse(Assert.Single(resource.Effects).PayloadJson)!.AsObject();
         Assert.Equal(("worker", "__attention_raise"), (resource.Effects[0].TargetKey, resource.Effects[0].Operation));
         Assert.Equal(("claim_expiring", "T-9", "ops", "printer", "high"), (raise["kind"]!.GetValue<string>(), raise["taskId"]!.GetValue<string>(), raise["boardId"]!.GetValue<string>(), raise["subject"]!.GetValue<string>(), raise["priority"]!.GetValue<string>()));
-        // One item per lease: a second check raises nothing, and nothing more is scheduled for this lease.
+        // One item per lease: a second check before the end raises nothing; the next check is due when the lease ends.
         Assert.True(Lock("__lease_check", new(), seconds: 260).Ok);
         Assert.Single(resource.Effects);
-        Assert.DoesNotContain(resource.DueWork, work => work.Kind == "lease_warning");
+        Assert.Equal(Now.AddSeconds(300), Assert.Single(resource.DueWork, work => work.Kind == "lease_warning").DueAt);
 
         // Renewing closes it with a newer revision and schedules a check for the new lease.
         Assert.True(Lock("claim_renew", new() { ["sessionId"] = "worker", ["requestId"] = "renew", ["generation"] = 1, ["leaseSeconds"] = 300 }, seconds: 270).Ok);
@@ -834,6 +840,57 @@ public sealed class CoordinationTests
         // A renewal with no warning raised closes nothing.
         Assert.True(Lock("claim_renew", new() { ["sessionId"] = "worker", ["requestId"] = "renew-2", ["generation"] = 1, ["leaseSeconds"] = 300 }, seconds: 280).Ok);
         Assert.Equal(2, resource.Effects.Count);
+    }
+
+    [Fact]
+    public void A_lease_that_ends_with_an_action_unresolved_closes_claim_expiring_and_raises_interrupted()
+    {
+        var resource = new StateEnvelope<CoordinationDocument>();
+        RelayReply Lock(string op, JsonObject args, int seconds = 0)
+        {
+            args["repositoryId"] = "repo";
+            var reply = CoordinationStateMachine.Apply(resource, "lock", "printer", Caller, op, args, Now.AddSeconds(seconds));
+            CoordinationStateMachine.ScheduleLeases(resource);
+            return reply;
+        }
+        List<(string Target, string Operation, JsonObject Item)> Effects(int from) => resource.Effects.Skip(from).Select(effect =>
+        {
+            var payload = JsonNode.Parse(effect.PayloadJson)!.AsObject();
+            return effect.Operation == "__attention_route" ? ("role:" + payload["role"]!.GetValue<string>(), payload["operation"]!.GetValue<string>(), payload["item"]!.AsObject()) : (effect.TargetKey, effect.Operation, payload);
+        }).ToList();
+        Assert.True(Lock("claim_acquire", new() { ["sessionId"] = "worker", ["requestId"] = "acquire", ["leaseSeconds"] = 300 }).Ok);
+        var key = CoordinationStateMachine.ActionKey(new JsonObject { ["repositoryId"] = "repo", ["boardId"] = "ops", ["taskId"] = "T-9" }, "deploy", 1);
+        Assert.True(Lock("__block", new() { ["sessionId"] = "worker", ["actionId"] = "deploy", ["actionKey"] = key }).Ok);
+        Assert.True(Lock("__lease_check", new(), seconds: 250).Ok);
+        var warned = Assert.Single(Effects(0));
+        Assert.Equal("claim_expiring", warned.Item["kind"]!.GetValue<string>());
+
+        // The lease ends with the action still unresolved: claim_expiring closes, and interrupted goes to the holder and the managers.
+        Assert.True(Lock("__lease_check", new(), seconds: 301).Ok);
+        var ended = Effects(1);
+        Assert.Equal(3, ended.Count);
+        Assert.Equal(("worker", "__attention_close", "claim_expiring"), (ended[0].Target, ended[0].Operation, ended[0].Item["kinds"]![0]!.GetValue<string>()));
+        foreach (var (target, item) in new[] { ("worker", ended[1].Item), ("role:manager", ended[2].Item) })
+        {
+            Assert.Equal(target, ended.Single(effect => effect.Item == item).Target);
+            Assert.Equal(("interrupted", "T-9", "ops", "printer"), (item["kind"]!.GetValue<string>(), item["taskId"]!.GetValue<string>(), item["boardId"]!.GetValue<string>(), item["subject"]!.GetValue<string>()));
+            Assert.Contains("deploy unresolved", item["note"]!.GetValue<string>());
+        }
+        // Every effect has its own, rising revision; nothing more is due for this lease, and a repeated check raises nothing.
+        var revisions = Effects(0).Select(effect => effect.Item["revision"]!.GetValue<long>()).ToArray();
+        Assert.Equal(revisions.Order(), revisions);
+        Assert.Equal(revisions.Length, revisions.Distinct().Count());
+        Assert.DoesNotContain(resource.DueWork, work => work.Kind == "lease_warning");
+        Assert.True(Lock("__lease_check", new(), seconds: 400).Ok);
+        Assert.Equal(4, resource.Effects.Count);
+
+        // Reporting the action resolved closes interrupted at the holder and the managers.
+        Assert.True(Lock("__unblock", new() { ["sessionId"] = "worker", ["actionId"] = "deploy", ["actionKey"] = key }, seconds: 500).Ok);
+        var resolved = Effects(4);
+        Assert.Equal(("worker", "__attention_close"), (resolved[0].Target, resolved[0].Operation));
+        Assert.Contains("interrupted", resolved[0].Item["kinds"]!.AsArray().Select(x => x!.GetValue<string>()));
+        Assert.Equal(("role:manager", "__attention_close", "interrupted"), (resolved[1].Target, resolved[1].Operation, resolved[1].Item["kinds"]![0]!.GetValue<string>()));
+        Assert.True(resolved.All(effect => effect.Item["revision"]!.GetValue<long>() > revisions.Max()));
     }
 
     public class TestGrainFactory : DispatchProxy

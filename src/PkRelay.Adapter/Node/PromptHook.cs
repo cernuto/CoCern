@@ -24,10 +24,13 @@ public static class PromptHook
     {
         try
         {
+            // One deadline covers reading the input and the hub call together.
             var timeout = Timeout(Environment.GetEnvironmentVariable("PKRELAY_HOOK_TIMEOUT_MS"));
-            var read = ReadInputAsync(input);
-            var text = await read.WaitAsync(timeout);
-            var line = await LineAsync(text, nodeFolder, timeout, handler, clock);
+            var started = System.Diagnostics.Stopwatch.StartNew();
+            var text = await ReadInputAsync(input).WaitAsync(timeout);
+            var remaining = timeout - started.Elapsed;
+            if (remaining <= TimeSpan.Zero) return 0;
+            var line = await LineAsync(text, nodeFolder, remaining, handler, clock);
             if (line.Length > 0) await output.WriteLineAsync(line);
         }
         catch (Exception) { /* A hook must never fail the human's message. */ }

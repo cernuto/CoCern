@@ -71,6 +71,9 @@ public static class AttentionWeights
     /// <summary>The tier used for ranking: an item that blocks another session's claimed task ranks one tier higher.</summary>
     public static int Tier(string kind, string? blocker = null, bool blocking = false) => Math.Max(TopTier, BaseTier(kind, blocker) - (blocking ? 1 : 0));
 
+    /// <summary>The wake ID of an idle period: this prefix plus the ticks of the boundary that began it (0 before any boundary).</summary>
+    public const string HoldWakePrefix = "hold:";
+
     /// <summary>Only the top tier may wake a chat; every other item waits for a reply the agent was already getting.</summary>
     public static bool Wakes(int tier) => tier == TopTier;
 

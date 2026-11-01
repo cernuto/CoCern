@@ -44,7 +44,7 @@ The dashboard's **Standing** page (`/dashboard/standing`) shows the same, read-o
 
 - `session_open` returns `standing` when the board has any: `revision`, `lines` (ID and text), active `grants`, and `settings`.
 - The session remembers the revision it received. Later `task_update`, `action_report` and `task_claim` replies carry `standing` only when the board's revision is newer.
-- `check_inbox` never carries it, because background inbox reads are not seen by the model.
+- `check_inbox` never carries it, because background inbox reads are not seen by the model. (Attention offers do ride `check_inbox`: those reads opt out with `attention: false`.)
 - If a reply would be too large, it carries only `{"revision": N, "detailFetchRequired": true}`, and the full text comes with a later reply.
 - Standing counts as received when the reply carrying it is sent. If that reply is lost, the chat gets the text again only at the next revision; it can read it any time with `task_get`.
 - Expired grants are left out of what chats receive. Expiry does not change the revision, so a chat is not told when a grant lapses; each grant carries its `expiresAt`.

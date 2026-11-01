@@ -15,12 +15,38 @@ namespace PkRelay.Domain;
 internal static class SessionAttention
 {
     /// <summary>Adds an item, or refreshes the open one with the same key. An older source revision than one already seen is ignored.</summary>
-    public static RelayReply Raise(AggregateContext context)
+    public static RelayReply Raise(AggregateContext context) => Add(context.State, context.Args, context.Now);
+
+    /// <summary>
+    /// A wakeable inbox message is an <c>info</c> item (subject = the message ID), so like any lower-tier item it waits for a boundary
+    /// reply or the idle-hold wake. Its text stays in the inbox; the offer only points to it.
+    /// </summary>
+    public static void AddMessage(JsonObject state, JsonObject message, int expiryDays, DateTimeOffset now)
     {
-        var state = context.State;
+        var item = new JsonObject
+        {
+            ["kind"] = AttentionKinds.Info, ["subject"] = Text(message, "messageId"), ["expiryDays"] = expiryDays,
+            ["note"] = Text(message, "taskId") is { Length: > 0 } task ? "task " + task + " changed; read it with check_inbox" : "unread message; read it with check_inbox"
+        };
+        if (Text(message, "boardId") is { Length: > 0 } board) item["boardId"] = board;
+        Add(state, item, now);
+    }
+
+    /// <summary>Closes the <c>info</c> items of messages that were read or acknowledged.</summary>
+    public static void CloseMessages(JsonObject state, IEnumerable<string> messageIds, DateTimeOffset now)
+    {
+        if (state["attention"] is not JsonObject items) return;
+        var ids = messageIds.ToHashSet(StringComparer.Ordinal);
+        foreach (var item in AttentionScheduler.Items(items).Where(item => item.Kind == AttentionKinds.Info && ids.Contains(item.Subject)).ToArray())
+        {
+            Tombstone(state, item.Key, items[item.Id]!.AsObject(), now);
+            items.Remove(item.Id);
+        }
+    }
+
+    private static RelayReply Add(JsonObject state, JsonObject args, DateTimeOffset now)
+    {
         if (!state.ContainsKey("principalId")) return Error(SessionUnknown);
-        var args = context.Args;
-        var now = context.Now;
         var kind = Text(args, "kind");
         if (!AttentionKinds.All.Contains(kind)) return Error(InvalidArguments, new { field = "kind" });
         var (taskId, boardId, subject) = (Optional(args, "taskId"), Optional(args, "boardId") is { Length: > 0 } board ? board : "default", Optional(args, "subject"));
@@ -103,6 +129,15 @@ internal static class SessionAttention
         RemoveExpired(items, now);
         // An idle chat is one with no boundary for a while; see Status.
         state["attentionBoundaryAt"] = now.ToString("O");
+        // The control directory learns, at most hourly, that this chat is still active, so routed manager items keep reaching it.
+        if (now - (DateTimeOffset.TryParse(Text(state, "activeReportedAt"), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var reported) ? reported : DateTimeOffset.MinValue) >= TimeSpan.FromMinutes(RelayLimits.AttentionActivityReportMinutes)
+            && Text(state, "sessionId") is { Length: > 0 } self)
+        {
+            state["activeReportedAt"] = now.ToString("O");
+            context.Emit(AggregateKinds.Control, AggregateKinds.ControlKey, Operations.Register, new JsonObject { ["repositoryId"] = context.Repository, ["sessionId"] = self, ["activeAt"] = now.ToString("O") });
+        }
+        // Messages a model-visible check_inbox reply lists were seen, so their info items close before anything is picked.
+        if (args["seenMessageIds"] is JsonArray seen) CloseMessages(state, Strings(seen), now);
         var boundaries = SnoozeBoundaries(args);
         foreach (var item in items.Select(x => x.Value).OfType<JsonObject>())
             if (item["shownAt"] is JsonValue)
@@ -135,8 +170,9 @@ internal static class SessionAttention
     /// <summary>
     /// Read-only, for <c>get_status</c>: the count of actionable items (never snoozed or expired ones). With <paramref name="detail"/>
     /// it also gives the top item (ID, kind, task), the count of top-tier items, and <c>wake</c>: the item that may wake the chat now.
-    /// That is the newest top-tier item, or else, when the chat has had no boundary for <c>maxHoldMinutes</c>, the oldest item that has
-    /// waited that long, so an idle chat gets one wake. The adapter wakes at most once per item ID.
+    /// That is the newest top-tier item's ID, or else, when an item has waited <c>maxHoldMinutes</c> since the chat's last boundary,
+    /// <c>hold:&lt;ticks of that boundary&gt;</c>: one ID per idle period, so however many items wait, an idle chat gets one wake until
+    /// its next boundary. The adapter wakes at most once per ID.
     /// </summary>
     public static JsonObject Status(JsonObject state, JsonObject args, DateTimeOffset now, bool detail)
     {
@@ -156,9 +192,9 @@ internal static class SessionAttention
         var hold = TimeSpan.FromMinutes(Math.Clamp(Number(args, "maxHoldMinutes", RelayLimits.DefaultAttentionMaxHoldMinutes), 1, RelayLimits.MaxAttentionMaxHoldMinutes));
         var boundary = OptionalDate(state, "attentionBoundaryAt");
         DateTimeOffset Waiting(AttentionItem item) => boundary is { } at && at > item.CreatedAt ? at : item.CreatedAt;
-        var wake = urgent.OrderByDescending(item => item.CreatedAt).ThenByDescending(item => item.Id, StringComparer.Ordinal).FirstOrDefault()
-            ?? eligible.Where(item => now - Waiting(item) >= hold).OrderBy(item => item.CreatedAt).ThenBy(item => item.Id, StringComparer.Ordinal).FirstOrDefault();
-        if (wake is not null) status["wake"] = wake.Id;
+        var wake = urgent.OrderByDescending(item => item.CreatedAt).ThenByDescending(item => item.Id, StringComparer.Ordinal).FirstOrDefault()?.Id
+            ?? (eligible.Any(item => now - Waiting(item) >= hold) ? AttentionWeights.HoldWakePrefix + (boundary?.UtcTicks ?? 0).ToString(CultureInfo.InvariantCulture) : null);
+        if (wake is not null) status["wake"] = wake;
         return status;
     }
 

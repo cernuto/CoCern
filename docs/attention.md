@@ -6,7 +6,7 @@ Attention is on by default. Set `Relay:Attention:Enabled` to `false` to turn it 
 
 ## Where offers appear
 
-A successful `task_update`, `action_report` or `task_claim` reply carries at most one offer:
+A successful `check_inbox`, `task_update`, `action_report` or `task_claim` reply carries at most one offer:
 
 ```json
 "attention": { "id": "a-91", "k": "blocked", "t": "T-12", "x": "T-12 blocked: waiting on schema review", "more": 3 }
@@ -15,9 +15,11 @@ A successful `task_update`, `action_report` or `task_claim` reply carries at mos
 `k` is the kind, `t` the task, `b` the board when not `default`, `x` at most 200 characters of text, and `more` how many other items could be offered now.
 
 - Pass `"attention": false` on one of these calls to get no offer, for example in the middle of careful work.
-- `check_inbox` never carries an offer. The adapter's background inbox reads would mark it shown before the model saw it.
+- The adapter's background inbox reads (wake watchers, the Claude waiter, and `check_inbox` with `waitSeconds`) send `attention: false`, so they never use up an offer the model does not see. An older adapter does not; update it.
+- A `check_inbox` reply closes the info items of the messages it lists, since the model now sees them.
 - `get_status` shows only the count: `"attention": { "actionable": 2 }`. Snoozed and expired items are not counted.
 - An offer is counted as seen only when it is attached to a reply. If a reply has no room left, no offer is made.
+- An offer on a reply that is lost on the way counts as `later` at your next reply, like an offer you did not answer.
 
 ## Answer an offer
 
@@ -45,14 +47,18 @@ A successful `task_update`, `action_report` or `task_claim` reply carries at mos
 | Board | `review_ready` (the task completed) | managers | the task leaves `completed` |
 | Board | `next_work` (a dependency completed) | the unblocked task's `targetSessionId` | anyone claims that task |
 | Board | `standing_proposal` | managers | an administrator approves or rejects it |
-| Lock | `claim_expiring` (lease ends within 60 seconds, action in flight) | the holder | renew, release, or the action resolves |
+| Lock | `claim_expiring` (lease ends within 60 seconds, action in flight) | the holder | renew, release, the lease ends, or the action resolves |
+| Lock | `interrupted` (the lease ended with the action unresolved) | the holder and managers | the action is reported resolved |
 | Claim | `duplicate_warning` (open look-alike tasks), `related_work` (completed ones), IDs only | the claimer | the claimed task completes |
+| Next-work offer | `next_work` for the task a `task_update` reply's `nextWork` offered | the caller | the caller claims it, or after a day |
+| Inbox | `info` for each message that may wake its chat | the recipient | `check_inbox` shows it, or `ack` |
 
 - A manager is a session opened with `role: "manager"` (any case). Give that role at `session_open`.
 - The session that caused a change gets no copy of its own manager-bound item.
+- A session neither fresh nor active (no offer-carrying reply) for 24 hours, such as a closed chat, gets no manager items.
 - Each raise and close commits with the change that caused it, through the source's outbox.
-- Look-alikes come from `search` on the task's title or goal, so they need search turned on.
-- The `nextWork` field on `task_update` is unchanged. `next_work` items cover tasks unblocked for someone else.
+- Look-alikes come from `search` on the task's title or goal, so they need search turned on. A task must contain every word and match well, so one shared word is not enough. The search runs after the claim reply, so the items appear from the next reply on.
+- The `nextWork` field on `task_update` is unchanged.
 
 ## How items are ranked
 
@@ -71,7 +77,7 @@ A successful `task_update`, `action_report` or `task_claim` reply carries at mos
 ## Wakes
 
 - Only a tier 1 item wakes a chat at once. See [wake.md](wake.md).
-- Other items wait for a reply. A chat with no offer-carrying reply for 10 minutes gets one wake for its oldest waiting item.
+- Everything else, messages included, waits for a reply. A chat with no offer-carrying reply for 10 minutes gets one wake, however many items wait. The next one can come 10 minutes after its next reply.
 - Each item wakes a chat at most once.
 
 ## Items
@@ -87,7 +93,7 @@ A successful `task_update`, `action_report` or `task_claim` reply carries at mos
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| `Relay:Attention:Enabled` | true | Offers on replies, and storing and routing items. |
+| `Relay:Attention:Enabled` | true | Offers on replies, storing and routing items, and urgent-only wakes. `false` restores the old wakes: every message wakes. |
 | `Relay:Attention:SnoozeBoundaries` | 3 | Replies a `later` item stays hidden when no time is given (1 to 50). |
 | `Relay:Attention:MaxHoldMinutes` | 10 | Minutes an idle chat waits before one wake for a lower-tier item (1 to 1440). |
 | `Relay:Attention:ItemExpiryDays` | 7 | Days before an item nobody closed disappears (1 to 90). |

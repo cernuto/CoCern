@@ -59,7 +59,7 @@ internal static class ControlAggregate
     {
         var id = Required(context.Args, "sessionId");
         if (ObjectAt(context.State, "sessions")[id] is not JsonObject session || Text(session, "repositoryId") != context.Repository) return Error(SessionDenied);
-        foreach (var property in new[] { "binding", "bindingVersion", "observedAt", "freshUntil", "availability", "machineId", "label", "hubIncarnation" })
+        foreach (var property in new[] { "binding", "bindingVersion", "observedAt", "freshUntil", "availability", "machineId", "label", "hubIncarnation", "activeAt" })
             if (context.Args.ContainsKey(property)) session[property] = context.Args[property]?.DeepClone();
         return Ok(new { registered = true });
     }
@@ -102,7 +102,8 @@ internal static class ControlAggregate
 
     /// <summary>
     /// Passes one attention raise or close to every session in the repository whose role (from <c>session_open</c>, ignoring case) matches,
-    /// except the session that caused it; at most <see cref="RelayLimits.MaxAttentionRouteTargets"/>, most recently seen first.
+    /// except the session that caused it and sessions neither fresh nor active (a boundary reply, reported hourly as <c>activeAt</c>) for
+    /// more than <see cref="RelayLimits.MaxAttentionRouteIdleHours"/> (closed chats); at most <see cref="RelayLimits.MaxAttentionRouteTargets"/>, most recently seen first.
     /// </summary>
     private static RelayReply RouteAttention(AggregateContext context)
     {
@@ -112,7 +113,8 @@ internal static class ControlAggregate
         var role = Required(args, "role");
         var except = Text(args, "exceptSessionId");
         var targets = ObjectAt(context.State, "sessions").Select(x => x.Value).OfType<JsonObject>()
-            .Where(session => Text(session, "repositoryId") == context.Repository && string.Equals(Text(session, "role"), role, StringComparison.OrdinalIgnoreCase) && Text(session, "sessionId") != except)
+            .Where(session => Text(session, "repositoryId") == context.Repository && string.Equals(Text(session, "role"), role, StringComparison.OrdinalIgnoreCase) && Text(session, "sessionId") != except
+                && Max(Date(session, "freshUntil"), Date(session, "activeAt")) > context.Now.AddHours(-RelayLimits.MaxAttentionRouteIdleHours))
             .OrderByDescending(session => Date(session, "observedAt")).Take(RelayLimits.MaxAttentionRouteTargets).Select(session => Text(session, "sessionId")).ToArray();
         foreach (var target in targets)
         {
@@ -121,6 +123,8 @@ internal static class ControlAggregate
         }
         return Ok(new { routed = targets.Length });
     }
+
+    private static DateTimeOffset Max(DateTimeOffset first, DateTimeOffset second) => first > second ? first : second;
 
     /// <summary>The given session IDs that the caller's principal opened in this repository. Read-only; tokens and other principals are never returned.</summary>
     private static RelayReply OwnedSessions(AggregateContext context)

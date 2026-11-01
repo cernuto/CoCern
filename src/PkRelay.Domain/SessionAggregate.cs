@@ -63,9 +63,15 @@ internal static class SessionAggregate
                 // The acknowledged set is bounded like explicit acknowledgments; once full, older messages are simply kept.
                 if (ObjectAt(state, "acked").Count >= RelayLimits.MaxRecords) break;
                 inbox.Remove(old); ObjectAt(state, "acked")[old] = true; superseded++;
+                SessionAttention.CloseMessages(state, [old], context.Now);
             }
         if (inbox.Count >= RelayLimits.MaxRecords) return Error(CapacityExceeded);
-        inbox[id] = context.Args.DeepClone();
+        // With attention on, the dispatcher passes the item lifetime: a message that may wake its chat is then an info item.
+        var message = context.Args.DeepClone().AsObject();
+        var infoDays = message["attentionExpiryDays"] is JsonValue days && days.TryGetValue<int>(out var lifetime) ? lifetime : 0;
+        message.Remove("attentionExpiryDays");
+        inbox[id] = message;
+        if (infoDays > 0 && !(message["wake"] is JsonValue wake && wake.TryGetValue<bool>(out var wakes) && !wakes)) SessionAttention.AddMessage(state, message, infoDays, context.Now);
         return Ok(new { delivered = true, superseded });
     }
 
@@ -119,7 +125,7 @@ internal static class SessionAggregate
         state["availability"] = Text(args, "availability", "unknown");
         state["hubIncarnation"] = Text(args, "hubIncarnation");
         var registration = state.DeepClone().AsObject();
-        foreach (var secretOrPrivate in new[] { "sessionToken", "requests", "inbox", "acked", "attention", "attentionClosed", "attentionRecent", "attentionSeq", "attentionBoundaryAt" }) registration.Remove(secretOrPrivate);
+        foreach (var secretOrPrivate in new[] { "sessionToken", "requests", "inbox", "acked", "attention", "attentionClosed", "attentionRecent", "attentionSeq", "attentionBoundaryAt", "activeReportedAt" }) registration.Remove(secretOrPrivate);
         context.Emit(AggregateKinds.Control, AggregateKinds.ControlKey, Operations.Register, registration);
         return Ok(new { bindingVersion = current + 1 }, current + 1);
     }
@@ -135,6 +141,7 @@ internal static class SessionAggregate
             if (ObjectAt(context.State, "inbox").Remove(id)) acknowledged++;
             ObjectAt(context.State, "acked")[id] = true;
         }
+        SessionAttention.CloseMessages(context.State, Strings(ids), context.Now);
         return Ok(new { acknowledged });
     }
 
