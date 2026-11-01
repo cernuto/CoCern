@@ -58,7 +58,11 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         // The attention opt-out and the adapter's status detail are read here and never reach an aggregate.
         var offerWanted = args["attention"] is not JsonValue optOut || optOut.GetValue<bool>();
         var statusDetail = args["attentionDetail"] is JsonValue detail && detail.GetValue<bool>();
-        args.Remove("attention"); args.Remove("attentionDetail"); args.Remove("attentionStatus"); args.Remove("maxHoldMinutes");
+        // An adapter reader whose reply reaches the model without an offer (a waiting read, the waiter's printed inbox) reports what it
+        // showed: seen (the returned page) or seenMessageIds (the messages it printed), so their info items close.
+        var pageSeen = args["seen"] is JsonValue seenFlag && seenFlag.GetValue<bool>();
+        var seenIds = args["seenMessageIds"] is JsonArray seenList ? Strings(seenList).ToArray() : [];
+        args.Remove("attention"); args.Remove("attentionDetail"); args.Remove("attentionStatus"); args.Remove("maxHoldMinutes"); args.Remove("seen"); args.Remove("seenMessageIds");
         args["hubIncarnation"] = incarnation;
         var trusted = caller with { IsInternal = true };
         try
@@ -85,6 +89,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
             if (result.Ok && tool == RelayTools.StandingPut) CacheStanding(BoardKey(args), 0, result.Version, null);
             if (result.Ok && session is not null && CarriesStanding(tool)) result = await WithStandingAsync(trusted, args, session, result);
             if (result.Ok && session is not null && offerWanted && attentionOptions.Enabled && IsBoundary(tool)) result = await WithAttentionAsync(trusted, args, tool, result);
+            else if (result.Ok && session is not null && attentionOptions.Enabled && tool == RelayTools.CheckInbox && (pageSeen || seenIds.Length > 0)) await MarkSeenAsync(trusted, args, result, pageSeen, seenIds);
             // The next-work offer this reply carries becomes a next_work item too, raised after the reply's own attention offer was chosen.
             if (result.Ok && tool == RelayTools.TaskUpdate && attentionOptions.Enabled) await RaiseOfferedWorkAsync(trusted, args, result);
             // The claimer's own next_work item for the task (from a next-work offer) closes with the claim.
@@ -338,7 +343,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
     {
         var sessionId = Text(args, "sessionId");
         if (activity is null || holdWakes.TryGetValue(sessionId, out var last) && last == wake) return;
-        if (holdWakes.Count >= RelayLimits.StandingCacheBoards) holdWakes.Clear();
+        if (holdWakes.Count >= RelayLimits.MaxHoldWakeSessions) holdWakes.Clear();
         holdWakes[sessionId] = wake;
         try { activity.Record(new ActivityEvent { Timestamp = DateTimeOffset.UtcNow, Kind = ActivityEvent.Wake, RepositoryId = Text(args, "repositoryId"), SessionId = Bounded(sessionId), Ok = true, Code = "Ok" }); }
         catch (Exception) { /* Telemetry never affects the call. */ }
@@ -378,6 +383,23 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
             return Ok(data, committed.Version);
         }
         catch (Exception) { return committed; }
+    }
+
+    /// <summary>Closes the info items of messages an adapter reader showed the model without an offer. Advisory: the read stands either way.</summary>
+    private async Task MarkSeenAsync(RelayCaller caller, JsonObject args, RelayReply read, bool pageSeen, string[] seenIds)
+    {
+        try
+        {
+            var ids = seenIds.ToList();
+            if (pageSeen && Parse(read)["items"] is JsonArray page) ids.AddRange(page.OfType<JsonObject>().Select(message => Text(message, "messageId")).Where(id => id.Length > 0));
+            if (ids.Count == 0) return;
+            await CallSession(caller, Operations.AttentionSeen, new JsonObject
+            {
+                ["repositoryId"] = Text(args, "repositoryId"), ["sessionId"] = Text(args, "sessionId"), ["sessionToken"] = Text(args, "sessionToken"),
+                ["messageIds"] = new JsonArray(ids.Distinct(StringComparer.Ordinal).Take(RelayLimits.MaxAcknowledgedMessages + RelayLimits.MaxPageSize).Select(id => (JsonNode)id).ToArray())
+            });
+        }
+        catch (Exception) { /* The read stands either way. */ }
     }
 
     /// <summary>

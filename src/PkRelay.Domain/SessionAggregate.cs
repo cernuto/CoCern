@@ -31,6 +31,7 @@ internal static class SessionAggregate
             RelayTools.SendMessage => SendDirect(context),
             Operations.StandingSeen => MarkStandingSeen(context),
             Operations.AttentionOffer => SessionAttention.Offer(context),
+            Operations.AttentionSeen => MarkMessagesSeen(context),
             RelayTools.AttentionRespond => SessionAttention.Respond(context),
             _ => Error(UnknownTool)
         };
@@ -100,6 +101,12 @@ internal static class SessionAggregate
         if (context.Operation == RelayTools.GetStatus && Text(context.Args, "attentionStatus") is "count" or "detail")
             description["attention"] = SessionAttention.Status(state, context.Args, context.Now, Text(context.Args, "attentionStatus") == "detail");
         return Ok(description);
+    }
+
+    private static RelayReply MarkMessagesSeen(AggregateContext context)
+    {
+        SessionAttention.CloseMessages(context.State, Strings(context.Args["messageIds"]), context.Now);
+        return Ok(new { seen = true });
     }
 
     /// <summary>Records that this session received a board's standing at <c>standingRevision</c>. A revision never moves back.</summary>

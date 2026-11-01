@@ -149,6 +149,8 @@ public static class RelayLimits
     public const int MaxAttentionRouteIdleHours = 24;
     /// <summary>Least minutes between a session's reports to the control directory that it is still active (made at boundary replies).</summary>
     public const int AttentionActivityReportMinutes = 60;
+    /// <summary>Sessions whose last idle-hold wake the hub remembers for counting; past this the memory is cleared.</summary>
+    public const int MaxHoldWakeSessions = 1_024;
     /// <summary>Seconds the prompt hook reuses its last answer.</summary>
     public const int PromptHookCacheSeconds = 30;
     /// <summary>The prompt hook's hub timeout, in milliseconds, unless <c>PKRELAY_HOOK_TIMEOUT_MS</c> says otherwise.</summary>

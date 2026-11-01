@@ -151,6 +151,8 @@ public sealed class TokenEfficiencyTests
         // The adapter-only option never reaches the hub, and the polls, mostly discarded unseen, take no attention offer.
         Assert.DoesNotContain("waitSeconds", hub.LastBody);
         Assert.Contains("\"attention\":false", hub.LastBody);
+        // The poll that returns reaches the model, so the hub closes the info items of the messages it lists.
+        Assert.Contains("\"seen\":true", hub.LastBody);
     }
 
     [Fact]

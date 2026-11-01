@@ -67,6 +67,10 @@ With [attention](attention.md) on (the default), only urgent things wake a chat.
 - The wake prompt gets one more line naming the top item's ID, kind and task, for example `PkRelay attention: 1 item waits; top a-91 blocked on task "T-12".` No note or message text is included.
 - The hub counts a new tier 1 item, and the first time it hands out an idle-hold wake, as wakes. A message is not a wake.
 
+With attention on, a message between agents can wait up to `MaxHoldMinutes` (10) before its recipient is woken, and `wake: true` on `send_message` has no effect. Send something urgent as a task blocker or failure instead, which is tier 1.
+
+**Upgrade adapters before or together with the hub.** Older adapters' background reads do not send `attention: false`, so they consume attention offers the model never sees.
+
 Set `Relay:Attention:Enabled` to `false` for the old behaviour: every message without `wake: false` wakes the chat, and messages count as wakes. A watcher talking to a hub without attention behaves the same way.
 
 ## Pause, stop and uncertain delivery

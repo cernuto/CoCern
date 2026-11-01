@@ -25,8 +25,10 @@ public static class InboxWait
             return await forwarder.ForwardAsync(RelayTools.CheckInbox, arguments, cancellationToken);
         var forwarded = JsonNode.Parse(arguments.GetRawText())!.AsObject();
         forwarded.Remove("waitSeconds");
-        // Most polls are discarded unseen, so none of them takes an attention offer: a waiting read carries none.
+        // Most polls are discarded unseen, so none of them takes an attention offer: a waiting read carries none. The poll that returns
+        // reaches the model, so the hub closes the info items of the messages on its page (seen); an empty poll lists none.
         forwarded["attention"] = false;
+        forwarded["seen"] = true;
         var request = JsonSerializer.SerializeToElement(forwarded);
         var duration = TimeSpan.FromSeconds(wait.TryGetInt32(out var value) ? Math.Clamp(value, 0, MaxSeconds) : 0);
         // A monotonic clock, and no read for a remainder shorter than a timer tick: the wall clock and the delay timer disagree by a

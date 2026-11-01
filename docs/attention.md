@@ -15,8 +15,9 @@ A successful `check_inbox`, `task_update`, `action_report` or `task_claim` reply
 `k` is the kind, `t` the task, `b` the board when not `default`, `x` at most 200 characters of text, and `more` how many other items could be offered now.
 
 - Pass `"attention": false` on one of these calls to get no offer, for example in the middle of careful work.
-- The adapter's background inbox reads (wake watchers, the Claude waiter, and `check_inbox` with `waitSeconds`) send `attention: false`, so they never use up an offer the model does not see. An older adapter does not; update it.
-- A `check_inbox` reply closes the info items of the messages it lists, since the model now sees them.
+- The adapter's background inbox reads (wake watchers, the Claude waiter, and `check_inbox` with `waitSeconds`) send `attention: false`, so they never use up an offer the model does not see.
+- **Upgrade adapters before or together with the hub.** Older adapters' background reads do not send `attention: false`, so they consume offers the model never sees.
+- A `check_inbox` reply closes the info items of the messages it lists, since the model now sees them. A waiting read and the Claude waiter's printed inbox take no offer, but they still report the messages they showed, so those items close too.
 - `get_status` shows only the count: `"attention": { "actionable": 2 }`. Snoozed and expired items are not counted.
 - An offer is counted as seen only when it is attached to a reply. If a reply has no room left, no offer is made.
 - An offer on a reply that is lost on the way counts as `later` at your next reply, like an offer you did not answer.

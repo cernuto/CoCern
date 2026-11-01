@@ -153,6 +153,8 @@ public static class Operations
     public const string AttentionClose = "__attention_close";
     /// <summary>One boundary: an unanswered shown item counts as later, snoozes count down, the best item is picked and marked shown.</summary>
     public const string AttentionOffer = "__attention_offer";
+    /// <summary>Closes the info items of messages an adapter reader showed the model without an offer.</summary>
+    public const string AttentionSeen = "__attention_seen";
     /// <summary>
     /// Sent to the control aggregate through the outbox: raises or closes an attention item at every session of one role (such as manager)
     /// in the repository, found in the session directory by the role given at <c>session_open</c>.

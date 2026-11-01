@@ -593,6 +593,45 @@ public class HostTests
     }
 
     [Fact]
+    public async Task Messages_shown_by_adapter_readers_close_their_info_items_without_an_offer()
+    {
+        await using var host = new RelayHostFixture();
+        using var client = host.AuthorizedClient();
+        var sender = Data(await host.Call(client, "session_open", new { repositoryId = "repo", requestId = "seen-sender" }));
+        var reader = Data(await host.Call(client, "session_open", new { repositoryId = "repo", requestId = "seen-reader" }));
+        async Task<int> Actionable() => Data(await host.Call(client, "get_status", SessionArgs(reader))).GetProperty("attention").GetProperty("actionable").GetInt32();
+        async Task<string> Send(string requestId)
+        {
+            var sent = Data(await host.Call(client, "send_message", new { repositoryId = "repo", requestId, sessionId = sender.GetProperty("sessionId").GetString(), sessionToken = sender.GetProperty("sessionToken").GetString(), recipientSessionId = reader.GetProperty("sessionId").GetString(), text = "please look" }));
+            var deadline = DateTime.UtcNow.AddSeconds(20);
+            while (await Actionable() == 0 && DateTime.UtcNow < deadline) await Task.Delay(50);
+            return sent.GetProperty("messageId").GetString()!;
+        }
+        object Read(object extra)
+        {
+            var arguments = JsonSerializer.SerializeToNode(extra)!.AsObject();
+            arguments["repositoryId"] = "repo"; arguments["sessionId"] = reader.GetProperty("sessionId").GetString(); arguments["sessionToken"] = reader.GetProperty("sessionToken").GetString();
+            return arguments;
+        }
+        // A message is an info item until the model has seen it.
+        await Send("seen-1");
+        Assert.Equal(1, await Actionable());
+        // A background read that showed nothing to the model leaves it open.
+        Assert.False(Data(await host.Call(client, "check_inbox", Read(new { attention = false }))).TryGetProperty("attention", out _));
+        Assert.Equal(1, await Actionable());
+        // A waiting read whose page reached the model (seen) closes it, with no offer.
+        Assert.False(Data(await host.Call(client, "check_inbox", Read(new { attention = false, seen = true }))).TryGetProperty("attention", out _));
+        Assert.Equal(0, await Actionable());
+        // The waiter names the messages it printed.
+        var second = await Send("seen-2");
+        Assert.Equal(1, await Actionable());
+        await host.Call(client, "check_inbox", Read(new { attention = false, limit = 1, seenMessageIds = new[] { second } }));
+        Assert.Equal(0, await Actionable());
+        using var bad = await client.PostAsJsonAsync("/api/tools/check_inbox", Read(new { seenMessageIds = new[] { 1 } }));
+        Assert.Equal(HttpStatusCode.BadRequest, bad.StatusCode);
+    }
+
+    [Fact]
     public async Task A_claim_raises_look_alikes_only_on_an_all_words_match_after_the_reply()
     {
         await using var host = new RelayHostFixture();
