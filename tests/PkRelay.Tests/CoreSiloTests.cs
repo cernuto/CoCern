@@ -115,6 +115,81 @@ public sealed class CoreSiloTests
         finally { await host.StopAsync(); }
     }
 
+    [Fact]
+    public async Task Attention_effects_reach_their_session_take_the_hub_settings_and_refused_ones_are_dropped()
+    {
+        var siloPort = FreePort(); var gatewayPort = FreePort();
+        using var host = new HostBuilder().ConfigureLogging(log => log.ClearProviders()).UseOrleans(silo => silo
+            .UseLocalhostClustering(siloPort: siloPort, gatewayPort: gatewayPort, serviceId: "core-attention-tests", clusterId: Guid.NewGuid().ToString("N"))
+            .AddMemoryGrainStorage("relay"))
+            .ConfigureServices(services => services.AddPkRelayCore().AddSingleton(new AttentionOptions { SnoozeBoundaries = 2, ItemExpiryDays = 2 })
+                // The test seeds outboxes straight into memory storage, which then reads them back through its JSON type allow-list.
+                .Configure<Orleans.Serialization.Configuration.TypeManifestOptions>(options => options.AllowAllTypes = true)).Build();
+        await host.StartAsync();
+        try
+        {
+            var application = host.Services.GetRequiredService<RelayApplication>();
+            var factory = host.Services.GetRequiredService<IGrainFactory>();
+            var storage = host.Services.GetRequiredKeyedService<Orleans.Storage.IGrainStorage>("relay");
+            var caller = new RelayCaller("alice", false, ["repo"]);
+            var hub = caller with { IsInternal = true };
+            async Task<JsonObject> Call(string tool, JsonObject args)
+            {
+                args["repositoryId"] = "repo"; args["requestId"] = Guid.NewGuid().ToString("N");
+                var reply = await application.ExecuteAsync(caller, tool, JsonSerializer.SerializeToElement(args));
+                Assert.True(reply.Ok, reply.Code + " " + reply.DataJson);
+                return JsonNode.Parse(reply.DataJson)!.AsObject();
+            }
+            var session = await Call("session_open", new());
+            var sessionId = session["sessionId"]!.GetValue<string>();
+            DurableEffect Raise(string target, JsonObject item)
+            {
+                item["repositoryId"] = "repo"; item["__principalId"] = "alice"; item["__administrator"] = false; item["__repositories"] = new JsonArray("repo");
+                return new(Guid.NewGuid().ToString("N"), "session", target, Operations.AttentionRaise, item.ToJsonString(), DateTimeOffset.UtcNow.AddSeconds(-1));
+            }
+
+            // A board outbox holding raises for an open session, an unknown session and a malformed kind. Seed it before the board activates.
+            var board = new StateEnvelope<CoordinationDocument> { Value = new() { Json = """{"repositoryId":"repo"}""" } };
+            board.Effects.Add(Raise(sessionId, new() { ["kind"] = "blocked", ["taskId"] = "T-1", ["note"] = "waiting on review" }));
+            board.Effects.Add(Raise("no-such-session", new() { ["kind"] = "blocked", ["taskId"] = "T-1" }));
+            board.Effects.Add(Raise(sessionId, new() { ["kind"] = "not-a-kind", ["taskId"] = "T-2" }));
+            board.Effects.Add(Raise(sessionId, new() { ["kind"] = "next_work", ["taskId"] = "T-3" }));
+            await storage.WriteStateAsync("board", GrainId.Create("pkrelay.board", "repo/seeded"), new GrainState<StateEnvelope<CoordinationDocument>>(board));
+            var dispatched = await factory.GetGrain<ITaskBoardGrain>("repo/seeded").ExecuteAsync(hub, Operations.Dispatch, "{}");
+            // Refused items are dropped, not left to retry forever: nothing is pending.
+            Assert.True(dispatched.Ok, dispatched.Code + " " + dispatched.DataJson);
+
+            var stored = new GrainState<StateEnvelope<CoordinationDocument>>(new());
+            await storage.ReadStateAsync("session", GrainId.Create("pkrelay.session", sessionId), stored);
+            var items = JsonNode.Parse(stored.State!.Value.Json)!["attention"]!.AsObject();
+            Assert.Equal(new[] { "T-1", "T-3" }, items.Select(item => item.Value!["taskId"]!.GetValue<string>()));
+            var lifetime = DateTimeOffset.Parse(items.First().Value!["expiresAt"]!.GetValue<string>()) - DateTimeOffset.Parse(items.First().Value!["createdAt"]!.GetValue<string>());
+            Assert.Equal(TimeSpan.FromDays(2), lifetime);
+
+            var sessionGrain = factory.GetGrain<ISessionGrain>(sessionId);
+            var handle = new JsonObject { ["repositoryId"] = "repo", ["sessionId"] = sessionId, ["sessionToken"] = session["sessionToken"]!.DeepClone() };
+            var offered = JsonNode.Parse((await sessionGrain.ExecuteAsync(hub, Operations.AttentionOffer, handle.ToJsonString())).DataJson)!.AsObject();
+            var offer = offered["attention"]!.AsObject();
+            Assert.Equal(("blocked", "T-1", "T-1 blocked: waiting on review", 1), (offer["k"]!.GetValue<string>(), offer["t"]!.GetValue<string>(), offer["x"]!.GetValue<string>(), offer["more"]!.GetValue<int>()));
+
+            // The answer goes through the public tool, with the hub's two-boundary snooze.
+            var answer = handle.DeepClone().AsObject(); answer["itemId"] = offer["id"]!.DeepClone(); answer["action"] = "later"; answer["snoozeBoundaries"] = 9;
+            Assert.Equal(2, (await Call("attention_respond", answer))["snoozeBoundaries"]!.GetValue<int>());
+            answer["itemId"] = "a-999"; answer["action"] = "dismiss"; answer["requestId"] = Guid.NewGuid().ToString("N");
+            Assert.Equal(RelayErrorCodes.NotFound, (await application.ExecuteAsync(caller, "attention_respond", JsonSerializer.SerializeToElement(answer))).Code);
+
+            // A session delivering an item to itself applies it in place (a non-reentrant grain cannot call itself), with the hub's lifetime.
+            var self = new StateEnvelope<CoordinationDocument> { Value = new() { Json = """{"repositoryId":"repo","principalId":"alice","sessionToken":"tok","sessionId":"self"}""" } };
+            self.Effects.Add(Raise("self", new() { ["kind"] = "info", ["taskId"] = "T-9" }));
+            await storage.WriteStateAsync("session", GrainId.Create("pkrelay.session", "self"), new GrainState<StateEnvelope<CoordinationDocument>>(self));
+            var selfGrain = factory.GetGrain<ISessionGrain>("self");
+            Assert.True((await selfGrain.ExecuteAsync(hub, Operations.Dispatch, "{}")).Ok);
+            var selfOffer = JsonNode.Parse((await selfGrain.ExecuteAsync(hub, Operations.AttentionOffer, """{"repositoryId":"repo","sessionId":"self","sessionToken":"tok"}""")).DataJson)!["attention"]!;
+            Assert.Equal("T-9", selfOffer["t"]!.GetValue<string>());
+        }
+        finally { await host.StopAsync(); }
+    }
+
     private sealed class FakeSearch : IFullTextSearch
     {
         public IReadOnlyList<SearchHit> Result { get; set; } = [];

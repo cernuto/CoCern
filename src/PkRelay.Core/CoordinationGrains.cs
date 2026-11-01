@@ -61,10 +61,13 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
         {
             var payload = JsonNode.Parse(effect.PayloadJson)!.AsObject();
             var effectCaller = CoordinationStateMachine.TakeEffectCaller(payload);
+            // A raised item takes the hub's configured lifetime unless its source set one.
+            if (effect.Operation == Operations.AttentionRaise && !payload.ContainsKey("expiryDays") && !payload.ContainsKey("expiresAt") && services.GetService<AttentionOptions>() is { } attention)
+                payload["expiryDays"] = attention.ItemExpiryDays;
             RelayReply result;
             try
             {
-                if (Kind == AggregateKinds.Session && effect.TargetKind == AggregateKinds.Session && effect.Operation == Operations.Deliver && GrainContext is not null && effect.TargetKey == this.GetPrimaryKeyString())
+                if (Kind == AggregateKinds.Session && effect.TargetKind == AggregateKinds.Session && (effect.Operation == Operations.Deliver || Operations.IsAttention(effect.Operation)) && GrainContext is not null && effect.TargetKey == this.GetPrimaryKeyString())
                 {
                     // A non-reentrant grain cannot await an RPC to itself. Commit its inbox entry
                     // and outbox removal together so a stale dispatch snapshot cannot erase delivery.
@@ -73,7 +76,9 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
                 else result = await Aggregate(grains, effect.TargetKind, effect.TargetKey).ExecuteAsync(effectCaller, effect.Operation, payload.ToJsonString());
             }
             catch (Exception) { result = Replies.Error(RelayErrorCodes.DeliveryUnavailable); }
-            if (!result.Ok)
+            // Attention is advisory. A session that refuses an item (unknown session, another repository, a malformed item) would refuse
+            // it on every retry, so the effect is dropped rather than retried every few seconds forever. Infrastructure failures still retry.
+            if (!result.Ok && !(Operations.IsAttention(effect.Operation) && !IsTransient(result.Code)))
             {
                 candidate.Effects[candidate.Effects.FindIndex(x => x.Id == effect.Id)] = effect with { DueAt = DateTimeOffset.UtcNow.Add(RedeliveryDelay) };
                 if (!await CommitAsync(candidate)) return Replies.Error(RelayErrorCodes.StorageFailure);
@@ -94,6 +99,9 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
         if (candidate.Effects.Any(Selected)) return Replies.Error(RelayErrorCodes.DeliveryPending);
         return Replies.Ok(new { dispatched = true });
     }
+
+    /// <summary>Failures a later attempt can succeed past: the target's storage or the grain call itself failed.</summary>
+    private static bool IsTransient(string code) => code is RelayErrorCodes.StorageFailure or RelayErrorCodes.DeliveryUnavailable or RelayErrorCodes.DeliveryPending or RelayErrorCodes.Unavailable;
 
     /// <summary>Counts one wake: a message newly stored in a session inbox that may wake its chat. Redeliveries and <c>wake: false</c> messages are not wakes.</summary>
     private void RecordWake(string sessionId, JsonObject payload, RelayReply delivered)

@@ -137,6 +137,18 @@ public static class Operations
     public const string StandingSeen = "__standing_seen";
     /// <summary>Read-only: which of the given sessions in the repository the caller's principal opened.</summary>
     public const string SessionOwners = "__session_owners";
+    /// <summary>
+    /// Adds an attention item to a session, or refreshes the open one with the same kind, task and subject. Sent through the outbox.
+    /// Sources should always send <c>revision</c>; without one, only an identical copy within a few minutes of a close is ignored.
+    /// </summary>
+    public const string AttentionRaise = "__attention_raise";
+    /// <summary>Closes a session's attention items for a task (optionally only some kinds) when their condition ends. Sent through the outbox.</summary>
+    public const string AttentionClose = "__attention_close";
+    /// <summary>One boundary: an unanswered shown item counts as later, snoozes count down, the best item is picked and marked shown.</summary>
+    public const string AttentionOffer = "__attention_offer";
 
     public static bool IsInternal(string operation) => operation.StartsWith("__", StringComparison.Ordinal);
+
+    /// <summary>Attention effects are advisory: a target that refuses one is not asked again.</summary>
+    public static bool IsAttention(string operation) => operation is AttentionRaise or AttentionClose;
 }

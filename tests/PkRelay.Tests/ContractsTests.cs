@@ -120,6 +120,36 @@ public sealed class ContractsTests
     }
 
     [Fact]
+    public void Attention_respond_appears_in_hub_and_adapter_catalogs_with_matching_schemas()
+    {
+        using var client = new HttpClient();
+        var adapter = PkRelay.Adapter.CoordinationTools.Create(new PkRelay.Adapter.RelayForwarder(client, new PkRelay.Adapter.AdapterOptions("http://127.0.0.1:5271", "client-secret")), admin: false)
+            .ToDictionary(tool => tool.ProtocolTool.Name, tool => tool.ProtocolTool.InputSchema.GetRawText());
+        var hub = ToolResults.Tools(false).ToDictionary(tool => tool.Name, tool => tool.InputSchema.GetRawText());
+        Assert.True(RelayToolCatalog.TryGet(RelayTools.AttentionRespond, out var respond));
+        Assert.Equal(RelayToolCatalog.ForwardingSchema(respond).GetRawText(), adapter[RelayTools.AttentionRespond]);
+        Assert.Equal(RelayToolCatalog.InputSchema(respond).GetRawText(), hub[RelayTools.AttentionRespond]);
+        Assert.Contains(RelayTools.AttentionRespond, ToolResults.Tools(true).Select(tool => tool.Name));
+        Assert.Equal((true, true, false), (respond.IsMutation, respond.RequiresSession, respond.AdministratorOnly));
+        Assert.Equal("Accept, dismiss or postpone an attention offer; postponing never acknowledges the message.", respond.Description);
+        var strict = RelayToolCatalog.InputSchema(respond);
+        Assert.Equal(new[] { "repositoryId", "requestId", "sessionId", "sessionToken", "itemId", "action" }, strict.GetProperty("required").EnumerateArray().Select(x => x.GetString()));
+        var properties = strict.GetProperty("properties");
+        Assert.Equal(AttentionActions.All, properties.GetProperty("action").GetProperty("enum").EnumerateArray().Select(x => x.GetString()!));
+        Assert.Equal(RelayLimits.MaxIdentifierLength, properties.GetProperty("itemId").GetProperty("maxLength").GetInt32());
+        Assert.Equal("date-time", properties.GetProperty("until").GetProperty("format").GetString());
+        // The forwarding copy is the session envelope plus the three answer fields, by type only.
+        var forwarding = RelayToolCatalog.ForwardingSchema(respond).GetProperty("properties");
+        Assert.Equal(new[] { "action", "itemId", "repositoryId", "requestId", "sessionId", "sessionToken", "until" }, forwarding.EnumerateObject().Select(x => x.Name).Order());
+        Assert.Equal(AttentionActions.All, forwarding.GetProperty("action").GetProperty("enum").EnumerateArray().Select(x => x.GetString()!));
+        Assert.False(forwarding.GetProperty("itemId").TryGetProperty("maxLength", out _));
+        // Every session may answer, but the messaging-only chat profile receives no offers to answer.
+        Assert.Contains(RelayTools.AttentionRespond, PkRelay.Adapter.CoordinationTools.NamesForRole(false));
+        Assert.DoesNotContain(RelayTools.AttentionRespond, PkRelay.Adapter.CoordinationTools.NamesForRole(false, chatOnly: true));
+        Assert.Equal(RelayErrorKind.Conflict, RelayErrorCodes.Classify(RelayErrorCodes.SnoozeLimit));
+    }
+
+    [Fact]
     public void Forwarding_catalog_stays_within_its_context_budget()
     {
         // Every connected agent carries these definitions on every turn; the pre-refactor adapter was about 19,400 characters.

@@ -99,4 +99,31 @@ public static class RelayLimits
     public const int SearchCandidateRows = 40;
     /// <summary>A hit scoring less than this share of the best hit's score is dropped as too weak.</summary>
     public const double SearchMinRelativeScore = 0.25;
+
+    /// <summary>Most open attention items one session keeps; when full, the lowest-tier oldest item is dropped.</summary>
+    public const int MaxAttentionItems = 50;
+    /// <summary>Longest attention note and offer text, in characters.</summary>
+    public const int MaxAttentionTextLength = 200;
+    /// <summary>Most related IDs one attention item carries.</summary>
+    public const int MaxAttentionRefs = 8;
+    /// <summary>Boundaries a "later" item stays hidden when no time is given, unless <c>Relay:Attention:SnoozeBoundaries</c> says otherwise.</summary>
+    public const int DefaultAttentionSnoozeBoundaries = 3;
+    /// <summary>Largest allowed <c>Relay:Attention:SnoozeBoundaries</c>.</summary>
+    public const int MaxAttentionSnoozeBoundaries = 50;
+    /// <summary>Days an item stays open without being closed, unless <c>Relay:Attention:ItemExpiryDays</c> says otherwise.</summary>
+    public const int DefaultAttentionExpiryDays = 7;
+    /// <summary>Largest allowed item lifetime, in days.</summary>
+    public const int MaxAttentionExpiryDays = 90;
+    /// <summary>Most times an item that blocks another session may be snoozed.</summary>
+    public const int MaxBlockingSnoozes = 2;
+    /// <summary>Longest an item that blocks another session may stay snoozed, counted from its first snooze.</summary>
+    public const int MaxBlockingSnoozeMinutes = 30;
+    /// <summary>Closed item keys a session remembers with their source revision, so a late, older raise cannot reopen them.</summary>
+    public const int MaxAttentionClosedKeys = 100;
+    /// <summary>How long a closed item's content is remembered, so the same raise delivered again without a revision cannot reopen it.</summary>
+    public const int AttentionTombstoneMinutes = 10;
+    /// <summary>Most recently closed items one session remembers by content.</summary>
+    public const int MaxAttentionTombstones = 100;
+    /// <summary>Longest blocker kind an attention item records.</summary>
+    public const int MaxAttentionBlockerLength = 64;
 }

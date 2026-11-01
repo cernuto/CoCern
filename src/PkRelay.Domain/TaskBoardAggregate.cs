@@ -258,6 +258,7 @@ internal static class TaskBoardAggregate
             var completing = Text(workflow, "state") == "completed" && (task["workflow"] is not JsonObject prior || Text(prior, "state") != "completed");
             task["workflow"] = workflow.DeepClone();
             // Seam for attention (build steps 7-8): raise a next_work item to each unblocked task's targetSessionId here.
+            // Always send a revision (the task's changeRevision) so a late or repeated raise can never reopen a closed item.
             if (completing) unblocked = TaskWorkflow.Unblocked(tasks, Text(task, "taskId"));
         }
         task["updatedAt"] = context.Now.ToString("O"); task["updatedBy"] = context.Caller.PrincipalId; task["version"] = ++version;

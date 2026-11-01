@@ -257,6 +257,7 @@ Batch compatible task-state, note, task-message/reply, and action-report changes
 | `control_request` | Pause/resume dispatch and request cancellation, without claiming IDE enforcement |
 | `standing_propose`, `standing_put` | Propose, or as an administrator change, the board's standing lines, grants and settings |
 | `search` | Find tasks, notes and your own inbox messages by words; returns IDs and snippets to open with the read tools |
+| `attention_respond` | Accept, dismiss or postpone an attention offer; postponing never acknowledges the message |
 
 These are logical groups; expose a small role-appropriate subset to each client. Authenticate and authorize every call. Use expected versions for updates, action/trigger identity for business deduplication, and request IDs for transport retries. A stale update returns current version/change information instead of silently overwriting another participant's work.
 
@@ -284,6 +285,8 @@ The database is at schema version 2. Beside the grain state it holds `activity_l
 Next-work offers skip tasks whose `dependsOn` tasks are not completed. With `packet.resources`, `RelayApplication` asks the lock aggregates (read-only `__claim_state`) which listed resources are held and asks the board again, so that within equal priority a task with free resources is offered first. The domain stays pure: the board only ranks against the `busyResources` it is given. See [dependencies.md](dependencies.md).
 
 Standing lines, grants and settings live on the board under `standing`, with one revision. `RelayApplication` reads them with the read-only `__standing` operation, attaches them to `session_open` and to milestone replies when the revision is newer than the one the session recorded (`__standing_seen`), and caches each board's read for a few seconds. See [standing.md](standing.md).
+
+Each session keeps its attention items under `attention` in its own state. Other aggregates add and close them with the internal `__attention_raise` and `__attention_close` effects through their outbox; the session ignores a raise older than a close it already saw, and the dispatcher drops an attention effect the session refuses instead of retrying it. `__attention_offer` runs one boundary and uses the pure `AttentionScheduler`; tiers and weights are in `AttentionWeights` in Contracts. See [attention.md](attention.md).
 
 Each aggregate's state describes its own searchable text, as it describes its due work. `StateEnvelope` implements `IHasSearchDocuments` by calling the pure `SearchExtraction` in the domain, which knows nothing about storage. `SqliteStore.CommitAsync` compares the state's change markers with those stored in `search_docs` and rewrites only the changed rows, keyed by (grain, kind, doc ID), in the same transaction. Queries go through the `IFullTextSearch` port on a separate read-only connection. See [search.md](search.md).
 

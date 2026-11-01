@@ -39,10 +39,19 @@ public static class RelayHostBuilderExtensions
         builder.Services.AddSingleton<ICoordinationNotifier, CoordinationNotifier>();
         builder.Services.AddDiscovery();
         builder.Services.AddPkRelayCore();
+        builder.Services.AddSingleton(services =>
+        {
+            var configuration = services.GetRequiredService<IConfiguration>();
+            return new AttentionOptions
+            {
+                SnoozeBoundaries = configuration.GetValue("Relay:Attention:SnoozeBoundaries", RelayLimits.DefaultAttentionSnoozeBoundaries),
+                ItemExpiryDays = configuration.GetValue("Relay:Attention:ItemExpiryDays", RelayLimits.DefaultAttentionExpiryDays)
+            }.Validated();
+        });
         // The search port is passed only when the store keeps an index; otherwise the search tool answers SearchUnavailable.
         builder.Services.Replace(ServiceDescriptor.Singleton(services => new RelayApplication(
             services.GetRequiredService<Orleans.IGrainFactory>(), services.GetService<IMachineDirectory>(), services.GetService<IActivitySink>(),
-            services.GetService<SqliteStore>() is { SearchEnabled: true } store ? store : null)));
+            services.GetService<SqliteStore>() is { SearchEnabled: true } store ? store : null, services.GetRequiredService<AttentionOptions>())));
         builder.AddRelayOrleans();
         builder.Services.AddRelayDashboard();
         builder.Services.AddHostedService<DueWorkDispatcher>();

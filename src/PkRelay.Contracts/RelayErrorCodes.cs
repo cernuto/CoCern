@@ -77,6 +77,10 @@ public static class RelayErrorCodes
     public const string DependencyUnknown = "DependencyUnknown";
     public const string GrantInvalid = "GrantInvalid";
 
+    // Attention
+    /// <summary>An item that blocks another session cannot be postponed again (at most 2 snoozes and 30 minutes).</summary>
+    public const string SnoozeLimit = "SnoozeLimit";
+
     // Infrastructure
     public const string StorageFailure = "StorageFailure";
     public const string DeliveryPending = "DeliveryPending";
@@ -89,7 +93,7 @@ public static class RelayErrorCodes
     private static readonly FrozenSet<string> Conflicts = new[]
     {
         VersionConflict, RequestConflict, StaleClaim, Paused, Busy, ActionConflict, UnresolvedAction,
-        DeltaRestartRequired, WorkflowRecheckRequired, WorkflowIncomplete, WorkflowNotReady
+        DeltaRestartRequired, WorkflowRecheckRequired, WorkflowIncomplete, WorkflowNotReady, SnoozeLimit
     }.ToFrozenSet(StringComparer.Ordinal);
 
     private static readonly FrozenSet<string> Denials = new[] { RepositoryDenied, SessionDenied, AdministratorRequired, MachineRevoked, MachineRequired }.ToFrozenSet(StringComparer.Ordinal);

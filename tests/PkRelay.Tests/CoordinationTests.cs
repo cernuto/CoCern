@@ -544,6 +544,133 @@ public sealed class CoordinationTests
         Assert.Single(next["candidates"]!.AsArray());
     }
 
+    private static StateEnvelope<CoordinationDocument> AttentionSession()
+    {
+        var session = new StateEnvelope<CoordinationDocument>();
+        Assert.True(Call(session, "session", "__open", new() { ["principalId"] = "alice", ["sessionToken"] = "secret", ["sessionId"] = "s1" }).Ok);
+        return session;
+    }
+
+    private static JsonObject AttentionItems(StateEnvelope<CoordinationDocument> session) => JsonNode.Parse(session.Value.Json)!["attention"]?.AsObject() ?? new();
+
+    private static RelayReply RaiseAttention(StateEnvelope<CoordinationDocument> session, string kind, string taskId, JsonObject? extra = null, int seconds = 0)
+    {
+        var args = extra ?? new JsonObject();
+        args["kind"] = kind; args["taskId"] = taskId;
+        return Call(session, "session", "__attention_raise", args, seconds: seconds);
+    }
+
+    [Fact]
+    public void Attention_raise_is_deduplicated_per_task_and_kind_and_closing_ends_its_items()
+    {
+        var session = AttentionSession();
+        var first = Data(RaiseAttention(session, "blocked", "T-1", new() { ["note"] = "waiting on schema review", ["blocker"] = "prerequisite" }));
+        var again = Data(RaiseAttention(session, "blocked", "T-1", new() { ["note"] = "still waiting" }, seconds: 60));
+        Assert.Equal(first["itemId"]!.GetValue<string>(), again["itemId"]!.GetValue<string>());
+        Assert.True(again["refreshed"]!.GetValue<bool>());
+        var items = AttentionItems(session);
+        var item = Assert.Single(items).Value!.AsObject();
+        Assert.Equal(("still waiting", Now.ToString("O")), (item["note"]!.GetValue<string>(), item["createdAt"]!.GetValue<string>()));
+        Assert.False(item.ContainsKey("blocker"));
+        // Another kind, the same task on another board, and another task are separate items.
+        Assert.True(RaiseAttention(session, "review_ready", "T-1").Ok);
+        Assert.True(RaiseAttention(session, "blocked", "T-1", new() { ["boardId"] = "other" }).Ok);
+        Assert.True(RaiseAttention(session, "blocked", "T-2").Ok);
+        Assert.Equal(4, AttentionItems(session).Count);
+
+        // The blocker is cleared: only that task's blocked item closes. Then the task closes: all of its items on that board close.
+        Assert.Equal(1, Data(Call(session, "session", "__attention_close", new() { ["taskId"] = "T-1", ["kinds"] = new JsonArray("blocked") }))["closed"]!.GetValue<int>());
+        Assert.Equal(1, Data(Call(session, "session", "__attention_close", new() { ["taskId"] = "T-1" }))["closed"]!.GetValue<int>());
+        Assert.Equal(new[] { "other/T-1", "default/T-2" }, AttentionScheduler.Items(AttentionItems(session)).Select(x => x.BoardId + "/" + x.TaskId));
+        Assert.Equal(RelayErrorCodes.InvalidArguments, Call(session, "session", "__attention_close", new()).Code);
+
+        // A close at a source revision keeps a later-arriving older raise from reopening the item; a newer raise opens a new one.
+        Assert.True(Call(session, "session", "__attention_close", new() { ["taskId"] = "T-3", ["kinds"] = new JsonArray("failed"), ["revision"] = 5 }).Ok);
+        Assert.Equal("stale", Data(RaiseAttention(session, "failed", "T-3", new() { ["revision"] = 4 }))["reason"]!.GetValue<string>());
+        var reopened = Data(RaiseAttention(session, "failed", "T-3", new() { ["revision"] = 6 }));
+        Assert.True(reopened["raised"]!.GetValue<bool>());
+        Assert.Equal("stale", Data(RaiseAttention(session, "failed", "T-3", new() { ["revision"] = 5 }))["reason"]!.GetValue<string>());
+
+        // An unopened session refuses items; nothing is stored for it.
+        var unknown = new StateEnvelope<CoordinationDocument>();
+        Assert.Equal(RelayErrorCodes.SessionUnknown, RaiseAttention(unknown, "info", "T-1").Code);
+        Assert.Equal("{}", unknown.Value.Json);
+        // Attention state is private: a binding registration never copies it into the control directory.
+        var bind = Call(session, "session", "session_bind", new() { ["sessionToken"] = "secret", ["expectedVersion"] = 0, ["binding"] = new JsonObject(), ["requestId"] = "bind" });
+        Assert.True(bind.Ok, bind.Code);
+        Assert.DoesNotContain("attention", session.Effects.Single(effect => effect.Operation == "__register").PayloadJson);
+    }
+
+    [Fact]
+    public void A_raise_delivered_again_without_a_revision_cannot_reopen_a_just_closed_item()
+    {
+        var session = AttentionSession();
+        var raise = new JsonObject { ["note"] = "tests failed", ["refs"] = new JsonArray("T-9") };
+        var id = Data(RaiseAttention(session, "failed", "T-1", raise.DeepClone().AsObject()))["itemId"]!.GetValue<string>();
+        Assert.True(Call(session, "session", "attention_respond", new() { ["sessionToken"] = "secret", ["itemId"] = id, ["action"] = "dismiss", ["requestId"] = "d" }).Ok);
+        // The same outbox raise delivered again is ignored for ten minutes after the close.
+        Assert.Equal("recentlyClosed", Data(RaiseAttention(session, "failed", "T-1", raise.DeepClone().AsObject(), seconds: 60))["reason"]!.GetValue<string>());
+        Assert.Empty(AttentionItems(session));
+        // A raise with new content, or with a revision, is a new event and opens an item.
+        var changed = Data(RaiseAttention(session, "failed", "T-1", new() { ["note"] = "tests failed again" }, seconds: 120));
+        Assert.True(changed["raised"]!.GetValue<bool>());
+        Assert.True(Call(session, "session", "__attention_close", new() { ["taskId"] = "T-1" }, seconds: 130).Ok);
+        Assert.Equal("recentlyClosed", Data(RaiseAttention(session, "failed", "T-1", new() { ["note"] = "tests failed again" }, seconds: 140))["reason"]!.GetValue<string>());
+        var withRevision = raise.DeepClone().AsObject(); withRevision["revision"] = 3;
+        Assert.True(Data(RaiseAttention(session, "failed", "T-1", withRevision, seconds: 150))["raised"]!.GetValue<bool>());
+        Assert.True(Call(session, "session", "__attention_close", new() { ["taskId"] = "T-1" }, seconds: 160).Ok);
+        // After the window the same raise opens an item again.
+        Assert.True(Data(RaiseAttention(session, "failed", "T-1", new() { ["note"] = "tests failed again" }, seconds: 140 + RelayLimits.AttentionTombstoneMinutes * 60))["raised"]!.GetValue<bool>());
+        // The remembered closes are capped.
+        for (var index = 0; index < RelayLimits.MaxAttentionTombstones + 5; index++)
+        {
+            Assert.True(RaiseAttention(session, "info", "C-" + index, seconds: 2_000).Ok);
+            Assert.True(Call(session, "session", "__attention_close", new() { ["taskId"] = "C-" + index }, seconds: 2_000).Ok);
+        }
+        Assert.Equal(RelayLimits.MaxAttentionTombstones, JsonNode.Parse(session.Value.Json)!["attentionRecent"]!.AsObject().Count);
+        Assert.True(Data(RaiseAttention(session, "info", "C-0", seconds: 2_001))["raised"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public void Expired_attention_items_vanish()
+    {
+        var session = AttentionSession();
+        var id = Data(RaiseAttention(session, "next_work", "T-1", new() { ["expiryDays"] = 1 }))["itemId"]!.GetValue<string>();
+        var kept = Data(RaiseAttention(session, "info", "T-2"))["itemId"]!.GetValue<string>();
+        Assert.Equal(Now.AddDays(7).ToString("O"), AttentionItems(session)[kept]!["expiresAt"]!.GetValue<string>());
+        var day = (int)TimeSpan.FromDays(1).TotalSeconds;
+        Assert.Equal(RelayErrorCodes.NotFound, Call(session, "session", "attention_respond", new() { ["sessionToken"] = "secret", ["itemId"] = id, ["action"] = "accept", ["requestId"] = "r" }, seconds: day).Code);
+        var offer = Data(Call(session, "session", "__attention_offer", new() { ["sessionToken"] = "secret" }, seconds: day));
+        Assert.Equal(kept, offer["attention"]!["id"]!.GetValue<string>());
+        Assert.False(AttentionItems(session).ContainsKey(id));
+        // A refresh extends the safety net; an expired item cannot be picked even before anything removes it.
+        RaiseAttention(session, "info", "T-2", seconds: 6 * day);
+        Assert.Equal(Now.AddDays(13).ToString("O"), AttentionItems(session)[kept]!["expiresAt"]!.GetValue<string>());
+        Assert.Null(AttentionScheduler.Pick(AttentionItems(session), Now.AddDays(13)));
+    }
+
+    [Fact]
+    public void A_full_attention_queue_drops_the_lowest_tier_oldest_item()
+    {
+        var session = AttentionSession();
+        // 10 low-tier items first (the oldest is a-1), then 40 more urgent ones.
+        for (var index = 1; index <= 10; index++) Assert.True(RaiseAttention(session, "next_work", "N-" + index, seconds: index).Ok);
+        for (var index = 1; index <= 40; index++) Assert.True(RaiseAttention(session, "review_ready", "R-" + index, seconds: 100 + index).Ok);
+        Assert.Equal(RelayLimits.MaxAttentionItems, AttentionItems(session).Count);
+        var full = Data(RaiseAttention(session, "failed", "F-1", seconds: 500));
+        Assert.Equal("a-1", full["dropped"]!.GetValue<string>());
+        Assert.Equal(RelayLimits.MaxAttentionItems, AttentionItems(session).Count);
+        Assert.Equal("N-2", AttentionScheduler.DropCandidate(AttentionScheduler.Items(AttentionItems(session)))!.TaskId);
+        // A refresh never drops anything.
+        Assert.True(Data(RaiseAttention(session, "review_ready", "R-1", seconds: 501))["refreshed"]!.GetValue<bool>());
+        // Once only urgent items remain, a new lowest-tier item is the one dropped.
+        for (var index = 2; index <= 10; index++) Assert.True(RaiseAttention(session, "blocked", "B-" + index, seconds: 600 + index).Ok);
+        Assert.DoesNotContain(AttentionScheduler.Items(AttentionItems(session)), item => item.Kind == "next_work");
+        var refused = Data(RaiseAttention(session, "info", "I-1", seconds: 700));
+        Assert.Equal(("full", false), (refused["reason"]!.GetValue<string>(), refused["raised"]!.GetValue<bool>()));
+        Assert.DoesNotContain(AttentionScheduler.Items(AttentionItems(session)), item => item.TaskId == "I-1");
+    }
+
     public class TestGrainFactory : DispatchProxy
     {
         private readonly Dictionary<string, TestAggregate> aggregates = [];

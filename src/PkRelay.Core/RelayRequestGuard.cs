@@ -11,7 +11,7 @@ namespace PkRelay.Core;
 /// <summary>Public-boundary validation: shape, size, repository scope and request identity, before any aggregate is touched.</summary>
 internal static class RelayRequestGuard
 {
-    private static readonly string[] IdentifierFields = ["requestId", "repositoryId", "sessionId", "sessionToken", "boardId", "machineId", "label", "taskId", "resourceId"];
+    private static readonly string[] IdentifierFields = ["requestId", "repositoryId", "sessionId", "sessionToken", "boardId", "machineId", "label", "taskId", "resourceId", "itemId"];
 
     /// <summary>Returns a rejection, or null with the parsed arguments.</summary>
     public static RelayReply? Validate(RelayCaller caller, RelayTool tool, JsonElement arguments, out JsonObject args)

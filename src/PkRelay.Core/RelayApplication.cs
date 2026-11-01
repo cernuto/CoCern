@@ -19,9 +19,10 @@ namespace PkRelay.Core;
 /// (session open, task claim with resources, action begin, convenience renewals/acks, next-work offers).
 /// Aggregates enforce the rules; this layer authenticates the session, routes, composes and bounds replies.
 /// </summary>
-public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? machines = null, IActivitySink? activity = null, IFullTextSearch? search = null) : IRelayApplication
+public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? machines = null, IActivitySink? activity = null, IFullTextSearch? search = null, AttentionOptions? attention = null) : IRelayApplication
 {
     private readonly IMachineDirectory directory = machines ?? new MachineDirectory(grains);
+    private readonly AttentionOptions attentionOptions = attention ?? new();
     private const int WorkerProbeLimit = 50;
     private readonly string incarnation = Guid.NewGuid().ToString("N");
     /// <summary>
@@ -78,6 +79,8 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
             if (result.Ok && tool == RelayTools.TaskUpdate && args["includeNextWork"]?.GetValue<bool>() == true) result = await WithNextWorkAsync(trusted, args, session, result);
             if (result.Ok && tool == RelayTools.StandingPut) CacheStanding(BoardKey(args), 0, result.Version, null);
             if (result.Ok && session is not null && CarriesStanding(tool)) result = await WithStandingAsync(trusted, args, session, result);
+            // Seam for attention delivery (build step 8): on a successful boundary reply, call the session's __attention_offer here and
+            // attach at most one compact offer. Until then no reply carries attention, so existing replies are unchanged.
             return BoundWire(result);
         }
         catch (ArgumentException) { return Error(InvalidArguments); }
@@ -106,6 +109,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         RelayTools.ControlRequest when Text(args, "command") == "revoke_machine" => RevokeMachineAsync(caller, args),
         RelayTools.Search => SearchAsync(args, cancellationToken),
         RelayTools.SessionBind or RelayTools.CheckInbox or RelayTools.Ack => CallSession(caller, tool, args),
+        RelayTools.AttentionRespond => RespondToAttentionAsync(caller, args),
         RelayTools.WorkerList or RelayTools.ControlRequest => CallControl(caller, tool, args),
         _ => CallBoard(caller, tool, args)
     };
@@ -143,6 +147,13 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
             reply["truncated"] = true;
         }
         return Ok(reply);
+    }
+
+    /// <summary>The agent's answer to an attention item. "Later" uses the hub's configured snooze; a client cannot set it.</summary>
+    private Task<RelayReply> RespondToAttentionAsync(RelayCaller caller, JsonObject args)
+    {
+        args["snoozeBoundaries"] = attentionOptions.SnoozeBoundaries;
+        return CallSession(caller, RelayTools.AttentionRespond, args);
     }
 
     /// <summary>Revoking a machine is a discovery concern, not a control-aggregate one: it needs the machine ID and is refused for non-administrators by the discovery grain.</summary>

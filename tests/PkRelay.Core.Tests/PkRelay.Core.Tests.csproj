@@ -6,6 +6,7 @@
     <Compile Include="../PkRelay.Tests/CoreSiloTests.cs" />
     <Compile Include="../PkRelay.Tests/CollaborationTests.cs" />
     <Compile Include="../PkRelay.Tests/SearchExtractionTests.cs" />
+    <Compile Include="../PkRelay.Tests/AttentionSchedulerTests.cs" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="xunit" />
     <PackageReference Include="xunit.runner.visualstudio"><PrivateAssets>all</PrivateAssets></PackageReference>
