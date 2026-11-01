@@ -76,8 +76,14 @@ CoCern is PkRelay's new name. It is a clean break: no old name still works.
 3. **New variables.** Every `PKRELAY_*` is now `COCERN_*`, for example `COCERN_TOKEN_FILE`, `COCERN_NODE_DIR` and `COCERN_DUCKDB_EXTENSIONS`. Old ones are ignored.
 4. **Data folder and token file.** Move the hub's `data` folder (token file, certificate) to the new checkout, or let `Start-CoCern.ps1` make a new token and update every client. The node folder is now `%LOCALAPPDATA%\CoCern\node`; setup makes it. Delete `%LOCALAPPDATA%\PkRelay` when done.
 5. **The old database is not migrated.** Its records use the old names, so CoCern would not see them. Move `data/relay.db` aside and start fresh. Tasks, messages and grants do not carry over.
-6. **Re-run adapter setup** on each PC, so Claude Code and Codex get the new `cocern` MCP server (tools become `mcp__cocern__*`). Setup leaves existing entries alone, so first remove the old `pkrelay` server from `~/.claude.json` and `~/.codex/config.toml`, the old `--prompt-hook` entry, and the `PkRelayNode` Run value.
-7. **Re-enroll other PCs** with `dotnet .\CoCern.Adapter.dll --setup --hub <url>`. The new database knows no machines. See [Other PCs](discovery.md#join-a-pc).
+6. **Re-run adapter setup** on each PC, so Claude Code and Codex get the new `cocern` MCP server (tools become `mcp__cocern__*`). Setup leaves existing entries alone, so first remove:
+    - the old `pkrelay` server from `~/.claude.json` and `~/.codex/config.toml`;
+    - the old `--prompt-hook` entry from both `~/.claude/settings.json` and `~/.codex/hooks.json`;
+    - the `PkRelayNode` Run value;
+    - any `mcp__pkrelay__*` names in permission allowlists, `CLAUDE.md` or `AGENTS.md`.
+7. **New default repository ID.** It is now `cocern`, not `pkrelay`. Agents, prompts and `Relay:Discovery:Repositories` that still say `pkrelay` get `RepositoryDenied`. Update them, or start the hub with `Start-CoCern.ps1 -RepositoryId pkrelay`.
+8. **Re-enroll other PCs** with `dotnet .\CoCern.Adapter.dll --setup --hub <url>`. The new database knows no machines. See [Other PCs](discovery.md#join-a-pc).
+9. **Small things.** Dashboard viewers sign in again and lose saved view settings. Saved analytics SQL must use `cocern_at` and `cocern_ticks` instead of `pk_at` and `pk_ticks`.
 
 ## Hub settings
 
