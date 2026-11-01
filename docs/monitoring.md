@@ -101,7 +101,7 @@ A session gets at most one tip an hour, and each rule at most once a day. If the
 | `compaction_rate_by_tool` | A tool compacts more than 30% of at least 20 replies. |
 | `session_token_outliers` | A session's busiest hour is 5 times its role's median hour, over at least 10 hours. |
 
-**Team rules** (`Relay:Feedback:ProposeRules`): when one rule fires for 5 different sessions in 7 days, the hub proposes that rule's line as a standing line, from `pkrelay-hub`. It changes nothing until an administrator approves it with `standing_put`.
+**Team rules** (`Relay:Feedback:ProposeRules`): when one rule fires for 5 different sessions in 7 days, the hub proposes that rule's line as a standing line, from `cocern-hub`. It changes nothing until an administrator approves it with `standing_put`.
 
 | Setting | Default | What it does |
 | --- | --- | --- |
@@ -114,20 +114,20 @@ A session gets at most one tip an hour, and each rule at most once a day. If the
 
 Hourly snapshots of the database, queried with DuckDB. Queries never touch the live database. **Off by default.**
 
-1. Install DuckDB's `sqlite` extension. `Build-PkRelay.ps1` does this for you. By hand, with internet access:
+1. Install DuckDB's `sqlite` extension. `Build-CoCern.ps1` does this for you. By hand, with internet access:
 
    ```
-   dotnet PkRelay.Host.dll --install-analytics-extension <folder> [platform]
+   dotnet CoCern.Host.dll --install-analytics-extension <folder> [platform]
    ```
 
-   The hub looks in `duckdb_extensions` beside itself. For CI, install into a cached folder and set `PKRELAY_DUCKDB_EXTENSIONS` to it before `dotnet test`.
+   The hub looks in `duckdb_extensions` beside itself. For CI, install into a cached folder and set `COCERN_DUCKDB_EXTENSIONS` to it before `dotnet test`.
 
 2. Set `Relay:Analytics:Enabled` to `true` and restart. This also starts the [anomaly monitor](collaboration.md#anomaly-monitor).
 
 Ask with `analytics_query`. It needs an administrator token:
 
 ```json
-{ "repositoryId": "pkrelay", "name": "tokens_per_task", "params": { "days": 7 } }
+{ "repositoryId": "cocern", "name": "tokens_per_task", "params": { "days": 7 } }
 ```
 
 ```json

@@ -1,0 +1,94 @@
+@page "/"
+@page "/sessions"
+@page "/sql"
+@page "/logs"
+@page "/standing"
+
+<PageTitle>@PageTitle · CoCern</PageTitle>
+@if (Connection.State == DashboardLinkState.SignIn)
+{
+    <SignIn Notice="@Connection.Notice" OnSignIn="SignInAsync" />
+}
+else if (!Connection.Authenticated)
+{
+    <main class="connection-splash"><div class="relay-mark" aria-hidden="true">Co</div><h1>Connecting to your relay</h1><p>@(Connection.Notice ?? "Checking dashboard access…")</p><span class="muted">This page will retry automatically.</span></main>
+}
+else
+{
+    <div class="dashboard-shell">
+        <a class="skip-link" href="#main">Skip to content</a>
+        <header class="app-header">
+            <a class="brand" href="./" aria-label="CoCern overview"><span class="relay-mark" aria-hidden="true">Co</span><span>CoCern<small>Observation deck</small></span></a>
+            <nav class="main-nav" aria-label="Dashboard">
+                <NavLink href="" Match="NavLinkMatch.All"><span aria-hidden="true">◈</span>Overview</NavLink>
+                <NavLink href="sessions"><span aria-hidden="true">◇</span>Sessions</NavLink>
+                <NavLink href="sql"><span aria-hidden="true">▤</span>SQL</NavLink>
+                <NavLink href="logs"><span aria-hidden="true">≋</span>Logs</NavLink>
+                <NavLink href="standing"><span aria-hidden="true">✓</span>Standing</NavLink>
+            </nav>
+            <div class="header-actions">
+                <button type="button" class="theme-toggle" @onclick="ToggleThemeAsync" aria-pressed="@(_theme == "dark" ? "true" : "false")" aria-label="Dark appearance">@(_theme == "dark" ? "☾" : "☀")<span>@(_theme == "dark" ? "Dark" : "Light")</span></button>
+                <button type="button" class="sign-out" @onclick="SignOutAsync" disabled="@_signingOut">@(_signingOut ? "Signing out…" : "Sign out")</button>
+            </div>
+        </header>
+        <main id="main" class="dashboard-main">
+            <div class="page-heading">
+                <div><h1>@PageTitle</h1><p>@PageDescription</p></div>
+                <div class="connection-status"><span class="connection-chip @(IsLive ? "live" : "waiting")" role="status"><span class="status-dot"></span>@ConnectionLabel</span><span title="@DashboardFormat.Timestamp(Connection.Snapshot?.ObservedAt)">Observed @DashboardFormat.Ago(Connection.Snapshot?.ObservedAt, _now)</span></div>
+            </div>
+            @if (!string.IsNullOrWhiteSpace(Connection.Notice))
+            {
+                <p class="connection-notice" role="status">@Connection.Notice</p>
+            }
+            @if (Connection.Snapshot is { } snapshot)
+            {
+                <section class="relay-summary" aria-label="Relay summary">
+                    <div class="host-summary"><span class="host-symbol" aria-hidden="true">⌁</span><span><strong>@snapshot.Host.Name</strong><small>Relay @snapshot.Host.Version</small></span></div>
+                    <div class="summary-stat"><strong>@snapshot.Host.MachineCount</strong><span>Enrolled machines</span></div>
+                    <div class="summary-stat"><strong>@snapshot.Host.SessionCount</strong><span>Sessions</span></div>
+                    <div class="summary-stat"><strong>@snapshot.Host.ReachableCount</strong><span>Reachable sessions</span></div>
+                    <label class="motion-setting"><input type="checkbox" checked="@_motion" @onchange="ChangeMotionAsync" /><span>Signal motion</span></label>
+                </section>
+                @if (snapshot.Warnings.Length > 0)
+                {
+                    <details class="observation-warnings"><summary>@snapshot.Warnings.Length observation @(snapshot.Warnings.Length == 1 ? "notice" : "notices")</summary><ul>@foreach (var warning in snapshot.Warnings) { <li>@warning</li> }</ul></details>
+                }
+                @if (snapshot.SessionsTruncated && View is "overview" or "sessions")
+                {
+                    <p class="limit-note">Showing @snapshot.Sessions.Length of @snapshot.Host.SessionCount sessions in this bounded observation.</p>
+                }
+                @switch (View)
+                {
+                    case "sessions":
+                        <div class="board-layout"><SessionList Sessions="@snapshot.Sessions" SelectedId="@_selectedId" OnSelect="SelectSession" Now="@_now" Truncated="@snapshot.SessionsTruncated" /><SessionInspector Session="@SelectedSession" Logs="@snapshot.Logs" Now="@_now" /></div>
+                        <TrafficLane Entries="@snapshot.Traffic" Sessions="@snapshot.Sessions" SelectedSession="@SelectedSession" InstanceId="@snapshot.InstanceId" Now="@_now" Live="@IsLive" />
+                        break;
+                    case "sql":
+                        <SqlView Metrics="@snapshot.Database" Now="@_now" />
+                        break;
+                    case "logs":
+                        <LogView Entries="@snapshot.Logs" />
+                        break;
+                    case "standing":
+                        <StandingView Boards="@snapshot.Standing" Truncated="@snapshot.StandingTruncated" Tokens="@snapshot.Tokens" Now="@_now" />
+                        break;
+                    default:
+                        <div class="overview-layout">
+                            <div class="overview-board"><ActivityBoard Snapshot="@snapshot" SelectedId="@_selectedId" OnSelect="SelectSession" Now="@_now" Live="@IsLive" IsPulsing="Pulse" /></div>
+                            <div class="overview-inspector"><SessionInspector Session="@SelectedSession" Logs="@snapshot.Logs" Now="@_now" /></div>
+                            <div class="overview-traffic"><TrafficLane Entries="@snapshot.Traffic" Sessions="@snapshot.Sessions" SelectedSession="@SelectedSession" InstanceId="@snapshot.InstanceId" Now="@_now" Live="@IsLive" /></div>
+                        </div>
+                        <LogView Entries="@snapshot.Logs" Compact />
+                        break;
+                }
+                <footer class="app-footer"><span>Read-only observation <span aria-hidden="true">/</span> @Connection.PrincipalId</span><span>Started @DashboardFormat.Timestamp(snapshot.Host.StartedAt)</span></footer>
+            }
+            else
+            {
+                <section class="surface waiting-snapshot"><span class="small-symbol" aria-hidden="true">◎</span><h2>Waiting for the first observation</h2><p>Your stations will appear when the relay sends its latest snapshot.</p></section>
+            }
+        </main>
+    </div>
+}
+
+

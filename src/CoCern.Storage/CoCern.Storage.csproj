@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="../CoCern.Core/CoCern.Core.csproj" />
+    <PackageReference Include="Microsoft.Data.Sqlite" />
+    <InternalsVisibleTo Include="CoCern.Tests" />
+  </ItemGroup>
+</Project>

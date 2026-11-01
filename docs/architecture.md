@@ -1,19 +1,19 @@
 # Architecture
 
-PkRelay stores coordination only: tasks, claims, messages, notes and reported outcomes. It never runs IDE tools, models or builds. Agents do that with their own tools and report back.
+CoCern stores coordination only: tasks, claims, messages, notes and reported outcomes. It never runs IDE tools, models or builds. Agents do that with their own tools and report back.
 
 ## Parts
 
 | Project | What it holds |
 | --- | --- |
-| `PkRelay.Contracts` | The tool catalog and schemas, error codes and limits (`RelayLimits`). Shared by hub and adapter. |
-| `PkRelay.Domain` | The rules, as pure code. `CoordinationStateMachine.Apply` checks every call, then hands it to one aggregate: control, session, task board or lock. Discovery (`DiscoveryStateMachine`) and the anomaly monitor (`AnomalyMonitor`) have their own. |
-| `PkRelay.Core` | `RelayApplication`: checks the request, authenticates the session, routes each tool, and composes calls that span aggregates. Also the Orleans grains and the ports below. |
-| `PkRelay.Storage` | SQLite: grain state, due work, the search index and the activity log. |
-| `PkRelay.Analytics` | DuckDB snapshots and named queries. Loaded only when analytics is on. |
-| `PkRelay.Host` | ASP.NET Core: REST, MCP, SignalR, auth, the due-work pump, the dashboard host. |
-| `PkRelay.Dashboard` | The Blazor WebAssembly dashboard. |
-| `PkRelay.Adapter` | The stdio MCP adapter, the node, setup, and the wake watchers. Depends only on Contracts. |
+| `CoCern.Contracts` | The tool catalog and schemas, error codes and limits (`RelayLimits`). Shared by hub and adapter. |
+| `CoCern.Domain` | The rules, as pure code. `CoordinationStateMachine.Apply` checks every call, then hands it to one aggregate: control, session, task board or lock. Discovery (`DiscoveryStateMachine`) and the anomaly monitor (`AnomalyMonitor`) have their own. |
+| `CoCern.Core` | `RelayApplication`: checks the request, authenticates the session, routes each tool, and composes calls that span aggregates. Also the Orleans grains and the ports below. |
+| `CoCern.Storage` | SQLite: grain state, due work, the search index and the activity log. |
+| `CoCern.Analytics` | DuckDB snapshots and named queries. Loaded only when analytics is on. |
+| `CoCern.Host` | ASP.NET Core: REST, MCP, SignalR, auth, the due-work pump, the dashboard host. |
+| `CoCern.Dashboard` | The Blazor WebAssembly dashboard. |
+| `CoCern.Adapter` | The stdio MCP adapter, the node, setup, and the wake watchers. Depends only on Contracts. |
 
 Dependencies point inward. Domain knows nothing about Orleans or storage.
 
@@ -46,7 +46,7 @@ Ports in Core, implemented outside it: `IDueWorkSource`, `IFullTextSearch`, `IAc
 | `data/relay.db` | One SQLite file, schema version 2, WAL. Tables `grain_state`, `due_work`, `hub_metadata`, `search_index` and `search_docs`, `activity_log` and `activity_daily`. Only the hub opens it. |
 | `data/analytics/` | DuckDB snapshots, when analytics is on. |
 | `data/hub-certificate.pfx` | The hub's HTTPS certificate, when the network listener is on. |
-| `%LOCALAPPDATA%\PkRelay\node` | On each PC: the node's credential, pinned fingerprint, session handles and wake database. |
+| `%LOCALAPPDATA%\CoCern\node` | On each PC: the node's credential, pinned fingerprint, session handles and wake database. |
 
 ## Rules to keep
 

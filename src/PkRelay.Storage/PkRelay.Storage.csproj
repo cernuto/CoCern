@@ -1,7 +1,0 @@
-<Project Sdk="Microsoft.NET.Sdk">
-  <ItemGroup>
-    <ProjectReference Include="../PkRelay.Core/PkRelay.Core.csproj" />
-    <PackageReference Include="Microsoft.Data.Sqlite" />
-    <InternalsVisibleTo Include="PkRelay.Tests" />
-  </ItemGroup>
-</Project>

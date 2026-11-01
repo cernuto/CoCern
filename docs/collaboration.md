@@ -21,7 +21,7 @@ Add `workflow` to `task_update`:
 ```json
 "workflow": {
   "state": "ready",
-  "packet": { "goal": "Fix the refresh timeout", "target": "pkrelay main", "authorityRef": "grant:ci",
+  "packet": { "goal": "Fix the refresh timeout", "target": "cocern main", "authorityRef": "grant:ci",
               "restoration": "Remove the test fixture", "stopCondition": "Stop if the target differs", "resources": ["rig-1"] },
   "criteria": [ { "id": "tests", "description": "Tests pass", "result": "not_run" } ],
   "blockers": [],
@@ -64,7 +64,7 @@ With [analytics](monitoring.md#analytics) on, the hub checks the named queries h
 A board's settled rules (lines) and permissions (grants). Chats get them at `session_open`, and again only when they change. An administrator writes them:
 
 ```json
-{ "repositoryId": "pkrelay", "requestId": "r-1", "expectedRevision": 0,
+{ "repositoryId": "cocern", "requestId": "r-1", "expectedRevision": 0,
   "lines":  [ { "id": "css", "text": "Never deploy CSS without a restoration receipt." } ],
   "grants": [ { "id": "ci", "scope": "repository", "expiresAt": "2026-12-01T00:00:00Z" } ],
   "settings": { "requireResources": true } }
@@ -79,7 +79,7 @@ A board's settled rules (lines) and permissions (grants). Chats get them at `ses
 "When this happens, do that", run by the hub. **Off by default** (`Relay:Orders:Enabled`).
 
 ```json
-{ "repositoryId": "pkrelay", "requestId": "r-2", "orderId": "after-schema",
+{ "repositoryId": "cocern", "requestId": "r-2", "orderId": "after-schema",
   "trigger": { "on": "workflow_completed", "taskId": "T-12" },
   "actions": [ { "do": "release_claims" },
                { "do": "offer", "taskId": "T-13", "sessionId": "s-worker-2" },
@@ -96,7 +96,7 @@ A board's settled rules (lines) and permissions (grants). Chats get them at `ses
 On by default (`Relay:Search:Enabled`). Finds tasks, notes and your own unread messages:
 
 ```json
-{ "repositoryId": "pkrelay", "sessionId": "...", "sessionToken": "...", "query": "refresh timeout" }
+{ "repositoryId": "cocern", "sessionId": "...", "sessionToken": "...", "query": "refresh timeout" }
 ```
 
 It returns IDs and snippets. Open one with `task_get`, `context_get` or `check_inbox`. Optional: `kinds` (`task`, `context`, `message`), `status`, `limit` (1 to 10, default 3).
@@ -106,7 +106,7 @@ It returns IDs and snippets. Open one with `task_get`, `context_get` or `check_i
 Search the repository's specs and docs by section, instead of reading whole files. **Off by default** (`Relay:DocCache:Enabled`).
 
 ```json
-{ "repositoryId": "pkrelay", "query": "POST /v1/orders", "spec": "orders-api" }
+{ "repositoryId": "cocern", "query": "POST /v1/orders", "spec": "orders-api" }
 ```
 
 - `doc_search` returns up to 5 sections (`limit` up to 10). Each has `path`, `anchor`, `heading`, `snippet`, `score`, `tokens` (the whole section's cost) and `commit`. Optional: `spec`, `path`.
