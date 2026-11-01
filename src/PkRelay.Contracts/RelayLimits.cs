@@ -62,6 +62,10 @@ public static class RelayLimits
     public const int MaxStandingIdLength = 64;
     /// <summary>Most proposals one board keeps waiting for an administrator.</summary>
     public const int MaxStandingProposals = 20;
+    /// <summary>Most proposals one session may have waiting at once.</summary>
+    public const int MaxStandingProposalsPerSession = 5;
+    /// <summary>Changes listed in one history entry; the entry keeps the total when there are more.</summary>
+    public const int StandingHistoryChanges = 20;
     /// <summary>Standing changes the board keeps in its revision history; older ones are dropped.</summary>
     public const int StandingHistoryEntries = 20;
     /// <summary>Largest standing text sent to a chat (lines, active grants and settings), in UTF-8 bytes.</summary>

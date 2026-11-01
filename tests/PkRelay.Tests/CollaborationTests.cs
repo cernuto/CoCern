@@ -547,7 +547,7 @@ public sealed class CollaborationTests
         Assert.Equal(RelayLimits.StandingHistoryEntries, history.Count);
         Assert.Equal(3 + RelayLimits.StandingHistoryEntries + 2, history[0]!["revision"]!.GetValue<long>());
         Assert.Equal("alice", history[0]!["by"]!.GetValue<string>());
-        Assert.Equal("+line:rev", history[0]!["changes"]![0]!.GetValue<string>());
+        Assert.Equal("~line:rev", history[0]!["changes"]![0]!.GetValue<string>());
         Assert.Equal(2, view["lines"]!.AsArray().Count);
         Assert.Equal("alice", view["lines"]![0]!["author"]!.GetValue<string>());
         Assert.False(view["settings"]!["requireResources"]!.GetValue<bool>());
@@ -558,7 +558,7 @@ public sealed class CollaborationTests
     {
         var state = new StateEnvelope<CoordinationDocument>();
         var bob = new RelayCaller("bob", false, ["repo"], true);
-        string Propose(JsonObject args, int seconds = 0) { args["sessionId"] = "bob-session"; var reply = Standing(state, "standing_propose", args, bob, seconds); Assert.True(reply.Ok, reply.Code); return Data(reply)["proposalId"]!.GetValue<string>(); }
+        string Propose(JsonObject args, string session = "bob-session") { args["sessionId"] = session; var reply = Standing(state, "standing_propose", args, bob); Assert.True(reply.Ok, reply.Code); return Data(reply)["proposalId"]!.GetValue<string>(); }
         RelayReply Delivered(int seconds = 0) => Call(state, "__standing", new(), seconds);
 
         Assert.Equal("InvalidArguments", Standing(state, "standing_propose", new() { ["sessionId"] = "s" }, bob).Code);
@@ -593,7 +593,56 @@ public sealed class CollaborationTests
         Assert.Empty(Data(Delivered(7200))["grants"]!.AsArray());
         Assert.True(Data(Call(state, "task_get", new() { ["section"] = "standing" }, 7200))["grants"]![0]!["expired"]!.GetValue<bool>());
 
-        for (var i = 1; i < RelayLimits.MaxStandingProposals; i++) Propose(new() { ["line"] = new JsonObject { ["text"] = "Proposal " + i } });
+        // One session may keep at most 5 proposals waiting; the board keeps at most 20 in all.
+        for (var i = 1; i < RelayLimits.MaxStandingProposalsPerSession; i++) Propose(new() { ["line"] = new JsonObject { ["text"] = "Proposal " + i } });
+        var sixth = Standing(state, "standing_propose", new() { ["sessionId"] = "bob-session", ["line"] = new JsonObject { ["text"] = "Sixth" } }, bob);
+        Assert.Equal("CapacityExceeded", sixth.Code);
+        Assert.Equal(RelayLimits.MaxStandingProposalsPerSession, Data(sixth)["maxPerSession"]!.GetValue<int>());
+        for (var i = RelayLimits.MaxStandingProposalsPerSession; i < RelayLimits.MaxStandingProposals; i++) Propose(new() { ["line"] = new JsonObject { ["text"] = "Proposal " + i } }, "session-" + i);
         Assert.Equal("CapacityExceeded", Standing(state, "standing_propose", new() { ["sessionId"] = "s", ["line"] = new JsonObject { ["text"] = "One too many" } }, bob).Code);
+    }
+
+    [Fact]
+    public void Standing_revision_moves_only_when_a_line_grant_or_setting_changes()
+    {
+        var state = new StateEnvelope<CoordinationDocument>();
+        var bob = new RelayCaller("bob", false, ["repo"], true);
+        var line = new JsonObject { ["id"] = "css", ["text"] = "Never deploy CSS without a restoration receipt." };
+        Assert.Equal(1, Standing(state, "standing_put", Put(0, "lines", new JsonArray(line.DeepClone()))).Version);
+        Assert.True(Standing(state, "standing_put", Put(1, "settings", new JsonObject { ["requireResources"] = true })).Ok);
+        string Propose(JsonObject args) { args["sessionId"] = "bob-session"; return Data(Standing(state, "standing_propose", args, bob))["proposalId"]!.GetValue<string>(); }
+        RelayReply Put2(string field, JsonNode value) => Standing(state, "standing_put", Put(2, field, value));
+        long HistoryCount() => Data(Call(state, "task_get", new() { ["section"] = "standing" }))["history"]!.AsArray().Count;
+
+        // Nothing to change: no revision and no history; standing is left exactly as it was.
+        string StandingJson() => JsonNode.Parse(state.Value.Json)!["standing"]!.ToJsonString();
+        var before = StandingJson();
+        foreach (var (field, value) in new (string, JsonNode)[] { ("lines", new JsonArray()), ("lines", new JsonArray(line.DeepClone())), ("settings", new JsonObject { ["requireResources"] = true }), ("grants", new JsonArray()) })
+        {
+            var reply = Put2(field, value);
+            Assert.True(reply.Ok); Assert.Equal(2, reply.Version); Assert.False(Data(reply)["changed"]!.GetValue<bool>());
+        }
+        Assert.Equal(before, StandingJson());
+
+        // Rejecting a proposal, or approving one identical to the current line, keeps the revision but is recorded.
+        var rejected = Propose(new() { ["line"] = new JsonObject { ["text"] = "Skip review." } });
+        var reply2 = Put2("remove", new JsonArray(rejected));
+        Assert.Equal(2, reply2.Version); Assert.False(Data(reply2)["changed"]!.GetValue<bool>());
+        var same = Propose(new() { ["line"] = line.DeepClone() });
+        Assert.Equal(2, Put2("approve", new JsonArray(same)).Version);
+        Assert.Equal(2, Data(Call(state, "__standing", new()))["revision"]!.GetValue<long>());
+        Assert.Equal(4, HistoryCount());
+
+        // An approval whose ID matches an existing line is an edit: the view says so before approval, and history records "~".
+        var edit = Propose(new() { ["line"] = new JsonObject { ["id"] = "css", ["text"] = "Deploy CSS only with a restoration receipt." } });
+        var fresh = Propose(new() { ["line"] = new JsonObject { ["id"] = "new-line", ["text"] = "Run smoke tests first." } });
+        var proposals = Data(Call(state, "task_get", new() { ["section"] = "standing" }))["proposals"]!.AsArray().ToDictionary(x => x!["id"]!.GetValue<string>());
+        Assert.True(proposals[edit]!["replaces"]!.GetValue<bool>());
+        Assert.Null(proposals[fresh]!["replaces"]);
+        var approved = Put2("approve", new JsonArray(edit, fresh));
+        Assert.Equal(3, approved.Version); Assert.True(Data(approved)["changed"]!.GetValue<bool>());
+        var latest = Data(Call(state, "task_get", new() { ["section"] = "standing" }))["history"]![0]!["changes"]!.AsArray().Select(x => x!.GetValue<string>()).ToArray();
+        Assert.Equal(new[] { "approve:" + edit, "~line:css", "approve:" + fresh, "+line:new-line" }, latest);
+        Assert.Equal("bob", Data(Call(state, "task_get", new() { ["section"] = "standing" }))["lines"]![0]!["author"]!.GetValue<string>());
     }
 }

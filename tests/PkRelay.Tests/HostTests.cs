@@ -406,6 +406,19 @@ public class HostTests
 
     private static JsonElement Data(JsonElement reply) { using var document = JsonDocument.Parse(reply.GetProperty("dataJson").GetString()!); return document.RootElement.Clone(); }
     private static object SessionArgs(JsonElement session) => new { repositoryId = "repo", sessionId = session.GetProperty("sessionId").GetString(), sessionToken = session.GetProperty("sessionToken").GetString() };
+
+    [Theory]
+    [InlineData("sessionId")]
+    [InlineData("sessionToken")]
+    public async Task Over_long_session_handles_are_refused_over_rest(string field)
+    {
+        await using var host = new RelayHostFixture();
+        using var client = host.AuthorizedClient();
+        var arguments = new Dictionary<string, object?> { ["repositoryId"] = "repo", ["sessionId"] = "s", ["sessionToken"] = "t", [field] = new string('x', 257) };
+        using var response = await client.PostAsJsonAsync("/api/tools/check_inbox", arguments);
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("InvalidArguments", (await response.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString());
+    }
 }
 
 internal sealed class RelayHostFixture : WebApplicationFactory<PkRelay.Host.RelayHostMarker>

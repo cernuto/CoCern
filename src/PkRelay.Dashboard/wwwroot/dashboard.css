@@ -227,6 +227,12 @@ small { font-size: .8rem; }
 .metrics-table th:nth-child(3) { width: 27%; }
 .metrics-table th:nth-child(4) { width: 16%; }
 .metrics-table thead th { color: var(--muted); font-size: .75rem; font-weight: 550; }
+.standing-board { padding-bottom: 24px; }
+.standing-board + .standing-board { border-top: 1px solid var(--line); padding-top: 24px; }
+.standing-view .metrics-table { margin-bottom: 18px; }
+.standing-view .metrics-table caption { text-align: left; font-weight: 600; padding: 6px 0; }
+.standing-view .metrics-table th:first-child { width: 18%; }
+.standing-view .metrics-table th:nth-child(2) { width: auto; }
 .metrics-table tbody th { font-weight: 550; }
 .metrics-table tbody th small { display: block; color: var(--muted); font-size: .7rem; font-weight: 400; }
 .numeric { font-variant-numeric: tabular-nums; }

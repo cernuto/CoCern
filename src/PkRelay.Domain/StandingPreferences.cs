@@ -17,8 +17,6 @@ internal static class StandingPreferences
     /// <summary>A packet's <c>authorityRef</c> names a grant as <c>grant:&lt;id&gt;</c>; any other text stays a prose reference.</summary>
     public const string GrantPrefix = "grant:";
     private static readonly string[] Scopes = ["repository", "resource", "action"];
-    private const int MaxHistoryChanges = 20;
-
     public static RelayReply Put(AggregateContext context)
     {
         if (!context.Caller.IsAdministrator) return Error(AdministratorRequired);
@@ -35,7 +33,20 @@ internal static class StandingPreferences
         var proposals = ObjectAt(next, "proposals");
         var admin = context.Caller.PrincipalId;
         var now = context.Now.ToString("O");
+        // "+" adds, "~" replaces (an edit), "-" removes; only line, grant and setting changes advance the revision.
         var changes = new List<string>();
+        void SetLine(string id, string text, string author)
+        {
+            if (lines[id] is JsonObject existing && Text(existing, "text") == text) return;
+            changes.Add((lines.ContainsKey(id) ? "~line:" : "+line:") + id);
+            lines[id] = Line(id, text, author, admin, now);
+        }
+        void SetGrant(string id, JsonObject grant, string? proposer)
+        {
+            if (grants[id] is JsonObject existing && SameGrant(existing, grant)) return;
+            changes.Add((grants.ContainsKey(id) ? "~grant:" : "+grant:") + id);
+            grants[id] = Grant(id, grant, admin, now, proposer);
+        }
 
         if (args.ContainsKey("remove"))
         {
@@ -55,21 +66,20 @@ internal static class StandingPreferences
             {
                 if (proposals[id] is not JsonObject proposal) return Error(NotFound, new { id });
                 proposals.Remove(id);
+                changes.Add("approve:" + id);
                 var proposer = Text(proposal, "proposedBy");
                 if (proposal["line"] is JsonObject line)
                 {
                     var lineId = Text(line, "id", id);
                     if (grants.ContainsKey(lineId)) return Invalid("approve", lineId);
-                    lines[lineId] = Line(lineId, Text(line, "text"), proposer, admin, now);
-                    changes.Add("+line:" + lineId);
+                    SetLine(lineId, Text(line, "text"), proposer);
                 }
                 else if (proposal["grant"] is JsonObject grant)
                 {
                     var grantId = Text(grant, "id", id);
                     if (lines.ContainsKey(grantId)) return Invalid("approve", grantId);
                     if (Date(grant, "expiresAt") <= context.Now) return Error(GrantInvalid, new { grantId, reason = "expired" });
-                    grants[grantId] = Grant(grantId, grant, admin, now, proposer);
-                    changes.Add("+grant:" + grantId);
+                    SetGrant(grantId, grant, proposer);
                 }
             }
         }
@@ -80,8 +90,7 @@ internal static class StandingPreferences
             {
                 if (ReadLine(item, idRequired: true, out var id, out var text) is { } field) return Invalid("lines." + field);
                 if (grants.ContainsKey(id)) return Invalid("lines.id", id);
-                lines[id] = Line(id, text, admin, admin, now);
-                changes.Add("+line:" + id);
+                SetLine(id, text, admin);
             }
         }
         if (args.ContainsKey("grants"))
@@ -92,8 +101,7 @@ internal static class StandingPreferences
                 if (ReadGrant(item, idRequired: true, context.Repository, context.Now, out var grant) is { } field) return Invalid("grants." + field);
                 var id = Text(grant, "id");
                 if (lines.ContainsKey(id)) return Invalid("grants.id", id);
-                grants[id] = Grant(id, grant, admin, now, proposer: null);
-                changes.Add("+grant:" + id);
+                SetGrant(id, grant, proposer: null);
             }
         }
         if (args.ContainsKey("settings"))
@@ -102,22 +110,33 @@ internal static class StandingPreferences
             foreach (var setting in settings)
             {
                 if (setting.Key != "requireResources" || setting.Value is not JsonValue value || !value.TryGetValue<bool>(out var enabled)) return Invalid("settings." + setting.Key);
-                ObjectAt(next, "settings")[setting.Key] = enabled;
+                var stored = ObjectAt(next, "settings");
+                if (stored[setting.Key] is JsonValue prior && prior.TryGetValue<bool>(out var was) && was == enabled) continue;
+                stored[setting.Key] = enabled;
                 changes.Add("settings:" + setting.Key + "=" + (enabled ? "true" : "false"));
             }
         }
 
         if (lines.Count > RelayLimits.MaxStandingLines || grants.Count > RelayLimits.MaxStandingGrants) return Error(CapacityExceeded);
-        next["revision"] = revision + 1;
+        // A put that changes nothing (lines: [], an identical line) commits nothing; one that only approves or rejects proposals keeps the
+        // revision, so chats are not sent standing that did not change.
+        if (changes.Count == 0) return Ok(new { revision, changed = false, lines = lines.Count, grants = grants.Count, pending = proposals.Count }, revision);
+        var standingChanged = changes.Any(change => !change.StartsWith("approve:", StringComparison.Ordinal) && !change.StartsWith("-proposal:", StringComparison.Ordinal));
+        if (standingChanged) next["revision"] = revision + 1;
+        var updated = Number(next, "revision");
         if (ByteSize(Delivered(next, context.Now)) > RelayLimits.MaxStandingBytes) return Error(PayloadTooLarge, new { maxBytes = RelayLimits.MaxStandingBytes });
         var history = ArrayAt(next, "history");
-        var entry = new JsonObject { ["revision"] = revision + 1, ["by"] = admin, ["at"] = now, ["changes"] = new JsonArray(changes.Take(MaxHistoryChanges).Select(change => (JsonNode)change).ToArray()) };
-        if (changes.Count > MaxHistoryChanges) entry["changesTotal"] = changes.Count;
+        var entry = new JsonObject { ["revision"] = updated, ["by"] = admin, ["at"] = now, ["changes"] = new JsonArray(changes.Take(RelayLimits.StandingHistoryChanges).Select(change => (JsonNode)change).ToArray()) };
+        if (changes.Count > RelayLimits.StandingHistoryChanges) entry["changesTotal"] = changes.Count;
         history.Add(entry);
         while (history.Count > RelayLimits.StandingHistoryEntries) history.RemoveAt(0);
         context.State["standing"] = next;
-        return Ok(new { revision = revision + 1, lines = lines.Count, grants = grants.Count, pending = proposals.Count }, revision + 1);
+        return Ok(new { revision = updated, changed = standingChanged, lines = lines.Count, grants = grants.Count, pending = proposals.Count }, updated);
     }
+
+    private static bool SameGrant(JsonObject existing, JsonObject grant) =>
+        Text(existing, "scope") == Text(grant, "scope") && Text(existing, "expiresAt") == Text(grant, "expiresAt")
+        && StringSet(existing["targets"]).SetEquals(StringSet(grant["targets"]));
 
     public static RelayReply Propose(AggregateContext context)
     {
@@ -126,6 +145,8 @@ internal static class StandingPreferences
         var standing = context.State["standing"] as JsonObject ?? new JsonObject();
         var proposals = ObjectAt(standing, "proposals");
         if (proposals.Count >= RelayLimits.MaxStandingProposals) return Error(CapacityExceeded);
+        if (proposals.Count(x => x.Value is JsonObject pending && Text(pending, "sessionId") == context.SessionId) >= RelayLimits.MaxStandingProposalsPerSession)
+            return Error(CapacityExceeded, new { maxPerSession = RelayLimits.MaxStandingProposalsPerSession });
         var id = "p-" + Guid.NewGuid().ToString("N")[..12];
         var proposal = new JsonObject { ["id"] = id, ["proposedBy"] = context.Caller.PrincipalId, ["sessionId"] = context.SessionId, ["proposedAt"] = context.Now.ToString("O") };
         if (args.ContainsKey("line"))
@@ -180,7 +201,7 @@ internal static class StandingPreferences
             ["lines"] = new JsonArray((standing["lines"] as JsonObject ?? new()).Select(x => x.Value?.DeepClone()).ToArray()),
             ["grants"] = grants,
             ["settings"] = standing["settings"]?.DeepClone() ?? new JsonObject(),
-            ["proposals"] = new JsonArray((standing["proposals"] as JsonObject ?? new()).Select(x => x.Value?.DeepClone()).ToArray()),
+            ["proposals"] = new JsonArray((standing["proposals"] as JsonObject ?? new()).Select(x => x.Value).OfType<JsonObject>().Select(proposal => (JsonNode)Proposal(standing, proposal)).ToArray()),
             ["history"] = new JsonArray((standing["history"] as JsonArray ?? new()).Reverse().Select(x => x?.DeepClone()).ToArray())
         };
         var revision = Number(standing, "revision");
@@ -191,6 +212,15 @@ internal static class StandingPreferences
             while (items.Count > 0 && !FitsWire(Ok(view, revision), RelayLimits.AggregateReplyBytes)) { items.RemoveAt(items.Count - 1); view[section + "Truncated"] = true; }
         }
         return Ok(view, revision);
+    }
+
+    /// <summary>A proposal as the view shows it; <c>replaces</c> marks one whose ID would edit an existing line or grant when approved.</summary>
+    private static JsonObject Proposal(JsonObject standing, JsonObject proposal)
+    {
+        var copy = proposal.DeepClone().AsObject();
+        var (item, collection) = proposal["line"] is JsonObject line ? (line, "lines") : (proposal["grant"] as JsonObject ?? new JsonObject(), "grants");
+        if ((standing[collection] as JsonObject)?.ContainsKey(Text(item, "id", Text(proposal, "id"))) == true) copy["replaces"] = true;
+        return copy;
     }
 
     /// <summary>

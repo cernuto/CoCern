@@ -24,8 +24,11 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
     private readonly IMachineDirectory directory = machines ?? new MachineDirectory(grains);
     private const int WorkerProbeLimit = 50;
     private readonly string incarnation = Guid.NewGuid().ToString("N");
-    /// <summary>Each board's last standing read (tick count, delivered JSON), reused for <see cref="RelayLimits.StandingCacheSeconds"/>.</summary>
-    private readonly ConcurrentDictionary<string, (long At, string Json)> standingCache = new(StringComparer.Ordinal);
+    /// <summary>
+    /// Each board's last standing read (tick count, revision, delivered JSON), reused for <see cref="RelayLimits.StandingCacheSeconds"/>. An entry
+    /// never moves to an older revision; a write leaves only its new revision (no JSON), so a read already in flight cannot restore stale standing.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, (long At, long Revision, string? Json)> standingCache = new(StringComparer.Ordinal);
     public string IncarnationId => incarnation;
 
     /// <summary>Runs one public tool call and, when a sink is configured, records it once. Recording never changes or fails the call.</summary>
@@ -73,7 +76,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
             var result = await DispatchAsync(trusted, tool, args, session);
             if (result.Ok) result = await PiggybackAsync(trusted, args, result);
             if (result.Ok && tool == RelayTools.TaskUpdate && args["includeNextWork"]?.GetValue<bool>() == true) result = await WithNextWorkAsync(trusted, args, session, result);
-            if (result.Ok && tool == RelayTools.StandingPut) standingCache.TryRemove(BoardKey(args), out _);
+            if (result.Ok && tool == RelayTools.StandingPut) CacheStanding(BoardKey(args), 0, result.Version, null);
             if (result.Ok && session is not null && CarriesStanding(tool)) result = await WithStandingAsync(trusted, args, session, result);
             return BoundWire(result);
         }
@@ -179,12 +182,17 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
     {
         var key = BoardKey(args);
         var now = Environment.TickCount64;
-        if (standingCache.TryGetValue(key, out var cached) && now - cached.At < RelayLimits.StandingCacheSeconds * 1000L) return JsonNode.Parse(cached.Json)!.AsObject();
+        if (standingCache.TryGetValue(key, out var cached) && cached.Json is not null && now - cached.At < RelayLimits.StandingCacheSeconds * 1000L) return JsonNode.Parse(cached.Json)!.AsObject();
         var read = await CallBoard(caller, Operations.Standing, new JsonObject { ["repositoryId"] = Text(args, "repositoryId"), ["boardId"] = Text(args, "boardId", "default") });
         if (!read.Ok) return null;
-        if (standingCache.Count >= RelayLimits.StandingCacheBoards) standingCache.Clear();
-        standingCache[key] = (now, read.DataJson);
+        CacheStanding(key, now, read.Version, read.DataJson);
         return Parse(read);
+    }
+
+    private void CacheStanding(string key, long at, long revision, string? json)
+    {
+        if (standingCache.Count >= RelayLimits.StandingCacheBoards && !standingCache.ContainsKey(key)) standingCache.Clear();
+        standingCache.AddOrUpdate(key, (at, revision, json), (_, old) => revision >= old.Revision ? (at, revision, json) : old);
     }
 
     private Task<RelayReply> VerifySessionAsync(RelayCaller caller, JsonObject args) =>
