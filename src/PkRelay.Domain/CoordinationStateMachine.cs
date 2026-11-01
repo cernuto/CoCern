@@ -50,6 +50,7 @@ public static class CoordinationStateMachine
                 AggregateKinds.Session => SessionAggregate.Handle(context),
                 AggregateKinds.Board => TaskBoardAggregate.Handle(context),
                 AggregateKinds.Lock => LockAggregate.Handle(context),
+                AggregateKinds.Anomaly => AnomalyMonitor.Handle(context),
                 _ => Error(UnknownAggregate)
             };
         }
@@ -127,11 +128,15 @@ public static class CoordinationStateMachine
         Text(args, "repositoryId"), Text(args, "boardId", "default"), Text(args, "taskId"), actionId, attempt.ToString(CultureInfo.InvariantCulture)
     }.Select(Uri.EscapeDataString));
 
-    /// <summary>Rebuilds lease-expiry timers from the aggregate's own leases and its tasks' leases.</summary>
+    /// <summary>
+    /// Rebuilds the aggregate's timers from its own state: lease expiry from its own and its tasks' leases, a lock's lease check, and the
+    /// anomaly monitor's next check.
+    /// </summary>
     public static void ScheduleLeases(StateEnvelope<CoordinationDocument> envelope)
     {
         var state = JsonNode.Parse(envelope.Value.Json)!.AsObject();
-        envelope.DueWork.RemoveAll(x => x.Kind is "lease" or DueWorkKinds.LeaseWarning);
+        envelope.DueWork.RemoveAll(x => x.Kind is "lease" or DueWorkKinds.LeaseWarning or DueWorkKinds.AnomalyCheck);
+        if (DateTimeOffset.TryParse(Text(state, "nextCheckAt"), out var check)) envelope.DueWork.Add(new(DueWorkKinds.AnomalyCheck, DueWorkKinds.AnomalyCheck, check));
         if (DateTimeOffset.TryParse(Text(state, "leaseUntil"), out var lease)) envelope.DueWork.Add(new("lease", "lease", lease));
         // A lock whose holder has an action in flight checks its lease shortly before it ends (claim_expiring).
         if (AttentionSources.LeaseWarningAt(state) is { } warning) envelope.DueWork.Add(new(DueWorkKinds.LeaseWarning, DueWorkKinds.LeaseWarning, warning));

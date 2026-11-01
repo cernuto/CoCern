@@ -634,6 +634,39 @@ public class HostTests
         Assert.Contains("Relay:Attention:SnoozeBoundaries", failure.ToString());
     }
 
+    [Fact]
+    public async Task Anomaly_monitor_is_off_unless_analytics_is_on_and_its_settings_fail_clearly()
+    {
+        await using (var host = new RelayHostFixture())
+        {
+            using var client = host.AuthorizedClient();
+            Data(await host.Call(client, "session_open", new { repositoryId = "repo", requestId = "anomaly-manager", role = "manager" }));
+            Assert.Equal(TimeSpan.FromHours(1), host.Services.GetRequiredService<AnomalyOptions>().Interval);
+            await Task.Delay(300);
+            // With analytics off (the default) a manager session starts no monitor, so no check is ever scheduled.
+            var due = await host.Services.GetRequiredService<SqliteStore>().ReadDueAsync(DateTimeOffset.UtcNow.AddDays(30), 64);
+            Assert.DoesNotContain(due, work => work.GrainType == "pkrelay.anomaly");
+        }
+        foreach (var (setting, value, named) in new[]
+        {
+            ("Relay:Attention:AnomalyInterval", "00:00:30", "Relay:Attention:AnomalyInterval"),
+            ("Relay:Attention:AnomalyThresholds:not_a_query:Ratio", "3", "Relay:Attention:AnomalyThresholds:not_a_query"),
+            ("Relay:Attention:AnomalyThresholds:tokens_per_task:Ratio", "1", "Relay:Attention:AnomalyThresholds:tokens_per_task:Ratio"),
+            ("Relay:Attention:AnomalyThresholds:tokens_per_task:MinSamples", "0", "Relay:Attention:AnomalyThresholds:tokens_per_task:MinSamples")
+        })
+        {
+            await using var host = new RelayHostFixture(settings: new Dictionary<string, string?> { [setting] = value });
+            var failure = Assert.ThrowsAny<Exception>(() => host.Services.GetRequiredService<AnomalyOptions>());
+            Assert.Contains(named, failure.ToString());
+        }
+        await using (var off = new RelayHostFixture(settings: new Dictionary<string, string?> { ["Relay:Attention:AnomalyInterval"] = "0", ["Relay:Attention:AnomalyThresholds:noisiest_tools:Ratio"] = "0" }))
+        {
+            var options = off.Services.GetRequiredService<AnomalyOptions>();
+            Assert.False(options.Enabled);
+            Assert.DoesNotContain(options.Checks(), check => check.Query == AnalyticsQueryNames.NoisiestTools);
+        }
+    }
+
     /// <summary>A ready workflow, or a blocked one with one blocker, as the board accepts it.</summary>
     internal static object Workflow(string state, string blockerSummary = "waiting on schema review") => new
     {

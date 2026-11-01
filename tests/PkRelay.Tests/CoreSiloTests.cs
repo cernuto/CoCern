@@ -286,6 +286,225 @@ public sealed class CoreSiloTests
         finally { await host.StopAsync(); }
     }
 
+    [Fact]
+    public async Task Anomaly_monitor_check_survives_a_restart_ignores_small_samples_cools_down_and_closes_back_in_range()
+    {
+        var storage = new DurableStorage();
+        var clock = new ManualClock(DateTimeOffset.UtcNow);
+        var analytics = new FakeAnalytics(clock);
+        var options = new AnomalyOptions { Time = clock };
+        var caller = new RelayCaller("alice", false, ["repo"]);
+        IHost Silo() => new HostBuilder().ConfigureLogging(log => log.ClearProviders()).UseOrleans(silo =>
+            {
+                silo.UseLocalhostClustering(siloPort: FreePort(), gatewayPort: FreePort(), serviceId: "core-anomaly-tests", clusterId: Guid.NewGuid().ToString("N"));
+                silo.Services.AddKeyedSingleton<Orleans.Storage.IGrainStorage>("relay", (_, _) => storage);
+            })
+            .ConfigureServices(services => services.AddPkRelayCore().AddSingleton(options).AddSingleton<IAnalyticsQueries>(analytics)
+                .AddSingleton(provider => new RelayApplication(provider.GetRequiredService<IGrainFactory>(), anomaly: options))).Build();
+        async Task<JsonObject> Call(IHost host, string tool, JsonObject args)
+        {
+            args["repositoryId"] = "repo"; args["requestId"] = Guid.NewGuid().ToString("N");
+            var reply = await host.Services.GetRequiredService<RelayApplication>().ExecuteAsync(caller, tool, JsonSerializer.SerializeToElement(args));
+            Assert.True(reply.Ok, tool + ": " + reply.Code + " " + reply.DataJson);
+            return JsonNode.Parse(reply.DataJson)!.AsObject();
+        }
+        // Like the hub's pump: dispatch every due item until none is left, judging the monitor by its own clock.
+        async Task Pump(IHost host)
+        {
+            for (var round = 0; round < 5; round++)
+            {
+                var due = await storage.ReadDueAsync(clock.GetUtcNow() > DateTimeOffset.UtcNow ? clock.GetUtcNow() : DateTimeOffset.UtcNow, 64);
+                if (due.Count == 0) return;
+                foreach (var item in due) await host.Services.GetRequiredService<RelayApplication>().DispatchDueAsync(item);
+            }
+        }
+        StateEnvelope<CoordinationDocument> Monitor() => storage.Envelope("anomaly", GrainId.Create("pkrelay.anomaly", "repo"))!;
+        long Revision() => JsonNode.Parse(Monitor().Value.Json)!["attentionRevision"]?.GetValue<long>() ?? 0;
+
+        JsonObject manager;
+        using (var first = Silo())
+        {
+            await first.StartAsync();
+            manager = await Call(first, "session_open", new() { ["role"] = "Manager" });
+            // The manager session starts the monitor after its reply; the first check is due at once.
+            var deadline = DateTime.UtcNow.AddSeconds(20);
+            while (storage.Envelope("anomaly", GrainId.Create("pkrelay.anomaly", "repo")) is null && DateTime.UtcNow < deadline) await Task.Delay(25);
+            Assert.Equal(clock.GetUtcNow(), Assert.Single(Monitor().DueWork, work => work.Kind == DueWorkKinds.AnomalyCheck).DueAt);
+
+            // A value far above its baseline, but from too few rows, raises nothing.
+            analytics.Rows[AnalyticsQueryNames.TokensPerTask] = [["all", 3000.0, 100.0, 2L, 2L]];
+            await Pump(first);
+            Assert.Equal(AnomalyOptions.CheckedQueries, analytics.Queries);
+            Assert.Empty(Monitor().Effects);
+            Assert.Equal(0, Revision());
+            Assert.Equal(clock.GetUtcNow().AddHours(1), Assert.Single(Monitor().DueWork, work => work.Kind == DueWorkKinds.AnomalyCheck).DueAt);
+            await first.StopAsync();
+        }
+
+        using var second = Silo();
+        await second.StartAsync();
+        JsonObject As(JsonObject args) { args["sessionId"] = manager["sessionId"]!.DeepClone(); args["sessionToken"] = manager["sessionToken"]!.DeepClone(); return args; }
+        async Task<int> Actionable() => (await Call(second, "get_status", As(new())))["attention"]!["actionable"]!.GetValue<int>();
+        async Task Check(object?[] tokens)
+        {
+            clock.Advance(TimeSpan.FromHours(1));
+            analytics.Rows[AnalyticsQueryNames.TokensPerTask] = [tokens];
+            await Pump(second);
+        }
+
+        // After the restart the scheduled check is still in due work, and it runs once its time comes.
+        analytics.Queries.Clear();
+        await Check(["all", 300.0, 100.0, 10L, 10L]);
+        Assert.Equal(AnomalyOptions.CheckedQueries, analytics.Queries);
+        Assert.Equal(1, await Actionable());
+        var offer = (await Call(second, "check_inbox", As(new())))["attention"]!.AsObject();
+        Assert.Equal(("anomaly", "anomaly: tokens_per_task all: 300 vs 100 baseline (n=10)"), (offer["k"]!.GetValue<string>(), offer["x"]!.GetValue<string>()));
+
+        // The same anomaly in the same period is not raised again.
+        await Check(["all", 400.0, 100.0, 10L, 10L]);
+        Assert.Equal(1, Revision());
+        // Back in range: the item closes.
+        await Check(["all", 110.0, 100.0, 10L, 10L]);
+        Assert.Equal(2, Revision());
+        Assert.Equal(0, await Actionable());
+        // Out of range again within the cooldown: suppressed.
+        await Check(["all", 300.0, 100.0, 10L, 10L]);
+        Assert.Equal(2, Revision());
+        Assert.Equal(0, await Actionable());
+        // Once the cooldown has passed, it is raised again.
+        clock.Advance(TimeSpan.FromHours(RelayLimits.AnomalyCooldownHours));
+        await Check(["all", 300.0, 100.0, 10L, 10L]);
+        Assert.Equal(3, Revision());
+        Assert.Equal(1, await Actionable());
+        Assert.Empty(Monitor().Effects);
+        await second.StopAsync();
+    }
+
+    [Fact]
+    public async Task Anomaly_monitor_does_nothing_when_analytics_or_attention_is_off()
+    {
+        var storage = new DurableStorage();
+        var clock = new ManualClock(DateTimeOffset.UtcNow);
+        var analytics = new FakeAnalytics(clock);
+        analytics.Rows[AnalyticsQueryNames.TokensPerTask] = [["all", 300.0, 100.0, 10L, 10L]];
+        var options = new AnomalyOptions { Time = clock };
+        var caller = new RelayCaller("alice", false, ["repo"]);
+        var monitorId = GrainId.Create("pkrelay.anomaly", "repo");
+        foreach (var (attentionOn, analyticsOn) in new[] { (false, true), (true, false) })
+        {
+            using var host = new HostBuilder().ConfigureLogging(log => log.ClearProviders()).UseOrleans(silo =>
+                {
+                    silo.UseLocalhostClustering(siloPort: FreePort(), gatewayPort: FreePort(), serviceId: "core-anomaly-off-tests", clusterId: Guid.NewGuid().ToString("N"));
+                    silo.Services.AddKeyedSingleton<Orleans.Storage.IGrainStorage>("relay", (_, _) => storage);
+                })
+                .ConfigureServices(services =>
+                {
+                    var attention = new AttentionOptions { Enabled = attentionOn };
+                    services.AddPkRelayCore().AddSingleton(options).AddSingleton(attention);
+                    if (analyticsOn) services.AddSingleton<IAnalyticsQueries>(analytics);
+                    // The host passes the monitor's options only with analytics on.
+                    services.AddSingleton(provider => new RelayApplication(provider.GetRequiredService<IGrainFactory>(), attention: attention, anomaly: analyticsOn ? options : null));
+                }).Build();
+            await host.StartAsync();
+            var application = host.Services.GetRequiredService<RelayApplication>();
+            var opened = await application.ExecuteAsync(caller, "session_open", JsonSerializer.SerializeToElement(new { repositoryId = "repo", requestId = Guid.NewGuid().ToString("N"), role = "manager" }));
+            Assert.True(opened.Ok, opened.Code);
+            await Task.Delay(200);
+            Assert.Null(storage.Envelope("anomaly", monitorId));
+
+            // A check scheduled earlier (here started by hand) runs no query and raises nothing, and the monitor stops.
+            var monitor = host.Services.GetRequiredService<IGrainFactory>().GetGrain<IAnomalyMonitorGrain>("repo");
+            Assert.True((await monitor.ExecuteAsync(caller with { IsInternal = true }, Operations.AnomalyStart, """{"repositoryId":"repo"}""")).Ok);
+            var due = Assert.Single(await storage.ReadDueAsync(clock.GetUtcNow(), 64), work => work.Kind == DueWorkKinds.AnomalyCheck);
+            await application.DispatchDueAsync(due);
+            Assert.Empty(analytics.Queries);
+            Assert.Empty(storage.Envelope("anomaly", monitorId)!.Effects);
+            Assert.Empty(storage.Envelope("anomaly", monitorId)!.DueWork);
+            await host.StopAsync();
+            storage.Remove("anomaly", monitorId);
+        }
+    }
+
+    [Fact]
+    public void An_anomaly_needs_enough_samples_on_both_sides_and_a_value_past_the_ratio()
+    {
+        var at = new DateTimeOffset(2026, 11, 1, 10, 0, 0, TimeSpan.Zero);
+        JsonObject Find(string query, params object?[][] rows) => AnomalyMonitorGrain.Finding(query, new AnalyticsResult(["key", "cur", "prev", "cur_n", "prev_n"], rows, false, at), new AnomalyThreshold(2, 5));
+        Assert.Equal("2026-11-01", Find(AnalyticsQueryNames.TokensPerTask)["period"]!.GetValue<string>());
+        Assert.Null(Find(AnalyticsQueryNames.TokensPerTask, ["all", 300.0, 100.0, 4L, 10L])["anomaly"]);
+        Assert.Null(Find(AnalyticsQueryNames.TokensPerTask, ["all", 300.0, 100.0, 10L, 4L])["anomaly"]);
+        Assert.Null(Find(AnalyticsQueryNames.TokensPerTask, ["all", 199.0, 100.0, 10L, 10L])["anomaly"]);
+        Assert.Null(Find(AnalyticsQueryNames.TokensPerTask, ["all", 300.0, null, 10L, 10L])["anomaly"]);
+        Assert.Null(Find(AnalyticsQueryNames.TokensPerTask, ["all", 300.0, 0.0, 10L, 10L])["anomaly"]);
+        // Closures are better when higher, so they are never an anomaly.
+        Assert.Null(Find(AnalyticsQueryNames.QualityGuardrails, ["closures", 30L, 10L, 30L, 10L])["anomaly"]);
+        // The worst row (by ratio) is the one reported.
+        var worst = Find(AnalyticsQueryNames.NoisiestTools, ["task_get", 900L, 300L, 9L, 9L], ["search", 500L, 100L, 6L, 5L])["anomaly"]!;
+        Assert.Equal(("search", 500.0, 100.0, 6L), (worst["key"]!.GetValue<string>(), worst["value"]!.GetValue<double>(), worst["baseline"]!.GetValue<double>(), worst["samples"]!.GetValue<long>()));
+    }
+
+    /// <summary>A clock the test moves by hand.</summary>
+    private sealed class ManualClock(DateTimeOffset start) : TimeProvider
+    {
+        private DateTimeOffset now = start;
+        public override DateTimeOffset GetUtcNow() => now;
+        public void Advance(TimeSpan by) => now += by;
+    }
+
+    /// <summary>Named query results by name, with the snapshot taken at the clock's time; the queries it ran, in order.</summary>
+    private sealed class FakeAnalytics(TimeProvider clock) : IAnalyticsQueries
+    {
+        public Dictionary<string, IReadOnlyList<IReadOnlyList<object?>>> Rows { get; } = [];
+        public List<string> Queries { get; } = [];
+        public IReadOnlyList<string> QueryNames => AnalyticsQueryNames.All;
+        public Task<AnalyticsResult> RunNamedAsync(string name, string repositoryId, JsonElement parameters = default, CancellationToken cancellationToken = default)
+        {
+            lock (Queries) Queries.Add(name);
+            return Task.FromResult(new AnalyticsResult(["key", "cur", "prev", "cur_n", "prev_n"], Rows.TryGetValue(name, out var rows) ? rows : [], false, clock.GetUtcNow()));
+        }
+        public Task<AnalyticsResult> RunSqlAsync(string sql, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    }
+
+    /// <summary>Grain storage that outlives a silo, with the due-work index the hub's pump reads, as the SQLite store keeps them.</summary>
+    private sealed class DurableStorage : Orleans.Storage.IGrainStorage, IDueWorkSource
+    {
+        private static readonly JsonSerializerOptions Json = new() { IncludeFields = true };
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<(string State, GrainId Grain), string> rows = new();
+
+        public StateEnvelope<CoordinationDocument>? Envelope(string stateName, GrainId grainId) =>
+            rows.TryGetValue((stateName, grainId), out var json) ? JsonSerializer.Deserialize<StateEnvelope<CoordinationDocument>>(json, Json) : null;
+
+        public void Remove(string stateName, GrainId grainId) => rows.TryRemove((stateName, grainId), out _);
+
+        public Task ReadStateAsync<T>(string stateName, GrainId grainId, IGrainState<T> grainState)
+        {
+            var found = rows.TryGetValue((stateName, grainId), out var json);
+            grainState.State = found ? JsonSerializer.Deserialize<T>(json!, Json)! : Activator.CreateInstance<T>();
+            grainState.ETag = found ? "1" : null;
+            grainState.RecordExists = found;
+            return Task.CompletedTask;
+        }
+
+        public Task WriteStateAsync<T>(string stateName, GrainId grainId, IGrainState<T> grainState)
+        {
+            rows[(stateName, grainId)] = JsonSerializer.Serialize(grainState.State, Json);
+            grainState.ETag = "1"; grainState.RecordExists = true;
+            return Task.CompletedTask;
+        }
+
+        public Task ClearStateAsync<T>(string stateName, GrainId grainId, IGrainState<T> grainState)
+        {
+            rows.TryRemove((stateName, grainId), out _);
+            grainState.ETag = null; grainState.RecordExists = false;
+            return Task.CompletedTask;
+        }
+
+        public Task<IReadOnlyList<DueWorkReference>> ReadDueAsync(DateTimeOffset now, int limit, CancellationToken cancellationToken = default, int offset = 0) =>
+            Task.FromResult<IReadOnlyList<DueWorkReference>>(rows.Keys.SelectMany(key => (Envelope(key.State, key.Grain)?.GetDueWork() ?? []).Where(work => work.DueAt <= now)
+                    .Select(work => new DueWorkReference(key.State, key.Grain.Type.ToString()!, key.Grain.Key.ToString()!, work.Id, work.Kind, work.DueAt)))
+                .OrderBy(work => work.DueAt).Skip(offset).Take(limit).ToList());
+    }
+
     private sealed class FakeSearch : IFullTextSearch
     {
         public IReadOnlyList<SearchHit> Result { get; set; } = [];

@@ -99,13 +99,16 @@ public sealed class CoordinationDocument
     }
 }
 
-/// <summary>The four coordination aggregates. Each is a single-writer state machine keyed by a string.</summary>
+/// <summary>The four coordination aggregates, plus the anomaly monitor. Each is a single-writer state machine keyed by a string.</summary>
 public static class AggregateKinds
 {
     public const string Control = "control";
     public const string Session = "session";
     public const string Board = "board";
     public const string Lock = "lock";
+
+    /// <summary>One anomaly monitor per repository, keyed by the repository ID. It only raises and closes manager attention items.</summary>
+    public const string Anomaly = "anomaly";
 
     /// <summary>The machine-scoped discovery aggregate; a hub singleton keyed by <see cref="ControlKey"/>, applied by <see cref="DiscoveryStateMachine"/> rather than the repository-scoped state machine.</summary>
     public const string Discovery = "discovery";
@@ -114,11 +117,21 @@ public static class AggregateKinds
     public const string ControlKey = "hub";
 }
 
+/// <summary>Session roles the hub acts on. A role is given at <c>session_open</c>, compared ignoring case, and grants nothing.</summary>
+public static class SessionRoles
+{
+    /// <summary>Sessions that receive manager-bound attention items; a manager session also starts its repository's anomaly monitor.</summary>
+    public const string Manager = "manager";
+}
+
 /// <summary>Kinds of an aggregate's own timers (due work), besides lease expiry.</summary>
 public static class DueWorkKinds
 {
     /// <summary>A lock's check, shortly before its lease ends, for an action still in flight (raises <c>claim_expiring</c>).</summary>
     public const string LeaseWarning = "lease_warning";
+
+    /// <summary>The anomaly monitor's next check, rebuilt from its state's <c>nextCheckAt</c>.</summary>
+    public const string AnomalyCheck = "anomaly_check";
 }
 
 /// <summary>Hub-internal operations. They compose public tools across aggregates and are never accepted from clients.</summary>
@@ -162,6 +175,10 @@ public static class Operations
     public const string AttentionRoute = "__attention_route";
     /// <summary>A lock's due-work check: when its lease nears expiry with an action in flight, the holder gets a <c>claim_expiring</c> item.</summary>
     public const string LeaseCheck = "__lease_check";
+    /// <summary>Starts a repository's anomaly monitor: its first check is due now unless one is already scheduled.</summary>
+    public const string AnomalyStart = "__anomaly_start";
+    /// <summary>The anomaly monitor's due check, with the findings the hub read from the analytics snapshot.</summary>
+    public const string AnomalyCheck = "__anomaly_check";
 
     public static bool IsInternal(string operation) => operation.StartsWith("__", StringComparison.Ordinal);
 

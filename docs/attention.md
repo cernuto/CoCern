@@ -53,6 +53,7 @@ A successful `check_inbox`, `task_update`, `action_report` or `task_claim` reply
 | Claim | `duplicate_warning` (open look-alike tasks), `related_work` (completed ones), IDs only | the claimer | the claimed task completes |
 | Next-work offer | `next_work` for the task a `task_update` reply's `nextWork` offered | the caller | the caller claims it, or after a day |
 | Inbox | `info` for each message that may wake its chat | the recipient | `check_inbox` shows it, or `ack` |
+| Anomaly monitor | `anomaly` (a metric far above its baseline) | managers | a later check finds it back in range |
 
 - A manager is a session opened with `role: "manager"` (any case). Give that role at `session_open`.
 - The session that caused a change gets no copy of its own manager-bound item.
@@ -60,6 +61,27 @@ A successful `check_inbox`, `task_update`, `action_report` or `task_claim` reply
 - Each raise and close commits with the change that caused it, through the source's outbox.
 - Look-alikes come from `search` on the task's title or goal, so they need search turned on. A task must contain every word and match well, so one shared word is not enough. The search runs after the claim reply, so the items appear from the next reply on.
 - The `nextWork` field on `task_update` is unchanged.
+
+## Anomaly monitor
+
+Each repository has an anomaly monitor. It is off unless [analytics](analytics.md) is on. Attention must be on too.
+
+- The first manager session opened in the repository starts it. After that it checks every hour, and its schedule survives restarts.
+- Each check runs the named queries on the latest snapshot. A row is an anomaly when its current value is at least 2 times its previous value (the baseline). Both values must come from at least 5 rows.
+- Each query raises at most one item. The item's subject is the query name, and its note gives the metric, value, baseline and sample size:
+
+  ```
+  anomaly: tokens_per_task all: 1050 vs 330 baseline (n=12)
+  ```
+
+- The same query, row and day is never raised twice. A query that raised waits 24 hours before it can raise again.
+- `quality_guardrails` closures (more is better) and `attention_outcomes_by_kind` are not checked.
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `Relay:Attention:AnomalyInterval` | `01:00:00` | Time between checks (1 minute to 7 days). `0` turns the monitor off. |
+| `Relay:Attention:AnomalyThresholds:<query>:Ratio` | 2 | How many times its baseline a value must be. `0` turns off that query's check. |
+| `Relay:Attention:AnomalyThresholds:<query>:MinSamples` | 5 | Rows each value must come from. |
 
 ## How items are ranked
 

@@ -17,6 +17,7 @@ public interface ISessionGrain : IRelayAggregateGrain;
 public interface ITaskBoardGrain : IRelayAggregateGrain;
 public interface ILockGrain : IRelayAggregateGrain;
 public interface IControlGrain : IRelayAggregateGrain;
+public interface IAnomalyMonitorGrain : IRelayAggregateGrain;
 
 /// <summary>
 /// Orleans adapter for one aggregate. It owns activation, persistence and outbox delivery; every rule is applied by
@@ -27,6 +28,17 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
     private static readonly TimeSpan RedeliveryDelay = TimeSpan.FromSeconds(5);
     protected abstract string Kind { get; }
     private bool uncertainCommit;
+
+    /// <summary>The time operations and due work are judged by. The anomaly monitor reads it from its options, so tests can move it.</summary>
+    protected virtual DateTimeOffset Now => DateTimeOffset.UtcNow;
+
+    private protected IServiceProvider Services => services;
+
+    /// <summary>
+    /// Runs this aggregate's own due checks before its outbox is delivered, committing what they change and raise. Returns false when
+    /// that commit failed. <paramref name="workId"/> is empty for all due work. The anomaly monitor runs its analytics check here.
+    /// </summary>
+    private protected virtual Task<bool> RunDueChecksAsync(StateEnvelope<CoordinationDocument> candidate, DateTimeOffset now, string workId) => Task.FromResult(true);
 
     public async Task<RelayReply> ExecuteAsync(RelayCaller caller, string operation, string argumentsJson)
     {
@@ -39,7 +51,7 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
         var candidate = Clone(persistent.State);
         var firstNewEffect = candidate.Effects.Count;
         var priorTaskRevision = Kind == AggregateKinds.Board ? CoordinationStateMachine.TaskRevision(candidate) : null;
-        var reply = CoordinationStateMachine.Apply(candidate, Kind, this.GetPrimaryKeyString(), caller, operation, args, DateTimeOffset.UtcNow);
+        var reply = CoordinationStateMachine.Apply(candidate, Kind, this.GetPrimaryKeyString(), caller, operation, args, Now);
         if (!reply.Ok || !CoordinationStateMachine.RequiresCommit(Kind, operation, priorTaskRevision, candidate)) return reply;
         CoordinationStateMachine.StampEffects(candidate.Effects, firstNewEffect, caller);
         CoordinationStateMachine.ScheduleLeases(candidate);
@@ -55,9 +67,14 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
         bool Selected(DurableEffect effect) =>
             (workId.Length == 0 || effect.Id == workId) && (operation.Length == 0 || effect.Operation == operation)
             && (actionKey.Length == 0 || JsonNode.Parse(effect.PayloadJson)?["actionKey"]?.ToString() == actionKey);
-        var now = DateTimeOffset.UtcNow;
+        var now = Now;
         var candidate = Clone(persistent.State);
         var attention = services.GetService<AttentionOptions>();
+        if (operation.Length == 0 && actionKey.Length == 0)
+        {
+            if (!await RunDueChecksAsync(candidate, now, workId)) return Replies.Error(RelayErrorCodes.StorageFailure);
+            candidate = Clone(persistent.State);
+        }
         if (Kind == AggregateKinds.Lock && operation.Length == 0 && actionKey.Length == 0 && candidate.DueWork.Any(x => x.Kind == DueWorkKinds.LeaseWarning && x.DueAt <= now && (workId.Length == 0 || x.Id == workId)))
         {
             // The lease check commits its claim_expiring raise in the lock's own outbox; the pump delivers it next.
@@ -164,7 +181,7 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
         catch (Exception) { /* Telemetry never affects delivery. */ }
     }
 
-    private async Task<bool> CommitAsync(StateEnvelope<CoordinationDocument> candidate)
+    private protected async Task<bool> CommitAsync(StateEnvelope<CoordinationDocument> candidate)
     {
         var previous = persistent.State;
         persistent.State = candidate;
@@ -180,7 +197,7 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
         }
     }
 
-    private static StateEnvelope<CoordinationDocument> Clone(StateEnvelope<CoordinationDocument> state) => new()
+    private protected static StateEnvelope<CoordinationDocument> Clone(StateEnvelope<CoordinationDocument> state) => new()
     {
         SchemaVersion = state.SchemaVersion, Value = new() { Json = state.Value.Json }, Effects = [.. state.Effects], DueWork = [.. state.DueWork]
     };
@@ -191,6 +208,7 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
         AggregateKinds.Board => factory.GetGrain<ITaskBoardGrain>(key),
         AggregateKinds.Lock => factory.GetGrain<ILockGrain>(key),
         AggregateKinds.Control => factory.GetGrain<IControlGrain>(key),
+        AggregateKinds.Anomaly => factory.GetGrain<IAnomalyMonitorGrain>(key),
         _ => throw new ArgumentException("Unknown coordination grain type.", nameof(kind))
     };
 }

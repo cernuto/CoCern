@@ -51,6 +51,7 @@ public static class RelayHostBuilderExtensions
                 ItemExpiryDays = configuration.GetValue("Relay:Attention:ItemExpiryDays", RelayLimits.DefaultAttentionExpiryDays)
             }.Validated();
         });
+        builder.Services.AddSingleton(services => AnomalySettings(services.GetRequiredService<IConfiguration>()));
         // The search port is passed only when the store keeps an index; otherwise the search tool answers SearchUnavailable. Likewise
         // analytics_query gets the analytics port only when analytics is on, and answers AnalyticsUnavailable otherwise.
         builder.Services.Replace(ServiceDescriptor.Singleton(services => new RelayApplication(
@@ -58,7 +59,9 @@ public static class RelayHostBuilderExtensions
             services.GetService<SqliteStore>() is { SearchEnabled: true } store ? store : null, services.GetRequiredService<AttentionOptions>(),
             services.GetService<IAnalyticsQueries>() is { } queries
                 ? new AnalyticsTool(queries, services.GetRequiredService<IConfiguration>().GetValue("Relay:Analytics:AllowAdHocSql", false), services.GetRequiredService<ILoggerFactory>().CreateLogger<AnalyticsTool>())
-                : null)));
+                : null,
+            // The anomaly monitor runs only with analytics on; its grain checks the same before every check.
+            services.GetService<IAnalyticsQueries>() is not null ? services.GetRequiredService<AnomalyOptions>() : null)));
         builder.AddRelayOrleans();
         builder.Services.AddRelayDashboard();
         builder.Services.AddHostedService<DueWorkDispatcher>();
@@ -124,6 +127,22 @@ public static class RelayHostBuilderExtensions
         });
         services.AddSingleton<IAnalyticsQueries>(provider => provider.GetRequiredService<AnalyticsSettings>().Enabled ? provider.GetRequiredService<AnalyticsService>() : null!);
         services.AddHostedService<AnalyticsSnapshotService>();
+    }
+
+    /// <summary>
+    /// <c>Relay:Attention:AnomalyInterval</c> (default 1 hour; 0 turns the monitor off) and per-query thresholds under
+    /// <c>Relay:Attention:AnomalyThresholds:&lt;query&gt;</c> with <c>Ratio</c> (0 turns that check off) and <c>MinSamples</c>.
+    /// </summary>
+    private static AnomalyOptions AnomalySettings(IConfiguration configuration)
+    {
+        var thresholds = new Dictionary<string, AnomalyThreshold>(StringComparer.Ordinal);
+        foreach (var section in configuration.GetSection("Relay:Attention:AnomalyThresholds").GetChildren())
+            thresholds[section.Key] = new(section.GetValue("Ratio", RelayLimits.DefaultAnomalyRatio), section.GetValue("MinSamples", RelayLimits.DefaultAnomalyMinSamples));
+        return new AnomalyOptions
+        {
+            Interval = configuration.GetValue("Relay:Attention:AnomalyInterval", TimeSpan.FromMinutes(RelayLimits.DefaultAnomalyIntervalMinutes)),
+            Thresholds = thresholds
+        }.Validated();
     }
 
     private static string DefaultDatabasePath(IHostEnvironment environment) => Path.Combine(environment.ContentRootPath, "data", "relay.db");
