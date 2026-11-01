@@ -666,6 +666,7 @@ public sealed class DocCacheTests
         await using var host = new RelayHostFixture(settings: new Dictionary<string, string?>
         {
             ["Relay:Clients:1:Token"] = AdminToken, ["Relay:Clients:1:PrincipalId"] = "doc-admin", ["Relay:Clients:1:IsAdministrator"] = "true", ["Relay:Clients:1:Repositories:0"] = "repo",
+            ["Relay:DocCache:Enabled"] = "false",
             ["Relay:DocCache:Repositories:0:Id"] = "repo", ["Relay:DocCache:Repositories:0:ClonePath"] = "/nonexistent", ["Relay:DocCache:SyncMinutes"] = "1"
         }, configureServices: services => { services.RemoveAll<GitCli>(); services.AddSingleton<GitCli>(git); });
         using var worker = host.AuthorizedClient();
@@ -682,6 +683,60 @@ public sealed class DocCacheTests
         // The shared token counter is registered either way, for other features to reuse.
         Assert.Equal("o200k_base", host.Services.GetRequiredService<ITokenCounter>().Encoding);
         Assert.Equal(RelayErrorKind.Invalid, RelayErrorCodes.Classify(RelayErrorCodes.DocCacheUnavailable));
+    }
+
+    [Fact]
+    public async Task With_no_repositories_configured_the_doc_cache_runs_no_git_and_says_so()
+    {
+        var git = new WatchingGit();
+        // The doc cache is on by default; this hub configures no repositories for it.
+        await using var host = new RelayHostFixture(settings: new Dictionary<string, string?>
+        {
+            ["Relay:Clients:1:Token"] = AdminToken, ["Relay:Clients:1:PrincipalId"] = "doc-admin", ["Relay:Clients:1:IsAdministrator"] = "true", ["Relay:Clients:1:Repositories:0"] = "repo"
+        }, configureServices: services => { services.RemoveAll<GitCli>(); services.AddSingleton<GitCli>(git); });
+        using var worker = host.AuthorizedClient();
+        using var admin = Admin(host);
+        var settings = host.Services.GetRequiredService<DocCacheSettings>();
+        Assert.True(settings.Enabled);
+        Assert.Empty(settings.Repositories);
+        Assert.NotNull(host.Services.GetService<DocCacheTool>());
+        var search = await Tool(worker, "doc_search", new { repositoryId = "repo", query = "x" });
+        Assert.Equal((HttpStatusCode.BadRequest, "NoRepositoriesConfigured"), Status(search));
+        Assert.Contains("Relay:DocCache:Repositories", Data(search).GetProperty("message").GetString());
+        Assert.Equal((HttpStatusCode.BadRequest, "NoRepositoriesConfigured"), Status(await Tool(worker, "doc_section", new { repositoryId = "repo", path = "a.md", anchor = "a" })));
+        Assert.Equal((HttpStatusCode.BadRequest, "NoRepositoriesConfigured"), Status(await Tool(admin, "doc_sync", new { repositoryId = "repo", requestId = "none-1" })));
+        // The timer has nothing to sync, so it returns at once and git never runs.
+        await host.Services.GetServices<IHostedService>().OfType<SpecSyncService>().Single().ExecuteTask!;
+        await Task.Delay(200);
+        Assert.Equal(0, git.Commands);
+        Assert.Equal(RelayErrorKind.Invalid, RelayErrorCodes.Classify(RelayErrorCodes.NoRepositoriesConfigured));
+    }
+
+    [Fact]
+    public async Task A_clone_without_a_remote_syncs_its_local_branch_head_without_fetching_or_touching_the_working_tree()
+    {
+        using var git = GitRepositories.Create(new() { ["docs/a.md"] = "# Claims\n\nHow to claim a task." });
+        git.RemoveCloneRemote();
+        var watching = new WatchingGit();
+        await using var host = DocHost(git, watching);
+        using var worker = host.AuthorizedClient();
+        var first = await SyncAsync(host);
+        Assert.False(first.Fetched);
+        Assert.Equal(git.CloneHead(), first.Commit);
+        Assert.Equal(1, first.Changed);
+        Assert.Single(Hits(await Tool(worker, "doc_search", new { repositoryId = "repo", query = "claim a task" })));
+
+        // A commit on the local branch is picked up on the next sync; an uncommitted file is not.
+        git.CommitInCloneOnly("docs/refunds.md", "# Refunds\n\nRefunds go back to the card.");
+        git.WriteInClone("docs/draft.md", "# Draft\n\nzebra crossing notes");
+        var second = await SyncAsync(host);
+        Assert.Equal((git.CloneHead(), 1, false), (second.Commit, second.Changed, second.Fetched));
+        Assert.Equal("docs/refunds.md", Assert.Single(Hits(await Tool(worker, "doc_search", new { repositoryId = "repo", query = "refunds card" }))).GetProperty("path").GetString());
+        Assert.Empty(Hits(await Tool(worker, "doc_search", new { repositoryId = "repo", query = "zebra" })));
+        Assert.Equal(0, (await SyncAsync(host)).Changed);
+        // Nothing was fetched, and the working tree is as it was: only the untracked draft.
+        Assert.Empty(watching.Fetches);
+        Assert.Equal("?? docs/draft.md", git.CloneStatus().Trim());
     }
 
     [Fact]
@@ -1186,6 +1241,13 @@ public sealed class DocCacheTests
         }
 
         public void SetCloneRemote(string url) => Run(Clone, "remote", "set-url", "origin", url);
+
+        /// <summary>Makes the hub's clone a local-only repository, with no remote to fetch from.</summary>
+        public void RemoveCloneRemote() => Run(Clone, "remote", "remove", "origin");
+
+        public string CloneHead() => Run(Clone, "rev-parse", "HEAD").Trim();
+
+        public string CloneStatus() => Run(Clone, "status", "--porcelain", "--untracked-files=all");
 
         public void WriteInClone(string path, string text)
         {

@@ -368,10 +368,10 @@ public class AnalyticsTests
     }
 
     [Fact]
-    public async Task Analytics_is_off_by_default_and_takes_a_snapshot_at_startup_when_enabled()
+    public async Task Analytics_turned_off_loads_nothing_and_takes_a_snapshot_at_startup_when_on()
     {
         var root = TempDirectory();
-        await using (var off = new RelayHostFixture(databasePath: Path.Combine(root, "off", "relay.db")))
+        await using (var off = new RelayHostFixture(databasePath: Path.Combine(root, "off", "relay.db"), settings: new Dictionary<string, string?> { ["Relay:Analytics:Enabled"] = "false" }))
         {
             using var client = off.AuthorizedClient();
             await Open(off, client, "off", "worker");
@@ -606,14 +606,22 @@ public class AnalyticsTests
 }
 
 /// <summary>
-/// The DuckDB sqlite extension for tests: the folder in <c>COCERN_DUCKDB_EXTENSIONS</c>, or a per-machine cache in the temp folder.
-/// It is downloaded once when missing; after that the tests need no network.
+/// The DuckDB sqlite extension for tests: the folder in <c>COCERN_DUCKDB_EXTENSIONS</c> when set; otherwise the bundled folder the build
+/// unpacks next to the test binaries, where it covers this platform (Windows x64); otherwise a per-machine cache in the temp folder,
+/// downloaded once when missing. After that the tests need no network.
 /// </summary>
 internal static class AnalyticsTestExtension
 {
     private static readonly Lazy<Task<string>> Ready = new(async () =>
     {
-        var directory = Path.GetFullPath(Environment.GetEnvironmentVariable("COCERN_DUCKDB_EXTENSIONS") is { Length: > 0 } configured ? configured : Path.Combine(Path.GetTempPath(), "cocern-duckdb-extensions"));
+        if (Environment.GetEnvironmentVariable("COCERN_DUCKDB_EXTENSIONS") is { Length: > 0 } configured)
+        {
+            var folder = Path.GetFullPath(configured);
+            if (!AnalyticsExtension.IsInstalled(folder)) await AnalyticsExtension.InstallAsync(folder);
+            return folder;
+        }
+        if (AnalyticsExtension.Problem(AnalyticsOptions.DefaultExtensionDirectory) is null) return AnalyticsOptions.DefaultExtensionDirectory;
+        var directory = Path.Combine(Path.GetTempPath(), "cocern-duckdb-extensions");
         if (!AnalyticsExtension.IsInstalled(directory)) await AnalyticsExtension.InstallAsync(directory);
         return directory;
     });

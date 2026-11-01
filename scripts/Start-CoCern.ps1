@@ -3,7 +3,9 @@ param(
     [string]$RepositoryId = 'cocern',
     [string]$Url = 'http://127.0.0.1:5271',
     [string]$DataDirectory = (Join-Path $PSScriptRoot '..\data'),
-    [string]$HostDll = (Join-Path $PSScriptRoot '..\src\CoCern.Host\bin\Debug\net10.0\CoCern.Host.dll')
+    [string]$HostDll = (Join-Path $PSScriptRoot '..\src\CoCern.Host\bin\Debug\net10.0\CoCern.Host.dll'),
+    # Leave the doc cache without the checkout this script runs from.
+    [switch]$NoDocs
 )
 $ErrorActionPreference = 'Stop'
 $DataDirectory = [IO.Path]::GetFullPath($DataDirectory)
@@ -46,6 +48,35 @@ $settings = @{
     Relay__Clients__0__IsAdministrator = 'true'
     Relay__Clients__0__Repositories__0 = $RepositoryId
 }
+# The doc cache syncs committed docs from git. Out of the box it follows the checkout this script runs from, on its current branch,
+# with the default patterns. It reads commits only (git show), never the working tree. A clone without a remote is read locally.
+function Get-DocRepositorySettings([string]$Root) {
+    if ($NoDocs -or [Environment]::GetEnvironmentVariable('Relay__DocCache__Repositories__0__Id', 'Process')) { return @{} }
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) { return @{} }
+    $top = & git -C $Root rev-parse --show-toplevel 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $top -or [IO.Path]::GetFullPath($top).TrimEnd('\', '/') -ne $Root.TrimEnd('\', '/')) { return @{} }
+    $branch = & git -C $Root symbolic-ref --quiet --short HEAD 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $branch) { Write-Host 'Doc cache: the checkout is not on a branch, so its docs are not synced.'; return @{} }
+    $remote = & git -C $Root config --get "branch.$branch.remote" 2>$null
+    $merge = & git -C $Root config --get "branch.$branch.merge" 2>$null
+    # Follow the branch's upstream when it has one; otherwise the branch itself, from origin (or read locally in a clone without remotes).
+    if ($remote -and $remote -ne '.' -and $merge -like 'refs/heads/*') { $branch = $merge.Substring('refs/heads/'.Length) } else { $remote = $null }
+    $safe = '^(?![-./])(?!.*\.\.)(?!.*//)(?!.*@\{)[A-Za-z0-9._/-]{1,200}(?<![/.])(?<!\.lock)$'
+    if ($branch -notmatch $safe -or ($remote -and $remote -notmatch '^(?![-.])[A-Za-z0-9._-]{1,200}(?<!\.)(?<!\.lock)$')) {
+        Write-Host "Doc cache: the branch name '$branch' is not supported, so the checkout's docs are not synced."
+        return @{}
+    }
+    $docs = @{
+        Relay__DocCache__Repositories__0__Id = $RepositoryId
+        Relay__DocCache__Repositories__0__ClonePath = $Root
+        Relay__DocCache__Repositories__0__Branch = $branch
+    }
+    if ($remote) { $docs.Relay__DocCache__Repositories__0__Remote = $remote }
+    Write-Host "Doc cache: syncing $Root ($branch) as repository $RepositoryId."
+    return $docs
+}
+$docSettings = Get-DocRepositorySettings ([IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..')))
+foreach ($name in $docSettings.Keys) { $settings[$name] = $docSettings[$name] }
 $previous = @{}
 try {
     foreach ($name in $settings.Keys) {

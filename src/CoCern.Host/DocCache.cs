@@ -44,7 +44,7 @@ internal sealed record DocRepository(string Id, string ClonePath, string Branch,
     public IEnumerable<string> Pathspecs => Patterns.Select(pattern => ":(glob)" + pattern.Glob);
 }
 
-/// <summary><c>Relay:DocCache:*</c>. Off unless <see cref="Enabled"/>.</summary>
+/// <summary><c>Relay:DocCache:*</c>. On by default; with no repositories configured it does nothing.</summary>
 internal sealed record DocCacheSettings(bool Enabled, int SyncMinutes, int IdleMinutes, int MaxDocuments, IReadOnlyList<DocRepository> Repositories, long MaxRepositoryBytes = RelayLimits.MaxRepositoryDocBytes)
 {
     /// <summary>
@@ -71,8 +71,8 @@ internal sealed record DocCacheSettings(bool Enabled, int SyncMinutes, int IdleM
                 throw new InvalidOperationException($"Relay:DocCache:{key} must be {(minimum == 0 ? "0 (off) or " : "")}from {Math.Max(minimum, 1)} to {RelayLimits.MaxDocCacheMinutes} minutes.");
             return value;
         }
-        // Off reads nothing more, so settings for a cache that is off never stop the hub.
-        if (!section.GetValue("Enabled", false)) return new(false, RelayLimits.DefaultDocSyncMinutes, RelayLimits.DefaultDocIdleMinutes, RelayLimits.MaxDocsPerRepository, []);
+        // On by default. Off reads nothing more, so settings for a cache that is off never stop the hub.
+        if (!section.GetValue("Enabled", true)) return new(false, RelayLimits.DefaultDocSyncMinutes, RelayLimits.DefaultDocIdleMinutes, RelayLimits.MaxDocsPerRepository, []);
         var maxBytes = section.GetValue("MaxRepositoryBytes", RelayLimits.MaxRepositoryDocBytes);
         if (maxBytes < 1 || maxBytes > RelayLimits.MaxRepositoryDocBytesCeiling)
             throw new InvalidOperationException($"Relay:DocCache:MaxRepositoryBytes must be from 1 to {RelayLimits.MaxRepositoryDocBytesCeiling}.");
@@ -269,10 +269,26 @@ internal sealed class DocGit(GitCli git, DocRepository repository, ILogger? logg
         return null;
     }
 
-    /// <summary>The commit at the head of the branch's remote-tracking ref, or null when there is none.</summary>
+    private bool? hasRemote;
+
+    /// <summary>
+    /// Whether the clone defines the configured remote. A clone without it (a local-only repository) is never fetched, and its branches
+    /// are read from <c>refs/heads</c>: still committed content only, never the working tree.
+    /// </summary>
+    public async Task<bool> HasRemoteAsync(CancellationToken cancellationToken)
+    {
+        if (hasRemote is { } known) return known;
+        var result = await git.RunAsync(repository.ClonePath, ["remote"], 65_536, null, cancellationToken);
+        if (result.ExitCode != 0) return false;
+        hasRemote = result.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Contains(repository.Remote, StringComparer.Ordinal);
+        return hasRemote.Value;
+    }
+
+    /// <summary>The commit at the head of the branch's remote-tracking ref (or, in a clone without the remote, the local branch), or null when there is none.</summary>
     public async Task<string?> HeadAsync(string branch, CancellationToken cancellationToken)
     {
-        var result = await git.RunAsync(repository.ClonePath, ["rev-parse", "--verify", "--quiet", $"refs/remotes/{repository.Remote}/{branch}^{{commit}}"], 1_024, null, cancellationToken);
+        var reference = await HasRemoteAsync(cancellationToken) ? $"refs/remotes/{repository.Remote}/{branch}" : $"refs/heads/{branch}";
+        var result = await git.RunAsync(repository.ClonePath, ["rev-parse", "--verify", "--quiet", reference + "^{commit}"], 1_024, null, cancellationToken);
         var commit = result.Text.Trim();
         return result.ExitCode == 0 && IsCommit(commit) ? commit : null;
     }
@@ -418,10 +434,12 @@ internal sealed class DocSyncRunner(DocCacheSettings settings, GitCli git, IGrai
         var fingerprint = settings.Fingerprint(repository);
         var settingsChanged = view.Fingerprint != fingerprint;
         var branch = branchOverride ?? (view.Branch.Length > 0 && !settingsChanged ? view.Branch : repository.Branch);
-        var fetched = await git.FetchAsync(branch, cancellationToken);
-        if (!fetched) logger.LogWarning("Doc sync for {Repository}: git fetch of {Branch} failed; using the clone's last fetched commit.", repository.Id, branch);
+        // A clone without the remote has nothing to fetch: its local branch head is compared instead.
+        var remote = await git.HasRemoteAsync(cancellationToken);
+        var fetched = remote && await git.FetchAsync(branch, cancellationToken);
+        if (remote && !fetched) logger.LogWarning("Doc sync for {Repository}: git fetch of {Branch} failed; using the clone's last fetched commit.", repository.Id, branch);
         var head = await git.HeadAsync(branch, cancellationToken)
-            ?? throw new DocSyncException(DocSyncError.UnknownBranch, $"The clone has no branch {branch} from {repository.Remote}.");
+            ?? throw new DocSyncException(DocSyncError.UnknownBranch, remote ? $"The clone has no branch {branch} from {repository.Remote}." : $"The clone has no branch {branch}.");
         var full = view.Commit.Length == 0 || view.NeedsResync || settingsChanged || branch != view.Branch || !await git.CommitExistsAsync(view.Commit, cancellationToken);
         if (!full && head == view.Commit) return new(head, 0, 0, fetched);
 
@@ -528,7 +546,8 @@ internal sealed class SpecSyncService(DocCacheSettings settings, IServiceProvide
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        if (!settings.Enabled || settings.SyncMinutes == 0) return;
+        // With no repositories configured there is nothing to sync: no git runs at all.
+        if (!settings.Enabled || settings.SyncMinutes == 0 || settings.Repositories.Count == 0) return;
         await Task.Yield();
         try
         {

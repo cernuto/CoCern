@@ -26,6 +26,42 @@ public static class AnalyticsExtension
         catch (DuckDBException) { return false; }
     }
 
+    /// <summary>The checksum manifest the build copies next to the bundled extension.</summary>
+    public const string ManifestName = "SHA256SUMS";
+
+    /// <summary>
+    /// Why analytics cannot load the <c>sqlite</c> extension from <paramref name="directory"/>, or null when it can. The file for this
+    /// DuckDB version and platform must be there and, when the folder has a <see cref="ManifestName"/> (the bundled folder does), match its
+    /// SHA-256 sum; DuckDB then checks its signature on <c>LOAD</c>. Never throws: a missing native library is a reason too.
+    /// </summary>
+    public static string? Problem(string directory)
+    {
+        try
+        {
+            directory = Path.GetFullPath(directory);
+            string version, platform;
+            using (var connection = Open(directory))
+            {
+                version = Scalar(connection, "SELECT version()");
+                platform = Scalar(connection, "SELECT platform FROM pragma_platform()");
+            }
+            var relative = $"{version}/{platform}/{FileName}";
+            var file = Path.Combine(directory, version, platform, FileName);
+            if (!File.Exists(file)) return $"The DuckDB sqlite extension for {platform} is not in {directory}.";
+            var manifest = Path.Combine(directory, ManifestName);
+            if (File.Exists(manifest))
+            {
+                var expected = File.ReadLines(manifest).Select(line => line.Trim()).Where(line => line.Length > 66 && line[66..].Trim() == relative).Select(line => line[..64]).FirstOrDefault();
+                if (expected is null) return $"The extension manifest in {directory} has no sum for {relative}.";
+                using var stream = File.OpenRead(file);
+                if (!string.Equals(Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(stream)), expected, StringComparison.OrdinalIgnoreCase))
+                    return $"The DuckDB sqlite extension in {directory} does not match its SHA-256 sum.";
+            }
+            return IsInstalled(directory) ? null : $"DuckDB could not load the sqlite extension from {directory}.";
+        }
+        catch (Exception exception) { return "DuckDB could not start: " + exception.Message.Split('\n', 2)[0].Trim(); }
+    }
+
     /// <summary>
     /// Makes sure <paramref name="directory"/> holds the <c>sqlite</c> extension for this DuckDB version and <paramref name="platform"/>
     /// (default: this machine's). Downloads only when it is missing. An extension for this machine is loaded once to check it; one for

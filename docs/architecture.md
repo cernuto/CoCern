@@ -10,7 +10,7 @@ CoCern stores coordination only: tasks, claims, messages, notes and reported out
 | `CoCern.Domain` | The rules, as pure code. `CoordinationStateMachine.Apply` checks every call, then hands it to one aggregate: control, session, task board or lock. Discovery (`DiscoveryStateMachine`) and the anomaly monitor (`AnomalyMonitor`) have their own. |
 | `CoCern.Core` | `RelayApplication`: checks the request, authenticates the session, routes each tool, and composes calls that span aggregates. Also the Orleans grains and the ports below. |
 | `CoCern.Storage` | SQLite: grain state, due work, the search index and the activity log. |
-| `CoCern.Analytics` | DuckDB snapshots and named queries. Loaded only when analytics is on. |
+| `CoCern.Analytics` | DuckDB snapshots and named queries. Not loaded when analytics is turned off. |
 | `CoCern.Host` | ASP.NET Core: REST, MCP, SignalR, auth, the due-work pump, the dashboard host. |
 | `CoCern.Dashboard` | The Blazor WebAssembly dashboard. |
 | `CoCern.Adapter` | The stdio MCP adapter, the node, setup, and the wake watchers. Depends only on Contracts. |
@@ -43,8 +43,9 @@ Ports in Core, implemented outside it: `IDueWorkSource`, `IFullTextSearch`, `IAc
 
 | Place | What |
 | --- | --- |
-| `data/relay.db` | One SQLite file, schema version 2, WAL. Tables `grain_state`, `due_work`, `hub_metadata`, `search_index` and `search_docs`, `activity_log` and `activity_daily`. Only the hub opens it. |
-| `data/analytics/` | DuckDB snapshots, when analytics is on. |
+| `data/relay.db` | One SQLite file, WAL. Tables `grain_state`, `due_work`, `hub_metadata`, `search_index` and `search_docs`, `activity_log` and `activity_daily`. Only the hub opens it. |
+| `data/analytics/` | DuckDB snapshots. |
+| `extensions/duckdb/` | The bundled DuckDB `sqlite` extension for Windows x64 (gzipped, with SHA-256 sums), unpacked into `duckdb_extensions` beside the hub at build time. |
 | `data/hub-certificate.pfx` | The hub's HTTPS certificate, when the network listener is on. |
 | `%LOCALAPPDATA%\CoCern\node` | On each PC: the node's credential, pinned fingerprint, session handles and wake database. |
 

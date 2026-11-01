@@ -140,11 +140,12 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
     /// <summary>
     /// Bounds a reply to the wire. A tool in <c>Relay:Tokens:EnforceTools</c> is first compacted to its token budget; this runs on the
     /// composed reply, after the aggregate stored its own, and is a pure function of it, so a retried request gets the same compacted reply.
-    /// Every other tool is measure-only and goes out unchanged.
+    /// Every other tool is measure-only and goes out unchanged. A token is at least one UTF-8 byte, so a reply with no more bytes than its
+    /// budget is within it and is not counted on the call path (the activity writer counts it later, as for a measure-only tool).
     /// </summary>
     private RelayReply Bound(RelayTool tool, JsonObject args, RelayReply result, CallTrace? trace)
     {
-        if (counter is null || !tokenSettings.Enforces(tool.Name) || !result.Ok) return BoundWire(result);
+        if (counter is null || !tokenSettings.Enforces(tool.Name) || !result.Ok || Encoding.UTF8.GetByteCount(result.DataJson) <= tool.TokenBudget) return BoundWire(result);
         Compaction compaction;
         try { compaction = ReplyCompactor.Compact(result, tool, counter, enforce: true, Number(args, "cursor")); }
         catch (Exception) { return BoundWire(result); }

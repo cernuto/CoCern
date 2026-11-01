@@ -8,11 +8,10 @@
 ```
 
 - The start script makes a private administrator token in `data/local-client-token`. `-RepositoryId <id>` sets its repository (default `cocern`).
+- It also points the [doc cache](documents.md) at this checkout, on its current branch, as that repository. `-NoDocs` skips this.
 - To run the published hub: `./scripts/Start-CoCern.ps1 -HostDll ./artifacts/host/CoCern.Host.dll`.
 - Never rebuild the folder of a running hub or adapter. Publish to a new folder and switch.
 - One hub owns one database file. Do not put it on a shared drive or start a second hub on it.
-- The first start of this hub on an older database moves it to schema 2, after saving a backup beside it: `relay.db.pre-migration-<id>.db`.
-- An older hub refuses a schema 2 database. To roll back, stop the hub and restore that backup.
 - The hub needs SQLite with FTS5. Without it, the hub stops at startup and leaves the database unchanged.
 
 ## Connect an agent
@@ -49,41 +48,25 @@ Every model call re-reads the whole chat, so fewer calls matter most.
 | --- | --- | --- |
 | `Relay:Activity:Enabled` | on | [Monitoring](monitoring.md#activity) |
 | `Relay:Tokens:Enabled` | on | [Monitoring](monitoring.md#tokens) |
-| `Relay:Tokens:EnforceTools` | none | [Monitoring](monitoring.md#tokens) |
-| `Relay:Feedback:Tips` | off | [Monitoring](monitoring.md#feedback) |
-| `Relay:Feedback:Alerts` | off | [Monitoring](monitoring.md#feedback) |
-| `Relay:Feedback:ProposeRules` | off | [Monitoring](monitoring.md#feedback) |
+| `Relay:Tokens:Enforce` | on | [Monitoring](monitoring.md#tokens) |
+| `Relay:Feedback:Tips` | on | [Monitoring](monitoring.md#feedback) |
+| `Relay:Feedback:Alerts` | on | [Monitoring](monitoring.md#feedback) |
+| `Relay:Feedback:ProposeRules` | on | [Monitoring](monitoring.md#feedback) |
 | `Relay:Search:Enabled` | on | [Collaboration](collaboration.md#search) |
 | `Relay:Attention:Enabled` | on | [Collaboration](collaboration.md#attention) |
-| `Relay:Analytics:Enabled` | off | [Monitoring](monitoring.md#analytics) |
-| `Relay:Analytics:AllowAdHocSql` | off | [Monitoring](monitoring.md#analytics) |
-| `Relay:Orders:Enabled` | off | [Collaboration](collaboration.md#orders) |
-| `Relay:DocCache:Enabled` | off | [Collaboration](collaboration.md#docs) |
+| `Relay:Analytics:Enabled` | on | [Monitoring](monitoring.md#analytics) |
+| `Relay:Analytics:AllowAdHocSql` | on | [Monitoring](monitoring.md#analytics) |
+| `Relay:Orders:Enabled` | on | [Collaboration](collaboration.md#orders) |
+| `Relay:DocCache:Enabled` | on | [Documents](documents.md) |
 | `Relay:Discovery:Enabled` | off | [Other PCs](discovery.md) |
 | `Relay:Network:Enabled` | off | [Other PCs](discovery.md) |
 
 - **Upgrade adapters together with the hub.** Older adapters use up attention offers the model never sees.
 - **With attention on, messages can wait up to 10 minutes** before they wake a chat. Only urgent items wake at once.
-- **Token counting only measures.** Replies change only for tools you list in `Relay:Tokens:EnforceTools`.
-- **Analytics, ad hoc SQL, orders and the doc cache are off by default.** `analytics_query` and `standing_put` need an administrator token, as do `order_put`, `order_remove`, `control_request` and `doc_sync`.
-
-## Upgrading from PkRelay
-
-CoCern is PkRelay's new name. It is a clean break: no old name still works.
-
-1. **Stop** the old hub, every node (`dotnet` running `PkRelay.Adapter.dll`) and the chats that use it.
-2. **New file names.** Scripts: `Build-CoCern.ps1`, `Start-CoCern.ps1`, `Start-CoCernWake.ps1`, `Smoke-CoCern.py`. Programs: `CoCern.Host.dll`, `CoCern.Adapter.dll`. Solution: `CoCern.slnx`.
-3. **New variables.** Every `PKRELAY_*` is now `COCERN_*`, for example `COCERN_TOKEN_FILE`, `COCERN_NODE_DIR` and `COCERN_DUCKDB_EXTENSIONS`. Old ones are ignored.
-4. **Data folder and token file.** Move the hub's `data` folder (token file, certificate) to the new checkout, or let `Start-CoCern.ps1` make a new token and update every client. The node folder is now `%LOCALAPPDATA%\CoCern\node`; setup makes it. Delete `%LOCALAPPDATA%\PkRelay` when done.
-5. **The old database is not migrated.** Its records use the old names, so CoCern would not see them. Move `data/relay.db` aside and start fresh. Tasks, messages and grants do not carry over.
-6. **Re-run adapter setup** on each PC, so Claude Code and Codex get the new `cocern` MCP server (tools become `mcp__cocern__*`). Setup leaves existing entries alone, so first remove:
-    - the old `pkrelay` server from `~/.claude.json` and `~/.codex/config.toml`;
-    - the old `--prompt-hook` entry from both `~/.claude/settings.json` and `~/.codex/hooks.json`;
-    - the `PkRelayNode` Run value;
-    - any `mcp__pkrelay__*` names in permission allowlists, `CLAUDE.md` or `AGENTS.md`.
-7. **New default repository ID.** It is now `cocern`, not `pkrelay`. Agents, prompts and `Relay:Discovery:Repositories` that still say `pkrelay` get `RepositoryDenied`. Update them, or start the hub with `Start-CoCern.ps1 -RepositoryId pkrelay`.
-8. **Re-enroll other PCs** with `dotnet .\CoCern.Adapter.dll --setup --hub <url>`. The new database knows no machines. See [Other PCs](discovery.md#join-a-pc).
-9. **Small things.** Dashboard viewers sign in again and lose saved view settings. Saved analytics SQL must use `cocern_at` and `cocern_ticks` instead of `pk_at` and `pk_ticks`.
+- **Every reply is held to its token budget.** Budgets sit at the byte limit, so in practice only a reply that would be cut anyway is compacted. `Relay:Tokens:Enforce=false` only measures.
+- **Administrator tools need an administrator token:** `analytics_query` (ad hoc SQL too), `standing_put`, `order_put`, `order_remove`, `control_request` and `doc_sync`.
+- **Analytics works out of the box on Windows x64 only**, where its DuckDB extension is bundled. Elsewhere the hub logs one warning and `analytics_query` answers `AnalyticsUnavailable` until you install the extension. See [Monitoring](monitoring.md#analytics).
+- **Other PCs stay off.** Discovery and the network listener are off by default. The network listener serves the hub beyond loopback, so turn it on only on purpose. See [Other PCs](discovery.md).
 
 ## Hub settings
 

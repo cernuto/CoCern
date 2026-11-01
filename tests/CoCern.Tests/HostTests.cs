@@ -469,7 +469,7 @@ public class HostTests
     }
 
     [Fact]
-    public async Task Standing_orders_are_off_by_default_need_an_administrator_and_run_through_the_pump_when_on()
+    public async Task Standing_orders_turned_off_answer_OrdersUnavailable_need_an_administrator_and_run_through_the_pump_when_on()
     {
         static async Task<(HttpStatusCode Status, string Code, JsonElement Data)> Tool(HttpClient client, string tool, object arguments)
         {
@@ -484,7 +484,7 @@ public class HostTests
             ["Relay:Orders:Enabled"] = enabled?.ToString()
         };
         var order = new { repositoryId = "repo", requestId = "order", orderId = "o-1", trigger = new { on = "workflow_completed", taskId = "T-1" }, actions = new object[] { new { @do = "notify", sessionId = "s" } } };
-        await using (var off = new RelayHostFixture(settings: Settings(null)))
+        await using (var off = new RelayHostFixture(settings: Settings(false)))
         {
             using var worker = off.AuthorizedClient();
             using var admin = AnalyticsAdmin(off);
@@ -712,13 +712,13 @@ public class HostTests
     [Fact]
     public async Task Anomaly_monitor_is_off_unless_analytics_is_on_and_its_settings_fail_clearly()
     {
-        await using (var host = new RelayHostFixture())
+        await using (var host = new RelayHostFixture(settings: new Dictionary<string, string?> { ["Relay:Analytics:Enabled"] = "false" }))
         {
             using var client = host.AuthorizedClient();
             Data(await host.Call(client, "session_open", new { repositoryId = "repo", requestId = "anomaly-manager", role = "manager" }));
             Assert.Equal(TimeSpan.FromHours(1), host.Services.GetRequiredService<AnomalyOptions>().Interval);
             await Task.Delay(300);
-            // With analytics off (the default) a manager session starts no monitor, so no check is ever scheduled.
+            // With analytics turned off a manager session starts no monitor, so no check is ever scheduled.
             var due = await host.Services.GetRequiredService<SqliteStore>().ReadDueAsync(DateTimeOffset.UtcNow.AddDays(30), 64);
             Assert.DoesNotContain(due, work => work.GrainType == "cocern.anomaly");
         }
@@ -746,7 +746,7 @@ public class HostTests
     [Fact]
     public async Task Manager_alerts_are_extra_anomaly_checks_with_their_own_thresholds_and_minimum_samples()
     {
-        // Off by default: the monitor checks only the nine named queries.
+        // With alerts off the monitor checks only the nine named queries.
         Assert.DoesNotContain(new AnomalyOptions().Checks(), check => AnalyticsQueryNames.Alerts.Contains(check.Query));
         var checks = new AnomalyOptions { Alerts = true }.Checks().Where(check => AnalyticsQueryNames.Alerts.Contains(check.Query)).ToDictionary(check => check.Query, check => check.Threshold);
         Assert.Equal(AnalyticsQueryNames.Alerts, checks.Keys);
@@ -774,7 +774,7 @@ public class HostTests
         Assert.Null(Finding(AnalyticsQueryNames.SessionTokenOutliers, "s-1", 9000.0, 1000.0, 9L, 9L)["anomaly"]);
 
         // Alerts need analytics: with Relay:Feedback:Alerts on and analytics off the monitor never starts.
-        await using (var host = new RelayHostFixture(settings: new Dictionary<string, string?> { ["Relay:Feedback:Alerts"] = "true" }))
+        await using (var host = new RelayHostFixture(settings: new Dictionary<string, string?> { ["Relay:Feedback:Alerts"] = "true", ["Relay:Analytics:Enabled"] = "false" }))
         {
             using var client = host.AuthorizedClient();
             Assert.True(host.Services.GetRequiredService<AnomalyOptions>().Alerts);

@@ -4,7 +4,7 @@ using CoCern.Storage;
 
 namespace CoCern.Host;
 
-/// <summary>Host settings for snapshots (<c>Relay:Analytics:*</c>). Analytics is off unless <see cref="Enabled"/> is set.</summary>
+/// <summary>Host settings for snapshots (<c>Relay:Analytics:*</c>). Analytics is on unless <see cref="Enabled"/> is turned off.</summary>
 internal sealed record AnalyticsSettings(bool Enabled, TimeSpan SnapshotInterval, string Directory)
 {
     public const string FilePrefix = "snapshot-";
@@ -17,7 +17,7 @@ internal sealed record AnalyticsSettings(bool Enabled, TimeSpan SnapshotInterval
         // By default snapshots sit beside the database, which is data/analytics for the default data/relay.db.
         var configured = configuration["Relay:Analytics:Directory"];
         var directory = string.IsNullOrWhiteSpace(configured) ? Path.Combine(Path.GetDirectoryName(store.DatabasePath)!, "analytics") : Path.GetFullPath(Path.Combine(environment.ContentRootPath, configured));
-        return new(configuration.GetValue("Relay:Analytics:Enabled", false), interval, directory);
+        return new(configuration.GetValue("Relay:Analytics:Enabled", true), interval, directory);
     }
 }
 
@@ -33,6 +33,13 @@ internal sealed class AnalyticsSnapshotService(SqliteStore store, AnalyticsSetti
         await Task.Yield();
         var analytics = services.GetRequiredService<AnalyticsService>();
         RemoveStaleSnapshots();
+        // Without a usable sqlite extension no snapshot can load: say so once, and analytics_query answers AnalyticsUnavailable.
+        if (AnalyticsExtension.Problem(analytics.ExtensionDirectory) is { } problem)
+        {
+            analytics.MarkUnavailable(problem);
+            logger.LogWarning("Analytics is unavailable: {Reason} The hub runs without it. Only windows_amd64 is bundled; elsewhere run 'CoCern.Host --install-analytics-extension <folder>' and set Relay:Analytics:ExtensionDirectory.", problem);
+            return;
+        }
         while (!stoppingToken.IsCancellationRequested)
         {
             try { await TakeSnapshotAsync(analytics, stoppingToken); }

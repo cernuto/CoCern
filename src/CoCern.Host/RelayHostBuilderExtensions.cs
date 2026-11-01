@@ -52,13 +52,13 @@ public static class RelayHostBuilderExtensions
             }.Validated();
         });
         builder.Services.AddSingleton(services => AnomalySettings(services.GetRequiredService<IConfiguration>()));
-        // Standing orders are off by default; the board grains read the same options to decide whether orders run.
+        // Standing orders are on by default; the board grains read the same options to decide whether orders run.
         builder.Services.AddSingleton(services =>
         {
             var configuration = services.GetRequiredService<IConfiguration>();
             return new OrderOptions
             {
-                Enabled = configuration.GetValue("Relay:Orders:Enabled", false),
+                Enabled = configuration.GetValue("Relay:Orders:Enabled", true),
                 DefaultExpiryDays = configuration.GetValue("Relay:Orders:DefaultExpiryDays", RelayLimits.DefaultOrderExpiryDays)
             }.Validated();
         });
@@ -70,16 +70,16 @@ public static class RelayHostBuilderExtensions
             services.GetRequiredService<Orleans.IGrainFactory>(), services.GetService<IMachineDirectory>(), services.GetService<IActivitySink>(),
             services.GetService<SqliteStore>() is { SearchEnabled: true } store ? store : null, services.GetRequiredService<AttentionOptions>(),
             services.GetService<IAnalyticsQueries>() is { } queries
-                ? new AnalyticsTool(queries, services.GetRequiredService<IConfiguration>().GetValue("Relay:Analytics:AllowAdHocSql", false), services.GetRequiredService<ILoggerFactory>().CreateLogger<AnalyticsTool>())
+                ? new AnalyticsTool(queries, services.GetRequiredService<IConfiguration>().GetValue("Relay:Analytics:AllowAdHocSql", true), services.GetRequiredService<ILoggerFactory>().CreateLogger<AnalyticsTool>())
                 : null,
             // The anomaly monitor runs only with analytics on; its grain checks the same before every check.
             services.GetService<IAnalyticsQueries>() is not null ? services.GetRequiredService<AnomalyOptions>() : null,
             services.GetRequiredService<OrderOptions>(),
-            // The doc cache tools get their port only when Relay:DocCache:Enabled is on, and answer DocCacheUnavailable otherwise.
+            // The doc cache tools get their port only when Relay:DocCache:Enabled is on (the default), and answer DocCacheUnavailable otherwise.
             services.GetService<DocCacheTool>(),
-            // Token counting is on by default and only measures; tools in Relay:Tokens:EnforceTools are compacted to their budget.
+            // Token counting is on by default; every tool is compacted to its budget, which sits at its byte cap, unless Relay:Tokens settings say otherwise.
             services.GetRequiredService<ITokenCounter>(), services.GetRequiredService<TokenOptions>(),
-            // The feedback rules exist only with tips or proposed team rules on, both off by default.
+            // The feedback rules exist only with tips or proposed team rules on, both on by default.
             services.GetRequiredService<FeedbackOptions>() is { Enabled: true } feedback
                 ? new FeedbackRules(feedback, services.GetRequiredService<ITokenCounter>(), services.GetService<SqliteStore>())
                 : null))));
@@ -136,8 +136,9 @@ public static class RelayHostBuilderExtensions
     }
 
     /// <summary>
-    /// Snapshots and DuckDB analytics, off by default. The analytics service is created only when enabled, so DuckDB's native library
-    /// is not loaded otherwise; <see cref="IAnalyticsQueries"/> resolves to null when analytics is off.
+    /// Snapshots and DuckDB analytics, on by default. The analytics service is created only when enabled, so DuckDB's native library
+    /// is not loaded otherwise; <see cref="IAnalyticsQueries"/> resolves to null when analytics is off. The extension comes bundled next
+    /// to the binaries; without a usable one the snapshot service warns once and queries answer AnalyticsUnavailable.
     /// </summary>
     private static void AddRelayAnalytics(this IServiceCollection services)
     {
@@ -158,9 +159,10 @@ public static class RelayHostBuilderExtensions
     }
 
     /// <summary>
-    /// The doc cache, off by default. Like analytics, its parts resolve only when <c>Relay:DocCache:Enabled</c> is on: otherwise the
+    /// The doc cache, on by default. Like analytics, its parts resolve only when <c>Relay:DocCache:Enabled</c> is on: otherwise the
     /// tool and the document source resolve to null, the sync service returns at once without building its runner, git never runs,
-    /// and the document grains keep the default idle time.
+    /// and the document grains keep the default idle time. On with no repositories configured, git never runs either, and the tools
+    /// answer NoRepositoriesConfigured.
     /// </summary>
     private static void AddDocCache(this IServiceCollection services)
     {
@@ -176,7 +178,7 @@ public static class RelayHostBuilderExtensions
         // Idle deactivation is the cache's eviction: an unused document grain drops its index after Relay:DocCache:IdleMinutes.
         services.AddOptions<GrainCollectionOptions>().Configure<IConfiguration>((options, configuration) =>
         {
-            if (configuration.GetValue("Relay:DocCache:Enabled", false))
+            if (configuration.GetValue("Relay:DocCache:Enabled", true))
                 options.ClassSpecificCollectionAge[typeof(DocumentGrain).FullName!] = TimeSpan.FromMinutes(configuration.GetValue("Relay:DocCache:IdleMinutes", RelayLimits.DefaultDocIdleMinutes));
         });
     }
@@ -192,18 +194,26 @@ public static class RelayHostBuilderExtensions
         return application;
     }
 
-    /// <summary><c>Relay:Tokens:Enabled</c> (default true; it only measures) and <c>Relay:Tokens:EnforceTools</c> (default none).</summary>
-    private static TokenOptions TokenSettings(IConfiguration configuration) => new TokenOptions
+    /// <summary>
+    /// <c>Relay:Tokens:Enabled</c> (default true), <c>Relay:Tokens:Enforce</c> (default true: every tool but the doc cache's is compacted
+    /// to its budget; false only measures) and <c>Relay:Tokens:EnforceTools</c> (when listed, only those tools are enforced).
+    /// </summary>
+    private static TokenOptions TokenSettings(IConfiguration configuration)
     {
-        Enabled = configuration.GetValue("Relay:Tokens:Enabled", true),
-        EnforceTools = configuration.GetSection("Relay:Tokens:EnforceTools").GetChildren().Select(tool => tool.Value ?? "").Where(tool => tool.Length > 0).ToHashSet(StringComparer.Ordinal)
-    }.Validated();
+        var listed = configuration.GetSection("Relay:Tokens:EnforceTools").GetChildren().Select(tool => tool.Value ?? "").Where(tool => tool.Length > 0).ToHashSet(StringComparer.Ordinal);
+        return new TokenOptions
+        {
+            Enabled = configuration.GetValue("Relay:Tokens:Enabled", true),
+            EnforceTools = !configuration.GetValue("Relay:Tokens:Enforce", true) ? new HashSet<string>(StringComparer.Ordinal)
+                : listed.Count > 0 ? listed : TokenOptions.AllEnforceable
+        }.Validated();
+    }
 
-    /// <summary><c>Relay:Feedback:Tips</c>, <c>ProposeRules</c> (both default false) and <c>MinFollowRate</c> (default 0.2).</summary>
+    /// <summary><c>Relay:Feedback:Tips</c>, <c>ProposeRules</c> (both default true) and <c>MinFollowRate</c> (default 0.2).</summary>
     private static FeedbackOptions FeedbackSettings(IConfiguration configuration) => new FeedbackOptions
     {
-        Tips = configuration.GetValue("Relay:Feedback:Tips", false),
-        ProposeRules = configuration.GetValue("Relay:Feedback:ProposeRules", false),
+        Tips = configuration.GetValue("Relay:Feedback:Tips", true),
+        ProposeRules = configuration.GetValue("Relay:Feedback:ProposeRules", true),
         MinFollowRate = configuration.GetValue("Relay:Feedback:MinFollowRate", RelayLimits.DefaultMinFollowRate)
     }.Validated();
 
@@ -221,7 +231,7 @@ public static class RelayHostBuilderExtensions
             Interval = configuration.GetValue("Relay:Attention:AnomalyInterval", TimeSpan.FromMinutes(RelayLimits.DefaultAnomalyIntervalMinutes)),
             Thresholds = thresholds,
             // Manager alerts are extra anomaly checks; like every check they run only with analytics on.
-            Alerts = configuration.GetValue("Relay:Feedback:Alerts", false)
+            Alerts = configuration.GetValue("Relay:Feedback:Alerts", true)
         }.Validated();
     }
 
