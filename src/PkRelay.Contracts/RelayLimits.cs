@@ -76,4 +76,11 @@ public static class RelayLimits
     public const int StandingCacheBoards = 1_024;
     /// <summary>Most boards one session records a received standing revision for.</summary>
     public const int MaxStandingBoardsPerSession = 64;
+
+    /// <summary>Largest search document body, in UTF-8 bytes, so one huge task cannot dominate the index or the commit.</summary>
+    public const int MaxSearchBodyBytes = 4_096;
+    /// <summary>Largest share of a search body one part (a note, a report, a message) may take, in UTF-8 bytes.</summary>
+    public const int MaxSearchFieldBytes = 1_024;
+    /// <summary>Largest search document title, in UTF-8 bytes.</summary>
+    public const int MaxSearchTitleBytes = 256;
 }
