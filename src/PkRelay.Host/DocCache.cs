@@ -45,8 +45,18 @@ internal sealed record DocRepository(string Id, string ClonePath, string Branch,
 }
 
 /// <summary><c>Relay:DocCache:*</c>. Off unless <see cref="Enabled"/>.</summary>
-internal sealed record DocCacheSettings(bool Enabled, int SyncMinutes, int IdleMinutes, int MaxDocuments, IReadOnlyList<DocRepository> Repositories)
+internal sealed record DocCacheSettings(bool Enabled, int SyncMinutes, int IdleMinutes, int MaxDocuments, IReadOnlyList<DocRepository> Repositories, long MaxRepositoryBytes = RelayLimits.MaxRepositoryDocBytes)
 {
+    /// <summary>
+    /// What the repository's documents were indexed under: patterns, excludes, branch and remote, the document and byte limits, and the
+    /// splitters' limits. The directory stores it, and a change forces a full resync (and returns to the configured branch).
+    /// </summary>
+    public string Fingerprint(DocRepository repository) => DocHash.Of(string.Join('\n',
+        [DocFormats.SplitterVersion.ToString(System.Globalization.CultureInfo.InvariantCulture), repository.Branch, repository.Remote,
+         string.Join('|', repository.Patterns.Select(pattern => pattern.Glob + "=" + pattern.Spec)), string.Join('|', repository.Excludes),
+         MaxDocuments.ToString(System.Globalization.CultureInfo.InvariantCulture), MaxRepositoryBytes.ToString(System.Globalization.CultureInfo.InvariantCulture),
+         $"{RelayLimits.MaxDocBytes}/{RelayLimits.MaxOpenApiBytes}/{RelayLimits.MaxSectionsPerDoc}/{RelayLimits.DocChunkTokens}/{RelayLimits.DocChunkChars}"]));
+
     private static readonly Regex Name = new("^[A-Za-z0-9._-]{1,64}$", RegexOptions.CultureInvariant);
 
     public DocRepository? Find(string id) => Repositories.FirstOrDefault(repository => repository.Id == id);
@@ -63,6 +73,9 @@ internal sealed record DocCacheSettings(bool Enabled, int SyncMinutes, int IdleM
         }
         // Off reads nothing more, so settings for a cache that is off never stop the hub.
         if (!section.GetValue("Enabled", false)) return new(false, RelayLimits.DefaultDocSyncMinutes, RelayLimits.DefaultDocIdleMinutes, RelayLimits.MaxDocsPerRepository, []);
+        var maxBytes = section.GetValue("MaxRepositoryBytes", RelayLimits.MaxRepositoryDocBytes);
+        if (maxBytes < 1 || maxBytes > RelayLimits.MaxRepositoryDocBytesCeiling)
+            throw new InvalidOperationException($"Relay:DocCache:MaxRepositoryBytes must be from 1 to {RelayLimits.MaxRepositoryDocBytesCeiling}.");
         var sync = Minutes("SyncMinutes", RelayLimits.DefaultDocSyncMinutes, 0);
         var idle = Minutes("IdleMinutes", RelayLimits.DefaultDocIdleMinutes, 2);
         var maxDocuments = section.GetValue("MaxDocuments", RelayLimits.MaxDocsPerRepository);
@@ -95,7 +108,7 @@ internal sealed record DocCacheSettings(bool Enabled, int SyncMinutes, int IdleM
             string Resolve(string path) => Path.GetFullPath(Path.Combine(environment.ContentRootPath, path));
             repositories.Add(new(id, Resolve(entry["ClonePath"]!), branch, remote, patterns, excludes, entry["TokenFile"] is { Length: > 0 } token ? Resolve(token) : null));
         }
-        return new(true, sync, idle, maxDocuments, repositories);
+        return new(true, sync, idle, maxDocuments, repositories, maxBytes);
     }
 }
 
@@ -159,9 +172,13 @@ internal class GitCli
         try
         {
             var (output, truncated) = await ReadAsync(process.StandardOutput.BaseStream, maxOutputBytes, timeout.Token);
-            if (truncated) Kill(process);
+            if (truncated)
+            {
+                Kill(process);
+                return new(-1, output, true, "");
+            }
             await process.WaitForExitAsync(timeout.Token);
-            return new(truncated ? -1 : process.ExitCode, output, truncated, Encoding.UTF8.GetString((await error).Output).Trim());
+            return new(process.ExitCode, output, false, Encoding.UTF8.GetString((await error).Output).Trim());
         }
         catch (OperationCanceledException)
         {
@@ -171,7 +188,7 @@ internal class GitCli
         }
     }
 
-    /// <summary>Reads at most <paramref name="maximum"/> bytes; one more means the output was cut off. The rest is drained unread.</summary>
+    /// <summary>Reads at most <paramref name="maximum"/> bytes; one more means the output was cut off, and reading stops there.</summary>
     private static async Task<(byte[] Output, bool Truncated)> ReadAsync(Stream stream, int maximum, CancellationToken cancellationToken)
     {
         var buffer = new MemoryStream();
@@ -180,10 +197,10 @@ internal class GitCli
         int read;
         while ((read = await stream.ReadAsync(chunk, cancellationToken)) > 0)
         {
-            if (truncated) continue;
             var keep = (int)Math.Min(read, maximum + 1L - buffer.Length);
             buffer.Write(chunk, 0, keep);
-            if (buffer.Length > maximum) { truncated = true; buffer.SetLength(maximum); }
+            // Past the cap: stop reading now, and the caller kills git at once.
+            if (buffer.Length > maximum) { truncated = true; buffer.SetLength(maximum); break; }
         }
         return (buffer.ToArray(), truncated);
     }
@@ -197,26 +214,59 @@ internal class GitCli
 }
 
 /// <summary>The git commands the doc cache uses, for one configured repository.</summary>
-internal sealed class DocGit(GitCli git, DocRepository repository)
+internal sealed class DocGit(GitCli git, DocRepository repository, ILogger? logger = null)
 {
+    /// <summary>Regular files only: a symlink (120000) or a submodule (160000) is never indexed.</summary>
+    private static bool Regular(string mode) => mode is "100644" or "100755";
+
     private static readonly Regex Sha = new("^[0-9a-f]{40}([0-9a-f]{24})?$", RegexOptions.CultureInvariant);
 
     public DocRepository Repository => repository;
 
     public static bool IsCommit(string value) => Sha.IsMatch(value);
 
-    /// <summary>Fetches the branch into its remote-tracking ref, with the read-only token (if any) as an HTTP header in git's environment, never on the command line.</summary>
+    /// <summary>
+    /// Fetches the branch into its remote-tracking ref, never into submodules. The read-only token (if any) goes in git's environment,
+    /// never on the command line, as an HTTP header scoped to the remote's own HTTPS URL, so no other host ever receives it.
+    /// </summary>
     public async Task<bool> FetchAsync(string branch, CancellationToken cancellationToken)
     {
         var environment = new Dictionary<string, string>();
-        if (repository.TokenFile is { } file && File.Exists(file) && (await File.ReadAllTextAsync(file, cancellationToken)).Trim() is { Length: > 0 } token)
+        if (await TokenAsync(cancellationToken) is { } token && await RemoteUrlAsync(cancellationToken) is { } url)
         {
             environment["GIT_CONFIG_COUNT"] = "1";
-            environment["GIT_CONFIG_KEY_0"] = "http.extraHeader";
+            environment["GIT_CONFIG_KEY_0"] = $"http.{url}.extraHeader";
             environment["GIT_CONFIG_VALUE_0"] = "Authorization: Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes("x-access-token:" + token));
         }
-        var result = await git.RunAsync(repository.ClonePath, ["fetch", "--quiet", "--no-tags", repository.Remote, $"+refs/heads/{branch}:refs/remotes/{repository.Remote}/{branch}"], 65_536, environment, cancellationToken);
+        var result = await git.RunAsync(repository.ClonePath, ["fetch", "--quiet", "--no-tags", "--no-recurse-submodules", repository.Remote, $"+refs/heads/{branch}:refs/remotes/{repository.Remote}/{branch}"], 65_536, environment, cancellationToken);
         return result.ExitCode == 0;
+    }
+
+    /// <summary>The token from the configured file, read up to <see cref="RelayLimits.MaxDocTokenFileBytes"/>; a missing, empty or oversized file is logged.</summary>
+    private async Task<string?> TokenAsync(CancellationToken cancellationToken)
+    {
+        if (repository.TokenFile is not { } file) return null;
+        if (!File.Exists(file)) { logger?.LogWarning("Doc sync for {Repository}: token file {File} is missing; fetching without a token.", repository.Id, file); return null; }
+        await using var stream = File.OpenRead(file);
+        var buffer = new byte[RelayLimits.MaxDocTokenFileBytes + 1];
+        var length = 0;
+        int read;
+        while (length < buffer.Length && (read = await stream.ReadAsync(buffer.AsMemory(length), cancellationToken)) > 0) length += read;
+        if (length > RelayLimits.MaxDocTokenFileBytes) { logger?.LogWarning("Doc sync for {Repository}: token file {File} is over {Limit} bytes; fetching without a token.", repository.Id, file, RelayLimits.MaxDocTokenFileBytes); return null; }
+        var token = Encoding.UTF8.GetString(buffer, 0, length).Trim();
+        if (token.Length == 0 || token.Any(char.IsControl)) { logger?.LogWarning("Doc sync for {Repository}: token file {File} is empty or not one line; fetching without a token.", repository.Id, file); return null; }
+        return token;
+    }
+
+    /// <summary>The remote's URL when it is plain HTTPS (no credentials, query or spaces), the only kind a token header is sent to.</summary>
+    private async Task<string?> RemoteUrlAsync(CancellationToken cancellationToken)
+    {
+        var result = await git.RunAsync(repository.ClonePath, ["remote", "get-url", repository.Remote], 4_096, null, cancellationToken);
+        var url = result.Text.Trim();
+        if (result.ExitCode == 0 && Uri.TryCreate(url, UriKind.Absolute, out var uri) && uri.Scheme == Uri.UriSchemeHttps && uri.UserInfo.Length == 0
+            && uri.Query.Length == 0 && uri.Fragment.Length == 0 && !url.Any(c => char.IsWhiteSpace(c) || char.IsControl(c))) return url;
+        logger?.LogWarning("Doc sync for {Repository}: the remote {Remote} is not a plain HTTPS URL, so its token is not sent.", repository.Id, repository.Remote);
+        return null;
     }
 
     /// <summary>The commit at the head of the branch's remote-tracking ref, or null when there is none.</summary>
@@ -230,25 +280,37 @@ internal sealed class DocGit(GitCli git, DocRepository repository)
     public async Task<bool> CommitExistsAsync(string commit, CancellationToken cancellationToken) =>
         IsCommit(commit) && (await git.RunAsync(repository.ClonePath, ["cat-file", "-e", commit + "^{commit}"], 1_024, null, cancellationToken)).ExitCode == 0;
 
-    /// <summary>Every file path at <paramref name="commit"/>; ls-tree has no glob pathspecs, so the caller applies the patterns.</summary>
-    public async Task<IReadOnlyList<string>> ListAsync(string commit, CancellationToken cancellationToken)
+    /// <summary>
+    /// Every path at <paramref name="commit"/>, and whether it is a regular file (not a symlink or submodule). ls-tree has no glob pathspecs,
+    /// so the caller applies the patterns.
+    /// </summary>
+    public async Task<IReadOnlyList<(string Path, bool Regular)>> ListAsync(string commit, CancellationToken cancellationToken)
     {
-        var result = await git.RunAsync(repository.ClonePath, ["ls-tree", "-r", "-z", "--name-only", "--full-tree", commit], RelayLimits.MaxDocGitListingBytes, null, cancellationToken);
+        var result = await git.RunAsync(repository.ClonePath, ["ls-tree", "-r", "-z", "--full-tree", commit], RelayLimits.MaxDocGitListingBytes, null, cancellationToken);
         if (result.ExitCode != 0) throw new DocSyncException(DocSyncError.Failed, "git ls-tree failed: " + (result.Truncated ? "the listing is too long" : result.Error));
-        return result.Text.Split('\0', StringSplitOptions.RemoveEmptyEntries);
+        // "<mode> <type> <object>\t<path>"
+        return result.Text.Split('\0', StringSplitOptions.RemoveEmptyEntries).Select(line => line.Split('\t', 2)).Where(parts => parts.Length == 2)
+            .Select(parts => (parts[1], Regular(parts[0].Split(' ')[0]))).ToArray();
     }
 
     /// <summary>
     /// Changed paths between two commits that the include patterns match. With <c>--no-renames</c> a rename is a delete plus an add, so an
-    /// old path never lingers. True for added or modified, false for deleted.
+    /// old path never lingers. Present is false for a deleted path; Regular is false when the new version is a symlink or submodule.
     /// </summary>
-    public async Task<IReadOnlyList<(string Path, bool Present)>> DiffAsync(string from, string to, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<(string Path, bool Present, bool Regular)>> DiffAsync(string from, string to, CancellationToken cancellationToken)
     {
-        var result = await git.RunAsync(repository.ClonePath, ["diff", "--name-status", "-z", "--no-renames", "--no-ext-diff", from, to, "--", .. repository.Pathspecs], RelayLimits.MaxDocGitListingBytes, null, cancellationToken);
+        var result = await git.RunAsync(repository.ClonePath, ["diff", "--raw", "-z", "--no-abbrev", "--no-renames", "--no-ext-diff", "--no-textconv", from, to, "--", .. repository.Pathspecs], RelayLimits.MaxDocGitListingBytes, null, cancellationToken);
         if (result.ExitCode != 0) throw new DocSyncException(DocSyncError.Failed, "git diff failed: " + (result.Truncated ? "the listing is too long" : result.Error));
+        // ":<old mode> <new mode> <old object> <new object> <status>\0<path>\0"
         var fields = result.Text.Split('\0', StringSplitOptions.RemoveEmptyEntries);
-        var changes = new List<(string, bool)>();
-        for (var i = 0; i + 1 < fields.Length; i += 2) changes.Add((fields[i + 1], fields[i] != "D"));
+        var changes = new List<(string, bool, bool)>();
+        for (var i = 0; i + 1 < fields.Length; i += 2)
+        {
+            var header = fields[i].TrimStart(':').Split(' ');
+            if (header.Length < 5) continue;
+            var present = header[4] != "D";
+            changes.Add((fields[i + 1], present, present && Regular(header[1])));
+        }
         return changes;
     }
 
@@ -272,6 +334,9 @@ internal sealed class GitDocSource(DocCacheSettings settings, GitCli git) : IDoc
         return text is null ? null : new DocContent(text, commit, DocHash.Of(text));
     }
 
+    public async Task<bool> CommitExistsAsync(string repositoryId, string commit, CancellationToken cancellationToken = default) =>
+        settings.Find(repositoryId) is { } repository && await new DocGit(git, repository).CommitExistsAsync(commit, cancellationToken);
+
     public async Task<DocContent?> ReadHeadAsync(string repositoryId, string path, string branch, CancellationToken cancellationToken = default)
     {
         if (settings.Find(repositoryId) is not { } repository || !DocGlob.SafeRef(branch)) return null;
@@ -283,24 +348,48 @@ internal sealed class GitDocSource(DocCacheSettings settings, GitCli git) : IDoc
 /// The doc sync, shared by the timer and <c>doc_sync</c>: one run at a time per repository (the other waits). It fetches, compares the
 /// branch's commit with the directory's and stops when they match; otherwise it diffs (or lists, for a first or full resync), reads each
 /// changed file with <c>git show</c>, updates the directory, and then pushes the new content to document grains that are active.
-/// Files that are too large, have too many sections, are not OpenAPI, are malformed, or are past the document limit are skipped and counted.
+/// Files that are too large, have too many sections, are not OpenAPI, are malformed, are symlinks, or are past the document or byte limit
+/// are skipped and counted. A change of the sync settings (its fingerprint) forces a full resync.
 /// </summary>
 internal sealed class DocSyncRunner(DocCacheSettings settings, GitCli git, IGrainFactory grains, ITokenCounter tokens, ILogger<DocSyncRunner> logger) : IDocSync
 {
     private readonly ConcurrentDictionary<string, SemaphoreSlim> locks = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, long> lastManual = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, Lazy<Task<DocSyncOutcome>>> requests = new(StringComparer.Ordinal);
+    private readonly ConcurrentQueue<string> requestOrder = new();
+    private const int RememberedRequests = 64;
 
-    public Task<DocSyncOutcome> SyncNowAsync(string repositoryId, string? branch, CancellationToken cancellationToken = default)
+    /// <summary>
+    /// <c>doc_sync</c>: a retry with the same requestId gets the first run's outcome (even while it runs), never a second run or the
+    /// rate limit. A failed run is forgotten, so its retry runs again.
+    /// </summary>
+    public async Task<DocSyncOutcome> SyncNowAsync(string repositoryId, string? branch, string requestId, CancellationToken cancellationToken = default)
     {
         if (settings.Find(repositoryId) is null) throw new DocSyncException(DocSyncError.NotConfigured, "No docs are configured for this repository.");
         if (branch is not null && !DocGlob.SafeRef(branch)) throw new DocSyncException(DocSyncError.UnknownBranch, "The branch name is not valid.");
+        var key = repositoryId + "\n" + (branch ?? "") + "\n" + requestId;
+        var run = new Lazy<Task<DocSyncOutcome>>(() => RateLimitedAsync(repositoryId, branch, cancellationToken));
+        // Only the stored entry is ever started, so two calls with one requestId run once.
+        var stored = requests.GetOrAdd(key, run);
+        if (ReferenceEquals(stored, run))
+        {
+            requestOrder.Enqueue(key);
+            while (requestOrder.Count > RememberedRequests && requestOrder.TryDequeue(out var old)) requests.TryRemove(old, out _);
+        }
+        try { return await stored.Value; }
+        catch (Exception) { requests.TryRemove(new KeyValuePair<string, Lazy<Task<DocSyncOutcome>>>(key, stored)); throw; }
+    }
+
+    private async Task<DocSyncOutcome> RateLimitedAsync(string repositoryId, string? branch, CancellationToken cancellationToken)
+    {
+        await Task.Yield();
         var now = Environment.TickCount64;
         var interval = RelayLimits.DocSyncMinIntervalSeconds * 1000L;
         var last = lastManual.GetOrAdd(repositoryId, long.MinValue);
         if (last != long.MinValue && now - last < interval)
             throw new DocSyncException(DocSyncError.RateLimited, "A doc sync ran for this repository moments ago.", (int)Math.Ceiling((interval - (now - last)) / 1000.0));
         if (!lastManual.TryUpdate(repositoryId, now, last)) throw new DocSyncException(DocSyncError.RateLimited, "A doc sync for this repository has just started.", RelayLimits.DocSyncMinIntervalSeconds);
-        return SyncAsync(repositoryId, branch, cancellationToken);
+        return await SyncAsync(repositoryId, branch, cancellationToken);
     }
 
     public async Task<DocSyncOutcome> SyncAsync(string repositoryId, string? branchOverride, CancellationToken cancellationToken)
@@ -311,7 +400,7 @@ internal sealed class DocSyncRunner(DocCacheSettings settings, GitCli git, IGrai
         await gate.WaitAsync(cancellationToken);
         try
         {
-            try { return await RunAsync(new DocGit(git, repository), branchOverride, cancellationToken); }
+            try { return await RunAsync(new DocGit(git, repository, logger), branchOverride, cancellationToken); }
             catch (TimeoutException exception) { throw new DocSyncException(DocSyncError.Failed, exception.Message); }
             catch (System.ComponentModel.Win32Exception exception) { throw new DocSyncException(DocSyncError.Failed, "git could not run: " + exception.Message); }
         }
@@ -323,38 +412,47 @@ internal sealed class DocSyncRunner(DocCacheSettings settings, GitCli git, IGrai
         var repository = git.Repository;
         var directory = grains.GetGrain<IDocDirectoryGrain>(repository.Id);
         var view = await directory.ReadAsync();
-        // A branch given to doc_sync is followed from then on; the configured branch is the default.
-        var branch = branchOverride ?? (view.Branch.Length > 0 ? view.Branch : repository.Branch);
+        // A branch given to doc_sync is followed from then on; the configured branch is the default, and a settings change returns to it.
+        var fingerprint = settings.Fingerprint(repository);
+        var settingsChanged = view.Fingerprint != fingerprint;
+        var branch = branchOverride ?? (view.Branch.Length > 0 && !settingsChanged ? view.Branch : repository.Branch);
         var fetched = await git.FetchAsync(branch, cancellationToken);
         if (!fetched) logger.LogWarning("Doc sync for {Repository}: git fetch of {Branch} failed; using the clone's last fetched commit.", repository.Id, branch);
         var head = await git.HeadAsync(branch, cancellationToken)
             ?? throw new DocSyncException(DocSyncError.UnknownBranch, $"The clone has no branch {branch} from {repository.Remote}.");
-        var full = view.Commit.Length == 0 || view.NeedsResync || branch != view.Branch || !await git.CommitExistsAsync(view.Commit, cancellationToken);
+        var full = view.Commit.Length == 0 || view.NeedsResync || settingsChanged || branch != view.Branch || !await git.CommitExistsAsync(view.Commit, cancellationToken);
         if (!full && head == view.Commit) return new(head, 0, 0, fetched);
 
         var entries = view.Entries.ToDictionary(entry => entry.Path, StringComparer.Ordinal);
         var skippedBefore = view.Skipped.ToHashSet(StringComparer.Ordinal);
         List<string> present;
         var removed = new List<string>();
+        var skipped = new List<string>();
         if (full)
         {
-            present = (await git.ListAsync(head, cancellationToken)).Where(path => repository.SpecOf(path) is not null).ToList();
+            var listing = (await git.ListAsync(head, cancellationToken)).Where(item => repository.SpecOf(item.Path) is not null).ToArray();
+            present = listing.Where(item => item.Regular).Select(item => item.Path).ToList();
+            // A symlink or submodule that a pattern matches is skipped and counted; git show would give its target path, not a document.
+            skipped.AddRange(listing.Where(item => !item.Regular).Select(item => item.Path));
             var listed = present.ToHashSet(StringComparer.Ordinal);
             removed.AddRange(entries.Keys.Where(path => !listed.Contains(path) || repository.SpecOf(path) is null));
         }
         else
         {
             present = [];
-            foreach (var (path, isPresent) in await git.DiffAsync(view.Commit, head, cancellationToken))
-                if (isPresent) present.Add(path);
-                else if (entries.ContainsKey(path)) removed.Add(path);
+            foreach (var (path, isPresent, regular) in await git.DiffAsync(view.Commit, head, cancellationToken))
+            {
+                if (isPresent && regular) { present.Add(path); continue; }
+                if (entries.ContainsKey(path)) removed.Add(path);
+                if (isPresent && repository.SpecOf(path) is not null) skipped.Add(path);
+            }
         }
         var active = await ActiveAsync(repository.Id);
         var upserts = new List<DocEntry>();
         var pushes = new List<(DocEntry Entry, string Text)>();
-        var skipped = new List<string>();
         var unskipped = new List<string>();
         var count = entries.Count - removed.Count;
+        var bytes = entries.Values.Where(entry => !removed.Contains(entry.Path)).Sum(entry => (long)entry.Bytes);
         foreach (var path in present.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal))
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -372,17 +470,27 @@ internal sealed class DocSyncRunner(DocCacheSettings settings, GitCli git, IGrai
                 if (known) { removed.Add(path); count--; }
                 continue;
             }
+            var size = Encoding.UTF8.GetByteCount(text);
+            var after = bytes - (known ? existing!.Bytes : 0) + size;
+            if (after > settings.MaxRepositoryBytes)
+            {
+                logger.LogInformation("Doc sync for {Repository}: skipped {Path} (the repository's {Limit} bytes are used).", repository.Id, path, settings.MaxRepositoryBytes);
+                skipped.Add(path);
+                if (known) { removed.Add(path); count--; bytes -= existing!.Bytes; }
+                continue;
+            }
             if (skippedBefore.Contains(path)) unskipped.Add(path);
             var hash = DocHash.Of(text);
             // An unchanged file keeps its entry and is not re-indexed.
-            if (known && existing!.Hash == hash && existing.Spec == spec) continue;
-            var entry = new DocEntry(path, spec, head, hash, sections.Count, sections.Sum(section => section.Tokens));
+            if (known && existing!.Hash == hash && existing.Spec == spec && existing.Bytes == size) continue;
+            var entry = new DocEntry(path, spec, head, hash, sections.Count, sections.Sum(section => section.Tokens), size);
             upserts.Add(entry);
+            bytes = after;
             if (!known) count++;
             if (active.Contains(DocKeys.Document(repository.Id, path))) pushes.Add((entry, text));
         }
         unskipped.AddRange(removed.Where(skippedBefore.Contains));
-        await directory.ApplyAsync(new DocDirectoryUpdate(branch, head, full, [.. upserts], [.. removed.Distinct(StringComparer.Ordinal)], [.. skipped], [.. unskipped]));
+        await directory.ApplyAsync(new DocDirectoryUpdate(branch, head, full, [.. upserts], [.. removed.Distinct(StringComparer.Ordinal)], [.. skipped], [.. unskipped], fingerprint));
         foreach (var (entry, text) in pushes)
         {
             try { await grains.GetGrain<IDocumentGrain>(DocKeys.Document(repository.Id, entry.Path)).ReplaceAsync(new DocRef(repository.Id, entry.Path, entry.Spec, entry.Commit, entry.Hash, branch), text); }

@@ -25,8 +25,14 @@ namespace PkRelay.Core;
 /// <param name="HeadingLength">Characters at the start of <paramref name="Text"/> that are the heading line, indexed as the heading only.</param>
 public sealed record DocSectionText(string Anchor, string HeadingPath, string Text, int HeadingLength);
 
-/// <summary>A section split into chunks of at most <see cref="RelayLimits.DocChunkTokens"/> tokens; the chunks put together are exactly the section text.</summary>
-public sealed record DocSection(string Anchor, string HeadingPath, string Text, int Tokens, IReadOnlyList<DocChunk> Chunks, int HeadingLength);
+/// <summary>
+/// A section split into chunks of at most <see cref="RelayLimits.DocChunkTokens"/> tokens. Only the chunks hold the text, so a loaded
+/// document keeps one copy of it; <see cref="Text"/> puts them together, which is exactly the section text.
+/// </summary>
+public sealed record DocSection(string Anchor, string HeadingPath, int Tokens, IReadOnlyList<DocChunk> Chunks, int HeadingLength)
+{
+    public string Text => string.Concat(Chunks.Select(chunk => chunk.Text));
+}
 
 public sealed record DocChunk(string Text, int Tokens);
 
@@ -43,6 +49,8 @@ public static class DocFormats
     /// <summary>Always excluded, before any configured exclude.</summary>
     public static readonly IReadOnlyList<string> DefaultExcludes = ["**/node_modules/**", "**/bin/**", "**/obj/**", "**/.git/**"];
     public const string DefaultSpec = "docs";
+    /// <summary>Raise when a splitter changes what it produces, so every repository resyncs in full.</summary>
+    public const int SplitterVersion = 1;
 
     public static DocFormat Of(string path) => Path.GetExtension(path).ToLowerInvariant() switch
     {
@@ -63,18 +71,27 @@ public static class DocFormats
         if (format == DocFormat.Unsupported) { reason = DocSkipReason.Unsupported; return null; }
         if (Encoding.UTF8.GetByteCount(content) > MaxBytes(format)) { reason = DocSkipReason.TooLarge; return null; }
         IReadOnlyList<DocSectionText> split;
-        switch (format)
+        // Any failure to read one file skips that file as malformed; it never fails the sync.
+        try
         {
-            case DocFormat.Markdown: split = MarkdownSections.Split(content); break;
-            case DocFormat.Text: split = TextSections.Split(Path.GetFileName(path), content, tokens); break;
-            default:
-                var root = format == DocFormat.OpenApiJson ? OpenApiSections.ParseJson(content) : OpenApiSections.ParseYaml(content);
-                if (root is null) { reason = DocSkipReason.Malformed; return null; }
-                if (OpenApiSections.Split(root) is not { } operations) { reason = DocSkipReason.NotOpenApi; return null; }
-                split = operations; break;
+            switch (format)
+            {
+                case DocFormat.Markdown: split = MarkdownSections.Split(content); break;
+                case DocFormat.Text: split = TextSections.Split(Path.GetFileName(path), content, tokens); break;
+                default:
+                    var root = format == DocFormat.OpenApiJson ? OpenApiSections.ParseJson(content) : OpenApiSections.ParseYaml(content);
+                    if (root is null) { reason = DocSkipReason.Malformed; return null; }
+                    if (OpenApiSections.Split(root) is not { } operations) { reason = DocSkipReason.NotOpenApi; return null; }
+                    split = operations; break;
+            }
+        }
+        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or JsonException or FormatException or InvalidDataException or InvalidCastException or IndexOutOfRangeException or KeyNotFoundException)
+        {
+            reason = DocSkipReason.Malformed;
+            return null;
         }
         if (split.Count > RelayLimits.MaxSectionsPerDoc) { reason = DocSkipReason.TooManySections; return null; }
-        return split.Select(section => new DocSection(section.Anchor, section.HeadingPath, section.Text, tokens.Count(section.Text), DocChunks.Chunk(section.Text, tokens), section.HeadingLength)).ToArray();
+        return split.Select(section => new DocSection(section.Anchor, section.HeadingPath, tokens.Count(section.Text), DocChunks.Chunk(section.Text, tokens), section.HeadingLength)).ToArray();
     }
 
     /// <summary>A GitHub-style slug: lower case, letters, digits, <c>-</c> and <c>_</c>, spaces as <c>-</c>.</summary>
@@ -185,11 +202,38 @@ public static class OpenApiSections
     private static readonly string[] Methods = ["get", "put", "post", "delete", "options", "head", "patch", "trace"];
     private static readonly Regex OperationId = new("^[A-Za-z0-9._-]{1,100}$", RegexOptions.CultureInvariant);
 
-    /// <summary>The JSON, or null when it is malformed or nested past <see cref="RelayLimits.MaxOpenApiDepth"/>.</summary>
+    /// <summary>
+    /// The JSON, or null when it is malformed, repeats a key, is nested past <see cref="RelayLimits.MaxOpenApiDepth"/>, or holds more than
+    /// <see cref="RelayLimits.MaxOpenApiNodes"/> nodes (counted before any node is built).
+    /// </summary>
     public static JsonNode? ParseJson(string json)
     {
-        try { return JsonNode.Parse(json, documentOptions: new JsonDocumentOptions { MaxDepth = RelayLimits.MaxOpenApiDepth }); }
+        var options = new JsonDocumentOptions { MaxDepth = RelayLimits.MaxOpenApiDepth, AllowDuplicateProperties = false };
+        try
+        {
+            var bytes = Encoding.UTF8.GetBytes(json);
+            var reader = new Utf8JsonReader(bytes, new JsonReaderOptions { MaxDepth = RelayLimits.MaxOpenApiDepth });
+            var nodes = 0;
+            while (reader.Read())
+                if (reader.TokenType is not (JsonTokenType.EndObject or JsonTokenType.EndArray) && ++nodes > RelayLimits.MaxOpenApiNodes) return null;
+            var root = JsonNode.Parse(bytes, documentOptions: options);
+            // Building every object now surfaces a repeated key here, not later in the splitter.
+            Touch(root);
+            return root;
+        }
         catch (JsonException) { return null; }
+        catch (ArgumentException) { return null; }
+        catch (InvalidOperationException) { return null; }
+    }
+
+    private static void Touch(JsonNode? node)
+    {
+        var pending = new Stack<JsonNode?>([node]);
+        while (pending.TryPop(out var next))
+        {
+            if (next is JsonObject map) foreach (var (_, value) in map) pending.Push(value);
+            else if (next is JsonArray list) foreach (var value in list) pending.Push(value);
+        }
     }
 
     /// <summary>
@@ -584,6 +628,23 @@ public static class DocQuery
             return query is BooleanQuery { Clauses.Count: 0 } ? null : query;
         }
         catch (ParseException) { return null; }
+    }
+
+    /// <summary>
+    /// English stop words and question words ("how do I ..."), as the analyzer turns them into terms. They still match and score, but a
+    /// hit's coverage of the query leaves them out, so a chunk full of them cannot outrank one with the words that matter.
+    /// </summary>
+    private static readonly HashSet<string> StopTerms = BuildStopTerms();
+
+    public static bool IsStopTerm(string term) => StopTerms.Contains(term);
+
+    private static HashSet<string> BuildStopTerms()
+    {
+        string[] words = ["a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "if", "in", "into", "is", "it", "no", "not", "of", "on", "or",
+            "such", "that", "the", "their", "then", "there", "these", "they", "this", "to", "was", "will", "with", "how", "do", "does", "did", "i",
+            "me", "my", "we", "our", "you", "your", "what", "when", "where", "which", "who", "why", "can", "should", "would", "could", "from", "about", "get"];
+        using var analyzer = new ApiDocAnalyzer();
+        return Terms(analyzer, string.Join(' ', words));
     }
 
     /// <summary>The analyzed terms of <paramref name="text"/>, to tell whether a heading matched the query.</summary>

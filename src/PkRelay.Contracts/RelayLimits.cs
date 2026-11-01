@@ -245,6 +245,15 @@ public static class RelayLimits
     public const int MaxDocsPerRepository = 500;
     /// <summary>Largest allowed <c>Relay:DocCache:MaxDocuments</c>.</summary>
     public const int MaxDocsPerRepositoryCeiling = 5_000;
+    /// <summary>
+    /// Bytes of document text one repository may hold, unless <c>Relay:DocCache:MaxRepositoryBytes</c> says otherwise; files past it are
+    /// skipped and counted at sync. A loaded document holds its text once, plus its Lucene index.
+    /// </summary>
+    public const long MaxRepositoryDocBytes = 128L * 1024 * 1024;
+    /// <summary>Largest allowed <c>Relay:DocCache:MaxRepositoryBytes</c>.</summary>
+    public const long MaxRepositoryDocBytesCeiling = 1024L * 1024 * 1024;
+    /// <summary>Largest read-only token file the sync reads, in bytes.</summary>
+    public const int MaxDocTokenFileBytes = 4_096;
     /// <summary>Markdown sections one document may have; a file with more is skipped at sync.</summary>
     public const int MaxSectionsPerDoc = 1_000;
     /// <summary>Document grains one doc search asks at once; a search over more documents asks them in turn, this many at a time.</summary>

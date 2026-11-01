@@ -81,12 +81,14 @@ internal static class ToolSchemas
                 properties["expectedRevision"] = new { type = "integer" };
             }
         }
-        // Doc tools are reads by the client token, scoped by its repositories: no requestId or session handle, and fields by type only.
-        // doc_search leaves out limit (default 5); InputSchema gives it and every length bound.
+        // Doc tools act by the client token, scoped by its repositories: no session handle, and fields by type only. The two reads leave out
+        // requestId; doc_sync is a mutation (it can change the followed branch) and keeps it. doc_search leaves out limit (default 5);
+        // InputSchema gives it and every length bound.
         if (tool.Name is RelayTools.DocSearch or RelayTools.DocSection or RelayTools.DocSync)
         {
-            properties.Remove("requestId"); properties.Remove("sessionId"); properties.Remove("sessionToken");
-            foreach (var field in properties.Keys.Where(field => field != "repositoryId").ToArray()) properties[field] = new { type = "string" };
+            if (!tool.IsMutation) properties.Remove("requestId");
+            properties.Remove("sessionId"); properties.Remove("sessionToken");
+            foreach (var field in properties.Keys.Where(field => field is not ("repositoryId" or "requestId")).ToArray()) properties[field] = new { type = "string" };
         }
         // Administrator-only tools are listed only beside every worker tool, which already describes the envelope, so they advertise it by
         // type only. Without a session they leave out the session token; control_request keeps sessionId, the session a cancel targets.

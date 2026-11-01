@@ -51,8 +51,9 @@ public sealed class DocCacheTool(IGrainFactory grains, ITokenCounter tokens, IDo
     }
 
     /// <summary>
-    /// One section from its start, or from a chunk anchor such as <c>errors~3</c>. A section over the budget returns whole chunks that fit,
-    /// with <c>next</c> (the anchor to continue from) and <c>moreTokens</c> (what the rest costs).
+    /// One section from its start, or from a chunk anchor such as <c>errors~3</c> (or <c>errors~3+1200</c>, a point inside a chunk). A
+    /// section over the budget returns the whole chunks that fit, with <c>next</c> (the anchor to continue from) and <c>moreTokens</c>
+    /// (what the rest costs); a first chunk that alone is over the budget is cut where it fits, and <c>next</c> points inside it.
     /// </summary>
     public async Task<RelayReply> SectionAsync(JsonObject args)
     {
@@ -68,14 +69,23 @@ public sealed class DocCacheTool(IGrainFactory grains, ITokenCounter tokens, IDo
         while (taken < section.Chunks.Length)
         {
             reply["text"] = text.ToString() + section.Chunks[taken];
-            if (!Fits(reply) && taken > 0) break;
+            if (!Fits(reply)) break;
             text.Append(section.Chunks[taken]);
             taken++;
         }
         reply["text"] = text.ToString();
-        if (taken < section.Chunks.Length)
+        if (taken == 0)
         {
-            reply["next"] = section.Anchor + DocumentGrain.ChunkSeparator + (section.FirstChunk + taken).ToString(CultureInfo.InvariantCulture);
+            // Even the first chunk is over the budget (very long tokens or heavy JSON escaping): send the longest start that fits.
+            var first = section.Chunks[0];
+            var length = LongestFit(reply, first);
+            reply["text"] = first[..length];
+            reply["next"] = Anchor(section.Anchor, section.FirstChunk, section.FirstOffset + length);
+            reply["moreTokens"] = tokens.Count(first[length..]) + section.ChunkTokens.Skip(1).Sum();
+        }
+        else if (taken < section.Chunks.Length)
+        {
+            reply["next"] = Anchor(section.Anchor, section.FirstChunk + taken, 0);
             reply["moreTokens"] = section.ChunkTokens.Skip(taken).Sum();
         }
         return Ok(reply);
@@ -87,7 +97,7 @@ public sealed class DocCacheTool(IGrainFactory grains, ITokenCounter tokens, IDo
         if (!configured.Contains(repository)) return NotConfigured();
         try
         {
-            var outcome = await sync.SyncNowAsync(repository, Optional(args, "branch"), cancellationToken);
+            var outcome = await sync.SyncNowAsync(repository, Optional(args, "branch"), Text(args, "requestId"), cancellationToken);
             return Ok(new { commit = outcome.Commit, changed = outcome.Changed, skipped = outcome.Skipped, fetched = outcome.Fetched });
         }
         catch (DocSyncException exception)
@@ -102,13 +112,34 @@ public sealed class DocCacheTool(IGrainFactory grains, ITokenCounter tokens, IDo
         }
     }
 
+    /// <summary>The longest start of <paramref name="chunk"/> that fits the reply, at least one character and never half a surrogate pair.</summary>
+    private int LongestFit(JsonObject reply, string chunk)
+    {
+        int low = 1, high = chunk.Length - 1;
+        while (low < high)
+        {
+            var middle = (low + high + 1) / 2;
+            reply["text"] = chunk[..middle];
+            if (Fits(reply)) low = middle; else high = middle - 1;
+        }
+        if (low < chunk.Length && low > 1 && char.IsHighSurrogate(chunk[low - 1])) low--;
+        return low;
+    }
+
+    private static string Anchor(string anchor, int chunk, int offset) =>
+        anchor + DocumentGrain.ChunkSeparator + chunk.ToString(CultureInfo.InvariantCulture) + (offset > 0 ? DocumentGrain.OffsetSeparator + offset.ToString(CultureInfo.InvariantCulture) : "");
+
     private IDocDirectoryGrain Directory(string repository) => grains.GetGrain<IDocDirectoryGrain>(repository);
 
+    /// <summary>Whether the reply fits its budgets with room left for the count fields added after packing (<c>more</c>, <c>next</c>, <c>moreTokens</c>).</summary>
     private bool Fits(JsonObject reply)
     {
         var json = reply.ToJsonString();
-        return Encoding.UTF8.GetByteCount(json) <= RelayLimits.MaxDocReplyBytes && tokens.Count(json) <= RelayLimits.MaxDocReplyTokens;
+        return Encoding.UTF8.GetByteCount(json) <= RelayLimits.MaxDocReplyBytes - ReserveBytes && tokens.Count(json) <= RelayLimits.MaxDocReplyTokens - ReserveTokens;
     }
+
+    private const int ReserveBytes = 64 + RelayLimits.MaxDocAnchorLength;
+    private const int ReserveTokens = 64;
 
     private static string? Optional(JsonObject args, string field) => Text(args, field) is { Length: > 0 } value ? value : null;
 

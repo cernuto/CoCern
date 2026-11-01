@@ -187,6 +187,9 @@ public interface IDocSource
 {
     Task<DocContent?> ReadAsync(string repositoryId, string path, string commit, CancellationToken cancellationToken = default);
 
+    /// <summary>Whether the clone still has <paramref name="commit"/>; a document falls back to the branch head only when it does not.</summary>
+    Task<bool> CommitExistsAsync(string repositoryId, string commit, CancellationToken cancellationToken = default);
+
     /// <summary>Reads the file at the head of <paramref name="branch"/>, for a document whose recorded commit is gone.</summary>
     Task<DocContent?> ReadHeadAsync(string repositoryId, string path, string branch, CancellationToken cancellationToken = default);
 }
@@ -215,7 +218,8 @@ public sealed class DocSyncException(DocSyncError error, string message, int ret
 /// <summary>Port implemented by the host: runs the doc sync for one repository now, sharing the timer's per-repository lock.</summary>
 public interface IDocSync
 {
-    Task<DocSyncOutcome> SyncNowAsync(string repositoryId, string? branch, CancellationToken cancellationToken = default);
+    /// <summary>A repeated <paramref name="requestId"/> returns the first run's outcome instead of running again.</summary>
+    Task<DocSyncOutcome> SyncNowAsync(string repositoryId, string? branch, string requestId, CancellationToken cancellationToken = default);
 }
 
 /// <summary>Port implemented by the host: best-effort change hints. The durable inbox stays authoritative.</summary>

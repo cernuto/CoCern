@@ -20,15 +20,16 @@ public sealed record DocRef(
     [property: Id(0)] string RepositoryId, [property: Id(1)] string Path, [property: Id(2)] string Spec,
     [property: Id(3)] string Commit, [property: Id(4)] string Hash, [property: Id(5)] string Branch);
 
-/// <summary>One document as the directory lists it.</summary>
+/// <summary>One document as the directory lists it; <see cref="Bytes"/> is its UTF-8 size, summed against the repository's byte cap.</summary>
 [GenerateSerializer, Immutable]
 public sealed record DocEntry(
     [property: Id(0)] string Path, [property: Id(1)] string Spec, [property: Id(2)] string Commit,
-    [property: Id(3)] string Hash, [property: Id(4)] int Sections, [property: Id(5)] int Tokens);
+    [property: Id(3)] string Hash, [property: Id(4)] int Sections, [property: Id(5)] int Tokens, [property: Id(6)] int Bytes = 0);
 
 /// <summary>
 /// One search hit: the best chunk of one section. <see cref="Tokens"/> is what the whole section costs. <see cref="Coverage"/> is the
-/// share of the query's distinct terms the chunk (heading and body) contains, from 0 to 1.
+/// IDF-weighted share of the query's content terms (stop words left out) the chunk contains, from 0 to 1; <see cref="Score"/> is the
+/// BM25 score scaled by it.
 /// </summary>
 [GenerateSerializer, Immutable]
 public sealed record DocHit(
@@ -37,11 +38,11 @@ public sealed record DocHit(
     [property: Id(8)] float Coverage)
 {
     /// <summary>
-    /// Best first: more of the query's terms, then the BM25 score, then a heading match. Each document has its own index, so BM25 scores
-    /// are only roughly comparable across documents; covering more terms (such as both the verb and the path) decides first.
+    /// Best first by <see cref="Score"/>, then a heading match. Each document has its own index, so BM25 scores are only roughly comparable
+    /// across documents; the coverage scaling keeps a hit that misses a rare query term (such as the path) below one that has them all.
     /// </summary>
     public static IOrderedEnumerable<DocHit> Ranked(IEnumerable<DocHit> hits) =>
-        hits.OrderByDescending(hit => hit.Coverage).ThenByDescending(hit => hit.Score).ThenByDescending(hit => hit.HeadingMatch)
+        hits.OrderByDescending(hit => hit.Score).ThenByDescending(hit => hit.HeadingMatch)
             .ThenBy(hit => hit.Path, StringComparer.Ordinal).ThenBy(hit => hit.Anchor, StringComparer.Ordinal);
 }
 
@@ -49,13 +50,17 @@ public sealed record DocHit(
 [GenerateSerializer, Immutable]
 public sealed record DocGrainHits([property: Id(0)] bool FellBack, [property: Id(1)] DocHit[] Hits);
 
-/// <summary>A section from one chunk on: the chunks in order, so the text put together is exactly the section text from that chunk.</summary>
+/// <summary>
+/// A section from one chunk (and a character offset in it) on: the chunks in order, so the text put together is exactly the section
+/// text from that point. <see cref="Chunks"/>[0] already starts at <see cref="FirstOffset"/>.
+/// </summary>
 [GenerateSerializer, Immutable]
 public sealed record DocSectionChunks(
     [property: Id(0)] string Path, [property: Id(1)] string Anchor, [property: Id(2)] string Heading, [property: Id(3)] string Commit,
-    [property: Id(4)] int Tokens, [property: Id(5)] int FirstChunk, [property: Id(6)] string[] Chunks, [property: Id(7)] int[] ChunkTokens);
+    [property: Id(4)] int Tokens, [property: Id(5)] int FirstChunk, [property: Id(6)] string[] Chunks, [property: Id(7)] int[] ChunkTokens,
+    [property: Id(8)] int FirstOffset = 0);
 
-/// <summary>A merged search over the directory's documents. <see cref="NotSearched"/> documents did not answer before the search timeout.</summary>
+/// <summary>A merged search over the directory's documents. <see cref="NotSearched"/> documents failed or did not answer before the search timeout.</summary>
 [GenerateSerializer, Immutable]
 public sealed record DocSearchOutcome(
     [property: Id(0)] DocHit[] Hits, [property: Id(1)] int Documents, [property: Id(2)] int NotSearched, [property: Id(3)] bool PathUnknown,
@@ -64,7 +69,7 @@ public sealed record DocSearchOutcome(
 [GenerateSerializer, Immutable]
 public sealed record DocDirectoryView(
     [property: Id(0)] string Branch, [property: Id(1)] string Commit, [property: Id(2)] bool NeedsResync, [property: Id(3)] DateTimeOffset? SyncedAt,
-    [property: Id(4)] DocEntry[] Entries, [property: Id(5)] string[] Skipped);
+    [property: Id(4)] DocEntry[] Entries, [property: Id(5)] string[] Skipped, [property: Id(6)] string Fingerprint = "");
 
 /// <summary>
 /// One sync's changes. <see cref="Full"/> replaces the skipped list and clears a pending full resync. <see cref="Skipped"/> are files
@@ -73,7 +78,7 @@ public sealed record DocDirectoryView(
 [GenerateSerializer, Immutable]
 public sealed record DocDirectoryUpdate(
     [property: Id(0)] string Branch, [property: Id(1)] string Commit, [property: Id(2)] bool Full, [property: Id(3)] DocEntry[] Upserts,
-    [property: Id(4)] string[] Removed, [property: Id(5)] string[] Skipped, [property: Id(6)] string[] Unskipped);
+    [property: Id(4)] string[] Removed, [property: Id(5)] string[] Skipped, [property: Id(6)] string[] Unskipped, [property: Id(7)] string Fingerprint = "");
 
 /// <summary>For tests and diagnostics: what a document grain holds now.</summary>
 [GenerateSerializer, Immutable]
@@ -90,6 +95,8 @@ public sealed class DocDirectoryState
     [Id(4)] public Dictionary<string, DocEntry> Docs { get; set; } = new(StringComparer.Ordinal);
     /// <summary>Paths a sync left out, at most <see cref="RelayLimits.MaxDocsPerRepositoryCeiling"/>.</summary>
     [Id(5)] public SortedSet<string> Skipped { get; set; } = new(StringComparer.Ordinal);
+    /// <summary>The sync settings (patterns, excludes, limits, branch, splitter version) the documents were indexed under; a change forces a full resync.</summary>
+    [Id(6)] public string Fingerprint { get; set; } = "";
 }
 
 public static class DocKeys
@@ -130,9 +137,12 @@ public sealed class DocumentGrain(IDocSource source, ITokenCounter tokens) : Gra
 {
     private const string AnchorField = "anchor";
     private const string PartField = "part";
-    private const string TokensField = "tokens";
     /// <summary>Separates a section anchor from a chunk number: <c>errors~2</c> is the second chunk of the section <c>errors</c>.</summary>
     public const char ChunkSeparator = '~';
+    /// <summary>Separates a chunk number from a character offset in it: <c>errors~2+1500</c>.</summary>
+    public const char OffsetSeparator = '+';
+
+    private static bool Natural(string text, out int value) => int.TryParse(text, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out value);
     private readonly RAMDirectory directory = new();
     private readonly Analyzer analyzer = new ApiDocAnalyzer();
     private IndexWriter writer = null!;
@@ -162,22 +172,25 @@ public sealed class DocumentGrain(IDocSource source, ITokenCounter tokens) : Gra
         var fellBack = await EnsureLoadedAsync(doc);
         if (DocQuery.Parse(analyzer, query) is not { } parsed || sections.Count == 0) return new(fellBack, []);
         var queryTerms = DocQuery.Terms(analyzer, query);
+        var content = queryTerms.Where(term => !DocQuery.IsStopTerm(term)).ToArray();
         var highlighter = new Highlighter(new SimpleHTMLFormatter("[", "]"), new QueryScorer(parsed, DocQuery.Body)) { TextFragmenter = new SimpleFragmenter(RelayLimits.MaxDocSnippetChars / 2) };
         var searcher = searchers.Acquire();
         try
         {
+            var weights = content.ToDictionary(term => term, term => Idf(searcher.IndexReader, term), StringComparer.Ordinal);
+            var total = weights.Values.Sum();
             var candidates = new List<DocHit>();
             foreach (var scored in searcher.Search(parsed, Math.Max(top, 1) * 4).ScoreDocs)
             {
                 var stored = searcher.Doc(scored.Doc);
-                var heading = stored.Get(DocQuery.Heading);
-                var body = stored.Get(DocQuery.Body);
-                var headingTerms = DocQuery.Terms(analyzer, heading);
-                var inHeading = queryTerms.Count(headingTerms.Contains);
-                var covered = inHeading == queryTerms.Count ? inHeading : DocQuery.Terms(analyzer, heading + "\n" + body).Count(queryTerms.Contains);
+                var section = sections[byAnchor[stored.Get(AnchorField)]];
+                var body = BodyOf(section, stored.GetField(PartField).GetInt32Value() ?? 0);
+                var headingTerms = DocQuery.Terms(analyzer, section.HeadingPath);
+                var chunkTerms = DocQuery.Terms(analyzer, section.HeadingPath + "\n" + body);
+                var coverage = total <= 0 ? 1f : (float)(weights.Where(weight => chunkTerms.Contains(weight.Key)).Sum(weight => weight.Value) / total);
                 // The body rides in Snippet until the hits are chosen, so only returned hits are highlighted.
-                candidates.Add(new(doc.Path, stored.Get(AnchorField), heading, body, scored.Score, stored.GetField(TokensField).GetInt32Value() ?? 0, commit,
-                    inHeading > 0, queryTerms.Count == 0 ? 0 : (float)covered / queryTerms.Count));
+                candidates.Add(new(doc.Path, section.Anchor, section.HeadingPath, body, scored.Score * (CoverageFloor + (1 - CoverageFloor) * coverage * coverage),
+                    section.Tokens, commit, headingTerms.Overlaps(queryTerms), coverage));
             }
             // One hit per section: its best chunk.
             var hits = DocHit.Ranked(candidates).DistinctBy(hit => hit.Anchor).Take(top).Select(hit => hit with { Snippet = Snippet(highlighter, hit.Snippet) }).ToArray();
@@ -186,17 +199,42 @@ public sealed class DocumentGrain(IDocSource source, ITokenCounter tokens) : Gra
         finally { searchers.Release(searcher); }
     }
 
+    /// <summary>The score share a hit keeps when it has none of the query's content terms (only stop words matched).</summary>
+    private const float CoverageFloor = 0.1f;
+
+    /// <summary>BM25's inverse document frequency of a term over this document's chunks, from its rarer field.</summary>
+    private static double Idf(IndexReader reader, string term)
+    {
+        var frequency = Math.Max(reader.DocFreq(new Term(DocQuery.Body, term)), reader.DocFreq(new Term(DocQuery.Heading, term)));
+        return Math.Log(1 + (reader.NumDocs - frequency + 0.5) / (frequency + 0.5));
+    }
+
+    /// <summary>A chunk's indexed body: the first chunk without its heading line, which is indexed as the heading.</summary>
+    private static string BodyOf(DocSection section, int part) =>
+        part == 0 ? section.Chunks[0].Text[Math.Min(section.HeadingLength, section.Chunks[0].Text.Length)..] : section.Chunks[part].Text;
+
     public async Task<DocSectionChunks?> SectionAsync(DocRef doc, string anchor)
     {
         await EnsureLoadedAsync(doc);
+        // name, name~chunk, or name~chunk+offset (a character offset in that chunk, for a chunk too long for one reply).
         var separator = anchor.LastIndexOf(ChunkSeparator);
         var name = separator < 0 ? anchor : anchor[..separator];
         var first = 1;
-        if (separator >= 0 && (!int.TryParse(anchor[(separator + 1)..], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out first) || first < 1)) return null;
+        var offset = 0;
+        if (separator >= 0)
+        {
+            var position = anchor[(separator + 1)..].Split(OffsetSeparator);
+            if (position.Length > 2 || !Natural(position[0], out first) || first < 1 || position.Length == 2 && !Natural(position[1], out offset)) return null;
+        }
         if (!byAnchor.TryGetValue(name, out var index) || first > sections[index].Chunks.Count) return null;
         var section = sections[index];
-        var chunks = section.Chunks.Skip(first - 1).ToArray();
-        return new(doc.Path, section.Anchor, section.HeadingPath, commit, section.Tokens, first, chunks.Select(chunk => chunk.Text).ToArray(), chunks.Select(chunk => chunk.Tokens).ToArray());
+        var chunks = section.Chunks.Skip(first - 1).Select(chunk => (chunk.Text, chunk.Tokens)).ToArray();
+        if (offset > 0)
+        {
+            if (offset >= chunks[0].Text.Length) return null;
+            chunks[0] = (chunks[0].Text[offset..], tokens.Count(chunks[0].Text[offset..]));
+        }
+        return new(doc.Path, section.Anchor, section.HeadingPath, commit, section.Tokens, first, chunks.Select(chunk => chunk.Text).ToArray(), chunks.Select(chunk => chunk.Tokens).ToArray(), offset);
     }
 
     public Task<bool> ReplaceAsync(DocRef doc, string markdown)
@@ -221,16 +259,22 @@ public sealed class DocumentGrain(IDocSource source, ITokenCounter tokens) : Gra
     /// <summary>
     /// Loads the file at the directory's recorded commit when this activation has not loaded that version yet. When the commit is gone
     /// (a force push, then garbage collection) it reads the branch head and returns true, so the directory schedules a full resync.
-    /// When neither read works, nothing is loaded and the next call tries again.
+    /// When the read fails for another reason (a timeout, a file over its limit), nothing is loaded and the next call tries again.
     /// </summary>
     private async Task<bool> EnsureLoadedAsync(DocRef doc)
     {
         if (loadedFor == doc.Hash) return false;
         reads++;
         var content = await source.ReadAsync(doc.RepositoryId, doc.Path, doc.Commit);
-        var fellBack = content is null;
-        if (content is null && doc.Branch.Length > 0) content = await source.ReadHeadAsync(doc.RepositoryId, doc.Path, doc.Branch);
-        if (content is null) return fellBack;
+        var fellBack = false;
+        if (content is null)
+        {
+            // Only a commit that is really gone falls back to the branch head; a failed or refused read tries again on the next call.
+            if (doc.Branch.Length == 0 || await source.CommitExistsAsync(doc.RepositoryId, doc.Commit)) return false;
+            fellBack = true;
+            content = await source.ReadHeadAsync(doc.RepositoryId, doc.Path, doc.Branch);
+            if (content is null) return true;
+        }
         if (content.Hash != contentHash) Index(doc.Path, content.Text, content.Hash);
         commit = content.Commit;
         loadedFor = doc.Hash;
@@ -249,15 +293,14 @@ public sealed class DocumentGrain(IDocSource source, ITokenCounter tokens) : Gra
         foreach (var section in sections)
             for (var part = 0; part < section.Chunks.Count; part++)
             {
-                // The first chunk's heading line is indexed as the heading only, so a heading match and a body match stay apart.
-                var body = part == 0 ? section.Chunks[0].Text[Math.Min(section.HeadingLength, section.Chunks[0].Text.Length)..] : section.Chunks[part].Text;
+                // The first chunk's heading line is indexed as the heading only, so a heading match and a body match stay apart. The text is
+                // not stored in Lucene: the sections hold the one copy, and a hit finds its chunk by anchor and part.
                 writer.AddDocument(new Document
                 {
                     new StringField(AnchorField, section.Anchor, Field.Store.YES),
                     new Int32Field(PartField, part, Field.Store.YES),
-                    new TextField(DocQuery.Heading, section.HeadingPath, Field.Store.YES),
-                    new TextField(DocQuery.Body, body, Field.Store.YES),
-                    new Int32Field(TokensField, section.Tokens, Field.Store.YES)
+                    new TextField(DocQuery.Heading, section.HeadingPath, Field.Store.NO),
+                    new TextField(DocQuery.Body, BodyOf(section, part), Field.Store.NO)
                 });
             }
         writer.Commit();
@@ -295,13 +338,14 @@ public sealed class DocDirectoryGrain([PersistentState("docs", "relay")] IPersis
     private string Repository => this.GetPrimaryKeyString();
 
     public Task<DocDirectoryView> ReadAsync() => Task.FromResult(new DocDirectoryView(state.State.Branch, state.State.Commit, state.State.NeedsResync, state.State.SyncedAt,
-        state.State.Docs.Values.OrderBy(entry => entry.Path, StringComparer.Ordinal).ToArray(), state.State.Skipped.ToArray()));
+        state.State.Docs.Values.OrderBy(entry => entry.Path, StringComparer.Ordinal).ToArray(), state.State.Skipped.ToArray(), state.State.Fingerprint));
 
     public async Task ApplyAsync(DocDirectoryUpdate update)
     {
         var current = state.State;
         current.Branch = update.Branch;
         current.Commit = update.Commit;
+        current.Fingerprint = update.Fingerprint;
         current.SyncedAt = DateTimeOffset.UtcNow;
         foreach (var path in update.Removed) current.Docs.Remove(path);
         foreach (var entry in update.Upserts) current.Docs[entry.Path] = entry;
@@ -336,7 +380,7 @@ public sealed class DocDirectoryGrain([PersistentState("docs", "relay")] IPersis
             var now = Interlocked.Increment(ref running);
             InterlockedMax(ref peak, now);
             try { results[index] = await GrainFactory.GetGrain<IDocumentGrain>(DocKeys.Document(Repository, candidates[index].Path)).SearchAsync(Ref(candidates[index]), query, limit); }
-            catch (Exception) { results[index] = new(false, []); /* A failing document is left out; the others still answer. */ }
+            catch (Exception) { /* A failing document is counted as not searched; the others still answer. */ }
             finally { Interlocked.Decrement(ref running); gate.Release(); }
         }
         var all = Task.WhenAll(Enumerable.Range(0, candidates.Length).Select(AskAsync));
