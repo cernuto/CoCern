@@ -157,4 +157,29 @@ public static class RelayLimits
     public const int DefaultPromptHookTimeoutMs = 1_000;
     /// <summary>Largest allowed <c>PKRELAY_HOOK_TIMEOUT_MS</c>.</summary>
     public const int MaxPromptHookTimeoutMs = 10_000;
+
+    /// <summary>Minutes between analytics snapshots, unless <c>Relay:Analytics:SnapshotInterval</c> says otherwise.</summary>
+    public const int DefaultAnalyticsSnapshotMinutes = 60;
+    /// <summary>Shortest allowed snapshot interval, in minutes: each snapshot copies the whole database.</summary>
+    public const int MinAnalyticsSnapshotMinutes = 1;
+    /// <summary>Seconds one analytics query may run before it is interrupted, unless <c>Relay:Analytics:QueryTimeout</c> says otherwise.</summary>
+    public const int DefaultAnalyticsQueryTimeoutSeconds = 10;
+    /// <summary>Longest allowed analytics query timeout, in seconds.</summary>
+    public const int MaxAnalyticsQueryTimeoutSeconds = 300;
+    /// <summary>Rows one analytics result keeps, unless <c>Relay:Analytics:MaxRows</c> says otherwise.</summary>
+    public const int DefaultAnalyticsMaxRows = 50;
+    /// <summary>Largest allowed <c>Relay:Analytics:MaxRows</c>.</summary>
+    public const int MaxAnalyticsMaxRows = 500;
+    /// <summary>Longest ad hoc analytics SQL, in characters.</summary>
+    public const int MaxAnalyticsSqlLength = 4_096;
+    /// <summary>Days in each period a named query compares (current against previous), when it gives no <c>days</c>.</summary>
+    public const int DefaultAnalyticsPeriodDays = 7;
+    /// <summary>
+    /// Longest period a named query compares, in days. Two periods of 14 days fit inside the default 30 days of raw activity.
+    /// </summary>
+    public const int MaxAnalyticsPeriodDays = 14;
+    /// <summary>Memory DuckDB may use for analytics, in megabytes, so a heavy query cannot starve the hub.</summary>
+    public const int AnalyticsMemoryLimitMegabytes = 512;
+    /// <summary>Threads DuckDB may use for analytics.</summary>
+    public const int AnalyticsThreads = 2;
 }

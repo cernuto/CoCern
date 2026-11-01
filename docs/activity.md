@@ -4,7 +4,7 @@ The hub records every tool call in the `activity_log` table, so you can measure 
 
 ## What is recorded
 
-One row per public tool call, from REST, MCP and SignalR alike: time, repository, session, the session's `role` from `session_open`, tool, result code, request and reply size, and duration. A row never holds arguments or reply text. It keeps only the task or note the call wrote, and a short fingerprint of the status text it wrote there.
+One row per public tool call, from REST, MCP and SignalR alike: time, repository, session, the session's `role` from `session_open`, tool, result code, request and reply size, and duration. A row never holds arguments or reply text. It keeps only the task, note or resource the call wrote or claimed, and a short fingerprint of the status text it wrote there.
 
 The hub also adds one `wake` row each time something can wake a chat: with [attention](attention.md) on, a new tier 1 item or an idle-hold wake; with it off, a message without `wake: false` landing in a session inbox. Background status reads (`get_status` with `attentionDetail`, from the prompt hook and wake watchers) are recorded without a role, so they are not manager turns. Each attention offer shown and each answer adds one `attention` row: `tool` is the item's kind and `code` is `shown`, `accepted`, `later` or `dismissed`. Expired items are not recorded.
 
@@ -54,7 +54,7 @@ GROUP BY role, tool ORDER BY calls DESC;
 SELECT day, role, tool, calls, input_tokens, output_tokens FROM activity_daily ORDER BY day DESC LIMIT 50;
 ```
 
-`at_ticks` is .NET UTC ticks. `kind` is `call`, `wake` or `attention`.
+`at_ticks` is .NET UTC ticks. `kind` is `call`, `wake` or `attention`. To compare periods with DuckDB, see [analytics.md](analytics.md).
 
 ## Settings
 

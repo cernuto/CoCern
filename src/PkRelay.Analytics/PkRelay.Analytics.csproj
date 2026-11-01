@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- DuckDB analytics over snapshots. Its native library stays out of Core, Domain and Storage; only the host references this project. -->
+  <ItemGroup>
+    <ProjectReference Include="../PkRelay.Core/PkRelay.Core.csproj" />
+    <ProjectReference Include="../PkRelay.Contracts/PkRelay.Contracts.csproj" />
+    <PackageReference Include="DuckDB.NET.Data.Full" />
+    <EmbeddedResource Include="Views.sql" LogicalName="PkRelay.Analytics.Views.sql" />
+    <InternalsVisibleTo Include="PkRelay.Tests" />
+  </ItemGroup>
+</Project>

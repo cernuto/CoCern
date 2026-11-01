@@ -2,6 +2,7 @@ using System.Net;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Orleans.Configuration;
 using Orleans.Hosting;
+using PkRelay.Analytics;
 using PkRelay.Contracts;
 using PkRelay.Core;
 using PkRelay.Domain;
@@ -57,6 +58,7 @@ public static class RelayHostBuilderExtensions
         builder.AddRelayOrleans();
         builder.Services.AddRelayDashboard();
         builder.Services.AddHostedService<DueWorkDispatcher>();
+        builder.Services.AddRelayAnalytics();
         builder.Services.AddOpenApi();
         builder.Services.AddRelayMcp();
         return builder;
@@ -96,6 +98,28 @@ public static class RelayHostBuilderExtensions
             options.ServiceId = ServiceId;
             options.ClusterId = configuration["Relay:ClusterId"] ?? ServiceId;
         });
+    }
+
+    /// <summary>
+    /// Snapshots and DuckDB analytics, off by default. The analytics service is created only when enabled, so DuckDB's native library
+    /// is not loaded otherwise; <see cref="IAnalyticsQueries"/> resolves to null when analytics is off.
+    /// </summary>
+    private static void AddRelayAnalytics(this IServiceCollection services)
+    {
+        services.AddSingleton(provider => AnalyticsSettings.From(provider.GetRequiredService<IConfiguration>(), provider.GetRequiredService<IHostEnvironment>(), provider.GetRequiredService<SqliteStore>()));
+        services.AddSingleton(provider =>
+        {
+            var configuration = provider.GetRequiredService<IConfiguration>();
+            return new AnalyticsService(new AnalyticsOptions
+            {
+                ExtensionDirectory = configuration["Relay:Analytics:ExtensionDirectory"] is { Length: > 0 } extensions ? Path.GetFullPath(Path.Combine(provider.GetRequiredService<IHostEnvironment>().ContentRootPath, extensions)) : AnalyticsOptions.DefaultExtensionDirectory,
+                QueryTimeout = configuration.GetValue("Relay:Analytics:QueryTimeout", TimeSpan.FromSeconds(RelayLimits.DefaultAnalyticsQueryTimeoutSeconds)),
+                MaxRows = configuration.GetValue("Relay:Analytics:MaxRows", RelayLimits.DefaultAnalyticsMaxRows),
+                LiveDatabasePath = provider.GetRequiredService<SqliteStore>().DatabasePath
+            });
+        });
+        services.AddSingleton<IAnalyticsQueries>(provider => provider.GetRequiredService<AnalyticsSettings>().Enabled ? provider.GetRequiredService<AnalyticsService>() : null!);
+        services.AddHostedService<AnalyticsSnapshotService>();
     }
 
     private static string DefaultDatabasePath(IHostEnvironment environment) => Path.Combine(environment.ContentRootPath, "data", "relay.db");
