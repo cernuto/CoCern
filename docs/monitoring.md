@@ -115,6 +115,8 @@ A session gets at most one tip an hour, and each rule at most once a day. If the
 
 Hourly snapshots of the database, queried with DuckDB. Queries never touch the live database. On by default, with the [anomaly monitor](collaboration.md#anomaly-monitor).
 
+Every hour the hub copies the whole database into `data/analytics` (beside the database), leaves out sessions, inboxes, credentials and replay caches, and converts the copy for DuckDB. It keeps one copy: the one before is deleted as soon as no query uses it, and copies left from an earlier run are deleted at startup. Expect about the database's size on disk, and briefly more while a new copy is made.
+
 DuckDB reads the snapshots with its `sqlite` extension. The Windows x64 build comes bundled in `extensions/duckdb`, signed by DuckDB, with a SHA-256 manifest. The build checks the sums and unpacks it into `duckdb_extensions` beside the hub, so nothing is downloaded. DuckDB checks the signature again when it loads it.
 
 Without a usable extension (any other platform, or a file that fails its sum), the hub still starts. It logs one warning, and `analytics_query` answers `AnalyticsUnavailable`. For another platform or DuckDB version, with internet access:

@@ -8,6 +8,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
 using Orleans;
@@ -740,6 +741,49 @@ public sealed class DocCacheTests
     }
 
     [Fact]
+    public async Task An_unpushed_branch_with_origin_present_is_read_locally_and_syncs_quietly()
+    {
+        using var git = GitRepositories.Create(new() { ["docs/a.md"] = "# Claims\n\nHow to claim a task." });
+        git.CommitInCloneOnNewBranch("feature", "docs/feature.md", "# Feature\n\nThe unpushed refunds note.");
+        await using var host = DocHost(git, settings: new() { ["Relay:DocCache:Repositories:0:Branch"] = "feature" });
+        using var worker = host.AuthorizedClient();
+        var logger = new ListLogger<DocSyncRunner>();
+        var runner = new DocSyncRunner(host.Services.GetRequiredService<DocCacheSettings>(), new GitCli(), host.Services.GetRequiredService<IGrainFactory>(), Tokens, logger);
+        // origin has no "feature": the fetch finds nothing, so the local branch is read, with one line and no warning.
+        var first = await runner.SyncAsync("repo", null, CancellationToken.None);
+        Assert.Equal(git.CloneHead(), first.Commit);
+        Assert.Equal("docs/feature.md", Assert.Single(Hits(await Tool(worker, "doc_search", new { repositoryId = "repo", query = "unpushed refunds" }))).GetProperty("path").GetString());
+        git.CommitInCloneOnly("docs/more.md", "# More\n\nA second local commit about invoices.");
+        var second = await runner.SyncAsync("repo", null, CancellationToken.None);
+        Assert.Equal((git.CloneHead(), 1), (second.Commit, second.Changed));
+        Assert.Equal(0, (await runner.SyncAsync("repo", null, CancellationToken.None)).Changed);
+        Assert.DoesNotContain(logger.Entries, entry => entry.Level >= LogLevel.Warning);
+        Assert.Single(logger.Entries, entry => entry.Message.Contains("has no branch feature", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task With_fetch_off_the_hub_never_fetches_and_reads_the_local_branch_head()
+    {
+        using var git = GitRepositories.Create(new() { ["docs/a.md"] = "# Claims\n\nHow to claim a task." });
+        var watching = new WatchingGit();
+        await using var host = DocHost(git, watching, new() { ["Relay:DocCache:Repositories:0:Fetch"] = "false" });
+        using var worker = host.AuthorizedClient();
+        Assert.False(host.Services.GetRequiredService<DocCacheSettings>().Find("repo")!.Fetch);
+        Assert.False((await SyncAsync(host)).Fetched);
+        // A commit pushed to origin is not fetched, and the clone's remote-tracking ref stays where it was; a local commit is read.
+        var tracking = git.CloneRef("refs/remotes/origin/main");
+        git.Commit(new() { ["docs/pushed.md"] = "# Pushed\n\nzebra pushed elsewhere." });
+        git.CommitInCloneOnly("docs/local.md", "# Local\n\nrefunds from a local commit.");
+        var synced = await SyncAsync(host);
+        Assert.Equal((git.CloneHead(), false), (synced.Commit, synced.Fetched));
+        Assert.Single(Hits(await Tool(worker, "doc_search", new { repositoryId = "repo", query = "refunds local commit" })));
+        Assert.Empty(Hits(await Tool(worker, "doc_search", new { repositoryId = "repo", query = "zebra" })));
+        Assert.Equal(tracking, git.CloneRef("refs/remotes/origin/main"));
+        Assert.Empty(watching.Fetches);
+        Assert.DoesNotContain(watching.Arguments, arguments => arguments[0] is "fetch" or "remote");
+    }
+
+    [Fact]
     public void Bad_settings_fail_clearly_and_defaults_cover_every_supported_type()
     {
         void Fails(string key, string value, string expected) =>
@@ -1114,6 +1158,14 @@ public sealed class DocCacheTests
         return new Microsoft.Extensions.Configuration.ConfigurationBuilder().AddInMemoryCollection(values).Build();
     }
 
+    private sealed class ListLogger<T> : Microsoft.Extensions.Logging.ILogger<T>
+    {
+        public System.Collections.Concurrent.ConcurrentQueue<(LogLevel Level, string Message)> Entries { get; } = new();
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) => Entries.Enqueue((logLevel, formatter(state, exception)));
+    }
+
     private sealed class FakeEnvironment : IHostEnvironment
     {
         public string EnvironmentName { get; set; } = "Test";
@@ -1138,6 +1190,7 @@ public sealed class DocCacheTests
         public bool FakeFetch { get; init; }
         public System.Collections.Concurrent.ConcurrentQueue<(IReadOnlyList<string> Arguments, IReadOnlyDictionary<string, string>? Environment)> Fetches { get; } = new();
         public System.Collections.Concurrent.ConcurrentQueue<string> Shows { get; } = new();
+        public System.Collections.Concurrent.ConcurrentQueue<IReadOnlyList<string>> Arguments { get; } = new();
 
         public void HoldFetch() => hold = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public void ReleaseFetch() => hold?.TrySetResult();
@@ -1145,6 +1198,7 @@ public sealed class DocCacheTests
         public override async Task<GitResult> RunAsync(string directory, IReadOnlyList<string> arguments, int maxOutputBytes, IReadOnlyDictionary<string, string>? environment, CancellationToken cancellationToken)
         {
             Interlocked.Increment(ref Commands);
+            Arguments.Enqueue(arguments.ToArray());
             if (arguments[0] == "fetch")
             {
                 Interlocked.Increment(ref FetchesStarted);
@@ -1246,6 +1300,15 @@ public sealed class DocCacheTests
         public void RemoveCloneRemote() => Run(Clone, "remote", "remove", "origin");
 
         public string CloneHead() => Run(Clone, "rev-parse", "HEAD").Trim();
+
+        public string CloneRef(string reference) => Run(Clone, "rev-parse", reference).Trim();
+
+        /// <summary>A branch made and committed in the hub's clone only, never pushed; the clone stays on it.</summary>
+        public void CommitInCloneOnNewBranch(string branch, string path, string text)
+        {
+            Run(Clone, "checkout", "-q", "-b", branch);
+            CommitInCloneOnly(path, text);
+        }
 
         public string CloneStatus() => Run(Clone, "status", "--porcelain", "--untracked-files=all");
 

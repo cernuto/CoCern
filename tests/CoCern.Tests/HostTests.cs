@@ -957,6 +957,44 @@ public class HostTests
     }
 
     [Fact]
+    public async Task A_seen_page_cut_by_compaction_closes_only_the_messages_it_kept()
+    {
+        // Token budgets are enforced by default, so a page of token-dense messages ("7 3 9 1 4" is one token per byte) is cut.
+        await using var host = new RelayHostFixture();
+        using var client = host.AuthorizedClient();
+        var sender = Data(await host.Call(client, "session_open", new { repositoryId = "repo", requestId = "cut-sender" }));
+        var reader = Data(await host.Call(client, "session_open", new { repositoryId = "repo", requestId = "cut-reader" }));
+        object Read(object extra)
+        {
+            var arguments = JsonSerializer.SerializeToNode(extra)!.AsObject();
+            arguments["repositoryId"] = "repo"; arguments["sessionId"] = reader.GetProperty("sessionId").GetString(); arguments["sessionToken"] = reader.GetProperty("sessionToken").GetString();
+            return arguments;
+        }
+        async Task<int> Actionable() => Data(await host.Call(client, "get_status", Read(new { attentionDetail = true }))).GetProperty("attention").GetProperty("actionable").GetInt32();
+        for (var i = 0; i < 30; i++)
+            Data(await host.Call(client, "send_message", new { repositoryId = "repo", requestId = $"cut-{i}", sessionId = sender.GetProperty("sessionId").GetString(), sessionToken = sender.GetProperty("sessionToken").GetString(),
+                recipientSessionId = reader.GetProperty("sessionId").GetString(), text = $"Message {i}: " + string.Concat(Enumerable.Repeat("7 3 9 1 4 ", 35)) }));
+        var deadline = DateTime.UtcNow.AddSeconds(20);
+        while (await Actionable() < 30 && DateTime.UtcNow < deadline) await Task.Delay(50);
+        Assert.Equal(30, await Actionable());
+
+        // The page the model saw was compacted: only the messages it kept close; the ones cut off stay open.
+        var page = Data(await host.Call(client, "check_inbox", Read(new { attention = false, seen = true, limit = 50 })));
+        Assert.True(page.GetProperty("compacted").GetBoolean());
+        var kept = page.GetProperty("items").GetArrayLength();
+        Assert.InRange(kept, 1, 29);
+        Assert.Equal(30 - kept, await Actionable());
+        // Reading on from the cursor closes the rest.
+        var cursor = kept;
+        while (cursor < 30)
+        {
+            var next = Data(await host.Call(client, "check_inbox", Read(new { attention = false, seen = true, limit = 50, cursor })));
+            cursor += next.GetProperty("items").GetArrayLength();
+        }
+        Assert.Equal(0, await Actionable());
+    }
+
+    [Fact]
     public async Task A_claim_raises_look_alikes_only_on_an_all_words_match_after_the_reply()
     {
         await using var host = new RelayHostFixture();

@@ -7,8 +7,14 @@
 ./scripts/Start-CoCern.ps1                # loopback hub on http://127.0.0.1:5271
 ```
 
-- The start script makes a private administrator token in `data/local-client-token`. `-RepositoryId <id>` sets its repository (default `cocern`).
-- It also points the [doc cache](documents.md) at this checkout, on its current branch, as that repository. `-NoDocs` skips this.
+- The start script makes a private **administrator** token in `data/local-client-token`. `-RepositoryId <id>` sets its repository (default `cocern`). Every chat that uses this token file can use the administrator tools, ad hoc SQL included.
+- For worker-only chats, issue a second token before starting the hub, in the same PowerShell window, and give those chats `COCERN_TOKEN_FILE=data/worker-token` (keep the file private; `IsAdministrator` defaults to `false`):
+
+  ```powershell
+  $t = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBytes(32)); Set-Content data/worker-token $t; $env:Relay__Clients__1__Token = $t; $env:Relay__Clients__1__PrincipalId = 'worker'; $env:Relay__Clients__1__Repositories__0 = 'cocern'
+  ```
+
+- It also points the [doc cache](documents.md) at this checkout, on its current branch, as that repository. It reads local commits only and never fetches. `-NoDocs` skips this.
 - To run the published hub: `./scripts/Start-CoCern.ps1 -HostDll ./artifacts/host/CoCern.Host.dll`.
 - Never rebuild the folder of a running hub or adapter. Publish to a new folder and switch.
 - One hub owns one database file. Do not put it on a shared drive or start a second hub on it.
@@ -61,7 +67,7 @@ Every model call re-reads the whole chat, so fewer calls matter most.
 | `Relay:Discovery:Enabled` | off | [Other PCs](discovery.md) |
 | `Relay:Network:Enabled` | off | [Other PCs](discovery.md) |
 
-- **Upgrade adapters together with the hub.** Older adapters use up attention offers the model never sees.
+- **Run the same version of the hub and its adapters.** A mismatched adapter can use up attention offers the model never sees.
 - **With attention on, messages can wait up to 10 minutes** before they wake a chat. Only urgent items wake at once.
 - **Every reply is held to its token budget.** Budgets sit at the byte limit, so in practice only a reply that would be cut anyway is compacted. `Relay:Tokens:Enforce=false` only measures.
 - **Administrator tools need an administrator token:** `analytics_query` (ad hoc SQL too), `standing_put`, `order_put`, `order_remove`, `control_request` and `doc_sync`.

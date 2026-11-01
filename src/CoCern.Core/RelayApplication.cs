@@ -104,8 +104,10 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
             if (result.Ok && tool == RelayTools.TaskUpdate && args["includeNextWork"]?.GetValue<bool>() == true) result = await WithNextWorkAsync(trusted, args, session, result);
             if (result.Ok && tool == RelayTools.StandingPut) CacheStanding(BoardKey(args), 0, result.Version, null);
             if (result.Ok && session is not null && CarriesStanding(tool)) result = await WithStandingAsync(trusted, args, session, result);
-            if (result.Ok && session is not null && offerWanted && attentionOptions.Enabled && IsBoundary(tool)) result = await WithAttentionAsync(trusted, args, tool, result);
-            else if (result.Ok && session is not null && attentionOptions.Enabled && tool == RelayTools.CheckInbox && (pageSeen || seenIds.Length > 0)) await MarkSeenAsync(trusted, args, result, pageSeen, seenIds);
+            var offers = result.Ok && session is not null && offerWanted && attentionOptions.Enabled && IsBoundary(tool);
+            if (offers) result = await WithAttentionAsync(trusted, args, tool, result);
+            // A page reported as seen is marked from the reply as sent, after compaction, so a message cut from the page stays unseen.
+            var markSeen = !offers && result.Ok && session is not null && attentionOptions.Enabled && tool == RelayTools.CheckInbox && (pageSeen || seenIds.Length > 0);
             // The next-work offer this reply carries becomes a next_work item too, raised after the reply's own attention offer was chosen.
             if (result.Ok && tool == RelayTools.TaskUpdate && attentionOptions.Enabled) await RaiseOfferedWorkAsync(trusted, args, result);
             // The claimer's own next_work item for the task (from a next-work offer) closes with the claim.
@@ -116,7 +118,9 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
                 var claimed = result;
                 _ = Task.Run(() => RaiseRelatedWorkAsync(trusted, args, claimed), CancellationToken.None);
             }
-            return Bound(definition, args, result, trace);
+            var sent = Bound(definition, args, result, trace);
+            if (markSeen && sent.Ok) await MarkSeenAsync(trusted, args, sent, pageSeen, seenIds);
+            return sent;
         }
         catch (ArgumentException) { return Error(InvalidArguments); }
         catch (InvalidOperationException) { return Error(InvalidArguments); }
