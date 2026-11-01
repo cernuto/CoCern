@@ -133,8 +133,8 @@ public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
     /// <summary>Queues one event. Never blocks and never throws: when the queue is full the event is dropped and counted.</summary>
     public void Record(ActivityEvent activity)
     {
-        if (_activity is not { } channel || activity is null) return;
-        if (!channel.Writer.TryWrite(activity)) Interlocked.Increment(ref _droppedActivity);
+        if (_activity is not { } channel || activity is null) { if (activity is not null) TokenTextBudget.Shared.Release(activity); return; }
+        if (!channel.Writer.TryWrite(activity)) { Interlocked.Increment(ref _droppedActivity); TokenTextBudget.Shared.Release(activity); }
     }
 
     /// <summary>Writes every event queued before this call. Snapshots and tests use it; the background writer does the same each second.</summary>
@@ -177,6 +177,8 @@ public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
                 if (batch.Count == 0) return;
                 // Token counts are taken here, off every call's path and outside the telemetry lock.
                 var rows = TokenCounter is { } tokens ? batch.SelectMany(item => TokenMeter.Measure(item, tokens)).ToList() : batch;
+                // Without a counter the texts are dropped uncounted, and their room is given back.
+                if (TokenCounter is null) foreach (var item in batch) TokenTextBudget.Shared.Release(item);
                 try { await InsertActivityAsync(rows); }
                 catch (Exception exception) when (exception is SqliteException or ObjectDisposedException or InvalidOperationException) { Interlocked.Add(ref _droppedActivity, rows.Count); }
             }

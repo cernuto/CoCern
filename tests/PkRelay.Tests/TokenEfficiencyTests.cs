@@ -391,8 +391,13 @@ public sealed class TokenEfficiencyTests(ITestOutputHelper output)
     {
         await using var host = new RelayHostFixture(settings: new Dictionary<string, string?> { ["Relay:Clients:0:IsAdministrator"] = "true" });
         using var client = host.AuthorizedClient();
-        var status = Data(await host.Call(client, "get_status", new { repositoryId = "repo" }));
-        var totals = status.GetProperty("toolTokens");
+        // The totals appear once the startup warm-up has counted them; no status read waits for the tokenizer.
+        JsonElement totals = default;
+        for (var retry = 0; retry < 100 && totals.ValueKind != JsonValueKind.Object; retry++)
+        {
+            if (Data(await host.Call(client, "get_status", new { repositoryId = "repo" })).TryGetProperty("toolTokens", out var found)) totals = found;
+            else await Task.Delay(100);
+        }
         var counter = new O200kTokenCounter();
         int Expected(bool administrator) => RelayToolCatalog.ForRole(administrator).Sum(tool => counter.Count(tool.Description) + counter.Count(RelayToolCatalog.ForwardingSchema(tool).GetRawText()));
         Assert.Equal(Expected(false), totals.GetProperty("worker").GetInt32());
@@ -435,16 +440,57 @@ public sealed class TokenEfficiencyTests(ITestOutputHelper output)
         Assert.Equal(["over"], measured.Budget);
         Assert.Empty(uncounted.Budget);
 
-        var enforced = await Search(new() { ["Relay:Tokens:EnforceTools:0"] = "search" });
-        var data = JsonDocument.Parse(enforced.Reply).RootElement;
-        Assert.True(counter.Count(enforced.Reply) <= RelayLimits.SearchReplyTokens, counter.Count(enforced.Reply).ToString());
-        Assert.True(data.GetProperty("compacted").GetBoolean());
-        Assert.Equal(2, data.GetProperty("compactStep").GetInt32());
-        var all = JsonDocument.Parse(measured.Reply).RootElement.GetProperty("hits").GetArrayLength();
-        Assert.Equal(all - data.GetProperty("hits").GetArrayLength(), data.GetProperty("more").GetInt32());
-        // The strongest hits are the ones kept.
-        Assert.Equal(JsonDocument.Parse(measured.Reply).RootElement.GetProperty("hits")[0].GetRawText(), data.GetProperty("hits")[0].GetRawText());
-        Assert.Equal(["step2"], enforced.Budget);
+        // Search hits have no cursor, so nothing could fetch the rest: even with search enforced they are never cut, only counted.
+        var enforcedSearch = await Search(new() { ["Relay:Tokens:EnforceTools:0"] = "search" });
+        Assert.Equal(measured.Reply, enforcedSearch.Reply);
+        Assert.Equal(["over"], enforcedSearch.Budget);
+
+        // An enforced paged read is compacted under its budget, and its cursor continues where it stopped.
+        await using var host = new RelayHostFixture(settings: new Dictionary<string, string?> { ["Relay:Tokens:EnforceTools:0"] = "check_inbox" });
+        using var client = host.AuthorizedClient();
+        var reader = Data(await host.Call(client, "session_open", new { repositoryId = "repo", requestId = "budget-reader" }));
+        var writer = Data(await host.Call(client, "session_open", new { repositoryId = "repo", requestId = "budget-writer" }));
+        for (var i = 0; i < 30; i++)
+            Data(await host.Call(client, "send_message", new { repositoryId = "repo", requestId = $"budget-mail-{i}", sessionId = writer.GetProperty("sessionId").GetString(), sessionToken = writer.GetProperty("sessionToken").GetString(),
+                recipientSessionId = reader.GetProperty("sessionId").GetString(), text = $"Message {i}: " + string.Join(' ', Enumerable.Repeat("status detail", 20)) }));
+        var inbox = new { repositoryId = "repo", sessionId = reader.GetProperty("sessionId").GetString(), sessionToken = reader.GetProperty("sessionToken").GetString(), attention = false, limit = 50 };
+        JsonElement page = default;
+        for (var retry = 0; retry < 50; retry++)
+        {
+            page = Data(await host.Call(client, "check_inbox", inbox));
+            if (page.GetProperty("total").GetInt32() == 30) break;
+            await Task.Delay(100);
+        }
+        Assert.True(counter.Count(page.GetRawText()) <= RelayLimits.InboxReplyTokens, counter.Count(page.GetRawText()).ToString());
+        Assert.True(page.GetProperty("compacted").GetBoolean());
+        Assert.Equal(2, page.GetProperty("compactStep").GetInt32());
+        // The whole inbox fit one page before compaction, so "more" is every message left out.
+        var kept = page.GetProperty("items").GetArrayLength();
+        Assert.Equal(30 - kept, page.GetProperty("more").GetInt32());
+        Assert.Equal(kept, page.GetProperty("nextCursor").GetInt32());
+        var next = Data(await host.Call(client, "check_inbox", new { inbox.repositoryId, inbox.sessionId, inbox.sessionToken, inbox.attention, inbox.limit, cursor = kept }));
+        Assert.StartsWith($"Message {kept}:", next.GetProperty("items")[0].GetProperty("text").GetString());
+        var store = host.Services.GetRequiredService<SqliteStore>();
+        await store.FlushActivityAsync();
+        Assert.Contains("step2", Rows(store, "SELECT code FROM activity_log WHERE kind = 'budget' AND tool = 'check_inbox'").Select(row => (string)row[0]!));
+    }
+
+    [Fact]
+    public void Queued_text_past_its_cap_drops_only_the_token_counts()
+    {
+        var budget = new TokenTextBudget(100);
+        Assert.True(budget.TryHold(new string('a', 40), new string('b', 40)));
+        // Both texts or neither: a call that would pass the cap attaches none, and its event is recorded without counts.
+        Assert.False(budget.TryHold(new string('c', 15), new string('d', 15)));
+        Assert.Equal(80, budget.Held);
+        Assert.True(budget.TryHold(null, new string('e', 20)));
+        budget.Release(new ActivityEvent { RequestText = new string('a', 40), ReplyText = new string('b', 40) });
+        Assert.Equal(20, budget.Held);
+        Assert.True(budget.TryHold(new string('c', 15), new string('d', 15)));
+        // An event without texts is written as it is, with no counts.
+        var plain = new ActivityEvent { Kind = ActivityEvent.Call, Tool = RelayTools.TaskGet, Ok = true };
+        Assert.Same(plain, Assert.Single(TokenMeter.Measure(plain, new O200kTokenCounter())));
+        Assert.Equal(RelayLimits.MaxQueuedTokenTextChars, 8_000_000);
     }
 
     [Fact]

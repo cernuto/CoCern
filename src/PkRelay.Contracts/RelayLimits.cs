@@ -18,8 +18,6 @@ public static class RelayLimits
     public const int DefaultReplyTokens = 1_000;
     /// <summary>Budget of a <c>search</c> reply. Its 2,048-byte cap is about 500 to 600 tokens, so this budget is measure-only.</summary>
     public const int SearchReplyTokens = 300;
-    /// <summary>Budget of a <c>doc_search</c> reply. The doc cache keeps its own <see cref="MaxDocReplyTokens"/>, so this one is measure-only.</summary>
-    public const int DocSearchReplyTokens = 300;
     /// <summary>Budget of a whole-task or board <c>task_get</c> reply.</summary>
     public const int TaskReadReplyTokens = 2_000;
     /// <summary>Budget of one <c>check_inbox</c> page.</summary>
@@ -30,6 +28,13 @@ public static class RelayLimits
     public const int NextWorkOfferTokens = 400;
     /// <summary>Compaction step 3 shortens text values longer than this, in characters, to their first line.</summary>
     public const int CompactTextChars = 200;
+    /// <summary>
+    /// Characters of request and reply text that queued activity events may hold for counting, across the hub (about 16 MB). Past it a
+    /// call's event is still recorded, without token counts, so counting can never cost an activity row.
+    /// </summary>
+    public const long MaxQueuedTokenTextChars = 8_000_000;
+    /// <summary>Longest etag the adapter forwards as <c>knownEtag</c> and the hub reads; the adapter's etags are 16 characters.</summary>
+    public const int MaxKnownEtagLength = 64;
 
     // Feedback rules (tips to agents, proposed team rules).
     /// <summary>Most tips one session gets in an hour.</summary>

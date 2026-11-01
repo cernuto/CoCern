@@ -4,7 +4,7 @@ Three ways to see what is happening: the live dashboard, the activity log, and a
 
 ## Dashboard
 
-Open `/dashboard/` on the hub. It shows sessions by PC, live requests and pushes, SQL table sizes, logs, and each board's standing and orders. It is read-only and never opens sessions or reads inboxes.
+Open `/dashboard/` on the hub. It shows sessions by PC, live requests and pushes, SQL table sizes, logs, each board's standing and orders, and token feedback. It is read-only and never opens sessions or reads inboxes.
 
 To turn it on, allow an administrator client's principal:
 
@@ -60,12 +60,12 @@ FROM activity_log GROUP BY role, tool ORDER BY calls DESC;
 
 The hub counts the tokens in every request and reply, with the o200k tokenizer. The counts go into `activity_log` as `request_tokens` and `reply_tokens`. They match Codex exactly. For Claude they are estimates, so they are labeled "estimated tokens". Counting runs in the background and never changes a reply. On by default.
 
-Administrators see the tokens of the tool definitions each role carries in `get_status`, as `toolTokens`.
+Administrators see the tokens of the tool definitions each role carries in `get_status`, as `toolTokens`, and on the dashboard's Standing page.
 
 Each tool has a token budget. A reply over budget is logged as a `budget` row with code `over`, and sent unchanged. Tools you list in `Relay:Tokens:EnforceTools` are compacted to their budget instead:
 
 1. Drop optional detail (such as full task messages) and set `detailFetchRequired`.
-2. Shorten lists to their first items, with `truncated`, a `more` count and `nextCursor`.
+2. Shorten a paged list to its first items, with `truncated`, a `more` count and `nextCursor`. Lists without a cursor, such as search hits, are never cut.
 3. Cut long text to its first line. The ID stays, so you can fetch the rest.
 
 A compacted reply says `compacted: true` and `compactStep`. IDs, versions, codes, grants and errors are never removed. A mutation only loses its optional detail. The 32 KB byte limit still applies.
@@ -89,7 +89,7 @@ Fixed rules spot wasteful patterns and send a short nudge. No AI runs in the hub
 | `inbox_polling` | 6 `check_inbox` reads with nothing new in an hour. Background reads and `waitSeconds` waits do not count. |
 | `repeated_status` | A duplicate status write (see the counters above). |
 
-A session gets at most one tip an hour, and each rule at most once a day. If the pattern comes back within an hour, the tip counts as ignored. A rule followed less than `MinFollowRate` of the time, over 20 or more tips, switches itself off and stays off after a restart. Administrators see switched-off rules in `get_status`, as `tipRulesOff`.
+A session gets at most one tip an hour, and each rule at most once a day. If the pattern comes back within an hour, the tip counts as ignored. A rule followed less than `MinFollowRate` of the time, over 20 or more tips, switches itself off and stays off after a restart. Administrators see switched-off rules in `get_status`, as `tipRulesOff`, and on the Standing page.
 
 `task_get` counts toward tips only when it carries your session handle.
 

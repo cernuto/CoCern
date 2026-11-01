@@ -11,7 +11,8 @@ public readonly record struct Compaction(RelayReply Reply, int Tokens, int Step,
 /// Shrinks a reply that is over its tool's token budget, in fixed steps, until it fits:
 /// <list type="number">
 /// <item>drop the tool's declared detail fields and set <c>detailFetchRequired</c>;</item>
-/// <item>shorten lists to their first items, with <c>truncated</c>, a <c>more</c> count and, for a paged list, the next cursor;</item>
+/// <item>shorten a paged list (<c>items</c> with <c>nextCursor</c>) to its first items, with <c>truncated</c>, a <c>more</c> count and the
+/// cursor to continue from; a list without a cursor (such as search hits) is never cut, since nothing could fetch the rest;</item>
 /// <item>shorten remaining long text to its first line, with <c>detailFetchRequired</c>; the record's ID stays to fetch the rest.</item>
 /// </list>
 /// Required fields (IDs, versions, revisions, codes, cursors, grants, the attention offer and standing) are never removed or changed. A
@@ -58,8 +59,8 @@ public static class ReplyCompactor
         // A mutation's result is what happened; only its optional detail may go.
         if (tool.IsMutation) return step == 0 ? new(reply, count, 0, true) : Result();
 
-        var lists = data.Where(property => property.Value is JsonArray { Count: > 1 } && !IsRequired(property.Key))
-            .OrderByDescending(property => property.Value!.ToJsonString().Length).Select(property => property.Key).ToArray();
+        // Only a paged list is shortened: its cursor lets the agent continue from the first item left out.
+        string[] lists = data["items"] is JsonArray { Count: > 1 } && data.ContainsKey("nextCursor") ? ["items"] : [];
         long dropped = 0;
         foreach (var name in lists)
         {
@@ -70,8 +71,7 @@ public static class ReplyCompactor
                 data[name] = new JsonArray(items.Take(kept).Select(item => item?.DeepClone()).ToArray());
                 data["truncated"] = true;
                 data["more"] = dropped + items.Length - kept;
-                // A paged list continues from the first item left out.
-                if (name == "items" && data.ContainsKey("nextCursor")) data["nextCursor"] = cursor + kept;
+                data["nextCursor"] = cursor + kept;
             }
             // The most items that fit, found by halving; at least one item stays.
             int low = 1, high = items.Length - 1;

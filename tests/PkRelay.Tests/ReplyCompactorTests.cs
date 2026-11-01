@@ -95,6 +95,19 @@ public sealed class ReplyCompactorTests
     }
 
     [Fact]
+    public void A_list_without_a_cursor_is_never_cut()
+    {
+        // Search hits have no cursor to fetch the rest with, so step 2 leaves them whole; only long text could be shortened.
+        var hits = Replies.Ok(new { hits = Enumerable.Range(1, 10).Select(i => new { id = $"T{i}", k = "task", s = "open", x = "deploy [rollback] runbook step " + i }).ToArray() });
+        var search = ReplyCompactor.Compact(hits, Tool(RelayTools.Search, 50), Tokens, enforce: true);
+        Assert.Same(hits, search.Reply);
+        Assert.True(search.OverBudget);
+        // A list beside a paged one is not cut either, and neither is "items" when the reply has no cursor.
+        var unpaged = Replies.Ok(new { items = Enumerable.Range(1, 10).Select(i => new { messageId = $"m{i}", text = "short" }).ToArray() });
+        Assert.Same(unpaged, ReplyCompactor.Compact(unpaged, Tool(RelayTools.CheckInbox, 20), Tokens, enforce: true).Reply);
+    }
+
+    [Fact]
     public void Required_fields_are_never_removed_or_changed()
     {
         var reply = Replies.Ok(new

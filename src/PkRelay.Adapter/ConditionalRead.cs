@@ -32,7 +32,7 @@ public static class ConditionalRead
             var forwarded = JsonNode.Parse(arguments.GetRawText())!.AsObject();
             forwarded.Remove("ifNoneMatch");
             // The hub's feedback rules leave a read that comes back unchanged out of their reread counts; they need only the etag.
-            if (ifNoneMatch is { Length: > 0 and <= 64 }) forwarded[KnownEtagField] = ifNoneMatch;
+            if (ifNoneMatch is { Length: > 0 and <= RelayLimits.MaxKnownEtagLength }) forwarded[KnownEtagField] = ifNoneMatch;
             request = JsonSerializer.SerializeToElement(forwarded);
         }
         var reply = await forwarder.ForwardAsync(tool, request, cancellationToken);

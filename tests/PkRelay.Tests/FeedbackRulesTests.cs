@@ -88,6 +88,14 @@ public sealed class FeedbackRulesTests
         Assert.Null(rules.Observe(Status(1, "r1")).Tip);
         Assert.Null(rules.Observe(Status(2, "r2", "H2")).Tip);
         Assert.Equal("Report a milestone only when something changed.", rules.Observe(Status(3, "r3", "H2")).Tip!.Text);
+        // Another session writing the same text to the same target did not repeat its own write, so it gets no tip.
+        rules = new FeedbackRules(TipsOn, Tokens);
+        FeedbackCall By(string session, int minute, string requestId) =>
+            Call(Start.AddMinutes(minute), RelayTools.TaskUpdate, new { repositoryId = "repo", taskId = "T1" }, session: session, target: "task:repo/default/T1", hash: "H", requestId: requestId);
+        Assert.Null(rules.Observe(By("s-1", 0, "a1")).Tip);
+        Assert.Null(rules.Observe(By("s-2", 1, "b1")).Tip);
+        // The session that repeats its own write is the one tipped.
+        Assert.Equal("s-1", rules.Observe(By("s-1", 2, "a2")).Tip!.SessionId);
     }
 
     [Fact]

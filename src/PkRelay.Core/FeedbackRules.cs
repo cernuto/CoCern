@@ -154,12 +154,14 @@ public sealed class FeedbackRules
     {
         var args = call.Args;
         var firstPage = Number(args, "cursor") == 0;
-        // Step 1's duplicate status write: the same fingerprint on the same target as the write before it, under another requestId.
+        // Step 1's duplicate status write: the same fingerprint on the same target as the write before it, under another requestId. It
+        // is kept per session, so only a session that repeats its own write is tipped.
         if (call.Target is { } target && call.ContentHash is { } hash)
         {
-            var repeated = statuses.TryGetValue(target, out var previous) && previous.Hash == hash && previous.RequestId != call.RequestId;
-            if (statuses.Count >= RelayLimits.MaxFeedbackTargets && !statuses.ContainsKey(target)) statuses.Clear();
-            statuses[target] = (hash, call.RequestId);
+            var key = call.SessionId + "\n" + target;
+            var repeated = statuses.TryGetValue(key, out var previous) && previous.Hash == hash && previous.RequestId != call.RequestId;
+            if (statuses.Count >= RelayLimits.MaxFeedbackTargets && !statuses.ContainsKey(key)) statuses.Clear();
+            statuses[key] = (hash, call.RequestId);
             if (repeated) return (FeedbackRuleNames.RepeatedStatus, null, 0);
         }
         switch (call.Tool)

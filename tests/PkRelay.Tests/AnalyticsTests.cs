@@ -156,7 +156,9 @@ public class AnalyticsTests
         using var store = new SqliteStore(Path.Combine(root, "relay.db"));
         var snapshot = Path.Combine(root, "analytics", "snapshot-limits.db");
         await store.CreateAnalyticsSnapshotAsync(snapshot);
-        using var analytics = await Service(store, timeout: TimeSpan.FromMilliseconds(500));
+        // The size and row-cap checks run under a generous timeout, so a loaded machine cannot turn them into timeouts; only the timeout
+        // case below uses a service with a short one.
+        using var analytics = await Service(store, timeout: TimeSpan.FromSeconds(30));
         Assert.Equal(AnalyticsError.Unavailable, (await Assert.ThrowsAsync<AnalyticsException>(() => analytics.RunSqlAsync("SELECT 1"))).Error);
         await analytics.SwitchSnapshotAsync(snapshot);
 
@@ -185,12 +187,16 @@ public class AnalyticsTests
         Assert.Equal(["n", "n_1"], (await analytics.RunSqlAsync("SELECT 1 AS n, 2 AS n; -- two")).Columns);
         Assert.Equal(1L, Single(await analytics.RunSqlAsync("SELECT 1 AS one -- trailing comment")));
 
+        var shortSnapshot = Path.Combine(root, "analytics", "snapshot-timeout.db");
+        await store.CreateAnalyticsSnapshotAsync(shortSnapshot);
+        using var hurried = await Service(store, timeout: TimeSpan.FromMilliseconds(500));
+        await hurried.SwitchSnapshotAsync(shortSnapshot);
         started = DateTimeOffset.UtcNow;
-        var timedOut = await Assert.ThrowsAsync<AnalyticsException>(() => analytics.RunSqlAsync("SELECT count(*) FROM range(1000000000000) t(a) WHERE a % 7 = 3"));
+        var timedOut = await Assert.ThrowsAsync<AnalyticsException>(() => hurried.RunSqlAsync("SELECT count(*) FROM range(1000000000000) t(a) WHERE a % 7 = 3"));
         Assert.Equal(AnalyticsError.Timeout, timedOut.Error);
         Assert.True(DateTimeOffset.UtcNow - started < TimeSpan.FromSeconds(10));
         // The interrupted connection does not poison the next query.
-        Assert.Equal(1L, Single(await analytics.RunSqlAsync("SELECT 1")));
+        Assert.Equal(1L, Single(await hurried.RunSqlAsync("SELECT 1")));
     }
 
     [Fact]

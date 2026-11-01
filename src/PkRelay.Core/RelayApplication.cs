@@ -28,7 +28,8 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
     private readonly ITokenCounter? counter = tokenOptions?.Enabled == false ? null : tokens;
     private readonly TokenOptions tokenSettings = tokenOptions ?? new();
     /// <summary>Estimated tokens of the tool definitions an agent carries, per role, counted once.</summary>
-    private (int Worker, int Administrator)? toolTokens;
+    private volatile ToolTotals? toolTokens;
+    private sealed record ToolTotals(int Worker, int Administrator);
     private const int WorkerProbeLimit = 50;
     private readonly string incarnation = Guid.NewGuid().ToString("N");
     /// <summary>
@@ -73,7 +74,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         var pageSeen = args["seen"] is JsonValue seenFlag && seenFlag.GetValue<bool>();
         var seenIds = args["seenMessageIds"] is JsonArray seenList ? Strings(seenList).ToArray() : [];
         // The etag the agent passed as ifNoneMatch, forwarded by the adapter only so the feedback rules can tell an unchanged read.
-        if (trace is not null) { trace.ModelVisible = offerWanted && !args.ContainsKey("waitSeconds"); trace.KnownEtag = Bounded(Text(args, "knownEtag"), 64); }
+        if (trace is not null) { trace.ModelVisible = offerWanted && !args.ContainsKey("waitSeconds"); trace.KnownEtag = Bounded(Text(args, "knownEtag"), RelayLimits.MaxKnownEtagLength); }
         args.Remove("knownEtag");
         args.Remove("attention"); args.Remove("attentionDetail"); args.Remove("attentionStatus"); args.Remove("maxHoldMinutes"); args.Remove("seen"); args.Remove("seenMessageIds");
         args["hubIncarnation"] = incarnation;
@@ -148,7 +149,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         try { compaction = ReplyCompactor.Compact(result, tool, counter, enforce: true, Number(args, "cursor")); }
         catch (Exception) { return BoundWire(result); }
         var bounded = BoundWire(compaction.Reply);
-        if (trace is not null && ReferenceEquals(bounded, compaction.Reply)) { trace.ReplyTokens = compaction.Tokens; trace.CompactStep = compaction.Step; }
+        if (trace is not null && ReferenceEquals(bounded, compaction.Reply)) { trace.ReplyTokens = compaction.Tokens; trace.CompactStep = compaction.Step; trace.OverBudget = compaction.OverBudget; }
         return bounded;
     }
 
@@ -160,13 +161,11 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
     {
         try
         {
-            if (counter is null && feedback is null) return status;
+            if ((counter is null || toolTokens is null) && feedback is null) return status;
             var data = Parse(status);
-            if (counter is not null)
-            {
-                var (worker, administrator) = toolTokens ??= (ToolDefinitionTokens(false), ToolDefinitionTokens(true));
-                data["toolTokens"] = new JsonObject { ["worker"] = worker, ["administrator"] = administrator, ["encoding"] = counter.Encoding, ["estimated"] = true };
-            }
+            // Shown once the startup warm-up has counted them, so no status read waits for the tokenizer to load.
+            if (counter is not null && toolTokens is { } totals)
+                data["toolTokens"] = new JsonObject { ["worker"] = totals.Worker, ["administrator"] = totals.Administrator, ["encoding"] = counter.Encoding, ["estimated"] = true };
             if (feedback?.Rules.Where(rule => !rule.Enabled).Select(rule => (JsonNode)rule.Rule).ToArray() is { Length: > 0 } off) data["tipRulesOff"] = new JsonArray(off);
             return Ok(data, status.Version);
         }
@@ -177,11 +176,18 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
     private int ToolDefinitionTokens(bool administrator) =>
         RelayToolCatalog.ForRole(administrator).Sum(tool => counter!.Count(tool.Description) + counter.Count(RelayToolCatalog.ForwardingSchema(tool).GetRawText()));
 
+    /// <summary>The token totals and switched-off tip rules for the dashboard. Totals are null until the startup warm-up has counted them.</summary>
+    public PkRelay.Contracts.Dashboard.DashboardTokens TokenSummary() => new()
+    {
+        WorkerToolTokens = counter is null ? null : toolTokens?.Worker, AdministratorToolTokens = counter is null ? null : toolTokens?.Administrator,
+        Encoding = counter?.Encoding ?? "", TipRulesOff = feedback?.Rules.Where(rule => !rule.Enabled).Select(rule => rule.Rule).ToArray() ?? []
+    };
+
     /// <summary>Counts the tool definitions once, which also loads the tokenizer, so the first call does not pay for it.</summary>
     public void WarmTokenCounts()
     {
         if (counter is null) return;
-        try { toolTokens ??= (ToolDefinitionTokens(false), ToolDefinitionTokens(true)); }
+        try { toolTokens ??= new(ToolDefinitionTokens(false), ToolDefinitionTokens(true)); }
         catch (Exception) { /* Counted on first use instead. */ }
     }
 
@@ -858,6 +864,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         /// <summary>The reply's tokens when compaction already counted the reply as sent, and the step it reached.</summary>
         public int? ReplyTokens { get; set; }
         public int CompactStep { get; set; }
+        public bool OverBudget { get; set; }
     }
 
     /// <summary>Builds and queues the call's activity event. Any failure here is swallowed: telemetry must never fail a call.</summary>
@@ -872,6 +879,10 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
             var workflow = ok && tool == RelayTools.TaskUpdate && args?["workflow"] is JsonObject flow ? Text(flow, "state") : "";
             var raw = arguments.ValueKind == JsonValueKind.Undefined ? null : arguments.GetRawText();
             var role = Bounded(trace.Role?.ToLowerInvariant(), RelayLimits.MaxActivityRoleLength);
+            // The texts wait in the queue until the writer counts them. Past the hub's cap the event goes without them: token counts are
+            // dropped before any activity row is.
+            var (requestText, replyText) = counter is null ? (null, null) : (raw, reply is null || trace.ReplyTokens is not null ? null : reply.DataJson);
+            if (!TokenTextBudget.Shared.TryHold(requestText, replyText)) (requestText, replyText) = (null, null);
             activity!.Record(new ActivityEvent
             {
                 Timestamp = trace.At, Kind = ActivityEvent.Call, RepositoryId = repository.Length <= RelayLimits.MaxIdentifierLength ? repository : "",
@@ -886,14 +897,15 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
                 OfferTarget = ok && reply is not null && args is not null ? OfferTarget(args, reply) : null,
                 // Estimated tokens (o200k) of what the agent sent and got back, as sent. The texts are counted by the activity writer, off
                 // the call's path (see TokenMeter); a compacted reply was already counted.
-                RequestText = counter is null ? null : raw, ReplyText = counter is null || reply is null || trace.ReplyTokens is not null ? null : reply.DataJson,
+                RequestText = requestText, ReplyText = replyText,
                 ReplyTokens = counter is null ? null : trace.ReplyTokens
             });
-            // A compacted reply is counted here, with the step it reached, so analytics shows which tools compact most often.
-            if (trace.CompactStep > 0) activity.Record(new ActivityEvent
+            // A compacted reply is counted here, with the step it reached, so analytics shows which tools compact most often; an enforced
+            // reply that no step could shrink is counted as over.
+            if (trace.CompactStep > 0 || trace.OverBudget) activity.Record(new ActivityEvent
             {
                 Timestamp = trace.At, Kind = ActivityEvent.Budget, RepositoryId = repository.Length <= RelayLimits.MaxIdentifierLength ? repository : "",
-                SessionId = Bounded(trace.SessionId), Role = role, Tool = tool, Ok = true, Code = "step" + trace.CompactStep, ReplyTokens = trace.ReplyTokens
+                SessionId = Bounded(trace.SessionId), Role = role, Tool = tool, Ok = true, Code = trace.CompactStep > 0 ? "step" + trace.CompactStep : "over", ReplyTokens = trace.ReplyTokens
             });
         }
         catch (Exception) { /* Never fail or slow the call for telemetry. */ }

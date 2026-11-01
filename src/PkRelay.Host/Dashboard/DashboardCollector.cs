@@ -117,6 +117,9 @@ public sealed class DashboardCollector : BackgroundService
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
             catch (Exception) { logs.CollectionFailed(); }
         }
+        // Token totals are counted once at startup and tip rule state is in memory, so this read is free.
+        try { snapshot = snapshot with { Tokens = application.TokenSummary() }; }
+        catch (Exception) { logs.CollectionFailed(); }
         return Bound(snapshot with { Revision = previous.Revision + 1, Logs = logs.Snapshot(), Traffic = traffic.Snapshot() });
     }
 

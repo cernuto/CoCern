@@ -15,7 +15,18 @@ public sealed record DashboardSnapshot
     /// <summary>Boards with standing preferences: lines, grants, pending proposals and recent changes. Read-only.</summary>
     public DashboardStanding[] Standing { get; init; } = [];
     public bool StandingTruncated { get; init; }
+    /// <summary>Estimated tokens of the tool definitions each role carries, and the tip rules that switched themselves off. Read-only.</summary>
+    public DashboardTokens Tokens { get; init; } = new();
     public string[] Warnings { get; init; } = [];
+}
+
+public sealed record DashboardTokens
+{
+    /// <summary>Null until the hub has counted them, or with token counting off.</summary>
+    public int? WorkerToolTokens { get; init; }
+    public int? AdministratorToolTokens { get; init; }
+    public string Encoding { get; init; } = "";
+    public string[] TipRulesOff { get; init; } = [];
 }
 
 public sealed record DashboardStanding
