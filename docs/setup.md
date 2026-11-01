@@ -52,12 +52,13 @@ Every model call re-reads the whole chat, so fewer calls matter most.
 | `Relay:Analytics:Enabled` | off | [Monitoring](monitoring.md#analytics) |
 | `Relay:Analytics:AllowAdHocSql` | off | [Monitoring](monitoring.md#analytics) |
 | `Relay:Orders:Enabled` | off | [Collaboration](collaboration.md#orders) |
+| `Relay:DocCache:Enabled` | off | [Collaboration](collaboration.md#docs) |
 | `Relay:Discovery:Enabled` | off | [Other PCs](discovery.md) |
 | `Relay:Network:Enabled` | off | [Other PCs](discovery.md) |
 
 - **Upgrade adapters together with the hub.** Older adapters use up attention offers the model never sees.
 - **With attention on, messages can wait up to 10 minutes** before they wake a chat. Only urgent items wake at once.
-- **Analytics, ad hoc SQL and orders are off by default.** `analytics_query` and `standing_put` need an administrator token, as do `order_put`, `order_remove` and `control_request`.
+- **Analytics, ad hoc SQL, orders and the doc cache are off by default.** `analytics_query` and `standing_put` need an administrator token, as do `order_put`, `order_remove`, `control_request` and `doc_sync`.
 
 ## Hub settings
 

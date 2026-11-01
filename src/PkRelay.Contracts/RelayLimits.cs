@@ -227,4 +227,75 @@ public static class RelayLimits
     public const int AnomalyCooldownHours = 24;
     /// <summary>Seconds one anomaly check may spend on its queries in total; queries not finished by then are skipped until the next check.</summary>
     public const int AnomalyCheckBudgetSeconds = 20;
+
+    /// <summary>Largest markdown or text file the doc cache indexes, in UTF-8 bytes; a larger file is skipped and counted at sync.</summary>
+    public const int MaxDocBytes = 262_144;
+    /// <summary>Largest OpenAPI JSON file the doc cache indexes, in UTF-8 bytes; API specs are often larger than prose docs.</summary>
+    public const int MaxOpenApiBytes = 8 * 1024 * 1024;
+    /// <summary>Deepest JSON nesting an OpenAPI file may have; a deeper file is skipped as malformed.</summary>
+    public const int MaxOpenApiDepth = 64;
+    /// <summary>Most nodes (values, objects and arrays, aliases expanded) one OpenAPI file may hold; more is refused, which stops alias bombs.</summary>
+    public const int MaxOpenApiNodes = 500_000;
+    /// <summary>Longest first-line part of a text chunk's heading, in characters.</summary>
+    public const int MaxTextHeadingChars = 60;
+    /// <summary>
+    /// Documents one repository's doc directory lists, unless <c>Relay:DocCache:MaxDocuments</c> says otherwise; files past this are skipped
+    /// and counted at sync. With <see cref="MaxDocBytes"/> the default caps raw text at 128 MB per repository.
+    /// </summary>
+    public const int MaxDocsPerRepository = 500;
+    /// <summary>Largest allowed <c>Relay:DocCache:MaxDocuments</c>.</summary>
+    public const int MaxDocsPerRepositoryCeiling = 5_000;
+    /// <summary>
+    /// Bytes of document text one repository may hold, unless <c>Relay:DocCache:MaxRepositoryBytes</c> says otherwise; files past it are
+    /// skipped and counted at sync. A loaded document holds its text once, plus its Lucene index.
+    /// </summary>
+    public const long MaxRepositoryDocBytes = 128L * 1024 * 1024;
+    /// <summary>Largest allowed <c>Relay:DocCache:MaxRepositoryBytes</c>.</summary>
+    public const long MaxRepositoryDocBytesCeiling = 1024L * 1024 * 1024;
+    /// <summary>Largest read-only token file the sync reads, in bytes.</summary>
+    public const int MaxDocTokenFileBytes = 4_096;
+    /// <summary>Markdown sections one document may have; a file with more is skipped at sync.</summary>
+    public const int MaxSectionsPerDoc = 1_000;
+    /// <summary>Document grains one doc search asks at once; a search over more documents asks them in turn, this many at a time.</summary>
+    public const int MaxDocFanOut = 32;
+    /// <summary>Seconds one doc search may take over all its documents; past it the reply has the hits so far, <c>partial</c> and the count not searched.</summary>
+    public const int DocSearchTimeoutSeconds = 10;
+    /// <summary>Most sections one <c>doc_search</c> returns.</summary>
+    public const int MaxDocSearchResults = 10;
+    /// <summary>Sections <c>doc_search</c> returns when it gives no limit.</summary>
+    public const int DefaultDocSearchResults = 5;
+    /// <summary>Token budget (o200k) of one <c>doc_search</c> or <c>doc_section</c> reply; what does not fit is reported as a count.</summary>
+    public const int MaxDocReplyTokens = 2_000;
+    /// <summary>Byte bound on the same replies, so a reply of a few very long tokens still fits the wire.</summary>
+    public const int MaxDocReplyBytes = 16_384;
+    /// <summary>Long sections are split at paragraph boundaries into chunks of at most this many tokens.</summary>
+    public const int DocChunkTokens = 400;
+    /// <summary>Chunks are also at most this many characters.</summary>
+    public const int DocChunkChars = 3_000;
+    /// <summary>Longest snippet on a doc search hit, in characters.</summary>
+    public const int MaxDocSnippetChars = 240;
+    /// <summary>Longest <c>doc_search</c> query, in characters.</summary>
+    public const int MaxDocQueryLength = 256;
+    /// <summary>Longest spec name, in characters.</summary>
+    public const int MaxDocSpecLength = 64;
+    /// <summary>Longest document path, in characters.</summary>
+    public const int MaxDocPathLength = 256;
+    /// <summary>Longest section anchor, in characters.</summary>
+    public const int MaxDocAnchorLength = 128;
+    /// <summary>Longest branch name <c>doc_sync</c> accepts, in characters.</summary>
+    public const int MaxDocBranchLength = 200;
+    /// <summary>Seconds between two <c>doc_sync</c> runs for one repository.</summary>
+    public const int DocSyncMinIntervalSeconds = 30;
+    /// <summary>Minutes between timer syncs, unless <c>Relay:DocCache:SyncMinutes</c> says otherwise (0 turns the timer off).</summary>
+    public const int DefaultDocSyncMinutes = 5;
+    /// <summary>Minutes an unused document grain stays loaded, unless <c>Relay:DocCache:IdleMinutes</c> says otherwise.</summary>
+    public const int DefaultDocIdleMinutes = 30;
+    /// <summary>Longest allowed sync or idle setting, in minutes (one day).</summary>
+    public const int MaxDocCacheMinutes = 1_440;
+    /// <summary>Seconds one git command may run before it is stopped.</summary>
+    public const int DocGitTimeoutSeconds = 120;
+    /// <summary>Largest git listing (ls-tree of a whole commit, or diff output) the sync reads, in bytes.</summary>
+    public const int MaxDocGitListingBytes = 16 * 1024 * 1024;
+    /// <summary>Path patterns one repository may map to spec names.</summary>
+    public const int MaxDocPatterns = 32;
 }

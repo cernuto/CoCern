@@ -4,5 +4,13 @@
     <ProjectReference Include="../PkRelay.Domain/PkRelay.Domain.csproj" />
     <PackageReference Include="Microsoft.Orleans.Server" />
     <PackageReference Include="Microsoft.Orleans.Sdk" />
+    <!-- The doc cache: one in-memory Lucene index per document grain. -->
+    <PackageReference Include="Lucene.Net" />
+    <PackageReference Include="Lucene.Net.Analysis.Common" />
+    <PackageReference Include="Lucene.Net.QueryParser" />
+    <PackageReference Include="Lucene.Net.Highlighter" />
+    <!-- OpenAPI YAML, read through its event parser into JSON nodes only. -->
+    <PackageReference Include="YamlDotNet" />
+    <InternalsVisibleTo Include="PkRelay.Tests" />
   </ItemGroup>
 </Project>
