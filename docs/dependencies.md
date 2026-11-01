@@ -41,7 +41,7 @@ The offer is still advisory. It reserves nothing, and you still call `task_claim
 
 ## Require resources on a board
 
-A board can refuse `ready` until `packet.resources` is present. An empty list counts as present, meaning "needs no resources". This board setting is `requireResources` and is off by default. The `standing_put` tool, which arrives in a later step, turns it on.
+A board can refuse `ready` until `packet.resources` is present. An empty list counts as present, meaning "needs no resources". This board setting is `requireResources` and is off by default. An administrator turns it on with `standing_put` (`"settings": {"requireResources": true}`); see [standing.md](standing.md).
 
 | Setting | Default | What it does |
 | --- | --- | --- |

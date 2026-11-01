@@ -22,9 +22,17 @@ internal static class ToolSchemas
             RelayTools.Ack => ["messageId", "messageIds"],
             RelayTools.ClaimRenew => ["resourceId", "generation", "taskId", "claimGeneration", "leaseSeconds"],
             RelayTools.ClaimRelease => ["resourceId", "generation", "taskId", "claimGeneration", "expectedVersion"],
+            RelayTools.StandingPropose => ["line", "grant"],
+            RelayTools.StandingPut => ["lines", "grants", "remove", "approve", "settings"],
             _ => []
         };
         var properties = ForwardingFields.Concat(tool.RequiredFields).Concat(extra).Distinct(StringComparer.Ordinal).ToDictionary(field => field, field => all[field]);
+        // The envelope repeats on every tool, so it is advertised without its length bounds; the hub enforces them.
+        foreach (var field in ForwardingFields) properties[field] = new { type = "string", description = EnvelopeDescription(field) };
+        // Standing items are advertised by shape only; InputSchema gives their limits.
+        if (tool.Name is RelayTools.StandingPropose or RelayTools.StandingPut)
+            foreach (var field in properties.Keys.ToArray())
+                if (CompactStanding(field) is { } compact) properties[field] = compact;
         // Only the milestone call advertises a compact usage entry: adding it to action_report too would exceed the 20,000-character
         // forwarding budget (20,034). The hub still accepts usage on action_report, and InputSchema lists it there in full.
         if (properties.ContainsKey("usage")) properties["usage"] = new { type = "object", description = "Optional {inputTokens,outputTokens}." };
@@ -37,11 +45,11 @@ internal static class ToolSchemas
     {
         var properties = new Dictionary<string, object>
         {
-            ["repositoryId"] = new { type = "string", maxLength = RelayLimits.MaxIdentifierLength, description = "Authorized repository ID." },
+            ["repositoryId"] = new { type = "string", maxLength = RelayLimits.MaxIdentifierLength, description = EnvelopeDescription("repositoryId") },
             ["boardId"] = new { type = "string", maxLength = RelayLimits.MaxIdentifierLength },
-            ["sessionId"] = new { type = "string", maxLength = RelayLimits.MaxIdentifierLength, description = "This chat's session ID." },
-            ["sessionToken"] = new { type = "string", maxLength = RelayLimits.MaxIdentifierLength, description = "Private session secret; never put in shared notes." },
-            ["requestId"] = new { type = "string", maxLength = RelayLimits.MaxIdentifierLength, description = "Stable request ID; reuse it when retrying." },
+            ["sessionId"] = new { type = "string", maxLength = RelayLimits.MaxIdentifierLength, description = EnvelopeDescription("sessionId") },
+            ["sessionToken"] = new { type = "string", maxLength = RelayLimits.MaxIdentifierLength, description = EnvelopeDescription("sessionToken") },
+            ["requestId"] = new { type = "string", maxLength = RelayLimits.MaxIdentifierLength, description = EnvelopeDescription("requestId") },
             ["expectedVersion"] = new { type = "integer", minimum = 0 },
             ["taskId"] = new { type = "string" },
             ["resourceId"] = new { type = "string" },
@@ -64,7 +72,7 @@ internal static class ToolSchemas
                 Object("binding", "Reported configured Roslyn/Visual Studio binding; update under expectedVersion."); Text("availability", "Reported current worker availability."); Integer("freshnessSeconds", "Freshness duration, at most 600 seconds."); break;
             case RelayTools.TaskGet:
                 properties["taskId"] = new { type = "string", maxLength = RelayLimits.MaxIdentifierLength, description = "Omit for a bounded board list or delta." };
-                properties["section"] = new { type = "string", @enum = new[] { "facts", "messages", "reports", "actions", "workflow" } };
+                properties["section"] = new { type = "string", @enum = new[] { "facts", "messages", "reports", "actions", "workflow", "standing" }, description = "standing needs no taskId." };
                 Integer("sinceRevision", "Board delta checkpoint; omit taskId. Save snapshotRevision only after all pages.");
                 Integer("snapshotRevision", "Pinned revision from the first delta page; a concurrent change returns DeltaRestartRequired.");
                 properties["cursor"] = new { type = "integer", minimum = 0, description = "Continuation from a bounded list; keep the same sinceRevision and snapshotRevision." };
@@ -105,12 +113,71 @@ internal static class ToolSchemas
             case RelayTools.ContextGet: Text("contextId", "Selected shared context ID; omit for a bounded listing."); break;
             case RelayTools.ContextPut:
                 Text("contextId", "Stable authored shared context record ID."); properties["content"] = new { description = "Bounded explicitly shared context, at most 16 KiB." }; properties["provenance"] = new { description = "Source and authorship evidence for shared context." }; break;
+            case RelayTools.StandingPropose:
+                properties["line"] = LineSchema(idRequired: false);
+                properties["grant"] = GrantSchema(idRequired: false); break;
+            case RelayTools.StandingPut:
+                properties["expectedRevision"] = new { type = "integer", minimum = 0, description = "Current standing revision; 0 before the first write." };
+                properties["lines"] = new { type = "array", items = LineSchema(idRequired: true), maxItems = RelayLimits.MaxStandingLines, description = "Lines to add, or to replace by ID." };
+                properties["grants"] = new { type = "array", items = GrantSchema(idRequired: true), maxItems = RelayLimits.MaxStandingGrants, description = "Grants to add, or to replace by ID." };
+                properties["remove"] = StandingIds("Line, grant or proposal IDs to remove; removing a proposal rejects it.");
+                properties["approve"] = StandingIds("Pending proposal IDs to approve.");
+                properties["settings"] = new { type = "object", properties = new { requireResources = new { type = "boolean", description = "Refuse ready without packet.resources." } }, additionalProperties = false, description = "Board settings." }; break;
             case RelayTools.ControlRequest:
                 properties["command"] = new { type = "string", @enum = new[] { "pause", "resume", "stop", "cancel", "register_resource", "revoke_machine" } };
                 properties["aliases"] = new { type = "array", items = new { type = "string" } }; Text("reason", "Coordination control explanation."); Text("machineId", "Machine to revoke; required by revoke_machine."); break;
         }
         return properties;
     }
+
+    private static string EnvelopeDescription(string field) => field switch
+    {
+        "repositoryId" => "Authorized repository ID.",
+        "sessionId" => "Your session ID.",
+        "sessionToken" => "Private session secret; never share it.",
+        _ => "Stable request ID; reuse on retry."
+    };
+
+    private static object? CompactStanding(string field) => field switch
+    {
+        "line" => new { type = "object", description = "{id?,text}" },
+        "grant" => new { type = "object", description = "{id?,scope,targets,expiresAt}" },
+        "lines" => new { type = "array", description = "[{id,text}]" },
+        "grants" => new { type = "array", description = "[{id,scope,targets,expiresAt}]" },
+        "remove" or "approve" => new { type = "array", items = new { type = "string" } },
+        "settings" => new { type = "object", description = "{requireResources}" },
+        "expectedRevision" => new { type = "integer" },
+        _ => null
+    };
+
+    private static object StandingIds(string description) =>
+        new { type = "array", items = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxStandingIdLength }, maxItems = RelayLimits.MaxStandingLines + RelayLimits.MaxStandingGrants + RelayLimits.MaxStandingProposals, description };
+
+    private static object LineSchema(bool idRequired) => new
+    {
+        type = "object",
+        properties = new
+        {
+            id = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxStandingIdLength, description = idRequired ? "Line ID." : "Optional line ID; an existing ID proposes an edit." },
+            text = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxStandingLineLength, description = "A settled convention, such as a rule every chat on this board follows." }
+        },
+        required = idRequired ? new[] { "id", "text" } : ["text"],
+        description = "A standing line: a convention, never a permission."
+    };
+
+    private static object GrantSchema(bool idRequired) => new
+    {
+        type = "object",
+        properties = new
+        {
+            id = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxStandingIdLength, description = idRequired ? "Grant ID; name it in authorityRef as grant:<id>." : "Optional grant ID." },
+            scope = new { type = "string", @enum = new[] { "repository", "resource", "action" } },
+            targets = new { type = "array", items = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxIdentifierLength }, minItems = 1, maxItems = RelayLimits.MaxGrantTargets, description = "Repository, resource IDs or action classes covered; a repository grant defaults to this repository." },
+            expiresAt = new { type = "string", format = "date-time", description = "Required future expiry." }
+        },
+        required = new[] { "scope", "expiresAt" }.Concat(idRequired ? ["id"] : Array.Empty<string>()).ToArray(),
+        description = "Typed authority with a scope and an expiry."
+    };
 
     private static object UsageSchema()
     {

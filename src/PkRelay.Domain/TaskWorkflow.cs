@@ -81,7 +81,7 @@ internal static class TaskWorkflow
     private static IEnumerable<string> StringList(JsonNode? node) =>
         node is JsonArray items && items.All(item => item is JsonValue value && value.GetValueKind() == JsonValueKind.String) ? items.Select(item => item!.GetValue<string>()) : [];
 
-    /// <summary>The board setting that refuses <c>ready</c> without <c>packet.resources</c>. Off unless set; build step 3's <c>standing_put</c> writes it.</summary>
+    /// <summary>The board setting that refuses <c>ready</c> without <c>packet.resources</c>. Off unless set with <c>standing_put</c>.</summary>
     public static bool RequiresResources(JsonObject board) => board["standing"]?["settings"]?["requireResources"] is JsonValue value && value.TryGetValue<bool>(out var required) && required;
 
     /// <summary>Returns the failure code, or null when every dependency names a task on this board and none leads back to <paramref name="taskId"/>.</summary>
@@ -129,7 +129,7 @@ internal static class TaskWorkflow
         var busy = new HashSet<string>(Strings(args["busyResources"]), StringComparer.Ordinal);
         var limit = (int)Math.Clamp(Number(args, "limit"), 0, RelayLimits.NextWorkCandidates);
         var ranked = tasks.Select(x => x.Value!.AsObject())
-            .Where(task => Text(task, "taskId") != current && IsOfferable(tasks, task, session, now))
+            .Where(task => Text(task, "taskId") != current && IsOfferable(state, tasks, task, session, now))
             .OrderByDescending(task => Number(task["workflow"]!.AsObject(), "priority"))
             .ThenBy(task => busy.Count > 0 && Resources(task["workflow"]!.AsObject()).Any(busy.Contains))
             .ThenBy(task => Text(task, "taskId"), StringComparer.Ordinal)
@@ -146,12 +146,13 @@ internal static class TaskWorkflow
         return WithCandidates(new JsonObject { ["ok"] = true, ["code"] = "Offered", ["offer"] = offer });
     }
 
-    private static bool IsOfferable(JsonObject tasks, JsonObject task, string session, DateTimeOffset now) =>
+    private static bool IsOfferable(JsonObject board, JsonObject tasks, JsonObject task, string session, DateTimeOffset now) =>
         task["workflow"] is JsonObject workflow
         && Text(workflow, "state") == "ready"
         && Validate(workflow, null, TaskActions.HasUnresolved(task)) is null
         && !TaskActions.HasUnresolved(task)
         && TargetsSession(workflow, session)
         && (Text(task, "owner").Length == 0 || Text(task, "owner") == session || Date(task, "leaseUntil") <= now)
-        && DependenciesDone(tasks, workflow);
+        && DependenciesDone(tasks, workflow)
+        && StandingPreferences.GrantProblem(board, workflow, now) is null;
 }
