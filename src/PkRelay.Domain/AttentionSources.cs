@@ -13,7 +13,7 @@ namespace PkRelay.Domain;
 internal static class AttentionSources
 {
     /// <summary>The role, given at <c>session_open</c> and compared ignoring case, of the sessions that receive manager-bound items.</summary>
-    public const string ManagerRole = "manager";
+    public const string ManagerRole = SessionRoles.Manager;
 
     /// <summary>
     /// Board items after a <c>task_update</c> or <c>action_report</c>: <c>blocked</c> and <c>failed</c> to managers, <c>review_ready</c>
@@ -193,7 +193,7 @@ internal static class AttentionSources
     }
 
     /// <summary>Asks the control aggregate to pass the effect to every manager session in the repository except the one that caused it.</summary>
-    private static void ToManagers(AggregateContext context, string operation, JsonObject item)
+    internal static void ToManagers(AggregateContext context, string operation, JsonObject item)
     {
         item["repositoryId"] = context.Repository;
         if (Text(context.Args, "boardId") is { Length: > 0 } board) item["boardId"] = board;

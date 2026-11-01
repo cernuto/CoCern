@@ -16,7 +16,7 @@ The hub can copy its database into a snapshot every hour and query that copy wit
 
    For CI, install into a cached folder and set `PKRELAY_DUCKDB_EXTENSIONS` to it before `dotnet test`. Without it, the tests download the extension once into the temp folder.
 
-2. Set `Relay:Analytics:Enabled` to `true` and restart the hub.
+2. Set `Relay:Analytics:Enabled` to `true` and restart the hub. This also turns on the [anomaly monitor](attention.md#anomaly-monitor).
 
 The hub takes a snapshot at startup and then on every interval. If a snapshot fails, the hub logs why and keeps the previous one.
 
@@ -64,6 +64,8 @@ Ad hoc SQL is off unless `Relay:Analytics:AllowAdHocSql` is true. Then `"name": 
 ## What a snapshot holds
 
 A snapshot is a backup of `relay.db` that keeps only board and lock state. These stay in the live database:
+
+- the anomaly monitor's own state
 
 - session state (private inboxes, attention notes and bindings)
 - control and discovery state (the session directory and machine credentials)
@@ -115,5 +117,7 @@ Every named query takes the repository and an optional `days` (1 to 14, default 
 | `manager_assignment_latency` | `all` | Average minutes from a task becoming `ready` to its first claim. This stands in for assignment time, which the hub does not record |
 | `quality_guardrails` | `closures`, `reopened`, `failed_actions`, `retried_actions` | Counts |
 | `attention_outcomes_by_kind` | `<kind>:<outcome>` | Outcomes; `cur_n` is all outcomes of that kind |
+
+The [anomaly monitor](attention.md#anomaly-monitor) reads these queries on each check and raises `anomaly` items to managers when a value is far above its baseline.
 
 A refused `task_claim` counts once for each resource listed in the task's `packet.resources`, or once against `task:<id>` when the task lists none. A stale `expectedVersion` (`VersionConflict`) is not counted.

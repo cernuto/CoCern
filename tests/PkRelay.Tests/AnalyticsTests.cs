@@ -286,6 +286,31 @@ public class AnalyticsTests
     }
 
     [Fact]
+    public async Task A_manager_session_starts_the_anomaly_monitor_which_raises_from_the_latest_snapshot()
+    {
+        var settings = await Enabled();
+        settings["Relay:Clients:0:IsAdministrator"] = "true";
+        // The fixture's token rows come from one task per period, so this one check accepts a single sample.
+        settings["Relay:Attention:AnomalyThresholds:tokens_per_task:MinSamples"] = "1";
+        await using var host = new RelayHostFixture(settings: settings);
+        using var client = host.AuthorizedClient();
+        RecordPastActivity(host.Services.GetRequiredService<SqliteStore>(), DateTimeOffset.UtcNow);
+        await TakeSnapshot(host);
+        var opened = await host.Call(client, "session_open", new { repositoryId = "past", requestId = "anomaly-manager", role = "manager" });
+        var manager = JsonDocument.Parse(opened.GetProperty("dataJson").GetString()!).RootElement.Clone();
+        object Session() => new { repositoryId = "past", requestId = Guid.NewGuid().ToString("N"), sessionId = manager.GetProperty("sessionId").GetString(), sessionToken = manager.GetProperty("sessionToken").GetString() };
+        JsonElement Data(JsonElement reply) => JsonDocument.Parse(reply.GetProperty("dataJson").GetString()!).RootElement.Clone();
+
+        // The hub's due-work pump runs the first check against the snapshot and routes the item to the manager.
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(30);
+        while (Data(await host.Call(client, "get_status", Session())).GetProperty("attention").GetProperty("actionable").GetInt32() == 0 && DateTimeOffset.UtcNow < deadline) await Task.Delay(100);
+        var offer = Data(await host.Call(client, "check_inbox", Session())).GetProperty("attention");
+        Assert.Equal("anomaly", offer.GetProperty("k").GetString());
+        Assert.Equal("anomaly: tokens_per_task all: 1050 vs 330 baseline (n=1)", offer.GetProperty("x").GetString());
+        Assert.Equal(0, offer.GetProperty("more").GetInt32());
+    }
+
+    [Fact]
     public async Task Analytics_is_off_by_default_and_takes_a_snapshot_at_startup_when_enabled()
     {
         var root = TempDirectory();

@@ -186,4 +186,26 @@ public static class RelayLimits
     public const int AnalyticsThreads = 2;
     /// <summary>Largest DuckDB extension the installer accepts once decompressed, in bytes (the sqlite extension is about 35 MB).</summary>
     public const long MaxAnalyticsExtensionBytes = 64L * 1024 * 1024;
+
+    /// <summary>Minutes between anomaly checks, unless <c>Relay:Attention:AnomalyInterval</c> says otherwise.</summary>
+    public const int DefaultAnomalyIntervalMinutes = 60;
+    /// <summary>Shortest allowed anomaly interval, in minutes (an interval of zero turns the monitor off).</summary>
+    public const int MinAnomalyIntervalMinutes = 1;
+    /// <summary>Longest allowed anomaly interval, in minutes (7 days).</summary>
+    public const int MaxAnomalyIntervalMinutes = 10_080;
+    /// <summary>A value at least this many times its baseline is an anomaly, unless a per-query threshold says otherwise.</summary>
+    public const double DefaultAnomalyRatio = 2.0;
+    /// <summary>
+    /// <c>quality_guardrails</c> closures are an anomaly when their baseline is at least this many times the current value (closures
+    /// dropped), unless <c>Relay:Attention:AnomalyThresholds:quality_guardrails:DropRatio</c> says otherwise.
+    /// </summary>
+    public const double DefaultAnomalyDropRatio = 2.0;
+    /// <summary>Rows a value and its baseline must each be computed from before either can raise an anomaly, unless set per query.</summary>
+    public const int DefaultAnomalyMinSamples = 5;
+    /// <summary>Largest allowed per-query minimum sample size.</summary>
+    public const int MaxAnomalyMinSamples = 1_000_000;
+    /// <summary>Hours after an anomaly is raised before the same named query may raise another one.</summary>
+    public const int AnomalyCooldownHours = 24;
+    /// <summary>Seconds one anomaly check may spend on its queries in total; queries not finished by then are skipped until the next check.</summary>
+    public const int AnomalyCheckBudgetSeconds = 20;
 }

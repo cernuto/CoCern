@@ -19,7 +19,7 @@ namespace PkRelay.Core;
 /// (session open, task claim with resources, action begin, convenience renewals/acks, next-work offers).
 /// Aggregates enforce the rules; this layer authenticates the session, routes, composes and bounds replies.
 /// </summary>
-public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? machines = null, IActivitySink? activity = null, IFullTextSearch? search = null, AttentionOptions? attention = null, AnalyticsTool? analytics = null) : IRelayApplication
+public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? machines = null, IActivitySink? activity = null, IFullTextSearch? search = null, AttentionOptions? attention = null, AnalyticsTool? analytics = null, AnomalyOptions? anomaly = null) : IRelayApplication
 {
     private readonly IMachineDirectory directory = machines ?? new MachineDirectory(grains);
     private readonly AttentionOptions attentionOptions = attention ?? new();
@@ -71,6 +71,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
             {
                 var opened = BoundWire(await OpenSessionAsync(trusted, args));
                 if (trace is not null && opened.Ok) { trace.SessionId = Text(Parse(opened), "sessionId"); trace.Role = Text(args, "role"); }
+                if (opened.Ok && string.Equals(Text(args, "role"), SessionRoles.Manager, StringComparison.OrdinalIgnoreCase)) StartAnomalyMonitor(trusted, Text(args, "repositoryId"));
                 return opened;
             }
             JsonObject? session = null;
@@ -105,6 +106,20 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         catch (ArgumentException) { return Error(InvalidArguments); }
         catch (InvalidOperationException) { return Error(InvalidArguments); }
         catch (JsonException) { return Error(InvalidArguments); }
+    }
+
+    /// <summary>
+    /// A manager session starts its repository's anomaly monitor when analytics, attention and the monitor are all on. It runs after the
+    /// reply, because the monitor grain may be busy with a check, and it never schedules a second check.
+    /// </summary>
+    private void StartAnomalyMonitor(RelayCaller caller, string repository)
+    {
+        if (anomaly is not { Enabled: true } || !attentionOptions.Enabled) return;
+        _ = Task.Run(async () =>
+        {
+            try { await Call(AggregateKinds.Anomaly, repository, caller, Operations.AnomalyStart, new() { ["repositoryId"] = repository }); }
+            catch (Exception) { /* The next manager session starts it. */ }
+        }, CancellationToken.None);
     }
 
     /// <summary>Delivers one aggregate's due outbox effects; called by the hub's due-work pump.</summary>
