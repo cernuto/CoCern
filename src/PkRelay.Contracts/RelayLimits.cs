@@ -83,8 +83,16 @@ public static class RelayLimits
     public const int MaxSearchFieldBytes = 1_024;
     /// <summary>Largest search document title, in UTF-8 bytes.</summary>
     public const int MaxSearchTitleBytes = 256;
+    /// <summary>Hits a search returns when it gives no <c>limit</c>.</summary>
+    public const int DefaultSearchResults = 3;
     /// <summary>Most hits one search returns.</summary>
     public const int MaxSearchResults = 10;
+    /// <summary>Largest search reply, in UTF-8 bytes; the weakest hits give way first.</summary>
+    public const int MaxSearchReplyBytes = 2_048;
+    /// <summary>Longest search query, in characters.</summary>
+    public const int MaxSearchQueryLength = 256;
+    /// <summary>Longest status filter on a search, in characters.</summary>
+    public const int MaxSearchStatusLength = 64;
     /// <summary>Most words of a query that are searched; the rest are ignored.</summary>
     public const int MaxSearchQueryTerms = 16;
     /// <summary>Rows one search reads from the index before dropping weak and duplicate hits.</summary>

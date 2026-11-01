@@ -24,6 +24,7 @@ internal static class ToolSchemas
             RelayTools.ClaimRelease => ["resourceId", "generation", "taskId", "claimGeneration", "expectedVersion"],
             RelayTools.StandingPropose => ["line", "grant"],
             RelayTools.StandingPut => ["lines", "grants", "remove", "approve", "settings"],
+            RelayTools.Search => ["kinds"],
             _ => []
         };
         var properties = ForwardingFields.Concat(tool.RequiredFields).Concat(extra).Distinct(StringComparer.Ordinal).ToDictionary(field => field, field => all[field]);
@@ -36,6 +37,14 @@ internal static class ToolSchemas
         // Only the milestone call advertises a compact usage entry: adding it to action_report too would exceed the 20,000-character
         // forwarding budget (20,034). The hub still accepts usage on action_report, and InputSchema lists it there in full.
         if (properties.ContainsKey("usage")) properties["usage"] = new { type = "object", description = "Optional {inputTokens,outputTokens}." };
+        // Search is advertised by shape, without status or limit (default 3 hits); InputSchema gives them and the length and kind limits.
+        if (tool.Name == RelayTools.Search)
+        {
+            // A read is never deduplicated, so its forwarding copy leaves out requestId.
+            properties.Remove("requestId");
+            properties["query"] = new { type = "string" };
+            properties["kinds"] = new { type = "array", items = new { type = "string" } };
+        }
         // The same budget leaves room only for typed names of workflow dependsOn and packet.resources; InputSchema describes them in full.
         if (properties.ContainsKey("workflow")) properties["workflow"] = WorkflowSchema(compact: true);
         return properties;
@@ -123,6 +132,11 @@ internal static class ToolSchemas
                 properties["remove"] = StandingIds("Line, grant or proposal IDs to remove; removing a proposal rejects it.");
                 properties["approve"] = StandingIds("Pending proposal IDs to approve.");
                 properties["settings"] = new { type = "object", properties = new { requireResources = new { type = "boolean", description = "Refuse ready without packet.resources." } }, additionalProperties = false, description = "Board settings." }; break;
+            case RelayTools.Search:
+                properties["query"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxSearchQueryLength, description = "Words to find; each space-separated chunk is one phrase. Search syntax is read as plain words." };
+                properties["kinds"] = new { type = "array", items = new { type = "string", @enum = SearchKinds.All }, maxItems = SearchKinds.All.Count, uniqueItems = true, description = "Kinds to search; default all." };
+                properties["status"] = new { type = "string", maxLength = RelayLimits.MaxSearchStatusLength, description = "Only hits with this status, such as ready, blocked or completed." };
+                properties["limit"] = new { type = "integer", minimum = 1, maximum = RelayLimits.MaxSearchResults, description = $"Most hits; default {RelayLimits.DefaultSearchResults}." }; break;
             case RelayTools.ControlRequest:
                 properties["command"] = new { type = "string", @enum = new[] { "pause", "resume", "stop", "cancel", "register_resource", "revoke_machine" } };
                 properties["aliases"] = new { type = "array", items = new { type = "string" } }; Text("reason", "Coordination control explanation."); Text("machineId", "Machine to revoke; required by revoke_machine."); break;

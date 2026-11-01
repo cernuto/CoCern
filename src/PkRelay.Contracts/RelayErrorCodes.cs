@@ -82,6 +82,8 @@ public static class RelayErrorCodes
     public const string DeliveryPending = "DeliveryPending";
     public const string DeliveryUnavailable = "DeliveryUnavailable";
     public const string Unavailable = "Unavailable";
+    /// <summary>The hub keeps no search index (search is turned off, or the store has none).</summary>
+    public const string SearchUnavailable = "SearchUnavailable";
     public const string InternalError = "InternalError";
 
     private static readonly FrozenSet<string> Conflicts = new[]

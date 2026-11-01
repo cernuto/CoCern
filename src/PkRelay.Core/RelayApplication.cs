@@ -19,7 +19,7 @@ namespace PkRelay.Core;
 /// (session open, task claim with resources, action begin, convenience renewals/acks, next-work offers).
 /// Aggregates enforce the rules; this layer authenticates the session, routes, composes and bounds replies.
 /// </summary>
-public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? machines = null, IActivitySink? activity = null) : IRelayApplication
+public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? machines = null, IActivitySink? activity = null, IFullTextSearch? search = null) : IRelayApplication
 {
     private readonly IMachineDirectory directory = machines ?? new MachineDirectory(grains);
     private const int WorkerProbeLimit = 50;
@@ -104,10 +104,39 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         RelayTools.GetStatus => StatusAsync(caller, args),
         RelayTools.ChatDirectory => directory.DirectoryAsync([Text(args, "repositoryId")], CancellationToken.None),
         RelayTools.ControlRequest when Text(args, "command") == "revoke_machine" => RevokeMachineAsync(caller, args),
+        RelayTools.Search => SearchAsync(args),
         RelayTools.SessionBind or RelayTools.CheckInbox or RelayTools.Ack => CallSession(caller, tool, args),
         RelayTools.WorkerList or RelayTools.ControlRequest => CallControl(caller, tool, args),
         _ => CallBoard(caller, tool, args)
     };
+
+    /// <summary>
+    /// Full-text search over committed state, as the verified session (checked before dispatch): the request's repository plus that
+    /// session's own inbox. The reply is compact: per hit its ID, kind, status, date and snippet, and its board when not default. The
+    /// agent opens a hit with task_get, context_get or check_inbox. Weakest hits give way until the reply fits its byte budget.
+    /// </summary>
+    private async Task<RelayReply> SearchAsync(JsonObject args)
+    {
+        if (search is null) return Error(SearchUnavailable);
+        var limit = args["limit"] is null ? RelayLimits.DefaultSearchResults : (int)Math.Clamp(Number(args, "limit", RelayLimits.DefaultSearchResults), 1, RelayLimits.MaxSearchResults);
+        var kinds = args["kinds"] is JsonArray requested ? Strings(requested).Distinct(StringComparer.Ordinal).ToArray() : [];
+        var status = Text(args, "status");
+        var hits = await search.SearchAsync(Text(args, "repositoryId"), Text(args, "sessionId"), Text(args, "query"), kinds, limit, status.Length > 0 ? status : null);
+        var items = new JsonArray();
+        foreach (var hit in hits)
+        {
+            var item = new JsonObject { ["id"] = hit.DocId, ["k"] = hit.Kind, ["s"] = hit.Status, ["at"] = hit.UpdatedAt.UtcDateTime.ToString("yyyy-MM-dd"), ["x"] = hit.Snippet };
+            if (hit.BoardId is { } board) item["b"] = board;
+            items.Add(item);
+        }
+        var reply = new JsonObject { ["hits"] = items };
+        while (items.Count > 0 && Encoding.UTF8.GetByteCount(reply.ToJsonString()) > RelayLimits.MaxSearchReplyBytes)
+        {
+            items.RemoveAt(items.Count - 1);
+            reply["truncated"] = true;
+        }
+        return Ok(reply);
+    }
 
     /// <summary>Revoking a machine is a discovery concern, not a control-aggregate one: it needs the machine ID and is refused for non-administrators by the discovery grain.</summary>
     private Task<RelayReply> RevokeMachineAsync(RelayCaller caller, JsonObject args) =>
