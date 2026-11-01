@@ -28,7 +28,10 @@ public sealed class SqliteGrainStorage(SqliteStore store) : IGrainStorage
     {
         var payload = JsonSerializer.Serialize(grainState.State, JsonOptions);
         var due = grainState.State is IHasDueWork indexed ? indexed.GetDueWork().ToArray() : [];
-        var etag = await store.CommitAsync(stateName, grainId, grainState.ETag, payload, due, cancellationToken);
+        var search = grainState.State as IHasSearchDocuments;
+        string etag;
+        try { etag = await store.CommitAsync(stateName, grainId, grainState.ETag, payload, due, cancellationToken, search); }
+        finally { search?.ReleaseSearchState(); }
         grainState.ETag = etag;
         grainState.RecordExists = true;
     }

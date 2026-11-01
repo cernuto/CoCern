@@ -74,6 +74,8 @@ public static class CoordinationStateMachine
             requests[requestKey] = new JsonObject { ["fingerprint"] = fingerprint, ["code"] = result.Code, ["json"] = result.DataJson, ["version"] = result.Version };
         }
         envelope.Value = new() { Json = state.ToJsonString() };
+        // Nothing changes the state object after this point, so the commit's search indexing can read it instead of parsing again.
+        envelope.Value.KeepParsed(state);
         envelope.Effects.AddRange(context.Effects);
         return result;
     }

@@ -230,41 +230,34 @@ public sealed class SearchExtractionTests
     }
 
     [Fact]
-    public void Changes_rewrite_only_changed_documents_and_list_removed_keys()
+    public void Updates_against_the_previous_markers_rewrite_only_changed_documents_and_list_removed_keys()
     {
         var board = new StateEnvelope<CoordinationDocument>();
         foreach (var id in new[] { "T-1", "T-2", "T-3" }) Assert.True(Call(board, "board", "task_update", new() { ["taskId"] = id, ["expectedVersion"] = 0, ["notes"] = "first " + id }).Ok);
         Assert.True(Call(board, "board", "context_put", new() { ["contextId"] = "n1", ["expectedVersion"] = 0, ["content"] = "note one" }).Ok);
         Assert.True(Call(board, "board", "context_put", new() { ["contextId"] = "n2", ["expectedVersion"] = 0, ["content"] = "note two" }).Ok);
-        var initial = board.Value.Json;
-
-        var first = SearchExtraction.Changes("board", null, initial);
-        Assert.True(first.ReplaceAll);
-        Assert.Equal(SearchExtraction.Extract("board", initial), first.Upserts);
-
         var before = board.Value.Json;
-        var snapshot = new StateEnvelope<CoordinationDocument> { Value = new() { Json = before } };
+
         Assert.True(Call(board, "board", "send_message", new() { ["taskId"] = "T-2", ["text"] = "a new finding" }).Ok);
         Assert.True(Call(board, "board", "context_put", new() { ["contextId"] = "n2", ["expectedVersion"] = 1, ["content"] = "note two, revised" }).Ok);
         Assert.True(Call(board, "board", "task_get", new() { ["taskId"] = "T-1" }).Ok);
 
-        var delta = board.GetSearchChanges("board", snapshot);
-        Assert.False(delta.ReplaceAll);
-        Assert.Equal(new[] { "context:n2", "task:T-2" }, delta.Upserts.Select(x => x.Kind + ":" + x.DocId).Order().ToArray());
-        Assert.Empty(delta.Removed);
-        Assert.Contains("a new finding", Single(delta.Upserts, SearchKinds.Task, "T-2").Body);
-        Assert.Equal(SearchExtraction.ExtractTasks(JsonNode.Parse(board.Value.Json)!.AsObject(), ["T-2", "missing", "T-2"]), delta.Upserts.Where(x => x.Kind == SearchKinds.Task).ToArray());
-        AssertApplies("board", before, board.Value.Json, delta);
-        Assert.Empty(SearchExtraction.Changes("board", board.Value.Json, board.Value.Json).Upserts);
+        var update = board.GetSearchUpdate("board", Markers("board", before));
+        Assert.Equal(new[] { "context:n2", "task:T-2" }, update.Upserts.Select(x => x.Document.Kind + ":" + x.Document.DocId).Order().ToArray());
+        Assert.Empty(update.Removed);
+        Assert.Contains("a new finding", update.Upserts.Single(x => x.Document.DocId == "T-2").Document.Body);
+        Assert.Equal(SearchExtraction.ExtractTasks(JsonNode.Parse(board.Value.Json)!.AsObject(), ["T-2", "missing", "T-2"]), update.Upserts.Where(x => x.Document.Kind == SearchKinds.Task).Select(x => x.Document).ToArray());
+        AssertApplies("board", before, board.Value.Json, update);
+        Assert.Empty(SearchExtraction.Update("board", board.Value.Json, Markers("board", board.Value.Json)).Upserts);
 
-        // A task or note without its change marker (a legacy board) is compared whole, so an unchanged one is not rewritten.
+        // A task or note without its change marker (a legacy board) is compared by its hash, so an unchanged one is not rewritten.
         var legacy = JsonNode.Parse(board.Value.Json)!.AsObject();
         legacy["tasks"]!["T-3"]!.AsObject().Remove("changeRevision");
         legacy["context"]!["n1"]!.AsObject().Remove("version");
-        Assert.Empty(SearchExtraction.Changes("board", legacy, legacy.DeepClone().AsObject()).Upserts);
+        Assert.Empty(SearchExtraction.Update("board", legacy.DeepClone().AsObject(), SearchExtraction.Markers("board", legacy)).Upserts);
         var edited = legacy.DeepClone().AsObject();
         edited["tasks"]!["T-3"]!["facts"]!["notes"] = "edited";
-        Assert.Equal("T-3", Assert.Single(SearchExtraction.Changes("board", legacy, edited).Upserts).DocId);
+        Assert.Equal("T-3", Assert.Single(SearchExtraction.Update("board", edited, SearchExtraction.Markers("board", legacy)).Upserts).Document.DocId);
 
         var session = new StateEnvelope<CoordinationDocument>();
         Assert.True(Call(session, "session", "__open", new() { ["sessionId"] = "s1", ["principalId"] = "alice", ["sessionToken"] = "secret" }).Ok);
@@ -273,24 +266,99 @@ public sealed class SearchExtractionTests
         Assert.True(Call(session, "session", "ack", new() { ["sessionId"] = "s1", ["sessionToken"] = "secret", ["messageId"] = "m1" }).Ok);
         Assert.True(Call(session, "session", "__deliver", new() { ["messageId"] = "m3", ["text"] = "text m3" }).Ok);
         Assert.True(Call(session, "session", "__deliver", new() { ["messageId"] = "n1", ["taskId"] = "T-1", ["kind"] = "task.changed" }).Ok);
-        var messages = SearchExtraction.Changes("session", inbox, session.Value.Json);
-        Assert.False(messages.ReplaceAll);
-        Assert.Equal("m3", Assert.Single(messages.Upserts).DocId);
+        var messages = SearchExtraction.Update("session", session.Value.Json, Markers("session", inbox));
+        Assert.Equal("m3", Assert.Single(messages.Upserts).Document.DocId);
         Assert.Equal(new SearchDocumentKey(SearchKinds.Message, "m1"), Assert.Single(messages.Removed));
         AssertApplies("session", inbox, session.Value.Json, messages);
-
-        // Clearing a state, or a state whose repository cannot be read, replaces every row with nothing.
-        foreach (var cleared in new[] { SearchExtraction.Changes("board", before, null), SearchExtraction.Changes("board", before, "{}") })
-            Assert.Equal((true, 0, 0), (cleared.ReplaceAll, cleared.Upserts.Count, cleared.Removed.Count));
-        Assert.Equal(SearchDelta.None, SearchExtraction.Changes("lock", before, board.Value.Json));
     }
 
-    /// <summary>Applying the delta to an index built from the previous state gives exactly the index of the current state.</summary>
-    private static void AssertApplies(string stateName, string previous, string current, SearchDelta delta)
+    [Fact]
+    public void Every_operation_that_changes_a_task_document_moves_its_change_marker()
+    {
+        var board = new StateEnvelope<CoordinationDocument>();
+        var key = new SearchDocumentKey(SearchKinds.Task, "t");
+        var version = 0L;
+        var checkedOperations = new List<string>();
+        void Step(string operation, JsonObject args, bool changesText)
+        {
+            var before = board.Value.Json;
+            args["taskId"] = "t"; args["sessionId"] ??= "s1";
+            var reply = Call(board, "board", operation, args);
+            Assert.True(reply.Ok, operation + " " + reply.Code + " " + reply.DataJson);
+            if (reply.Version > 0) version = reply.Version;
+            var (oldDocument, newDocument) = (Document(before), Document(board.Value.Json));
+            var (oldMarker, newMarker) = (Marker(before), Marker(board.Value.Json));
+            // The index rewrites a task only when its marker moves, so any change to its text must move the marker too.
+            if (oldDocument != newDocument) Assert.NotEqual(oldMarker, newMarker);
+            Assert.Equal(changesText, oldDocument != newDocument);
+            checkedOperations.Add(operation);
+        }
+        SearchDocument? Document(string json) => SearchExtraction.Extract("board", json).SingleOrDefault(x => x.Kind == SearchKinds.Task && x.DocId == "t");
+        string? Marker(string json) => Markers("board", json).TryGetValue(key, out var marker) ? marker : null;
+
+        Step("task_update", new() { ["expectedVersion"] = 0, ["notes"] = "created" }, changesText: true);
+        Step("task_update", new() { ["expectedVersion"] = version, ["notes"] = "new notes", ["patch"] = new JsonObject { ["title"] = "A title" } }, changesText: true);
+        Step("task_update", new() { ["expectedVersion"] = version, ["message"] = new JsonObject { ["text"] = "a message in the update" } }, changesText: true);
+        Step("send_message", new() { ["text"] = "a task message" }, changesText: true);
+        Step("task_update", new() { ["expectedVersion"] = version, ["workflow"] = Workflow("ready") }, changesText: true);
+        Step("task_claim", new() { ["expectedVersion"] = version, ["resourceIds"] = new JsonArray() }, changesText: false);
+        var claim = JsonNode.Parse(board.Value.Json)!["tasks"]!["t"]!;
+        Step("action_begin", new() { ["expectedVersion"] = version, ["actionId"] = "a", ["inputFingerprint"] = "f" }, changesText: false);
+        Step("action_report", new() { ["expectedVersion"] = version, ["actionId"] = "a", ["attempt"] = 1, ["outcome"] = "completed", ["report"] = new JsonObject { ["summary"] = "deployed the fix" } }, changesText: true);
+        Step("task_update", new() { ["expectedVersion"] = version, ["actionReports"] = new JsonArray(new JsonObject { ["actionId"] = "a", ["attempt"] = 1, ["outcome"] = "completed", ["report"] = "second report in a milestone" }) }, changesText: true);
+        Step("action_begin", new() { ["expectedVersion"] = version, ["actionId"] = "b", ["inputFingerprint"] = "g" }, changesText: false);
+        Step("action_report", new() { ["expectedVersion"] = version, ["actionId"] = "b", ["attempt"] = 1, ["outcome"] = "failed", ["report"] = "rig offline" }, changesText: true);
+        Step("claim_release", new() { ["expectedVersion"] = version, ["claimGeneration"] = claim["claimGeneration"]!.DeepClone() }, changesText: false);
+        Step("task_claim", new() { ["expectedVersion"] = version, ["resourceIds"] = new JsonArray(), ["requestId"] = "reclaim" }, changesText: false);
+        var reclaimed = JsonNode.Parse(board.Value.Json)!["tasks"]!["t"]!;
+        Step("__task_unclaim", new() { ["claimGeneration"] = reclaimed["claimGeneration"]!.DeepClone(), ["claimRequestId"] = "reclaim" }, changesText: false);
+        Step("task_update", new() { ["expectedVersion"] = version, ["workflow"] = Workflow("blocked", new JsonArray(new JsonObject { ["id"] = "b", ["kind"] = "other", ["summary"] = "waiting on rig", ["recheckCondition"] = "rig back" })) }, changesText: true);
+        Step("task_get", new(), changesText: false);
+        Assert.Equal(16, checkedOperations.Count);
+    }
+
+    [Fact]
+    public void Update_compares_markers_with_the_index_and_lists_what_it_no_longer_holds()
+    {
+        var board = new StateEnvelope<CoordinationDocument>();
+        foreach (var id in new[] { "T-1", "T-2" }) Assert.True(Call(board, "board", "task_update", new() { ["taskId"] = id, ["expectedVersion"] = 0, ["notes"] = "first " + id }).Ok);
+        var state = JsonNode.Parse(board.Value.Json)!.AsObject();
+        var markers = SearchExtraction.Markers("board", state);
+        Assert.Equal(new[] { "r:1", "r:2" }, markers.Values.Order().ToArray());
+
+        var first = SearchExtraction.Update("board", state, new Dictionary<SearchDocumentKey, string>());
+        Assert.Equal(2, first.Upserts.Count);
+        Assert.Equal(SearchExtraction.Extract("board", state), first.Upserts.Select(x => x.Document));
+        Assert.Equal(markers.Values.Order(), first.Upserts.Select(x => x.Marker).Order());
+
+        // Only a key with a different marker is rebuilt; a key the state no longer has is removed.
+        var indexed = new Dictionary<SearchDocumentKey, string>(markers) { [new(SearchKinds.Task, "T-2")] = "stale", [new(SearchKinds.Task, "gone")] = "r:9" };
+        var update = SearchExtraction.Update("board", state, indexed);
+        Assert.Equal("T-2", Assert.Single(update.Upserts).Document.DocId);
+        Assert.Equal(new SearchDocumentKey(SearchKinds.Task, "gone"), Assert.Single(update.Removed));
+        Assert.Empty(SearchExtraction.Update("board", state, markers).Upserts);
+
+        // A cleared, unreadable or unindexed state removes everything the index holds.
+        Assert.Equal(2, SearchExtraction.Update("board", (JsonObject?)null, markers).Removed.Count);
+        Assert.Equal(2, SearchExtraction.Update("board", "not json", markers).Removed.Count);
+        Assert.Equal(2, SearchExtraction.Update("lock", state, markers).Removed.Count);
+        // Without a change counter (a legacy item), the marker is a hash of the item, stable until the item changes.
+        state["tasks"]!["T-1"]!.AsObject().Remove("changeRevision");
+        var legacy = SearchExtraction.Markers("board", state)[new(SearchKinds.Task, "T-1")];
+        Assert.StartsWith("h:", legacy);
+        Assert.Equal(legacy, SearchExtraction.Markers("board", JsonNode.Parse(state.ToJsonString())!.AsObject())[new(SearchKinds.Task, "T-1")]);
+        Assert.True(Call(board, "board", "task_get", new() { ["taskId"] = "T-1" }).Ok);
+        Assert.Empty(board.GetSearchUpdate("board", SearchExtraction.Markers("board", JsonNode.Parse(board.Value.Json)!.AsObject())).Upserts);
+    }
+
+    private static IReadOnlyDictionary<SearchDocumentKey, string> Markers(string stateName, string json) => SearchExtraction.Markers(stateName, JsonNode.Parse(json)!.AsObject());
+
+    /// <summary>Applying the update to an index built from the previous state gives exactly the index of the current state.</summary>
+    private static void AssertApplies(string stateName, string previous, string current, SearchUpdate update)
     {
         var index = SearchExtraction.Extract(stateName, previous).ToDictionary(x => new SearchDocumentKey(x.Kind, x.DocId));
-        foreach (var key in delta.Removed) Assert.True(index.Remove(key));
-        foreach (var document in delta.Upserts) index[new SearchDocumentKey(document.Kind, document.DocId)] = document;
+        foreach (var key in update.Removed) Assert.True(index.Remove(key));
+        foreach (var document in update.Upserts.Select(x => x.Document)) index[new SearchDocumentKey(document.Kind, document.DocId)] = document;
         var expected = SearchExtraction.Extract(stateName, current).ToDictionary(x => new SearchDocumentKey(x.Kind, x.DocId));
         Assert.Equal(expected.OrderBy(x => x.Key.Kind + ":" + x.Key.DocId).ToArray(), index.OrderBy(x => x.Key.Kind + ":" + x.Key.DocId).ToArray());
     }

@@ -222,7 +222,7 @@ public sealed class DashboardTests
         var source = Assert.IsAssignableFrom<IRelayObservationSource>(store);
         var metrics = Assert.IsType<PkRelay.Contracts.Dashboard.DatabaseMetrics>(await source.ReadDatabaseMetricsAsync(rowCountLimit: 2));
         Assert.Equal("SQLite", metrics.Provider);
-        Assert.Equal(new[] { "activity_daily", "activity_log", "due_work", "grain_state", "hub_metadata", "search_index" }, metrics.Tables.Select(table => table.Name));
+        Assert.Equal(new[] { "activity_daily", "activity_log", "due_work", "grain_state", "hub_metadata", "search_docs", "search_index" }, metrics.Tables.Select(table => table.Name));
         var metadata = Assert.Single(metrics.Tables, table => table.Name == "hub_metadata");
         Assert.Equal(2, metadata.RowCount);
         Assert.Equal("lower-bound", metadata.CountKind);
@@ -309,12 +309,16 @@ public sealed class DashboardTests
         (await browser.PostAsJsonAsync("/dashboard/api/login", new { token = RelayHostFixture.Token })).EnsureSuccessStatusCode();
         await using var viewer = await StartViewerAsync(host, browser);
         PkRelay.Contracts.Dashboard.DashboardSnapshot? snapshot = null;
-        for (var attempt = 0; attempt < 100; attempt++)
+        // The sampler ticks every 2 seconds and a standing read that finds the writer busy is retried on the next tick, so allow
+        // for one missed read plus slack before giving up on the revision-1 board with its proposal.
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(10);
+        do
         {
             snapshot = await browser.GetFromJsonAsync<PkRelay.Contracts.Dashboard.DashboardSnapshot>("/dashboard/api/snapshot");
-            if (snapshot!.Standing.Length > 0) break;
+            if (snapshot!.Standing is [{ Revision: 1, Proposals.Length: > 0 }]) break;
             await Task.Delay(50);
         }
+        while (DateTimeOffset.UtcNow < deadline);
         var board = Assert.Single(snapshot!.Standing);
         Assert.Equal("repo/default", board.Board);
         Assert.Equal(1, board.Revision);

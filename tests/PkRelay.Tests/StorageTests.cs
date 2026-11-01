@@ -1,5 +1,9 @@
 using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Orleans;
+using Orleans.Hosting;
 using Orleans.Runtime;
 using Orleans.Storage;
 using PkRelay.Contracts;
@@ -398,8 +402,350 @@ public sealed class StorageTests : IDisposable
         DurationMilliseconds = 1.5, Target = target, ContentHash = hash, WorkflowState = state, OfferTarget = offer, RequestId = request, InputTokens = inputTokens, OutputTokens = outputTokens
     };
 
-    private void CreateVersion1Database(string text)
+    // ---- Search index (build step 5) ----
+
+    private static readonly RelayCaller Internal = new("alice", true, ["repo", "other"], true);
+    private static readonly System.Text.Json.JsonSerializerOptions EnvelopeJson = new() { IncludeFields = true };
+
+    private static RelayReply Apply(StateEnvelope<CoordinationDocument> state, string kind, string operation, System.Text.Json.Nodes.JsonObject args, string repository = "repo")
     {
+        args["repositoryId"] = repository; args["requestId"] ??= Guid.NewGuid().ToString("N");
+        var reply = CoordinationStateMachine.Apply(state, kind, "key", Internal, operation, args, Now);
+        Assert.True(reply.Ok, reply.Code + " " + reply.DataJson);
+        return reply;
+    }
+
+    private static GrainId BoardGrain(string repository = "repo", string board = "default") => GrainId.Create("board", Uri.EscapeDataString(repository) + "/" + Uri.EscapeDataString(board));
+    private static readonly GrainId SessionGrain = GrainId.Create("session", "s1");
+
+    private static StateEnvelope<CoordinationDocument> Board(string repository = "repo", params (string Task, string Notes)[] tasks)
+    {
+        var board = new StateEnvelope<CoordinationDocument>();
+        foreach (var (task, notes) in tasks) Apply(board, "board", "task_update", new() { ["taskId"] = task, ["expectedVersion"] = 0, ["notes"] = notes }, repository);
+        return board;
+    }
+
+    private static StateEnvelope<CoordinationDocument> Inbox(string session, params (string Id, string Text)[] messages)
+    {
+        var state = new StateEnvelope<CoordinationDocument>();
+        Apply(state, "session", "__open", new() { ["sessionId"] = session, ["principalId"] = "alice", ["sessionToken"] = "secret" });
+        foreach (var (id, text) in messages) Apply(state, "session", "__deliver", new() { ["messageId"] = id, ["text"] = text, ["sentAt"] = Now.ToString("O") });
+        return state;
+    }
+
+    private static TestGrainState<StateEnvelope<CoordinationDocument>> Grain_(StateEnvelope<CoordinationDocument> state) => new() { State = state };
+
+    private static async Task<string[]> Find(SqliteStore store, string query, string session = "s1", string repository = "repo", string[]? kinds = null, int limit = 10, string? status = null) =>
+        (await store.SearchAsync(repository, session, query, kinds ?? [], limit, status)).Select(hit => hit.Kind + ":" + hit.DocId).ToArray();
+
+    /// <summary>The indexed rows of one grain as "kind:doc_id|title|body|status", in key order.</summary>
+    private static string[] IndexRows(string path, string grainKey)
+    {
+        using var connection = Open(path);
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT kind, doc_id, title, body, status FROM search_index WHERE grain_key=$key ORDER BY kind, doc_id;";
+        command.Parameters.AddWithValue("$key", grainKey);
+        using var reader = command.ExecuteReader();
+        var rows = new List<string>();
+        while (reader.Read()) rows.Add($"{reader.GetString(0)}:{reader.GetString(1)}|{reader.GetString(2)}|{reader.GetString(3)}|{reader.GetString(4)}");
+        return rows.ToArray();
+    }
+
+    private static string[] Expected(string stateName, StateEnvelope<CoordinationDocument> state) =>
+        state.GetSearchDocuments(stateName).OrderBy(x => x.Kind, StringComparer.Ordinal).ThenBy(x => x.DocId, StringComparer.Ordinal).Select(x => $"{x.Kind}:{x.DocId}|{x.Title}|{x.Body}|{x.Status}").ToArray();
+
+    [Fact]
+    public async Task Version_1_database_upgrades_to_version_2_with_the_search_index_backfilled()
+    {
+        var board = Board("repo", ("T-1", "token refresh times out after idle"), ("T-2", "unrelated cleanup"));
+        var inbox = Inbox("s1", ("m1", "the refresh fix is ready for review"));
+        CreateVersion1Database("kept", ("board", BoardGrain(), board), ("session", SessionGrain, inbox));
+        using (var store = new SqliteStore(Database))
+        {
+            Assert.Equal(new[] { "task:T-1", "message:m1" }.Order(), (await Find(store, "refresh")).Order());
+            Assert.Equal(new[] { "task:T-1" }, await Find(store, "refresh", session: "s2"));
+            Assert.Empty(await Find(store, "refresh", repository: "other"));
+        }
+        var backup = Assert.Single(Directory.GetFiles(_directory, "relay.db.pre-migration-*.db"));
+        Assert.Equal(0L, Scalar(backup, "SELECT COUNT(*) FROM sqlite_schema WHERE name IN ('search_docs', 'search_index');"));
+        Assert.Equal(Expected("board", board), IndexRows(Database, BoardGrain().Key.ToString()));
+        Assert.Equal(3L, Scalar(Database, "SELECT COUNT(*) FROM search_docs;"));
+        Assert.Equal("1", Text(Database, "SELECT value FROM hub_metadata WHERE name='search_index_version';"));
+    }
+
+    [Fact]
+    public async Task Version_2_database_without_a_built_index_is_backfilled_once_and_turning_search_off_empties_it()
+    {
+        var board = Board("repo", ("T-1", "token refresh times out after idle"));
+        using (var store = new SqliteStore(Database, search: new SearchOptions { Enabled = false }))
+        {
+            await new SqliteGrainStorage(store).WriteStateAsync("board", BoardGrain(), Grain_(board));
+            Assert.False(store.SearchEnabled);
+            Assert.Empty(await Find(store, "refresh"));
+        }
+        Assert.Equal(0L, Scalar(Database, "SELECT COUNT(*) FROM search_index;"));
+        // A database from build steps 1 to 4 is at version 2 with an empty search_index and no search_docs table.
+        Execute(Database, "DROP TABLE search_docs;");
+        using (var store = new SqliteStore(Database))
+            Assert.Equal(new[] { "task:T-1" }, await Find(store, "refresh"));
+        Assert.Empty(Directory.GetFiles(_directory, "*.pre-migration-*"));
+        // Built once: a later start leaves the index alone (a marker edited by hand survives it).
+        Execute(Database, "UPDATE search_docs SET marker='kept';");
+        using (new SqliteStore(Database)) { }
+        Assert.Equal("kept", Text(Database, "SELECT marker FROM search_docs;"));
+        using (new SqliteStore(Database, search: new SearchOptions { Enabled = false })) { }
+        Assert.Equal((0L, 0L, 0L), (Scalar(Database, "SELECT COUNT(*) FROM search_index;"), Scalar(Database, "SELECT COUNT(*) FROM search_docs;"), Scalar(Database, "SELECT COUNT(*) FROM hub_metadata WHERE name='search_index_version';")));
+        using (var store = new SqliteStore(Database))
+            Assert.Equal(new[] { "task:T-1" }, await Find(store, "refresh"));
+        Assert.NotEqual("kept", Text(Database, "SELECT marker FROM search_docs;"));
+    }
+
+    [Fact]
+    public async Task Index_matches_state_after_write_change_clear_conflict_and_a_commit_canceled_before_it_commits()
+    {
+        using var store = new SqliteStore(Database);
+        var provider = new SqliteGrainStorage(store);
+        var key = BoardGrain().Key.ToString();
+        var state = Grain_(Board("repo", ("T-1", "token refresh times out"), ("T-2", "cleanup")));
+        Apply(state.State, "board", "context_put", new() { ["contextId"] = "n1", ["expectedVersion"] = 0, ["content"] = "rig notes" });
+        await provider.WriteStateAsync("board", BoardGrain(), state);
+        Assert.Equal(Expected("board", state.State), IndexRows(Database, key));
+        var rowids = Text(Database, "SELECT group_concat(kind || ':' || doc_id || '=' || id, ',') FROM (SELECT * FROM search_docs ORDER BY kind, doc_id);");
+
+        // A change rewrites only its own document; the other rows keep their FTS rowids and markers.
+        var stale = Grain_(new StateEnvelope<CoordinationDocument> { Value = new() { Json = state.State.Value.Json } }); stale.ETag = state.ETag;
+        Apply(state.State, "board", "task_update", new() { ["taskId"] = "T-2", ["expectedVersion"] = 1, ["notes"] = "cleanup of the refresh cache" });
+        var markers = Text(Database, "SELECT group_concat(marker, ',') FROM (SELECT marker FROM search_docs WHERE doc_id <> 'T-2' ORDER BY kind, doc_id);");
+        await provider.WriteStateAsync("board", BoardGrain(), state);
+        Assert.Equal(Expected("board", state.State), IndexRows(Database, key));
+        Assert.Equal(rowids, Text(Database, "SELECT group_concat(kind || ':' || doc_id || '=' || id, ',') FROM (SELECT * FROM search_docs ORDER BY kind, doc_id);"));
+        Assert.Equal(markers, Text(Database, "SELECT group_concat(marker, ',') FROM (SELECT marker FROM search_docs WHERE doc_id <> 'T-2' ORDER BY kind, doc_id);"));
+        Assert.Equal(new[] { "task:T-1", "task:T-2" }.Order(), (await Find(store, "refresh")).Order());
+        var committed = IndexRows(Database, key);
+
+        // A stale etag is refused before anything is written.
+        Apply(stale.State, "board", "task_update", new() { ["taskId"] = "T-1", ["expectedVersion"] = 1, ["notes"] = "conflicting text" });
+        await Assert.ThrowsAsync<InconsistentStateException>(() => provider.WriteStateAsync("board", BoardGrain(), stale));
+        Assert.Equal(committed, IndexRows(Database, key));
+
+        // Canceled after the index rows were written but before Commit(): the transaction rolls them back with the state.
+        using (var canceled = new CancellationTokenSource())
+        {
+            var canceling = new TestGrainState<CancelingState> { State = new CancelingState(state.State, canceled), ETag = state.ETag };
+            Apply(state.State, "board", "task_update", new() { ["taskId"] = "T-1", ["expectedVersion"] = 1, ["notes"] = "never committed" });
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => provider.WriteStateAsync("board", BoardGrain(), canceling, canceled.Token));
+            Assert.True(canceling.State.Wrote);
+        }
+        Assert.Equal(committed, IndexRows(Database, key));
+        Assert.Empty(await Find(store, "committed"));
+
+        await provider.ClearStateAsync("board", BoardGrain(), state);
+        Assert.Empty(IndexRows(Database, key));
+        Assert.Equal(0L, Scalar(Database, "SELECT COUNT(*) FROM search_docs;"));
+        Assert.Empty(await Find(store, "refresh"));
+    }
+
+    [Fact]
+    public async Task Outbox_only_commits_skip_the_index_and_a_new_state_repairs_it()
+    {
+        using var store = new SqliteStore(Database);
+        var provider = new SqliteGrainStorage(store);
+        var state = Grain_(Board("repo", ("T-1", "token refresh times out")));
+        await provider.WriteStateAsync("board", BoardGrain(), state);
+        Execute(Database, "UPDATE search_docs SET marker='stale';");
+        // Same state document (as when the grain only removes a delivered effect): nothing is re-read or rewritten.
+        state.State.DueWork.Add(new DueWorkItem("retry", "effect", Now));
+        await provider.WriteStateAsync("board", BoardGrain(), state);
+        Assert.Equal("stale", Text(Database, "SELECT marker FROM search_docs;"));
+        // A new state document is compared with the stored markers, so the stale row is rebuilt.
+        state.State.Value = new() { Json = new string(state.State.Value.Json.AsSpan()) };
+        await provider.WriteStateAsync("board", BoardGrain(), state);
+        Assert.NotEqual("stale", Text(Database, "SELECT marker FROM search_docs;"));
+        Assert.Equal(Expected("board", state.State), IndexRows(Database, BoardGrain().Key.ToString()));
+    }
+
+    [Theory]
+    [InlineData("title:secret refresh", "task:T-1")]
+    [InlineData("\"refresh", "task:T-1")]
+    [InlineData("NEAR(refresh secret, 2)", "task:T-2")]
+    [InlineData("refresh* OR secret AND NOT x", "task:T-1")]
+    [InlineData("{title body}: refresh ^secret -x +y", "task:T-2")]
+    [InlineData("refresh)) ((", "task:T-1")]
+    public async Task Search_syntax_in_a_query_is_read_as_plain_words(string query, string expected)
+    {
+        using var store = new SqliteStore(Database);
+        var board = Board("repo", ("T-1", "token refresh times out"));
+        Apply(board, "board", "task_update", new() { ["taskId"] = "T-2", ["expectedVersion"] = 0, ["patch"] = new System.Text.Json.Nodes.JsonObject { ["title"] = "secret rotation" } });
+        await new SqliteGrainStorage(store).WriteStateAsync("board", BoardGrain(), Grain_(board));
+        Assert.Contains(expected, await Find(store, query));
+        var phrases = SqliteStore.Phrases(query);
+        const string phrase = "\"[\\p{L}\\p{N}]+( [\\p{L}\\p{N}]+)*\"";
+        Assert.Matches($"^{phrase}( {phrase})*$", SqliteStore.MatchAll(phrases));
+        Assert.Matches($"^{phrase}( OR {phrase})*$", SqliteStore.MatchAny(phrases));
+    }
+
+    [Fact]
+    public void Query_chunks_become_quoted_phrases_capped_and_deduplicated()
+    {
+        Assert.Equal(new[] { "NEAR a", "b" }, SqliteStore.Phrases("NEAR(a b)"));
+        Assert.Equal("\"NEAR a\" \"b\"", SqliteStore.MatchAll(SqliteStore.Phrases("NEAR(a b)")));
+        Assert.Equal("\"NEAR a\" OR \"b\"", SqliteStore.MatchAny(SqliteStore.Phrases("NEAR(a b)")));
+        Assert.Equal(new[] { "T 118" }, SqliteStore.Phrases("T-118"));
+        Assert.Equal(new[] { "title x" }, SqliteStore.Phrases("title:x TITLE:X"));
+        Assert.Equal(new[] { "été", "日本" }, SqliteStore.Phrases("été, 日本!"));
+        Assert.Empty(SqliteStore.Phrases(" \"*:()- "));
+        Assert.Empty(SqliteStore.Phrases(null));
+        Assert.Equal(RelayLimits.MaxSearchQueryTerms, SqliteStore.Phrases(string.Join(' ', Enumerable.Range(0, 20).Select(i => $"w{i}-x{i}"))).Sum(x => x.Split(' ').Length));
+    }
+
+    [Fact]
+    public async Task Search_matches_every_phrase_first_and_falls_back_to_any_only_when_short()
+    {
+        using var store = new SqliteStore(Database);
+        await new SqliteGrainStorage(store).WriteStateAsync("board", BoardGrain(), Grain_(Board("repo",
+            ("both", "refresh timeout seen on the rig"), ("refresh", "refresh cache cleanup"), ("timeout", "a timeout on deploy"),
+            ("T-118-fix", "fixed in T-118 yesterday"), ("apart", "T-2 has 118 open items"))));
+        // Every phrase matches only one task, and that fills a limit of one, so nothing weaker is added.
+        Assert.Equal(new[] { "task:both" }, await Find(store, "refresh timeout", limit: 1));
+        // Too few hits for the limit: tasks with any of the phrases follow, after the task with all of them.
+        var widened = await Find(store, "refresh timeout", limit: 3);
+        Assert.Equal("task:both", widened[0]);
+        Assert.Equal(new[] { "task:refresh", "task:timeout" }, widened.Skip(1).Order());
+        // A hyphenated ID is one phrase: T and 118 must be adjacent, so a task with both words apart does not match.
+        Assert.Equal(new[] { "task:T-118-fix" }, await Find(store, "T-118"));
+        Assert.Equal(new[] { "task:T-118-fix" }, await Find(store, "t-118", limit: 10));
+    }
+
+    [Fact]
+    public async Task Search_is_scoped_filtered_ranked_and_trimmed()
+    {
+        using var store = new SqliteStore(Database);
+        var provider = new SqliteGrainStorage(store);
+        var board = Board("repo", ("strong", "alpha beta gamma alpha beta gamma"), ("weak", string.Join(' ', Enumerable.Repeat("filler words about other things", 60)) + " gamma"));
+        Apply(board, "board", "task_update", new() { ["taskId"] = "done", ["expectedVersion"] = 0, ["notes"] = "alpha beta", ["workflow"] = new System.Text.Json.Nodes.JsonObject
+        {
+            ["state"] = "blocked", ["packet"] = new System.Text.Json.Nodes.JsonObject { ["goal"] = "g", ["target"] = "t", ["authorityRef"] = "a", ["restoration"] = "r", ["stopCondition"] = "s" },
+            ["criteria"] = new System.Text.Json.Nodes.JsonArray(new System.Text.Json.Nodes.JsonObject { ["id"] = "c", ["description"] = "d", ["result"] = "not_run" }),
+            ["blockers"] = new System.Text.Json.Nodes.JsonArray(new System.Text.Json.Nodes.JsonObject { ["id"] = "b", ["kind"] = "other", ["summary"] = "waiting", ["recheckCondition"] = "later" })
+        } });
+        Apply(board, "board", "context_put", new() { ["contextId"] = "n1", ["expectedVersion"] = 0, ["content"] = "alpha beta gamma notes" });
+        await provider.WriteStateAsync("board", BoardGrain(), Grain_(board));
+        await provider.WriteStateAsync("board", BoardGrain("repo", "side board"), Grain_(Board("repo", ("side", "alpha beta gamma on another board"))));
+        await provider.WriteStateAsync("board", BoardGrain("other"), Grain_(Board("other", ("foreign", "alpha beta gamma elsewhere"))));
+        await provider.WriteStateAsync("session", SessionGrain, Grain_(Inbox("s1", ("m1", "alpha beta gamma in a private message"))));
+
+        var all = await Find(store, "alpha beta gamma");
+        Assert.Contains("message:m1", all);
+        Assert.Contains("task:strong", all);
+        Assert.DoesNotContain("task:foreign", all);
+        // A hit far weaker than the best one (one common word in a long body) is dropped.
+        Assert.DoesNotContain("task:weak", all);
+        Assert.Contains("task:weak", await Find(store, "filler"));
+        Assert.DoesNotContain("message:m1", await Find(store, "alpha beta gamma", session: "s2"));
+        Assert.Empty(await Find(store, "alpha", session: "s2", repository: "nobody"));
+        Assert.Equal(new[] { "context:n1" }, await Find(store, "alpha", kinds: [SearchKinds.Context]));
+        Assert.Equal(new[] { "message:m1" }, await Find(store, "alpha", kinds: [SearchKinds.Message, "unknown"]));
+        Assert.Equal(new[] { "task:done" }, await Find(store, "alpha", status: "blocked"));
+        Assert.Single(await Find(store, "alpha", limit: 1));
+        Assert.Single(await Find(store, "alpha", limit: -5));
+        Assert.True((await Find(store, "alpha", limit: 500)).Length <= RelayLimits.MaxSearchResults);
+        Assert.Empty(await Find(store, "   "));
+        var hits = await store.SearchAsync("repo", "s1", "another", [], 10);
+        var side = Assert.Single(hits);
+        Assert.Equal(("side", "side board", "open"), (side.DocId, side.BoardId, side.Status));
+        Assert.Contains("[another]", side.Snippet);
+        Assert.Null((await store.SearchAsync("repo", "s1", "strong", [], 10)).SingleOrDefault()?.BoardId);
+        using var off = new SqliteStore(Path.Combine(_directory, "off.db"), search: new SearchOptions { Enabled = false });
+        Assert.Empty(await Find(off, "alpha"));
+    }
+
+    [Fact]
+    public async Task A_search_completes_while_a_long_write_holds_the_writer()
+    {
+        using var store = new SqliteStore(Database);
+        await new SqliteGrainStorage(store).WriteStateAsync("board", BoardGrain(), Grain_(Board("repo", ("T-1", "token refresh times out"))));
+        await store.WriterGate.WaitAsync();
+        using var writer = Open(Database);
+        using var transaction = writer.BeginTransaction(deferred: false);
+        try
+        {
+            using (var write = writer.CreateCommand()) { write.Transaction = transaction; write.CommandText = "INSERT INTO hub_metadata(name, value) VALUES ('long-write', 'x');"; write.ExecuteNonQuery(); }
+            var search = store.SearchAsync("repo", "s1", "refresh", [], 3);
+            Assert.Same(search, await Task.WhenAny(search, Task.Delay(TimeSpan.FromSeconds(5))));
+            Assert.Equal("T-1", Assert.Single(await search).DocId);
+        }
+        finally { transaction.Rollback(); store.WriterGate.Release(); }
+    }
+
+    [Fact]
+    public async Task Silo_restart_returns_the_same_search_hits()
+    {
+        async Task<string[]> RunAsync(bool write)
+        {
+            var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0); listener.Start();
+            var siloPort = ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
+            var gateway = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0); gateway.Start();
+            var gatewayPort = ((System.Net.IPEndPoint)gateway.LocalEndpoint).Port;
+            listener.Stop(); gateway.Stop();
+            using var host = new HostBuilder()
+                .ConfigureLogging(log => log.ClearProviders())
+                .UseOrleans(silo => silo.UseLocalhostClustering(siloPort: siloPort, gatewayPort: gatewayPort, serviceId: "search-restart", clusterId: Guid.NewGuid().ToString("N")).AddPkRelaySqlite(Database))
+                .ConfigureServices(services => services.AddPkRelayCore()).Build();
+            await host.StartAsync();
+            try
+            {
+                if (write)
+                {
+                    var application = host.Services.GetRequiredService<RelayApplication>();
+                    async Task<System.Text.Json.Nodes.JsonObject> Call(string tool, System.Text.Json.Nodes.JsonObject args)
+                    {
+                        args["repositoryId"] = "repo"; args["requestId"] = Guid.NewGuid().ToString("N");
+                        var reply = await application.ExecuteAsync(Internal with { IsInternal = false }, tool, System.Text.Json.JsonSerializer.SerializeToElement(args));
+                        Assert.True(reply.Ok, reply.Code + " " + reply.DataJson);
+                        return System.Text.Json.Nodes.JsonNode.Parse(reply.DataJson)!.AsObject();
+                    }
+                    var session = await Call("session_open", new());
+                    System.Text.Json.Nodes.JsonObject For(System.Text.Json.Nodes.JsonObject args) { args["sessionId"] = session["sessionId"]!.DeepClone(); args["sessionToken"] = session["sessionToken"]!.DeepClone(); return args; }
+                    await Call("task_update", For(new() { ["taskId"] = "T-1", ["expectedVersion"] = 0, ["notes"] = "token refresh times out" }));
+                    await Call("task_update", For(new() { ["taskId"] = "T-2", ["expectedVersion"] = 0, ["notes"] = "refresh cache cleanup" }));
+                    await Call("context_put", For(new() { ["contextId"] = "n1", ["expectedVersion"] = 0, ["content"] = "refresh runbook" }));
+                }
+                var search = host.Services.GetRequiredService<IFullTextSearch>();
+                return (await search.SearchAsync("repo", "s1", "refresh", [], 10)).Select(hit => $"{hit.Kind}:{hit.DocId}:{hit.Snippet}").ToArray();
+            }
+            finally { await host.StopAsync(); }
+        }
+
+        var before = await RunAsync(write: true);
+        Assert.Equal(3, before.Length);
+        Assert.Equal(before, await RunAsync(write: false));
+    }
+
+    /// <summary>A board state whose search update cancels the commit's token after it was computed, to cancel between the index writes and Commit().</summary>
+    public sealed class CancelingState : IHasSearchDocuments
+    {
+        private readonly StateEnvelope<CoordinationDocument> _inner = new();
+        private readonly CancellationTokenSource? _cancel;
+        public CancelingState() { }
+        public CancelingState(StateEnvelope<CoordinationDocument> inner, CancellationTokenSource cancel) { _inner = inner; _cancel = cancel; Json = inner.Value.Json; }
+        public string Json { get; set; } = "{}";
+        [System.Text.Json.Serialization.JsonIgnore] public bool Wrote { get; private set; }
+        public IReadOnlyList<SearchDocument> GetSearchDocuments(string stateName) => _inner.GetSearchDocuments(stateName);
+        public SearchUpdate GetSearchUpdate(string stateName, IReadOnlyDictionary<SearchDocumentKey, string> indexed)
+        {
+            var update = _inner.GetSearchUpdate(stateName, indexed);
+            Assert.NotEmpty(update.Upserts);
+            Wrote = true;
+            _cancel?.Cancel();
+            return update;
+        }
+        public object? GetSearchSource() => null;
+        public void ReleaseSearchState() { }
+    }
+
+    private void CreateVersion1Database(string text, params (string StateName, GrainId Grain, StateEnvelope<CoordinationDocument> State)[] rows)
+    {
+        var extraRows = string.Concat(rows.Select(row => $"INSERT INTO grain_state VALUES ('{row.StateName}', '{row.Grain.Type}', '{row.Grain.Key}', 1, 'etag-{row.StateName}', '{System.Text.Json.JsonSerializer.Serialize(row.State, EnvelopeJson).Replace("'", "''")}');\n"));
         var payload = System.Text.Json.JsonSerializer.Serialize(new StateEnvelope<Payload> { Value = new() { Text = text } }, new System.Text.Json.JsonSerializerOptions { IncludeFields = true });
         Execute(Database, $"""
             CREATE TABLE grain_state (state_name TEXT NOT NULL, grain_type TEXT NOT NULL, grain_key TEXT NOT NULL, generation INTEGER NOT NULL, etag TEXT NOT NULL, payload TEXT, PRIMARY KEY (state_name, grain_type, grain_key));
@@ -409,7 +755,7 @@ public sealed class StorageTests : IDisposable
             CREATE TABLE hub_metadata (name TEXT PRIMARY KEY, value TEXT NOT NULL);
             INSERT INTO hub_metadata(name, value) VALUES ('service_id', 'version-one');
             INSERT INTO grain_state VALUES ('board', '{Grain.Type}', '{Grain.Key}', 1, 'etag-one', '{payload.Replace("'", "''")}');
-            PRAGMA user_version=1;
+            {extraRows}PRAGMA user_version=1;
             """);
     }
 
