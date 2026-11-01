@@ -15,6 +15,7 @@ public sealed class DashboardCollector : BackgroundService
     private readonly DashboardSecurity security;
     private readonly RelayApplication application;
     private DateTimeOffset nextDatabaseAt;
+    private DateTimeOffset nextStandingAt;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     public DashboardCollector(DashboardLogBuffer logs, DashboardConnections connections, IRelayObservationSource source, DashboardTrafficBuffer traffic, DashboardSecurity security, RelayApplication application)
@@ -100,10 +101,18 @@ public sealed class DashboardCollector : BackgroundService
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
             catch (Exception) { snapshot = snapshot with { Database = previous.Database with { Warning = "Database metrics are unavailable; the previous metrics are retained." } }; }
-            // Standing preferences change rarely, so they are read on the database-metrics cadence; busy or failed reads keep the previous view.
+        }
+        // Standing preferences change rarely, so they are read on the database-metrics cadence. The read gives up at once when the
+        // writer is busy; its next time moves on only after a read succeeds, so a busy or failed read is retried on the next tick.
+        if (now >= nextStandingAt)
+        {
             try
             {
-                if (await source.ReadStandingAsync(cancellationToken) is { } standing) snapshot = snapshot with { Standing = standing.Boards, StandingTruncated = standing.Truncated };
+                if (await source.ReadStandingAsync(cancellationToken) is { } standing)
+                {
+                    snapshot = snapshot with { Standing = standing.Boards, StandingTruncated = standing.Truncated };
+                    nextStandingAt = now.AddSeconds(15);
+                }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
             catch (Exception) { logs.CollectionFailed(); }

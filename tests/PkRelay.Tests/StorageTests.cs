@@ -565,31 +565,55 @@ public sealed class StorageTests : IDisposable
     }
 
     [Theory]
-    [InlineData("title:secret refresh")]
-    [InlineData("\"refresh")]
-    [InlineData("NEAR(refresh secret, 2)")]
-    [InlineData("refresh* OR secret AND NOT x")]
-    [InlineData("{title body}: refresh ^secret -x +y")]
-    [InlineData("refresh)) ((")]
-    public async Task Search_syntax_in_a_query_is_read_as_plain_words(string query)
+    [InlineData("title:secret refresh", "task:T-1")]
+    [InlineData("\"refresh", "task:T-1")]
+    [InlineData("NEAR(refresh secret, 2)", "task:T-2")]
+    [InlineData("refresh* OR secret AND NOT x", "task:T-1")]
+    [InlineData("{title body}: refresh ^secret -x +y", "task:T-2")]
+    [InlineData("refresh)) ((", "task:T-1")]
+    public async Task Search_syntax_in_a_query_is_read_as_plain_words(string query, string expected)
     {
         using var store = new SqliteStore(Database);
         var board = Board("repo", ("T-1", "token refresh times out"));
         Apply(board, "board", "task_update", new() { ["taskId"] = "T-2", ["expectedVersion"] = 0, ["patch"] = new System.Text.Json.Nodes.JsonObject { ["title"] = "secret rotation" } });
         await new SqliteGrainStorage(store).WriteStateAsync("board", BoardGrain(), Grain_(board));
-        var hits = await Find(store, query);
-        Assert.Contains("task:T-1", hits);
-        Assert.Matches("^(\"[\\p{L}\\p{N}]+\")( OR \"[\\p{L}\\p{N}]+\")*$", SqliteStore.MatchExpression(query)!);
+        Assert.Contains(expected, await Find(store, query));
+        var phrases = SqliteStore.Phrases(query);
+        const string phrase = "\"[\\p{L}\\p{N}]+( [\\p{L}\\p{N}]+)*\"";
+        Assert.Matches($"^{phrase}( {phrase})*$", SqliteStore.MatchAll(phrases));
+        Assert.Matches($"^{phrase}( OR {phrase})*$", SqliteStore.MatchAny(phrases));
     }
 
     [Fact]
-    public void Query_words_are_quoted_capped_and_deduplicated()
+    public void Query_chunks_become_quoted_phrases_capped_and_deduplicated()
     {
-        Assert.Equal("\"NEAR\" OR \"a\" OR \"b\"", SqliteStore.MatchExpression("NEAR(a b)"));
-        Assert.Equal("\"title\" OR \"x\"", SqliteStore.MatchExpression("title:x TITLE"));
-        Assert.Equal("\"été\" OR \"日本\"", SqliteStore.MatchExpression("été, 日本!"));
-        Assert.Null(SqliteStore.MatchExpression(" \"*:()- "));
-        Assert.Equal(RelayLimits.MaxSearchQueryTerms, SqliteStore.MatchExpression(string.Join(' ', Enumerable.Range(0, 40).Select(i => "w" + i)))!.Split(" OR ").Length);
+        Assert.Equal(new[] { "NEAR a", "b" }, SqliteStore.Phrases("NEAR(a b)"));
+        Assert.Equal("\"NEAR a\" \"b\"", SqliteStore.MatchAll(SqliteStore.Phrases("NEAR(a b)")));
+        Assert.Equal("\"NEAR a\" OR \"b\"", SqliteStore.MatchAny(SqliteStore.Phrases("NEAR(a b)")));
+        Assert.Equal(new[] { "T 118" }, SqliteStore.Phrases("T-118"));
+        Assert.Equal(new[] { "title x" }, SqliteStore.Phrases("title:x TITLE:X"));
+        Assert.Equal(new[] { "été", "日本" }, SqliteStore.Phrases("été, 日本!"));
+        Assert.Empty(SqliteStore.Phrases(" \"*:()- "));
+        Assert.Empty(SqliteStore.Phrases(null));
+        Assert.Equal(RelayLimits.MaxSearchQueryTerms, SqliteStore.Phrases(string.Join(' ', Enumerable.Range(0, 20).Select(i => $"w{i}-x{i}"))).Sum(x => x.Split(' ').Length));
+    }
+
+    [Fact]
+    public async Task Search_matches_every_phrase_first_and_falls_back_to_any_only_when_short()
+    {
+        using var store = new SqliteStore(Database);
+        await new SqliteGrainStorage(store).WriteStateAsync("board", BoardGrain(), Grain_(Board("repo",
+            ("both", "refresh timeout seen on the rig"), ("refresh", "refresh cache cleanup"), ("timeout", "a timeout on deploy"),
+            ("T-118-fix", "fixed in T-118 yesterday"), ("apart", "T-2 has 118 open items"))));
+        // Every phrase matches only one task, and that fills a limit of one, so nothing weaker is added.
+        Assert.Equal(new[] { "task:both" }, await Find(store, "refresh timeout", limit: 1));
+        // Too few hits for the limit: tasks with any of the phrases follow, after the task with all of them.
+        var widened = await Find(store, "refresh timeout", limit: 3);
+        Assert.Equal("task:both", widened[0]);
+        Assert.Equal(new[] { "task:refresh", "task:timeout" }, widened.Skip(1).Order());
+        // A hyphenated ID is one phrase: T and 118 must be adjacent, so a task with both words apart does not match.
+        Assert.Equal(new[] { "task:T-118-fix" }, await Find(store, "T-118"));
+        Assert.Equal(new[] { "task:T-118-fix" }, await Find(store, "t-118", limit: 10));
     }
 
     [Fact]
@@ -707,7 +731,6 @@ public sealed class StorageTests : IDisposable
         public string Json { get; set; } = "{}";
         [System.Text.Json.Serialization.JsonIgnore] public bool Wrote { get; private set; }
         public IReadOnlyList<SearchDocument> GetSearchDocuments(string stateName) => _inner.GetSearchDocuments(stateName);
-        public SearchDelta GetSearchChanges(string stateName, IHasSearchDocuments? previous) => _inner.GetSearchChanges(stateName, previous);
         public SearchUpdate GetSearchUpdate(string stateName, IReadOnlyDictionary<SearchDocumentKey, string> indexed)
         {
             var update = _inner.GetSearchUpdate(stateName, indexed);

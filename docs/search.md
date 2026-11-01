@@ -25,8 +25,9 @@ Search is on by default. To turn it off:
 ## How queries work
 
 - A query is read as plain words. Quotes, `AND`, `OR`, `NEAR`, `*` and `column:` are just words, never search syntax.
-- Any word may match; hits with more of the words rank higher. A title match counts four times a body match.
-- Hits much weaker than the best one are dropped (under a quarter of its score).
+- Each space-separated chunk is one phrase, so `T-118` matches "T 118" but not a T and a 118 far apart.
+- Every phrase must match. Only when that finds fewer hits than asked for, hits with any of the phrases are added after them.
+- A title match counts four times a body match. Hits much weaker than the best one are dropped (under a quarter of its score).
 - Results are scoped to one repository, plus the asking session's own inbox. They can be narrowed by kind (`task`, `context`, `message`) and by status.
 - Each hit gives the ID, kind, status, date and a short snippet with matches in `[brackets]`. Open it with `task_get`, `context_get` or `check_inbox`.
 

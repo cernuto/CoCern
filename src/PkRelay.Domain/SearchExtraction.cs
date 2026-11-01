@@ -67,31 +67,6 @@ public static class SearchExtraction
     public static SearchUpdate Update(string stateName, string? currentJson, IReadOnlyDictionary<SearchDocumentKey, string> indexed) =>
         Update(stateName, IsIndexed(stateName) ? Parse(currentJson) : null, indexed);
 
-    /// <summary>What changed between two serialized states; see <see cref="Changes(string, JsonObject?, JsonObject?)"/>.</summary>
-    public static SearchDelta Changes(string stateName, string? previousJson, string? currentJson) =>
-        IsIndexed(stateName) ? Changes(stateName, Parse(previousJson), Parse(currentJson)) : SearchDelta.None;
-
-    /// <summary>
-    /// The documents to write and the keys to delete when a grain's state moves from <paramref name="previous"/> to
-    /// <paramref name="current"/>: those whose <see cref="Markers"/> differ, and those whose source is gone. With no readable previous
-    /// state, a cleared state, or a changed repository or owner, the delta is <see cref="SearchDelta.ReplaceAll"/>: delete every row of
-    /// the grain and insert <see cref="SearchDelta.Upserts"/>.
-    /// </summary>
-    public static SearchDelta Changes(string stateName, JsonObject? previous, JsonObject? current)
-    {
-        if (!IsIndexed(stateName)) return SearchDelta.None;
-        if (current is null) return new([], [], ReplaceAll: true);
-        return Guarded(() =>
-        {
-            var repository = Repository(current);
-            if (repository is null) return new SearchDelta([], [], ReplaceAll: true);
-            if (previous is null || Repository(previous) != repository || stateName == AggregateKinds.Session && Text(previous, "sessionId") != Text(current, "sessionId"))
-                return new SearchDelta(Extract(stateName, current), [], ReplaceAll: true);
-            var update = Update(stateName, current, Markers(stateName, previous));
-            return new SearchDelta(update.Upserts.Select(entry => entry.Document).ToArray(), update.Removed, ReplaceAll: false);
-        }, () => new SearchDelta(Extract(stateName, current), [], ReplaceAll: true));
-    }
-
     /// <summary>Whether a field name looks like it holds a credential or token.</summary>
     public static bool IsCredentialName(string name)
     {

@@ -174,82 +174,107 @@ public sealed partial class SqliteStore : IFullTextSearch
     public async Task<IReadOnlyList<SearchHit>> SearchAsync(string repositoryId, string sessionId, string query, IReadOnlyList<string> kinds, int limit,
         string? status = null, CancellationToken ct = default)
     {
-        if (!_searchOptions.Enabled || string.IsNullOrEmpty(repositoryId) || MatchExpression(query) is not { } match) return [];
+        if (!_searchOptions.Enabled || string.IsNullOrEmpty(repositoryId) || Phrases(query) is not { Count: > 0 } phrases) return [];
         limit = Math.Clamp(limit, 1, RelayLimits.MaxSearchResults);
+        var wanted = kinds.Where(kind => SearchKinds.All.Contains(kind)).Distinct(StringComparer.Ordinal).ToArray();
         await _searchGate.WaitAsync(ct);
         try
         {
             if (_searchConnection is not { } connection) return [];
-            using var command = connection.CreateCommand();
-            var sql = new StringBuilder("""
-                SELECT state_name, grain_key, doc_id, kind, status, updated_ticks,
-                       snippet(search_index, 9, '[', ']', '…', 12) AS snip,
-                       bm25(search_index, 0, 0, 0, 0, 0, 0, 0, 0, 4.0, 1.0) AS score
-                FROM search_index
-                WHERE search_index MATCH $match
-                  AND repository_id = $repository
-                  AND (owner_session IS NULL OR owner_session = $session)
-                """);
-            command.Parameters.AddWithValue("$match", match);
-            command.Parameters.AddWithValue("$repository", repositoryId);
-            command.Parameters.AddWithValue("$session", sessionId ?? "");
-            var wanted = kinds.Where(kind => SearchKinds.All.Contains(kind)).Distinct(StringComparer.Ordinal).ToArray();
-            if (wanted.Length > 0)
-            {
-                sql.Append(" AND kind IN (").Append(string.Join(", ", wanted.Select((_, index) => "$kind" + index))).Append(')');
-                for (var index = 0; index < wanted.Length; index++) command.Parameters.AddWithValue("$kind" + index, wanted[index]);
-            }
-            if (!string.IsNullOrEmpty(status))
-            {
-                sql.Append(" AND status = $status");
-                command.Parameters.AddWithValue("$status", status);
-            }
-            sql.Append(" ORDER BY score LIMIT $rows;");
-            command.Parameters.AddWithValue("$rows", RelayLimits.SearchCandidateRows);
-            command.CommandText = sql.ToString();
             var hits = new List<SearchHit>();
             var seen = new HashSet<(string, string, string, string)>();
-            double? best = null;
-            using var reader = await command.ExecuteReaderAsync(ct);
-            while (hits.Count < limit && await reader.ReadAsync(ct))
-            {
-                var score = reader.GetDouble(7);
-                best ??= score;
-                // bm25 scores are negative, and lower is better. Hits far weaker than the best one are noise; rows come best first.
-                if (best < 0 && score > best * RelayLimits.SearchMinRelativeScore) break;
-                var (stateName, grainKey, docId, kind) = (reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3));
-                if (!seen.Add((stateName, grainKey, kind, docId))) continue;
-                hits.Add(new SearchHit(docId, kind, reader.GetString(4), new DateTimeOffset(reader.GetInt64(5), TimeSpan.Zero), reader.GetString(6), BoardId(stateName, grainKey)));
-            }
+            // Every phrase first; only when that finds too few, any phrase, appended after the stronger hits.
+            await ReadHitsAsync(connection, MatchAll(phrases), repositoryId, sessionId, wanted, status, limit, hits, seen, ct);
+            if (hits.Count < limit && phrases.Count > 1)
+                await ReadHitsAsync(connection, MatchAny(phrases), repositoryId, sessionId, wanted, status, limit, hits, seen, ct);
             return hits;
         }
         finally { _searchGate.Release(); }
     }
 
-    /// <summary>
-    /// The query as FTS5 text: its words, each quoted, any of which may match (bm25 ranks hits with more of them first). Only letters
-    /// and digits survive, so operators (<c>AND</c>, <c>NEAR</c>), quotes, prefixes and column filters in user input are plain words.
-    /// Null when the query has no words.
-    /// </summary>
-    internal static string? MatchExpression(string? query)
+    /// <summary>Appends the best hits for one match expression until <paramref name="limit"/>, skipping weak hits and ones already found.</summary>
+    private static async Task ReadHitsAsync(SqliteConnection connection, string match, string repositoryId, string? sessionId, string[] kinds, string? status, int limit,
+        List<SearchHit> hits, HashSet<(string, string, string, string)> seen, CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(query)) return null;
-        var terms = new List<string>();
-        var term = new StringBuilder();
-        void Flush()
+        using var command = connection.CreateCommand();
+        var sql = new StringBuilder("""
+            SELECT state_name, grain_key, doc_id, kind, status, updated_ticks,
+                   snippet(search_index, 9, '[', ']', '…', 12) AS snip,
+                   bm25(search_index, 0, 0, 0, 0, 0, 0, 0, 0, 4.0, 1.0) AS score
+            FROM search_index
+            WHERE search_index MATCH $match
+              AND repository_id = $repository
+              AND (owner_session IS NULL OR owner_session = $session)
+            """);
+        command.Parameters.AddWithValue("$match", match);
+        command.Parameters.AddWithValue("$repository", repositoryId);
+        command.Parameters.AddWithValue("$session", sessionId ?? "");
+        if (kinds.Length > 0)
         {
-            if (term.Length > 0 && !terms.Contains(term.ToString(), StringComparer.OrdinalIgnoreCase)) terms.Add(term.ToString());
-            term.Clear();
+            sql.Append(" AND kind IN (").Append(string.Join(", ", kinds.Select((_, index) => "$kind" + index))).Append(')');
+            for (var index = 0; index < kinds.Length; index++) command.Parameters.AddWithValue("$kind" + index, kinds[index]);
         }
-        foreach (var rune in query.EnumerateRunes())
+        if (!string.IsNullOrEmpty(status))
         {
-            if (Rune.IsLetterOrDigit(rune)) term.Append(rune.ToString());
-            else Flush();
-            if (terms.Count >= RelayLimits.MaxSearchQueryTerms) break;
+            sql.Append(" AND status = $status");
+            command.Parameters.AddWithValue("$status", status);
         }
-        Flush();
-        return terms.Count == 0 ? null : string.Join(" OR ", terms.Take(RelayLimits.MaxSearchQueryTerms).Select(word => "\"" + word + "\""));
+        sql.Append(" ORDER BY score LIMIT $rows;");
+        command.Parameters.AddWithValue("$rows", RelayLimits.SearchCandidateRows);
+        command.CommandText = sql.ToString();
+        double? best = null;
+        using var reader = await command.ExecuteReaderAsync(ct);
+        while (hits.Count < limit && await reader.ReadAsync(ct))
+        {
+            var score = reader.GetDouble(7);
+            best ??= score;
+            // bm25 scores are negative, and lower is better. Hits far weaker than this query's best one are noise; rows come best first.
+            if (best < 0 && score > best * RelayLimits.SearchMinRelativeScore) break;
+            var (stateName, grainKey, docId, kind) = (reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3));
+            // Each (grain, kind, doc_id) has one row, so this only drops what the AND pass already returned when the OR pass runs.
+            if (!seen.Add((stateName, grainKey, kind, docId))) continue;
+            hits.Add(new SearchHit(docId, kind, reader.GetString(4), new DateTimeOffset(reader.GetInt64(5), TimeSpan.Zero), reader.GetString(6), BoardId(stateName, grainKey)));
+        }
     }
+
+    /// <summary>
+    /// The query's phrases: each whitespace-separated chunk, reduced to its runs of letters and digits, so <c>T-118</c> is the phrase
+    /// <c>T 118</c> and <c>title:x</c> is <c>title x</c>. Only letters and digits survive, so operators (<c>AND</c>, <c>NEAR</c>), quotes,
+    /// prefixes and column filters in user input are plain words. Repeated phrases are dropped (ignoring case), and at most
+    /// <see cref="RelayLimits.MaxSearchQueryTerms"/> words are kept in all.
+    /// </summary>
+    internal static IReadOnlyList<string> Phrases(string? query)
+    {
+        var phrases = new List<string>();
+        if (string.IsNullOrWhiteSpace(query)) return phrases;
+        var words = 0;
+        foreach (var chunk in query.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
+        {
+            var parts = new List<string>();
+            var word = new StringBuilder();
+            foreach (var rune in chunk.EnumerateRunes())
+            {
+                if (Rune.IsLetterOrDigit(rune)) { word.Append(rune.ToString()); continue; }
+                if (word.Length > 0) { parts.Add(word.ToString()); word.Clear(); }
+            }
+            if (word.Length > 0) parts.Add(word.ToString());
+            parts = parts.Take(RelayLimits.MaxSearchQueryTerms - words).ToList();
+            if (parts.Count == 0) continue;
+            var phrase = string.Join(' ', parts);
+            if (!phrases.Contains(phrase, StringComparer.OrdinalIgnoreCase)) { phrases.Add(phrase); words += parts.Count; }
+            if (words >= RelayLimits.MaxSearchQueryTerms) break;
+        }
+        return phrases;
+    }
+
+    /// <summary>FTS5 text matching every phrase (quoted phrases side by side are an implicit AND).</summary>
+    internal static string MatchAll(IReadOnlyList<string> phrases) => string.Join(" ", phrases.Select(Quote));
+
+    /// <summary>FTS5 text matching any phrase; bm25 ranks documents with more of them first.</summary>
+    internal static string MatchAny(IReadOnlyList<string> phrases) => string.Join(" OR ", phrases.Select(Quote));
+
+    // A phrase holds only letters, digits and single spaces, so quoting it needs no escaping.
+    private static string Quote(string phrase) => "\"" + phrase + "\"";
 
     /// <summary>The board of a board hit when it is not <c>default</c>. Board grain keys are <c>escaped-repository/escaped-board</c>.</summary>
     private static string? BoardId(string stateName, string grainKey)
