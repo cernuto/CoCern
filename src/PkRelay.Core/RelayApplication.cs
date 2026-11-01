@@ -69,7 +69,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
             if (tool is RelayTools.TaskClaim or RelayTools.ClaimAcquire or RelayTools.ActionBegin && await PausedAsync(trusted, args) is { } paused) return paused;
             var result = await DispatchAsync(trusted, tool, args, session);
             if (result.Ok) result = await PiggybackAsync(trusted, args, result);
-            if (result.Ok && tool == RelayTools.TaskUpdate && args["includeNextWork"]?.GetValue<bool>() == true) result = await WithNextWorkAsync(trusted, args, result);
+            if (result.Ok && tool == RelayTools.TaskUpdate && args["includeNextWork"]?.GetValue<bool>() == true) result = await WithNextWorkAsync(trusted, args, session, result);
             return BoundWire(result);
         }
         catch (ArgumentException) { return Error(InvalidArguments); }
@@ -247,7 +247,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
     }
 
     /// <summary>Adds an advisory next-work offer to a committed milestone. The milestone stands whatever the offer's outcome.</summary>
-    private async Task<RelayReply> WithNextWorkAsync(RelayCaller caller, JsonObject args, RelayReply committed)
+    private async Task<RelayReply> WithNextWorkAsync(RelayCaller caller, JsonObject args, JsonObject? session, RelayReply committed)
     {
         JsonNode next;
         try
@@ -260,7 +260,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
                 var read = args.DeepClone().AsObject(); read.Remove("requestId"); read.Remove("busyResources"); read["limit"] = RelayLimits.NextWorkCandidates;
                 var offered = await CallBoard(caller, Operations.NextWork, read);
                 var offer = offered.Ok ? Parse(offered) : null;
-                var busy = offer?["candidates"] is JsonArray candidates ? await BusyResourcesAsync(caller, args, candidates) : [];
+                var busy = offer?["candidates"] is JsonArray candidates ? await BusyResourcesAsync(caller, args, session, candidates) : [];
                 if (busy.Count > 0)
                 {
                     // Ask again so that, within equal priority, a task whose listed resources are all free is offered first.
@@ -281,18 +281,20 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
     /// The candidates' listed resources that another session holds now, in their listed spelling. At most
     /// <see cref="RelayLimits.MaxOfferResourceLookups"/> are looked up; unknown or unchecked resources count as free. Advisory only.
     /// </summary>
-    private async Task<List<string>> BusyResourcesAsync(RelayCaller caller, JsonObject args, JsonArray candidates)
+    private async Task<List<string>> BusyResourcesAsync(RelayCaller caller, JsonObject args, JsonObject? session, JsonArray candidates)
     {
         try
         {
             var listed = candidates.SelectMany(candidate => Strings(candidate?["resources"])).Distinct(StringComparer.Ordinal).Take(RelayLimits.MaxOfferResourceLookups).ToArray();
             if (listed.Length == 0) return [];
-            var lookup = new JsonObject { ["repositoryId"] = Text(args, "repositoryId"), ["sessionId"] = Text(args, "sessionId"), ["machineId"] = Text(args, "machineId") };
+            var lookup = new JsonObject { ["repositoryId"] = Text(args, "repositoryId"), ["sessionId"] = Text(args, "sessionId"), ["machineId"] = session is null ? "" : Text(session, "machineId") };
+            var resolve = lookup.DeepClone().AsObject(); resolve["resourceIds"] = JsonSerializer.SerializeToNode(listed);
+            var resolved = await CallControl(caller, Operations.ResolveAll, resolve);
+            if (!resolved.Ok || Parse(resolved)["resolved"] is not JsonObject canonical) return [];
             async Task<bool> IsBusy(string resource)
             {
-                var resolved = await Resolve(caller, lookup, resource);
-                if (!resolved.Ok) return false;
-                var claim = await Call(AggregateKinds.Lock, Text(Parse(resolved), "resourceId"), caller, Operations.ClaimState, lookup);
+                if (canonical[resource] is not JsonValue id) return false;
+                var claim = await Call(AggregateKinds.Lock, id.GetValue<string>(), caller, Operations.ClaimState, lookup);
                 return claim.Ok && Parse(claim)["busy"]?.GetValue<bool>() == true;
             }
             var busy = await Task.WhenAll(listed.Select(IsBusy));

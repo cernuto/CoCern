@@ -49,10 +49,13 @@ public sealed class ContractsTests
         var strict = RelayToolCatalog.InputSchema(update).GetProperty("properties").GetProperty("workflow").GetProperty("properties");
         Assert.Equal(RelayLimits.MaxDependencies, strict.GetProperty("dependsOn").GetProperty("maxItems").GetInt32());
         Assert.Equal(RelayLimits.MaxClaimResources, strict.GetProperty("packet").GetProperty("properties").GetProperty("resources").GetProperty("maxItems").GetInt32());
-        // The forwarding schema names both fields so agents can find them; the hub validates them.
+        // The forwarding schema gives both fields as compact string arrays; the hub validates the limits.
         var forwarding = RelayToolCatalog.ForwardingSchema(update).GetProperty("properties").GetProperty("workflow").GetProperty("properties");
-        Assert.True(forwarding.TryGetProperty("dependsOn", out _));
-        Assert.True(forwarding.GetProperty("packet").GetProperty("properties").TryGetProperty("resources", out _));
+        foreach (var field in new[] { forwarding.GetProperty("dependsOn"), forwarding.GetProperty("packet").GetProperty("properties").GetProperty("resources") })
+        {
+            Assert.Equal("array", field.GetProperty("type").GetString());
+            Assert.Equal("string", field.GetProperty("items").GetProperty("type").GetString());
+        }
     }
 
     [Fact]

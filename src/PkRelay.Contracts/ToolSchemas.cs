@@ -28,7 +28,7 @@ internal static class ToolSchemas
         // Only the milestone call advertises a compact usage entry: adding it to action_report too would exceed the 20,000-character
         // forwarding budget (20,034). The hub still accepts usage on action_report, and InputSchema lists it there in full.
         if (properties.ContainsKey("usage")) properties["usage"] = new { type = "object", description = "Optional {inputTokens,outputTokens}." };
-        // The same budget leaves room only for the names of workflow dependsOn and packet.resources; InputSchema describes them in full.
+        // The same budget leaves room only for typed names of workflow dependsOn and packet.resources; InputSchema describes them in full.
         if (properties.ContainsKey("workflow")) properties["workflow"] = WorkflowSchema(compact: true);
         return properties;
     }
@@ -37,11 +37,11 @@ internal static class ToolSchemas
     {
         var properties = new Dictionary<string, object>
         {
-            ["repositoryId"] = new { type = "string", maxLength = RelayLimits.MaxIdentifierLength, description = "Authorized repository identity." },
+            ["repositoryId"] = new { type = "string", maxLength = RelayLimits.MaxIdentifierLength, description = "Authorized repository ID." },
             ["boardId"] = new { type = "string", maxLength = RelayLimits.MaxIdentifierLength },
             ["sessionId"] = new { type = "string", maxLength = RelayLimits.MaxIdentifierLength, description = "This chat's session ID." },
             ["sessionToken"] = new { type = "string", maxLength = RelayLimits.MaxIdentifierLength, description = "Private session secret; never put in shared notes." },
-            ["requestId"] = new { type = "string", maxLength = RelayLimits.MaxIdentifierLength, description = "Stable mutation request identity for reconciliation/retry." },
+            ["requestId"] = new { type = "string", maxLength = RelayLimits.MaxIdentifierLength, description = "Stable request ID; reuse it when retrying." },
             ["expectedVersion"] = new { type = "integer", minimum = 0 },
             ["taskId"] = new { type = "string" },
             ["resourceId"] = new { type = "string" },
@@ -65,16 +65,16 @@ internal static class ToolSchemas
             case RelayTools.TaskGet:
                 properties["taskId"] = new { type = "string", maxLength = RelayLimits.MaxIdentifierLength, description = "Omit for a bounded board list or delta." };
                 properties["section"] = new { type = "string", @enum = new[] { "facts", "messages", "reports", "actions", "workflow" } };
-                Integer("sinceRevision", "Board-list delta checkpoint; omit taskId. Save the returned snapshotRevision only after all pages.");
-                Integer("snapshotRevision", "Pinned revision returned by the first delta page. A concurrent task change returns DeltaRestartRequired.");
-                properties["cursor"] = new { type = "integer", minimum = 0, description = "Numeric continuation returned by a bounded list; retain the same delta checkpoint and snapshot revision." };
+                Integer("sinceRevision", "Board delta checkpoint; omit taskId. Save snapshotRevision only after all pages.");
+                Integer("snapshotRevision", "Pinned revision from the first delta page; a concurrent change returns DeltaRestartRequired.");
+                properties["cursor"] = new { type = "integer", minimum = 0, description = "Continuation from a bounded list; keep the same sinceRevision and snapshotRevision." };
                 Text("factKey", "Optional selected task fact key."); break;
             case RelayTools.TaskUpdate:
                 Object("patch", "Shared task facts; cannot overwrite coordination ownership/version internals.");
                 properties["notes"] = new { description = "Bounded authored task notes, at most 16 KiB with task patch." };
                 Text("message", "Task conversation message committed with this milestone."); Array("actionReports", "Reported action results committed atomically with this milestone.");
                 properties["workflow"] = WorkflowSchema();
-                properties["includeNextWork"] = new { type = "boolean", description = "After committing the milestone, include an independent advisory nextWork result. An offer acquires no claim and authorizes no execution." };
+                properties["includeNextWork"] = new { type = "boolean", description = "Also return an advisory nextWork offer; it acquires no claim and authorizes no execution." };
                 properties["usage"] = UsageSchema();
                 break;
             case RelayTools.TaskClaim:
@@ -98,8 +98,8 @@ internal static class ToolSchemas
                 Text("text", "Message text, at most 8 KiB. Supply taskId for shared conversation, otherwise recipientSessionId for private delivery.");
                 Text("replyTo", "Optional ID of the message this replies to.");
                 properties["ackMessageIds"] = new { type = "array", items = new { type = "string" }, maxItems = RelayLimits.MaxAcknowledgedMessages, description = "Inbox message IDs this reply handles; acknowledged in the same call." };
-                properties["supersede"] = new { type = "boolean", description = "For repeated status/heartbeat messages: replaces your earlier unread superseding message to this recipient." };
-                properties["wake"] = new { type = "boolean", description = "false for status/FYI needing no prompt action: stored, read at the recipient's next wake, never wakes it." }; break;
+                properties["supersede"] = new { type = "boolean", description = "For repeated status or heartbeats: replaces your earlier unread superseding message to this recipient." };
+                properties["wake"] = new { type = "boolean", description = "false for status/FYI needing no action now: stored and read at the next wake, never wakes the recipient." }; break;
             case RelayTools.Ack:
                 Text("messageId", "One explicitly handled inbox message ID."); properties["messageIds"] = new { type = "array", items = new { type = "string" }, maxItems = RelayLimits.MaxAcknowledgedMessages }; break;
             case RelayTools.ContextGet: Text("contextId", "Selected shared context ID; omit for a bounded listing."); break;
@@ -122,18 +122,18 @@ internal static class ToolSchemas
     {
         static object Text(int maximum, string description) => new { type = "string", minLength = 1, maxLength = maximum, description };
         static object OptionalText(int maximum, string description) => new { type = new[] { "string", "null" }, minLength = 1, maxLength = maximum, description };
-        object Identifiers(int maximum, string description) => compact ? new { } : (object)new { type = new[] { "array", "null" }, items = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxIdentifierLength }, maxItems = maximum, uniqueItems = true, description };
+        object Identifiers(int maximum, string description) => compact ? new { type = "array", items = new { type = "string" } } : (object)new { type = new[] { "array", "null" }, items = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxIdentifierLength }, maxItems = maximum, uniqueItems = true, description };
         return new
         {
             type = "object",
-            description = "Optional full structured workflow, at most 12288 UTF-8 serialized bytes. Reported evidence only; completion requires every criterion passed with evidence and no unresolved action/restoration. A blocked-to-ready update requires recheckEvidenceRef.",
+            description = "Optional structured workflow, at most 12288 UTF-8 bytes. Reported evidence only; completed needs every criterion passed with evidence and no unresolved action or restoration. Blocked to ready needs recheckEvidenceRef.",
             properties = new
             {
                 state = new { type = "string", @enum = new[] { "ready", "blocked", "completed" } },
                 packet = new
                 {
                     type = "object",
-                    properties = new { goal = Text(2048, "Useful completion goal."), target = Text(2048, "Source, workspace or fixture identity."), authorityRef = Text(2048, "Reference to existing human authority; grants no permission."), restoration = Text(2048, "Restoration expectation; actual action restoration remains in action reports."), stopCondition = Text(2048, "Condition requiring the participant to stop."), resources = Identifiers(RelayLimits.MaxClaimResources, "Resource IDs this task expects to claim.") },
+                    properties = new { goal = Text(2048, "Useful completion goal."), target = Text(2048, "Source, workspace or fixture identity."), authorityRef = Text(2048, "Reference to existing human authority; grants no permission."), restoration = Text(2048, "Expected restoration; actual restoration stays in action reports."), stopCondition = Text(2048, "Condition requiring the participant to stop."), resources = Identifiers(RelayLimits.MaxClaimResources, "Resource IDs this task expects to claim.") },
                     required = new[] { "goal", "target", "authorityRef", "restoration", "stopCondition" }
                 },
                 criteria = new
@@ -147,8 +147,8 @@ internal static class ToolSchemas
                     items = new { type = "object", properties = new { id = Text(128, "Unique blocker ID."), kind = new { type = "string", @enum = new[] { "coordinator_hold", "provider_rejection", "tool_unavailable", "resource_busy", "missing_fixture", "prerequisite", "other" } }, summary = Text(2048, "Current blocking condition."), recheckCondition = Text(2048, "Evidence needed before clearing the blocker.") }, required = new[] { "id", "kind", "summary", "recheckCondition" } }
                 },
                 targetSessionId = OptionalText(256, "Optional intended worker session ID; never its private token."),
-                priority = new { type = new[] { "integer", "null" }, minimum = -1000, maximum = 1000, description = "Higher is offered first; ties prefer free resources, then task ID." },
-                recheckEvidenceRef = OptionalText(2048, "Nonempty reference required when explicitly changing blocked to ready. Existing human authority may resolve a coordinator hold; provider approval remains separate."),
+                priority = new { type = new[] { "integer", "null" }, minimum = -1000, maximum = 1000, description = "Higher is offered first." },
+                recheckEvidenceRef = OptionalText(2048, "Nonempty reference required when explicitly changing blocked to ready."),
                 dependsOn = Identifiers(RelayLimits.MaxDependencies, "Task IDs on this board that must be completed before this task is offered.")
             },
             required = new[] { "state", "packet", "criteria", "blockers" }

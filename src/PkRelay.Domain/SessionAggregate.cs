@@ -80,6 +80,8 @@ internal static class SessionAggregate
         };
         // The role reported at session_open labels this session's activity; only the hub's internal verification sees it.
         if (context.Operation == Operations.Verify && Text(state, "role") is { Length: > 0 } role) description["role"] = role;
+        // The machine given at session_open resolves this session's resource aliases (next-work lookups); also internal only.
+        if (context.Operation == Operations.Verify && Text(state, "machineId") is { Length: > 0 } machine) description["machineId"] = machine;
         return Ok(description);
     }
 

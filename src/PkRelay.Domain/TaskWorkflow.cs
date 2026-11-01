@@ -71,8 +71,15 @@ internal static class TaskWorkflow
         return items.All(item => item is JsonValue value && value.TryGetValue<string>(out var id) && !string.IsNullOrWhiteSpace(id) && id.Length <= RelayLimits.MaxIdentifierLength && seen.Add(id));
     }
 
-    public static IEnumerable<string> Dependencies(JsonObject workflow) => Strings(workflow["dependsOn"]);
-    public static IEnumerable<string> Resources(JsonObject workflow) => workflow["packet"] is JsonObject packet ? Strings(packet["resources"]) : [];
+    /// <summary>
+    /// A workflow's dependencies, or none when <c>dependsOn</c> is not an array of strings. Boards always accepted unknown workflow fields,
+    /// so a stored legacy value of another shape is skipped here rather than failing every later write; it still fails <see cref="Validate"/>.
+    /// </summary>
+    public static IEnumerable<string> Dependencies(JsonObject workflow) => StringList(workflow["dependsOn"]);
+    public static IEnumerable<string> Resources(JsonObject workflow) => workflow["packet"] is JsonObject packet ? StringList(packet["resources"]) : [];
+
+    private static IEnumerable<string> StringList(JsonNode? node) =>
+        node is JsonArray items && items.All(item => item is JsonValue value && value.GetValueKind() == JsonValueKind.String) ? items.Select(item => item!.GetValue<string>()) : [];
 
     /// <summary>The board setting that refuses <c>ready</c> without <c>packet.resources</c>. Off unless set; build step 3's <c>standing_put</c> writes it.</summary>
     public static bool RequiresResources(JsonObject board) => board["standing"]?["settings"]?["requireResources"] is JsonValue value && value.TryGetValue<bool>(out var required) && required;

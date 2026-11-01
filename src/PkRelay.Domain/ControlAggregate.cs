@@ -25,6 +25,7 @@ internal static class ControlAggregate
             RelayTools.WorkerList => ListWorkers(context),
             RelayTools.GetStatus => Status(context),
             Operations.Resolve => ResolveResource(context),
+            Operations.ResolveAll => ResolveAll(context),
             Operations.SessionOwners => OwnedSessions(context),
             RelayTools.ControlRequest => Control(context),
             _ => Error(UnknownTool)
@@ -106,13 +107,24 @@ internal static class ControlAggregate
     }
 
     /// <summary>Maps a resource ID or a machine-scoped alias to its canonical registered resource.</summary>
-    private static RelayReply ResolveResource(AggregateContext context)
+    private static RelayReply ResolveResource(AggregateContext context) =>
+        Find(context, Required(context.Args, "resourceId")) is { } resolved ? Ok(resolved) : Error(ResourceUnknown);
+
+    /// <summary>Read-only: the canonical ID of each named resource this repository registered, in one call. Unknown names are left out.</summary>
+    private static RelayReply ResolveAll(AggregateContext context)
+    {
+        var resolved = new JsonObject();
+        foreach (var id in Strings(context.Args["resourceIds"]).Distinct(StringComparer.Ordinal).Take(RelayLimits.MaxOfferResourceLookups))
+            if (Find(context, id) is { } resource) resolved[id] = Text(resource, "resourceId");
+        return Ok(new { resolved });
+    }
+
+    private static JsonObject? Find(AggregateContext context, string id)
     {
         var resources = ObjectAt(context.State, "resources");
-        var id = Required(context.Args, "resourceId");
         var resolved = resources[id] as JsonObject;
         if (resolved is null && ObjectAt(context.State, "aliases")[AliasKey(Text(context.Args, "machineId"), id)] is JsonValue alias) resolved = resources[alias.GetValue<string>()] as JsonObject;
-        return resolved is null || Text(resolved, "repositoryId") != context.Repository ? Error(ResourceUnknown) : Ok(resolved);
+        return resolved is null || Text(resolved, "repositoryId") != context.Repository ? null : resolved;
     }
 
     private static RelayReply Control(AggregateContext context)

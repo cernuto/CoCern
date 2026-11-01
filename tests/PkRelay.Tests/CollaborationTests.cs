@@ -323,9 +323,11 @@ public sealed class CollaborationTests
             args["repositoryId"] = "repo"; args["requestId"] = Guid.NewGuid().ToString("N");
             return await app.ExecuteAsync(Caller with { IsInternal = false }, tool, JsonSerializer.SerializeToElement(args));
         }
-        var worker = Data(await Invoke("session_open", new())); var holder = Data(await Invoke("session_open", new()));
-        JsonObject For(JsonObject session) => new() { ["sessionId"] = session["sessionId"]!.DeepClone(), ["sessionToken"] = session["sessionToken"]!.DeepClone(), ["machineId"] = "pc" };
-        foreach (var resource in new[] { "held", "free" }) Assert.True((await Invoke("control_request", new() { ["command"] = "register_resource", ["resourceId"] = resource, ["machineId"] = "pc" })).Ok);
+        // The worker's session is on machine "pc", where "bench" is an alias of "held"; its task_update names another machine.
+        var worker = Data(await Invoke("session_open", new() { ["machineId"] = "pc" })); var holder = Data(await Invoke("session_open", new() { ["machineId"] = "pc" }));
+        JsonObject For(JsonObject session) => new() { ["sessionId"] = session["sessionId"]!.DeepClone(), ["sessionToken"] = session["sessionToken"]!.DeepClone(), ["machineId"] = "elsewhere" };
+        Assert.True((await Invoke("control_request", new() { ["command"] = "register_resource", ["resourceId"] = "held", ["aliases"] = new JsonArray("bench"), ["machineId"] = "pc" })).Ok);
+        Assert.True((await Invoke("control_request", new() { ["command"] = "register_resource", ["resourceId"] = "free", ["machineId"] = "pc" })).Ok);
         var hold = For(holder); hold["resourceId"] = "held";
         var grant = Data(await Invoke("claim_acquire", hold));
         async Task Create(string id, JsonObject? workflow)
@@ -335,17 +337,19 @@ public sealed class CollaborationTests
             Assert.True((await Invoke("task_update", args)).Ok);
         }
         await Create("current", null);
-        await Create("a", WithResources(5, "held"));
+        await Create("a", WithResources(5, "bench"));
         await Create("b", WithResources(5, "free"));
         await Create("c", WithResources(1));
         var milestone = For(worker); milestone["taskId"] = "current"; milestone["expectedVersion"] = 1; milestone["includeNextWork"] = true;
-        var lookups = ((LockCountingFactory)(object)factory).Lookups;
+        var counter = (LockCountingFactory)(object)factory;
+        var (lookups, resolves, batches) = (counter.Lookups, counter.Resolves, counter.BatchResolves);
         var reply = await Invoke("task_update", milestone);
         var next = Data(reply)["nextWork"]!;
         Assert.Equal("b", next["offer"]!["taskId"]!.GetValue<string>());
         Assert.True(next["offer"]!["claimRequired"]!.GetValue<bool>());
         Assert.Null(next["candidates"]);
-        Assert.Equal(2, ((LockCountingFactory)(object)factory).Lookups - lookups);
+        Assert.Equal(2, counter.Lookups - lookups);
+        Assert.Equal((0, 1), (counter.Resolves - resolves, counter.BatchResolves - batches));
         Assert.Null(Data(await Invoke("task_get", new() { ["taskId"] = "b" }))["owner"]);
 
         // Once the resource is free again, task ID breaks the tie as before.
@@ -385,23 +389,32 @@ public sealed class CollaborationTests
         Assert.Equal(32, ((LockCountingFactory)(object)factory).Lookups);
     }
 
+    /// <summary>Counts lock claim-state lookups and control resolves, single and batched.</summary>
     public class LockCountingFactory : CoordinationTests.TestGrainFactory
     {
-        private int lookups;
+        private int lookups, resolves, batchResolves;
         public int Lookups => Volatile.Read(ref lookups);
-        internal void Count() => Interlocked.Increment(ref lookups);
+        public int Resolves => Volatile.Read(ref resolves);
+        public int BatchResolves => Volatile.Read(ref batchResolves);
+        internal void Count(string operation)
+        {
+            if (operation == Operations.ClaimState) Interlocked.Increment(ref lookups);
+            else if (operation == Operations.Resolve) Interlocked.Increment(ref resolves);
+            else if (operation == Operations.ResolveAll) Interlocked.Increment(ref batchResolves);
+        }
         protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
         {
             var grain = base.Invoke(targetMethod, args);
-            return targetMethod!.GetGenericArguments()[0] == typeof(ILockGrain) ? new CountingLock((ILockGrain)grain!, this) : grain;
+            var type = targetMethod!.GetGenericArguments()[0];
+            return type == typeof(ILockGrain) || type == typeof(IControlGrain) ? new CountingGrain((IRelayAggregateGrain)grain!, this) : grain;
         }
     }
 
-    private sealed class CountingLock(ILockGrain inner, LockCountingFactory owner) : ILockGrain
+    private sealed class CountingGrain(IRelayAggregateGrain inner, LockCountingFactory owner) : ILockGrain, IControlGrain
     {
         public Task<RelayReply> ExecuteAsync(RelayCaller caller, string operation, string argumentsJson)
         {
-            if (operation == Operations.ClaimState) owner.Count();
+            owner.Count(operation);
             return inner.ExecuteAsync(caller, operation, argumentsJson);
         }
     }

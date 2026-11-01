@@ -59,6 +59,8 @@ public static class Operations
     public const string Register = "__register";
     public const string Deliver = "__deliver";
     public const string Resolve = "__resolve";
+    /// <summary>Read-only: resolves several resource names in one control call.</summary>
+    public const string ResolveAll = "__resolve_all";
     public const string Block = "__block";
     public const string Unblock = "__unblock";
     public const string Dispatch = "__dispatch";

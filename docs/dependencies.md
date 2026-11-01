@@ -17,6 +17,7 @@ Add `dependsOn` to a task's `workflow` in `task_update`:
 - A task is offered only when all its dependencies are done. You can still claim it directly.
 - The hub refuses a write that names an unknown task (`DependencyUnknown`) or makes a cycle anywhere on the board (`DependencyCycle`).
 - Dependencies on another board are not supported. Use a `prerequisite` blocker for those.
+- A `dependsOn` written before this check existed that names unknown or duplicate IDs keeps its task out of offers until it is fixed.
 
 When a task's workflow becomes `completed`, the `task_update` reply lists the ready tasks it unblocked:
 
@@ -34,7 +35,7 @@ Add `resources` to the workflow `packet` with the resource IDs the task expects 
 "packet": { "goal": "...", "target": "...", "authorityRef": "...", "restoration": "...", "stopCondition": "...", "resources": ["rig-1"] }
 ```
 
-With `includeNextWork: true`, the hub takes the top 5 offerable tasks, checks which of their listed resources another session holds right now (at most 32 lookups per offer), and ranks again. Priority still comes first. Within equal priority, a task whose resources are all free comes before one waiting on a busy resource, then task ID as before. Resources it cannot find or did not check count as free.
+With `includeNextWork: true`, the hub takes the top 5 offerable tasks, resolves their listed resources with your session's machine, checks which ones another session holds right now (at most 32 lookups per offer), and ranks again. Priority still comes first. Within equal priority, a task whose resources are all free comes before one waiting on a busy resource, then task ID as before. Resources it cannot find or did not check count as free.
 
 The offer is still advisory. It reserves nothing, and you still call `task_claim` with the resources.
 

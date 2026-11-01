@@ -519,6 +519,31 @@ public sealed class CoordinationTests
         Assert.Equal("c", Offered("worker-c"));
     }
 
+    [Fact]
+    public void Legacy_dependsOn_of_another_shape_is_skipped_and_never_breaks_writes_or_completion()
+    {
+        // Boards always accepted unknown workflow fields, so a stored dependsOn may hold any JSON.
+        var odd = new JsonNode?[] { JsonValue.Create("a"), new JsonArray(1, 2), new JsonArray(new JsonObject { ["id"] = "a" }), new JsonArray("a", null) };
+        var tasks = new JsonObject();
+        for (var i = 0; i < odd.Length; i++)
+        {
+            var workflow = DependentWorkflow("ready"); workflow["dependsOn"] = odd[i]; workflow["packet"]!["resources"] = odd[i]?.DeepClone();
+            tasks["legacy" + i] = new JsonObject { ["taskId"] = "legacy" + i, ["version"] = 1, ["changeRevision"] = i + 1, ["actions"] = new JsonObject(), ["workflow"] = workflow };
+        }
+        var state = new StateEnvelope<CoordinationDocument> { Value = new() { Json = new JsonObject { ["repositoryId"] = "repo", ["taskRevision"] = odd.Length, ["tasks"] = tasks }.ToJsonString() } };
+        Assert.True(WriteWorkflow(state, "a", 0, DependentWorkflow("ready")).Ok);
+        // A new dependency walks through the legacy tasks without failing.
+        Assert.True(WriteWorkflow(state, "b", 0, DependentWorkflow("ready", "a", "legacy0", "legacy1", "legacy2", "legacy3")).Ok);
+        Assert.True(WriteWorkflow(state, "c", 0, DependentWorkflow("ready", "a")).Ok);
+        var completed = WriteWorkflow(state, "a", 1, DependentWorkflow("completed"));
+        Assert.True(completed.Ok, completed.Code);
+        Assert.Equal(["c"], Data(completed)["unblocked"]!.AsArray().Select(x => x!.GetValue<string>()));
+        // The legacy tasks fail validation and stay out of offers; b waits on them.
+        var next = Data(Call(state, "board", "__next_work", new() { ["sessionId"] = "worker", ["limit"] = RelayLimits.NextWorkCandidates, ["busyResources"] = new JsonArray("a") }));
+        Assert.Equal("c", next["offer"]!["taskId"]!.GetValue<string>());
+        Assert.Single(next["candidates"]!.AsArray());
+    }
+
     public class TestGrainFactory : DispatchProxy
     {
         private readonly Dictionary<string, TestAggregate> aggregates = [];
