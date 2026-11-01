@@ -107,6 +107,7 @@ public sealed class DocCacheTool(IGrainFactory grains, ITokenCounter tokens, IDo
                 DocSyncError.RateLimited => Error(RateLimited, new { retryAfterSeconds = exception.RetryAfterSeconds }),
                 DocSyncError.UnknownBranch => Error(InvalidArguments, new { field = "branch", message = exception.Message }),
                 DocSyncError.NotConfigured => NotConfigured(),
+                DocSyncError.RequestConflict => Error(RequestConflict, new { message = exception.Message }),
                 _ => Error(Unavailable, new { message = exception.Message })
             };
         }

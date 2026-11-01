@@ -355,29 +355,31 @@ internal sealed class DocSyncRunner(DocCacheSettings settings, GitCli git, IGrai
 {
     private readonly ConcurrentDictionary<string, SemaphoreSlim> locks = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, long> lastManual = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, Lazy<Task<DocSyncOutcome>>> requests = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, (string? Branch, Lazy<Task<DocSyncOutcome>> Run)> requests = new(StringComparer.Ordinal);
     private readonly ConcurrentQueue<string> requestOrder = new();
     private const int RememberedRequests = 64;
 
     /// <summary>
-    /// <c>doc_sync</c>: a retry with the same requestId gets the first run's outcome (even while it runs), never a second run or the
-    /// rate limit. A failed run is forgotten, so its retry runs again.
+    /// <c>doc_sync</c>: a retry with the same requestId (per repository) gets the first run's outcome (even while it runs), never a second
+    /// run or the rate limit; the same requestId with another branch is a conflict. The shared run ignores each caller's cancellation, so
+    /// one caller giving up never fails the retries. A failed run is forgotten, so its retry runs again.
     /// </summary>
     public async Task<DocSyncOutcome> SyncNowAsync(string repositoryId, string? branch, string requestId, CancellationToken cancellationToken = default)
     {
         if (settings.Find(repositoryId) is null) throw new DocSyncException(DocSyncError.NotConfigured, "No docs are configured for this repository.");
         if (branch is not null && !DocGlob.SafeRef(branch)) throw new DocSyncException(DocSyncError.UnknownBranch, "The branch name is not valid.");
-        var key = repositoryId + "\n" + (branch ?? "") + "\n" + requestId;
-        var run = new Lazy<Task<DocSyncOutcome>>(() => RateLimitedAsync(repositoryId, branch, cancellationToken));
+        var key = repositoryId + "\n" + requestId;
+        var run = new Lazy<Task<DocSyncOutcome>>(() => RateLimitedAsync(repositoryId, branch, CancellationToken.None));
         // Only the stored entry is ever started, so two calls with one requestId run once.
-        var stored = requests.GetOrAdd(key, run);
-        if (ReferenceEquals(stored, run))
+        var stored = requests.GetOrAdd(key, (branch, run));
+        if (ReferenceEquals(stored.Run, run))
         {
             requestOrder.Enqueue(key);
             while (requestOrder.Count > RememberedRequests && requestOrder.TryDequeue(out var old)) requests.TryRemove(old, out _);
         }
-        try { return await stored.Value; }
-        catch (Exception) { requests.TryRemove(new KeyValuePair<string, Lazy<Task<DocSyncOutcome>>>(key, stored)); throw; }
+        else if (stored.Branch != branch) throw new DocSyncException(DocSyncError.RequestConflict, "This requestId was already used for a doc_sync with another branch.");
+        try { return await stored.Run.Value.WaitAsync(cancellationToken); }
+        catch (Exception) when (!cancellationToken.IsCancellationRequested) { requests.TryRemove(new KeyValuePair<string, (string?, Lazy<Task<DocSyncOutcome>>)>(key, stored)); throw; }
     }
 
     private async Task<DocSyncOutcome> RateLimitedAsync(string repositoryId, string? branch, CancellationToken cancellationToken)
@@ -467,7 +469,7 @@ internal sealed class DocSyncRunner(DocCacheSettings settings, GitCli git, IGrai
                 logger.LogInformation("Doc sync for {Repository}: skipped {Path} ({Reason}).", repository.Id, path, text is null ? tooLarge ? "too large" : "unreadable" : reason);
                 skipped.Add(path);
                 // A file that can no longer be indexed leaves the index too.
-                if (known) { removed.Add(path); count--; }
+                if (known) { removed.Add(path); count--; bytes -= existing!.Bytes; }
                 continue;
             }
             var size = Encoding.UTF8.GetByteCount(text);

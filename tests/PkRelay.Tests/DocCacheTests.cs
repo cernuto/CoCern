@@ -596,6 +596,8 @@ public sealed class DocCacheTests
         Assert.Equal((HttpStatusCode.BadRequest, "RateLimited"), Status(limited));
         Assert.InRange(Data(limited).GetProperty("retryAfterSeconds").GetInt32(), 1, RelayLimits.DocSyncMinIntervalSeconds);
         Assert.Equal((HttpStatusCode.BadRequest, "RequestIdRequired"), Status(await Tool(admin, "doc_sync", new { repositoryId = "repo" })));
+        // The same requestId with another branch is a conflict, not a second sync.
+        Assert.Equal((HttpStatusCode.Conflict, "RequestConflict"), Status(await Tool(admin, "doc_sync", new { repositoryId = "repo", requestId = "s-1", branch = "main" })));
     }
 
     [Fact]
@@ -843,6 +845,43 @@ public sealed class DocCacheTests
             }
         }
         finally { File.Delete(tokenFile); }
+    }
+
+    [Fact]
+    public async Task A_known_file_that_becomes_malformed_frees_its_bytes_for_the_rest_of_the_sync()
+    {
+        const string valid = """{"openapi":"3.0.0","paths":{}}""";
+        var prose = "# B\n\n" + new string('b', 50) + "\n";
+        using var git = GitRepositories.Create(new() { ["api.json"] = valid, ["docs/b.md"] = prose });
+        await using var host = DocHost(git, settings: new() { ["Relay:DocCache:MaxRepositoryBytes"] = "80" });
+        await SyncAsync(host);
+        var directory = host.Services.GetRequiredService<IGrainFactory>().GetGrain<IDocDirectoryGrain>("repo");
+        Assert.Equal(new[] { "api.json" }, (await directory.ReadAsync()).Entries.Select(entry => entry.Path));
+        Assert.Equal(new[] { "docs/b.md" }, (await directory.ReadAsync()).Skipped);
+        git.Commit(new() { ["api.json"] = """{ "openapi": """, ["docs/b.md"] = prose.Replace('b', 'c') });
+        await SyncAsync(host);
+        var view = await directory.ReadAsync();
+        Assert.Equal(new[] { "docs/b.md" }, view.Entries.Select(entry => entry.Path));
+        Assert.Equal(new[] { "api.json" }, view.Skipped);
+    }
+
+    [Fact]
+    public async Task A_caller_giving_up_on_doc_sync_does_not_fail_its_retry()
+    {
+        using var git = GitRepositories.Create(new() { ["docs/a.md"] = "# Alpha\n\nText.\n" });
+        var watcher = new WatchingGit();
+        await using var host = DocHost(git, watcher);
+        var runner = host.Services.GetRequiredService<DocSyncRunner>();
+        watcher.HoldFetch();
+        using var gaveUp = new CancellationTokenSource();
+        var first = runner.SyncNowAsync("repo", null, "r-1", gaveUp.Token);
+        await WaitUntilAsync(() => Task.FromResult(watcher.FetchesStarted == 1));
+        gaveUp.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => first);
+        var retry = runner.SyncNowAsync("repo", null, "r-1", CancellationToken.None);
+        watcher.ReleaseFetch();
+        Assert.Equal(git.Head(), (await retry).Commit);
+        Assert.Equal(1, watcher.FetchesStarted);
     }
 
     [Fact]

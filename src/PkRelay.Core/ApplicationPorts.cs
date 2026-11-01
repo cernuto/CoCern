@@ -206,7 +206,9 @@ public enum DocSyncError
     /// <summary>The branch name is malformed, or the clone has no such branch from its remote.</summary>
     UnknownBranch,
     /// <summary>A git command failed or timed out.</summary>
-    Failed
+    Failed,
+    /// <summary>The requestId was already used for this repository with another branch.</summary>
+    RequestConflict
 }
 
 public sealed class DocSyncException(DocSyncError error, string message, int retryAfterSeconds = 0) : Exception(message)
