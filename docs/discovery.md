@@ -37,7 +37,12 @@ Setup then:
 - adds the `PkRelayNode` value to the current user's Run key, so the node starts at sign-in;
 - starts the node and prints the machine ID.
 
-Run it again any time: it leaves existing entries alone. `--data-dir <path>` moves the node folder from `%LOCALAPPDATA%\PkRelay\node`. Exit code 1 is a setup or join problem, 4 a changed hub certificate, 5 a settings file it could not read.
+Run it again any time: it leaves existing entries alone. `--data-dir <path>` moves the node folder. Exit code 1 is a setup or join problem, 4 a changed hub certificate, 5 a settings file it could not read.
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `PKRELAY_NODE_DIR` | `%LOCALAPPDATA%\PkRelay\node` | The node folder, as read by `--await-inbox --chat`, `--prompt-hook` (unless given `--data-dir`) and the MCP adapter. Set it if setup used `--data-dir`. |
+| `PKRELAY_HOOK_TIMEOUT_MS` | 1000 | How long the prompt hook waits for the hub. |
 
 New chats on that PC appear in `chat_directory` within about a minute. A chat whose adapter has its own `PKRELAY_URL`, `PKRELAY_TOKEN_FILE` or `PKRELAY_TOKEN` is not seen by the node.
 
@@ -67,7 +72,7 @@ Add `--prompt-hook` to the setup command to also add a hook to `~/.claude/settin
 PkRelay: 3 attention items (1 urgent), 2 inbox, standing r4; top a-91 blocked "T-12".
 ```
 
-It only reads, never blocks, and gives up after `PKRELAY_HOOK_TIMEOUT_MS` (default 1000). Codex asks you to approve a new hook in `/hooks`.
+It only reads and never blocks. Codex asks you to approve a new hook in `/hooks`.
 
 ## Stop, revoke
 
@@ -77,21 +82,7 @@ It only reads, never blocks, and gives up after `PKRELAY_HOOK_TIMEOUT_MS` (defau
 
 ## Hand-written wake configs
 
-Older setups still work. Watch one chat with only one of them.
-
-```powershell
-dotnet <adapter>\PkRelay.Adapter.dll --wake <config.json>                               # Codex chats
-dotnet <adapter>\PkRelay.Adapter.dll --await-inbox <config.json> --timeout-minutes 120   # one Claude chat
-```
-
-```json
-{ "relayUrl": "http://127.0.0.1:5271", "tokenFile": "C:\\...\\local-client-token", "codexPath": "C:\\...\\codex.exe",
-  "statePath": "C:\\...\\wake\\state.db", "stopFile": "C:\\...\\wake\\stop",
-  "routes": [ { "repositoryId": "pkrelay", "boardId": "default", "sessionFile": "C:\\private\\chat-a.json",
-                "threadId": "<chat UUID>", "machineId": "<this PC>" } ] }
-```
-
-All paths are absolute. The session file holds the chat's `sessionId` and `sessionToken`. An optional `wakeLimits` (`minIntervalSeconds` 3, `maxPerWindow` 20, `windowMinutes` 10) changes the rate limit. `./scripts/Start-PkRelayWake.ps1 -ConfigPath <config>` runs `--wake` in the foreground.
+Older `--wake <config>` and `--await-inbox <config>` setups still work; see `scripts/Start-PkRelayWake.ps1`. Watch each chat with only one of them.
 
 ## Limits
 

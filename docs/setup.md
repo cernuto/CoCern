@@ -11,6 +11,9 @@
 - To run the published hub: `./scripts/Start-PkRelay.ps1 -HostDll ./artifacts/host/PkRelay.Host.dll`.
 - Never rebuild the folder of a running hub or adapter. Publish to a new folder and switch.
 - One hub owns one database file. Do not put it on a shared drive or start a second hub on it.
+- The first start of this hub on an older database moves it to schema 2, after saving a backup beside it: `relay.db.pre-migration-<id>.db`.
+- An older hub refuses a schema 2 database. To roll back, stop the hub and restore that backup.
+- The hub needs SQLite with FTS5. Without it, the hub stops at startup and leaves the database unchanged.
 
 ## Connect an agent
 
@@ -55,7 +58,6 @@ Every model call re-reads the whole chat, so fewer calls matter most.
 - **Upgrade adapters together with the hub.** Older adapters use up attention offers the model never sees.
 - **With attention on, messages can wait up to 10 minutes** before they wake a chat. Only urgent items wake at once.
 - **Analytics, ad hoc SQL and orders are off by default.** `analytics_query` and `standing_put` need an administrator token, as do `order_put`, `order_remove` and `control_request`.
-- **Search and attention are on by default.**
 
 ## Hub settings
 
@@ -86,6 +88,8 @@ The hub refuses to start with no clients and no OAuth issuer.
 | `/dashboard/` | Live dashboard. See [Monitoring](monitoring.md). |
 | `/scalar`, `/openapi/v1.json` | API reference. |
 | `/health` | Health check. |
+
+REST replies are `{ "ok": true, "code": "...", "dataJson": "{...}", "version": 1 }`. `dataJson` is a JSON string, so parse it once more. Errors use 400 (bad arguments), 401 (no valid token), 403 (denied), 404 (unknown tool or record), 409 (conflict) and 413 (too large). The stdio adapter returns the parsed `data` instead.
 
 Tokens work only over HTTPS or real loopback. The hub ignores forwarded headers.
 
