@@ -7,7 +7,7 @@ using static PkRelay.Domain.Replies;
 
 namespace PkRelay.Domain;
 
-/// <summary>One chat's private session: its secret, reported tool binding, durable inbox and acknowledgments.</summary>
+/// <summary>One chat's private session: its secret, reported tool binding, durable inbox and acknowledgments, and its attention queue.</summary>
 internal static class SessionAggregate
 {
     private const int MinFreshnessSeconds = 1;
@@ -18,6 +18,9 @@ internal static class SessionAggregate
     {
         if (context.Operation == Operations.Open) return Initialize(context);
         if (context.Operation == Operations.Deliver) return Deliver(context);
+        // Attention items arrive through other aggregates' outboxes, which carry no session secret, just like deliveries.
+        if (context.Operation == Operations.AttentionRaise) return SessionAttention.Raise(context);
+        if (context.Operation == Operations.AttentionClose) return SessionAttention.Close(context);
         if (!Authenticates(context)) return Error(SessionDenied);
         return context.Operation switch
         {
@@ -27,6 +30,8 @@ internal static class SessionAggregate
             RelayTools.Ack => Acknowledge(context),
             RelayTools.SendMessage => SendDirect(context),
             Operations.StandingSeen => MarkStandingSeen(context),
+            Operations.AttentionOffer => SessionAttention.Offer(context),
+            RelayTools.AttentionRespond => SessionAttention.Respond(context),
             _ => Error(UnknownTool)
         };
     }
@@ -111,7 +116,7 @@ internal static class SessionAggregate
         state["availability"] = Text(args, "availability", "unknown");
         state["hubIncarnation"] = Text(args, "hubIncarnation");
         var registration = state.DeepClone().AsObject();
-        foreach (var secretOrPrivate in new[] { "sessionToken", "requests", "inbox", "acked" }) registration.Remove(secretOrPrivate);
+        foreach (var secretOrPrivate in new[] { "sessionToken", "requests", "inbox", "acked", "attention", "attentionClosed", "attentionSeq" }) registration.Remove(secretOrPrivate);
         context.Emit(AggregateKinds.Control, AggregateKinds.ControlKey, Operations.Register, registration);
         return Ok(new { bindingVersion = current + 1 }, current + 1);
     }

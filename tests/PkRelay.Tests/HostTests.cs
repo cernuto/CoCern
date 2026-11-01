@@ -461,6 +461,38 @@ public class HostTests
         Assert.False(host.Services.GetRequiredService<SqliteStore>().SearchEnabled);
     }
 
+    [Fact]
+    public async Task Attention_respond_over_rest_uses_the_configured_snooze_and_leaves_milestone_replies_unchanged()
+    {
+        await using var host = new RelayHostFixture(settings: new Dictionary<string, string?> { ["Relay:Attention:SnoozeBoundaries"] = "4", ["Relay:Attention:ItemExpiryDays"] = "3" });
+        using var client = host.AuthorizedClient();
+        var session = Data(await host.Call(client, "session_open", new { repositoryId = "repo", requestId = "attention-open" }));
+        var sessionId = session.GetProperty("sessionId").GetString()!;
+        var sessionToken = session.GetProperty("sessionToken").GetString()!;
+        Assert.Equal(new AttentionOptions { SnoozeBoundaries = 4, ItemExpiryDays = 3 }, host.Services.GetRequiredService<AttentionOptions>());
+        // Nothing raises items or attaches offers yet, so a milestone reply carries no attention.
+        var created = Data(await host.Call(client, "task_update", new { repositoryId = "repo", requestId = "attention-task", sessionId, sessionToken, taskId = "T-1", expectedVersion = 0 }));
+        Assert.False(created.TryGetProperty("attention", out _));
+        var hub = new RelayCaller("test-user", false, ["repo"], true);
+        var raised = await host.Services.GetRequiredService<Orleans.IGrainFactory>().GetGrain<ISessionGrain>(sessionId)
+            .ExecuteAsync(hub, "__attention_raise", JsonSerializer.Serialize(new { repositoryId = "repo", kind = "review_ready", taskId = "T-1" }));
+        var itemId = JsonDocument.Parse(raised.DataJson).RootElement.GetProperty("itemId").GetString();
+        var later = Data(await host.Call(client, "attention_respond", new { repositoryId = "repo", requestId = "attention-later", sessionId, sessionToken, itemId, action = "later" }));
+        Assert.Equal(4, later.GetProperty("snoozeBoundaries").GetInt32());
+        using var unknown = await client.PostAsJsonAsync("/api/tools/attention_respond", new { repositoryId = "repo", requestId = "attention-missing", sessionId, sessionToken, itemId = "a-404", action = "accept" });
+        Assert.Equal(HttpStatusCode.NotFound, unknown.StatusCode);
+        using var noSession = await client.PostAsJsonAsync("/api/tools/attention_respond", new { repositoryId = "repo", requestId = "attention-anon", itemId, action = "accept" });
+        Assert.Equal(HttpStatusCode.Forbidden, noSession.StatusCode);
+    }
+
+    [Fact]
+    public async Task Attention_settings_outside_their_limits_fail_clearly()
+    {
+        await using var host = new RelayHostFixture(settings: new Dictionary<string, string?> { ["Relay:Attention:SnoozeBoundaries"] = "0" });
+        var failure = Assert.ThrowsAny<Exception>(() => host.Services.GetRequiredService<AttentionOptions>());
+        Assert.Contains("Relay:Attention:SnoozeBoundaries", failure.ToString());
+    }
+
     private static JsonElement Data(JsonElement reply) { using var document = JsonDocument.Parse(reply.GetProperty("dataJson").GetString()!); return document.RootElement.Clone(); }
     private static object SessionArgs(JsonElement session) => new { repositoryId = "repo", sessionId = session.GetProperty("sessionId").GetString(), sessionToken = session.GetProperty("sessionToken").GetString() };
 

@@ -39,6 +39,15 @@ public class ToolDiscoveryTests
         Assert.False(PkRelay.Adapter.CoordinationTools.IsAllowed(RelayTools.Search, admin: false, chatOnly: true));
     }
 
+    [Fact]
+    public void Attention_respond_is_discovered_by_every_session_role_but_not_the_chat_profile()
+    {
+        Assert.Contains(RelayTools.AttentionRespond, PkRelay.Adapter.CoordinationTools.NamesForRole(true));
+        Assert.Contains(RelayTools.AttentionRespond, PkRelay.Adapter.CoordinationTools.NamesForRole(false));
+        Assert.True(PkRelay.Adapter.CoordinationTools.IsAllowed(RelayTools.AttentionRespond, admin: false));
+        Assert.False(PkRelay.Adapter.CoordinationTools.IsAllowed(RelayTools.AttentionRespond, admin: false, chatOnly: true));
+    }
+
     [Theory]
     [InlineData("session_open", "machineId", "string")]
     [InlineData("session_open", "label", "string")]
@@ -70,6 +79,9 @@ public class ToolDiscoveryTests
     [InlineData("standing_put", "settings", "object")]
     [InlineData("search", "query", "string")]
     [InlineData("search", "kinds", "array")]
+    [InlineData("attention_respond", "itemId", "string")]
+    [InlineData("attention_respond", "action", "string")]
+    [InlineData("attention_respond", "until", "string")]
     public void Forwarding_tools_advertise_arguments_needed_for_chat_coordination(string toolName, string field, string type)
     {
         Assert.True(RelayToolCatalog.TryGet(toolName, out var tool));

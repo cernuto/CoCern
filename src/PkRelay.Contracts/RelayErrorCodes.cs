@@ -77,6 +77,10 @@ public static class RelayErrorCodes
     public const string DependencyUnknown = "DependencyUnknown";
     public const string GrantInvalid = "GrantInvalid";
 
+    // Attention
+    /// <summary>An item that blocks another session cannot be postponed again (at most 2 snoozes and 30 minutes).</summary>
+    public const string SnoozeLimit = "SnoozeLimit";
+
     // Infrastructure
     public const string StorageFailure = "StorageFailure";
     public const string DeliveryPending = "DeliveryPending";

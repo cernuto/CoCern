@@ -27,6 +27,7 @@ public static class RelayTools
     public const string StandingPropose = "standing_propose";
     public const string StandingPut = "standing_put";
     public const string Search = "search";
+    public const string AttentionRespond = "attention_respond";
 }
 
 /// <param name="IsMutation">Mutations require a stable requestId and are deduplicated by it.</param>
@@ -61,6 +62,7 @@ public static class RelayToolCatalog
         new(RelayTools.StandingPropose, "Propose a standing line or grant; takes effect only after an administrator approves it.", false, true, true, []),
         new(RelayTools.StandingPut, "Add, edit or remove standing lines, grants and board settings under the expected revision.", true, true, false, ["expectedRevision"]),
         new(RelayTools.Search, "Search this repository's tasks, notes and your inbox; returns IDs and snippets to open with task_get, context_get or check_inbox.", false, false, true, ["query"]),
+        new(RelayTools.AttentionRespond, "Accept, dismiss or postpone an attention offer; postponing never acknowledges the message.", false, true, true, ["itemId", "action"]),
     ];
 
     private static readonly Dictionary<string, RelayTool> ByName = All.ToDictionary(tool => tool.Name, StringComparer.Ordinal);

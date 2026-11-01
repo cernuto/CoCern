@@ -22,6 +22,8 @@ ASP.NET Core configuration files, protected environment settings and command-lin
 | `Relay:Activity:Enabled` | Record tool calls and wakes in `activity_log`; default true. See [activity.md](activity.md). |
 | `Relay:Activity:RetentionDays` | Raw activity rows kept before the daily rollup; default 30. |
 | `Relay:Search:Enabled` | Keep the full-text search index; default true. See [search.md](search.md). |
+| `Relay:Attention:SnoozeBoundaries` | Replies a "later" attention item stays hidden; default 3. See [attention.md](attention.md). |
+| `Relay:Attention:ItemExpiryDays` | Days before an unclosed attention item disappears; default 7. |
 
 Client token comparison uses fixed-time comparison of SHA-256 digests. All bearer credentials, including external JWTs, are accepted over HTTPS or an actual loopback TCP connection. An off-host plaintext request fails even if it supplies `X-Forwarded-For` or `X-Forwarded-Proto`. The host does not trust forwarded headers. Use HTTPS to the host for remote deployments; configure any tunnel or proxy separately and keep its upstream access protected. Browser CORS access is denied by default. SignalR clients should send the bearer token in authorization headers, as the supplied adapter does with long polling; query-string access tokens are not accepted.
 

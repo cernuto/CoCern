@@ -25,6 +25,7 @@ internal static class ToolSchemas
             RelayTools.StandingPropose => ["line", "grant"],
             RelayTools.StandingPut => ["lines", "grants", "remove", "approve", "settings"],
             RelayTools.Search => ["kinds"],
+            RelayTools.AttentionRespond => ["until"],
             _ => []
         };
         var properties = ForwardingFields.Concat(tool.RequiredFields).Concat(extra).Distinct(StringComparer.Ordinal).ToDictionary(field => field, field => all[field]);
@@ -44,6 +45,13 @@ internal static class ToolSchemas
             properties.Remove("requestId");
             properties["query"] = new { type = "string" };
             properties["kinds"] = new { type = "array", items = new { type = "string" } };
+        }
+        // Attention answers are advertised by type; InputSchema gives the ID bound and the until format.
+        if (tool.Name == RelayTools.AttentionRespond)
+        {
+            properties["itemId"] = new { type = "string" };
+            properties["action"] = new { type = "string", @enum = AttentionActions.All };
+            properties["until"] = new { type = "string", description = "Optional ISO time for later." };
         }
         // The same budget leaves room only for typed names of workflow dependsOn and packet.resources; InputSchema describes them in full.
         if (properties.ContainsKey("workflow")) properties["workflow"] = WorkflowSchema(compact: true);
@@ -137,6 +145,10 @@ internal static class ToolSchemas
                 properties["kinds"] = new { type = "array", items = new { type = "string", @enum = SearchKinds.All }, maxItems = SearchKinds.All.Count, uniqueItems = true, description = "Kinds to search; default all." };
                 properties["status"] = new { type = "string", maxLength = RelayLimits.MaxSearchStatusLength, description = "Only hits with this status, such as ready, blocked or completed." };
                 properties["limit"] = new { type = "integer", minimum = 1, maximum = RelayLimits.MaxSearchResults, description = $"Most hits; default {RelayLimits.DefaultSearchResults}." }; break;
+            case RelayTools.AttentionRespond:
+                properties["itemId"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxIdentifierLength, description = "Attention item ID from an offer." };
+                properties["action"] = new { type = "string", @enum = AttentionActions.All, description = "later hides the item for a few replies, or until a time; accept and dismiss close it." };
+                properties["until"] = new { type = "string", format = "date-time", description = "Optional future time when a later item returns." }; break;
             case RelayTools.ControlRequest:
                 properties["command"] = new { type = "string", @enum = new[] { "pause", "resume", "stop", "cancel", "register_resource", "revoke_machine" } };
                 properties["aliases"] = new { type = "array", items = new { type = "string" } }; Text("reason", "Coordination control explanation."); Text("machineId", "Machine to revoke; required by revoke_machine."); break;
