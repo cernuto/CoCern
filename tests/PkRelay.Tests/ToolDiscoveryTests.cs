@@ -16,6 +16,20 @@ public class ToolDiscoveryTests
         }
     }
 
+    [Fact]
+    public void Standing_tools_are_discovered_by_role()
+    {
+        var administrator = PkRelay.Adapter.CoordinationTools.NamesForRole(true);
+        var worker = PkRelay.Adapter.CoordinationTools.NamesForRole(false);
+        Assert.Contains(RelayTools.StandingPropose, administrator);
+        Assert.Contains(RelayTools.StandingPut, administrator);
+        Assert.Contains(RelayTools.StandingPropose, worker);
+        Assert.DoesNotContain(RelayTools.StandingPut, worker);
+        Assert.True(PkRelay.Adapter.CoordinationTools.IsAllowed(RelayTools.StandingPut, admin: true));
+        Assert.False(PkRelay.Adapter.CoordinationTools.IsAllowed(RelayTools.StandingPut, admin: false));
+        Assert.False(PkRelay.Adapter.CoordinationTools.IsAllowed(RelayTools.StandingPropose, admin: false, chatOnly: true));
+    }
+
     [Theory]
     [InlineData("session_open", "machineId", "string")]
     [InlineData("session_open", "label", "string")]
@@ -37,6 +51,14 @@ public class ToolDiscoveryTests
     [InlineData("claim_release", "taskId", "string")]
     [InlineData("claim_release", "claimGeneration", "integer")]
     [InlineData("claim_release", "expectedVersion", "integer")]
+    [InlineData("standing_propose", "line", "object")]
+    [InlineData("standing_propose", "grant", "object")]
+    [InlineData("standing_put", "expectedRevision", "integer")]
+    [InlineData("standing_put", "lines", "array")]
+    [InlineData("standing_put", "grants", "array")]
+    [InlineData("standing_put", "remove", "array")]
+    [InlineData("standing_put", "approve", "array")]
+    [InlineData("standing_put", "settings", "object")]
     public void Forwarding_tools_advertise_arguments_needed_for_chat_coordination(string toolName, string field, string type)
     {
         Assert.True(RelayToolCatalog.TryGet(toolName, out var tool));

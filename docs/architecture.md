@@ -255,6 +255,7 @@ Batch compatible task-state, note, task-message/reply, and action-report changes
 | `send_message`, `check_inbox`, `ack` | Explicit task or private-session messages, bounded waits, and handling acknowledgments |
 | `context_get`, `context_put` | Authorized bounded notes/artifacts with provenance and version checks |
 | `control_request` | Pause/resume dispatch and request cancellation, without claiming IDE enforcement |
+| `standing_propose`, `standing_put` | Propose, or as an administrator change, the board's standing lines, grants and settings |
 
 These are logical groups; expose a small role-appropriate subset to each client. Authenticate and authorize every call. Use expected versions for updates, action/trigger identity for business deduplication, and request IDs for transport retries. A stale update returns current version/change information instead of silently overwriting another participant's work.
 
@@ -280,6 +281,8 @@ One background dispatcher delivers persisted coordination effects, and recipient
 The database is at schema version 2. Beside the grain state it holds `activity_log` and `activity_daily`, telemetry written by a separate background writer outside the grain commit, and an empty `search_index` FTS5 table that later search work fills. `RelayApplication.ExecuteAsync` records each call through the `IActivitySink` port; see [activity.md](activity.md).
 
 Next-work offers skip tasks whose `dependsOn` tasks are not completed. With `packet.resources`, `RelayApplication` asks the lock aggregates (read-only `__claim_state`) which listed resources are held and asks the board again, so that within equal priority a task with free resources is offered first. The domain stays pure: the board only ranks against the `busyResources` it is given. See [dependencies.md](dependencies.md).
+
+Standing lines, grants and settings live on the board under `standing`, with one revision. `RelayApplication` reads them with the read-only `__standing` operation, attaches them to `session_open` and to milestone replies when the revision is newer than the one the session recorded (`__standing_seen`), and caches each board's read for a few seconds. See [standing.md](standing.md).
 
 Only the hub opens its local `relay.db`; PCs never share a live database file. Use WAL, short transactions, bounded busy handling, and `synchronous=FULL` for durable coordination. Database failure stops mutations visibly. Back up consistently using SQLite's backup API, keep pre-migration backups, and test restore. Large optional attachments can use a hub-owned artifact directory with immutable IDs, authorization, retention, and a backup policy covering referenced artifacts; the initial notes and small reports fit in SQLite. [SQLite WAL](https://sqlite.org/wal.html), [durability settings](https://sqlite.org/pragma.html#pragma_synchronous), [backup API](https://sqlite.org/backup.html)
 

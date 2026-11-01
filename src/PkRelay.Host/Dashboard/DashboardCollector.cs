@@ -100,6 +100,13 @@ public sealed class DashboardCollector : BackgroundService
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
             catch (Exception) { snapshot = snapshot with { Database = previous.Database with { Warning = "Database metrics are unavailable; the previous metrics are retained." } }; }
+            // Standing preferences change rarely, so they are read on the database-metrics cadence; busy or failed reads keep the previous view.
+            try
+            {
+                if (await source.ReadStandingAsync(cancellationToken) is { } standing) snapshot = snapshot with { Standing = standing.Boards, StandingTruncated = standing.Truncated };
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+            catch (Exception) { logs.CollectionFailed(); }
         }
         return Bound(snapshot with { Revision = previous.Revision + 1, Logs = logs.Snapshot(), Traffic = traffic.Snapshot() });
     }
@@ -118,6 +125,12 @@ public sealed class DashboardCollector : BackgroundService
         bytes -= EncodedLength(root.GetProperty("logs")) - 2;
         bytes += JsonSerializer.SerializeToUtf8Bytes(new[] { warning }, JsonOptions).Length - EncodedLength(root.GetProperty("warnings"));
         snapshot = snapshot with { Logs = [], Warnings = [warning] };
+        if (bytes <= maximumBytes) return snapshot;
+
+        // Standing stays readable through task_get, so it gives way before the live inventory.
+        bytes -= EncodedLength(root.GetProperty("standing")) - 2;
+        if (!snapshot.StandingTruncated) bytes--;
+        snapshot = snapshot with { Standing = [], StandingTruncated = true };
         if (bytes <= maximumBytes) return snapshot;
 
         if (!snapshot.SessionsTruncated) bytes--; // "false" becomes "true".
@@ -139,7 +152,7 @@ public sealed class DashboardCollector : BackgroundService
         return snapshot with
         {
             Host = new() { StartedAt = snapshot.Host.StartedAt },
-            Machines = [], Sessions = [], SessionsTruncated = true, Traffic = [],
+            Machines = [], Sessions = [], SessionsTruncated = true, Traffic = [], Standing = [], StandingTruncated = true,
             Database = new() { ObservedAt = snapshot.Database.ObservedAt, Truncated = true, Warning = warning }
         };
 

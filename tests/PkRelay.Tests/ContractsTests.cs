@@ -59,6 +59,40 @@ public sealed class ContractsTests
     }
 
     [Fact]
+    public void Standing_tools_appear_in_hub_and_adapter_catalogs_with_matching_schemas()
+    {
+        using var client = new HttpClient();
+        var adapter = PkRelay.Adapter.CoordinationTools.Create(new PkRelay.Adapter.RelayForwarder(client, new PkRelay.Adapter.AdapterOptions("http://127.0.0.1:5271", "client-secret")), admin: true)
+            .ToDictionary(tool => tool.ProtocolTool.Name, tool => tool.ProtocolTool.InputSchema.GetRawText());
+        var hub = ToolResults.Tools(true).ToDictionary(tool => tool.Name, tool => tool.InputSchema.GetRawText());
+        foreach (var name in new[] { RelayTools.StandingPropose, RelayTools.StandingPut })
+        {
+            Assert.True(RelayToolCatalog.TryGet(name, out var tool));
+            Assert.Equal(RelayToolCatalog.ForwardingSchema(tool).GetRawText(), adapter[name]);
+            Assert.Equal(RelayToolCatalog.InputSchema(tool).GetRawText(), hub[name]);
+            Assert.True(tool.IsMutation);
+            Assert.DoesNotContain('.', tool.Description.TrimEnd('.'));
+        }
+        // Only administrators see standing_put; any session may propose.
+        Assert.Contains(RelayTools.StandingPropose, ToolResults.Tools(false).Select(tool => tool.Name));
+        Assert.DoesNotContain(RelayTools.StandingPut, ToolResults.Tools(false).Select(tool => tool.Name));
+        Assert.DoesNotContain(RelayTools.StandingPut, PkRelay.Adapter.CoordinationTools.NamesForRole(false));
+        RelayToolCatalog.TryGet(RelayTools.StandingPut, out var put);
+        var strict = RelayToolCatalog.InputSchema(put);
+        Assert.Contains("expectedRevision", strict.GetProperty("required").EnumerateArray().Select(x => x.GetString()));
+        Assert.Equal(RelayLimits.MaxStandingLines, strict.GetProperty("properties").GetProperty("lines").GetProperty("maxItems").GetInt32());
+        Assert.Equal(RelayLimits.MaxStandingLineLength, strict.GetProperty("properties").GetProperty("lines").GetProperty("items").GetProperty("properties").GetProperty("text").GetProperty("maxLength").GetInt32());
+        var forwarding = RelayToolCatalog.ForwardingSchema(put).GetProperty("properties");
+        foreach (var field in new[] { "expectedRevision", "lines", "grants", "remove", "approve", "settings" }) Assert.True(forwarding.TryGetProperty(field, out _), field);
+        RelayToolCatalog.TryGet(RelayTools.StandingPropose, out var propose);
+        Assert.Contains("sessionToken", RelayToolCatalog.InputSchema(propose).GetProperty("required").EnumerateArray().Select(x => x.GetString()));
+        Assert.True(RelayToolCatalog.ForwardingSchema(propose).GetProperty("properties").TryGetProperty("grant", out _));
+        // The envelope keeps its length bound in the strict schema; the compact forwarding copy leaves it to the hub.
+        Assert.Equal(RelayLimits.MaxIdentifierLength, strict.GetProperty("properties").GetProperty("requestId").GetProperty("maxLength").GetInt32());
+        Assert.False(forwarding.GetProperty("requestId").TryGetProperty("maxLength", out _));
+    }
+
+    [Fact]
     public void Forwarding_catalog_stays_within_its_context_budget()
     {
         // Every connected agent carries these definitions on every turn; the pre-refactor adapter was about 19,400 characters.

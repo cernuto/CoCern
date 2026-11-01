@@ -293,6 +293,44 @@ public sealed class DashboardTests
         Assert.Equal(HttpStatusCode.Forbidden, (await client.PostAsJsonAsync("/dashboard/api/login", new { token = RelayHostFixture.Token })).StatusCode);
     }
 
+    [Fact]
+    public async Task Standing_panel_shows_lines_grants_provenance_proposals_and_history()
+    {
+        await using var host = OperatorHost();
+        using var agent = host.AuthorizedClient();
+        var expires = DateTimeOffset.UtcNow.AddHours(1).ToString("O");
+        var put = await host.Call(agent, "standing_put", new { repositoryId = "repo", requestId = "panel-put", expectedRevision = 0, lines = new[] { new { id = "css", text = "Never deploy CSS without a restoration receipt." } }, grants = new[] { new { id = "rig", scope = "resource", targets = new[] { "rig-1" }, expiresAt = expires } } });
+        Assert.True(put.GetProperty("ok").GetBoolean());
+        using var openedDocument = JsonDocument.Parse((await host.Call(agent, "session_open", new { repositoryId = "repo", requestId = "panel-session" })).GetProperty("dataJson").GetString()!);
+        var opened = openedDocument.RootElement;
+        Assert.True((await host.Call(agent, "standing_propose", new { repositoryId = "repo", requestId = "panel-propose", sessionId = opened.GetProperty("sessionId").GetString(), sessionToken = opened.GetProperty("sessionToken").GetString(), line = new { id = "css", text = "Deploy CSS only with a receipt." } })).GetProperty("ok").GetBoolean());
+
+        using var browser = BrowserClient(host);
+        (await browser.PostAsJsonAsync("/dashboard/api/login", new { token = RelayHostFixture.Token })).EnsureSuccessStatusCode();
+        await using var viewer = await StartViewerAsync(host, browser);
+        PkRelay.Contracts.Dashboard.DashboardSnapshot? snapshot = null;
+        for (var attempt = 0; attempt < 100; attempt++)
+        {
+            snapshot = await browser.GetFromJsonAsync<PkRelay.Contracts.Dashboard.DashboardSnapshot>("/dashboard/api/snapshot");
+            if (snapshot!.Standing.Length > 0) break;
+            await Task.Delay(50);
+        }
+        var board = Assert.Single(snapshot!.Standing);
+        Assert.Equal("repo/default", board.Board);
+        Assert.Equal(1, board.Revision);
+        var line = Assert.Single(board.Lines);
+        Assert.Equal(("css", "test-user", "test-user"), (line.Id, line.Author, line.ApprovedBy));
+        var grant = Assert.Single(board.Grants);
+        Assert.Equal(("rig", "resource", "test-user"), (grant.Id, grant.Scope, grant.Grantor));
+        Assert.Equal(["rig-1"], grant.Targets);
+        var proposal = Assert.Single(board.Proposals);
+        Assert.True(proposal.Replaces);
+        Assert.Equal("Deploy CSS only with a receipt.", proposal.Summary);
+        Assert.Equal(["+line:css", "+grant:rig"], Assert.Single(board.History).Changes);
+        Assert.DoesNotContain(opened.GetProperty("sessionToken").GetString()!, JsonSerializer.Serialize(snapshot));
+        Assert.Equal(HttpStatusCode.OK, (await browser.GetAsync("/dashboard/standing")).StatusCode);
+    }
+
     private static RelayHostFixture OperatorHost(bool administrator = true, bool grant = true, IPAddress? remoteAddress = null) => new(remoteAddress: remoteAddress, settings: new Dictionary<string, string?>
     {
         ["Relay:Clients:0:IsAdministrator"] = administrator.ToString(),

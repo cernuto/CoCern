@@ -152,6 +152,101 @@ public sealed class CollaborationHostTests
         Assert.True(Data(reply).GetProperty("nextWork").GetProperty("offer").GetProperty("detailFetchRequired").GetBoolean());
     }
 
+    private const string AdminToken = "standing-admin-test-secret-not-production";
+
+    private static RelayHostFixture StandingHost() => new(settings: new Dictionary<string, string?>
+    {
+        ["Relay:Clients:1:Token"] = AdminToken, ["Relay:Clients:1:PrincipalId"] = "admin-user", ["Relay:Clients:1:IsAdministrator"] = "true", ["Relay:Clients:1:Repositories:0"] = "repo"
+    });
+
+    private static HttpClient AdminClient(RelayHostFixture host)
+    {
+        var client = host.AuthorizedClient();
+        client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", AdminToken);
+        return client;
+    }
+
+    private static async Task<JsonElement> Post(HttpClient http, string tool, object arguments)
+    {
+        using var response = await http.PostAsJsonAsync("/api/tools/" + tool, arguments);
+        return (await response.Content.ReadFromJsonAsync<JsonElement>()).Clone();
+    }
+
+    private static object Line(string id, string text) => new { id, text };
+
+    [Fact]
+    public async Task Standing_writes_need_an_administrator_and_proposals_never_take_effect_unapproved()
+    {
+        await using var host = StandingHost();
+        using var worker = host.AuthorizedClient();
+        using var admin = AdminClient(host);
+        var session = Data(await host.Call(worker, "session_open", new { repositoryId = "repo", requestId = "standing-worker", role = "coder" }));
+        var handle = new { sessionId = session.GetProperty("sessionId").GetString(), sessionToken = session.GetProperty("sessionToken").GetString() };
+
+        using (var denied = await worker.PostAsJsonAsync("/api/tools/standing_put", new { repositoryId = "repo", requestId = "worker-put", expectedRevision = 0, lines = new[] { Line("css", "Deploy CSS freely.") } }))
+        {
+            Assert.Equal(HttpStatusCode.Forbidden, denied.StatusCode);
+            Assert.Equal("AdministratorRequired", (await denied.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString());
+        }
+        // The admin-only tool is not even listed for a worker.
+        Assert.DoesNotContain("standing_put", (await worker.GetFromJsonAsync<JsonElement>("/api/tools")).GetRawText());
+
+        var proposed = Data(await host.Call(worker, "standing_propose", new { repositoryId = "repo", requestId = "propose", handle.sessionId, handle.sessionToken, line = new { text = "Never deploy CSS without a restoration receipt." } }));
+        Assert.True(proposed.GetProperty("pending").GetBoolean());
+        var proposalId = proposed.GetProperty("proposalId").GetString();
+        var unapproved = Data(await host.Call(worker, "session_open", new { repositoryId = "repo", requestId = "standing-unapproved" }));
+        Assert.False(unapproved.TryGetProperty("standing", out _));
+        var pending = Data(await host.Call(worker, "task_get", new { repositoryId = "repo", section = "standing" }));
+        Assert.Equal(0, pending.GetProperty("revision").GetInt64());
+        Assert.Empty(pending.GetProperty("lines").EnumerateArray());
+        Assert.Equal(proposalId, Assert.Single(pending.GetProperty("proposals").EnumerateArray()).GetProperty("id").GetString());
+
+        var approved = Data(await host.Call(admin, "standing_put", new { repositoryId = "repo", requestId = "approve", expectedRevision = 0, approve = new[] { proposalId } }));
+        Assert.Equal(1, approved.GetProperty("revision").GetInt64());
+        var opened = Data(await host.Call(worker, "session_open", new { repositoryId = "repo", requestId = "standing-approved" }));
+        var line = Assert.Single(opened.GetProperty("standing").GetProperty("lines").EnumerateArray());
+        Assert.Equal("Never deploy CSS without a restoration receipt.", line.GetProperty("text").GetString());
+        var record = Data(await host.Call(worker, "task_get", new { repositoryId = "repo", section = "standing" })).GetProperty("lines")[0];
+        Assert.Equal("test-user", record.GetProperty("author").GetString());
+        Assert.Equal("admin-user", record.GetProperty("approvedBy").GetString());
+    }
+
+    [Fact]
+    public async Task Session_open_returns_standing_and_replies_attach_it_only_when_the_revision_is_newer()
+    {
+        await using var host = StandingHost();
+        using var worker = host.AuthorizedClient();
+        using var admin = AdminClient(host);
+        Assert.True((await host.Call(admin, "standing_put", new { repositoryId = "repo", requestId = "put-1", expectedRevision = 0, lines = new[] { Line("css", "Never deploy CSS without a restoration receipt.") } })).GetProperty("ok").GetBoolean());
+        var session = Data(await host.Call(worker, "session_open", new { repositoryId = "repo", requestId = "standing-session" }));
+        var standing = session.GetProperty("standing");
+        Assert.Equal(1, standing.GetProperty("revision").GetInt64());
+        Assert.Equal("css", Assert.Single(standing.GetProperty("lines").EnumerateArray()).GetProperty("id").GetString());
+        Assert.Empty(standing.GetProperty("grants").EnumerateArray());
+
+        // The chat already holds revision 1, so its milestone replies leave standing out.
+        Assert.False(Data(await Update(host, worker, session, "a", 0, Workflow())).TryGetProperty("standing", out _));
+        var expires = DateTimeOffset.UtcNow.AddHours(1).ToString("O");
+        Assert.True((await host.Call(admin, "standing_put", new { repositoryId = "repo", requestId = "put-2", expectedRevision = 1, lines = new[] { Line("smoke", "Run the smoke suite before merging.") }, grants = new[] { new { id = "rig", scope = "resource", targets = new[] { "rig-1" }, expiresAt = expires } } })).GetProperty("ok").GetBoolean());
+        // check_inbox never carries standing: background wake readers would record it as received without the model seeing it.
+        Assert.False(Data(await host.Call(worker, "check_inbox", new { repositoryId = "repo", sessionId = session.GetProperty("sessionId").GetString(), sessionToken = session.GetProperty("sessionToken").GetString() })).TryGetProperty("standing", out _));
+        var changed = Data(await Update(host, worker, session, "a", 1, Workflow())).GetProperty("standing");
+        Assert.Equal(2, changed.GetProperty("revision").GetInt64());
+        Assert.Equal(2, changed.GetProperty("lines").GetArrayLength());
+        Assert.Equal("rig", Assert.Single(changed.GetProperty("grants").EnumerateArray()).GetProperty("id").GetString());
+        Assert.False(Data(await Update(host, worker, session, "a", 2, Workflow())).TryGetProperty("standing", out _));
+        Assert.False(Data(await Update(host, worker, session, "b", 0, Workflow())).TryGetProperty("standing", out _));
+        // A settings-only change is a new revision too, and the ready task naming the grant passes readiness.
+        var authorized = Workflow(); authorized["packet"]!["authorityRef"] = "grant:rig"; authorized["packet"]!["resources"] = new JsonArray("rig-1");
+        Assert.True((await host.Call(admin, "standing_put", new { repositoryId = "repo", requestId = "put-3", expectedRevision = 2, settings = new { requireResources = true } })).GetProperty("ok").GetBoolean());
+        var third = Data(await Update(host, worker, session, "c", 0, authorized));
+        Assert.Equal(3, third.GetProperty("standing").GetProperty("revision").GetInt64());
+        Assert.True(third.GetProperty("standing").GetProperty("settings").GetProperty("requireResources").GetBoolean());
+        var stale = await Post(admin, "standing_put", new { repositoryId = "repo", requestId = "put-stale", expectedRevision = 2, remove = new[] { "css" } });
+        Assert.Equal("VersionConflict", stale.GetProperty("code").GetString());
+        Assert.Equal(3, stale.GetProperty("version").GetInt64());
+    }
+
     private static JsonObject Workflow(string state = "ready") => new()
     {
         ["state"] = state,

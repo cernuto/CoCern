@@ -68,6 +68,10 @@ public static class Operations
     public const string NextWork = "__next_work";
     /// <summary>Read-only: whether another session holds a resource now, so a next-work offer can prefer tasks whose resources are free.</summary>
     public const string ClaimState = "__claim_state";
+    /// <summary>Read-only: a board's standing lines, active grants and settings in the compact form sent to chats.</summary>
+    public const string Standing = "__standing";
+    /// <summary>Records the standing revision a session received for a board, so later replies carry standing only when it changed.</summary>
+    public const string StandingSeen = "__standing_seen";
     /// <summary>Read-only: which of the given sessions in the repository the caller's principal opened.</summary>
     public const string SessionOwners = "__session_owners";
 

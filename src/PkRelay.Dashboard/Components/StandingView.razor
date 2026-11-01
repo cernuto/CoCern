@@ -1,0 +1,41 @@
+<section class="surface sql-view standing-view" aria-labelledby="standing-heading">
+    <div class="section-heading"><div><h2 id="standing-heading">Standing preferences</h2><p>Each board's settled lines and typed grants, who approved them, and recent changes. Read-only.</p></div><span class="small-symbol" aria-hidden="true">✓</span></div>
+    @if (Boards.Length == 0) { <p class="empty-copy">No board has standing preferences yet.</p> }
+    @foreach (var board in Boards)
+    {
+        <article class="standing-board" @key="board.Board" aria-label="@($"Board {board.Board}")">
+            <dl class="database-summary"><div><dt>Board</dt><dd>@board.Board</dd></div><div><dt>Revision</dt><dd>@board.Revision</dd></div><div><dt>Require resources</dt><dd>@(board.RequireResources ? "On" : "Off")</dd></div><div><dt>Pending proposals</dt><dd>@board.Proposals.Length</dd></div></dl>
+            <table class="metrics-table">
+                <caption>Lines</caption>
+                <thead><tr><th scope="col">ID</th><th scope="col">Text</th><th scope="col">Author</th><th scope="col">Approved</th></tr></thead>
+                <tbody>@foreach (var line in board.Lines) { <tr><th scope="row">@line.Id</th><td>@line.Text</td><td>@line.Author</td><td title="@DashboardFormat.Timestamp(line.ApprovedAt)">@line.ApprovedBy, @DashboardFormat.Ago(line.ApprovedAt, Now)</td></tr> }</tbody>
+            </table>
+            <table class="metrics-table">
+                <caption>Grants</caption>
+                <thead><tr><th scope="col">ID</th><th scope="col">Scope</th><th scope="col">Targets</th><th scope="col">Expires</th><th scope="col">Granted by</th></tr></thead>
+                <tbody>@foreach (var grant in board.Grants) { <tr><th scope="row">@grant.Id</th><td>@grant.Scope</td><td>@string.Join(", ", grant.Targets)</td><td>@(grant.ExpiresAt <= Now ? "Expired" : DashboardFormat.Timestamp(grant.ExpiresAt))</td><td>@grant.Grantor@(string.IsNullOrEmpty(grant.ProposedBy) ? "" : $" (proposed by {grant.ProposedBy})")</td></tr> }</tbody>
+            </table>
+            @if (board.Proposals.Length > 0)
+            {
+                <table class="metrics-table">
+                    <caption>Waiting for approval</caption>
+                    <thead><tr><th scope="col">Proposal</th><th scope="col">Kind</th><th scope="col">Summary</th><th scope="col">Proposed by</th></tr></thead>
+                    <tbody>@foreach (var proposal in board.Proposals) { <tr><th scope="row">@proposal.Id</th><td>@proposal.Kind@(proposal.Replaces ? " (edit)" : "")</td><td>@proposal.Summary</td><td title="@DashboardFormat.Timestamp(proposal.ProposedAt)">@proposal.ProposedBy</td></tr> }</tbody>
+                </table>
+            }
+            <table class="metrics-table">
+                <caption>Recent changes</caption>
+                <thead><tr><th scope="col">Revision</th><th scope="col">By</th><th scope="col">When</th><th scope="col">Changes</th></tr></thead>
+                <tbody>@foreach (var change in board.History) { <tr><td class="numeric">@change.Revision</td><td>@change.By</td><td title="@DashboardFormat.Timestamp(change.At)">@DashboardFormat.Ago(change.At, Now)</td><td>@string.Join(" ", change.Changes)</td></tr> }</tbody>
+            </table>
+        </article>
+    }
+    @if (Truncated) { <p class="limit-note">The board list is bounded. Additional boards are not shown.</p> }
+    <p class="table-footnote">Changes: + added, ~ edited, - removed. An administrator changes standing with standing_put.</p>
+</section>
+
+@code {
+    [Parameter, EditorRequired] public DashboardStanding[] Boards { get; set; } = [];
+    [Parameter] public bool Truncated { get; set; }
+    [Parameter] public DateTimeOffset Now { get; set; }
+}

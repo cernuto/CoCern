@@ -26,6 +26,7 @@ internal static class SessionAggregate
             RelayTools.CheckInbox => Page(ObjectAt(context.State, "inbox").Select(x => x.Value!), context.Args),
             RelayTools.Ack => Acknowledge(context),
             RelayTools.SendMessage => SendDirect(context),
+            Operations.StandingSeen => MarkStandingSeen(context),
             _ => Error(UnknownTool)
         };
     }
@@ -82,7 +83,20 @@ internal static class SessionAggregate
         if (context.Operation == Operations.Verify && Text(state, "role") is { Length: > 0 } role) description["role"] = role;
         // The machine given at session_open resolves this session's resource aliases (next-work lookups); also internal only.
         if (context.Operation == Operations.Verify && Text(state, "machineId") is { Length: > 0 } machine) description["machineId"] = machine;
+        // The standing revision this session last received per board, so replies carry standing only when it changed; internal only.
+        if (context.Operation == Operations.Verify && state["standingSeen"] is JsonObject seen) description["standingSeen"] = seen.DeepClone();
         return Ok(description);
+    }
+
+    /// <summary>Records that this session received a board's standing at <c>standingRevision</c>. A revision never moves back.</summary>
+    private static RelayReply MarkStandingSeen(AggregateContext context)
+    {
+        var seen = ObjectAt(context.State, "standingSeen");
+        var board = Text(context.Args, "boardId", "default");
+        var revision = Number(context.Args, "standingRevision");
+        if (!seen.ContainsKey(board) && seen.Count >= RelayLimits.MaxStandingBoardsPerSession) return Ok(new { recorded = false });
+        if (revision > Number(seen, board)) seen[board] = revision;
+        return Ok(new { recorded = true });
     }
 
     private static RelayReply Bind(AggregateContext context)

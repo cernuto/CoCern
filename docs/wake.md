@@ -53,6 +53,8 @@ Duplicate hints and messages already notified are suppressed durably. New messag
 
 The hub counts each newly stored message that can wake its chat as one wake, and each first-page `check_inbox` as one inbox read, in its [activity log](activity.md). These counters see what the hub stores, not whether the adapter actually queued a turn. If a message is stored but the sender's outbox commit then fails, the retry finds it already stored and is not counted, so wakes can be slightly undercounted.
 
+`check_inbox` replies never carry [standing preferences](standing.md): the watcher's and waiter's background reads would otherwise mark them received before the chat sees them.
+
 ## Pause, stop and uncertain delivery
 
 Relay pause/stop suppresses new dispatch. Creating the configured stop file stops the local watcher; this does not stop an already running model turn or external operation. Stopping a model, tool or device operation remains the client's or user's responsibility.

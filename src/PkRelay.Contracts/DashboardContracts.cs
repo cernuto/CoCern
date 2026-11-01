@@ -12,7 +12,59 @@ public sealed record DashboardSnapshot
     public DatabaseMetrics Database { get; init; } = new();
     public DashboardLogEntry[] Logs { get; init; } = [];
     public DashboardTrafficEvent[] Traffic { get; init; } = [];
+    /// <summary>Boards with standing preferences: lines, grants, pending proposals and recent changes. Read-only.</summary>
+    public DashboardStanding[] Standing { get; init; } = [];
+    public bool StandingTruncated { get; init; }
     public string[] Warnings { get; init; } = [];
+}
+
+public sealed record DashboardStanding
+{
+    public string Board { get; init; } = "";
+    public long Revision { get; init; }
+    public bool RequireResources { get; init; }
+    public DashboardStandingLine[] Lines { get; init; } = [];
+    public DashboardStandingGrant[] Grants { get; init; } = [];
+    public DashboardStandingProposal[] Proposals { get; init; } = [];
+    public DashboardStandingChange[] History { get; init; } = [];
+}
+
+public sealed record DashboardStandingLine
+{
+    public string Id { get; init; } = "";
+    public string Text { get; init; } = "";
+    public string Author { get; init; } = "";
+    public string ApprovedBy { get; init; } = "";
+    public DateTimeOffset? ApprovedAt { get; init; }
+}
+
+public sealed record DashboardStandingGrant
+{
+    public string Id { get; init; } = "";
+    public string Scope { get; init; } = "";
+    public string[] Targets { get; init; } = [];
+    public DateTimeOffset? ExpiresAt { get; init; }
+    public string Grantor { get; init; } = "";
+    public string ProposedBy { get; init; } = "";
+    public DateTimeOffset? GrantedAt { get; init; }
+}
+
+public sealed record DashboardStandingProposal
+{
+    public string Id { get; init; } = "";
+    public string Kind { get; init; } = "";
+    public string Summary { get; init; } = "";
+    public string ProposedBy { get; init; } = "";
+    public DateTimeOffset? ProposedAt { get; init; }
+    public bool Replaces { get; init; }
+}
+
+public sealed record DashboardStandingChange
+{
+    public long Revision { get; init; }
+    public string By { get; init; } = "";
+    public DateTimeOffset? At { get; init; }
+    public string[] Changes { get; init; } = [];
 }
 
 public sealed record DashboardHost

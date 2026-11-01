@@ -75,6 +75,7 @@ public static class RelayErrorCodes
     public const string WorkflowNotReady = "WorkflowNotReady";
     public const string DependencyCycle = "DependencyCycle";
     public const string DependencyUnknown = "DependencyUnknown";
+    public const string GrantInvalid = "GrantInvalid";
 
     // Infrastructure
     public const string StorageFailure = "StorageFailure";

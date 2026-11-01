@@ -23,14 +23,16 @@ public partial class Dashboard : IAsyncDisposable
         "sessions" => "sessions",
         "sql" => "sql",
         "logs" => "logs",
+        "standing" => "standing",
         _ => "overview"
     };
-    private string PageTitle => View switch { "sessions" => "Session watch", "sql" => "Inside the database", "logs" => "Signals from the relay", _ => "Relay at a glance" };
+    private string PageTitle => View switch { "sessions" => "Session watch", "sql" => "Inside the database", "logs" => "Signals from the relay", "standing" => "Standing preferences", _ => "Relay at a glance" };
     private string PageDescription => View switch
     {
         "sessions" => "Find a session and inspect its latest reported state.",
         "sql" => "Real tables. Reported counts. A little more visibility.",
         "logs" => "A quiet record of recent operational events.",
+        "standing" => "Settled lines and grants on each board, with who approved them.",
         _ => "A place for every machine. A signal for every session."
     };
     private bool IsLive => Connection.State == DashboardLinkState.Live && Connection.ObservationsFresh;

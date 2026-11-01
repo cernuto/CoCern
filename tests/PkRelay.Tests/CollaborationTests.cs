@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Orleans;
+using PkRelay.Contracts;
 using PkRelay.Core;
 using PkRelay.Domain;
 using Xunit;
@@ -454,5 +455,194 @@ public sealed class CollaborationTests
         milestone["sessionToken"] = session["sessionToken"]!.DeepClone(); milestone["notes"] = new string('"', 2000);
         var bounded = await Invoke("task_update", milestone); Assert.True(bounded.Ok, bounded.Code);
         Assert.True(Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(bounded)) <= 32768);
+    }
+
+    private static RelayReply Standing(StateEnvelope<CoordinationDocument> state, string operation, JsonObject args, RelayCaller? caller = null, int seconds = 0)
+    {
+        args["repositoryId"] = "repo"; args["requestId"] ??= Guid.NewGuid().ToString("N");
+        return CoordinationStateMachine.Apply(state, "board", "repo:default", caller ?? Caller, operation, args, Now.AddSeconds(seconds));
+    }
+    private static JsonObject Put(long revision, string field, JsonNode value) => new() { ["expectedRevision"] = revision, [field] = value };
+    private static JsonObject Grant(string id, string scope, int expiresInSeconds, params string[] targets)
+    {
+        var grant = new JsonObject { ["id"] = id, ["scope"] = scope, ["expiresAt"] = Now.AddSeconds(expiresInSeconds).ToString("O") };
+        if (targets.Length > 0) grant["targets"] = new JsonArray(targets.Select(target => (JsonNode)target).ToArray());
+        return grant;
+    }
+    private static JsonObject Authorized(string authorityRef, params string[] resources)
+    {
+        var workflow = Workflow(); workflow["packet"]!["authorityRef"] = authorityRef;
+        if (resources.Length > 0) workflow["packet"]!["resources"] = new JsonArray(resources.Select(id => (JsonNode)id).ToArray());
+        return workflow;
+    }
+
+    [Fact]
+    public void Readiness_refuses_an_unknown_expired_or_out_of_scope_grant_in_authorityRef()
+    {
+        var state = new StateEnvelope<CoordinationDocument>();
+        var grants = new JsonArray(Grant("rigs", "resource", 3600, "rig-1", "rig-2"), Grant("repo-wide", "repository", 3600), Grant("deploy", "action", 3600, "deploy-css"), Grant("short", "resource", 60, "rig-1"));
+        Assert.True(Standing(state, "standing_put", Put(0, "grants", grants)).Ok);
+        string Reason(RelayReply reply) { Assert.Equal("GrantInvalid", reply.Code); return Data(reply)["reason"]!.GetValue<string>(); }
+
+        Assert.True(Call(state, "task_update", Update("covered", 0, Authorized("grant:rigs", "rig-1", "rig-2"))).Ok);
+        Assert.True(Call(state, "task_update", Update("repository", 0, Authorized("grant:repo-wide"))).Ok);
+        Assert.True(Call(state, "task_update", Update("prose", 0, Workflow())).Ok);
+        Assert.Equal("scope", Reason(Call(state, "task_update", Update("other-rig", 0, Authorized("grant:rigs", "rig-1", "rig-3")))));
+        Assert.Equal("scope", Reason(Call(state, "task_update", Update("no-resources", 0, Authorized("grant:rigs")))));
+        Assert.Equal("scope", Reason(Call(state, "task_update", Update("action", 0, Authorized("grant:deploy", "rig-1")))));
+        Assert.Equal("unknown", Reason(Call(state, "task_update", Update("missing", 0, Authorized("grant:missing")))));
+        // A blocked or completed packet is not a readiness claim, so its grant is not checked.
+        var blocked = Authorized("grant:missing"); blocked["state"] = "blocked";
+        blocked["blockers"]!.AsArray().Add(new JsonObject { ["id"] = "hold", ["kind"] = "coordinator_hold", ["summary"] = "Waiting", ["recheckCondition"] = "Released" });
+        Assert.True(Call(state, "task_update", Update("held", 0, blocked)).Ok);
+
+        // A grant that was valid when the task became ready stops it being offered once it expires, and refuses a new ready write.
+        Assert.True(Call(state, "task_update", Update("expiring", 0, Authorized("grant:short", "rig-1"))).Ok);
+        string Offered(int seconds)
+        {
+            var reply = Data(Call(state, "__next_work", new() { ["sessionId"] = "worker", ["limit"] = 5 }, seconds));
+            return string.Join(",", reply["candidates"]!.AsArray().Select(candidate => candidate!["taskId"]!.GetValue<string>()).Order(StringComparer.Ordinal));
+        }
+        Assert.Equal("covered,expiring,prose,repository", Offered(0));
+        Assert.Equal("covered,prose,repository", Offered(120));
+        Assert.Equal("expired", Reason(Call(state, "task_update", Update("expiring", 1, Authorized("grant:short", "rig-1")), 120)));
+
+        // Removing a grant makes the tasks that name it unknown, and they are no longer offered.
+        Assert.True(Standing(state, "standing_put", Put(1, "remove", new JsonArray("rigs"))).Ok);
+        Assert.Equal("expiring,prose,repository", Offered(0));
+    }
+
+    [Fact]
+    public void Standing_put_needs_an_administrator_and_the_expected_revision_within_limits()
+    {
+        var state = new StateEnvelope<CoordinationDocument>();
+        var line = new JsonArray(new JsonObject { ["id"] = "css", ["text"] = "Never deploy CSS without a restoration receipt." });
+        Assert.Equal("AdministratorRequired", Standing(state, "standing_put", Put(0, "lines", line.DeepClone()), Caller with { IsAdministrator = false }).Code);
+        Assert.Equal("VersionConflict", Standing(state, "standing_put", Put(1, "lines", line.DeepClone())).Code);
+        Assert.Equal("InvalidArguments", Standing(state, "standing_put", new() { ["expectedRevision"] = 0 }).Code);
+        Assert.Equal("InvalidArguments", Standing(state, "standing_put", Put(0, "lines", new JsonArray(new JsonObject { ["id"] = "long", ["text"] = new string('x', 201) }))).Code);
+        Assert.Equal("CapacityExceeded", Standing(state, "standing_put", Put(0, "lines", new JsonArray(Enumerable.Range(0, 31).Select(i => (JsonNode)new JsonObject { ["id"] = "l" + i, ["text"] = "Line " + i }).ToArray()))).Code);
+        Assert.Equal("InvalidArguments", Standing(state, "standing_put", Put(0, "grants", new JsonArray(Grant("past", "resource", -1, "rig-1")))).Code);
+        Assert.Equal("InvalidArguments", Standing(state, "standing_put", Put(0, "grants", new JsonArray(Grant("elsewhere", "repository", 60, "other-repo")))).Code);
+        Assert.Equal("InvalidArguments", Standing(state, "standing_put", Put(0, "settings", new JsonObject { ["unknown"] = true })).Code);
+        Assert.Equal("NotFound", Standing(state, "standing_put", Put(0, "remove", new JsonArray("absent"))).Code);
+        Assert.DoesNotContain("standing", state.Value.Json);
+
+        var put = Standing(state, "standing_put", Put(0, "lines", line.DeepClone()));
+        Assert.True(put.Ok); Assert.Equal(1, put.Version); Assert.Equal(1, Data(put)["revision"]!.GetValue<long>());
+        Assert.Equal("InvalidArguments", Standing(state, "standing_put", Put(1, "grants", new JsonArray(Grant("css", "resource", 60, "rig-1")))).Code);
+
+        // requireResources (build step 2) is the board setting standing_put writes.
+        Assert.True(Call(state, "task_update", Update("before", 0, Workflow())).Ok);
+        Assert.True(Standing(state, "standing_put", Put(1, "settings", new JsonObject { ["requireResources"] = true })).Ok);
+        Assert.Equal("packet.resources", Data(Call(state, "task_update", Update("after", 0, Workflow())))["required"]!.GetValue<string>());
+        Assert.True(Standing(state, "standing_put", Put(2, "settings", new JsonObject { ["requireResources"] = false })).Ok);
+        Assert.True(Call(state, "task_update", Update("after", 0, Workflow())).Ok);
+
+        // Every change advances the revision once; the history keeps the latest entries, newest first, with who and what.
+        for (var revision = 3; revision < 3 + RelayLimits.StandingHistoryEntries + 2; revision++)
+            Assert.True(Standing(state, "standing_put", Put(revision, "lines", new JsonArray(new JsonObject { ["id"] = "rev", ["text"] = "Revision " + revision }))).Ok);
+        var view = Data(Call(state, "task_get", new() { ["section"] = "standing" }));
+        var history = view["history"]!.AsArray();
+        Assert.Equal(RelayLimits.StandingHistoryEntries, history.Count);
+        Assert.Equal(3 + RelayLimits.StandingHistoryEntries + 2, history[0]!["revision"]!.GetValue<long>());
+        Assert.Equal("alice", history[0]!["by"]!.GetValue<string>());
+        Assert.Equal("~line:rev", history[0]!["changes"]![0]!.GetValue<string>());
+        Assert.Equal(2, view["lines"]!.AsArray().Count);
+        Assert.Equal("alice", view["lines"]![0]!["author"]!.GetValue<string>());
+        Assert.False(view["settings"]!["requireResources"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public void Proposals_take_effect_only_when_an_administrator_approves_them()
+    {
+        var state = new StateEnvelope<CoordinationDocument>();
+        var bob = new RelayCaller("bob", false, ["repo"], true);
+        string Propose(JsonObject args, string session = "bob-session") { args["sessionId"] = session; var reply = Standing(state, "standing_propose", args, bob); Assert.True(reply.Ok, reply.Code); return Data(reply)["proposalId"]!.GetValue<string>(); }
+        RelayReply Delivered(int seconds = 0) => Call(state, "__standing", new(), seconds);
+
+        Assert.Equal("InvalidArguments", Standing(state, "standing_propose", new() { ["sessionId"] = "s" }, bob).Code);
+        Assert.Equal("InvalidArguments", Standing(state, "standing_propose", new() { ["sessionId"] = "s", ["line"] = new JsonObject { ["text"] = "a" }, ["grant"] = Grant("g", "repository", 60) }, bob).Code);
+        var line = Propose(new() { ["line"] = new JsonObject { ["text"] = "Run the smoke suite before every merge." } });
+        var grant = Propose(new() { ["grant"] = Grant("bench", "resource", 3600, "rig-1") });
+        var rejected = Propose(new() { ["line"] = new JsonObject { ["id"] = "rejected", ["text"] = "Skip review." } });
+        var stale = Propose(new() { ["grant"] = Grant("brief", "resource", 60, "rig-1") });
+
+        // Pending proposals are not standing: the revision does not move, nothing is delivered, and a named grant does not authorize work.
+        Assert.Equal(0, Delivered().Version);
+        Assert.Empty(Data(Delivered())["lines"]!.AsArray());
+        Assert.Equal("unknown", Data(Call(state, "task_update", Update("t", 0, Authorized("grant:bench", "rig-1"))))["reason"]!.GetValue<string>());
+        Assert.Equal(4, Data(Call(state, "task_get", new() { ["section"] = "standing" }))["proposals"]!.AsArray().Count);
+        Assert.Equal("AdministratorRequired", Standing(state, "standing_put", Put(0, "approve", new JsonArray(line)), bob).Code);
+
+        Assert.True(Standing(state, "standing_put", new() { ["expectedRevision"] = 0, ["approve"] = new JsonArray(line, grant), ["remove"] = new JsonArray(rejected) }).Ok);
+        Assert.Equal("GrantInvalid", Standing(state, "standing_put", Put(1, "approve", new JsonArray(stale)), seconds: 120).Code);
+        var delivered = Data(Delivered());
+        Assert.Equal(1, delivered["revision"]!.GetValue<long>());
+        Assert.Equal("Run the smoke suite before every merge.", Assert.Single(delivered["lines"]!.AsArray())!["text"]!.GetValue<string>());
+        Assert.Equal("bench", Assert.Single(delivered["grants"]!.AsArray())!["id"]!.GetValue<string>());
+        Assert.Null(delivered["lines"]![0]!["author"]);
+        var view = Data(Call(state, "task_get", new() { ["section"] = "standing" }));
+        Assert.Equal("bob", view["lines"]![0]!["author"]!.GetValue<string>());
+        Assert.Equal("alice", view["lines"]![0]!["approvedBy"]!.GetValue<string>());
+        Assert.Equal("bob", view["grants"]![0]!["proposedBy"]!.GetValue<string>());
+        Assert.Equal("alice", view["grants"]![0]!["grantor"]!.GetValue<string>());
+        Assert.Equal(stale, Assert.Single(view["proposals"]!.AsArray())!["id"]!.GetValue<string>());
+        Assert.True(Call(state, "task_update", Update("t", 0, Authorized("grant:bench", "rig-1"))).Ok);
+        // Expired grants stay on record for review but are no longer delivered.
+        Assert.Empty(Data(Delivered(7200))["grants"]!.AsArray());
+        Assert.True(Data(Call(state, "task_get", new() { ["section"] = "standing" }, 7200))["grants"]![0]!["expired"]!.GetValue<bool>());
+
+        // One session may keep at most 5 proposals waiting; the board keeps at most 20 in all.
+        for (var i = 1; i < RelayLimits.MaxStandingProposalsPerSession; i++) Propose(new() { ["line"] = new JsonObject { ["text"] = "Proposal " + i } });
+        var sixth = Standing(state, "standing_propose", new() { ["sessionId"] = "bob-session", ["line"] = new JsonObject { ["text"] = "Sixth" } }, bob);
+        Assert.Equal("CapacityExceeded", sixth.Code);
+        Assert.Equal(RelayLimits.MaxStandingProposalsPerSession, Data(sixth)["maxPerSession"]!.GetValue<int>());
+        for (var i = RelayLimits.MaxStandingProposalsPerSession; i < RelayLimits.MaxStandingProposals; i++) Propose(new() { ["line"] = new JsonObject { ["text"] = "Proposal " + i } }, "session-" + i);
+        Assert.Equal("CapacityExceeded", Standing(state, "standing_propose", new() { ["sessionId"] = "s", ["line"] = new JsonObject { ["text"] = "One too many" } }, bob).Code);
+    }
+
+    [Fact]
+    public void Standing_revision_moves_only_when_a_line_grant_or_setting_changes()
+    {
+        var state = new StateEnvelope<CoordinationDocument>();
+        var bob = new RelayCaller("bob", false, ["repo"], true);
+        var line = new JsonObject { ["id"] = "css", ["text"] = "Never deploy CSS without a restoration receipt." };
+        Assert.Equal(1, Standing(state, "standing_put", Put(0, "lines", new JsonArray(line.DeepClone()))).Version);
+        Assert.True(Standing(state, "standing_put", Put(1, "settings", new JsonObject { ["requireResources"] = true })).Ok);
+        string Propose(JsonObject args) { args["sessionId"] = "bob-session"; return Data(Standing(state, "standing_propose", args, bob))["proposalId"]!.GetValue<string>(); }
+        RelayReply Put2(string field, JsonNode value) => Standing(state, "standing_put", Put(2, field, value));
+        long HistoryCount() => Data(Call(state, "task_get", new() { ["section"] = "standing" }))["history"]!.AsArray().Count;
+
+        // Nothing to change: no revision and no history; standing is left exactly as it was.
+        string StandingJson() => JsonNode.Parse(state.Value.Json)!["standing"]!.ToJsonString();
+        var before = StandingJson();
+        foreach (var (field, value) in new (string, JsonNode)[] { ("lines", new JsonArray()), ("lines", new JsonArray(line.DeepClone())), ("settings", new JsonObject { ["requireResources"] = true }), ("grants", new JsonArray()) })
+        {
+            var reply = Put2(field, value);
+            Assert.True(reply.Ok); Assert.Equal(2, reply.Version); Assert.False(Data(reply)["changed"]!.GetValue<bool>());
+        }
+        Assert.Equal(before, StandingJson());
+
+        // Rejecting a proposal, or approving one identical to the current line, keeps the revision but is recorded.
+        var rejected = Propose(new() { ["line"] = new JsonObject { ["text"] = "Skip review." } });
+        var reply2 = Put2("remove", new JsonArray(rejected));
+        Assert.Equal(2, reply2.Version); Assert.False(Data(reply2)["changed"]!.GetValue<bool>());
+        var same = Propose(new() { ["line"] = line.DeepClone() });
+        Assert.Equal(2, Put2("approve", new JsonArray(same)).Version);
+        Assert.Equal(2, Data(Call(state, "__standing", new()))["revision"]!.GetValue<long>());
+        Assert.Equal(4, HistoryCount());
+
+        // An approval whose ID matches an existing line is an edit: the view says so before approval, and history records "~".
+        var edit = Propose(new() { ["line"] = new JsonObject { ["id"] = "css", ["text"] = "Deploy CSS only with a restoration receipt." } });
+        var fresh = Propose(new() { ["line"] = new JsonObject { ["id"] = "new-line", ["text"] = "Run smoke tests first." } });
+        var proposals = Data(Call(state, "task_get", new() { ["section"] = "standing" }))["proposals"]!.AsArray().ToDictionary(x => x!["id"]!.GetValue<string>());
+        Assert.True(proposals[edit]!["replaces"]!.GetValue<bool>());
+        Assert.Null(proposals[fresh]!["replaces"]);
+        var approved = Put2("approve", new JsonArray(edit, fresh));
+        Assert.Equal(3, approved.Version); Assert.True(Data(approved)["changed"]!.GetValue<bool>());
+        var latest = Data(Call(state, "task_get", new() { ["section"] = "standing" }))["history"]![0]!["changes"]!.AsArray().Select(x => x!.GetValue<string>()).ToArray();
+        Assert.Equal(new[] { "approve:" + edit, "~line:css", "approve:" + fresh, "+line:new-line" }, latest);
+        Assert.Equal("bob", Data(Call(state, "task_get", new() { ["section"] = "standing" }))["lines"]![0]!["author"]!.GetValue<string>());
     }
 }

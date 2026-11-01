@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
@@ -23,6 +24,11 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
     private readonly IMachineDirectory directory = machines ?? new MachineDirectory(grains);
     private const int WorkerProbeLimit = 50;
     private readonly string incarnation = Guid.NewGuid().ToString("N");
+    /// <summary>
+    /// Each board's last standing read (tick count, revision, delivered JSON), reused for <see cref="RelayLimits.StandingCacheSeconds"/>. An entry
+    /// never moves to an older revision; a write leaves only its new revision (no JSON), so a read already in flight cannot restore stale standing.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, (long At, long Revision, string? Json)> standingCache = new(StringComparer.Ordinal);
     public string IncarnationId => incarnation;
 
     /// <summary>Runs one public tool call and, when a sink is configured, records it once. Recording never changes or fails the call.</summary>
@@ -70,6 +76,8 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
             var result = await DispatchAsync(trusted, tool, args, session);
             if (result.Ok) result = await PiggybackAsync(trusted, args, result);
             if (result.Ok && tool == RelayTools.TaskUpdate && args["includeNextWork"]?.GetValue<bool>() == true) result = await WithNextWorkAsync(trusted, args, session, result);
+            if (result.Ok && tool == RelayTools.StandingPut) CacheStanding(BoardKey(args), 0, result.Version, null);
+            if (result.Ok && session is not null && CarriesStanding(tool)) result = await WithStandingAsync(trusted, args, session, result);
             return BoundWire(result);
         }
         catch (ArgumentException) { return Error(InvalidArguments); }
@@ -121,7 +129,70 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
             var packet = await CallBoard(caller, RelayTools.TaskGet, args);
             data["taskPacket"] = packet.Ok ? JsonNode.Parse(packet.DataJson) : JsonSerializer.SerializeToNode(new { code = packet.Code });
         }
+        try
+        {
+            // A fresh chat receives the board's standing once, and the session records it so later replies leave it out.
+            if (await StandingAsync(caller, args) is { } standing && Number(standing, "revision") > 0 && Attach(data, standing))
+            {
+                var session = args.DeepClone().AsObject(); session["sessionId"] = Text(data, "sessionId"); session["sessionToken"] = Text(data, "sessionToken");
+                await MarkStandingSeenAsync(caller, session, Number(standing, "revision"));
+            }
+        }
+        catch (Exception) { /* Standing is a convenience; the session is open either way. */ }
         return Ok(data, opened.Version);
+    }
+
+    /// <summary>
+    /// Successful calls whose reply carries changed standing. <c>check_inbox</c> is left out: the adapter's background wake readers and
+    /// <c>waitSeconds</c> polls discard most inbox replies unseen, so standing attached there could be recorded as received without reaching the model.
+    /// </summary>
+    private static bool CarriesStanding(string tool) => tool is RelayTools.TaskUpdate or RelayTools.ActionReport or RelayTools.TaskClaim;
+
+    /// <summary>Attaches the board's standing when its revision is newer than the one this session last received. Never changes the committed result.</summary>
+    private async Task<RelayReply> WithStandingAsync(RelayCaller caller, JsonObject args, JsonObject session, RelayReply committed)
+    {
+        try
+        {
+            var seen = session["standingSeen"] is JsonObject boards ? Number(boards, Text(args, "boardId", "default")) : 0;
+            if (await StandingAsync(caller, args) is not { } standing || Number(standing, "revision") <= seen) return committed;
+            var data = Parse(committed);
+            if (Attach(data, standing)) await MarkStandingSeenAsync(caller, args, Number(standing, "revision"));
+            return Ok(data, committed.Version);
+        }
+        catch (Exception) { return committed; }
+    }
+
+    /// <summary>Attaches the full standing when the reply still fits; otherwise only its revision, and the text waits for a later, smaller reply.</summary>
+    private static bool Attach(JsonObject data, JsonObject standing)
+    {
+        data["standing"] = standing.DeepClone();
+        if (FitsWire(Ok(data, long.MaxValue))) return true;
+        data["standing"] = new JsonObject { ["revision"] = Number(standing, "revision"), ["detailFetchRequired"] = true };
+        return false;
+    }
+
+    private Task<RelayReply> MarkStandingSeenAsync(RelayCaller caller, JsonObject args, long revision) => CallSession(caller, Operations.StandingSeen, new JsonObject
+    {
+        ["repositoryId"] = Text(args, "repositoryId"), ["sessionId"] = Text(args, "sessionId"), ["sessionToken"] = Text(args, "sessionToken"),
+        ["boardId"] = Text(args, "boardId", "default"), ["standingRevision"] = revision
+    });
+
+    /// <summary>The board's delivered standing, read at most once per <see cref="RelayLimits.StandingCacheSeconds"/>; a write through this hub clears it at once.</summary>
+    private async Task<JsonObject?> StandingAsync(RelayCaller caller, JsonObject args)
+    {
+        var key = BoardKey(args);
+        var now = Environment.TickCount64;
+        if (standingCache.TryGetValue(key, out var cached) && cached.Json is not null && now - cached.At < RelayLimits.StandingCacheSeconds * 1000L) return JsonNode.Parse(cached.Json)!.AsObject();
+        var read = await CallBoard(caller, Operations.Standing, new JsonObject { ["repositoryId"] = Text(args, "repositoryId"), ["boardId"] = Text(args, "boardId", "default") });
+        if (!read.Ok) return null;
+        CacheStanding(key, now, read.Version, read.DataJson);
+        return Parse(read);
+    }
+
+    private void CacheStanding(string key, long at, long revision, string? json)
+    {
+        if (standingCache.Count >= RelayLimits.StandingCacheBoards && !standingCache.ContainsKey(key)) standingCache.Clear();
+        standingCache.AddOrUpdate(key, (at, revision, json), (_, old) => revision >= old.Revision ? (at, revision, json) : old);
     }
 
     private Task<RelayReply> VerifySessionAsync(RelayCaller caller, JsonObject args) =>

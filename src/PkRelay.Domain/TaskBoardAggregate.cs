@@ -47,6 +47,10 @@ internal static class TaskBoardAggregate
         switch (context.Operation)
         {
             case Operations.NextWork: return TaskWorkflow.NextWork(context.State, context.Args, context.Now);
+            case Operations.Standing: return StandingPreferences.Read(context.State, context.Now);
+            case RelayTools.StandingPut: return StandingPreferences.Put(context);
+            case RelayTools.StandingPropose: return StandingPreferences.Propose(context);
+            case RelayTools.TaskGet when taskId.Length == 0 && Text(context.Args, "section") == "standing": return StandingPreferences.View(context.State, context.Now);
             case RelayTools.TaskGet when taskId.Length == 0: return context.Args.ContainsKey("sinceRevision") ? DeltaPage(context.State, context.Args) : ListTasks(context.State, context.Args);
             case RelayTools.ContextGet: return GetContext(context);
             case RelayTools.ContextPut: return PutContext(context);
@@ -247,6 +251,8 @@ internal static class TaskBoardAggregate
             if (context.Operation != RelayTools.TaskUpdate || args["workflow"] is not JsonObject workflow) return Error(InvalidWorkflow);
             if (TaskWorkflow.Validate(workflow, task["workflow"] as JsonObject, TaskActions.HasUnresolved(task)) is { } invalid) return Error(invalid);
             if (Text(workflow, "state") == "ready" && TaskWorkflow.RequiresResources(context.State) && workflow["packet"]?["resources"] is not JsonArray) return Error(InvalidWorkflow, new { required = "packet.resources" });
+            // A packet whose authorityRef names a standing grant is ready only while that grant exists, covers it and has not expired.
+            if (Text(workflow, "state") == "ready" && StandingPreferences.GrantProblem(context.State, workflow, context.Now) is { } grant) return Error(GrantInvalid, new { authorityRef = Text(workflow["packet"]!.AsObject(), "authorityRef"), reason = grant });
             var tasks = ObjectAt(context.State, "tasks");
             if (TaskWorkflow.CheckDependencies(tasks, Text(task, "taskId"), workflow) is { } dependency) return Error(dependency);
             var completing = Text(workflow, "state") == "completed" && (task["workflow"] is not JsonObject prior || Text(prior, "state") != "completed");

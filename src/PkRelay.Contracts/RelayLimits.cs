@@ -49,4 +49,31 @@ public static class RelayLimits
     public const int NextWorkCandidates = 5;
     /// <summary>Most resource claim lookups one next-work offer makes.</summary>
     public const int MaxOfferResourceLookups = 32;
+
+    /// <summary>Most standing lines one board keeps.</summary>
+    public const int MaxStandingLines = 30;
+    /// <summary>Longest standing line, in characters.</summary>
+    public const int MaxStandingLineLength = 200;
+    /// <summary>Most authority grants one board keeps.</summary>
+    public const int MaxStandingGrants = 30;
+    /// <summary>Most repository, resource or action targets one grant names.</summary>
+    public const int MaxGrantTargets = 16;
+    /// <summary>Longest standing line, grant or proposal ID.</summary>
+    public const int MaxStandingIdLength = 64;
+    /// <summary>Most proposals one board keeps waiting for an administrator.</summary>
+    public const int MaxStandingProposals = 20;
+    /// <summary>Most proposals one session may have waiting at once.</summary>
+    public const int MaxStandingProposalsPerSession = 5;
+    /// <summary>Changes listed in one history entry; the entry keeps the total when there are more.</summary>
+    public const int StandingHistoryChanges = 20;
+    /// <summary>Standing changes the board keeps in its revision history; older ones are dropped.</summary>
+    public const int StandingHistoryEntries = 20;
+    /// <summary>Largest standing text sent to a chat (lines, active grants and settings), in UTF-8 bytes.</summary>
+    public const int MaxStandingBytes = 12_288;
+    /// <summary>How long the hub reuses a board's standing read before reading it again.</summary>
+    public const int StandingCacheSeconds = 5;
+    /// <summary>Most boards whose standing the hub keeps cached; past this the cache starts over.</summary>
+    public const int StandingCacheBoards = 1_024;
+    /// <summary>Most boards one session records a received standing revision for.</summary>
+    public const int MaxStandingBoardsPerSession = 64;
 }

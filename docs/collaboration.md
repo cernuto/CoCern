@@ -32,7 +32,7 @@ An optional `task_update.workflow` supplies the full workflow record. It is stor
 }
 ```
 
-The closure packet requires nonempty `goal`, `target`, `authorityRef`, `restoration` and `stopCondition` strings. `restoration` describes the expectation; actual action outcomes and restoration evidence remain in the existing action reports. `authorityRef` preserves the source of existing human authority and grants no new permission. Provider approval remains separate.
+The closure packet requires nonempty `goal`, `target`, `authorityRef`, `restoration` and `stopCondition` strings. `restoration` describes the expectation; actual action outcomes and restoration evidence remain in the existing action reports. `authorityRef` preserves the source of existing human authority and grants no new permission. It may name a standing grant as `grant:<id>`, which readiness then checks; see [standing.md](standing.md). Provider approval remains separate.
 
 Each of 1–32 named criteria has a unique `id`, a `description`, and a reported `result` of `not_run`, `passed` or `failed`. A passed criterion requires a nonempty `evidenceRef`. Report `state: "completed"` only when every criterion is passed with evidence, there are no blockers, and no external action or restoration remains unresolved. This is reported completion, not independent runtime verification or human acceptance.
 
