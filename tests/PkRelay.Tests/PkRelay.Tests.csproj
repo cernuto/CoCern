@@ -4,6 +4,7 @@
     <ProjectReference Include="../../src/PkRelay.Core/PkRelay.Core.csproj" />
     <ProjectReference Include="../../src/PkRelay.Storage/PkRelay.Storage.csproj" />
     <ProjectReference Include="../../src/PkRelay.Host/PkRelay.Host.csproj" />
+    <ProjectReference Include="../../src/PkRelay.Analytics/PkRelay.Analytics.csproj" />
     <ProjectReference Include="../../src/PkRelay.Adapter/PkRelay.Adapter.csproj" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="xunit" />

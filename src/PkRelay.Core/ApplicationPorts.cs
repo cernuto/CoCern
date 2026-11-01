@@ -107,6 +107,56 @@ public sealed record ActivityCounters
     public long DroppedEvents { get; init; }
 }
 
+/// <summary>
+/// One analytics result: column names, at most the configured row cap of rows, whether more rows were cut off, and when the snapshot
+/// it read was taken. Values are plain JSON-friendly types: null, bool, long, double or string.
+/// </summary>
+public sealed record AnalyticsResult(IReadOnlyList<string> Columns, IReadOnlyList<IReadOnlyList<object?>> Rows, bool Truncated, DateTimeOffset SnapshotAt);
+
+/// <summary>Why an analytics query did not run or did not finish.</summary>
+public enum AnalyticsError
+{
+    /// <summary>No snapshot is loaded yet, or analytics is turned off.</summary>
+    Unavailable,
+    /// <summary>No named query has this name.</summary>
+    UnknownQuery,
+    /// <summary>A parameter is unknown or out of range, or the SQL text is empty or too long.</summary>
+    InvalidArguments,
+    /// <summary>The SQL is not exactly one read-only <c>SELECT</c> statement.</summary>
+    Refused,
+    /// <summary>The query ran past the per-query timeout and was interrupted.</summary>
+    Timeout,
+    /// <summary>The database rejected the query, for example a file read or an unknown column.</summary>
+    Failed
+}
+
+public sealed class AnalyticsException(AnalyticsError error, string message, Exception? inner = null) : Exception(message, inner)
+{
+    public AnalyticsError Error { get; } = error;
+}
+
+/// <summary>
+/// Port implemented by <c>PkRelay.Analytics</c>: read-only queries against the latest analytics snapshot, never the live database.
+/// Failures throw <see cref="AnalyticsException"/>.
+/// </summary>
+public interface IAnalyticsQueries
+{
+    /// <summary>The fixed named queries, in a stable order.</summary>
+    IReadOnlyList<string> QueryNames { get; }
+
+    /// <summary>
+    /// Runs one named query for <paramref name="repositoryId"/>. <paramref name="parameters"/> is a JSON object (or undefined) of the
+    /// query's optional parameters, such as <c>days</c>.
+    /// </summary>
+    Task<AnalyticsResult> RunNamedAsync(string name, string repositoryId, JsonElement parameters = default, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Runs ad hoc SQL that must be exactly one <c>SELECT</c>. The caller decides whether ad hoc SQL is allowed
+    /// (<c>Relay:Analytics:AllowAdHocSql</c>) and logs it.
+    /// </summary>
+    Task<AnalyticsResult> RunSqlAsync(string sql, CancellationToken cancellationToken = default);
+}
+
 /// <summary>Port implemented by the host: best-effort change hints. The durable inbox stays authoritative.</summary>
 public interface ICoordinationNotifier
 {

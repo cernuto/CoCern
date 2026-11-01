@@ -700,6 +700,8 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
             RelayTools.SendMessage when taskId.Length > 0 => TaskTarget(args, taskId),
             RelayTools.SendMessage when Text(args, "recipientSessionId").Length > 0 => "message:" + Uri.EscapeDataString(Text(args, "sessionId")) + ">" + Uri.EscapeDataString(Text(args, "recipientSessionId")),
             RelayTools.ContextPut when Text(args, "contextId").Length > 0 => "context:" + BoardKey(args) + "/" + Uri.EscapeDataString(Text(args, "contextId")),
+            // Lets analytics count refused claims per resource.
+            RelayTools.ClaimAcquire when Text(args, "resourceId").Length > 0 => "resource:" + Uri.EscapeDataString(Text(args, "repositoryId")) + "/" + Uri.EscapeDataString(Text(args, "resourceId")),
             // Only a first page counts as an inbox read; continuation pages belong to the same read.
             RelayTools.CheckInbox when Number(args, "cursor") == 0 => "inbox:" + Uri.EscapeDataString(Text(args, "sessionId")),
             _ => null
