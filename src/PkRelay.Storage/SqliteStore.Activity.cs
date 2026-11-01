@@ -232,7 +232,7 @@ public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
 
     private const long UnixEpochTicks = 621_355_968_000_000_000;
 
-    /// <summary>The hub-side counters for one repository over [from, to). Definitions are in docs/activity.md.</summary>
+    /// <summary>The hub-side counters for one repository over [from, to). Definitions are in docs/monitoring.md.</summary>
     public async Task<ActivityCounters> ReadActivityCountersAsync(string repositoryId, DateTimeOffset from, DateTimeOffset to, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrEmpty(repositoryId);

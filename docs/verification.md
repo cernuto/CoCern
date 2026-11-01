@@ -1,90 +1,19 @@
-# Build verification
+# Verification
 
-## Joint native MCP smoke, October 30, 2026
+What has been checked beyond the automated tests, and what has not. Run the tests with `dotnet test PkRelay.slnx`.
 
-Codex and the existing Claude Code chat coordinated through the enrolled node and native PkRelay MCP tools on `16XAURORA`. Both Roslyn CodeLens and the Visual Studio MCP server at `http://localhost:5050` were verified against `C:\Users\PaulC\source\repos\PkRelay\PkRelay.slnx`. This pass used disjoint source ownership in the shared checkout and separate `--artifacts-path artifacts/smoke-codex` and `artifacts/smoke-claude` test outputs. Neither participant built into the running adapter's folder.
+## Checked live
 
-- **Messaging and wake behavior.** Messages flowed in both directions, were read from the intended private inboxes, and were explicitly acknowledged. Claude reported a waiter wake about one second after a message, immediate delivery when rearming after a message arrived during the gap, and directory reachability dropping after the waiter exited. A real idle Codex wake was not separately exercised in this pass; its native session was mapped as `codex` and reported reachable by the directory.
-- **Ownership and retry behavior.** An exact `task_update` retry replayed its original result without advancing the board revision. A stale task version returned `VersionConflict` and did not apply its patch. Claude's attempt to claim Codex's actively leased task returned `Busy` with the existing holder and no grant or takeover. An unregistered source-path resource was refused; resource claims require administrator-registered canonical resources rather than arbitrary file names. Live task renewal succeeded, and release succeeded with the current task version and claim generation; the smoke task retained no lease.
-- **Schema repair.** The compact forwarding schemas omitted basic messaging fields, catalog-declared required operation fields and conditional task/resource claim arguments. The repair advertises those required fields plus session machine/label, recipient/text/reply correlation, inbox pagination, acknowledgment IDs and the two claim identity/generation forms, retaining repository-only forwarding requirements and the existing 20,000-character catalog budget. A task release advertises its additional `expectedVersion`; renewal advertises `leaseSeconds`. `chat_directory` does not advertise pagination it cannot perform. New discovery tests and the revised claim-schema test were run failing before their repair, including ten conditional-claim cases added after the live cleanup probe exposed the gap.
-- **Error repair.** The adapter previously preserved HTTP 409 domain conflicts but hid actionable domain failures on HTTP 400, 403, 404 and 413. It now preserves known error codes, data and version only when their shared classification matches the HTTP status. Unknown codes, success envelopes on failure statuses, malformed bodies and authentication middleware responses remain generic and do not expose raw response data. Oversized failure bodies retain the explicit `response_too_large` result, including both declared and streamed lengths. Only a locally generated size failure bypasses domain-code validation: a numeric-version hub envelope imitating that local code remains generic, with no returned data. Claude verified three impersonation regression cases failing before the final guard, then passing. The separate oversized-response test was verified passing; it was not run failing before its guard was added.
-- **Final tests.** Codex independently ran `dotnet test tests/PkRelay.Tests/PkRelay.Tests.csproj --artifacts-path artifacts/smoke-codex --no-restore --nologo --verbosity minimal`: **363 passed, zero failed, zero skipped**. Claude independently reported the same complete result from `artifacts/smoke-claude`. Roslyn compiler diagnostics were clean. Claude reviewed the schema changes; Codex reviewed the adapter error handling and requested the oversized-conflict and local-error impersonation corrections.
-- **Real protocol verification.** A fresh adapter process from the isolated build completed the actual stdio MCP handshake and tool listing, advertised the required coordination/claim/action/context fields, and used Codex's existing session for a paginated inbox read. An `ack` without a mutation request ID returned `RequestIdRequired`; a fresh request for an unknown resource returned `ResourceUnknown`. These rejected probes acknowledged no messages, acquired no resource and opened no new session. Tokens were not printed.
+- **Two chats on one PC** (October 30, 2026). Codex and Claude Code worked through the node and native MCP tools. Messages, acknowledgments, stale-version conflicts, `Busy` claims and the Claude waiter all behaved as documented.
+- **Codex wake-ups** (October 29). `codex queue` started real turns in two desktop chats. Four automatic turns finished a hand-off with no supervisor. A watcher restart sent no duplicates.
+- **Discovery** (October 30). A separate hub and two nodes on one PC: joining, certificate pinning, `chat_directory`, a machine refused `control_request` (403), and a stopped node turning unreachable within 90 seconds.
+- **Dashboard** (October 30). Desktop and phone sizes in a browser: sign-in, sessions, SQL, logs, light and dark themes, and a token change sending the browser back to sign-in.
 
-The live hub disappeared during the pass before any Visual Studio launch call. Process/listener inspection confirmed its absence; it was restored through Visual Studio's current startup project. Existing session, inbox and task state survived. The original exit cause remains unproven, and durable host logging is a follow-up because the host's console disappeared with it. Source repairs and isolated adapter verification do not by themselves update already-running native MCP processes; those clients must reconnect to rebuilt adapter binaries before receiving the new schemas and error handling.
+## Not checked yet
 
-Verified October 29, 2026 in `C:\Users\PaulC\source\repos\PkRelay`.
-
-## Initial build checks
-
-- The complete shared suite passed **95 tests, zero failed, zero skipped** using `dotnet test tests/PkRelay.Tests/PkRelay.Tests.csproj --no-restore --nologo --verbosity minimal`.
-- Roslyn CodeLens reported zero compiler errors and warnings for the loaded five-project PkRelay solution. Optional analyzer execution was not claimed.
-- Release publication succeeded for both `artifacts/host` and `artifacts/adapter`. These folders contain the actual deployable binaries and runtime dependencies.
-- The isolated process smoke passed authenticated REST task continuity, anonymous-access rejection, OpenAPI/Scalar retrieval, and real stdio MCP initialize/tool-list/tool-call using the official SDK server.
-- The documented startup script launched the published host with a separate temporary database and loopback ports. Health and Scalar returned HTTP 200; the test host was stopped afterward. No bearer value was printed.
-
-The tests exercise SQLite persistence/ETag conflicts, tombstones, atomic due-index replacement, exclusive ownership, backup recovery, schema rejection and fair due-work pagination; real Orleans activation; separate session handles/private inboxes; composed-claim rollback; action replay/attempt fencing; restoration obligations and administrator acceptance; actual serialized reply bounds; authenticated REST/MCP; session-scoped SignalR; OAuth transport/scope validation; and queued-message recovery after an actual SQLite close/reopen.
-
-Host fixtures assert their actual SQLite path, Orleans ports and cluster identity. A test exposed an earlier configuration-order error that reused default values before fixture overrides. That error was fixed through deferred configuration; the final passing results include the isolation assertions. Earlier restart/isolation claims were withdrawn until those corrected tests passed.
-
-Independent component reviews found action-attempt, restoration, claim-set, convenience-authentication, wire-bound, OAuth and dispatch-fairness defects. They were repaired with regression tests. Scoped re-review found one additional administrator-acceptance edge case, subsequently reproduced in three nonterminal states and fixed. The coordinating agent independently inspected the amended acceptance guard and post-failure retry timestamp; the full 95-test run includes those regressions.
-
-## Environment-dependent limits
-
-Visual Studio MCP port 5050 remains connected to the SNX solution. The user requested a separate PkRelay instance, which was opened, but Windows app-control approval timed out during its MCP setup. Port 5051 was not reachable at the final check. No SNX IDE build, solution switch, debugger or document operation was performed. PkRelay IDE build/test verification therefore remains pending. Binary/test production used the CLI's documented actual-binary/test exception after both required MCP connections were checked and the mismatch reported.
-
-Real off-host TLS, an external OAuth issuer/JWKS lifecycle, ChatGPT account registration, Secure MCP Tunnel onboarding and client-specific wake mechanisms were not configured or verified. JWT tests use a signed local fixture and normal named authentication options. The build exposes configured authentication and coordination tools; it does not supply an OAuth issuer or guarantee unattended model wakeup.
-
-This is the first continuity and reported-action build. It does not implement optional MCP Events, cross-provider chat bridges, multi-hub clustering, automatic source transfer or an IDE executor. Claims remain advisory, and external execution/restoration is reported by authorized participants. Actual total token savings have not been measured.
-
-The ignored default test database under `src/PkRelay.Host/data` was retained for diagnosis and is not part of source control or the published output. Live test logs and temporary databases are local verification artifacts. No enrolled rig, other chat or application was operated during these checks.
-
-## Collaboration efficiency update
-
-After the Manager retrospective, the existing board/application/tools gained durable task-change checkpoints with pinned delta pagination, opt-in closure packets with reported acceptance criteria and typed blockers, and an advisory next-work offer attached to `task_update`. Existing unstructured task clients remain compatible. See [collaboration.md](collaboration.md) for the request/response contract and boundaries.
-
-The independently run complete suite passed **117 tests, zero failed, zero skipped**. It includes the earlier 95 cases plus 22 collaboration cases, including actual HTTP/MCP, SQLite checkpoint continuation/restart, criteria and blocker validation, report/offer composition, private handle isolation and serialized reply limits. Core's initial missing-feature regressions were observed failing before implementation. Integration setup/cursor mismatches were corrected without counting them as valid missing-feature evidence.
-
-Independent review found two readiness bypasses: cached claim retries and new action reservations could use old readiness after a task became blocked/completed/retargeted. Six cases reproduced those defects before fixing; scoped re-review confirmed both addressed while preserving existing-action reconciliation and cleanup reporting. Compiler diagnostics were clean after the fixes.
-
-The updated live process smoke passed authenticated REST report-plus-offer and actual stdio MCP task delta retrieval, alongside the existing authentication, metadata and protocol checks. Owned test processes were stopped. Release host and adapter binaries were republished. Dedicated PkRelay Visual Studio MCP verification and external onboarding retain the environment limits above. No running rig campaign or remote deployment was changed, and actual aggregate token savings remain unmeasured.
-
-## Automatic local Codex wake integration
-
-The optional adapter `--wake` mode adds trusted local chat enrollment, authenticated SignalR hints and durable inbox reconciliation, fixed Codex CLI queue prompts, SQLite notification deduplication/reservations, exclusive ownership, bounded pagination, persistent rate limits and a local stop file. Normal stdio MCP behavior remains available. Setup and delivery/recovery boundaries are documented in [wake.md](wake.md).
-
-Visual Studio MCP was enabled during this work. Its native `solution_info` confirmed the PkRelay solution at port 5050 and `debugger_status` confirmed Design mode. The earlier SNX/missing-PkRelay IDE limitation above describes the initial build; it no longer describes the current connection. Visual Studio built the actual test binaries successfully, and Test Explorer reported **141 passed, zero failed, zero skipped, zero not run**. The coordinating agent's independent complete CLI run also passed **141 tests**. Roslyn compiler diagnostics were clean; optional analyzer execution is not claimed.
-
-The 24 added cases comprise 23 wake cases and one real Orleans/SQLite self-delivery case. Initial missing-wake behavior was observed failing before implementation. Independent review found a presentation-dependent route key that could bypass durable deduplication and uncertainty after restart; three real SQLite restart regressions failed before the key was fixed to canonical hub origin, repository and session inbox identity. Scoped re-review found the issue addressed.
-
-A live observer-only self-message probe exposed an existing non-reentrant grain self-call deadlock. A real Orleans regression timed out before the repair. Self delivery now applies to the owner's dispatch candidate so inbox insertion and outbox removal commit atomically, followed by best-effort notification. The regression verifies single delivery, repeated dispatch, restart durability, due-work removal and acknowledgment. Independent review checked rejection and storage-failure behavior and found no actionable issue. Other participant delivery does not recursively drain a recipient's outbox.
-
-The original isolated process smoke passed again after the entry-point change: authenticated REST milestone/offer, anonymous rejection, Scalar/OpenAPI and actual stdio MCP initialization, tool listing and task-delta calls. It used owned temporary processes and databases and stopped them afterward.
-
-The installed Codex CLI queued probes to both exact existing desktop test chats, and both chats actually ran reply turns without the supervising chat's continuation tool. The optional `--resume` flag warned about a missing standalone daemon; queue-only delivery was verified through the running desktop app instead. A queue receipt alone remains insufficient evidence of execution on another installation or while the desktop app is closed.
-
-The complete autonomous exchange then passed on board `local-auto-wake-20261029-01`. After one relay seed message, the watcher generated exactly four automatic turns: A produced a nonce/checksum and handed off; B independently verified and completed review; A verified B's report and completed production; B verified both completions and acknowledged the final receipt without replying. Both tasks finished at version 3 with passed evidence. The supervisor independently recomputed the checksum, checked both empty inboxes and inspected four queued SQLite wake batches across two routes. No native chat continuation was sent after seeding. Waiting and inbox reconciliation occurred in ordinary adapter code; aggregate token savings were not measured.
-
-The watcher honored its stop file. After a private consistent SQLite backup, only the owned local relay was restarted from fresh published binaries using the same database. A bootstrap retry exposed a Windows privilege error when reapplying an already-correct token-file ACL; the script now skips rewriting only an already-protected DACL with exactly one explicit current-user FullControl Allow rule, otherwise retaining the original restrictive ACL path. Independent review found no weaker condition, both startup scripts parsed, and the actual restart succeeded. The updated host recovered both previously stuck observer self-messages, which were explicitly acknowledged. Restarting the watcher against its unchanged wake database preserved exactly four queued batches, zero uncertain batches and zero new chat turns; both participant inboxes remained empty. Relay health was `ok`, and the two enrolled local test routes were left running as an opt-in pilot.
-
-Local verification artifacts are under ignored `artifacts/local-two-chat`, including `auto-observer-final.json`, `auto-wake-final.json`, `auto-restart-verification.json` and `self-delivery-recovery.json`. Private enrollment/state lived under ignored `data/wake-live` and each chat's restricted session file until October 30, when it was retired in favour of node mode and moved out of the repository. No rig campaign, remote deployment, provider approval setting or scheduled automation was changed. Remote hosts and other client wake protocols remain unverified.
-
-## Cross-PC discovery
-
-Verified October 30, 2026 in the `feature/cross-pc-discovery` worktree. The complete suite passed **294 tests, zero failed, zero skipped** (`dotnet test PkRelay.slnx`), up from 154 before the feature. Codex waking, setup and the transcript locators are covered by those tests only (in-memory hubs, substituted Run key and client files, synthetic transcripts and a substituted `codex queue`); they were not exercised live.
-
-A real-process end-to-end check ran on this PC from fresh Release publishes under `artifacts\e2e`. It used a separate hub (loopback HTTP 5281, HTTPS 5283, its own Orleans ports and cluster ID, a temporary database, certificate and admin token) and two nodes with temporary data folders, so the running development hub on 5271, the real node folder, the Run key, the Codex and Claude settings files and the firewall were not touched. Secrets were read from the temporary folder and never printed. Results:
-
-- **Enrollment and trust paths.** Node A used `--hub https://127.0.0.1:5283/` and pinned the hub certificate on first use; node B used `--hub http://127.0.0.1:5281/`. Both enrolled and received different machine IDs.
-- **Certificate fingerprint.** The fingerprint stored by the HTTPS node equals the one the hub logged at startup (compared case-insensitively). The loopback HTTP node stores none.
-- **`chat_directory`.** After one `session_open` per node through the stdio adapter on each node's credentials, an administrator call listed both chats, and a machine credential could also call it (200). A chat whose provider could not be located is listed as `unknown` and not reachable. For the liveness check the second chat's handle was edited to a mapped Claude chat and `--await-inbox --chat <id>` was started for it (a temporary folder, no real chat); the directory then listed it as reachable.
-- **Authorization.** A machine credential calling `control_request` (`pause` and `revoke_machine`) was refused with HTTP 403, `AdministratorRequired`.
-- **Liveness.** After node B was stopped, its chat turned unreachable 80 seconds after the stop (the limit is 90 seconds since its last announcement). Restarting node B in the same folder, with no `--hub`, kept the same machine ID, did not enroll again and made the chat reachable.
-- **Cleanup.** Every process started was stopped, the temporary folder was deleted and nothing was left listening. Windows kept a few stale loopback socket entries on 5281, with no owning process.
-
-Not exercised, and still open:
-
-- Network discovery on a physical second PC. Everything above used loopback on one machine, so real firewall behavior, name or address resolution and certificate subject-alternative names for a LAN address were not checked.
-- Real Codex waking. No prompt was queued into any real chat; the live end-to-end check had no Codex chat, and the waking path is covered by tests with a substituted dispatcher.
-- Setup on a real PC. `--setup` was not run, so the Run-key value, the Codex and Claude settings edits and the hidden node start are verified by tests only.
-- Automatic mapping of a real Claude or Codex chat to its transcript. The locators are verified against synthetic transcripts shaped after the structural findings in [discovery.md](discovery.md).
+- Discovery or the dashboard on a second physical PC or phone, through a real firewall and LAN certificate.
+- `--setup` on a real PC: the Run key, client settings edits and hidden node start are covered by tests only.
+- A real Codex chat woken by the node, and a real chat found from its transcript.
+- Remote HTTPS, an external OAuth issuer, ChatGPT registration and Secure MCP Tunnel.
+- Analytics loading the extension offline on a Windows hub.
+- Overall token savings.

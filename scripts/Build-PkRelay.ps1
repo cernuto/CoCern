@@ -7,7 +7,7 @@ try {
     & dotnet restore PkRelay.slnx --nologo
     if ($LASTEXITCODE -ne 0) { throw 'Package restore failed.' }
     # Analytics reads snapshots with DuckDB's sqlite extension. Install it once for this machine (this needs internet access the first
-    # time), so the tests never download it. CI does the same and sets PKRELAY_DUCKDB_EXTENSIONS. See docs/analytics.md.
+    # time), so the tests never download it. CI does the same and sets PKRELAY_DUCKDB_EXTENSIONS. See docs/monitoring.md.
     $extensions = Join-Path $root 'artifacts/duckdb_extensions'
     & dotnet run --project src/PkRelay.Host/PkRelay.Host.csproj -c Release --no-restore --no-launch-profile --nologo -- --install-analytics-extension $extensions
     if ($LASTEXITCODE -ne 0) { throw 'Installing the DuckDB sqlite extension failed.' }

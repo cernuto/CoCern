@@ -88,7 +88,7 @@ public interface IActivityCounterSource
     Task<ActivityCounters> ReadActivityCountersAsync(string repositoryId, DateTimeOffset from, DateTimeOffset to, CancellationToken cancellationToken = default);
 }
 
-/// <summary>Hub-side efficiency counters for one repository and time window. Definitions are in docs/activity.md.</summary>
+/// <summary>Hub-side efficiency counters for one repository and time window. Definitions are in docs/monitoring.md.</summary>
 public sealed record ActivityCounters
 {
     public long Calls { get; init; }
