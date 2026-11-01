@@ -1,12 +1,36 @@
 # Search
 
-The hub keeps a full-text index of tasks, notes and inbox messages. It is written in the same transaction as the state it describes, so it never disagrees with committed state. There is no `search` tool yet; agents cannot query it until the tool ships.
+The `search` tool finds tasks, notes and your own inbox messages by words. It returns IDs and short snippets; open the one you need with `task_get`, `context_get` or `check_inbox`. The index is written in the same transaction as the state it describes, so it never disagrees with committed state.
 
-Search is on by default. To turn it off:
+## Use it
+
+```json
+{ "repositoryId": "repo", "sessionId": "...", "sessionToken": "...", "query": "refresh timeout T-118" }
+```
+
+| Argument | Required | Meaning |
+| --- | --- | --- |
+| `query` | yes | Words to find, at most 256 characters. |
+| `kinds` | no | Any of `task`, `context`, `message`. Default: all. |
+| `status` | no | Only hits with this status, such as `ready`, `blocked`, `completed`, `open`, `note` or `unread`. |
+| `limit` | no | Most hits, 1 to 10. Default 3. |
+
+Reply:
+
+```json
+{ "hits": [ { "id": "T-118", "k": "task", "s": "completed", "at": "2026-10-29", "x": "…token [refresh] [timeout] after…" } ] }
+```
+
+- `b` names the board when a hit is not on `default`; pass it as `boardId` to `task_get`.
+- The reply stays under 2,048 bytes. When hits had to be dropped to fit, it carries `"truncated": true`.
+- A session is required. You only ever see your own repository and your own inbox.
+- `SearchUnavailable` means the hub keeps no index.
+
+## Turn it off
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| `Relay:Search:Enabled` | true | Keep the search index. Off empties it; on again rebuilds it at the next start. |
+| `Relay:Search:Enabled` | true | Keep the search index. Off empties it and the tool answers `SearchUnavailable`; on again rebuilds it at the next start. |
 
 ## What is searchable
 
@@ -28,8 +52,7 @@ Search is on by default. To turn it off:
 - Each space-separated chunk is one phrase, so `T-118` matches "T 118" but not a T and a 118 far apart.
 - Every phrase must match. Only when that finds fewer hits than asked for, hits with any of the phrases are added after them.
 - A title match counts four times a body match. Hits much weaker than the best one are dropped (under a quarter of its score).
-- Results are scoped to one repository, plus the asking session's own inbox. They can be narrowed by kind (`task`, `context`, `message`) and by status.
-- Each hit gives the ID, kind, status, date and a short snippet with matches in `[brackets]`. Open it with `task_get`, `context_get` or `check_inbox`.
+- Snippets show matches in `[brackets]`.
 
 ## Index upkeep
 
@@ -45,6 +68,8 @@ Search is on by default. To turn it off:
 | One part of a body (a note, report or message) | 1,024 bytes (`RelayLimits.MaxSearchFieldBytes`) |
 | Title | 256 bytes (`RelayLimits.MaxSearchTitleBytes`) |
 | Words per query | 16 (`RelayLimits.MaxSearchQueryTerms`) |
-| Hits per search | 10 (`RelayLimits.MaxSearchResults`) |
+| Hits per search | 3 by default, 10 at most (`RelayLimits.DefaultSearchResults`, `MaxSearchResults`) |
+| Reply | 2,048 bytes (`RelayLimits.MaxSearchReplyBytes`) |
+| Query | 256 characters (`RelayLimits.MaxSearchQueryLength`) |
 
 Reports and messages share the body, newest first, so the cap drops the oldest of either.

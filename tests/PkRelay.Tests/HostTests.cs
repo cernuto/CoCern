@@ -13,6 +13,7 @@ using Microsoft.AspNetCore.SignalR;
 using Microsoft.AspNetCore.SignalR.Client;
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
+using PkRelay.Contracts;
 using PkRelay.Core;
 using PkRelay.Domain;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -402,6 +403,62 @@ public class HostTests
     {
         public int Calls;
         public void Record(ActivityEvent activity) { Interlocked.Increment(ref Calls); throw new InvalidOperationException("Telemetry unavailable."); }
+    }
+
+    [Fact]
+    public async Task Search_is_scoped_to_the_repository_and_the_callers_own_inbox_and_needs_a_session()
+    {
+        await using var host = new RelayHostFixture(settings: new Dictionary<string, string?> { ["Relay:Clients:0:Repositories:1"] = "other" });
+        using var client = host.AuthorizedClient();
+        var alice = Data(await host.Call(client, "session_open", new { repositoryId = "repo", requestId = "search-alice" }));
+        var bob = Data(await host.Call(client, "session_open", new { repositoryId = "repo", requestId = "search-bob" }));
+        var carol = Data(await host.Call(client, "session_open", new { repositoryId = "other", requestId = "search-carol" }));
+        string Id(JsonElement session) => session.GetProperty("sessionId").GetString()!;
+        string Token(JsonElement session) => session.GetProperty("sessionToken").GetString()!;
+        Assert.True((await host.Call(client, "task_update", new { repositoryId = "repo", requestId = "search-t1", sessionId = Id(alice), sessionToken = Token(alice), taskId = "T-1", expectedVersion = 0, notes = "refresh timeout after idle" })).GetProperty("ok").GetBoolean());
+        Assert.True((await host.Call(client, "task_update", new { repositoryId = "other", requestId = "search-x1", sessionId = Id(carol), sessionToken = Token(carol), taskId = "X-1", expectedVersion = 0, notes = "refresh timeout elsewhere" })).GetProperty("ok").GetBoolean());
+        await host.Call(client, "send_message", new { repositoryId = "repo", requestId = "search-private", sessionId = Id(alice), sessionToken = Token(alice), recipientSessionId = Id(bob), text = "refresh plan for bob only" });
+        for (var retry = 0; retry < 40 && Data(await host.Call(client, "check_inbox", SessionArgs(bob))).GetProperty("items").GetArrayLength() == 0; retry++) await Task.Delay(100);
+
+        async Task<string[]> Search(string repository, JsonElement session, object? extra = null)
+        {
+            var arguments = new Dictionary<string, object?> { ["repositoryId"] = repository, ["sessionId"] = Id(session), ["sessionToken"] = Token(session), ["query"] = "refresh", ["limit"] = 10 };
+            var reply = await host.Call(client, "search", arguments);
+            Assert.True(reply.GetProperty("ok").GetBoolean(), reply.ToString());
+            return Data(reply).GetProperty("hits").EnumerateArray().Select(hit => hit.GetProperty("k").GetString() + ":" + hit.GetProperty("id").GetString()).Order().ToArray();
+        }
+        var bobs = await Search("repo", bob);
+        Assert.Equal(2, bobs.Length);
+        Assert.Contains("task:T-1", bobs);
+        Assert.Contains(bobs, hit => hit.StartsWith("message:", StringComparison.Ordinal));
+        // Another session's inbox and another repository's tasks are never found.
+        Assert.Equal(new[] { "task:T-1" }, await Search("repo", alice));
+        Assert.Equal(new[] { "task:X-1" }, await Search("other", carol));
+
+        async Task<(HttpStatusCode Status, string Code)> Refused(object arguments)
+        {
+            using var response = await client.PostAsJsonAsync("/api/tools/search", arguments);
+            return (response.StatusCode, (await response.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString()!);
+        }
+        Assert.NotEqual(HttpStatusCode.OK, (await Refused(new { repositoryId = "repo", query = "refresh" })).Status);
+        Assert.Equal("SessionDenied", (await Refused(new { repositoryId = "repo", sessionId = Id(bob), sessionToken = "wrong", query = "refresh" })).Code);
+        // A session from another repository cannot search this one.
+        Assert.Equal("RepositoryDenied", (await Refused(new { repositoryId = "repo", sessionId = Id(carol), sessionToken = Token(carol), query = "refresh" })).Code);
+        Assert.Equal((HttpStatusCode.BadRequest, "InvalidArguments"), await Refused(new { repositoryId = "repo", sessionId = Id(bob), sessionToken = Token(bob), query = "refresh", kinds = new[] { "standing" } }));
+        Assert.Equal((HttpStatusCode.BadRequest, "InvalidArguments"), await Refused(new { repositoryId = "repo", sessionId = Id(bob), sessionToken = Token(bob), query = new string('q', RelayLimits.MaxSearchQueryLength + 1) }));
+        Assert.Equal((HttpStatusCode.BadRequest, "InvalidArguments"), await Refused(new { repositoryId = "repo", sessionId = Id(bob), sessionToken = Token(bob), query = "  " }));
+        Assert.Equal((HttpStatusCode.BadRequest, "InvalidArguments"), await Refused(new { repositoryId = "repo", sessionId = Id(bob), sessionToken = Token(bob), query = "refresh", limit = "3" }));
+    }
+
+    [Fact]
+    public async Task Search_turned_off_answers_SearchUnavailable()
+    {
+        await using var host = new RelayHostFixture(settings: new Dictionary<string, string?> { ["Relay:Search:Enabled"] = "false" });
+        using var client = host.AuthorizedClient();
+        var session = Data(await host.Call(client, "session_open", new { repositoryId = "repo", requestId = "search-off" }));
+        using var response = await client.PostAsJsonAsync("/api/tools/search", new { repositoryId = "repo", sessionId = session.GetProperty("sessionId").GetString(), sessionToken = session.GetProperty("sessionToken").GetString(), query = "anything" });
+        Assert.Equal(RelayErrorCodes.SearchUnavailable, (await response.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString());
+        Assert.False(host.Services.GetRequiredService<SqliteStore>().SearchEnabled);
     }
 
     private static JsonElement Data(JsonElement reply) { using var document = JsonDocument.Parse(reply.GetProperty("dataJson").GetString()!); return document.RootElement.Clone(); }

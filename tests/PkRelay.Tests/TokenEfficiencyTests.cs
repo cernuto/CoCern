@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using PkRelay.Adapter;
 using PkRelay.Contracts;
@@ -9,6 +10,48 @@ namespace PkRelay.Tests;
 public sealed class TokenEfficiencyTests
 {
     private static readonly string[] ChatTools = ["session_open", "send_message", "check_inbox", "ack", "chat_directory"];
+
+    [Fact]
+    public async Task Search_replies_stay_small_default_to_three_hits_one_per_task_and_drop_weak_ones()
+    {
+        await using var host = new RelayHostFixture();
+        using var client = host.AuthorizedClient();
+        var session = JsonDocument.Parse((await host.Call(client, "session_open", new { repositoryId = "repo", requestId = "budget-session" })).GetProperty("dataJson").GetString()!).RootElement;
+        var (id, token) = (session.GetProperty("sessionId").GetString(), session.GetProperty("sessionToken").GetString());
+        async Task Task(string taskId, string notes, object? message = null) =>
+            Assert.True((await host.Call(client, "task_update", new { repositoryId = "repo", requestId = "budget-" + taskId, sessionId = id, sessionToken = token, taskId, expectedVersion = 0, notes, message })).GetProperty("ok").GetBoolean());
+        // Each strong task mentions the words in its notes and again in its conversation: still one hit per task.
+        for (var i = 0; i < 6; i++) await Task($"strong-{i}", $"deploy rollback runbook step {i}", new { text = "deploy rollback again" });
+        await Task("weak", string.Join(' ', Enumerable.Repeat("unrelated filler text about other things entirely", 70)) + " deploy rollback");
+        for (var i = 0; i < 12; i++) await Task(new string((char)('a' + i), 200), "deploy rollback with a long task ID " + new string('x', 40));
+        async Task<(JsonElement Hits, int Bytes, bool Truncated)> Search(object arguments)
+        {
+            var reply = await host.Call(client, "search", arguments);
+            Assert.True(reply.GetProperty("ok").GetBoolean(), reply.ToString());
+            var data = reply.GetProperty("dataJson").GetString()!;
+            using var document = JsonDocument.Parse(data);
+            return (document.RootElement.GetProperty("hits").Clone(), Encoding.UTF8.GetByteCount(data), document.RootElement.TryGetProperty("truncated", out _));
+        }
+
+        var defaults = await Search(new { repositoryId = "repo", sessionId = id, sessionToken = token, query = "deploy rollback" });
+        Assert.Equal(RelayLimits.DefaultSearchResults, defaults.Hits.GetArrayLength());
+        Assert.True(defaults.Bytes <= RelayLimits.MaxSearchReplyBytes);
+        var hit = defaults.Hits[0];
+        Assert.Equal(new[] { "at", "id", "k", "s", "x" }, hit.EnumerateObject().Select(property => property.Name).Order());
+        Assert.Matches("^\\d{4}-\\d{2}-\\d{2}$", hit.GetProperty("at").GetString()!);
+
+        var strong = await Search(new { repositoryId = "repo", sessionId = id, sessionToken = token, query = "rollback runbook", limit = 10 });
+        var ids = strong.Hits.EnumerateArray().Select(x => x.GetProperty("id").GetString()).ToArray();
+        Assert.Equal(ids.Distinct().Count(), ids.Length);
+        Assert.Equal(6, ids.Count(x => x!.StartsWith("strong-", StringComparison.Ordinal)));
+        Assert.DoesNotContain("weak", ids);
+
+        // Ten hits with 200-character IDs would not fit: the weakest give way and the reply says so.
+        var wide = await Search(new { repositoryId = "repo", sessionId = id, sessionToken = token, query = "long task", limit = 10 });
+        Assert.True(wide.Bytes <= RelayLimits.MaxSearchReplyBytes, $"{wide.Bytes} bytes");
+        Assert.True(wide.Truncated);
+        Assert.InRange(wide.Hits.GetArrayLength(), 1, 9);
+    }
 
     [Fact]
     public void Chat_profile_advertises_only_the_messaging_tools()

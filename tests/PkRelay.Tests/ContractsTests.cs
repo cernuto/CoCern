@@ -93,11 +93,43 @@ public sealed class ContractsTests
     }
 
     [Fact]
+    public void Search_tool_appears_in_hub_and_adapter_catalogs_with_matching_schemas()
+    {
+        using var client = new HttpClient();
+        var adapter = PkRelay.Adapter.CoordinationTools.Create(new PkRelay.Adapter.RelayForwarder(client, new PkRelay.Adapter.AdapterOptions("http://127.0.0.1:5271", "client-secret")), admin: false)
+            .ToDictionary(tool => tool.ProtocolTool.Name, tool => tool.ProtocolTool.InputSchema.GetRawText());
+        var hub = ToolResults.Tools(false).ToDictionary(tool => tool.Name, tool => tool.InputSchema.GetRawText());
+        Assert.True(RelayToolCatalog.TryGet(RelayTools.Search, out var search));
+        Assert.Equal(RelayToolCatalog.ForwardingSchema(search).GetRawText(), adapter[RelayTools.Search]);
+        Assert.Equal(RelayToolCatalog.InputSchema(search).GetRawText(), hub[RelayTools.Search]);
+        Assert.Equal((false, true, false), (search.IsMutation, search.RequiresSession, search.AdministratorOnly));
+        // One sentence.
+        Assert.DoesNotContain('.', search.Description.TrimEnd('.'));
+        var strict = RelayToolCatalog.InputSchema(search);
+        Assert.Equal(new[] { "repositoryId", "sessionId", "sessionToken", "query" }, strict.GetProperty("required").EnumerateArray().Select(x => x.GetString()));
+        var properties = strict.GetProperty("properties");
+        Assert.Equal(SearchKinds.All, properties.GetProperty("kinds").GetProperty("items").GetProperty("enum").EnumerateArray().Select(x => x.GetString()!));
+        Assert.Equal(RelayLimits.MaxSearchQueryLength, properties.GetProperty("query").GetProperty("maxLength").GetInt32());
+        Assert.Equal(RelayLimits.MaxSearchResults, properties.GetProperty("limit").GetProperty("maximum").GetInt32());
+        Assert.True(properties.TryGetProperty("status", out _));
+        // The forwarding copy is minimal: the session envelope, query and kinds, with no requestId for a read.
+        Assert.Equal(new[] { "kinds", "query", "repositoryId", "sessionId", "sessionToken" }, RelayToolCatalog.ForwardingSchema(search).GetProperty("properties").EnumerateObject().Select(x => x.Name).Order());
+        Assert.Contains(RelayTools.Search, PkRelay.Adapter.CoordinationTools.NamesForRole(false));
+        Assert.DoesNotContain(RelayTools.Search, PkRelay.Adapter.CoordinationTools.NamesForRole(false, chatOnly: true));
+        Assert.Equal(RelayErrorKind.Invalid, RelayErrorCodes.Classify(RelayErrorCodes.SearchUnavailable));
+    }
+
+    [Fact]
     public void Forwarding_catalog_stays_within_its_context_budget()
     {
         // Every connected agent carries these definitions on every turn; the pre-refactor adapter was about 19,400 characters.
-        var size = RelayToolCatalog.ForRole(true).Sum(tool => tool.Description.Length + RelayToolCatalog.ForwardingSchema(tool).GetRawText().Length);
-        Assert.True(size < 20_000, $"Forwarding catalog grew to {size} characters.");
+        // Workers are most agents, so their surface keeps the original 20,000-character budget.
+        Assert.True(Size(administrator: false) < 20_000, $"Worker forwarding catalog grew to {Size(administrator: false)} characters.");
+        // Role-specific lists keep administrator-only tools (standing_put, control_request, and later analytics_query and the order
+        // tools) away from workers, so only the few administrator chats pay for them; that surface has its own, larger cap.
+        Assert.True(Size(administrator: true) < 22_000, $"Administrator forwarding catalog grew to {Size(administrator: true)} characters.");
+
+        static int Size(bool administrator) => RelayToolCatalog.ForRole(administrator).Sum(tool => tool.Description.Length + RelayToolCatalog.ForwardingSchema(tool).GetRawText().Length);
     }
 
     [Fact]

@@ -7,6 +7,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Orleans;
 using Orleans.Hosting;
+using PkRelay.Contracts;
 using PkRelay.Core;
 using PkRelay.Domain;
 using Xunit;
@@ -74,6 +75,60 @@ public sealed class CoreSiloTests
         }
         finally { await host.StopAsync(); }
     }
+
+    [Fact]
+    public async Task Search_leaves_out_unknown_dates_passes_cancellation_and_reports_a_failing_index_as_unavailable()
+    {
+        var siloPort = FreePort(); var gatewayPort = FreePort();
+        var search = new FakeSearch();
+        using var host = new HostBuilder().ConfigureLogging(log => log.ClearProviders()).UseOrleans(silo => silo
+            .UseLocalhostClustering(siloPort: siloPort, gatewayPort: gatewayPort, serviceId: "core-search-tests", clusterId: Guid.NewGuid().ToString("N"))
+            .AddMemoryGrainStorage("relay"))
+            .ConfigureServices(services => services.AddPkRelayCore().AddSingleton(provider => new RelayApplication(provider.GetRequiredService<IGrainFactory>(), search: search))).Build();
+        await host.StartAsync();
+        try
+        {
+            var application = host.Services.GetRequiredService<RelayApplication>();
+            var caller = new RelayCaller("alice", true, ["repo"]);
+            Task<RelayReply> Call(string tool, JsonObject args, CancellationToken cancellationToken = default)
+            {
+                args["repositoryId"] = "repo"; if (!args.ContainsKey("requestId")) args["requestId"] = Guid.NewGuid().ToString("N");
+                return application.ExecuteAsync(caller, tool, JsonSerializer.SerializeToElement(args), cancellationToken);
+            }
+            var session = JsonNode.Parse((await Call("session_open", new())).DataJson)!.AsObject();
+            JsonObject Search() => new() { ["sessionId"] = session["sessionId"]!.DeepClone(), ["sessionToken"] = session["sessionToken"]!.DeepClone(), ["query"] = "anything" };
+
+            using var cancellation = new CancellationTokenSource();
+            search.Result = [new SearchHit("dated", "task", "ready", DateTimeOffset.Parse("2026-10-29T12:00:00Z"), "[anything]"), new SearchHit("undated", "task", "open", DateTimeOffset.MinValue, "[anything]")];
+            var reply = await Call("search", Search(), cancellation.Token);
+            Assert.True(reply.Ok, reply.Code);
+            var hits = JsonNode.Parse(reply.DataJson)!["hits"]!.AsArray();
+            Assert.Equal("2026-10-29", hits[0]!["at"]!.GetValue<string>());
+            Assert.False(hits[1]!.AsObject().ContainsKey("at"));
+            Assert.Equal(cancellation.Token, search.Token);
+
+            search.Failure = new FakeDbException();
+            Assert.Equal(RelayErrorCodes.Unavailable, (await Call("search", Search())).Code);
+            search.Failure = new ObjectDisposedException("SqliteStore");
+            Assert.Equal(RelayErrorCodes.Unavailable, (await Call("search", Search())).Code);
+        }
+        finally { await host.StopAsync(); }
+    }
+
+    private sealed class FakeSearch : IFullTextSearch
+    {
+        public IReadOnlyList<SearchHit> Result { get; set; } = [];
+        public Exception? Failure { get; set; }
+        public CancellationToken Token { get; private set; }
+
+        public Task<IReadOnlyList<SearchHit>> SearchAsync(string repositoryId, string sessionId, string query, IReadOnlyList<string> kinds, int limit, string? status = null, CancellationToken ct = default)
+        {
+            Token = ct;
+            return Failure is { } failure ? Task.FromException<IReadOnlyList<SearchHit>>(failure) : Task.FromResult(Result);
+        }
+    }
+
+    private sealed class FakeDbException : System.Data.Common.DbException { }
 
     private static int FreePort()
     {
