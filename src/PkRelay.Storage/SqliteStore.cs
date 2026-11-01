@@ -17,11 +17,12 @@ public sealed partial class SqliteStore : IDueWorkSource, IDisposable, IAsyncDis
     public string ServiceId { get; private set; } = "";
     public string IncarnationId { get; private set; } = "";
 
-    public SqliteStore(string databasePath, ActivityOptions? activity = null) : this(databasePath, activity, SearchModule) { }
+    public SqliteStore(string databasePath, ActivityOptions? activity = null, SearchOptions? search = null) : this(databasePath, activity, SearchModule, search) { }
 
     /// <summary>Tests name a missing module here to exercise the startup check.</summary>
-    internal SqliteStore(string databasePath, ActivityOptions? activity, string searchModule)
+    internal SqliteStore(string databasePath, ActivityOptions? activity, string searchModule, SearchOptions? search = null)
     {
+        _searchOptions = search ?? new();
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         DatabasePath = Path.GetFullPath(databasePath);
         Directory.CreateDirectory(Path.GetDirectoryName(DatabasePath)!);
@@ -32,11 +33,13 @@ public sealed partial class SqliteStore : IDueWorkSource, IDisposable, IAsyncDis
         {
             _connection.Open();
             Initialize(existingDatabase, searchModule);
+            OpenSearchConnection();
             StartActivity(activity ?? new());
         }
         catch
         {
             StopActivity();
+            CloseSearchConnection();
             _connection.Dispose();
             _ownership.Dispose();
             throw;
@@ -97,7 +100,7 @@ public sealed partial class SqliteStore : IDueWorkSource, IDisposable, IAsyncDis
             );
             CREATE INDEX IF NOT EXISTS ix_due_work_due ON due_work(due_ticks, state_name, grain_type, grain_key, work_id);
             CREATE TABLE IF NOT EXISTS hub_metadata (name TEXT PRIMARY KEY, value TEXT NOT NULL);
-            """ + ActivitySchema + """
+            """ + ActivitySchema + SearchSchema + """
             CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
                 state_name UNINDEXED, grain_key UNINDEXED, doc_id UNINDEXED,
                 kind UNINDEXED, repository_id UNINDEXED, owner_session UNINDEXED,
@@ -120,6 +123,8 @@ public sealed partial class SqliteStore : IDueWorkSource, IDisposable, IAsyncDis
             incarnation.Parameters.AddWithValue("$value", IncarnationId);
             incarnation.ExecuteNonQuery();
         }
+        // The backfill shares the migration transaction, so a database is never left at version 2 with a half-built index.
+        PrepareSearchIndex(transaction);
         transaction.Commit();
     }
 
@@ -149,7 +154,11 @@ public sealed partial class SqliteStore : IDueWorkSource, IDisposable, IAsyncDis
         finally { _gate.Release(); }
     }
 
-    internal async Task<string> CommitAsync(string stateName, GrainId grainId, string? expectedEtag, string? payload, IReadOnlyList<DueWorkItem> dueWork, CancellationToken cancellationToken)
+    /// <summary>
+    /// Commits a grain's state, its due-work index and its search rows in one transaction. <paramref name="search"/> describes the
+    /// state's searchable text; a cleared state (null <paramref name="payload"/>) deletes the grain's search rows.
+    /// </summary>
+    internal async Task<string> CommitAsync(string stateName, GrainId grainId, string? expectedEtag, string? payload, IReadOnlyList<DueWorkItem> dueWork, CancellationToken cancellationToken, IHasSearchDocuments? search = null)
     {
         await _gate.WaitAsync(cancellationToken);
         try
@@ -192,8 +201,10 @@ public sealed partial class SqliteStore : IDueWorkSource, IDisposable, IAsyncDis
                 due.Parameters.AddWithValue("$ticks", work.DueAt.UtcTicks);
                 due.ExecuteNonQuery();
             }
+            var indexedSource = WriteSearch(transaction, stateName, grainId, expectedEtag, payload, search);
             cancellationToken.ThrowIfCancellationRequested();
             transaction.Commit();
+            RememberSearch(indexedSource, stateName, grainId, etag);
             return etag;
         }
         finally { _gate.Release(); }
@@ -266,6 +277,7 @@ public sealed partial class SqliteStore : IDueWorkSource, IDisposable, IAsyncDis
     {
         // Drain queued telemetry before closing; the writer takes the gate itself.
         StopActivity();
+        CloseSearchConnection();
         _gate.Wait();
         try
         {

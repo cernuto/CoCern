@@ -18,6 +18,23 @@ public interface IDueWorkSource
 }
 
 /// <summary>
+/// One search result: the ID to open with <c>task_get</c>, <c>context_get</c> or <c>check_inbox</c>, its kind, status and date, and a
+/// short snippet with matches in brackets. <see cref="BoardId"/> is set for a task or note on a board other than <c>default</c>.
+/// </summary>
+public sealed record SearchHit(string DocId, string Kind, string Status, DateTimeOffset UpdatedAt, string Snippet, string? BoardId = null);
+
+/// <summary>Port implemented by storage: full-text search over committed state, scoped to one repository and one session's inbox.</summary>
+public interface IFullTextSearch
+{
+    /// <summary>
+    /// The best hits for <paramref name="query"/>, read as plain words (never as search syntax), in <paramref name="repositoryId"/>:
+    /// shared documents plus <paramref name="sessionId"/>'s own inbox. Empty <paramref name="kinds"/> means every kind.
+    /// </summary>
+    Task<IReadOnlyList<SearchHit>> SearchAsync(string repositoryId, string sessionId, string query, IReadOnlyList<string> kinds, int limit,
+        string? status = null, CancellationToken ct = default);
+}
+
+/// <summary>
 /// One telemetry row. Kind <c>call</c> is one public tool call; kind <c>wake</c> is one new waking message stored in a session inbox.
 /// <see cref="Target"/> names the task, context note or message thread the call wrote; <see cref="ContentHash"/> fingerprints the status
 /// text it wrote there, so a repeat of the same status can be counted. Field names follow the dashboard traffic feed where they overlap.

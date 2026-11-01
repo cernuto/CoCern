@@ -41,6 +41,12 @@ public sealed record SearchDelta(IReadOnlyList<SearchDocument> Upserts, IReadOnl
     public static readonly SearchDelta None = new([], [], false);
 }
 
+/// <summary>A document to index with the change marker stored beside its row; see <see cref="SearchExtraction.Markers"/>.</summary>
+public sealed record SearchEntry(SearchDocument Document, string Marker);
+
+/// <summary>The rows one commit changes for its grain: insert or replace each of <see cref="Upserts"/> by key, and delete <see cref="Removed"/>.</summary>
+public sealed record SearchUpdate(IReadOnlyList<SearchEntry> Upserts, IReadOnlyList<SearchDocumentKey> Removed);
+
 /// <summary>State that describes its own searchable text, as <see cref="IHasDueWork"/> describes its timers. Storage decides how to index it.</summary>
 public interface IHasSearchDocuments
 {
@@ -48,6 +54,18 @@ public interface IHasSearchDocuments
 
     /// <summary>Only what changed since <paramref name="previous"/>, the state this one replaces (null when there is none).</summary>
     SearchDelta GetSearchChanges(string stateName, IHasSearchDocuments? previous);
+
+    /// <summary>The rows to write given what the index holds for this grain now: each indexed key with its stored marker.</summary>
+    SearchUpdate GetSearchUpdate(string stateName, IReadOnlyDictionary<SearchDocumentKey, string> indexed);
+
+    /// <summary>
+    /// An object that stays the same instance while the searchable content is unchanged (the state document's JSON string), so storage
+    /// can skip a commit that only changed the outbox or timers. Null when there is nothing to identify.
+    /// </summary>
+    object? GetSearchSource();
+
+    /// <summary>Drops anything kept only for indexing this commit. Storage calls it after every write, indexed or not.</summary>
+    void ReleaseSearchState();
 }
 
 /// <summary>An aggregate's persisted state plus its pending outbox and timers, committed atomically.</summary>
@@ -63,12 +81,40 @@ public sealed class StateEnvelope<T> : IHasDueWork, IHasSearchDocuments where T 
         Value is CoordinationDocument document
             ? SearchExtraction.Changes(stateName, previous is StateEnvelope<T> { Value: CoordinationDocument prior } ? prior.Json : null, document.Json)
             : SearchDelta.None;
+
+    /// <summary>Uses the parsed state the state machine kept for this commit, when there is one, so the document is not parsed again.</summary>
+    public SearchUpdate GetSearchUpdate(string stateName, IReadOnlyDictionary<SearchDocumentKey, string> indexed)
+    {
+        if (Value is not CoordinationDocument document) return new([], indexed.Keys.ToArray());
+        var parsed = document.TakeParsed();
+        return parsed is not null ? SearchExtraction.Update(stateName, parsed, indexed) : SearchExtraction.Update(stateName, document.Json, indexed);
+    }
+
+    public object? GetSearchSource() => Value is CoordinationDocument document ? document.Json : null;
+
+    public void ReleaseSearchState() => (Value as CoordinationDocument)?.TakeParsed();
 }
 
 /// <summary>An aggregate's state document. Its JSON shape is the persisted format.</summary>
 public sealed class CoordinationDocument
 {
-    public string Json { get; set; } = "{}";
+    private string _json = "{}";
+    private System.Text.Json.Nodes.JsonObject? _parsed;
+
+    public string Json { get => _json; set { _json = value; _parsed = null; } }
+
+    /// <summary>
+    /// Keeps the object <see cref="Json"/> was serialized from, for the commit that follows. It is not persisted, it is dropped when
+    /// <see cref="Json"/> changes, and it is taken at most once, so a large board's parsed form is not held after its commit.
+    /// </summary>
+    internal void KeepParsed(System.Text.Json.Nodes.JsonObject state) => _parsed = state;
+
+    internal System.Text.Json.Nodes.JsonObject? TakeParsed()
+    {
+        var parsed = _parsed;
+        _parsed = null;
+        return parsed;
+    }
 }
 
 /// <summary>The four coordination aggregates. Each is a single-writer state machine keyed by a string.</summary>

@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -10,8 +11,8 @@ namespace PkRelay.Domain;
 /// Turns an aggregate's state document into the text that search can find. Pure: it reads only the JSON it is given, never changes it,
 /// never throws on a malformed or unexpected document (it returns what it can read), and knows nothing about how documents are stored.
 /// The state name decides what to read: a board gives its tasks and context notes; a session gives its inbox; the lock, control and
-/// discovery aggregates give nothing. <see cref="Changes(string, JsonObject?, JsonObject?)"/> gives only what changed between two
-/// states, so a commit rewrites the documents it touched rather than the whole grain.
+/// discovery aggregates give nothing. <see cref="Update(string, JsonObject?, IReadOnlyDictionary{SearchDocumentKey, string})"/> gives only
+/// what changed against the index, so a commit rewrites the documents it touched rather than the whole grain.
 /// </summary>
 public static class SearchExtraction
 {
@@ -19,13 +20,16 @@ public static class SearchExtraction
     private static readonly string[] CredentialMarkers =
         ["token", "secret", "password", "passwd", "passphrase", "credential", "apikey", "privatekey", "authorization", "cookie", "bearer"];
 
+    /// <summary>Whether a state name has searchable text: boards and sessions do; locks, control and discovery do not.</summary>
+    public static bool IsIndexed(string stateName) => stateName is AggregateKinds.Board or AggregateKinds.Session;
+
     /// <summary>Every search document in <paramref name="json"/>.</summary>
     public static IReadOnlyList<SearchDocument> Extract(string stateName, string json) =>
-        Indexed(stateName) && Parse(json) is { } state ? Extract(stateName, state) : [];
+        IsIndexed(stateName) && Parse(json) is { } state ? Extract(stateName, state) : [];
 
     /// <summary>Every search document in an already parsed state, so a caller holding the object does not parse it again.</summary>
     public static IReadOnlyList<SearchDocument> Extract(string stateName, JsonObject state) =>
-        Guarded(() => Repository(state) is { } repository ? Documents(stateName, state, repository, null) : [], () => []);
+        Guarded(() => Entries(stateName, state, null).Select(entry => entry.Document).ToArray(), () => []);
 
     /// <summary>The documents of only the named tasks on a board. Unknown IDs are ignored.</summary>
     public static IReadOnlyList<SearchDocument> ExtractTasks(JsonObject board, IEnumerable<string> taskIds) =>
@@ -33,31 +37,58 @@ public static class SearchExtraction
             ? taskIds.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).Where(id => tasks[id] is JsonObject).Select(id => TaskDocument(id, tasks[id]!.AsObject(), repository)).ToArray()
             : [], () => []);
 
+    /// <summary>
+    /// Each document's change marker, without building its text: a task's <c>changeRevision</c>, a note's <c>version</c> (a hash of the
+    /// item when it has no marker, as on a legacy board), and a fixed marker for an inbox message, which never changes once delivered.
+    /// A document needs rewriting exactly when its marker differs from the one stored with its indexed row.
+    /// </summary>
+    public static IReadOnlyDictionary<SearchDocumentKey, string> Markers(string stateName, JsonObject state) =>
+        Guarded(() => Sources(stateName, state).Aggregate(new Dictionary<SearchDocumentKey, string>(), (markers, source) => { markers.TryAdd(source.Key, source.Marker); return markers; }),
+            () => new Dictionary<SearchDocumentKey, string>());
+
+    /// <summary>
+    /// The rows to write when a grain's state becomes <paramref name="current"/> and its index holds <paramref name="indexed"/> (each key
+    /// with its stored marker): every document whose marker is new or different, and every indexed key with no document any more.
+    /// A null or unreadable <paramref name="current"/> removes everything. Comparing with the index itself, rather than with the
+    /// previous state, means a commit rewrites only what changed and an index that missed a write repairs itself.
+    /// </summary>
+    public static SearchUpdate Update(string stateName, JsonObject? current, IReadOnlyDictionary<SearchDocumentKey, string> indexed)
+    {
+        if (current is null || !IsIndexed(stateName)) return new([], indexed.Keys.ToArray());
+        return Guarded(() =>
+        {
+            var upserts = Entries(stateName, current, (key, marker) => !indexed.TryGetValue(key, out var stored) || stored != marker);
+            var kept = Markers(stateName, current);
+            return new SearchUpdate(upserts, indexed.Keys.Where(key => !kept.ContainsKey(key)).ToArray());
+        }, () => new SearchUpdate([], indexed.Keys.ToArray()));
+    }
+
+    /// <summary>As <see cref="Update(string, JsonObject?, IReadOnlyDictionary{SearchDocumentKey, string})"/>, from serialized state.</summary>
+    public static SearchUpdate Update(string stateName, string? currentJson, IReadOnlyDictionary<SearchDocumentKey, string> indexed) =>
+        Update(stateName, IsIndexed(stateName) ? Parse(currentJson) : null, indexed);
+
     /// <summary>What changed between two serialized states; see <see cref="Changes(string, JsonObject?, JsonObject?)"/>.</summary>
     public static SearchDelta Changes(string stateName, string? previousJson, string? currentJson) =>
-        Indexed(stateName) ? Changes(stateName, Parse(previousJson), Parse(currentJson)) : SearchDelta.None;
+        IsIndexed(stateName) ? Changes(stateName, Parse(previousJson), Parse(currentJson)) : SearchDelta.None;
 
     /// <summary>
     /// The documents to write and the keys to delete when a grain's state moves from <paramref name="previous"/> to
-    /// <paramref name="current"/>. A task is rewritten only when its <c>changeRevision</c> moved, a note only when its <c>version</c>
-    /// moved, and an inbox message only when it is new; documents whose source is gone are listed in <see cref="SearchDelta.Removed"/>.
-    /// With no readable previous state (first write, backfill), a cleared state, or a changed repository or owner, the delta is
-    /// <see cref="SearchDelta.ReplaceAll"/>: delete every row of the grain and insert <see cref="SearchDelta.Upserts"/>.
+    /// <paramref name="current"/>: those whose <see cref="Markers"/> differ, and those whose source is gone. With no readable previous
+    /// state, a cleared state, or a changed repository or owner, the delta is <see cref="SearchDelta.ReplaceAll"/>: delete every row of
+    /// the grain and insert <see cref="SearchDelta.Upserts"/>.
     /// </summary>
     public static SearchDelta Changes(string stateName, JsonObject? previous, JsonObject? current)
     {
-        if (!Indexed(stateName)) return SearchDelta.None;
+        if (!IsIndexed(stateName)) return SearchDelta.None;
         if (current is null) return new([], [], ReplaceAll: true);
         return Guarded(() =>
         {
             var repository = Repository(current);
             if (repository is null) return new SearchDelta([], [], ReplaceAll: true);
             if (previous is null || Repository(previous) != repository || stateName == AggregateKinds.Session && Text(previous, "sessionId") != Text(current, "sessionId"))
-                return new SearchDelta(Documents(stateName, current, repository, null), [], ReplaceAll: true);
-            var upserts = Documents(stateName, current, repository, previous);
-            var kept = Keys(stateName, current).ToHashSet();
-            var removed = Keys(stateName, previous).Where(key => !kept.Contains(key)).ToArray();
-            return new SearchDelta(upserts, removed, ReplaceAll: false);
+                return new SearchDelta(Extract(stateName, current), [], ReplaceAll: true);
+            var update = Update(stateName, current, Markers(stateName, previous));
+            return new SearchDelta(update.Upserts.Select(entry => entry.Document).ToArray(), update.Removed, ReplaceAll: false);
         }, () => new SearchDelta(Extract(stateName, current), [], ReplaceAll: true));
     }
 
@@ -67,8 +98,6 @@ public static class SearchExtraction
         var normalized = new string(name.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
         return CredentialMarkers.Any(marker => normalized.Contains(marker, StringComparison.Ordinal));
     }
-
-    private static bool Indexed(string stateName) => stateName is AggregateKinds.Board or AggregateKinds.Session;
 
     private static JsonObject? Parse(string? json)
     {
@@ -88,24 +117,36 @@ public static class SearchExtraction
         catch (Exception exception) when (exception is JsonException or ArgumentException or InvalidOperationException or FormatException) { return fallback(); }
     }
 
-    /// <summary>The documents of <paramref name="state"/>; with <paramref name="previous"/>, only those whose source changed since it.</summary>
-    private static List<SearchDocument> Documents(string stateName, JsonObject state, string repository, JsonObject? previous)
+    /// <summary>One item that gives a document: its key, its change marker, and how to build the document.</summary>
+    private sealed record Source(SearchDocumentKey Key, string Marker, Func<SearchDocument> Build);
+
+    /// <summary>The items of <paramref name="state"/> that give documents, in key order, without building their text.</summary>
+    private static IEnumerable<Source> Sources(string stateName, JsonObject state)
     {
-        var documents = new List<SearchDocument>();
+        if (Repository(state) is not { } repository) yield break;
         if (stateName == AggregateKinds.Board)
         {
             foreach (var (id, task) in Items(state, "tasks"))
-                if (previous is null || Changed(previous["tasks"], id, task, "changeRevision")) documents.Add(TaskDocument(id, task, repository));
+                yield return new(new(SearchKinds.Task, id), Marker(task, "changeRevision"), () => TaskDocument(id, task, repository));
             foreach (var (id, note) in Items(state, "context"))
-                if (previous is null || Changed(previous["context"], id, note, "version")) documents.Add(ContextDocument(id, note, repository));
+                yield return new(new(SearchKinds.Context, id), Marker(note, "version"), () => ContextDocument(id, note, repository));
         }
         else if (stateName == AggregateKinds.Session && Text(state, "sessionId") is { Length: > 0 } owner)
         {
             foreach (var (id, message) in Items(state, "inbox"))
-                if (MessageText(message) is { } text && (previous is null || Changed(previous["inbox"], id, message, null)))
-                    documents.Add(MessageDocument(id, message, text, repository, owner));
+                if (MessageText(message) is { } text)
+                    yield return new(new(SearchKinds.Message, Text(message, "messageId", id)), "m", () => MessageDocument(id, message, text, repository, owner));
         }
-        return documents;
+    }
+
+    /// <summary>The documents (with markers) of <paramref name="state"/>; with <paramref name="include"/>, only those it accepts.</summary>
+    private static List<SearchEntry> Entries(string stateName, JsonObject state, Func<SearchDocumentKey, string, bool>? include)
+    {
+        var entries = new List<SearchEntry>();
+        var seen = new HashSet<SearchDocumentKey>();
+        foreach (var source in Sources(stateName, state))
+            if (seen.Add(source.Key) && (include is null || include(source.Key, source.Marker))) entries.Add(new(source.Build(), source.Marker));
+        return entries;
     }
 
     /// <summary>The object entries of a state section in key order; anything that is not an object is skipped.</summary>
@@ -114,27 +155,11 @@ public static class SearchExtraction
             ? items.Where(x => x.Value is JsonObject).OrderBy(x => x.Key, StringComparer.Ordinal).Select(x => (x.Key, x.Value!.AsObject()))
             : [];
 
-    /// <summary>
-    /// Whether an item differs from the same item in the previous state. The marker (<c>changeRevision</c> on a task, <c>version</c>
-    /// on a note) moves on every change; when either side lacks it, the whole item is compared instead.
-    /// </summary>
-    private static bool Changed(JsonNode? previousSection, string id, JsonObject item, string? marker)
-    {
-        if ((previousSection as JsonObject)?[id] is not JsonObject prior) return true;
-        if (marker is not null && prior[marker] is JsonValue before && item[marker] is JsonValue after) return before.ToJsonString() != after.ToJsonString();
-        return !JsonNode.DeepEquals(prior, item);
-    }
-
-    /// <summary>The keys of every document <paramref name="state"/> gives, without building their text.</summary>
-    private static IEnumerable<SearchDocumentKey> Keys(string stateName, JsonObject state)
-    {
-        if (Repository(state) is null) return [];
-        if (stateName == AggregateKinds.Board)
-            return Items(state, "tasks").Select(x => new SearchDocumentKey(SearchKinds.Task, x.Id)).Concat(Items(state, "context").Select(x => new SearchDocumentKey(SearchKinds.Context, x.Id)));
-        if (stateName == AggregateKinds.Session && Text(state, "sessionId").Length > 0)
-            return Items(state, "inbox").Where(x => MessageText(x.Item) is not null).Select(x => new SearchDocumentKey(SearchKinds.Message, Text(x.Item, "messageId", x.Id)));
-        return [];
-    }
+    /// <summary>The item's change counter (<c>changeRevision</c> or <c>version</c>), or a hash of the whole item when it has none.</summary>
+    private static string Marker(JsonObject item, string counter) =>
+        item[counter] is JsonValue value && value.GetValueKind() == JsonValueKind.Number
+            ? "r:" + value.ToJsonString()
+            : "h:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(item.ToJsonString())), 0, 12);
 
     /// <summary>
     /// One task: its title, workflow state, packet goal and target, blockers, dependencies, resources, <c>facts.notes</c>, and the

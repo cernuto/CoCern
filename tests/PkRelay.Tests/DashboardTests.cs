@@ -222,7 +222,7 @@ public sealed class DashboardTests
         var source = Assert.IsAssignableFrom<IRelayObservationSource>(store);
         var metrics = Assert.IsType<PkRelay.Contracts.Dashboard.DatabaseMetrics>(await source.ReadDatabaseMetricsAsync(rowCountLimit: 2));
         Assert.Equal("SQLite", metrics.Provider);
-        Assert.Equal(new[] { "activity_daily", "activity_log", "due_work", "grain_state", "hub_metadata", "search_index" }, metrics.Tables.Select(table => table.Name));
+        Assert.Equal(new[] { "activity_daily", "activity_log", "due_work", "grain_state", "hub_metadata", "search_docs", "search_index" }, metrics.Tables.Select(table => table.Name));
         var metadata = Assert.Single(metrics.Tables, table => table.Name == "hub_metadata");
         Assert.Equal(2, metadata.RowCount);
         Assert.Equal("lower-bound", metadata.CountKind);

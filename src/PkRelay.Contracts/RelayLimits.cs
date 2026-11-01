@@ -83,4 +83,12 @@ public static class RelayLimits
     public const int MaxSearchFieldBytes = 1_024;
     /// <summary>Largest search document title, in UTF-8 bytes.</summary>
     public const int MaxSearchTitleBytes = 256;
+    /// <summary>Most hits one search returns.</summary>
+    public const int MaxSearchResults = 10;
+    /// <summary>Most words of a query that are searched; the rest are ignored.</summary>
+    public const int MaxSearchQueryTerms = 16;
+    /// <summary>Rows one search reads from the index before dropping weak and duplicate hits.</summary>
+    public const int SearchCandidateRows = 40;
+    /// <summary>A hit scoring less than this share of the best hit's score is dropped as too weak.</summary>
+    public const double SearchMinRelativeScore = 0.25;
 }

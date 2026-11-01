@@ -285,6 +285,40 @@ public sealed class SearchExtractionTests
         Assert.Equal(SearchDelta.None, SearchExtraction.Changes("lock", before, board.Value.Json));
     }
 
+    [Fact]
+    public void Update_compares_markers_with_the_index_and_lists_what_it_no_longer_holds()
+    {
+        var board = new StateEnvelope<CoordinationDocument>();
+        foreach (var id in new[] { "T-1", "T-2" }) Assert.True(Call(board, "board", "task_update", new() { ["taskId"] = id, ["expectedVersion"] = 0, ["notes"] = "first " + id }).Ok);
+        var state = JsonNode.Parse(board.Value.Json)!.AsObject();
+        var markers = SearchExtraction.Markers("board", state);
+        Assert.Equal(new[] { "r:1", "r:2" }, markers.Values.Order().ToArray());
+
+        var first = SearchExtraction.Update("board", state, new Dictionary<SearchDocumentKey, string>());
+        Assert.Equal(2, first.Upserts.Count);
+        Assert.Equal(SearchExtraction.Extract("board", state), first.Upserts.Select(x => x.Document));
+        Assert.Equal(markers.Values.Order(), first.Upserts.Select(x => x.Marker).Order());
+
+        // Only a key with a different marker is rebuilt; a key the state no longer has is removed.
+        var indexed = new Dictionary<SearchDocumentKey, string>(markers) { [new(SearchKinds.Task, "T-2")] = "stale", [new(SearchKinds.Task, "gone")] = "r:9" };
+        var update = SearchExtraction.Update("board", state, indexed);
+        Assert.Equal("T-2", Assert.Single(update.Upserts).Document.DocId);
+        Assert.Equal(new SearchDocumentKey(SearchKinds.Task, "gone"), Assert.Single(update.Removed));
+        Assert.Empty(SearchExtraction.Update("board", state, markers).Upserts);
+
+        // A cleared, unreadable or unindexed state removes everything the index holds.
+        Assert.Equal(2, SearchExtraction.Update("board", (JsonObject?)null, markers).Removed.Count);
+        Assert.Equal(2, SearchExtraction.Update("board", "not json", markers).Removed.Count);
+        Assert.Equal(2, SearchExtraction.Update("lock", state, markers).Removed.Count);
+        // Without a change counter (a legacy item), the marker is a hash of the item, stable until the item changes.
+        state["tasks"]!["T-1"]!.AsObject().Remove("changeRevision");
+        var legacy = SearchExtraction.Markers("board", state)[new(SearchKinds.Task, "T-1")];
+        Assert.StartsWith("h:", legacy);
+        Assert.Equal(legacy, SearchExtraction.Markers("board", JsonNode.Parse(state.ToJsonString())!.AsObject())[new(SearchKinds.Task, "T-1")]);
+        Assert.True(Call(board, "board", "task_get", new() { ["taskId"] = "T-1" }).Ok);
+        Assert.Empty(board.GetSearchUpdate("board", SearchExtraction.Markers("board", JsonNode.Parse(board.Value.Json)!.AsObject())).Upserts);
+    }
+
     /// <summary>Applying the delta to an index built from the previous state gives exactly the index of the current state.</summary>
     private static void AssertApplies(string stateName, string previous, string current, SearchDelta delta)
     {

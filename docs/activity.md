@@ -65,4 +65,4 @@ SELECT day, role, tool, calls, input_tokens, output_tokens FROM activity_daily O
 
 ## Database
 
-The log ships with SQLite schema version 2. A version 1 database is upgraded on first start, after the usual pre-migration backup next to it (`relay.db.pre-migration-*.db`). Version 2 also adds an empty `search_index` table for search, which comes later. The hub refuses newer versions, and refuses to start if its SQLite has no FTS5. Neither case changes the database.
+The log ships with SQLite schema version 2. A version 1 database is upgraded on first start, after the usual pre-migration backup next to it (`relay.db.pre-migration-*.db`). Version 2 also adds the search index; see [search.md](search.md). The hub refuses newer versions, and refuses to start if its SQLite has no FTS5. Neither case changes the database.
