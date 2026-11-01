@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- DuckDB analytics over snapshots. Its native library stays out of Core, Domain and Storage; only the host references this project. -->
+  <ItemGroup>
+    <ProjectReference Include="../CoCern.Core/CoCern.Core.csproj" />
+    <ProjectReference Include="../CoCern.Contracts/CoCern.Contracts.csproj" />
+    <PackageReference Include="DuckDB.NET.Data.Full" />
+    <EmbeddedResource Include="Views.sql" LogicalName="CoCern.Analytics.Views.sql" />
+    <InternalsVisibleTo Include="CoCern.Tests" />
+  </ItemGroup>
+</Project>

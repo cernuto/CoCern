@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <ItemGroup>
+    <ProjectReference Include="../CoCern.Core/CoCern.Core.csproj" />
+    <ProjectReference Include="../CoCern.Storage/CoCern.Storage.csproj" />
+    <ProjectReference Include="../CoCern.Analytics/CoCern.Analytics.csproj" />
+    <ProjectReference Include="../CoCern.Dashboard/CoCern.Dashboard.csproj" ReferenceOutputAssembly="false" />
+    <PackageReference Include="Serilog.AspNetCore" />
+    <PackageReference Include="Scalar.AspNetCore" />
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" />
+    <PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly.Server" />
+    <PackageReference Include="ModelContextProtocol.AspNetCore" />
+    <!-- The shared token counter (o200k). -->
+    <PackageReference Include="Microsoft.ML.Tokenizers" />
+    <PackageReference Include="Microsoft.ML.Tokenizers.Data.O200kBase" />
+  </ItemGroup>
+</Project>

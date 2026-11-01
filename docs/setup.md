@@ -3,12 +3,12 @@
 ## Start the hub
 
 ```powershell
-./scripts/Build-PkRelay.ps1 -Publish       # builds, runs the tests, publishes to artifacts/host and artifacts/adapter
-./scripts/Start-PkRelay.ps1                # loopback hub on http://127.0.0.1:5271
+./scripts/Build-CoCern.ps1 -Publish       # builds, runs the tests, publishes to artifacts/host and artifacts/adapter
+./scripts/Start-CoCern.ps1                # loopback hub on http://127.0.0.1:5271
 ```
 
-- The start script makes a private administrator token in `data/local-client-token`. `-RepositoryId <id>` sets its repository (default `pkrelay`).
-- To run the published hub: `./scripts/Start-PkRelay.ps1 -HostDll ./artifacts/host/PkRelay.Host.dll`.
+- The start script makes a private administrator token in `data/local-client-token`. `-RepositoryId <id>` sets its repository (default `cocern`).
+- To run the published hub: `./scripts/Start-CoCern.ps1 -HostDll ./artifacts/host/CoCern.Host.dll`.
 - Never rebuild the folder of a running hub or adapter. Publish to a new folder and switch.
 - One hub owns one database file. Do not put it on a shared drive or start a second hub on it.
 - The first start of this hub on an older database moves it to schema 2, after saving a backup beside it: `relay.db.pre-migration-<id>.db`.
@@ -17,16 +17,16 @@
 
 ## Connect an agent
 
-Run the adapter as an MCP server: `dotnet <path>/PkRelay.Adapter.dll`.
+Run the adapter as an MCP server: `dotnet <path>/CoCern.Adapter.dll`.
 
 | Variable | Default | What it does |
 | --- | --- | --- |
-| `PKRELAY_URL` | `http://127.0.0.1:5271` | Hub address. Plain HTTP works only on loopback. |
-| `PKRELAY_TOKEN_FILE` | | File holding the client token. Wins over `PKRELAY_TOKEN`. |
-| `PKRELAY_TOKEN` | | The token itself, for clients with protected settings. |
-| `PKRELAY_PROFILE` | | `chat` shows only `session_open`, `send_message`, `check_inbox`, `ack` and `chat_directory`. Use it for chats that only message. |
-| `PKRELAY_ROLE` | | `admin` also lists administrator tools. The hub still checks the token. |
-| `PKRELAY_SIGNALR` | `false` | `true` prints a hint on standard error when the session's inbox changes. |
+| `COCERN_URL` | `http://127.0.0.1:5271` | Hub address. Plain HTTP works only on loopback. |
+| `COCERN_TOKEN_FILE` | | File holding the client token. Wins over `COCERN_TOKEN`. |
+| `COCERN_TOKEN` | | The token itself, for clients with protected settings. |
+| `COCERN_PROFILE` | | `chat` shows only `session_open`, `send_message`, `check_inbox`, `ack` and `chat_directory`. Use it for chats that only message. |
+| `COCERN_ROLE` | | `admin` also lists administrator tools. The hub still checks the token. |
+| `COCERN_SIGNALR` | `false` | `true` prints a hint on standard error when the session's inbox changes. |
 
 With none of the first three set, the adapter uses this PC's node. See [Other PCs](discovery.md).
 
@@ -67,6 +67,18 @@ Every model call re-reads the whole chat, so fewer calls matter most.
 - **Token counting only measures.** Replies change only for tools you list in `Relay:Tokens:EnforceTools`.
 - **Analytics, ad hoc SQL, orders and the doc cache are off by default.** `analytics_query` and `standing_put` need an administrator token, as do `order_put`, `order_remove`, `control_request` and `doc_sync`.
 
+## Upgrading from PkRelay
+
+CoCern is PkRelay's new name. It is a clean break: no old name still works.
+
+1. **Stop** the old hub, every node (`dotnet` running `PkRelay.Adapter.dll`) and the chats that use it.
+2. **New file names.** Scripts: `Build-CoCern.ps1`, `Start-CoCern.ps1`, `Start-CoCernWake.ps1`, `Smoke-CoCern.py`. Programs: `CoCern.Host.dll`, `CoCern.Adapter.dll`. Solution: `CoCern.slnx`.
+3. **New variables.** Every `PKRELAY_*` is now `COCERN_*`, for example `COCERN_TOKEN_FILE`, `COCERN_NODE_DIR` and `COCERN_DUCKDB_EXTENSIONS`. Old ones are ignored.
+4. **Data folder and token file.** Move the hub's `data` folder (token file, certificate) to the new checkout, or let `Start-CoCern.ps1` make a new token and update every client. The node folder is now `%LOCALAPPDATA%\CoCern\node`; setup makes it. Delete `%LOCALAPPDATA%\PkRelay` when done.
+5. **The old database is not migrated.** Its records use the old names, so CoCern would not see them. Move `data/relay.db` aside and start fresh. Tasks, messages and grants do not carry over.
+6. **Re-run adapter setup** on each PC, so Claude Code and Codex get the new `cocern` MCP server (tools become `mcp__cocern__*`). Setup leaves existing entries alone, so first remove the old `pkrelay` server from `~/.claude.json` and `~/.codex/config.toml`, the old `--prompt-hook` entry, and the `PkRelayNode` Run value.
+7. **Re-enroll other PCs** with `dotnet .\CoCern.Adapter.dll --setup --hub <url>`. The new database knows no machines. See [Other PCs](discovery.md#join-a-pc).
+
 ## Hub settings
 
 Use `appsettings.json`, environment variables (`Relay__Clients__0__Token`) or the command line.
@@ -77,7 +89,7 @@ Use `appsettings.json`, environment variables (`Relay__Clients__0__Token`) or th
 | `Relay:DatabasePath` | `data/relay.db` | The database, relative to the content root. |
 | `Relay:SiloPort` | 21111 | Orleans silo port (loopback). |
 | `Relay:GatewayPort` | 31111 | Orleans gateway port (loopback). |
-| `Relay:ClusterId` | `PkRelay` | Change it, and the ports, for a second test hub. |
+| `Relay:ClusterId` | `CoCern` | Change it, and the ports, for a second test hub. |
 | `Relay:Clients:N:Token` | | A client's bearer token. |
 | `Relay:Clients:N:TokenFile` | | Read the token from this file instead. |
 | `Relay:Clients:N:PrincipalId` | | Who the client is. |

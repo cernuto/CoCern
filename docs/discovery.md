@@ -9,7 +9,7 @@ Each PC runs a small background program, the node. It joins the hub once, lists 
 | Setting | Default | What it does |
 | --- | --- | --- |
 | `Relay:Discovery:Enabled` | `false` | Lets PCs join and announce chats. |
-| `Relay:Discovery:Repositories` | `["pkrelay"]` | Repositories joined PCs may use. |
+| `Relay:Discovery:Repositories` | `["cocern"]` | Repositories joined PCs may use. |
 | `Relay:Network:Enabled` | `false` | Also serves HTTPS on every network interface. |
 | `Relay:Network:HttpsPort` | 5273 | The HTTPS port. |
 | `Relay:Network:CertificatePath` | `data/hub-certificate.pfx` | Self-signed certificate, made on first start. Keep it: PCs pin its fingerprint. |
@@ -17,34 +17,34 @@ Each PC runs a small background program, the node. It joins the hub once, lists 
 The Visual Studio launch profile turns on both switches. Setup never changes the firewall. To open the port on private networks only, run this once in an elevated PowerShell:
 
 ```powershell
-New-NetFirewallRule -DisplayName "PkRelay hub (HTTPS 5273)" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 5273 -Profile Private
+New-NetFirewallRule -DisplayName "CoCern hub (HTTPS 5273)" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 5273 -Profile Private
 ```
 
 ## Join a PC
 
-1. Copy `artifacts/adapter` (from `./scripts/Build-PkRelay.ps1 -Publish`) to the PC, and leave it there.
+1. Copy `artifacts/adapter` (from `./scripts/Build-CoCern.ps1 -Publish`) to the PC, and leave it there.
 2. Close Claude Code on that PC. Setup edits `.claude.json`, which Claude Code overwrites while it runs.
 3. From the copied folder, run:
 
 ```powershell
-dotnet .\PkRelay.Adapter.dll --setup --hub https://<hub-pc>:5273/
+dotnet .\CoCern.Adapter.dll --setup --hub https://<hub-pc>:5273/
 ```
 
 Setup then:
 
 - pins the hub's certificate and joins;
-- adds a `pkrelay` MCP server to `~/.codex/config.toml` and `~/.claude.json`, with a backup (skip with `--skip-client-config`);
-- adds the `PkRelayNode` value to the current user's Run key, so the node starts at sign-in;
+- adds a `cocern` MCP server to `~/.codex/config.toml` and `~/.claude.json`, with a backup (skip with `--skip-client-config`);
+- adds the `CoCernNode` value to the current user's Run key, so the node starts at sign-in;
 - starts the node and prints the machine ID.
 
 Run it again any time: it leaves existing entries alone. `--data-dir <path>` moves the node folder. Exit code 1 is a setup or join problem, 4 a changed hub certificate, 5 a settings file it could not read.
 
 | Variable | Default | What it does |
 | --- | --- | --- |
-| `PKRELAY_NODE_DIR` | `%LOCALAPPDATA%\PkRelay\node` | The node folder, as read by `--await-inbox --chat`, `--prompt-hook` (unless given `--data-dir`) and the MCP adapter. Set it if setup used `--data-dir`. |
-| `PKRELAY_HOOK_TIMEOUT_MS` | 1000 | How long the prompt hook waits for the hub. |
+| `COCERN_NODE_DIR` | `%LOCALAPPDATA%\CoCern\node` | The node folder, as read by `--await-inbox --chat`, `--prompt-hook` (unless given `--data-dir`) and the MCP adapter. Set it if setup used `--data-dir`. |
+| `COCERN_HOOK_TIMEOUT_MS` | 1000 | How long the prompt hook waits for the hub. |
 
-New chats on that PC appear in `chat_directory` within about a minute. A chat whose adapter has its own `PKRELAY_URL`, `PKRELAY_TOKEN_FILE` or `PKRELAY_TOKEN` is not seen by the node.
+New chats on that PC appear in `chat_directory` within about a minute. A chat whose adapter has its own `COCERN_URL`, `COCERN_TOKEN_FILE` or `COCERN_TOKEN` is not seen by the node.
 
 ## Wake-ups
 
@@ -53,7 +53,7 @@ New chats on that PC appear in `chat_directory` within about a minute. A chat wh
 **Claude chats** wake themselves. Run this as a background command in the chat:
 
 ```powershell
-dotnet <adapter folder>\PkRelay.Adapter.dll --await-inbox --chat <this chat's session ID> --timeout-minutes 120
+dotnet <adapter folder>\CoCern.Adapter.dll --await-inbox --chat <this chat's session ID> --timeout-minutes 120
 ```
 
 - The session ID is the chat's `CLAUDE_CODE_SESSION_ID`. The chat must have called `session_open` on this PC first.
@@ -69,7 +69,7 @@ With attention on, only urgent items wake a chat at once. See [Collaboration](co
 Add `--prompt-hook` to the setup command to also add a hook to `~/.claude/settings.json` and `~/.codex/hooks.json`. It prints one line on each message you type, at no model cost:
 
 ```
-PkRelay: 3 attention items (1 urgent), 2 inbox, standing r4; top a-91 blocked "T-12".
+CoCern: 3 attention items (1 urgent), 2 inbox, standing r4; top a-91 blocked "T-12".
 ```
 
 It only reads and never blocks. Codex asks you to approve a new hook in `/hooks`.
@@ -77,12 +77,12 @@ It only reads and never blocks. Codex asks you to approve a new hook in `/hooks`
 ## Stop, revoke
 
 - **Stop waking on a PC:** create a file named `stop` in the node folder. Delete it to start again.
-- **Stop the node:** end its `dotnet` process. Remove the `PkRelayNode` Run value to keep it from starting.
+- **Stop the node:** end its `dotnet` process. Remove the `CoCernNode` Run value to keep it from starting.
 - **Revoke a PC:** an administrator calls `control_request` with `"command": "revoke_machine"` and the `machineId`. The device can still join again under a new ID, so keep the port closed to devices you do not trust.
 
 ## Hand-written wake configs
 
-Older `--wake <config>` and `--await-inbox <config>` setups still work; see `scripts/Start-PkRelayWake.ps1`. Watch each chat with only one of them.
+Older `--wake <config>` and `--await-inbox <config>` setups still work; see `scripts/Start-CoCernWake.ps1`. Watch each chat with only one of them.
 
 ## Limits
 

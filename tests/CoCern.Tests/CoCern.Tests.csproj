@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><IsTestProject>true</IsTestProject><IsPackable>false</IsPackable></PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/CoCern.Core/CoCern.Core.csproj" />
+    <ProjectReference Include="../../src/CoCern.Storage/CoCern.Storage.csproj" />
+    <ProjectReference Include="../../src/CoCern.Host/CoCern.Host.csproj" />
+    <ProjectReference Include="../../src/CoCern.Analytics/CoCern.Analytics.csproj" />
+    <ProjectReference Include="../../src/CoCern.Adapter/CoCern.Adapter.csproj" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio"><PrivateAssets>all</PrivateAssets></PackageReference>
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" />
+    <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" />
+  </ItemGroup>
+</Project>

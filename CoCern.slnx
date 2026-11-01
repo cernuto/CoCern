@@ -1,0 +1,15 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/CoCern.Contracts/CoCern.Contracts.csproj" />
+    <Project Path="src/CoCern.Domain/CoCern.Domain.csproj" />
+    <Project Path="src/CoCern.Core/CoCern.Core.csproj" />
+    <Project Path="src/CoCern.Storage/CoCern.Storage.csproj" />
+    <Project Path="src/CoCern.Analytics/CoCern.Analytics.csproj" />
+    <Project Path="src/CoCern.Host/CoCern.Host.csproj" />
+    <Project Path="src/CoCern.Adapter/CoCern.Adapter.csproj" />
+    <Project Path="src/CoCern.Dashboard/CoCern.Dashboard.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/CoCern.Tests/CoCern.Tests.csproj" />
+  </Folder>
+</Solution>

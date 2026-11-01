@@ -1,6 +1,6 @@
 # Verification
 
-What has been checked beyond the automated tests, and what has not. Run the tests with `dotnet test PkRelay.slnx`.
+What has been checked beyond the automated tests, and what has not. Run the tests with `dotnet test CoCern.slnx`.
 
 ## Checked live
 
