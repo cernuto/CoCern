@@ -497,6 +497,101 @@ public sealed class CoreSiloTests
     }
 
     [Fact]
+    public async Task Standing_orders_run_through_real_grains_releasing_claims_offering_next_work_and_following_released_locks()
+    {
+        var siloPort = FreePort(); var gatewayPort = FreePort();
+        var orders = new OrderOptions { Enabled = true };
+        using var host = new HostBuilder().ConfigureLogging(log => log.ClearProviders()).UseOrleans(silo => silo
+            .UseLocalhostClustering(siloPort: siloPort, gatewayPort: gatewayPort, serviceId: "core-orders-tests", clusterId: Guid.NewGuid().ToString("N"))
+            .AddMemoryGrainStorage("relay"))
+            .ConfigureServices(services => services.AddPkRelayCore().AddSingleton(orders).AddSingleton(provider => new RelayApplication(provider.GetRequiredService<IGrainFactory>(), orders: orders))).Build();
+        await host.StartAsync();
+        try
+        {
+            var application = host.Services.GetRequiredService<RelayApplication>();
+            var factory = host.Services.GetRequiredService<IGrainFactory>();
+            var caller = new RelayCaller("alice", true, ["repo"]);
+            var hub = caller with { IsInternal = true };
+            async Task<RelayReply> Raw(string tool, JsonObject args, RelayCaller? who = null)
+            {
+                args["repositoryId"] = "repo"; if (!args.ContainsKey("requestId")) args["requestId"] = Guid.NewGuid().ToString("N");
+                return await application.ExecuteAsync(who ?? caller, tool, JsonSerializer.SerializeToElement(args));
+            }
+            async Task<JsonObject> Call(string tool, JsonObject args)
+            {
+                var reply = await Raw(tool, args);
+                Assert.True(reply.Ok, tool + ": " + reply.Code + " " + reply.DataJson);
+                return JsonNode.Parse(reply.DataJson)!.AsObject();
+            }
+            var board = factory.GetGrain<ITaskBoardGrain>("repo/default");
+            var printer = factory.GetGrain<ILockGrain>("pc");
+            async Task Dispatch(IRelayAggregateGrain grain) => Assert.True((await grain.ExecuteAsync(hub, Operations.Dispatch, "{}")).Ok);
+            async Task Pump() { foreach (var grain in new IRelayAggregateGrain[] { board, printer, board, factory.GetGrain<IControlGrain>(AggregateKinds.ControlKey) }) await Dispatch(grain); }
+            var manager = await Call("session_open", new() { ["role"] = "manager" });
+            var worker = await Call("session_open", new() { ["role"] = "worker" });
+            var next = await Call("session_open", new() { ["role"] = "worker" });
+            JsonObject As(JsonObject session, JsonObject args) { args["sessionId"] = session["sessionId"]!.DeepClone(); args["sessionToken"] = session["sessionToken"]!.DeepClone(); return args; }
+            JsonObject Workflow(string state) => new()
+            {
+                ["state"] = state, ["packet"] = new JsonObject { ["goal"] = "g", ["target"] = "t", ["authorityRef"] = "human-grant:1", ["restoration"] = "r", ["stopCondition"] = "s" },
+                ["criteria"] = new JsonArray(new JsonObject { ["id"] = "c", ["description"] = "d", ["result"] = state == "completed" ? "passed" : "not_run", ["evidenceRef"] = state == "completed" ? "artifact:1" : null }),
+                ["blockers"] = new JsonArray()
+            };
+            await Call("control_request", new() { ["command"] = "register_resource", ["resourceId"] = "pc", ["machineId"] = "pc" });
+            await Call("task_update", As(worker, new() { ["taskId"] = "T-1", ["expectedVersion"] = 0, ["workflow"] = Workflow("ready"), ["attention"] = false }));
+            await Call("task_update", As(worker, new() { ["taskId"] = "T-2", ["expectedVersion"] = 0, ["workflow"] = Workflow("ready"), ["attention"] = false }));
+
+            // A non-administrator cannot write orders, whatever role its session claims.
+            Assert.Equal(RelayErrorCodes.AdministratorRequired, (await Raw("order_put", new() { ["orderId"] = "o-0", ["trigger"] = new JsonObject { ["on"] = "workflow_completed", ["taskId"] = "T-1" }, ["actions"] = new JsonArray(new JsonObject { ["do"] = "release_claims" }) }, new RelayCaller("bob", false, ["repo"]))).Code);
+            // When T-1 completes: release its claims, offer T-2 to the next worker, tell the manager. When pc is released: tell the manager.
+            await Call("order_put", new()
+            {
+                ["orderId"] = "o-1", ["trigger"] = new JsonObject { ["on"] = "workflow_completed", ["taskId"] = "T-1" },
+                ["actions"] = new JsonArray(new JsonObject { ["do"] = "release_claims" }, new JsonObject { ["do"] = "offer", ["taskId"] = "T-2", ["sessionId"] = next["sessionId"]!.DeepClone() }, new JsonObject { ["do"] = "notify", ["sessionId"] = manager["sessionId"]!.DeepClone(), ["note"] = "T-1 done" })
+            });
+            Assert.Equal(RelayErrorCodes.ResourceUnknown, (await Raw("order_put", new() { ["orderId"] = "o-2", ["trigger"] = new JsonObject { ["on"] = "claim_released", ["resourceId"] = "nowhere" }, ["actions"] = new JsonArray(new JsonObject { ["do"] = "notify", ["sessionId"] = "x" }) })).Code);
+            await Call("order_put", new()
+            {
+                ["orderId"] = "o-2", ["trigger"] = new JsonObject { ["on"] = "claim_released", ["resourceId"] = "pc" },
+                ["actions"] = new JsonArray(new JsonObject { ["do"] = "notify", ["sessionId"] = manager["sessionId"]!.DeepClone(), ["note"] = "pc is free" })
+            });
+            await Pump();
+
+            var claim = await Call("task_claim", As(worker, new() { ["taskId"] = "T-1", ["expectedVersion"] = 1, ["resourceIds"] = new JsonArray("pc"), ["leaseSeconds"] = 600, ["attention"] = false }));
+            Assert.Equal(RelayErrorCodes.Busy, (await Raw("claim_acquire", As(next, new() { ["resourceId"] = "pc" }))).Code);
+            await Call("task_update", As(worker, new() { ["taskId"] = "T-1", ["expectedVersion"] = 2, ["workflow"] = Workflow("completed"), ["attention"] = false }));
+            // The board's release reaches the lock, whose release runs the board's claim_released order in turn.
+            await Pump();
+            await Pump();
+
+            Assert.False((await Call("task_get", new() { ["taskId"] = "T-1" })).ContainsKey("owner"));
+            Assert.True((await Call("claim_acquire", As(next, new() { ["resourceId"] = "pc" })))["newlyAcquired"]!.GetValue<bool>());
+            var offer = (await Call("check_inbox", As(next, new())))["attention"]!.AsObject();
+            Assert.Equal(("next_work", "T-2"), (offer["k"]!.GetValue<string>(), offer["t"]!.GetValue<string>()));
+            Assert.Contains("claim it with task_claim", offer["x"]!.GetValue<string>());
+            // The offer acquired nothing: T-2 is still unclaimed until the worker claims it.
+            Assert.False((await Call("task_get", new() { ["taskId"] = "T-2" })).ContainsKey("owner"));
+            var notes = new List<string>();
+            for (var turn = 0; turn < 6; turn++)
+            {
+                if ((await Call("check_inbox", As(manager, new())))["attention"] is not JsonObject item) break;
+                notes.Add(item["x"]!.GetValue<string>());
+                await Call("attention_respond", As(manager, new() { ["itemId"] = item["id"]!.DeepClone(), ["action"] = "dismiss" }));
+            }
+            Assert.Contains(notes, note => note.Contains("T-1 done"));
+            Assert.Contains(notes, note => note.Contains("pc is free"));
+            Assert.Contains(notes, note => note.Contains("review_ready"));
+
+            // get_status lists the orders; a background detail read does not.
+            var listed = (await Call("get_status", As(manager, new())))["orders"]!.AsArray();
+            Assert.Equal([("o-1", 1L), ("o-2", 1L)], listed.Select(order => (order!["id"]!.GetValue<string>(), order["runs"]!.GetValue<long>())));
+            Assert.False((await Call("get_status", As(manager, new() { ["attentionDetail"] = true }))).ContainsKey("orders"));
+            Assert.Equal(claim["grants"]![0]!["generation"]!.GetValue<long>() + 1, (await Call("claim_acquire", As(next, new() { ["resourceId"] = "pc" })))["generation"]!.GetValue<long>());
+        }
+        finally { await host.StopAsync(); }
+    }
+
+    [Fact]
     public void An_anomaly_needs_enough_samples_on_both_sides_and_a_value_past_the_ratio()
     {
         var at = new DateTimeOffset(2026, 11, 1, 10, 0, 0, TimeSpan.Zero);

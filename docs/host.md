@@ -27,6 +27,8 @@ ASP.NET Core configuration files, protected environment settings and command-lin
 | `Relay:Attention:MaxHoldMinutes` | Minutes an idle chat waits before one wake for a lower-tier item; default 10. |
 | `Relay:Attention:ItemExpiryDays` | Days before an unclosed attention item disappears; default 7. |
 | `Relay:Attention:AnomalyInterval` | Time between anomaly checks; default 1 hour, `0` off. Needs analytics on. Thresholds are under `Relay:Attention:AnomalyThresholds`. See [attention.md](attention.md#anomaly-monitor). |
+| `Relay:Orders:Enabled` | Allow `order_put` and `order_remove` and run standing orders; default false. See [orders.md](orders.md). |
+| `Relay:Orders:DefaultExpiryDays` | Days an order lives without `expiresAt`; default 7, from 1 to 30. |
 | `Relay:Analytics:Enabled` | Take hourly analytics snapshots and answer `analytics_query`; default false. See [analytics.md](analytics.md) for the other `Relay:Analytics:*` settings, including `AllowAdHocSql` (default false). |
 
 Client token comparison uses fixed-time comparison of SHA-256 digests. All bearer credentials, including external JWTs, are accepted over HTTPS or an actual loopback TCP connection. An off-host plaintext request fails even if it supplies `X-Forwarded-For` or `X-Forwarded-Proto`. The host does not trust forwarded headers. Use HTTPS to the host for remote deployments; configure any tunnel or proxy separately and keep its upstream access protected. Browser CORS access is denied by default. SignalR clients should send the bearer token in authorization headers, as the supplied adapter does with long polling; query-string access tokens are not accepted.

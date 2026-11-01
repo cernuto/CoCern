@@ -20,6 +20,8 @@ internal static class LockAggregate
         Operations.Unblock => Unblock(context),
         Operations.ClaimState => ClaimState(context),
         Operations.LeaseCheck => LeaseCheck(context),
+        Operations.OrderWatch => StandingOrders.Watch(context),
+        Operations.OrderRelease => StandingOrders.Release(context),
         RelayTools.ClaimAcquire => Acquire(context),
         RelayTools.ClaimRenew or RelayTools.ClaimRelease => RenewOrRelease(context),
         _ => Error(UnknownTool)
@@ -108,6 +110,7 @@ internal static class LockAggregate
             state["leaseUntil"] = context.Now.ToString("O");
         }
         AttentionSources.OnLeaseSettled(context, context.SessionId, context.Key);
+        if (release) StandingOrders.OnLockReleased(context);
         return Ok(new { generation, leaseUntil = Text(state, "leaseUntil"), released = release }, generation);
     }
 }

@@ -77,6 +77,25 @@ public static class RelayLimits
     /// <summary>Most boards one session records a received standing revision for.</summary>
     public const int MaxStandingBoardsPerSession = 64;
 
+    /// <summary>Most standing orders one board keeps, disabled ones included; expired ones are dropped at the next <c>order_put</c>.</summary>
+    public const int MaxOrders = 20;
+    /// <summary>Most actions one standing order runs when its trigger fires.</summary>
+    public const int MaxOrderActions = 4;
+    /// <summary>Longest note a <c>notify</c> action sends, in characters.</summary>
+    public const int MaxOrderNoteLength = 200;
+    /// <summary>Failed runs after which a standing order is disabled.</summary>
+    public const int MaxOrderFailures = 3;
+    /// <summary>Days an order lives when it gives no <c>expiresAt</c>, unless <c>Relay:Orders:DefaultExpiryDays</c> says otherwise.</summary>
+    public const int DefaultOrderExpiryDays = 7;
+    /// <summary>Longest order lifetime, in days.</summary>
+    public const int MaxOrderExpiryDays = 30;
+    /// <summary>Order changes, runs and failures one board keeps in its order log; older entries are dropped.</summary>
+    public const int OrderLogEntries = 20;
+    /// <summary>Most boards one resource lock tells when its claim is released, for <c>claim_released</c> orders.</summary>
+    public const int MaxOrderWatchBoards = 16;
+    /// <summary>Order releases one lock remembers, so a redelivered release is never applied twice.</summary>
+    public const int OrderReleasesRemembered = 32;
+
     /// <summary>Largest search document body, in UTF-8 bytes, so one huge task cannot dominate the index or the commit.</summary>
     public const int MaxSearchBodyBytes = 4_096;
     /// <summary>Largest share of a search body one part (a note, a report, a message) may take, in UTF-8 bytes.</summary>

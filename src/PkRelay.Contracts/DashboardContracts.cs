@@ -27,6 +27,30 @@ public sealed record DashboardStanding
     public DashboardStandingGrant[] Grants { get; init; } = [];
     public DashboardStandingProposal[] Proposals { get; init; } = [];
     public DashboardStandingChange[] History { get; init; } = [];
+    /// <summary>The board's standing orders, and its recent order log, newest first.</summary>
+    public DashboardOrder[] Orders { get; init; } = [];
+    public DashboardOrderLogEntry[] OrderLog { get; init; } = [];
+}
+
+public sealed record DashboardOrder
+{
+    public string Id { get; init; } = "";
+    public string Trigger { get; init; } = "";
+    public string Target { get; init; } = "";
+    public string[] Actions { get; init; } = [];
+    public string ApprovedBy { get; init; } = "";
+    public DateTimeOffset? ExpiresAt { get; init; }
+    public long Runs { get; init; }
+    public long Failures { get; init; }
+    public bool Disabled { get; init; }
+    public string LastError { get; init; } = "";
+}
+
+public sealed record DashboardOrderLogEntry
+{
+    public DateTimeOffset? At { get; init; }
+    public string OrderId { get; init; } = "";
+    public string What { get; init; } = "";
 }
 
 public sealed record DashboardStandingLine

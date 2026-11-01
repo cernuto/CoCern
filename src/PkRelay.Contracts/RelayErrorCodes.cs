@@ -96,6 +96,8 @@ public static class RelayErrorCodes
     public const string AnalyticsTimeout = "AnalyticsTimeout";
     /// <summary>DuckDB rejected the query, for example an unknown column or a file read; the reply says why.</summary>
     public const string AnalyticsFailed = "AnalyticsFailed";
+    /// <summary>Standing orders are turned off on this hub (<c>Relay:Orders:Enabled</c>).</summary>
+    public const string OrdersUnavailable = "OrdersUnavailable";
     public const string InternalError = "InternalError";
 
     private static readonly FrozenSet<string> Conflicts = new[]

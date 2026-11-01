@@ -65,6 +65,10 @@ A packet's `authorityRef` can name a grant as `grant:<id>`. Then a `ready` write
 
 The token's principal must have `IsAdministrator` (`Relay:Clients:N:IsAdministrator`, or the OAuth mapping). The `role` given at `session_open` does not grant it. Give the manager chat an administrator token only if it should change standing.
 
+## Standing orders
+
+Boards can also hold standing orders: approved "when this happens, do that" rules the hub runs itself. They are off by default. See [orders.md](orders.md).
+
 ## Limits
 
 | Limit | Value |

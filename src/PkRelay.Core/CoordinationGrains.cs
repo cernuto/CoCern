@@ -51,7 +51,7 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
         var candidate = Clone(persistent.State);
         var firstNewEffect = candidate.Effects.Count;
         var priorTaskRevision = Kind == AggregateKinds.Board ? CoordinationStateMachine.TaskRevision(candidate) : null;
-        var reply = CoordinationStateMachine.Apply(candidate, Kind, this.GetPrimaryKeyString(), caller, operation, args, Now);
+        var reply = CoordinationStateMachine.Apply(candidate, Kind, this.GetPrimaryKeyString(), caller, operation, args, Now, services.GetService<OrderOptions>() is { Enabled: true });
         if (!reply.Ok || !CoordinationStateMachine.RequiresCommit(Kind, operation, priorTaskRevision, candidate)) return reply;
         CoordinationStateMachine.StampEffects(candidate.Effects, firstNewEffect, caller);
         CoordinationStateMachine.ScheduleLeases(candidate);
@@ -70,6 +70,7 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
         var now = Now;
         var candidate = Clone(persistent.State);
         var attention = services.GetService<AttentionOptions>();
+        var ordersOn = services.GetService<OrderOptions>() is { Enabled: true };
         if (operation.Length == 0 && actionKey.Length == 0)
         {
             if (!await RunDueChecksAsync(candidate, now, workId)) return Replies.Error(RelayErrorCodes.StorageFailure);
@@ -86,7 +87,8 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
             var payload = JsonNode.Parse(effect.PayloadJson)!.AsObject();
             var effectCaller = CoordinationStateMachine.TakeEffectCaller(payload);
             // With attention turned off, items are neither stored nor routed: the effect is dropped.
-            if (Operations.IsAttention(effect.Operation) && attention is { Enabled: false })
+            // Likewise with standing orders turned off, order effects (watches, releases, runs) are dropped.
+            if (Operations.IsAttention(effect.Operation) && attention is { Enabled: false } || Operations.IsOrder(effect.Operation) && !ordersOn)
             {
                 candidate.Effects.RemoveAll(x => x.Id == effect.Id);
                 if (!await CommitAsync(candidate)) return Replies.Error(RelayErrorCodes.StorageFailure);
@@ -111,9 +113,9 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
                 else result = await Aggregate(grains, effect.TargetKind, effect.TargetKey).ExecuteAsync(effectCaller, effect.Operation, payload.ToJsonString());
             }
             catch (Exception) { result = Replies.Error(RelayErrorCodes.DeliveryUnavailable); }
-            // Attention is advisory. A session that refuses an item (unknown session, another repository, a malformed item) would refuse
+            // Attention and order effects are advisory. A session that refuses an item (unknown session, another repository, a malformed item) would refuse
             // it on every retry, so the effect is dropped rather than retried every few seconds forever. Infrastructure failures still retry.
-            if (!result.Ok && !(Operations.IsAttention(effect.Operation) && !IsTransient(result.Code)))
+            if (!result.Ok && !((Operations.IsAttention(effect.Operation) || Operations.IsOrder(effect.Operation)) && !IsTransient(result.Code)))
             {
                 candidate.Effects[candidate.Effects.FindIndex(x => x.Id == effect.Id)] = effect with { DueAt = DateTimeOffset.UtcNow.Add(RedeliveryDelay) };
                 if (!await CommitAsync(candidate)) return Replies.Error(RelayErrorCodes.StorageFailure);

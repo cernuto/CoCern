@@ -180,7 +180,21 @@ public static class Operations
     /// <summary>The anomaly monitor's due check, with the findings the hub read from the analytics snapshot.</summary>
     public const string AnomalyCheck = "__anomaly_check";
 
+    /// <summary>Read-only: a board's standing orders in the compact form <c>get_status</c> lists.</summary>
+    public const string Orders = "__orders";
+    /// <summary>Sent by a lock to each board watching it when its claim is released: runs the board's <c>claim_released</c> order.</summary>
+    public const string OrderFire = "__order_fire";
+    /// <summary>Sent by a board to a lock: starts or stops telling that board when the lock's claim is released.</summary>
+    public const string OrderWatch = "__order_watch";
+    /// <summary>Sent by a board to a lock: an order releases the claim its task's owner holds, once per order run.</summary>
+    public const string OrderRelease = "__order_release";
+    /// <summary>Sent by a lock back to the board: an order's release could not run (an action is still unresolved).</summary>
+    public const string OrderFailed = "__order_failed";
+
     public static bool IsInternal(string operation) => operation.StartsWith("__", StringComparison.Ordinal);
+
+    /// <summary>Order effects run only while standing orders are on; a target that refuses one is not asked again.</summary>
+    public static bool IsOrder(string operation) => operation is OrderFire or OrderWatch or OrderRelease or OrderFailed;
 
     /// <summary>Attention effects are advisory: a target that refuses one is not asked again.</summary>
     public static bool IsAttention(string operation) => operation is AttentionRaise or AttentionClose or AttentionRoute;

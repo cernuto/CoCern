@@ -123,6 +123,43 @@ public sealed class ContractsTests
     }
 
     [Fact]
+    public void Order_tools_appear_only_in_the_administrator_catalogs_with_matching_schemas()
+    {
+        using var client = new HttpClient();
+        var forwarder = new PkRelay.Adapter.RelayForwarder(client, new PkRelay.Adapter.AdapterOptions("http://127.0.0.1:5271", "client-secret"));
+        var adapter = PkRelay.Adapter.CoordinationTools.Create(forwarder, admin: true).ToDictionary(tool => tool.ProtocolTool.Name, tool => tool.ProtocolTool.InputSchema.GetRawText());
+        var hub = ToolResults.Tools(true).ToDictionary(tool => tool.Name, tool => tool.InputSchema.GetRawText());
+        foreach (var (name, description) in new[] { (RelayTools.OrderPut, "Create or replace a standing order with a trigger, actions and expiry."), (RelayTools.OrderRemove, "Remove a standing order.") })
+        {
+            Assert.True(RelayToolCatalog.TryGet(name, out var tool));
+            Assert.Equal(RelayToolCatalog.ForwardingSchema(tool).GetRawText(), adapter[name]);
+            Assert.Equal(RelayToolCatalog.InputSchema(tool).GetRawText(), hub[name]);
+            // An administrator-only mutation with no session: the administrator token is the authority, as for standing_put.
+            Assert.Equal((true, false, true), (tool.IsMutation, tool.RequiresSession, tool.AdministratorOnly));
+            Assert.Equal(description, tool.Description);
+            Assert.DoesNotContain(name, ToolResults.Tools(false).Select(item => item.Name));
+            Assert.DoesNotContain(name, PkRelay.Adapter.CoordinationTools.NamesForRole(false));
+            Assert.DoesNotContain(name, PkRelay.Adapter.CoordinationTools.Create(forwarder, admin: false).Select(item => item.ProtocolTool.Name));
+            Assert.Contains(name, PkRelay.Adapter.CoordinationTools.NamesForRole(true));
+            var forwarding = RelayToolCatalog.ForwardingSchema(tool).GetProperty("properties");
+            Assert.False(forwarding.TryGetProperty("sessionToken", out _));
+            Assert.False(forwarding.GetProperty("orderId").TryGetProperty("maxLength", out _));
+        }
+        RelayToolCatalog.TryGet(RelayTools.OrderPut, out var put);
+        var strict = RelayToolCatalog.InputSchema(put);
+        Assert.Equal(new[] { "repositoryId", "requestId", "orderId", "trigger", "actions" }, strict.GetProperty("required").EnumerateArray().Select(x => x.GetString()));
+        var properties = strict.GetProperty("properties");
+        Assert.Equal(OrderTriggers.All, properties.GetProperty("trigger").GetProperty("properties").GetProperty("on").GetProperty("enum").EnumerateArray().Select(x => x.GetString()!));
+        Assert.Equal(OrderActions.All, properties.GetProperty("actions").GetProperty("items").GetProperty("properties").GetProperty("do").GetProperty("enum").EnumerateArray().Select(x => x.GetString()!));
+        Assert.DoesNotContain("accept", OrderActions.All);
+        Assert.Equal(RelayLimits.MaxOrderActions, properties.GetProperty("actions").GetProperty("maxItems").GetInt32());
+        Assert.Equal(RelayLimits.MaxOrderNoteLength, properties.GetProperty("actions").GetProperty("items").GetProperty("properties").GetProperty("note").GetProperty("maxLength").GetInt32());
+        Assert.Equal(RelayLimits.MaxStandingIdLength, properties.GetProperty("orderId").GetProperty("maxLength").GetInt32());
+        Assert.Equal(new[] { "actions", "expiresAt", "orderId", "repositoryId", "requestId", "trigger" }, RelayToolCatalog.ForwardingSchema(put).GetProperty("properties").EnumerateObject().Select(x => x.Name).Order());
+        Assert.Equal(RelayErrorKind.Invalid, RelayErrorCodes.Classify(RelayErrorCodes.OrdersUnavailable));
+    }
+
+    [Fact]
     public void Search_tool_appears_in_hub_and_adapter_catalogs_with_matching_schemas()
     {
         using var client = new HttpClient();

@@ -54,6 +54,8 @@ A successful `check_inbox`, `task_update`, `action_report` or `task_claim` reply
 | Next-work offer | `next_work` for the task a `task_update` reply's `nextWork` offered | the caller | the caller claims it, or after a day |
 | Inbox | `info` for each message that may wake its chat | the recipient | `check_inbox` shows it, or `ack` |
 | Anomaly monitor | `anomaly` (a metric far above its baseline) | managers | a later check finds it back in range |
+| [Standing order](orders.md) | `next_work` (`offer`) and `info` (`notify`) | the named session | as for any `next_work` or `info` item |
+| Standing order | `order_failed` (an action could not run) | managers | the order is replaced or removed |
 
 - A manager is a session opened with `role: "manager"` (any case). Give that role at `session_open`.
 - The session that caused a change gets no copy of its own manager-bound item.
