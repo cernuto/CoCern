@@ -59,11 +59,15 @@ public static class Operations
     public const string Register = "__register";
     public const string Deliver = "__deliver";
     public const string Resolve = "__resolve";
+    /// <summary>Read-only: resolves several resource names in one control call.</summary>
+    public const string ResolveAll = "__resolve_all";
     public const string Block = "__block";
     public const string Unblock = "__unblock";
     public const string Dispatch = "__dispatch";
     public const string TaskUnclaim = "__task_unclaim";
     public const string NextWork = "__next_work";
+    /// <summary>Read-only: whether another session holds a resource now, so a next-work offer can prefer tasks whose resources are free.</summary>
+    public const string ClaimState = "__claim_state";
     /// <summary>Read-only: which of the given sessions in the repository the caller's principal opened.</summary>
     public const string SessionOwners = "__session_owners";
 

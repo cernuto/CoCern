@@ -18,6 +18,7 @@ internal static class LockAggregate
     {
         Operations.Block => Block(context),
         Operations.Unblock => Unblock(context),
+        Operations.ClaimState => ClaimState(context),
         RelayTools.ClaimAcquire => Acquire(context),
         RelayTools.ClaimRenew or RelayTools.ClaimRelease => RenewOrRelease(context),
         _ => Error(UnknownTool)
@@ -48,6 +49,18 @@ internal static class LockAggregate
         if (!resolved.ContainsKey(id) && resolved.Count >= RelayLimits.MaxRecords) return Error(CapacityExceeded);
         blockers.Remove(id); resolved[id] = true;
         return Ok(new { resolved = true });
+    }
+
+    /// <summary>Read-only: whether <see cref="Acquire"/> would refuse this session now. It changes nothing and acquires nothing.</summary>
+    private static RelayReply ClaimState(AggregateContext context)
+    {
+        var state = context.State;
+        var holder = Text(state, "holder");
+        var blockers = (state["blockers"] as JsonObject)?.Count ?? 0;
+        var live = Date(state, "leaseUntil") > context.Now;
+        var owned = holder == context.SessionId && live;
+        var busy = holder.Length > 0 && holder != context.SessionId && (live || blockers > 0) || blockers > 0 && !owned;
+        return Ok(new { busy });
     }
 
     private static RelayReply Acquire(AggregateContext context)

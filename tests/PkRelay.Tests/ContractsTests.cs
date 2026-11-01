@@ -43,6 +43,22 @@ public sealed class ContractsTests
     }
 
     [Fact]
+    public void Workflow_schema_advertises_dependencies_and_resources()
+    {
+        RelayToolCatalog.TryGet(RelayTools.TaskUpdate, out var update);
+        var strict = RelayToolCatalog.InputSchema(update).GetProperty("properties").GetProperty("workflow").GetProperty("properties");
+        Assert.Equal(RelayLimits.MaxDependencies, strict.GetProperty("dependsOn").GetProperty("maxItems").GetInt32());
+        Assert.Equal(RelayLimits.MaxClaimResources, strict.GetProperty("packet").GetProperty("properties").GetProperty("resources").GetProperty("maxItems").GetInt32());
+        // The forwarding schema gives both fields as compact string arrays; the hub validates the limits.
+        var forwarding = RelayToolCatalog.ForwardingSchema(update).GetProperty("properties").GetProperty("workflow").GetProperty("properties");
+        foreach (var field in new[] { forwarding.GetProperty("dependsOn"), forwarding.GetProperty("packet").GetProperty("properties").GetProperty("resources") })
+        {
+            Assert.Equal("array", field.GetProperty("type").GetString());
+            Assert.Equal("string", field.GetProperty("items").GetProperty("type").GetString());
+        }
+    }
+
+    [Fact]
     public void Forwarding_catalog_stays_within_its_context_budget()
     {
         // Every connected agent carries these definitions on every turn; the pre-refactor adapter was about 19,400 characters.

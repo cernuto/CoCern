@@ -285,6 +285,141 @@ public sealed class CollaborationTests
     }
 
     [Fact]
+    public void Board_requireResources_refuses_ready_without_packet_resources()
+    {
+        var plain = new StateEnvelope<CoordinationDocument>();
+        Assert.True(Call(plain, "task_update", Update("t", 0, Workflow())).Ok);
+
+        var state = new StateEnvelope<CoordinationDocument> { Value = new() { Json = "{\"standing\":{\"settings\":{\"requireResources\":true}}}" } };
+        var refused = Call(state, "task_update", Update("t", 0, Workflow()));
+        Assert.Equal("InvalidWorkflow", refused.Code);
+        Assert.Equal("packet.resources", Data(refused)["required"]!.GetValue<string>());
+        var blocked = Workflow("blocked"); blocked["blockers"]!.AsArray().Add(new JsonObject { ["id"] = "hold", ["kind"] = "coordinator_hold", ["summary"] = "Waiting", ["recheckCondition"] = "Released" });
+        Assert.True(Call(state, "task_update", Update("held", 0, blocked)).Ok);
+        var ready = Workflow(); ready["packet"]!["resources"] = new JsonArray("rig-1");
+        Assert.True(Call(state, "task_update", Update("t", 0, ready)).Ok);
+        var none = Workflow(); none["packet"]!["resources"] = new JsonArray();
+        Assert.True(Call(state, "task_update", Update("no-resources", 0, none)).Ok);
+        var duplicate = Workflow(); duplicate["packet"]!["resources"] = new JsonArray("rig-1", "rig-1");
+        Assert.Equal("InvalidWorkflow", Call(state, "task_update", Update("bad", 0, duplicate)).Code);
+        var tooMany = Workflow(); tooMany["packet"]!["resources"] = new JsonArray(Enumerable.Range(0, 17).Select(i => (JsonNode)("rig-" + i)).ToArray());
+        Assert.Equal("InvalidWorkflow", Call(state, "task_update", Update("bad", 0, tooMany)).Code);
+    }
+
+    private static JsonObject WithResources(int priority, params string[] resources)
+    {
+        var workflow = Workflow(); workflow["priority"] = priority;
+        workflow["packet"]!["resources"] = new JsonArray(resources.Select(id => (JsonNode)id).ToArray());
+        return workflow;
+    }
+
+    [Fact]
+    public async Task Next_work_prefers_free_resources_at_equal_priority_and_still_requires_claim()
+    {
+        var factory = DispatchProxy.Create<IGrainFactory, LockCountingFactory>();
+        var app = new RelayApplication(factory);
+        async Task<RelayReply> Invoke(string tool, JsonObject args)
+        {
+            args["repositoryId"] = "repo"; args["requestId"] = Guid.NewGuid().ToString("N");
+            return await app.ExecuteAsync(Caller with { IsInternal = false }, tool, JsonSerializer.SerializeToElement(args));
+        }
+        // The worker's session is on machine "pc", where "bench" is an alias of "held"; its task_update names another machine.
+        var worker = Data(await Invoke("session_open", new() { ["machineId"] = "pc" })); var holder = Data(await Invoke("session_open", new() { ["machineId"] = "pc" }));
+        JsonObject For(JsonObject session) => new() { ["sessionId"] = session["sessionId"]!.DeepClone(), ["sessionToken"] = session["sessionToken"]!.DeepClone(), ["machineId"] = "elsewhere" };
+        Assert.True((await Invoke("control_request", new() { ["command"] = "register_resource", ["resourceId"] = "held", ["aliases"] = new JsonArray("bench"), ["machineId"] = "pc" })).Ok);
+        Assert.True((await Invoke("control_request", new() { ["command"] = "register_resource", ["resourceId"] = "free", ["machineId"] = "pc" })).Ok);
+        var hold = For(holder); hold["resourceId"] = "held";
+        var grant = Data(await Invoke("claim_acquire", hold));
+        async Task Create(string id, JsonObject? workflow)
+        {
+            var args = For(worker); args["taskId"] = id; args["expectedVersion"] = 0;
+            if (workflow is not null) args["workflow"] = workflow;
+            Assert.True((await Invoke("task_update", args)).Ok);
+        }
+        await Create("current", null);
+        await Create("a", WithResources(5, "bench"));
+        await Create("b", WithResources(5, "free"));
+        await Create("c", WithResources(1));
+        var milestone = For(worker); milestone["taskId"] = "current"; milestone["expectedVersion"] = 1; milestone["includeNextWork"] = true;
+        var counter = (LockCountingFactory)(object)factory;
+        var (lookups, resolves, batches) = (counter.Lookups, counter.Resolves, counter.BatchResolves);
+        var reply = await Invoke("task_update", milestone);
+        var next = Data(reply)["nextWork"]!;
+        Assert.Equal("b", next["offer"]!["taskId"]!.GetValue<string>());
+        Assert.True(next["offer"]!["claimRequired"]!.GetValue<bool>());
+        Assert.Null(next["candidates"]);
+        Assert.Equal(2, counter.Lookups - lookups);
+        Assert.Equal((0, 1), (counter.Resolves - resolves, counter.BatchResolves - batches));
+        Assert.Null(Data(await Invoke("task_get", new() { ["taskId"] = "b" }))["owner"]);
+
+        // Once the resource is free again, task ID breaks the tie as before.
+        var release = For(holder); release["resourceId"] = "held"; release["generation"] = grant["generation"]!.DeepClone();
+        Assert.True((await Invoke("claim_release", release)).Ok);
+        milestone["expectedVersion"] = 2;
+        Assert.Equal("a", Data(await Invoke("task_update", milestone))["nextWork"]!["offer"]!["taskId"]!.GetValue<string>());
+
+        // The offer acquired nothing: the worker still claims the task and its resources itself.
+        var claim = For(worker); claim["taskId"] = "b"; claim["expectedVersion"] = 1; claim["resourceIds"] = new JsonArray("free");
+        Assert.True((await Invoke("task_claim", claim)).Ok);
+    }
+
+    [Fact]
+    public async Task Next_work_resource_lookups_are_capped_per_offer()
+    {
+        var factory = DispatchProxy.Create<IGrainFactory, LockCountingFactory>();
+        var app = new RelayApplication(factory);
+        async Task<RelayReply> Invoke(string tool, JsonObject args)
+        {
+            args["repositoryId"] = "repo"; args["requestId"] = Guid.NewGuid().ToString("N");
+            return await app.ExecuteAsync(Caller with { IsInternal = false }, tool, JsonSerializer.SerializeToElement(args));
+        }
+        var worker = Data(await Invoke("session_open", new()));
+        JsonObject For() => new() { ["sessionId"] = worker["sessionId"]!.DeepClone(), ["sessionToken"] = worker["sessionToken"]!.DeepClone(), ["machineId"] = "pc" };
+        var create = For(); create["taskId"] = "current"; create["expectedVersion"] = 0; Assert.True((await Invoke("task_update", create)).Ok);
+        for (var task = 0; task < 6; task++)
+        {
+            var resources = Enumerable.Range(0, 16).Select(i => $"r{task}-{i}").ToArray();
+            foreach (var resource in resources) Assert.True((await Invoke("control_request", new() { ["command"] = "register_resource", ["resourceId"] = resource, ["machineId"] = "pc" })).Ok);
+            var args = For(); args["taskId"] = "t" + task; args["expectedVersion"] = 0; args["workflow"] = WithResources(1, resources);
+            Assert.True((await Invoke("task_update", args)).Ok);
+        }
+        var milestone = For(); milestone["taskId"] = "current"; milestone["expectedVersion"] = 1; milestone["includeNextWork"] = true;
+        var reply = await Invoke("task_update", milestone);
+        Assert.Equal("t0", Data(reply)["nextWork"]!["offer"]!["taskId"]!.GetValue<string>());
+        Assert.Equal(32, ((LockCountingFactory)(object)factory).Lookups);
+    }
+
+    /// <summary>Counts lock claim-state lookups and control resolves, single and batched.</summary>
+    public class LockCountingFactory : CoordinationTests.TestGrainFactory
+    {
+        private int lookups, resolves, batchResolves;
+        public int Lookups => Volatile.Read(ref lookups);
+        public int Resolves => Volatile.Read(ref resolves);
+        public int BatchResolves => Volatile.Read(ref batchResolves);
+        internal void Count(string operation)
+        {
+            if (operation == Operations.ClaimState) Interlocked.Increment(ref lookups);
+            else if (operation == Operations.Resolve) Interlocked.Increment(ref resolves);
+            else if (operation == Operations.ResolveAll) Interlocked.Increment(ref batchResolves);
+        }
+        protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
+        {
+            var grain = base.Invoke(targetMethod, args);
+            var type = targetMethod!.GetGenericArguments()[0];
+            return type == typeof(ILockGrain) || type == typeof(IControlGrain) ? new CountingGrain((IRelayAggregateGrain)grain!, this) : grain;
+        }
+    }
+
+    private sealed class CountingGrain(IRelayAggregateGrain inner, LockCountingFactory owner) : ILockGrain, IControlGrain
+    {
+        public Task<RelayReply> ExecuteAsync(RelayCaller caller, string operation, string argumentsJson)
+        {
+            owner.Count(operation);
+            return inner.ExecuteAsync(caller, operation, argumentsJson);
+        }
+    }
+
+    [Fact]
     public async Task Report_offer_is_advisory_targeted_paused_authenticated_and_bounded()
     {
         var factory = DispatchProxy.Create<IGrainFactory, CoordinationTests.TestGrainFactory>();

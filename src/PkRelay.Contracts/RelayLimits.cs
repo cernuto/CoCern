@@ -42,4 +42,11 @@ public static class RelayLimits
     public const int ActivityTurnGapSeconds = 60;
     /// <summary>Largest token count accepted in one <c>usage</c> report field.</summary>
     public const long MaxReportedTokens = 1_000_000_000;
+
+    /// <summary>Most task IDs one workflow may list in <c>dependsOn</c>.</summary>
+    public const int MaxDependencies = 16;
+    /// <summary>Offerable tasks a next-work offer checks against current resource claims.</summary>
+    public const int NextWorkCandidates = 5;
+    /// <summary>Most resource claim lookups one next-work offer makes.</summary>
+    public const int MaxOfferResourceLookups = 32;
 }

@@ -467,6 +467,83 @@ public sealed class CoordinationTests
         Assert.Equal("SessionDenied", (await Invoke(bob, "action_report", spoof)).Code);
     }
 
+    private static JsonObject DependentWorkflow(string state, params string[] dependsOn)
+    {
+        var workflow = new JsonObject
+        {
+            ["state"] = state,
+            ["packet"] = new JsonObject { ["goal"] = "g", ["target"] = "t", ["authorityRef"] = "human-grant:1", ["restoration"] = "r", ["stopCondition"] = "s" },
+            ["criteria"] = new JsonArray(new JsonObject { ["id"] = "c", ["description"] = "d", ["result"] = state == "completed" ? "passed" : "not_run", ["evidenceRef"] = state == "completed" ? "artifact:1" : null }),
+            ["blockers"] = new JsonArray()
+        };
+        if (dependsOn.Length > 0) workflow["dependsOn"] = new JsonArray(dependsOn.Select(id => (JsonNode)id).ToArray());
+        return workflow;
+    }
+
+    private static RelayReply WriteWorkflow(StateEnvelope<CoordinationDocument> state, string taskId, long version, JsonObject workflow, string? target = null)
+    {
+        if (target is not null) workflow["targetSessionId"] = target;
+        return Call(state, "board", "task_update", new() { ["taskId"] = taskId, ["requestId"] = Guid.NewGuid().ToString("N"), ["expectedVersion"] = version, ["workflow"] = workflow });
+    }
+
+    [Fact]
+    public void Dependencies_refuse_cycles_and_unknown_tasks_gate_offers_and_report_what_completion_unblocks()
+    {
+        var state = new StateEnvelope<CoordinationDocument>();
+        Assert.Equal("DependencyUnknown", WriteWorkflow(state, "b", 0, DependentWorkflow("ready", "a")).Code);
+        Assert.True(WriteWorkflow(state, "a", 0, DependentWorkflow("ready")).Ok);
+        Assert.Equal("DependencyCycle", WriteWorkflow(state, "self", 0, DependentWorkflow("ready", "self")).Code);
+        Assert.True(WriteWorkflow(state, "b", 0, DependentWorkflow("ready", "a"), "worker-b").Ok);
+        Assert.True(WriteWorkflow(state, "c", 0, DependentWorkflow("ready", "a", "b"), "worker-c").Ok);
+        Assert.True(WriteWorkflow(state, "d", 0, DependentWorkflow("ready", "a"), "worker-d").Ok);
+        // a <- b <- c: making a depend on c closes a cycle anywhere on the board.
+        Assert.Equal("DependencyCycle", WriteWorkflow(state, "a", 1, DependentWorkflow("ready", "c")).Code);
+        Assert.Equal("InvalidWorkflow", WriteWorkflow(state, "e", 0, DependentWorkflow("ready", "a", "a")).Code);
+        Assert.Equal("InvalidWorkflow", WriteWorkflow(state, "e", 0, DependentWorkflow("ready", Enumerable.Range(0, RelayLimits.MaxDependencies + 1).Select(i => "x" + i).ToArray())).Code);
+
+        string? Offered(string session) => Data(Call(state, "board", "__next_work", new() { ["sessionId"] = session }))["offer"]?["taskId"]?.GetValue<string>();
+        Assert.Equal("a", Offered("worker-b"));
+        Assert.Equal("a", Offered("worker-d"));
+
+        var completed = WriteWorkflow(state, "a", 1, DependentWorkflow("completed"));
+        Assert.True(completed.Ok, completed.Code);
+        // Only tasks whose every dependency is now completed are unblocked; c still waits on b.
+        Assert.Equal(["b", "d"], Data(completed)["unblocked"]!.AsArray().Select(x => x!.GetValue<string>()));
+        Assert.Empty(state.Effects);
+        Assert.Equal("b", Offered("worker-b"));
+        Assert.Equal("d", Offered("worker-d"));
+        Assert.Null(Offered("worker-c"));
+        // Completing again unblocks nothing new.
+        Assert.Null(Data(WriteWorkflow(state, "a", 2, DependentWorkflow("completed")))["unblocked"]);
+        Assert.Equal(["c"], Data(WriteWorkflow(state, "b", 1, DependentWorkflow("completed", "a")))["unblocked"]!.AsArray().Select(x => x!.GetValue<string>()));
+        Assert.Equal("c", Offered("worker-c"));
+    }
+
+    [Fact]
+    public void Legacy_dependsOn_of_another_shape_is_skipped_and_never_breaks_writes_or_completion()
+    {
+        // Boards always accepted unknown workflow fields, so a stored dependsOn may hold any JSON.
+        var odd = new JsonNode?[] { JsonValue.Create("a"), new JsonArray(1, 2), new JsonArray(new JsonObject { ["id"] = "a" }), new JsonArray("a", null) };
+        var tasks = new JsonObject();
+        for (var i = 0; i < odd.Length; i++)
+        {
+            var workflow = DependentWorkflow("ready"); workflow["dependsOn"] = odd[i]; workflow["packet"]!["resources"] = odd[i]?.DeepClone();
+            tasks["legacy" + i] = new JsonObject { ["taskId"] = "legacy" + i, ["version"] = 1, ["changeRevision"] = i + 1, ["actions"] = new JsonObject(), ["workflow"] = workflow };
+        }
+        var state = new StateEnvelope<CoordinationDocument> { Value = new() { Json = new JsonObject { ["repositoryId"] = "repo", ["taskRevision"] = odd.Length, ["tasks"] = tasks }.ToJsonString() } };
+        Assert.True(WriteWorkflow(state, "a", 0, DependentWorkflow("ready")).Ok);
+        // A new dependency walks through the legacy tasks without failing.
+        Assert.True(WriteWorkflow(state, "b", 0, DependentWorkflow("ready", "a", "legacy0", "legacy1", "legacy2", "legacy3")).Ok);
+        Assert.True(WriteWorkflow(state, "c", 0, DependentWorkflow("ready", "a")).Ok);
+        var completed = WriteWorkflow(state, "a", 1, DependentWorkflow("completed"));
+        Assert.True(completed.Ok, completed.Code);
+        Assert.Equal(["c"], Data(completed)["unblocked"]!.AsArray().Select(x => x!.GetValue<string>()));
+        // The legacy tasks fail validation and stay out of offers; b waits on them.
+        var next = Data(Call(state, "board", "__next_work", new() { ["sessionId"] = "worker", ["limit"] = RelayLimits.NextWorkCandidates, ["busyResources"] = new JsonArray("a") }));
+        Assert.Equal("c", next["offer"]!["taskId"]!.GetValue<string>());
+        Assert.Single(next["candidates"]!.AsArray());
+    }
+
     public class TestGrainFactory : DispatchProxy
     {
         private readonly Dictionary<string, TestAggregate> aggregates = [];
