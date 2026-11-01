@@ -6,7 +6,7 @@ using static CoCern.Domain.JsonFields;
 namespace CoCern.Core;
 
 /// <summary>
-/// Host settings for feedback (<c>Relay:Feedback:*</c>): tips to agents and proposed team rules, both off by default. Manager alerts are
+/// Host settings for feedback (<c>Relay:Feedback:*</c>): tips to agents and proposed team rules, both on by default in the host. Manager alerts are
 /// anomaly monitor checks (<see cref="AnomalyOptions.Alerts"/>).
 /// </summary>
 public sealed record FeedbackOptions

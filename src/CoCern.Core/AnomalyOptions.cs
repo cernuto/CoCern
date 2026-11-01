@@ -16,7 +16,7 @@ public sealed record AnomalyThreshold(double Ratio, int MinSamples, double DropR
 
 /// <summary>
 /// Host settings for the anomaly monitor (<c>Relay:Attention:AnomalyInterval</c> and <c>Relay:Attention:AnomalyThresholds</c>). The monitor
-/// also needs analytics (<c>Relay:Analytics:Enabled</c>, off by default) and attention turned on; otherwise it does nothing.
+/// also needs analytics (<c>Relay:Analytics:Enabled</c>, on by default) and attention turned on; otherwise it does nothing.
 /// </summary>
 public sealed record AnomalyOptions
 {
@@ -42,7 +42,7 @@ public sealed record AnomalyOptions
         [AnalyticsQueryNames.SessionTokenOutliers] = new(RelayLimits.SessionOutlierAlertRatio, RelayLimits.SessionOutlierAlertSamples, 0)
     };
 
-    /// <summary>Also check the manager alerts (<c>Relay:Feedback:Alerts</c>, off by default). Like every check, it needs analytics on.</summary>
+    /// <summary>Also check the manager alerts (<c>Relay:Feedback:Alerts</c>, on by default in the host). Like every check, it needs analytics on.</summary>
     public bool Alerts { get; init; }
 
     /// <summary>Time between checks. Zero turns the monitor off.</summary>

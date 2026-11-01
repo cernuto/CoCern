@@ -27,7 +27,7 @@ public sealed class DocCacheTool(IGrainFactory grains, ITokenCounter tokens, IDo
     public async Task<RelayReply> SearchAsync(JsonObject args)
     {
         var repository = Text(args, "repositoryId");
-        if (!configured.Contains(repository)) return NotConfigured();
+        if (!configured.Contains(repository)) return NotConfigured(configured.Count);
         var limit = args["limit"] is null ? RelayLimits.DefaultDocSearchResults : (int)Math.Clamp(Number(args, "limit", RelayLimits.DefaultDocSearchResults), 1, RelayLimits.MaxDocSearchResults);
         var outcome = await Directory(repository).SearchAsync(Text(args, "query"), Optional(args, "spec"), Optional(args, "path"), limit, SearchTimeout);
         if (outcome.PathUnknown) return Error(NotFound, new { field = "path" });
@@ -58,7 +58,7 @@ public sealed class DocCacheTool(IGrainFactory grains, ITokenCounter tokens, IDo
     public async Task<RelayReply> SectionAsync(JsonObject args)
     {
         var repository = Text(args, "repositoryId");
-        if (!configured.Contains(repository)) return NotConfigured();
+        if (!configured.Contains(repository)) return NotConfigured(configured.Count);
         if (await Directory(repository).SectionAsync(Text(args, "path"), Text(args, "anchor")) is not { } section) return Error(NotFound, new { field = "anchor" });
         var reply = new JsonObject
         {
@@ -94,7 +94,7 @@ public sealed class DocCacheTool(IGrainFactory grains, ITokenCounter tokens, IDo
     public async Task<RelayReply> SyncAsync(JsonObject args, CancellationToken cancellationToken)
     {
         var repository = Text(args, "repositoryId");
-        if (!configured.Contains(repository)) return NotConfigured();
+        if (!configured.Contains(repository)) return NotConfigured(configured.Count);
         try
         {
             var outcome = await sync.SyncNowAsync(repository, Optional(args, "branch"), Text(args, "requestId"), cancellationToken);
@@ -106,7 +106,7 @@ public sealed class DocCacheTool(IGrainFactory grains, ITokenCounter tokens, IDo
             {
                 DocSyncError.RateLimited => Error(RateLimited, new { retryAfterSeconds = exception.RetryAfterSeconds }),
                 DocSyncError.UnknownBranch => Error(InvalidArguments, new { field = "branch", message = exception.Message }),
-                DocSyncError.NotConfigured => NotConfigured(),
+                DocSyncError.NotConfigured => NotConfigured(configured.Count),
                 DocSyncError.RequestConflict => Error(RequestConflict, new { message = exception.Message }),
                 _ => Error(Unavailable, new { message = exception.Message })
             };
@@ -146,5 +146,8 @@ public sealed class DocCacheTool(IGrainFactory grains, ITokenCounter tokens, IDo
 
     private static string Short(string commit) => commit.Length > CommitLength ? commit[..CommitLength] : commit;
 
-    private static RelayReply NotConfigured() => Error(DocCacheUnavailable, new { message = "No docs are synced for this repository on this hub." });
+    /// <summary>A hub with no repositories configured says so with its own code; otherwise this repository is just not one of them.</summary>
+    private static RelayReply NotConfigured(int repositories) => repositories == 0
+        ? Error(NoRepositoriesConfigured, new { message = "No repositories are configured for the doc cache on this hub (Relay:DocCache:Repositories)." })
+        : Error(DocCacheUnavailable, new { message = "No docs are synced for this repository on this hub." });
 }

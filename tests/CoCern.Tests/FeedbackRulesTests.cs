@@ -255,8 +255,8 @@ public sealed class FeedbackRulesTests
         // Tips are only ever attention items: no reply carries a tips field.
         Assert.False(Data(await host.Call(client, "task_get", Args())).TryGetProperty("tips", out _));
 
-        // With tips off (the default) the same reads raise nothing.
-        await using var quiet = new RelayHostFixture();
+        // With tips and team rules turned off the same reads raise nothing.
+        await using var quiet = new RelayHostFixture(settings: new Dictionary<string, string?> { ["Relay:Feedback:Tips"] = "false", ["Relay:Feedback:ProposeRules"] = "false" });
         using var quietClient = quiet.AuthorizedClient();
         var other = Data(await quiet.Call(quietClient, "session_open", new { repositoryId = "repo", requestId = "tip-quiet", role = "worker" }));
         var quietArgs = new { repositoryId = "repo", sessionId = other.GetProperty("sessionId").GetString(), sessionToken = other.GetProperty("sessionToken").GetString() };

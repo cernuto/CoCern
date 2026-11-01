@@ -3,7 +3,7 @@ using CoCern.Contracts;
 namespace CoCern.Core;
 
 /// <summary>
-/// Host settings for standing orders (<c>Relay:Orders:*</c>). Off by default. The board grain passes <see cref="Enabled"/> to the domain,
+/// Host settings for standing orders (<c>Relay:Orders:*</c>). On by default in the host. The board grain passes <see cref="Enabled"/> to the domain,
 /// and the dispatcher drops order effects while it is off, so orders written earlier never run.
 /// </summary>
 public sealed record OrderOptions

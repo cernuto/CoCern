@@ -43,7 +43,7 @@ public static class RelayTools
 /// Optional detail a reply over its token budget may leave out first (compaction step 1), as dotted paths from the reply's root; the reply
 /// then says <c>detailFetchRequired</c>. A client can tell from this list what a compacted reply may be missing.
 /// </param>
-/// <param name="TokenBudget">The reply's token budget. Enforced only for tools in <c>Relay:Tokens:EnforceTools</c>; otherwise overruns are only counted.</param>
+/// <param name="TokenBudget">The reply's token budget, at what its byte cap allows. Enforced for every tool by default (<c>Relay:Tokens</c> settings can make tools measure-only, where overruns are only counted).</param>
 public sealed record RelayTool(string Name, string Description, bool AdministratorOnly, bool IsMutation, bool RequiresSession, IReadOnlyList<string> RequiredFields,
     IReadOnlyList<string>? DetailFields = null, int TokenBudget = RelayLimits.DefaultReplyTokens)
 {

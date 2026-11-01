@@ -1,0 +1,100 @@
+<Project>
+  <!--
+    The bundled DuckDB sqlite extension (extensions/duckdb: windows_amd64 only, gzipped and signed by DuckDB). Each build unpacks it offline into
+    duckdb_extensions next to the binaries, for the runtime being built (or this machine's), after checking both SHA-256 sums in the
+    manifest. The files flow to every project that references the hub (the tests) and into its publish output. A missing file or a
+    wrong sum is a build warning and no file; a platform with no bundled file is a message. Either way the hub then answers
+    AnalyticsUnavailable. CoCernDuckDbPlatforms overrides the platforms to unpack.
+  -->
+  <PropertyGroup>
+    <CoCernDuckDbBundle>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)../../extensions/duckdb/'))</CoCernDuckDbBundle>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(CoCernDuckDbPlatforms)' == '' and '$(RuntimeIdentifier)' != ''">
+    <CoCernDuckDbPlatforms Condition="$(RuntimeIdentifier.StartsWith('win')) and $(RuntimeIdentifier.EndsWith('-x64'))">windows_amd64</CoCernDuckDbPlatforms>
+    <CoCernDuckDbPlatforms Condition="$(RuntimeIdentifier.StartsWith('linux')) and $(RuntimeIdentifier.EndsWith('-x64'))">linux_amd64</CoCernDuckDbPlatforms>
+    <CoCernDuckDbPlatforms Condition="$(RuntimeIdentifier.StartsWith('osx')) and $(RuntimeIdentifier.EndsWith('-arm64'))">osx_arm64</CoCernDuckDbPlatforms>
+    <CoCernDuckDbPlatforms Condition="$(RuntimeIdentifier.StartsWith('osx')) and $(RuntimeIdentifier.EndsWith('-x64'))">osx_amd64</CoCernDuckDbPlatforms>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(CoCernDuckDbPlatforms)' == '' and '$(RuntimeIdentifier)' == ''">
+    <CoCernDuckDbArch>$([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)</CoCernDuckDbArch>
+    <CoCernDuckDbPlatforms Condition="$([MSBuild]::IsOSPlatform('Windows')) and '$(CoCernDuckDbArch)' == 'X64'">windows_amd64</CoCernDuckDbPlatforms>
+    <CoCernDuckDbPlatforms Condition="$([MSBuild]::IsOSPlatform('Linux')) and '$(CoCernDuckDbArch)' == 'X64'">linux_amd64</CoCernDuckDbPlatforms>
+    <CoCernDuckDbPlatforms Condition="$([MSBuild]::IsOSPlatform('OSX')) and '$(CoCernDuckDbArch)' == 'Arm64'">osx_arm64</CoCernDuckDbPlatforms>
+    <CoCernDuckDbPlatforms Condition="$([MSBuild]::IsOSPlatform('OSX')) and '$(CoCernDuckDbArch)' == 'X64'">osx_amd64</CoCernDuckDbPlatforms>
+  </PropertyGroup>
+
+  <UsingTask TaskName="CoCernUnpackDuckDbExtensions" TaskFactory="RoslynCodeTaskFactory" AssemblyFile="$(MSBuildToolsPath)/Microsoft.Build.Tasks.Core.dll">
+    <ParameterGroup>
+      <Bundle ParameterType="System.String" Required="true" />
+      <Target ParameterType="System.String" Required="true" />
+      <Platforms ParameterType="System.String" Required="false" />
+      <Files ParameterType="Microsoft.Build.Framework.ITaskItem[]" Output="true" />
+    </ParameterGroup>
+    <Task>
+      <Using Namespace="System" />
+      <Using Namespace="System.Collections.Generic" />
+      <Using Namespace="System.IO" />
+      <Using Namespace="System.IO.Compression" />
+      <Using Namespace="System.Linq" />
+      <Using Namespace="System.Security.Cryptography" />
+      <Code Type="Fragment" Language="cs"><![CDATA[
+        var files = new List<Microsoft.Build.Framework.ITaskItem>();
+        Func<string, string> sha = path => { using (var stream = File.OpenRead(path)) using (var hash = SHA256.Create()) return BitConverter.ToString(hash.ComputeHash(stream)).Replace("-", "").ToLowerInvariant(); };
+        Action<string, string> add = (path, relative) =>
+        {
+            var item = new Microsoft.Build.Utilities.TaskItem(path);
+            item.SetMetadata("Link", Path.Combine("duckdb_extensions", relative));
+            files.Add(item);
+        };
+        var manifestPath = Path.Combine(Bundle, "SHA256SUMS");
+        if (!File.Exists(manifestPath)) { Log.LogWarning("The DuckDB extension manifest {0} is missing; analytics will be unavailable.", manifestPath); Files = files.ToArray(); return true; }
+        var sums = File.ReadAllLines(manifestPath).Select(line => line.Trim()).Where(line => line.Length > 66)
+            .ToDictionary(line => line.Substring(66).Trim().Replace('\\', '/'), line => line.Substring(0, 64), StringComparer.Ordinal);
+        Directory.CreateDirectory(Target);
+        File.Copy(manifestPath, Path.Combine(Target, "SHA256SUMS"), true);
+        add(Path.Combine(Target, "SHA256SUMS"), "SHA256SUMS");
+        var license = Path.Combine(Bundle, "LICENSE-duckdb.txt");
+        if (File.Exists(license)) { File.Copy(license, Path.Combine(Target, "LICENSE-duckdb.txt"), true); add(Path.Combine(Target, "LICENSE-duckdb.txt"), "LICENSE-duckdb.txt"); }
+        foreach (var platform in (Platforms ?? "").Split(new[] { ';', ',' }, StringSplitOptions.RemoveEmptyEntries).Select(name => name.Trim()))
+        {
+            var packed = sums.Keys.Where(key => key.EndsWith("/" + platform + "/sqlite_scanner.duckdb_extension.gz", StringComparison.Ordinal)).ToArray();
+            if (packed.Length == 0) { Log.LogMessage(Microsoft.Build.Framework.MessageImportance.High, "No bundled DuckDB sqlite extension for {0} (only windows_amd64 is bundled); analytics needs --install-analytics-extension there.", platform); continue; }
+            foreach (var gz in packed)
+            {
+                var relative = gz.Substring(0, gz.Length - 3);
+                var source = Path.Combine(Bundle, gz);
+                var target = Path.Combine(Target, relative);
+                string expected;
+                if (!sums.TryGetValue(relative, out expected)) { Log.LogWarning("The DuckDB extension manifest has no sum for {0}; it is not unpacked.", relative); continue; }
+                if (File.Exists(target) && sha(target) == expected) { add(target, relative); continue; }
+                if (!File.Exists(source)) { Log.LogWarning("The bundled DuckDB extension {0} is missing; analytics will be unavailable for {1}.", source, platform); continue; }
+                if (sha(source) != sums[gz]) { Log.LogWarning("The bundled DuckDB extension {0} does not match its SHA-256 sum; it is not unpacked.", source); continue; }
+                Directory.CreateDirectory(Path.GetDirectoryName(target));
+                var temporary = target + ".unpack";
+                using (var input = new GZipStream(File.OpenRead(source), CompressionMode.Decompress))
+                using (var output = File.Create(temporary))
+                    input.CopyTo(output);
+                if (sha(temporary) != expected) { File.Delete(temporary); Log.LogWarning("The unpacked DuckDB extension {0} does not match its SHA-256 sum; it is not used.", relative); continue; }
+                if (File.Exists(target)) File.Delete(target);
+                File.Move(temporary, target);
+                add(target, relative);
+            }
+        }
+        Files = files.ToArray();
+      ]]></Code>
+    </Task>
+  </UsingTask>
+
+  <Target Name="CoCernUnpackDuckDbExtensions" BeforeTargets="AssignTargetPaths">
+    <!-- IntermediateOutputPath is only known once the SDK targets are evaluated, so the folder is worked out here. -->
+    <PropertyGroup>
+      <CoCernDuckDbUnpacked>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)/$(IntermediateOutputPath)duckdb_extensions/'))</CoCernDuckDbUnpacked>
+    </PropertyGroup>
+    <CoCernUnpackDuckDbExtensions Bundle="$(CoCernDuckDbBundle)" Target="$(CoCernDuckDbUnpacked)" Platforms="$(CoCernDuckDbPlatforms)">
+      <Output TaskParameter="Files" ItemName="CoCernDuckDbFile" />
+    </CoCernUnpackDuckDbExtensions>
+    <ItemGroup>
+      <None Include="@(CoCernDuckDbFile)" Link="%(CoCernDuckDbFile.Link)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    </ItemGroup>
+  </Target>
+</Project>

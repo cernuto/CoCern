@@ -8,6 +8,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
 using Orleans;
@@ -666,6 +667,7 @@ public sealed class DocCacheTests
         await using var host = new RelayHostFixture(settings: new Dictionary<string, string?>
         {
             ["Relay:Clients:1:Token"] = AdminToken, ["Relay:Clients:1:PrincipalId"] = "doc-admin", ["Relay:Clients:1:IsAdministrator"] = "true", ["Relay:Clients:1:Repositories:0"] = "repo",
+            ["Relay:DocCache:Enabled"] = "false",
             ["Relay:DocCache:Repositories:0:Id"] = "repo", ["Relay:DocCache:Repositories:0:ClonePath"] = "/nonexistent", ["Relay:DocCache:SyncMinutes"] = "1"
         }, configureServices: services => { services.RemoveAll<GitCli>(); services.AddSingleton<GitCli>(git); });
         using var worker = host.AuthorizedClient();
@@ -682,6 +684,103 @@ public sealed class DocCacheTests
         // The shared token counter is registered either way, for other features to reuse.
         Assert.Equal("o200k_base", host.Services.GetRequiredService<ITokenCounter>().Encoding);
         Assert.Equal(RelayErrorKind.Invalid, RelayErrorCodes.Classify(RelayErrorCodes.DocCacheUnavailable));
+    }
+
+    [Fact]
+    public async Task With_no_repositories_configured_the_doc_cache_runs_no_git_and_says_so()
+    {
+        var git = new WatchingGit();
+        // The doc cache is on by default; this hub configures no repositories for it.
+        await using var host = new RelayHostFixture(settings: new Dictionary<string, string?>
+        {
+            ["Relay:Clients:1:Token"] = AdminToken, ["Relay:Clients:1:PrincipalId"] = "doc-admin", ["Relay:Clients:1:IsAdministrator"] = "true", ["Relay:Clients:1:Repositories:0"] = "repo"
+        }, configureServices: services => { services.RemoveAll<GitCli>(); services.AddSingleton<GitCli>(git); });
+        using var worker = host.AuthorizedClient();
+        using var admin = Admin(host);
+        var settings = host.Services.GetRequiredService<DocCacheSettings>();
+        Assert.True(settings.Enabled);
+        Assert.Empty(settings.Repositories);
+        Assert.NotNull(host.Services.GetService<DocCacheTool>());
+        var search = await Tool(worker, "doc_search", new { repositoryId = "repo", query = "x" });
+        Assert.Equal((HttpStatusCode.BadRequest, "NoRepositoriesConfigured"), Status(search));
+        Assert.Contains("Relay:DocCache:Repositories", Data(search).GetProperty("message").GetString());
+        Assert.Equal((HttpStatusCode.BadRequest, "NoRepositoriesConfigured"), Status(await Tool(worker, "doc_section", new { repositoryId = "repo", path = "a.md", anchor = "a" })));
+        Assert.Equal((HttpStatusCode.BadRequest, "NoRepositoriesConfigured"), Status(await Tool(admin, "doc_sync", new { repositoryId = "repo", requestId = "none-1" })));
+        // The timer has nothing to sync, so it returns at once and git never runs.
+        await host.Services.GetServices<IHostedService>().OfType<SpecSyncService>().Single().ExecuteTask!;
+        await Task.Delay(200);
+        Assert.Equal(0, git.Commands);
+        Assert.Equal(RelayErrorKind.Invalid, RelayErrorCodes.Classify(RelayErrorCodes.NoRepositoriesConfigured));
+    }
+
+    [Fact]
+    public async Task A_clone_without_a_remote_syncs_its_local_branch_head_without_fetching_or_touching_the_working_tree()
+    {
+        using var git = GitRepositories.Create(new() { ["docs/a.md"] = "# Claims\n\nHow to claim a task." });
+        git.RemoveCloneRemote();
+        var watching = new WatchingGit();
+        await using var host = DocHost(git, watching);
+        using var worker = host.AuthorizedClient();
+        var first = await SyncAsync(host);
+        Assert.False(first.Fetched);
+        Assert.Equal(git.CloneHead(), first.Commit);
+        Assert.Equal(1, first.Changed);
+        Assert.Single(Hits(await Tool(worker, "doc_search", new { repositoryId = "repo", query = "claim a task" })));
+
+        // A commit on the local branch is picked up on the next sync; an uncommitted file is not.
+        git.CommitInCloneOnly("docs/refunds.md", "# Refunds\n\nRefunds go back to the card.");
+        git.WriteInClone("docs/draft.md", "# Draft\n\nzebra crossing notes");
+        var second = await SyncAsync(host);
+        Assert.Equal((git.CloneHead(), 1, false), (second.Commit, second.Changed, second.Fetched));
+        Assert.Equal("docs/refunds.md", Assert.Single(Hits(await Tool(worker, "doc_search", new { repositoryId = "repo", query = "refunds card" }))).GetProperty("path").GetString());
+        Assert.Empty(Hits(await Tool(worker, "doc_search", new { repositoryId = "repo", query = "zebra" })));
+        Assert.Equal(0, (await SyncAsync(host)).Changed);
+        // Nothing was fetched, and the working tree is as it was: only the untracked draft.
+        Assert.Empty(watching.Fetches);
+        Assert.Equal("?? docs/draft.md", git.CloneStatus().Trim());
+    }
+
+    [Fact]
+    public async Task An_unpushed_branch_with_origin_present_is_read_locally_and_syncs_quietly()
+    {
+        using var git = GitRepositories.Create(new() { ["docs/a.md"] = "# Claims\n\nHow to claim a task." });
+        git.CommitInCloneOnNewBranch("feature", "docs/feature.md", "# Feature\n\nThe unpushed refunds note.");
+        await using var host = DocHost(git, settings: new() { ["Relay:DocCache:Repositories:0:Branch"] = "feature" });
+        using var worker = host.AuthorizedClient();
+        var logger = new ListLogger<DocSyncRunner>();
+        var runner = new DocSyncRunner(host.Services.GetRequiredService<DocCacheSettings>(), new GitCli(), host.Services.GetRequiredService<IGrainFactory>(), Tokens, logger);
+        // origin has no "feature": the fetch finds nothing, so the local branch is read, with one line and no warning.
+        var first = await runner.SyncAsync("repo", null, CancellationToken.None);
+        Assert.Equal(git.CloneHead(), first.Commit);
+        Assert.Equal("docs/feature.md", Assert.Single(Hits(await Tool(worker, "doc_search", new { repositoryId = "repo", query = "unpushed refunds" }))).GetProperty("path").GetString());
+        git.CommitInCloneOnly("docs/more.md", "# More\n\nA second local commit about invoices.");
+        var second = await runner.SyncAsync("repo", null, CancellationToken.None);
+        Assert.Equal((git.CloneHead(), 1), (second.Commit, second.Changed));
+        Assert.Equal(0, (await runner.SyncAsync("repo", null, CancellationToken.None)).Changed);
+        Assert.DoesNotContain(logger.Entries, entry => entry.Level >= LogLevel.Warning);
+        Assert.Single(logger.Entries, entry => entry.Message.Contains("has no branch feature", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task With_fetch_off_the_hub_never_fetches_and_reads_the_local_branch_head()
+    {
+        using var git = GitRepositories.Create(new() { ["docs/a.md"] = "# Claims\n\nHow to claim a task." });
+        var watching = new WatchingGit();
+        await using var host = DocHost(git, watching, new() { ["Relay:DocCache:Repositories:0:Fetch"] = "false" });
+        using var worker = host.AuthorizedClient();
+        Assert.False(host.Services.GetRequiredService<DocCacheSettings>().Find("repo")!.Fetch);
+        Assert.False((await SyncAsync(host)).Fetched);
+        // A commit pushed to origin is not fetched, and the clone's remote-tracking ref stays where it was; a local commit is read.
+        var tracking = git.CloneRef("refs/remotes/origin/main");
+        git.Commit(new() { ["docs/pushed.md"] = "# Pushed\n\nzebra pushed elsewhere." });
+        git.CommitInCloneOnly("docs/local.md", "# Local\n\nrefunds from a local commit.");
+        var synced = await SyncAsync(host);
+        Assert.Equal((git.CloneHead(), false), (synced.Commit, synced.Fetched));
+        Assert.Single(Hits(await Tool(worker, "doc_search", new { repositoryId = "repo", query = "refunds local commit" })));
+        Assert.Empty(Hits(await Tool(worker, "doc_search", new { repositoryId = "repo", query = "zebra" })));
+        Assert.Equal(tracking, git.CloneRef("refs/remotes/origin/main"));
+        Assert.Empty(watching.Fetches);
+        Assert.DoesNotContain(watching.Arguments, arguments => arguments[0] is "fetch" or "remote");
     }
 
     [Fact]
@@ -1059,6 +1158,14 @@ public sealed class DocCacheTests
         return new Microsoft.Extensions.Configuration.ConfigurationBuilder().AddInMemoryCollection(values).Build();
     }
 
+    private sealed class ListLogger<T> : Microsoft.Extensions.Logging.ILogger<T>
+    {
+        public System.Collections.Concurrent.ConcurrentQueue<(LogLevel Level, string Message)> Entries { get; } = new();
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) => Entries.Enqueue((logLevel, formatter(state, exception)));
+    }
+
     private sealed class FakeEnvironment : IHostEnvironment
     {
         public string EnvironmentName { get; set; } = "Test";
@@ -1083,6 +1190,7 @@ public sealed class DocCacheTests
         public bool FakeFetch { get; init; }
         public System.Collections.Concurrent.ConcurrentQueue<(IReadOnlyList<string> Arguments, IReadOnlyDictionary<string, string>? Environment)> Fetches { get; } = new();
         public System.Collections.Concurrent.ConcurrentQueue<string> Shows { get; } = new();
+        public System.Collections.Concurrent.ConcurrentQueue<IReadOnlyList<string>> Arguments { get; } = new();
 
         public void HoldFetch() => hold = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public void ReleaseFetch() => hold?.TrySetResult();
@@ -1090,6 +1198,7 @@ public sealed class DocCacheTests
         public override async Task<GitResult> RunAsync(string directory, IReadOnlyList<string> arguments, int maxOutputBytes, IReadOnlyDictionary<string, string>? environment, CancellationToken cancellationToken)
         {
             Interlocked.Increment(ref Commands);
+            Arguments.Enqueue(arguments.ToArray());
             if (arguments[0] == "fetch")
             {
                 Interlocked.Increment(ref FetchesStarted);
@@ -1186,6 +1295,22 @@ public sealed class DocCacheTests
         }
 
         public void SetCloneRemote(string url) => Run(Clone, "remote", "set-url", "origin", url);
+
+        /// <summary>Makes the hub's clone a local-only repository, with no remote to fetch from.</summary>
+        public void RemoveCloneRemote() => Run(Clone, "remote", "remove", "origin");
+
+        public string CloneHead() => Run(Clone, "rev-parse", "HEAD").Trim();
+
+        public string CloneRef(string reference) => Run(Clone, "rev-parse", reference).Trim();
+
+        /// <summary>A branch made and committed in the hub's clone only, never pushed; the clone stays on it.</summary>
+        public void CommitInCloneOnNewBranch(string branch, string path, string text)
+        {
+            Run(Clone, "checkout", "-q", "-b", branch);
+            CommitInCloneOnly(path, text);
+        }
+
+        public string CloneStatus() => Run(Clone, "status", "--porcelain", "--untracked-files=all");
 
         public void WriteInClone(string path, string text)
         {

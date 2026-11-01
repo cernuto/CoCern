@@ -12,16 +12,26 @@ public static class RelayLimits
     /// <summary>Largest reply a single aggregate may produce before composition.</summary>
     public const int AggregateReplyBytes = MaxPayloadBytes - CompositionReserveBytes;
 
-    // Token budgets (o200k, labeled estimated tokens for Claude). A tool in Relay:Tokens:EnforceTools is compacted to its budget; every
-    // other tool is measure-only: an overrun is counted and the reply goes out unchanged. The byte limits above stay the hard safety net.
+    // Token budgets (o200k, labeled estimated tokens for Claude). Every tool except the doc cache's is enforced by default: a reply over
+    // its budget is compacted. Each budget sits at what the tool's byte cap allows, at about 3 bytes per token (JSON replies run nearer 4,
+    // so a reply under the cap is almost always under its budget too). So enforcement changes, in practice, only a reply that would
+    // otherwise be cut at the byte limit. The byte limits stay the hard safety net.
+    /// <summary>Bytes per token used to turn a byte cap into a token budget; real replies average more bytes per token, so this rounds up.</summary>
+    public const int BudgetBytesPerToken = 3;
+    /// <summary>
+    /// What a reply bounded only by <see cref="MaxPayloadBytes"/> can hold: 10,923 tokens. Every enforced tool's reply is bounded by that
+    /// envelope; the smaller caps inside some replies (search hits at <see cref="MaxSearchReplyBytes"/>, analytics rows at
+    /// <see cref="MaxAnalyticsReplyBytes"/>) cover only part of the composed reply, which also carries the attention offer and standing.
+    /// </summary>
+    public const int PayloadReplyTokens = (MaxPayloadBytes + BudgetBytesPerToken - 1) / BudgetBytesPerToken;
     /// <summary>Reply budget of a tool without its own, in tokens.</summary>
-    public const int DefaultReplyTokens = 1_000;
-    /// <summary>Budget of a <c>search</c> reply. Its 2,048-byte cap is about 500 to 600 tokens, so this budget is measure-only.</summary>
-    public const int SearchReplyTokens = 300;
+    public const int DefaultReplyTokens = PayloadReplyTokens;
+    /// <summary>Budget of a <c>search</c> reply: its hits are capped at 2,048 bytes, but the composed reply is bounded only by the envelope.</summary>
+    public const int SearchReplyTokens = PayloadReplyTokens;
     /// <summary>Budget of a whole-task or board <c>task_get</c> reply.</summary>
-    public const int TaskReadReplyTokens = 2_000;
+    public const int TaskReadReplyTokens = PayloadReplyTokens;
     /// <summary>Budget of one <c>check_inbox</c> page.</summary>
-    public const int InboxReplyTokens = 1_500;
+    public const int InboxReplyTokens = PayloadReplyTokens;
     /// <summary>Budget of the attention offer a boundary reply carries.</summary>
     public const int AttentionOfferTokens = 60;
     /// <summary>Budget of the next-work offer a <c>task_update</c> reply carries.</summary>

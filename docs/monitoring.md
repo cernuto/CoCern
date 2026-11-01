@@ -58,26 +58,27 @@ FROM activity_log GROUP BY role, tool ORDER BY calls DESC;
 
 ## Tokens
 
-The hub counts the tokens in every request and reply, with the o200k tokenizer. The counts go into `activity_log` as `request_tokens` and `reply_tokens`. They match Codex exactly. For Claude they are estimates, so they are labeled "estimated tokens". Counting runs in the background and never changes a reply. On by default.
+The hub counts the tokens in every request and reply, with the o200k tokenizer. The counts go into `activity_log` as `request_tokens` and `reply_tokens`. They match Codex exactly. For Claude they are estimates, so they are labeled "estimated tokens". Counting runs in the background. On by default.
 
 Administrators see the tokens of the tool definitions each role carries in `get_status`, as `toolTokens`, and on the dashboard's Standing page.
 
-Each tool has a token budget. A reply over budget is logged as a `budget` row with code `over`, and sent unchanged. Tools you list in `Relay:Tokens:EnforceTools` are compacted to their budget instead:
+Each tool has a token budget, and every reply is held to it. A budget sits at what the tool's byte limit allows (about 3 bytes per token, so 10,923 tokens under the 32 KB limit). So a normal reply never changes: in practice only a reply that would be cut at the byte limit anyway is compacted. The doc cache keeps its own 2,000-token budget. A reply over its budget is compacted in steps:
 
 1. Drop optional detail (such as full task messages) and set `detailFetchRequired`.
 2. Shorten a paged list to its first items, with `truncated`, a `more` count and `nextCursor`. Lists without a cursor, such as search hits, are never cut.
 3. Cut long text to its first line. The ID stays, so you can fetch the rest.
 
-A compacted reply says `compacted: true` and `compactStep`. IDs, versions, codes, grants and errors are never removed. A mutation only loses its optional detail. The 32 KB byte limit still applies.
+A compacted reply says `compacted: true` and `compactStep`, and is logged as a `budget` row (`step1` to `step3`). IDs, versions, codes, grants and errors are never removed. A mutation only loses its optional detail. The 32 KB byte limit still applies. A measure-only tool logs an over-budget reply as `over` and sends it unchanged.
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| `Relay:Tokens:Enabled` | `true` | Count tokens. It only measures. |
-| `Relay:Tokens:EnforceTools` | none | Tools to compact to their budget. Every other tool is measure-only. The doc cache keeps its own budget and cannot be listed. |
+| `Relay:Tokens:Enabled` | `true` | Count tokens. |
+| `Relay:Tokens:Enforce` | `true` | Hold replies to their budget. `false`: only measure. |
+| `Relay:Tokens:EnforceTools:N` | every tool but the doc cache's | Enforce only the tools listed; the rest only measure. The doc cache tools cannot be listed. |
 
 ## Feedback
 
-Fixed rules spot wasteful patterns and send a short nudge. No AI runs in the hub. **Off by default.**
+Fixed rules spot wasteful patterns and send a short nudge. No AI runs in the hub. On by default. Nothing fires until agents repeat a pattern.
 
 **Tips** (`Relay:Feedback:Tips`) go to the agent as a lowest-tier `tip` attention item on its next milestone or inbox reply. They never wake a chat.
 
@@ -105,24 +106,26 @@ A session gets at most one tip an hour, and each rule at most once a day. If the
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| `Relay:Feedback:Tips` | `false` | Send tips to agents. |
-| `Relay:Feedback:Alerts` | `false` | Alert managers. Needs `Relay:Analytics:Enabled`. |
-| `Relay:Feedback:ProposeRules` | `false` | Propose standing lines. |
+| `Relay:Feedback:Tips` | `true` | Send tips to agents. |
+| `Relay:Feedback:Alerts` | `true` | Alert managers. Needs analytics. |
+| `Relay:Feedback:ProposeRules` | `true` | Propose standing lines. |
 | `Relay:Feedback:MinFollowRate` | 0.2 | Below this, a tip rule switches itself off. |
 
 ## Analytics
 
-Hourly snapshots of the database, queried with DuckDB. Queries never touch the live database. **Off by default.**
+Hourly snapshots of the database, queried with DuckDB. Queries never touch the live database. On by default, with the [anomaly monitor](collaboration.md#anomaly-monitor).
 
-1. Install DuckDB's `sqlite` extension. `Build-CoCern.ps1` does this for you. By hand, with internet access:
+Every hour the hub copies the whole database into `data/analytics` (beside the database), leaves out sessions, inboxes, credentials and replay caches, and converts the copy for DuckDB. It keeps one copy: the one before is deleted as soon as no query uses it, and copies left from an earlier run are deleted at startup. Expect about the database's size on disk, and briefly more while a new copy is made.
 
-   ```
-   dotnet CoCern.Host.dll --install-analytics-extension <folder> [platform]
-   ```
+DuckDB reads the snapshots with its `sqlite` extension. The Windows x64 build comes bundled in `extensions/duckdb`, signed by DuckDB, with a SHA-256 manifest. The build checks the sums and unpacks it into `duckdb_extensions` beside the hub, so nothing is downloaded. DuckDB checks the signature again when it loads it.
 
-   The hub looks in `duckdb_extensions` beside itself. For CI, install into a cached folder and set `COCERN_DUCKDB_EXTENSIONS` to it before `dotnet test`.
+Without a usable extension (any other platform, or a file that fails its sum), the hub still starts. It logs one warning, and `analytics_query` answers `AnalyticsUnavailable`. For another platform or DuckDB version, with internet access:
 
-2. Set `Relay:Analytics:Enabled` to `true` and restart. This also starts the [anomaly monitor](collaboration.md#anomaly-monitor).
+```
+dotnet CoCern.Host.dll --install-analytics-extension <folder> [platform]
+```
+
+Then point `Relay:Analytics:ExtensionDirectory` at that folder. Tests use `COCERN_DUCKDB_EXTENSIONS` when set, then the bundled folder (Windows x64), and otherwise download the extension once into a temp cache.
 
 Ask with `analytics_query`. It needs an administrator token:
 
@@ -151,15 +154,15 @@ Each named query compares the last `days` days (`cur`, 1 to 14, default 7) with 
 
 With ad hoc SQL on, `"name": "sql", "sql": "SELECT ..."` runs one `SELECT` over the views: `tasks`, `tool_calls`, `context_by_role`, `messages`, `action_reports`, `claim_conflicts`, `attention_outcomes`, `budget_events`, `board_doc`, `task_doc`, `activity`. `relay_tokens` in `activity` is the hub's own token count for a call. Every ad hoc query is written to the hub log.
 
-Errors: `AdministratorRequired`, `AnalyticsUnavailable` (off, or no snapshot yet), `AnalyticsRefused` (ad hoc SQL off, or not one `SELECT`), `AnalyticsTimeout`, `AnalyticsFailed`, `InvalidArguments`, `PayloadTooLarge` (reply over 8 KB).
+Errors: `AdministratorRequired`, `AnalyticsUnavailable` (off, no snapshot yet, or no usable extension), `AnalyticsRefused` (ad hoc SQL off, or not one `SELECT`), `AnalyticsTimeout`, `AnalyticsFailed`, `InvalidArguments`, `PayloadTooLarge` (reply over 8 KB).
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| `Relay:Analytics:Enabled` | `false` | Take snapshots and answer queries. |
-| `Relay:Analytics:AllowAdHocSql` | `false` | Accept `sql`. |
+| `Relay:Analytics:Enabled` | `true` | Take snapshots and answer queries. |
+| `Relay:Analytics:AllowAdHocSql` | `true` | Accept `sql` (administrators only, like every analytics query). |
 | `Relay:Analytics:SnapshotInterval` | `01:00:00` | Time between snapshots. At least 1 minute. |
 | `Relay:Analytics:Directory` | `analytics` beside the database | Where snapshots go. |
-| `Relay:Analytics:ExtensionDirectory` | `duckdb_extensions` beside the hub | Where the extension is. |
+| `Relay:Analytics:ExtensionDirectory` | `duckdb_extensions` beside the hub | Where the extension is. The build puts the bundled Windows x64 one there. |
 | `Relay:Analytics:QueryTimeout` | `00:00:10` | Longest query. At most 5 minutes. |
 | `Relay:Analytics:MaxRows` | 50 | Rows per result. At most 500. |
 

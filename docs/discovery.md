@@ -82,7 +82,7 @@ It only reads and never blocks. Codex asks you to approve a new hook in `/hooks`
 
 ## Hand-written wake configs
 
-Older `--wake <config>` and `--await-inbox <config>` setups still work; see `scripts/Start-CoCernWake.ps1`. Watch each chat with only one of them.
+`--wake <config>` and `--await-inbox <config>` with a config file you write also work; see `scripts/Start-CoCernWake.ps1`. Watch each chat with only one of them.
 
 ## Limits
 

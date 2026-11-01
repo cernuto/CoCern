@@ -1,0 +1,2 @@
+# The bundled DuckDB extensions are signed binaries: never diff, merge or convert line endings.
+extensions/duckdb/**/*.gz binary

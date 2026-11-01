@@ -6,12 +6,9 @@ Push-Location -LiteralPath $root
 try {
     & dotnet restore CoCern.slnx --nologo
     if ($LASTEXITCODE -ne 0) { throw 'Package restore failed.' }
-    # Analytics reads snapshots with DuckDB's sqlite extension. Install it once for this machine (this needs internet access the first
-    # time), so the tests never download it. CI does the same and sets COCERN_DUCKDB_EXTENSIONS. See docs/monitoring.md.
-    $extensions = Join-Path $root 'artifacts/duckdb_extensions'
-    & dotnet run --project src/CoCern.Host/CoCern.Host.csproj -c Release --no-restore --no-launch-profile --nologo -- --install-analytics-extension $extensions
-    if ($LASTEXITCODE -ne 0) { throw 'Installing the DuckDB sqlite extension failed.' }
-    $env:COCERN_DUCKDB_EXTENSIONS = $extensions
+    # Analytics reads snapshots with DuckDB's sqlite extension. The Windows x64 build is bundled in extensions/duckdb and unpacked into
+    # the build output (checksums checked), so on Windows neither the build nor the tests download anything. Elsewhere the tests use
+    # COCERN_DUCKDB_EXTENSIONS, or download it once into a temp cache. See docs/monitoring.md.
     # Tests produce their own binaries and verify behavior before packaging.
     & dotnet test tests/CoCern.Tests/CoCern.Tests.csproj --no-restore --nologo
     if ($LASTEXITCODE -ne 0) { throw 'Tests failed.' }
@@ -19,11 +16,7 @@ try {
         # The hub runs on Windows x64: publishing for that runtime ships only its DuckDB library (about 35 MB, not every platform's).
         & dotnet publish src/CoCern.Host/CoCern.Host.csproj -c Release -r win-x64 --self-contained false -o artifacts/host --nologo
         if ($LASTEXITCODE -ne 0) { throw 'Host publish failed.' }
-        # The hub loads the extension from duckdb_extensions next to it, so analytics works offline. Install the windows_amd64 build
-        # whatever machine this runs on.
-        $shipped = Join-Path $root 'artifacts/host/duckdb_extensions'
-        & dotnet run --project src/CoCern.Host/CoCern.Host.csproj -c Release --no-build --no-launch-profile --nologo -- --install-analytics-extension $shipped windows_amd64
-        if ($LASTEXITCODE -ne 0) { throw 'Installing the DuckDB sqlite extension for the published hub failed.' }
+        # Publishing for win-x64 unpacks the bundled windows_amd64 extension into artifacts/host/duckdb_extensions.
         & dotnet publish src/CoCern.Adapter/CoCern.Adapter.csproj -c Release -o artifacts/adapter --no-restore --nologo
         if ($LASTEXITCODE -ne 0) { throw 'Adapter publish failed.' }
     }

@@ -28,8 +28,12 @@ internal sealed record DocPattern(string Glob, string Spec)
     public Regex Matcher { get; } = DocGlob.Compile(Glob);
 }
 
-/// <summary>One synced repository: its clone, the branch and remote it follows, what it includes and excludes, and its read-only token file.</summary>
-internal sealed record DocRepository(string Id, string ClonePath, string Branch, string Remote, IReadOnlyList<DocPattern> Patterns, IReadOnlyList<string> Excludes, string? TokenFile)
+/// <summary>
+/// One synced repository: its clone, the branch and remote it follows, what it includes and excludes, and its read-only token file.
+/// With <see cref="Fetch"/> off the hub never runs <c>git fetch</c> in the clone and reads the local branch head only, which is how the
+/// start script follows the user's own checkout without touching its remote-tracking refs.
+/// </summary>
+internal sealed record DocRepository(string Id, string ClonePath, string Branch, string Remote, IReadOnlyList<DocPattern> Patterns, IReadOnlyList<string> Excludes, string? TokenFile, bool Fetch = true)
 {
     private readonly Regex[] excluded = Excludes.Select(DocGlob.Compile).ToArray();
 
@@ -44,7 +48,7 @@ internal sealed record DocRepository(string Id, string ClonePath, string Branch,
     public IEnumerable<string> Pathspecs => Patterns.Select(pattern => ":(glob)" + pattern.Glob);
 }
 
-/// <summary><c>Relay:DocCache:*</c>. Off unless <see cref="Enabled"/>.</summary>
+/// <summary><c>Relay:DocCache:*</c>. On by default; with no repositories configured it does nothing.</summary>
 internal sealed record DocCacheSettings(bool Enabled, int SyncMinutes, int IdleMinutes, int MaxDocuments, IReadOnlyList<DocRepository> Repositories, long MaxRepositoryBytes = RelayLimits.MaxRepositoryDocBytes)
 {
     /// <summary>
@@ -52,7 +56,7 @@ internal sealed record DocCacheSettings(bool Enabled, int SyncMinutes, int IdleM
     /// splitters' limits. The directory stores it, and a change forces a full resync (and returns to the configured branch).
     /// </summary>
     public string Fingerprint(DocRepository repository) => DocHash.Of(string.Join('\n',
-        [DocFormats.SplitterVersion.ToString(System.Globalization.CultureInfo.InvariantCulture), repository.Branch, repository.Remote,
+        [DocFormats.SplitterVersion.ToString(System.Globalization.CultureInfo.InvariantCulture), repository.Branch, repository.Remote, repository.Fetch ? "fetch" : "local",
          string.Join('|', repository.Patterns.Select(pattern => pattern.Glob + "=" + pattern.Spec)), string.Join('|', repository.Excludes),
          MaxDocuments.ToString(System.Globalization.CultureInfo.InvariantCulture), MaxRepositoryBytes.ToString(System.Globalization.CultureInfo.InvariantCulture),
          $"{RelayLimits.MaxDocBytes}/{RelayLimits.MaxOpenApiBytes}/{RelayLimits.MaxSectionsPerDoc}/{RelayLimits.DocChunkTokens}/{RelayLimits.DocChunkChars}"]));
@@ -71,8 +75,8 @@ internal sealed record DocCacheSettings(bool Enabled, int SyncMinutes, int IdleM
                 throw new InvalidOperationException($"Relay:DocCache:{key} must be {(minimum == 0 ? "0 (off) or " : "")}from {Math.Max(minimum, 1)} to {RelayLimits.MaxDocCacheMinutes} minutes.");
             return value;
         }
-        // Off reads nothing more, so settings for a cache that is off never stop the hub.
-        if (!section.GetValue("Enabled", false)) return new(false, RelayLimits.DefaultDocSyncMinutes, RelayLimits.DefaultDocIdleMinutes, RelayLimits.MaxDocsPerRepository, []);
+        // On by default. Off reads nothing more, so settings for a cache that is off never stop the hub.
+        if (!section.GetValue("Enabled", true)) return new(false, RelayLimits.DefaultDocSyncMinutes, RelayLimits.DefaultDocIdleMinutes, RelayLimits.MaxDocsPerRepository, []);
         var maxBytes = section.GetValue("MaxRepositoryBytes", RelayLimits.MaxRepositoryDocBytes);
         if (maxBytes < 1 || maxBytes > RelayLimits.MaxRepositoryDocBytesCeiling)
             throw new InvalidOperationException($"Relay:DocCache:MaxRepositoryBytes must be from 1 to {RelayLimits.MaxRepositoryDocBytesCeiling}.");
@@ -106,7 +110,7 @@ internal sealed record DocCacheSettings(bool Enabled, int SyncMinutes, int IdleM
             foreach (var exclude in excludes)
                 if (!DocGlob.SafeGlob(exclude)) throw new InvalidOperationException($"{where}:Exclude pattern '{exclude}' must be a relative pattern of letters, digits, . _ - / * and ?.");
             string Resolve(string path) => Path.GetFullPath(Path.Combine(environment.ContentRootPath, path));
-            repositories.Add(new(id, Resolve(entry["ClonePath"]!), branch, remote, patterns, excludes, entry["TokenFile"] is { Length: > 0 } token ? Resolve(token) : null));
+            repositories.Add(new(id, Resolve(entry["ClonePath"]!), branch, remote, patterns, excludes, entry["TokenFile"] is { Length: > 0 } token ? Resolve(token) : null, entry.GetValue("Fetch", true)));
         }
         return new(true, sync, idle, maxDocuments, repositories, maxBytes);
     }
@@ -269,10 +273,44 @@ internal sealed class DocGit(GitCli git, DocRepository repository, ILogger? logg
         return null;
     }
 
-    /// <summary>The commit at the head of the branch's remote-tracking ref, or null when there is none.</summary>
+    private bool? hasRemote;
+
+    /// <summary>Whether the last <see cref="HeadAsync"/> read the local branch because the remote has no such branch (yet).</summary>
+    public bool ReadLocalBranch { get; private set; }
+
+    /// <summary>
+    /// Whether the hub fetches from the configured remote: <c>Fetch</c> is on and the clone defines that remote. Otherwise (a local-only
+    /// repository, or the user's own checkout) it never fetches, and branches are read from <c>refs/heads</c>: still committed content
+    /// only, never the working tree.
+    /// </summary>
+    public async Task<bool> HasRemoteAsync(CancellationToken cancellationToken)
+    {
+        if (!repository.Fetch) return false;
+        if (hasRemote is { } known) return known;
+        var result = await git.RunAsync(repository.ClonePath, ["remote"], 65_536, null, cancellationToken);
+        if (result.ExitCode != 0) return false;
+        hasRemote = result.Text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Contains(repository.Remote, StringComparer.Ordinal);
+        return hasRemote.Value;
+    }
+
+    /// <summary>
+    /// The commit at the head of the branch's remote-tracking ref, or null when there is none. Without fetching (see
+    /// <see cref="HasRemoteAsync"/>) it is the local branch. A branch the remote does not have (an unpushed one) is read from the local
+    /// branch too, and <see cref="ReadLocalBranch"/> says so.
+    /// </summary>
     public async Task<string?> HeadAsync(string branch, CancellationToken cancellationToken)
     {
-        var result = await git.RunAsync(repository.ClonePath, ["rev-parse", "--verify", "--quiet", $"refs/remotes/{repository.Remote}/{branch}^{{commit}}"], 1_024, null, cancellationToken);
+        ReadLocalBranch = false;
+        if (!await HasRemoteAsync(cancellationToken)) return await CommitAtAsync($"refs/heads/{branch}", cancellationToken);
+        if (await CommitAtAsync($"refs/remotes/{repository.Remote}/{branch}", cancellationToken) is { } tracked) return tracked;
+        var local = await CommitAtAsync($"refs/heads/{branch}", cancellationToken);
+        ReadLocalBranch = local is not null;
+        return local;
+    }
+
+    private async Task<string?> CommitAtAsync(string reference, CancellationToken cancellationToken)
+    {
+        var result = await git.RunAsync(repository.ClonePath, ["rev-parse", "--verify", "--quiet", reference + "^{commit}"], 1_024, null, cancellationToken);
         var commit = result.Text.Trim();
         return result.ExitCode == 0 && IsCommit(commit) ? commit : null;
     }
@@ -357,6 +395,7 @@ internal sealed class DocSyncRunner(DocCacheSettings settings, GitCli git, IGrai
     private readonly ConcurrentDictionary<string, long> lastManual = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, (string? Branch, Lazy<Task<DocSyncOutcome>> Run)> requests = new(StringComparer.Ordinal);
     private readonly ConcurrentQueue<string> requestOrder = new();
+    private readonly ConcurrentDictionary<string, byte> localNoted = new(StringComparer.Ordinal);
     private const int RememberedRequests = 64;
 
     /// <summary>
@@ -418,10 +457,22 @@ internal sealed class DocSyncRunner(DocCacheSettings settings, GitCli git, IGrai
         var fingerprint = settings.Fingerprint(repository);
         var settingsChanged = view.Fingerprint != fingerprint;
         var branch = branchOverride ?? (view.Branch.Length > 0 && !settingsChanged ? view.Branch : repository.Branch);
-        var fetched = await git.FetchAsync(branch, cancellationToken);
-        if (!fetched) logger.LogWarning("Doc sync for {Repository}: git fetch of {Branch} failed; using the clone's last fetched commit.", repository.Id, branch);
+        // With Fetch off, or in a clone without the remote, nothing is fetched: the local branch head is compared instead.
+        var remote = await git.HasRemoteAsync(cancellationToken);
+        var fetched = remote && await git.FetchAsync(branch, cancellationToken);
         var head = await git.HeadAsync(branch, cancellationToken)
-            ?? throw new DocSyncException(DocSyncError.UnknownBranch, $"The clone has no branch {branch} from {repository.Remote}.");
+            ?? throw new DocSyncException(DocSyncError.UnknownBranch, remote ? $"The clone has no branch {branch} from {repository.Remote}." : $"The clone has no branch {branch}.");
+        // A branch the remote does not have yet is read locally until it is pushed: said once, not warned on every sync.
+        if (git.ReadLocalBranch)
+        {
+            if (localNoted.TryAdd(repository.Id + "\n" + branch, 0))
+                logger.LogInformation("Doc sync for {Repository}: {Remote} has no branch {Branch}, so the local branch is read until it is pushed.", repository.Id, repository.Remote, branch);
+        }
+        else
+        {
+            if (remote && !fetched) logger.LogWarning("Doc sync for {Repository}: git fetch of {Branch} failed; using the clone's last fetched commit.", repository.Id, branch);
+            localNoted.TryRemove(repository.Id + "\n" + branch, out _);
+        }
         var full = view.Commit.Length == 0 || view.NeedsResync || settingsChanged || branch != view.Branch || !await git.CommitExistsAsync(view.Commit, cancellationToken);
         if (!full && head == view.Commit) return new(head, 0, 0, fetched);
 
@@ -528,7 +579,8 @@ internal sealed class SpecSyncService(DocCacheSettings settings, IServiceProvide
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        if (!settings.Enabled || settings.SyncMinutes == 0) return;
+        // With no repositories configured there is nothing to sync: no git runs at all.
+        if (!settings.Enabled || settings.SyncMinutes == 0 || settings.Repositories.Count == 0) return;
         await Task.Yield();
         try
         {

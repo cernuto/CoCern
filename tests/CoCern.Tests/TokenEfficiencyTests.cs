@@ -431,48 +431,65 @@ public sealed class TokenEfficiencyTests(ITestOutputHelper output)
             return (reply.GetRawText(), Rows(store, "SELECT code FROM activity_log WHERE kind = 'budget' AND tool = 'search'").Select(row => (string)row[0]!).ToArray());
         }
 
+        // Every tool is enforced by default, and its budget sits at what its byte cap allows, so a normal reply is sent byte for byte as
+        // without counting, and is not even over its budget.
         var counter = new O200kTokenCounter();
         var uncounted = await Search(new() { ["Relay:Tokens:Enabled"] = "false" });
-        var measured = await Search(null);
-        // Over its 300-token budget, the measure-only reply is counted as over and sent byte for byte as without counting.
-        Assert.True(counter.Count(measured.Reply) > RelayLimits.SearchReplyTokens, counter.Count(measured.Reply).ToString());
-        Assert.Equal(uncounted.Reply, measured.Reply);
-        Assert.Equal(["over"], measured.Budget);
+        var enforced = await Search(null);
+        Assert.True(new TokenOptions().Enforces(RelayTools.Search));
+        Assert.True(counter.Count(enforced.Reply) < RelayLimits.SearchReplyTokens, counter.Count(enforced.Reply).ToString());
+        Assert.Equal(uncounted.Reply, enforced.Reply);
+        Assert.Empty(enforced.Budget);
         Assert.Empty(uncounted.Budget);
 
-        // Search hits have no cursor, so nothing could fetch the rest: even with search enforced they are never cut, only counted.
-        var enforcedSearch = await Search(new() { ["Relay:Tokens:EnforceTools:0"] = "search" });
-        Assert.Equal(measured.Reply, enforcedSearch.Reply);
-        Assert.Equal(["over"], enforcedSearch.Budget);
-
-        // An enforced paged read is compacted under its budget, and its cursor continues where it stopped.
-        await using var host = new RelayHostFixture(settings: new Dictionary<string, string?> { ["Relay:Tokens:EnforceTools:0"] = "check_inbox" });
-        using var client = host.AuthorizedClient();
-        var reader = Data(await host.Call(client, "session_open", new { repositoryId = "repo", requestId = "budget-reader" }));
-        var writer = Data(await host.Call(client, "session_open", new { repositoryId = "repo", requestId = "budget-writer" }));
-        for (var i = 0; i < 30; i++)
-            Data(await host.Call(client, "send_message", new { repositoryId = "repo", requestId = $"budget-mail-{i}", sessionId = writer.GetProperty("sessionId").GetString(), sessionToken = writer.GetProperty("sessionToken").GetString(),
-                recipientSessionId = reader.GetProperty("sessionId").GetString(), text = $"Message {i}: " + string.Join(' ', Enumerable.Repeat("status detail", 20)) }));
-        var inbox = new { repositoryId = "repo", sessionId = reader.GetProperty("sessionId").GetString(), sessionToken = reader.GetProperty("sessionToken").GetString(), attention = false, limit = 50 };
-        JsonElement page = default;
-        for (var retry = 0; retry < 50; retry++)
+        // A page of token-dense messages ("7 3 9 1 4" is one token per byte) is over its budget while still under the byte cap.
+        async Task<(JsonElement Page, string[] Budget, Func<long, Task<JsonElement>> Next)> Inbox(RelayHostFixture host)
         {
-            page = Data(await host.Call(client, "check_inbox", inbox));
-            if (page.GetProperty("total").GetInt32() == 30) break;
-            await Task.Delay(100);
+            var client = host.AuthorizedClient();
+            var reader = Data(await host.Call(client, "session_open", new { repositoryId = "repo", requestId = "budget-reader" }));
+            var writer = Data(await host.Call(client, "session_open", new { repositoryId = "repo", requestId = "budget-writer" }));
+            for (var i = 0; i < 30; i++)
+                Data(await host.Call(client, "send_message", new { repositoryId = "repo", requestId = $"budget-mail-{i}", sessionId = writer.GetProperty("sessionId").GetString(), sessionToken = writer.GetProperty("sessionToken").GetString(),
+                    recipientSessionId = reader.GetProperty("sessionId").GetString(), text = $"Message {i}: " + string.Concat(Enumerable.Repeat("7 3 9 1 4 ", 35)) }));
+            var inbox = new { repositoryId = "repo", sessionId = reader.GetProperty("sessionId").GetString(), sessionToken = reader.GetProperty("sessionToken").GetString(), attention = false, limit = 50 };
+            JsonElement page = default;
+            for (var retry = 0; retry < 50; retry++)
+            {
+                page = Data(await host.Call(client, "check_inbox", inbox));
+                if (page.GetProperty("total").GetInt32() == 30) break;
+                await Task.Delay(100);
+            }
+            var store = host.Services.GetRequiredService<SqliteStore>();
+            await store.FlushActivityAsync();
+            return (page, Rows(store, "SELECT code FROM activity_log WHERE kind = 'budget' AND tool = 'check_inbox'").Select(row => (string)row[0]!).ToArray(),
+                cursor => host.Call(client, "check_inbox", new { inbox.repositoryId, inbox.sessionId, inbox.sessionToken, inbox.attention, inbox.limit, cursor }).ContinueWith(task => Data(task.Result)));
         }
-        Assert.True(counter.Count(page.GetRawText()) <= RelayLimits.InboxReplyTokens, counter.Count(page.GetRawText()).ToString());
-        Assert.True(page.GetProperty("compacted").GetBoolean());
-        Assert.Equal(2, page.GetProperty("compactStep").GetInt32());
+
+        // Measure-only (Relay:Tokens:Enforce false): the over-budget page is counted as over and sent whole.
+        await using (var measureOnly = new RelayHostFixture(settings: new Dictionary<string, string?> { ["Relay:Tokens:Enforce"] = "false" }))
+        {
+            var (page, budget, _) = await Inbox(measureOnly);
+            Assert.True(counter.Count(page.GetRawText()) > RelayLimits.InboxReplyTokens, counter.Count(page.GetRawText()).ToString());
+            Assert.True(Encoding.UTF8.GetByteCount(page.GetRawText()) < RelayLimits.AggregateReplyBytes);
+            Assert.Equal(30, page.GetProperty("items").GetArrayLength());
+            Assert.False(page.TryGetProperty("compacted", out _));
+            // Every read of the page (the test polls until all 30 messages arrived) is counted as over, and none is compacted.
+            Assert.NotEmpty(budget);
+            Assert.All(budget, code => Assert.Equal("over", code));
+        }
+
+        // Enforced (the default): the same page is compacted under its budget, and its cursor continues where it stopped.
+        await using var host = new RelayHostFixture();
+        var (compacted, steps, next) = await Inbox(host);
+        Assert.True(counter.Count(compacted.GetRawText()) <= RelayLimits.InboxReplyTokens, counter.Count(compacted.GetRawText()).ToString());
+        Assert.True(compacted.GetProperty("compacted").GetBoolean());
+        Assert.Equal(2, compacted.GetProperty("compactStep").GetInt32());
         // The whole inbox fit one page before compaction, so "more" is every message left out.
-        var kept = page.GetProperty("items").GetArrayLength();
-        Assert.Equal(30 - kept, page.GetProperty("more").GetInt32());
-        Assert.Equal(kept, page.GetProperty("nextCursor").GetInt32());
-        var next = Data(await host.Call(client, "check_inbox", new { inbox.repositoryId, inbox.sessionId, inbox.sessionToken, inbox.attention, inbox.limit, cursor = kept }));
-        Assert.StartsWith($"Message {kept}:", next.GetProperty("items")[0].GetProperty("text").GetString());
-        var store = host.Services.GetRequiredService<SqliteStore>();
-        await store.FlushActivityAsync();
-        Assert.Contains("step2", Rows(store, "SELECT code FROM activity_log WHERE kind = 'budget' AND tool = 'check_inbox'").Select(row => (string)row[0]!));
+        var kept = compacted.GetProperty("items").GetArrayLength();
+        Assert.Equal(30 - kept, compacted.GetProperty("more").GetInt32());
+        Assert.Equal(kept, compacted.GetProperty("nextCursor").GetInt32());
+        Assert.StartsWith($"Message {kept}:", (await next(kept)).GetProperty("items")[0].GetProperty("text").GetString());
+        Assert.Contains("step2", steps);
     }
 
     [Fact]
@@ -567,8 +584,11 @@ public sealed class TokenEfficiencyTests(ITestOutputHelper output)
         var worst = Counting(large);
         output.WriteLine($"Writer, per event (median): {typical:0.000} ms for a {Encoding.UTF8.GetByteCount(request)}-byte request and {Encoding.UTF8.GetByteCount(reply)}-byte reply; {worst:0.000} ms with a {Encoding.UTF8.GetByteCount(large)}-byte reply.");
         Assert.True(typical < 1.0, $"{typical} ms");
-        var measured = TokenMeter.Measure(new ActivityEvent { Kind = ActivityEvent.Call, Tool = RelayTools.TaskGet, Ok = true, RequestText = request, ReplyText = large }, counter).ToList();
-        Assert.Equal((counter.Count(request), counter.Count(large)), (measured[0].RequestTokens, measured[0].ReplyTokens));
+        // A reply over task_get's budget (at its byte cap) is counted as over: token-dense text is one token per byte.
+        var over = Replies.Ok(new { items = Enumerable.Range(1, 60).Select(i => new { messageId = $"m{i}", text = string.Concat(Enumerable.Repeat("7 3 9 1 4 ", 25)) }) }).DataJson;
+        Assert.True(counter.Count(over) > RelayLimits.TaskReadReplyTokens);
+        var measured = TokenMeter.Measure(new ActivityEvent { Kind = ActivityEvent.Call, Tool = RelayTools.TaskGet, Ok = true, RequestText = request, ReplyText = over }, counter).ToList();
+        Assert.Equal((counter.Count(request), counter.Count(over)), (measured[0].RequestTokens, measured[0].ReplyTokens));
         Assert.Null(measured[0].ReplyText);
         Assert.Equal("over", Assert.Single(measured, row => row.Kind == ActivityEvent.Budget).Code);
     }

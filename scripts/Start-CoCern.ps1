@@ -3,7 +3,9 @@ param(
     [string]$RepositoryId = 'cocern',
     [string]$Url = 'http://127.0.0.1:5271',
     [string]$DataDirectory = (Join-Path $PSScriptRoot '..\data'),
-    [string]$HostDll = (Join-Path $PSScriptRoot '..\src\CoCern.Host\bin\Debug\net10.0\CoCern.Host.dll')
+    [string]$HostDll = (Join-Path $PSScriptRoot '..\src\CoCern.Host\bin\Debug\net10.0\CoCern.Host.dll'),
+    # Leave the doc cache without the checkout this script runs from.
+    [switch]$NoDocs
 )
 $ErrorActionPreference = 'Stop'
 $DataDirectory = [IO.Path]::GetFullPath($DataDirectory)
@@ -46,6 +48,31 @@ $settings = @{
     Relay__Clients__0__IsAdministrator = 'true'
     Relay__Clients__0__Repositories__0 = $RepositoryId
 }
+# The doc cache syncs committed docs from git. Out of the box it follows the checkout this script runs from, on its current branch,
+# with the default patterns. It reads local commits only (git show), never the working tree, and never fetches: Fetch=false leaves
+# this clone's remote-tracking refs alone.
+function Get-DocRepositorySettings([string]$Root) {
+    if ($NoDocs -or [Environment]::GetEnvironmentVariable('Relay__DocCache__Repositories__0__Id', 'Process')) { return @{} }
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) { return @{} }
+    $top = & git -C $Root rev-parse --show-toplevel 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $top -or [IO.Path]::GetFullPath($top).TrimEnd('\', '/') -ne $Root.TrimEnd('\', '/')) { return @{} }
+    $branch = & git -C $Root symbolic-ref --quiet --short HEAD 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $branch) { Write-Host 'Doc cache: the checkout is not on a branch, so its docs are not synced.'; return @{} }
+    $safe = '^(?![-./])(?!.*\.\.)(?!.*//)(?!.*@\{)[A-Za-z0-9._/-]{1,200}(?<![/.])(?<!\.lock)$'
+    if ($branch -notmatch $safe) {
+        Write-Host "Doc cache: the branch name '$branch' is not supported, so the checkout's docs are not synced."
+        return @{}
+    }
+    Write-Host "Doc cache: syncing local commits of $Root ($branch) as repository $RepositoryId."
+    return @{
+        Relay__DocCache__Repositories__0__Id = $RepositoryId
+        Relay__DocCache__Repositories__0__ClonePath = $Root
+        Relay__DocCache__Repositories__0__Branch = $branch
+        Relay__DocCache__Repositories__0__Fetch = 'false'
+    }
+}
+$docSettings = Get-DocRepositorySettings ([IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..')))
+foreach ($name in $docSettings.Keys) { $settings[$name] = $docSettings[$name] }
 $previous = @{}
 try {
     foreach ($name in $settings.Keys) {

@@ -31,6 +31,17 @@ public sealed class AnalyticsService(AnalyticsOptions options) : IAnalyticsQueri
 
     public IReadOnlyList<string> QueryNames => NamedQueries.Names;
 
+    /// <summary>Where the <c>sqlite</c> extension is loaded from.</summary>
+    public string ExtensionDirectory => _options.ExtensionDirectory;
+
+    private volatile string? _unavailable;
+
+    /// <summary>
+    /// Analytics cannot run on this hub (the extension is missing or does not check out): every query answers unavailable with
+    /// <paramref name="reason"/> instead of waiting for a snapshot that never comes.
+    /// </summary>
+    public void MarkUnavailable(string reason) => _unavailable = reason;
+
     /// <summary>When the loaded snapshot was taken, or null before the first one.</summary>
     public DateTimeOffset? SnapshotAt { get { lock (_sync) return _current?.TakenAt; } }
 
@@ -112,6 +123,7 @@ public sealed class AnalyticsService(AnalyticsOptions options) : IAnalyticsQueri
         lock (_sync)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
+            if (_unavailable is { } reason) throw new AnalyticsException(AnalyticsError.Unavailable, "Analytics is unavailable on this hub. " + reason);
             if (_current is not { } snapshot || !snapshot.TryAddReference())
                 throw new AnalyticsException(AnalyticsError.Unavailable, "No analytics snapshot is loaded yet.");
             return snapshot;

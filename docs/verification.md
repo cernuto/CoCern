@@ -15,5 +15,5 @@ What has been checked beyond the automated tests, and what has not. Run the test
 - `--setup` on a real PC: the Run key, client settings edits and hidden node start are covered by tests only.
 - A real Codex chat woken by the node, and a real chat found from its transcript.
 - Remote HTTPS, an external OAuth issuer, ChatGPT registration and Secure MCP Tunnel.
-- Analytics loading the extension offline on a Windows hub.
+- Analytics loading the bundled extension on a real Windows hub. Its checksum and the publish layout were checked on Linux; DuckDB loading was checked there with the Linux extension.
 - Overall token savings.
