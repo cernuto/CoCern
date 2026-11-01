@@ -18,7 +18,7 @@ A background writer saves rows about once a second, in its own short transaction
 "usage": { "inputTokens": 120000, "outputTokens": 3400 }
 ```
 
-Report the tokens you used since your last report. The hub copies them into the activity row only. They are never stored in the task. A malformed `usage` is ignored.
+Report the tokens you used since your last report. The hub copies them into the activity row only, and only when the call succeeds, because a rejected milestone is usually sent again with the same `usage`. They are never stored in the task. A malformed `usage` is ignored. The stdio adapter advertises `usage` on `task_update` only, to keep its tool definitions small; `action_report` accepts it as well.
 
 ## Counters
 
@@ -26,18 +26,35 @@ Counters are read per repository and time window from `activity_log`.
 
 | Counter | Exact definition |
 | --- | --- |
-| Tokens | Sum of reported `inputTokens` and `outputTokens`. An exact retry (same session, tool and `requestId`) counts once. |
+| Tokens | Sum of reported `inputTokens` and `outputTokens` on successful calls. An exact retry (same session, tool and `requestId`) counts once. |
 | Wakes | New messages stored in a session inbox without `wake: false`. Redeliveries do not count. Whether the chat's model actually ran is up to the adapter and is not seen here. |
-| Inbox reads | Successful `check_inbox` calls for the first page (`cursor` 0 or absent). Later pages belong to the same read. Adapter waits and wake checks count too. |
+| Inbox reads | Bursts of successful first-page `check_inbox` calls (`cursor` 0 or absent) by one session. A burst ends after 60 seconds with no such read, so one adapter wait that polls every 2 seconds is one read, and so are back-to-back waits. Later pages belong to the same read. |
 | Offers made | Replies to `task_update` with `includeNextWork` that offered a task. |
 | Offers that ended blocked | An offer of task X to session S that ended in S's next `task_claim` of X failing, or in X's workflow being set to `blocked` before S claimed it or it completed. Offers still open are not counted. |
 | Duplicate status writes | A successful `task_update`, `send_message` or `context_put` that writes the same status text to the same task, conversation or note as the write just before it, under a different `requestId`. For `task_update` the status text is `patch`, `notes`, `message` and `workflow` together. |
-| Manager turns | Calls by sessions whose role is `manager`. A burst counts as one turn; a gap of 60 seconds or more starts a new one. |
+| Manager turns | Bursts of calls by one session whose role is `manager`. A gap of 60 seconds or more starts a new turn. |
 | Closures | A task's workflow changing to `completed` through `task_update`. Writing `completed` again does not count. |
 | Manager turns per closure | Manager turns divided by closures in the same window. |
 | Time to accepted result | Median time from a task's first `ready` workflow write to its closure. Closures with no logged `ready` are left out. |
 
 A closure is the worker's reported completion. The hub keeps no separate acceptance record, so this is the closest signal.
+
+## How to read the counters
+
+The counters are computed by `SqliteStore.ReadActivityCountersAsync`. To look at the raw rows, open a copy of the database (or the live one read-only) with `sqlite3`:
+
+```sql
+-- Calls, errors and tokens per role and tool in the last day
+SELECT role, tool, COUNT(*) AS calls, SUM(1 - ok) AS errors, SUM(input_tokens) AS input, SUM(output_tokens) AS output
+FROM activity_log
+WHERE at_ticks >= (strftime('%s', 'now', '-1 day') * 10000000 + 621355968000000000)
+GROUP BY role, tool ORDER BY calls DESC;
+
+-- Older days, after the rollup
+SELECT day, role, tool, calls, input_tokens, output_tokens FROM activity_daily ORDER BY day DESC LIMIT 50;
+```
+
+`at_ticks` is .NET UTC ticks. `kind` is `call` or `wake`.
 
 ## Settings
 

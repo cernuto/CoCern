@@ -32,7 +32,13 @@ public static class RelayLimits
     public const int ActivityBatchSize = 512;
     /// <summary>How long the activity writer collects events before inserting a batch.</summary>
     public const int ActivityBatchMilliseconds = 1_000;
-    /// <summary>A gap this long between one manager session's calls starts a new counted manager turn.</summary>
+    /// <summary>How often raw activity older than the retention period is rolled into daily totals.</summary>
+    public const int ActivityRollupHours = 24;
+    /// <summary>How long shutdown waits for the activity writer to drain its queue.</summary>
+    public const int ActivityStopWaitSeconds = 5;
+    /// <summary>Longest session role recorded with activity; longer roles are left out.</summary>
+    public const int MaxActivityRoleLength = 64;
+    /// <summary>A gap this long between one session's calls starts a new counted burst: a manager turn, or an inbox read.</summary>
     public const int ActivityTurnGapSeconds = 60;
     /// <summary>Largest token count accepted in one <c>usage</c> report field.</summary>
     public const long MaxReportedTokens = 1_000_000_000;

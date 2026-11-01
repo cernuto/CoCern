@@ -22,7 +22,6 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
 {
     private readonly IMachineDirectory directory = machines ?? new MachineDirectory(grains);
     private const int WorkerProbeLimit = 50;
-    private const int MaxRoleLength = 64;
     private readonly string incarnation = Guid.NewGuid().ToString("N");
     public string IncarnationId => incarnation;
 
@@ -329,11 +328,12 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
             activity!.Record(new ActivityEvent
             {
                 Timestamp = trace.At, Kind = ActivityEvent.Call, RepositoryId = repository.Length <= RelayLimits.MaxIdentifierLength ? repository : "",
-                SessionId = Bounded(trace.SessionId), Role = Bounded(trace.Role?.ToLowerInvariant(), MaxRoleLength), Tool = tool, Ok = ok,
+                SessionId = Bounded(trace.SessionId), Role = Bounded(trace.Role?.ToLowerInvariant(), RelayLimits.MaxActivityRoleLength), Tool = tool, Ok = ok,
                 Code = reply?.Code ?? (canceled ? "Canceled" : Unavailable),
                 RequestBytes = arguments.ValueKind == JsonValueKind.Undefined ? 0 : Encoding.UTF8.GetByteCount(arguments.GetRawText()),
                 ReplyBytes = reply is null ? 0 : Encoding.UTF8.GetByteCount(reply.DataJson), DurationMilliseconds = elapsed.TotalMilliseconds,
-                InputTokens = Tokens(trace.Usage, "inputTokens"), OutputTokens = Tokens(trace.Usage, "outputTokens"),
+                // Usage counts only with a committed call: a rejected milestone is usually resent with the same usage.
+                InputTokens = ok ? Tokens(trace.Usage, "inputTokens") : null, OutputTokens = ok ? Tokens(trace.Usage, "outputTokens") : null,
                 RequestId = Bounded(args is null ? null : Text(args, "requestId")), Target = target, ContentHash = hash,
                 WorkflowState = workflow is "ready" or "blocked" or "completed" ? workflow : null,
                 OfferTarget = ok && reply is not null && args is not null ? OfferTarget(args, reply) : null

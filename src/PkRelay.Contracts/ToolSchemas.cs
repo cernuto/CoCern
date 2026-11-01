@@ -25,7 +25,8 @@ internal static class ToolSchemas
             _ => []
         };
         var properties = ForwardingFields.Concat(tool.RequiredFields).Concat(extra).Distinct(StringComparer.Ordinal).ToDictionary(field => field, field => all[field]);
-        // The milestone call carries a compact usage entry; the hub also accepts it on action_report, with the full schema in InputSchema.
+        // Only the milestone call advertises a compact usage entry: adding it to action_report too would exceed the 20,000-character
+        // forwarding budget (20,034). The hub still accepts usage on action_report, and InputSchema lists it there in full.
         if (properties.ContainsKey("usage")) properties["usage"] = new { type = "object", description = "Optional {inputTokens,outputTokens}." };
         return properties;
     }

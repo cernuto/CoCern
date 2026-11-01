@@ -2,6 +2,7 @@ using Microsoft.Data.Sqlite;
 using Orleans;
 using Orleans.Runtime;
 using Orleans.Storage;
+using PkRelay.Contracts;
 using PkRelay.Core;
 using PkRelay.Domain;
 using PkRelay.Storage;
@@ -374,6 +375,20 @@ public sealed class StorageTests : IDisposable
         Assert.Equal(100, counters.InputTokens);
         Assert.Equal(10, counters.OutputTokens);
         Assert.Equal(0, (await store.ReadActivityCountersAsync("other-repo", Now, Now.AddHours(1))).Calls);
+    }
+
+    [Fact]
+    public async Task One_burst_of_inbox_reads_by_a_session_counts_as_one_read()
+    {
+        using var store = new SqliteStore(Database);
+        // One adapter wait: a first-page read every 2 seconds for 50 seconds.
+        for (var second = 0; second <= 50; second += 2) store.Record(Call(Now.AddSeconds(second), "check_inbox", session: "worker", target: "inbox:worker"));
+        // Another session reading at the same time is its own read.
+        store.Record(Call(Now.AddSeconds(10), "check_inbox", session: "other", target: "inbox:other"));
+        // A read after a full gap starts a new burst.
+        store.Record(Call(Now.AddSeconds(50 + RelayLimits.ActivityTurnGapSeconds), "check_inbox", session: "worker", target: "inbox:worker"));
+        await store.FlushActivityAsync();
+        Assert.Equal(3, (await store.ReadActivityCountersAsync("repo", Now, Now.AddHours(1))).InboxReads);
     }
 
     private static ActivityEvent Call(DateTimeOffset at, string tool, string? session = null, string? role = null, bool ok = true, string? target = null, string? hash = null,

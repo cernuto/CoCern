@@ -306,11 +306,13 @@ public class HostTests
         await store.FlushActivityAsync();
         var counters = await host.Services.GetRequiredService<IActivityCounterSource>().ReadActivityCountersAsync("repo", started, DateTimeOffset.UtcNow.AddMinutes(1));
         Assert.Equal(1, counters.Wakes);
-        Assert.InRange(counters.InboxReads, 1, 40);
+        // The polling loop above is one burst of reads by one session.
+        Assert.Equal(1, counters.InboxReads);
         Assert.Equal(1, counters.DuplicateStatusWrites);
         Assert.Equal(1200, counters.InputTokens);
         Assert.Equal(80, counters.OutputTokens);
-        Assert.True(counters.ManagerTurns >= 1);
+        // The manager's session_open and two messages are one burst.
+        Assert.Equal(1, counters.ManagerTurns);
 
         using var connection = new Microsoft.Data.Sqlite.SqliteConnection(new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder { DataSource = store.DatabasePath, Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly, Pooling = false }.ToString());
         connection.Open();
@@ -320,6 +322,69 @@ public class HostTests
         command.CommandText = "SELECT COUNT(*) FROM grain_state WHERE payload LIKE '%inputTokens%';";
         Assert.Equal(0L, command.ExecuteScalar());
     }
+
+    [Fact]
+    public async Task Usage_on_a_rejected_milestone_is_not_counted()
+    {
+        await using var host = new RelayHostFixture();
+        using var client = host.AuthorizedClient();
+        var started = DateTimeOffset.UtcNow.AddMinutes(-1);
+        var worker = Data(await host.Call(client, "session_open", new { repositoryId = "repo", requestId = "usage-worker" }));
+        var sessionId = worker.GetProperty("sessionId").GetString();
+        var sessionToken = worker.GetProperty("sessionToken").GetString();
+        var usage = new { inputTokens = 500, outputTokens = 40 };
+        Assert.True((await host.Call(client, "task_update", new { repositoryId = "repo", requestId = "usage-create", sessionId, sessionToken, taskId = "U1", expectedVersion = 0 })).GetProperty("ok").GetBoolean());
+        // A stale milestone fails, and the agent resends it with the same usage under the current version.
+        using (var stale = await client.PostAsJsonAsync("/api/tools/task_update", new { repositoryId = "repo", requestId = "usage-stale", sessionId, sessionToken, taskId = "U1", expectedVersion = 0, patch = new { step = 2 }, usage }))
+            Assert.Equal(HttpStatusCode.Conflict, stale.StatusCode);
+        Assert.True((await host.Call(client, "task_update", new { repositoryId = "repo", requestId = "usage-retry", sessionId, sessionToken, taskId = "U1", expectedVersion = 1, patch = new { step = 2 }, usage })).GetProperty("ok").GetBoolean());
+        var store = host.Services.GetRequiredService<SqliteStore>();
+        await store.FlushActivityAsync();
+        var counters = await store.ReadActivityCountersAsync("repo", started, DateTimeOffset.UtcNow.AddMinutes(1));
+        Assert.Equal(500, counters.InputTokens);
+        Assert.Equal(40, counters.OutputTokens);
+    }
+
+    [Fact]
+    public async Task An_offer_whose_claim_fails_counts_as_one_offer_that_ended_blocked()
+    {
+        await using var host = new RelayHostFixture();
+        using var client = host.AuthorizedClient();
+        var started = DateTimeOffset.UtcNow.AddMinutes(-1);
+        var first = Data(await host.Call(client, "session_open", new { repositoryId = "repo", requestId = "offer-first" }));
+        var second = Data(await host.Call(client, "session_open", new { repositoryId = "repo", requestId = "offer-second" }));
+        object Update(JsonElement session, string taskId, string state, bool includeNextWork) => new
+        {
+            repositoryId = "repo", requestId = Guid.NewGuid().ToString("N"), sessionId = session.GetProperty("sessionId").GetString(), sessionToken = session.GetProperty("sessionToken").GetString(),
+            taskId, expectedVersion = 0, includeNextWork, workflow = OfferWorkflow(state)
+        };
+        async Task<HttpStatusCode> Claim(JsonElement session)
+        {
+            using var response = await client.PostAsJsonAsync("/api/tools/task_claim", new { repositoryId = "repo", requestId = Guid.NewGuid().ToString("N"), sessionId = session.GetProperty("sessionId").GetString(), sessionToken = session.GetProperty("sessionToken").GetString(), taskId = "next", expectedVersion = 1, resourceIds = Array.Empty<string>() });
+            return response.StatusCode;
+        }
+        Assert.True((await host.Call(client, "task_update", Update(first, "next", "ready", false))).GetProperty("ok").GetBoolean());
+        // Both sessions finish a task and are offered "next".
+        foreach (var (session, done) in new[] { (first, "done-first"), (second, "done-second") })
+            Assert.Equal("Offered", Data(await host.Call(client, "task_update", Update(session, done, "completed", true))).GetProperty("nextWork").GetProperty("code").GetString());
+        // The second session claims it; the first session's claim then fails, so its offer ended blocked.
+        Assert.Equal(HttpStatusCode.OK, await Claim(second));
+        Assert.Equal(HttpStatusCode.Conflict, await Claim(first));
+        var store = host.Services.GetRequiredService<SqliteStore>();
+        await store.FlushActivityAsync();
+        var counters = await store.ReadActivityCountersAsync("repo", started, DateTimeOffset.UtcNow.AddMinutes(1));
+        Assert.Equal(2, counters.OffersMade);
+        Assert.Equal(1, counters.OffersEndedBlocked);
+        Assert.Equal(2, counters.Closures);
+    }
+
+    private static object OfferWorkflow(string state) => new
+    {
+        state,
+        packet = new { goal = "Finish a useful leg", target = "repo at revision abc", authorityRef = "human-grant:17", restoration = "Remove owned fixture", stopCondition = "Stop on target mismatch" },
+        criteria = new[] { state == "completed" ? (object)new { id = "leg", description = "Leg passes", result = "passed", evidenceRef = "test-report:17" } : new { id = "leg", description = "Leg passes", result = "not_run" } },
+        blockers = Array.Empty<object>()
+    };
 
     [Fact]
     public async Task A_failing_activity_sink_never_fails_or_changes_a_call()

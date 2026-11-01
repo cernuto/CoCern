@@ -23,7 +23,7 @@ public sealed record ActivityOptions
 /// </summary>
 public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
 {
-    private static readonly TimeSpan RollupInterval = TimeSpan.FromDays(1);
+    private static readonly TimeSpan RollupInterval = TimeSpan.FromHours(RelayLimits.ActivityRollupHours);
 
     private const string ActivitySchema = """
         CREATE TABLE IF NOT EXISTS activity_log (
@@ -78,6 +78,10 @@ public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
     private Task _activityWriter = Task.CompletedTask;
     private DateTimeOffset _lastRollup = DateTimeOffset.MinValue;
     private long _droppedActivity;
+    private long _activityWriterFaults;
+
+    /// <summary>Unexpected writer failures this process survived.</summary>
+    public long ActivityWriterFaults => Interlocked.Read(ref _activityWriterFaults);
 
     /// <summary>Events dropped by this process because the queue was full or a batch could not be written.</summary>
     public long DroppedActivityEvents => Interlocked.Read(ref _droppedActivity);
@@ -111,9 +115,9 @@ public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
     private async Task WriteActivityAsync()
     {
         var reader = _activity!.Reader;
-        try
+        while (await reader.WaitToReadAsync())
         {
-            while (await reader.WaitToReadAsync())
+            try
             {
                 // Collect for one batch interval; shutdown skips the wait and drains at once.
                 try { await Task.Delay(_activityOptions.BatchInterval, _activityOptions.Clock, _activityStop.Token); }
@@ -121,8 +125,14 @@ public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
                 await DrainActivityAsync(CancellationToken.None);
                 await RollUpIfDueAsync();
             }
+            catch (Exception exception)
+            {
+                // Telemetry never takes the hub down, and one unexpected failure must not end the writer: report it and keep going.
+                Interlocked.Increment(ref _activityWriterFaults);
+                Console.Error.WriteLine("PkRelay activity writer failed and continues: " + exception.GetType().Name);
+                if (_activityStop.IsCancellationRequested) return;
+            }
         }
-        catch (Exception) { /* Telemetry never takes the hub down. */ }
     }
 
     private async Task DrainActivityAsync(CancellationToken cancellationToken)
@@ -241,17 +251,33 @@ public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
             long Scalar(string sql) { using var command = Query(sql); return Convert.ToInt64(command.ExecuteScalar() ?? 0L); }
             const string Window = "repository_id = $repository AND at_ticks >= $from AND at_ticks < $to";
 
-            long calls, inboxReads, wakes, offers;
+            long calls, wakes, offers;
             using (var totals = Query($"""
-                SELECT COALESCE(SUM(kind = 'call'), 0), COALESCE(SUM(kind = 'call' AND ok = 1 AND target LIKE 'inbox:%'), 0),
-                       COALESCE(SUM(kind = 'wake'), 0), COALESCE(SUM(offer_target IS NOT NULL), 0)
+                SELECT COALESCE(SUM(kind = 'call'), 0), COALESCE(SUM(kind = 'wake'), 0), COALESCE(SUM(offer_target IS NOT NULL), 0)
                 FROM activity_log WHERE {Window};
                 """))
             using (var reader = totals.ExecuteReader())
             {
                 reader.Read();
-                calls = reader.GetInt64(0); inboxReads = reader.GetInt64(1); wakes = reader.GetInt64(2); offers = reader.GetInt64(3);
+                calls = reader.GetInt64(0); wakes = reader.GetInt64(1); offers = reader.GetInt64(2);
             }
+
+            // A burst is one session's calls with no gap of ActivityTurnGapSeconds or more. Manager turns count bursts of a manager's
+            // calls; inbox reads count bursts of a session's first-page reads, so one adapter wait polling every 2 seconds is one read.
+            long Bursts(string filter)
+            {
+                using var command = Query($"""
+                    SELECT COUNT(*) FROM (
+                        SELECT at_ticks, LAG(at_ticks) OVER (PARTITION BY session_id ORDER BY at_ticks, id) AS previous
+                        FROM activity_log
+                        WHERE repository_id = $repository AND kind = 'call' AND session_id IS NOT NULL AND at_ticks < $to AND {filter})
+                    WHERE at_ticks >= $from AND (previous IS NULL OR at_ticks - previous >= $gap);
+                    """);
+                command.Parameters.AddWithValue("$gap", TimeSpan.FromSeconds(RelayLimits.ActivityTurnGapSeconds).Ticks);
+                return Convert.ToInt64(command.ExecuteScalar() ?? 0L);
+            }
+            var inboxReads = Bursts("ok = 1 AND target LIKE 'inbox:%'");
+            var managerTurns = Bursts("role = 'manager'");
 
             // A retried request replays its reply and is recorded again; count its reported tokens once.
             long input, output;
@@ -277,15 +303,6 @@ public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
                 WHERE at_ticks >= $from AND content_hash = previous_hash AND request_id IS NOT previous_request;
                 """);
 
-            using var turnsCommand = Query("""
-                SELECT COUNT(*) FROM (
-                    SELECT at_ticks, LAG(at_ticks) OVER (PARTITION BY session_id ORDER BY at_ticks, id) AS previous
-                    FROM activity_log
-                    WHERE repository_id = $repository AND kind = 'call' AND role = 'manager' AND session_id IS NOT NULL AND at_ticks < $to)
-                WHERE at_ticks >= $from AND (previous IS NULL OR at_ticks - previous >= $gap);
-                """);
-            turnsCommand.Parameters.AddWithValue("$gap", TimeSpan.FromSeconds(RelayLimits.ActivityTurnGapSeconds).Ticks);
-            var managerTurns = Convert.ToInt64(turnsCommand.ExecuteScalar() ?? 0L);
 
             var (closures, medianSeconds) = Closures(Query($"""
                 SELECT target, at_ticks, workflow_state FROM activity_log
@@ -400,7 +417,7 @@ public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
         if (_activity is { } channel && channel.Writer.TryComplete())
         {
             _activityStop.Cancel();
-            try { _activityWriter.Wait(TimeSpan.FromSeconds(5)); }
+            try { _activityWriter.Wait(TimeSpan.FromSeconds(RelayLimits.ActivityStopWaitSeconds)); }
             catch (AggregateException) { }
         }
         _activityGate.Wait();
