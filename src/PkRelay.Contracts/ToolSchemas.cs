@@ -28,7 +28,7 @@ internal static class ToolSchemas
             RelayTools.Search => ["kinds"],
             RelayTools.AttentionRespond => ["until"],
             RelayTools.AnalyticsQuery => ["params", "sql"],
-            RelayTools.OrderPut => ["expiresAt"],
+            RelayTools.OrderPut => ["expiresAt", "expectedRevision"],
             _ => []
         };
         var properties = ForwardingFields.Concat(tool.RequiredFields).Concat(extra).Distinct(StringComparer.Ordinal).ToDictionary(field => field, field => all[field]);
@@ -76,6 +76,7 @@ internal static class ToolSchemas
                 properties["trigger"] = new { type = "object", description = "{on:" + string.Join("|", OrderTriggers.All) + ",taskId|resourceId}" };
                 properties["actions"] = new { type = "array", description = "[{do:" + string.Join("|", OrderActions.All) + ",taskId?,sessionId?,note?}]" };
                 properties["expiresAt"] = new { type = "string" };
+                properties["expectedRevision"] = new { type = "integer" };
             }
         }
         // Each boundary tool advertises the attention opt-out with a short description; InputSchema gives the full one.
@@ -185,6 +186,7 @@ internal static class ToolSchemas
                 properties["sql"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxAnalyticsSqlLength, description = "One SELECT over the analytics views; only with name sql, and only when the hub allows ad hoc SQL." }; break;
             case RelayTools.OrderPut:
                 properties["orderId"] = OrderId();
+                properties["expectedRevision"] = new { type = "integer", minimum = 0, description = "Optional current order revision, as get_status shows it; a stale one gets VersionConflict." };
                 properties["trigger"] = new
                 {
                     type = "object",

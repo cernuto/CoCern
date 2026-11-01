@@ -146,6 +146,23 @@ internal static class TaskWorkflow
         return WithCandidates(new JsonObject { ["ok"] = true, ["code"] = "Offered", ["offer"] = offer });
     }
 
+    /// <summary>
+    /// Why a standing order may not offer this task to <paramref name="session"/>, or null: the next-work checks of <see cref="IsOfferable"/>
+    /// except the target-session match, each with a reason for the order log.
+    /// </summary>
+    public static string? OfferProblem(JsonObject board, JsonObject tasks, JsonObject task, string session, DateTimeOffset now)
+    {
+        if (task["workflow"] is not JsonObject workflow) return "has no workflow";
+        if ((workflow["blockers"] as JsonArray ?? []).OfType<JsonObject>().Any(blocker => Text(blocker, "kind") == AttentionWeights.ProviderRejection)) return "has a provider_rejection blocker";
+        if (Text(workflow, "state") != "ready") return "is " + Text(workflow, "state");
+        if (Validate(workflow, null, TaskActions.HasUnresolved(task)) is not null) return "has an invalid workflow";
+        if (TaskActions.HasUnresolved(task)) return "has an unresolved action";
+        if (Text(task, "owner") is { Length: > 0 } owner && owner != session && Date(task, "leaseUntil") > now) return "is claimed by another session";
+        if (!DependenciesDone(tasks, workflow)) return "has dependencies not completed";
+        if (StandingPreferences.GrantProblem(board, workflow, now) is { } grant) return "names a grant that is " + (grant == "scope" ? "out of scope" : grant);
+        return null;
+    }
+
     private static bool IsOfferable(JsonObject board, JsonObject tasks, JsonObject task, string session, DateTimeOffset now) =>
         task["workflow"] is JsonObject workflow
         && Text(workflow, "state") == "ready"

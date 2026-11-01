@@ -155,7 +155,8 @@ public sealed class ContractsTests
         Assert.Equal(RelayLimits.MaxOrderActions, properties.GetProperty("actions").GetProperty("maxItems").GetInt32());
         Assert.Equal(RelayLimits.MaxOrderNoteLength, properties.GetProperty("actions").GetProperty("items").GetProperty("properties").GetProperty("note").GetProperty("maxLength").GetInt32());
         Assert.Equal(RelayLimits.MaxStandingIdLength, properties.GetProperty("orderId").GetProperty("maxLength").GetInt32());
-        Assert.Equal(new[] { "actions", "expiresAt", "orderId", "repositoryId", "requestId", "trigger" }, RelayToolCatalog.ForwardingSchema(put).GetProperty("properties").EnumerateObject().Select(x => x.Name).Order());
+        Assert.Equal(0, properties.GetProperty("expectedRevision").GetProperty("minimum").GetInt32());
+        Assert.Equal(new[] { "actions", "expectedRevision", "expiresAt", "orderId", "repositoryId", "requestId", "trigger" }, RelayToolCatalog.ForwardingSchema(put).GetProperty("properties").EnumerateObject().Select(x => x.Name).Order());
         Assert.Equal(RelayErrorKind.Invalid, RelayErrorCodes.Classify(RelayErrorCodes.OrdersUnavailable));
     }
 

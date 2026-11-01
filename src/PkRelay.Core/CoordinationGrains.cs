@@ -115,6 +115,18 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
             catch (Exception) { result = Replies.Error(RelayErrorCodes.DeliveryUnavailable); }
             // Attention and order effects are advisory. A session that refuses an item (unknown session, another repository, a malformed item) would refuse
             // it on every retry, so the effect is dropped rather than retried every few seconds forever. Infrastructure failures still retry.
+            // A standing order's offer or notice that its session refuses (unknown session, another repository) is a failed run of that
+            // order: it is applied here, on this board's own state, so it is logged, raised to the managers and counted.
+            if (!result.Ok && !IsTransient(result.Code) && ordersOn && Kind == AggregateKinds.Board && effect.Operation == Operations.AttentionRaise && JsonFields.Text(payload, Operations.OrderIdField) is { Length: > 0 } orderId)
+            {
+                var first = candidate.Effects.Count;
+                CoordinationStateMachine.Apply(candidate, Kind, this.GetPrimaryKeyString(), effectCaller, Operations.OrderFailed, new JsonObject
+                {
+                    ["repositoryId"] = JsonFields.Text(payload, "repositoryId"), ["boardId"] = JsonFields.Text(payload, "boardId", "default"), ["orderId"] = orderId,
+                    ["run"] = JsonFields.Number(payload, Operations.OrderRunField), ["reason"] = "session " + effect.TargetKey + " refused the " + JsonFields.Text(payload, "kind") + " item (" + result.Code + ")"
+                }, now, ordersEnabled: true);
+                CoordinationStateMachine.StampEffects(candidate.Effects, first, effectCaller);
+            }
             if (!result.Ok && !((Operations.IsAttention(effect.Operation) || Operations.IsOrder(effect.Operation)) && !IsTransient(result.Code)))
             {
                 candidate.Effects[candidate.Effects.FindIndex(x => x.Id == effect.Id)] = effect with { DueAt = DateTimeOffset.UtcNow.Add(RedeliveryDelay) };

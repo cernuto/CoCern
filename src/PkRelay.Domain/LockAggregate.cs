@@ -92,6 +92,11 @@ internal static class LockAggregate
             state["generation"] = ++generation;
             state["leaseUntil"] = context.Now.AddSeconds(Leases.Seconds(context.Args)).ToString("O");
         }
+        // The task claim this grant now serves (set by task_claim, even when the holder already had it), so a standing order releases the
+        // grant only for that claim and never one the same session took again for its next task.
+        if (Text(context.Args, "taskId") is { Length: > 0 } taskId && context.Args["taskClaimGeneration"] is not null)
+            state["claimFor"] = StandingOrders.ClaimKey(Text(context.Args, "boardId", "default"), taskId, Number(context.Args, "taskClaimGeneration"));
+        else state.Remove("claimFor");
         return Ok(new { newlyAcquired = !owned, generation, leaseUntil = Text(state, "leaseUntil") }, generation);
     }
 

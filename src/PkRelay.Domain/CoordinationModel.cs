@@ -191,6 +191,10 @@ public static class Operations
     /// <summary>Sent by a lock back to the board: an order's release could not run (an action is still unresolved).</summary>
     public const string OrderFailed = "__order_failed";
 
+    /// <summary>Fields of a standing order's attention raise naming its order and run; the session ignores them.</summary>
+    public const string OrderIdField = "orderId";
+    public const string OrderRunField = "orderRun";
+
     public static bool IsInternal(string operation) => operation.StartsWith("__", StringComparison.Ordinal);
 
     /// <summary>Order effects run only while standing orders are on; a target that refuses one is not asked again.</summary>

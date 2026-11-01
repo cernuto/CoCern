@@ -224,7 +224,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         {
             var read = await CallBoard(caller, Operations.Orders, new JsonObject { ["repositoryId"] = Text(args, "repositoryId"), ["boardId"] = Text(args, "boardId", "default") });
             if (!read.Ok || Parse(read)["orders"] is not JsonArray { Count: > 0 } list) return status;
-            var data = Parse(status); data["orders"] = list.DeepClone();
+            var data = Parse(status); data["orders"] = list.DeepClone(); data["ordersRevision"] = Parse(read)["revision"]?.DeepClone();
             return FitsWire(Ok(data, status.Version)) ? Ok(data, status.Version) : status;
         }
         catch (Exception) { return status; }
@@ -561,6 +561,8 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         foreach (var resource in canonical)
         {
             var resourceArgs = args.DeepClone().AsObject(); resourceArgs["requestId"] = Text(args, "requestId") + ":resource:" + resource;
+            // The lock records which task claim its grant serves, so a standing order's release cannot drop a later claim.
+            resourceArgs["taskClaimGeneration"] = Parse(task)["claimGeneration"]?.DeepClone();
             var claim = await Call(AggregateKinds.Lock, resource, caller, RelayTools.ClaimAcquire, resourceArgs);
             if (!claim.Ok)
             {

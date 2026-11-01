@@ -37,6 +37,7 @@ internal static class StandingOrders
         else if (!DateTimeOffset.TryParse(Text(args, "expiresAt"), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out expires) || expires <= context.Now || expires > context.Now.AddDays(RelayLimits.MaxOrderExpiryDays)) return Invalid("expiresAt");
 
         var orders = context.State["orders"] as JsonObject ?? new JsonObject();
+        if (WriteConflict(args, orders) is { } conflict) return conflict;
         var items = ObjectAt(orders, "items");
         var watchedBefore = Watched(items);
         // Expired orders never run again; a write drops them so they do not hold places under the cap.
@@ -48,7 +49,8 @@ internal static class StandingOrders
         if (Items(items).FirstOrDefault(order => Text(order, "id") != id && SameTrigger(order, on, target)) is { } other) return Error(InvalidArguments, new { field = "trigger", conflictsWith = Text(other, "id") });
         if (!items.ContainsKey(id) && items.Count >= RelayLimits.MaxOrders) return Error(CapacityExceeded, new { maxOrders = RelayLimits.MaxOrders });
         var replaced = items[id] is JsonObject;
-        var revision = NextRevision(orders);
+        var revision = NextWrite(orders);
+        NextRevision(orders);
         items[id] = new JsonObject
         {
             ["id"] = id, ["trigger"] = trigger, ["actions"] = actions, ["approvedBy"] = context.Caller.PrincipalId, ["approvedAt"] = context.Now.ToString("O"),
@@ -68,9 +70,10 @@ internal static class StandingOrders
         if (!context.OrdersEnabled) return Error(OrdersUnavailable);
         if (!Identifier(context.Args["orderId"], RelayLimits.MaxStandingIdLength, out var id)) return Invalid("orderId");
         if (context.State["orders"] is not JsonObject orders || orders["items"] is not JsonObject items || !items.ContainsKey(id)) return Error(NotFound, new { orderId = id });
+        if (WriteConflict(context.Args, orders) is { } conflict) return conflict;
         var watchedBefore = Watched(items);
         items.Remove(id);
-        var revision = NextRevision(orders);
+        var revision = NextWrite(orders);
         Log(orders, context, id, "removed by " + context.Caller.PrincipalId);
         CloseFailure(context, id, NextRevision(orders));
         UpdateWatches(context, watchedBefore, Watched(items), null, id);
@@ -93,7 +96,7 @@ internal static class StandingOrders
             if (Text(order, "lastError") is { Length: > 0 } error) item["err"] = Cap(error, 120);
             return (JsonNode)item;
         }).ToArray());
-        return Ok(new { orders = list }, Number(orders, "revision"));
+        return Ok(new { revision = Number(orders, "writeRevision"), orders = list }, Number(orders, "writeRevision"));
     }
 
     /// <summary>Records the order triggers a task change caused: completion, and leaving the blocked state. They run once the change is marked.</summary>
@@ -193,6 +196,9 @@ internal static class StandingOrders
         while (done.Count > RelayLimits.OrderReleasesRemembered) done.RemoveAt(0);
         var holder = Text(args, "holderSessionId");
         if (holder.Length == 0 || Text(state, "holder") != holder || Date(state, "leaseUntil") <= context.Now) return Ok(new { released = false });
+        // Only the grant taken for the order's task claim: a session that already claimed the resource again (for its next task, or
+        // directly) keeps it.
+        if (Text(args, "claimFor") is not { Length: > 0 } claim || Text(state, "claimFor") != claim) return Ok(new { released = false, claimedAgain = true });
         if (state["blockers"] is JsonObject { Count: > 0 })
         {
             context.Emit(AggregateKinds.Board, Text(args, "boardKey"), Operations.OrderFailed, new JsonObject
@@ -248,7 +254,7 @@ internal static class StandingOrders
                     context.Emit(AggregateKinds.Lock, resource, Operations.OrderRelease, new JsonObject
                     {
                         ["repositoryId"] = context.Repository, ["boardId"] = Text(context.Args, "boardId", "default"), ["boardKey"] = context.Key,
-                        ["holderSessionId"] = owner, ["orderId"] = id, ["run"] = revision
+                        ["holderSessionId"] = owner, ["claimFor"] = ClaimKey(Text(context.Args, "boardId", "default"), taskId, Number(task, "claimGeneration")), ["orderId"] = id, ["run"] = revision
                     });
                 return null;
             }
@@ -256,17 +262,17 @@ internal static class StandingOrders
             {
                 var taskId = Text(action, "taskId");
                 if (tasks[taskId] is not JsonObject task) return "unknown task " + taskId;
-                var workflow = task["workflow"] as JsonObject;
-                // An order never works around a provider rejection, and offers only work that could be claimed.
-                if ((workflow?["blockers"] as JsonArray ?? []).OfType<JsonObject>().Any(blocker => Text(blocker, "kind") == AttentionWeights.ProviderRejection)) return "task " + taskId + " has a provider_rejection blocker";
-                if (workflow is not null && Text(workflow, "state") != "ready") return "task " + taskId + " is " + Text(workflow, "state");
+                // The next-work checks apply, except the target-session match: an order never works around a provider rejection, and
+                // offers only work the session could claim now.
+                if (TaskWorkflow.OfferProblem(context.State, tasks, task, Text(action, "sessionId"), context.Now) is { } problem) return "task " + taskId + " " + problem;
+                var workflow = task["workflow"]!.AsObject();
                 var item = new JsonObject
                 {
-                    ["kind"] = AttentionKinds.NextWork, ["taskId"] = taskId, ["subject"] = id, ["priority"] = workflow is null ? 0 : Number(workflow, "priority"),
+                    ["kind"] = AttentionKinds.NextWork, ["taskId"] = taskId, ["subject"] = id, ["priority"] = Number(workflow, "priority"),
                     ["note"] = "order " + id + ": " + on + " " + target + "; claim it with task_claim", ["revision"] = revision
                 };
                 if (triggerTask.Length > 0) item["refs"] = new JsonArray(triggerTask);
-                AttentionSources.Emit(context, Text(action, "sessionId"), Operations.AttentionRaise, item);
+                AttentionSources.Emit(context, Text(action, "sessionId"), Operations.AttentionRaise, Mark(item, id, revision));
                 return null;
             }
             case OrderActions.Notify:
@@ -276,12 +282,23 @@ internal static class StandingOrders
                     ["kind"] = AttentionKinds.Info, ["subject"] = id, ["note"] = Text(action, "note", "order " + id + ": " + on + " " + target), ["revision"] = revision
                 };
                 if (triggerTask.Length > 0) item["taskId"] = triggerTask;
-                AttentionSources.Emit(context, Text(action, "sessionId"), Operations.AttentionRaise, item);
+                AttentionSources.Emit(context, Text(action, "sessionId"), Operations.AttentionRaise, Mark(item, id, revision));
                 return null;
             }
             default: return "unknown action";
         }
     }
+
+    /// <summary>Names the order and run an order's raise belongs to; if the session refuses it, the dispatcher reports a failed run.</summary>
+    private static JsonObject Mark(JsonObject item, string orderId, long run)
+    {
+        item[OrderIdField] = orderId;
+        item[OrderRunField] = run;
+        return item;
+    }
+
+    private const string OrderIdField = Operations.OrderIdField;
+    private const string OrderRunField = Operations.OrderRunField;
 
     /// <summary>Counts one failed run, logs it, raises <c>order_failed</c> to the managers, and disables the order at the failure limit.</summary>
     private static void Fail(AggregateContext context, JsonObject orders, JsonObject order, string reason)
@@ -374,6 +391,9 @@ internal static class StandingOrders
         return null;
     }
 
+    /// <summary>The identity of one task claim, as a lock records it for the grant it serves: board, task and claim generation.</summary>
+    public static string ClaimKey(string boardId, string taskId, long claimGeneration) => boardId + "/" + taskId + "#" + claimGeneration;
+
     private static IEnumerable<JsonObject> Items(JsonObject items) => items.Select(x => x.Value).OfType<JsonObject>();
 
     private static bool SameTrigger(JsonObject order, string on, string target) =>
@@ -382,6 +402,25 @@ internal static class StandingOrders
     private static string Target(JsonObject trigger) => Text(trigger, "on") == OrderTriggers.ClaimReleased ? Text(trigger, "resourceId") : Text(trigger, "taskId");
 
     private static bool IsDisabled(JsonObject order) => order["disabled"] is JsonValue value && value.TryGetValue<bool>(out var disabled) && disabled;
+
+    /// <summary>
+    /// The write revision moves only when an administrator puts or removes an order. An optional <c>expectedRevision</c> must match it,
+    /// as with <c>standing_put</c>, so two administrators cannot overwrite each other unseen.
+    /// </summary>
+    private static RelayReply? WriteConflict(JsonObject args, JsonObject orders)
+    {
+        var current = Number(orders, "writeRevision");
+        if (args["expectedRevision"] is null) return null;
+        return args["expectedRevision"] is JsonValue expected && long.TryParse(expected.ToJsonString(), out var revision) && revision == current
+            ? null : Error(RelayErrorCodes.VersionConflict, new { currentRevision = current }, current);
+    }
+
+    private static long NextWrite(JsonObject orders)
+    {
+        var revision = Number(orders, "writeRevision") + 1;
+        orders["writeRevision"] = revision;
+        return revision;
+    }
 
     /// <summary>One counter for every order effect and change on this board, so raises, closes and releases are applied once and in order.</summary>
     private static long NextRevision(JsonObject orders)

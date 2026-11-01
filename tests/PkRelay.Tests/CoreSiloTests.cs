@@ -592,6 +592,83 @@ public sealed class CoreSiloTests
     }
 
     [Fact]
+    public async Task A_late_order_release_keeps_a_claim_taken_again_and_a_refused_notice_is_a_failed_run()
+    {
+        var siloPort = FreePort(); var gatewayPort = FreePort();
+        var orders = new OrderOptions { Enabled = true };
+        using var host = new HostBuilder().ConfigureLogging(log => log.ClearProviders()).UseOrleans(silo => silo
+            .UseLocalhostClustering(siloPort: siloPort, gatewayPort: gatewayPort, serviceId: "core-orders-race-tests", clusterId: Guid.NewGuid().ToString("N"))
+            .AddMemoryGrainStorage("relay"))
+            .ConfigureServices(services => services.AddPkRelayCore().AddSingleton(orders).AddSingleton(provider => new RelayApplication(provider.GetRequiredService<IGrainFactory>(), orders: orders))).Build();
+        await host.StartAsync();
+        try
+        {
+            var application = host.Services.GetRequiredService<RelayApplication>();
+            var factory = host.Services.GetRequiredService<IGrainFactory>();
+            var caller = new RelayCaller("alice", true, ["repo"]);
+            var hub = caller with { IsInternal = true };
+            async Task<RelayReply> Raw(string tool, JsonObject args)
+            {
+                args["repositoryId"] = "repo"; if (!args.ContainsKey("requestId")) args["requestId"] = Guid.NewGuid().ToString("N");
+                return await application.ExecuteAsync(caller, tool, JsonSerializer.SerializeToElement(args));
+            }
+            async Task<JsonObject> Call(string tool, JsonObject args)
+            {
+                var reply = await Raw(tool, args);
+                Assert.True(reply.Ok, tool + ": " + reply.Code + " " + reply.DataJson);
+                return JsonNode.Parse(reply.DataJson)!.AsObject();
+            }
+            // A refused item makes the board raise order_failed while it dispatches, so one pass may leave that new effect pending.
+            async Task Dispatch(IRelayAggregateGrain grain)
+            {
+                for (var attempt = 0; attempt < 5; attempt++)
+                    if ((await grain.ExecuteAsync(hub, Operations.Dispatch, "{}")).Ok) return;
+                Assert.Fail("dispatch stayed pending");
+            }
+            var board = factory.GetGrain<ITaskBoardGrain>("repo/default");
+            async Task Pump() { foreach (var grain in new IRelayAggregateGrain[] { board, factory.GetGrain<ILockGrain>("pc"), board, factory.GetGrain<IControlGrain>(AggregateKinds.ControlKey) }) await Dispatch(grain); }
+            var manager = await Call("session_open", new() { ["role"] = "manager" });
+            var worker = await Call("session_open", new() { ["role"] = "worker" });
+            var other = await Call("session_open", new() { ["role"] = "worker" });
+            JsonObject As(JsonObject session, JsonObject args) { args["sessionId"] = session["sessionId"]!.DeepClone(); args["sessionToken"] = session["sessionToken"]!.DeepClone(); return args; }
+            JsonObject Workflow(string state) => new()
+            {
+                ["state"] = state, ["packet"] = new JsonObject { ["goal"] = "g", ["target"] = "t", ["authorityRef"] = "human-grant:1", ["restoration"] = "r", ["stopCondition"] = "s" },
+                ["criteria"] = new JsonArray(new JsonObject { ["id"] = "c", ["description"] = "d", ["result"] = state == "completed" ? "passed" : "not_run", ["evidenceRef"] = state == "completed" ? "artifact:1" : null }),
+                ["blockers"] = new JsonArray()
+            };
+            await Call("control_request", new() { ["command"] = "register_resource", ["resourceId"] = "pc", ["machineId"] = "pc" });
+            await Call("task_update", As(worker, new() { ["taskId"] = "T-1", ["expectedVersion"] = 0, ["workflow"] = Workflow("ready"), ["attention"] = false }));
+            await Call("task_update", As(worker, new() { ["taskId"] = "T-2", ["expectedVersion"] = 0, ["workflow"] = Workflow("ready"), ["attention"] = false }));
+            await Call("order_put", new()
+            {
+                ["orderId"] = "o-1", ["trigger"] = new JsonObject { ["on"] = "workflow_completed", ["taskId"] = "T-1" },
+                ["actions"] = new JsonArray(new JsonObject { ["do"] = "release_claims" }, new JsonObject { ["do"] = "notify", ["sessionId"] = "no-such-session", ["note"] = "T-1 done" })
+            });
+
+            // The worker completes T-1 and at once claims T-2 with the same resource, before the pump delivers the order's release.
+            await Call("task_claim", As(worker, new() { ["taskId"] = "T-1", ["expectedVersion"] = 1, ["resourceIds"] = new JsonArray("pc"), ["leaseSeconds"] = 600, ["attention"] = false }));
+            await Call("task_update", As(worker, new() { ["taskId"] = "T-1", ["expectedVersion"] = 2, ["workflow"] = Workflow("completed"), ["attention"] = false }));
+            await Call("task_claim", As(worker, new() { ["taskId"] = "T-2", ["expectedVersion"] = 1, ["resourceIds"] = new JsonArray("pc"), ["leaseSeconds"] = 600, ["attention"] = false }));
+            await Pump();
+            await Pump();
+            // The new claim survives: another session still cannot take pc, and T-2 is still the worker's.
+            Assert.Equal(RelayErrorCodes.Busy, (await Raw("claim_acquire", As(other, new() { ["resourceId"] = "pc" }))).Code);
+            Assert.Equal(worker["sessionId"]!.GetValue<string>(), (await Call("task_get", new() { ["taskId"] = "T-2" }))["owner"]!.GetValue<string>());
+            Assert.False((await Call("task_get", new() { ["taskId"] = "T-1" })).ContainsKey("owner"));
+
+            // The notice to an unknown session was refused: a failed run, logged and raised to the manager.
+            var listed = Assert.Single((await Call("get_status", As(manager, new())))["orders"]!.AsArray())!.AsObject();
+            Assert.Equal((1L, 1L), (listed["runs"]!.GetValue<long>(), listed["fails"]!.GetValue<long>()));
+            Assert.Contains("refused", listed["err"]!.GetValue<string>());
+            var item = (await Call("check_inbox", As(manager, new())))["attention"]!.AsObject();
+            Assert.Equal("order_failed", item["k"]!.GetValue<string>());
+            Assert.Contains("no-such-session", item["x"]!.GetValue<string>());
+        }
+        finally { await host.StopAsync(); }
+    }
+
+    [Fact]
     public void An_anomaly_needs_enough_samples_on_both_sides_and_a_value_past_the_ratio()
     {
         var at = new DateTimeOffset(2026, 11, 1, 10, 0, 0, TimeSpan.Zero);
