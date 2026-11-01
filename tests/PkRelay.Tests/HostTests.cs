@@ -479,6 +479,12 @@ public class HostTests
         var itemId = JsonDocument.Parse(raised.DataJson).RootElement.GetProperty("itemId").GetString();
         var later = Data(await host.Call(client, "attention_respond", new { repositoryId = "repo", requestId = "attention-later", sessionId, sessionToken, itemId, action = "later" }));
         Assert.Equal(4, later.GetProperty("snoozeBoundaries").GetInt32());
+        var again = await host.Services.GetRequiredService<Orleans.IGrainFactory>().GetGrain<ISessionGrain>(sessionId)
+            .ExecuteAsync(hub, "__attention_raise", JsonSerializer.Serialize(new { repositoryId = "repo", kind = "failed", taskId = "T-1", blocking = true }));
+        var blocking = JsonDocument.Parse(again.DataJson).RootElement.GetProperty("itemId").GetString();
+        foreach (var attempt in new[] { "b1", "b2" }) await host.Call(client, "attention_respond", new { repositoryId = "repo", requestId = attempt, sessionId, sessionToken, itemId = blocking, action = "later" });
+        using var capped = await client.PostAsJsonAsync("/api/tools/attention_respond", new { repositoryId = "repo", requestId = "b3", sessionId, sessionToken, itemId = blocking, action = "later" });
+        Assert.Equal(HttpStatusCode.Conflict, capped.StatusCode);
         using var unknown = await client.PostAsJsonAsync("/api/tools/attention_respond", new { repositoryId = "repo", requestId = "attention-missing", sessionId, sessionToken, itemId = "a-404", action = "accept" });
         Assert.Equal(HttpStatusCode.NotFound, unknown.StatusCode);
         using var noSession = await client.PostAsJsonAsync("/api/tools/attention_respond", new { repositoryId = "repo", requestId = "attention-anon", itemId, action = "accept" });

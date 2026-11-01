@@ -162,6 +162,7 @@ internal static class StandingPreferences
         proposals[id] = proposal;
         context.State["standing"] = standing;
         // Seam for attention (build steps 7-8): raise a standing_proposal item to the repository's manager sessions here.
+        // Always send a revision so a late or repeated raise can never reopen a closed item.
         return Ok(new { proposalId = id, pending = true }, Number(standing, "revision"));
     }
 

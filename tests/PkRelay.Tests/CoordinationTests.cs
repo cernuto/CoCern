@@ -602,6 +602,36 @@ public sealed class CoordinationTests
     }
 
     [Fact]
+    public void A_raise_delivered_again_without_a_revision_cannot_reopen_a_just_closed_item()
+    {
+        var session = AttentionSession();
+        var raise = new JsonObject { ["note"] = "tests failed", ["refs"] = new JsonArray("T-9") };
+        var id = Data(RaiseAttention(session, "failed", "T-1", raise.DeepClone().AsObject()))["itemId"]!.GetValue<string>();
+        Assert.True(Call(session, "session", "attention_respond", new() { ["sessionToken"] = "secret", ["itemId"] = id, ["action"] = "dismiss", ["requestId"] = "d" }).Ok);
+        // The same outbox raise delivered again is ignored for ten minutes after the close.
+        Assert.Equal("recentlyClosed", Data(RaiseAttention(session, "failed", "T-1", raise.DeepClone().AsObject(), seconds: 60))["reason"]!.GetValue<string>());
+        Assert.Empty(AttentionItems(session));
+        // A raise with new content, or with a revision, is a new event and opens an item.
+        var changed = Data(RaiseAttention(session, "failed", "T-1", new() { ["note"] = "tests failed again" }, seconds: 120));
+        Assert.True(changed["raised"]!.GetValue<bool>());
+        Assert.True(Call(session, "session", "__attention_close", new() { ["taskId"] = "T-1" }, seconds: 130).Ok);
+        Assert.Equal("recentlyClosed", Data(RaiseAttention(session, "failed", "T-1", new() { ["note"] = "tests failed again" }, seconds: 140))["reason"]!.GetValue<string>());
+        var withRevision = raise.DeepClone().AsObject(); withRevision["revision"] = 3;
+        Assert.True(Data(RaiseAttention(session, "failed", "T-1", withRevision, seconds: 150))["raised"]!.GetValue<bool>());
+        Assert.True(Call(session, "session", "__attention_close", new() { ["taskId"] = "T-1" }, seconds: 160).Ok);
+        // After the window the same raise opens an item again.
+        Assert.True(Data(RaiseAttention(session, "failed", "T-1", new() { ["note"] = "tests failed again" }, seconds: 140 + RelayLimits.AttentionTombstoneMinutes * 60))["raised"]!.GetValue<bool>());
+        // The remembered closes are capped.
+        for (var index = 0; index < RelayLimits.MaxAttentionTombstones + 5; index++)
+        {
+            Assert.True(RaiseAttention(session, "info", "C-" + index, seconds: 2_000).Ok);
+            Assert.True(Call(session, "session", "__attention_close", new() { ["taskId"] = "C-" + index }, seconds: 2_000).Ok);
+        }
+        Assert.Equal(RelayLimits.MaxAttentionTombstones, JsonNode.Parse(session.Value.Json)!["attentionRecent"]!.AsObject().Count);
+        Assert.True(Data(RaiseAttention(session, "info", "C-0", seconds: 2_001))["raised"]!.GetValue<bool>());
+    }
+
+    [Fact]
     public void Expired_attention_items_vanish()
     {
         var session = AttentionSession();

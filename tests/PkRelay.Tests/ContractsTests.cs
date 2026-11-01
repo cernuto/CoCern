@@ -146,7 +146,7 @@ public sealed class ContractsTests
         // Every session may answer, but the messaging-only chat profile receives no offers to answer.
         Assert.Contains(RelayTools.AttentionRespond, PkRelay.Adapter.CoordinationTools.NamesForRole(false));
         Assert.DoesNotContain(RelayTools.AttentionRespond, PkRelay.Adapter.CoordinationTools.NamesForRole(false, chatOnly: true));
-        Assert.Equal(RelayErrorKind.Invalid, RelayErrorCodes.Classify(RelayErrorCodes.SnoozeLimit));
+        Assert.Equal(RelayErrorKind.Conflict, RelayErrorCodes.Classify(RelayErrorCodes.SnoozeLimit));
     }
 
     [Fact]

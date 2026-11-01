@@ -17,7 +17,7 @@ Each session keeps a small queue of attention items: things it should look at, s
 | `later` | Hides it for the next 3 replies, or until `until` (an ISO time) when you give one. |
 
 - `later` never acknowledges a message. Only `ack` does.
-- An item that blocks another session's claimed task can be put off at most twice, and for at most 30 minutes after the first time. After that `later` answers `SnoozeLimit`.
+- An item that blocks another session's claimed task can be put off at most twice, and for at most 30 minutes after the first time. After that `later` answers `SnoozeLimit` (HTTP 409).
 - An offer you do not answer counts as `later` at your next reply.
 - An unknown or closed item answers `NotFound`.
 
@@ -27,7 +27,7 @@ Each session keeps a small queue of attention items: things it should look at, s
 "attention": { "id": "a-91", "k": "blocked", "t": "T-12", "x": "T-12 blocked: waiting on schema review", "more": 3 }
 ```
 
-`k` is the kind, `t` the task, `b` the board when not `default`, `x` at most 200 characters of text, and `more` how many other items wait.
+`k` is the kind, `t` the task, `b` the board when not `default`, `x` at most 200 characters of text, and `more` how many other items could be offered now.
 
 ## How items are ranked
 
@@ -47,6 +47,7 @@ Each session keeps a small queue of attention items: things it should look at, s
 ## Items
 
 - One open item per kind and task. Raising it again updates it.
+- For 10 minutes after an item closes, the same raise sent again is ignored, so a repeated delivery cannot reopen it.
 - At most 50 open items per session. When full, the lowest-tier oldest item is dropped.
 - Every item expires after 7 days if nothing closes it.
 - Items live in the session's own state, next to the inbox, and survive restarts.

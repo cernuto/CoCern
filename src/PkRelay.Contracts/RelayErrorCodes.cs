@@ -93,7 +93,7 @@ public static class RelayErrorCodes
     private static readonly FrozenSet<string> Conflicts = new[]
     {
         VersionConflict, RequestConflict, StaleClaim, Paused, Busy, ActionConflict, UnresolvedAction,
-        DeltaRestartRequired, WorkflowRecheckRequired, WorkflowIncomplete, WorkflowNotReady
+        DeltaRestartRequired, WorkflowRecheckRequired, WorkflowIncomplete, WorkflowNotReady, SnoozeLimit
     }.ToFrozenSet(StringComparer.Ordinal);
 
     private static readonly FrozenSet<string> Denials = new[] { RepositoryDenied, SessionDenied, AdministratorRequired, MachineRevoked, MachineRequired }.ToFrozenSet(StringComparer.Ordinal);

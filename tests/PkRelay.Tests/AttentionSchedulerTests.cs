@@ -219,6 +219,18 @@ public sealed class AttentionSchedulerTests
     }
 
     [Fact]
+    public void More_counts_only_items_that_could_be_offered_now()
+    {
+        var session = OpenSession();
+        Raise(session, AttentionKinds.Blocked, "T-1");
+        Raise(session, AttentionKinds.Info, "T-1");
+        var next = Raise(session, AttentionKinds.NextWork, "T-2");
+        var reply = Data(Call(session, "__attention_offer", new() { ["focusTaskId"] = "T-1" }));
+        // The two items for the focused task are still actionable, but neither could be offered at this boundary.
+        Assert.Equal((next, 0, 3), (reply["attention"]!["id"]!.GetValue<string>(), reply["attention"]!["more"]!.GetValue<int>(), reply["actionable"]!.GetValue<int>()));
+    }
+
+    [Fact]
     public void Later_hides_an_item_for_exactly_three_boundaries_through_offer()
     {
         var session = OpenSession();

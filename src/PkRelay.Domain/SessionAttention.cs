@@ -31,19 +31,23 @@ internal static class SessionAttention
         if (revision > 0 && Number(ObjectAt(state, "attentionClosed"), key) >= revision) return Ok(new { raised = false, reason = "stale" });
         var existing = Find(items, key);
         if (existing is { } open && revision > 0 && Number(open.Item, "revision") > revision) return Ok(new { raised = false, reason = "stale", itemId = open.Id });
+        var content = new JsonObject { ["kind"] = kind };
+        Set(content, "taskId", taskId); Set(content, "boardId", boardId == "default" ? "" : boardId); Set(content, "subject", subject);
+        Set(content, "blocker", Text(args, "blocker") is { Length: > 0 and <= RelayLimits.MaxAttentionBlockerLength } blocker ? blocker : "");
+        if (AttentionItem.IsTrue(args, "blocking")) content["blocking"] = true;
+        content["priority"] = Priority(args["priority"]);
+        content["refs"] = new JsonArray(Refs(args["refs"]).Select(x => (JsonNode)x).ToArray());
+        content["note"] = Cap(Text(args, "note"));
+        // Without a revision, a redelivered copy of a raise for an item just closed is recognized by its content and ignored.
+        if (revision == 0 && existing is null && RecentlyClosed(state, key, Fingerprint(content), now)) return Ok(new { raised = false, reason = "recentlyClosed" });
 
         var id = existing?.Id ?? "a-" + (Number(state, "attentionSeq") + 1);
         var item = existing?.Item ?? new JsonObject
         {
             ["id"] = id, ["createdAt"] = now.ToString("O"), ["snoozes"] = 0, ["snoozeBoundaries"] = 0, ["snoozeUntil"] = null, ["shownAt"] = null
         };
-        item["kind"] = kind;
-        Set(item, "taskId", taskId); Set(item, "boardId", boardId == "default" ? "" : boardId); Set(item, "subject", subject);
-        Set(item, "blocker", Text(args, "blocker") is { Length: > 0 and <= 64 } blocker ? blocker : "");
-        if (AttentionItem.IsTrue(args, "blocking")) item["blocking"] = true; else item.Remove("blocking");
-        item["priority"] = Priority(args["priority"]);
-        item["refs"] = new JsonArray(Refs(args["refs"]).Select(x => (JsonNode)x).ToArray());
-        item["note"] = Cap(Text(args, "note"));
+        foreach (var field in ContentFields)
+            if (content[field] is { } value) item[field] = value.DeepClone(); else item.Remove(field);
         if (revision > 0) item["revision"] = revision;
         item["updatedAt"] = now.ToString("O");
         item["expiresAt"] = Expiry(args, now).ToString("O");
@@ -76,6 +80,7 @@ internal static class SessionAttention
                 : (taskId.Length == 0 || item.TaskId == taskId && item.BoardId == boardId) && (subject.Length == 0 || item.Subject == subject) && (kinds is null || kinds.Contains(item.Kind));
             if (!matches) continue;
             RememberClosed(state, item.Key, Math.Max(revision, Number(items[item.Id]!.AsObject(), "revision")));
+            Tombstone(state, item.Key, items[item.Id]!.AsObject(), context.Now);
             items.Remove(item.Id); closed++;
         }
         // A close with a revision and named kinds also guards keys with no open item, so an older raise arriving later stays closed.
@@ -117,10 +122,12 @@ internal static class SessionAttention
         }
         var candidates = AttentionScheduler.Items(items).Where(item => !sittingOut.Contains(item.Id)).ToArray();
         var actionable = AttentionScheduler.Eligible(candidates, now).Count();
-        var picked = AttentionScheduler.Pick(candidates, now, Optional(args, "focusTaskId"), Optional(args, "focusBoardId") is { Length: > 0 } board ? board : "default");
+        // "more" counts from the set Pick chooses from, so it never includes items for the focused task that cannot be offered now.
+        var offerable = AttentionScheduler.Eligible(candidates, now, Optional(args, "focusTaskId"), Optional(args, "focusBoardId") is { Length: > 0 } board ? board : "default").ToArray();
+        var picked = AttentionScheduler.Pick(offerable, now);
         if (picked is null) return Ok(new JsonObject { ["actionable"] = actionable });
         items[picked.Id]!["shownAt"] = now.ToString("O");
-        return Ok(new JsonObject { ["attention"] = OfferJson(picked, actionable - 1), ["actionable"] = actionable });
+        return Ok(new JsonObject { ["attention"] = OfferJson(picked, offerable.Length - 1), ["actionable"] = actionable });
     }
 
     /// <summary>The agent's answer: accept and dismiss close the item; later snoozes it for a number of boundaries or until a time.</summary>
@@ -138,6 +145,7 @@ internal static class SessionAttention
         {
             case AttentionActions.Accept or AttentionActions.Dismiss:
                 RememberClosed(state, AttentionItem.From(id, item).Key, Number(item, "revision"));
+                Tombstone(state, AttentionItem.From(id, item).Key, item, now);
                 items.Remove(id);
                 return Ok(new { itemId = id, outcome = action == AttentionActions.Accept ? "accepted" : "dismissed" });
             case AttentionActions.Later:
@@ -227,6 +235,39 @@ internal static class SessionAttention
         closed.Remove(key);
         closed[key] = newest;
         while (closed.Count > RelayLimits.MaxAttentionClosedKeys) closed.Remove(closed.First().Key);
+    }
+
+    /// <summary>The fields that make up an item's content; two raises with the same values are the same raise.</summary>
+    private static readonly string[] ContentFields = ["kind", "taskId", "boardId", "subject", "blocker", "blocking", "priority", "refs", "note"];
+
+    private static string Fingerprint(JsonObject item)
+    {
+        var content = new JsonObject();
+        foreach (var field in ContentFields) content[field] = item[field]?.DeepClone();
+        return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(content.ToJsonString())), 0, 12);
+    }
+
+    /// <summary>
+    /// Remembers a closed item's content for <see cref="RelayLimits.AttentionTombstoneMinutes"/>, at most
+    /// <see cref="RelayLimits.MaxAttentionTombstones"/> keys, so an outbox raise delivered twice cannot reopen it.
+    /// </summary>
+    private static void Tombstone(JsonObject state, string key, JsonObject item, DateTimeOffset now)
+    {
+        var recent = PruneTombstones(state, now);
+        recent.Remove(key);
+        recent[key] = new JsonObject { ["at"] = now.ToString("O"), ["fingerprint"] = Fingerprint(item) };
+        while (recent.Count > RelayLimits.MaxAttentionTombstones) recent.Remove(recent.First().Key);
+    }
+
+    private static bool RecentlyClosed(JsonObject state, string key, string fingerprint, DateTimeOffset now) =>
+        PruneTombstones(state, now)[key] is JsonObject tombstone && Text(tombstone, "fingerprint") == fingerprint;
+
+    private static JsonObject PruneTombstones(JsonObject state, DateTimeOffset now)
+    {
+        var recent = ObjectAt(state, "attentionRecent");
+        foreach (var stale in recent.Where(x => x.Value is not JsonObject tombstone || now >= Date(tombstone, "at").AddMinutes(RelayLimits.AttentionTombstoneMinutes)).Select(x => x.Key).ToArray())
+            recent.Remove(stale);
+        return recent;
     }
 
     private static DateTimeOffset Expiry(JsonObject args, DateTimeOffset now)
