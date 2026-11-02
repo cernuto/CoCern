@@ -55,8 +55,8 @@ public static class RelayToolCatalog
 {
     public static IReadOnlyList<RelayTool> All { get; } =
     [
-        new(RelayTools.SessionOpen, "Open a fresh chat session; return its private handle and bounded task packet. Supply repositoryId, machineId, workspaceId, role, optional taskId/binding, and requestId.", false, true, false, []),
-        new(RelayTools.SessionBind, "Record this session's verified direct Roslyn/Visual Studio tool bindings under an expected binding version. Does not connect or switch IDEs.", false, true, true, ["expectedVersion", "binding"]),
+        new(RelayTools.SessionOpen, "Open this chat's one session; optional role, taskId, binding. Retry an uncertain open with the same requestId and arguments.", false, true, false, []),
+        new(RelayTools.SessionBind, "Report Roslyn/Visual Studio bindings under expectedVersion; optional label renames the session, machineId reports its PC.", false, true, true, ["expectedVersion"]),
         new(RelayTools.WorkerList, "List authorized reported workers and observation freshness for a repository. Registration or heartbeat does not prove model availability.", false, false, false, []),
         new(RelayTools.GetStatus, "Read bounded repository and session coordination status, including blockers and uncertain actions.", false, false, false, []),
         new(RelayTools.TaskGet, "Read bounded task details or a board list. sinceRevision reads task deltas; finish every page before saving the checkpoint, and restart on DeltaRestartRequired.", false, false, false, [],

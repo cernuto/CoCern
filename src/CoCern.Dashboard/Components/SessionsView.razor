@@ -1,0 +1,24 @@
+<div class="sessions-view">
+    <div class="session-view-switch" role="group" aria-label="Session view">
+        <button type="button" aria-pressed="@(_graph ? "true" : "false")" @onclick="() => _graph = true">Interaction map</button>
+        <button type="button" aria-pressed="@(!_graph ? "true" : "false")" @onclick="() => _graph = false">Session list</button>
+    </div>
+    @if (_graph)
+    {
+        <SessionGraph Sessions="@Sessions" Interactions="@Interactions" SelectedId="@SelectedId" OnSelect="@OnSelect" Now="@Now" Truncated="@Truncated" />
+    }
+    else
+    {
+        <SessionList Sessions="@Sessions" SelectedId="@SelectedId" OnSelect="@OnSelect" Now="@Now" Truncated="@Truncated" />
+    }
+</div>
+
+@code {
+    [Parameter] public DashboardSession[] Sessions { get; set; } = [];
+    [Parameter] public DashboardInteractions Interactions { get; set; } = new();
+    [Parameter] public string? SelectedId { get; set; }
+    [Parameter] public EventCallback<string> OnSelect { get; set; }
+    [Parameter] public DateTimeOffset Now { get; set; }
+    [Parameter] public bool Truncated { get; set; }
+    private bool _graph = true;
+}

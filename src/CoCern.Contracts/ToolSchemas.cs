@@ -15,6 +15,7 @@ internal static class ToolSchemas
         string[] extra = tool.Name switch
         {
             RelayTools.SessionOpen => ["machineId", "label"],
+            RelayTools.SessionBind => ["binding", "label", "machineId"],
             RelayTools.TaskGet => ["taskId", "section", "sinceRevision", "snapshotRevision", "cursor", "limit"],
             RelayTools.TaskUpdate => ["taskId", "expectedVersion", "workflow", "includeNextWork", "usage", "attention"],
             RelayTools.TaskClaim or RelayTools.ActionReport => ["attention"],
@@ -36,6 +37,15 @@ internal static class ToolSchemas
         var properties = ForwardingFields.Concat(tool.RequiredFields).Concat(extra).Distinct(StringComparer.Ordinal).ToDictionary(field => field, field => all[field]);
         // The envelope repeats on every tool, so it is advertised without its length bounds; the hub enforces them.
         foreach (var field in ForwardingFields) properties[field] = new { type = "string", description = EnvelopeDescription(field) };
+        // A chat keeps one session, so session_open says what its requestId buys: a retried open returns that session, never a second one.
+        if (tool.Name == RelayTools.SessionOpen) properties["requestId"] = new { type = "string", description = SessionOpenRequestId };
+        // session_bind's description says what its optional fields do, so they are advertised by type; InputSchema describes them in full.
+        if (tool.Name == RelayTools.SessionBind)
+        {
+            properties["binding"] = new { type = "object" };
+            properties["label"] = new { type = "string" };
+            properties["machineId"] = new { type = "string" };
+        }
         // Standing items are advertised by shape only; InputSchema gives their limits.
         if (tool.Name is RelayTools.StandingPropose or RelayTools.StandingPut)
             foreach (var field in properties.Keys.ToArray())
@@ -131,9 +141,9 @@ internal static class ToolSchemas
         switch (tool)
         {
             case RelayTools.SessionOpen:
-                Text("label", "Display label for this fresh chat session."); Object("binding", "Reported configured Roslyn/Visual Studio binding and source identity."); break;
+                Text("label", "Display label for this chat's session."); properties["requestId"] = new { type = "string", maxLength = RelayLimits.MaxIdentifierLength, description = SessionOpenRequestId }; Object("binding", "Reported configured Roslyn/Visual Studio binding and source identity."); break;
             case RelayTools.SessionBind:
-                Object("binding", "Reported configured Roslyn/Visual Studio binding; update under expectedVersion."); Text("availability", "Reported current worker availability."); Integer("freshnessSeconds", "Freshness duration, at most 600 seconds."); break;
+                Object("binding", "Reported configured Roslyn/Visual Studio binding; update under expectedVersion. Left out, the current binding stays."); Text("label", "New display label for this session, such as its chat's title."); Text("availability", "Reported current worker availability."); Integer("freshnessSeconds", "Freshness duration, at most 600 seconds."); break;
             case RelayTools.TaskGet:
                 properties["taskId"] = new { type = "string", maxLength = RelayLimits.MaxIdentifierLength, description = "Omit for a bounded board list or delta." };
                 properties["section"] = new { type = "string", @enum = new[] { "facts", "messages", "reports", "actions", "workflow", "standing" }, description = "standing needs no taskId." };
@@ -254,6 +264,8 @@ internal static class ToolSchemas
         }
         return properties;
     }
+
+    private const string SessionOpenRequestId = "Retried with the same arguments, returns the same session.";
 
     private static string EnvelopeDescription(string field) => field switch
     {

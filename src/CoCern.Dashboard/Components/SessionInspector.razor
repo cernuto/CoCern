@@ -6,15 +6,30 @@
     }
     else
     {
-        <div class="inspector-title"><span class="provider-token" aria-hidden="true">@ProviderInitial</span><div><h3>@Session.Label</h3><p>@Session.Provider</p></div></div>
-        <div class="tag-row"><span class="tag @(Session.Reachable ? "good" : "attention")" title="Whether the hub can wake this chat. It does not tell whether a model is running.">@(Session.Reachable ? "Reachable" : "Not reachable")</span><span class="tag neutral">@DashboardFormat.Freshness(Session, Now)</span></div>
+        <div class="inspector-title"><span class="provider-token" aria-hidden="true">@ProviderInitial</span><div><h3>@Session.Label</h3><p title="@Session.SessionId">@Session.Provider · #@ShortId(Session.SessionId)</p></div></div>
+        <div class="tag-row">
+            <span class="tag @(Session.Reachable ? "good" : "attention")" title="Whether the hub can wake this chat. It does not tell whether a model is running.">@(Session.Reachable ? "Reachable" : "Not reachable")</span>
+            @if (Session.HasBindingReport is null)
+            {
+                <span class="tag neutral">Tool binding not reported</span>
+            }
+            else if (Session.HasBindingReport == false)
+            {
+                <span class="tag neutral">No tool binding reported</span>
+            }
+            else
+            {
+                <span class="tag neutral" title="Freshness of reported binding metadata, not a verified IDE connection. Relay calls do not renew this report.">Report: @DashboardFormat.Freshness(Session, Now)</span>
+            }
+        </div>
         <dl class="session-facts">
             <div><dt>Machine</dt><dd>@MachineLabel</dd></div>
             <div><dt>Repository</dt><dd>@(string.IsNullOrWhiteSpace(Session.RepositoryId) ? "Not reported" : Session.RepositoryId)</dd></div>
             <div><dt>Mapping</dt><dd>@(Session.IsMapped ? "Mapped" : "Not mapped")</dd></div>
-            <div><dt>Last report</dt><dd title="@DashboardFormat.Timestamp(Session.ReportedAt)">@DashboardFormat.Ago(Session.ReportedAt, Now)</dd></div>
-            <div><dt>Fresh until</dt><dd>@DashboardFormat.Timestamp(Session.FreshUntil)</dd></div>
-            <div><dt>Last activity</dt><dd title="@DashboardFormat.Timestamp(Session.LastActivityAt)">@DashboardFormat.Ago(Session.LastActivityAt, Now)</dd></div>
+            <div><dt>Opened</dt><dd>@(Session.OpenedAt is { } opened ? DashboardFormat.Timestamp(opened) : "Opened time unavailable")</dd></div>
+            <div><dt>Status report</dt><dd title="@DashboardFormat.Timestamp(Session.ReportedAt)">@DashboardFormat.Ago(Session.ReportedAt, Now)</dd></div>
+            <div><dt>Report fresh until</dt><dd>@DashboardFormat.Timestamp(Session.FreshUntil)</dd></div>
+            <div><dt title="Most recent recorded successful tool call, including background polling. This does not indicate whether a model is running.">Last relay call</dt><dd title="@DashboardFormat.Timestamp(Session.LastActivityAt)">@DashboardFormat.Ago(Session.LastActivityAt, Now)</dd></div>
         </dl>
         <div class="inspector-counts"><div><strong>@DashboardFormat.Count(Session.UnreadMessages)</strong><span>Unread messages</span></div><div><strong>@DashboardFormat.Count(Session.PendingEffects)</strong><span>Pending effects</span></div></div>
         <details class="session-identifiers"><summary>Session ID</summary><p>@Session.SessionId</p></details>
@@ -35,6 +50,7 @@
     [Parameter] public DashboardSession? Session { get; set; }
     [Parameter] public DashboardLogEntry[] Logs { get; set; } = [];
     [Parameter] public DateTimeOffset Now { get; set; }
+    private static string ShortId(string id) => id[..Math.Min(8, id.Length)];
     private string ProviderInitial => string.IsNullOrWhiteSpace(Session?.Provider) ? "S" : Session.Provider[..1].ToUpperInvariant();
     private string MachineLabel => Session is null ? "" : DashboardFormat.Machine(Session);
     private DashboardLogEntry[] SessionLogEntries => Logs.Where(entry => entry.SessionId == Session?.SessionId).OrderByDescending(entry => entry.Sequence).Take(4).ToArray();

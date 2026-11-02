@@ -9,7 +9,7 @@
 <PageTitle>@PageTitle · CoCern</PageTitle>
 @if (Connection.State == DashboardLinkState.SignIn)
 {
-    <SignIn Notice="@Connection.Notice" OnSignIn="SignInAsync" />
+    <SignIn Notice="@Connection.Notice" OnSignIn="SignInAsync" Options="@Connection.LoginOptions" />
 }
 else if (!Connection.Authenticated)
 {
@@ -70,7 +70,7 @@ else
                         <DocCacheView Cache="@snapshot.DocCache" Now="@_now" />
                         break;
                     case "sessions":
-                        <div class="board-layout"><SessionList Sessions="@snapshot.Sessions" SelectedId="@_selectedId" OnSelect="SelectSession" Now="@_now" Truncated="@snapshot.SessionsTruncated" /><SessionInspector Session="@SelectedSession" Logs="@snapshot.Logs" Now="@_now" /></div>
+                        <div class="board-layout"><SessionsView Sessions="@snapshot.Sessions" Interactions="@snapshot.Interactions" SelectedId="@_selectedId" OnSelect="SelectSession" Now="@_now" Truncated="@snapshot.SessionsTruncated" /><SessionInspector Session="@SelectedSession" Logs="@snapshot.Logs" Now="@_now" /></div>
                         <TrafficLane Entries="@snapshot.Traffic" Sessions="@snapshot.Sessions" SelectedSession="@SelectedSession" InstanceId="@snapshot.InstanceId" Now="@_now" Live="@IsLive" />
                         break;
                     case "sql":

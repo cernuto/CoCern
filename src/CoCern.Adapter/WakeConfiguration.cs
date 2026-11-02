@@ -7,7 +7,7 @@ public sealed record WakeRoute(string RepositoryId, string BoardId, string Sessi
 public sealed record WakeSession(string SessionId, string SessionToken);
 /// <summary>The optional <c>wakeLimits</c> object of a wake configuration; any field left out takes its default.</summary>
 public sealed record WakeLimitSettings(int? MinIntervalSeconds = null, int? MaxPerWindow = null, int? WindowMinutes = null);
-public sealed record WakeConfiguration(string RelayUrl, string TokenFile, string CodexPath, string StatePath, string StopFile, WakeRoute[] Routes, [property: JsonPropertyName("wakeLimits")] WakeLimitSettings? Limits = null)
+public sealed record WakeConfiguration(string RelayUrl, string TokenFile, string CodexPath, string StatePath, string StopFile, WakeRoute[] Routes, [property: JsonPropertyName("wakeLimits")] WakeLimitSettings? Limits = null, string? Fingerprint = null)
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -67,7 +67,11 @@ public sealed record WakeConfiguration(string RelayUrl, string TokenFile, string
         return new(TimeSpan.FromSeconds(interval), count, TimeSpan.FromMinutes(window));
     }
 
-    public AdapterOptions AdapterOptions() => new(RelayUrl, ReadBounded(TokenFile, 8192), signalR: true);
+    /// <summary>The configured pin takes precedence over <c>COCERN_FINGERPRINT</c>; an omitted pin uses the same environment setting as the MCP adapter.</summary>
+    public AdapterOptions AdapterOptions() => new(RelayUrl, ReadBounded(TokenFile, 8192), signalR: true)
+    {
+        PinnedFingerprint = CoCern.Adapter.AdapterOptions.ParseFingerprint(RelayUrl, Fingerprint ?? Environment.GetEnvironmentVariable("COCERN_FINGERPRINT"))
+    };
     public static WakeSession ReadSession(WakeRoute route)
     {
         try

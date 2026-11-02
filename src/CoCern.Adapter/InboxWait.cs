@@ -5,9 +5,9 @@ using CoCern.Contracts;
 namespace CoCern.Adapter;
 
 /// <summary>
-/// <c>check_inbox</c> with <c>waitSeconds</c>: the adapter re-reads the inbox itself until mail arrives or the wait ends, inside one tool call.
+/// <c>check_inbox</c> with <c>waitSeconds</c>: the adapter re-reads the inbox until mail, an eligible attention wake, or the end of the wait.
 /// A chat that is mid-turn cannot be woken, so without this it polls, and every poll is a model call that re-reads its whole context.
-/// The option is the adapter's own and never reaches the hub. Its polls send <c>attention: false</c>, so a waiting read never takes an offer.
+/// The option never reaches the hub. Internal polls send <c>attention: false</c>; only the read returned for an attention wake takes an offer.
 /// </summary>
 public static class InboxWait
 {
@@ -19,7 +19,7 @@ public static class InboxWait
     internal static readonly TimeSpan PollMargin = TimeSpan.FromSeconds(5);
 
     /// <summary>The property added to the advertised <c>check_inbox</c> schema.</summary>
-    public static object Schema => new { type = "integer", minimum = 1, maximum = MaxSeconds, description = "Wait up to this many seconds for mail instead of polling; returns as soon as any message arrives." };
+    public static object Schema => new { type = "integer", minimum = 1, maximum = MaxSeconds, description = "Wait up to this many seconds for mail or an eligible attention wake instead of polling; attention:false opts out of attention wakes." };
 
     /// <summary>A number, or a quoted one (models send both); anything else waits for nothing rather than failing the read.</summary>
     internal static int WaitSeconds(JsonElement wait) => wait.ValueKind switch
@@ -35,7 +35,18 @@ public static class InboxWait
             return await forwarder.ForwardAsync(RelayTools.CheckInbox, arguments, cancellationToken);
         var forwarded = JsonNode.Parse(arguments.GetRawText())!.AsObject();
         forwarded.Remove("waitSeconds");
-        // Most polls are discarded unseen, so none of them takes an attention offer: a waiting read carries none. The poll that returns
+        var offeredRequest = JsonSerializer.SerializeToElement(forwarded);
+        JsonElement? attentionRequest = null;
+        if ((!arguments.TryGetProperty("attention", out var attention) || attention.ValueKind != JsonValueKind.False) &&
+            arguments.TryGetProperty("sessionId", out var session) && session.ValueKind == JsonValueKind.String &&
+            arguments.TryGetProperty("sessionToken", out var token) && token.ValueKind == JsonValueKind.String)
+        {
+            var status = new JsonObject { ["attentionDetail"] = true };
+            foreach (var key in new[] { "repositoryId", "boardId", "sessionId", "sessionToken" })
+                if (forwarded.TryGetPropertyValue(key, out var value)) status[key] = value?.DeepClone();
+            attentionRequest = JsonSerializer.SerializeToElement(status);
+        }
+        // Most polls are discarded unseen, so none of them takes an attention offer. The poll that returns
         // reaches the model, so the hub closes the info items of the messages on its page (seen); an empty poll lists none.
         forwarded["attention"] = false;
         forwarded["seen"] = true;
@@ -52,12 +63,23 @@ public static class InboxWait
             var left = duration - elapsed.Elapsed;
             poll.CancelAfter((left > TimeSpan.Zero ? left : TimeSpan.Zero) + PollMargin);
             AdapterReply reply;
-            try { reply = await forwarder.ForwardAsync(RelayTools.CheckInbox, request, poll.Token); }
+            try
+            {
+                reply = await forwarder.ForwardAsync(RelayTools.CheckInbox, request, poll.Token);
+                if (!reply.Ok && poll.IsCancellationRequested && !cancellationToken.IsCancellationRequested) return last ?? reply;
+                if (!reply.Ok || HasMail(reply) || duration - elapsed.Elapsed < MinimumDelay) return reply;
+                last = reply;
+                if (attentionRequest is { } statusRequest)
+                {
+                    // Status reads never consume offers. Only a hub-validated eligible wake ends the wait with one ordinary inbox read.
+                    var status = await forwarder.ForwardAsync(RelayTools.GetStatus, statusRequest, poll.Token);
+                    if (status.Ok && status.Data is { ValueKind: JsonValueKind.Object } data && WakeReconciler.Attention(data).Wake is not null)
+                        return await forwarder.ForwardAsync(RelayTools.CheckInbox, offeredRequest, poll.Token);
+                }
+            }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return last ?? new(false, "hub_timeout"); }
-            if (!reply.Ok && poll.IsCancellationRequested && !cancellationToken.IsCancellationRequested) return last ?? reply;
             var remaining = duration - elapsed.Elapsed;
-            if (!reply.Ok || HasMail(reply) || remaining < MinimumDelay) return reply;
-            last = reply;
+            if (remaining < MinimumDelay) return reply;
             await Task.Delay(remaining < pollInterval ? remaining : pollInterval, cancellationToken);
         }
     }

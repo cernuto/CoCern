@@ -10,6 +10,7 @@ public sealed record DashboardSnapshot
     public DashboardMachine[] Machines { get; init; } = [];
     public DashboardSession[] Sessions { get; init; } = [];
     public bool SessionsTruncated { get; init; }
+    public DashboardInteractions Interactions { get; init; } = new();
     public DatabaseMetrics Database { get; init; } = new();
     public DashboardLogEntry[] Logs { get; init; } = [];
     public DashboardTrafficEvent[] Traffic { get; init; } = [];
@@ -157,10 +158,34 @@ public sealed record DashboardSession
     public bool Reachable { get; init; }
     public DateTimeOffset? ReportedAt { get; init; }
     public DateTimeOffset? FreshUntil { get; init; }
+    public DateTimeOffset? OpenedAt { get; init; }
+    public long? BindingVersion { get; init; }
+    /// <summary>Whether nonempty binding metadata was reported; never proof of an IDE connection. Null for unknown legacy records.</summary>
+    public bool? HasBindingReport { get; init; }
     public bool IncarnationMismatch { get; init; }
     public int? UnreadMessages { get; init; }
     public int? PendingEffects { get; init; }
     public DateTimeOffset? LastActivityAt { get; init; }
+}
+
+/// <summary>Bounded, retained successful direct-message call metadata. Does not contain message bodies or task-thread messages.</summary>
+public sealed record DashboardInteractions
+{
+    public DateTimeOffset? ObservedAt { get; init; }
+    public DateTimeOffset? WindowStart { get; init; }
+    public DashboardInteractionEdge[] Edges { get; init; } = [];
+    public bool Truncated { get; init; }
+}
+
+public sealed record DashboardInteractionEdge
+{
+    public string SourceSessionId { get; init; } = "";
+    public string TargetSessionId { get; init; } = "";
+    public int CallCount { get; init; }
+    public DateTimeOffset LastInteractionAt { get; init; }
+    /// <summary>Measured hub processing of send_message calls; not recipient delivery or model response latency.</summary>
+    public double? MeanHubDurationMilliseconds { get; init; }
+    public int MeasuredCallCount { get; init; }
 }
 
 public sealed record DatabaseMetrics

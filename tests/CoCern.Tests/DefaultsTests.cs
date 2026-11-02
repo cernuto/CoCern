@@ -117,7 +117,8 @@ public sealed class DefaultsTests
             File.Copy(original, extension);
             await using (var stream = File.OpenRead(extension))
                 File.WriteAllText(Path.Combine(damaged, AnalyticsExtension.ManifestName), Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant() + "  " + relative + "\n");
-            Assert.Null(AnalyticsExtension.Problem(damaged));
+            // Do not validate this copy while it is intact: Problem LOADs it, and Windows then locks the native library.
+            // The source was validated above; corrupt the copy before the first check so the checksum rejects it before LOAD.
             await using (var stream = File.Open(extension, FileMode.Open)) { stream.Position = 1_000; var value = stream.ReadByte(); stream.Position = 1_000; stream.WriteByte((byte)(value ^ 0xFF)); }
             Assert.Contains("SHA-256", AnalyticsExtension.Problem(damaged));
 

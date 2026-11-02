@@ -251,12 +251,15 @@ public sealed class DashboardTests
         });
         await writer.WriteStateAsync("discovery", GrainId.Create("cocern.discovery", "machines"), discovery);
         var source = Assert.IsAssignableFrom<IRelayObservationSource>(store);
-        var observation = Assert.IsType<RelayObservation>(await source.ReadObservationAsync(now, "test-incarnation"));
-        for (var attempt = 0; observation.SessionsTruncated && attempt < 20; attempt++)
+        RelayObservation? observation = null;
+        for (var attempt = 0; attempt < 20; attempt++)
         {
-            await Task.Delay(50);
-            observation = Assert.IsType<RelayObservation>(await source.ReadObservationAsync(now, "test-incarnation"));
+            observation = await source.ReadObservationAsync(now, "test-incarnation");
+            if (observation is { SessionsTruncated: false }) break;
+            if (attempt < 19) await Task.Delay(50);
         }
+        Assert.True(observation is not null, "The metadata fixture did not produce an available observation after 20 samples.");
+        observation = Assert.IsType<RelayObservation>(observation);
         Assert.False(observation.SessionsTruncated, JsonSerializer.Serialize(observation));
         var session = Assert.Single(observation.Sessions);
         Assert.Equal("session-a", session.SessionId);

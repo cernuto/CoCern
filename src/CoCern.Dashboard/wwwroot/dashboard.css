@@ -293,6 +293,8 @@ small { font-size: .8rem; }
 .sign-in-form form { margin-top: 36px; }
 .sign-in-form form label { display: block; font-size: .83rem; margin-bottom: 8px; }
 .sign-in-form input { display: block; width: 100%; min-height: 50px; }
+.sign-in-form form label.remember-browser { display: flex; align-items: center; gap: 10px; margin: 18px 0 8px; }
+.sign-in-form input[type="checkbox"] { width: 18px; min-height: 18px; height: 18px; }
 .field-note { color: var(--muted); font-size: .72rem; margin-top: 10px; }
 .primary-button { min-height: 48px; width: 100%; margin-top: 26px; background: var(--ink); color: var(--surface); border: 1px solid var(--ink); font-weight: 600; }
 .primary-button:hover { opacity: .9; }
@@ -301,7 +303,8 @@ small { font-size: .8rem; }
 
 @media (min-width: 1400px) { .board-layout { grid-template-columns: minmax(0,1fr) 330px; } }
 @media (max-width: 1100px) {
-    .app-header { gap: 18px; padding-inline: 24px; }
+    .app-header { gap: 18px; padding-inline: 24px; flex-wrap: wrap; }
+    .main-nav { order: 3; flex-basis: 100%; flex-wrap: wrap; justify-content: center; }
     .main-nav a { padding-inline: 12px; }
     .dashboard-main { padding-inline: 24px; }
     .relay-summary { gap: 20px; flex-wrap: wrap; }

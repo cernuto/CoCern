@@ -15,7 +15,6 @@ from pathlib import Path
 import queue
 import re
 import secrets
-import signal
 import socket
 import ssl
 import subprocess
@@ -107,8 +106,46 @@ class Hub:
         })
         self.log_path = work / "host.log"
         self.process = None
+        self.connect_isolated = False
+
+    def assert_connect_isolation(self):
+        """Prove the real adapter reads only our folders before allowing Connect to write anything."""
+        expect(self.home.resolve().is_relative_to(self.work.resolve()), "the test home is outside the work folder")
+        expect(all(self.env[name] == str(self.home) for name in ("HOME", "USERPROFILE")), "the test profile environment is not isolated")
+        expect(self.env["APPDATA"] == str(self.home / "AppData"), "the test application data environment is not isolated")
+        token = self.work / "isolation-probe-token"
+        probes = [("codex", self.home / ".codex" / "config.toml"),
+                  ("claude-code", self.home / ".claude.json"),
+                  ("claude-desktop", self.home / "AppData" / "Claude" / "claude_desktop_config.json")]
+        token.write_text("isolation-probe", encoding="utf-8")
+        try:
+            for client, path in probes:
+                expect(not path.exists(), f"isolation probe would overwrite {path}")
+                path.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    path.write_bytes(b"\xff")
+                    result = subprocess.run(["dotnet", str(ADAPTER), "--connect", "--check", "--json", "--only", client, "--token-file", str(token)],
+                                            env=self.env, cwd=self.work, capture_output=True, text=True, timeout=60)
+                    reply = json.loads(result.stdout)
+                    clients = reply.get("clients", [])
+                    # An existing real CoCern entry also reports "connected", so only an error naming the exact probe proves the path.
+                    expect(result.returncode == 5 and len(clients) == 1 and clients[0].get("id") == client
+                           and clients[0].get("state") == "error" and f"'{path}'" in clients[0].get("detail", ""),
+                           f"Connect isolation was not proved for {client}; refusing to run settings-write tests. Rebuild the adapter with environment folder support.")
+                    expect(path.read_bytes() == b"\xff", "the read-only isolation probe changed its settings fixture")
+                finally:
+                    path.unlink(missing_ok=True)
+        finally:
+            token.unlink(missing_ok=True)
+            # Restore the initially absent desktop installation so the normal Connect check remains meaningful.
+            desktop = self.home / "AppData" / "Claude"
+            if desktop.is_dir():
+                desktop.rmdir()
+        self.connect_isolated = True
 
     def start(self):
+        if not self.connect_isolated:
+            self.assert_connect_isolation()
         with self.log_path.open("a", encoding="utf-8") as log:
             self.process = subprocess.Popen(["dotnet", str(HOST)], env=self.env, cwd=self.work, stdout=log, stderr=log)
         deadline = time.monotonic() + 60
@@ -421,6 +458,7 @@ def run_checks(hub, checks):
     checks.run("happy", "the dashboard snapshot is served to a signed-in viewer", snapshot)
 
     def connect_page():
+        expect(hub.connect_isolated, "Connect settings writes require a successful isolation preflight")
         status, data = request(hub.origin + "/dashboard/api/connect", opener=browser)
         expect(status == 200 and data.get("unavailable") is None, f"HTTP {status} {data}")
         states = {client["id"]: client["state"] for client in data["clients"]}
@@ -638,6 +676,7 @@ def run_checks(hub, checks):
         note = poll_attention(manager, None, "second is done")
         expect(note is not None, "the order's notify never reached the manager")
     checks.run("happy", "a blocked task alerts the manager; an order notifies on completion", attention_and_order)
+    checks.run("happy", "waiting stdio inbox returns urgent manager attention with no mail", lambda: adapter_urgent_attention_wait(hub))
     checks.run("sad", "a worker can't add orders",
                lambda: refused("order_put", {"requestId": rid(), "orderId": "mine", "trigger": {"on": "workflow_completed", "taskId": "act"}, "actions": [{"do": "release_claims"}]}, "AdministratorRequired", 403, hub.worker_token))
 
@@ -753,8 +792,8 @@ def run_checks(hub, checks):
     def killed_mid_flight():
         for i in range(10):
             ok("send_message", {**state["a"], "requestId": rid(), "recipientSessionId": state["b"]["sessionId"], "text": f"crash {i}"})
-        os.kill(hub.process.pid, signal.SIGKILL)
-        hub.process.wait()
+        hub.process.kill()
+        hub.process.wait(timeout=10)
         hub.start()
         deadline, texts = time.monotonic() + 20, set()
         while len(texts) < 10 and time.monotonic() < deadline:
@@ -767,7 +806,7 @@ def run_checks(hub, checks):
                     break
             time.sleep(0.3)
         expect(len(texts) == 10, f"{len(texts)} of 10 messages delivered after the hub was killed")
-    checks.run("happy", "messages in flight survive the hub being killed (kill -9)", killed_mid_flight)
+    checks.run("happy", "messages in flight survive the hub being forcibly killed", killed_mid_flight)
 
     # ---- Restart -------------------------------------------------------------------------------------------------
     print("Restart")
@@ -804,6 +843,92 @@ def run_checks(hub, checks):
     checks.run("sad", "a worker can't run analytics", lambda: refused("analytics_query", {"name": "tokens_per_task"}, "AdministratorRequired", 403, hub.worker_token))
 
 
+def read_rpc_reply(process, request_id, timeout=60):
+    """Read a matching reply with a wall-clock bound, even when the child never writes a line."""
+    lines = queue.Queue()
+    threading.Thread(target=lambda: [lines.put(line) for line in process.stdout] + [lines.put(None)], daemon=True).start()
+    deadline = time.monotonic() + timeout
+    while (remaining := deadline - time.monotonic()) > 0:
+        try:
+            line = lines.get(timeout=remaining)
+        except queue.Empty:
+            return None
+        if line is None:
+            return None
+        reply = json.loads(line)
+        if reply.get("id") == request_id:
+            return reply
+    return None
+
+
+def adapter_urgent_attention_wait(hub, adapter_path=None):
+    """A real blocked-task alert must end an empty-mailbox MCP wait; the optional path supports an old/new adapter comparison."""
+    def call(name, arguments, token):
+        status, reply = request(f"{hub.origin}/api/tools/{name}", {"repositoryId": REPO, **arguments}, token=token)
+        # Do not include session_open replies or private handles in a failing check's output.
+        expect(status == 200 and isinstance(reply, dict) and reply.get("ok"), f"attention fixture {name}: HTTP {status}")
+        return json.loads(reply["dataJson"])
+
+    def opened(role, token):
+        data = call("session_open", {"requestId": str(uuid.uuid4()), **({"role": role} if role else {})}, token)
+        return {"sessionId": data["sessionId"], "sessionToken": data["sessionToken"]}
+
+    manager = opened("manager", hub.admin_token)
+    worker = opened(None, hub.worker_token)
+    task_id = "adapter-attention-" + uuid.uuid4().hex
+    workflow = {"state": "ready", "packet": {"goal": "Verify urgent inbox attention", "target": "This throwaway hub", "authorityRef": "smoke:local",
+                "restoration": "Nothing to restore", "stopCondition": "Stop on anything unexpected"},
+                "criteria": [{"id": "attention", "description": "Blocked offer reaches the manager", "result": "not_run"}], "blockers": []}
+    call("task_update", {**worker, "requestId": str(uuid.uuid4()), "taskId": task_id, "expectedVersion": 0, "workflow": workflow}, hub.worker_token)
+    call("task_claim", {**worker, "requestId": str(uuid.uuid4()), "taskId": task_id, "expectedVersion": 1}, hub.worker_token)
+    workflow = {**workflow, "state": "blocked", "blockers": [{"id": "fixture", "kind": "missing_fixture", "summary": "Attention smoke fixture unavailable", "recheckCondition": "Fixture restored"}]}
+    call("task_update", {**worker, "requestId": str(uuid.uuid4()), "taskId": task_id, "expectedVersion": 2, "workflow": workflow}, hub.worker_token)
+
+    deadline, candidate = time.monotonic() + 10, None
+    while time.monotonic() < deadline:
+        status = call("get_status", {**manager, "attentionDetail": True, "attention": False}, hub.admin_token)
+        attention = status.get("attention", {})
+        top = attention.get("top", {})
+        if top.get("k") == "blocked" and top.get("t") == task_id and attention.get("wake") == top.get("id") and attention.get("urgent", 0) > 0:
+            candidate = top["id"]
+            break
+        time.sleep(0.1)
+    expect(candidate is not None, "the hub did not queue the real blocked-task urgent wake")
+    inbox = call("check_inbox", {**manager, "attention": False}, hub.admin_token)
+    expect(inbox.get("items") == [] and inbox.get("total") == 0, "the fresh manager mailbox is not empty")
+
+    env = dict(hub.env, COCERN_URL=hub.origin, COCERN_TOKEN=hub.admin_token)
+    adapter = subprocess.Popen(["dotnet", str(adapter_path or ADAPTER)], env=env, cwd=hub.work, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                               stderr=subprocess.DEVNULL, text=True, encoding="utf-8")
+    wait_seconds = 5
+    try:
+        messages = [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "cocern-smoke", "version": "1.0"}}},
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "check_inbox", "arguments": {"repositoryId": REPO, **manager, "waitSeconds": wait_seconds}}}]
+        started = time.monotonic()
+        for message in messages:
+            adapter.stdin.write(json.dumps(message) + "\n")
+            adapter.stdin.flush()
+        # Read once: the helper's reader thread owns stdout for this adapter's entire lifetime.
+        reply = read_rpc_reply(adapter, 2, timeout=wait_seconds + 10)
+        elapsed = time.monotonic() - started
+        expect(reply is not None and "error" not in reply, "the waiting adapter did not return an MCP tool result")
+        result = reply.get("result", {})
+        expect(not result.get("isError"), "the waiting adapter returned an MCP tool error")
+        payload = json.loads(next(content["text"] for content in result["content"] if content["type"] == "text"))
+        expect(payload.get("ok"), "the waiting adapter returned an unsuccessful inbox reply")
+        data = payload["data"]
+        offer = data.get("attention", {})
+        expect(data.get("items") == [] and data.get("total") == 0, "the waiting inbox returned mail instead of an attention-only wake")
+        expect(offer.get("id") == candidate and offer.get("k") == "blocked" and offer.get("t") == task_id,
+               "the waiting inbox lost the hub's eligible blocked-task offer")
+        expect(elapsed < wait_seconds, f"urgent attention did not end the {wait_seconds}s wait early ({elapsed:.2f}s)")
+        return {"elapsedSeconds": round(elapsed, 3), "taskId": task_id, "offerId": candidate, "kind": offer["k"]}
+    finally:
+        stop(adapter)
+
+
 def pinned_call(hub, fingerprint):
     """One task_get through a real adapter over the hub's loopback HTTPS, pinned to `fingerprint`; returns the MCP result."""
     env = dict(hub.env, COCERN_URL=f"https://127.0.0.1:{hub.local_https_port}/", COCERN_TOKEN=hub.worker_token, COCERN_FINGERPRINT=fingerprint)
@@ -816,14 +941,9 @@ def pinned_call(hub, fingerprint):
         for message in messages:
             adapter.stdin.write(json.dumps(message) + "\n")
             adapter.stdin.flush()
-        deadline = time.monotonic() + 60
-        while time.monotonic() < deadline:
-            line = adapter.stdout.readline()
-            if not line:
-                break
-            reply = json.loads(line)
-            if reply.get("id") == 2:
-                return reply.get("result", {"isError": True, "error": reply.get("error")})
+        reply = read_rpc_reply(adapter, 2, timeout=60)
+        if reply is not None:
+            return reply.get("result", {"isError": True, "error": reply.get("error")})
         return {"isError": True, "error": "no reply"}
     finally:
         stop(adapter)

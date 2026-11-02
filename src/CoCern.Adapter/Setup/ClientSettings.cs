@@ -33,8 +33,9 @@ internal sealed class ClientPlan
         try
         {
             // The replacement takes the original's mode (these files can hold API keys); a rename would otherwise leave it world-readable on Unix.
-            UnixFileMode? mode = OperatingSystem.IsWindows() ? null : _existed ? File.GetUnixFileMode(Path) : UnixFileMode.UserRead | UnixFileMode.UserWrite;
-            using (var stream = new FileStream(temp, new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write, UnixCreateMode = mode })) stream.Write(_content);
+            var options = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write };
+            if (!OperatingSystem.IsWindows()) options.UnixCreateMode = _existed ? File.GetUnixFileMode(Path) : UnixFileMode.UserRead | UnixFileMode.UserWrite;
+            using (var stream = new FileStream(temp, options)) stream.Write(_content);
             if (_existed) File.Replace(temp, Path, null); else File.Move(temp, Path);
         }
         catch { try { File.Delete(temp); } catch (IOException) { } catch (UnauthorizedAccessException) { } throw; }

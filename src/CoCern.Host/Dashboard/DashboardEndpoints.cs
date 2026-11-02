@@ -15,6 +15,7 @@ public static class DashboardEndpoints
     private const string LoginPolicy = "dashboard-login";
     public static IServiceCollection AddRelayDashboard(this IServiceCollection services)
     {
+        services.AddSingleton<DashboardAuthenticationSettings>();
         services.AddSingleton<DashboardSecurity>();
         services.AddSingleton<DashboardSignInLink>();
         services.AddSingleton<DashboardConnect>();
@@ -38,12 +39,13 @@ public static class DashboardEndpoints
             options.Cookie.HttpOnly = true;
             options.Cookie.SameSite = SameSiteMode.Strict;
             options.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
-            options.ExpireTimeSpan = TimeSpan.FromMinutes(30);
             options.SlidingExpiration = false;
             options.Events.OnValidatePrincipal = DashboardSecurity.ValidateCookie;
             options.Events.OnRedirectToLogin = context => { context.Response.StatusCode = 401; return Task.CompletedTask; };
             options.Events.OnRedirectToAccessDenied = context => { context.Response.StatusCode = 403; return Task.CompletedTask; };
         });
+        services.AddOptions<CookieAuthenticationOptions>(DashboardSecurity.Scheme)
+            .Configure<DashboardAuthenticationSettings>((options, settings) => options.ExpireTimeSpan = settings.Lifetime(false));
         services.AddAuthorization(options => options.AddPolicy(DashboardSecurity.Policy, policy => policy
             .AddAuthenticationSchemes(DashboardSecurity.Scheme).RequireAuthenticatedUser().RequireClaim(DashboardSecurity.Policy, "true")));
         return services;
@@ -51,6 +53,9 @@ public static class DashboardEndpoints
 
     public static WebApplication MapRelayDashboard(this WebApplication app)
     {
+        // Validate once at startup, including when no dashboard viewer has been enrolled yet.
+        var authentication = app.Services.GetRequiredService<DashboardAuthenticationSettings>();
+        app.MapGet("/", () => Results.Redirect("/dashboard/"));
         // Checked once started, when the configuration is final: no viewer configured, no link.
         app.Lifetime.ApplicationStarted.Register(() =>
         {
@@ -59,6 +64,7 @@ public static class DashboardEndpoints
                     open: app.Configuration.GetValue("Relay:Dashboard:OpenOnStart", false));
         });
         var api = app.MapGroup("/dashboard/api");
+        api.MapGet("/login-options", () => Results.Ok(new DashboardLoginOptions { SessionHours = authentication.SessionHours, RememberDays = authentication.RememberDays }));
         api.MapGet("/auth", (HttpContext context) => Results.Ok(new DashboardAuthStatus { Authenticated = true, PrincipalId = context.User.FindFirstValue(ClaimTypes.NameIdentifier) }))
             .RequireAuthorization(DashboardSecurity.Policy);
         api.MapPost("/login", LoginAsync).RequireRateLimiting(LoginPolicy);
@@ -113,7 +119,7 @@ public static class DashboardEndpoints
         return app;
     }
 
-    private static async Task<IResult> LoginAsync(HttpContext context, DashboardSecurity security, DashboardSignInLink link)
+    private static async Task<IResult> LoginAsync(HttpContext context, DashboardSecurity security, DashboardSignInLink link, DashboardAuthenticationSettings settings)
     {
         if (!DashboardSecurity.SecureTransport(context) || !DashboardSecurity.SameOrigin(context)) return Results.StatusCode(403);
         const int maximumBytes = 16 * 1024;
@@ -128,25 +134,33 @@ public static class DashboardEndpoints
         }
         if (body.Length > maximumBytes) return Results.StatusCode(413);
         ClaimsPrincipal? principal;
+        var now = DateTimeOffset.UtcNow;
+        DateTimeOffset expires;
+        var rememberBrowser = false;
         try
         {
             using var json = JsonDocument.Parse(body.ToArray(), new JsonDocumentOptions { MaxDepth = 4 });
             if (json.RootElement.ValueKind != JsonValueKind.Object) return Results.BadRequest();
-            var now = DateTimeOffset.UtcNow;
+            if (json.RootElement.TryGetProperty("rememberBrowser", out var remember))
+            {
+                if (remember.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) return Results.BadRequest();
+                rememberBrowser = remember.GetBoolean();
+            }
+            expires = now.Add(settings.Lifetime(rememberBrowser));
             if (json.RootElement.TryGetProperty("link", out var code) && code.ValueKind == JsonValueKind.String)
             {
                 // A logged link signs in only from this PC, so a copy of the log elsewhere is no use.
                 if (context.Connection.RemoteIpAddress is not { } remote || !System.Net.IPAddress.IsLoopback(remote)) return Results.StatusCode(403);
                 if (!link.Redeem(code.GetString(), now)) return Results.Unauthorized();
-                principal = security.LocalViewer(now);
+                principal = security.LocalViewer(now, expires);
                 link.Issue(now);
             }
-            else if (json.RootElement.TryGetProperty("token", out var value) && value.ValueKind == JsonValueKind.String) principal = security.Exchange(value.GetString()!, now);
+            else if (json.RootElement.TryGetProperty("token", out var value) && value.ValueKind == JsonValueKind.String) principal = security.Exchange(value.GetString()!, now, expires);
             else return Results.BadRequest();
         }
         catch (JsonException) { return Results.BadRequest(); }
         if (principal is null) return Results.Unauthorized();
-        await context.SignInAsync(DashboardSecurity.Scheme, principal, new AuthenticationProperties { IsPersistent = false, AllowRefresh = false, ExpiresUtc = DateTimeOffset.UtcNow.AddMinutes(30) });
+        await context.SignInAsync(DashboardSecurity.Scheme, principal, new AuthenticationProperties { IsPersistent = rememberBrowser, AllowRefresh = false, IssuedUtc = now, ExpiresUtc = expires });
         return Results.Ok(new DashboardAuthStatus { Authenticated = true, PrincipalId = principal.FindFirstValue(ClaimTypes.NameIdentifier) });
     }
 }

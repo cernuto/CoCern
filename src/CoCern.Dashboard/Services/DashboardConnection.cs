@@ -26,6 +26,7 @@ public sealed class DashboardConnection(HttpClient http, NavigationManager navig
     public bool Authenticated { get; private set; }
     public string? PrincipalId { get; private set; }
     public string? Notice { get; private set; }
+    public DashboardLoginOptions? LoginOptions { get; private set; }
     public DateTimeOffset? ReceivedAt { get; private set; }
     public bool ObservationsConfirmed => _observations.Confirmed;
     public bool ObservationsFresh => _observations.IsFresh(_elapsed.Elapsed, TimeSpan.FromSeconds(12));
@@ -42,7 +43,7 @@ public sealed class DashboardConnection(HttpClient http, NavigationManager navig
     public bool IsPulsing(string sessionId, DateTimeOffset now) =>
         State == DashboardLinkState.Live && now - _pulseAt < TimeSpan.FromMilliseconds(1400) && _activitySessions.Contains(sessionId);
 
-    public Task<bool> LoginAsync(string token) => PostLoginAsync(new { token }, "This credential does not have dashboard access.");
+    public Task<bool> LoginAsync(string token, bool rememberBrowser = false) => PostLoginAsync(new DashboardLoginRequest { Token = token, RememberBrowser = rememberBrowser }, "This credential does not have dashboard access.");
 
     /// <summary>Signs in with a one-time link from the hub's log, then connects; a spent or expired link leaves the sign-in form saying so.</summary>
     public async Task StartWithLinkAsync(string link)
@@ -113,6 +114,13 @@ public sealed class DashboardConnection(HttpClient http, NavigationManager navig
         {
             try
             {
+                if (LoginOptions is null)
+                {
+                    using var optionsResponse = await http.GetAsync("api/login-options", cancellationToken);
+                    optionsResponse.EnsureSuccessStatusCode();
+                    LoginOptions = await optionsResponse.Content.ReadFromJsonAsync<DashboardLoginOptions>(cancellationToken)
+                        ?? throw new InvalidOperationException("The hub did not return sign-in options.");
+                }
                 using var authResponse = await http.GetAsync("api/auth", cancellationToken);
                 if (authResponse.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
                 {

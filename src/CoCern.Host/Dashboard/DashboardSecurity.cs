@@ -20,25 +20,25 @@ public sealed class DashboardSecurity(IConfiguration configuration, IHostEnviron
     public bool Enabled => configuration.GetSection("Relay:Dashboard:ViewerPrincipalIds").Get<string[]>() is { } ids
         && ids.Any(id => !string.IsNullOrWhiteSpace(id));
 
-    public ClaimsPrincipal? Exchange(string token, DateTimeOffset now)
+    public ClaimsPrincipal? Exchange(string token, DateTimeOffset now, DateTimeOffset? expiresAt = null)
     {
         if (string.IsNullOrWhiteSpace(token) || token.Length > 8192) return null;
         var digest = SHA256.HashData(Encoding.UTF8.GetBytes(token));
         Enrollment? match = null;
         foreach (var enrollment in CurrentClients())
             if (CryptographicOperations.FixedTimeEquals(digest, enrollment.Digest)) match = enrollment;
-        return match is null || !Allowed(match.Client) ? null : Principal(match, now);
+        return match is null || !Allowed(match.Client) ? null : Principal(match, expiresAt ?? now.Add(new DashboardAuthenticationSettings(configuration).Lifetime(false)));
     }
 
     /// <summary>The first configured viewer, for a sign-in link: the hub's own administrator on this PC.</summary>
-    public ClaimsPrincipal? LocalViewer(DateTimeOffset now) => CurrentClients().FirstOrDefault(enrollment => Allowed(enrollment.Client)) is { } viewer ? Principal(viewer, now) : null;
+    public ClaimsPrincipal? LocalViewer(DateTimeOffset now, DateTimeOffset? expiresAt = null) => CurrentClients().FirstOrDefault(enrollment => Allowed(enrollment.Client)) is { } viewer ? Principal(viewer, expiresAt ?? now.Add(new DashboardAuthenticationSettings(configuration).Lifetime(false))) : null;
 
-    private static ClaimsPrincipal Principal(Enrollment match, DateTimeOffset now) =>
+    private static ClaimsPrincipal Principal(Enrollment match, DateTimeOffset expiresAt) =>
         new(new ClaimsIdentity([
             new Claim(ClaimTypes.NameIdentifier, match.Client.PrincipalId),
             new Claim(Policy, "true"),
             new Claim(EnrollmentClaim, match.Fingerprint),
-            new Claim(ExpiryClaim, now.AddMinutes(30).UtcTicks.ToString(System.Globalization.CultureInfo.InvariantCulture))
+            new Claim(ExpiryClaim, expiresAt.UtcTicks.ToString(System.Globalization.CultureInfo.InvariantCulture))
         ], Scheme));
 
     public bool IsValid(ClaimsPrincipal? principal, DateTimeOffset now)
