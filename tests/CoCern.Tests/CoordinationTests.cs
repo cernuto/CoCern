@@ -648,6 +648,82 @@ public sealed class CoordinationTests
         Assert.Equal(1, Data(Call(session, "session", "ack", new() { ["sessionToken"] = "secret", ["requestId"] = "ack-big", ["messageId"] = "big" }))["acknowledged"]!.GetValue<int>());
     }
 
+    [Fact]
+    public void The_session_directory_drops_long_stale_sessions_so_new_opens_keep_working()
+    {
+        // A directory full of sessions opened over time: most closed days ago (some in another repository), a few still in use.
+        var sessions = new JsonObject();
+        var live = new List<string>();
+        for (var i = 0; i < RelayLimits.MaxRecords; i++)
+        {
+            var id = "s-" + i;
+            var seen = i % 40 == 0 ? Now.AddMinutes(-30) : Now.AddHours(-RelayLimits.StaleSessionHours - 2).AddSeconds(-i);
+            var record = new JsonObject
+            {
+                ["sessionId"] = id, ["principalId"] = "alice", ["repositoryId"] = i % 7 == 0 ? "other" : "repo", ["sessionToken"] = "t" + i, ["bindingVersion"] = 0,
+                ["observedAt"] = seen.ToString("O"), ["freshUntil"] = seen.AddMinutes(2).ToString("O"), ["availability"] = "unknown"
+            };
+            if (i % 40 == 0) { record["activeAt"] = seen.ToString("O"); live.Add(id); }
+            sessions[id] = record;
+        }
+        var control = new StateEnvelope<CoordinationDocument> { Value = new() { Json = new JsonObject { ["sessions"] = sessions }.ToJsonString() } };
+        var opened = new List<string>();
+        var delivered = new List<DurableEffect>();
+        for (var i = 0; i < RelayLimits.MaxRecords / 2; i++)
+        {
+            var open = Call(control, "control", "session_open", new() { ["requestId"] = "open-" + i }, seconds: i);
+            Assert.True(open.Ok, i + ": " + open.Code);
+            opened.Add(Data(open)["sessionId"]!.GetValue<string>());
+            // The outbox delivers between opens.
+            delivered.AddRange(control.Effects); control.Effects.Clear();
+        }
+        var directory = StateJson(control)["sessions"]!.AsObject();
+        Assert.InRange(directory.Count, 1, RelayLimits.MaxRecords);
+        // Live sessions and every new one are untouched; only sessions not seen for a day were dropped, oldest first.
+        Assert.All(live.Concat(opened), id => Assert.True(directory.ContainsKey(id), id));
+        Assert.True(directory.ContainsKey("s-1"));
+        Assert.False(directory.ContainsKey("s-" + (RelayLimits.MaxRecords - 1)));
+        // Each dropped session is told, under its own repository, so its chat gets a clean error and opens again.
+        var expiries = delivered.Where(effect => effect.Operation == Operations.SessionExpire).ToList();
+        Assert.Equal(RelayLimits.MaxRecords + opened.Count - directory.Count, expiries.Count);
+        Assert.All(expiries, effect => Assert.False(directory.ContainsKey(effect.TargetKey)));
+        CoordinationStateMachine.StampEffects(delivered, 0, Caller with { Repositories = ["repo"] });
+        var other = delivered.First(effect => effect.Operation == Operations.SessionExpire && JsonNode.Parse(effect.PayloadJson)!["repositoryId"]!.GetValue<string>() == "other");
+        Assert.Equal(["other"], CoordinationStateMachine.TakeEffectCaller(JsonNode.Parse(other.PayloadJson)!.AsObject()).Repositories);
+        // A late registration from a dropped session is accepted and ignored, so its outbox never retries it forever.
+        Assert.True(Call(control, "control", "__register", new() { ["sessionId"] = "s-" + (RelayLimits.MaxRecords - 1), ["activeAt"] = Now.ToString("O") }).Ok);
+
+        // When every session was seen within the day, an open is refused for now and works again once some go stale.
+        var busy = new StateEnvelope<CoordinationDocument> { Value = new() { Json = new JsonObject { ["sessions"] = new JsonObject(sessions.Select(x =>
+        {
+            var copy = x.Value!.DeepClone().AsObject(); copy["activeAt"] = Now.ToString("O");
+            return KeyValuePair.Create(x.Key, (JsonNode?)copy);
+        })) }.ToJsonString() } };
+        Assert.Equal("CapacityExceeded", Call(busy, "control", "session_open", new() { ["requestId"] = "busy" }).Code);
+        Assert.True(Call(busy, "control", "session_open", new() { ["requestId"] = "later" }, seconds: (RelayLimits.StaleSessionHours + 1) * 3600).Ok);
+    }
+
+    [Fact]
+    public void An_expired_session_gets_a_clean_error_and_drops_what_is_sent_to_it()
+    {
+        var session = new StateEnvelope<CoordinationDocument>();
+        Assert.True(Call(session, "session", "__open", new() { ["principalId"] = "alice", ["sessionToken"] = "secret", ["sessionId"] = "s" }).Ok);
+        Assert.True(Call(session, "session", Operations.SessionExpire, new()).Ok);
+        // Repeated expiry, or one for a session this grain never held, is accepted.
+        Assert.True(Call(session, "session", Operations.SessionExpire, new()).Ok);
+        Assert.True(Call(new StateEnvelope<CoordinationDocument>(), "session", Operations.SessionExpire, new()).Ok);
+        var inbox = Call(session, "session", "check_inbox", new() { ["sessionToken"] = "secret" });
+        Assert.Equal("SessionUnknown", inbox.Code);
+        Assert.True(Data(inbox)["expired"]!.GetValue<bool>());
+        Assert.Equal("session_open", Data(inbox)["reopen"]!.GetValue<string>());
+        Assert.Equal("SessionUnknown", Call(session, "session", "__verify", new() { ["sessionToken"] = "secret" }).Code);
+        Assert.Equal("SessionDenied", Call(session, "session", "check_inbox", new() { ["sessionToken"] = "secret" }, new("mallory", false, ["repo"], true)).Code);
+        // Deliveries are dropped rather than retried forever; attention is refused, which drops it too.
+        Assert.True(Data(Call(session, "session", "__deliver", new() { ["messageId"] = "m", ["text"] = "late" }))["expired"]!.GetValue<bool>());
+        Assert.Equal("SessionUnknown", Call(session, "session", "__attention_raise", new() { ["kind"] = "info", ["taskId"] = "t" }).Code);
+        Assert.DoesNotContain("secret", session.Value.Json);
+    }
+
     private static JsonObject DependentWorkflow(string state, params string[] dependsOn)
     {
         var workflow = new JsonObject

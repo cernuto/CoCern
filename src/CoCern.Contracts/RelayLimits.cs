@@ -261,6 +261,11 @@ public static class RelayLimits
     public const int OfferedWorkExpiryDays = 1;
     /// <summary>Hours a session may go without freshness or activity before it no longer receives routed (manager) attention items.</summary>
     public const int MaxAttentionRouteIdleHours = 24;
+    /// <summary>
+    /// A session not seen (open, bound or active) for this long may be dropped from the hub's session directory once it is full, and is
+    /// told so: its chat then gets <c>SessionUnknown</c> with <c>expired</c> and opens a new session. At least the attention route's idle limit.
+    /// </summary>
+    public const int StaleSessionHours = MaxAttentionRouteIdleHours;
     /// <summary>Least minutes between a session's reports to the control directory that it is still active (made at boundary replies).</summary>
     public const int AttentionActivityReportMinutes = 60;
     /// <summary>Sessions whose last idle-hold wake the hub remembers for counting; past this the memory is cleared.</summary>

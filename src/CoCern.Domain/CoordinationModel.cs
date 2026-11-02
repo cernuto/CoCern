@@ -166,6 +166,11 @@ public static class Operations
     /// hub; it is outside the per-session proposal cap.
     /// </summary>
     public const string StandingProposeHub = "__standing_propose_hub";
+    /// <summary>
+    /// Sent by the control aggregate to a session it dropped from its directory (long stale, directory full). The session then answers
+    /// <c>SessionUnknown</c> with <c>expired</c>, and drops deliveries. The effect carries its own caller, scoped to the session's repository.
+    /// </summary>
+    public const string SessionExpire = "__session_expire";
     /// <summary>Read-only: which of the given sessions in the repository the caller's principal opened.</summary>
     public const string SessionOwners = "__session_owners";
     /// <summary>

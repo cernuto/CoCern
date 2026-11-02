@@ -38,7 +38,9 @@ internal static class ControlAggregate
         var args = context.Args;
         Required(args, "requestId");
         var sessions = ObjectAt(context.State, "sessions");
-        if (sessions.Count >= RelayLimits.MaxRecords) return Error(CapacityExceeded);
+        if (sessions.Count >= RelayLimits.MaxRecords) DropStaleSessions(context, sessions);
+        // Every session was seen within StaleSessionHours: refused for now, and it clears as they go stale.
+        if (sessions.Count >= RelayLimits.MaxRecords) return Error(CapacityExceeded, new { staleAfterHours = RelayLimits.StaleSessionHours });
         var id = Guid.NewGuid().ToString("N");
         var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
         var session = new JsonObject
@@ -55,10 +57,40 @@ internal static class ControlAggregate
         return Ok(new { sessionId = id, sessionToken = token, bindingVersion = 0, binding = args["binding"] });
     }
 
+    /// <summary>
+    /// Makes room in a full directory: drops sessions not seen (fresh, active or observed) for <see cref="RelayLimits.StaleSessionHours"/>,
+    /// least recently seen first, down to <see cref="RelayLimits.RetainedEntriesAfterPrune"/>, so it runs at most once per 512 opens.
+    /// A session seen within that time is never dropped. Each dropped session is sent <see cref="Operations.SessionExpire"/>, under its own
+    /// repository, so its chat gets a clean <c>SessionUnknown</c> and opens again.
+    /// </summary>
+    private static void DropStaleSessions(AggregateContext context, JsonObject sessions)
+    {
+        var cutoff = context.Now.AddHours(-RelayLimits.StaleSessionHours);
+        var stale = sessions.Select(entry => (entry.Key, Session: entry.Value as JsonObject, Seen: entry.Value is JsonObject record ? LastSeen(record) : DateTimeOffset.MinValue))
+            .Where(entry => entry.Seen <= cutoff).OrderBy(entry => entry.Seen).ThenBy(entry => entry.Key, StringComparer.Ordinal)
+            .Take(sessions.Count - RelayLimits.RetainedEntriesAfterPrune).ToList();
+        foreach (var (id, session, _) in stale)
+        {
+            sessions.Remove(id);
+            var repository = session is null ? "" : Text(session, "repositoryId");
+            context.Emit(AggregateKinds.Session, id, Operations.SessionExpire, new JsonObject
+            {
+                ["repositoryId"] = repository, ["sessionId"] = id,
+                // Its own caller: the session belongs to its repository, which the caller opening a new session may not reach.
+                ["__principalId"] = "relay-directory", ["__administrator"] = false, ["__repositories"] = new JsonArray(repository)
+            });
+        }
+    }
+
+    private static DateTimeOffset LastSeen(JsonObject session) =>
+        new[] { Date(session, "freshUntil"), Date(session, "activeAt"), Date(session, "observedAt") }.Max();
+
     private static RelayReply RegisterSession(AggregateContext context)
     {
         var id = Required(context.Args, "sessionId");
-        if (ObjectAt(context.State, "sessions")[id] is not JsonObject session || Text(session, "repositoryId") != context.Repository) return Error(SessionDenied);
+        // A session dropped from the directory may still send a late registration; accept it unchanged so its outbox does not retry forever.
+        if (ObjectAt(context.State, "sessions")[id] is not JsonObject session) return Ok(new { registered = false });
+        if (Text(session, "repositoryId") != context.Repository) return Error(SessionDenied);
         foreach (var property in new[] { "binding", "bindingVersion", "observedAt", "freshUntil", "availability", "machineId", "label", "hubIncarnation", "activeAt" })
             if (context.Args.ContainsKey(property)) session[property] = context.Args[property]?.DeepClone();
         return Ok(new { registered = true });

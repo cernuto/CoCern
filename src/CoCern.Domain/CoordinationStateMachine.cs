@@ -156,6 +156,8 @@ public static class CoordinationStateMachine
         {
             var effect = effects[index];
             var payload = JsonNode.Parse(effect.PayloadJson)!.AsObject();
+            // A session expiry carries its own caller, scoped to the dropped session's repository.
+            if (effect.Operation == Operations.SessionExpire && payload.ContainsKey("__principalId")) continue;
             payload["__principalId"] = caller.PrincipalId;
             payload["__administrator"] = caller.IsAdministrator;
             payload["__repositories"] = JsonSerializer.SerializeToNode(caller.Repositories);

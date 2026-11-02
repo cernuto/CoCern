@@ -6,7 +6,7 @@ A retry within 24 hours does not run again. It gets the first reply, or `Request
 
 ## The loop
 
-1. `session_open` once per chat. Give the managing chat `role: "manager"`.
+1. `session_open` once per chat. Give the managing chat `role: "manager"`. When the hub's session list is full, it closes sessions not seen for a day; a closed session's calls get `SessionUnknown` with `expired: true`. Call `session_open` again.
 2. `task_claim` the task and its resources.
 3. Do the work with your own tools. The hub never runs them.
 4. `task_update` with what happened.

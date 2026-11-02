@@ -17,10 +17,15 @@ internal static class SessionAggregate
     public static RelayReply Handle(AggregateContext context)
     {
         if (context.Operation == Operations.Open) return Initialize(context);
-        if (context.Operation == Operations.Deliver) return Deliver(context);
+        if (context.Operation == Operations.SessionExpire) return Expire(context);
+        var expired = context.State["expiredAt"] is not null;
+        // An expired session drops deliveries (a refusal would be retried forever) and refuses attention, which its sources then drop.
+        if (context.Operation == Operations.Deliver) return expired ? Ok(new { expired = true }) : Deliver(context);
+        if (expired && context.Operation is Operations.AttentionRaise or Operations.AttentionClose) return Error(SessionUnknown, new { expired = true });
         // Attention items arrive through other aggregates' outboxes, which carry no session secret, just like deliveries.
         if (context.Operation == Operations.AttentionRaise) return SessionAttention.Raise(context);
         if (context.Operation == Operations.AttentionClose) return SessionAttention.Close(context);
+        if (expired) return Text(context.State, "principalId") == context.Caller.PrincipalId ? Error(SessionUnknown, new { expired = true, reopen = RelayTools.SessionOpen }) : Error(SessionDenied);
         if (!Authenticates(context)) return Error(SessionDenied);
         return context.Operation switch
         {
@@ -45,6 +50,19 @@ internal static class SessionAggregate
             return Text(state, "principalId") == Text(context.Args, "principalId") && Text(state, "sessionToken") == Text(context.Args, "sessionToken") ? Ok(new { initialized = true }) : Error(SessionDenied);
         foreach (var property in context.Args) if (property.Key != "requestId") state[property.Key] = property.Value?.DeepClone();
         return Ok(new { initialized = true });
+    }
+
+    /// <summary>
+    /// The hub's directory dropped this long-stale session. Its secret, inbox and attention are cleared; afterwards its own calls get
+    /// <c>SessionUnknown</c> with <c>expired</c>, and its chat opens a new session. Idempotent, and accepted for a session never opened here.
+    /// </summary>
+    private static RelayReply Expire(AggregateContext context)
+    {
+        var state = context.State;
+        if (!state.ContainsKey("principalId") || state["expiredAt"] is not null) return Ok(new { expired = true });
+        foreach (var key in new[] { "sessionToken", "inbox", "acked", "attention", "attentionClosed", "attentionRecent", "standingSeen", "binding" }) state.Remove(key);
+        state["expiredAt"] = context.Now.ToString("O");
+        return Ok(new { expired = true });
     }
 
     private static RelayReply Deliver(AggregateContext context)
