@@ -1,0 +1,33 @@
+/* Document usage stays with the inventory, independent of loaded indexes. */
+.document-inventory .document-repository { padding: 0; }
+.document-inventory .document-repository-heading { display: list-item; padding: 15px 0; cursor: pointer; font-size: .82rem; }
+.document-inventory .document-repository-name { color: var(--ink); font-size: .94rem; font-weight: 650; overflow-wrap: anywhere; }
+.document-inventory .document-repository-heading > span:last-child { margin-left: 12px; white-space: nowrap; }
+.document-inventory .document-file-list { display: block; margin: 0; }
+.document-inventory .document-file { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(0, 1.8fr); gap: 7px 26px; padding: 16px 0; border-top: 1px solid var(--line); }
+.document-file-identity { min-width: 0; }
+.document-inventory .document-file-identity strong { font-size: .9rem; }
+.document-inventory .document-file-identity small { overflow-wrap: anywhere; }
+.document-usage { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)) minmax(105px, 1.2fr); gap: 14px; margin: 0; align-self: start; }
+.document-usage > div { min-width: 0; }
+.document-usage dt { color: var(--muted); font-size: .72rem; }
+.document-usage dd { margin: 4px 0 0; color: var(--ink); font-size: .9rem; font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.document-inventory .document-tracking { grid-column: 2; color: var(--muted); font-size: .7rem; }
+.document-inventory .document-inventory-note { margin: 0 0 16px; }
+.document-usage-note { margin: 14px 22px 20px; padding-top: 14px; border-top: 1px solid var(--line); color: var(--muted); font-size: .75rem; max-width: 85ch; }
+.document-index-details { margin: 14px 0 18px; }
+.document-index-details > summary { margin-inline: 22px; padding-block: 8px; color: var(--ink); font-size: .82rem; cursor: pointer; }
+.document-index-details .doc-cache-table { margin-top: 8px; }
+.doc-cache-view > .muted { margin-inline: 22px; font-size: .75rem; }
+@media (max-width: 800px) {
+    .document-inventory .document-file { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+    .document-inventory .document-tracking { grid-column: 1; }
+}
+@media (max-width: 560px) {
+    .document-inventory .document-repository { margin-inline: 16px; }
+    .document-inventory .document-repository-heading { padding-block: 14px; }
+    .document-usage { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 20px; }
+    .document-usage dt { font-size: .72rem; }
+    .document-usage dd { font-size: .86rem; }
+    .document-usage-note, .document-index-details > summary, .doc-cache-view > .muted { margin-inline: 16px; }
+}

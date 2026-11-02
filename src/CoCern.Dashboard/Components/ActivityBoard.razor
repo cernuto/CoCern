@@ -1,14 +1,23 @@
 <section class="activity-board @(Live ? "" : "board-paused")" aria-labelledby="board-heading">
     <div class="board-heading">
-        <div><h2 id="board-heading">Machines</h2><p>Select a session to inspect it.</p></div>
+        <div><h2 id="board-heading">Machines and sessions</h2><p>Grouped by recorded machine identity. Select a session to inspect it.</p></div>
     </div>
     <div class="station-grid">
         @foreach (var machine in Stations)
         {
             var sessions = Snapshot.Sessions.Where(session => session.MachineId == machine.MachineId).OrderBy(session => session.SessionId, StringComparer.Ordinal).ToArray();
-            <article class="machine-station" @key="machine.MachineId">
+            var machineRecorded = HasMachineIdentity(machine.MachineId);
+            var enrolled = IsEnrolled(machine.MachineId);
+            var directRoute = sessions.Any(session => session.Reachable);
+            <article class="@(machineRecorded ? "machine-station" : "session-metadata-group")" @key="machine.MachineId">
+                @if (!machineRecorded)
+                {
+                    <div class="metadata-group-heading"><h3>Sessions without machine information</h3><p>Machine identity was not recorded for these sessions. This group does not represent another computer.</p><span>@sessions.Length @(sessions.Length == 1 ? "session" : "sessions")</span></div>
+                }
+                else
+                {
                 <div class="station-mast">
-                    <span class="station-beacon @(machine.Reachable ? "reachable" : "")" aria-hidden="true">
+                    <span class="station-beacon @(enrolled && machine.Reachable ? "reachable" : "")" aria-hidden="true">
                         <svg viewBox="0 0 80 72" class="outpost-glyph">
                             <path class="outpost-shadow" d="M8 49 40 32 72 49 40 67Z" />
                             <path class="outpost-base" d="M8 44 40 27 72 44 40 61Z" />
@@ -23,18 +32,20 @@
                     <div class="station-name">
                         <h3 title="@machine.MachineId">@machine.Name</h3>
                         <span>@machine.SessionCount @(machine.SessionCount == 1 ? "session" : "sessions")</span>
-                        @if (!IsEnrolled(machine.MachineId)) { <span class="station-registration">Unregistered</span> }
+                        @if (!enrolled) { <span class="station-registration" title="No node enrollment is recorded for this machine. This does not indicate whether the PC is online.">No node enrollment</span> }
+                        else { <span class="station-registration" title="Freshness of the enrolled node's discovery heartbeat, separate from direct chat routes.">@(machine.Reachable ? "Node heartbeat current" : "No current node heartbeat")</span> }
                     </div>
-                    <span class="station-status"><span class="status-dot @(machine.Reachable ? "teal" : "amber")" aria-hidden="true"></span><span>@(machine.Reachable ? "Reachable" : "Not reachable")</span></span>
+                    <span class="station-status" title="Whether a session shown here has a direct chat route. MCP calls and inbox communication can still work without one; this does not indicate whether a model is running."><span class="status-dot @(directRoute ? "teal" : "neutral")" aria-hidden="true"></span><span>@(directRoute ? "Direct chat route available" : "No direct chat route")</span></span>
                 </div>
+                }
                 <div class="station-sessions">
                     @foreach (var session in sessions)
                     {
-                        <button type="button" @key="session.SessionId" title="@(session.Reachable ? "Reachable: the hub can wake this chat" : "Not reachable: the hub cannot wake this chat")" class="session-node @(SelectedId == session.SessionId ? "selected" : "") @(IsPulsing(session.SessionId) ? "signal" : "")" aria-pressed="@(SelectedId == session.SessionId ? "true" : "false")" @onclick="() => OnSelect.InvokeAsync(session.SessionId)">
+                        <button type="button" @key="session.SessionId" title="@(session.Reachable ? "Direct chat route available: the hub can wake this chat. This does not indicate whether a model is running." : "No direct chat route: the hub has no current wake route for this chat. MCP calls and inbox communication can still work.")" class="session-node @(SelectedId == session.SessionId ? "selected" : "") @(IsPulsing(session.SessionId) ? "signal" : "")" aria-pressed="@(SelectedId == session.SessionId ? "true" : "false")" @onclick="() => OnSelect.InvokeAsync(session.SessionId)">
                             <span class="signal-trail" aria-hidden="true"></span>
-                            <span class="session-token" aria-hidden="true"><span class="token-initials">@SessionTokenLetters(session)</span><span class="node-shape @(session.Reachable ? "teal" : "amber")"></span></span>
+                            <span class="session-token" aria-hidden="true"><span class="token-initials">@SessionTokenLetters(session)</span><span class="node-shape @(session.Reachable ? "teal" : "neutral")"></span></span>
                             <span class="node-copy"><strong>@session.Label</strong><span>@(string.IsNullOrWhiteSpace(session.Provider) ? "Session" : session.Provider)</span></span>
-                            <span class="node-meta">@TrafficNote(session)<span class="visually-hidden">, @(session.Reachable ? "reachable" : "not reachable")</span></span>
+                            <span class="node-meta">@TrafficNote(session)<span class="visually-hidden">, @(session.Reachable ? "direct chat route available" : "no direct chat route")</span></span>
                         </button>
                     }
                     @if (sessions.Length == 0)
@@ -60,6 +71,7 @@
     [Parameter] public Func<string, bool> IsPulsing { get; set; } = _ => false;
 
     private bool IsEnrolled(string machineId) => Snapshot.Machines.Any(machine => machine.MachineId == machineId);
+    private static bool HasMachineIdentity(string machineId) => !string.IsNullOrWhiteSpace(machineId);
 
     private static string SessionTokenLetters(DashboardSession session)
     {

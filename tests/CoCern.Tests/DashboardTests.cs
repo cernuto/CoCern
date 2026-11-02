@@ -282,7 +282,15 @@ public sealed class DashboardTests
     {
         using var store = new SqliteStore(Path.Combine(Path.GetTempPath(), "cocern-dashboard-" + Guid.NewGuid().ToString("N"), "relay.db"));
         var source = Assert.IsAssignableFrom<IRelayObservationSource>(store);
-        var metrics = Assert.IsType<CoCern.Contracts.Dashboard.DatabaseMetrics>(await source.ReadDatabaseMetricsAsync(rowCountLimit: 2));
+        CoCern.Contracts.Dashboard.DatabaseMetrics? sample = null;
+        for (var attempt = 0; attempt < 20; attempt++)
+        {
+            sample = await source.ReadDatabaseMetricsAsync(rowCountLimit: 2);
+            if (sample is { Truncated: false }) break;
+            if (attempt < 19) await Task.Delay(50);
+        }
+        Assert.True(sample is { Truncated: false }, "The small metadata fixture did not produce complete database metrics after 20 samples. Last result: " + System.Text.Json.JsonSerializer.Serialize(sample));
+        var metrics = Assert.IsType<CoCern.Contracts.Dashboard.DatabaseMetrics>(sample);
         Assert.Equal("SQLite", metrics.Provider);
         Assert.Equal(new[] { "activity_daily", "activity_log", "due_work", "grain_state", "hub_metadata", "search_docs", "search_index", "task_archive" }, metrics.Tables.Select(table => table.Name));
         Assert.Equal(0, metrics.ArchivedTasks);

@@ -1,5 +1,33 @@
 namespace CoCern.Contracts.Dashboard;
 
+public sealed class DashboardAnalyticsSnapshot
+{
+    public string RepositoryId { get; set; } = "";
+    public int Days { get; set; }
+    public string Status { get; set; } = "ready";
+    public string? Message { get; set; }
+    public DateTimeOffset? SnapshotAt { get; set; }
+    public DateTimeOffset? AvailableFrom { get; set; }
+    public DashboardAnalyticsQuery[] Queries { get; set; } = [];
+}
+
+public sealed class DashboardAnalyticsQuery
+{
+    public string Name { get; set; } = "";
+    public DashboardAnalyticsRow[] Rows { get; set; } = [];
+    public string? Error { get; set; }
+    public bool Truncated { get; set; }
+}
+
+public sealed class DashboardAnalyticsRow
+{
+    public string Key { get; set; } = "";
+    public double? Current { get; set; }
+    public double? Previous { get; set; }
+    public long CurrentCount { get; set; }
+    public long PreviousCount { get; set; }
+}
+
 public sealed record DashboardSnapshot
 {
     public DashboardDocCache DocCache { get; init; } = new();
@@ -45,6 +73,18 @@ public sealed record DashboardDocGrain
     public int Documents { get; init; }
     /// <summary>Bounded indexed paths for a directory; Documents remains its complete indexed count.</summary>
     public string[] DocumentPaths { get; init; } = [];
+    /// <summary>Known utilization for the displayed paths. An absent entry means tracking is unavailable, not zero use.</summary>
+    public Dictionary<string, DashboardDocUsage> DocumentUsage { get; init; } = new(StringComparer.Ordinal);
+}
+
+public sealed record DashboardDocUsage
+{
+    public long Searches { get; init; }
+    /// <summary>Sections found by completed document searches, before the directory's overall limit and reply token budget.</summary>
+    public long MatchedSections { get; init; }
+    public long SectionReads { get; init; }
+    public DateTimeOffset? LastUsedAt { get; init; }
+    public DateTimeOffset TrackingSince { get; init; }
 }
 
 public sealed record DashboardTokens

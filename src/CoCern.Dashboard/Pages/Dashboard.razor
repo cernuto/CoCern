@@ -64,9 +64,9 @@ else
             {
                 <section class="relay-summary" aria-label="Relay summary">
                     <div class="host-summary"><span class="host-symbol" aria-hidden="true"><Icon Name="machine" Size="20" /></span><span><strong>@snapshot.Host.Name</strong><small>CoCern @snapshot.Host.Version</small></span></div>
-                    <div class="summary-stat"><strong>@snapshot.Host.MachineCount</strong><span title="Machines enrolled with this hub">Enrolled</span></div>
+                    <div class="summary-stat"><strong>@snapshot.Host.MachineCount</strong><span title="Nodes recorded in this hub's discovery inventory; this is not a count of active PCs.">Enrolled nodes</span></div>
                     <div class="summary-stat"><strong>@snapshot.Host.SessionCount</strong><span>@(snapshot.Host.SessionCount == 1 ? "Session" : "Sessions")</span></div>
-                    <div class="summary-stat"><strong>@snapshot.Host.ReachableCount</strong><span>Reachable</span></div>
+                    <div class="summary-stat"><strong>@snapshot.Host.ReachableCount</strong><span title="Sessions with a current direct wake route. MCP calls and inbox communication can still work without one; this is not a count of running models.">Direct chat routes</span></div>
                 </section>
                 @if (snapshot.SessionsTruncated && View is "overview" or "sessions")
                 {

@@ -1,9 +1,13 @@
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.Versioning;
 using System.Security.AccessControl;
+using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Security.Principal;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Server.Kestrel.Https;
 using Microsoft.Extensions.Configuration;
 using CoCern.Host;
 using Xunit;
@@ -94,17 +98,26 @@ public sealed class HubNetworkTests : IDisposable
     public async Task Stopping_the_host_removes_the_key_container_the_hub_certificate_created()
     {
         if (!OperatingSystem.IsWindows()) return;
-        var before = KeyContainers();
+        // Another host can keep its own certificate alive while this host stops.
+        using var foreignCertificate = HubCertificate.LoadOrCreate(Path.Combine(root, "foreign-certificate.pfx"), "other-hub");
+        var foreignContainer = KeyContainer(foreignCertificate);
+        List<HttpsConnectionAdapterOptions> listeners = [];
+        string hubContainer;
         var (httpPort, httpsPort) = (FreePort(), FreePort());
-        await using (var app = await StartAsync(httpPort, httpsPort, enabled: true))
+        await using (var app = await StartAsync(httpPort, httpsPort, enabled: true, configureHttps: listeners.Add))
         {
+            var certificate = Assert.IsType<X509Certificate2>(Assert.Single(listeners.Select(listener => listener.ServerCertificate).Distinct()));
+            hubContainer = KeyContainer(certificate);
+            Assert.NotEqual(foreignContainer, hubContainer);
             using var handler = new HttpClientHandler { ServerCertificateCustomValidationCallback = (_, _, _, _) => true };
             using var client = new HttpClient(handler);
             Assert.Equal(HttpStatusCode.OK, (await client.GetAsync($"https://127.0.0.1:{httpsPort}/health")).StatusCode);
-            Assert.NotEmpty(KeyContainers().Except(before));
+            Assert.Contains(hubContainer, KeyContainers());
             await app.StopAsync();
         }
-        Assert.Empty(KeyContainers().Except(before));
+        var remaining = KeyContainers();
+        Assert.DoesNotContain(hubContainer, remaining);
+        Assert.Contains(foreignContainer, remaining);
     }
 
     [Fact]
@@ -133,7 +146,7 @@ public sealed class HubNetworkTests : IDisposable
         Assert.False(File.Exists(CertificatePath));
     }
 
-    private async Task<WebApplication> StartAsync(int httpPort, int httpsPort, bool enabled, int? localPort = null)
+    private async Task<WebApplication> StartAsync(int httpPort, int httpsPort, bool enabled, int? localPort = null, Action<HttpsConnectionAdapterOptions>? configureHttps = null)
     {
         Directory.CreateDirectory(root);
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions { ContentRootPath = root });
@@ -152,6 +165,7 @@ public sealed class HubNetworkTests : IDisposable
             ["Relay:Local:HttpsPort"] = (localPort ?? FreePort()).ToString(),
             ["Relay:Network:CertificatePath"] = Path.Combine("nested", "hub-certificate.pfx")
         });
+        if (configureHttps is not null) builder.WebHost.ConfigureKestrel(options => options.ConfigureHttpsDefaults(configureHttps));
         builder.AddRelayHost();
         var app = builder.Build();
         app.UseRelayPipeline();
@@ -160,7 +174,14 @@ public sealed class HubNetworkTests : IDisposable
         return app;
     }
 
-    /// <summary>File names in the current user's CNG key store. The assertion compares only names that appeared since the snapshot, so other processes removing keys cannot fail it.</summary>
+    [SupportedOSPlatform("windows")]
+    private static string KeyContainer(X509Certificate2 certificate)
+    {
+        using var key = Assert.IsType<ECDsaCng>(certificate.GetECDsaPrivateKey());
+        return Assert.IsType<string>(key.Key.UniqueName);
+    }
+
+    /// <summary>File names in the current user's CNG key store, compared only with the containers owned by this test.</summary>
     private static HashSet<string> KeyContainers()
     {
         var folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Microsoft", "Crypto", "Keys");

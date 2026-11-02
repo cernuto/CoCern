@@ -145,14 +145,41 @@ public sealed class DashboardCollector : BackgroundService
         var encodedGrains = root.GetProperty("docCache").GetProperty("grains");
         var grainBytes = EncodedLength(encodedGrains);
         var grains = snapshot.DocCache.Grains.ToArray();
-        for (var index = grains.Length - 1; index >= 0 && bytes > maximumBytes; index--)
+        var pathCounts = grains.Select(grain => grain.DocumentPaths.Length).ToArray();
+        var usageCounts = grains.Select(grain => grain.DocumentUsage.Count).ToArray();
+        while (bytes > maximumBytes)
         {
-            var paths = encodedGrains[index].GetProperty("documentPaths");
-            var before = bytes;
-            var count = Trim(paths);
-            grainBytes -= before - bytes;
-            if (count < grains[index].DocumentPaths.Length)
-                grains[index] = grains[index] with { DocumentPaths = grains[index].DocumentPaths[..count] };
+            // Remove from the fullest row first so later repositories retain the same fair coverage.
+            var index = -1;
+            for (var candidate = 0; candidate < grains.Length; candidate++)
+                if (pathCounts[candidate] > 0 && (index < 0 || pathCounts[candidate] >= pathCounts[index]))
+                    index = candidate;
+            if (index < 0) break;
+
+            var count = pathCounts[index];
+            var path = grains[index].DocumentPaths[count - 1];
+            var removedBytes = EncodedLength(encodedGrains[index].GetProperty("documentPaths")[count - 1]) + (count > 1 ? 1 : 0);
+            if (encodedGrains[index].GetProperty("documentUsage").TryGetProperty(path, out var usage))
+            {
+                // Dictionary entries repeat the encoded path, followed by a colon, value and optional comma.
+                removedBytes += JsonSerializer.SerializeToUtf8Bytes(path, JsonOptions).Length + 1 + EncodedLength(usage)
+                    + (usageCounts[index] > 1 ? 1 : 0);
+                usageCounts[index]--;
+            }
+            bytes -= removedBytes;
+            grainBytes -= removedBytes;
+            pathCounts[index]--;
+        }
+        for (var index = 0; index < grains.Length; index++)
+        {
+            if (pathCounts[index] == grains[index].DocumentPaths.Length) continue;
+            var paths = grains[index].DocumentPaths[..pathCounts[index]];
+            grains[index] = grains[index] with
+            {
+                DocumentPaths = paths,
+                DocumentUsage = paths.Where(grains[index].DocumentUsage.ContainsKey)
+                    .ToDictionary(path => path, path => grains[index].DocumentUsage[path], StringComparer.Ordinal)
+            };
         }
         snapshot = snapshot with { DocCache = snapshot.DocCache with { Grains = grains } };
         if (bytes <= maximumBytes) return snapshot;

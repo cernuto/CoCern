@@ -27,7 +27,7 @@ public sealed class DashboardDocumentInventoryTests
         var pathsShown = snapshot.Grains.SelectMany(Paths).ToArray();
         Assert.Equal(200, pathsShown.Length);
         Assert.All(pathsShown, path => Assert.InRange(path.Length, 1, 1024));
-        Assert.Equal(150, Paths(snapshot.Grains.Single(row => row.Kind == "Directory" && row.Repository == "a")).Length);
+        Assert.Equal(100, Paths(snapshot.Grains.Single(row => row.Kind == "Directory" && row.Repository == "a")).Length);
         Assert.All(snapshot.Grains.Where(row => row.Kind == "Directory"), row => Assert.Equal(151, row.Documents));
         Assert.False(snapshot.Truncated);
     }

@@ -28,6 +28,198 @@ public sealed class DocCacheCollection;
 public sealed class DocCacheTests
 {
     [Fact]
+    public async Task Document_utilization_counts_completed_searches_and_successful_section_reads_per_path()
+    {
+        using var git = GitRepositories.Create(new() { ["docs/a.md"] = "# Alpha\n\nCached alpha.\n", ["docs/b.md"] = "# Beta\n\nCached beta.\n" });
+        await using var host = DocHost(git);
+        await SyncAsync(host);
+        var directory = host.Services.GetRequiredService<IGrainFactory>().GetGrain<IDocDirectoryGrain>("repo");
+        var initial = DocumentUsage(host, "repo", "docs/a.md");
+        Assert.Equal(0, UsageCount(initial, "Searches"));
+        Assert.Equal(0, UsageCount(initial, "MatchedSections"));
+        Assert.Equal(0, UsageCount(initial, "SectionReads"));
+        Assert.Equal(JsonValueKind.Null, initial.GetProperty("LastUsedAt").ValueKind);
+        var since = initial.GetProperty("TrackingSince").GetDateTimeOffset();
+        Assert.True(since <= DateTimeOffset.UtcNow);
+
+        var found = await directory.SearchAsync("cached", null, null, 1, TimeSpan.FromSeconds(10));
+        Assert.Single(found.Hits); // Each document matched, even though the directory returns only one hit.
+        await directory.SearchAsync("unfindablequux", null, "docs/a.md", 3, TimeSpan.FromSeconds(10));
+        Assert.NotNull(await directory.SectionAsync("docs/a.md", "alpha"));
+        Assert.Null(await directory.SectionAsync("docs/a.md", "missing"));
+        Assert.Null(await directory.SectionAsync("docs/missing.md", "alpha"));
+        Assert.True((await directory.SearchAsync("cached", null, "docs/missing.md", 3, TimeSpan.FromSeconds(10))).PathUnknown);
+        Assert.Empty((await directory.SearchAsync("cached", "not-a-spec", null, 3, TimeSpan.FromSeconds(10))).Hits);
+
+        var a = DocumentUsage(host, "repo", "docs/a.md");
+        var b = DocumentUsage(host, "repo", "docs/b.md");
+        Assert.Equal((2L, 1L, 1L), (UsageCount(a, "Searches"), UsageCount(a, "MatchedSections"), UsageCount(a, "SectionReads")));
+        Assert.Equal((1L, 1L, 0L), (UsageCount(b, "Searches"), UsageCount(b, "MatchedSections"), UsageCount(b, "SectionReads")));
+        Assert.Equal(since, a.GetProperty("TrackingSince").GetDateTimeOffset());
+        Assert.True(a.GetProperty("LastUsedAt").GetDateTimeOffset() >= since);
+        await Task.WhenAll(Enumerable.Range(0, 6).Select(_ => directory.SearchAsync("unfindablequux", null, "docs/a.md", 1, TimeSpan.FromSeconds(10))));
+        Assert.Equal(8, UsageCount(DocumentUsage(host, "repo", "docs/a.md"), "Searches"));
+        await Task.WhenAll(Enumerable.Range(0, 6).SelectMany(_ => new Task[]
+        {
+            directory.SearchAsync("unfindablequux", null, "docs/a.md", 1, TimeSpan.FromSeconds(10)),
+            directory.SectionAsync("docs/a.md", "alpha")
+        }));
+        a = DocumentUsage(host, "repo", "docs/a.md");
+        Assert.Equal((14L, 7L), (UsageCount(a, "Searches"), UsageCount(a, "SectionReads")));
+    }
+
+    [Fact]
+    public async Task Document_utilization_survives_restart_and_prunes_removed_paths_without_crossing_repositories()
+    {
+        using var git = GitRepositories.Create(new() { ["docs/a.md"] = "# Alpha\n\nCached alpha.\n", ["docs/old.md"] = "# Old\n\nCached old.\n" });
+        var settings = new Dictionary<string, string?> { ["Relay:DocCache:Repositories:1:Id"] = "repo2", ["Relay:DocCache:Repositories:1:ClonePath"] = git.Clone };
+        var database = Path.Combine(Path.GetTempPath(), $"cocern-doc-usage-{Guid.NewGuid():N}.db");
+        DateTimeOffset since;
+        await using (var host = DocHost(git, settings: settings, databasePath: database))
+        {
+            await SyncAsync(host);
+            await host.Services.GetRequiredService<DocSyncRunner>().SyncAsync("repo2", null, CancellationToken.None);
+            var grains = host.Services.GetRequiredService<IGrainFactory>();
+            var directory = grains.GetGrain<IDocDirectoryGrain>("repo");
+            await directory.SearchAsync("cached", null, null, 3, TimeSpan.FromSeconds(10));
+            await directory.SectionAsync("docs/a.md", "alpha");
+            since = DocumentUsage(host, "repo", "docs/a.md").GetProperty("TrackingSince").GetDateTimeOffset();
+            Assert.Equal(0, UsageCount(DocumentUsage(host, "repo2", "docs/a.md"), "Searches"));
+            await grains.GetGrain<IDocumentGrain>(DocKeys.Document("repo", "docs/a.md")).DropAsync();
+            await directory.SearchAsync("cached", null, "docs/a.md", 3, TimeSpan.FromSeconds(10));
+            Assert.Equal(2, UsageCount(DocumentUsage(host, "repo", "docs/a.md"), "Searches"));
+        }
+        await using (var host = DocHost(git, settings: settings, databasePath: database))
+        {
+            var directory = host.Services.GetRequiredService<IGrainFactory>().GetGrain<IDocDirectoryGrain>("repo");
+            await directory.ReadAsync();
+            var retained = DocumentUsage(host, "repo", "docs/a.md");
+            Assert.Equal((2L, 1L), (UsageCount(retained, "Searches"), UsageCount(retained, "SectionReads")));
+            Assert.Equal(since, retained.GetProperty("TrackingSince").GetDateTimeOffset());
+            git.Move("docs/old.md", "docs/new.md");
+            await SyncAsync(host);
+            var observation = DirectoryObservation(host, "repo");
+            Assert.False(observation.GetProperty("DocumentUsage").TryGetProperty("docs/old.md", out _));
+            Assert.Equal(0, UsageCount(DocumentUsage(host, "repo", "docs/new.md"), "Searches"));
+            Assert.Equal(2, UsageCount(DocumentUsage(host, "repo", "docs/a.md"), "Searches"));
+        }
+    }
+
+    [Fact]
+    public async Task Document_utilization_excludes_failed_and_late_search_answers()
+    {
+        using var git = GitRepositories.Create(new() { ["docs/fast.md"] = "# Cached\n\nFast cached.\n", ["docs/slow.md"] = "# Cached\n\nSlow cached.\n" });
+        var watcher = new WatchingGit { SlowPath = "docs/slow.md" };
+        await using var host = DocHost(git, watcher);
+        await SyncAsync(host);
+        watcher.ShowDelay = TimeSpan.FromSeconds(2);
+        var directory = host.Services.GetRequiredService<IGrainFactory>().GetGrain<IDocDirectoryGrain>("repo");
+        var result = await directory.SearchAsync("cached", null, null, 3, TimeSpan.FromMilliseconds(600));
+        Assert.Equal(1, result.NotSearched);
+        Assert.Equal(1, UsageCount(DocumentUsage(host, "repo", "docs/fast.md"), "Searches"));
+        Assert.Equal(0, UsageCount(DocumentUsage(host, "repo", "docs/slow.md"), "Searches"));
+        await Task.Delay(TimeSpan.FromSeconds(2.5));
+        Assert.Equal(0, UsageCount(DocumentUsage(host, "repo", "docs/slow.md"), "Searches"));
+        watcher.ShowDelay = TimeSpan.Zero;
+        await host.Services.GetRequiredService<IGrainFactory>().GetGrain<IDocumentGrain>(DocKeys.Document("repo", "docs/slow.md")).DropAsync();
+        watcher.FailPath = "docs/slow.md";
+        Assert.Equal(1, (await directory.SearchAsync("cached", null, "docs/slow.md", 3, TimeSpan.FromSeconds(10))).NotSearched);
+        Assert.Equal(0, UsageCount(DocumentUsage(host, "repo", "docs/slow.md"), "Searches"));
+    }
+
+    [Fact]
+    public async Task A_document_utilization_write_failure_does_not_fail_the_document_response_or_the_next_sync()
+    {
+        using var git = GitRepositories.Create(new() { ["docs/a.md"] = "# Alpha\n\nCached alpha.\n" });
+        await using var host = DocHost(git);
+        await SyncAsync(host);
+        var directory = host.Services.GetRequiredService<IGrainFactory>().GetGrain<IDocDirectoryGrain>("repo");
+        using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={host.DatabasePath}");
+        await connection.OpenAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = "CREATE TRIGGER fail_doc_usage BEFORE UPDATE ON grain_state WHEN NEW.state_name = 'docs' BEGIN SELECT RAISE(FAIL, 'usage write unavailable'); END;";
+        await command.ExecuteNonQueryAsync();
+        Assert.Single((await directory.SearchAsync("cached", null, null, 3, TimeSpan.FromSeconds(10))).Hits);
+        Assert.NotNull(await directory.SectionAsync("docs/a.md", "alpha"));
+        Assert.Equal(0, UsageCount(DocumentUsage(host, "repo", "docs/a.md"), "Searches"));
+        Assert.Equal(0, UsageCount(DocumentUsage(host, "repo", "docs/a.md"), "SectionReads"));
+        command.CommandText = "DROP TRIGGER fail_doc_usage;";
+        await command.ExecuteNonQueryAsync();
+        await directory.SearchAsync("cached", null, null, 3, TimeSpan.FromSeconds(10));
+        git.Commit(new() { ["docs/a.md"] = "# Alpha\n\nUpdated cached alpha.\n" });
+        await SyncAsync(host);
+        Assert.Equal(git.Head(), (await directory.ReadAsync()).Commit);
+        Assert.Equal(1, UsageCount(DocumentUsage(host, "repo", "docs/a.md"), "Searches"));
+    }
+
+    private static JsonElement DirectoryObservation(RelayHostFixture host, string repository) => JsonSerializer.SerializeToElement(
+        Assert.Single(host.Services.GetRequiredService<DocCacheActivity>().Snapshot(DateTimeOffset.UtcNow).Grains, row => row.Kind == "Directory" && row.Repository == repository));
+
+    private static JsonElement DocumentUsage(RelayHostFixture host, string repository, string path)
+    {
+        var observation = DirectoryObservation(host, repository);
+        Assert.True(observation.TryGetProperty("DocumentUsage", out var usage), "Directory observations must include persistent per-document utilization.");
+        Assert.True(usage.TryGetProperty(path, out var document), $"A tracked zero or utilization record is required for {repository}/{path}.");
+        return document;
+    }
+
+    private static long UsageCount(JsonElement usage, string name) => usage.GetProperty(name).GetInt64();
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_null_persisted_document_usage_record_starts_a_new_period_or_remains_unknown_when_migration_cannot_write(bool failMigration)
+    {
+        using var git = GitRepositories.Create(new() { ["docs/a.md"] = "# Alpha\n\nCached alpha.\n", ["docs/b.md"] = "# Beta\n\nCached beta.\n" });
+        var database = Path.Combine(Path.GetTempPath(), $"cocern-doc-usage-null-{Guid.NewGuid():N}.db");
+        DateTimeOffset retainedSince;
+        await using (var host = DocHost(git, databasePath: database))
+        {
+            await SyncAsync(host);
+            await host.Services.GetRequiredService<IGrainFactory>().GetGrain<IDocDirectoryGrain>("repo").SearchAsync("cached", null, null, 3, TimeSpan.FromSeconds(10));
+            retainedSince = DocumentUsage(host, "repo", "docs/b.md").GetProperty("TrackingSince").GetDateTimeOffset();
+        }
+
+        using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={database}");
+        await connection.OpenAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE grain_state SET payload = json_set(payload, '$.Usage.\"docs/a.md\"', NULL) WHERE state_name = 'docs';";
+        Assert.Equal(1, await command.ExecuteNonQueryAsync());
+        if (failMigration)
+        {
+            command.CommandText = "CREATE TRIGGER fail_usage_migration BEFORE UPDATE ON grain_state WHEN NEW.state_name = 'docs' BEGIN SELECT RAISE(FAIL, 'usage migration unavailable'); END;";
+            await command.ExecuteNonQueryAsync();
+        }
+
+        var restartedAt = DateTimeOffset.UtcNow;
+        await using var restarted = DocHost(git, databasePath: database);
+        var directory = restarted.Services.GetRequiredService<IGrainFactory>().GetGrain<IDocDirectoryGrain>("repo");
+        Assert.Equal(2, (await directory.ReadAsync()).Entries.Length);
+        var observation = DirectoryObservation(restarted, "repo");
+        Assert.Equal(1, UsageCount(DocumentUsage(restarted, "repo", "docs/b.md"), "Searches"));
+        Assert.Equal(retainedSince, DocumentUsage(restarted, "repo", "docs/b.md").GetProperty("TrackingSince").GetDateTimeOffset());
+        if (failMigration)
+        {
+            Assert.False(observation.GetProperty("DocumentUsage").TryGetProperty("docs/a.md", out _));
+            Assert.NotNull(await directory.SectionAsync("docs/a.md", "alpha"));
+            Assert.False(DirectoryObservation(restarted, "repo").GetProperty("DocumentUsage").TryGetProperty("docs/a.md", out _));
+            command.CommandText = "DROP TRIGGER fail_usage_migration;";
+            await command.ExecuteNonQueryAsync();
+        }
+        else
+        {
+            var migrated = DocumentUsage(restarted, "repo", "docs/a.md");
+            Assert.Equal((0L, 0L, 0L), (UsageCount(migrated, "Searches"), UsageCount(migrated, "MatchedSections"), UsageCount(migrated, "SectionReads")));
+            Assert.Equal(JsonValueKind.Null, migrated.GetProperty("LastUsedAt").ValueKind);
+            Assert.True(migrated.GetProperty("TrackingSince").GetDateTimeOffset() >= restartedAt);
+        }
+        Assert.Single((await directory.SearchAsync("cached", null, "docs/a.md", 3, TimeSpan.FromSeconds(10))).Hits);
+        var recovered = DocumentUsage(restarted, "repo", "docs/a.md");
+        Assert.Equal((1L, 1L, 0L), (UsageCount(recovered, "Searches"), UsageCount(recovered, "MatchedSections"), UsageCount(recovered, "SectionReads")));
+        Assert.True(recovered.GetProperty("TrackingSince").GetDateTimeOffset() >= restartedAt);
+    }
+
+    [Fact]
     public async Task Directory_inventory_names_survive_cold_documents_and_refresh_after_sync()
     {
         using var git = GitRepositories.Create(new() { ["docs/a.md"] = "# Alpha\n\nCached text.\n", ["docs/old.md"] = "# Old\n" });
@@ -122,7 +314,8 @@ public sealed class DocCacheTests
     private static DocDirectoryState CopyDirectory(DocDirectoryState source) => new()
     {
         Branch = source.Branch, Commit = source.Commit, NeedsResync = source.NeedsResync, SyncedAt = source.SyncedAt, Fingerprint = source.Fingerprint,
-        Docs = new(source.Docs, StringComparer.Ordinal), Skipped = new(source.Skipped, StringComparer.Ordinal), CapacitySkipped = new(source.CapacitySkipped, StringComparer.Ordinal)
+        Docs = new(source.Docs, StringComparer.Ordinal), Skipped = new(source.Skipped, StringComparer.Ordinal), CapacitySkipped = new(source.CapacitySkipped, StringComparer.Ordinal),
+        Usage = new(source.Usage ?? [], StringComparer.Ordinal)
     };
 
     [Fact]

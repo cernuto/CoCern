@@ -1,5 +1,5 @@
 <section class="surface document-inventory" aria-labelledby="docs-heading">
-    <div class="section-heading"><div><h2 id="docs-heading">Documents</h2><p>Files discovered in each repository.</p></div></div>
+    <div class="section-heading"><div><h2 id="docs-heading">Documents</h2><p>Usage for files discovered in each repository. Expand a repository to see its files.</p></div></div>
     @if (Cache.ObservedAt is null)
     {
         <p class="empty-copy">Waiting for the hub.</p>
@@ -8,12 +8,22 @@
     {
         @foreach (var directory in Cache.Grains.Where(grain => grain.Kind == "Directory"))
         {
-            <section class="document-repository" aria-label="@($"{directory.Repository} documents")">
-                <div class="document-repository-heading"><h3>@directory.Repository</h3><span>@directory.Documents @(directory.Documents == 1 ? "document" : "documents")</span></div>
+            <details class="document-repository" open="@IsFirstRepository(directory)">
+                <summary class="document-repository-heading"><span class="document-repository-name">@directory.Repository</span><span>@directory.Documents.ToString("N0") @(directory.Documents == 1 ? "document" : "documents")</span></summary>
                 <ul class="document-file-list">
                     @foreach (var path in directory.DocumentPaths)
                     {
-                        <li><strong>@System.IO.Path.GetFileName(path.Replace('\\', '/'))</strong><small>@path</small></li>
+                        var usage = directory.DocumentUsage.GetValueOrDefault(path);
+                        <li class="document-file">
+                            <div class="document-file-identity"><strong>@DocumentName(path)</strong><small>@path</small></div>
+                            <dl class="document-usage">
+                                <div><dt title="Completed document searches, including searches with no matches.">Searches</dt><dd>@UsageCount(usage?.Searches)</dd></div>
+                                <div><dt title="Matching sections found in this file before the combined search result limit.">Matches found</dt><dd>@UsageCount(usage?.MatchedSections)</dd></div>
+                                <div><dt title="Successful section reads; source reads for the cache are shown separately below.">Section reads</dt><dd>@UsageCount(usage?.SectionReads)</dd></div>
+                                <div><dt>Last used</dt><dd title="@(usage?.LastUsedAt is null ? null : DashboardFormat.Timestamp(usage.LastUsedAt))">@(usage is null ? "Not recorded" : usage.LastUsedAt is null ? "No use recorded" : DashboardFormat.Ago(usage.LastUsedAt, Now))</dd></div>
+                            </dl>
+                            <p class="document-tracking">@(usage is null ? "Tracking period not recorded." : $"Tracked since {DashboardFormat.Timestamp(usage.TrackingSince)} (local time).")</p>
+                        </li>
                     }
                 </ul>
                 @if (directory.Documents == 0)
@@ -22,17 +32,18 @@
                 }
                 else if (directory.DocumentPaths.Length < directory.Documents)
                 {
-                    <p class="document-inventory-note">Showing @directory.DocumentPaths.Length of @directory.Documents document filenames.</p>
+                    <p class="document-inventory-note">Showing @directory.DocumentPaths.Length of @directory.Documents documents in this update.</p>
                 }
-            </section>
+            </details>
         }
         @if (!Cache.Grains.Any(grain => grain.Kind == "Directory")) { <p class="empty-copy">No repository document inventories reported yet.</p> }
+        <p class="document-usage-note">Searches count completed checks of a file, including zero-match searches. Matches found are matching sections, which may not have been returned or read. Section reads count successful section responses. Counts cover the tracking period shown; Not recorded means no usage history is available.</p>
         @if (Cache.Truncated) { <p class="table-footnote">Some repository inventories may be omitted from this update.</p> }
     }
 </section>
 
 <section class="surface doc-cache-view" aria-labelledby="indexes-heading">
-    <div class="section-heading"><div><h2 id="indexes-heading">Index activity</h2><p>@Cache.ActiveDirectories @(Cache.ActiveDirectories == 1 ? "repository index" : "repository indexes") · @Cache.ActiveDocuments @(Cache.ActiveDocuments == 1 ? "document index" : "document indexes") active</p></div></div>
+    <div class="section-heading"><div><h2 id="indexes-heading">Index activity</h2><p>@Cache.ActiveDirectories @(Cache.ActiveDirectories == 1 ? "repository index" : "repository indexes") · @Cache.ActiveDocuments @(Cache.ActiveDocuments == 1 ? "document index" : "document indexes") active. Source reads and index builds describe cache work for the current activation.</p></div></div>
     @if (Cache.ObservedAt is null)
     {
         <p class="empty-copy">Waiting for the hub.</p>
@@ -40,6 +51,10 @@
     else
     {
         <p class="muted" title="@DashboardFormat.Timestamp(Cache.ObservedAt)">Updated @DashboardFormat.Ago(Cache.ObservedAt, Now).ToLowerInvariant()</p>
+        @if (Cache.Grains.Length > 0)
+        {
+        <details class="document-index-details">
+            <summary>View active index diagnostics</summary>
         <div class="doc-cache-table">
             <table class="metrics-table">
                 <caption class="visually-hidden">Loaded repository and document indexes</caption>
@@ -61,6 +76,8 @@
                 </tbody>
             </table>
         </div>
+        </details>
+        }
         @if (Cache.Grains.Length == 0 && !Cache.Truncated) { <p class="empty-copy">Nothing loaded. Indexes load when an agent searches or reads documents, and unload when idle.</p> }
         @if (Cache.Truncated) { <p class="limit-note">Showing @Cache.Grains.Length of @(Cache.ActiveDirectories + Cache.ActiveDocuments).</p> }
     }
@@ -69,4 +86,11 @@
 @code {
     [Parameter, EditorRequired] public DashboardDocCache Cache { get; set; } = new();
     [Parameter] public DateTimeOffset Now { get; set; }
+
+    private bool IsFirstRepository(DashboardDocGrain directory) =>
+        directory == Cache.Grains.FirstOrDefault(grain => grain.Kind == "Directory" && grain.Documents > 0);
+
+    private static string DocumentName(string path) => System.IO.Path.GetFileName(path.Replace('\\', '/'));
+
+    private static string UsageCount(long? value) => value?.ToString("N0") ?? "Not recorded";
 }

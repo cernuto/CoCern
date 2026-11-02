@@ -8,7 +8,7 @@
     {
         <div class="inspector-title"><span class="provider-token" aria-hidden="true">@ProviderInitial</span><div><h3>@Session.Label</h3><p title="@Session.SessionId">@Session.Provider · #@ShortId(Session.SessionId)</p></div></div>
         <div class="tag-row">
-            <span class="tag @(Session.Reachable ? "good" : "attention")" title="Whether the hub can wake this chat. It does not tell whether a model is running.">@(Session.Reachable ? "Reachable" : "Not reachable")</span>
+            <span class="tag @(Session.Reachable ? "good" : "neutral")" title="Whether the hub has a current direct route to wake this chat. MCP calls and inbox communication can still work without one. This does not indicate whether a model is running.">@(Session.Reachable ? "Direct chat route available" : "No direct chat route")</span>
             @if (Session.HasBindingReport is null)
             {
                 <span class="tag neutral">Tool binding not reported</span>
@@ -25,7 +25,7 @@
         <dl class="session-facts">
             <div><dt>Machine</dt><dd>@MachineLabel</dd></div>
             <div><dt>Repository</dt><dd>@(string.IsNullOrWhiteSpace(Session.RepositoryId) ? "Not reported" : Session.RepositoryId)</dd></div>
-            <div><dt>Mapping</dt><dd>@(Session.IsMapped ? "Mapped" : "Not mapped")</dd></div>
+            <div><dt title="Whether discovery reported a provider mapping for this chat's direct route.">Chat route mapping</dt><dd>@(Session.IsMapped ? "Reported" : "Not reported")</dd></div>
             <div><dt>Opened</dt><dd>@(Session.OpenedAt is { } opened ? DashboardFormat.Timestamp(opened) : "Opened time unavailable")</dd></div>
             <div><dt>Status report</dt><dd title="@DashboardFormat.Timestamp(Session.ReportedAt)">@DashboardFormat.Ago(Session.ReportedAt, Now)</dd></div>
             <div><dt>Report fresh until</dt><dd>@DashboardFormat.Timestamp(Session.FreshUntil)</dd></div>
