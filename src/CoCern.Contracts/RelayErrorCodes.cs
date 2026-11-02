@@ -34,6 +34,8 @@ public static class RelayErrorCodes
     public const string MachineRevoked = "MachineRevoked";
     public const string MachineRequired = "MachineRequired";
     public const string HttpsRequired = "HttpsRequired";
+    /// <summary>Enrollment needs the hub's join code, and the request carried none or a wrong one.</summary>
+    public const string JoinCodeRequired = "JoinCodeRequired";
     public const string RateLimited = "RateLimited";
 
     // Records
@@ -127,7 +129,7 @@ public static class RelayErrorCodes
         DeltaRestartRequired, WorkflowRecheckRequired, WorkflowIncomplete, WorkflowNotReady, DependenciesIncomplete, TaskArchived, SnoozeLimit
     }.ToFrozenSet(StringComparer.Ordinal);
 
-    private static readonly FrozenSet<string> Denials = new[] { RepositoryDenied, SessionDenied, AdministratorRequired, MachineRevoked, MachineRequired }.ToFrozenSet(StringComparer.Ordinal);
+    private static readonly FrozenSet<string> Denials = new[] { RepositoryDenied, SessionDenied, AdministratorRequired, MachineRevoked, MachineRequired, JoinCodeRequired }.ToFrozenSet(StringComparer.Ordinal);
     private static readonly FrozenSet<string> Missing = new[] { UnknownTool, NotFound }.ToFrozenSet(StringComparer.Ordinal);
 
     /// <summary>Recognized conflicts are the failures a client reconciles by rereading state; they keep their code, data and version end to end.</summary>

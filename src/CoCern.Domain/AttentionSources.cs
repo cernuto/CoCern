@@ -101,6 +101,17 @@ internal static class AttentionSources
         });
     }
 
+    /// <summary>A claim rolled back (a resource was busy) offers the task to its target again, since the claim closed that offer.</summary>
+    public static void OnUnclaim(AggregateContext context, JsonObject task)
+    {
+        if (task["workflow"] is not JsonObject workflow || Text(workflow, "state") != "ready" || Text(workflow, "targetSessionId") is not { Length: > 0 } target) return;
+        Emit(context, target, Operations.AttentionRaise, new JsonObject
+        {
+            ["kind"] = AttentionKinds.NextWork, ["taskId"] = Text(task, "taskId"), ["priority"] = Number(workflow, "priority"), ["note"] = "ready again: a claim was rolled back",
+            ["revision"] = Number(context.State, "taskRevision") + 1
+        });
+    }
+
     /// <summary>A new proposal is raised to the managers; each proposal ID is raised once (revision 1) and closed once (revision 2).</summary>
     public static void OnProposal(AggregateContext context, string proposalId, string note) =>
         ToManagers(context, Operations.AttentionRaise, new JsonObject { ["kind"] = AttentionKinds.StandingProposal, ["subject"] = proposalId, ["note"] = note, ["revision"] = 1 });
@@ -123,6 +134,8 @@ internal static class AttentionSources
         var action = (state["blockers"] as JsonObject ?? new JsonObject()).FirstOrDefault(x => x.Value is JsonObject blocker && Text(blocker, "sessionId") == holder);
         if (action.Key is null) return;
         var (boardId, taskId, actionId) = ActionTask(action.Key);
+        // Remembered so the closes name the same task: a close guards only the key it names, and the raises carry the task.
+        state["warnedTask"] = new JsonObject { ["boardId"] = boardId, ["taskId"] = taskId };
         JsonObject Item(string kind, string note) => new()
         {
             ["kind"] = kind, ["taskId"] = taskId, ["boardId"] = boardId, ["subject"] = resourceId, ["priority"] = AttentionWeights.High, ["note"] = note, ["revision"] = NextLockRevision(state)
@@ -137,7 +150,7 @@ internal static class AttentionSources
         if (Text(state, "interruptedLease") == lease) return;
         state["interruptedLease"] = lease;
         if (state.ContainsKey("warnedLease"))
-            Emit(context, holder, Operations.AttentionClose, new JsonObject { ["subject"] = resourceId, ["kinds"] = new JsonArray(AttentionKinds.ClaimExpiring), ["revision"] = NextLockRevision(state) });
+            Emit(context, holder, Operations.AttentionClose, WarnedClose(state, resourceId, AttentionKinds.ClaimExpiring));
         state["warnedLease"] = lease;
         var note = "claim on " + resourceId + " ended with action " + actionId + " unresolved; report its outcome";
         Emit(context, holder, Operations.AttentionRaise, Item(AttentionKinds.Interrupted, note));
@@ -152,10 +165,18 @@ internal static class AttentionSources
     {
         var state = context.State;
         var interrupted = state.Remove("interruptedLease");
-        if (!state.Remove("warnedLease") || holder.Length == 0) return;
-        Emit(context, holder, Operations.AttentionClose, new JsonObject { ["subject"] = resourceId, ["kinds"] = new JsonArray(AttentionKinds.ClaimExpiring, AttentionKinds.Interrupted), ["revision"] = NextLockRevision(state) });
-        if (interrupted)
-            ToManagers(context, Operations.AttentionClose, new JsonObject { ["subject"] = resourceId, ["kinds"] = new JsonArray(AttentionKinds.Interrupted), ["revision"] = NextLockRevision(state) });
+        if (!state.Remove("warnedLease") || holder.Length == 0) { state.Remove("warnedTask"); return; }
+        Emit(context, holder, Operations.AttentionClose, WarnedClose(state, resourceId, AttentionKinds.ClaimExpiring, AttentionKinds.Interrupted));
+        if (interrupted) ToManagers(context, Operations.AttentionClose, WarnedClose(state, resourceId, AttentionKinds.Interrupted));
+        state.Remove("warnedTask");
+    }
+
+    /// <summary>A close for the lock's warned items, naming the task they were raised for.</summary>
+    private static JsonObject WarnedClose(JsonObject state, string resourceId, params string[] kinds)
+    {
+        var close = new JsonObject { ["subject"] = resourceId, ["kinds"] = new JsonArray(kinds.Select(kind => (JsonNode)kind).ToArray()), ["revision"] = NextLockRevision(state) };
+        if (state["warnedTask"] is JsonObject task) { close["taskId"] = Text(task, "taskId"); close["boardId"] = Text(task, "boardId"); }
+        return close;
     }
 
     /// <summary>

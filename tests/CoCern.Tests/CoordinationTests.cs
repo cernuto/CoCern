@@ -458,7 +458,7 @@ public sealed class CoordinationTests
         var create = For(worker); create["expectedVersion"] = 0; Assert.True((await Invoke(alice, "task_update", create)).Ok);
         var claim = For(worker); claim["expectedVersion"] = 1; Assert.True((await Invoke(alice, "task_claim", claim)).Ok);
         var begin = For(worker); begin["expectedVersion"] = 2; begin["actionId"] = "a"; begin["inputFingerprint"] = "f"; begin["requiresRestoration"] = true;
-        Assert.Equal("ActionPending", (await Invoke(alice, "action_begin", begin)).Code); // This fake routes no dispatch; reservation is durable.
+        Assert.Equal("Ok", (await Invoke(alice, "action_begin", begin)).Code); // The hub blocks the locks itself, so even this fake confirms them.
         var report = For(worker); report["expectedVersion"] = 3; report["actionId"] = "a"; report["attempt"] = 1; report["outcome"] = "completed"; report["restoration"] = "blocked";
         Assert.True((await Invoke(alice, "action_report", report)).Ok);
         var acceptance = For(admin); acceptance["expectedVersion"] = 4; acceptance["actionId"] = "a"; acceptance["attempt"] = 1; acceptance["restoration"] = "accepted";
@@ -2018,7 +2018,7 @@ public sealed class CoordinationTests
         var claim = For("claim-b"); claim["taskId"] = "b"; claim["expectedVersion"] = 1;
         Assert.True((await Invoke("task_claim", claim)).Ok);
         var begin = For("begin"); begin["taskId"] = "b"; begin["expectedVersion"] = 2; begin["actionId"] = "x"; begin["inputFingerprint"] = "f";
-        Assert.Equal("ActionPending", (await Invoke("action_begin", begin.DeepClone().AsObject())).Code); // This fake routes no dispatch; the record is durable.
+        Assert.Equal("Ok", (await Invoke("action_begin", begin.DeepClone().AsObject())).Code); // The hub blocks the locks itself, so even this fake confirms them.
         var bind = For("bind"); bind["expectedVersion"] = 0; bind["binding"] = new JsonObject { ["solution"] = "other.sln" };
         Assert.True((await Invoke("session_bind", bind)).Ok);
         var again = await Invoke("action_begin", begin.DeepClone().AsObject());

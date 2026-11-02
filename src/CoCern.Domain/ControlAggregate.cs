@@ -94,76 +94,37 @@ internal static class ControlAggregate
         }
     }
 
-    private const string OpenActionsKey = "openActions";
-    private const string ClosedActionsKey = "closedActions";
-    private const string OpenOverflowKey = "openActionsOverflow";
-
-    /// <summary>The oldest report time a tracked open action, closed tombstone or overflow mark still counts from.</summary>
-    private static long TrackingCutoff(DateTimeOffset now) => now.AddDays(-RelayLimits.SessionWorkRetentionDays).ToUnixTimeSeconds();
-
-    private static long Seconds(JsonNode? value) => value is JsonValue number && number.TryGetValue<long>(out var seconds) ? seconds : long.MinValue;
+    private const string OwnsWorkKey = "ownsWork";
+    private const string ClearedWorkKey = "ownsWorkCleared";
 
     /// <summary>
-    /// Whether the session answers for an unresolved action: one it began (or recovered) is still open, reported or refreshed within
-    /// <see cref="RelayLimits.SessionWorkRetentionDays"/>, or it overflowed the record within that time.
+    /// Whether the session answers for an unresolved action: its session reported so within <see cref="RelayLimits.SessionWorkRetentionDays"/>,
+    /// or (before sessions reported for themselves) a board's per-action report still counts.
     /// </summary>
-    private static bool OwnsWork(JsonObject session, DateTimeOffset now)
-    {
-        var cutoff = TrackingCutoff(now);
-        return session[OpenActionsKey] is JsonObject open && open.Any(entry => Seconds(entry.Value) > cutoff) || Seconds(session[OpenOverflowKey]) > cutoff;
-    }
+    private static bool OwnsWork(JsonObject session, DateTimeOffset now) =>
+        WorkLedger.Seconds(session[OwnsWorkKey]) > WorkLedger.Cutoff(now) || WorkLedger.Owns(session, now);
 
     /// <summary>
-    /// A board's report (<see cref="Operations.SessionWork"/>) that a session now answers for an unresolved action, or no longer does. Each
-    /// action is kept as a short hash of its key with the time of its last report (the board's <c>at</c>), at most
-    /// <see cref="RelayLimits.MaxSessionOpenActions"/>. Delivery can be reordered (effects are retried one by one), so:
-    /// <list type="bullet">
-    /// <item>a close leaves a tombstone, at most <see cref="RelayLimits.MaxSessionClosedActions"/>, and an open or refresh reported no later
-    /// than the close is ignored, however late it arrives; one reported after it (the action came back to this session) opens it again;</item>
-    /// <item>a close for an action never seen open (one begun before the directory tracked actions) only leaves its tombstone;</item>
-    /// <item>open actions, tombstones and an overflow mark all lapse after <see cref="RelayLimits.SessionWorkRetentionDays"/> without a report,
-    /// so nothing protects a session for good. A report older than that is ignored.</item>
-    /// </list>
-    /// A session missing from the directory, or in another repository, is ignored: a refusal would make the board's outbox retry it forever.
+    /// <see cref="Operations.SessionWork"/>: a session's report that it now answers for unresolved work (<c>owns</c>), or no longer does,
+    /// sent only when that changes and as a daily refresh, so each action no longer writes this directory. A report older than the last
+    /// change is ignored, so reordered reports never flip it back. A board's older per-action report (<c>actionKey</c>) still applies to the
+    /// ledger it kept here. A session missing from the directory, or in another repository, is ignored: a refusal would be retried forever.
     /// </summary>
     private static RelayReply TrackWork(AggregateContext context)
     {
         var id = Required(context.Args, "sessionId");
-        var key = Retention.Hash(Required(context.Args, "actionKey"));
         if (ObjectAt(context.State, "sessions")[id] is not JsonObject session || Text(session, "repositoryId") != context.Repository) return Ok(new { tracked = false });
-        var cutoff = TrackingCutoff(context.Now);
-        var at = Date(context.Args, "at") is var reported && reported > DateTimeOffset.MinValue ? Math.Min(reported.ToUnixTimeSeconds(), context.Now.ToUnixTimeSeconds()) : context.Now.ToUnixTimeSeconds();
-        var open = ObjectAt(session, OpenActionsKey);
-        var closed = ObjectAt(session, ClosedActionsKey);
-        foreach (var map in new[] { open, closed })
-            foreach (var stale in map.Where(entry => Seconds(entry.Value) <= cutoff).Select(entry => entry.Key).ToArray()) map.Remove(stale);
-        if (Seconds(session[OpenOverflowKey]) <= cutoff) session.Remove(OpenOverflowKey);
-        var tracked = false;
-        if (at > cutoff)
+        var at = WorkLedger.ReportedAt(context.Args, context.Now);
+        if (!context.Args.ContainsKey("owns"))
         {
-            if (Flag(context.Args, "open"))
-            {
-                // A late open or refresh for an action that already closed changes nothing. One reported after the close (by the board's
-                // time) is real: the action came back to this session (its writer took it back from a recovery), so it opens again.
-                if (!closed.ContainsKey(key) || at > Seconds(closed[key]))
-                {
-                    closed.Remove(key);
-                    tracked = true;
-                    if (open.ContainsKey(key) || open.Count < RelayLimits.MaxSessionOpenActions) open[key] = Math.Max(at, Seconds(open[key]));
-                    else session[OpenOverflowKey] = Math.Max(at, Seconds(session[OpenOverflowKey]));
-                }
-            }
-            else
-            {
-                tracked = open.Remove(key);
-                if (!closed.ContainsKey(key) && closed.Count >= RelayLimits.MaxSessionClosedActions)
-                    closed.Remove(closed.OrderBy(entry => Seconds(entry.Value)).ThenBy(entry => entry.Key, StringComparer.Ordinal).First().Key);
-                closed[key] = Math.Max(at, Seconds(closed[key])); // a late, older close never lowers it
-            }
+            var tracked = WorkLedger.Apply(session, Required(context.Args, "actionKey"), Flag(context.Args, "open"), at, context.Now);
+            return Ok(new { tracked, openActions = WorkLedger.OpenCount(session), overflow = WorkLedger.Overflowing(session) });
         }
-        if (open.Count == 0) session.Remove(OpenActionsKey);
-        if (closed.Count == 0) session.Remove(ClosedActionsKey);
-        return Ok(new { tracked, openActions = open.Count, overflow = session.ContainsKey(OpenOverflowKey) });
+        var (owns, cleared) = (WorkLedger.Seconds(session[OwnsWorkKey]), WorkLedger.Seconds(session[ClearedWorkKey]));
+        if (at <= Math.Max(owns, cleared)) return Ok(new { tracked = false });
+        if (Flag(context.Args, "owns")) session[OwnsWorkKey] = at;
+        else { session.Remove(OwnsWorkKey); session[ClearedWorkKey] = at; }
+        return Ok(new { tracked = true });
     }
 
     private static DateTimeOffset LastSeen(JsonObject session) =>
@@ -185,7 +146,7 @@ internal static class ControlAggregate
     {
         var workers = ObjectAt(context.State, "sessions").Select(x => x.Value!.AsObject()).Where(x => Text(x, "repositoryId") == context.Repository).Select(x =>
         {
-            var copy = x.DeepClone().AsObject(); copy.Remove("sessionToken"); copy.Remove("principalId"); copy.Remove(OpenActionsKey); copy.Remove(ClosedActionsKey); copy.Remove(OpenOverflowKey);
+            var copy = x.DeepClone().AsObject(); copy.Remove("sessionToken"); copy.Remove("principalId"); foreach (var field in WorkLedger.Fields) copy.Remove(field); copy.Remove(OwnsWorkKey); copy.Remove(ClearedWorkKey);
             var stale = Date(copy, "freshUntil") <= context.Now || Text(copy, "hubIncarnation") != Text(context.Args, "hubIncarnation");
             copy["stale"] = stale; copy.Remove("hubIncarnation");
             if (stale) copy["availability"] = "unknown";

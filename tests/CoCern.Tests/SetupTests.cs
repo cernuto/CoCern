@@ -39,6 +39,7 @@ public sealed class SetupTests : IDisposable
         StartNode = (dotnet, dll, dataDir) => started.Add($"{dotnet}|{dll}|{dataDir}"),
         Transport = new NodeTransport
         {
+            JoinCode = RelayHostFixture.JoinCode,
             CreateHandler = (_, _) => new HookHandler(host.Server.CreateHandler(), duringEnrollment),
             HubHandler = () => host.Server.CreateHandler(),
             MachineName = "Setup PC",

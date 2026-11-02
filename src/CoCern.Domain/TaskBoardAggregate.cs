@@ -237,6 +237,7 @@ internal static class TaskBoardAggregate
             task.Remove("owner"); task["leaseUntil"] = context.Now.ToString("O"); task["version"] = Number(task, "version") + 1;
             // The claim is undone, so its retry must run again rather than replay it.
             CoordinationStateMachine.ForgetRequest(context.State, context.Caller.PrincipalId, RelayTools.TaskClaim, Text(args, "claimRequestId"));
+            AttentionSources.OnUnclaim(context, task);
         }
         return Ok(new { released = true }, Number(task, "version"));
     }

@@ -5,15 +5,16 @@ using CoCern.Adapter.Node;
 namespace CoCern.Adapter.Setup;
 
 /// <summary>What <c>--setup</c> was asked to do.</summary>
-internal sealed record SetupOptions(Uri Hub, bool SkipClientConfig, string? DataDir, bool PromptHook = false)
+internal sealed record SetupOptions(Uri Hub, bool SkipClientConfig, string? DataDir, bool PromptHook = false, string? JoinCode = null, string? Fingerprint = null)
 {
-    private const string Usage = "Use --setup --hub <https-url> [--skip-client-config] [--prompt-hook] [--data-dir <path>].";
+    public const string JoinCodeVariable = "COCERN_JOIN_CODE";
+    private const string Usage = "Use --setup --hub <https-url> --join-code <code> [--fingerprint <sha256>] [--skip-client-config] [--prompt-hook] [--data-dir <path>].";
 
-    /// <summary>Parses the arguments after <c>--setup</c>. <c>--hub</c> is required.</summary>
-    public static SetupOptions Parse(IReadOnlyList<string> args)
+    /// <summary>Parses the arguments after <c>--setup</c>. <c>--hub</c> is required; without <c>--join-code</c>, <paramref name="joinCodeFallback"/> (from <see cref="JoinCodeVariable"/>) is used.</summary>
+    public static SetupOptions Parse(IReadOnlyList<string> args, string? joinCodeFallback = null)
     {
         Uri? hub = null;
-        string? dataDir = null;
+        string? dataDir = null, joinCode = null, fingerprint = null;
         var skip = false;
         var hook = false;
         for (var i = 0; i < args.Count; i++)
@@ -27,10 +28,18 @@ internal sealed record SetupOptions(Uri Hub, bool SkipClientConfig, string? Data
                     hub = typed;
                     break;
                 case "--data-dir" when dataDir is null && i + 1 < args.Count && !string.IsNullOrWhiteSpace(args[i + 1]): dataDir = args[++i]; break;
+                case "--join-code" when joinCode is null && i + 1 < args.Count && !string.IsNullOrWhiteSpace(args[i + 1]): joinCode = args[++i].Trim(); break;
+                case "--fingerprint" when fingerprint is null && i + 1 < args.Count:
+                    // Accepts the hub's logged form and the colon-separated form certificate viewers show.
+                    fingerprint = args[++i].Replace(":", "").Trim().ToUpperInvariant();
+                    if (!PinnedCertificate.IsFingerprint(fingerprint)) throw new AdapterConfigurationException("--fingerprint must be the hub certificate's SHA-256 fingerprint: 64 hexadecimal characters, as the hub logs it.");
+                    break;
                 default: throw new AdapterConfigurationException(Usage);
             }
         }
-        return new(hub ?? throw new AdapterConfigurationException(Usage), skip, dataDir, hook);
+        if (hub is null) throw new AdapterConfigurationException(Usage);
+        if (fingerprint is not null && hub.Scheme != Uri.UriSchemeHttps) throw new AdapterConfigurationException("--fingerprint applies only to an https:// hub.");
+        return new(hub, skip, dataDir, hook, joinCode ?? (string.IsNullOrWhiteSpace(joinCodeFallback) ? null : joinCodeFallback.Trim()), fingerprint);
     }
 }
 
@@ -55,7 +64,7 @@ internal sealed class SetupEnvironment
         var host = Environment.ProcessPath;
         var dotnet = host is not null && string.Equals(Path.GetFileNameWithoutExtension(host), "dotnet", StringComparison.OrdinalIgnoreCase) ? host
             : Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") is { Length: > 0 } hostPath && File.Exists(hostPath) ? hostPath
-            : throw new AdapterConfigurationException("Run setup as 'dotnet CoCern.Adapter.dll --setup --hub <https-url>' so the dotnet host to start the node with is known.");
+            : throw new AdapterConfigurationException("Run setup as 'dotnet CoCern.Adapter.dll --setup --hub <https-url> --join-code <code>' so the dotnet host to start the node with is known.");
         var dll = Path.Combine(AppContext.BaseDirectory, "CoCern.Adapter.dll");
         if (!File.Exists(dll)) throw new AdapterConfigurationException($"'{dll}' was not found. Run setup from the copied published folder.");
         return new()
@@ -154,6 +163,8 @@ internal static class SetupCommand
         using (state)
         {
             env.Transport.SingleCycle = true;
+            if (options.JoinCode is not null) env.Transport.JoinCode = options.JoinCode;
+            if (options.Fingerprint is not null) env.Transport.ExpectedFingerprint = options.Fingerprint;
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeout.CancelAfter(env.EnrollTimeout);
             var code = await NodeRunner.RunAsync(state, options.Hub, env.Transport, env.Error, timeout.Token);

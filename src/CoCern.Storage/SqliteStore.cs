@@ -26,6 +26,7 @@ public sealed partial class SqliteStore : IDueWorkSource, IDisposable, IAsyncDis
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         DatabasePath = Path.GetFullPath(databasePath);
         Directory.CreateDirectory(Path.GetDirectoryName(DatabasePath)!);
+        RestrictToOwner(DatabasePath);
         var existingDatabase = File.Exists(DatabasePath) && new FileInfo(DatabasePath).Length != 0;
         _ownership = AcquireOwnership(DatabasePath);
         _connection = new SqliteConnection(ConnectionString(DatabasePath));
@@ -33,6 +34,9 @@ public sealed partial class SqliteStore : IDueWorkSource, IDisposable, IAsyncDis
         {
             _connection.Open();
             Initialize(existingDatabase, searchModule);
+            // New -wal/-shm files inherit the database's mode; ones left by an older hub are tightened here.
+            RestrictToOwner(DatabasePath + "-wal", createIfMissing: false);
+            RestrictToOwner(DatabasePath + "-shm", createIfMissing: false);
             OpenSearchConnection();
             StartActivity(activity ?? new());
         }
@@ -54,6 +58,20 @@ public sealed partial class SqliteStore : IDueWorkSource, IDisposable, IAsyncDis
         DefaultTimeout = 5
     }.ToString();
 
+    /// <summary>The database holds session tokens and messages, so on Unix it is created, or tightened to, owner read/write only; Windows keeps its inherited ACL.</summary>
+    internal static void RestrictToOwner(string path, bool createIfMissing = true)
+    {
+        if (OperatingSystem.IsWindows()) return;
+        const UnixFileMode owner = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        if (!File.Exists(path))
+        {
+            if (!createIfMissing) return;
+            try { using var _ = new FileStream(path, new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write, UnixCreateMode = owner }); }
+            catch (IOException) when (File.Exists(path)) { }
+        }
+        if ((File.GetUnixFileMode(path) & ~owner) != 0) File.SetUnixFileMode(path, owner);
+    }
+
     // Keep the lease file after closing: unlinking it could create a second independent lock inode.
     private static FileStream AcquireOwnership(string path) =>
         new(path + ".hub.lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
@@ -71,7 +89,9 @@ public sealed partial class SqliteStore : IDueWorkSource, IDisposable, IAsyncDis
         RequireModule(_connection, searchModule);
         if (version < SchemaVersion && existingDatabase)
         {
-            using var backup = new SqliteConnection(ConnectionString(DatabasePath + ".pre-migration-" + Guid.NewGuid().ToString("N") + ".db"));
+            var backupPath = DatabasePath + ".pre-migration-" + Guid.NewGuid().ToString("N") + ".db";
+            RestrictToOwner(backupPath);
+            using var backup = new SqliteConnection(ConnectionString(backupPath));
             backup.Open();
             _connection.BackupDatabase(backup);
         }

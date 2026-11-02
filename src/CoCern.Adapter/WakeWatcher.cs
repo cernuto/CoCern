@@ -18,6 +18,8 @@ public sealed record WakeRuntime(AdapterOptions Options, string StatePath, strin
     public TimeSpan Interval { get; init; } = TimeSpan.FromSeconds(15);
     /// <summary>How often a route may be woken.</summary>
     public WakeLimits Limits { get; init; } = WakeLimits.Default;
+    /// <summary>A state the caller already owns (and disposes); null opens <see cref="StatePath"/> for the run.</summary>
+    internal WakeState? State { get; init; }
 }
 
 /// <summary>Tells a running watcher that its targets may have changed. Pulses never queue up: one pending pulse is enough.</summary>
@@ -57,7 +59,8 @@ public static class WakeWatcher
     internal static async Task<string> RunAsync(WakeRuntime runtime, Func<CancellationToken, Task<IReadOnlyList<WakeTarget>>> targets, bool exitWhenQueued, TimeSpan? timeout, CancellationToken cancellationToken, HttpMessageHandler? handler = null, TimeProvider? clock = null)
     {
         var options = runtime.Options;
-        using var state = new WakeState(runtime.StatePath, runtime.Limits);
+        using var ownState = runtime.State is null ? new WakeState(runtime.StatePath, runtime.Limits) : null;
+        var state = runtime.State ?? ownState!;
         using var http = new HttpClient(handler ?? RelayForwarder.CreateHandler(options), disposeHandler: handler is null) { Timeout = TimeSpan.FromSeconds(15) };
         var forwarder = new RelayForwarder(http, options);
         // The reconciler reads only the relay URL and stop file from its configuration.
@@ -92,14 +95,15 @@ public static class WakeWatcher
                     if (exitWhenQueued && status == "queued") return status;
                     if (!watches.TryGetValue(target.Session.SessionId, out var watch)) watches[target.Session.SessionId] = watch = Watch.Create(options, runtime.HubHandler, target, changed, lifetime.Token);
                     watch.Target = target;
-                    if (watch.Connection.State == HubConnectionState.Disconnected)
+                    // A connection that started but never joined the session's group is retried too.
+                    if (watch.Connection.State == HubConnectionState.Disconnected || (watch.Connection.State == HubConnectionState.Connected && !watch.Subscribed))
                     {
                         try
                         {
                             using var connectTimeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
                             connectTimeout.CancelAfter(TimeSpan.FromSeconds(2));
-                            await watch.Connection.StartAsync(connectTimeout.Token);
-                            await watch.Connection.WatchSessionAsync(target.Session.SessionId, target.Session.SessionToken, target.Route.RepositoryId, connectTimeout.Token);
+                            if (watch.Connection.State == HubConnectionState.Disconnected) await watch.Connection.StartAsync(connectTimeout.Token);
+                            await watch.SubscribeAsync(connectTimeout.Token);
                         }
                         catch (Exception) { /* Reconcile on the next fixed fallback even when hints fail. */ }
                     }
@@ -141,6 +145,17 @@ public static class WakeWatcher
     {
         public HubConnection Connection { get; } = connection;
         public WakeTarget Target { get; set; } = target;
+        // Bumped on every reconnect or close; the group was joined only while _joined equals it.
+        private int _generation, _joined = -1;
+        public bool Subscribed => Volatile.Read(ref _joined) == Volatile.Read(ref _generation);
+
+        public async Task SubscribeAsync(CancellationToken cancellationToken)
+        {
+            var generation = Volatile.Read(ref _generation);
+            var current = Target;
+            await Connection.WatchSessionAsync(current.Session.SessionId, current.Session.SessionToken, current.Route.RepositoryId, cancellationToken);
+            Volatile.Write(ref _joined, generation);
+        }
 
         public static Watch Create(AdapterOptions options, Func<HttpMessageHandler>? hubHandler, WakeTarget target, Channel<bool> changed, CancellationToken lifetime)
         {
@@ -151,14 +166,16 @@ public static class WakeWatcher
                 if (hint.ValueKind == JsonValueKind.Object && hint.TryGetProperty("sessionId", out var session) && session.ValueKind == JsonValueKind.String && session.GetString() == sessionId)
                     changed.Writer.TryWrite(true);
             });
+            watch.Connection.Reconnecting += _ => { Interlocked.Increment(ref watch._generation); return Task.CompletedTask; };
+            watch.Connection.Closed += _ => { Interlocked.Increment(ref watch._generation); return Task.CompletedTask; };
             watch.Connection.Reconnected += async _ =>
             {
+                Interlocked.Increment(ref watch._generation);
                 try
                 {
                     using var reconnectTimeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime);
                     reconnectTimeout.CancelAfter(TimeSpan.FromSeconds(5));
-                    var current = watch.Target;
-                    await watch.Connection.WatchSessionAsync(current.Session.SessionId, current.Session.SessionToken, current.Route.RepositoryId, reconnectTimeout.Token);
+                    await watch.SubscribeAsync(reconnectTimeout.Token);
                     changed.Writer.TryWrite(true);
                 }
                 catch (Exception) { Console.Error.WriteLine("CoCern wake hints unavailable; fallback reconciliation remains active."); }

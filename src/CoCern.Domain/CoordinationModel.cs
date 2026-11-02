@@ -195,8 +195,8 @@ public static class Operations
     /// </summary>
     public const string SessionExpire = "__session_expire";
     /// <summary>
-    /// Sent by a board to the control aggregate when a session starts answering for an unresolved action (<c>open: true</c>: it began it,
-    /// or recovered it) or stops (the action resolved, or another session recovered it). The directory never expires such a session.
+    /// A board tells a session it starts answering for an unresolved action (<c>open: true</c>: it began or recovered it) or stops; the
+    /// session tells the control directory (<c>owns</c>) when it starts or stops owning any. The directory never expires such a session.
     /// </summary>
     public const string SessionWork = "__session_work";
     /// <summary>Server-set on <c>task_claim</c> and <c>action_begin</c>: ask the board for the declared resources (<c>DeclaredResourcesNeeded</c>) when the task has any.</summary>
@@ -205,6 +205,8 @@ public static class Operations
     public const string LockRefusalField = "lockRefusal";
     /// <summary>Server-set on a rolled-back claim's lock release: the grant's requestId, whose stored reply is dropped so a retry acquires again.</summary>
     public const string ForgetRequestField = "forgetRequestId";
+    /// <summary>Server-set on a rolled-back claim's re-acquire of a grant it already held: the claim that grant served before.</summary>
+    public const string RestoreClaimForField = "restoreClaimFor";
     /// <summary>A board's due sweep: moves tasks finished longer than <c>Relay:Board:ArchiveAfterDays</c> to the archive.</summary>
     public const string TaskArchive = "__task_archive";
     /// <summary>Read-only: which of the given sessions in the repository the caller's principal opened.</summary>

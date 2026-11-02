@@ -173,6 +173,12 @@ internal static class SessionAttention
             if (view.SnoozeBoundaries == 1) EndSnooze(item);
             sittingOut.Add(entry.Key);
         }
+        // Messages on the page this offer rides are not offered again; the hub closes them once it knows which ones the reply kept.
+        if (args["pageMessageIds"] is JsonArray page)
+        {
+            var onPage = Strings(page).ToHashSet(StringComparer.Ordinal);
+            foreach (var item in AttentionScheduler.Items(items).Where(item => item.Kind == AttentionKinds.Info && onPage.Contains(item.Subject))) sittingOut.Add(item.Id);
+        }
         var candidates = AttentionScheduler.Items(items).Where(item => !sittingOut.Contains(item.Id)).ToArray();
         var actionable = AttentionScheduler.Eligible(candidates, now).Count();
         // "more" counts from the set Pick chooses from, so it never includes items for the focused task that cannot be offered now.

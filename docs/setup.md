@@ -72,7 +72,7 @@ Every model call re-reads the whole chat, so fewer calls matter most.
 - **Every reply is held to its token budget.** Budgets sit at the byte limit, so in practice only a reply that would be cut anyway is compacted. `Relay:Tokens:Enforce=false` only measures.
 - **Administrator tools need an administrator token:** `analytics_query` (ad hoc SQL too), `standing_put`, `order_put`, `order_remove`, `control_request` and `doc_sync`.
 - **Analytics works out of the box on Windows x64 only**, where its DuckDB extension is bundled. Elsewhere the hub logs one warning and `analytics_query` answers `AnalyticsUnavailable` until you install the extension. See [Monitoring](monitoring.md#analytics).
-- **Other PCs stay off.** Discovery and the network listener are off by default. The network listener serves the hub beyond loopback, so turn it on only on purpose. See [Other PCs](discovery.md).
+- **Other PCs stay off.** Discovery and the network listener are off by default. The network listener serves the hub beyond loopback, so turn it on only on purpose. New PCs need the join code the hub logs, and setup should get the certificate fingerprint with `--fingerprint`. See [Other PCs](discovery.md).
 
 ## Hub settings
 
@@ -80,8 +80,8 @@ Use `appsettings.json`, environment variables (`Relay__Clients__0__Token`) or th
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| `ASPNETCORE_URLS` | `http://127.0.0.1:5271` | HTTP address. |
-| `Relay:DatabasePath` | `data/relay.db` | The database, relative to the content root. |
+| `ASPNETCORE_URLS` | `http://127.0.0.1:5271` | HTTP address. Plain `http://` must be loopback (`127.0.0.1`, `[::1]` or `localhost`); otherwise the hub refuses to start. |
+| `Relay:DatabasePath` | `data/relay.db` | The database, relative to the content root. On Linux and macOS it is readable by this user only. |
 | `Relay:SiloPort` | 21111 | Orleans silo port (loopback). |
 | `Relay:GatewayPort` | 31111 | Orleans gateway port (loopback). |
 | `Relay:ClusterId` | `CoCern` | Change it, and the ports, for a second test hub. |
@@ -102,7 +102,7 @@ The hub refuses to start with no clients and no OAuth issuer.
 | `/api/tools`, `/api/tools/{tool}` | List tools, call a tool. Needs a token. |
 | `/hubs/coordination` | SignalR inbox hints. Needs a token. |
 | `/dashboard/` | Live dashboard. See [Monitoring](monitoring.md). |
-| `/scalar`, `/openapi/v1.json` | API reference. |
+| `/scalar`, `/openapi/v1.json` | API reference. This PC only. |
 | `/health` | Health check. |
 
 REST replies are `{ "ok": true, "code": "...", "dataJson": "{...}", "version": 1 }`. `dataJson` is a JSON string, so parse it once more. Errors use 400 (bad arguments), 401 (no valid token), 403 (denied), 404 (unknown tool or record), 409 (conflict) and 413 (too large). The stdio adapter returns the parsed `data` instead.

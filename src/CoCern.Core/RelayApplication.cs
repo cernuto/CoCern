@@ -1,6 +1,5 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -27,6 +26,10 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
     /// <summary>The shared token counter when <c>Relay:Tokens:Enabled</c> is on; null otherwise, and then nothing is counted or compacted.</summary>
     private readonly ITokenCounter? counter = tokenOptions?.Enabled == false ? null : tokens;
     private readonly TokenOptions tokenSettings = tokenOptions ?? new();
+    // A turned-off feature answers for itself, so no call site checks for it.
+    private readonly IDocCacheTools docTools = (IDocCacheTools?)docs ?? DocCacheTool.Off;
+    private readonly IAnalyticsTool analyticsTool = (IAnalyticsTool?)analytics ?? AnalyticsTool.Off;
+    private readonly CallTelemetry? telemetry = activity is null ? null : new(activity, tokenOptions?.Enabled == false ? null : tokens);
     /// <summary>Estimated tokens of the tool definitions an agent carries, per role, counted once.</summary>
     private volatile ToolTotals? toolTokens;
     private sealed record ToolTotals(int Worker, int Administrator);
@@ -49,7 +52,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         try { return reply = await ExecuteCoreAsync(caller, tool, arguments, trace, cancellationToken); }
         finally
         {
-            if (activity is not null) RecordCall(tool, arguments, trace, reply, Stopwatch.GetElapsedTime(started), cancellationToken.IsCancellationRequested);
+            telemetry?.RecordCall(tool, arguments, trace, reply, Stopwatch.GetElapsedTime(started), cancellationToken.IsCancellationRequested);
             if (feedback is not null && reply is not null) ObserveFeedback(caller, tool, trace, reply);
         }
     }
@@ -74,7 +77,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         var pageSeen = args["seen"] is JsonValue seenFlag && seenFlag.GetValue<bool>();
         var seenIds = args["seenMessageIds"] is JsonArray seenList ? Strings(seenList).ToArray() : [];
         // The etag the agent passed as ifNoneMatch, forwarded by the adapter only so the feedback rules can tell an unchanged read.
-        if (trace is not null) { trace.ModelVisible = offerWanted && !args.ContainsKey("waitSeconds"); trace.KnownEtag = Bounded(Text(args, "knownEtag"), RelayLimits.MaxKnownEtagLength); }
+        if (trace is not null) { trace.ModelVisible = offerWanted && !args.ContainsKey("waitSeconds"); trace.KnownEtag = CallTelemetry.Bounded(Text(args, "knownEtag"), RelayLimits.MaxKnownEtagLength); }
         args.Remove("knownEtag");
         args.Remove("attention"); args.Remove("attentionDetail"); args.Remove("attentionStatus"); args.Remove("maxHoldMinutes"); args.Remove("seen"); args.Remove("seenMessageIds");
         args["hubIncarnation"] = incarnation;
@@ -107,7 +110,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
             var offers = result.Ok && session is not null && offerWanted && attentionOptions.Enabled && IsBoundary(tool);
             if (offers) result = await WithAttentionAsync(trusted, args, tool, result);
             // A page reported as seen is marked from the reply as sent, after compaction, so a message cut from the page stays unseen.
-            var markSeen = !offers && result.Ok && session is not null && attentionOptions.Enabled && tool == RelayTools.CheckInbox && (pageSeen || seenIds.Length > 0);
+            var markSeen = result.Ok && session is not null && attentionOptions.Enabled && tool == RelayTools.CheckInbox && (offers || pageSeen || seenIds.Length > 0);
             // The next-work offer this reply carries becomes a next_work item too, raised after the reply's own attention offer was chosen.
             if (result.Ok && tool == RelayTools.TaskUpdate && attentionOptions.Enabled) await RaiseOfferedWorkAsync(trusted, args, result);
             // The claimer's own next_work item for the task (from a next-work offer) closes with the claim.
@@ -116,10 +119,10 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
             if (result.Ok && tool == RelayTools.TaskClaim && attentionOptions.Enabled && search is not null)
             {
                 var claimed = result;
-                _ = Task.Run(() => RaiseRelatedWorkAsync(trusted, args, claimed), CancellationToken.None);
+                Advisory(() => RaiseRelatedWorkAsync(trusted, args, claimed));
             }
             var sent = Bound(definition, args, result, trace);
-            if (markSeen && sent.Ok) await MarkSeenAsync(trusted, args, sent, pageSeen, seenIds);
+            if (markSeen && sent.Ok) await MarkSeenAsync(trusted, args, sent, pageSeen || offers, seenIds);
             return sent;
         }
         catch (ArgumentException) { return Error(InvalidArguments); }
@@ -134,11 +137,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
     private void StartAnomalyMonitor(RelayCaller caller, string repository)
     {
         if (anomaly is not { Enabled: true } || !attentionOptions.Enabled) return;
-        _ = Task.Run(async () =>
-        {
-            try { await Call(AggregateKinds.Anomaly, repository, caller, Operations.AnomalyStart, new() { ["repositoryId"] = repository }); }
-            catch (Exception) { /* The next manager session starts it. */ }
-        }, CancellationToken.None);
+        Advisory(() => Call(AggregateKinds.Anomaly, repository, caller, Operations.AnomalyStart, new() { ["repositoryId"] = repository })); // else the next manager starts it
     }
 
     /// <summary>
@@ -207,48 +206,43 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
             if (trace.Args is not { } args) return;
             var trusted = caller with { IsInternal = true };
             FeedbackActions Observe(string sessionId) => feedback!.Observe(new FeedbackCall(feedback.Options.Time.GetUtcNow(), Text(args, "repositoryId"), sessionId, tool, args, reply.DataJson, reply.Ok,
-                trace.ModelVisible, trace.KnownEtag, reply.Ok ? Target(tool, args) : null, reply.Ok ? ContentHash(tool, args) : null, Bounded(Text(args, "requestId"))));
+                trace.ModelVisible, trace.KnownEtag, reply.Ok ? CallTelemetry.Target(tool, args) : null, reply.Ok ? CallTelemetry.ContentHash(tool, args) : null, CallTelemetry.Bounded(Text(args, "requestId"))));
             if (trace.SessionId is { Length: > 0 } verified)
             {
-                _ = Task.Run(() => Deliver(trusted, Observe(verified)), CancellationToken.None);
+                Advisory(() => Deliver(trusted, Observe(verified)));
                 return;
             }
             // A read that needs no session (task_get) counts only for a session that proves itself, so no caller can run up another
             // session's counts or send it tips. The check runs off the call's path.
             if (!reply.Ok || Text(args, "sessionId").Length == 0 || Text(args, "sessionToken").Length == 0) return;
-            _ = Task.Run(async () =>
-            {
-                try { if ((await VerifySessionAsync(trusted, args)).Ok) Deliver(trusted, Observe(Text(args, "sessionId"))); }
-                catch (Exception) { /* Advisory. */ }
-            }, CancellationToken.None);
+            Advisory(async () => { if ((await VerifySessionAsync(trusted, args)).Ok) await Deliver(trusted, Observe(Text(args, "sessionId"))); });
         }
         catch (Exception) { /* Feedback never affects the call. */ }
     }
 
-    /// <summary>Delivers what the rules decided, off the call's path. Advisory: any failure is ignored.</summary>
-    private void Deliver(RelayCaller trusted, FeedbackActions actions)
+    /// <summary>Delivers what the rules decided; callers run it off the call's path.</summary>
+    private async Task Deliver(RelayCaller trusted, FeedbackActions actions)
     {
-        if (actions.Tip is null && actions.Proposal is null) return;
-        _ = Task.Run(async () =>
-        {
-            try
+        if (actions.Tip is { } tip && attentionOptions.Enabled)
+            await CallSession(trusted, Operations.AttentionRaise, new JsonObject
             {
-                if (actions.Tip is { } tip && attentionOptions.Enabled)
-                    await CallSession(trusted, Operations.AttentionRaise, new JsonObject
-                    {
-                        ["repositoryId"] = tip.RepositoryId, ["sessionId"] = tip.SessionId, ["kind"] = AttentionKinds.Tip, ["subject"] = tip.Rule,
-                        ["priority"] = AttentionWeights.Low, ["note"] = tip.Text, ["revision"] = tip.Revision, ["expiryDays"] = RelayLimits.TipExpiryDays
-                    });
-                if (actions.Proposal is { } proposal)
-                    await Call(AggregateKinds.Board, Uri.EscapeDataString(proposal.RepositoryId) + "/default", HubProposer(proposal.RepositoryId), Operations.StandingProposeHub, new JsonObject
-                    {
-                        ["repositoryId"] = proposal.RepositoryId, ["boardId"] = "default", ["rule"] = proposal.Rule,
-                        ["line"] = new JsonObject { ["id"] = proposal.LineId, ["text"] = proposal.Text }
-                    });
-            }
-            catch (Exception) { /* Advisory: the call stands either way. */ }
-        }, CancellationToken.None);
+                ["repositoryId"] = tip.RepositoryId, ["sessionId"] = tip.SessionId, ["kind"] = AttentionKinds.Tip, ["subject"] = tip.Rule,
+                ["priority"] = AttentionWeights.Low, ["note"] = tip.Text, ["revision"] = tip.Revision, ["expiryDays"] = RelayLimits.TipExpiryDays
+            });
+        if (actions.Proposal is { } proposal)
+            await Call(AggregateKinds.Board, Uri.EscapeDataString(proposal.RepositoryId) + "/default", HubProposer(proposal.RepositoryId), Operations.StandingProposeHub, new JsonObject
+            {
+                ["repositoryId"] = proposal.RepositoryId, ["boardId"] = "default", ["rule"] = proposal.Rule,
+                ["line"] = new JsonObject { ["id"] = proposal.LineId, ["text"] = proposal.Text }
+            });
     }
+
+    /// <summary>Runs advisory work off the call's path. It never affects the call: any failure is dropped.</summary>
+    private static void Advisory(Func<Task> work) => _ = Task.Run(async () =>
+    {
+        try { await work(); }
+        catch (Exception) { /* Advisory: the call stands either way. */ }
+    }, CancellationToken.None);
 
     /// <summary>The hub's own identity for proposals: internal, so only this hub can use it, and scoped to the one repository.</summary>
     private static RelayCaller HubProposer(string repository) => new(SessionRoles.HubProposer, false, [repository], true);
@@ -277,10 +271,10 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         RelayTools.SessionBind or RelayTools.CheckInbox or RelayTools.Ack => CallSession(caller, tool, args),
         RelayTools.AttentionRespond => RespondToAttentionAsync(caller, args),
         RelayTools.OrderPut or RelayTools.OrderRemove => OrderAsync(caller, tool, args),
-        RelayTools.DocSearch => docs is null ? DocCacheOff() : docs.SearchAsync(args),
-        RelayTools.DocSection => docs is null ? DocCacheOff() : docs.SectionAsync(args),
+        RelayTools.DocSearch => docTools.SearchAsync(args),
+        RelayTools.DocSection => docTools.SectionAsync(args),
         // Administrator only, checked first, so a worker learns nothing about the hub's doc cache settings.
-        RelayTools.DocSync => !caller.IsAdministrator ? Task.FromResult(Error(AdministratorRequired)) : docs is null ? DocCacheOff() : docs.SyncAsync(args, cancellationToken),
+        RelayTools.DocSync => !caller.IsAdministrator ? Task.FromResult(Error(AdministratorRequired)) : docTools.SyncAsync(args, cancellationToken),
         RelayTools.WorkerList or RelayTools.ControlRequest => CallControl(caller, tool, args),
         RelayTools.TaskGet => ReadTaskAsync(caller, args, cancellationToken),
         _ => CallBoard(caller, tool, args)
@@ -333,17 +327,13 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         return Ok(reply);
     }
 
-    private static Task<RelayReply> DocCacheOff() =>
-        Task.FromResult(Error(DocCacheUnavailable, new { message = "The doc cache is turned off on this hub (Relay:DocCache:Enabled)." }));
-
     /// <summary>
     /// Administrator only, checked here because no aggregate handles this tool: a session's self-reported role is not an authority.
     /// An analytics-off hub answers <see cref="AnalyticsUnavailable"/> once the caller is known to be an administrator.
     /// </summary>
     private Task<RelayReply> AnalyticsAsync(RelayCaller caller, JsonObject args, CancellationToken cancellationToken) =>
         !caller.IsAdministrator ? Task.FromResult(Error(AdministratorRequired))
-        : analytics is null ? Task.FromResult(Error(AnalyticsUnavailable, new { message = "Analytics is turned off on this hub (Relay:Analytics:Enabled)." }))
-        : analytics.RunAsync(caller, args, cancellationToken);
+        : analyticsTool.RunAsync(caller, args, cancellationToken);
 
     /// <summary>
     /// Administrator only, like <c>standing_put</c>: a session's self-reported role is not an authority. An orders-off hub answers
@@ -386,23 +376,8 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
     {
         args["snoozeBoundaries"] = attentionOptions.SnoozeBoundaries;
         var reply = await CallSession(caller, RelayTools.AttentionRespond, args);
-        if (reply.Ok) { var data = Parse(reply); RecordOutcome(args, Text(data, "kind"), Text(data, "outcome"), Text(data, "itemId")); }
+        if (reply.Ok) { var data = Parse(reply); telemetry?.RecordOutcome(args, Text(data, "kind"), Text(data, "outcome"), Text(data, "itemId")); }
         return reply;
-    }
-
-    /// <summary>Records one offer outcome for later analysis of which kinds are mostly dismissed. Never fails the call.</summary>
-    private void RecordOutcome(JsonObject args, string kind, string outcome, string itemId)
-    {
-        if (activity is null) return;
-        try
-        {
-            activity.Record(new ActivityEvent
-            {
-                Timestamp = DateTimeOffset.UtcNow, Kind = ActivityEvent.Attention, RepositoryId = Text(args, "repositoryId"), SessionId = Bounded(Text(args, "sessionId")),
-                Tool = Bounded(kind), Ok = true, Code = outcome, Target = Bounded(itemId)
-            });
-        }
-        catch (Exception) { /* Telemetry never affects the call. */ }
     }
 
     /// <summary>Revoking a machine is a discovery concern, not a control-aggregate one: it needs the machine ID and is refused for non-administrators by the discovery grain.</summary>
@@ -506,7 +481,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
     private async Task<RelayReply> ResourceClaimAsync(RelayCaller caller, string tool, JsonObject args)
     {
         // Only task_claim names the task claim a grant serves; a client's own value is dropped (it is also left out of the fingerprint).
-        args.Remove("taskClaimGeneration"); args.Remove(Operations.ForgetRequestField);
+        args.Remove("taskClaimGeneration"); args.Remove(Operations.ForgetRequestField); args.Remove(Operations.RestoreClaimForField);
         var resolved = await Resolve(caller, args, Text(args, "resourceId"));
         if (!resolved.Ok) return resolved;
         return await Call(AggregateKinds.Lock, Text(Parse(resolved), "resourceId"), caller, tool, args);
@@ -541,26 +516,9 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         {
             try { if (await StandingAsync(caller, args) is { } standing) attention["standing"] = Number(standing, "revision"); }
             catch (Exception) { /* The revision is a convenience for the prompt hook. */ }
-            if (Text(attention, "wake") is { } wake && wake.StartsWith(AttentionWeights.HoldWakePrefix, StringComparison.Ordinal)) RecordHoldWake(args, wake);
+            if (Text(attention, "wake") is { } wake && wake.StartsWith(AttentionWeights.HoldWakePrefix, StringComparison.Ordinal)) telemetry?.RecordHoldWake(args, wake);
         }
         return detail ? Ok(data, result.Version) : await WithOrdersAsync(caller, args, Ok(data, result.Version));
-    }
-
-    /// <summary>Each session's last idle-hold wake ID handed out, so a hold wake is counted once however often watchers ask.</summary>
-    private readonly ConcurrentDictionary<string, string> holdWakes = new(StringComparer.Ordinal);
-
-    /// <summary>
-    /// Counts an idle-hold wake the first time its ID is handed to a reader. The hub cannot see whether the adapter then queued a turn,
-    /// and a hub restart may count one period again; the count is telemetry only.
-    /// </summary>
-    private void RecordHoldWake(JsonObject args, string wake)
-    {
-        var sessionId = Text(args, "sessionId");
-        if (activity is null || holdWakes.TryGetValue(sessionId, out var last) && last == wake) return;
-        if (holdWakes.Count >= RelayLimits.MaxHoldWakeSessions) holdWakes.Clear();
-        holdWakes[sessionId] = wake;
-        try { activity.Record(new ActivityEvent { Timestamp = DateTimeOffset.UtcNow, Kind = ActivityEvent.Wake, RepositoryId = Text(args, "repositoryId"), SessionId = Bounded(sessionId), Ok = true, Code = "Ok" }); }
-        catch (Exception) { /* Telemetry never affects the call. */ }
     }
 
     /// <summary>Calls that carry an attention offer. Background readers send <c>attention: false</c>, so no unseen offer is marked shown.</summary>
@@ -575,8 +533,9 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         try
         {
             var data = Parse(committed);
-            // A model-visible inbox page shows its messages, so their info items are closed rather than offered.
-            var seen = tool == RelayTools.CheckInbox && data["items"] is JsonArray page
+            // A model-visible inbox page shows its messages, so their info items are not offered. They close after compaction, from
+            // the page as sent, so a message cut from the page keeps its item.
+            var onPage = tool == RelayTools.CheckInbox && data["items"] is JsonArray page
                 ? new JsonArray(page.OfType<JsonObject>().Select(message => Text(message, "messageId")).Where(id => id.Length > 0).Select(id => (JsonNode)id).ToArray()) : null;
             data["attention"] = new string('x', RelayLimits.MaxAttentionOfferBytes);
             if (!FitsWire(Ok(data, long.MaxValue))) return committed;
@@ -585,11 +544,11 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
                 ["repositoryId"] = Text(args, "repositoryId"), ["sessionId"] = Text(args, "sessionId"), ["sessionToken"] = Text(args, "sessionToken"),
                 ["focusTaskId"] = Text(args, "taskId"), ["focusBoardId"] = Text(args, "boardId", "default"), ["snoozeBoundaries"] = attentionOptions.SnoozeBoundaries
             };
-            if (seen is { Count: > 0 }) request["seenMessageIds"] = seen;
+            if (onPage is { Count: > 0 }) request["pageMessageIds"] = onPage;
             var offer = await CallSession(caller, Operations.AttentionOffer, request);
             if (!offer.Ok || Parse(offer)["attention"] is not JsonObject item) return committed;
             data["attention"] = item.DeepClone();
-            RecordOutcome(args, Text(item, "k"), "shown", Text(item, "id"));
+            telemetry?.RecordOutcome(args, Text(item, "k"), "shown", Text(item, "id"));
             return Ok(data, committed.Version);
         }
         catch (Exception) { return committed; }
@@ -720,6 +679,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         }
         if (!task.Ok) return task;
         var acquired = new List<(string Resource, long Generation)>();
+        var held = new List<(string Resource, string ClaimFor)>();
         var grants = new JsonArray();
         foreach (var resource in canonical)
         {
@@ -729,11 +689,13 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
             var claim = await Call(AggregateKinds.Lock, resource, caller, RelayTools.ClaimAcquire, resourceArgs);
             if (!claim.Ok)
             {
-                await RollBackClaimAsync(caller, args, acquired, task);
+                await RollBackClaimAsync(caller, args, acquired, held, task);
                 return Error(Busy, new { resourceId = resource, detail = JsonNode.Parse(claim.DataJson), rollback = "new_grants_released" });
             }
             var grant = Parse(claim);
             if (grant["newlyAcquired"]?.GetValue<bool>() == true) acquired.Add((resource, Number(grant, "generation")));
+            else held.Add((resource, Text(grant, "previousClaimFor")));
+            grant.Remove("previousClaimFor");
             grant["resourceId"] = resource; grants.Add(grant);
         }
         var data = Parse(task); data["grants"] = grants; data["complete"] = true;
@@ -752,8 +714,14 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         return FitsWire(preview, RelayLimits.AggregateReplyBytes);
     }
 
-    private async Task RollBackClaimAsync(RelayCaller caller, JsonObject args, List<(string Resource, long Generation)> acquired, RelayReply task)
+    private async Task RollBackClaimAsync(RelayCaller caller, JsonObject args, List<(string Resource, long Generation)> acquired, List<(string Resource, string ClaimFor)> held, RelayReply task)
     {
+        // A grant the session already held keeps it, serving the claim it served before.
+        foreach (var (resource, claimFor) in held)
+        {
+            var restore = args.DeepClone().AsObject(); restore.Remove("requestId"); restore[Operations.RestoreClaimForField] = claimFor;
+            await Call(AggregateKinds.Lock, resource, caller, RelayTools.ClaimAcquire, restore);
+        }
         foreach (var grant in acquired)
         {
             var release = args.DeepClone().AsObject(); release["generation"] = grant.Generation; release.Remove("requestId");
@@ -801,8 +769,17 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         if (!result.Ok || Parse(result)["replayAllowed"]?.GetValue<bool>() != true) return result;
         var actionId = Text(args, "actionId");
         var attempt = Number(Parse(result)["action"]!.AsObject(), "attempt", 1);
-        var delivery = await Call(AggregateKinds.Board, BoardKey(args), caller, Operations.Dispatch, new() { ["operation"] = Operations.Block, ["actionKey"] = CoordinationStateMachine.ActionKey(args, actionId, attempt) });
-        if (!delivery.Ok) return Error(ActionPending, new { actionId, replayAllowed = false, reason = delivery.Code });
+        // The hub blocks each lock itself rather than having the board deliver: a board waiting on a lock while that lock's outbox waits on
+        // the board would stall both until the call timeout. Blocking is idempotent, so the board's own queued blocks are harmless.
+        var actionKey = CoordinationStateMachine.ActionKey(args, actionId, attempt);
+        foreach (var resource in Strings(Parse(result)["action"]!["resourceIds"]))
+        {
+            var block = await Call(AggregateKinds.Lock, resource, caller, Operations.Block, new JsonObject
+            {
+                ["repositoryId"] = Text(args, "repositoryId"), ["actionId"] = actionId, ["actionKey"] = actionKey, ["sessionId"] = Text(args, "sessionId")
+            });
+            if (!block.Ok) return Error(ActionPending, new { actionId, replayAllowed = false, reason = block.Code });
+        }
         var current = await CallBoard(caller, RelayTools.TaskGet, args);
         if (!current.Ok || current.Version != result.Version) return Error(ActionChanged, new { actionId, replayAllowed = false });
         return result;
@@ -810,7 +787,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
 
     /// <summary>Arguments only the hub sets on <c>task_claim</c> and <c>action_begin</c>.</summary>
     private static readonly string[] ServerClaimFields =
-        ["declaredResources", Operations.ResolveDeclaredField, Operations.LockRefusalField, CoordinationStateMachine.RequestedResourcesField];
+        ["declaredResources", Operations.ResolveDeclaredField, Operations.LockRefusalField, Operations.RestoreClaimForField, Operations.ForgetRequestField, CoordinationStateMachine.RequestedResourcesField];
 
     /// <summary>
     /// The task's declared <c>packet.resources</c> (as the board named them in <c>DeclaredResourcesNeeded</c>), each resolved to its canonical
@@ -972,113 +949,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
 
     private Task<RelayReply> Call(string kind, string key, RelayCaller caller, string operation, JsonObject args) => CoordinationGrain.Aggregate(grains, kind, key).ExecuteAsync(caller, operation, args.ToJsonString());
 
-    private sealed class CallTrace
-    {
-        public DateTimeOffset At { get; init; }
-        public JsonObject? Args { get; set; }
-        public JsonObject? Usage { get; set; }
-        public string? SessionId { get; set; }
-        public string? Role { get; set; }
-        /// <summary>False for an adapter's background read (<c>attention: false</c>) or a <c>waitSeconds</c> long-poll.</summary>
-        public bool ModelVisible { get; set; } = true;
-        public string? KnownEtag { get; set; }
-        /// <summary>The reply's tokens when compaction already counted the reply as sent, and the step it reached.</summary>
-        public int? ReplyTokens { get; set; }
-        public int CompactStep { get; set; }
-        public bool OverBudget { get; set; }
-    }
-
-    /// <summary>Builds and queues the call's activity event. Any failure here is swallowed: telemetry must never fail a call.</summary>
-    private void RecordCall(string tool, JsonElement arguments, CallTrace trace, RelayReply? reply, TimeSpan elapsed, bool canceled)
-    {
-        try
-        {
-            var args = trace.Args;
-            var ok = reply?.Ok == true;
-            var repository = args is null ? "" : Text(args, "repositoryId");
-            var (target, hash) = args is null || !ok ? (args is null ? null : Target(tool, args), (string?)null) : (Target(tool, args), ContentHash(tool, args));
-            var workflow = ok && tool == RelayTools.TaskUpdate && args?["workflow"] is JsonObject flow ? Text(flow, "state") : "";
-            var raw = arguments.ValueKind == JsonValueKind.Undefined ? null : arguments.GetRawText();
-            var role = Bounded(trace.Role?.ToLowerInvariant(), RelayLimits.MaxActivityRoleLength);
-            // The texts wait in the queue until the writer counts them. Past the hub's cap the event goes without them: token counts are
-            // dropped before any activity row is.
-            var (requestText, replyText) = counter is null ? (null, null) : (raw, reply is null || trace.ReplyTokens is not null ? null : reply.DataJson);
-            if (!TokenTextBudget.Shared.TryHold(requestText, replyText)) (requestText, replyText) = (null, null);
-            activity!.Record(new ActivityEvent
-            {
-                Timestamp = trace.At, Kind = ActivityEvent.Call, RepositoryId = repository.Length <= RelayLimits.MaxIdentifierLength ? repository : "",
-                SessionId = Bounded(trace.SessionId), Role = role, Tool = tool, Ok = ok,
-                Code = reply?.Code ?? (canceled ? "Canceled" : Unavailable),
-                RequestBytes = raw is null ? 0 : Encoding.UTF8.GetByteCount(raw),
-                ReplyBytes = reply is null ? 0 : Encoding.UTF8.GetByteCount(reply.DataJson), DurationMilliseconds = elapsed.TotalMilliseconds,
-                // Usage counts only with a committed call: a rejected milestone is usually resent with the same usage.
-                InputTokens = ok ? Tokens(trace.Usage, "inputTokens") : null, OutputTokens = ok ? Tokens(trace.Usage, "outputTokens") : null,
-                RequestId = Bounded(args is null ? null : Text(args, "requestId")), Target = target, ContentHash = hash,
-                WorkflowState = workflow is "ready" or "blocked" or "completed" ? workflow : null,
-                OfferTarget = ok && reply is not null && args is not null ? OfferTarget(args, reply) : null,
-                // Estimated tokens (o200k) of what the agent sent and got back, as sent. The texts are counted by the activity writer, off
-                // the call's path (see TokenMeter); a compacted reply was already counted.
-                RequestText = requestText, ReplyText = replyText,
-                ReplyTokens = counter is null ? null : trace.ReplyTokens
-            });
-            // A compacted reply is counted here, with the step it reached, so analytics shows which tools compact most often; an enforced
-            // reply that no step could shrink is counted as over.
-            if (trace.CompactStep > 0 || trace.OverBudget) activity.Record(new ActivityEvent
-            {
-                Timestamp = trace.At, Kind = ActivityEvent.Budget, RepositoryId = repository.Length <= RelayLimits.MaxIdentifierLength ? repository : "",
-                SessionId = Bounded(trace.SessionId), Role = role, Tool = tool, Ok = true, Code = trace.CompactStep > 0 ? "step" + trace.CompactStep : "over", ReplyTokens = trace.ReplyTokens
-            });
-        }
-        catch (Exception) { /* Never fail or slow the call for telemetry. */ }
-    }
-
-    /// <summary>The record a call wrote or claimed: a task, a context note, or a private conversation. Status repeats are counted per target.</summary>
-    private static string? Target(string tool, JsonObject args)
-    {
-        var taskId = Text(args, "taskId");
-        return tool switch
-        {
-            RelayTools.TaskUpdate or RelayTools.ActionReport or RelayTools.TaskClaim or RelayTools.ActionBegin when taskId.Length > 0 => TaskTarget(args, taskId),
-            RelayTools.SendMessage when taskId.Length > 0 => TaskTarget(args, taskId),
-            RelayTools.SendMessage when Text(args, "recipientSessionId").Length > 0 => "message:" + Uri.EscapeDataString(Text(args, "sessionId")) + ">" + Uri.EscapeDataString(Text(args, "recipientSessionId")),
-            RelayTools.ContextPut when Text(args, "contextId").Length > 0 => "context:" + BoardKey(args) + "/" + Uri.EscapeDataString(Text(args, "contextId")),
-            // Lets analytics count refused claims per resource.
-            RelayTools.ClaimAcquire when Text(args, "resourceId").Length > 0 => "resource:" + Uri.EscapeDataString(Text(args, "repositoryId")) + "/" + Uri.EscapeDataString(Text(args, "resourceId")),
-            // Only a first page counts as an inbox read; continuation pages belong to the same read.
-            RelayTools.CheckInbox when Number(args, "cursor") == 0 => "inbox:" + Uri.EscapeDataString(Text(args, "sessionId")),
-            _ => null
-        };
-    }
-
-    private static string TaskTarget(JsonObject args, string taskId) => "task:" + BoardKey(args) + "/" + Uri.EscapeDataString(taskId);
-
-    /// <summary>A fingerprint of the status text a call wrote: task facts, notes, message and workflow; a message's text; a note's content.</summary>
-    private static string? ContentHash(string tool, JsonObject args)
-    {
-        JsonNode? content = tool switch
-        {
-            RelayTools.TaskUpdate when args.ContainsKey("patch") || args.ContainsKey("notes") || args.ContainsKey("message") || args.ContainsKey("workflow") =>
-                new JsonObject { ["patch"] = args["patch"]?.DeepClone(), ["notes"] = args["notes"]?.DeepClone(), ["message"] = args["message"]?.DeepClone(), ["workflow"] = args["workflow"]?.DeepClone() },
-            RelayTools.SendMessage => args["text"]?.DeepClone(),
-            RelayTools.ContextPut => args["content"]?.DeepClone(),
-            _ => null
-        };
-        return content is null ? null : Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(content.ToJsonString())), 0, 16);
-    }
-
-    private static string? OfferTarget(JsonObject args, RelayReply reply)
-    {
-        if (args["includeNextWork"] is null) return null;
-        var offered = JsonNode.Parse(reply.DataJson)?["nextWork"]?["offer"]?["taskId"];
-        return offered is JsonValue value && value.TryGetValue<string>(out var taskId) && taskId.Length is > 0 and <= RelayLimits.MaxIdentifierLength ? TaskTarget(args, taskId) : null;
-    }
-
-    /// <summary>A reported count, or null when absent or malformed. A bad usage report is ignored rather than failing the milestone.</summary>
-    private static long? Tokens(JsonObject? usage, string key) =>
-        usage?[key] is JsonValue value && value.GetValueKind() == JsonValueKind.Number && long.TryParse(value.ToJsonString(), out var tokens) && tokens is >= 0 and <= RelayLimits.MaxReportedTokens ? tokens : null;
-    private static string? Bounded(string? value, int maximum = RelayLimits.MaxIdentifierLength) => string.IsNullOrEmpty(value) || value.Length > maximum ? null : value;
-
-    private static string BoardKey(JsonObject args) => Uri.EscapeDataString(Text(args, "repositoryId")) + "/" + Uri.EscapeDataString(Text(args, "boardId", "default"));
+    private static string BoardKey(JsonObject args) => CallTelemetry.BoardKey(args);
     private static JsonObject Parse(RelayReply reply) => JsonNode.Parse(reply.DataJson)!.AsObject();
     private static JsonNode Outcome(bool ok, string code) => JsonSerializer.SerializeToNode(new { ok, code })!;
 }

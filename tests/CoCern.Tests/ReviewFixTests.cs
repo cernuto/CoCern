@@ -68,6 +68,36 @@ public sealed class ReviewFixTests
     }
 
     [Fact]
+    public void A_rolled_back_claim_offers_the_task_to_its_target_again()
+    {
+        var board = new StateEnvelope<CoordinationDocument>();
+        var workflow = new JsonObject
+        {
+            ["state"] = "ready", ["targetSessionId"] = "target", ["packet"] = new JsonObject { ["goal"] = "g", ["target"] = "t", ["authorityRef"] = "human", ["restoration"] = "r", ["stopCondition"] = "s" },
+            ["criteria"] = new JsonArray(new JsonObject { ["id"] = "c", ["description"] = "d", ["result"] = "not_run" }), ["blockers"] = new JsonArray()
+        };
+        Assert.True(Apply(board, "board", RelayTools.TaskUpdate, new() { ["taskId"] = "t", ["requestId"] = "create", ["expectedVersion"] = 0, ["workflow"] = workflow }).Ok);
+        Assert.True(Apply(board, "board", RelayTools.TaskClaim, new() { ["taskId"] = "t", ["sessionId"] = "target", ["requestId"] = "R", ["expectedVersion"] = 1, ["resourceIds"] = new JsonArray() }).Ok);
+        board.Effects.Clear();
+        Assert.True(Apply(board, "board", Operations.TaskUnclaim, new() { ["taskId"] = "t", ["sessionId"] = "target", ["claimGeneration"] = 1, ["claimRequestId"] = "R" }).Ok);
+        var raise = Assert.Single(board.Effects, effect => effect.Operation == Operations.AttentionRaise && effect.TargetKey == "target");
+        Assert.Equal(AttentionKinds.NextWork, JsonNode.Parse(raise.PayloadJson)!["kind"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void A_rollback_puts_back_the_claim_a_held_grant_served()
+    {
+        var lockState = new StateEnvelope<CoordinationDocument>();
+        JsonObject Acquire(long generation) => new() { ["sessionId"] = "a", ["resourceId"] = "rig", ["taskId"] = "t" + generation, ["taskClaimGeneration"] = generation };
+        Assert.True(Apply(lockState, "lock", RelayTools.ClaimAcquire, Acquire(1)).Ok);
+        var second = Apply(lockState, "lock", RelayTools.ClaimAcquire, Acquire(2));
+        var previous = JsonNode.Parse(second.DataJson)!["previousClaimFor"]!.GetValue<string>();
+        Assert.NotEqual(previous, State(lockState)["claimFor"]!.GetValue<string>());
+        Assert.True(Apply(lockState, "lock", RelayTools.ClaimAcquire, new() { ["sessionId"] = "a", ["resourceId"] = "rig", [Operations.RestoreClaimForField] = previous }).Ok);
+        Assert.Equal(previous, State(lockState)["claimFor"]!.GetValue<string>());
+    }
+
+    [Fact]
     public void A_late_older_close_never_lowers_a_work_tombstone()
     {
         var control = new StateEnvelope<CoordinationDocument>
@@ -78,6 +108,37 @@ public sealed class ReviewFixTests
         foreach (var (open, at) in new[] { (true, 0), (false, 30), (false, 10) }) Assert.True(Apply(control, "control", Operations.SessionWork, Work(open, at)).Ok);
         // An open reported at 20 predates the close at 30, so it stays closed.
         Assert.False(JsonNode.Parse(Apply(control, "control", Operations.SessionWork, Work(true, 20)).DataJson)!["tracked"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public void A_session_tells_the_directory_only_when_it_starts_or_stops_owning_work()
+    {
+        var session = new StateEnvelope<CoordinationDocument>();
+        Assert.True(Apply(session, "session", Operations.Open, new() { ["principalId"] = "alice", ["sessionToken"] = "secret", ["sessionId"] = "s1" }).Ok);
+        int Reports(string key, bool open)
+        {
+            session.Effects.Clear();
+            Assert.True(Apply(session, "session", Operations.SessionWork, new() { ["sessionId"] = "s1", ["actionKey"] = key, ["open"] = open }).Ok);
+            return session.Effects.Count(effect => effect.Operation == Operations.SessionWork && effect.TargetKind == AggregateKinds.Control);
+        }
+        Assert.Equal(1, Reports("a", true));   // now owns work
+        Assert.Equal(0, Reports("b", true));   // still owns
+        Assert.Equal(0, Reports("a", false));  // b is still open
+        Assert.Equal(1, Reports("b", false));  // owns nothing now
+    }
+
+    [Fact]
+    public void The_directory_ignores_a_reordered_ownership_report()
+    {
+        var control = new StateEnvelope<CoordinationDocument>
+        {
+            Value = new() { Json = new JsonObject { ["sessions"] = new JsonObject { ["a"] = new JsonObject { ["sessionId"] = "a", ["principalId"] = "alice", ["repositoryId"] = "repo", ["observedAt"] = Now.ToString("O") } } }.ToJsonString() }
+        };
+        bool Report(bool owns, int seconds) => JsonNode.Parse(Apply(control, "control", Operations.SessionWork, new() { ["sessionId"] = "a", ["owns"] = owns, ["at"] = Now.AddSeconds(-100 + seconds).ToString("O") }).DataJson)!["tracked"]!.GetValue<bool>();
+        Assert.True(Report(true, 10));
+        Assert.True(Report(false, 30));
+        Assert.False(Report(true, 20));  // older than the clear
+        Assert.Null(State(control)["sessions"]!["a"]!["ownsWork"]);
     }
 
     [Fact]
@@ -93,6 +154,19 @@ public sealed class ReviewFixTests
         Assert.Equal("mine", state["label"]!.GetValue<string>());
         Assert.Null(state["inbox"]);
         Assert.False(state["requests"] is JsonObject { Count: > 0 });
+    }
+
+    [Theory]
+    [InlineData(Operations.Deliver, RelayErrorCodes.StorageFailure, false, "Retry")]
+    [InlineData(Operations.AttentionRaise, RelayErrorCodes.DeliveryUnavailable, false, "Retry")]
+    [InlineData(Operations.AttentionRaise, RelayErrorCodes.SessionUnknown, false, "Drop")]
+    [InlineData(Operations.AttentionRaise, RelayErrorCodes.SessionUnknown, true, "DropAsFailedOrderRun")]
+    [InlineData(Operations.Block, RelayErrorCodes.ClaimRequired, false, "Retry")]
+    public void A_refused_delivery_is_retried_dropped_or_counted_as_a_failed_order_run(string operation, string code, bool fromOrder, string expected)
+    {
+        var effect = new DurableEffect("e", AggregateKinds.Session, "s", operation, "{}", Now);
+        var payload = fromOrder ? new JsonObject { [Operations.OrderIdField] = "o" } : new JsonObject();
+        Assert.Equal(expected, EffectDelivery.OnFailure(effect, payload, code, AggregateKinds.Board, ordersOn: true).ToString());
     }
 
     [Theory]
