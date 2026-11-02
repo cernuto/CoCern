@@ -29,7 +29,9 @@ public sealed partial class SqliteStore
             throw new ArgumentException("Snapshot destination must differ from the live database.", nameof(destination));
         ObjectDisposedException.ThrowIf(_disposed, this);
         await FlushActivityAsync(cancellationToken);
-        Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+        // The copy holds sessions, tokens and inboxes until it is scrubbed, so the folder and file are this user's only, like the database.
+        CreatePrivateDirectory(Path.GetDirectoryName(target)!, tightenExisting: true);
+        RestrictToOwner(target);
         try
         {
             await Task.Run(() =>

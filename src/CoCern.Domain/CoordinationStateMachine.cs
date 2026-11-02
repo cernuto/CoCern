@@ -39,7 +39,7 @@ public static class CoordinationStateMachine
 
         var requestId = Text(arguments, "requestId");
         var requests = ObjectAt(state, "requests");
-        var requestKey = RequestKey(caller.PrincipalId, operation, requestId);
+        var requestKey = RequestKey(caller.PrincipalId, Text(arguments, "sessionId"), operation, requestId);
         var fingerprint = Fingerprint(operation, arguments);
         if (requestId.Length > 0 && requests[requestKey] is JsonObject prior) return Replay(kind, state, operation, arguments, prior, fingerprint, now);
         // Its stored reply was evicted to make room before its window ended: refuse rather than run the write twice.
@@ -86,7 +86,7 @@ public static class CoordinationStateMachine
         // New effects deliver with this call's authority, and the aggregate's timers follow its new state.
         StampEffects(context.Effects, 0, caller);
         envelope.Effects.AddRange(context.Effects);
-        ScheduleLeases(envelope, state, kind == AggregateKinds.Board ? archiveAfterDays : 0);
+        ScheduleLeases(envelope, state, kind == AggregateKinds.Board ? archiveAfterDays : 0, now);
         // Tasks this operation archived leave the board in this commit; storage writes them to the archive in the same transaction.
         envelope.QueueArchive(context.Archived);
         return result;
@@ -138,16 +138,20 @@ public static class CoordinationStateMachine
 
     private static string Hash(JsonObject significant) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(significant.ToJsonString())));
 
-    /// <summary>Where a request's stored reply lives: replays are per principal and operation.</summary>
-    public static string RequestKey(string principalId, string operation, string requestId) => principalId + ":" + operation + ":" + requestId;
+    /// <summary>
+    /// Where a request's stored reply lives: per principal, session and operation. Every chat on one PC shares a principal and agents reuse
+    /// simple request IDs, so without the session one chat's retry could replay another chat's reply.
+    /// </summary>
+    public static string RequestKey(string principalId, string sessionId, string operation, string requestId) =>
+        principalId + (sessionId.Length > 0 ? "/" + sessionId : "") + ":" + operation + ":" + requestId;
 
     /// <summary>
     /// Drops a stored reply whose effect was undone (a task claim rolled back because a resource was busy), so a retry with the same
     /// requestId runs again instead of replaying a claim that no longer exists.
     /// </summary>
-    public static void ForgetRequest(JsonObject state, string principalId, string operation, string requestId)
+    public static void ForgetRequest(JsonObject state, string principalId, string sessionId, string operation, string requestId)
     {
-        if (requestId.Length > 0 && state["requests"] is JsonObject requests) requests.Remove(RequestKey(principalId, operation, requestId));
+        if (requestId.Length > 0 && state["requests"] is JsonObject requests) requests.Remove(RequestKey(principalId, sessionId, operation, requestId));
     }
 
     /// <summary>Mutations are deduplicated by requestId and committed; reads never are.</summary>
@@ -178,10 +182,14 @@ public static class CoordinationStateMachine
     /// Rebuilds the aggregate's timers from its own state: lease expiry from its own and its tasks' leases, a lock's lease check, and the
     /// anomaly monitor's next check, and a board's next archive sweep (with <paramref name="archiveAfterDays"/> above 0).
     /// </summary>
-    public static void ScheduleLeases(StateEnvelope<CoordinationDocument> envelope, int archiveAfterDays = 0) =>
-        ScheduleLeases(envelope, JsonNode.Parse(envelope.Value.Json)!.AsObject(), archiveAfterDays);
+    public static void ScheduleLeases(StateEnvelope<CoordinationDocument> envelope, int archiveAfterDays = 0, DateTimeOffset? now = null) =>
+        ScheduleLeases(envelope, JsonNode.Parse(envelope.Value.Json)!.AsObject(), archiveAfterDays, now ?? DateTimeOffset.MinValue);
 
-    private static void ScheduleLeases(StateEnvelope<CoordinationDocument> envelope, JsonObject state, int archiveAfterDays)
+    /// <remarks>
+    /// Only leases still running get a timer. A lease's end needs no work of its own (lapses are read lazily); an ended one kept its
+    /// <c>leaseUntil</c>, and rescheduling it on every write cost one full commit per previously claimed task.
+    /// </remarks>
+    private static void ScheduleLeases(StateEnvelope<CoordinationDocument> envelope, JsonObject state, int archiveAfterDays, DateTimeOffset now)
     {
         var backoff = envelope.DueWork.FirstOrDefault(x => x.Id == DueWorkKinds.TaskArchiveRetry)?.DueAt;
         envelope.DueWork.RemoveAll(x => x.Kind is DueWorkKinds.Lease or DueWorkKinds.LeaseWarning or DueWorkKinds.AnomalyCheck or DueWorkKinds.TaskArchive);
@@ -189,12 +197,12 @@ public static class CoordinationStateMachine
         if (TaskArchiving.NextSweep(state, archiveAfterDays) is { } sweep)
             envelope.DueWork.Add(backoff > sweep ? new(DueWorkKinds.TaskArchiveRetry, DueWorkKinds.TaskArchive, backoff.Value) : new(DueWorkKinds.TaskArchive, DueWorkKinds.TaskArchive, sweep));
         if (DateTimeOffset.TryParse(Text(state, "nextCheckAt"), out var check)) envelope.DueWork.Add(new(DueWorkKinds.AnomalyCheck, DueWorkKinds.AnomalyCheck, check));
-        if (DateTimeOffset.TryParse(Text(state, "leaseUntil"), out var lease)) envelope.DueWork.Add(new(DueWorkKinds.Lease, DueWorkKinds.Lease, lease));
+        if (DateTimeOffset.TryParse(Text(state, "leaseUntil"), out var lease) && lease > now) envelope.DueWork.Add(new(DueWorkKinds.Lease, DueWorkKinds.Lease, lease));
         // A lock whose holder has an action in flight checks its lease shortly before it ends (claim_expiring).
         if (AttentionSources.LeaseWarningAt(state) is { } warning) envelope.DueWork.Add(new(DueWorkKinds.LeaseWarning, DueWorkKinds.LeaseWarning, warning));
         if (state["tasks"] is JsonObject tasks)
             foreach (var entry in tasks)
-                if (entry.Value is JsonObject task && DateTimeOffset.TryParse(Text(task, "leaseUntil"), out var taskLease)) envelope.DueWork.Add(new(DueWorkKinds.Lease + ":" + entry.Key, DueWorkKinds.Lease, taskLease));
+                if (entry.Value is JsonObject task && DateTimeOffset.TryParse(Text(task, "leaseUntil"), out var taskLease) && taskLease > now) envelope.DueWork.Add(new(DueWorkKinds.Lease + ":" + entry.Key, DueWorkKinds.Lease, taskLease));
     }
 
     /// <summary>Records who caused new outbox effects so delivery runs with the originating caller's authority.</summary>

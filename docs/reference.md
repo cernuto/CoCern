@@ -265,7 +265,7 @@ Ad hoc SQL: `"name": "sql", "sql": "SELECT ..."` runs one `SELECT` over the view
 
 ## Other PCs
 
-Each joined PC runs a small background program, the **node**. It joins the hub once, lists the PC's chats in `chat_directory`, and wakes its Codex chats when mail arrives. New chats show up within about a minute.
+Each joined PC runs a small background program, the **node**. It joins the hub once, lists the PC's chats in `chat_directory`, and wakes its Codex chats when mail arrives. New chats show up within about a minute. A chat that hasn't called CoCern for 7 days is no longer listed (a running Claude waiter keeps it).
 
 ### Setup by hand
 
@@ -289,7 +289,7 @@ New-NetFirewallRule -DisplayName "CoCern hub (HTTPS 5273)" -Direction Inbound -A
 
 ### Wake-ups
 
-**Codex chats** are woken by the node with `codex queue`: never mid-turn, at most one waiting wake per chat, at most one every 3 seconds and 20 per 10 minutes. Codex gives the adapter no chat ID, so the node finds each chat from its transcript.
+**Codex chats** are woken by the node with `codex queue`: never mid-turn, at most one waiting wake per chat, at most one every 3 seconds and 20 per 10 minutes. If a wake's outcome is unknown (the dispatch failed or was cut off), that chat isn't woken again for 10 minutes, and that wake's messages are never sent twice. Codex gives the adapter no chat ID, so the node finds each chat from its transcript.
 
 **Claude chats** wake themselves with `--await-inbox --chat <CLAUDE_CODE_SESSION_ID>` (see the README). The chat must have called `session_open` on this PC first. Exit codes: 0 mail arrived, 1 no session for that chat, 2 timed out, 3 stopped. `--print-inbox` also prints the messages; `--ack <id,id>` acknowledges them, then waits again. The chat shows as reachable only while it runs.
 
@@ -320,7 +320,8 @@ Set them in `appsettings.json`, as environment variables (`Relay__Clients__0__To
 | --- | --- | --- |
 | `ASPNETCORE_URLS` | `http://127.0.0.1:5271` | HTTP address. Plain HTTP must be loopback, or the hub refuses to start. |
 | `Relay:DatabasePath` | `data/relay.db` | The database, relative to the content root. Owner-only on Linux and macOS. |
-| `Relay:SiloPort`, `Relay:GatewayPort` | 21111, 31111 | Orleans ports (loopback). Change them and `Relay:ClusterId` for a second hub. |
+| `Relay:SiloPort` | 21111 | Orleans silo port (loopback). Change it and `Relay:ClusterId` for a second hub. |
+| `Relay:GatewayPort` | 0 (off) | An Orleans client gateway (loopback). Leave it off: nothing uses it, and it would let any local process call grains without a token. |
 | `Relay:ClusterId` | `CoCern` | Orleans cluster name. |
 | `Relay:Board:ArchiveAfterDays` | 30 | Days after completion before a task is archived (0 to 3650). |
 | `Relay:Dashboard:ViewerPrincipalIds:N` | | Administrator principals that may open the dashboard. The start script and Visual Studio profile set theirs. |

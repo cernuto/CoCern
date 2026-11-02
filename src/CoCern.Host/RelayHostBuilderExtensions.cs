@@ -17,7 +17,8 @@ using Dashboard;
 public static class RelayHostBuilderExtensions
 {
     private const int DefaultSiloPort = 21111;
-    private const int DefaultGatewayPort = 31111;
+    // No Orleans gateway by default: the hub is its only client, and a gateway would accept any caller identity from any local process.
+    private const int DefaultGatewayPort = 0;
     private const string ServiceId = "CoCern";
 
     public static WebApplicationBuilder AddRelayHost(this WebApplicationBuilder builder)

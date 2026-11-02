@@ -4,13 +4,22 @@ using Microsoft.Data.Sqlite;
 
 namespace CoCern.Adapter;
 
-/// <summary>How often a route may be woken: at least <paramref name="MinInterval"/> apart, and at most <paramref name="MaxPerWindow"/> times in any <paramref name="Window"/>.</summary>
-public sealed record WakeLimits(TimeSpan MinInterval, int MaxPerWindow, TimeSpan Window)
+/// <summary>
+/// How often a route may be woken: at least <paramref name="MinInterval"/> apart, and at most <paramref name="MaxPerWindow"/> times in any <paramref name="Window"/>.
+/// A wake whose outcome is unknown holds its route for <paramref name="UncertainHold"/>; its messages are never sent again either way.
+/// </summary>
+public sealed record WakeLimits(TimeSpan MinInterval, int MaxPerWindow, TimeSpan Window, TimeSpan UncertainHold = default)
 {
+    public TimeSpan UncertainHold { get; init; } = UncertainHold == default ? TimeSpan.FromMinutes(10) : UncertainHold;
+
     public static WakeLimits Default { get; } = new(TimeSpan.FromSeconds(3), 20, TimeSpan.FromMinutes(10));
 }
 
-/// <summary>One owned database, with durable reservations deliberately never retried automatically.</summary>
+/// <summary>
+/// One owned database, with durable reservations deliberately never retried automatically. A wake whose outcome is unknown (the dispatch failed
+/// or was cut off) holds its route for a while rather than for good: new mail then wakes the chat again, and the dispatcher still refuses
+/// while Codex holds a pending wake for the thread, so nothing is queued twice.
+/// </summary>
 public sealed class WakeState : IDisposable
 {
     private readonly FileStream _ownership;
@@ -31,9 +40,10 @@ public sealed class WakeState : IDisposable
         catch { _connection.Dispose(); _ownership.Dispose(); throw; }
     }
     public static string Key(params string[] parts) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(System.Text.Json.JsonSerializer.Serialize(parts))));
-    public bool IsUncertain(string route)
+    public bool IsUncertain(string route, DateTimeOffset? now = null)
     {
-        lock (_gate) return Scalar("SELECT COUNT(*) FROM batches WHERE route=$route AND status IN ('reserved','uncertain')", route) > 0;
+        var since = (now ?? DateTimeOffset.UtcNow).ToUnixTimeMilliseconds() - (long)_limits.UncertainHold.TotalMilliseconds;
+        lock (_gate) return Scalar("SELECT COUNT(*) FROM batches WHERE route=$route AND status IN ('reserved','uncertain') AND at > $value", route, since) > 0;
     }
     /// <param name="busy">Asked only when there is unseen mail; while it says the chat is mid-turn nothing is reserved and the status is "busy".</param>
     public (string Status, string? Batch) Reserve(string route, IEnumerable<string> ids, DateTimeOffset now, Func<bool>? busy = null)
@@ -41,7 +51,7 @@ public sealed class WakeState : IDisposable
         lock (_gate)
         {
             using var transaction = _connection.BeginTransaction();
-            if (IsUncertain(route)) return ("uncertain", null);
+            if (IsUncertain(route, now)) return ("uncertain", null);
             var unseen = ids.Select(id => Key(id)).Distinct().Where(id => Scalar("SELECT COUNT(*) FROM messages WHERE route=$route AND message=$value", route, id) == 0).ToArray();
             if (unseen.Length == 0) return ("empty", null);
             if (busy?.Invoke() == true) return ("busy", null);

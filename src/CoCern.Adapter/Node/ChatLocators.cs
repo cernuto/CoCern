@@ -316,6 +316,8 @@ internal sealed class NodeChats(string nodeFolder, IReadOnlyList<IChatLocator> l
     public static readonly TimeSpan DefaultBudget = TimeSpan.FromSeconds(5);
     /// <summary>How long a handle that never mapped to a chat is kept before its file is deleted.</summary>
     public static readonly TimeSpan PruneAfter = TimeSpan.FromHours(24);
+    /// <summary>How long a chat may go without calling CoCern (its adapter touches the handle) before its handle is deleted, unless its waiter runs.</summary>
+    public static readonly TimeSpan IdleAfter = TimeSpan.FromDays(7);
 
     public JsonArray Read(Func<string, bool> allowed)
     {
@@ -374,6 +376,17 @@ internal sealed class NodeChats(string nodeFolder, IReadOnlyList<IChatLocator> l
         }
     }
 
+    /// <summary>When the chat last called CoCern: its handle file's write time (which its adapter refreshes), and never before it opened.</summary>
+    private DateTimeOffset LastActive(SessionHandle handle)
+    {
+        try
+        {
+            var written = File.GetLastWriteTimeUtc(NodeState.SessionHandlePath(nodeFolder, handle.SessionId));
+            return written > handle.OpenedAt.UtcDateTime ? new DateTimeOffset(written, TimeSpan.Zero) : handle.OpenedAt;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException) { return handle.OpenedAt; }
+    }
+
     /// <summary>The node's normal delete of one of its own handle files; false when it could not be deleted now.</summary>
     private bool Delete(SessionHandle handle)
     {
@@ -382,15 +395,18 @@ internal sealed class NodeChats(string nodeFolder, IReadOnlyList<IChatLocator> l
     }
 
     /// <summary>
-    /// Deletes the node's own handle files for chats that never mapped (or never will) and opened more than <see cref="PruneAfter"/> ago; returns the rest.
-    /// A handle carrying the chat ID its client captured, or whose chat has a live waiter, is kept: <c>--await-inbox --chat</c> finds its session through that claim even when it was never located.
+    /// Deletes the node's own handle files for chats that stopped calling CoCern for <see cref="IdleAfter"/>, and for chats that never mapped
+    /// (or never will) and opened more than <see cref="PruneAfter"/> ago; returns the rest. A chat with a live waiter is always kept. Otherwise a
+    /// handle carrying the chat ID its client captured is kept while in use: <c>--await-inbox --chat</c> finds its session through that claim even when it was never located.
     /// </summary>
     private IEnumerable<SessionHandle> Prune(IEnumerable<SessionHandle> handles, DateTimeOffset now, HashSet<string> waiters)
     {
         foreach (var handle in handles)
         {
             var age = now - handle.OpenedAt;
-            if (handle.Client is not null || (handle.Client ?? handle.Chat) is { } chat && waiters.Contains(chat.ThreadId)) { yield return handle; continue; }
+            if ((handle.Client ?? handle.Chat) is { } chat && waiters.Contains(chat.ThreadId)) { yield return handle; continue; }
+            if (now - LastActive(handle) > IdleAfter && Delete(handle)) continue;
+            if (handle.Client is not null) { yield return handle; continue; }
             // Kept when it could not be deleted now; tried again next cycle.
             if (handle.Chat is null && (handle.Unmapped || age > locateWindow) && age > PruneAfter && Delete(handle)) continue;
             yield return handle;
