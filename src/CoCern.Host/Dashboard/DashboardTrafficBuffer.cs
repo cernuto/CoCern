@@ -32,26 +32,3 @@ public sealed class DashboardTrafficBuffer
     private static string? SafeSessionId(string? value) => Guid.TryParseExact(value, "N", out _) ? value : null;
     private static string? SafeCode(string value) => value.Length is > 0 and <= 64 && value.All(char.IsAsciiLetterOrDigit) ? value : null;
 }
-
-public sealed class DashboardRelayApplication(RelayApplication application, DashboardTrafficBuffer traffic) : IRelayApplication
-{
-    public async Task<RelayReply> ExecuteAsync(RelayCaller caller, string tool, JsonElement arguments, CancellationToken cancellationToken = default)
-    {
-        if (!RelayToolCatalog.TryGet(tool, out _)) return await application.ExecuteAsync(caller, tool, arguments, cancellationToken);
-        var sessionId = arguments.ValueKind == JsonValueKind.Object && arguments.TryGetProperty("sessionId", out var session) && session.ValueKind == JsonValueKind.String ? session.GetString() : null;
-        var correlationId = Guid.NewGuid().ToString("N");
-        var started = Stopwatch.GetTimestamp();
-        traffic.Request(tool, sessionId, correlationId);
-        try
-        {
-            var result = await application.ExecuteAsync(caller, tool, arguments, cancellationToken);
-            traffic.Response(tool, sessionId, correlationId, result.Code, Stopwatch.GetElapsedTime(started).TotalMilliseconds);
-            return result;
-        }
-        catch (Exception)
-        {
-            traffic.Response(tool, sessionId, correlationId, cancellationToken.IsCancellationRequested ? "Canceled" : "Unavailable", Stopwatch.GetElapsedTime(started).TotalMilliseconds);
-            throw;
-        }
-    }
-}

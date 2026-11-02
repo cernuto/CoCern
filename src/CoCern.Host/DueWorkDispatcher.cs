@@ -3,9 +3,9 @@ using CoCern.Domain;
 
 namespace CoCern.Host;
 
-internal sealed class DueWorkDispatcher(IDueWorkSource source, RelayApplication application, ILogger<DueWorkDispatcher> logger) : BackgroundService
+internal sealed class DueWorkDispatcher(IDueWorkSource source, Orleans.IGrainFactory grains, ILogger<DueWorkDispatcher> logger) : BackgroundService
 {
-    private readonly DueWorkPump pump = new(source, application.DispatchDueAsync, () => logger.LogWarning("A durable coordination effect remains pending."));
+    private readonly DueWorkPump pump = new(source, (work, ct) => CoordinationGrain.DispatchDueAsync(grains, work, ct), () => logger.LogWarning("A durable coordination effect remains pending."));
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var backoff = TimeSpan.FromMilliseconds(250);

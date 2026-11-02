@@ -44,9 +44,9 @@ public static class AttentionWeights
     public const int LowestTier = 4;
 
     /// <summary>A <c>blocked</c> item whose blocker is a provider rejection; it keeps the top tier.</summary>
-    public const string ProviderRejection = "provider_rejection";
+    public const string ProviderRejection = BlockerKinds.ProviderRejection;
     /// <summary>A <c>blocked</c> item whose blocker is a coordinator hold; it ranks with reviews (tier 3).</summary>
-    public const string CoordinatorHold = "coordinator_hold";
+    public const string CoordinatorHold = BlockerKinds.CoordinatorHold;
 
     public const string Low = "low";
     public const string Normal = "normal";

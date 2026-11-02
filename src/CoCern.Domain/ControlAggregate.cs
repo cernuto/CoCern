@@ -85,12 +85,9 @@ internal static class ControlAggregate
         {
             sessions.Remove(id);
             var repository = session is null ? "" : Text(session, "repositoryId");
-            context.Emit(AggregateKinds.Session, id, Operations.SessionExpire, new JsonObject
-            {
-                ["repositoryId"] = repository, ["sessionId"] = id,
-                // Its own caller: the session belongs to its repository, which the caller opening a new session may not reach.
-                ["__principalId"] = "relay-directory", ["__administrator"] = false, ["__repositories"] = new JsonArray(repository)
-            });
+            // Its own caller: the session belongs to its repository, which the caller opening a new session may not reach.
+            context.Emit(AggregateKinds.Session, id, Operations.SessionExpire, new JsonObject { ["repositoryId"] = repository, ["sessionId"] = id },
+                new RelayCaller("relay-directory", false, [repository]));
         }
     }
 
@@ -136,10 +133,13 @@ internal static class ControlAggregate
         // A session dropped from the directory may still send a late registration; accept it unchanged so its outbox does not retry forever.
         if (ObjectAt(context.State, "sessions")[id] is not JsonObject session) return Ok(new { registered = false });
         if (Text(session, "repositoryId") != context.Repository) return Error(SessionDenied);
-        foreach (var property in new[] { "binding", "bindingVersion", "observedAt", "freshUntil", "availability", "machineId", "label", "hubIncarnation", "activeAt" })
+        foreach (var property in RegistrationFields)
             if (context.Args.ContainsKey(property)) session[property] = context.Args[property]?.DeepClone();
         return Ok(new { registered = true });
     }
+
+    /// <summary>What a session reports to the directory about itself; nothing else of its state ever leaves it.</summary>
+    internal static readonly string[] RegistrationFields = ["binding", "bindingVersion", "observedAt", "freshUntil", "availability", "machineId", "label", "hubIncarnation", "activeAt"];
 
     /// <summary>Reported presence only. A record from another hub incarnation or past its freshness is shown as stale.</summary>
     private static RelayReply ListWorkers(AggregateContext context)

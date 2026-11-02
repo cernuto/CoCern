@@ -38,7 +38,6 @@ public sealed class AnomalyMonitorGrain([PersistentState("anomaly", "relay")] IP
         var monitor = Monitor(repository);
         var schedule = new JsonObject { ["repositoryId"] = repository, ["intervalSeconds"] = (long)options.Interval.TotalSeconds };
         if (!ApplyInternal(candidate, monitor, Operations.AnomalyCheck, schedule, now).Ok) return true;
-        CoordinationStateMachine.ScheduleLeases(candidate);
         if (!await CommitAsync(candidate)) return false;
         var self = GrainFactory.GetGrain<IAnomalyMonitorGrain>(this.GetPrimaryKeyString());
         var checks = options.Checks().ToArray();

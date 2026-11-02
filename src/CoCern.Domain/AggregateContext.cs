@@ -28,4 +28,8 @@ internal sealed class AggregateContext(JsonObject state, RelayCaller caller, str
 
     public void Emit(string targetKind, string targetKey, string operation, JsonObject payload) =>
         Effects.Add(new(Guid.NewGuid().ToString("N"), targetKind, targetKey, operation, payload.ToJsonString(), Now));
+
+    /// <summary>Emits an effect delivered with its own caller instead of the one whose call caused it.</summary>
+    public void Emit(string targetKind, string targetKey, string operation, JsonObject payload, RelayCaller asCaller) =>
+        Emit(targetKind, targetKey, operation, CoordinationStateMachine.WithCaller(payload, asCaller));
 }

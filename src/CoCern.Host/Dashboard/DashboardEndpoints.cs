@@ -16,7 +16,6 @@ public static class DashboardEndpoints
     public static IServiceCollection AddRelayDashboard(this IServiceCollection services)
     {
         services.AddSingleton<DashboardSecurity>();
-        services.AddSingleton<IRelayObservationSource>(provider => provider.GetRequiredService<SqliteStore>());
         services.AddSingleton<DashboardLogBuffer>();
         services.AddSingleton<DashboardTrafficBuffer>();
         services.Replace(ServiceDescriptor.Singleton<IRelayApplication, DashboardRelayApplication>());

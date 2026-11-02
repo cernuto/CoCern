@@ -223,7 +223,7 @@ internal static class TaskBoardAggregate
             // A recovered action no longer holds the task; its pending restoration still blocks new actions and completion.
             if (TaskActions.HoldsTask(task)) return Error(UnresolvedAction);
             if (!ExpectedVersionMatches(context.Args, version)) return VersionConflict(version);
-            task.Remove("owner"); task["leaseUntil"] = context.Now.ToString("O"); task["version"] = ++version;
+            ReleaseClaim(task, context.Now); task["version"] = ++version;
         }
         return Ok(new { claimGeneration = generation, leaseUntil = Text(task, "leaseUntil"), released = release }, version);
     }
@@ -234,12 +234,33 @@ internal static class TaskBoardAggregate
         var args = context.Args;
         if (Text(task, "owner") == context.SessionId && Number(task, "claimGeneration") == Number(args, "claimGeneration") && Text(task, "claimRequestId") == Text(args, "claimRequestId"))
         {
-            task.Remove("owner"); task["leaseUntil"] = context.Now.ToString("O"); task["version"] = Number(task, "version") + 1;
+            ReleaseClaim(task, context.Now); task["version"] = Number(task, "version") + 1;
             // The claim is undone, so its retry must run again rather than replay it.
             CoordinationStateMachine.ForgetRequest(context.State, context.Caller.PrincipalId, RelayTools.TaskClaim, Text(args, "claimRequestId"));
             AttentionSources.OnUnclaim(context, task);
         }
         return Ok(new { released = true }, Number(task, "version"));
+    }
+
+    /// <summary>
+    /// What a retry gets instead of its stored reply: a begun action returns as it stands now, and a claim replays only while this session
+    /// still holds the same claim on a task it may still run.
+    /// </summary>
+    internal static RelayReply? ReplayRefusal(JsonObject board, string operation, JsonObject args, JsonObject stored, DateTimeOffset now)
+    {
+        var (session, task) = (Text(args, "sessionId"), ObjectAt(board, "tasks")[Text(args, "taskId")] as JsonObject);
+        if (operation == RelayTools.ActionBegin && task is not null && ObjectAt(task, "actions")[Text(args, "actionId")] is JsonObject action)
+            return Ok(new { action, replayAllowed = false, existing = true }, Number(task, "version"));
+        if (operation is not (RelayTools.ClaimAcquire or RelayTools.ClaimRenew or RelayTools.TaskClaim) || task is null) return null;
+        if (Text(task, "owner") != session || Number(task, "claimGeneration") != Number(stored, "claimGeneration")) return Error(StaleClaim);
+        return operation == RelayTools.TaskClaim ? TaskWorkflow.ExecutionRefusal(board, task, session, now) : null;
+    }
+
+    /// <summary>Ends a task's claim; the caller bumps its version.</summary>
+    internal static void ReleaseClaim(JsonObject task, DateTimeOffset now)
+    {
+        task.Remove("owner");
+        task["leaseUntil"] = now.ToString("O");
     }
 
     private static RelayReply Claim(AggregateContext context, JsonObject task)

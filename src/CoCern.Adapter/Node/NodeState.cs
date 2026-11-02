@@ -39,6 +39,13 @@ public sealed class NodeState : IDisposable
 
     public static string DefaultFolder => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CoCern", "node");
 
+    /// <summary>
+    /// The node folder the adapter and the waiter read: <c>COCERN_NODE_DIR</c>, else <see cref="DefaultFolder"/>. <c>--node</c> and
+    /// <c>--setup</c> deliberately ignore the variable and take <c>--data-dir</c> instead.
+    /// </summary>
+    public static string ConfiguredFolder(Func<string, string?> environment) =>
+        environment("COCERN_NODE_DIR") is { } configured && !string.IsNullOrWhiteSpace(configured) ? configured : DefaultFolder;
+
     /// <summary>Takes the folder's lock and loads its state, creating a machine ID the first time. A second node on the same folder fails at once.</summary>
     public static NodeState Open(string? dataDir)
     {

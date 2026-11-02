@@ -60,7 +60,7 @@ internal static class SessionAttention
         var content = new JsonObject { ["kind"] = kind };
         Set(content, "taskId", taskId); Set(content, "boardId", boardId == "default" ? "" : boardId); Set(content, "subject", subject);
         Set(content, "blocker", Text(args, "blocker") is { Length: > 0 and <= RelayLimits.MaxAttentionBlockerLength } blocker ? blocker : "");
-        if (AttentionItem.IsTrue(args, "blocking")) content["blocking"] = true;
+        if (IsTrue(args, "blocking")) content["blocking"] = true;
         content["priority"] = Priority(args["priority"]);
         content["refs"] = new JsonArray(Refs(args["refs"]).Select(x => (JsonNode)x).ToArray());
         content["note"] = Cap(Text(args, "note"));
@@ -269,7 +269,7 @@ internal static class SessionAttention
     private static bool Snooze(JsonObject item, DateTimeOffset now, int boundaries, DateTimeOffset? until)
     {
         DateTimeOffset? ceiling = null;
-        if (AttentionItem.IsTrue(item, "blocking"))
+        if (IsTrue(item, "blocking"))
         {
             var first = item.ContainsKey("firstSnoozedAt") ? Date(item, "firstSnoozedAt") : now;
             ceiling = first.AddMinutes(RelayLimits.MaxBlockingSnoozeMinutes);

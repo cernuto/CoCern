@@ -83,7 +83,10 @@ public static class CoordinationStateMachine
         envelope.Value = new() { Json = state.ToJsonString() };
         // Nothing changes the state object after this point, so the commit's search indexing can read it instead of parsing again.
         envelope.Value.KeepParsed(state);
+        // New effects deliver with this call's authority, and the aggregate's timers follow its new state.
+        StampEffects(context.Effects, 0, caller);
         envelope.Effects.AddRange(context.Effects);
+        ScheduleLeases(envelope, state, kind == AggregateKinds.Board ? archiveAfterDays : 0);
         // Tasks this operation archived leave the board in this commit; storage writes them to the archive in the same transaction.
         envelope.QueueArchive(context.Archived);
         return result;
@@ -93,55 +96,33 @@ public static class CoordinationStateMachine
     private static RelayReply Replay(string kind, JsonObject state, string operation, JsonObject arguments, JsonObject prior, string fingerprint, DateTimeOffset now)
     {
         if (Text(prior, "fingerprint") != fingerprint && Text(prior, "fingerprint") != LegacyFingerprint(arguments)) return Error(RequestConflict);
-        var tasks = ObjectAt(state, "tasks");
-        var taskId = Text(arguments, "taskId");
-        var session = Text(arguments, "sessionId");
-        if (operation == RelayTools.ActionBegin && tasks[taskId] is JsonObject actionTask && ObjectAt(actionTask, "actions")[Text(arguments, "actionId")] is JsonObject currentAction)
-            return Ok(new { action = currentAction, replayAllowed = false, existing = true }, Number(actionTask, "version"));
-        if (operation is RelayTools.ClaimAcquire or RelayTools.ClaimRenew or RelayTools.TaskClaim)
+        var stored = JsonNode.Parse(Text(prior, "json")) as JsonObject ?? new JsonObject();
+        // A grant is replayed only while it is still live; whether it is still the same grant is each aggregate's own rule.
+        if (operation is RelayTools.ClaimAcquire or RelayTools.ClaimRenew or RelayTools.TaskClaim && Date(stored, "leaseUntil") <= now) return Error(StaleClaim);
+        var refusal = kind switch
         {
-            var grant = JsonNode.Parse(Text(prior, "json"))!.AsObject();
-            if (Date(grant, "leaseUntil") <= now) return Error(StaleClaim);
-            if (kind == AggregateKinds.Lock && (Text(state, "holder") != session || Number(state, "generation") != Number(grant, "generation"))) return Error(StaleClaim);
-            if (kind == AggregateKinds.Board && tasks[taskId] is JsonObject task)
-            {
-                if (Text(task, "owner") != session || Number(task, "claimGeneration") != Number(grant, "claimGeneration")) return Error(StaleClaim);
-                if (operation == RelayTools.TaskClaim && TaskWorkflow.ExecutionRefusal(state, task, session, now) is { } refusal) return refusal;
-            }
-        }
-        return new(true, Text(prior, "code"), Text(prior, "json"), Number(prior, "version"));
+            AggregateKinds.Board => TaskBoardAggregate.ReplayRefusal(state, operation, arguments, stored, now),
+            AggregateKinds.Lock => LockAggregate.ReplayRefusal(state, operation, arguments, stored),
+            _ => null
+        };
+        return refusal ?? new(true, Text(prior, "code"), Text(prior, "json"), Number(prior, "version"));
     }
 
     /// <summary>
-    /// Arguments the hub adds to a request, per operation, from its own state or settings: a retry with the same public arguments may get
-    /// different values (a dependency archived since, a session rebound since, a changed setting), so they never count toward the fingerprint.
-    /// <c>hubIncarnation</c> and every <c>__</c> field are left out for every operation.
+    /// The request's identity for replay: only the client's public arguments, never <c>hubIncarnation</c>, a <c>__</c> field or one of
+    /// <see cref="ServerArguments"/> (a retry may get different values for those).
     /// </summary>
-    private static readonly Dictionary<string, string[]> ServerArguments = new(StringComparer.Ordinal)
-    {
-        [RelayTools.TaskUpdate] = ["archivedDependsOn"],
-        [RelayTools.TaskClaim] = ["declaredResources", TaskWorkflow.ResolveDeclaredField],
-        [RelayTools.ActionBegin] = ["binding", "bindingVersion", "declaredResources", TaskWorkflow.ResolveDeclaredField, TaskWorkflow.LockRefusalField],
-        [RelayTools.ClaimAcquire] = ["taskClaimGeneration", "declaredResources"],
-        [RelayTools.OrderPut] = ["defaultExpiryDays"],
-        [RelayTools.AttentionRespond] = ["snoozeBoundaries"]
-    };
-
-    /// <summary>The request's identity for replay: only the client's public arguments.</summary>
     private static string Fingerprint(string operation, JsonObject arguments)
     {
         var significant = arguments.DeepClone().AsObject();
         significant.Remove("hubIncarnation");
         foreach (var key in significant.Select(entry => entry.Key).Where(key => key.StartsWith("__", StringComparison.Ordinal)).ToArray()) significant.Remove(key);
-        if (ServerArguments.TryGetValue(operation, out var injected)) foreach (var key in injected) significant.Remove(key);
         // The hub replaces a claim's resourceIds with their canonical IDs, which can change between retries (an alias re-registered): the
         // client's own list is what identifies the request.
-        if (significant[RequestedResourcesField] is { } requested) { significant["resourceIds"] = requested.DeepClone(); significant.Remove(RequestedResourcesField); }
+        if (significant[ServerArguments.RequestedResources] is { } requested) significant["resourceIds"] = requested.DeepClone();
+        ServerArguments.StripClientValues(operation, significant);
         return Hash(significant);
     }
-
-    /// <summary>Server-set on a <c>task_claim</c>: the <c>resourceIds</c> the client named, before the hub made them canonical.</summary>
-    public const string RequestedResourcesField = "requestedResourceIds";
 
     /// <summary>
     /// The fingerprint replays stored before server arguments were left out; a retry that matches it still replays. Fields the hub adds
@@ -151,7 +132,7 @@ public static class CoordinationStateMachine
     {
         var significant = arguments.DeepClone().AsObject();
         significant.Remove("hubIncarnation");
-        foreach (var key in new[] { RequestedResourcesField, TaskWorkflow.ResolveDeclaredField, TaskWorkflow.LockRefusalField }) significant.Remove(key);
+        foreach (var key in new[] { ServerArguments.RequestedResources, Operations.ResolveDeclaredField, Operations.LockRefusalField }) significant.Remove(key);
         return Hash(significant);
     }
 
@@ -171,14 +152,21 @@ public static class CoordinationStateMachine
 
     /// <summary>Mutations are deduplicated by requestId and committed; reads never are.</summary>
     public static bool IsMutation(string operation) =>
-        operation is not (Operations.Verify or Operations.Resolve or Operations.ResolveAll or Operations.NextWork or Operations.ClaimState or Operations.SessionOwners or Operations.Standing or Operations.Orders)
-        && (!RelayToolCatalog.TryGet(operation, out var tool) || tool.IsMutation);
+        !Operations.IsRead(operation) && (!RelayToolCatalog.TryGet(operation, out var tool) || tool.IsMutation);
 
     /// <summary>Whether a successful operation must be persisted. A legacy board's first read durably seeds current change markers without changing task versions.</summary>
     public static bool RequiresCommit(string kind, string operation, string? priorTaskRevision, StateEnvelope<CoordinationDocument> envelope) =>
         IsMutation(operation) || kind == AggregateKinds.Board && priorTaskRevision != TaskRevision(envelope);
 
     public static string? TaskRevision(StateEnvelope<CoordinationDocument> envelope) => JsonNode.Parse(envelope.Value.Json)?["taskRevision"]?.ToJsonString();
+
+    /// <summary>The board, task and action an <see cref="ActionKey"/> names; an older key without them reads as the default board.</summary>
+    public static (string BoardId, string TaskId, string ActionId) ParseActionKey(string actionKey)
+    {
+        var parts = actionKey.Split('/');
+        return parts.Length >= 4 ? (Uri.UnescapeDataString(parts[1]), Uri.UnescapeDataString(parts[2]), Uri.UnescapeDataString(parts[3]))
+            : parts.Length >= 3 ? (Uri.UnescapeDataString(parts[1]), Uri.UnescapeDataString(parts[2]), "") : (AggregateKinds.DefaultBoard, "", actionKey);
+    }
 
     /// <summary>Stable identity of one action attempt, shared by the board and the resource locks it blocks.</summary>
     public static string ActionKey(JsonObject args, string actionId, long attempt) => string.Join("/", new[]
@@ -190,19 +178,23 @@ public static class CoordinationStateMachine
     /// Rebuilds the aggregate's timers from its own state: lease expiry from its own and its tasks' leases, a lock's lease check, and the
     /// anomaly monitor's next check, and a board's next archive sweep (with <paramref name="archiveAfterDays"/> above 0).
     /// </summary>
-    public static void ScheduleLeases(StateEnvelope<CoordinationDocument> envelope, int archiveAfterDays = 0)
+    public static void ScheduleLeases(StateEnvelope<CoordinationDocument> envelope, int archiveAfterDays = 0) =>
+        ScheduleLeases(envelope, JsonNode.Parse(envelope.Value.Json)!.AsObject(), archiveAfterDays);
+
+    private static void ScheduleLeases(StateEnvelope<CoordinationDocument> envelope, JsonObject state, int archiveAfterDays)
     {
-        var state = JsonNode.Parse(envelope.Value.Json)!.AsObject();
-        envelope.DueWork.RemoveAll(x => x.Kind is "lease" or DueWorkKinds.LeaseWarning or DueWorkKinds.AnomalyCheck or DueWorkKinds.TaskArchive);
-        // A board's next archive sweep, when a finished task will pass Relay:Board:ArchiveAfterDays.
-        if (TaskArchiving.NextSweep(state, archiveAfterDays) is { } sweep) envelope.DueWork.Add(new(DueWorkKinds.TaskArchive, DueWorkKinds.TaskArchive, sweep));
+        var backoff = envelope.DueWork.FirstOrDefault(x => x.Id == DueWorkKinds.TaskArchiveRetry)?.DueAt;
+        envelope.DueWork.RemoveAll(x => x.Kind is DueWorkKinds.Lease or DueWorkKinds.LeaseWarning or DueWorkKinds.AnomalyCheck or DueWorkKinds.TaskArchive);
+        // A board's next archive sweep, when a finished task will pass Relay:Board:ArchiveAfterDays; a refused sweep's backoff still holds.
+        if (TaskArchiving.NextSweep(state, archiveAfterDays) is { } sweep)
+            envelope.DueWork.Add(backoff > sweep ? new(DueWorkKinds.TaskArchiveRetry, DueWorkKinds.TaskArchive, backoff.Value) : new(DueWorkKinds.TaskArchive, DueWorkKinds.TaskArchive, sweep));
         if (DateTimeOffset.TryParse(Text(state, "nextCheckAt"), out var check)) envelope.DueWork.Add(new(DueWorkKinds.AnomalyCheck, DueWorkKinds.AnomalyCheck, check));
-        if (DateTimeOffset.TryParse(Text(state, "leaseUntil"), out var lease)) envelope.DueWork.Add(new("lease", "lease", lease));
+        if (DateTimeOffset.TryParse(Text(state, "leaseUntil"), out var lease)) envelope.DueWork.Add(new(DueWorkKinds.Lease, DueWorkKinds.Lease, lease));
         // A lock whose holder has an action in flight checks its lease shortly before it ends (claim_expiring).
         if (AttentionSources.LeaseWarningAt(state) is { } warning) envelope.DueWork.Add(new(DueWorkKinds.LeaseWarning, DueWorkKinds.LeaseWarning, warning));
         if (state["tasks"] is JsonObject tasks)
             foreach (var entry in tasks)
-                if (entry.Value is JsonObject task && DateTimeOffset.TryParse(Text(task, "leaseUntil"), out var taskLease)) envelope.DueWork.Add(new("lease:" + entry.Key, "lease", taskLease));
+                if (entry.Value is JsonObject task && DateTimeOffset.TryParse(Text(task, "leaseUntil"), out var taskLease)) envelope.DueWork.Add(new(DueWorkKinds.Lease + ":" + entry.Key, DueWorkKinds.Lease, taskLease));
     }
 
     /// <summary>Records who caused new outbox effects so delivery runs with the originating caller's authority.</summary>
@@ -212,20 +204,31 @@ public static class CoordinationStateMachine
         {
             var effect = effects[index];
             var payload = JsonNode.Parse(effect.PayloadJson)!.AsObject();
-            // A session expiry carries its own caller, scoped to the dropped session's repository.
-            if (effect.Operation == Operations.SessionExpire && payload.ContainsKey("__principalId")) continue;
-            payload["__principalId"] = caller.PrincipalId;
-            payload["__administrator"] = caller.IsAdministrator;
-            payload["__repositories"] = JsonSerializer.SerializeToNode(caller.Repositories);
-            effects[index] = effect with { PayloadJson = payload.ToJsonString() };
+            // An effect emitted with its own caller keeps it.
+            if (payload.ContainsKey(CallerPrincipal)) continue;
+            effects[index] = effect with { PayloadJson = WithCaller(payload, caller).ToJsonString() };
         }
     }
 
     /// <summary>Removes the originating caller recorded by <see cref="StampEffects"/> and returns it as an internal caller.</summary>
     public static RelayCaller TakeEffectCaller(JsonObject payload)
     {
-        var caller = new RelayCaller(Text(payload, "__principalId"), payload["__administrator"]?.GetValue<bool>() ?? false, payload["__repositories"]?.Deserialize<string[]>() ?? [], true);
-        payload.Remove("__principalId"); payload.Remove("__administrator"); payload.Remove("__repositories");
+        var caller = new RelayCaller(Text(payload, CallerPrincipal), payload[CallerAdministrator]?.GetValue<bool>() ?? false, payload[CallerRepositories]?.Deserialize<string[]>() ?? [], true);
+        payload.Remove(CallerPrincipal); payload.Remove(CallerAdministrator); payload.Remove(CallerRepositories);
         return caller;
+    }
+
+    // An effect's caller rides in its payload under these keys (stripped from client arguments, see Fingerprint's "__" rule).
+    private const string CallerPrincipal = "__principalId";
+    private const string CallerAdministrator = "__administrator";
+    private const string CallerRepositories = "__repositories";
+
+    /// <summary>Records <paramref name="caller"/> in an effect's payload, so its delivery runs with that authority.</summary>
+    internal static JsonObject WithCaller(JsonObject payload, RelayCaller caller)
+    {
+        payload[CallerPrincipal] = caller.PrincipalId;
+        payload[CallerAdministrator] = caller.IsAdministrator;
+        payload[CallerRepositories] = JsonSerializer.SerializeToNode(caller.Repositories);
+        return payload;
     }
 }

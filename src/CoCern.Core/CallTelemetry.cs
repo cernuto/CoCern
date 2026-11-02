@@ -123,7 +123,7 @@ internal sealed class CallTelemetry(IActivitySink activity, ITokenCounter? count
         usage?[key] is JsonValue value && value.GetValueKind() == JsonValueKind.Number && long.TryParse(value.ToJsonString(), out var tokens) && tokens is >= 0 and <= RelayLimits.MaxReportedTokens ? tokens : null;
     internal static string? Bounded(string? value, int maximum = RelayLimits.MaxIdentifierLength) => string.IsNullOrEmpty(value) || value.Length > maximum ? null : value;
 
-    internal static string BoardKey(JsonObject args) => Uri.EscapeDataString(Text(args, "repositoryId")) + "/" + Uri.EscapeDataString(Text(args, "boardId", "default"));
+    internal static string BoardKey(JsonObject args) => AggregateKinds.BoardKey(Text(args, "repositoryId"), Text(args, "boardId", AggregateKinds.DefaultBoard));
 
     /// <summary>Records one offer outcome for later analysis of which kinds are mostly dismissed. Never fails the call.</summary>
     public void RecordOutcome(JsonObject args, string kind, string outcome, string itemId)

@@ -17,6 +17,7 @@ public static class SqliteSiloBuilderExtensions
         builder.Services.AddSingleton<IFullTextSearch>(services => services.GetRequiredService<SqliteStore>());
         builder.Services.AddSingleton<ITaskArchive>(services => services.GetRequiredService<SqliteStore>());
         builder.Services.AddSingleton<IFeedbackRuleStore>(services => services.GetRequiredService<SqliteStore>());
+        builder.Services.AddSingleton<IRelayObservationSource>(services => services.GetRequiredService<SqliteStore>());
         builder.Services.AddSingleton<IActivityCounterSource>(services => services.GetRequiredService<SqliteStore>());
         builder.Services.AddKeyedSingleton<IGrainStorage>("relay", (services, _) => new SqliteGrainStorage(services.GetRequiredService<SqliteStore>()));
         builder.AddStartupTask((services, cancellationToken) =>

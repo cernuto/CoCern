@@ -54,10 +54,9 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
         var candidate = Clone(persistent.State);
         var firstNewEffect = candidate.Effects.Count;
         var priorTaskRevision = Kind == AggregateKinds.Board ? CoordinationStateMachine.TaskRevision(candidate) : null;
-        var reply = ApplyInternal(candidate, caller, operation, args, Now, services.GetService<OrderOptions>() is { Enabled: true }, ArchiveAfterDays);
+        var reply = ApplyInternal(candidate, caller, operation, args, Now, services.GetService<OrderOptions>() is { Enabled: true });
         // A read that emitted an effect (a verify's hourly activity report) commits it, or the effect would be lost.
         if (!reply.Ok || !CoordinationStateMachine.RequiresCommit(Kind, operation, priorTaskRevision, candidate) && candidate.Effects.Count == firstNewEffect) return reply;
-        CoordinationStateMachine.ScheduleLeases(candidate, Kind == AggregateKinds.Board ? ArchiveAfterDays : 0);
         return await CommitAsync(candidate) ? reply : Replies.Error(RelayErrorCodes.StorageFailure);
     }
 
@@ -149,25 +148,15 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
     {
         var repository = JsonFields.Text(JsonNode.Parse(candidate.Value.Json)!.AsObject(), "repositoryId");
         var checker = new RelayCaller("relay-dispatcher", false, [repository], true);
-        ApplyInternal(candidate, checker, Operations.LeaseCheck, new JsonObject { ["repositoryId"] = repository }, now);
+        // Cleared first, so a check the lock refuses does not stay due; a check that runs reschedules the lock's timers itself.
         candidate.DueWork.RemoveAll(x => x.Kind == DueWorkKinds.LeaseWarning && x.DueAt <= now);
-        CoordinationStateMachine.ScheduleLeases(candidate);
+        ApplyInternal(candidate, checker, Operations.LeaseCheck, new JsonObject { ["repositoryId"] = repository }, now);
         return await CommitAsync(candidate);
     }
 
-    /// <summary>
-    /// Applies an operation the grain drives itself (a due sweep or check, a self-delivery, an order failure) and stamps the effects it
-    /// emitted with <paramref name="caller"/>; <see cref="ExecuteAsync"/> applies every call through it too. Without the stamp, delivery would rebuild an empty
-    /// caller that no target accepts, and advisory effects would be dropped.
-    /// </summary>
-    private protected RelayReply ApplyInternal(StateEnvelope<CoordinationDocument> candidate, RelayCaller caller, string operation, JsonObject args, DateTimeOffset now,
-        bool ordersEnabled = false, int archiveAfterDays = RelayLimits.DefaultArchiveAfterDays)
-    {
-        var first = candidate.Effects.Count;
-        var reply = CoordinationStateMachine.Apply(candidate, Kind, this.GetPrimaryKeyString(), caller, operation, args, now, ordersEnabled, archiveAfterDays);
-        if (reply.Ok) CoordinationStateMachine.StampEffects(candidate.Effects, first, caller);
-        return reply;
-    }
+    /// <summary>Applies an operation to this aggregate's working copy, with the hub's archive setting; every call and self-driven check goes through it.</summary>
+    private protected RelayReply ApplyInternal(StateEnvelope<CoordinationDocument> candidate, RelayCaller caller, string operation, JsonObject args, DateTimeOffset now, bool ordersEnabled = false) =>
+        CoordinationStateMachine.Apply(candidate, Kind, this.GetPrimaryKeyString(), caller, operation, args, now, ordersEnabled, ArchiveAfterDays);
 
     /// <summary>Counts one wake: a message newly stored in a session inbox that may wake its chat. Redeliveries and <c>wake: false</c> messages are not wakes.</summary>
     private void RecordWake(string sessionId, JsonObject payload, RelayReply delivered)
@@ -208,6 +197,15 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
         SchemaVersion = state.SchemaVersion, Value = new() { Json = state.Value.Json }, Effects = [.. state.Effects], DueWork = [.. state.DueWork]
     };
 
+    /// <summary>Delivers one aggregate's due outbox effects; the hub's due-work pump calls it. Throws while delivery stays pending.</summary>
+    public static async Task DispatchDueAsync(IGrainFactory grains, DueWorkReference reference, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var dispatcher = new RelayCaller("relay-dispatcher", false, [], true);
+        var reply = await Aggregate(grains, reference.GrainType, reference.GrainKey).ExecuteAsync(dispatcher, Operations.Dispatch, new JsonObject { ["workId"] = reference.WorkId }.ToJsonString());
+        if (!reply.Ok) throw new InvalidOperationException("Durable dispatch remains pending: " + reply.Code);
+    }
+
     internal static IRelayAggregateGrain Aggregate(IGrainFactory factory, string kind, string key) => kind.Replace("cocern.", "", StringComparison.Ordinal) switch
     {
         AggregateKinds.Session => factory.GetGrain<ISessionGrain>(key),
@@ -242,19 +240,18 @@ public sealed class TaskBoardGrain([PersistentState("board", "relay")] IPersiste
         var sweeper = new RelayCaller("relay-archive", false, [repository], true);
         // The board's own ID, so the attention closes it emits name this board and not the default one.
         var sweep = new JsonObject { ["repositoryId"] = repository, ["boardId"] = BoardId(this.GetPrimaryKeyString()) };
-        if (!ApplyInternal(candidate, sweeper, Operations.TaskArchive, sweep, now, false, ArchiveAfterDays).Ok)
+        if (!ApplyInternal(candidate, sweeper, Operations.TaskArchive, sweep, now).Ok)
         {
             // A sweep the board refuses would otherwise stay due and run on every pump: try again after a backoff.
             candidate.DueWork.RemoveAll(x => x.Kind == DueWorkKinds.TaskArchive);
-            candidate.DueWork.Add(new(DueWorkKinds.TaskArchive, DueWorkKinds.TaskArchive, now.AddMinutes(RelayLimits.ArchiveRetryMinutes)));
+            candidate.DueWork.Add(new(DueWorkKinds.TaskArchiveRetry, DueWorkKinds.TaskArchive, now.AddMinutes(RelayLimits.ArchiveRetryMinutes)));
             return await CommitAsync(candidate);
         }
-        CoordinationStateMachine.ScheduleLeases(candidate, ArchiveAfterDays);
         return await CommitAsync(candidate);
     }
 
     /// <summary>The board ID of a board grain key (escaped repository, <c>/</c>, escaped board ID); the escaping keeps the first <c>/</c> the separator.</summary>
-    internal static string BoardId(string key) => key.IndexOf('/') is var slash and >= 0 ? Uri.UnescapeDataString(key[(slash + 1)..]) : "default";
+    internal static string BoardId(string key) => AggregateKinds.BoardOf(key) ?? AggregateKinds.DefaultBoard;
 }
 
 [GrainType("cocern.lock")]

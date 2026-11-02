@@ -10,17 +10,17 @@ using static CoCern.Domain.Replies;
 
 namespace CoCern.Core;
 
-/// <summary>
-/// The <c>analytics_query</c> tool: a named query for the request's repository, or ad hoc SQL when the hub allows it. The caller is
-/// already checked to be an administrator. Every ad hoc query is logged, run or refused. The reply is compact rows within
-/// <see cref="RelayLimits.MaxAnalyticsReplyBytes"/>; a larger result is refused with a request for a narrower query.
-/// </summary>
 /// <summary><c>analytics_query</c> as the hub calls it; a hub with analytics off gets <see cref="AnalyticsTool.Off"/>.</summary>
 public interface IAnalyticsTool
 {
     Task<RelayReply> RunAsync(RelayCaller caller, JsonObject args, CancellationToken cancellationToken);
 }
 
+/// <summary>
+/// The <c>analytics_query</c> tool: a named query for the request's repository, or ad hoc SQL when the hub allows it. The caller is
+/// already checked to be an administrator. Every ad hoc query is logged, run or refused. The reply is compact rows within
+/// <see cref="RelayLimits.MaxAnalyticsReplyBytes"/>; a larger result is refused with a request for a narrower query.
+/// </summary>
 public sealed class AnalyticsTool(IAnalyticsQueries queries, bool allowAdHocSql, ILogger? logger = null) : IAnalyticsTool
 {
     public bool AllowAdHocSql => allowAdHocSql;

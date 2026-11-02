@@ -98,6 +98,22 @@ public sealed class ReviewFixTests
     }
 
     [Fact]
+    public void A_refused_archive_sweeps_backoff_survives_the_boards_next_write()
+    {
+        var finished = new JsonObject
+        {
+            ["taskId"] = "t", ["version"] = 1, ["workflow"] = new JsonObject { ["state"] = "completed" },
+            ["completedAt"] = Now.AddDays(-RelayLimits.DefaultArchiveAfterDays - 1).ToString("O")
+        };
+        var board = new StateEnvelope<CoordinationDocument> { Value = new() { Json = new JsonObject { ["repositoryId"] = "repo", ["tasks"] = new JsonObject { ["t"] = finished } }.ToJsonString() } };
+        var retryAt = Now.AddMinutes(RelayLimits.ArchiveRetryMinutes);
+        board.DueWork.Add(new(DueWorkKinds.TaskArchiveRetry, DueWorkKinds.TaskArchive, retryAt));
+        // The sweep is overdue, but the board refused it a moment ago: rescheduling keeps the backoff.
+        CoordinationStateMachine.ScheduleLeases(board, RelayLimits.DefaultArchiveAfterDays);
+        Assert.Equal(retryAt, Assert.Single(board.DueWork, item => item.Kind == DueWorkKinds.TaskArchive).DueAt);
+    }
+
+    [Fact]
     public void A_late_older_close_never_lowers_a_work_tombstone()
     {
         var control = new StateEnvelope<CoordinationDocument>

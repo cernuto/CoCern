@@ -28,6 +28,11 @@ internal static class LockAggregate
         _ => Error(UnknownTool)
     };
 
+    /// <summary>A retried claim replays only while this session still holds the same grant.</summary>
+    internal static RelayReply? ReplayRefusal(JsonObject state, string operation, JsonObject args, JsonObject grant) =>
+        operation is RelayTools.ClaimAcquire or RelayTools.ClaimRenew && (Text(state, "holder") != Text(args, "sessionId") || Number(state, "generation") != Number(grant, "generation"))
+            ? Error(StaleClaim) : null;
+
     private static RelayReply Block(AggregateContext context)
     {
         var state = context.State;
@@ -114,18 +119,30 @@ internal static class LockAggregate
         var blockers = ObjectAt(state, "blockers");
         if (Text(state, "holder") != context.SessionId || generation != Number(context.Args, "generation") || Date(state, "leaseUntil") <= context.Now) return Error(StaleClaim, new { generation });
         var release = context.Operation == RelayTools.ClaimRelease;
-        if (!release) state["leaseUntil"] = context.Now.AddSeconds(Leases.Seconds(context.Args)).ToString("O");
+        if (!release)
+        {
+            state["leaseUntil"] = context.Now.AddSeconds(Leases.Seconds(context.Args)).ToString("O");
+            AttentionSources.OnLeaseSettled(context, context.SessionId, context.Key);
+        }
         else
         {
             if (blockers.Count > 0) return Error(UnresolvedAction, new { blockers = blockers.Count });
-            state["holder"] = "";
-            state["leaseUntil"] = context.Now.ToString("O");
             // A rolled-back task claim releases the grant it took, and its retry must acquire again rather than replay it.
             CoordinationStateMachine.ForgetRequest(state, context.Caller.PrincipalId, RelayTools.ClaimAcquire, Text(context.Args, Operations.ForgetRequestField));
+            Release(context, context.SessionId);
         }
-        AttentionSources.OnLeaseSettled(context, context.SessionId, context.Key);
-        if (release) StandingOrders.OnLockReleased(context);
         return Ok(new { generation, leaseUntil = Text(state, "leaseUntil"), released = release }, generation);
+    }
+
+    /// <summary>Ends <paramref name="holder"/>'s grant: the lock is free, its lease warnings settle, and watching boards hear of it.</summary>
+    internal static void Release(AggregateContext context, string holder)
+    {
+        var state = context.State;
+        state["holder"] = "";
+        state["leaseUntil"] = context.Now.ToString("O");
+        state.Remove("claimFor");
+        AttentionSources.OnLeaseSettled(context, holder, context.Key);
+        StandingOrders.OnLockReleased(context);
     }
 }
 

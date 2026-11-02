@@ -62,6 +62,9 @@ internal static class SessionAggregate
         WorkKey, WorkReportedKey
     };
 
+    /// <summary>What an expired session forgets: its secret, its mail and attention, and its tool binding.</summary>
+    private static readonly string[] ExpiredState = ["sessionToken", "inbox", "acked", "attention", "attentionClosed", "attentionRecent", "standingSeen", "binding"];
+
     private const string WorkKey = "work";
     private const string WorkReportedKey = "workReported";
 
@@ -97,7 +100,7 @@ internal static class SessionAggregate
     {
         var state = context.State;
         if (!state.ContainsKey("principalId") || state["expiredAt"] is not null) return Ok(new { expired = true });
-        foreach (var key in new[] { "sessionToken", "inbox", "acked", "attention", "attentionClosed", "attentionRecent", "standingSeen", "binding" }) state.Remove(key);
+        foreach (var key in ExpiredState) state.Remove(key);
         state["expiredAt"] = context.Now.ToString("O");
         return Ok(new { expired = true });
     }
@@ -127,7 +130,7 @@ internal static class SessionAggregate
         var infoDays = message["attentionExpiryDays"] is JsonValue days && days.TryGetValue<int>(out var lifetime) ? lifetime : 0;
         message.Remove("attentionExpiryDays");
         inbox[id] = message;
-        if (infoDays > 0 && !(message["wake"] is JsonValue wake && wake.TryGetValue<bool>(out var wakes) && !wakes)) SessionAttention.AddMessage(state, message, infoDays, context.Now);
+        if (infoDays > 0 && IsNotFalse(message, "wake")) SessionAttention.AddMessage(state, message, infoDays, context.Now);
         return Ok(new { delivered = true, superseded });
     }
 
@@ -188,8 +191,8 @@ internal static class SessionAggregate
         state["freshUntil"] = context.Now.AddSeconds(Math.Clamp(Number(args, "freshnessSeconds", DefaultFreshnessSeconds), MinFreshnessSeconds, MaxFreshnessSeconds)).ToString("O");
         state["availability"] = Text(args, "availability", "unknown");
         state["hubIncarnation"] = Text(args, "hubIncarnation");
-        var registration = state.DeepClone().AsObject();
-        foreach (var secretOrPrivate in new[] { "sessionToken", "requests", "requestTombstones", "inbox", "acked", "attention", "attentionClosed", "attentionRecent", "attentionSeq", "attentionBoundaryAt", "activeReportedAt" }) registration.Remove(secretOrPrivate);
+        var registration = new JsonObject { ["repositoryId"] = Text(state, "repositoryId"), ["sessionId"] = Text(state, "sessionId") };
+        foreach (var field in ControlAggregate.RegistrationFields) if (state.ContainsKey(field)) registration[field] = state[field]?.DeepClone();
         context.Emit(AggregateKinds.Control, AggregateKinds.ControlKey, Operations.Register, registration);
         return Ok(new { bindingVersion = current + 1 }, current + 1);
     }
@@ -225,7 +228,7 @@ internal static class SessionAggregate
         };
         if (Flag(args, "supersede")) message["supersede"] = true;
         // A status or FYI message is stored like any other but never wakes the recipient; it is read with its next wake or inbox check.
-        if (args["wake"] is JsonValue wake && wake.TryGetValue<bool>(out var wakes) && !wakes) message["wake"] = false;
+        if (!IsNotFalse(args, "wake")) message["wake"] = false;
         // Measured as the recipient's check_inbox returns it, so a message escaping would make unreadable is never accepted.
         if (CheckReadable(message) is { } unreadable) return unreadable;
         context.Emit(AggregateKinds.Session, recipient, Operations.Deliver, message);
