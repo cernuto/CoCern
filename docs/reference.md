@@ -325,6 +325,7 @@ Set them in `appsettings.json`, as environment variables (`Relay__Clients__0__To
 | `Relay:ClusterId` | `CoCern` | Orleans cluster name. |
 | `Relay:Board:ArchiveAfterDays` | 30 | Days after completion before a task is archived (0 to 3650). |
 | `Relay:Dashboard:ViewerPrincipalIds:N` | | Administrator principals that may open the dashboard. The start script and Visual Studio profile set theirs. |
+| `Relay:Dashboard:OpenOnStart` | `false` | Open the dashboard in the default browser when the hub starts, already signed in with that start's one-time link. The Visual Studio launch profile turns it on. |
 | `Relay:Connect:AdapterPath` | found | The adapter the Connect page uses. Default: `artifacts/adapter`, else the build output. |
 
 ### Features

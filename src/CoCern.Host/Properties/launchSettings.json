@@ -12,6 +12,7 @@
         "Relay__Clients__0__IsAdministrator": "true",
         "Relay__Clients__0__Repositories__0": "cocern",
         "Relay__Dashboard__ViewerPrincipalIds__0": "PaulC",
+        "Relay__Dashboard__OpenOnStart": "true",
         "Relay__Discovery__Enabled": "true",
         "Relay__Network__Enabled": "true"
       }

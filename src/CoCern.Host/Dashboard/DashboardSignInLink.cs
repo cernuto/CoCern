@@ -31,19 +31,31 @@ public sealed class DashboardSignInLink(ILogger<DashboardSignInLink> log)
         }
     }
 
-    /// <summary>Makes a new code, replacing any unused one, and logs its link.</summary>
-    public void Issue(DateTimeOffset now)
+    /// <summary>Makes a new code, replacing any unused one, and logs its link; returns the link.</summary>
+    public string Issue(DateTimeOffset now)
     {
         var code = new string(RandomNumberGenerator.GetItems<char>(Alphabet, 24));
         lock (gate) { digest = Digest(code); expires = now + Lifetime; }
-        log.LogWarning("Dashboard sign-in link (works once, from this PC, for 24 hours): {SignInLink}", (baseUrl ?? "http://127.0.0.1:5271/dashboard/") + "#link=" + code);
+        var link = (baseUrl ?? "http://127.0.0.1:5271/dashboard/") + "#link=" + code;
+        log.LogWarning("Dashboard sign-in link (works once, from this PC, for 24 hours): {SignInLink}", link);
+        return link;
     }
 
-    /// <summary>Logs the first link once the hub is listening, at a loopback address it serves.</summary>
-    public void IssueAtStart(IServer server)
+    /// <summary>
+    /// Logs the first link once the hub is listening, at a loopback address it serves. With <paramref name="open"/>
+    /// (<c>Relay:Dashboard:OpenOnStart</c>), also opens it in the default browser, so the dashboard comes up already signed in.
+    /// </summary>
+    public void IssueAtStart(IServer server, bool open = false)
     {
         baseUrl = LoopbackUrl(server.Features.Get<IServerAddressesFeature>()?.Addresses ?? []);
-        Issue(DateTimeOffset.UtcNow);
+        var link = Issue(DateTimeOffset.UtcNow);
+        if (!open) return;
+        // Best effort: a PC without a browser (a server, a container) just keeps the logged link.
+        try { using var _ = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(link) { UseShellExecute = true }); }
+        catch (Exception exception) when (exception is System.ComponentModel.Win32Exception or InvalidOperationException or PlatformNotSupportedException)
+        {
+            log.LogInformation("Could not open a browser; open the sign-in link above instead.");
+        }
     }
 
     internal static string? LoopbackUrl(IEnumerable<string> addresses)

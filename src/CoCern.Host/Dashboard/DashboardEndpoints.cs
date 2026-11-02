@@ -55,7 +55,8 @@ public static class DashboardEndpoints
         app.Lifetime.ApplicationStarted.Register(() =>
         {
             if (app.Services.GetRequiredService<DashboardSecurity>().Enabled)
-                app.Services.GetRequiredService<DashboardSignInLink>().IssueAtStart(app.Services.GetRequiredService<Microsoft.AspNetCore.Hosting.Server.IServer>());
+                app.Services.GetRequiredService<DashboardSignInLink>().IssueAtStart(app.Services.GetRequiredService<Microsoft.AspNetCore.Hosting.Server.IServer>(),
+                    open: app.Configuration.GetValue("Relay:Dashboard:OpenOnStart", false));
         });
         var api = app.MapGroup("/dashboard/api");
         api.MapGet("/auth", (HttpContext context) => Results.Ok(new DashboardAuthStatus { Authenticated = true, PrincipalId = context.User.FindFirstValue(ClaimTypes.NameIdentifier) }))
