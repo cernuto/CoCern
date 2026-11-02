@@ -30,7 +30,9 @@ public sealed partial class SqliteStore : IRelayObservationSource
         try
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            using (var count = Command("SELECT COUNT(*) FROM grain_state WHERE state_name='session' AND grain_type='cocern.session';"))
+            // Closed sessions keep a record marked expiredAt. The state is stored as an escaped JSON string (quotes as "), so only the
+            // key itself matches: a label holding the same text is escaped once more (\\u0022) and never does.
+            using (var count = Command("SELECT COUNT(*) FROM grain_state WHERE state_name='session' AND grain_type='cocern.session' AND CAST(payload AS TEXT) NOT LIKE '%\\u0022expiredAt\\u0022%' AND CAST(payload AS TEXT) NOT LIKE '%\\\"expiredAt\\\"%';"))
                 sessionCount = Convert.ToInt32(count.ExecuteScalar());
             using var command = Command("SELECT CASE WHEN length(CAST(payload AS BLOB)) <= $maximum THEN payload ELSE NULL END, length(CAST(payload AS BLOB)) FROM grain_state WHERE state_name='discovery' AND grain_type='cocern.discovery' ORDER BY grain_key LIMIT 1;");
             command.Parameters.AddWithValue("$maximum", MaximumStateBytes);
@@ -219,7 +221,8 @@ public sealed partial class SqliteStore : IRelayObservationSource
         using var document = Document(envelope.RootElement);
         var state = document.RootElement;
         var id = Text(state, "sessionId");
-        if (string.IsNullOrEmpty(id)) return null;
+        // A closed session keeps its record (marked expiredAt) so its chat is told it expired; it is no longer a session to show.
+        if (string.IsNullOrEmpty(id) || Property(state, "expiredAt").ValueKind == JsonValueKind.String) return null;
         var inbox = Property(state, "inbox");
         var effects = Property(envelope.RootElement, "Effects");
         var bindingVersion = Property(state, "bindingVersion");
