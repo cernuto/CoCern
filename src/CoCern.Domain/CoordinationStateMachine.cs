@@ -40,7 +40,7 @@ public static class CoordinationStateMachine
         var requestId = Text(arguments, "requestId");
         var requests = ObjectAt(state, "requests");
         var requestKey = caller.PrincipalId + ":" + operation + ":" + requestId;
-        var fingerprint = Fingerprint(arguments);
+        var fingerprint = Fingerprint(operation, arguments);
         if (requestId.Length > 0 && requests[requestKey] is JsonObject prior) return Replay(kind, state, operation, arguments, prior, fingerprint, now);
         // Its stored reply was evicted to make room before its window ended: refuse rather than run the write twice.
         if (requestId.Length > 0 && IsMutation(operation) && Retention.IsBuried(state, requestKey, now)) return Error(RequestExpired, new { readCurrentState = true });
@@ -92,7 +92,7 @@ public static class CoordinationStateMachine
     /// <summary>A retried request returns its original reply, unless its grant has since gone stale or its task may no longer run (the claim gate).</summary>
     private static RelayReply Replay(string kind, JsonObject state, string operation, JsonObject arguments, JsonObject prior, string fingerprint, DateTimeOffset now)
     {
-        if (Text(prior, "fingerprint") != fingerprint) return Error(RequestConflict);
+        if (Text(prior, "fingerprint") != fingerprint && Text(prior, "fingerprint") != LegacyFingerprint(arguments)) return Error(RequestConflict);
         var tasks = ObjectAt(state, "tasks");
         var taskId = Text(arguments, "taskId");
         var session = Text(arguments, "sessionId");
@@ -112,12 +112,39 @@ public static class CoordinationStateMachine
         return new(true, Text(prior, "code"), Text(prior, "json"), Number(prior, "version"));
     }
 
-    private static string Fingerprint(JsonObject arguments)
+    /// <summary>
+    /// Arguments the hub adds to a request, per operation, from its own state or settings: a retry with the same public arguments may get
+    /// different values (a dependency archived since, a session rebound since, a changed setting), so they never count toward the fingerprint.
+    /// <c>hubIncarnation</c> and every <c>__</c> field are left out for every operation.
+    /// </summary>
+    private static readonly Dictionary<string, string[]> ServerArguments = new(StringComparer.Ordinal)
+    {
+        [RelayTools.TaskUpdate] = ["archivedDependsOn"],
+        [RelayTools.ActionBegin] = ["binding", "bindingVersion"],
+        [RelayTools.ClaimAcquire] = ["taskClaimGeneration"],
+        [RelayTools.OrderPut] = ["defaultExpiryDays"],
+        [RelayTools.AttentionRespond] = ["snoozeBoundaries"]
+    };
+
+    /// <summary>The request's identity for replay: only the client's public arguments.</summary>
+    private static string Fingerprint(string operation, JsonObject arguments)
     {
         var significant = arguments.DeepClone().AsObject();
         significant.Remove("hubIncarnation");
-        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(significant.ToJsonString())));
+        foreach (var key in significant.Select(entry => entry.Key).Where(key => key.StartsWith("__", StringComparison.Ordinal)).ToArray()) significant.Remove(key);
+        if (ServerArguments.TryGetValue(operation, out var injected)) foreach (var key in injected) significant.Remove(key);
+        return Hash(significant);
     }
+
+    /// <summary>The fingerprint replays stored before server arguments were left out; a retry that matches it still replays.</summary>
+    private static string LegacyFingerprint(JsonObject arguments)
+    {
+        var significant = arguments.DeepClone().AsObject();
+        significant.Remove("hubIncarnation");
+        return Hash(significant);
+    }
+
+    private static string Hash(JsonObject significant) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(significant.ToJsonString())));
 
     /// <summary>Mutations are deduplicated by requestId and committed; reads never are.</summary>
     public static bool IsMutation(string operation) =>

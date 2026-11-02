@@ -506,6 +506,8 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
 
     private async Task<RelayReply> ResourceClaimAsync(RelayCaller caller, string tool, JsonObject args)
     {
+        // Only task_claim names the task claim a grant serves; a client's own value is dropped (it is also left out of the fingerprint).
+        args.Remove("taskClaimGeneration");
         var resolved = await Resolve(caller, args, Text(args, "resourceId"));
         if (!resolved.Ok) return resolved;
         return await Call(AggregateKinds.Lock, Text(Parse(resolved), "resourceId"), caller, tool, args);

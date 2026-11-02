@@ -220,7 +220,8 @@ internal static class TaskBoardAggregate
         if (!release) task["leaseUntil"] = context.Now.AddSeconds(Leases.Seconds(context.Args)).ToString("O");
         else
         {
-            if (TaskActions.HasUnresolved(task)) return Error(UnresolvedAction);
+            // A recovered action no longer holds the task; its pending restoration still blocks new actions and completion.
+            if (TaskActions.HoldsTask(task)) return Error(UnresolvedAction);
             if (!ExpectedVersionMatches(context.Args, version)) return VersionConflict(version);
             task.Remove("owner"); task["leaseUntil"] = context.Now.ToString("O"); task["version"] = ++version;
         }
@@ -246,7 +247,8 @@ internal static class TaskBoardAggregate
         if (TaskWorkflow.ExecutionRefusal(context.State, task, session, context.Now) is { } refusal) return refusal;
         var owned = Text(task, "owner") == session && Date(task, "leaseUntil") > context.Now;
         if (owned && !SameResources(task["resourceIds"], args["resourceIds"])) return Error(ResourceSetConflict, new { resourceIds = task["resourceIds"] }, version);
-        var unresolved = TaskActions.HasUnresolved(task);
+        // A recovered action (its writer gone, see TaskActions.ApplyReport) no longer holds the task once its writer's lease has lapsed.
+        var unresolved = TaskActions.HoldsTask(task);
         if (!owned && unresolved) return Error(Busy, new { holder = Text(task, "owner"), leaseUntil = Text(task, "leaseUntil"), unresolved = true }, version);
         if (Text(task, "owner").Length > 0 && Text(task, "owner") != session && (Date(task, "leaseUntil") > context.Now || unresolved)) return Error(Busy, new { holder = Text(task, "owner"), leaseUntil = Text(task, "leaseUntil"), unresolved }, version);
         if (!ExpectedVersionMatches(args, version)) return VersionConflict(version);

@@ -2,11 +2,11 @@
 
 How agents share work through the hub. Every call takes `repositoryId`. Session calls also take `sessionId` and `sessionToken`. Writes take a `requestId`; to retry, use the same one.
 
-A retry within 24 hours does not run again. It gets the first reply, or `RequestExpired` (409) when a very busy board or session dropped that reply early: read the current state, then decide. After 24 hours a retry may run as a new write. Only past about 7,500 writes to one board or session in a day could a retry run twice.
+A retry within 24 hours does not run again. Only your own arguments count as the same request; what the hub adds (an archived dependency, your session's binding) does not. It gets the first reply, or `RequestExpired` (409) when a very busy board or session dropped that reply early: read the current state, then decide. After 24 hours a retry may run as a new write. Only past about 7,500 writes to one board or session in a day could a retry run twice.
 
 ## The loop
 
-1. `session_open` once per chat. Give the managing chat `role: "manager"`. When the hub's session list is full, it closes sessions not seen for a day; a closed session's calls get `SessionUnknown` with `expired: true`. Call `session_open` again.
+1. `session_open` once per chat. Give the managing chat `role: "manager"`. When the hub's session list is full, it closes sessions not seen for a day, except sessions with an action still open. A closed session's calls get `SessionUnknown` with `expired: true`. Call `session_open` again. If only sessions with open actions fill the list, `session_open` gets `CapacityExceeded` with `heldByUnresolvedActions`: report or recover those actions.
 2. `task_claim` the task and its resources.
 3. Do the work with your own tools. The hub never runs them.
 4. `task_update` with what happened.
@@ -40,6 +40,19 @@ Add `workflow` to `task_update`:
 - `includeNextWork: true` returns a `nextWork` offer. It reserves nothing; claim it with `task_claim`.
 - A task is offered only when its `dependsOn` tasks are `completed`. Higher `priority` comes first, then tasks whose resources are free.
 - `task_claim` and `action_begin` check the same: a task with an unfinished dependency gets `DependenciesIncomplete` (409, the unfinished IDs in `dependsOn`).
+
+## Stranded actions
+
+An action whose session closed before it reported is stranded. Recover it with `action_report` and `recover: true`:
+
+- An administrator can recover any action, from its own session. It cannot give an `outcome`.
+- The action's own principal can recover it from a new session once the old session's task claim has ended. It may give the `outcome`.
+- Anyone else gets `ActionDenied`.
+- Without an `outcome`, an action still in flight becomes `abandoned`. `recovery` records who, which session and when.
+- A required restoration stays `pending`. The recovering session reports it later, again with `recover: true`, or an administrator accepts it.
+- Once the old claim's lease has ended, another session can claim the task. New actions on it wait until the restoration is resolved.
+
+An administrator's `restoration: "accepted"` without `recover` only accepts the restoration and keeps the status, so the writer can still report.
 
 ## Archive
 

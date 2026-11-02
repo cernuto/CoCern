@@ -112,7 +112,7 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
                 {
                     // A non-reentrant grain cannot await an RPC to itself. Commit its inbox entry
                     // and outbox removal together so a stale dispatch snapshot cannot erase delivery.
-                    result = CoordinationStateMachine.Apply(candidate, Kind, effect.TargetKey, effectCaller, effect.Operation, payload, DateTimeOffset.UtcNow);
+                    result = ApplyInternal(candidate, effectCaller, effect.Operation, payload, DateTimeOffset.UtcNow);
                 }
                 else result = await Aggregate(grains, effect.TargetKind, effect.TargetKey).ExecuteAsync(effectCaller, effect.Operation, payload.ToJsonString());
             }
@@ -123,13 +123,11 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
             // order: it is applied here, on this board's own state, so it is logged, raised to the managers and counted.
             if (!result.Ok && !IsTransient(result.Code) && ordersOn && Kind == AggregateKinds.Board && effect.Operation == Operations.AttentionRaise && JsonFields.Text(payload, Operations.OrderIdField) is { Length: > 0 } orderId)
             {
-                var first = candidate.Effects.Count;
-                CoordinationStateMachine.Apply(candidate, Kind, this.GetPrimaryKeyString(), effectCaller, Operations.OrderFailed, new JsonObject
+                ApplyInternal(candidate, effectCaller, Operations.OrderFailed, new JsonObject
                 {
                     ["repositoryId"] = JsonFields.Text(payload, "repositoryId"), ["boardId"] = JsonFields.Text(payload, "boardId", "default"), ["orderId"] = orderId,
                     ["run"] = JsonFields.Number(payload, Operations.OrderRunField), ["reason"] = "session " + effect.TargetKey + " refused the " + JsonFields.Text(payload, "kind") + " item (" + result.Code + ")"
                 }, now, ordersEnabled: true);
-                CoordinationStateMachine.StampEffects(candidate.Effects, first, effectCaller);
             }
             if (!result.Ok && !((Operations.IsAttention(effect.Operation) || Operations.IsOrder(effect.Operation)) && !IsTransient(result.Code)))
             {
@@ -161,13 +159,25 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
     private async Task<bool> CheckLeaseAsync(StateEnvelope<CoordinationDocument> candidate, DateTimeOffset now)
     {
         var repository = JsonFields.Text(JsonNode.Parse(candidate.Value.Json)!.AsObject(), "repositoryId");
-        var first = candidate.Effects.Count;
         var checker = new RelayCaller("relay-dispatcher", false, [repository], true);
-        CoordinationStateMachine.Apply(candidate, Kind, this.GetPrimaryKeyString(), checker, Operations.LeaseCheck, new JsonObject { ["repositoryId"] = repository }, now);
-        CoordinationStateMachine.StampEffects(candidate.Effects, first, checker);
+        ApplyInternal(candidate, checker, Operations.LeaseCheck, new JsonObject { ["repositoryId"] = repository }, now);
         candidate.DueWork.RemoveAll(x => x.Kind == DueWorkKinds.LeaseWarning && x.DueAt <= now);
         CoordinationStateMachine.ScheduleLeases(candidate);
         return await CommitAsync(candidate);
+    }
+
+    /// <summary>
+    /// Applies an operation the grain drives itself (a due sweep or check, a self-delivery, an order failure) and stamps the effects it
+    /// emitted with <paramref name="caller"/>, exactly as <see cref="ExecuteAsync"/> does. Without the stamp, delivery would rebuild an empty
+    /// caller that no target accepts, and advisory effects would be dropped.
+    /// </summary>
+    private protected RelayReply ApplyInternal(StateEnvelope<CoordinationDocument> candidate, RelayCaller caller, string operation, JsonObject args, DateTimeOffset now,
+        bool ordersEnabled = false, int archiveAfterDays = RelayLimits.DefaultArchiveAfterDays)
+    {
+        var first = candidate.Effects.Count;
+        var reply = CoordinationStateMachine.Apply(candidate, Kind, this.GetPrimaryKeyString(), caller, operation, args, now, ordersEnabled, archiveAfterDays);
+        if (reply.Ok) CoordinationStateMachine.StampEffects(candidate.Effects, first, caller);
+        return reply;
     }
 
     /// <summary>Whether a delivered raise stored a new item whose tier may wake a chat.</summary>
@@ -252,7 +262,9 @@ public sealed class TaskBoardGrain([PersistentState("board", "relay")] IPersiste
         var repository = JsonFields.Text(JsonNode.Parse(candidate.Value.Json)!.AsObject(), "repositoryId");
         if (repository.Length == 0) return true;
         var sweeper = new RelayCaller("relay-archive", false, [repository], true);
-        if (!CoordinationStateMachine.Apply(candidate, Kind, this.GetPrimaryKeyString(), sweeper, Operations.TaskArchive, new JsonObject { ["repositoryId"] = repository }, now, false, ArchiveAfterDays).Ok)
+        // The board's own ID, so the attention closes it emits name this board and not the default one.
+        var sweep = new JsonObject { ["repositoryId"] = repository, ["boardId"] = BoardId(this.GetPrimaryKeyString()) };
+        if (!ApplyInternal(candidate, sweeper, Operations.TaskArchive, sweep, now, false, ArchiveAfterDays).Ok)
         {
             // A sweep the board refuses would otherwise stay due and run on every pump: try again after a backoff.
             candidate.DueWork.RemoveAll(x => x.Kind == DueWorkKinds.TaskArchive);
@@ -262,6 +274,9 @@ public sealed class TaskBoardGrain([PersistentState("board", "relay")] IPersiste
         CoordinationStateMachine.ScheduleLeases(candidate, ArchiveAfterDays);
         return await CommitAsync(candidate);
     }
+
+    /// <summary>The board ID of a board grain key (escaped repository, <c>/</c>, escaped board ID); the escaping keeps the first <c>/</c> the separator.</summary>
+    internal static string BoardId(string key) => key.IndexOf('/') is var slash and >= 0 ? Uri.UnescapeDataString(key[(slash + 1)..]) : "default";
 }
 
 [GrainType("cocern.lock")]

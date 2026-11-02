@@ -22,6 +22,7 @@ internal static class ControlAggregate
         {
             RelayTools.SessionOpen => OpenSession(context),
             Operations.Register => RegisterSession(context),
+            Operations.SessionWork => TrackWork(context),
             RelayTools.WorkerList => ListWorkers(context),
             RelayTools.GetStatus => Status(context),
             Operations.Resolve => ResolveResource(context),
@@ -39,8 +40,18 @@ internal static class ControlAggregate
         Required(args, "requestId");
         var sessions = ObjectAt(context.State, "sessions");
         if (sessions.Count >= RelayLimits.MaxRecords) DropStaleSessions(context, sessions);
-        // Every session was seen within StaleSessionHours: refused for now, and it clears as they go stale.
-        if (sessions.Count >= RelayLimits.MaxRecords) return Error(CapacityExceeded, new { staleAfterHours = RelayLimits.StaleSessionHours });
+        // Every session was seen within StaleSessionHours, or still answers for an unresolved action: refused for now. The first clears as
+        // sessions go stale; the second only once those actions are reported or recovered, since expiring their sessions would strand them.
+        if (sessions.Count >= RelayLimits.MaxRecords)
+        {
+            var cutoff = context.Now.AddHours(-RelayLimits.StaleSessionHours);
+            var held = sessions.Count(entry => entry.Value is JsonObject record && OwnsWork(record) && LastSeen(record) <= cutoff);
+            return Error(CapacityExceeded, new
+            {
+                staleAfterHours = RelayLimits.StaleSessionHours, heldByUnresolvedActions = held,
+                hint = held > 0 ? "stale sessions own unresolved actions; report them, or recover them with action_report recover: true" : null
+            });
+        }
         var id = Guid.NewGuid().ToString("N");
         var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
         var session = new JsonObject
@@ -60,14 +71,15 @@ internal static class ControlAggregate
     /// <summary>
     /// Makes room in a full directory: drops sessions not seen (fresh, active or observed) for <see cref="RelayLimits.StaleSessionHours"/>,
     /// least recently seen first, down to <see cref="RelayLimits.RetainedEntriesAfterPrune"/>, so it runs at most once per 512 opens.
-    /// A session seen within that time is never dropped. Each dropped session is sent <see cref="Operations.SessionExpire"/>, under its own
-    /// repository, so its chat gets a clean <c>SessionUnknown</c> and opens again.
+    /// A session seen within that time is never dropped, nor one that answers for an unresolved action (its expiry would leave nobody able
+    /// to report it). Each dropped session is sent <see cref="Operations.SessionExpire"/>, under its own repository, so its chat gets a
+    /// clean <c>SessionUnknown</c> and opens again.
     /// </summary>
     private static void DropStaleSessions(AggregateContext context, JsonObject sessions)
     {
         var cutoff = context.Now.AddHours(-RelayLimits.StaleSessionHours);
         var stale = sessions.Select(entry => (entry.Key, Session: entry.Value as JsonObject, Seen: entry.Value is JsonObject record ? LastSeen(record) : DateTimeOffset.MinValue))
-            .Where(entry => entry.Seen <= cutoff).OrderBy(entry => entry.Seen).ThenBy(entry => entry.Key, StringComparer.Ordinal)
+            .Where(entry => entry.Seen <= cutoff && !(entry.Session is { } record && OwnsWork(record))).OrderBy(entry => entry.Seen).ThenBy(entry => entry.Key, StringComparer.Ordinal)
             .Take(sessions.Count - RelayLimits.RetainedEntriesAfterPrune).ToList();
         foreach (var (id, session, _) in stale)
         {
@@ -80,6 +92,32 @@ internal static class ControlAggregate
                 ["__principalId"] = "relay-directory", ["__administrator"] = false, ["__repositories"] = new JsonArray(repository)
             });
         }
+    }
+
+    private const string OpenActionsKey = "openActions";
+    private const string OpenOverflowKey = "openActionsOverflow";
+
+    /// <summary>Whether the session answers for an unresolved action: it began one (or recovered one) that is still invoking, uncertain or awaiting restoration.</summary>
+    private static bool OwnsWork(JsonObject session) => session[OpenActionsKey] is JsonObject { Count: > 0 } || Number(session, OpenOverflowKey) > 0;
+
+    /// <summary>
+    /// A board's report (<see cref="Operations.SessionWork"/>) that a session now answers for an unresolved action, or no longer does. The
+    /// record names at most <see cref="RelayLimits.MaxSessionOpenActions"/> actions and counts any more, so it stays bounded. A session missing
+    /// from the directory, or in another repository, is ignored: a refusal would make the board's outbox retry it forever.
+    /// </summary>
+    private static RelayReply TrackWork(AggregateContext context)
+    {
+        var id = Required(context.Args, "sessionId");
+        var key = Required(context.Args, "actionKey");
+        if (ObjectAt(context.State, "sessions")[id] is not JsonObject session || Text(session, "repositoryId") != context.Repository) return Ok(new { tracked = false });
+        var open = ObjectAt(session, OpenActionsKey);
+        var overflow = Number(session, OpenOverflowKey);
+        if (Flag(context.Args, "open")) { if (!open.ContainsKey(key)) { if (open.Count < RelayLimits.MaxSessionOpenActions) open[key] = context.Now.ToUnixTimeSeconds(); else overflow++; } }
+        // A close for an action not named here was one of the counted ones (or began before the directory tracked actions).
+        else if (!open.Remove(key) && overflow > 0) overflow--;
+        if (overflow > 0) session[OpenOverflowKey] = overflow; else session.Remove(OpenOverflowKey);
+        if (open.Count == 0) session.Remove(OpenActionsKey);
+        return Ok(new { tracked = true, openActions = open.Count + overflow });
     }
 
     private static DateTimeOffset LastSeen(JsonObject session) =>
@@ -101,7 +139,7 @@ internal static class ControlAggregate
     {
         var workers = ObjectAt(context.State, "sessions").Select(x => x.Value!.AsObject()).Where(x => Text(x, "repositoryId") == context.Repository).Select(x =>
         {
-            var copy = x.DeepClone().AsObject(); copy.Remove("sessionToken"); copy.Remove("principalId");
+            var copy = x.DeepClone().AsObject(); copy.Remove("sessionToken"); copy.Remove("principalId"); copy.Remove(OpenActionsKey); copy.Remove(OpenOverflowKey);
             var stale = Date(copy, "freshUntil") <= context.Now || Text(copy, "hubIncarnation") != Text(context.Args, "hubIncarnation");
             copy["stale"] = stale; copy.Remove("hubIncarnation");
             if (stale) copy["availability"] = "unknown";

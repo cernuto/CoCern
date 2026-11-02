@@ -18,12 +18,40 @@ internal static class TaskActions
     private static readonly string[] Outcomes = ["started", "completed", "failed", "canceled", "incomplete", "unknown"];
     private static readonly string[] Restorations = ["pending", "blocked", "verified", "accepted", "not_required"];
 
+    /// <summary>
+    /// The status a recovery gives an action whose writer is gone without reporting it: terminal, and not an outcome. Only a recovery sets
+    /// it; a report never can.
+    /// </summary>
+    public const string Abandoned = "abandoned";
+
     public static bool IsUnresolved(JsonObject action) =>
         Text(action, "status") is "invoking" or "started" or "unknown" or "incomplete" || Text(action, "restoration") is "pending" or "blocked";
 
     public static bool HasUnresolved(JsonObject task) => (task["actions"] as JsonObject ?? new()).Any(x => IsUnresolved(x.Value!.AsObject()));
 
-    private static bool IsTerminal(string status) => status is "completed" or "failed" or "canceled";
+    /// <summary>
+    /// Whether an unresolved action still holds its task against another session's claim or a release. A recovered one does not: its
+    /// writer is gone, and its pending restoration still blocks new actions, completion and its resources until it is resolved.
+    /// </summary>
+    public static bool HoldsTask(JsonObject task) => (task["actions"] as JsonObject ?? new()).Any(x => x.Value is JsonObject action && IsUnresolved(action) && action["recovery"] is not JsonObject);
+
+    private static bool IsTerminal(string status) => status is "completed" or "failed" or "canceled" or Abandoned;
+
+    /// <summary>The session that answers for an action: the one that recovered it, else its writer.</summary>
+    private static string OwnerSession(JsonObject action) => action["recovery"] is JsonObject recovery ? Text(recovery, "sessionId") : Text(action, "sessionId");
+
+    /// <summary>
+    /// Tells the control directory that <paramref name="sessionId"/> now answers for an unresolved action (<paramref name="open"/>), or no
+    /// longer does, so a full directory never expires a session that still owns unresolved work.
+    /// </summary>
+    private static void Track(AggregateContext context, string sessionId, string actionKey, bool open)
+    {
+        if (sessionId.Length == 0) return;
+        context.Emit(AggregateKinds.Control, AggregateKinds.ControlKey, Operations.SessionWork, new JsonObject
+        {
+            ["repositoryId"] = context.Repository, ["sessionId"] = sessionId, ["actionKey"] = actionKey, ["open"] = open
+        });
+    }
 
     public static RelayReply Begin(AggregateContext context, JsonObject task)
     {
@@ -65,10 +93,21 @@ internal static class TaskActions
             {
                 ["repositoryId"] = context.Repository, ["actionId"] = id, ["actionKey"] = CoordinationStateMachine.ActionKey(args, id, Number(action, "attempt")), ["sessionId"] = session
             });
+        Track(context, session, CoordinationStateMachine.ActionKey(args, id, Number(action, "attempt")), open: true);
         return Ok(new { action, replayAllowed = true, existing = false }, version);
     }
 
-    /// <summary>Applies one action report to the task. Returns a failure, or null when the report was recorded.</summary>
+    /// <summary>
+    /// Applies one action report to the task. Returns a failure, or null when the report was recorded.
+    /// <list type="bullet">
+    /// <item>The action's own writer (principal and session), or the session that recovered it, reports its outcome and restoration.</item>
+    /// <item>An administrator's cleanup (<c>restoration: accepted</c>, no outcome) accepts its restoration and keeps its status.</item>
+    /// <item>A recovery (<c>recover: true</c>, <c>action_report</c> only) is for an action whose writer is gone: an administrator, or the
+    /// action's own principal on another session once the writer's claim has lapsed, takes it over. Without an outcome (an administrator
+    /// can never give one) an action still in flight becomes <see cref="Abandoned"/>. The recovery is recorded with who and when; a required
+    /// restoration stays pending, and the recovering session reports it. A recovered action no longer holds its task against claims.</item>
+    /// </list>
+    /// </summary>
     public static RelayReply? ApplyReport(AggregateContext context, JsonObject task, JsonObject update)
     {
         var args = context.Args;
@@ -83,11 +122,18 @@ internal static class TaskActions
         var action = historical ? ArrayAt(task, "attemptHistory").OfType<JsonObject>().SingleOrDefault(x => Text(x, "actionId") == id && Number(x, "attempt") == attempt) : currentAction;
         if (action is null) return Error(AttemptConflict);
         var originalWriter = Text(action, "principalId") == caller.PrincipalId && Text(action, "sessionId") == session;
+        var recoverer = action["recovery"] is JsonObject recovered && Text(recovered, "principalId") == caller.PrincipalId && Text(recovered, "sessionId") == session;
         // Administrative acceptance is only a cleanup decision. It cannot supply an outcome.
         var adminAcceptance = caller.IsAdministrator && context.Operation == RelayTools.ActionReport && Text(update, "restoration") == "accepted" && !update.ContainsKey("outcome") && !CarriesMilestone(args);
-        if (!originalWriter && !adminAcceptance) return Error(ActionDenied);
-        var outcome = adminAcceptance ? Text(action, "status") : Required(update, "outcome");
-        if (!Outcomes.Contains(outcome)) return Error(InvalidOutcome);
+        var recovery = context.Operation == RelayTools.ActionReport && !historical && Flag(update, "recover");
+        if (recovery) { if (RecoveryRefusal(context, task, action, update, originalWriter) is { } refused) return refused; }
+        else if (!originalWriter && !recoverer && !adminAcceptance) return Error(ActionDenied);
+        var status = Text(action, "status");
+        // A cleanup without an outcome keeps the action's status, whatever it is (an action still invoking included); a recovery without
+        // one abandons an action still in flight.
+        var outcome = recovery && !update.ContainsKey("outcome") ? (IsTerminal(status) ? status : Abandoned) : adminAcceptance ? status : Required(update, "outcome");
+        var kept = (adminAcceptance || recovery) && outcome == status;
+        if (!kept && !Outcomes.Contains(outcome) && !(recovery && outcome == Abandoned)) return Error(InvalidOutcome);
         var restoration = update.ContainsKey("restoration") ? Text(update, "restoration") : Text(action, "restoration");
         if (!Restorations.Contains(restoration)) return Error(InvalidRestoration);
         if (Text(update, "restoration") == "accepted" && Text(action, "restoration") != "accepted" && !caller.IsAdministrator) return Error(AdministratorRequired);
@@ -98,6 +144,7 @@ internal static class TaskActions
             ["actionId"] = id, ["attempt"] = attempt, ["outcome"] = outcome, ["restoration"] = restoration, ["report"] = update["report"]?.DeepClone(),
             ["at"] = context.Now.ToString("O"), ["author"] = caller.PrincipalId, ["sessionId"] = session
         };
+        if (recovery) entry["recovered"] = true;
         if (historical)
         {
             // A late report on a superseded attempt is kept for the record; it changes no current state.
@@ -105,23 +152,52 @@ internal static class TaskActions
             history.Add(entry);
             return null;
         }
-        if (IsTerminal(Text(action, "status")) && Text(action, "status") != outcome) return Error(ActionConflict);
+        if (IsTerminal(status) && status != outcome) return Error(ActionConflict);
         var priorRestoration = Text(action, "restoration");
         var requiresRestoration = Flag(action, "requiresRestoration") || priorRestoration is "pending" or "blocked";
         if (requiresRestoration && restoration == "not_required") return Error(RestorationRequired);
         if (priorRestoration is "verified" or "accepted" && restoration != priorRestoration) return Error(RestorationResolved);
         if (!IsUnresolved(action) && restoration is "pending" or "blocked") return Error(RestorationResolved);
+        var (priorOwner, wasUnresolved) = (OwnerSession(action), IsUnresolved(action));
         action["status"] = outcome;
         action["restoration"] = restoration;
         action["report"] = update["report"]?.DeepClone(); action["reportedAt"] = context.Now.ToString("O");
+        if (recovery)
+            action["recovery"] = new JsonObject
+            {
+                ["principalId"] = caller.PrincipalId, ["sessionId"] = session, ["administrator"] = caller.IsAdministrator, ["at"] = context.Now.ToString("O"), ["priorStatus"] = status
+            };
         history.Add(entry);
-        if (!IsUnresolved(action))
+        var actionKey = CoordinationStateMachine.ActionKey(args, id, Number(action, "attempt"));
+        var (owner, unresolved) = (OwnerSession(action), IsUnresolved(action));
+        if (wasUnresolved && (!unresolved || owner != priorOwner)) Track(context, priorOwner, actionKey, open: false);
+        if (unresolved && owner != priorOwner) Track(context, owner, actionKey, open: true);
+        // An administrator unblocks another principal's action only through cleanup: acceptance, a recovery, or a report on one it recovered.
+        var administrativeAcceptance = caller.IsAdministrator && (adminAcceptance || recovery || recoverer);
+        if (!unresolved)
             foreach (var resource in Strings(action["resourceIds"]))
                 context.Emit(AggregateKinds.Lock, resource, Operations.Unblock, new JsonObject
                 {
-                    ["repositoryId"] = context.Repository, ["actionId"] = id, ["actionKey"] = CoordinationStateMachine.ActionKey(args, id, Number(action, "attempt")),
-                    ["sessionId"] = Text(action, "sessionId"), ["administrativeAcceptance"] = adminAcceptance
+                    ["repositoryId"] = context.Repository, ["actionId"] = id, ["actionKey"] = actionKey,
+                    ["sessionId"] = Text(action, "sessionId"), ["administrativeAcceptance"] = administrativeAcceptance
                 });
+        return null;
+    }
+
+    /// <summary>
+    /// Why this caller may not recover the action, or null. Another principal must be an administrator, and gives no outcome; the action's
+    /// own principal on another session must wait until the writer's claim on the task has lapsed, since until then the writer is still
+    /// there to report. A recovery changes no shared task content, and an action already resolved has nothing to recover.
+    /// </summary>
+    private static RelayReply? RecoveryRefusal(AggregateContext context, JsonObject task, JsonObject action, JsonObject update, bool originalWriter)
+    {
+        var caller = context.Caller;
+        var samePrincipal = Text(action, "principalId") == caller.PrincipalId;
+        if (!samePrincipal && (!caller.IsAdministrator || update.ContainsKey("outcome")) || CarriesMilestone(context.Args)) return Error(ActionDenied);
+        if (!IsUnresolved(action)) return Error(ActionConflict, new { status = Text(action, "status"), restoration = Text(action, "restoration") });
+        var writer = Text(action, "sessionId");
+        if (!caller.IsAdministrator && !originalWriter && Text(task, "owner") == writer && Date(task, "leaseUntil") > context.Now)
+            return Error(OwnerConflict, new { holder = writer, leaseUntil = Text(task, "leaseUntil") });
         return null;
     }
 

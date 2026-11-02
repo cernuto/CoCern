@@ -168,6 +168,7 @@ internal static class ToolSchemas
                 properties["outcome"] = new { type = "string", @enum = new[] { "started", "completed", "failed", "canceled", "incomplete", "unknown" } };
                 properties["restoration"] = new { type = "string", @enum = new[] { "pending", "blocked", "verified", "accepted" } };
                 properties["report"] = new { description = "Bounded reported evidence; not a claim that the relay performed or verified external execution." };
+                properties["recover"] = new { type = "boolean", description = "Take over an action whose session is gone: an administrator, or its own principal once that claim lapsed. Without outcome it is abandoned." };
                 properties["usage"] = UsageSchema(); properties["attention"] = AttentionOptOut(); break;
             case RelayTools.SendMessage:
                 Text("text", "Message text, at most 8 KiB. Supply taskId for shared conversation, otherwise recipientSessionId for private delivery.");
