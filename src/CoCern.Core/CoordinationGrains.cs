@@ -55,7 +55,8 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
         var firstNewEffect = candidate.Effects.Count;
         var priorTaskRevision = Kind == AggregateKinds.Board ? CoordinationStateMachine.TaskRevision(candidate) : null;
         var reply = CoordinationStateMachine.Apply(candidate, Kind, this.GetPrimaryKeyString(), caller, operation, args, Now, services.GetService<OrderOptions>() is { Enabled: true }, ArchiveAfterDays);
-        if (!reply.Ok || !CoordinationStateMachine.RequiresCommit(Kind, operation, priorTaskRevision, candidate)) return reply;
+        // A read that emitted an effect (a verify's hourly activity report) commits it, or the effect would be lost.
+        if (!reply.Ok || !CoordinationStateMachine.RequiresCommit(Kind, operation, priorTaskRevision, candidate) && candidate.Effects.Count == firstNewEffect) return reply;
         CoordinationStateMachine.StampEffects(candidate.Effects, firstNewEffect, caller);
         CoordinationStateMachine.ScheduleLeases(candidate, Kind == AggregateKinds.Board ? ArchiveAfterDays : 0);
         return await CommitAsync(candidate) ? reply : Replies.Error(RelayErrorCodes.StorageFailure);

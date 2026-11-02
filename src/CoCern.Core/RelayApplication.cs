@@ -151,7 +151,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
     {
         if (counter is null || !tokenSettings.Enforces(tool.Name) || !result.Ok || Encoding.UTF8.GetByteCount(result.DataJson) <= tool.TokenBudget) return BoundWire(result);
         Compaction compaction;
-        try { compaction = ReplyCompactor.Compact(result, tool, counter, enforce: true, Number(args, "cursor")); }
+        try { compaction = ReplyCompactor.Compact(ReplyCompactor.FitPieces(result, tool, counter), tool, counter, enforce: true, Number(args, "cursor")); }
         catch (Exception) { return BoundWire(result); }
         var bounded = BoundWire(compaction.Reply);
         if (trace is not null && ReferenceEquals(bounded, compaction.Reply)) { trace.ReplyTokens = compaction.Tokens; trace.CompactStep = compaction.Step; trace.OverBudget = compaction.OverBudget; }

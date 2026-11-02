@@ -595,6 +595,28 @@ public sealed class CollaborationTests
     }
 
     [Fact]
+    public void After_the_grant_expires_reports_renewals_and_completion_still_work()
+    {
+        // Only a claim, its replay and action_begin start work, so only they recheck the grant; finishing work already started is never blocked.
+        var state = new StateEnvelope<CoordinationDocument>();
+        Assert.True(Standing(state, "standing_put", Put(0, "grants", new JsonArray(Grant("short", "resource", 60, "rig-1")))).Ok);
+        Assert.True(Call(state, "task_update", Update("t", 0, Authorized("grant:short", "rig-1"))).Ok);
+        Assert.True(Call(state, "task_claim", new() { ["taskId"] = "t", ["sessionId"] = "worker", ["requestId"] = "claim", ["expectedVersion"] = 1, ["leaseSeconds"] = RelayLimits.MaxLeaseSeconds }, 0).Ok);
+        Assert.True(Call(state, "action_begin", new() { ["taskId"] = "t", ["sessionId"] = "worker", ["requestId"] = "begin", ["expectedVersion"] = 2, ["actionId"] = "deploy", ["inputFingerprint"] = "f" }, 30).Ok);
+        // Two minutes on, the grant has expired.
+        var report = Call(state, "action_report", new() { ["taskId"] = "t", ["sessionId"] = "worker", ["requestId"] = "report", ["expectedVersion"] = 3, ["actionId"] = "deploy", ["attempt"] = 1, ["outcome"] = "completed" }, 120);
+        Assert.True(report.Ok, report.Code);
+        var renewed = Call(state, "claim_renew", new() { ["taskId"] = "t", ["sessionId"] = "worker", ["requestId"] = "renew", ["claimGeneration"] = 1, ["leaseSeconds"] = RelayLimits.MaxLeaseSeconds }, 150);
+        Assert.True(renewed.Ok, renewed.Code);
+        var done = Authorized("grant:short", "rig-1"); done["state"] = "completed";
+        done["criteria"]![0]!["result"] = "passed"; done["criteria"]![0]!["evidenceRef"] = "artifact:1";
+        var completed = Call(state, "task_update", new() { ["taskId"] = "t", ["sessionId"] = "worker", ["requestId"] = "done", ["expectedVersion"] = 4, ["workflow"] = done }, 180);
+        Assert.True(completed.Ok, completed.Code);
+        // A new start is still refused.
+        Assert.Equal("GrantInvalid", Call(state, "task_update", Update("again", 0, Authorized("grant:short", "rig-1")), 180).Code);
+    }
+
+    [Fact]
     public void Standing_put_needs_an_administrator_and_the_expected_revision_within_limits()
     {
         var state = new StateEnvelope<CoordinationDocument>();

@@ -36,7 +36,8 @@ internal static class Retention
     /// <summary>
     /// Makes room for one more entry when <paramref name="map"/> holds <paramref name="limit"/> or more. Drops entries past the window,
     /// then, if more than <paramref name="target"/> remain, the oldest down to that many. Returns the entries dropped before their window
-    /// ended (key and write time), so a caller can remember them. Below the limit it does nothing, so most writes never scan the map.
+    /// ended (key and write time; for entries without a time, now), so a caller can remember them. Below the limit it does nothing, so
+    /// most writes never scan the map.
     /// </summary>
     public static List<(string Key, DateTimeOffset At)> MakeRoom(JsonObject map, DateTimeOffset now, int limit = RelayLimits.MaxRecords, int target = RelayLimits.RetainedEntriesAfterPrune)
     {
@@ -46,6 +47,9 @@ internal static class Retention
         var entries = map.Select((entry, index) => (entry.Key, Value: entry.Value, At: WrittenAt(entry.Value), Index: index)).ToList();
         var young = entries.Where(entry => entry.At > cutoff).ToList();
         var drop = new HashSet<string>(entries.Where(entry => entry.At <= cutoff).Select(entry => entry.Key), StringComparer.Ordinal);
+        // An entry from before retention has no time, so it may be recent: it is dropped, but reported as evicted now, so a replay's
+        // retry still meets a tombstone for a full window.
+        evicted.AddRange(entries.Where(entry => entry.At == DateTimeOffset.MinValue).Select(entry => (entry.Key, now)));
         if (young.Count > target)
             foreach (var entry in young.OrderBy(entry => entry.At).ThenBy(entry => entry.Index).Take(young.Count - target))
             {
@@ -64,7 +68,7 @@ internal static class Retention
     /// <summary>
     /// Remembers replays evicted before their window ended (hashed key, Unix seconds of the original request) and drops tombstones past
     /// the window. Past <see cref="RelayLimits.MaxRequestTombstones"/>, the oldest are dropped down to <see cref="RelayLimits.RequestTombstonesAfterPrune"/>:
-    /// a retry of one of those would run again. That takes about 14,000 writes (1,536 replays plus 12,288 tombstones) to one aggregate
+    /// a retry of one of those would run again. That takes about 7,700 writes (1,536 replays plus 6,144 tombstones) to one aggregate
     /// between the request and its retry, within the window.
     /// </summary>
     public static void Bury(JsonObject state, IReadOnlyList<(string Key, DateTimeOffset At)> evicted, DateTimeOffset now)

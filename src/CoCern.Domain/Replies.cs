@@ -81,7 +81,11 @@ public static class Replies
     {
         var json = item.ToJsonString();
         var start = (int)Math.Clamp(partOffset, 0, json.Length);
-        var piece = new JsonObject { ["truncated"] = true, ["bytes"] = Encoding.UTF8.GetByteCount(json), ["chars"] = json.Length };
+        var piece = new JsonObject
+        {
+            ["truncated"] = true, ["bytes"] = Encoding.UTF8.GetByteCount(json), ["chars"] = json.Length,
+            ["hint"] = "Oversized: call again with the same cursor and partOffset = nextPartOffset; check its ID, since acknowledging earlier items shifts the cursor."
+        };
         if (item is JsonObject fields)
             foreach (var field in fields.Where(x => x.Value is JsonValue value && (value.GetValueKind() != JsonValueKind.String || value.GetValue<string>().Length <= RelayLimits.MaxIdentifierLength)).Take(16))
                 piece.TryAdd(field.Key, field.Value!.DeepClone());

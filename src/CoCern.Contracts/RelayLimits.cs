@@ -122,8 +122,11 @@ public static class RelayLimits
     /// so the prune runs at most once per 512 writes instead of scanning on every one.
     /// </summary>
     public const int RetainedEntriesAfterPrune = MaxRecords * 3 / 4;
-    /// <summary>Hashed keys of replays evicted before their window ended, so their retries get <c>RequestExpired</c> instead of running again.</summary>
-    public const int MaxRequestTombstones = 8 * MaxRecords;
+    /// <summary>
+    /// Hashed keys of replays evicted before their window ended, so their retries get <c>RequestExpired</c> instead of running again. Each
+    /// costs about 34 bytes in every parse and save of its aggregate, so 4 × <see cref="MaxRecords"/> (about 280 KB when full) rather than more.
+    /// </summary>
+    public const int MaxRequestTombstones = 4 * MaxRecords;
     /// <summary>When the tombstones pass <see cref="MaxRequestTombstones"/>, the oldest are dropped down to this many.</summary>
     public const int RequestTombstonesAfterPrune = MaxRequestTombstones * 3 / 4;
 

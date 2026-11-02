@@ -116,6 +116,21 @@ internal static class SessionAttention
     }
 
     /// <summary>
+    /// Tells the control directory, at most once per <see cref="RelayLimits.AttentionActivityReportMinutes"/>, that this chat is still active,
+    /// so routed manager items keep reaching it and a full directory never drops it. Runs on every verified call (and on offers), with or
+    /// without attention.
+    /// </summary>
+    public static void ReportActive(AggregateContext context)
+    {
+        var state = context.State;
+        var now = context.Now;
+        if (now - (DateTimeOffset.TryParse(Text(state, "activeReportedAt"), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var reported) ? reported : DateTimeOffset.MinValue) < TimeSpan.FromMinutes(RelayLimits.AttentionActivityReportMinutes)
+            || Text(state, "sessionId") is not { Length: > 0 } self) return;
+        state["activeReportedAt"] = now.ToString("O");
+        context.Emit(AggregateKinds.Control, AggregateKinds.ControlKey, Operations.Register, new JsonObject { ["repositoryId"] = context.Repository, ["sessionId"] = self, ["activeAt"] = now.ToString("O") });
+    }
+
+    /// <summary>
     /// One boundary, in one fixed order: the shown, unanswered item counts as later; one boundary passes for snoozed items; the best
     /// eligible item is picked; it is marked shown. Call it only for a reply that will carry the offer, so an item counts as seen only
     /// when it was delivered.
@@ -129,13 +144,7 @@ internal static class SessionAttention
         RemoveExpired(items, now);
         // An idle chat is one with no boundary for a while; see Status.
         state["attentionBoundaryAt"] = now.ToString("O");
-        // The control directory learns, at most hourly, that this chat is still active, so routed manager items keep reaching it.
-        if (now - (DateTimeOffset.TryParse(Text(state, "activeReportedAt"), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var reported) ? reported : DateTimeOffset.MinValue) >= TimeSpan.FromMinutes(RelayLimits.AttentionActivityReportMinutes)
-            && Text(state, "sessionId") is { Length: > 0 } self)
-        {
-            state["activeReportedAt"] = now.ToString("O");
-            context.Emit(AggregateKinds.Control, AggregateKinds.ControlKey, Operations.Register, new JsonObject { ["repositoryId"] = context.Repository, ["sessionId"] = self, ["activeAt"] = now.ToString("O") });
-        }
+        ReportActive(context);
         // Messages a model-visible check_inbox reply lists were seen, so their info items close before anything is picked.
         if (args["seenMessageIds"] is JsonArray seen) CloseMessages(state, Strings(seen), now);
         var boundaries = SnoozeBoundaries(args);

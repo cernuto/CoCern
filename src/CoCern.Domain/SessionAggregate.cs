@@ -100,6 +100,8 @@ internal static class SessionAggregate
     private static RelayReply Describe(AggregateContext context)
     {
         var state = context.State;
+        // Every verified call keeps the session's directory entry fresh, even with attention off or on attention: false calls.
+        if (context.Operation == Operations.Verify) SessionAttention.ReportActive(context);
         var current = Date(state, "freshUntil") > context.Now && Text(state, "hubIncarnation") == Text(context.Args, "hubIncarnation");
         var description = new JsonObject
         {

@@ -513,7 +513,8 @@ public sealed class CoordinationTests
         state.Value = new() { Json = stored.ToJsonString() };
         Assert.Equal(1, Call(state, "board", "context_put", Note("legacy", 0)).Version);
 
-        // Fill the map: old-format and day-old entries go by time, not count; a recent one stays and none becomes a tombstone.
+        // Fill the map: old-format and day-old entries go by time, not count; a recent one stays. An old-format entry has no time and may
+        // be recent, so it alone leaves a tombstone.
         stored = StateJson(state);
         var requests = stored["requests"]!.AsObject();
         var prior = requests[legacyKey]!.DeepClone().AsObject();
@@ -530,10 +531,11 @@ public sealed class CoordinationTests
         Assert.True(Call(state, "board", "context_put", Note("new", 1)).Ok);
         stored = StateJson(state);
         Assert.Equal(["alice:context_put:recent", "alice:context_put:new"], stored["requests"]!.AsObject().Select(x => x.Key));
-        Assert.Null(stored["requestTombstones"]);
+        Assert.Single(stored["requestTombstones"]!.AsObject());
         Assert.Equal(Now.ToString("O"), stored["requests"]!["alice:context_put:new"]!["at"]!.GetValue<string>());
-        // Past its window a request runs as new (here its stale expected version conflicts), as before any retention.
-        Assert.Equal("VersionConflict", Call(state, "board", "context_put", Note("legacy", 0)).Code);
+        // The old-format request's retry is refused, not run; a day-old one past its window runs as new (its stale version conflicts).
+        Assert.Equal("RequestExpired", Call(state, "board", "context_put", Note("legacy", 0)).Code);
+        Assert.Equal("VersionConflict", Call(state, "board", "context_put", Note("old-0", 0)).Code);
     }
 
     [Fact]
@@ -632,6 +634,7 @@ public sealed class CoordinationTests
             var piece = Data(page)["items"]!.AsArray().Single()!.AsObject();
             Assert.True(piece["truncated"]!.GetValue<bool>());
             Assert.Equal("big", piece["messageId"]!.GetValue<string>());
+            Assert.Contains("partOffset", piece["hint"]!.GetValue<string>());
             Assert.Equal(at, piece["partOffset"]!.GetValue<long>());
             Assert.True(piece["bytes"]!.GetValue<int>() > RelayLimits.AggregateReplyBytes / 4);
             Assert.Equal(2, Data(page)["nextCursor"]!.GetValue<int>());
@@ -849,6 +852,33 @@ public sealed class CoordinationTests
         Assert.NotNull(StateJson(state)["tasks"]!["later"]!["completedAt"]);
         Assert.True(Board(state, "task_update", new() { ["taskId"] = "later", ["expectedVersion"] = 2, ["workflow"] = DependentWorkflow("ready", "a") }, days: 31).Ok);
         Assert.Null(StateJson(state)["tasks"]!["later"]!["completedAt"]);
+    }
+
+    [Fact]
+    public void A_session_that_keeps_calling_is_never_dropped_from_a_full_directory_even_without_attention()
+    {
+        // A chat that only makes verified calls (attention off, or attention: false): no offer ever runs. Each hourly verify still reports it.
+        var session = new StateEnvelope<CoordinationDocument>();
+        Assert.True(Call(session, "session", "__open", new() { ["principalId"] = "alice", ["sessionToken"] = "secret", ["sessionId"] = "busy" }).Ok);
+        var sessions = new JsonObject
+        {
+            ["busy"] = new JsonObject { ["sessionId"] = "busy", ["principalId"] = "alice", ["repositoryId"] = "repo", ["observedAt"] = Now.ToString("O"), ["freshUntil"] = Now.AddMinutes(2).ToString("O") }
+        };
+        for (var i = 1; i < RelayLimits.MaxRecords; i++)
+            sessions["old-" + i] = new JsonObject { ["sessionId"] = "old-" + i, ["principalId"] = "alice", ["repositoryId"] = "repo", ["observedAt"] = Now.AddDays(-3).ToString("O"), ["freshUntil"] = Now.AddDays(-3).ToString("O") };
+        var control = new StateEnvelope<CoordinationDocument> { Value = new() { Json = new JsonObject { ["sessions"] = sessions }.ToJsonString() } };
+        for (var hour = 0; hour <= 30; hour++)
+        {
+            Assert.True(Call(session, "session", "__verify", new() { ["sessionToken"] = "secret" }, seconds: hour * 3600).Ok);
+            foreach (var effect in session.Effects.Where(effect => effect.Operation == Operations.Register))
+                Assert.True(Call(control, "control", "__register", JsonNode.Parse(effect.PayloadJson)!.AsObject(), seconds: hour * 3600).Ok);
+            session.Effects.Clear();
+        }
+        Assert.Equal(Now.AddHours(30).ToString("O"), StateJson(control)["sessions"]!["busy"]!["activeAt"]!.GetValue<string>());
+        // Thirty hours on, the directory is full and drops stale sessions; this one was seen within the hour.
+        Assert.True(Call(control, "control", "session_open", new() { ["requestId"] = "new" }, seconds: 30 * 3600 + 60).Ok);
+        Assert.True(StateJson(control)["sessions"]!.AsObject().ContainsKey("busy"));
+        Assert.False(StateJson(control)["sessions"]!.AsObject().ContainsKey("old-1"));
     }
 
     private static JsonObject DependentWorkflow(string state, params string[] dependsOn)
