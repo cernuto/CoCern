@@ -105,7 +105,7 @@ internal static class ConnectCommand
     {
         for (var folder = new DirectoryInfo(start); folder is not null; folder = folder.Parent)
         {
-            var candidate = Path.Combine(folder.FullName, DefaultTokenFile);
+            var candidate = Path.GetFullPath(Path.Combine(folder.FullName, DefaultTokenFile));
             if (File.Exists(candidate)) return candidate;
         }
         return null;

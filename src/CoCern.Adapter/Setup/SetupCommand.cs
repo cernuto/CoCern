@@ -73,6 +73,30 @@ internal sealed class SetupEnvironment
         };
     }
 
+    /// <summary>The folders selected by the caller of <c>--connect</c>, including explicitly isolated process environments.</summary>
+    public static (string Profile, string? AppData) ConnectFolders()
+    {
+        var profileVariables = OperatingSystem.IsWindows() ? new[] { "USERPROFILE", "HOME" } : new[] { "HOME", "USERPROFILE" };
+        var profile = ConnectFolder(Environment.SpecialFolder.UserProfile, profileVariables)
+            ?? throw new AdapterConfigurationException("The user profile folder could not be found. Set USERPROFILE or HOME to an absolute folder.");
+        return (profile, ConnectFolder(Environment.SpecialFolder.ApplicationData, ["APPDATA"]));
+    }
+
+    private static string? ConnectFolder(Environment.SpecialFolder folder, string[] variables)
+    {
+        foreach (var variable in variables)
+        {
+            if (Environment.GetEnvironmentVariable(variable) is not { } value) continue;
+            if (!string.IsNullOrWhiteSpace(value) && Path.IsPathFullyQualified(value))
+            {
+                try { return Path.GetFullPath(value); }
+                catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException) { }
+            }
+            throw new AdapterConfigurationException($"{variable} must name a nonblank absolute folder for --connect.");
+        }
+        return Environment.GetFolderPath(folder) is { Length: > 0 } known ? known : null;
+    }
+
     /// <summary>The dotnet host running this command and the adapter beside it: what client settings start.</summary>
     public static (string Dotnet, string Dll) Host()
     {

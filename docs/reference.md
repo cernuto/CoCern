@@ -23,7 +23,7 @@ Admin tools need a token with `IsAdministrator`. A session's `role` grants nothi
 | Tool | Who | What it does |
 | --- | --- | --- |
 | `session_open` | worker | Open a session for this chat; returns its private handle and the board's standing. |
-| `session_bind` | worker | Record this session's IDE tool bindings. |
+| `session_bind` | worker | Record this session's IDE tool bindings. Optional `label` renames the session (to match its chat's title) and `machineId` reports its PC; a bind that leaves out `binding` keeps the current one. |
 | `worker_list` | worker | List reported workers and how fresh each report is. |
 | `get_status` | worker | Repository and session status, including blockers and uncertain actions. |
 | `task_get` | worker | One task, or the board. |
@@ -55,13 +55,13 @@ Every call takes `repositoryId`. Session calls also take `sessionId` and `sessio
 
 **Retries.** Retry a write with the same `requestId`. Within 24 hours it does not run again; it gets the first reply. Only your own arguments count as the same request, not what the hub adds. A very busy board or session (over about 7,500 writes in a day) may drop that reply early: the retry then gets `RequestExpired` (409), so read the current state and decide.
 
-**Sessions.** The session list holds 2,048. When it is full, `session_open` closes sessions not seen for a day, except those with an action still open. A closed session's calls get `SessionUnknown` with `expired: true`: call `session_open` again. If only sessions with open actions fill it, `session_open` gets `CapacityExceeded` with `heldByUnresolvedActions`: report or [recover](#stranded-actions) those actions.
+**Sessions.** Keep one session per chat and reuse its handle across reconnects. A `session_open` retried with the same `requestId` and arguments returns the same session, token included, so a lost reply never makes a second session; other arguments under that `requestId` get `RequestConflict`. After `SessionUnknown`, open with a new `requestId`. The session list holds 2,048. When it is full, `session_open` closes sessions not seen for a day, except those with an action still open. A closed session's calls get `SessionUnknown` with `expired: true`: call `session_open` again. If only sessions with open actions fill it, `session_open` gets `CapacityExceeded` with `heldByUnresolvedActions`: report or [recover](#stranded-actions) those actions.
 
 **Large items.** A message or note too large to read back is refused with `PayloadTooLarge` (`maxBytes`, `bytes`). A stored item too large for any page comes back alone as a piece (`truncated: true`, `bytes`, `part`): call again with the same `cursor` and `partOffset` set to `nextPartOffset`. Joined, the pieces are the item's JSON.
 
 **Spend fewer tokens.** Every model call re-reads the whole chat, so fewer calls matter most. `waitSeconds` and `ifNoneMatch` are handled by the adapter (agents always use it); a direct REST call ignores them.
 
-- Wait for mail with `check_inbox` and `waitSeconds` (up to 50) instead of polling.
+- Wait with `check_inbox` and `waitSeconds` (up to 50) instead of polling. Mail, urgent attention, or an eligible idle reminder ends the wait; the returning attention read offers one item. Internal polls consume no offers, and `attention: false` opts out of attention wakes.
 - Pass the `etag` from `task_get`, `get_status`, `worker_list`, `context_get` or `chat_directory` back as `ifNoneMatch`. An unchanged read returns only `{"unchanged":true,"etag":...}`.
 - Acknowledge in your reply: `send_message` with `ackMessageIds`.
 - `supersede: true` replaces your previous status message; `wake: false` sends a note nobody must act on now.
@@ -305,7 +305,7 @@ New-NetFirewallRule -DisplayName "CoCern hub (HTTPS 5273)" -Direction Inbound -A
 
 **Claude chats** wake themselves with `--await-inbox --chat <CLAUDE_CODE_SESSION_ID>` (see the README). The chat must have called `session_open` on this PC first. Exit codes: 0 mail arrived, 1 no session for that chat, 2 timed out, 3 stopped. `--print-inbox` also prints the messages; `--ack <id,id>` acknowledges them, then waits again. The chat shows as reachable only while it runs.
 
-`--wake <config>` and `--await-inbox <config>` also take a hand-written config; see `scripts/Start-CoCernWake.ps1`. Watch each chat with only one of them.
+`--wake <config>` and `--await-inbox <config>` also take a hand-written config; see `scripts/Start-CoCernWake.ps1`. Watch each chat with only one of them. For an `https://` `relayUrl`, give the hub certificate's SHA-256 `fingerprint` in the config (it wins over `COCERN_FINGERPRINT`); only that certificate is accepted.
 
 ### Prompt hook
 
@@ -338,6 +338,8 @@ Set them in `appsettings.json`, as environment variables (`Relay__Clients__0__To
 | `Relay:Board:ArchiveAfterDays` | 30 | Days after completion before a task is archived (0 to 3650). |
 | `Relay:Dashboard:ViewerPrincipalIds:N` | | Administrator principals that may open the dashboard. The start script and Visual Studio profile set theirs. |
 | `Relay:Dashboard:OpenOnStart` | `false` | Open the dashboard in the default browser when the hub starts, already signed in with that start's one-time link. The Visual Studio launch profile turns it on. |
+| `Relay:Dashboard:SessionHours` | 8 | Hours a dashboard sign-in lasts in that browser session (1 to 168). The deadline is fixed at sign-in; use doesn't extend it. |
+| `Relay:Dashboard:RememberDays` | 30 | Days a sign-in lasts, across browser restarts, when "Remember this browser" is ticked (1 to 90, and at least `SessionHours`). |
 | `Relay:Connect:AdapterPath` | found | The adapter the Connect page uses. Default: `artifacts/adapter`, else the build output. |
 
 ### Features

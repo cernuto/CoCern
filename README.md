@@ -82,7 +82,7 @@ That PC is then joined: CoCern is added to its Claude Code and Codex, and it sta
 
 Agents find CoCern's tools on their own. A typical chat:
 
-1. `session_open` once, to join the hub. A managing chat passes `role: "manager"`.
+1. `session_open` once, to join the hub, and keep its handle for the whole chat. Retry an uncertain open with the same `requestId` and arguments: it returns the same session, not a second one. A managing chat passes `role: "manager"`.
 2. `task_get` to read the board, then `task_claim` a task.
 3. Do the work with the chat's own tools.
 4. `task_update` with what happened. Add `includeNextWork: true` to be offered the next task.
@@ -111,7 +111,7 @@ Only urgent items (a task blocked, failed or interrupted) wake a chat at once. E
 
 ## The dashboard
 
-Open it with the sign-in link the hub prints. The link works once, only on the hub's PC, for 24 hours, and each use prints the next one. You can also paste the token from `data/local-client-token`.
+Open it with the sign-in link the hub prints. The link works once, only on the hub's PC, for 24 hours, and each use prints the next one. You can also paste the token from `data/local-client-token`. A sign-in lasts 8 hours in that browser session, or 30 days with **Remember this browser** (`Relay:Dashboard:SessionHours` and `RememberDays`).
 
 | Page | Shows |
 | --- | --- |
@@ -155,7 +155,7 @@ dotnet build CoCern.slnx -c Release
 dotnet test CoCern.slnx -c Release
 ```
 
-For an end-to-end check, `python scripts/Smoke-CoCern.py` starts a throwaway hub from the build and runs 84 happy- and sad-path checks: sign-in, tasks, claims, actions, messages, notes, search, standing rules, orders, attention, pausing, doc search, the adapter, the dashboard, Connect, a real node joining over HTTPS, races, malformed input, a hub killed mid-flight, and a restart. It uses its own temporary folders and ports, never your hub or app settings, and its exit code is the number of failed checks.
+For an end-to-end check, `python scripts/Smoke-CoCern.py` starts a throwaway hub from the build and runs 88 happy- and sad-path checks: sign-in, tasks, claims, actions, messages, notes, search, standing rules, orders, attention, pausing, doc search, the adapter, the dashboard, Connect, a real node joining over HTTPS, races, malformed input, a hub killed mid-flight, and a restart. Before any settings writes, it verifies that the adapter reads the exact temporary profile and application-data paths; an older adapter that ignores these paths stops the run. It uses its own temporary folders and ports, and its exit code is the number of failed checks.
 
 On Windows the tests run offline. Elsewhere, 10 setup tests fail because they need Windows, and the analytics tests download DuckDB's `sqlite` extension once (or set `COCERN_DUCKDB_EXTENSIONS` to a folder that has it).
 

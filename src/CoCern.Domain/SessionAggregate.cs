@@ -51,6 +51,7 @@ internal static class SessionAggregate
         if (state.ContainsKey("principalId"))
             return Text(state, "principalId") == Text(context.Args, "principalId") && Text(state, "sessionToken") == Text(context.Args, "sessionToken") ? Ok(new { initialized = true }) : Error(SessionDenied);
         foreach (var field in OpenFields) if (context.Args[field] is { } value) state[field] = value.DeepClone();
+        state["openedAt"] = context.Now.ToString("O");
         if (Text(state, "role").Length > RelayLimits.MaxActivityRoleLength) state.Remove("role");
         // The direct call from session_open carries only the client's fields; the control record's freshness defaults fill the rest.
         state["bindingVersion"] ??= 0;
@@ -195,7 +196,11 @@ internal static class SessionAggregate
         var args = context.Args;
         var current = Number(state, "bindingVersion");
         if (!ExpectedVersionMatches(args, current)) return VersionConflict(current);
-        state["binding"] = args["binding"]?.DeepClone(); state["bindingVersion"] = current + 1;
+        // A metadata-only bind (a rename, or a missing machine reported later) leaves out binding and keeps the current one.
+        if (args.ContainsKey("binding")) state["binding"] = args["binding"]?.DeepClone();
+        state["bindingVersion"] = current + 1;
+        if (Text(args, "label") is { Length: > 0 } label) state["label"] = label;
+        if (Text(args, "machineId") is { Length: > 0 } machine) state["machineId"] = machine;
         state["observedAt"] = context.Now.ToString("O");
         state["freshUntil"] = context.Now.AddSeconds(Math.Clamp(Number(args, "freshnessSeconds", DefaultFreshnessSeconds), MinFreshnessSeconds, MaxFreshnessSeconds)).ToString("O");
         state["availability"] = Text(args, "availability", "unknown");

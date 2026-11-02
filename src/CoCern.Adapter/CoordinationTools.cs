@@ -28,6 +28,8 @@ public static class CoordinationTools
     {
         if (arguments.ValueKind != JsonValueKind.Object || !arguments.TryGetProperty("requestId", out var given) || given.ValueKind != JsonValueKind.String) return arguments;
         var node = System.Text.Json.Nodes.JsonNode.Parse(arguments.GetRawText())!.AsObject();
+        // This process is the client machine. Keep the default beside the process-owned request ID so direct HTTP retries retain their original arguments.
+        if (!node.ContainsKey("machineId")) node["machineId"] = Environment.MachineName;
         node["requestId"] = Instance + ":" + given.GetString();
         return JsonSerializer.SerializeToElement(node);
     }

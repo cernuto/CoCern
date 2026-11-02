@@ -51,6 +51,8 @@ public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
         );
         CREATE INDEX IF NOT EXISTS ix_activity_log_at ON activity_log(at_ticks);
         CREATE INDEX IF NOT EXISTS ix_activity_log_repository ON activity_log(repository_id, at_ticks);
+        CREATE INDEX IF NOT EXISTS ix_activity_log_session_call ON activity_log(repository_id, session_id, at_ticks DESC) WHERE kind = 'call' AND ok = 1;
+        CREATE INDEX IF NOT EXISTS ix_activity_log_direct_message ON activity_log(at_ticks DESC, id DESC) WHERE kind = 'call' AND ok = 1 AND tool = 'send_message' AND target GLOB 'message:*';
         CREATE TABLE IF NOT EXISTS activity_daily (
             day TEXT NOT NULL,
             repository_id TEXT NOT NULL,

@@ -71,7 +71,7 @@ public partial class Dashboard : IAsyncDisposable
     private void SelectSession(string sessionId) => _selectedId = sessionId;
     // Motion follows the system's reduced-motion setting (see dashboard.css).
     private bool Pulse(string sessionId) => IsLive && Connection.IsPulsing(sessionId, DateTimeOffset.UtcNow);
-    private async Task SignInAsync(string token) => await Connection.LoginAsync(token);
+    private async Task SignInAsync(DashboardLoginRequest request) => await Connection.LoginAsync(request.Token, request.RememberBrowser);
 
     private async Task SignOutAsync()
     {

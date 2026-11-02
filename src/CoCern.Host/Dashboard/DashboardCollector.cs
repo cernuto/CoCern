@@ -83,7 +83,7 @@ public sealed class DashboardCollector : BackgroundService
                 ? previous with { Warnings = [.. previous.Warnings.Where(warning => warning != "Observation is busy; the previous observation is retained."), "Observation is busy; the previous observation is retained."] }
                 : previous with
                 {
-                    ObservedAt = now, Machines = observation.Machines, Sessions = observation.Sessions, SessionsTruncated = observation.SessionsTruncated, Warnings = observation.Warnings,
+                    ObservedAt = now, Machines = observation.Machines, Sessions = observation.Sessions, SessionsTruncated = observation.SessionsTruncated, Interactions = observation.Interactions, Warnings = observation.Warnings,
                     Host = previous.Host with { MachineCount = observation.Machines.Length, SessionCount = observation.SessionCount, ReachableCount = observation.Sessions.Count(session => session.Reachable) }
                 };
         }
@@ -150,6 +150,11 @@ public sealed class DashboardCollector : BackgroundService
         bytes -= EncodedLength(root.GetProperty("standing")) - 2;
         if (!snapshot.StandingTruncated) bytes--;
         snapshot = snapshot with { Standing = [], StandingTruncated = true };
+        if (bytes <= maximumBytes) return snapshot;
+
+        bytes -= EncodedLength(root.GetProperty("interactions").GetProperty("edges")) - 2;
+        if (!snapshot.Interactions.Truncated) bytes--;
+        snapshot = snapshot with { Interactions = snapshot.Interactions with { Edges = [], Truncated = true } };
         if (bytes <= maximumBytes) return snapshot;
 
         if (!snapshot.SessionsTruncated) bytes--; // "false" becomes "true".

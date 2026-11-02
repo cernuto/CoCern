@@ -103,13 +103,44 @@ public sealed partial class SqliteStore : IRelayObservationSource
             if (sessions.Count >= MaximumSessions) { truncated = true; break; }
             sessions.TryAdd(session.SessionId, session);
         }
+        if (!await ProjectSessionActivityAsync(sessions, now, started, cancellationToken))
+            return null; // Retain the previous coherent observation and its timestamp rather than erase known last-call times.
+        var interactions = await ReadInteractionsAsync(sessions, now, started, cancellationToken);
+        if (interactions is null) return null;
         truncated |= sessionCount > MaximumSessions;
         if (truncated)
         {
             warnings.Add("The session observation is truncated to its count, time or size limit.");
             warnings.Add("Machine and reachable counts describe the bounded observed inventory; the session total counts persisted sessions.");
         }
-        return new() { SessionCount = sessionCount, Machines = machines.ToArray(), Sessions = sessions.Values.ToArray(), SessionsTruncated = truncated, Warnings = warnings.ToArray() };
+        return new() { SessionCount = sessionCount, Machines = machines.ToArray(), Sessions = sessions.Values.ToArray(), SessionsTruncated = truncated, Interactions = interactions, Warnings = warnings.ToArray() };
+    }
+
+    private async Task<bool> ProjectSessionActivityAsync(Dictionary<string, DashboardSession> sessions, DateTimeOffset now, long started, CancellationToken cancellationToken)
+    {
+        if (Stopwatch.GetElapsedTime(started) > ObservationBudget) return false;
+        if (sessions.Count == 0) return true;
+        if (!await _gate.WaitAsync(0, cancellationToken)) return false;
+        try
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            // One covering-index seek per bounded inventory row; never scan the retained activity history for each session.
+            using var command = Command("SELECT at_ticks FROM activity_log WHERE repository_id=$repository AND session_id=$session AND kind='call' AND ok=1 AND at_ticks <= $now ORDER BY at_ticks DESC LIMIT 1;");
+            var repository = command.Parameters.AddWithValue("$repository", "");
+            var sessionId = command.Parameters.AddWithValue("$session", "");
+            command.Parameters.AddWithValue("$now", now.UtcTicks);
+            foreach (var entry in sessions.ToArray())
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (Stopwatch.GetElapsedTime(started) > ObservationBudget) return false;
+                repository.Value = entry.Value.RepositoryId;
+                sessionId.Value = entry.Value.SessionId;
+                if (command.ExecuteScalar() is long ticks)
+                    sessions[entry.Key] = entry.Value with { LastActivityAt = new DateTimeOffset(ticks, TimeSpan.Zero) };
+            }
+            return true;
+        }
+        finally { _gate.Release(); }
     }
 
     private void CopySessionRows(string[] keys, bool announcedOnly, List<string> payloads, ref int rowsRead, ref int bytes, ref bool truncated, long started, HashSet<string> warnings, CancellationToken cancellationToken)
@@ -191,10 +222,17 @@ public sealed partial class SqliteStore : IRelayObservationSource
         if (string.IsNullOrEmpty(id)) return null;
         var inbox = Property(state, "inbox");
         var effects = Property(envelope.RootElement, "Effects");
+        var bindingVersion = Property(state, "bindingVersion");
+        var hasVersion = bindingVersion.ValueKind == JsonValueKind.Number && bindingVersion.TryGetInt64(out var reportedVersion) && reportedVersion >= 0;
+        var binding = Property(state, "binding");
+        var hasBinding = binding.ValueKind == JsonValueKind.Object && binding.EnumerateObject().Any();
         return new()
         {
             SessionId = id, Label = Text(state, "label"), MachineId = Text(state, "machineId"), RepositoryId = Text(state, "repositoryId"),
             ReportedAt = Date(state, "observedAt"), FreshUntil = Date(state, "freshUntil"),
+            OpenedAt = Date(state, "openedAt"),
+            BindingVersion = bindingVersion.ValueKind == JsonValueKind.Number && bindingVersion.TryGetInt64(out var version) && version >= 0 ? version : null,
+            HasBindingReport = hasBinding ? true : hasVersion ? false : null,
             IncarnationMismatch = RawText(state, "hubIncarnation") != incarnation,
             UnreadMessages = inbox.ValueKind == JsonValueKind.Object ? inbox.EnumerateObject().Count() : inbox.ValueKind == JsonValueKind.Undefined ? 0 : null,
             PendingEffects = effects.ValueKind == JsonValueKind.Array ? effects.GetArrayLength() : null

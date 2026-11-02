@@ -23,6 +23,7 @@ public sealed record RelayObservation
     public DashboardMachine[] Machines { get; init; } = [];
     public DashboardSession[] Sessions { get; init; } = [];
     public bool SessionsTruncated { get; init; }
+    public DashboardInteractions Interactions { get; init; } = new();
     public string[] Warnings { get; init; } = [];
 }
 

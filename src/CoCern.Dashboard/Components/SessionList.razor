@@ -1,13 +1,27 @@
 <section class="surface session-list" aria-labelledby="sessions-heading">
     <div class="section-heading"><h2 id="sessions-heading">Sessions</h2><span class="count-badge">@Sessions.Length</span></div>
-    <label class="search-field"><span class="visually-hidden">Find a session</span><input type="search" placeholder="Find by label, machine or repository" @bind="_query" @bind:event="oninput" /></label>
+    <label class="search-field"><span class="visually-hidden">Find a session</span><input type="search" placeholder="Find by label, ID, machine or repository" @bind="_query" @bind:event="oninput" /></label>
     <div class="session-list-rows">
         @foreach (var session in FilteredSessions)
         {
             <button type="button" @key="session.SessionId" class="session-list-row @(SelectedId == session.SessionId ? "selected" : "")" aria-pressed="@(SelectedId == session.SessionId ? "true" : "false")" @onclick="() => OnSelect.InvokeAsync(session.SessionId)">
                 <span class="status-dot @(session.Reachable ? "teal" : "amber")" aria-hidden="true"></span>
-                <span class="session-row-label"><strong>@session.Label</strong><span>@session.Provider on @DashboardFormat.Machine(session)</span></span>
-                <span class="session-row-state">@DashboardFormat.Freshness(session, Now)<small>@DashboardFormat.Ago(session.LastActivityAt, Now)</small></span>
+                <span class="session-row-label"><strong>@session.Label</strong><span>@session.Provider on @DashboardFormat.Machine(session)</span><span title="@session.SessionId">#@ShortId(session.SessionId) · @(session.OpenedAt is { } opened ? $"Opened {DashboardFormat.Timestamp(opened)}" : "Opened time unavailable")</span></span>
+                <span class="session-row-state">
+                    @if (session.HasBindingReport is null)
+                    {
+                        <span>Tool binding not reported</span>
+                    }
+                    else if (session.HasBindingReport == false)
+                    {
+                        <span>No tool binding reported</span>
+                    }
+                    else
+                    {
+                        <span title="Freshness of reported binding metadata, not a verified IDE connection. Relay calls do not renew this report.">Report: @DashboardFormat.Freshness(session, Now)</span>
+                    }
+                    <small title="Most recent recorded successful tool call, including background polling. This does not indicate whether a model is running.">Last relay call: @DashboardFormat.Ago(session.LastActivityAt, Now)</small>
+                </span>
             </button>
         }
         @if (!FilteredSessions.Any())
@@ -25,7 +39,8 @@
     [Parameter] public DateTimeOffset Now { get; set; }
     [Parameter] public bool Truncated { get; set; }
     private string _query = "";
-    private IEnumerable<DashboardSession> FilteredSessions => Sessions.Where(session => string.IsNullOrWhiteSpace(_query) || new[] { session.Label, session.Provider, session.MachineName, session.RepositoryId }.Any(value => value.Contains(_query, StringComparison.OrdinalIgnoreCase))).OrderBy(session => session.Label, StringComparer.OrdinalIgnoreCase);
+    private static string ShortId(string id) => id[..Math.Min(8, id.Length)];
+    private IEnumerable<DashboardSession> FilteredSessions => Sessions.Where(session => string.IsNullOrWhiteSpace(_query) || new[] { session.Label, session.SessionId, session.Provider, session.MachineName, session.RepositoryId }.Any(value => value.Contains(_query, StringComparison.OrdinalIgnoreCase))).OrderByDescending(session => session.LastActivityAt ?? session.OpenedAt ?? session.ReportedAt).ThenBy(session => session.SessionId, StringComparer.Ordinal);
 }
 
 

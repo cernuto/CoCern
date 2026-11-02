@@ -14,7 +14,11 @@
         "Relay__Dashboard__ViewerPrincipalIds__0": "PaulC",
         "Relay__Dashboard__OpenOnStart": "true",
         "Relay__Discovery__Enabled": "true",
-        "Relay__Network__Enabled": "true"
+        "Relay__Network__Enabled": "true",
+        "Relay__DocCache__Repositories__0__Id": "cocern",
+        "Relay__DocCache__Repositories__0__ClonePath": "../..",
+        "Relay__DocCache__Repositories__0__Branch": "main",
+        "Relay__DocCache__Repositories__0__Fetch": "false"
       }
     }
   }

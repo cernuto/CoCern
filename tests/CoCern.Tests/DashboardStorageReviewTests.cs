@@ -208,7 +208,17 @@ public sealed class DashboardStorageReviewTests
             await new SqliteGrainStorage(Store).WriteStateAsync(name, GrainId.Create(type, key), state);
         }
 
-        public async Task<RelayObservation> Observe() => Assert.IsType<RelayObservation>(await Store.ReadObservationAsync(Now, "observing-application"));
+        public async Task<RelayObservation> Observe()
+        {
+            // A busy or expired sample is explicitly unavailable; retry that result, not a failed content assertion.
+            for (var attempt = 0; attempt < 20; attempt++)
+            {
+                if (await Store.ReadObservationAsync(Now, "observing-application") is { } observation) return observation;
+                if (attempt < 19) await Task.Delay(50);
+            }
+            Assert.True(false, "The fixture did not produce an available observation after 20 samples.");
+            return null!;
+        }
         public void Dispose() => Store.Dispose();
     }
 }
