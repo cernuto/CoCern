@@ -122,7 +122,8 @@ public static class RelayHostBuilderExtensions
             return new SqliteStore(configured is null ? DefaultDatabasePath(environment) : Path.Combine(environment.ContentRootPath, configured), activity, search)
             {
                 // The activity writer counts each call's request and reply tokens, so counting never slows a call.
-                TokenCounter = services.GetRequiredService<TokenOptions>().Enabled ? services.GetRequiredService<ITokenCounter>() : null
+                TokenCounter = services.GetRequiredService<TokenOptions>().Enabled ? services.GetRequiredService<ITokenCounter>() : null,
+                Logger = services.GetService<ILoggerFactory>()?.CreateLogger<SqliteStore>()
             };
         }));
         builder.Services.AddOptions<EndpointOptions>().Configure<IConfiguration>((options, configuration) =>

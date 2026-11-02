@@ -1,4 +1,5 @@
 using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.Logging;
 using Orleans.Runtime;
 using CoCern.Core;
 using CoCern.Domain;
@@ -26,6 +27,9 @@ public sealed partial class SqliteStore : ITaskArchive
         );
 
         """;
+
+    /// <summary>Where the store logs; the host sets it. Storage had no logger before; with none set (tests, tools), nothing is logged.</summary>
+    public ILogger? Logger { get; init; }
 
     /// <summary>Tests set this to fail a commit after its archive rows were written, before the transaction commits.</summary>
     internal Action? ArchiveFault { get; set; }
@@ -60,7 +64,7 @@ public sealed partial class SqliteStore : ITaskArchive
             insert.Parameters.AddWithValue("$json", task.Json);
             // The hub refuses to reuse an archived ID, so a row already there means the same task again: the first copy is kept.
             if (insert.ExecuteNonQuery() == 0)
-                Console.Error.WriteLine($"CoCern archive: {task.RepositoryId}/{BoardOf(key)}/{task.TaskId} is already archived; the first copy is kept.");
+                Logger?.LogWarning("Task {Repository}/{Board}/{Task} is already archived; the first copy is kept.", task.RepositoryId, BoardOf(key), task.TaskId);
             if (!_searchOptions.Enabled) continue;
             mark.Parameters.Clear();
             mark.Parameters.AddWithValue("$state", stateName);

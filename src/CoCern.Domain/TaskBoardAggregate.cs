@@ -121,7 +121,7 @@ internal static class TaskBoardAggregate
         // Tasks moved to the archive since the checkpoint come back as removals: { taskId, archived: true, changeRevision }. A reader from
         // 0 has seen nothing yet, so it gets only live tasks.
         var removed = since == 0 ? Enumerable.Empty<(string Key, JsonNode Item)>() : (state[TaskArchiving.ArchivedKey] as JsonObject ?? new JsonObject())
-            .Select(x => (x.Key, Revision: TaskArchiving.Revision(x.Value))).Where(x => x.Revision > since)
+            .Select(x => (x.Key, Revision: TaskArchiving.Revision(x.Value))).Where(x => x.Revision > since && x.Revision > floor)
             .Select(x => (x.Key, Item: (JsonNode)new JsonObject { ["taskId"] = x.Key, ["archived"] = true, ["changeRevision"] = x.Revision }));
         var all = ObjectAt(state, "tasks").Where(x => Number(x.Value!.AsObject(), "changeRevision") > since).Select(x => (x.Key, Item: (JsonNode)Summary(x.Value!.AsObject())))
             .Concat(removed).OrderBy(x => x.Key, StringComparer.Ordinal).Select(x => x.Item).ToArray();

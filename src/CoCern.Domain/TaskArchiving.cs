@@ -108,26 +108,31 @@ internal static class TaskArchiving
             .SelectMany(task => task["workflow"] is JsonObject workflow ? TaskWorkflow.Dependencies(workflow) : []).ToHashSet(StringComparer.Ordinal);
 
     /// <summary>
-    /// Forgets archived IDs older than <see cref="RelayLimits.ArchivedIdDays"/>, then the oldest past <see cref="RelayLimits.MaxArchivedIds"/>,
-    /// except those a live task depends on, and raises <c>archiveFloor</c> to the newest revision it forgot.
+    /// Bounds what deltas can report: of the IDs with a removal revision, those older than <see cref="RelayLimits.ArchivedIdDays"/>, then
+    /// the oldest past <see cref="RelayLimits.MaxArchivedIds"/>, leave delta memory, and <c>archiveFloor</c> rises to the newest revision
+    /// among them. One a live task depends on stays remembered with revision 0 (counted as completed, never a removal); the rest are
+    /// dropped, as are revision-0 IDs no live task depends on any more. So removals never exceed <see cref="RelayLimits.MaxArchivedIds"/>.
     /// </summary>
     private static void Forget(JsonObject state, DateTimeOffset now)
     {
         if (state[ArchivedKey] is not JsonObject archived || archived.Count == 0) return;
         var referenced = Referenced(state);
         var cutoff = now.AddDays(-RelayLimits.ArchivedIdDays);
-        var free = archived.Where(entry => !referenced.Contains(entry.Key)).Select(entry => (entry.Key, Revision: Revision(entry.Value), At: ArchivedAt(entry.Value))).ToList();
-        var forget = free.Where(entry => entry.At <= cutoff).ToList();
-        var kept = free.Count - forget.Count;
+        var entries = archived.Select(entry => (entry.Key, Revision: Revision(entry.Value), At: ArchivedAt(entry.Value))).ToList();
+        var withRemoval = entries.Where(entry => entry.Revision > 0).ToList();
+        var leave = withRemoval.Where(entry => entry.At <= cutoff).ToList();
+        var kept = withRemoval.Count - leave.Count;
         if (kept > RelayLimits.MaxArchivedIds)
-            forget.AddRange(free.Where(entry => entry.At > cutoff).OrderBy(entry => entry.Revision).ThenBy(entry => entry.Key, StringComparer.Ordinal).Take(kept - RelayLimits.MaxArchivedIds));
-        if (forget.Count == 0) return;
-        var floor = Math.Max(Number(state, FloorKey), forget.Max(entry => entry.Revision));
-        var drop = forget.Select(entry => entry.Key).ToHashSet(StringComparer.Ordinal);
-        var remaining = archived.Where(entry => !drop.Contains(entry.Key)).Select(entry => (entry.Key, entry.Value)).ToList();
+            leave.AddRange(withRemoval.Where(entry => entry.At > cutoff).OrderBy(entry => entry.Revision).ThenBy(entry => entry.Key, StringComparer.Ordinal).Take(kept - RelayLimits.MaxArchivedIds));
+        var stale = entries.Where(entry => entry.Revision == 0 && !referenced.Contains(entry.Key)).ToList();
+        if (leave.Count == 0 && stale.Count == 0) return;
+        var leaving = leave.Select(entry => entry.Key).ToHashSet(StringComparer.Ordinal);
+        var dropping = stale.Select(entry => entry.Key).Concat(leave.Where(entry => !referenced.Contains(entry.Key)).Select(entry => entry.Key)).ToHashSet(StringComparer.Ordinal);
+        var remaining = entries.Where(entry => !dropping.Contains(entry.Key))
+            .Select(entry => (entry.Key, Value: (JsonNode)(leaving.Contains(entry.Key) ? Stub(0, entry.At) : archived[entry.Key]!.DeepClone()))).ToList();
         archived.Clear();
         foreach (var (key, value) in remaining) archived[key] = value;
-        state[FloorKey] = floor;
+        if (leave.Count > 0) state[FloorKey] = Math.Max(Number(state, FloorKey), leave.Max(entry => entry.Revision));
     }
 
     /// <summary>
@@ -160,8 +165,11 @@ internal static class TaskArchiving
             }
         if (state[ArchivedKey] is JsonObject { Count: > 0 } archived)
         {
+            // An ID with a removal revision leaves delta memory after ArchivedIdDays; a revision-0 one goes once nothing depends on it.
             var referenced = Referenced(state);
-            foreach (var entry in archived.Where(entry => !referenced.Contains(entry.Key))) Consider(ArchivedAt(entry.Value).AddDays(RelayLimits.ArchivedIdDays));
+            foreach (var entry in archived)
+                if (Revision(entry.Value) > 0) Consider(ArchivedAt(entry.Value).AddDays(RelayLimits.ArchivedIdDays));
+                else if (!referenced.Contains(entry.Key)) Consider(ArchivedAt(entry.Value));
         }
         return next;
     }

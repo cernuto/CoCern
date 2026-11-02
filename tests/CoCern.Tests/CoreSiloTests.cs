@@ -737,6 +737,36 @@ public sealed class CoreSiloTests
         finally { await host.StopAsync(); }
     }
 
+    [Fact]
+    public async Task A_client_cannot_mark_its_own_dependencies_archived_even_without_an_archive_store()
+    {
+        using var host = new HostBuilder().ConfigureLogging(log => log.ClearProviders()).UseOrleans(silo => silo
+            .UseLocalhostClustering(siloPort: FreePort(), gatewayPort: FreePort(), serviceId: "core-archive-inject-tests", clusterId: Guid.NewGuid().ToString("N"))
+            .AddMemoryGrainStorage("relay"))
+            .ConfigureServices(services => services.AddCoCernCore()).Build();
+        await host.StartAsync();
+        try
+        {
+            var application = host.Services.GetRequiredService<RelayApplication>();
+            var caller = new RelayCaller("alice", true, ["repo"]);
+            Task<RelayReply> Call(string tool, JsonObject args) { args["repositoryId"] = "repo"; args["requestId"] = Guid.NewGuid().ToString("N"); return application.ExecuteAsync(caller, tool, JsonSerializer.SerializeToElement(args)); }
+            var session = JsonNode.Parse((await Call("session_open", new())).DataJson)!.AsObject();
+            var workflow = new JsonObject
+            {
+                ["state"] = "ready", ["dependsOn"] = new JsonArray("never-archived"),
+                ["packet"] = new JsonObject { ["goal"] = "g", ["target"] = "t", ["authorityRef"] = "human", ["restoration"] = "r", ["stopCondition"] = "s" },
+                ["criteria"] = new JsonArray(new JsonObject { ["id"] = "c", ["description"] = "d", ["result"] = "not_run" }), ["blockers"] = new JsonArray()
+            };
+            var injected = await Call("task_update", new()
+            {
+                ["sessionId"] = session["sessionId"]!.DeepClone(), ["sessionToken"] = session["sessionToken"]!.DeepClone(), ["taskId"] = "t", ["expectedVersion"] = 0,
+                ["workflow"] = workflow, ["archivedDependsOn"] = new JsonArray("never-archived")
+            });
+            Assert.Equal(RelayErrorCodes.DependencyUnknown, injected.Code);
+        }
+        finally { await host.StopAsync(); }
+    }
+
     /// <summary>A clock the test moves by hand.</summary>
     private sealed class ManualClock(DateTimeOffset start) : TimeProvider
     {

@@ -950,6 +950,20 @@ public sealed class CoordinationTests
         Assert.True(Board(state, Operations.TaskArchive, new(), days: RelayLimits.ArchivedIdDays + 5).Ok);
         Assert.True(StateJson(state)["archivedTasks"]!.AsObject().ContainsKey("long-gone"));
         Assert.DoesNotContain(Data(Board(state, "task_get", new() { ["sinceRevision"] = 1 }, days: 40))["items"]!.AsArray(), item => item!["taskId"]!.GetValue<string>() == "long-gone");
+
+        // A task archived here that a live task depends on: after 30 days it leaves delta memory (the floor rises past it), so no delta
+        // lists it, but it stays remembered as completed for its dependent.
+        Assert.True(Board(state, "task_update", new() { ["taskId"] = "a", ["expectedVersion"] = 0, ["workflow"] = DependentWorkflow("completed") }, days: 40).Ok);
+        Assert.True(Board(state, "task_update", new() { ["taskId"] = "c", ["expectedVersion"] = 0, ["workflow"] = DependentWorkflow("ready", "a") }, days: 40).Ok);
+        Assert.Equal(1, Data(Board(state, Operations.TaskArchive, new(), days: 71))["archived"]!.GetValue<int>());
+        var revision = StateJson(state)["archivedTasks"]!["a"]![0]!.GetValue<long>();
+        Assert.True(revision > 0);
+        Assert.True(Board(state, Operations.TaskArchive, new(), days: 102).Ok);
+        var after = StateJson(state);
+        Assert.Equal(0, after["archivedTasks"]!["a"]![0]!.GetValue<long>());
+        Assert.Equal(revision, after["archiveFloor"]!.GetValue<long>());
+        Assert.Empty(Data(Board(state, "task_get", new() { ["sinceRevision"] = revision }, days: 102))["items"]!.AsArray().Where(item => item!["archived"] is not null));
+        Assert.True(Board(state, "task_claim", new() { ["taskId"] = "c", ["sessionId"] = "w", ["expectedVersion"] = 1 }, days: 102).Ok);
     }
 
     private static JsonObject DependentWorkflow(string state, params string[] dependsOn)

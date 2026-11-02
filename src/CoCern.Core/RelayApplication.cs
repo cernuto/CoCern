@@ -866,10 +866,14 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
 
     private Task<RelayReply> CallControl(RelayCaller caller, string operation, JsonObject args) => Call(AggregateKinds.Control, AggregateKinds.ControlKey, caller, operation, args);
     private Task<RelayReply> CallSession(RelayCaller caller, string operation, JsonObject args) => Call(AggregateKinds.Session, Text(args, "sessionId"), caller, operation, args);
-    private Task<RelayReply> CallBoard(RelayCaller caller, string operation, JsonObject args) =>
-        archive is not null && operation is RelayTools.TaskUpdate or RelayTools.TaskClaim or RelayTools.ActionBegin or RelayTools.ActionReport or RelayTools.SendMessage or RelayTools.ClaimRenew or RelayTools.ClaimRelease
+    private Task<RelayReply> CallBoard(RelayCaller caller, string operation, JsonObject args)
+    {
+        // Only the hub names archived dependencies; a client's own archivedDependsOn is always dropped, with or without an archive store.
+        if (operation == RelayTools.TaskUpdate) args.Remove("archivedDependsOn");
+        return archive is not null && operation is RelayTools.TaskUpdate or RelayTools.TaskClaim or RelayTools.ActionBegin or RelayTools.ActionReport or RelayTools.SendMessage or RelayTools.ClaimRenew or RelayTools.ClaimRelease
             ? CallTaskWriteAsync(caller, operation, args)
             : Call(AggregateKinds.Board, BoardKey(args), caller, operation, args);
+    }
 
     /// <summary>
     /// A task write, checked against the archive table, which keeps every archived ID after the board forgets it: a new task under an
@@ -879,7 +883,6 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
     private async Task<RelayReply> CallTaskWriteAsync(RelayCaller caller, string operation, JsonObject args)
     {
         var (repository, board, taskId) = (Text(args, "repositoryId"), Text(args, "boardId", "default"), Text(args, "taskId"));
-        args.Remove("archivedDependsOn");
         try
         {
             if (operation == RelayTools.TaskUpdate && args["workflow"] is JsonObject workflow && workflow["dependsOn"] is JsonArray dependsOn)
