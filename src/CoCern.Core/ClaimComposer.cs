@@ -149,13 +149,18 @@ internal sealed class ClaimComposer(Aggregates aggregates)
         // The hub blocks each lock itself rather than having the board deliver: a board waiting on a lock while that lock's outbox waits on
         // the board would stall both until the call timeout. Blocking is idempotent, so the board's own queued blocks are harmless.
         var actionKey = CoordinationStateMachine.ActionKey(args, actionId, attempt);
-        foreach (var resource in Strings(Aggregates.Parse(result)["action"]!["resourceIds"]))
+        var resources = Strings(Aggregates.Parse(result)["action"]!["resourceIds"]).ToArray();
+        JsonObject LockArgs() => new() { ["repositoryId"] = Text(args, "repositoryId"), ["actionId"] = actionId, ["actionKey"] = actionKey, ["sessionId"] = Text(args, "sessionId") };
+        foreach (var resource in resources)
         {
-            var block = await aggregates.Call(AggregateKinds.Lock, resource, caller, Operations.Block, new JsonObject
-            {
-                ["repositoryId"] = Text(args, "repositoryId"), ["actionId"] = actionId, ["actionKey"] = actionKey, ["sessionId"] = Text(args, "sessionId")
-            });
-            if (!block.Ok) return Error(ActionPending, new { actionId, replayAllowed = false, reason = block.Code });
+            var block = await aggregates.Call(AggregateKinds.Lock, resource, caller, Operations.Block, LockArgs());
+            if (block.Ok) continue;
+            // The action is recorded but never ran. Each lock remembers it as resolved, which lifts the blocks this call placed and turns the
+            // board's own queued blocks into no-ops, so no lock stays blocked by it. The action stays open until reported (canceled).
+            foreach (var placed in resources)
+                try { await aggregates.Call(AggregateKinds.Lock, placed, caller, Operations.Unblock, LockArgs()); }
+                catch (Exception exception) when (exception is not OperationCanceledException) { }
+            return Error(ActionPending, new { actionId, replayAllowed = false, reason = block.Code, resourceId = resource, next = "report this action with outcome canceled, then retry" });
         }
         var current = await aggregates.Board(caller, RelayTools.TaskGet, args);
         if (!current.Ok || current.Version != result.Version) return Error(ActionChanged, new { actionId, replayAllowed = false });

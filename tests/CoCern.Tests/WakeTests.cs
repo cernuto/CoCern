@@ -53,7 +53,7 @@ public sealed class WakeTests
     }
 
     [Fact]
-    public async Task Restart_preserves_deduplication_and_uncertain_dispatch_blocks_route()
+    public async Task Restart_preserves_deduplication_and_uncertain_dispatch_holds_the_route_then_never_resends()
     {
         using var fixture = new Fixture { Messages = ["first"] };
         Assert.Equal("queued", await fixture.Reconcile());
@@ -63,11 +63,17 @@ public sealed class WakeTests
         fixture.Messages = ["second"];
         fixture.Dispatcher.Accept = false;
         Assert.Equal("uncertain", await fixture.Reconcile());
+        // Within the hold, even after a restart, the route stays held and nothing is dispatched.
         fixture.Restart();
-        fixture.Clock.Now += TimeSpan.FromMinutes(11);
-        fixture.Messages = ["third"];
+        fixture.Clock.Now += TimeSpan.FromMinutes(5);
+        fixture.Messages = ["second", "third"];
+        fixture.Dispatcher.Accept = true;
         Assert.Equal("uncertain", await fixture.Reconcile());
         Assert.Equal(2, fixture.Dispatcher.Prompts.Count);
+        // After it, new mail wakes the chat again (the uncertain wake's own message stays seen: see the test below).
+        fixture.Clock.Now += TimeSpan.FromMinutes(6);
+        Assert.Equal("queued", await fixture.Reconcile());
+        Assert.Equal(3, fixture.Dispatcher.Prompts.Count);
     }
 
     [Theory]
@@ -91,9 +97,12 @@ public sealed class WakeTests
         fixture.Restart();
         fixture.Route = fixture.Route with { BoardId = "another-board", MachineId = Environment.MachineName.ToLowerInvariant(), ThreadId = "00000000-0000-0000-0000-000000000002" };
         fixture.Configuration = fixture.Configuration with { RelayUrl = "http://127.0.0.1:5271/", Routes = [fixture.Route] };
-        fixture.Clock.Now += TimeSpan.FromMinutes(11);
         fixture.Dispatcher.Accept = true;
+        // Within an uncertain wake's hold the route stays held; after it, the same message is still never sent again.
+        fixture.Clock.Now += TimeSpan.FromMinutes(5);
         Assert.Equal(status == "queued" ? "empty" : "uncertain", await fixture.Reconcile());
+        fixture.Clock.Now += TimeSpan.FromMinutes(6);
+        Assert.Equal("empty", await fixture.Reconcile());
         Assert.Equal(dispatches, fixture.Dispatcher.Prompts.Count);
     }
 

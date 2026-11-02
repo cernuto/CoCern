@@ -38,7 +38,7 @@ internal static class LockAggregate
         var state = context.State;
         if (Text(state, "holder") != context.SessionId || Date(state, "leaseUntil") <= context.Now) return Ok(new { restored = false });
         if (Text(context.Args, Operations.RestoreClaimForField) is { Length: > 0 } restored) state["claimFor"] = restored; else state.Remove("claimFor");
-        CoordinationStateMachine.ForgetRequest(state, context.Caller.PrincipalId, RelayTools.ClaimAcquire, Text(context.Args, Operations.ForgetRequestField));
+        CoordinationStateMachine.ForgetRequest(state, context.Caller.PrincipalId, context.SessionId, RelayTools.ClaimAcquire, Text(context.Args, Operations.ForgetRequestField));
         return Ok(new { restored = true });
     }
 
@@ -92,9 +92,10 @@ internal static class LockAggregate
         var blockers = (state["blockers"] as JsonObject)?.Count ?? 0;
         var live = Date(state, "leaseUntil") > context.Now;
         var owned = holder == context.SessionId && live;
-        var busy = holder.Length > 0 && holder != context.SessionId && (live || blockers > 0) || blockers > 0 && !owned;
-        // held: this session's grant is live, which action_begin needs for each resource its packet declares.
-        return Ok(new { busy, held = owned });
+        // An action already in flight on this lock blocks a new one, even this session's own: its block would be refused after the new action was recorded.
+        var busy = holder.Length > 0 && holder != context.SessionId && (live || blockers > 0) || blockers > 0;
+        // held: this session's grant is live and free, which action_begin needs for each resource its packet declares.
+        return Ok(new { busy, held = owned && blockers == 0 });
     }
 
     private static RelayReply Acquire(AggregateContext context)
@@ -140,7 +141,7 @@ internal static class LockAggregate
         {
             if (blockers.Count > 0) return Error(UnresolvedAction, new { blockers = blockers.Count });
             // A rolled-back task claim releases the grant it took, and its retry must acquire again rather than replay it.
-            CoordinationStateMachine.ForgetRequest(state, context.Caller.PrincipalId, RelayTools.ClaimAcquire, Text(context.Args, Operations.ForgetRequestField));
+            CoordinationStateMachine.ForgetRequest(state, context.Caller.PrincipalId, context.SessionId, RelayTools.ClaimAcquire, Text(context.Args, Operations.ForgetRequestField));
             Release(context, context.SessionId);
         }
         return Ok(new { generation, leaseUntil = Text(state, "leaseUntil"), released = release }, generation);

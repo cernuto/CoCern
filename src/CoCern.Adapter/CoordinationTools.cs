@@ -20,6 +20,20 @@ public static class CoordinationTools
 
     private static IEnumerable<RelayTool> Surface(bool admin, bool chatOnly) => RelayToolCatalog.ForRole(admin).Where(tool => !chatOnly || ChatTools.Contains(tool.Name));
 
+    /// <summary>
+    /// Every chat on a PC shares one principal, and agents reuse simple request IDs ("open-1"), so two chats' session_open calls could
+    /// replay each other's reply and share a session. This adapter (one per chat) makes the ID its own; its own retries still match.
+    /// </summary>
+    internal static JsonElement OwnRequestId(JsonElement arguments)
+    {
+        if (arguments.ValueKind != JsonValueKind.Object || !arguments.TryGetProperty("requestId", out var given) || given.ValueKind != JsonValueKind.String) return arguments;
+        var node = System.Text.Json.Nodes.JsonNode.Parse(arguments.GetRawText())!.AsObject();
+        node["requestId"] = Instance + ":" + given.GetString();
+        return JsonSerializer.SerializeToElement(node);
+    }
+
+    private static readonly string Instance = Guid.NewGuid().ToString("N");
+
     private sealed class ForwardedTool : McpServerTool
     {
         private readonly RelayForwarder _forwarder;
@@ -43,6 +57,7 @@ public static class CoordinationTools
 
         public override Tool ProtocolTool { get; }
 
+
         /// <summary>A hub schema plus one of the adapter's own options (<see cref="InboxWait"/>, <see cref="ConditionalRead"/>).</summary>
         private static JsonElement With(JsonElement schema, string property, object definition)
         {
@@ -55,10 +70,12 @@ public static class CoordinationTools
         public override async ValueTask<CallToolResult> InvokeAsync(RequestContext<CallToolRequestParams> request, CancellationToken cancellationToken = default)
         {
             var arguments = JsonSerializer.SerializeToElement(request.Params.Arguments ?? new Dictionary<string, JsonElement>());
+            if (ProtocolTool.Name == RelayTools.SessionOpen) arguments = CoordinationTools.OwnRequestId(arguments);
             var reply = ProtocolTool.Name == RelayTools.CheckInbox
                 ? await InboxWait.CheckAsync(_forwarder, arguments, InboxWait.PollInterval, cancellationToken)
                 : await ConditionalRead.ForwardAsync(_forwarder, ProtocolTool.Name, arguments, cancellationToken);
             if (reply.Ok && ProtocolTool.Name == RelayTools.SessionOpen) _handoff?.Record(arguments, reply);
+            else if (reply.Ok) _handoff?.Touch(arguments);
             if (_hints is not null)
             {
                 if (reply.Ok && ProtocolTool.Name == RelayTools.SessionOpen) await _hints.ObserveSessionAsync(arguments, reply, cancellationToken);

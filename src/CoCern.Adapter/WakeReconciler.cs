@@ -19,7 +19,7 @@ public sealed class WakeReconciler(WakeConfiguration configuration, WakeState st
         if (File.Exists(configuration.StopFile)) return "stopped";
         // The private session inbox is independent of mutable local routing metadata.
         var key = WakeState.Key(new Uri(configuration.RelayUrl, UriKind.Absolute).AbsoluteUri, route.RepositoryId, session.SessionId);
-        if (state.IsUncertain(key)) return "uncertain";
+        if (state.IsUncertain(key, (clock ?? TimeProvider.System).GetUtcNow())) return "uncertain";
         // The attention item that may wake the chat now (top tier, or one held past the hub's idle limit), and a line naming the top item.
         string? attentionWake = null, attentionLine = null;
         // A hub with attention on answers with an attention block. Then only its wake candidate wakes the chat: a message is an info

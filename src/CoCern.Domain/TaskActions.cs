@@ -39,6 +39,21 @@ internal static class TaskActions
     public static bool HoldsTask(JsonObject task) =>
         (task["actions"] as JsonObject ?? new()).Any(x => x.Value is JsonObject action && IsUnresolved(action) && action["recovery"] is not JsonObject);
 
+    /// <summary>
+    /// Brings a task back under <see cref="RelayLimits.MaxTaskBytes"/> for a report that settles an action: drops the bodies of the oldest
+    /// reports, then the oldest reports, then the oldest messages, always keeping the newest of each.
+    /// </summary>
+    private static void MakeRoom(JsonObject task, JsonArray history)
+    {
+        var size = ByteSize(task);
+        for (var i = 0; i < history.Count - 1 && size > RelayLimits.MaxTaskBytes; i++)
+            if (history[i] is JsonObject old && old["report"] is { } body) { size -= ByteSize(body) - 4; old["report"] = null; }
+        size = ByteSize(task);
+        while (history.Count > 1 && size > RelayLimits.MaxTaskBytes) { size -= ByteSize(history[0]) + 1; history.RemoveAt(0); }
+        if (task["messages"] is JsonArray messages)
+            while (messages.Count > 1 && size > RelayLimits.MaxTaskBytes) { size -= ByteSize(messages[0]) + 1; messages.RemoveAt(0); }
+    }
+
     private static bool IsTerminal(string status) => status is "completed" or "failed" or "canceled" or Abandoned;
 
     /// <summary>The outcomes a recovery may give: it settles the action, so it can never leave it in flight under a session that did not start it.</summary>
@@ -158,7 +173,10 @@ internal static class TaskActions
         if (!Restorations.All.Contains(restoration)) return Error(InvalidRestoration);
         if (Text(update, "restoration") == "accepted" && Text(action, "restoration") != "accepted" && !caller.IsAdministrator) return Error(AdministratorRequired);
         var history = ArrayAt(task, "reports");
-        if (history.Count >= MaxHistory) return Error(CapacityExceeded);
+        // A report on an unresolved action must always land, or the action holds its task and locks for good: it evicts the oldest report.
+        var settling = IsUnresolved(action);
+        if (history.Count >= MaxHistory && !settling) return Error(CapacityExceeded);
+        while (history.Count >= MaxHistory) history.RemoveAt(0);
         var entry = new JsonObject
         {
             ["actionId"] = id, ["attempt"] = attempt, ["outcome"] = outcome, ["restoration"] = restoration, ["report"] = update["report"]?.DeepClone(),
@@ -206,6 +224,7 @@ internal static class TaskActions
                 ["principalId"] = caller.PrincipalId, ["sessionId"] = session, ["administrator"] = caller.IsAdministrator, ["at"] = context.Now.ToString("O"), ["priorStatus"] = status
             };
         history.Add(entry);
+        if (settling) MakeRoom(task, history);
         var actionKey = CoordinationStateMachine.ActionKey(args, id, Number(action, "attempt"));
         var (owner, unresolved) = (OwnerSession(action), IsUnresolved(action));
         if (wasUnresolved && (!unresolved || owner != priorOwner)) Track(context, priorOwner, actionKey, open: false);

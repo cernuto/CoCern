@@ -212,7 +212,9 @@ public sealed class ReviewFixTests
     [InlineData(Operations.AttentionRaise, RelayErrorCodes.DeliveryUnavailable, false, "Retry")]
     [InlineData(Operations.AttentionRaise, RelayErrorCodes.SessionUnknown, false, "Drop")]
     [InlineData(Operations.AttentionRaise, RelayErrorCodes.SessionUnknown, true, "DropAsFailedOrderRun")]
-    [InlineData(Operations.Block, RelayErrorCodes.ClaimRequired, false, "Retry")]
+    [InlineData(Operations.Block, RelayErrorCodes.ClaimRequired, false, "Drop")]
+    [InlineData(Operations.Block, RelayErrorCodes.Busy, false, "Drop")]
+    [InlineData(Operations.Block, RelayErrorCodes.StorageFailure, false, "Retry")]
     public void A_refused_delivery_is_retried_dropped_or_counted_as_a_failed_order_run(string operation, string code, bool fromOrder, string expected)
     {
         var effect = new DurableEffect("e", AggregateKinds.Session, "s", operation, "{}", Now);

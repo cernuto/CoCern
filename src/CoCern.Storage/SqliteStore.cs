@@ -25,7 +25,8 @@ public sealed partial class SqliteStore : IDueWorkSource, IDisposable, IAsyncDis
         _searchOptions = search ?? new();
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         DatabasePath = Path.GetFullPath(databasePath);
-        Directory.CreateDirectory(Path.GetDirectoryName(DatabasePath)!);
+        // A folder this creates is this user's only; an existing one (which may be shared on purpose) is left as it is.
+        CreatePrivateDirectory(Path.GetDirectoryName(DatabasePath)!, tightenExisting: false);
         RestrictToOwner(DatabasePath);
         var existingDatabase = File.Exists(DatabasePath) && new FileInfo(DatabasePath).Length != 0;
         _ownership = AcquireOwnership(DatabasePath);
@@ -59,6 +60,17 @@ public sealed partial class SqliteStore : IDueWorkSource, IDisposable, IAsyncDis
     }.ToString();
 
     /// <summary>The database holds session tokens and messages, so on Unix it is created, or tightened to, owner read/write only; Windows keeps its inherited ACL.</summary>
+    /// <summary>Creates the folder owner-only on Unix (Windows keeps its inherited ACL); <paramref name="tightenExisting"/> also tightens one already there, best effort.</summary>
+    internal static void CreatePrivateDirectory(string path, bool tightenExisting)
+    {
+        if (OperatingSystem.IsWindows()) { Directory.CreateDirectory(path); return; }
+        const UnixFileMode owner = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
+        if (!Directory.Exists(path)) { Directory.CreateDirectory(path, owner); return; }
+        if (!tightenExisting) return;
+        try { if ((File.GetUnixFileMode(path) & ~owner) != 0) File.SetUnixFileMode(path, owner); }
+        catch (Exception exception) when (exception is UnauthorizedAccessException or IOException) { }
+    }
+
     internal static void RestrictToOwner(string path, bool createIfMissing = true)
     {
         if (OperatingSystem.IsWindows()) return;

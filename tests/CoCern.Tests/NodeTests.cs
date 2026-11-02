@@ -987,7 +987,8 @@ public sealed class NodeTests : IDisposable
         Assert.False(File.Exists(pid));
 
         // A process that has exited.
-        using var exited = Process.Start(OperatingSystem.IsWindows() ? new ProcessStartInfo("cmd.exe", "/c exit 0") { CreateNoWindow = true, UseShellExecute = false } : new ProcessStartInfo("/bin/sh", "-c true"))!;
+        // It lives about a second, so its start time can be read before it exits.
+        using var exited = Process.Start(OperatingSystem.IsWindows() ? new ProcessStartInfo("cmd.exe", "/c ping -n 2 127.0.0.1 >nul") { CreateNoWindow = true, UseShellExecute = false } : new ProcessStartInfo("/bin/sh", ["-c", "sleep 1"]))!;
         var exitedStart = exited.StartTime.ToUniversalTime();
         exited.WaitForExit();
         ClaudeWaiter.WritePid(DataDir, chatId, exited.Id, exitedStart);
