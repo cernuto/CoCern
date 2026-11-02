@@ -107,7 +107,12 @@ internal static class SessionAttention
                 : (taskId.Length == 0 || item.TaskId == taskId && item.BoardId == boardId) && (taskIds is null || taskIds.Contains(item.TaskId) && item.BoardId == boardId)
                   && (subject.Length == 0 || item.Subject == subject) && (kinds is null || kinds.Contains(item.Kind));
             if (!matches) continue;
-            RememberClosed(state, item.Key, Math.Max(revision, Number(items[item.Id]!.AsObject(), "revision")));
+            var itemRevision = Number(items[item.Id]!.AsObject(), "revision");
+            // An item with its own subject (an order's offer) counts revisions apart from a close that names no subject.
+            var sameCounter = revision > 0 && (subject.Length > 0 || item.Subject.Length == 0);
+            // A reordered close older than the item leaves it open.
+            if (sameCounter && itemRevision > revision) continue;
+            RememberClosed(state, item.Key, sameCounter ? revision : itemRevision);
             Tombstone(state, item.Key, items[item.Id]!.AsObject(), context.Now);
             items.Remove(item.Id); closed++;
         }

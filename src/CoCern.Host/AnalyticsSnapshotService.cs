@@ -14,6 +14,8 @@ internal sealed record AnalyticsSettings(bool Enabled, TimeSpan SnapshotInterval
         var interval = configuration.GetValue("Relay:Analytics:SnapshotInterval", TimeSpan.FromMinutes(RelayLimits.DefaultAnalyticsSnapshotMinutes));
         if (interval < TimeSpan.FromMinutes(RelayLimits.MinAnalyticsSnapshotMinutes))
             throw new InvalidOperationException($"Relay:Analytics:SnapshotInterval must be at least {RelayLimits.MinAnalyticsSnapshotMinutes} minute.");
+        // Task.Delay takes at most about 49 days; a longer wait would stop the hub.
+        if (interval > TimeSpan.FromDays(30)) throw new InvalidOperationException("Relay:Analytics:SnapshotInterval must be at most 30 days.");
         // By default snapshots sit beside the database, which is data/analytics for the default data/relay.db.
         var configured = configuration["Relay:Analytics:Directory"];
         var directory = string.IsNullOrWhiteSpace(configured) ? Path.Combine(Path.GetDirectoryName(store.DatabasePath)!, "analytics") : Path.GetFullPath(Path.Combine(environment.ContentRootPath, configured));

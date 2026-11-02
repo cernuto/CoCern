@@ -26,6 +26,9 @@ internal static class RelayRequestGuard
         if (!caller.MayAccess(Text(args, "repositoryId"))) return Replies.Error(RepositoryDenied);
         if (tool.IsMutation && Text(args, "requestId").Length == 0) return Replies.Error(RequestIdRequired);
         if (!IdentifiersFit(args)) return Replies.Error(InvalidArguments);
+        // replyTo names a message: a bounded single-line identifier, never free text.
+        if (args["replyTo"] is { } replyTo && (replyTo is not JsonValue replyValue || !replyValue.TryGetValue<string>(out var replyId) || replyId.Length > RelayLimits.MaxIdentifierLength || replyId.Any(char.IsControl)))
+            return Replies.Error(InvalidArguments, new { field = "replyTo" });
         if (tool.Name == RelayTools.Search && SearchProblem(args) is { } field) return Replies.Error(InvalidArguments, new { field });
         if (tool.Name == RelayTools.AnalyticsQuery && AnalyticsProblem(args) is { } analyticsField) return Replies.Error(InvalidArguments, new { field = analyticsField });
         if (tool.Name is RelayTools.DocSearch or RelayTools.DocSection or RelayTools.DocSync && DocProblem(tool.Name, args) is { } docField) return Replies.Error(InvalidArguments, new { field = docField });

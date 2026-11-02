@@ -16,7 +16,7 @@ public sealed record AdapterReply(bool Ok, string Code, JsonElement? Data = null
 
 public sealed class RelayForwarder(HttpClient client, AdapterOptions options)
 {
-    public const int MaxRequestBytes = 64 * 1024;
+    public const int MaxRequestBytes = RelayLimits.MaxPayloadBytes; // the hub refuses anything larger
     public const int MaxResponseBytes = 128 * 1024;
     private const string ResponseTooLarge = "response_too_large";
 

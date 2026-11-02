@@ -158,7 +158,7 @@ internal static class ControlAggregate
                 tracked = open.Remove(key);
                 if (!closed.ContainsKey(key) && closed.Count >= RelayLimits.MaxSessionClosedActions)
                     closed.Remove(closed.OrderBy(entry => Seconds(entry.Value)).ThenBy(entry => entry.Key, StringComparer.Ordinal).First().Key);
-                closed[key] = at;
+                closed[key] = Math.Max(at, Seconds(closed[key])); // a late, older close never lowers it
             }
         }
         if (open.Count == 0) session.Remove(OpenActionsKey);

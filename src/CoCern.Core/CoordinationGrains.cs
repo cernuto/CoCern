@@ -149,7 +149,8 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
             }
             candidate = Clone(persistent.State);
         }
-        if (candidate.DueWork.RemoveAll(x => (workId.Length == 0 || x.Id == workId) && x.DueAt <= now) > 0 && !await CommitAsync(candidate)) return Replies.Error(RelayErrorCodes.StorageFailure);
+        // A filtered dispatch (one operation or action) ran no due checks, so it must not clear them.
+        if (operation.Length == 0 && actionKey.Length == 0 && candidate.DueWork.RemoveAll(x => (workId.Length == 0 || x.Id == workId) && x.DueAt <= now) > 0 && !await CommitAsync(candidate)) return Replies.Error(RelayErrorCodes.StorageFailure);
         if (candidate.Effects.Any(Selected)) return Replies.Error(RelayErrorCodes.DeliveryPending);
         return Replies.Ok(new { dispatched = true });
     }
@@ -219,6 +220,7 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
             uncertainCommit = true;
             persistent.State = previous;
             try { await persistent.ReadStateAsync(); uncertainCommit = false; }
+            catch (Exception) { /* Still uncertain: every call answers StorageFailure until the grain reactivates. */ }
             finally { DeactivateOnIdle(); }
             return false;
         }

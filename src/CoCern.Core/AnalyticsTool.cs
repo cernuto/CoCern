@@ -55,7 +55,7 @@ public sealed class AnalyticsTool(IAnalyticsQueries queries, bool allowAdHocSql,
                 _ => Error(AnalyticsFailed, new { message = exception.Message })
             };
         }
-        var rows = new JsonArray(result.Rows.Select(row => (JsonNode)new JsonArray(row.Select(value => JsonSerializer.SerializeToNode(value)).ToArray())).ToArray());
+        var rows = new JsonArray(result.Rows.Select(row => (JsonNode)new JsonArray(row.Select(value => JsonSerializer.SerializeToNode(value is double number && !double.IsFinite(number) ? number.ToString(System.Globalization.CultureInfo.InvariantCulture) : value)).ToArray())).ToArray());
         var reply = new JsonObject
         {
             ["cols"] = new JsonArray(result.Columns.Select(column => (JsonNode)column).ToArray()),

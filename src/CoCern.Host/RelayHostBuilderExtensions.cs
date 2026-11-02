@@ -67,29 +67,23 @@ public static class RelayHostBuilderExtensions
                 DefaultExpiryDays = configuration.GetValue("Relay:Orders:DefaultExpiryDays", RelayLimits.DefaultOrderExpiryDays)
             }.Validated();
         });
-        // The search port is passed only when the store keeps an index; otherwise the search tool answers SearchUnavailable. Likewise
-        // analytics_query gets the analytics port only when analytics is on, and answers AnalyticsUnavailable otherwise.
         builder.Services.AddSingleton(services => TokenSettings(services.GetRequiredService<IConfiguration>()));
         builder.Services.AddSingleton(services => FeedbackSettings(services.GetRequiredService<IConfiguration>()));
+        // A port that is off is passed as null, and its tools answer *Unavailable (search, analytics, anomaly, doc cache, feedback).
         builder.Services.Replace(ServiceDescriptor.Singleton(services => Warmed(new RelayApplication(
             services.GetRequiredService<Orleans.IGrainFactory>(), services.GetService<IMachineDirectory>(), services.GetService<IActivitySink>(),
             services.GetService<SqliteStore>() is { SearchEnabled: true } store ? store : null, services.GetRequiredService<AttentionOptions>(),
             services.GetService<IAnalyticsQueries>() is { } queries
                 ? new AnalyticsTool(queries, services.GetRequiredService<IConfiguration>().GetValue("Relay:Analytics:AllowAdHocSql", true), services.GetRequiredService<ILoggerFactory>().CreateLogger<AnalyticsTool>())
                 : null,
-            // The anomaly monitor runs only with analytics on; its grain checks the same before every check.
             services.GetService<IAnalyticsQueries>() is not null ? services.GetRequiredService<AnomalyOptions>() : null,
             services.GetRequiredService<OrderOptions>(),
-            // The doc cache tools get their port only when Relay:DocCache:Enabled is on (the default), and answer DocCacheUnavailable otherwise.
             services.GetService<DocCacheTool>(),
-            // Token counting is on by default; every tool is compacted to its budget, which sits at its byte cap, unless Relay:Tokens settings say otherwise.
             services.GetRequiredService<ITokenCounter>(), services.GetRequiredService<TokenOptions>(),
-            // The feedback rules exist only with tips or proposed team rules on, both on by default.
             services.GetRequiredService<FeedbackOptions>() is { Enabled: true } feedback
                 ? new FeedbackRules(feedback, services.GetRequiredService<ITokenCounter>(), services.GetService<SqliteStore>())
                 : null,
-            // Archived tasks are read back from the store's task_archive.
-            services.GetService<SqliteStore>()))));
+            services.GetService<SqliteStore>())))); // the task archive
         // One shared tokenizer for every token count; it loads its vocabulary on first use.
         builder.Services.AddSingleton<ITokenCounter, O200kTokenCounter>();
         builder.Services.AddDocCache();
@@ -192,10 +186,6 @@ public static class RelayHostBuilderExtensions
         });
     }
 
-    /// <summary>
-    /// <c>Relay:Attention:AnomalyInterval</c> (default 1 hour; 0 turns the monitor off) and per-query thresholds under
-    /// <c>Relay:Attention:AnomalyThresholds:&lt;query&gt;</c> with <c>Ratio</c> (0 turns that check off), <c>MinSamples</c> and, for <c>quality_guardrails</c> closures, <c>DropRatio</c>.
-    /// </summary>
     /// <summary>Counts the tool definitions (and loads the tokenizer) in the background at startup, so no call waits for it.</summary>
     private static RelayApplication Warmed(RelayApplication application)
     {
@@ -226,6 +216,10 @@ public static class RelayHostBuilderExtensions
         MinFollowRate = configuration.GetValue("Relay:Feedback:MinFollowRate", RelayLimits.DefaultMinFollowRate)
     }.Validated();
 
+    /// <summary>
+    /// <c>Relay:Attention:AnomalyInterval</c> (default 1 hour; 0 turns the monitor off) and per-query thresholds under
+    /// <c>Relay:Attention:AnomalyThresholds:&lt;query&gt;</c> with <c>Ratio</c> (0 turns that check off), <c>MinSamples</c> and, for <c>quality_guardrails</c> closures, <c>DropRatio</c>.
+    /// </summary>
     private static AnomalyOptions AnomalySettings(IConfiguration configuration)
     {
         var thresholds = new Dictionary<string, AnomalyThreshold>(StringComparer.Ordinal);

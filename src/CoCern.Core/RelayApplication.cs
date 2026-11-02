@@ -294,7 +294,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         if (reply.Code is not (TaskArchived or NotFound) || archive is null || Text(args, "taskId") is not { Length: > 0 } taskId) return reply;
         string? json;
         try { json = await archive.ReadArchivedTaskAsync(Text(args, "repositoryId"), Text(args, "boardId", "default"), taskId, cancellationToken); }
-        catch (Exception exception) when (exception is System.Data.Common.DbException or ObjectDisposedException) { return Error(Unavailable); }
+        catch (Exception exception) when (IsStoreFault(exception)) { return Error(Unavailable); }
         return json is null ? reply : ArchivedTasks.Read(args, json);
     }
 
@@ -313,7 +313,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         // The index is a read-only copy of committed state: a database fault, or a store closing during shutdown, makes search unavailable
         // for this call, never an argument error or an internal error.
         try { hits = await search.SearchAsync(Text(args, "repositoryId"), Text(args, "sessionId"), Text(args, "query"), kinds, limit, status.Length > 0 ? status : null, cancellationToken); }
-        catch (Exception exception) when (exception is System.Data.Common.DbException or ObjectDisposedException) { return Error(Unavailable); }
+        catch (Exception exception) when (IsStoreFault(exception)) { return Error(Unavailable); }
         var items = new JsonArray();
         foreach (var hit in hits)
         {
@@ -507,7 +507,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
     private async Task<RelayReply> ResourceClaimAsync(RelayCaller caller, string tool, JsonObject args)
     {
         // Only task_claim names the task claim a grant serves; a client's own value is dropped (it is also left out of the fingerprint).
-        args.Remove("taskClaimGeneration");
+        args.Remove("taskClaimGeneration"); args.Remove(Operations.ForgetRequestField);
         var resolved = await Resolve(caller, args, Text(args, "resourceId"));
         if (!resolved.Ok) return resolved;
         return await Call(AggregateKinds.Lock, Text(Parse(resolved), "resourceId"), caller, tool, args);
@@ -762,6 +762,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         foreach (var grant in acquired)
         {
             var release = args.DeepClone().AsObject(); release["generation"] = grant.Generation; release.Remove("requestId");
+            release[Operations.ForgetRequestField] = Text(args, "requestId") + ":resource:" + grant.Resource;
             await Call(AggregateKinds.Lock, grant.Resource, caller, RelayTools.ClaimRelease, release);
         }
         var claimed = Parse(task);
@@ -910,6 +911,8 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
             var outcomes = new JsonArray();
             foreach (var item in claims.Take(RelayLimits.MaxClaimResources))
             {
+                // The write has committed: a malformed entry gets its own outcome, never an error for the whole call.
+                if (item is not JsonObject) { outcomes.Add(JsonSerializer.SerializeToNode(new { ok = false, code = InvalidArguments })); continue; }
                 var renew = args.DeepClone().AsObject(); renew.Remove("requestId"); renew["resourceId"] = item!["resourceId"]?.DeepClone(); renew["generation"] = item["generation"]?.DeepClone();
                 var resolved = authorization.Ok ? await Resolve(caller, renew, Text(renew, "resourceId")) : authorization;
                 var result = resolved.Ok ? await Call(AggregateKinds.Lock, Text(Parse(resolved), "resourceId"), caller, RelayTools.ClaimRenew, renew) : resolved;
@@ -963,12 +966,15 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
             if (taskId.Length > 0 && operation == RelayTools.TaskUpdate && ExpectedVersionMatches(args, 0) && (await archive!.ArchivedIdsAsync(repository, board, [taskId])).Count > 0)
                 return Error(TaskArchived, new { taskId, archived = true });
         }
-        catch (Exception exception) when (exception is System.Data.Common.DbException or ObjectDisposedException) { return Error(Unavailable); }
+        catch (Exception exception) when (IsStoreFault(exception)) { return Error(Unavailable); }
         var reply = await Call(AggregateKinds.Board, BoardKey(args), caller, operation, args);
         if (reply.Code != NotFound || taskId.Length == 0) return reply;
         try { return (await archive!.ArchivedIdsAsync(repository, board, [taskId])).Count > 0 ? Error(TaskArchived, new { taskId, archived = true }) : reply; }
-        catch (Exception exception) when (exception is System.Data.Common.DbException or ObjectDisposedException) { return reply; }
+        catch (Exception exception) when (IsStoreFault(exception)) { return reply; }
     }
+    /// <summary>The store behind a port is faulted or closing: the call answers Unavailable instead of failing.</summary>
+    private static bool IsStoreFault(Exception exception) => exception is System.Data.Common.DbException or ObjectDisposedException;
+
     private Task<RelayReply> Call(string kind, string key, RelayCaller caller, string operation, JsonObject args) => CoordinationGrain.Aggregate(grains, kind, key).ExecuteAsync(caller, operation, args.ToJsonString());
 
     private sealed class CallTrace

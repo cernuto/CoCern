@@ -2,25 +2,12 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text;
 using System.Text.RegularExpressions;
-using Microsoft.ML.Tokenizers;
 using Orleans;
 using Orleans.Runtime;
 using CoCern.Contracts;
 using CoCern.Core;
 
 namespace CoCern.Host;
-
-/// <summary>The shared token counter: the o200k vocabulary, loaded once per process on first use and shared by every caller.</summary>
-internal sealed class O200kTokenCounter : ITokenCounter
-{
-    private static readonly Lazy<Tokenizer> tokenizer = new(() => TiktokenTokenizer.CreateForEncoding("o200k_base"), LazyThreadSafetyMode.ExecutionAndPublication);
-
-    public string Encoding => "o200k_base";
-
-    public int Count(string text) => text.Length == 0 ? 0 : tokenizer.Value.CountTokens(text);
-
-    public int PrefixLength(string text, int maxTokens) => maxTokens <= 0 || text.Length == 0 ? 0 : tokenizer.Value.GetIndexByTokenCount(text, maxTokens, out _, out _);
-}
 
 /// <summary>One include pattern and the spec name its files belong to.</summary>
 internal sealed record DocPattern(string Glob, string Spec)
@@ -116,7 +103,7 @@ internal sealed record DocCacheSettings(bool Enabled, int SyncMinutes, int IdleM
     }
 }
 
-/// <summary>Path patterns as git's <c>:(glob)</c> magic reads them: <c>*</c> and <c>?</c> stay within a folder, <c>**/</c> spans folders.</summary>
+/// <summary>Path patterns as git's <c>:(glob)</c> magic reads them: <c>*</c> and <c>?</c> stay within a folder; <c>**</c> spans folders only as a whole segment.</summary>
 internal static class DocGlob
 {
     private static readonly Regex GlobCharacters = new("^[A-Za-z0-9._/*?-]+$", RegexOptions.CultureInvariant);
@@ -127,8 +114,11 @@ internal static class DocGlob
         var pattern = new StringBuilder("^");
         for (var i = 0; i < glob.Length; i++)
         {
-            if (string.CompareOrdinal(glob, i, "**/", 0, 3) == 0) { pattern.Append("(?:.*/)?"); i += 2; }
-            else if (string.CompareOrdinal(glob, i, "**", 0, 2) == 0) { pattern.Append(".*"); i += 1; }
+            // As in git, ** spans folders only as a whole segment (**/ at the start or after /, or a trailing /**); elsewhere it is *.
+            var segmentStart = i == 0 || glob[i - 1] == '/';
+            if (segmentStart && string.CompareOrdinal(glob, i, "**/", 0, 3) == 0) { pattern.Append("(?:.*/)?"); i += 2; }
+            else if (segmentStart && i + 2 == glob.Length && string.CompareOrdinal(glob, i, "**", 0, 2) == 0) { pattern.Append(".*"); i += 1; }
+            else if (string.CompareOrdinal(glob, i, "**", 0, 2) == 0) { pattern.Append("[^/]*"); i += 1; }
             else if (glob[i] == '*') pattern.Append("[^/]*");
             else if (glob[i] == '?') pattern.Append("[^/]");
             else pattern.Append(Regex.Escape(glob[i].ToString()));
@@ -172,7 +162,8 @@ internal class GitCli
         timeout.CancelAfter(TimeSpan.FromSeconds(RelayLimits.DocGitTimeoutSeconds));
         using var process = Process.Start(start) ?? throw new InvalidOperationException("git did not start.");
         process.StandardInput.Close();
-        var error = ReadAsync(process.StandardError.BaseStream, 4_096, timeout.Token);
+        // stderr is drained to the end (keeping the first 4 KB), so a chatty git never blocks on a full pipe.
+        var error = ReadAsync(process.StandardError.BaseStream, 4_096, timeout.Token, drain: true);
         try
         {
             var (output, truncated) = await ReadAsync(process.StandardOutput.BaseStream, maxOutputBytes, timeout.Token);
@@ -192,8 +183,11 @@ internal class GitCli
         }
     }
 
-    /// <summary>Reads at most <paramref name="maximum"/> bytes; one more means the output was cut off, and reading stops there.</summary>
-    private static async Task<(byte[] Output, bool Truncated)> ReadAsync(Stream stream, int maximum, CancellationToken cancellationToken)
+    /// <summary>
+    /// Keeps at most <paramref name="maximum"/> bytes; one more means the output was cut off. Reading then stops (the caller kills git),
+    /// unless <paramref name="drain"/> asks to read on to the end and discard the rest.
+    /// </summary>
+    private static async Task<(byte[] Output, bool Truncated)> ReadAsync(Stream stream, int maximum, CancellationToken cancellationToken, bool drain = false)
     {
         var buffer = new MemoryStream();
         var chunk = new byte[81_920];
@@ -201,10 +195,10 @@ internal class GitCli
         int read;
         while ((read = await stream.ReadAsync(chunk, cancellationToken)) > 0)
         {
+            if (truncated) continue;
             var keep = (int)Math.Min(read, maximum + 1L - buffer.Length);
             buffer.Write(chunk, 0, keep);
-            // Past the cap: stop reading now, and the caller kills git at once.
-            if (buffer.Length > maximum) { truncated = true; buffer.SetLength(maximum); break; }
+            if (buffer.Length > maximum) { truncated = true; buffer.SetLength(maximum); if (!drain) break; }
         }
         return (buffer.ToArray(), truncated);
     }
@@ -394,7 +388,7 @@ internal sealed class DocSyncRunner(DocCacheSettings settings, GitCli git, IGrai
     private readonly ConcurrentDictionary<string, SemaphoreSlim> locks = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, long> lastManual = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, (string? Branch, Lazy<Task<DocSyncOutcome>> Run)> requests = new(StringComparer.Ordinal);
-    private readonly ConcurrentQueue<string> requestOrder = new();
+    private readonly ConcurrentQueue<(string Key, Lazy<Task<DocSyncOutcome>> Run)> requestOrder = new();
     private readonly ConcurrentDictionary<string, byte> localNoted = new(StringComparer.Ordinal);
     private const int RememberedRequests = 64;
 
@@ -413,8 +407,10 @@ internal sealed class DocSyncRunner(DocCacheSettings settings, GitCli git, IGrai
         var stored = requests.GetOrAdd(key, (branch, run));
         if (ReferenceEquals(stored.Run, run))
         {
-            requestOrder.Enqueue(key);
-            while (requestOrder.Count > RememberedRequests && requestOrder.TryDequeue(out var old)) requests.TryRemove(old, out _);
+            requestOrder.Enqueue((key, run));
+            // Evict only the entry that was queued: a failed run's retry stores a new one under the same key.
+            while (requestOrder.Count > RememberedRequests && requestOrder.TryDequeue(out var old))
+                if (requests.TryGetValue(old.Key, out var current) && ReferenceEquals(current.Run, old.Run)) requests.TryRemove(new KeyValuePair<string, (string?, Lazy<Task<DocSyncOutcome>>)>(old.Key, current));
         }
         else if (stored.Branch != branch) throw new DocSyncException(DocSyncError.RequestConflict, "This requestId was already used for a doc_sync with another branch.");
         try { return await stored.Run.Value.WaitAsync(cancellationToken); }
