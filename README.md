@@ -135,6 +135,8 @@ dotnet build CoCern.slnx -c Release
 dotnet test CoCern.slnx -c Release
 ```
 
+For an end-to-end check, `python scripts/Smoke-CoCern.py` starts a throwaway hub from the build and runs 46 happy- and sad-path checks: sign-in, tasks, claims, messages, the adapter, the dashboard, Connect and joining a PC. It uses its own temporary folders and ports, never your hub or app settings, and its exit code is the number of failed checks.
+
 On Windows the tests run offline. Elsewhere, 10 setup tests fail because they need Windows, and the analytics tests download DuckDB's `sqlite` extension once (or set `COCERN_DUCKDB_EXTENSIONS` to a folder that has it).
 
 | Folder | What's in it |
