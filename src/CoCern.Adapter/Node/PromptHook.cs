@@ -15,7 +15,6 @@ namespace CoCern.Adapter.Node;
 public static class PromptHook
 {
     internal const string CacheFolder = "hooks";
-    private const int MaxInputChars = 64 * 1024;
 
     /// <summary>Reads the hook input, prints at most one line and returns 0, whatever happens.</summary>
     public static Task<int> RunAsync(TextReader input, TextWriter output, string nodeFolder) => RunAsync(input, output, nodeFolder, null, null);
@@ -27,10 +26,10 @@ public static class PromptHook
             // One deadline covers reading the input and the hub call together.
             var timeout = Timeout(Environment.GetEnvironmentVariable("COCERN_HOOK_TIMEOUT_MS"));
             var started = System.Diagnostics.Stopwatch.StartNew();
-            var text = await ReadInputAsync(input).WaitAsync(timeout);
+            var chat = await ReadSessionIdAsync(input).WaitAsync(timeout);
             var remaining = timeout - started.Elapsed;
             if (remaining <= TimeSpan.Zero) return 0;
-            var line = await LineAsync(text, nodeFolder, remaining, handler, clock);
+            var line = await LineForChatAsync(chat, nodeFolder, remaining, handler, clock);
             if (line.Length > 0) await output.WriteLineAsync(line);
         }
         catch (Exception) { /* A hook must never fail the human's message. */ }
@@ -42,16 +41,19 @@ public static class PromptHook
         TimeSpan.FromMilliseconds(int.TryParse(setting, out var ms) && ms is > 0 and <= RelayLimits.MaxPromptHookTimeoutMs ? ms : RelayLimits.DefaultPromptHookTimeoutMs);
 
     /// <summary>The line to print for one hook input, or empty. All work, the hub call included, ends within <paramref name="timeout"/>.</summary>
-    internal static async Task<string> LineAsync(string input, string nodeFolder, TimeSpan timeout, HttpMessageHandler? handler = null, TimeProvider? clock = null)
+    internal static async Task<string> LineAsync(string input, string nodeFolder, TimeSpan timeout, HttpMessageHandler? handler = null, TimeProvider? clock = null) =>
+        await LineForChatAsync(await ReadSessionIdAsync(new StringReader(input)), nodeFolder, timeout, handler, clock);
+
+    private static async Task<string> LineForChatAsync(string? chat, string nodeFolder, TimeSpan timeout, HttpMessageHandler? handler, TimeProvider? clock)
     {
         using var limit = new CancellationTokenSource(timeout);
-        try { return await ComputeAsync(input, Path.GetFullPath(nodeFolder), handler, clock ?? TimeProvider.System, limit.Token).WaitAsync(timeout); }
+        try { return await ComputeAsync(chat, Path.GetFullPath(nodeFolder), handler, clock ?? TimeProvider.System, limit.Token).WaitAsync(timeout); }
         catch (Exception) { return ""; }
     }
 
-    private static async Task<string> ComputeAsync(string input, string folder, HttpMessageHandler? handler, TimeProvider clock, CancellationToken cancellationToken)
+    private static async Task<string> ComputeAsync(string? chat, string folder, HttpMessageHandler? handler, TimeProvider clock, CancellationToken cancellationToken)
     {
-        if (JsonNode.Parse(input) is not JsonObject hook || hook["session_id"] is not JsonValue value || !value.TryGetValue<string>(out var chat) || !ChatLocators.IsUuid(chat)) return "";
+        if (chat is null || !ChatLocators.IsUuid(chat)) return "";
         var threadId = Guid.ParseExact(chat, "D").ToString("D");
         var cache = Path.Combine(folder, CacheFolder, threadId + ".json");
         var now = clock.GetUtcNow();
@@ -95,12 +97,53 @@ public static class PromptHook
             .Where(handle => string.Equals(handle.Client?.ThreadId, threadId, StringComparison.OrdinalIgnoreCase) || string.Equals(handle.Chat?.ThreadId, threadId, StringComparison.OrdinalIgnoreCase))
             .OrderByDescending(handle => handle.OpenedAt).FirstOrDefault();
 
-    private static async Task<string> ReadInputAsync(TextReader input)
+    /// <summary>Reads the hook input to its end (so the client's write never blocks) and returns its top-level <c>session_id</c>, or null.</summary>
+    internal static async Task<string?> ReadSessionIdAsync(TextReader input)
     {
-        var buffer = new char[MaxInputChars];
-        var total = 0;
-        while (total < buffer.Length && await input.ReadAsync(buffer.AsMemory(total)) is var read and > 0) total += read;
-        return new string(buffer, 0, total);
+        var scanner = new SessionIdScanner();
+        var buffer = new char[8192];
+        int read;
+        while ((read = await input.ReadAsync(buffer.AsMemory())) > 0) scanner.Feed(buffer.AsSpan(0, read), final: false);
+        scanner.Feed([], final: true);
+        return scanner.SessionId;
+    }
+
+    /// <summary>Finds the top-level <c>session_id</c> in hook JSON fed in pieces, holding only the current token, so a long pasted prompt cannot truncate it.</summary>
+    private sealed class SessionIdScanner
+    {
+        private const int MaxTokenBytes = 4 * 1024 * 1024;
+        private readonly Encoder _encoder = Encoding.UTF8.GetEncoder();
+        private byte[] _bytes = new byte[16 * 1024];
+        private int _pending;
+        private JsonReaderState _state;
+        private bool _started, _next, _done;
+        public string? SessionId { get; private set; }
+
+        public void Feed(ReadOnlySpan<char> chars, bool final)
+        {
+            if (_done) return;
+            var needed = _pending + _encoder.GetByteCount(chars, final);
+            if (needed > MaxTokenBytes) { _done = true; return; }
+            if (needed > _bytes.Length) Array.Resize(ref _bytes, Math.Max(needed, _bytes.Length * 2));
+            _pending += _encoder.GetBytes(chars, _bytes.AsSpan(_pending), final);
+            try { Scan(final); }
+            catch (JsonException) { _done = true; }
+        }
+
+        private void Scan(bool final)
+        {
+            var reader = new Utf8JsonReader(_bytes.AsSpan(0, _pending), final, _state);
+            while (!_done && reader.Read())
+            {
+                if (!_started) { _started = true; _done = reader.TokenType != JsonTokenType.StartObject; }
+                else if (_next) { _done = true; if (reader.TokenType == JsonTokenType.String) SessionId = reader.GetString(); }
+                else if (reader.TokenType == JsonTokenType.PropertyName && reader.CurrentDepth == 1 && reader.ValueTextEquals("session_id")) _next = true;
+            }
+            var consumed = (int)reader.BytesConsumed;
+            _bytes.AsSpan(consumed, _pending - consumed).CopyTo(_bytes);
+            _pending -= consumed;
+            _state = reader.CurrentState;
+        }
     }
 
     private static string? Cached(string path, DateTimeOffset now)

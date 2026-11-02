@@ -14,6 +14,7 @@ public static class ClaudeWaiter
 {
     internal const string WaitersFolder = "waiters";
     internal const string StopFile = "stop";
+    private const string ChatUsage = "--chat needs this Claude chat's session ID (a UUID).";
     /// <summary>Process start times are compared within this, so a PID reused by a later process never counts as the waiter.</summary>
     private static readonly TimeSpan StartTolerance = TimeSpan.FromSeconds(1);
 
@@ -28,6 +29,8 @@ public static class ClaudeWaiter
 
     internal static async Task<string> RunAsync(string nodeFolder, string claudeSessionId, Action<string> deliver, TimeSpan? timeout, CancellationToken cancellationToken, HttpMessageHandler? handler, Func<HttpMessageHandler>? hubHandler, TimeProvider? clock = null, bool printInbox = false, IReadOnlyList<string>? acknowledge = null)
     {
+        // Before --ack, which normalizes the ID, so a bad --chat gets the usage error rather than a FormatException.
+        if (!ChatLocators.IsUuid(claudeSessionId)) throw new AdapterConfigurationException(ChatUsage);
         if (acknowledge is { Count: > 0 })
         {
             var ids = acknowledge.ToArray();
@@ -116,19 +119,27 @@ public static class ClaudeWaiter
     private static async Task<string> WaitAsync(string nodeFolder, string claudeSessionId, Action<string> deliver, TimeSpan? timeout, CancellationToken cancellationToken, HttpMessageHandler? handler, Func<HttpMessageHandler>? hubHandler, TimeProvider? clock)
     {
         var folder = Path.GetFullPath(nodeFolder);
-        if (!ChatLocators.IsUuid(claudeSessionId)) throw new AdapterConfigurationException("--chat needs this Claude chat's session ID (a UUID).");
+        if (!ChatLocators.IsUuid(claudeSessionId)) throw new AdapterConfigurationException(ChatUsage);
         var threadId = Normalize(claudeSessionId);
         var enrollment = NodeState.ReadEnrollment(folder) ?? throw new AdapterConfigurationException($"This PC's node in '{folder}' is not enrolled with a hub yet. Start it once with --node --hub https://<hub-address>:5273/.");
         var handle = FindHandle(folder, threadId) ?? throw new AdapterConfigurationException($"No relay session on this PC belongs to Claude chat {threadId}. Call session_open from that chat first, with CoCern running on the node's credentials.");
         var options = new AdapterOptions(enrollment.Hub.AbsoluteUri, enrollment.Credential, signalR: true) { PinnedFingerprint = enrollment.Fingerprint };
-        var runtime = new WakeRuntime(options, Path.Combine(folder, WaitersFolder, threadId + ".db"), Path.Combine(folder, StopFile), enrollment.Hub.AbsoluteUri) { HubHandler = hubHandler };
+        var statePath = Path.Combine(folder, WaitersFolder, threadId + ".db");
         WakeTarget[] targets = [new(new WakeRoute(handle.RepositoryId, "default", NodeState.SessionHandlePath(folder, handle.SessionId), threadId, Environment.MachineName), new WakeSession(handle.SessionId, handle.SessionToken), new InboxWaitDispatcher(deliver))];
-        // One waiter per chat: a second one would replace the live waiter's pid file and then fail on its exclusive state.
-        if (IsAlive(PidPath(folder, threadId))) throw new AdapterConfigurationException($"An inbox waiter for Claude chat {threadId} is already running on this PC.");
-        using var self = Process.GetCurrentProcess();
-        var written = WritePid(folder, threadId, self.Id, self.StartTime.ToUniversalTime());
-        try { return await WakeWatcher.RunAsync(runtime, _ => Task.FromResult<IReadOnlyList<WakeTarget>>(targets), exitWhenQueued: true, timeout, cancellationToken, handler, clock); }
-        finally { RemoveIfUnchanged(PidPath(folder, threadId), written); }
+        // One waiter per chat: the exclusive state is taken before the pid file is written, so a losing second waiter never touches the live one's file.
+        var running = $"An inbox waiter for Claude chat {threadId} is already running on this PC.";
+        if (IsAlive(PidPath(folder, threadId))) throw new AdapterConfigurationException(running);
+        WakeState state;
+        try { state = new WakeState(statePath); }
+        catch (IOException) { throw new AdapterConfigurationException(running); }
+        using (state)
+        {
+            var runtime = new WakeRuntime(options, statePath, Path.Combine(folder, StopFile), enrollment.Hub.AbsoluteUri) { HubHandler = hubHandler, State = state };
+            using var self = Process.GetCurrentProcess();
+            var written = WritePid(folder, threadId, self.Id, self.StartTime.ToUniversalTime());
+            try { return await WakeWatcher.RunAsync(runtime, _ => Task.FromResult<IReadOnlyList<WakeTarget>>(targets), exitWhenQueued: true, timeout, cancellationToken, handler, clock); }
+            finally { RemoveIfUnchanged(PidPath(folder, threadId), written); }
+        }
     }
 
     /// <summary>The handle whose captured or located Claude chat ID is this one; the newest when several are.</summary>
