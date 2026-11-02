@@ -376,6 +376,8 @@ public static class RelayLimits
     public const int MaxDocsPerRepository = 500;
     /// <summary>Largest allowed <c>Relay:DocCache:MaxDocuments</c>.</summary>
     public const int MaxDocsPerRepositoryCeiling = 5_000;
+    /// <summary>Repositories the doc cache may add on its own, from <c>Relay:DocCache:Roots</c> scans and sessions' workspaces.</summary>
+    public const int MaxDiscoveredDocRepositories = 64;
     /// <summary>
     /// Bytes of document text one repository may hold, unless <c>Relay:DocCache:MaxRepositoryBytes</c> says otherwise; files past it are
     /// skipped and counted at sync. A loaded document holds its text once, plus its Lucene index.

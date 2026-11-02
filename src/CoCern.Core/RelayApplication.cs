@@ -34,8 +34,11 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
     private readonly IDocCacheTools docTools = docs ?? DocCacheTool.Off;
     private readonly IAnalyticsTool analyticsTool = analytics ?? AnalyticsTool.Off;
     private readonly CallTelemetry? telemetry = activity is null ? null : new(activity, tokenOptions?.Enabled == false ? null : tokens);
-    /// <summary>Estimated tokens of the tool definitions an agent carries, per role, counted once.</summary>
-    private const int WorkerProbeLimit = 50;
+    /// <summary>
+    /// A private send first reads one worker entry to check the caller's access to the repository; the entries are never used, so one
+    /// keeps the check while a large directory can no longer make the probe's reply too large and refuse every private message.
+    /// </summary>
+    private const int WorkerProbeLimit = 1;
     private readonly string incarnation = Guid.NewGuid().ToString("N");
     public string IncarnationId => incarnation;
 
@@ -78,6 +81,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
                 var opened = BoundWire(await OpenSessionAsync(trusted, args));
                 if (trace is not null && opened.Ok) { trace.SessionId = Text(Parse(opened), "sessionId"); trace.Role = Text(args, "role"); }
                 if (opened.Ok && string.Equals(Text(args, "role"), SessionRoles.Manager, StringComparison.OrdinalIgnoreCase)) StartAnomalyMonitor(trusted, Text(args, "repositoryId"));
+                if (opened.Ok) LearnWorkspace(args);
                 return opened;
             }
             JsonObject? session = null;
@@ -127,6 +131,17 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
     {
         if (anomaly is not { Enabled: true } || !attentionOptions.Enabled) return;
         Advisory(() => Call(AggregateKinds.Anomaly, repository, caller, Operations.AnomalyStart, new() { ["repositoryId"] = repository })); // else the next manager starts it
+    }
+
+    /// <summary>
+    /// The adapter reports its git workspace with session_open (never advertised in a schema). The doc cache may index it, after the reply
+    /// and off the open's path: a refused or failing workspace never changes the open.
+    /// </summary>
+    private void LearnWorkspace(JsonObject args)
+    {
+        if (args["workspace"] is not JsonValue reported || !reported.TryGetValue<string>(out var workspace) || string.IsNullOrWhiteSpace(workspace)) return;
+        var repository = Text(args, "repositoryId");
+        Advisory(() => docTools.LearnAsync(repository, workspace));
     }
 
     /// <summary>

@@ -43,6 +43,8 @@ public sealed record DashboardDocGrain
     public int Reads { get; init; }
     public int IndexRuns { get; init; }
     public int Documents { get; init; }
+    /// <summary>Bounded indexed paths for a directory; Documents remains its complete indexed count.</summary>
+    public string[] DocumentPaths { get; init; } = [];
 }
 
 public sealed record DashboardTokens

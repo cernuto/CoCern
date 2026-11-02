@@ -169,19 +169,22 @@ public static class RelayHostBuilderExtensions
     /// <summary>
     /// The doc cache, on by default. Like analytics, its parts resolve only when <c>Relay:DocCache:Enabled</c> is on: otherwise the
     /// tool and the document source resolve to null, the sync service returns at once without building its runner, git never runs,
-    /// and the document grains keep the default idle time. On with no repositories configured, git never runs either, and the tools
-    /// answer NoRepositoriesConfigured.
+    /// and the document grains keep the default idle time. On with no repositories configured and no roots, git never runs either, and the
+    /// tools answer NoRepositoriesConfigured.
     /// </summary>
     private static void AddDocCache(this IServiceCollection services)
     {
         services.AddSingleton<DocCacheActivity>();
         services.AddSingleton(provider => DocCacheSettings.From(provider.GetRequiredService<IConfiguration>(), provider.GetRequiredService<IHostEnvironment>()));
         services.TryAddSingleton<GitCli>();
-        services.AddSingleton<IDocSource>(provider => provider.GetRequiredService<DocCacheSettings>().Enabled ? new GitDocSource(provider.GetRequiredService<DocCacheSettings>(), provider.GetRequiredService<GitCli>()) : null!);
-        services.AddSingleton<DocSyncRunner>();
+        // Configured plus discovered repositories, shared by the reads, the sync, the timer and the tools.
+        services.AddSingleton<DocRepositoryRegistry>();
+        services.AddSingleton<IDocSource>(provider => provider.GetRequiredService<DocCacheSettings>().Enabled ? new GitDocSource(provider.GetRequiredService<DocRepositoryRegistry>(), provider.GetRequiredService<GitCli>()) : null!);
+        services.AddSingleton(provider => new DocSyncRunner(provider.GetRequiredService<DocCacheSettings>(), provider.GetRequiredService<DocRepositoryRegistry>(), provider.GetRequiredService<GitCli>(),
+            provider.GetRequiredService<Orleans.IGrainFactory>(), provider.GetRequiredService<ITokenCounter>(), provider.GetRequiredService<ILogger<DocSyncRunner>>()));
         services.AddSingleton<IDocSync>(provider => provider.GetRequiredService<DocSyncRunner>());
-        services.AddSingleton(provider => provider.GetRequiredService<DocCacheSettings>() is { Enabled: true } settings
-            ? new DocCacheTool(provider.GetRequiredService<Orleans.IGrainFactory>(), provider.GetRequiredService<ITokenCounter>(), provider.GetRequiredService<IDocSync>(), settings.Repositories.Select(repository => repository.Id).ToArray())
+        services.AddSingleton(provider => provider.GetRequiredService<DocCacheSettings>() is { Enabled: true }
+            ? new DocCacheTool(provider.GetRequiredService<Orleans.IGrainFactory>(), provider.GetRequiredService<ITokenCounter>(), provider.GetRequiredService<IDocSync>(), provider.GetRequiredService<DocRepositoryRegistry>().Ids)
             : null!);
         services.AddHostedService<SpecSyncService>();
         // Idle deactivation is the cache's eviction: an unused document grain drops its index after Relay:DocCache:IdleMinutes.

@@ -1,5 +1,38 @@
-<section class="surface doc-cache-view" aria-labelledby="docs-heading">
-    <div class="section-heading"><div><h2 id="docs-heading">Loaded indexes</h2><p>@Cache.ActiveDirectories @(Cache.ActiveDirectories == 1 ? "repository" : "repositories") · @Cache.ActiveDocuments @(Cache.ActiveDocuments == 1 ? "document" : "documents")</p></div></div>
+<section class="surface document-inventory" aria-labelledby="docs-heading">
+    <div class="section-heading"><div><h2 id="docs-heading">Documents</h2><p>Files discovered in each repository.</p></div></div>
+    @if (Cache.ObservedAt is null)
+    {
+        <p class="empty-copy">Waiting for the hub.</p>
+    }
+    else
+    {
+        @foreach (var directory in Cache.Grains.Where(grain => grain.Kind == "Directory"))
+        {
+            <section class="document-repository" aria-label="@($"{directory.Repository} documents")">
+                <div class="document-repository-heading"><h3>@directory.Repository</h3><span>@directory.Documents @(directory.Documents == 1 ? "document" : "documents")</span></div>
+                <ul class="document-file-list">
+                    @foreach (var path in directory.DocumentPaths)
+                    {
+                        <li><strong>@System.IO.Path.GetFileName(path.Replace('\\', '/'))</strong><small>@path</small></li>
+                    }
+                </ul>
+                @if (directory.Documents == 0)
+                {
+                    <p class="document-inventory-note">No documents found in this repository.</p>
+                }
+                else if (directory.DocumentPaths.Length < directory.Documents)
+                {
+                    <p class="document-inventory-note">Showing @directory.DocumentPaths.Length of @directory.Documents document filenames.</p>
+                }
+            </section>
+        }
+        @if (!Cache.Grains.Any(grain => grain.Kind == "Directory")) { <p class="empty-copy">No repository document inventories reported yet.</p> }
+        @if (Cache.Truncated) { <p class="table-footnote">Some repository inventories may be omitted from this update.</p> }
+    }
+</section>
+
+<section class="surface doc-cache-view" aria-labelledby="indexes-heading">
+    <div class="section-heading"><div><h2 id="indexes-heading">Index activity</h2><p>@Cache.ActiveDirectories @(Cache.ActiveDirectories == 1 ? "repository index" : "repository indexes") · @Cache.ActiveDocuments @(Cache.ActiveDocuments == 1 ? "document index" : "document indexes") active</p></div></div>
     @if (Cache.ObservedAt is null)
     {
         <p class="empty-copy">Waiting for the hub.</p>
@@ -10,12 +43,12 @@
         <div class="doc-cache-table">
             <table class="metrics-table">
                 <caption class="visually-hidden">Loaded repository and document indexes</caption>
-                <thead><tr><th scope="col">Repository / path</th><th scope="col">Kind</th><th scope="col">State</th><th scope="col">Sections</th><th scope="col">Source reads</th><th scope="col">Index builds</th><th scope="col">Commit</th><th scope="col">Activated</th></tr></thead>
+                <thead><tr><th scope="col">Document / repository</th><th scope="col">Kind</th><th scope="col">State</th><th scope="col">Sections</th><th scope="col">Source reads</th><th scope="col">Index builds</th><th scope="col">Commit</th><th scope="col">Activated</th></tr></thead>
                 <tbody>
                     @foreach (var grain in Cache.Grains)
                     {
                         <tr>
-                            <th scope="row"><small>@grain.Repository</small> @(grain.Kind == "Directory" ? "All documents" : grain.Path)</th>
+                            <th scope="row"><strong>@(grain.Kind == "Directory" ? grain.Repository : System.IO.Path.GetFileName(grain.Path.Replace('\\', '/')))</strong><small>@(grain.Kind == "Directory" ? "Repository index" : grain.Repository)</small>@if (grain.Kind != "Directory") { <small>@grain.Path</small> }</th>
                             <td>@grain.Kind</td>
                             <td>@(grain.Kind == "Directory" ? $"{grain.Documents} documents" : grain.Loaded ? "Loaded" : "Not loaded")</td>
                             <td class="numeric">@(grain.Kind == "Directory" ? "—" : grain.Sections.ToString("N0"))</td>

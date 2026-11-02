@@ -141,7 +141,23 @@ public sealed class DashboardCollector : BackgroundService
         snapshot = snapshot with { Logs = [], Warnings = [warning] };
         if (bytes <= maximumBytes) return snapshot;
 
-        bytes -= EncodedLength(root.GetProperty("docCache").GetProperty("grains")) - 2;
+        // Indexed names can give way without losing directory totals or active-grain metadata.
+        var encodedGrains = root.GetProperty("docCache").GetProperty("grains");
+        var grainBytes = EncodedLength(encodedGrains);
+        var grains = snapshot.DocCache.Grains.ToArray();
+        for (var index = grains.Length - 1; index >= 0 && bytes > maximumBytes; index--)
+        {
+            var paths = encodedGrains[index].GetProperty("documentPaths");
+            var before = bytes;
+            var count = Trim(paths);
+            grainBytes -= before - bytes;
+            if (count < grains[index].DocumentPaths.Length)
+                grains[index] = grains[index] with { DocumentPaths = grains[index].DocumentPaths[..count] };
+        }
+        snapshot = snapshot with { DocCache = snapshot.DocCache with { Grains = grains } };
+        if (bytes <= maximumBytes) return snapshot;
+
+        bytes -= grainBytes - 2;
         if (!snapshot.DocCache.Truncated) bytes--;
         snapshot = snapshot with { DocCache = snapshot.DocCache with { Grains = [], Truncated = true } };
         if (bytes <= maximumBytes) return snapshot;

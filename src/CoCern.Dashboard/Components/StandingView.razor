@@ -1,54 +1,162 @@
 <section class="surface sql-view standing-view" aria-labelledby="standing-heading">
     <h2 id="standing-heading" class="visually-hidden">Standing by board</h2>
-    <dl class="database-summary" aria-label="Tool definition size"><div><dt>Worker tools</dt><dd>@Estimated(Tokens.WorkerToolTokens)</dd></div><div><dt>Administrator tools</dt><dd>@Estimated(Tokens.AdministratorToolTokens)</dd></div><div><dt>Tips off</dt><dd>@(Tokens.TipRulesOff.Length == 0 ? "None" : string.Join(", ", Tokens.TipRulesOff))</dd></div></dl>
-    @if (Boards.Length == 0) { <p class="empty-copy">No board has standing yet.</p> }
+    @if (Boards.Length == 0) { <p class="standing-empty">No board has standing yet.</p> }
     @foreach (var board in Boards)
     {
         <article class="standing-board" @key="board.Board" aria-label="@($"Board {board.Board}")">
-            <dl class="database-summary"><div><dt>Board</dt><dd>@board.Board</dd></div><div><dt>Revision</dt><dd>@board.Revision</dd></div><div><dt>Require resources</dt><dd>@(board.RequireResources ? "On" : "Off")</dd></div><div><dt>Pending proposals</dt><dd>@board.Proposals.Length</dd></div></dl>
-            <table class="metrics-table">
-                <caption>Lines</caption>
-                <thead><tr><th scope="col">ID</th><th scope="col">Text</th><th scope="col">Author</th><th scope="col">Approved</th></tr></thead>
-                <tbody>@foreach (var line in board.Lines) { <tr><th scope="row">@line.Id</th><td>@line.Text</td><td>@line.Author</td><td title="@DashboardFormat.Timestamp(line.ApprovedAt)">@line.ApprovedBy, @DashboardFormat.Ago(line.ApprovedAt, Now)</td></tr> }</tbody>
-            </table>
-            <table class="metrics-table">
-                <caption>Grants</caption>
-                <thead><tr><th scope="col">ID</th><th scope="col">Scope</th><th scope="col">Targets</th><th scope="col">Expires</th><th scope="col">Granted by</th></tr></thead>
-                <tbody>@foreach (var grant in board.Grants) { <tr><th scope="row">@grant.Id</th><td>@grant.Scope</td><td>@string.Join(", ", grant.Targets)</td><td>@(grant.ExpiresAt <= Now ? "Expired" : DashboardFormat.Timestamp(grant.ExpiresAt))</td><td>@grant.Grantor@(string.IsNullOrEmpty(grant.ProposedBy) ? "" : $" (proposed by {grant.ProposedBy})")</td></tr> }</tbody>
-            </table>
-            @if (board.Proposals.Length > 0)
-            {
-                <table class="metrics-table">
-                    <caption>Awaiting approval</caption>
-                    <thead><tr><th scope="col">Proposal</th><th scope="col">Kind</th><th scope="col">Summary</th><th scope="col">Proposed by</th></tr></thead>
-                    <tbody>@foreach (var proposal in board.Proposals) { <tr><th scope="row">@proposal.Id</th><td>@proposal.Kind@(proposal.Replaces ? " (edit)" : "")</td><td>@proposal.Summary</td><td title="@DashboardFormat.Timestamp(proposal.ProposedAt)">@proposal.ProposedBy</td></tr> }</tbody>
-                </table>
-            }
+            <header class="standing-board-heading">
+                <h3>@board.Board</h3>
+                <p>Approved instructions and access grants for this board.</p>
+            </header>
+
+            <section class="standing-pending" aria-label="Awaiting approval">
+                <div class="standing-section-heading"><h4>Awaiting approval</h4><span class="standing-count">@board.Proposals.Length</span></div>
+                @if (board.Proposals.Length == 0)
+                {
+                    <p class="standing-empty">No proposals are awaiting approval.</p>
+                }
+                else
+                {
+                    <p class="standing-section-copy">Proposals do not take effect until approved.</p>
+                    <ul class="standing-proposals">
+                        @foreach (var proposal in board.Proposals)
+                        {
+                            <li @key="proposal.Id">
+                                <div class="standing-proposal-heading"><strong>@proposal.Kind@(proposal.Replaces ? " (edit)" : "")</strong><span class="standing-pending-label">Pending approval</span></div>
+                                <p class="standing-proposal-text">@proposal.Summary</p>
+                                <div class="standing-meta"><span>Proposed by @proposal.ProposedBy</span><time title="@DashboardFormat.Timestamp(proposal.ProposedAt)">@DashboardFormat.Ago(proposal.ProposedAt, Now)</time></div>
+                                <p class="standing-id">Proposal ID: @proposal.Id</p>
+                            </li>
+                        }
+                    </ul>
+                }
+            </section>
+
+            <div class="standing-approved">
+                <section class="standing-section" aria-label="Active instructions">
+                    <div class="standing-section-heading"><h4>Active instructions</h4><span class="standing-count">@board.Lines.Length</span></div>
+                    @if (board.Lines.Length == 0)
+                    {
+                        <p class="standing-empty">No instructions have been approved.</p>
+                    }
+                    else
+                    {
+                        <ul class="standing-records">
+                            @foreach (var line in board.Lines)
+                            {
+                                <li @key="line.Id">
+                                    <p class="standing-record-text">@line.Text</p>
+                                    <div class="standing-meta"><span>Written by @line.Author</span><span title="@DashboardFormat.Timestamp(line.ApprovedAt)">Approved by @line.ApprovedBy, @DashboardFormat.Ago(line.ApprovedAt, Now)</span></div>
+                                    <p class="standing-id">Instruction ID: @line.Id</p>
+                                </li>
+                            }
+                        </ul>
+                    }
+                </section>
+                <section class="standing-section" aria-label="Access grants">
+                    <div class="standing-section-heading"><h4>Access grants</h4><span class="standing-count">@board.Grants.Length</span></div>
+                    @if (board.Grants.Length == 0)
+                    {
+                        <p class="standing-empty">No access grants have been approved.</p>
+                    }
+                    else
+                    {
+                        <ul class="standing-records">
+                            @foreach (var grant in board.Grants)
+                            {
+                                <li @key="grant.Id">
+                                    <p class="standing-record-text"><strong>@grant.Scope</strong></p>
+                                    <dl class="standing-facts">
+                                        <div><dt>Targets</dt><dd>@string.Join(", ", grant.Targets)</dd></div>
+                                        <div><dt>Expires</dt><dd>@(grant.ExpiresAt <= Now ? "Expired" : DashboardFormat.Timestamp(grant.ExpiresAt))</dd></div>
+                                        <div><dt>Granted by</dt><dd>@grant.Grantor</dd></div>
+                                        @if (!string.IsNullOrEmpty(grant.ProposedBy)) { <div><dt>Proposed by</dt><dd>@grant.ProposedBy</dd></div> }
+                                    </dl>
+                                    <p class="standing-id">Grant ID: @grant.Id</p>
+                                </li>
+                            }
+                        </ul>
+                    }
+                </section>
+            </div>
+
             @if (board.Orders.Length > 0)
             {
-                <table class="metrics-table">
-                    <caption>Standing orders</caption>
-                    <thead><tr><th scope="col">ID</th><th scope="col">When</th><th scope="col">Then</th><th scope="col">Approved by</th><th scope="col">Expires</th><th scope="col">Runs</th><th scope="col">Failures</th></tr></thead>
-                    <tbody>@foreach (var order in board.Orders) { <tr><th scope="row">@order.Id@(order.Disabled ? " (disabled)" : "")</th><td>@order.Trigger @order.Target</td><td>@string.Join("; ", order.Actions)</td><td>@order.ApprovedBy</td><td>@(order.ExpiresAt <= Now ? "Expired" : DashboardFormat.Timestamp(order.ExpiresAt))</td><td class="numeric">@order.Runs</td><td class="numeric" title="@order.LastError">@order.Failures</td></tr> }</tbody>
-                </table>
+                <section class="standing-section" aria-label="Standing orders">
+                    <div class="standing-section-heading"><h4>Standing orders</h4><span class="standing-count">@board.Orders.Length</span></div>
+                    <ul class="standing-records">
+                        @foreach (var order in board.Orders)
+                        {
+                            <li @key="order.Id">
+                                @if (order.Disabled) { <p class="standing-order-state">Disabled</p> }
+                                <dl class="standing-facts">
+                                    <div><dt>When</dt><dd>@order.Trigger @order.Target</dd></div>
+                                    <div><dt>Then</dt><dd>@string.Join("; ", order.Actions)</dd></div>
+                                    <div><dt>Approved by</dt><dd>@order.ApprovedBy</dd></div>
+                                    <div><dt>Expires</dt><dd>@(order.ExpiresAt <= Now ? "Expired" : DashboardFormat.Timestamp(order.ExpiresAt))</dd></div>
+                                    <div><dt>Runs</dt><dd>@order.Runs</dd></div>
+                                    <div><dt>Failures</dt><dd>@order.Failures</dd></div>
+                                    @if (!string.IsNullOrEmpty(order.LastError)) { <div><dt>Last error</dt><dd>@order.LastError</dd></div> }
+                                </dl>
+                                <p class="standing-id">Order ID: @order.Id</p>
+                            </li>
+                        }
+                    </ul>
+                </section>
             }
             @if (board.OrderLog.Length > 0)
             {
-                <table class="metrics-table">
-                    <caption>Order runs</caption>
-                    <thead><tr><th scope="col">When</th><th scope="col">Order</th><th scope="col">What happened</th></tr></thead>
-                    <tbody>@foreach (var entry in board.OrderLog) { <tr><td title="@DashboardFormat.Timestamp(entry.At)">@DashboardFormat.Ago(entry.At, Now)</td><td>@entry.OrderId</td><td>@entry.What</td></tr> }</tbody>
-                </table>
+                <section class="standing-section" aria-label="Order runs">
+                    <h4>Order runs</h4>
+                    <ul class="standing-records">
+                        @foreach (var entry in board.OrderLog)
+                        {
+                            <li>
+                                <p class="standing-record-text">@entry.What</p>
+                                <div class="standing-meta"><time title="@DashboardFormat.Timestamp(entry.At)">@DashboardFormat.Ago(entry.At, Now)</time><span>Order ID: @entry.OrderId</span></div>
+                            </li>
+                        }
+                    </ul>
+                </section>
             }
-            <table class="metrics-table">
-                <caption>Recent changes</caption>
-                <thead><tr><th scope="col">Revision</th><th scope="col">By</th><th scope="col">When</th><th scope="col">Changes</th></tr></thead>
-                <tbody>@foreach (var change in board.History) { <tr><td class="numeric">@change.Revision</td><td>@change.By</td><td title="@DashboardFormat.Timestamp(change.At)">@DashboardFormat.Ago(change.At, Now)</td><td>@string.Join(" ", change.Changes)</td></tr> }</tbody>
-            </table>
+            <section class="standing-section standing-history" aria-label="Recent changes">
+                <h4>Recent changes</h4>
+                @if (board.History.Length == 0)
+                {
+                    <p class="standing-empty">No recent changes are recorded.</p>
+                }
+                else
+                {
+                    <ul class="standing-records">
+                        @foreach (var change in board.History)
+                        {
+                            <li>
+                                <p class="standing-record-text">@string.Join(" ", change.Changes)</p>
+                                <div class="standing-meta"><span>Revision @change.Revision</span><span>By @change.By</span><time title="@DashboardFormat.Timestamp(change.At)">@DashboardFormat.Ago(change.At, Now)</time></div>
+                            </li>
+                        }
+                    </ul>
+                    <p class="standing-legend">+ added · ~ edited · − removed</p>
+                }
+            </section>
+            <details class="standing-details">
+                <summary>Board settings</summary>
+                <dl class="standing-facts">
+                    <div><dt>Revision</dt><dd>@board.Revision</dd></div>
+                    <div><dt>Resource claims required</dt><dd>@(board.RequireResources ? "On" : "Off")</dd></div>
+                </dl>
+            </details>
         </article>
     }
     @if (Truncated) { <p class="limit-note">Some boards aren't shown.</p> }
-    @if (Boards.Length > 0) { <p class="table-footnote">+ added · ~ edited · − removed</p> }
+    <details class="standing-details standing-tool-details">
+        <summary>Tool details</summary>
+        <dl class="standing-facts">
+            <div><dt>Worker tools</dt><dd>@Estimated(Tokens.WorkerToolTokens)</dd></div>
+            <div><dt>Administrator tools</dt><dd>@Estimated(Tokens.AdministratorToolTokens)</dd></div>
+            <div><dt>Tips turned off</dt><dd>@(Tokens.TipRulesOff.Length == 0 ? "None" : string.Join(", ", Tokens.TipRulesOff))</dd></div>
+        </dl>
+    </details>
 </section>
 
 @code {

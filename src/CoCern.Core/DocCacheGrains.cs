@@ -371,7 +371,9 @@ public sealed class DocDirectoryGrain([PersistentState("docs", "relay")] IPersis
     private void Observe() => activity?.Update(observationId, new DashboardDocGrain
     {
         Kind = "Directory", Repository = Repository, ActivatedAt = activatedAt,
-        Loaded = true, Commit = state.State.Commit, Documents = state.State.Docs.Count
+        Loaded = true, Commit = state.State.Commit, Documents = state.State.Docs.Count,
+        DocumentPaths = state.State.Docs.Keys.Where(path => path.Length <= DocCacheActivity.MaxDocumentPathLength)
+            .Order(StringComparer.Ordinal).Take(DocCacheActivity.MaxDocumentPaths).ToArray()
     });
 
     public override Task OnActivateAsync(CancellationToken cancellationToken)

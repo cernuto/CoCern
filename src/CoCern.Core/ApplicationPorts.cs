@@ -260,6 +260,12 @@ public interface IDocSync
 {
     /// <summary>A repeated <paramref name="requestId"/> returns the first run's outcome instead of running again.</summary>
     Task<DocSyncOutcome> SyncNowAsync(string repositoryId, string? branch, string requestId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Advisory, after a session opens: registers the session's git workspace for doc search when it lies inside a configured root.
+    /// Returns the repository ID it was registered under, or null when refused.
+    /// </summary>
+    Task<string?> LearnAsync(string repositoryId, string workspace, CancellationToken cancellationToken = default) => Task.FromResult<string?>(null);
 }
 
 /// <summary>Port implemented by the host: best-effort change hints. The durable inbox stays authoritative.</summary>

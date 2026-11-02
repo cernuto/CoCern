@@ -389,6 +389,8 @@ All on by default except the two for other PCs.
 | `Relay:DocCache:IdleMinutes` | 30 | Minutes before an unused document leaves memory (2 to 1440). |
 | `Relay:DocCache:MaxDocuments` | 500 | Documents per repository (up to 5,000). |
 | `Relay:DocCache:MaxRepositoryBytes` | 128 MB | Text per repository (up to 1 GB). |
+| `Relay:DocCache:Roots:N` | | Folders whose git repositories are found and indexed on their own (relative to the content root). |
+| `Relay:DocCache:RootDepth` | 2 | Folder levels searched below each root (1 to 4). |
 | `Relay:DocCache:Repositories:N:Id` | | The repository. |
 | `…:ClonePath` | | Its local clone. |
 | `…:Branch`, `…:Remote` | `main`, `origin` | What to follow. |
@@ -398,6 +400,8 @@ All on by default except the two for other PCs.
 | `…:Exclude:M` | | More paths to leave out (`node_modules`, `bin`, `obj` and `.git` always are). |
 
 Changing a repository's settings makes its next sync re-read everything.
+
+**Found repositories.** With `Roots` set, every sync also looks for git repositories under them (a folder holding `.git`, never inside another repository) and indexes each one's current branch under its folder name in lower case, without fetching. A session's workspace is learned too: the adapter sends its git top-level folder with `session_open`, and when that folder is a repository inside a root the hub indexes it at once, under the session's repository if that has no documents yet, otherwise under its folder name. Roots are the only folders the hub reads this way; a configured repository's ID always wins, at most 64 are added, and access still follows each client's repositories.
 
 ### Adapter
 

@@ -18,7 +18,8 @@
         "Relay__DocCache__Repositories__0__Id": "cocern",
         "Relay__DocCache__Repositories__0__ClonePath": "../..",
         "Relay__DocCache__Repositories__0__Branch": "main",
-        "Relay__DocCache__Repositories__0__Fetch": "false"
+        "Relay__DocCache__Repositories__0__Fetch": "false",
+        "Relay__DocCache__Roots__0": "../../.."
       }
     }
   }

@@ -6,8 +6,12 @@
 .graph-intro, .graph-empty { margin: 0 22px 16px; max-width: 75ch; color: var(--muted); font-size: .9rem; }
 .graph-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding: 0 22px; }
 .graph-controls .search-field { flex: 1 1 250px; margin: 0; }
+.graph-limit { display: flex; align-items: center; gap: 8px; font-size: .85rem; white-space: nowrap; }
+.graph-limit select { min-height: 44px; padding: 8px 28px 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); font: inherit; }
 .graph-focus { display: flex; gap: 8px; align-items: center; font-size: .85rem; white-space: nowrap; }
-.graph-key { display: flex; align-items: center; flex-wrap: wrap; gap: 16px; padding: 16px 22px 10px; font-size: .76rem; color: var(--muted); }
+.graph-view-summary { margin: 14px 22px 0; font-size: .85rem; font-weight: 600; }
+.graph-subset-note { margin: 0 22px 14px; max-width: 90ch; font-size: .8rem; color: var(--muted); }
+.graph-key { display: flex; align-items: center; flex-wrap: wrap; gap: 16px; padding: 12px 22px 10px; font-size: .76rem; color: var(--muted); }
 .graph-key > span { display: flex; align-items: center; gap: 7px; }
 .graph-key-node { display: inline-block; width: 13px; height: 10px; border: 1px solid var(--muted); border-radius: 3px; }
 .graph-key-edge { display: inline-block; width: 22px; height: 2px; background: var(--muted); position: relative; }
@@ -16,6 +20,7 @@
 .graph-canvas { display: block; width: 100%; min-width: 720px; height: auto; }
 .graph-canvas marker path { fill: var(--muted); }
 .graph-edge { fill: none; stroke: var(--muted); stroke-width: 1.8; opacity: .75; pointer-events: none; }
+.graph-edge.unrelated { opacity: .18; }
 .graph-edge.connected { stroke: var(--focus); stroke-width: 2.8; opacity: .85; }
 .graph-edge.chosen { stroke: var(--focus); stroke-width: 4; opacity: 1; }
 .graph-edge-hit { fill: none; stroke: transparent; stroke-width: 16; cursor: pointer; }
@@ -40,4 +45,4 @@
 .graph-connection small { color: var(--muted); }
 .graph-footnote, .graph-sampled { font-size: .76rem; color: var(--muted); margin: 14px 22px; max-width: 90ch; }
 .session-graph .limit-note { margin: 14px 22px; }
-@media (max-width: 600px) { .graph-controls { padding: 0 14px; } .graph-key { padding-left: 14px; } .graph-intro, .graph-footnote, .graph-sampled { margin-left: 14px; margin-right: 14px; } .graph-viewport { max-height: 430px; } }
+@media (max-width: 600px) { .graph-controls { padding: 0 14px; } .graph-key { padding-left: 14px; } .graph-intro, .graph-view-summary, .graph-subset-note, .graph-footnote, .graph-sampled { margin-left: 14px; margin-right: 14px; } .graph-viewport { max-height: 430px; } }

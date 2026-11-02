@@ -24,15 +24,50 @@ public static class CoordinationTools
     /// Every chat on a PC shares one principal, and agents reuse simple request IDs ("open-1"), so two chats' session_open calls could
     /// replay each other's reply and share a session. This adapter (one per chat) makes the ID its own; its own retries still match.
     /// </summary>
-    internal static JsonElement OwnRequestId(JsonElement arguments)
+    internal static JsonElement OwnRequestId(JsonElement arguments, string? workspace)
     {
         if (arguments.ValueKind != JsonValueKind.Object || !arguments.TryGetProperty("requestId", out var given) || given.ValueKind != JsonValueKind.String) return arguments;
         var node = System.Text.Json.Nodes.JsonNode.Parse(arguments.GetRawText())!.AsObject();
         // This process is the client machine. Keep the default beside the process-owned request ID so direct HTTP retries retain their original arguments.
         if (!node.ContainsKey("machineId")) node["machineId"] = Environment.MachineName;
+        // The checkout this chat works in, so the hub can index its docs. Never advertised; a value the caller gave (even blank or null) stands.
+        if (workspace is not null && !node.ContainsKey("workspace")) node["workspace"] = workspace;
         node["requestId"] = Instance + ":" + given.GetString();
         return JsonSerializer.SerializeToElement(node);
     }
+
+    /// <summary>The git top-level folder that contains <paramref name="directory"/>, or null outside a repository (or when git is missing or slow).</summary>
+    internal static string? GitTopLevel(string directory)
+    {
+        try
+        {
+            if (!Directory.Exists(directory)) return null;
+            var start = new System.Diagnostics.ProcessStartInfo("git") { WorkingDirectory = directory, RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = true, UseShellExecute = false };
+            foreach (var argument in new[] { "rev-parse", "--show-toplevel" }) start.ArgumentList.Add(argument);
+            start.Environment["GIT_TERMINAL_PROMPT"] = "0";
+            start.Environment["GIT_OPTIONAL_LOCKS"] = "0";
+            using var process = System.Diagnostics.Process.Start(start);
+            if (process is null) return null;
+            process.StandardInput.Close();
+            var output = process.StandardOutput.ReadToEndAsync();
+            _ = process.StandardError.ReadToEndAsync();
+            if (!process.WaitForExit(GitTimeout) || !output.Wait(GitTimeout))
+            {
+                try { process.Kill(entireProcessTree: true); } catch (InvalidOperationException) { } catch (System.ComponentModel.Win32Exception) { }
+                return null;
+            }
+            var path = output.Result.Trim();
+            return process.ExitCode == 0 && path.Length > 0 ? Path.TrimEndingDirectorySeparator(Path.GetFullPath(path)) : null;
+        }
+        catch (Exception exception) when (exception is System.ComponentModel.Win32Exception or InvalidOperationException or IOException or ArgumentException or UnauthorizedAccessException) { return null; }
+    }
+
+    private static readonly TimeSpan GitTimeout = TimeSpan.FromSeconds(3);
+
+    /// <summary>Every session_open from this process reports the workspace it started in: found once, on the first open.</summary>
+    internal static JsonElement OwnRequestId(JsonElement arguments) => OwnRequestId(arguments, OwnWorkspace.Value);
+
+    private static readonly Lazy<string?> OwnWorkspace = new(() => GitTopLevel(Environment.CurrentDirectory));
 
     private static readonly string Instance = Guid.NewGuid().ToString("N");
 
