@@ -21,6 +21,8 @@ internal static class SessionAggregate
         var expired = context.State["expiredAt"] is not null;
         // An expired session drops deliveries (a refusal would be retried forever) and refuses attention, which its sources then drop.
         if (context.Operation == Operations.Deliver) return expired ? Ok(new { expired = true }) : Deliver(context);
+        // Boards report through their outboxes, without the session secret; an expired or unknown session ignores them.
+        if (context.Operation == Operations.SessionWork) return expired || !context.State.ContainsKey("principalId") ? Ok(new { tracked = false }) : TrackWork(context);
         if (expired && context.Operation is Operations.AttentionRaise or Operations.AttentionClose) return Error(SessionUnknown, new { expired = true });
         // Attention items arrive through other aggregates' outboxes, which carry no session secret, just like deliveries.
         if (context.Operation == Operations.AttentionRaise) return SessionAttention.Raise(context);
@@ -56,8 +58,36 @@ internal static class SessionAggregate
     private static readonly HashSet<string> HubState = new(StringComparer.Ordinal)
     {
         "requests", "requestTombstones", "inbox", "acked", "attention", "attentionClosed", "attentionRecent", "attentionSeq", "attentionRevision",
-        "attentionBoundaryAt", "activeReportedAt", "expiredAt", "standingSeen", "tasks", "taskRevision", "holder", "leaseUntil", "warnedLease", "interruptedLease"
+        "attentionBoundaryAt", "activeReportedAt", "expiredAt", "standingSeen", "tasks", "taskRevision", "holder", "leaseUntil", "warnedLease", "interruptedLease",
+        WorkKey, WorkReportedKey
     };
+
+    private const string WorkKey = "work";
+    private const string WorkReportedKey = "workReported";
+
+    /// <summary>
+    /// A board's report that this session now answers for an unresolved action, or no longer does (see <see cref="WorkLedger"/>). The hub's
+    /// directory hears only when that changes, and once a day while it lasts, so a full directory never expires a session that owns work.
+    /// </summary>
+    private static RelayReply TrackWork(AggregateContext context)
+    {
+        var (state, args, now) = (context.State, context.Args, context.Now);
+        var ledger = ObjectAt(state, WorkKey);
+        var tracked = WorkLedger.Apply(ledger, Required(args, "actionKey"), Flag(args, "open"), WorkLedger.ReportedAt(args, now), now);
+        var owns = WorkLedger.Owns(ledger, now);
+        if (ledger.Count == 0) state.Remove(WorkKey);
+        var reported = state[WorkReportedKey] as JsonObject;
+        var (wasOwning, reportedAt) = reported is null ? (false, DateTimeOffset.MinValue) : (Flag(reported, "owns"), Date(reported, "at"));
+        if (owns != wasOwning || owns && reportedAt <= now.AddHours(-RelayLimits.SessionWorkRefreshHours))
+        {
+            state[WorkReportedKey] = new JsonObject { ["owns"] = owns, ["at"] = now.ToString("O") };
+            context.Emit(AggregateKinds.Control, AggregateKinds.ControlKey, Operations.SessionWork, new JsonObject
+            {
+                ["repositoryId"] = context.Repository, ["sessionId"] = Text(state, "sessionId"), ["owns"] = owns, ["at"] = now.ToString("O")
+            });
+        }
+        return Ok(new { tracked, owns });
+    }
 
     /// <summary>
     /// The hub's directory dropped this long-stale session. Its secret, inbox and attention are cleared; afterwards its own calls get

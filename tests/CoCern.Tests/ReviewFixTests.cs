@@ -111,6 +111,37 @@ public sealed class ReviewFixTests
     }
 
     [Fact]
+    public void A_session_tells_the_directory_only_when_it_starts_or_stops_owning_work()
+    {
+        var session = new StateEnvelope<CoordinationDocument>();
+        Assert.True(Apply(session, "session", Operations.Open, new() { ["principalId"] = "alice", ["sessionToken"] = "secret", ["sessionId"] = "s1" }).Ok);
+        int Reports(string key, bool open)
+        {
+            session.Effects.Clear();
+            Assert.True(Apply(session, "session", Operations.SessionWork, new() { ["sessionId"] = "s1", ["actionKey"] = key, ["open"] = open }).Ok);
+            return session.Effects.Count(effect => effect.Operation == Operations.SessionWork && effect.TargetKind == AggregateKinds.Control);
+        }
+        Assert.Equal(1, Reports("a", true));   // now owns work
+        Assert.Equal(0, Reports("b", true));   // still owns
+        Assert.Equal(0, Reports("a", false));  // b is still open
+        Assert.Equal(1, Reports("b", false));  // owns nothing now
+    }
+
+    [Fact]
+    public void The_directory_ignores_a_reordered_ownership_report()
+    {
+        var control = new StateEnvelope<CoordinationDocument>
+        {
+            Value = new() { Json = new JsonObject { ["sessions"] = new JsonObject { ["a"] = new JsonObject { ["sessionId"] = "a", ["principalId"] = "alice", ["repositoryId"] = "repo", ["observedAt"] = Now.ToString("O") } } }.ToJsonString() }
+        };
+        bool Report(bool owns, int seconds) => JsonNode.Parse(Apply(control, "control", Operations.SessionWork, new() { ["sessionId"] = "a", ["owns"] = owns, ["at"] = Now.AddSeconds(-100 + seconds).ToString("O") }).DataJson)!["tracked"]!.GetValue<bool>();
+        Assert.True(Report(true, 10));
+        Assert.True(Report(false, 30));
+        Assert.False(Report(true, 20));  // older than the clear
+        Assert.Null(State(control)["sessions"]!["a"]!["ownsWork"]);
+    }
+
+    [Fact]
     public void Session_open_arguments_cannot_preset_the_sessions_own_state()
     {
         var session = new StateEnvelope<CoordinationDocument>();

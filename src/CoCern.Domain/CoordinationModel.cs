@@ -195,8 +195,8 @@ public static class Operations
     /// </summary>
     public const string SessionExpire = "__session_expire";
     /// <summary>
-    /// Sent by a board to the control aggregate when a session starts answering for an unresolved action (<c>open: true</c>: it began it,
-    /// or recovered it) or stops (the action resolved, or another session recovered it). The directory never expires such a session.
+    /// A board tells a session it starts answering for an unresolved action (<c>open: true</c>: it began or recovered it) or stops; the
+    /// session tells the control directory (<c>owns</c>) when it starts or stops owning any. The directory never expires such a session.
     /// </summary>
     public const string SessionWork = "__session_work";
     /// <summary>Server-set on <c>task_claim</c> and <c>action_begin</c>: ask the board for the declared resources (<c>DeclaredResourcesNeeded</c>) when the task has any.</summary>

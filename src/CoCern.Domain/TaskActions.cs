@@ -49,13 +49,13 @@ internal static class TaskActions
     private static string OwnerSession(JsonObject action) => action["recovery"] is JsonObject recovery ? Text(recovery, "sessionId") : Text(action, "sessionId");
 
     /// <summary>
-    /// Tells the control directory that <paramref name="sessionId"/> now answers for an unresolved action (<paramref name="open"/>), or no
-    /// longer does, so a full directory never expires a session that still owns unresolved work.
+    /// Tells <paramref name="sessionId"/>'s session that it now answers for an unresolved action (<paramref name="open"/>), or no longer
+    /// does; the session tells the directory when that changes, so a full directory never expires a session that owns work.
     /// </summary>
     private static void Track(AggregateContext context, string sessionId, string actionKey, bool open)
     {
         if (sessionId.Length == 0) return;
-        context.Emit(AggregateKinds.Control, AggregateKinds.ControlKey, Operations.SessionWork, new JsonObject
+        context.Emit(AggregateKinds.Session, sessionId, Operations.SessionWork, new JsonObject
         {
             ["repositoryId"] = context.Repository, ["sessionId"] = sessionId, ["actionKey"] = actionKey, ["open"] = open, ["at"] = context.Now.ToString("O")
         });
