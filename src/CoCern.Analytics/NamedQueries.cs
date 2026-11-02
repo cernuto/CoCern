@@ -128,18 +128,20 @@ public static class NamedQueries
                 WHERE ev = 'ready' AND next_ev = 'claim' AND next_at >= $prev)
             {Average("waits")}
             """,
-        // Counts: closures, reopened tasks (completed, then ready or blocked again), failed action reports, actions a recovery abandoned
-        // (external effects unknown), and retried actions
-        // (each attempt after the first).
+        // Counts: closures, reopened tasks (completed, then ready or blocked again), failed actions and actions a recovery abandoned
+        // (external effects unknown), each attempt counted once at its first such report (a recovery or an acceptance repeats the outcome),
+        // and retried actions (each attempt after the first).
         [QualityGuardrails] = $"""
             WITH {WorkflowStates},
             events AS (
                 SELECT CASE WHEN workflow_state = 'completed' THEN 'closures' ELSE 'reopened' END AS key, at_ticks FROM states
                 WHERE at_ticks >= $prev AND before IS DISTINCT FROM workflow_state AND (workflow_state = 'completed' OR before = 'completed')
                 UNION ALL
-                SELECT 'failed_actions', at_ticks FROM action_reports WHERE {Window} AND outcome = 'failed'
-                UNION ALL
-                SELECT 'abandoned_actions', at_ticks FROM action_reports WHERE {Window} AND outcome = 'abandoned'
+                SELECT key, first_at FROM (
+                    SELECT CASE outcome WHEN 'failed' THEN 'failed_actions' ELSE 'abandoned_actions' END AS key, min(at_ticks) AS first_at
+                    FROM action_reports WHERE repository_id = $repository AND outcome IN ('failed', 'abandoned')
+                    GROUP BY board_id, task_id, action_id, attempt, outcome)
+                WHERE first_at >= $prev AND first_at < $now
                 UNION ALL
                 SELECT 'retried_actions', first_at FROM (
                     SELECT min(at_ticks) AS first_at FROM action_reports WHERE repository_id = $repository AND attempt > 1

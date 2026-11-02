@@ -120,9 +120,9 @@ public static class CoordinationStateMachine
     private static readonly Dictionary<string, string[]> ServerArguments = new(StringComparer.Ordinal)
     {
         [RelayTools.TaskUpdate] = ["archivedDependsOn"],
-        [RelayTools.TaskClaim] = ["declaredResources"],
-        [RelayTools.ActionBegin] = ["binding", "bindingVersion", "declaredResources"],
-        [RelayTools.ClaimAcquire] = ["taskClaimGeneration"],
+        [RelayTools.TaskClaim] = ["declaredResources", TaskWorkflow.ResolveDeclaredField],
+        [RelayTools.ActionBegin] = ["binding", "bindingVersion", "declaredResources", TaskWorkflow.ResolveDeclaredField, TaskWorkflow.LockRefusalField],
+        [RelayTools.ClaimAcquire] = ["taskClaimGeneration", "declaredResources"],
         [RelayTools.OrderPut] = ["defaultExpiryDays"],
         [RelayTools.AttentionRespond] = ["snoozeBoundaries"]
     };
@@ -134,14 +134,24 @@ public static class CoordinationStateMachine
         significant.Remove("hubIncarnation");
         foreach (var key in significant.Select(entry => entry.Key).Where(key => key.StartsWith("__", StringComparison.Ordinal)).ToArray()) significant.Remove(key);
         if (ServerArguments.TryGetValue(operation, out var injected)) foreach (var key in injected) significant.Remove(key);
+        // The hub replaces a claim's resourceIds with their canonical IDs, which can change between retries (an alias re-registered): the
+        // client's own list is what identifies the request.
+        if (significant[RequestedResourcesField] is { } requested) { significant["resourceIds"] = requested.DeepClone(); significant.Remove(RequestedResourcesField); }
         return Hash(significant);
     }
 
-    /// <summary>The fingerprint replays stored before server arguments were left out; a retry that matches it still replays.</summary>
+    /// <summary>Server-set on a <c>task_claim</c>: the <c>resourceIds</c> the client named, before the hub made them canonical.</summary>
+    public const string RequestedResourcesField = "requestedResourceIds";
+
+    /// <summary>
+    /// The fingerprint replays stored before server arguments were left out; a retry that matches it still replays. Fields the hub adds
+    /// only since then are left out, since those older requests never carried them.
+    /// </summary>
     private static string LegacyFingerprint(JsonObject arguments)
     {
         var significant = arguments.DeepClone().AsObject();
         significant.Remove("hubIncarnation");
+        foreach (var key in new[] { RequestedResourcesField, TaskWorkflow.ResolveDeclaredField, TaskWorkflow.LockRefusalField }) significant.Remove(key);
         return Hash(significant);
     }
 

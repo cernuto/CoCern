@@ -297,6 +297,11 @@ public static class RelayLimits
     /// directory forgets it, so a lost or reordered report never protects a session from expiry for good.
     /// </summary>
     public const int SessionWorkRetentionDays = 7;
+    /// <summary>
+    /// Least hours between a board's refreshes of the directory's record for an action that stays unresolved with the same session; well
+    /// inside <see cref="SessionWorkRetentionDays"/>, so a reported long-running action never lapses.
+    /// </summary>
+    public const int SessionWorkRefreshHours = 24;
     /// <summary>Least minutes between a session's reports to the control directory that it is still active (made at boundary replies).</summary>
     public const int AttentionActivityReportMinutes = 60;
     /// <summary>Sessions whose last idle-hold wake the hub remembers for counting; past this the memory is cleared.</summary>

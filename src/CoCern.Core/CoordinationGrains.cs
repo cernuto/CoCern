@@ -54,10 +54,9 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
         var candidate = Clone(persistent.State);
         var firstNewEffect = candidate.Effects.Count;
         var priorTaskRevision = Kind == AggregateKinds.Board ? CoordinationStateMachine.TaskRevision(candidate) : null;
-        var reply = CoordinationStateMachine.Apply(candidate, Kind, this.GetPrimaryKeyString(), caller, operation, args, Now, services.GetService<OrderOptions>() is { Enabled: true }, ArchiveAfterDays);
+        var reply = ApplyInternal(candidate, caller, operation, args, Now, services.GetService<OrderOptions>() is { Enabled: true }, ArchiveAfterDays);
         // A read that emitted an effect (a verify's hourly activity report) commits it, or the effect would be lost.
         if (!reply.Ok || !CoordinationStateMachine.RequiresCommit(Kind, operation, priorTaskRevision, candidate) && candidate.Effects.Count == firstNewEffect) return reply;
-        CoordinationStateMachine.StampEffects(candidate.Effects, firstNewEffect, caller);
         CoordinationStateMachine.ScheduleLeases(candidate, Kind == AggregateKinds.Board ? ArchiveAfterDays : 0);
         return await CommitAsync(candidate) ? reply : Replies.Error(RelayErrorCodes.StorageFailure);
     }
@@ -168,7 +167,7 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
 
     /// <summary>
     /// Applies an operation the grain drives itself (a due sweep or check, a self-delivery, an order failure) and stamps the effects it
-    /// emitted with <paramref name="caller"/>, exactly as <see cref="ExecuteAsync"/> does. Without the stamp, delivery would rebuild an empty
+    /// emitted with <paramref name="caller"/>; <see cref="ExecuteAsync"/> applies every call through it too. Without the stamp, delivery would rebuild an empty
     /// caller that no target accepts, and advisory effects would be dropped.
     /// </summary>
     private protected RelayReply ApplyInternal(StateEnvelope<CoordinationDocument> candidate, RelayCaller caller, string operation, JsonObject args, DateTimeOffset now,

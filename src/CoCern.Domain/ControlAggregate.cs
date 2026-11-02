@@ -118,8 +118,8 @@ internal static class ControlAggregate
     /// action is kept as a short hash of its key with the time of its last report (the board's <c>at</c>), at most
     /// <see cref="RelayLimits.MaxSessionOpenActions"/>. Delivery can be reordered (effects are retried one by one), so:
     /// <list type="bullet">
-    /// <item>a close leaves a tombstone, at most <see cref="RelayLimits.MaxSessionClosedActions"/>, and an open or refresh for a closed
-    /// action is ignored, however late it arrives;</item>
+    /// <item>a close leaves a tombstone, at most <see cref="RelayLimits.MaxSessionClosedActions"/>, and an open or refresh reported no later
+    /// than the close is ignored, however late it arrives; one reported after it (the action came back to this session) opens it again;</item>
     /// <item>a close for an action never seen open (one begun before the directory tracked actions) only leaves its tombstone;</item>
     /// <item>open actions, tombstones and an overflow mark all lapse after <see cref="RelayLimits.SessionWorkRetentionDays"/> without a report,
     /// so nothing protects a session for good. A report older than that is ignored.</item>
@@ -143,9 +143,11 @@ internal static class ControlAggregate
         {
             if (Flag(context.Args, "open"))
             {
-                // A late open or refresh for an action that already closed changes nothing.
-                if (!closed.ContainsKey(key))
+                // A late open or refresh for an action that already closed changes nothing. One reported after the close (by the board's
+                // time) is real: the action came back to this session (its writer took it back from a recovery), so it opens again.
+                if (!closed.ContainsKey(key) || at > Seconds(closed[key]))
                 {
+                    closed.Remove(key);
                     tracked = true;
                     if (open.ContainsKey(key) || open.Count < RelayLimits.MaxSessionOpenActions) open[key] = Math.Max(at, Seconds(open[key]));
                     else session[OpenOverflowKey] = Math.Max(at, Seconds(session[OpenOverflowKey]));

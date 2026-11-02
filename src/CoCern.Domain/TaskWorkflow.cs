@@ -51,6 +51,18 @@ internal static class TaskWorkflow
     /// answers to. A name missing from the map (the packet changed since, or no hub) must be listed as itself. An unregistered name has no
     /// lock to take, so it is only refused on a board with <c>requireResources</c>.
     /// </summary>
+    public const string ResolveDeclaredField = Operations.ResolveDeclaredField;
+    public const string LockRefusalField = Operations.LockRefusalField;
+
+    /// <summary>
+    /// <c>DeclaredResourcesNeeded</c> with the declared names when the hub asked for them (<see cref="ResolveDeclaredField"/>) and the task
+    /// declares any, or null. The hub then resolves them and calls again with <c>declaredResources</c>.
+    /// </summary>
+    public static RelayReply? DeclaredResourcesNeeded(JsonObject task, JsonObject args) =>
+        Flag(args, ResolveDeclaredField) && task["workflow"] is JsonObject workflow && Resources(workflow).Distinct(StringComparer.Ordinal).ToArray() is { Length: > 0 } declared
+            ? Error(RelayErrorCodes.DeclaredResourcesNeeded, new { declared }, Number(task, "version"))
+            : null;
+
     public static RelayReply? ResourceRefusal(JsonObject board, JsonObject task, JsonObject args, IEnumerable<string> held)
     {
         if (task["workflow"] is not JsonObject workflow || Resources(workflow).ToArray() is not { Length: > 0 } declared) return null;

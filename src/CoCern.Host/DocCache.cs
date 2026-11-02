@@ -510,7 +510,9 @@ internal sealed class DocSyncRunner(DocCacheSettings settings, GitCli git, IGrai
             // The unchanged files waiting for room are read again from this commit when, after this commit's removals, the smallest fits.
             foreach (var path in gone) waiting.Remove(path);
             var left = entries.Values.Where(entry => !removed.Contains(entry.Path)).ToArray();
-            if (Fits(left.Length, left.Sum(entry => (long)entry.Bytes))) present.AddRange(waiting.Keys);
+            var used = left.Sum(entry => (long)entry.Bytes);
+            // Only those whose last known size fits the room left: one that cannot fit would be read just to be skipped again.
+            if (Fits(left.Length, used)) present.AddRange(waiting.Where(item => used + Math.Max(1, item.Value) <= settings.MaxRepositoryBytes).Select(item => item.Key));
         }
         var active = await ActiveAsync(repository.Id);
         var upserts = new List<DocEntry>();
