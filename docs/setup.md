@@ -7,6 +7,7 @@
 ./scripts/Start-CoCern.ps1                # loopback hub on http://127.0.0.1:5271
 ```
 
+- Open the dashboard with the one-time sign-in link the hub prints at startup. See [Monitoring](monitoring.md).
 - The start script makes a private **administrator** token in `data/local-client-token`. `-RepositoryId <id>` sets its repository (default `cocern`). Every chat that uses this token file can use the administrator tools, ad hoc SQL included.
 - For worker-only chats, issue a second token before starting the hub, in the same PowerShell window, and give those chats `COCERN_TOKEN_FILE=data/worker-token` (keep the file private; `IsAdministrator` defaults to `false`):
 
@@ -22,7 +23,13 @@
 
 ## Connect an agent
 
-Run the adapter as an MCP server: `dotnet <path>/CoCern.Adapter.dll`.
+**The easy way:** in the dashboard, open **Connect** and click **Connect** next to each app. Then restart the app. It adds CoCern to Claude Code (`~/.claude.json`), the Claude desktop app (`claude_desktop_config.json`, offered when it is installed) and Codex (`~/.codex/config.toml`, used by the Codex CLI, IDE extension and app). Each file is backed up first, and an existing `cocern` entry is left alone. The page works only in a browser on the hub's PC.
+
+**From a terminal:** `dotnet <adapter folder>/CoCern.Adapter.dll --connect` does the same for every app. It finds `data/local-client-token` above the adapter folder; `--token-file <path>` picks another. `--check` only reports.
+
+Both use the published adapter in `artifacts/adapter` when it exists, else the build output. Prefer the published one: a build can't replace an adapter that chats are running.
+
+**By hand:** run the adapter as an MCP server, `dotnet <path>/CoCern.Adapter.dll`, with these variables:
 
 | Variable | Default | What it does |
 | --- | --- | --- |
@@ -72,7 +79,7 @@ Every model call re-reads the whole chat, so fewer calls matter most.
 - **Every reply is held to its token budget.** Budgets sit at the byte limit, so in practice only a reply that would be cut anyway is compacted. `Relay:Tokens:Enforce=false` only measures.
 - **Administrator tools need an administrator token:** `analytics_query` (ad hoc SQL too), `standing_put`, `order_put`, `order_remove`, `control_request` and `doc_sync`.
 - **Analytics works out of the box on Windows x64 only**, where its DuckDB extension is bundled. Elsewhere the hub logs one warning and `analytics_query` answers `AnalyticsUnavailable` until you install the extension. See [Monitoring](monitoring.md#analytics).
-- **Other PCs stay off.** Discovery and the network listener are off by default. The network listener serves the hub beyond loopback, so turn it on only on purpose. New PCs need the join code the hub logs, and setup should get the certificate fingerprint with `--fingerprint`. See [Other PCs](discovery.md).
+- **Other PCs stay off.** Discovery and the network listener are off by default. The network listener serves the hub beyond loopback, so turn it on only on purpose. New PCs need the join code (the hub logs it once, when it creates it, and keeps it in `join-code` next to the database), and setup should get the certificate fingerprint with `--fingerprint`. See [Other PCs](discovery.md).
 
 ## Hub settings
 
@@ -86,7 +93,7 @@ Use `appsettings.json`, environment variables (`Relay__Clients__0__Token`) or th
 | `Relay:GatewayPort` | 31111 | Orleans gateway port (loopback). |
 | `Relay:ClusterId` | `CoCern` | Change it, and the ports, for a second test hub. |
 | `Relay:Clients:N:Token` | | A client's bearer token. |
-| `Relay:Clients:N:TokenFile` | | Read the token from this file instead. |
+| `Relay:Clients:N:TokenFile` | | Read the token from this file instead. If it does not exist at startup, it is created with a new token, owner-only. |
 | `Relay:Clients:N:PrincipalId` | | Who the client is. |
 | `Relay:Clients:N:IsAdministrator` | `false` | Allows administrator tools. |
 | `Relay:Clients:N:Repositories:M` | | Repositories the client may use. |

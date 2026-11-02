@@ -201,6 +201,22 @@ public sealed record DashboardAuthStatus
     public string? PrincipalId { get; init; }
 }
 
+/// <summary>The apps on the hub's PC that CoCern can be added to. <see cref="Unavailable"/> says why none can (another PC, no adapter found).</summary>
+public sealed record DashboardConnectStatus
+{
+    public string? Unavailable { get; init; }
+    public DashboardConnectClient[] Clients { get; init; } = [];
+}
+
+/// <summary><see cref="State"/> is <c>connected</c>, <c>available</c>, <c>added</c> or <c>error</c> (see <see cref="Detail"/>).</summary>
+public sealed record DashboardConnectClient
+{
+    public string Id { get; init; } = "";
+    public string Name { get; init; } = "";
+    public string State { get; init; } = "";
+    public string? Detail { get; init; }
+}
+
 public sealed record DashboardTrafficEvent
 {
     public long Sequence { get; init; }

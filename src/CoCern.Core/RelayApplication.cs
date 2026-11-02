@@ -333,8 +333,11 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         var opened = await CallControl(caller, RelayTools.SessionOpen, args);
         if (!opened.Ok) return opened;
         var data = Parse(opened);
-        var initialize = args.DeepClone().AsObject();
-        initialize["sessionId"] = Text(data, "sessionId"); initialize["sessionToken"] = Text(data, "sessionToken"); initialize["principalId"] = caller.PrincipalId; initialize.Remove("requestId");
+        var initialize = new JsonObject
+        {
+            ["sessionId"] = Text(data, "sessionId"), ["sessionToken"] = Text(data, "sessionToken"), ["principalId"] = caller.PrincipalId, ["repositoryId"] = Text(args, "repositoryId")
+        };
+        foreach (var field in Operations.SessionClientFields) if (args[field] is { } value) initialize[field] = value.DeepClone();
         var initialized = await Call(AggregateKinds.Session, Text(data, "sessionId"), caller, Operations.Open, initialize);
         if (!initialized.Ok) return initialized;
         // The queued initialization remains a retryable durable effect and deduplicates at its recipient.

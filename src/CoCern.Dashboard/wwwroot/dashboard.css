@@ -498,3 +498,14 @@ small { font-size: .8rem; }
 .sign-in-form code { font: .85em/1.4 ui-monospace, "Cascadia Mono", Consolas, monospace; padding: 1px 5px; border-radius: 5px; background: var(--surface-alt); border: 1px solid var(--line); overflow-wrap: anywhere; }
 @media (max-width: 800px) { .main-nav a .icon { width: 16px; height: 16px; } }
 @media (prefers-reduced-motion: reduce) { .icon-button, .main-nav a { transition: none; } }
+
+/* Connect: one row per app, one button each. */
+.connect-list { list-style: none; margin: 0; padding: 0 22px 8px; }
+.connect-item { display: grid; grid-template-columns: auto 1fr auto; gap: 14px; align-items: center; padding: 14px 0; border-top: 1px solid var(--line); }
+.connect-item small { display: block; color: var(--muted); font-size: .8rem; margin-top: 3px; overflow-wrap: anywhere; }
+.connect-button { min-height: 36px; padding: 0 16px; border-radius: 8px; background: var(--ink); color: var(--surface); border: 1px solid var(--ink); font-weight: 600; cursor: pointer; }
+.connect-button:hover:not(:disabled) { opacity: .9; }
+.connect-button:disabled { opacity: .55; cursor: default; }
+.connect-prompt { display: grid; grid-template-columns: auto 1fr auto; gap: 14px; align-items: center; padding: 14px 18px; margin-bottom: 18px; color: inherit; text-decoration: none; }
+.connect-prompt small { display: block; color: var(--muted); font-size: .8rem; margin-top: 3px; }
+.connect-prompt:hover { border-color: var(--ink); }

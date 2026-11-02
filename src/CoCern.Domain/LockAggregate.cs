@@ -28,6 +28,20 @@ internal static class LockAggregate
         _ => Error(UnknownTool)
     };
 
+    /// <summary>
+    /// A rolled-back task claim gives an already-held grant back to the claim it served before, and forgets the grant reply it stored
+    /// for that claim (<see cref="Operations.ForgetRequestField"/>), so the claim's retry points the grant at itself again. Only a grant
+    /// this session still holds is touched: one whose lease ran out meanwhile is never taken again.
+    /// </summary>
+    private static RelayReply RestoreClaimFor(AggregateContext context)
+    {
+        var state = context.State;
+        if (Text(state, "holder") != context.SessionId || Date(state, "leaseUntil") <= context.Now) return Ok(new { restored = false });
+        if (Text(context.Args, Operations.RestoreClaimForField) is { Length: > 0 } restored) state["claimFor"] = restored; else state.Remove("claimFor");
+        CoordinationStateMachine.ForgetRequest(state, context.Caller.PrincipalId, RelayTools.ClaimAcquire, Text(context.Args, Operations.ForgetRequestField));
+        return Ok(new { restored = true });
+    }
+
     /// <summary>A retried claim replays only while this session still holds the same grant.</summary>
     internal static RelayReply? ReplayRefusal(JsonObject state, string operation, JsonObject args, JsonObject grant) =>
         operation is RelayTools.ClaimAcquire or RelayTools.ClaimRenew && (Text(state, "holder") != Text(args, "sessionId") || Number(state, "generation") != Number(grant, "generation"))
@@ -90,6 +104,7 @@ internal static class LockAggregate
         var session = context.SessionId;
         var generation = Number(state, "generation");
         var blockers = ObjectAt(state, "blockers");
+        if (context.Args.ContainsKey(Operations.RestoreClaimForField)) return RestoreClaimFor(context);
         if (holder.Length > 0 && holder != session && (Date(state, "leaseUntil") > context.Now || blockers.Count > 0))
             return Error(Busy, new { holder, leaseUntil = Text(state, "leaseUntil"), blockers = blockers.Count, retryAfterSeconds = RetryAfterSeconds });
         var owned = holder == session && Date(state, "leaseUntil") > context.Now;
@@ -103,10 +118,7 @@ internal static class LockAggregate
         // The task claim this grant now serves (set by task_claim, even when the holder already had it), so a standing order releases the
         // grant only for that claim and never one the same session took again for its next task.
         var previous = Text(state, "claimFor");
-        // A rolled-back task claim puts back the claim an already-held grant served before (Operations.RestoreClaimForField).
-        if (context.Args[Operations.RestoreClaimForField] is JsonValue restore && restore.TryGetValue<string>(out var restored))
-        { if (restored.Length > 0) state["claimFor"] = restored; else state.Remove("claimFor"); }
-        else if (Text(context.Args, "taskId") is { Length: > 0 } taskId && context.Args["taskClaimGeneration"] is not null)
+        if (Text(context.Args, "taskId") is { Length: > 0 } taskId && context.Args["taskClaimGeneration"] is not null)
             state["claimFor"] = StandingOrders.ClaimKey(Text(context.Args, "boardId", "default"), taskId, Number(context.Args, "taskClaimGeneration"));
         else state.Remove("claimFor");
         return Ok(new { newlyAcquired = !owned, generation, leaseUntil = Text(state, "leaseUntil"), previousClaimFor = previous }, generation);

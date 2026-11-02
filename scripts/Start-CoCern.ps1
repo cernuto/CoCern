@@ -43,10 +43,12 @@ if ($IsWindows) {
 $settings = @{
     ASPNETCORE_URLS = $Url
     Relay__DatabasePath = (Join-Path $DataDirectory 'relay.db')
-    Relay__Clients__0__Token = $token
+    Relay__Clients__0__TokenFile = $tokenPath
     Relay__Clients__0__PrincipalId = [Environment]::UserName
     Relay__Clients__0__IsAdministrator = 'true'
     Relay__Clients__0__Repositories__0 = $RepositoryId
+    # This administrator may open the dashboard; the hub prints a one-time sign-in link for it.
+    Relay__Dashboard__ViewerPrincipalIds__0 = [Environment]::UserName
 }
 # The doc cache syncs committed docs from git. Out of the box it follows the checkout this script runs from, on its current branch,
 # with the default patterns. It reads local commits only (git show), never the working tree, and never fetches: Fetch=false leaves
@@ -81,6 +83,7 @@ try {
     }
     Write-Host "Starting CoCern at $Url. API reference: $Url/scalar"
     Write-Host "Local adapter token file: $tokenPath"
+    Write-Host 'Next: click the dashboard sign-in link the hub prints, then open Connect to add CoCern to Claude and Codex.'
     & dotnet $HostDll
     if ($LASTEXITCODE -ne 0) { throw "CoCern exited with code $LASTEXITCODE." }
 } finally {

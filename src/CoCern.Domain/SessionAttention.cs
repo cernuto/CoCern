@@ -54,7 +54,8 @@ internal static class SessionAttention
         var items = ObjectAt(state, "attention");
         RemoveExpired(items, now);
         var revision = Math.Max(0, Number(args, "revision"));
-        if (revision > 0 && Number(ObjectAt(state, "attentionClosed"), key) >= revision) return Ok(new { raised = false, reason = "stale" });
+        if (revision > 0 && (Number(ObjectAt(state, "attentionClosed"), key) >= revision || taskId.Length > 0 && Number(ObjectAt(state, ArchivedKey), ArchivedTask(boardId, taskId)) >= revision))
+            return Ok(new { raised = false, reason = "stale" });
         var existing = Find(items, key);
         if (existing is { } open && revision > 0 && Number(open.Item, "revision") > revision) return Ok(new { raised = false, reason = "stale", itemId = open.Id });
         var content = new JsonObject { ["kind"] = kind };
@@ -119,6 +120,9 @@ internal static class SessionAttention
         // A close with a revision and named kinds also guards keys with no open item, so an older raise arriving later stays closed.
         if (revision > 0 && kinds is not null && itemId.Length == 0)
             foreach (var kind in kinds) RememberClosed(state, AttentionScheduler.Key(kind, boardId, taskId, subject), revision);
+        // Archiving names tasks, not kinds: each is guarded as a whole, apart from the per-key guards it would otherwise flush.
+        if (revision > 0 && kinds is null && taskIds is not null)
+            foreach (var id in taskIds) RememberArchived(state, ArchivedTask(boardId, id), revision);
         return Ok(new { closed });
     }
 
@@ -317,6 +321,20 @@ internal static class SessionAttention
         foreach (var entry in items)
             if (entry.Value is JsonObject item && AttentionItem.From(entry.Key, item).Key == key) return (entry.Key, item);
         return null;
+    }
+
+    private const string ArchivedKey = "attentionArchived";
+
+    private static string ArchivedTask(string boardId, string taskId) => AttentionScheduler.Key("", boardId, taskId, "");
+
+    /// <summary>Remembers an archived task's revision, newest last, bounded by <see cref="RelayLimits.MaxAttentionArchivedTasks"/>.</summary>
+    private static void RememberArchived(JsonObject state, string key, long revision)
+    {
+        var archived = ObjectAt(state, ArchivedKey);
+        var newest = Math.Max(revision, Number(archived, key));
+        archived.Remove(key);
+        archived[key] = newest;
+        while (archived.Count > RelayLimits.MaxAttentionArchivedTasks) archived.Remove(archived.First().Key);
     }
 
     /// <summary>Remembers the newest source revision a closed key had, newest last, bounded by <see cref="RelayLimits.MaxAttentionClosedKeys"/>.</summary>

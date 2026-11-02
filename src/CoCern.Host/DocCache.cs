@@ -408,9 +408,13 @@ internal sealed class DocSyncRunner(DocCacheSettings settings, GitCli git, IGrai
         if (ReferenceEquals(stored.Run, run))
         {
             requestOrder.Enqueue((key, run));
-            // Evict only the entry that was queued: a failed run's retry stores a new one under the same key.
+            // Evict only the entry that was queued: a failed run's retry stores a new one under the same key. A run still going stays, so its
+            // retry joins it instead of starting a second sync; the queue shrinks again once it ends.
             while (requestOrder.Count > RememberedRequests && requestOrder.TryDequeue(out var old))
+            {
+                if (old.Run.IsValueCreated && !old.Run.Value.IsCompleted) { requestOrder.Enqueue(old); break; }
                 if (requests.TryGetValue(old.Key, out var current) && ReferenceEquals(current.Run, old.Run)) requests.TryRemove(new KeyValuePair<string, (string?, Lazy<Task<DocSyncOutcome>>)>(old.Key, current));
+            }
         }
         else if (stored.Branch != branch) throw new DocSyncException(DocSyncError.RequestConflict, "This requestId was already used for a doc_sync with another branch.");
         try { return await stored.Run.Value.WaitAsync(cancellationToken); }
@@ -501,9 +505,11 @@ internal sealed class DocSyncRunner(DocCacheSettings settings, GitCli git, IGrai
                 if (entries.ContainsKey(path)) removed.Add(path);
                 if (isPresent && repository.SpecOf(path) is not null) skipped.Add(path);
                 // A skipped file that was deleted is no longer skipped.
-                if (!isPresent && skippedBefore.Contains(path)) { unskippedGone.Add(path); gone.Add(path); }
+                if (!isPresent && skippedBefore.Contains(path)) unskippedGone.Add(path);
+                // Deleted, or no longer a regular file: either way it no longer waits for room.
+                gone.Add(path);
             }
-            // The unchanged files waiting for room are read again from this commit when, after this commit's removals, the smallest fits.
+            // The unchanged files still waiting for room are read again from this commit when, after this commit's removals, the smallest fits.
             foreach (var path in gone) waiting.Remove(path);
             var left = entries.Values.Where(entry => !removed.Contains(entry.Path)).ToArray();
             var used = left.Sum(entry => (long)entry.Bytes);

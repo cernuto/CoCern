@@ -96,9 +96,14 @@ public sealed class EnrollmentHardeningTests : IDisposable
         Assert.Matches("^[A-Z0-9]{5}(-[A-Z0-9]{5}){3}$", first.Value);
         Assert.Equal(first.Value, File.ReadAllText(path));
         if (!OperatingSystem.IsWindows()) Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(path));
-        Assert.Equal(first.Value, HubJoinCode.Load(configuration, environment).Value);
+        var again = HubJoinCode.Load(configuration, environment);
+        Assert.Equal(first.Value, again.Value);
+        // Only the start that creates the code logs its value.
+        Assert.Equal((true, false), (first.Generated, again.Generated));
         Assert.True(first.Matches(first.Value));
-        Assert.False(first.Matches(first.Value.ToLowerInvariant()));
+        // People retype it, so letter case and surrounding space never matter; any other change does.
+        Assert.True(first.Matches(" " + first.Value.ToLowerInvariant() + " "));
+        Assert.False(first.Matches(first.Value.Replace("-", "")));
         Assert.False(first.Matches(null));
     }
 
@@ -147,6 +152,9 @@ public sealed class EnrollmentHardeningTests : IDisposable
         Assert.Equal(DiscoveryLimits.MaxMachines, Machines(state).Count);
         Assert.Equal(RelayErrorCodes.CapacityExceeded, Enroll(state, "new-3", Now).Code);
         Assert.True(Machines(state).ContainsKey("m2"));
+        // A dropped ID is never issued again: its principal still owns actions and sessions.
+        Assert.Equal(RelayErrorCodes.MachineExpired, Enroll(state, "m1", Now).Code);
+        Assert.Equal(RelayErrorCodes.MachineExpired, Enroll(state, "m0", Now.AddDays(400)).Code);
     }
 
     [Fact]

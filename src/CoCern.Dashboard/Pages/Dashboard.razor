@@ -4,6 +4,7 @@
 @page "/logs"
 @page "/standing"
 @page "/documents"
+@page "/connect"
 
 <PageTitle>@PageTitle · CoCern</PageTitle>
 @if (Connection.State == DashboardLinkState.SignIn)
@@ -27,6 +28,7 @@ else
                 <NavLink href="logs"><Icon Name="logs" />Logs</NavLink>
                 <NavLink href="standing"><Icon Name="standing" />Standing</NavLink>
                 <NavLink href="documents"><Icon Name="documents" />Documents</NavLink>
+                <NavLink href="connect"><Icon Name="plug" />Connect</NavLink>
             </nav>
             <div class="header-actions">
                 <button type="button" class="icon-button" @onclick="ToggleThemeAsync" aria-label="@(_theme == "dark" ? "Use light appearance" : "Use dark appearance")" title="@(_theme == "dark" ? "Light appearance" : "Dark appearance")"><Icon Name="@(_theme == "dark" ? "sun" : "moon")" /></button>
@@ -60,6 +62,9 @@ else
                 }
                 @switch (View)
                 {
+                    case "connect":
+                        <ConnectView />
+                        break;
                     case "documents":
                         <DocCacheView Cache="@snapshot.DocCache" Now="@_now" />
                         break;
@@ -77,6 +82,7 @@ else
                         <StandingView Boards="@snapshot.Standing" Truncated="@snapshot.StandingTruncated" Tokens="@snapshot.Tokens" Now="@_now" />
                         break;
                     default:
+                        <ConnectView Compact />
                         <div class="overview-layout">
                             <div class="overview-board"><ActivityBoard Snapshot="@snapshot" SelectedId="@_selectedId" OnSelect="SelectSession" Now="@_now" Live="@IsLive" IsPulsing="Pulse" /></div>
                             <div class="overview-inspector"><SessionInspector Session="@SelectedSession" Logs="@snapshot.Logs" Now="@_now" /></div>
@@ -85,7 +91,7 @@ else
                         <LogView Entries="@snapshot.Logs" Compact />
                         break;
                 }
-                <footer class="app-footer"><span>Read-only · @Connection.PrincipalId</span><span>Hub started @DashboardFormat.Timestamp(snapshot.Host.StartedAt)</span></footer>
+                <footer class="app-footer"><span>Signed in as @Connection.PrincipalId</span><span>Hub started @DashboardFormat.Timestamp(snapshot.Host.StartedAt)</span></footer>
             }
             else
             {

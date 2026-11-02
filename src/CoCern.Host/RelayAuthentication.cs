@@ -36,7 +36,7 @@ public static class RelayAuthentication
 {
     public static void AddRelayAuthentication(this IServiceCollection services, IConfiguration configuration)
     {
-        services.AddSingleton(provider => LoadClients(provider.GetRequiredService<IConfiguration>(), provider.GetRequiredService<IHostEnvironment>()));
+        services.AddSingleton(provider => LoadClients(provider.GetRequiredService<IConfiguration>(), provider.GetRequiredService<IHostEnvironment>(), createMissing: true));
         services.AddSingleton<MachineCredentialLimiter>();
         services.AddHostedService<RelayConfigurationValidator>();
         var auth = services.AddAuthentication("Relay").AddScheme<AuthenticationSchemeOptions, RelayAuthenticationHandler>("Relay", _ => { });
@@ -45,12 +45,33 @@ public static class RelayAuthentication
         services.AddAuthorization();
     }
 
-    internal static RelayClient[] LoadClients(IConfiguration configuration, IHostEnvironment environment)
+    /// <summary>
+    /// The configured clients, with file tokens read. At startup (<paramref name="createMissing"/>) a token file that does not exist yet
+    /// is created with a new random token, owner-only, so a first run needs no script; later reads never create one.
+    /// </summary>
+    internal static RelayClient[] LoadClients(IConfiguration configuration, IHostEnvironment environment, bool createMissing = false)
     {
         var clients = configuration.GetSection("Relay:Clients").Get<RelayClient[]>() ?? [];
         foreach (var client in clients.Where(c => string.IsNullOrWhiteSpace(c.Token) && !string.IsNullOrWhiteSpace(c.TokenFile)))
-            client.Token = ReadTokenFile(Path.Combine(environment.ContentRootPath, client.TokenFile!));
+        {
+            var path = Path.Combine(environment.ContentRootPath, client.TokenFile!);
+            if (createMissing && !File.Exists(path)) CreateTokenFile(path);
+            client.Token = ReadTokenFile(path);
+        }
         return clients;
+    }
+
+    private static void CreateTokenFile(string path)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
+            HubCertificate.WritePrivately(path, Encoding.ASCII.GetBytes(Convert.ToHexString(RandomNumberGenerator.GetBytes(32))));
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            throw new InvalidOperationException("A relay client token file could not be created.");
+        }
     }
 
     private static string ReadTokenFile(string path)
@@ -71,7 +92,7 @@ public static class RelayAuthentication
 
     internal static void Validate(IConfiguration configuration, IHostEnvironment environment)
     {
-        var clients = LoadClients(configuration, environment);
+        var clients = LoadClients(configuration, environment, createMissing: true);
         if (clients.Any(c => string.IsNullOrWhiteSpace(c.Token) || string.IsNullOrWhiteSpace(c.PrincipalId) || c.Token.Length > 4096))
             throw new InvalidOperationException("Relay client configuration is invalid.");
         // Two clients with one token would authenticate as whichever is listed last.

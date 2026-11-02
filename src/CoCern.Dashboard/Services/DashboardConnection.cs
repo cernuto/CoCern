@@ -42,16 +42,26 @@ public sealed class DashboardConnection(HttpClient http, NavigationManager navig
     public bool IsPulsing(string sessionId, DateTimeOffset now) =>
         State == DashboardLinkState.Live && now - _pulseAt < TimeSpan.FromMilliseconds(1400) && _activitySessions.Contains(sessionId);
 
-    public async Task<bool> LoginAsync(string token)
+    public Task<bool> LoginAsync(string token) => PostLoginAsync(new { token }, "This credential does not have dashboard access.");
+
+    /// <summary>Signs in with a one-time link from the hub's log, then connects; a spent or expired link leaves the sign-in form saying so.</summary>
+    public async Task StartWithLinkAsync(string link)
+    {
+        if (!await PostLoginAsync(new { link }, "This sign-in link was already used or has expired. The hub logs a new one each time one is used, and at every start.")) { _signInNotice = Notice; Start(); }
+    }
+
+    private string? _signInNotice;
+
+    private async Task<bool> PostLoginAsync(object body, string refused)
     {
         Notice = null;
         try
         {
-            using var response = await http.PostAsJsonAsync("api/login", new { token });
+            using var response = await http.PostAsJsonAsync("api/login", body);
             if (!response.IsSuccessStatusCode)
             {
                 Notice = response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden
-                    ? "This credential does not have dashboard access."
+                    ? refused
                     : "Sign-in is unavailable. Check the relay connection and try again.";
                 Changed?.Invoke();
                 return false;
@@ -184,7 +194,8 @@ public sealed class DashboardConnection(HttpClient http, NavigationManager navig
         _observations.Reset();
         _activitySessions.Clear();
         State = DashboardLinkState.SignIn;
-        Notice = null;
+        Notice = _signInNotice;
+        _signInNotice = null;
         Changed?.Invoke();
     }
 

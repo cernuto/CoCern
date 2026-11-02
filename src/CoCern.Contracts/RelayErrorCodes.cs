@@ -32,6 +32,8 @@ public static class RelayErrorCodes
     public const string InternalOnly = "InternalOnly";
     public const string ActionDenied = "ActionDenied";
     public const string MachineRevoked = "MachineRevoked";
+    /// <summary>The hub dropped this machine ID for inactivity and never reissues it; enroll again under a new ID.</summary>
+    public const string MachineExpired = "MachineExpired";
     public const string MachineRequired = "MachineRequired";
     public const string HttpsRequired = "HttpsRequired";
     /// <summary>Enrollment needs the hub's join code, and the request carried none or a wrong one.</summary>

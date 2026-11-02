@@ -22,6 +22,7 @@ public sealed class NodeState : IDisposable
 {
     private const string StateFile = "node.json";
     private const string CredentialFile = "credential";
+    private const string JoinCodeFile = "join-code";
     private const string LockFile = "node.lock";
     internal const string SessionsFolder = "sessions";
     /// <summary>The hub's bound on identifiers such as repository IDs and labels.</summary>
@@ -99,6 +100,18 @@ public sealed class NodeState : IDisposable
         if (Fingerprint is not null || !PinnedCertificate.IsFingerprint(fingerprint)) throw new InvalidOperationException("The hub certificate is already pinned.");
         Fingerprint = fingerprint.ToUpperInvariant();
         Save();
+    }
+
+    /// <summary>
+    /// Keeps the hub's join code, current-user-only like the credential, so the node can enroll again by itself when the hub drops this
+    /// PC (an expiry, a rejected credential) instead of stopping until setup runs again.
+    /// </summary>
+    internal void SaveJoinCode(string joinCode) => WritePrivately(Path.Combine(Folder, JoinCodeFile), Encoding.UTF8.GetBytes(joinCode));
+
+    internal string? ReadJoinCode()
+    {
+        try { return File.ReadAllText(Path.Combine(Folder, JoinCodeFile)).Trim() is { Length: > 0 and <= 256 } code ? code : null; }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { return null; }
     }
 
     /// <summary>Writes the credential to its current-user-only file first; only then does <c>node.json</c> say the node is enrolled.</summary>

@@ -19,6 +19,7 @@ internal sealed class ClientPlan
     private ClientPlan(string path, byte[]? content, bool existed) => (Path, _content, _existed) = (path, content, existed);
 
     public string Path { get; }
+    public bool IsUnchanged => _content is null;
     public static ClientPlan Unchanged(string path) => new(path, null, true);
     public static ClientPlan Write(string path, byte[] content, bool existed) => new(path, content, existed);
 
@@ -64,11 +65,12 @@ internal static class ClientSettings
 
     public static ClientChange RegisterClaudeCode(string claudeJsonPath, string dotnetPath, string adapterDll, TimeProvider? clock = null) => PlanClaudeCode(claudeJsonPath, dotnetPath, adapterDll).Apply(clock ?? TimeProvider.System);
 
-    public static ClientPlan PlanCodex(string path, string dotnetPath, string adapterDll)
+    /// <param name="environment">Variables for the adapter, such as <c>COCERN_TOKEN_FILE</c> on the hub's own PC; none for an enrolled node.</param>
+    public static ClientPlan PlanCodex(string path, string dotnetPath, string adapterDll, IReadOnlyDictionary<string, string>? environment = null)
     {
         var original = ReadAll(path);
         if (original is null)
-            return ClientPlan.Write(path, Encoding.UTF8.GetBytes(Entry(dotnetPath, adapterDll, Environment.NewLine)), existed: false);
+            return ClientPlan.Write(path, Encoding.UTF8.GetBytes(Entry(dotnetPath, adapterDll, environment, Environment.NewLine)), existed: false);
         string text;
         try { text = Strict.GetString(original, Bom(original), original.Length - Bom(original)); }
         catch (DecoderFallbackException) { throw Malformed(path, "it is not valid UTF-8"); }
@@ -78,13 +80,20 @@ internal static class ClientSettings
         if (exists) return ClientPlan.Unchanged(path);
         var eol = text.Contains("\r\n") ? "\r\n" : text.Contains('\n') ? "\n" : Environment.NewLine;
         var separator = text.Length == 0 ? "" : (text.EndsWith('\n') ? "" : eol) + eol;
-        return ClientPlan.Write(path, [.. original, .. Encoding.UTF8.GetBytes(separator + Entry(dotnetPath, adapterDll, eol))], existed: true);
+        return ClientPlan.Write(path, [.. original, .. Encoding.UTF8.GetBytes(separator + Entry(dotnetPath, adapterDll, environment, eol))], existed: true);
     }
 
-    public static ClientPlan PlanClaudeCode(string path, string dotnetPath, string adapterDll)
+    public static ClientPlan PlanClaudeCode(string path, string dotnetPath, string adapterDll, IReadOnlyDictionary<string, string>? environment = null) =>
+        PlanClaudeJson(path, new JsonObject { ["type"] = "stdio", ["command"] = dotnetPath, ["args"] = new JsonArray(adapterDll) }, environment);
+
+    /// <summary>The Claude desktop app's <c>claude_desktop_config.json</c>: the same <c>mcpServers</c> shape, without a transport type.</summary>
+    public static ClientPlan PlanClaudeDesktop(string path, string dotnetPath, string adapterDll, IReadOnlyDictionary<string, string>? environment = null) =>
+        PlanClaudeJson(path, new JsonObject { ["command"] = dotnetPath, ["args"] = new JsonArray(adapterDll) }, environment);
+
+    private static ClientPlan PlanClaudeJson(string path, JsonObject entry, IReadOnlyDictionary<string, string>? environment)
     {
         var original = ReadAll(path);
-        var entry = new JsonObject { ["type"] = "stdio", ["command"] = dotnetPath, ["args"] = new JsonArray(adapterDll) };
+        if (environment is { Count: > 0 }) entry["env"] = new JsonObject(environment.Select(pair => KeyValuePair.Create(pair.Key, (JsonNode?)pair.Value)));
         if (original is null) return ClientPlan.Write(path, Encoding.UTF8.GetBytes(Render(new JsonObject { ["mcpServers"] = new JsonObject { [Name] = entry } }, "\n") + "\n"), existed: false);
         JsonObject root;
         try
@@ -163,8 +172,9 @@ internal static class ClientSettings
     private static ClientSettingsException Malformed(string path, string reason) => new($"Setup stopped: '{path}' could not be understood ({reason}). It was not changed, and nothing else was changed. Fix or move the file, or use --skip-client-config.");
 
     /// <summary>The table to append. Single-quoted literal strings need no escaping of Windows backslashes.</summary>
-    private static string Entry(string dotnetPath, string adapterDll, string eol) =>
-        $"[{Table}.{Name}]{eol}command = {TomlString(dotnetPath)}{eol}args = [{TomlString(adapterDll)}]{eol}";
+    private static string Entry(string dotnetPath, string adapterDll, IReadOnlyDictionary<string, string>? environment, string eol) =>
+        $"[{Table}.{Name}]{eol}command = {TomlString(dotnetPath)}{eol}args = [{TomlString(adapterDll)}]{eol}"
+        + (environment is { Count: > 0 } ? $"env = {{ {string.Join(", ", environment.Select(pair => $"{pair.Key} = {TomlString(pair.Value)}"))} }}{eol}" : "");
 
     internal static string TomlString(string value)
     {

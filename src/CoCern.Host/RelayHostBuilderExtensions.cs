@@ -33,7 +33,8 @@ public static class RelayHostBuilderExtensions
             .MinimumLevel.Override("Microsoft", LogEventLevel.Warning)
             .MinimumLevel.Override("Orleans", LogEventLevel.Warning)
             .MinimumLevel.Override("ModelContextProtocol", LogEventLevel.Warning)
-            .WriteTo.Console().WriteTo.Sink(services.GetRequiredService<DashboardLogBuffer>()));
+            .ReadFrom.Services(services).WriteTo.Console().WriteTo.Sink(services.GetRequiredService<DashboardLogBuffer>()),
+            preserveStaticLogger: true); // each host logs through its own logger, never another's static one
         // Host-level registration sees configuration added later by application factories and tests.
         builder.Host.ConfigureServices((context, services) => services.AddRelayAuthentication(context.Configuration));
         builder.Services.AddHttpContextAccessor();
@@ -244,7 +245,7 @@ public static class RelayHostBuilderExtensions
 
     /// <summary>A relative configured path resolves from the content root, so a launch profile can point at the repository's data folder.</summary>
     internal static string DatabasePath(IConfiguration configuration, IHostEnvironment environment) =>
-        configuration["Relay:DatabasePath"] is { } configured ? Path.Combine(environment.ContentRootPath, configured) : DefaultDatabasePath(environment);
+        configuration["Relay:DatabasePath"] is { } configured && !string.IsNullOrWhiteSpace(configured) ? Path.Combine(environment.ContentRootPath, configured) : DefaultDatabasePath(environment);
 
     private static string DefaultDatabasePath(IHostEnvironment environment) => Path.Combine(environment.ContentRootPath, "data", "relay.db");
 }

@@ -246,6 +246,8 @@ public static class RelayLimits
     public const int MaxBlockingSnoozeMinutes = 30;
     /// <summary>Closed item keys a session remembers with their source revision, so a late, older raise cannot reopen them.</summary>
     public const int MaxAttentionClosedKeys = 100;
+    /// <summary>Archived tasks a session remembers with the archive revision, so a late, older raise for one never reopens it.</summary>
+    public const int MaxAttentionArchivedTasks = 256;
     /// <summary>How long a closed item's content is remembered, so the same raise delivered again without a revision cannot reopen it.</summary>
     public const int AttentionTombstoneMinutes = 10;
     /// <summary>Most recently closed items one session remembers by content.</summary>

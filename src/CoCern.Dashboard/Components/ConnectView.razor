@@ -1,0 +1,81 @@
+@using System.Net.Http.Json
+@inject HttpClient Http
+
+@if (Compact)
+{
+    @* On the overview: a single prompt while an app on this PC can still get CoCern. *@
+    if (_status?.Clients.Any(client => client.State == "available") == true)
+    {
+        <a class="surface connect-prompt" href="connect"><Icon Name="plug" Size="20" /><span><strong>Add CoCern to your apps</strong><small>@string.Join(", ", _status.Clients.Where(client => client.State == "available").Select(client => client.Name)) on this PC, in one click.</small></span><span aria-hidden="true">→</span></a>
+    }
+}
+else
+{
+    <section class="surface connect-view" aria-labelledby="connect-heading">
+        <div class="section-heading"><div><h2 id="connect-heading">Apps on this PC</h2><p>Each one gets CoCern as a tool. Restart the app afterwards.</p></div></div>
+        @if (_status is null)
+        {
+            <p class="empty-copy">Looking for apps…</p>
+        }
+        else if (_status.Unavailable is { } reason)
+        {
+            <p class="empty-copy">@reason</p>
+        }
+        else
+        {
+            <ul class="connect-list">
+                @foreach (var client in _status.Clients)
+                {
+                    <li class="connect-item" @key="client.Id">
+                        <span class="provider-token" aria-hidden="true">@client.Name[..1]</span>
+                        <div><strong>@client.Name</strong><small>@Describe(client)</small></div>
+                        @if (client.State is "connected" or "added")
+                        {
+                            <span class="tag good">@(client.State == "added" ? "Connected · restart it" : "Connected")</span>
+                        }
+                        else
+                        {
+                            <button type="button" class="connect-button" disabled="@(_busy is not null)" @onclick="() => ConnectAsync(client.Id)">@(_busy == client.Id ? "Connecting…" : client.State == "error" ? "Try again" : "Connect")</button>
+                        }
+                    </li>
+                }
+            </ul>
+        }
+        <p class="table-footnote">ChatGPT: Codex is ChatGPT's coding agent and uses this connection. The ChatGPT chat app can only reach CoCern at a public HTTPS address.</p>
+    </section>
+}
+
+@code {
+    [Parameter] public bool Compact { get; set; }
+    private DashboardConnectStatus? _status;
+    private string? _busy;
+
+    protected override async Task OnInitializedAsync() => _status = await LoadAsync(() => Http.GetFromJsonAsync<DashboardConnectStatus>("api/connect"));
+
+    private async Task ConnectAsync(string id)
+    {
+        _busy = id;
+        var result = await LoadAsync(async () =>
+        {
+            using var response = await Http.PostAsync($"api/connect/{id}", null);
+            return response.IsSuccessStatusCode ? await response.Content.ReadFromJsonAsync<DashboardConnectStatus>() : new DashboardConnectStatus { Unavailable = "Connecting is only possible from the hub's PC." };
+        });
+        _busy = null;
+        // Keep the other apps' rows; replace only the one just connected.
+        if (result?.Unavailable is null && _status is { Unavailable: null } && result?.Clients is [var changed])
+            _status = _status with { Clients = _status.Clients.Select(client => client.Id == changed.Id ? changed : client).ToArray() };
+        else _status = result;
+    }
+
+    private static async Task<DashboardConnectStatus?> LoadAsync(Func<Task<DashboardConnectStatus?>> load)
+    {
+        try { return await load() ?? new DashboardConnectStatus { Unavailable = "The hub did not answer. Reload to try again." }; }
+        catch (Exception error) when (error is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException) { return new DashboardConnectStatus { Unavailable = "The hub did not answer. Reload to try again." }; }
+    }
+
+    private static string Describe(DashboardConnectClient client) => client.State switch
+    {
+        "error" => client.Detail ?? "Its settings could not be changed.",
+        _ => client.Id switch { "claude-code" => "The Claude Code CLI and its IDE extensions.", "claude-desktop" => "Claude for desktop.", "codex" => "Codex CLI, IDE extension and app.", _ => "" }
+    };
+}

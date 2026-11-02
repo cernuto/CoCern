@@ -95,6 +95,7 @@ internal sealed class ClaimComposer(Aggregates aggregates)
         foreach (var (resource, claimFor) in held)
         {
             var restore = args.DeepClone().AsObject(); restore.Remove("requestId"); restore[Operations.RestoreClaimForField] = claimFor;
+            restore[Operations.ForgetRequestField] = Text(args, "requestId") + ":resource:" + resource;
             await aggregates.Call(AggregateKinds.Lock, resource, caller, RelayTools.ClaimAcquire, restore);
         }
         foreach (var grant in acquired)
@@ -125,7 +126,9 @@ internal sealed class ClaimComposer(Aggregates aggregates)
         if (result.Code == DeclaredResourcesNeeded)
         {
             beginArgs.Remove(Operations.ResolveDeclaredField);
-            if (await ResolveDeclaredAsync(caller, args, session, Strings(Aggregates.Parse(result)["declared"])) is { } declared)
+            // Without the lookup the locks cannot be checked, so nothing is recorded: the agent retries.
+            if (await ResolveDeclaredAsync(caller, args, session, Strings(Aggregates.Parse(result)["declared"])) is not { } declared)
+                return Error(Unavailable, new { replayAllowed = false });
             {
                 beginArgs["declaredResources"] = declared;
                 var lookup = new JsonObject { ["repositoryId"] = Text(args, "repositoryId"), ["sessionId"] = Text(args, "sessionId") };
