@@ -68,6 +68,36 @@ public sealed class ReviewFixTests
     }
 
     [Fact]
+    public void A_rolled_back_claim_offers_the_task_to_its_target_again()
+    {
+        var board = new StateEnvelope<CoordinationDocument>();
+        var workflow = new JsonObject
+        {
+            ["state"] = "ready", ["targetSessionId"] = "target", ["packet"] = new JsonObject { ["goal"] = "g", ["target"] = "t", ["authorityRef"] = "human", ["restoration"] = "r", ["stopCondition"] = "s" },
+            ["criteria"] = new JsonArray(new JsonObject { ["id"] = "c", ["description"] = "d", ["result"] = "not_run" }), ["blockers"] = new JsonArray()
+        };
+        Assert.True(Apply(board, "board", RelayTools.TaskUpdate, new() { ["taskId"] = "t", ["requestId"] = "create", ["expectedVersion"] = 0, ["workflow"] = workflow }).Ok);
+        Assert.True(Apply(board, "board", RelayTools.TaskClaim, new() { ["taskId"] = "t", ["sessionId"] = "target", ["requestId"] = "R", ["expectedVersion"] = 1, ["resourceIds"] = new JsonArray() }).Ok);
+        board.Effects.Clear();
+        Assert.True(Apply(board, "board", Operations.TaskUnclaim, new() { ["taskId"] = "t", ["sessionId"] = "target", ["claimGeneration"] = 1, ["claimRequestId"] = "R" }).Ok);
+        var raise = Assert.Single(board.Effects, effect => effect.Operation == Operations.AttentionRaise && effect.TargetKey == "target");
+        Assert.Equal(AttentionKinds.NextWork, JsonNode.Parse(raise.PayloadJson)!["kind"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void A_rollback_puts_back_the_claim_a_held_grant_served()
+    {
+        var lockState = new StateEnvelope<CoordinationDocument>();
+        JsonObject Acquire(long generation) => new() { ["sessionId"] = "a", ["resourceId"] = "rig", ["taskId"] = "t" + generation, ["taskClaimGeneration"] = generation };
+        Assert.True(Apply(lockState, "lock", RelayTools.ClaimAcquire, Acquire(1)).Ok);
+        var second = Apply(lockState, "lock", RelayTools.ClaimAcquire, Acquire(2));
+        var previous = JsonNode.Parse(second.DataJson)!["previousClaimFor"]!.GetValue<string>();
+        Assert.NotEqual(previous, State(lockState)["claimFor"]!.GetValue<string>());
+        Assert.True(Apply(lockState, "lock", RelayTools.ClaimAcquire, new() { ["sessionId"] = "a", ["resourceId"] = "rig", [Operations.RestoreClaimForField] = previous }).Ok);
+        Assert.Equal(previous, State(lockState)["claimFor"]!.GetValue<string>());
+    }
+
+    [Fact]
     public void A_late_older_close_never_lowers_a_work_tombstone()
     {
         var control = new StateEnvelope<CoordinationDocument>

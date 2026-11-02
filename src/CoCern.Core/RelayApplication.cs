@@ -107,7 +107,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
             var offers = result.Ok && session is not null && offerWanted && attentionOptions.Enabled && IsBoundary(tool);
             if (offers) result = await WithAttentionAsync(trusted, args, tool, result);
             // A page reported as seen is marked from the reply as sent, after compaction, so a message cut from the page stays unseen.
-            var markSeen = !offers && result.Ok && session is not null && attentionOptions.Enabled && tool == RelayTools.CheckInbox && (pageSeen || seenIds.Length > 0);
+            var markSeen = result.Ok && session is not null && attentionOptions.Enabled && tool == RelayTools.CheckInbox && (offers || pageSeen || seenIds.Length > 0);
             // The next-work offer this reply carries becomes a next_work item too, raised after the reply's own attention offer was chosen.
             if (result.Ok && tool == RelayTools.TaskUpdate && attentionOptions.Enabled) await RaiseOfferedWorkAsync(trusted, args, result);
             // The claimer's own next_work item for the task (from a next-work offer) closes with the claim.
@@ -119,7 +119,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
                 _ = Task.Run(() => RaiseRelatedWorkAsync(trusted, args, claimed), CancellationToken.None);
             }
             var sent = Bound(definition, args, result, trace);
-            if (markSeen && sent.Ok) await MarkSeenAsync(trusted, args, sent, pageSeen, seenIds);
+            if (markSeen && sent.Ok) await MarkSeenAsync(trusted, args, sent, pageSeen || offers, seenIds);
             return sent;
         }
         catch (ArgumentException) { return Error(InvalidArguments); }
@@ -506,7 +506,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
     private async Task<RelayReply> ResourceClaimAsync(RelayCaller caller, string tool, JsonObject args)
     {
         // Only task_claim names the task claim a grant serves; a client's own value is dropped (it is also left out of the fingerprint).
-        args.Remove("taskClaimGeneration"); args.Remove(Operations.ForgetRequestField);
+        args.Remove("taskClaimGeneration"); args.Remove(Operations.ForgetRequestField); args.Remove(Operations.RestoreClaimForField);
         var resolved = await Resolve(caller, args, Text(args, "resourceId"));
         if (!resolved.Ok) return resolved;
         return await Call(AggregateKinds.Lock, Text(Parse(resolved), "resourceId"), caller, tool, args);
@@ -575,8 +575,9 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         try
         {
             var data = Parse(committed);
-            // A model-visible inbox page shows its messages, so their info items are closed rather than offered.
-            var seen = tool == RelayTools.CheckInbox && data["items"] is JsonArray page
+            // A model-visible inbox page shows its messages, so their info items are not offered. They close after compaction, from
+            // the page as sent, so a message cut from the page keeps its item.
+            var onPage = tool == RelayTools.CheckInbox && data["items"] is JsonArray page
                 ? new JsonArray(page.OfType<JsonObject>().Select(message => Text(message, "messageId")).Where(id => id.Length > 0).Select(id => (JsonNode)id).ToArray()) : null;
             data["attention"] = new string('x', RelayLimits.MaxAttentionOfferBytes);
             if (!FitsWire(Ok(data, long.MaxValue))) return committed;
@@ -585,7 +586,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
                 ["repositoryId"] = Text(args, "repositoryId"), ["sessionId"] = Text(args, "sessionId"), ["sessionToken"] = Text(args, "sessionToken"),
                 ["focusTaskId"] = Text(args, "taskId"), ["focusBoardId"] = Text(args, "boardId", "default"), ["snoozeBoundaries"] = attentionOptions.SnoozeBoundaries
             };
-            if (seen is { Count: > 0 }) request["seenMessageIds"] = seen;
+            if (onPage is { Count: > 0 }) request["pageMessageIds"] = onPage;
             var offer = await CallSession(caller, Operations.AttentionOffer, request);
             if (!offer.Ok || Parse(offer)["attention"] is not JsonObject item) return committed;
             data["attention"] = item.DeepClone();
@@ -720,6 +721,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         }
         if (!task.Ok) return task;
         var acquired = new List<(string Resource, long Generation)>();
+        var held = new List<(string Resource, string ClaimFor)>();
         var grants = new JsonArray();
         foreach (var resource in canonical)
         {
@@ -729,11 +731,13 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
             var claim = await Call(AggregateKinds.Lock, resource, caller, RelayTools.ClaimAcquire, resourceArgs);
             if (!claim.Ok)
             {
-                await RollBackClaimAsync(caller, args, acquired, task);
+                await RollBackClaimAsync(caller, args, acquired, held, task);
                 return Error(Busy, new { resourceId = resource, detail = JsonNode.Parse(claim.DataJson), rollback = "new_grants_released" });
             }
             var grant = Parse(claim);
             if (grant["newlyAcquired"]?.GetValue<bool>() == true) acquired.Add((resource, Number(grant, "generation")));
+            else held.Add((resource, Text(grant, "previousClaimFor")));
+            grant.Remove("previousClaimFor");
             grant["resourceId"] = resource; grants.Add(grant);
         }
         var data = Parse(task); data["grants"] = grants; data["complete"] = true;
@@ -752,8 +756,14 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         return FitsWire(preview, RelayLimits.AggregateReplyBytes);
     }
 
-    private async Task RollBackClaimAsync(RelayCaller caller, JsonObject args, List<(string Resource, long Generation)> acquired, RelayReply task)
+    private async Task RollBackClaimAsync(RelayCaller caller, JsonObject args, List<(string Resource, long Generation)> acquired, List<(string Resource, string ClaimFor)> held, RelayReply task)
     {
+        // A grant the session already held keeps it, serving the claim it served before.
+        foreach (var (resource, claimFor) in held)
+        {
+            var restore = args.DeepClone().AsObject(); restore.Remove("requestId"); restore[Operations.RestoreClaimForField] = claimFor;
+            await Call(AggregateKinds.Lock, resource, caller, RelayTools.ClaimAcquire, restore);
+        }
         foreach (var grant in acquired)
         {
             var release = args.DeepClone().AsObject(); release["generation"] = grant.Generation; release.Remove("requestId");
@@ -801,8 +811,17 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         if (!result.Ok || Parse(result)["replayAllowed"]?.GetValue<bool>() != true) return result;
         var actionId = Text(args, "actionId");
         var attempt = Number(Parse(result)["action"]!.AsObject(), "attempt", 1);
-        var delivery = await Call(AggregateKinds.Board, BoardKey(args), caller, Operations.Dispatch, new() { ["operation"] = Operations.Block, ["actionKey"] = CoordinationStateMachine.ActionKey(args, actionId, attempt) });
-        if (!delivery.Ok) return Error(ActionPending, new { actionId, replayAllowed = false, reason = delivery.Code });
+        // The hub blocks each lock itself rather than having the board deliver: a board waiting on a lock while that lock's outbox waits on
+        // the board would stall both until the call timeout. Blocking is idempotent, so the board's own queued blocks are harmless.
+        var actionKey = CoordinationStateMachine.ActionKey(args, actionId, attempt);
+        foreach (var resource in Strings(Parse(result)["action"]!["resourceIds"]))
+        {
+            var block = await Call(AggregateKinds.Lock, resource, caller, Operations.Block, new JsonObject
+            {
+                ["repositoryId"] = Text(args, "repositoryId"), ["actionId"] = actionId, ["actionKey"] = actionKey, ["sessionId"] = Text(args, "sessionId")
+            });
+            if (!block.Ok) return Error(ActionPending, new { actionId, replayAllowed = false, reason = block.Code });
+        }
         var current = await CallBoard(caller, RelayTools.TaskGet, args);
         if (!current.Ok || current.Version != result.Version) return Error(ActionChanged, new { actionId, replayAllowed = false });
         return result;
@@ -810,7 +829,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
 
     /// <summary>Arguments only the hub sets on <c>task_claim</c> and <c>action_begin</c>.</summary>
     private static readonly string[] ServerClaimFields =
-        ["declaredResources", Operations.ResolveDeclaredField, Operations.LockRefusalField, CoordinationStateMachine.RequestedResourcesField];
+        ["declaredResources", Operations.ResolveDeclaredField, Operations.LockRefusalField, Operations.RestoreClaimForField, Operations.ForgetRequestField, CoordinationStateMachine.RequestedResourcesField];
 
     /// <summary>
     /// The task's declared <c>packet.resources</c> (as the board named them in <c>DeclaredResourcesNeeded</c>), each resolved to its canonical

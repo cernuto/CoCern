@@ -205,6 +205,8 @@ public static class Operations
     public const string LockRefusalField = "lockRefusal";
     /// <summary>Server-set on a rolled-back claim's lock release: the grant's requestId, whose stored reply is dropped so a retry acquires again.</summary>
     public const string ForgetRequestField = "forgetRequestId";
+    /// <summary>Server-set on a rolled-back claim's re-acquire of a grant it already held: the claim that grant served before.</summary>
+    public const string RestoreClaimForField = "restoreClaimFor";
     /// <summary>A board's due sweep: moves tasks finished longer than <c>Relay:Board:ArchiveAfterDays</c> to the archive.</summary>
     public const string TaskArchive = "__task_archive";
     /// <summary>Read-only: which of the given sessions in the repository the caller's principal opened.</summary>
