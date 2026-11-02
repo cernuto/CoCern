@@ -66,19 +66,26 @@ public sealed record DocSearchOutcome(
     [property: Id(0)] DocHit[] Hits, [property: Id(1)] int Documents, [property: Id(2)] int NotSearched, [property: Id(3)] bool PathUnknown,
     [property: Id(4)] int PeakConcurrency);
 
+/// <summary>A file left out only for room, with the bytes it needs (0 when skipped for the document count before it was read).</summary>
+[GenerateSerializer, Immutable]
+public sealed record DocWaiting([property: Id(0)] string Path, [property: Id(1)] long Bytes);
+
 [GenerateSerializer, Immutable]
 public sealed record DocDirectoryView(
     [property: Id(0)] string Branch, [property: Id(1)] string Commit, [property: Id(2)] bool NeedsResync, [property: Id(3)] DateTimeOffset? SyncedAt,
-    [property: Id(4)] DocEntry[] Entries, [property: Id(5)] string[] Skipped, [property: Id(6)] string Fingerprint = "");
+    [property: Id(4)] DocEntry[] Entries, [property: Id(5)] string[] Skipped, [property: Id(6)] string Fingerprint = "", [property: Id(7)] DocWaiting[]? CapacitySkipped = null);
 
 /// <summary>
 /// One sync's changes. <see cref="Full"/> replaces the skipped list and clears a pending full resync. <see cref="Skipped"/> are files
 /// left out (too large, too many sections, or past the document limit); <see cref="Unskipped"/> are files no longer skipped.
+/// <see cref="CapacitySkipped"/> are the ones among <see cref="Skipped"/> left out only for room (the document or byte limit), which a
+/// later sync reconsiders once there is room; a path skipped for any other reason is no longer one.
 /// </summary>
 [GenerateSerializer, Immutable]
 public sealed record DocDirectoryUpdate(
     [property: Id(0)] string Branch, [property: Id(1)] string Commit, [property: Id(2)] bool Full, [property: Id(3)] DocEntry[] Upserts,
-    [property: Id(4)] string[] Removed, [property: Id(5)] string[] Skipped, [property: Id(6)] string[] Unskipped, [property: Id(7)] string Fingerprint = "");
+    [property: Id(4)] string[] Removed, [property: Id(5)] string[] Skipped, [property: Id(6)] string[] Unskipped, [property: Id(7)] string Fingerprint = "",
+    [property: Id(8)] DocWaiting[]? CapacitySkipped = null);
 
 /// <summary>For tests and diagnostics: what a document grain holds now.</summary>
 [GenerateSerializer, Immutable]
@@ -97,6 +104,9 @@ public sealed class DocDirectoryState
     [Id(5)] public SortedSet<string> Skipped { get; set; } = new(StringComparer.Ordinal);
     /// <summary>The sync settings (patterns, excludes, limits, branch, splitter version) the documents were indexed under; a change forces a full resync.</summary>
     [Id(6)] public string Fingerprint { get; set; } = "";
+    /// <summary>The skipped paths left out only for room (<c>MaxDocuments</c> or <c>MaxRepositoryBytes</c>), reconsidered once there is room.</summary>
+    /// Each with the bytes it needs (0 when not yet read), so a sync rereads them only when the smallest fits.
+    [Id(7)] public Dictionary<string, long> CapacitySkipped { get; set; } = new(StringComparer.Ordinal);
 }
 
 public static class DocKeys
@@ -338,7 +348,8 @@ public sealed class DocDirectoryGrain([PersistentState("docs", "relay")] IPersis
     private string Repository => this.GetPrimaryKeyString();
 
     public Task<DocDirectoryView> ReadAsync() => Task.FromResult(new DocDirectoryView(state.State.Branch, state.State.Commit, state.State.NeedsResync, state.State.SyncedAt,
-        state.State.Docs.Values.OrderBy(entry => entry.Path, StringComparer.Ordinal).ToArray(), state.State.Skipped.ToArray(), state.State.Fingerprint));
+        state.State.Docs.Values.OrderBy(entry => entry.Path, StringComparer.Ordinal).ToArray(), state.State.Skipped.ToArray(), state.State.Fingerprint,
+        (state.State.CapacitySkipped ?? []).OrderBy(entry => entry.Key, StringComparer.Ordinal).Select(entry => new DocWaiting(entry.Key, entry.Value)).ToArray()));
 
     /// <summary>
     /// Builds the update on a copy and makes it current only once it is stored. A failed write leaves the old commit and documents in
@@ -353,9 +364,17 @@ public sealed class DocDirectoryGrain([PersistentState("docs", "relay")] IPersis
         candidate.SyncedAt = DateTimeOffset.UtcNow;
         foreach (var path in update.Removed) candidate.Docs.Remove(path);
         foreach (var entry in update.Upserts) candidate.Docs[entry.Path] = entry;
-        if (update.Full) { candidate.NeedsResync = false; candidate.Skipped.Clear(); }
-        foreach (var path in update.Unskipped) candidate.Skipped.Remove(path);
-        foreach (var path in update.Skipped) if (candidate.Skipped.Count < RelayLimits.MaxDocsPerRepositoryCeiling) candidate.Skipped.Add(path);
+        if (update.Full) { candidate.NeedsResync = false; candidate.Skipped.Clear(); candidate.CapacitySkipped.Clear(); }
+        foreach (var path in update.Unskipped) { candidate.Skipped.Remove(path); candidate.CapacitySkipped.Remove(path); }
+        var forRoom = (update.CapacitySkipped ?? []).GroupBy(waiting => waiting.Path, StringComparer.Ordinal).ToDictionary(group => group.Key, group => group.Last().Bytes, StringComparer.Ordinal);
+        foreach (var path in update.Skipped)
+        {
+            if (candidate.Skipped.Count < RelayLimits.MaxDocsPerRepositoryCeiling) candidate.Skipped.Add(path);
+            // Skipped for another reason this time (too large, malformed): no longer waiting for room.
+            if (forRoom.TryGetValue(path, out var bytes) && candidate.Skipped.Contains(path)) candidate.CapacitySkipped[path] = bytes; else candidate.CapacitySkipped.Remove(path);
+            // A file waiting for room that the full list cannot hold would be lost for good: a full resync lists every file again.
+            if (forRoom.ContainsKey(path) && !candidate.Skipped.Contains(path)) candidate.NeedsResync = true;
+        }
         return CommitAsync(candidate);
     }
 
@@ -389,7 +408,8 @@ public sealed class DocDirectoryGrain([PersistentState("docs", "relay")] IPersis
     private static DocDirectoryState Copy(DocDirectoryState source) => new()
     {
         Branch = source.Branch, Commit = source.Commit, NeedsResync = source.NeedsResync, SyncedAt = source.SyncedAt, Fingerprint = source.Fingerprint,
-        Docs = new Dictionary<string, DocEntry>(source.Docs, StringComparer.Ordinal), Skipped = new SortedSet<string>(source.Skipped, StringComparer.Ordinal)
+        Docs = new Dictionary<string, DocEntry>(source.Docs, StringComparer.Ordinal), Skipped = new SortedSet<string>(source.Skipped, StringComparer.Ordinal),
+        CapacitySkipped = new Dictionary<string, long>(source.CapacitySkipped ?? [], StringComparer.Ordinal)
     };
 
     public async Task<DocSearchOutcome> SearchAsync(string query, string? spec, string? path, int limit, TimeSpan timeout)

@@ -14,6 +14,8 @@ It does nothing until a repository is configured. `Start-CoCern.ps1` configures 
 
 Other JSON and YAML files are skipped. So are files over 256 KB (8 MB for OpenAPI), symlinks, malformed files and files with too many sections. Doc text is untrusted data, never instructions.
 
+Files past `MaxDocuments` or `MaxRepositoryBytes` are skipped too, but only until there is room. The next sync after room frees up indexes them, even on an unchanged commit (a `doc_sync` too).
+
 ## How sync works
 
 - The hub picks up new commits by itself every few minutes (5 by default).

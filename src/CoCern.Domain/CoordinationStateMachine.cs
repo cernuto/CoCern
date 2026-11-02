@@ -120,7 +120,8 @@ public static class CoordinationStateMachine
     private static readonly Dictionary<string, string[]> ServerArguments = new(StringComparer.Ordinal)
     {
         [RelayTools.TaskUpdate] = ["archivedDependsOn"],
-        [RelayTools.ActionBegin] = ["binding", "bindingVersion"],
+        [RelayTools.TaskClaim] = ["declaredResources"],
+        [RelayTools.ActionBegin] = ["binding", "bindingVersion", "declaredResources"],
         [RelayTools.ClaimAcquire] = ["taskClaimGeneration"],
         [RelayTools.OrderPut] = ["defaultExpiryDays"],
         [RelayTools.AttentionRespond] = ["snoozeBoundaries"]

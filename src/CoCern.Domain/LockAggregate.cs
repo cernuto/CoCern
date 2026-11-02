@@ -73,7 +73,8 @@ internal static class LockAggregate
         var live = Date(state, "leaseUntil") > context.Now;
         var owned = holder == context.SessionId && live;
         var busy = holder.Length > 0 && holder != context.SessionId && (live || blockers > 0) || blockers > 0 && !owned;
-        return Ok(new { busy });
+        // held: this session's grant is live, which action_begin needs for each resource its packet declares.
+        return Ok(new { busy, held = owned });
     }
 
     private static RelayReply Acquire(AggregateContext context)

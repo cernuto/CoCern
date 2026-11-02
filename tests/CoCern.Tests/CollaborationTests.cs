@@ -519,8 +519,10 @@ public sealed class CollaborationTests
         Assert.True(Standing(state, "standing_put", Put(0, "grants", new JsonArray(Grant("short", "resource", 60, "rig-1"), Grant("rigs", "resource", 3600, "rig-2")))).Ok);
         foreach (var id in new[] { "early", "late", "begin-late", "retried" }) Assert.True(Call(state, "task_update", Update(id, 0, Authorized("grant:short", "rig-1"))).Ok);
         foreach (var id in new[] { "removed", "begin-removed", "rescoped" }) Assert.True(Call(state, "task_update", Update(id, 0, Authorized("grant:rigs", "rig-2"))).Ok);
+        // Each claim takes the resource its packet declares.
         RelayReply Claim(string id, int seconds, string? requestId = null) =>
-            Call(state, "task_claim", new() { ["taskId"] = id, ["sessionId"] = "worker", ["requestId"] = requestId ?? Guid.NewGuid().ToString("N"), ["expectedVersion"] = 1, ["leaseSeconds"] = RelayLimits.MaxLeaseSeconds }, seconds);
+            Call(state, "task_claim", new() { ["taskId"] = id, ["sessionId"] = "worker", ["requestId"] = requestId ?? Guid.NewGuid().ToString("N"), ["expectedVersion"] = 1, ["leaseSeconds"] = RelayLimits.MaxLeaseSeconds,
+                ["resourceIds"] = new JsonArray(id is "removed" or "begin-removed" or "rescoped" ? "rig-2" : "rig-1") }, seconds);
         RelayReply Begin(string id, int seconds) =>
             Call(state, "action_begin", new() { ["taskId"] = id, ["sessionId"] = "worker", ["requestId"] = Guid.NewGuid().ToString("N"), ["expectedVersion"] = 2, ["actionId"] = "deploy", ["inputFingerprint"] = "f" }, seconds);
         // The same code and reasons readiness gives.
@@ -601,7 +603,7 @@ public sealed class CollaborationTests
         var state = new StateEnvelope<CoordinationDocument>();
         Assert.True(Standing(state, "standing_put", Put(0, "grants", new JsonArray(Grant("short", "resource", 60, "rig-1")))).Ok);
         Assert.True(Call(state, "task_update", Update("t", 0, Authorized("grant:short", "rig-1"))).Ok);
-        Assert.True(Call(state, "task_claim", new() { ["taskId"] = "t", ["sessionId"] = "worker", ["requestId"] = "claim", ["expectedVersion"] = 1, ["leaseSeconds"] = RelayLimits.MaxLeaseSeconds }, 0).Ok);
+        Assert.True(Call(state, "task_claim", new() { ["taskId"] = "t", ["sessionId"] = "worker", ["requestId"] = "claim", ["expectedVersion"] = 1, ["leaseSeconds"] = RelayLimits.MaxLeaseSeconds, ["resourceIds"] = new JsonArray("rig-1") }, 0).Ok);
         Assert.True(Call(state, "action_begin", new() { ["taskId"] = "t", ["sessionId"] = "worker", ["requestId"] = "begin", ["expectedVersion"] = 2, ["actionId"] = "deploy", ["inputFingerprint"] = "f" }, 30).Ok);
         // Two minutes on, the grant has expired.
         var report = Call(state, "action_report", new() { ["taskId"] = "t", ["sessionId"] = "worker", ["requestId"] = "report", ["expectedVersion"] = 3, ["actionId"] = "deploy", ["attempt"] = 1, ["outcome"] = "completed" }, 120);

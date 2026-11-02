@@ -45,7 +45,7 @@ internal static class ControlAggregate
         if (sessions.Count >= RelayLimits.MaxRecords)
         {
             var cutoff = context.Now.AddHours(-RelayLimits.StaleSessionHours);
-            var held = sessions.Count(entry => entry.Value is JsonObject record && OwnsWork(record) && LastSeen(record) <= cutoff);
+            var held = sessions.Count(entry => entry.Value is JsonObject record && OwnsWork(record, context.Now) && LastSeen(record) <= cutoff);
             return Error(CapacityExceeded, new
             {
                 staleAfterHours = RelayLimits.StaleSessionHours, heldByUnresolvedActions = held,
@@ -79,7 +79,7 @@ internal static class ControlAggregate
     {
         var cutoff = context.Now.AddHours(-RelayLimits.StaleSessionHours);
         var stale = sessions.Select(entry => (entry.Key, Session: entry.Value as JsonObject, Seen: entry.Value is JsonObject record ? LastSeen(record) : DateTimeOffset.MinValue))
-            .Where(entry => entry.Seen <= cutoff && !(entry.Session is { } record && OwnsWork(record))).OrderBy(entry => entry.Seen).ThenBy(entry => entry.Key, StringComparer.Ordinal)
+            .Where(entry => entry.Seen <= cutoff && !(entry.Session is { } record && OwnsWork(record, context.Now))).OrderBy(entry => entry.Seen).ThenBy(entry => entry.Key, StringComparer.Ordinal)
             .Take(sessions.Count - RelayLimits.RetainedEntriesAfterPrune).ToList();
         foreach (var (id, session, _) in stale)
         {
@@ -95,16 +95,35 @@ internal static class ControlAggregate
     }
 
     private const string OpenActionsKey = "openActions";
+    private const string ClosedActionsKey = "closedActions";
     private const string OpenOverflowKey = "openActionsOverflow";
 
-    /// <summary>Whether the session answers for an unresolved action: it began one (or recovered one) that is still invoking, uncertain or awaiting restoration.</summary>
-    private static bool OwnsWork(JsonObject session) => session[OpenActionsKey] is JsonObject { Count: > 0 } || Flag(session, OpenOverflowKey);
+    /// <summary>The oldest report time a tracked open action, closed tombstone or overflow mark still counts from.</summary>
+    private static long TrackingCutoff(DateTimeOffset now) => now.AddDays(-RelayLimits.SessionWorkRetentionDays).ToUnixTimeSeconds();
+
+    private static long Seconds(JsonNode? value) => value is JsonValue number && number.TryGetValue<long>(out var seconds) ? seconds : long.MinValue;
 
     /// <summary>
-    /// A board's report (<see cref="Operations.SessionWork"/>) that a session now answers for an unresolved action, or no longer does. The
-    /// record keeps each open action as a short hash of its key, at most <see cref="RelayLimits.MaxSessionOpenActions"/>, so it stays bounded.
-    /// A close for an action the directory never saw open (one begun before it tracked actions) is ignored. Past the bound the session
-    /// is marked <c>openActionsOverflow</c> and stays exempt for good, since the directory can no longer tell when its last action closes.
+    /// Whether the session answers for an unresolved action: one it began (or recovered) is still open, reported or refreshed within
+    /// <see cref="RelayLimits.SessionWorkRetentionDays"/>, or it overflowed the record within that time.
+    /// </summary>
+    private static bool OwnsWork(JsonObject session, DateTimeOffset now)
+    {
+        var cutoff = TrackingCutoff(now);
+        return session[OpenActionsKey] is JsonObject open && open.Any(entry => Seconds(entry.Value) > cutoff) || Seconds(session[OpenOverflowKey]) > cutoff;
+    }
+
+    /// <summary>
+    /// A board's report (<see cref="Operations.SessionWork"/>) that a session now answers for an unresolved action, or no longer does. Each
+    /// action is kept as a short hash of its key with the time of its last report (the board's <c>at</c>), at most
+    /// <see cref="RelayLimits.MaxSessionOpenActions"/>. Delivery can be reordered (effects are retried one by one), so:
+    /// <list type="bullet">
+    /// <item>a close leaves a tombstone, at most <see cref="RelayLimits.MaxSessionClosedActions"/>, and an open or refresh for a closed
+    /// action is ignored, however late it arrives;</item>
+    /// <item>a close for an action never seen open (one begun before the directory tracked actions) only leaves its tombstone;</item>
+    /// <item>open actions, tombstones and an overflow mark all lapse after <see cref="RelayLimits.SessionWorkRetentionDays"/> without a report,
+    /// so nothing protects a session for good. A report older than that is ignored.</item>
+    /// </list>
     /// A session missing from the directory, or in another repository, is ignored: a refusal would make the board's outbox retry it forever.
     /// </summary>
     private static RelayReply TrackWork(AggregateContext context)
@@ -112,12 +131,37 @@ internal static class ControlAggregate
         var id = Required(context.Args, "sessionId");
         var key = Retention.Hash(Required(context.Args, "actionKey"));
         if (ObjectAt(context.State, "sessions")[id] is not JsonObject session || Text(session, "repositoryId") != context.Repository) return Ok(new { tracked = false });
+        var cutoff = TrackingCutoff(context.Now);
+        var at = Date(context.Args, "at") is var reported && reported > DateTimeOffset.MinValue ? Math.Min(reported.ToUnixTimeSeconds(), context.Now.ToUnixTimeSeconds()) : context.Now.ToUnixTimeSeconds();
         var open = ObjectAt(session, OpenActionsKey);
-        var known = open.ContainsKey(key);
-        if (Flag(context.Args, "open")) { if (!known) { if (open.Count < RelayLimits.MaxSessionOpenActions) open[key] = context.Now.ToUnixTimeSeconds(); else session[OpenOverflowKey] = true; } }
-        else open.Remove(key);
+        var closed = ObjectAt(session, ClosedActionsKey);
+        foreach (var map in new[] { open, closed })
+            foreach (var stale in map.Where(entry => Seconds(entry.Value) <= cutoff).Select(entry => entry.Key).ToArray()) map.Remove(stale);
+        if (Seconds(session[OpenOverflowKey]) <= cutoff) session.Remove(OpenOverflowKey);
+        var tracked = false;
+        if (at > cutoff)
+        {
+            if (Flag(context.Args, "open"))
+            {
+                // A late open or refresh for an action that already closed changes nothing.
+                if (!closed.ContainsKey(key))
+                {
+                    tracked = true;
+                    if (open.ContainsKey(key) || open.Count < RelayLimits.MaxSessionOpenActions) open[key] = Math.Max(at, Seconds(open[key]));
+                    else session[OpenOverflowKey] = Math.Max(at, Seconds(session[OpenOverflowKey]));
+                }
+            }
+            else
+            {
+                tracked = open.Remove(key);
+                if (!closed.ContainsKey(key) && closed.Count >= RelayLimits.MaxSessionClosedActions)
+                    closed.Remove(closed.OrderBy(entry => Seconds(entry.Value)).ThenBy(entry => entry.Key, StringComparer.Ordinal).First().Key);
+                closed[key] = at;
+            }
+        }
         if (open.Count == 0) session.Remove(OpenActionsKey);
-        return Ok(new { tracked = known || Flag(context.Args, "open"), openActions = open.Count, overflow = Flag(session, OpenOverflowKey) });
+        if (closed.Count == 0) session.Remove(ClosedActionsKey);
+        return Ok(new { tracked, openActions = open.Count, overflow = session.ContainsKey(OpenOverflowKey) });
     }
 
     private static DateTimeOffset LastSeen(JsonObject session) =>
@@ -139,7 +183,7 @@ internal static class ControlAggregate
     {
         var workers = ObjectAt(context.State, "sessions").Select(x => x.Value!.AsObject()).Where(x => Text(x, "repositoryId") == context.Repository).Select(x =>
         {
-            var copy = x.DeepClone().AsObject(); copy.Remove("sessionToken"); copy.Remove("principalId"); copy.Remove(OpenActionsKey); copy.Remove(OpenOverflowKey);
+            var copy = x.DeepClone().AsObject(); copy.Remove("sessionToken"); copy.Remove("principalId"); copy.Remove(OpenActionsKey); copy.Remove(ClosedActionsKey); copy.Remove(OpenOverflowKey);
             var stale = Date(copy, "freshUntil") <= context.Now || Text(copy, "hubIncarnation") != Text(context.Args, "hubIncarnation");
             copy["stale"] = stale; copy.Remove("hubIncarnation");
             if (stale) copy["availability"] = "unknown";

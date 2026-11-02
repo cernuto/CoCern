@@ -82,6 +82,12 @@ public static class RelayErrorCodes
     /// <summary><c>task_claim</c> or <c>action_begin</c> on a task whose <c>dependsOn</c> tasks are not all completed; <c>dependsOn</c> lists the unfinished ones.</summary>
     public const string DependenciesIncomplete = "DependenciesIncomplete";
     public const string GrantInvalid = "GrantInvalid";
+    /// <summary>
+    /// <c>task_claim</c> without every registered resource its <c>packet.resources</c> declares in <c>resourceIds</c>, or <c>action_begin</c>
+    /// on a task whose claim does not cover them; <c>missing</c> lists them (and <c>unregistered</c> the declared names no resource answers
+    /// to, which a board with <c>requireResources</c> refuses).
+    /// </summary>
+    public const string ResourcesRequired = "ResourcesRequired";
 
     // Attention
     /// <summary>An item that blocks another session cannot be postponed again (at most 2 snoozes and 30 minutes).</summary>

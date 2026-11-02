@@ -50,7 +50,7 @@ internal static class TaskActions
         if (sessionId.Length == 0) return;
         context.Emit(AggregateKinds.Control, AggregateKinds.ControlKey, Operations.SessionWork, new JsonObject
         {
-            ["repositoryId"] = context.Repository, ["sessionId"] = sessionId, ["actionKey"] = actionKey, ["open"] = open
+            ["repositoryId"] = context.Repository, ["sessionId"] = sessionId, ["actionKey"] = actionKey, ["open"] = open, ["at"] = context.Now.ToString("O")
         });
     }
 
@@ -76,6 +76,8 @@ internal static class TaskActions
         if (TaskWorkflow.ExecutionRefusal(context.State, task, session, context.Now) is { } refusal) return refusal;
         if (previousAttempt is not null) ArrayAt(task, "attemptHistory").Add(previousAttempt.DeepClone());
         if (Text(task, "owner") != session || Date(task, "leaseUntil") <= context.Now) return Error(ClaimRequired);
+        // The task's claim must cover the packet's declared resources (it may have changed since the claim); the hub checks they are held.
+        if (TaskWorkflow.ResourceRefusal(context.State, task, args, Strings(task["resourceIds"])) is { } resources) return resources;
         if (actions.Any(x => x.Key != id && IsUnresolved(x.Value!.AsObject()))) return Error(ActionUncertain);
         if (!ExpectedVersionMatches(args, version)) return VersionConflict(version);
         var trigger = Text(args, "triggerId");
@@ -187,7 +189,8 @@ internal static class TaskActions
         var actionKey = CoordinationStateMachine.ActionKey(args, id, Number(action, "attempt"));
         var (owner, unresolved) = (OwnerSession(action), IsUnresolved(action));
         if (wasUnresolved && (!unresolved || owner != priorOwner)) Track(context, priorOwner, actionKey, open: false);
-        if (unresolved && owner != priorOwner) Track(context, owner, actionKey, open: true);
+        // A report that leaves it unresolved with the same session refreshes the directory's record, so a long-running action stays tracked.
+        if (unresolved) Track(context, owner, actionKey, open: true);
         // An administrator unblocks another principal's action only through cleanup: acceptance, a recovery, or a report on one it recovered.
         var administrativeAcceptance = caller.IsAdministrator && (adminAcceptance || recovery || recoverer);
         if (!unresolved)
