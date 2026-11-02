@@ -28,8 +28,12 @@ public static class DashboardFormat
         _ => $"{value / 1_073_741_824d:N1} GB"
     };
 
+    /// <summary>The session's machine name, else its ID.</summary>
+    public static string Machine(DashboardSession session) =>
+        !string.IsNullOrWhiteSpace(session.MachineName) ? session.MachineName : !string.IsNullOrWhiteSpace(session.MachineId) ? session.MachineId : "Unknown machine";
+
     public static string Freshness(DashboardSession session, DateTimeOffset now) =>
-        session.IncarnationMismatch ? "Report stale" : session.FreshUntil is null ? "Freshness unknown" : session.FreshUntil > now ? "Report current" : "Report stale";
+        session.IncarnationMismatch ? "Out of date" : session.FreshUntil is null ? "No report yet" : session.FreshUntil > now ? "Up to date" : "Out of date";
 
     public static string CountQuality(string kind) => kind.ToLowerInvariant() switch
     {

@@ -1,27 +1,27 @@
 <section class="surface traffic-lane @(Live ? "" : "traffic-disconnected")" aria-labelledby="traffic-heading">
     <div class="section-heading">
-        <div><h2 id="traffic-heading">Relay traffic</h2><p>@TrafficDescription</p></div>
+        <div><h2 id="traffic-heading">Traffic</h2><p>@TrafficDescription</p></div>
         <div class="traffic-controls">
             @if (SelectedSession is not null)
             {
                 <button type="button" class="traffic-filter @(_sessionOnly ? "active" : "")" aria-pressed="@(_sessionOnly ? "true" : "false")" @onclick="ToggleSessionFilter">This session</button>
             }
-            <button type="button" class="traffic-pause" aria-pressed="@(_paused ? "true" : "false")" @onclick="TogglePause">@(_paused ? Live ? "Resume live" : "Resume view" : "Pause view")</button>
+            <button type="button" class="traffic-pause" aria-pressed="@(_paused ? "true" : "false")" @onclick="TogglePause">@(_paused ? "Resume" : "Pause")</button>
         </div>
     </div>
-    <div class="traffic-legend"><span><i class="traffic-key request" aria-hidden="true"></i>Request</span><span><i class="traffic-key response" aria-hidden="true"></i>Response</span><span><i class="traffic-key push" aria-hidden="true"></i>Push</span><span class="traffic-count">@VisibleEvents.Length in view</span></div>
+    <div class="traffic-legend"><span><i class="traffic-key request" aria-hidden="true"></i>Request</span><span><i class="traffic-key response" aria-hidden="true"></i>Response</span><span><i class="traffic-key push" aria-hidden="true"></i>Push</span><span class="traffic-count">@VisibleEvents.Length shown</span></div>
     @if (_sessionOnly && SelectedSession is not null)
     {
         <p class="traffic-scope">Following @SelectedSession.Label</p>
     }
-    <div class="traffic-stream" @onwheel="Pause" @ontouchmove="Pause" @onkeydown="PauseForScrollKey" tabindex="0" aria-label="Recent relay traffic. Scroll or inspect an event to pause this view.">
+    <div class="traffic-stream" @onwheel="Pause" @ontouchmove="Pause" @onkeydown="PauseForScrollKey" tabindex="0" aria-label="Recent traffic. Scrolling or opening an event pauses it.">
         <ol class="traffic-events">
             @foreach (var entry in VisibleEvents)
             {
                 var inspecting = _selectedSequence == entry.Sequence;
                 <li class="traffic-event @KindClass(entry.Kind) @(IsNew(entry.Sequence) ? "traffic-arrival" : "") @(inspecting ? "inspecting" : "")" @key="entry.Sequence">
                     <button type="button" class="traffic-event-summary" aria-expanded="@(inspecting ? "true" : "false")" @onclick="() => Inspect(entry.Sequence)">
-                        <span class="traffic-direction" aria-hidden="true">@Direction(entry.Kind)</span>
+                        <span class="traffic-direction" aria-hidden="true"></span>
                         <span class="traffic-kind">@KindLabel(entry.Kind)</span>
                         <span class="traffic-operation">@entry.Name</span>
                         @if (entry.Code is not null) { <span class="traffic-code">@entry.Code</span> }
@@ -32,16 +32,16 @@
                     @if (inspecting)
                     {
                         <div class="traffic-event-detail">
-                            <dl><div><dt>Observed</dt><dd>@DashboardFormat.Timestamp(entry.Timestamp)</dd></div><div><dt>Session</dt><dd>@SessionLabel(entry.SessionId)</dd></div>
+                            <dl><div><dt>Time</dt><dd>@DashboardFormat.Timestamp(entry.Timestamp)</dd></div><div><dt>Session</dt><dd>@SessionLabel(entry.SessionId)</dd></div>
                                 @if (entry.CorrelationId is not null) { <div><dt>Correlation</dt><dd>@entry.CorrelationId</dd></div> }
                             </dl>
                             @if (PairedEvent(entry) is { } paired)
                             {
-                                <p class="traffic-pair"><span aria-hidden="true">↔</span> Matched @KindLabel(paired.Kind).ToLowerInvariant(): @paired.Name@if (paired.Code is not null) { <span> (@paired.Code)</span> }@if (paired.DurationMilliseconds is not null) { <span>, @Duration(paired.DurationMilliseconds)</span> }</p>
+                                <p class="traffic-pair">Matching @KindLabel(paired.Kind).ToLowerInvariant(): @paired.Name@if (paired.Code is not null) { <span> (@paired.Code)</span> }@if (paired.DurationMilliseconds is not null) { <span>, @Duration(paired.DurationMilliseconds)</span> }</p>
                             }
                             else if (entry.CorrelationId is not null)
                             {
-                                <p class="traffic-pair">The matching event is outside this visible window or has not arrived.</p>
+                                <p class="traffic-pair">The matching event isn't shown.</p>
                             }
                         </div>
                     }
@@ -50,10 +50,10 @@
         </ol>
         @if (VisibleEvents.Length == 0)
         {
-            <p class="empty-copy">@(_sessionOnly ? "No recent traffic for this session." : "No recent traffic in this observation. Relay requests and pushes will appear here.")</p>
+            <p class="empty-copy">@(_sessionOnly ? "No recent traffic for this session." : "No recent traffic.")</p>
         }
     </div>
-    <p class="traffic-footnote">Safe metadata from up to 120 recent events. Older entries roll off. Scroll or inspect to hold your place.</p>
+    <p class="traffic-footnote">The latest 120 events, names and timings only.</p>
 </section>
 
 @code {
@@ -73,7 +73,7 @@
     private long _latestSequence;
     private bool _paused;
     private bool _sessionOnly;
-    private string TrafficDescription => !Live ? "Showing the last observed traffic. Waiting for fresh observations." : _paused ? "Your view is paused. Resume to see incoming events." : "Requests, responses and pushes as they happen.";
+    private string TrafficDescription => !Live ? "Waiting for the hub. Showing the last traffic seen." : _paused ? "Paused." : "Requests, responses and pushes as they happen.";
     private DashboardTrafficEvent[] VisibleEvents => _sessionOnly && SelectedSession is not null ? _window.Where(entry => entry.SessionId == SelectedSession.SessionId).ToArray() : _window;
 
     protected override void OnParametersSet()
@@ -144,7 +144,6 @@
     private string SessionLabel(string? id) => id is null ? "Relay-wide" : Sessions.FirstOrDefault(session => session.SessionId == id)?.Label ?? id;
     private static string KindClass(string kind) => kind.ToLowerInvariant() switch { "response" => "response", "push" => "push", _ => "request" };
     private static string KindLabel(string kind) => kind.ToLowerInvariant() switch { "request" => "Request", "response" => "Response", "push" => "Push", _ => "Event" };
-    private static string Direction(string kind) => kind.ToLowerInvariant() switch { "request" => "↗", "response" => "↙", "push" => "→", _ => "·" };
     private static string Duration(double? milliseconds) => milliseconds is null ? "—" : milliseconds < 1000 ? $"{milliseconds:0.#} ms" : $"{milliseconds / 1000:0.##} s";
 }
 

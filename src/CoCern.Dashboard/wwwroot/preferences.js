@@ -1,22 +1,25 @@
 (() => {
+    // The appearance follows the system until the viewer picks one. Motion always follows the system (prefers-reduced-motion).
     const key = "cocern.dashboard.preferences";
-    let preferences = { theme: "light", motion: true };
+    const system = () => matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+    let chosen = null;
     try {
         const stored = JSON.parse(localStorage.getItem(key) || "null");
-        preferences.theme = stored?.theme === "dark" ? "dark" : "light";
-        preferences.motion = stored?.motion !== false;
-    } catch { /* Presentation preferences are optional. */ }
+        if (stored?.theme === "dark" || stored?.theme === "light") chosen = stored.theme;
+    } catch { /* Preferences are optional. */ }
+    const theme = () => chosen ?? system();
     const apply = () => {
-        document.documentElement.dataset.theme = preferences.theme;
-        document.documentElement.dataset.motion = preferences.motion ? "on" : "off";
+        document.documentElement.dataset.theme = theme();
+        document.querySelector('meta[name="theme-color"]')?.setAttribute("content", theme() === "dark" ? "#0c2230" : "#edf3f4");
     };
     apply();
+    matchMedia("(prefers-color-scheme: dark)").addEventListener?.("change", () => { if (!chosen) apply(); });
     window.pkDashboard = {
-        preferences: () => preferences,
-        setPreferences: (theme, motion) => {
-            preferences = { theme: theme === "dark" ? "dark" : "light", motion: !!motion };
+        preferences: () => ({ theme: theme() }),
+        setPreferences: (value) => {
+            chosen = value === "dark" ? "dark" : "light";
             apply();
-            try { localStorage.setItem(key, JSON.stringify(preferences)); } catch { }
+            try { localStorage.setItem(key, JSON.stringify({ theme: chosen })); } catch { }
         }
     };
 })();

@@ -1,7 +1,6 @@
 <section class="activity-board @(Live ? "" : "board-paused")" aria-labelledby="board-heading">
     <div class="board-heading">
-        <div><h2 id="board-heading">Activity board</h2><p>Your machines. Your sessions. Follow a signal.</p></div>
-        <span class="board-key"><span class="key-outpost" aria-hidden="true">◇</span> Machines <span class="key-piece" aria-hidden="true">●</span> Sessions</span>
+        <div><h2 id="board-heading">Machines</h2><p>Select a session to inspect it.</p></div>
     </div>
     <div class="station-grid">
         @foreach (var machine in Stations)
@@ -26,32 +25,30 @@
                         <span>@machine.SessionCount @(machine.SessionCount == 1 ? "session" : "sessions")</span>
                         @if (!IsEnrolled(machine.MachineId)) { <span class="station-registration">Unregistered</span> }
                     </div>
-                    <span class="station-status"><span class="status-dot @(machine.Reachable ? "teal" : "amber")" aria-hidden="true"></span><span>@(machine.Reachable ? "Wake path reachable" : "Wake path unavailable")</span></span>
+                    <span class="station-status"><span class="status-dot @(machine.Reachable ? "teal" : "amber")" aria-hidden="true"></span><span>@(machine.Reachable ? "Reachable" : "Not reachable")</span></span>
                 </div>
                 <div class="station-sessions">
                     @foreach (var session in sessions)
                     {
-                        <button type="button" @key="session.SessionId" class="session-node @(SelectedId == session.SessionId ? "selected" : "") @(IsPulsing(session.SessionId) ? "signal" : "")" aria-pressed="@(SelectedId == session.SessionId ? "true" : "false")" @onclick="() => OnSelect.InvokeAsync(session.SessionId)">
+                        <button type="button" @key="session.SessionId" title="@(session.Reachable ? "Reachable: the hub can wake this chat" : "Not reachable: the hub cannot wake this chat")" class="session-node @(SelectedId == session.SessionId ? "selected" : "") @(IsPulsing(session.SessionId) ? "signal" : "")" aria-pressed="@(SelectedId == session.SessionId ? "true" : "false")" @onclick="() => OnSelect.InvokeAsync(session.SessionId)">
                             <span class="signal-trail" aria-hidden="true"></span>
                             <span class="session-token" aria-hidden="true"><span class="token-initials">@SessionTokenLetters(session)</span><span class="node-shape @(session.Reachable ? "teal" : "amber")"></span></span>
                             <span class="node-copy"><strong>@session.Label</strong><span>@(string.IsNullOrWhiteSpace(session.Provider) ? "Session" : session.Provider)</span></span>
-                            <span class="node-meta">@TrafficNote(session)</span>
-                            <span class="node-wake">@(session.Reachable ? "Wake path reachable" : "Wake path unavailable")</span>
+                            <span class="node-meta">@TrafficNote(session)<span class="visually-hidden">, @(session.Reachable ? "reachable" : "not reachable")</span></span>
                         </button>
                     }
                     @if (sessions.Length == 0)
                     {
-                        <p class="station-idle">No sessions in this observation.</p>
+                        <p class="station-idle">No sessions.</p>
                     }
                 </div>
             </article>
         }
         @if (Stations.Length == 0)
         {
-            <div class="board-empty"><span aria-hidden="true">◎</span><h3>Room for your first station.</h3><p>Enrolled machines and observed sessions will appear here.</p></div>
+            <div class="board-empty"><Icon Name="machine" Size="28" /><h3>No machines yet</h3><p>A machine appears when a chat on it opens a session.</p></div>
         }
     </div>
-    <div class="board-footer"><span><span class="tiny-ring" aria-hidden="true"></span> Signals mark newly observed activity</span><span>Select a session to inspect it</span></div>
 </section>
 
 @code {
@@ -74,7 +71,7 @@
     private string TrafficNote(DashboardSession session)
     {
         var latest = Snapshot.Traffic.Where(entry => entry.SessionId == session.SessionId).MaxBy(entry => entry.Sequence);
-        if (latest is null) return DashboardFormat.Ago(session.LastActivityAt, Now);
+        if (latest is null) return session.LastActivityAt is null ? "No activity yet" : DashboardFormat.Ago(session.LastActivityAt, Now);
         var kind = latest.Kind.ToLowerInvariant() switch { "request" => "Request", "response" => "Response", "push" => "Push", _ => "Event" };
         return $"{kind} {DashboardFormat.Ago(latest.Timestamp, Now).ToLowerInvariant()}";
     }
@@ -82,7 +79,7 @@
     private DashboardMachine[] Stations => Snapshot.Machines
         .Concat(Snapshot.Sessions.Where(session => !Snapshot.Machines.Any(machine => machine.MachineId == session.MachineId))
             .GroupBy(session => session.MachineId)
-            .Select(group => new DashboardMachine { MachineId = group.Key, Name = !string.IsNullOrWhiteSpace(group.First().MachineName) ? group.First().MachineName : !string.IsNullOrWhiteSpace(group.Key) ? group.Key : "Not reported", SessionCount = group.Count(), Reachable = group.Any(session => session.Reachable) }))
+            .Select(group => new DashboardMachine { MachineId = group.Key, Name = DashboardFormat.Machine(group.First()), SessionCount = group.Count(), Reachable = group.Any(session => session.Reachable) }))
         .OrderBy(machine => machine.MachineId, StringComparer.Ordinal).ToArray();
 }
 

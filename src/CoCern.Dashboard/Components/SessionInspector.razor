@@ -1,14 +1,13 @@
 <aside class="session-inspector surface" aria-labelledby="inspector-heading">
-    <div class="section-heading"><h2 id="inspector-heading">Session inspector</h2><span class="small-symbol" aria-hidden="true">⌖</span></div>
+    <div class="section-heading"><h2 id="inspector-heading">Session</h2></div>
     @if (Session is null)
     {
-        <div class="inspector-empty"><span class="empty-node" aria-hidden="true">◇</span><h3>Follow a signal.</h3><p>Select a session on the board or in the list to see its latest reported state.</p></div>
+        <div class="inspector-empty"><Icon Name="sessions" Size="28" /><h3>No session selected</h3><p>Select one to see its details.</p></div>
     }
     else
     {
         <div class="inspector-title"><span class="provider-token" aria-hidden="true">@ProviderInitial</span><div><h3>@Session.Label</h3><p>@Session.Provider</p></div></div>
-        <div class="tag-row"><span class="tag @(Session.Reachable ? "good" : "attention")">@(Session.Reachable ? "Wake path reachable" : "Wake path unavailable")</span><span class="tag neutral">@DashboardFormat.Freshness(Session, Now)</span></div>
-        <p class="inspector-explanation">Wake-path reachability does not report whether a model is running.</p>
+        <div class="tag-row"><span class="tag @(Session.Reachable ? "good" : "attention")" title="Whether the hub can wake this chat. It does not tell whether a model is running.">@(Session.Reachable ? "Reachable" : "Not reachable")</span><span class="tag neutral">@DashboardFormat.Freshness(Session, Now)</span></div>
         <dl class="session-facts">
             <div><dt>Machine</dt><dd>@MachineLabel</dd></div>
             <div><dt>Repository</dt><dd>@(string.IsNullOrWhiteSpace(Session.RepositoryId) ? "Not reported" : Session.RepositoryId)</dd></div>
@@ -18,11 +17,11 @@
             <div><dt>Last activity</dt><dd title="@DashboardFormat.Timestamp(Session.LastActivityAt)">@DashboardFormat.Ago(Session.LastActivityAt, Now)</dd></div>
         </dl>
         <div class="inspector-counts"><div><strong>@DashboardFormat.Count(Session.UnreadMessages)</strong><span>Unread messages</span></div><div><strong>@DashboardFormat.Count(Session.PendingEffects)</strong><span>Pending effects</span></div></div>
-        <details class="session-identifiers"><summary>Session identifier</summary><p>@Session.SessionId</p></details>
-        <div class="inspector-events"><h3>Recent log entries</h3>
+        <details class="session-identifiers"><summary>Session ID</summary><p>@Session.SessionId</p></details>
+        <div class="inspector-events"><h3>Recent log</h3>
             @if (SessionLogEntries.Length == 0)
             {
-                <p class="muted">No session-specific log entries in this window</p>
+                <p class="muted">Nothing recent.</p>
             }
             @foreach (var entry in SessionLogEntries)
             {
@@ -37,7 +36,7 @@
     [Parameter] public DashboardLogEntry[] Logs { get; set; } = [];
     [Parameter] public DateTimeOffset Now { get; set; }
     private string ProviderInitial => string.IsNullOrWhiteSpace(Session?.Provider) ? "S" : Session.Provider[..1].ToUpperInvariant();
-    private string MachineLabel => !string.IsNullOrWhiteSpace(Session?.MachineName) ? Session.MachineName : !string.IsNullOrWhiteSpace(Session?.MachineId) ? Session.MachineId : "Not reported";
+    private string MachineLabel => Session is null ? "" : DashboardFormat.Machine(Session);
     private DashboardLogEntry[] SessionLogEntries => Logs.Where(entry => entry.SessionId == Session?.SessionId).OrderByDescending(entry => entry.Sequence).Take(4).ToArray();
 }
 
