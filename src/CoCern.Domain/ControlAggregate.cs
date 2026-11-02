@@ -141,9 +141,18 @@ internal static class ControlAggregate
         // A session dropped from the directory may still send a late registration; accept it unchanged so its outbox does not retry forever.
         if (ObjectAt(context.State, "sessions")[id] is not JsonObject session) return Ok(new { registered = false });
         if (Text(session, "repositoryId") != context.Repository) return Error(SessionDenied);
+        // Registrations can arrive reordered (a retried delivery): an older binding never replaces a newer one, and times never move back.
+        var stale = context.Args.ContainsKey("bindingVersion") && Number(context.Args, "bindingVersion") < Number(session, "bindingVersion");
         foreach (var property in RegistrationFields)
-            if (context.Args.ContainsKey(property)) session[property] = context.Args[property]?.DeepClone();
-        return Ok(new { registered = true });
+        {
+            if (!context.Args.ContainsKey(property)) continue;
+            if (property is "observedAt" or "freshUntil" or "activeAt")
+            {
+                if (Date(context.Args, property) > Date(session, property)) session[property] = context.Args[property]?.DeepClone();
+            }
+            else if (!stale) session[property] = context.Args[property]?.DeepClone();
+        }
+        return Ok(new { registered = !stale });
     }
 
     /// <summary>What a session reports to the directory about itself; nothing else of its state ever leaves it.</summary>
@@ -197,10 +206,12 @@ internal static class ControlAggregate
         if (operation is not (Operations.AttentionRaise or Operations.AttentionClose) || args["item"] is not JsonObject item) return Error(InvalidArguments, new { field = "item" });
         var role = Required(args, "role");
         var except = Text(args, "exceptSessionId");
+        // A raise goes to recently active managers only; a close reaches every manager, or an idle one would keep a stale item until it expires.
+        var closing = operation == Operations.AttentionClose;
         var targets = ObjectAt(context.State, "sessions").Select(x => x.Value).OfType<JsonObject>()
             .Where(session => Text(session, "repositoryId") == context.Repository && string.Equals(Text(session, "role"), role, StringComparison.OrdinalIgnoreCase) && Text(session, "sessionId") != except
-                && Max(Date(session, "freshUntil"), Date(session, "activeAt")) > context.Now.AddHours(-RelayLimits.MaxAttentionRouteIdleHours))
-            .OrderByDescending(session => Date(session, "observedAt")).Take(RelayLimits.MaxAttentionRouteTargets).Select(session => Text(session, "sessionId")).ToArray();
+                && (closing || Max(Date(session, "freshUntil"), Date(session, "activeAt")) > context.Now.AddHours(-RelayLimits.MaxAttentionRouteIdleHours)))
+            .OrderByDescending(session => Date(session, "observedAt")).Take(closing ? RelayLimits.MaxRecords : RelayLimits.MaxAttentionRouteTargets).Select(session => Text(session, "sessionId")).ToArray();
         foreach (var target in targets)
         {
             var copy = item.DeepClone().AsObject(); copy["repositoryId"] = context.Repository;

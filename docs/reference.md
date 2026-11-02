@@ -278,7 +278,7 @@ dotnet .\CoCern.Adapter.dll --setup --hub https://<hub-pc>:5273/ --join-code <co
 - The join code is in `join-code` next to the hub's database; the hub logs it once, when it creates it. Letter case doesn't matter. `COCERN_JOIN_CODE` can supply it instead.
 - The fingerprint is in the hub's log at every start. With it, setup refuses any other certificate (exit code 4).
 - Setup joins, adds a `cocern` server to `~/.codex/config.toml` and `~/.claude.json` (with a backup; `--skip-client-config` skips this), adds `CoCernNode` to the user's Run key, and starts the node. It keeps the join code, so a PC the hub dropped joins again by itself.
-- Run it again any time; it leaves existing entries alone. `--data-dir <path>` moves the node folder (default `%LOCALAPPDATA%\CoCern\node`; set `COCERN_NODE_DIR` to match). Exit codes: 1 setup or join problem, 4 changed hub certificate, 5 an unreadable settings file.
+- Run it again any time; it leaves existing entries alone. `--data-dir <path>` moves the node folder (default `%LOCALAPPDATA%\CoCern\node`; set `COCERN_NODE_DIR` to match). Exit codes: 1 setup or join problem, 4 a hub certificate other than the pinned one, 5 an unreadable settings file. A running node that later meets another certificate sends nothing, says so once, and keeps retrying the pinned hub.
 - A chat whose adapter sets its own `COCERN_URL`, `COCERN_TOKEN_FILE` or `COCERN_TOKEN` is not seen by the node.
 
 Firewall, once on the hub PC, in PowerShell as administrator:
@@ -360,6 +360,7 @@ All on by default except the two for other PCs.
 | `Relay:Discovery:Enabled` | `false` | Lets PCs join and announce chats. |
 | `Relay:Discovery:Repositories` | `["cocern"]` | Repositories joined PCs may use. |
 | `Relay:Discovery:JoinCode` | generated | The join code. Unset: made on first start, kept owner-only in `join-code` next to the database. At least 8 characters. |
+| `Relay:Local:HttpsPort` | 5272 | HTTPS for chats on this PC, loopback only, with the hub certificate. Connect points apps here and pins the certificate, so a program that takes the port while the hub is down never gets their token. Its address and fingerprint are written to `local-hub.json` beside the database. `0` turns it off. |
 | `Relay:Network:Enabled` | `false` | Also serve HTTPS on every network interface. |
 | `Relay:Network:HttpsPort` | 5273 | The HTTPS port. |
 | `Relay:Network:CertificatePath` | `data/hub-certificate.pfx` | Self-signed certificate, made on first start. Keep it: PCs pin its fingerprint. |
@@ -395,10 +396,11 @@ The Connect page sets these. By hand, run `dotnet <path>/CoCern.Adapter.dll` as 
 | `COCERN_PROFILE` | | `chat`: only `session_open`, `send_message`, `check_inbox`, `ack` and `chat_directory`. |
 | `COCERN_ROLE` | | `admin` also lists administrator tools. The hub still checks the token. |
 | `COCERN_SIGNALR` | `false` | `true` prints a hint on standard error when the inbox changes. |
+| `COCERN_FINGERPRINT` | | The hub certificate's SHA-256 fingerprint, for an `https://` `COCERN_URL`: only that certificate is accepted. Connect sets it. |
 
 With none of the first three set, the adapter uses this PC's node.
 
-`--connect` options: `--token-file <path>` (default: `data/local-client-token` above the adapter folder), `--hub <url>`, `--only claude-code|claude-desktop|codex`, `--check` (report only) and `--json`.
+`--connect` options: `--token-file <path>` (default: `data/local-client-token` above the adapter folder), `--hub <url>` and `--fingerprint <sha256>` (default: the pinned loopback HTTPS from `local-hub.json` beside the token file), `--only claude-code|claude-desktop|codex`, `--check` (report only) and `--json`. An app that already has a `cocern` entry keeps it; to switch an older entry to the pinned connection, remove it and connect again.
 
 ## Clients and tokens
 
@@ -436,7 +438,7 @@ Then give those chats `COCERN_TOKEN_FILE=data/worker-token`, or run `--connect -
 
 REST replies are `{ "ok": true, "code": "...", "dataJson": "{...}", "version": 1 }`; `dataJson` is a JSON string, so parse it again. Errors: 400 invalid or refused (bad arguments, or a refusal such as `ResourceUnknown` or `ClaimRequired`), 401 no valid token, 403 denied, 404 unknown tool or `NotFound`, 409 a conflict to resolve by reading again (such as `VersionConflict` or `Busy`), 413 too large. The `code` says exactly which. The stdio adapter returns the parsed `data` instead.
 
-Tokens work only over HTTPS or real loopback, and the hub ignores forwarded headers. Behind a local reverse proxy every caller looks local, so don't put one in front of the hub.
+Tokens work only over HTTPS or real loopback, and the hub ignores forwarded headers. Plain HTTP on loopback can't prove it's the hub, so local apps use the pinned loopback HTTPS (`Relay:Local:HttpsPort`) instead. Behind a local reverse proxy every caller looks local, so don't put one in front of the hub.
 
 ## Architecture
 

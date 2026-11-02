@@ -11,7 +11,7 @@ namespace CoCern.Host.Dashboard;
 /// Adds CoCern to the apps on the hub's own PC (Claude Code, the Claude desktop app, Codex) from the dashboard. It runs the adapter's
 /// <c>--connect</c>, which edits only this user's app settings, never the hub's. Only a viewer on this PC may use it.
 /// </summary>
-public sealed class DashboardConnect(IConfiguration configuration, IHostEnvironment environment, IServer server)
+internal sealed class DashboardConnect(IConfiguration configuration, IHostEnvironment environment, IServer server, HubListener? listener = null)
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(20);
     private static readonly JsonSerializerOptions Web = new(JsonSerializerDefaults.Web);
@@ -34,10 +34,16 @@ public sealed class DashboardConnect(IConfiguration configuration, IHostEnvironm
         timeout.CancelAfter(Timeout);
         try
         {
+            // Both streams are drained together: an adapter writing a long error would otherwise block on a full pipe until the timeout.
+            var errors = process.StandardError.ReadToEndAsync(timeout.Token);
             var output = await process.StandardOutput.ReadToEndAsync(timeout.Token);
             await process.WaitForExitAsync(timeout.Token);
+            var failure = await errors;
+            if (output.Trim().Length == 0 && process.ExitCode != 0)
+                return new() { Unavailable = "The adapter failed: " + (failure.Split('\n', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.Trim() is { Length: > 0 } line ? line[..Math.Min(line.Length, 300)] : $"exit code {process.ExitCode}") };
             using var reply = JsonDocument.Parse(output.Trim() is { Length: > 0 } text ? text : "{}");
-            if (reply.RootElement.TryGetProperty("error", out var error)) return new() { Unavailable = error.GetString() };
+            if (reply.RootElement.TryGetProperty("error", out var error))
+                return new() { Unavailable = error.ValueKind == JsonValueKind.String ? error.GetString() : "The adapter failed." };
             return new() { Clients = reply.RootElement.TryGetProperty("clients", out var clients) ? clients.Deserialize<DashboardConnectClient[]>(Web) ?? [] : [] };
         }
         catch (Exception exception) when (exception is OperationCanceledException or JsonException)
@@ -69,9 +75,13 @@ public sealed class DashboardConnect(IConfiguration configuration, IHostEnvironm
         .Where(client => client.IsAdministrator && string.IsNullOrWhiteSpace(client.Token) && !string.IsNullOrWhiteSpace(client.TokenFile))
         .Select(client => Path.GetFullPath(Path.Combine(environment.ContentRootPath, client.TokenFile!))).FirstOrDefault(File.Exists);
 
-    /// <summary>The hub's loopback address, when it is not the adapter's default.</summary>
+    /// <summary>
+    /// Where the apps reach the hub: its loopback HTTPS with the certificate pinned, so their token never goes to another process on that
+    /// port; else (that listener off) its loopback HTTP address when it is not the adapter's default.
+    /// </summary>
     private IEnumerable<string> HubArguments()
     {
+        if (listener?.Local is { } local) return ["--hub", $"https://127.0.0.1:{local.Port}/", "--fingerprint", local.Fingerprint];
         var url = DashboardSignInLink.LoopbackUrl(server.Features.Get<IServerAddressesFeature>()?.Addresses ?? [])?.Replace("/dashboard/", "/");
         return url is null || url == "http://127.0.0.1:5271/" ? [] : ["--hub", url];
     }

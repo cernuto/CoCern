@@ -117,6 +117,9 @@ internal static class TaskActions
         action["requiresRestoration"] = Flag(args, "requiresRestoration");
         action[TrackedAtField] = context.Now.ToString("O");
         actions[id] = action; task["version"] = ++version;
+        // Retrying a failed or abandoned action replaces it: the managers' failed item is restated for what is still failed, or closed.
+        if (previousAttempt is not null && Text(previousAttempt, "status") is "failed" or Abandoned)
+            AttentionSources.OnTaskUpdate(context, task, task["workflow"] as JsonObject, [], [], [], [id]);
         foreach (var resource in Strings(action["resourceIds"]))
             context.Emit(AggregateKinds.Lock, resource, Operations.Block, new JsonObject
             {

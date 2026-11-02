@@ -132,7 +132,8 @@ internal static class SessionAggregate
                 inbox.Remove(old); ObjectAt(state, "acked")[old] = Retention.Stamp(context.Now); superseded++;
                 SessionAttention.CloseMessages(state, [old], context.Now);
             }
-        if (inbox.Count >= RelayLimits.MaxRecords) return Error(CapacityExceeded);
+        // A full inbox (a chat that stopped reading) drops the message: a refusal would be retried forever and stall the sender's outbox.
+        if (inbox.Count >= RelayLimits.MaxRecords) return Ok(new { delivered = false, full = true });
         // With attention on, the dispatcher passes the item lifetime: a message that may wake its chat is then an info item.
         var message = context.Args.DeepClone().AsObject();
         var infoDays = message["attentionExpiryDays"] is JsonValue days && days.TryGetValue<int>(out var lifetime) ? lifetime : 0;

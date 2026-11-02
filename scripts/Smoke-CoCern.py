@@ -73,6 +73,7 @@ class Hub:
         self.home.mkdir(parents=True)
         self.docs = work / "docs-repo"
         self.https_port = free_port()
+        self.local_https_port = free_port()
         self.certificate = work / "data" / "hub-certificate.pfx"
         make_docs_repo(self.docs)
         self.env = os.environ.copy()
@@ -96,6 +97,7 @@ class Hub:
             "Relay__Connect__AdapterPath": str(ADAPTER),
             "Relay__Network__Enabled": "true",
             "Relay__Network__HttpsPort": str(self.https_port),
+            "Relay__Local__HttpsPort": str(self.local_https_port),
             "Relay__Network__CertificatePath": str(self.certificate),
             "Relay__DocCache__SyncMinutes": "0",
             "Relay__DocCache__Repositories__0__Id": REPO,
@@ -158,7 +160,7 @@ def run_node(hub, folder, join_code, seconds):
                             env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     output, deadline = [], time.monotonic() + seconds
     threading.Thread(target=lambda: [output.append(line) for line in node.stdout], daemon=True).start()
-    while time.monotonic() < deadline and node.poll() is None and not any("enrolled" in line for line in output):
+    while time.monotonic() < deadline and node.poll() is None and not any("enrolled" in line or "presented a certificate" in line for line in output):
         time.sleep(0.2)
     code = node.poll()
     stop(node)
@@ -427,6 +429,7 @@ def run_checks(hub, checks):
         expect(status == 200 and data["clients"][0]["state"] == "added", f"HTTP {status} {data}")
         config = (hub.home / ".codex" / "config.toml").read_text()
         expect("[mcp_servers.cocern]" in config and str(hub.token_file) in config, "codex config.toml was not written as expected")
+        expect(f"https://127.0.0.1:{hub.local_https_port}/" in config and "COCERN_FINGERPRINT" in config, "Connect did not point Codex at the pinned loopback HTTPS")
         status, data = request(hub.origin + "/dashboard/api/connect", opener=browser)
         expect({client["id"]: client["state"] for client in data["clients"]}.get("codex") == "connected", "codex not shown as connected afterwards")
     checks.run("happy", "Connect adds CoCern to Codex (in a temporary home folder)", connect_page)
@@ -483,6 +486,22 @@ def run_checks(hub, checks):
         expect(peer_fingerprint(hub.https_port) == logged[-1], "the HTTPS listener presents a different certificate than the one logged")
         state["fingerprint"] = logged[-1]
     checks.run("happy", "HTTPS listener serves the certificate whose fingerprint it logs", https_listener)
+
+    def local_hub_record():
+        record = json.loads((hub.work / "data" / "local-hub.json").read_text())
+        expect(record == {"url": f"https://127.0.0.1:{hub.local_https_port}/", "fingerprint": state["fingerprint"]}, f"local-hub.json is {record}")
+        expect(peer_fingerprint(hub.local_https_port) == state["fingerprint"], "the loopback HTTPS listener presents another certificate")
+    checks.run("happy", "loopback HTTPS serves the hub certificate, recorded in local-hub.json for Connect", local_hub_record)
+
+    def pinned_adapter():
+        reply = pinned_call(hub, state["fingerprint"])
+        expect(not reply.get("isError") and '\\"ok\\":true' in json.dumps(reply), f"a pinned call failed: {json.dumps(reply)[:200]}")
+    checks.run("happy", "a chat's adapter works over the pinned loopback HTTPS", pinned_adapter)
+
+    def wrong_pin():
+        reply = pinned_call(hub, "0" * 64)
+        expect(reply.get("isError") is True, f"an adapter pinned to another certificate still got an answer: {json.dumps(reply)[:200]}")
+    checks.run("sad", "an adapter pinned to another certificate refuses the hub (so it never sends its token)", wrong_pin)
 
     def add_pc_filled_in():
         status, data = request(hub.origin + "/dashboard/api/add-pc", opener=browser)
@@ -770,8 +789,9 @@ def run_checks(hub, checks):
         hub.start()
         expect(hub.fingerprints()[-1] != state["fingerprint"], "the hub did not make a new certificate")
         code, output = run_node(hub, hub.work / "node", state["join_code"], 45)
-        expect(code == 4, f"exit {code}: {output.strip()[-300:]}")
-    checks.run("sad", "a joined node refuses a hub whose certificate changed (exit 4)", changed_certificate)
+        # It sends nothing to the new certificate, says so, and keeps running (backing off) instead of exiting until the next sign-in.
+        expect(code is None and "presented a certificate" in output and "enrolled" not in output, f"exit {code}: {output.strip()[-300:]}")
+    checks.run("sad", "a joined node refuses a hub whose certificate changed, and keeps running", changed_certificate)
 
     # ---- Analytics -----------------------------------------------------------------------------------------------
     print("Analytics")
@@ -782,6 +802,31 @@ def run_checks(hub, checks):
         expect((status == 200 and reply.get("ok")) or code == "AnalyticsUnavailable", f"HTTP {status} {code}")
     checks.run("happy", "analytics answers (or AnalyticsUnavailable before its first snapshot / without the extension)", analytics)
     checks.run("sad", "a worker can't run analytics", lambda: refused("analytics_query", {"name": "tokens_per_task"}, "AdministratorRequired", 403, hub.worker_token))
+
+
+def pinned_call(hub, fingerprint):
+    """One task_get through a real adapter over the hub's loopback HTTPS, pinned to `fingerprint`; returns the MCP result."""
+    env = dict(hub.env, COCERN_URL=f"https://127.0.0.1:{hub.local_https_port}/", COCERN_TOKEN=hub.worker_token, COCERN_FINGERPRINT=fingerprint)
+    adapter = subprocess.Popen(["dotnet", str(ADAPTER)], env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, encoding="utf-8")
+    try:
+        messages = [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "cocern-smoke", "version": "1.0"}}},
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "task_get", "arguments": {"repositoryId": REPO}}}]
+        for message in messages:
+            adapter.stdin.write(json.dumps(message) + "\n")
+            adapter.stdin.flush()
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            line = adapter.stdout.readline()
+            if not line:
+                break
+            reply = json.loads(line)
+            if reply.get("id") == 2:
+                return reply.get("result", {"isError": True, "error": reply.get("error")})
+        return {"isError": True, "error": "no reply"}
+    finally:
+        stop(adapter)
 
 
 def adapter_round_trip(hub):

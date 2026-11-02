@@ -30,7 +30,9 @@ public static class JsonFields
     /// <summary>The child array at <paramref name="key"/>, created when absent.</summary>
     public static JsonArray ArrayAt(JsonObject node, string key) { if (node[key] is not JsonArray result) node[key] = result = new(); return result; }
 
-    public static IEnumerable<string> Strings(JsonNode? node) => (node as JsonArray ?? new()).Select(x => x!.GetValue<string>());
+    /// <summary>An array of strings; any other element (null included) is invalid input, never a crash.</summary>
+    public static IEnumerable<string> Strings(JsonNode? node) => (node as JsonArray ?? new())
+        .Select(x => x is JsonValue value && value.TryGetValue<string>(out var text) ? text : throw new ArgumentException("Expected an array of strings."));
 
     public static bool ExpectedVersionMatches(JsonObject args, long current) => args.ContainsKey("expectedVersion") && Number(args, "expectedVersion") == current;
 

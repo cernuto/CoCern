@@ -90,6 +90,8 @@ public static class HubCertificate
 internal sealed class HubListener
 {
     public (int Port, string Fingerprint)? Https { get; set; }
+    /// <summary>The loopback HTTPS listener local chats pin: its port and certificate fingerprint. Null while it is off.</summary>
+    public (int Port, string Fingerprint)? Local { get; set; }
 }
 
 /// <summary>The optional network listener: HTTPS on every interface with the hub certificate, beside the loopback HTTP endpoint that keeps working unchanged. Off unless <c>Relay:Network:Enabled</c> is true.</summary>
@@ -97,6 +99,7 @@ internal static class HubNetwork
 {
     public const string DefaultUrl = "http://127.0.0.1:5271";
     private const int DefaultHttpsPort = 5273;
+    private const int DefaultLocalHttpsPort = 5272;
     private const string DefaultCertificatePath = "data/hub-certificate.pfx";
 
     public static bool Enabled(IConfiguration configuration) => bool.TryParse(configuration["Relay:Network:Enabled"], out var enabled) && enabled;
@@ -117,9 +120,21 @@ internal static class HubNetwork
     }
 
     /// <summary>Kestrel ignores <c>urls</c> once endpoints are set in code, so this recreates the loopback HTTP endpoint(s) itself and adds the HTTPS one.</summary>
+    /// <summary>
+    /// The HTTPS listeners, both with the hub certificate:
+    /// <list type="bullet">
+    /// <item>Loopback HTTPS (<c>Relay:Local:HttpsPort</c>, default 5272; 0 turns it off): local chats connect here and pin the certificate,
+    /// so a process that takes the port while the hub is down never receives their token. Its address and fingerprint go to
+    /// <c>local-hub.json</c> beside the database, where Connect finds them.</item>
+    /// <item>Network HTTPS on every interface, only with <c>Relay:Network:Enabled</c>.</item>
+    /// </list>
+    /// Kestrel ignores <c>urls</c> once endpoints are set in code, so the loopback HTTP endpoint(s) are recreated here too.
+    /// </summary>
     public static void Configure(IConfiguration configuration, IHostEnvironment environment, KestrelServerOptions options)
     {
-        if (!Enabled(configuration)) return;
+        var network = Enabled(configuration);
+        var localPort = configuration.GetValue("Relay:Local:HttpsPort", DefaultLocalHttpsPort);
+        if (!network && localPort == 0) return;
         var port = configuration.GetValue("Relay:Network:HttpsPort", DefaultHttpsPort);
         var configured = configuration["Relay:Network:CertificatePath"];
         var path = Path.Combine(environment.ContentRootPath, string.IsNullOrWhiteSpace(configured) ? DefaultCertificatePath : configured);
@@ -127,18 +142,46 @@ internal static class HubNetwork
         var certificate = HubCertificate.LoadOrCreate(path, Environment.MachineName);
         // The certificate's private key is a persisted Windows key container that only Dispose removes, so release it when the host stops.
         options.ApplicationServices.GetRequiredService<IHostApplicationLifetime>().ApplicationStopped.Register(certificate.Dispose);
-        options.ListenAnyIP(port, listen => listen.UseHttps(certificate));
+        var fingerprint = HubCertificate.Fingerprint(certificate);
         var logger = options.ApplicationServices.GetService<ILoggerFactory>()?.CreateLogger("CoCern.Host.HubNetwork");
-        logger?.LogInformation("Hub listening on https port {Port}; certificate fingerprint {Fingerprint}", port, HubCertificate.Fingerprint(certificate));
-        options.ApplicationServices.GetRequiredService<HubListener>().Https = (port, HubCertificate.Fingerprint(certificate));
+        var listener = options.ApplicationServices.GetRequiredService<HubListener>();
+        if (localPort != 0)
+        {
+            options.Listen(IPAddress.Loopback, localPort, listen => listen.UseHttps(certificate));
+            listener.Local = (localPort, fingerprint);
+            WriteLocalHub(configuration, environment, localPort, fingerprint, logger);
+        }
+        if (network)
+        {
+            options.ListenAnyIP(port, listen => listen.UseHttps(certificate));
+            listener.Https = (port, fingerprint);
+        }
+        logger?.LogInformation("Hub HTTPS: this PC on port {LocalPort}, other PCs {Network}; certificate fingerprint {Fingerprint}", localPort, network ? $"on port {port}" : "off", fingerprint);
+    }
+
+    public const string LocalHubFile = "local-hub.json";
+
+    /// <summary>Records where local chats reach the hub over pinned HTTPS. Not a secret; rewritten each start. Best effort.</summary>
+    private static void WriteLocalHub(IConfiguration configuration, IHostEnvironment environment, int port, string fingerprint, ILogger? logger)
+    {
+        try
+        {
+            var folder = Path.GetDirectoryName(RelayHostBuilderExtensions.DatabasePath(configuration, environment))!;
+            Directory.CreateDirectory(folder);
+            var target = Path.Combine(folder, LocalHubFile);
+            var temporary = target + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            File.WriteAllText(temporary, System.Text.Json.JsonSerializer.Serialize(new { url = $"https://127.0.0.1:{port}/", fingerprint }));
+            File.Move(temporary, target, overwrite: true);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { logger?.LogWarning("Could not write {File}; Connect will use plain HTTP on this PC.", LocalHubFile); }
     }
 
     private static void ListenHttp(KestrelServerOptions options, string url)
     {
         if (!Uri.TryCreate(url.Replace("://+", "://0.0.0.0").Replace("://*", "://0.0.0.0"), UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttp)
-            throw new InvalidOperationException($"Relay:Network:Enabled requires every configured url to be an http address, but found '{url}'. The HTTPS endpoint is configured by Relay:Network:HttpsPort.");
+            throw new InvalidOperationException($"With the hub's own HTTPS listeners, every configured url must be an http address, but found '{url}'. The HTTPS endpoints are Relay:Local:HttpsPort and Relay:Network:HttpsPort.");
         if (uri.Host.Equals("localhost", StringComparison.OrdinalIgnoreCase)) options.ListenLocalhost(uri.Port);
         else if (IPAddress.TryParse(uri.Host.Trim('[', ']'), out var address)) options.Listen(address, uri.Port);
-        else throw new InvalidOperationException($"Relay:Network:Enabled cannot bind the url '{url}': use an IP address or localhost.");
+        else throw new InvalidOperationException($"The hub cannot bind the url '{url}': use an IP address or localhost.");
     }
 }

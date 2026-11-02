@@ -309,7 +309,7 @@ internal static class TaskBoardAggregate
         }
         var priorStatus = ObjectAt(task, "actions").ToDictionary(x => x.Key, x => x.Value is JsonObject action ? Text(action, "status") : "", StringComparer.Ordinal);
         foreach (var report in reports)
-            if (TaskActions.ApplyReport(context, task, report!.AsObject()) is { } failure) return failure;
+            if (TaskActions.ApplyReport(context, task, report as JsonObject ?? throw new ArgumentException("Each action report must be an object.")) is { } failure) return failure;
         if (args["patch"] is JsonObject patch)
         {
             if (ByteSize(patch) > MaxSharedBytes) return Error(PayloadTooLarge);
@@ -356,7 +356,7 @@ internal static class TaskBoardAggregate
         // call reported are included, since the reporter needs their resulting status and restoration.
         var acknowledgment = new JsonObject { ["taskId"] = Text(task, "taskId"), ["version"] = version, ["updatedAt"] = Text(task, "updatedAt") };
         var reported = new JsonObject();
-        foreach (var id in reports.Select(report => Text(report!.AsObject(), "actionId")).Where(id => id.Length > 0).Distinct(StringComparer.Ordinal))
+        foreach (var id in reports.OfType<JsonObject>().Select(report => Text(report, "actionId")).Where(id => id.Length > 0).Distinct(StringComparer.Ordinal))
             if (ObjectAt(task, "actions")[id] is JsonNode action) reported[id] = action.DeepClone();
         if (reported.Count > 0) acknowledgment["actions"] = reported;
         if (unblocked.Count > 0) acknowledgment["unblocked"] = new JsonArray(unblocked.Take(RelayLimits.MaxPageSize).Select(id => (JsonNode)id).ToArray());
