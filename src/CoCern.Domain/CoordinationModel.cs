@@ -177,6 +177,9 @@ public static class DueWorkKinds
 
     /// <summary>A board's next archive sweep: when its oldest finished, idle task passes <c>Relay:Board:ArchiveAfterDays</c>.</summary>
     public const string TaskArchive = "task_archive";
+
+    /// <summary>The ID of a <see cref="TaskArchive"/> sweep pushed back after the board refused one; rescheduling keeps the backoff.</summary>
+    public const string TaskArchiveRetry = "task_archive:retry";
 }
 
 /// <summary>Hub-internal operations. They compose public tools across aggregates and are never accepted from clients.</summary>

@@ -83,7 +83,10 @@ public static class CoordinationStateMachine
         envelope.Value = new() { Json = state.ToJsonString() };
         // Nothing changes the state object after this point, so the commit's search indexing can read it instead of parsing again.
         envelope.Value.KeepParsed(state);
+        // New effects deliver with this call's authority, and the aggregate's timers follow its new state.
+        StampEffects(context.Effects, 0, caller);
         envelope.Effects.AddRange(context.Effects);
+        ScheduleLeases(envelope, state, kind == AggregateKinds.Board ? archiveAfterDays : 0);
         // Tasks this operation archived leave the board in this commit; storage writes them to the archive in the same transaction.
         envelope.QueueArchive(context.Archived);
         return result;
@@ -182,12 +185,16 @@ public static class CoordinationStateMachine
     /// Rebuilds the aggregate's timers from its own state: lease expiry from its own and its tasks' leases, a lock's lease check, and the
     /// anomaly monitor's next check, and a board's next archive sweep (with <paramref name="archiveAfterDays"/> above 0).
     /// </summary>
-    public static void ScheduleLeases(StateEnvelope<CoordinationDocument> envelope, int archiveAfterDays = 0)
+    public static void ScheduleLeases(StateEnvelope<CoordinationDocument> envelope, int archiveAfterDays = 0) =>
+        ScheduleLeases(envelope, JsonNode.Parse(envelope.Value.Json)!.AsObject(), archiveAfterDays);
+
+    private static void ScheduleLeases(StateEnvelope<CoordinationDocument> envelope, JsonObject state, int archiveAfterDays)
     {
-        var state = JsonNode.Parse(envelope.Value.Json)!.AsObject();
+        var backoff = envelope.DueWork.FirstOrDefault(x => x.Id == DueWorkKinds.TaskArchiveRetry)?.DueAt;
         envelope.DueWork.RemoveAll(x => x.Kind is DueWorkKinds.Lease or DueWorkKinds.LeaseWarning or DueWorkKinds.AnomalyCheck or DueWorkKinds.TaskArchive);
-        // A board's next archive sweep, when a finished task will pass Relay:Board:ArchiveAfterDays.
-        if (TaskArchiving.NextSweep(state, archiveAfterDays) is { } sweep) envelope.DueWork.Add(new(DueWorkKinds.TaskArchive, DueWorkKinds.TaskArchive, sweep));
+        // A board's next archive sweep, when a finished task will pass Relay:Board:ArchiveAfterDays; a refused sweep's backoff still holds.
+        if (TaskArchiving.NextSweep(state, archiveAfterDays) is { } sweep)
+            envelope.DueWork.Add(backoff > sweep ? new(DueWorkKinds.TaskArchiveRetry, DueWorkKinds.TaskArchive, backoff.Value) : new(DueWorkKinds.TaskArchive, DueWorkKinds.TaskArchive, sweep));
         if (DateTimeOffset.TryParse(Text(state, "nextCheckAt"), out var check)) envelope.DueWork.Add(new(DueWorkKinds.AnomalyCheck, DueWorkKinds.AnomalyCheck, check));
         if (DateTimeOffset.TryParse(Text(state, "leaseUntil"), out var lease)) envelope.DueWork.Add(new(DueWorkKinds.Lease, DueWorkKinds.Lease, lease));
         // A lock whose holder has an action in flight checks its lease shortly before it ends (claim_expiring).
