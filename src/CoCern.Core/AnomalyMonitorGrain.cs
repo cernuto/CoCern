@@ -81,48 +81,6 @@ public sealed class AnomalyMonitorGrain([PersistentState("anomaly", "relay")] IP
         return findings;
     }
 
-    /// <summary>
-    /// One query's result: its period and, when a row is out of range by <paramref name="threshold"/> (see <see cref="AnomalyThreshold"/>),
-    /// the worst row as <c>anomaly</c>. <c>inRange</c> needs <paramref name="openKey"/>'s row measured with enough samples: too little data
-    /// is not "back in range".
-    /// </summary>
-    public static JsonObject Finding(string query, AnalyticsResult result, AnomalyThreshold threshold, string? openKey = null)
-    {
-        var finding = new JsonObject { ["query"] = query, ["period"] = result.SnapshotAt.UtcDateTime.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) };
-        int Column(string name) => result.Columns.ToList().IndexOf(name);
-        var (key, cur, prev, curN, prevN) = (Column("key"), Column("cur"), Column("prev"), Column("cur_n"), Column("prev_n"));
-        if (key < 0 || cur < 0 || prev < 0 || curN < 0 || prevN < 0) return finding;
-        (string Key, double Value, double Baseline, long Samples, double Severity)? worst = null;
-        var openMeasured = false;
-        foreach (var row in result.Rows)
-        {
-            var name = Convert.ToString(row[key], CultureInfo.InvariantCulture) ?? "";
-            var down = query == AnalyticsQueryNames.QualityGuardrails && name == "closures";
-            var value = Real(row[cur]) ?? (down ? 0 : null);
-            if (value is not { } current || (Real(row[prev]) ?? (threshold.Limit > 0 ? 0 : null)) is not { } baseline || Real(row[curN]) is not { } samples) continue;
-            var baselineSamples = Real(row[prevN]) ?? 0;
-            // A fixed limit (compaction rate) needs only enough current rows, and stands in for the baseline.
-            var limited = threshold.Limit > 0;
-            if (limited) baseline = threshold.Limit;
-            var measured = limited ? samples >= threshold.MinSamples : baselineSamples >= threshold.MinSamples && (down || samples >= threshold.MinSamples) && baseline > 0;
-            if (name == openKey && measured) openMeasured = true;
-            if (!measured) continue;
-            var severity = limited ? (current > threshold.Limit ? current / threshold.Limit : 0)
-                : down ? (threshold.DropRatio > 0 && baseline >= current * threshold.DropRatio ? (current <= 0 ? double.MaxValue : baseline / current) : 0)
-                : (threshold.Ratio > 0 && current >= baseline * threshold.Ratio ? current / baseline : 0);
-            if (severity > 0 && (worst is null || severity > worst.Value.Severity)) worst = (name, current, baseline, (long)(down ? baselineSamples : samples), severity);
-        }
-        if (worst is { } found)
-            finding["anomaly"] = new JsonObject { ["key"] = found.Key, ["value"] = Math.Round(found.Value, 2), ["baseline"] = Math.Round(found.Baseline, 2), ["samples"] = found.Samples };
-        else if (openMeasured) finding["inRange"] = true;
-        return finding;
-    }
-
-    private static double? Real(object? value) => value switch
-    {
-        null => null,
-        double number => double.IsFinite(number) ? number : null,
-        IConvertible convertible when value is not string and not bool => convertible.ToDouble(CultureInfo.InvariantCulture),
-        _ => null
-    };
+    /// <summary>One query's result judged by <paramref name="threshold"/>; see <see cref="AnomalyThreshold.Judge"/>.</summary>
+    public static JsonObject Finding(string query, AnalyticsResult result, AnomalyThreshold threshold, string? openKey = null) => threshold.Judge(query, result, openKey);
 }

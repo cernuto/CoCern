@@ -37,6 +37,9 @@ public interface ITaskArchive
 /// <summary>Port implemented by storage: full-text search over committed state, scoped to one repository and one session's inbox.</summary>
 public interface IFullTextSearch
 {
+    /// <summary>Whether the store keeps a search index; with none the hub answers <c>SearchUnavailable</c>.</summary>
+    bool Enabled => true;
+
     /// <summary>
     /// The best hits for <paramref name="query"/>, read as plain words (never as search syntax), in <paramref name="repositoryId"/>:
     /// shared documents plus <paramref name="sessionId"/>'s own inbox. Empty <paramref name="kinds"/> means every kind.

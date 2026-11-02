@@ -71,20 +71,25 @@ public static class RelayHostBuilderExtensions
         builder.Services.AddSingleton(services => TokenSettings(services.GetRequiredService<IConfiguration>()));
         builder.Services.AddSingleton(services => FeedbackSettings(services.GetRequiredService<IConfiguration>()));
         // A port that is off is passed as null, and its tools answer *Unavailable (search, analytics, anomaly, doc cache, feedback).
-        builder.Services.Replace(ServiceDescriptor.Singleton(services => Warmed(new RelayApplication(
-            services.GetRequiredService<Orleans.IGrainFactory>(), services.GetService<IMachineDirectory>(), services.GetService<IActivitySink>(),
-            services.GetService<SqliteStore>() is { SearchEnabled: true } store ? store : null, services.GetRequiredService<AttentionOptions>(),
-            services.GetService<IAnalyticsQueries>() is { } queries
-                ? new AnalyticsTool(queries, services.GetRequiredService<IConfiguration>().GetValue("Relay:Analytics:AllowAdHocSql", true), services.GetRequiredService<ILoggerFactory>().CreateLogger<AnalyticsTool>())
-                : null,
-            services.GetService<IAnalyticsQueries>() is not null ? services.GetRequiredService<AnomalyOptions>() : null,
-            services.GetRequiredService<OrderOptions>(),
-            services.GetService<DocCacheTool>(),
-            services.GetRequiredService<ITokenCounter>(), services.GetRequiredService<TokenOptions>(),
-            services.GetRequiredService<FeedbackOptions>() is { Enabled: true } feedback
-                ? new FeedbackRules(feedback, services.GetRequiredService<ITokenCounter>(), services.GetService<SqliteStore>())
-                : null,
-            services.GetService<SqliteStore>())))); // the task archive
+        builder.Services.Replace(ServiceDescriptor.Singleton(services =>
+        {
+            var queries = services.GetService<IAnalyticsQueries>();
+            var counter = services.GetRequiredService<ITokenCounter>();
+            return Warmed(new RelayApplication(
+                services.GetRequiredService<Orleans.IGrainFactory>(),
+                machines: services.GetService<IMachineDirectory>(),
+                activity: services.GetService<IActivitySink>(),
+                search: services.GetService<IFullTextSearch>() is { Enabled: true } search ? search : null,
+                attention: services.GetRequiredService<AttentionOptions>(),
+                analytics: queries is null ? null : new AnalyticsTool(queries, services.GetRequiredService<IConfiguration>().GetValue("Relay:Analytics:AllowAdHocSql", true), services.GetRequiredService<ILoggerFactory>().CreateLogger<AnalyticsTool>()),
+                anomaly: queries is null ? null : services.GetRequiredService<AnomalyOptions>(),
+                orders: services.GetRequiredService<OrderOptions>(),
+                docs: services.GetService<DocCacheTool>(),
+                tokens: counter,
+                tokenOptions: services.GetRequiredService<TokenOptions>(),
+                feedback: services.GetRequiredService<FeedbackOptions>() is { Enabled: true } feedback ? new FeedbackRules(feedback, counter, services.GetService<IFeedbackRuleStore>()) : null,
+                archive: services.GetService<ITaskArchive>()));
+        }));
         // One shared tokenizer for every token count; it loads its vocabulary on first use.
         builder.Services.AddSingleton<ITokenCounter, O200kTokenCounter>();
         builder.Services.AddDocCache();
@@ -154,6 +159,7 @@ public static class RelayHostBuilderExtensions
                 LiveDatabasePath = provider.GetRequiredService<SqliteStore>().DatabasePath
             });
         });
+        // Resolved lazily, so settings applied after registration (hosts, tests) still decide; null when off.
         services.AddSingleton<IAnalyticsQueries>(provider => provider.GetRequiredService<AnalyticsSettings>().Enabled ? provider.GetRequiredService<AnalyticsService>() : null!);
         services.AddHostedService<AnalyticsSnapshotService>();
     }

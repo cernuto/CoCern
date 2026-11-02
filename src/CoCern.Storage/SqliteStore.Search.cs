@@ -57,6 +57,7 @@ public sealed partial class SqliteStore : IFullTextSearch
 
     /// <summary>Whether this hub keeps the search index; when off, <see cref="SearchAsync"/> finds nothing.</summary>
     public bool SearchEnabled => _searchOptions.Enabled;
+    bool IFullTextSearch.Enabled => SearchEnabled;
 
     /// <summary>Tests hold the writer's gate through this to show that searches do not wait on it.</summary>
     internal SemaphoreSlim WriterGate => _gate;

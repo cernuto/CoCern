@@ -120,6 +120,33 @@ public sealed class AdapterReliabilityTests : IDisposable
     }
 
     [Fact]
+    public async Task An_announcement_whose_body_stalls_after_the_headers_is_bounded_by_the_request_timeout()
+    {
+        var folder = Path.Combine(root, "stalled-node");
+        using var state = NodeState.Open(folder);
+        state.SetHub(Relay, null);
+        state.SaveCredential(new string('c', 64));
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var calls = 0;
+        // Every reply stalls after its headers. A second request can only come once the first was cut off.
+        using var hub = new Stub((_, _) =>
+        {
+            if (Interlocked.Increment(ref calls) == 2) stop.Cancel();
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(new StallingStream()) });
+        });
+        var transport = new NodeTransport
+        {
+            CreateHandler = (_, _) => hub, HubHandler = () => new Stub((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound))), MachineName = "Node PC", Clients = () => [],
+            Chats = _ => Task.FromResult(new JsonArray()), FirstRetry = TimeSpan.FromMilliseconds(10), CodexExecutable = () => null,
+            RequestTimeout = TimeSpan.FromMilliseconds(300)
+        };
+        var started = System.Diagnostics.Stopwatch.StartNew();
+        await NodeRunner.RunAsync(state, null, transport, new StringWriter(), stop.Token);
+        Assert.True(calls >= 2);
+        Assert.True(started.Elapsed < TimeSpan.FromSeconds(10));
+    }
+
+    [Fact]
     public async Task Announce_retries_the_full_list_when_isolating_a_denied_repository_meets_another_failure()
     {
         var folder = Path.Combine(root, "node");

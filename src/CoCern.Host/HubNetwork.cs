@@ -98,7 +98,10 @@ internal static class HubNetwork
     /// <summary>Plain HTTP beyond loopback would carry bearer tokens in clear text before any handler could refuse them, so such a url stops startup.</summary>
     public static void RefusePlainNetworkHttp(IConfiguration configuration)
     {
-        foreach (var url in (configuration["urls"] ?? DefaultUrl).Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        // Both places Kestrel reads addresses from: urls, and any endpoints in configuration (Kestrel:Endpoints:<name>:Url).
+        var urls = (configuration["urls"] ?? DefaultUrl).Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Concat(configuration.GetSection("Kestrel:Endpoints").GetChildren().Select(endpoint => endpoint["Url"] ?? "").Where(url => url.Length > 0));
+        foreach (var url in urls)
         {
             if (!url.StartsWith("http://", StringComparison.OrdinalIgnoreCase)) continue;
             var loopback = Uri.TryCreate(url.Replace("://+", "://0.0.0.0").Replace("://*", "://0.0.0.0"), UriKind.Absolute, out var uri)

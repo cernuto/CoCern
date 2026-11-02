@@ -22,6 +22,8 @@ internal sealed class NodeTransport
     public Func<CancellationToken, Task<JsonArray>>? Chats { get; init; }
     public IReadOnlyList<IChatLocator> Locators { get; init; } = ChatLocators.Default();
     public TimeProvider Clock { get; init; } = TimeProvider.System;
+    /// <summary>How long one request to the hub may take, body included.</summary>
+    public TimeSpan RequestTimeout { get; init; } = TimeSpan.FromSeconds(30);
     /// <summary>How long after opening a session is searched for; after that it is permanently unmapped.</summary>
     public TimeSpan LocateWindow { get; init; } = NodeChats.DefaultLocateWindow;
     /// <summary>The most one cycle spends reading transcripts; the announcement goes out with what is known so far.</summary>
@@ -204,7 +206,7 @@ public sealed class NodeRunner : IAsyncDisposable
             _error.WriteLine($"CoCern node pinned the certificate of the hub at {_hub}: {_state.Fingerprint}.");
         }
         else if (Https && !ExpectedMatches(_state.Fingerprint!)) return Unexpected(_state.Fingerprint!);
-        _http ??= new HttpClient(_transport.CreateHandler(Https ? _state.Fingerprint : null, presented => _mismatch ??= presented)) { Timeout = TimeSpan.FromSeconds(30) };
+        _http ??= new HttpClient(_transport.CreateHandler(Https ? _state.Fingerprint : null, presented => _mismatch ??= presented)) { Timeout = _transport.RequestTimeout };
         if (_credential is null)
         {
             var enrolled = await EnrollAsync(ct);
