@@ -702,9 +702,11 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         args.Remove("declaredResources");
         if (await DeclaredResourcesAsync(caller, args, session) is { } declared) args["declaredResources"] = declared;
         var canonical = new SortedSet<string>(StringComparer.Ordinal);
+        // The claim's own names resolve by the same machine as the declared ones: the verified session's, else the one the call gives.
+        var lookup = args.DeepClone().AsObject(); lookup["machineId"] = SessionMachine(args, session);
         foreach (var resource in Strings(args["resourceIds"]))
         {
-            var resolved = await Resolve(caller, args, resource);
+            var resolved = await Resolve(caller, lookup, resource);
             if (!resolved.Ok) return resolved;
             canonical.Add(Text(Parse(resolved), "resourceId"));
         }
@@ -809,7 +811,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         if (names.Length == 0) return null;
         var resolved = await CallControl(caller, Operations.ResolveAll, new JsonObject
         {
-            ["repositoryId"] = Text(args, "repositoryId"), ["machineId"] = session is not null && Text(session, "machineId").Length > 0 ? Text(session, "machineId") : Text(args, "machineId"),
+            ["repositoryId"] = Text(args, "repositoryId"), ["machineId"] = SessionMachine(args, session),
             ["resourceIds"] = JsonSerializer.SerializeToNode(names)
         });
         // Without the lookup the board checks each declared name as listed, which only refuses more.
@@ -819,6 +821,10 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         foreach (var name in names) declared[name] = map?[name] is JsonValue canonical && canonical.TryGetValue<string>(out var id) ? id : "";
         return declared;
     }
+
+    /// <summary>The machine a session's resource names resolve by: the one it gave at <c>session_open</c>, else the one this call gives.</summary>
+    private static string SessionMachine(JsonObject args, JsonObject? session) =>
+        session is not null && Text(session, "machineId").Length > 0 ? Text(session, "machineId") : Text(args, "machineId");
 
     /// <summary>Adds an advisory next-work offer to a committed milestone. The milestone stands whatever the offer's outcome.</summary>
     private async Task<RelayReply> WithNextWorkAsync(RelayCaller caller, JsonObject args, JsonObject? session, RelayReply committed)

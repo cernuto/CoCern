@@ -50,8 +50,25 @@ public sealed class DocCacheTests
     private static DocDirectoryState CopyDirectory(DocDirectoryState source) => new()
     {
         Branch = source.Branch, Commit = source.Commit, NeedsResync = source.NeedsResync, SyncedAt = source.SyncedAt, Fingerprint = source.Fingerprint,
-        Docs = new(source.Docs, StringComparer.Ordinal), Skipped = new(source.Skipped, StringComparer.Ordinal)
+        Docs = new(source.Docs, StringComparer.Ordinal), Skipped = new(source.Skipped, StringComparer.Ordinal), CapacitySkipped = new(source.CapacitySkipped, StringComparer.Ordinal)
     };
+
+    [Fact]
+    public async Task A_file_waiting_for_room_that_the_full_skipped_list_cannot_hold_marks_a_full_resync()
+    {
+        var directory = new DocDirectoryGrain(new FlakyState<DocDirectoryState>(CopyDirectory));
+        var full = Enumerable.Range(0, RelayLimits.MaxDocsPerRepositoryCeiling).Select(i => $"docs/skip-{i:D5}.md").ToArray();
+        await directory.ApplyAsync(new DocDirectoryUpdate("main", "c1", true, [], [], full, []));
+        Assert.Equal(RelayLimits.MaxDocsPerRepositoryCeiling, (await directory.ReadAsync()).Skipped.Length);
+        // A file skipped for another reason past the ceiling is only not listed: it is read again whenever it changes.
+        await directory.ApplyAsync(new DocDirectoryUpdate("main", "c2", false, [], [], ["docs/huge.md"], []));
+        Assert.False((await directory.ReadAsync()).NeedsResync);
+        // One waiting for room would never be reconsidered, so the next sync is a full one, which lists every file again.
+        await directory.ApplyAsync(new DocDirectoryUpdate("main", "c3", false, [], [], ["docs/late.md"], [], "", [new DocWaiting("docs/late.md", 10)]));
+        var view = await directory.ReadAsync();
+        Assert.True(view.NeedsResync);
+        Assert.DoesNotContain(view.CapacitySkipped!, waiting => waiting.Path == "docs/late.md");
+    }
 
     [Fact]
     public async Task A_failed_directory_write_keeps_the_old_commit_active_and_the_next_sync_persists()
@@ -1070,7 +1087,7 @@ public sealed class DocCacheTests
 
         // A directory already at the head with a file waiting for room (as one synced before this change, or where room came back
         // without a commit): a doc_sync on the unchanged commit reconsiders it.
-        var waiting = new DocDirectoryUpdate(view.Branch, view.Commit, false, [], ["docs/b.md"], ["docs/b.md"], [], view.Fingerprint, ["docs/b.md"]);
+        var waiting = new DocDirectoryUpdate(view.Branch, view.Commit, false, [], ["docs/b.md"], ["docs/b.md"], [], view.Fingerprint, [new DocWaiting("docs/b.md", 0)]);
         await directory.ApplyAsync(waiting);
         Assert.Empty((await directory.ReadAsync()).Entries);
         var manual = await runner.SyncNowAsync("repo", null, "same-commit");
@@ -1079,6 +1096,33 @@ public sealed class DocCacheTests
         Assert.Empty((await directory.ReadAsync()).Skipped);
         // With nothing waiting, an unchanged commit still does nothing.
         Assert.Equal(0, (await runner.SyncAsync("repo", null, CancellationToken.None)).Changed);
+    }
+
+    [Fact]
+    public async Task Files_waiting_for_room_are_reread_only_once_the_smallest_fits()
+    {
+        var a = "# A\n\n" + new string('a', 50) + "\n";
+        var b = "# B\n\n" + new string('b', 50) + "\n";
+        using var git = GitRepositories.Create(new() { ["docs/a.md"] = a, ["docs/b.md"] = b });
+        var watcher = new WatchingGit();
+        await using var host = DocHost(git, watcher, settings: new() { ["Relay:DocCache:MaxRepositoryBytes"] = "80" });
+        var directory = host.Services.GetRequiredService<IGrainFactory>().GetGrain<IDocDirectoryGrain>("repo");
+        var runner = host.Services.GetRequiredService<DocSyncRunner>();
+        await SyncAsync(host);
+        Assert.Equal([new DocWaiting("docs/b.md", Encoding.UTF8.GetByteCount(b))], (await directory.ReadAsync()).CapacitySkipped!);
+        int Reads() => watcher.Shows.Count(show => show.EndsWith(":docs/b.md", StringComparison.Ordinal));
+        var reads = Reads();
+        // Room for 8 more bytes but not for b's 56: a new commit, and a doc_sync on it, leave b unread.
+        git.Commit(new() { ["docs/c.md"] = "# C\n\nc\n" });
+        Assert.Equal(1, (await runner.SyncAsync("repo", null, CancellationToken.None)).Changed);
+        var manual = await runner.SyncNowAsync("repo", null, "unchanged");
+        Assert.Equal(0, manual.Changed);
+        Assert.Equal(reads, Reads());
+        // Once a's bytes are freed, b fits and is read and indexed.
+        git.Delete("docs/a.md");
+        await runner.SyncAsync("repo", null, CancellationToken.None);
+        Assert.Equal(reads + 1, Reads());
+        Assert.Equal(new[] { "docs/b.md", "docs/c.md" }, (await directory.ReadAsync()).Entries.Select(entry => entry.Path));
     }
 
     [Fact]

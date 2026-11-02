@@ -2029,6 +2029,24 @@ public sealed class CoordinationTests
         Assert.Equal("RequestConflict", (await Invoke("task_update", write)).Code);
     }
 
+    [Fact]
+    public async Task A_claim_resolves_its_own_resources_by_the_sessions_machine_like_the_declared_ones()
+    {
+        var application = new RelayApplication(DispatchProxy.Create<IGrainFactory, TestGrainFactory>());
+        Task<RelayReply> Invoke(string tool, JsonObject args) { args["repositoryId"] = "repo"; args["requestId"] = Guid.NewGuid().ToString("N"); return application.ExecuteAsync(Caller with { IsInternal = false }, tool, JsonSerializer.SerializeToElement(args)); }
+        var session = Data(await Invoke("session_open", new() { ["machineId"] = "pc" }));
+        JsonObject For() => new() { ["sessionId"] = session["sessionId"]!.DeepClone(), ["sessionToken"] = session["sessionToken"]!.DeepClone(), ["taskId"] = "t" };
+        Assert.True((await Invoke("control_request", new() { ["command"] = "register_resource", ["resourceId"] = "rig-1", ["aliases"] = new JsonArray("bench"), ["machineId"] = "pc" })).Ok);
+        var workflow = DependentWorkflow("ready"); workflow["packet"]!["resources"] = new JsonArray("bench");
+        var create = For(); create["expectedVersion"] = 0; create["workflow"] = workflow;
+        Assert.True((await Invoke("task_update", create)).Ok);
+        // The call names another machine, where "bench" means nothing; both lists still resolve by the session's machine, to rig-1.
+        var claim = For(); claim["expectedVersion"] = 1; claim["resourceIds"] = new JsonArray("bench"); claim["machineId"] = "elsewhere";
+        var claimed = await Invoke("task_claim", claim);
+        Assert.True(claimed.Ok, claimed.Code + " " + claimed.DataJson);
+        Assert.Equal(["rig-1"], Data(claimed)["resourceIds"]!.AsArray().Select(id => id!.GetValue<string>()));
+    }
+
     private sealed class FakeArchive : ITaskArchive
     {
         public HashSet<string> Archived { get; } = new(StringComparer.Ordinal);
