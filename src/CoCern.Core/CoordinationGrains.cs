@@ -208,6 +208,15 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
         SchemaVersion = state.SchemaVersion, Value = new() { Json = state.Value.Json }, Effects = [.. state.Effects], DueWork = [.. state.DueWork]
     };
 
+    /// <summary>Delivers one aggregate's due outbox effects; the hub's due-work pump calls it. Throws while delivery stays pending.</summary>
+    public static async Task DispatchDueAsync(IGrainFactory grains, DueWorkReference reference, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var dispatcher = new RelayCaller("relay-dispatcher", false, [], true);
+        var reply = await Aggregate(grains, reference.GrainType, reference.GrainKey).ExecuteAsync(dispatcher, Operations.Dispatch, new JsonObject { ["workId"] = reference.WorkId }.ToJsonString());
+        if (!reply.Ok) throw new InvalidOperationException("Durable dispatch remains pending: " + reply.Code);
+    }
+
     internal static IRelayAggregateGrain Aggregate(IGrainFactory factory, string kind, string key) => kind.Replace("cocern.", "", StringComparison.Ordinal) switch
     {
         AggregateKinds.Session => factory.GetGrain<ISessionGrain>(key),
