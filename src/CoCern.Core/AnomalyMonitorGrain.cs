@@ -10,12 +10,9 @@ using static CoCern.Domain.JsonFields;
 namespace CoCern.Core;
 
 /// <summary>
-/// One repository's anomaly monitor (keyed by the repository ID). Its next check is due work in its own state, so checks survive restarts
-/// through the <c>due_work</c> table and the hub's due-work pump. Each check runs the named analytics queries against the latest snapshot,
-/// compares each row's current value with its baseline (the previous period), and passes what it found to the domain's anomaly monitor
-/// rules, which raise or close <c>anomaly</c> items at the repository's managers through the outbox.
-/// The queries run detached from the grain, so a slow query never holds up the due-work pump.
-/// The first manager session opened in a repository starts the monitor. With analytics, attention or the monitor turned off it does nothing.
+/// One repository's anomaly monitor, started by its first manager session. Each check (durable due work) runs the named queries on the
+/// latest snapshot, detached from the grain, and the domain raises or closes <c>anomaly</c> items for managers. Off with analytics,
+/// attention or the monitor off.
 /// </summary>
 [GrainType("cocern.anomaly")]
 public sealed class AnomalyMonitorGrain([PersistentState("anomaly", "relay")] IPersistentState<StateEnvelope<CoordinationDocument>> state, IGrainFactory grains, IServiceProvider services)
@@ -85,16 +82,9 @@ public sealed class AnomalyMonitorGrain([PersistentState("anomaly", "relay")] IP
     }
 
     /// <summary>
-    /// What one named query's result shows: its query, its period (the snapshot's UTC date) and, when a row is out of range, the worst one
-    /// as <c>anomaly</c> (key, value, baseline, samples).
-    /// <list type="bullet">
-    /// <item>Up: a row is out of range when its value is at least <c>Ratio</c> times its baseline (the previous period's value, above zero),
-    /// both from at least <c>MinSamples</c> rows. Samples are the current value's.</item>
-    /// <item>Down, for rows that are better when higher (<c>quality_guardrails</c> closures): out of range when its baseline, from at least
-    /// <c>MinSamples</c> rows, is at least <c>DropRatio</c> times its value. Samples are the baseline's, since few current rows is the signal.</item>
-    /// </list>
-    /// With no row out of range, <c>inRange</c> is true only when <paramref name="openKey"/> (the row of the query's open item) was measured
-    /// with enough samples: too little data is not "back in range".
+    /// One query's result: its period and, when a row is out of range by <paramref name="threshold"/> (see <see cref="AnomalyThreshold"/>),
+    /// the worst row as <c>anomaly</c>. <c>inRange</c> needs <paramref name="openKey"/>'s row measured with enough samples: too little data
+    /// is not "back in range".
     /// </summary>
     public static JsonObject Finding(string query, AnalyticsResult result, AnomalyThreshold threshold, string? openKey = null)
     {

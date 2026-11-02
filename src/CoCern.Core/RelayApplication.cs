@@ -439,9 +439,8 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
     }
 
     /// <summary>
-    /// Successful calls whose reply carries changed standing. <c>check_inbox</c> is left out: the adapter's background wake readers and
-    /// <c>waitSeconds</c> polls discard inbox replies unseen and send no opt-out for standing, so standing attached there could be recorded
-    /// as received without reaching the model. Attention offers do ride <c>check_inbox</c>, because those readers send <c>attention: false</c>.
+    /// Calls whose reply carries changed standing. Not <c>check_inbox</c>: background readers discard those replies and cannot opt out, so
+    /// standing could be recorded as received without reaching the model.
     /// </summary>
     private static bool CarriesStanding(string tool) => tool is RelayTools.TaskUpdate or RelayTools.ActionReport or RelayTools.TaskClaim;
 
@@ -564,11 +563,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         catch (Exception) { /* Telemetry never affects the call. */ }
     }
 
-    /// <summary>
-    /// Successful calls that carry an attention offer. <c>check_inbox</c> is one, so a manager that mostly reads its inbox still gets offers;
-    /// the adapter's background readers (wake watchers, the Claude waiter, <c>waitSeconds</c> polls) send <c>attention: false</c>, so they
-    /// never mark an offer shown that the model does not see.
-    /// </summary>
+    /// <summary>Calls that carry an attention offer. Background readers send <c>attention: false</c>, so no unseen offer is marked shown.</summary>
     private static bool IsBoundary(string tool) => tool is RelayTools.TaskUpdate or RelayTools.ActionReport or RelayTools.TaskClaim or RelayTools.CheckInbox;
 
     /// <summary>

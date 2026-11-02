@@ -12,21 +12,15 @@ public static class RelayLimits
     /// <summary>Largest reply a single aggregate may produce before composition.</summary>
     public const int AggregateReplyBytes = MaxPayloadBytes - CompositionReserveBytes;
 
-    // Token budgets (o200k, labeled estimated tokens for Claude). Every tool except the doc cache's is enforced by default: a reply over
-    // its budget is compacted. Each budget sits at what the tool's byte cap allows, at about 3 bytes per token (JSON replies run nearer 4,
-    // so a reply under the cap is almost always under its budget too). So enforcement changes, in practice, only a reply that would
-    // otherwise be cut at the byte limit. The byte limits stay the hard safety net.
-    /// <summary>Bytes per token used to turn a byte cap into a token budget; real replies average more bytes per token, so this rounds up.</summary>
+    // Token budgets (o200k). A reply over its budget is compacted (every tool but the doc cache's). Budgets sit at the byte cap, so in
+    // practice only a reply that would be cut anyway is compacted; the byte limits stay the hard safety net.
+    /// <summary>Bytes per token for turning a byte cap into a budget; real JSON runs nearer 4, so budgets round up.</summary>
     public const int BudgetBytesPerToken = 3;
-    /// <summary>
-    /// What a reply bounded only by <see cref="MaxPayloadBytes"/> can hold: 10,923 tokens. Every enforced tool's reply is bounded by that
-    /// envelope; the smaller caps inside some replies (search hits at <see cref="MaxSearchReplyBytes"/>, analytics rows at
-    /// <see cref="MaxAnalyticsReplyBytes"/>) cover only part of the composed reply, which also carries the attention offer and standing.
-    /// </summary>
+    /// <summary>What the whole reply envelope holds, in tokens; inner caps (search hits, analytics rows) bound only part of a reply.</summary>
     public const int PayloadReplyTokens = (MaxPayloadBytes + BudgetBytesPerToken - 1) / BudgetBytesPerToken;
     /// <summary>Reply budget of a tool without its own, in tokens.</summary>
     public const int DefaultReplyTokens = PayloadReplyTokens;
-    /// <summary>Budget of a <c>search</c> reply: its hits are capped at 2,048 bytes, but the composed reply is bounded only by the envelope.</summary>
+    /// <summary>Budget of a <c>search</c> reply; its hits have a smaller cap, but the composed reply only the envelope's.</summary>
     public const int SearchReplyTokens = PayloadReplyTokens;
     /// <summary>Budget of a whole-task or board <c>task_get</c> reply.</summary>
     public const int TaskReadReplyTokens = PayloadReplyTokens;
@@ -38,10 +32,7 @@ public static class RelayLimits
     public const int NextWorkOfferTokens = 400;
     /// <summary>Compaction step 3 shortens text values longer than this, in characters, to their first line.</summary>
     public const int CompactTextChars = 200;
-    /// <summary>
-    /// Characters of request and reply text that queued activity events may hold for counting, across the hub (about 16 MB). Past it a
-    /// call's event is still recorded, without token counts, so counting can never cost an activity row.
-    /// </summary>
+    /// <summary>Text queued activity events may hold for token counting (about 16 MB). Past it events are recorded uncounted.</summary>
     public const long MaxQueuedTokenTextChars = 8_000_000;
     /// <summary>Longest etag the adapter forwards as <c>knownEtag</c> and the hub reads; the adapter's etags are 16 characters.</summary>
     public const int MaxKnownEtagLength = 64;
