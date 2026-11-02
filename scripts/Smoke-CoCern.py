@@ -6,6 +6,7 @@ Everything it touches is temporary: its own data folder, its own home folder (fo
 ports. It never reads or changes your real hub, database or app settings. Every check runs even if an earlier one fails;
 the exit code is the number of failed checks (0 = all passed).
 """
+import hashlib
 import http.cookiejar
 import json
 import os
@@ -14,6 +15,7 @@ import queue
 import re
 import secrets
 import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -67,6 +69,10 @@ class Hub:
         self.token_file = work / "data" / "admin-token"
         self.home = work / "home"
         self.home.mkdir(parents=True)
+        self.docs = work / "docs-repo"
+        self.https_port = free_port()
+        self.certificate = work / "data" / "hub-certificate.pfx"
+        make_docs_repo(self.docs)
         self.env = os.environ.copy()
         for name in [name for name in self.env if name.startswith(("COCERN_", "Relay__"))]:
             del self.env[name]
@@ -86,12 +92,20 @@ class Hub:
             "Relay__Discovery__Enabled": "true",
             "Relay__Discovery__Repositories__0": REPO,
             "Relay__Connect__AdapterPath": str(ADAPTER),
+            "Relay__Network__Enabled": "true",
+            "Relay__Network__HttpsPort": str(self.https_port),
+            "Relay__Network__CertificatePath": str(self.certificate),
+            "Relay__DocCache__SyncMinutes": "0",
+            "Relay__DocCache__Repositories__0__Id": REPO,
+            "Relay__DocCache__Repositories__0__ClonePath": str(self.docs),
+            "Relay__DocCache__Repositories__0__Branch": "main",
+            "Relay__DocCache__Repositories__0__Fetch": "false",
         })
         self.log_path = work / "host.log"
         self.process = None
 
     def start(self):
-        with self.log_path.open("w", encoding="utf-8") as log:
+        with self.log_path.open("a", encoding="utf-8") as log:
             self.process = subprocess.Popen(["dotnet", str(HOST)], env=self.env, cwd=self.work, stdout=log, stderr=log)
         deadline = time.monotonic() + 60
         while True:
@@ -103,12 +117,51 @@ class Hub:
                     raise RuntimeError(f"The hub did not start; see {self.log_path}")
                 time.sleep(0.2)
 
+    def restart(self):
+        stop(self.process)
+        self.start()
+
+    def fingerprints(self):
+        return re.findall(r"certificate fingerprint ([0-9A-F]{64})", self.log())
+
     def log(self):
         return self.log_path.read_text(encoding="utf-8", errors="replace")
 
     @property
     def admin_token(self):
         return self.token_file.read_text().strip()
+
+
+def make_docs_repo(folder):
+    """A one-commit git repository for doc search; nothing is ever fetched."""
+    (folder / "docs").mkdir(parents=True)
+    (folder / "docs" / "guide.md").write_text("# Guide\n\n## Refunds\n\nRefunds take five business days.\n\n## Shipping\n\nParcels leave within a day.\n")
+    git = ["git", "-C", str(folder), "-c", "user.name=smoke", "-c", "user.email=smoke@example.invalid"]
+    for command in (["init", "-q", "-b", "main"], ["add", "."], ["commit", "-q", "-m", "docs"]):
+        subprocess.run(git + command, check=True, capture_output=True)
+
+
+def peer_fingerprint(port):
+    """SHA-256 of the certificate the hub's HTTPS listener presents (self-signed, so not verified here: the fingerprint is the check)."""
+    context = ssl.create_default_context()
+    context.check_hostname, context.verify_mode = False, ssl.CERT_NONE
+    with socket.create_connection(("127.0.0.1", port), timeout=10) as raw, context.wrap_socket(raw, server_hostname="127.0.0.1") as tls:
+        return hashlib.sha256(tls.getpeercert(binary_form=True)).hexdigest().upper()
+
+
+def run_node(hub, folder, join_code, seconds):
+    """Runs the node until it prints that it enrolled (or for `seconds`); returns its exit code (None if still running) and output."""
+    env = dict(hub.env, COCERN_NODE_DIR=str(folder))
+    node = subprocess.Popen(["dotnet", str(ADAPTER), "--node", "--data-dir", str(folder), "--hub", f"https://127.0.0.1:{hub.https_port}/", "--join-code", join_code],
+                            env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    output, deadline = [], time.monotonic() + seconds
+    threading.Thread(target=lambda: [output.append(line) for line in node.stdout], daemon=True).start()
+    while time.monotonic() < deadline and node.poll() is None and not any("enrolled" in line for line in output):
+        time.sleep(0.2)
+    code = node.poll()
+    stop(node)
+    time.sleep(0.2)
+    return code, "".join(output)
 
 
 def request(url, payload=None, token=None, headers=None, raw=None, opener=None, method=None):
@@ -422,15 +475,194 @@ def run_checks(hub, checks):
         refused("control_request", {"requestId": rid(), "command": "pause"}, "AdministratorRequired", 403, state["machine_credential"])
     checks.run("sad", "a joined PC can't use admin tools", machine_cannot_admin)
 
-    def add_pc_needs_network():
+    def https_listener():
+        logged = hub.fingerprints()
+        expect(logged, "no certificate fingerprint in the hub log")
+        expect(peer_fingerprint(hub.https_port) == logged[-1], "the HTTPS listener presents a different certificate than the one logged")
+        state["fingerprint"] = logged[-1]
+    checks.run("happy", "HTTPS listener serves the certificate whose fingerprint it logs", https_listener)
+
+    def add_pc_filled_in():
         status, data = request(hub.origin + "/dashboard/api/add-pc", opener=browser)
-        expect(status == 200 and "Relay:Network:Enabled" in (data.get("unavailable") or ""), f"HTTP {status} {data}")
-    checks.run("sad", "Add another PC says to turn the network listener on", add_pc_needs_network)
+        expect(status == 200 and data.get("unavailable") is None, f"HTTP {status} {data}")
+        command = data["addresses"][0]["command"]
+        expect(f"--join-code {state['join_code']}" in command and f"--fingerprint {state['fingerprint']}" in command and f":{hub.https_port}/" in command, command)
+    checks.run("happy", "Add another PC fills in the join code, fingerprint and port", add_pc_filled_in)
+
+    def add_pc_only_here():
+        status, data = request(hub.origin + "/dashboard/api/add-pc")
+        expect(status == 401, f"HTTP {status}")
+    checks.run("sad", "Add another PC needs a signed-in viewer", add_pc_only_here)
+
+    def node_joins_over_https():
+        code, output = run_node(hub, hub.work / "node", state["join_code"], 45)
+        expect("enrolled" in output, f"exit {code}: {output.strip()[-300:]}")
+        expect((hub.work / "node").is_dir() and any((hub.work / "node").iterdir()), "the node saved nothing")
+    checks.run("happy", "a real node joins over HTTPS", node_joins_over_https)
+
+    def node_wrong_code():
+        code, output = run_node(hub, hub.work / "node-wrong", "WRONG-CODE-0000", 45)
+        expect(code is not None and code != 0 and "join code" in output, f"exit {code}: {output.strip()[-300:]}")
+    checks.run("sad", "a node with a wrong join code stops and says why", node_wrong_code)
 
     def enroll_rate_limited():
         statuses = [request(enroll_url, {"machineId": machine + "-x", "machineName": "Smoke PC", "joinCode": "WRONG"})[0] for _ in range(12)]
         expect(429 in statuses, f"statuses {statuses}")
     checks.run("sad", "repeated join attempts are rate limited", enroll_rate_limited)
+
+    # ---- Resources, actions and notes --------------------------------------------------------------------------------
+    print("Resources, actions and notes")
+
+    def resource_claims():
+        ok("control_request", {"requestId": rid(), "command": "register_resource", "resourceId": "rig-1", "machineId": "smoke-pc"})
+        _, held = ok("claim_acquire", {**state["a"], "requestId": rid(), "resourceId": "rig-1"})
+        state["generation"] = held["generation"]
+        refused("claim_acquire", {**state["b"], "requestId": rid(), "resourceId": "rig-1"}, "Busy", 409, hub.worker_token)
+        ok("claim_renew", {**state["a"], "requestId": rid(), "resourceId": "rig-1", "generation": state["generation"], "leaseSeconds": 600})
+    checks.run("happy", "register a resource, claim it, renew it; a second claim is Busy", resource_claims)
+    checks.run("sad", "releasing with a stale generation is refused",
+               lambda: refused("claim_release", {**state["a"], "requestId": rid(), "resourceId": "rig-1", "generation": state["generation"] + 5}, "StaleClaim", 409))
+
+    def release_then_other_claims():
+        ok("claim_release", {**state["a"], "requestId": rid(), "resourceId": "rig-1", "generation": state["generation"]})
+        ok("claim_acquire", {**state["b"], "requestId": rid(), "resourceId": "rig-1"}, hub.worker_token)
+    checks.run("happy", "after release, another chat can claim it", release_then_other_claims)
+    checks.run("sad", "claiming an unregistered resource is refused",
+               lambda: refused("claim_acquire", {**state["a"], "requestId": rid(), "resourceId": "no-such-rig"}, "ResourceUnknown", 400))
+
+    def action_flow():
+        ok("task_update", {**state["a"], "requestId": rid(), "taskId": "act", "expectedVersion": 0, "workflow": workflow("ready")})
+        ok("task_claim", {**state["a"], "requestId": rid(), "taskId": "act", "expectedVersion": 1})
+        ok("action_begin", {**state["a"], "requestId": rid(), "taskId": "act", "actionId": "deploy", "inputFingerprint": "v1", "expectedVersion": 2})
+        _, task = ok("task_get", {"taskId": "act"})
+        expect(task["actions"]["deploy"]["status"] in ("started", "invoking", "begun"), f"action status {task['actions']['deploy'].get('status')}")
+        ok("action_report", {**state["a"], "requestId": rid(), "taskId": "act", "actionId": "deploy", "attempt": 1, "outcome": "completed", "expectedVersion": task["version"]})
+        _, task = ok("task_get", {"taskId": "act"})
+        expect(task["actions"]["deploy"]["status"] == "completed", f"action status {task['actions']['deploy'].get('status')}")
+    checks.run("happy", "begin an action and report it completed", action_flow)
+    checks.run("sad", "another chat can't begin an action on a task it didn't claim",
+               lambda: refused("action_begin", {**state["b"], "requestId": rid(), "taskId": "act", "actionId": "other", "inputFingerprint": "v1", "expectedVersion": 4}, "ClaimRequired", 400, hub.worker_token))
+    checks.run("sad", "reporting an action that never began is refused",
+               lambda: refused("action_report", {**state["a"], "requestId": rid(), "taskId": "act", "actionId": "ghost", "attempt": 1, "outcome": "completed", "expectedVersion": 4}, "ActionUnknown", 400))
+
+    def notes():
+        ok("context_put", {**state["a"], "requestId": rid(), "contextId": "note-1", "content": "The rig password rotates on Mondays.", "expectedVersion": 0})
+        _, note = ok("context_get", {**state["b"], "contextId": "note-1"}, hub.worker_token)
+        expect("Mondays" in json.dumps(note), "note content not returned")
+    checks.run("happy", "write a shared note and read it from another chat", notes)
+    checks.run("sad", "overwriting a note with a stale version gets VersionConflict",
+               lambda: refused("context_put", {**state["b"], "requestId": rid(), "contextId": "note-1", "content": "late", "expectedVersion": 0}, "VersionConflict", 409, hub.worker_token))
+
+    def search():
+        _, hits = ok("search", {**state["a"], "query": "Mondays"})
+        expect("note-1" in json.dumps(hits), f"note not found: {json.dumps(hits)[:200]}")
+    checks.run("happy", "search finds the note", search)
+    checks.run("sad", "search in another repository is refused",
+               lambda: refused("search", {**state["b"], "query": "Mondays"}, "RepositoryDenied", 403, hub.worker_token, "not-mine"))
+
+    # ---- Standing, orders, attention, pause --------------------------------------------------------------------------
+    print("Standing, orders, attention, pause")
+
+    def poll_attention(who, kind, text=None):
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            _, inbox = ok("check_inbox", who)
+            offer = inbox.get("attention")
+            if offer and (kind is None or offer.get("k") == kind) and (text is None or text in json.dumps(offer)):
+                return offer
+            if offer:
+                ok("attention_respond", {**who, "requestId": rid(), "itemId": offer["id"], "action": "dismiss"})
+            time.sleep(0.3)
+        return None
+
+    def standing():
+        _, proposal = ok("standing_propose", {**state["b"], "requestId": rid(), "line": {"text": "Always run the smoke test."}}, hub.worker_token)
+        proposal_id = proposal.get("proposalId") or proposal.get("id")
+        expect(proposal_id, f"no proposal ID in {proposal}")
+        _, written = ok("standing_put", {"requestId": rid(), "expectedRevision": 0, "approve": [proposal_id]})
+        state["standing_revision"] = written.get("revision", 1)
+        _, opened = ok("session_open", {"requestId": rid()}, hub.worker_token)
+        expect("Always run the smoke test." in json.dumps(opened), "a new session did not receive the approved line")
+    checks.run("happy", "a worker proposes a rule, an admin approves it, new sessions get it", standing)
+    checks.run("sad", "standing_put with a stale revision gets VersionConflict",
+               lambda: refused("standing_put", {"requestId": rid(), "expectedRevision": 0, "lines": [{"id": "x", "text": "late"}]}, "VersionConflict", 409))
+    checks.run("sad", "a worker can't write standing rules",
+               lambda: refused("standing_put", {"requestId": rid(), "expectedRevision": 1, "lines": [{"id": "x", "text": "mine"}]}, "AdministratorRequired", 403, hub.worker_token))
+
+    def attention_and_order():
+        _, opened = ok("session_open", {"requestId": rid(), "role": "manager"})
+        manager = {"sessionId": opened["sessionId"], "sessionToken": opened["sessionToken"]}
+        state["manager"] = manager
+        ok("order_put", {"requestId": rid(), "orderId": "notify-done", "trigger": {"on": "workflow_completed", "taskId": "second"},
+                         "actions": [{"do": "notify", "sessionId": manager["sessionId"], "note": "second is done"}]})
+        ok("task_claim", {**state["b"], "requestId": rid(), "taskId": "second", "expectedVersion": 1}, hub.worker_token)
+        blocked = workflow("blocked")
+        blocked["blockers"] = [{"id": "b1", "kind": "missing_fixture", "summary": "No test database", "recheckCondition": "Database restored"}]
+        ok("task_update", {**state["b"], "requestId": rid(), "taskId": "second", "expectedVersion": 2, "workflow": blocked}, hub.worker_token)
+        offer = poll_attention(manager, "blocked")
+        expect(offer is not None, "the manager got no blocked item")
+        ok("attention_respond", {**manager, "requestId": rid(), "itemId": offer["id"], "action": "dismiss"})
+        refused("attention_respond", {**manager, "requestId": rid(), "itemId": "no-such-item", "action": "dismiss"}, "NotFound", 404)
+        _, task = ok("task_get", {"taskId": "second"})
+        ready = workflow("ready")
+        ready["recheckEvidenceRef"] = "smoke:database-restored"
+        ok("task_update", {**state["b"], "requestId": rid(), "taskId": "second", "expectedVersion": task["version"], "workflow": ready}, hub.worker_token)
+        _, task = ok("task_get", {"taskId": "second"})
+        ok("task_update", {**state["b"], "requestId": rid(), "taskId": "second", "expectedVersion": task["version"], "workflow": workflow("completed", True)}, hub.worker_token)
+        note = poll_attention(manager, None, "second is done")
+        expect(note is not None, "the order's notify never reached the manager")
+    checks.run("happy", "a blocked task alerts the manager; an order notifies on completion", attention_and_order)
+    checks.run("sad", "a worker can't add orders",
+               lambda: refused("order_put", {"requestId": rid(), "orderId": "mine", "trigger": {"on": "workflow_completed", "taskId": "act"}, "actions": [{"do": "release_claims"}]}, "AdministratorRequired", 403, hub.worker_token))
+
+    def pause():
+        ok("control_request", {"requestId": rid(), "command": "pause", "reason": "smoke"})
+        ok("task_update", {**state["a"], "requestId": rid(), "taskId": "paused", "expectedVersion": 0, "workflow": workflow("ready")})
+        refused("task_claim", {**state["a"], "requestId": rid(), "taskId": "paused", "expectedVersion": 1}, "Paused", 409)
+        ok("control_request", {"requestId": rid(), "command": "resume"})
+        ok("task_claim", {**state["a"], "requestId": rid(), "taskId": "paused", "expectedVersion": 1})
+    checks.run("sad", "while paused, claims are refused; after resume they work", pause)
+
+    # ---- Doc search ----------------------------------------------------------------------------------------------
+    print("Doc search")
+
+    def doc_search():
+        ok("doc_sync", {"requestId": rid()})
+        deadline, hits = time.monotonic() + 30, []
+        while not hits and time.monotonic() < deadline:
+            _, found = ok("doc_search", {"query": "refunds"}, hub.worker_token)
+            hits = found.get("hits", [])
+            time.sleep(0 if hits else 0.5)
+        expect(hits and hits[0]["path"] == "docs/guide.md", f"hits {hits}")
+        _, section = ok("doc_section", {"path": hits[0]["path"], "anchor": hits[0]["anchor"]}, hub.worker_token)
+        expect("five business days" in json.dumps(section), "section text missing")
+    checks.run("happy", "sync a git repo's docs, search them, read a section", doc_search)
+    checks.run("sad", "a worker can't force a doc sync", lambda: refused("doc_sync", {"requestId": rid()}, "AdministratorRequired", 403, hub.worker_token))
+    checks.run("sad", "reading a section that doesn't exist is 404",
+               lambda: refused("doc_section", {"path": "docs/guide.md", "anchor": "nope"}, "NotFound", 404, hub.worker_token))
+
+    # ---- Restart -------------------------------------------------------------------------------------------------
+    print("Restart")
+
+    def survives_restart():
+        hub.restart()
+        _, task = ok("task_get", {"taskId": "act"})
+        expect(task["actions"]["deploy"]["status"] == "completed", "task state was lost across a restart")
+        _, note = ok("context_get", {**state["b"], "contextId": "note-1"}, hub.worker_token)
+        expect("Mondays" in json.dumps(note), "note lost across a restart")
+        expect(peer_fingerprint(hub.https_port) == state["fingerprint"], "the certificate changed across a restart")
+        status, _ = request(hub.origin + "/dashboard/api/auth", opener=browser)
+        expect(status in (200, 401), f"HTTP {status}")
+    checks.run("happy", "tasks, notes and the certificate survive a restart", survives_restart)
+
+    def changed_certificate():
+        stop(hub.process)
+        hub.certificate.unlink()
+        hub.start()
+        expect(hub.fingerprints()[-1] != state["fingerprint"], "the hub did not make a new certificate")
+        code, output = run_node(hub, hub.work / "node", state["join_code"], 45)
+        expect(code == 4, f"exit {code}: {output.strip()[-300:]}")
+    checks.run("sad", "a joined node refuses a hub whose certificate changed (exit 4)", changed_certificate)
 
     # ---- Analytics -----------------------------------------------------------------------------------------------
     print("Analytics")

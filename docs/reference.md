@@ -431,7 +431,7 @@ Then give those chats `COCERN_TOKEN_FILE=data/worker-token`, or run `--connect -
 | `/scalar`, `/openapi/v1.json` | API reference. This PC only. |
 | `/health` | Health check. |
 
-REST replies are `{ "ok": true, "code": "...", "dataJson": "{...}", "version": 1 }`; `dataJson` is a JSON string, so parse it again. Errors: 400 bad arguments, 401 no valid token, 403 denied, 404 unknown tool or record, 409 conflict, 413 too large. The stdio adapter returns the parsed `data` instead.
+REST replies are `{ "ok": true, "code": "...", "dataJson": "{...}", "version": 1 }`; `dataJson` is a JSON string, so parse it again. Errors: 400 invalid or refused (bad arguments, or a refusal such as `ResourceUnknown` or `ClaimRequired`), 401 no valid token, 403 denied, 404 unknown tool or `NotFound`, 409 a conflict to resolve by reading again (such as `VersionConflict` or `Busy`), 413 too large. The `code` says exactly which. The stdio adapter returns the parsed `data` instead.
 
 Tokens work only over HTTPS or real loopback, and the hub ignores forwarded headers. Behind a local reverse proxy every caller looks local, so don't put one in front of the hub.
 
@@ -475,7 +475,7 @@ Dependencies point inward; Domain knows nothing about Orleans or storage.
 
 ## Verification
 
-Beyond the unit and integration tests, `scripts/Smoke-CoCern.py` checks a real hub process end to end (46 checks, about a minute; see the README).
+Beyond the unit and integration tests, `scripts/Smoke-CoCern.py` checks a real hub process end to end (72 checks, about 15 seconds; see the README).
 
 **Checked live**
 
