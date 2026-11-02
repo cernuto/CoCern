@@ -86,7 +86,7 @@ internal static class TaskActions
         if (TaskWorkflow.DeclaredResourcesNeeded(task, args) is { } needed) return needed;
         if (TaskWorkflow.ResourceRefusal(context.State, task, args, Strings(task["resourceIds"])) is { } resources) return resources;
         // The hub found a declared resource's lock not held by this session: nothing is recorded, so no action starts unguarded.
-        if (args[TaskWorkflow.LockRefusalField] is JsonObject locks)
+        if (args[Operations.LockRefusalField] is JsonObject locks)
             return Error(Text(locks, "code") == Busy ? Busy : ClaimRequired, new { resourceId = Text(locks, "resourceId"), replayAllowed = false }, version);
         if (actions.Any(x => x.Key != id && IsUnresolved(x.Value!.AsObject()))) return Error(ActionUncertain);
         if (!ExpectedVersionMatches(args, version)) return VersionConflict(version);

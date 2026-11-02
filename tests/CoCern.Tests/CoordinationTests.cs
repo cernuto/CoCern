@@ -2191,7 +2191,7 @@ public sealed class CoordinationTests
         JsonObject Claim(string canonical, string named) => new()
         {
             ["taskId"] = "t", ["sessionId"] = "a", ["requestId"] = "claim", ["expectedVersion"] = 1, ["resourceIds"] = new JsonArray(canonical),
-            [CoordinationStateMachine.RequestedResourcesField] = new JsonArray(named)
+            [ServerArguments.RequestedResources] = new JsonArray(named)
         };
         Assert.True(Call(board, "board", "task_claim", Claim("rig-1", "bench")).Ok);
         // The alias now names another resource: the same request still replays.

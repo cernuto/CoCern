@@ -113,35 +113,20 @@ public static class CoordinationStateMachine
     }
 
     /// <summary>
-    /// Arguments the hub adds to a request, per operation, from its own state or settings: a retry with the same public arguments may get
-    /// different values (a dependency archived since, a session rebound since, a changed setting), so they never count toward the fingerprint.
-    /// <c>hubIncarnation</c> and every <c>__</c> field are left out for every operation.
+    /// The request's identity for replay: only the client's public arguments, never <c>hubIncarnation</c>, a <c>__</c> field or one of
+    /// <see cref="ServerArguments"/> (a retry may get different values for those).
     /// </summary>
-    private static readonly Dictionary<string, string[]> ServerArguments = new(StringComparer.Ordinal)
-    {
-        [RelayTools.TaskUpdate] = ["archivedDependsOn"],
-        [RelayTools.TaskClaim] = ["declaredResources", TaskWorkflow.ResolveDeclaredField],
-        [RelayTools.ActionBegin] = ["binding", "bindingVersion", "declaredResources", TaskWorkflow.ResolveDeclaredField, TaskWorkflow.LockRefusalField],
-        [RelayTools.ClaimAcquire] = ["taskClaimGeneration", "declaredResources"],
-        [RelayTools.OrderPut] = ["defaultExpiryDays"],
-        [RelayTools.AttentionRespond] = ["snoozeBoundaries"]
-    };
-
-    /// <summary>The request's identity for replay: only the client's public arguments.</summary>
     private static string Fingerprint(string operation, JsonObject arguments)
     {
         var significant = arguments.DeepClone().AsObject();
         significant.Remove("hubIncarnation");
         foreach (var key in significant.Select(entry => entry.Key).Where(key => key.StartsWith("__", StringComparison.Ordinal)).ToArray()) significant.Remove(key);
-        if (ServerArguments.TryGetValue(operation, out var injected)) foreach (var key in injected) significant.Remove(key);
         // The hub replaces a claim's resourceIds with their canonical IDs, which can change between retries (an alias re-registered): the
         // client's own list is what identifies the request.
-        if (significant[RequestedResourcesField] is { } requested) { significant["resourceIds"] = requested.DeepClone(); significant.Remove(RequestedResourcesField); }
+        if (significant[ServerArguments.RequestedResources] is { } requested) significant["resourceIds"] = requested.DeepClone();
+        ServerArguments.StripClientValues(operation, significant);
         return Hash(significant);
     }
-
-    /// <summary>Server-set on a <c>task_claim</c>: the <c>resourceIds</c> the client named, before the hub made them canonical.</summary>
-    public const string RequestedResourcesField = "requestedResourceIds";
 
     /// <summary>
     /// The fingerprint replays stored before server arguments were left out; a retry that matches it still replays. Fields the hub adds
@@ -151,7 +136,7 @@ public static class CoordinationStateMachine
     {
         var significant = arguments.DeepClone().AsObject();
         significant.Remove("hubIncarnation");
-        foreach (var key in new[] { RequestedResourcesField, TaskWorkflow.ResolveDeclaredField, TaskWorkflow.LockRefusalField }) significant.Remove(key);
+        foreach (var key in new[] { ServerArguments.RequestedResources, Operations.ResolveDeclaredField, Operations.LockRefusalField }) significant.Remove(key);
         return Hash(significant);
     }
 

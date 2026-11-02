@@ -1,3 +1,5 @@
+using System.Text.Json.Nodes;
+using CoCern.Contracts;
 namespace CoCern.Domain;
 
 /// <summary>An authenticated principal. <see cref="IsInternal"/> marks calls the hub itself composes; only those may run "__" operations.</summary>
@@ -274,3 +276,34 @@ public static class Operations
     /// <summary>Attention effects are advisory: a target that refuses one is not asked again.</summary>
     public static bool IsAttention(string operation) => operation is AttentionRaise or AttentionClose or AttentionRoute;
 }
+
+/// <summary>
+/// Arguments only the hub sets, per tool: values it derives from its own state or settings. A client's copy is dropped on entry
+/// (<see cref="StripClientValues"/>), and none of them counts toward a request's replay fingerprint, since a retry may get different ones.
+/// </summary>
+public static class ServerArguments
+{
+    /// <summary>The <c>resourceIds</c> a <c>task_claim</c>'s client named, before the hub made them canonical; the fingerprint uses these.</summary>
+    public const string RequestedResources = "requestedResourceIds";
+
+    private static readonly Dictionary<string, string[]> ByTool = new(StringComparer.Ordinal)
+    {
+        [RelayTools.TaskUpdate] = ["archivedDependsOn"],
+        [RelayTools.TaskClaim] = ["declaredResources", Operations.ResolveDeclaredField, Operations.LockRefusalField, Operations.RestoreClaimForField, Operations.ForgetRequestField, RequestedResources],
+        [RelayTools.ActionBegin] = ["binding", "bindingVersion", "declaredResources", Operations.ResolveDeclaredField, Operations.LockRefusalField, Operations.RestoreClaimForField, Operations.ForgetRequestField, RequestedResources],
+        [RelayTools.ClaimAcquire] = ["taskClaimGeneration", "declaredResources", Operations.ForgetRequestField, Operations.RestoreClaimForField],
+        [RelayTools.ClaimRenew] = ["taskClaimGeneration", Operations.ForgetRequestField, Operations.RestoreClaimForField],
+        [RelayTools.ClaimRelease] = ["taskClaimGeneration", Operations.ForgetRequestField, Operations.RestoreClaimForField],
+        [RelayTools.OrderPut] = ["defaultExpiryDays"],
+        [RelayTools.AttentionRespond] = ["snoozeBoundaries"]
+    };
+
+    public static IReadOnlyList<string> For(string tool) => ByTool.TryGetValue(tool, out var fields) ? fields : [];
+
+    /// <summary>Drops any value a client sent for a field only the hub sets.</summary>
+    public static void StripClientValues(string tool, JsonObject args)
+    {
+        foreach (var field in For(tool)) args.Remove(field);
+    }
+}
+

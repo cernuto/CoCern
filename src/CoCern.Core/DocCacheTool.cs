@@ -10,12 +10,6 @@ using static CoCern.Domain.Replies;
 
 namespace CoCern.Core;
 
-/// <summary>
-/// The doc cache tools: <c>doc_search</c> and <c>doc_section</c> read a repository's synced docs through its directory grain, and
-/// <c>doc_sync</c> runs the sync now (the caller is already checked to be an administrator). The repository scope was checked at the
-/// boundary. Replies fit <see cref="RelayLimits.MaxDocReplyTokens"/> tokens and <see cref="RelayLimits.MaxDocReplyBytes"/> bytes; what does
-/// not fit is reported as a count.
-/// </summary>
 /// <summary>The doc cache tools as the hub calls them; a hub with the cache off gets <see cref="DocCacheTool.Off"/>.</summary>
 public interface IDocCacheTools
 {
@@ -24,6 +18,12 @@ public interface IDocCacheTools
     Task<RelayReply> SyncAsync(JsonObject args, CancellationToken cancellationToken);
 }
 
+/// <summary>
+/// The doc cache tools: <c>doc_search</c> and <c>doc_section</c> read a repository's synced docs through its directory grain, and
+/// <c>doc_sync</c> runs the sync now (the caller is already checked to be an administrator). The repository scope was checked at the
+/// boundary. Replies fit <see cref="RelayLimits.MaxDocReplyTokens"/> tokens and <see cref="RelayLimits.MaxDocReplyBytes"/> bytes; what does
+/// not fit is reported as a count.
+/// </summary>
 public sealed class DocCacheTool(IGrainFactory grains, ITokenCounter tokens, IDocSync sync, IReadOnlyCollection<string> repositories) : IDocCacheTools
 {
     private readonly HashSet<string> configured = new(repositories, StringComparer.Ordinal);
