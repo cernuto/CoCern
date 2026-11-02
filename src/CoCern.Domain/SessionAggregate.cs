@@ -115,7 +115,8 @@ internal static class SessionAggregate
     private static RelayReply Deliver(AggregateContext context)
     {
         var state = context.State;
-        if (!state.ContainsKey("principalId")) return Error(SessionUnknown);
+        // Never opened: a sender named a session that doesn't exist. Dropped like a delivery to an expired session; a refusal would be retried forever.
+        if (!state.ContainsKey("principalId")) return Ok(new { delivered = false, unknown = true });
         var id = Required(context.Args, "messageId");
         var inbox = ObjectAt(state, "inbox");
         if (inbox.ContainsKey(id) || ObjectAt(state, "acked").ContainsKey(id)) return Ok(new { duplicate = true });

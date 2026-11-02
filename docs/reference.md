@@ -51,6 +51,8 @@ Admin tools need a token with `IsAdministrator`. A session's `role` grants nothi
 
 Every call takes `repositoryId`. Session calls also take `sessionId` and `sessionToken`; keep the token private to the chat. Writes take a `requestId`.
 
+**Arguments.** IDs (`taskId`, `sessionId`, `resourceId` and the like) are at most 256 characters, not blank, and without control characters. Versions, revisions, generations, attempts and leases are whole numbers; a quoted one (`"3"`) works, and `null` counts as left out. A repeated key or unreadable text is `InvalidArguments`. Out-of-range leases are clamped to 1 to 1800 seconds. A message to a session that doesn't exist is accepted and then dropped.
+
 **Retries.** Retry a write with the same `requestId`. Within 24 hours it does not run again; it gets the first reply. Only your own arguments count as the same request, not what the hub adds. A very busy board or session (over about 7,500 writes in a day) may drop that reply early: the retry then gets `RequestExpired` (409), so read the current state and decide.
 
 **Sessions.** The session list holds 2,048. When it is full, `session_open` closes sessions not seen for a day, except those with an action still open. A closed session's calls get `SessionUnknown` with `expired: true`: call `session_open` again. If only sessions with open actions fill it, `session_open` gets `CapacityExceeded` with `heldByUnresolvedActions`: report or [recover](#stranded-actions) those actions.
@@ -475,7 +477,7 @@ Dependencies point inward; Domain knows nothing about Orleans or storage.
 
 ## Verification
 
-Beyond the unit and integration tests, `scripts/Smoke-CoCern.py` checks a real hub process end to end (72 checks, about 15 seconds; see the README).
+Beyond the unit and integration tests, `scripts/Smoke-CoCern.py` checks a real hub process end to end (84 checks, about 20 seconds; see the README).
 
 **Checked live**
 

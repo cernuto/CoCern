@@ -6,6 +6,7 @@ Everything it touches is temporary: its own data folder, its own home folder (fo
 ports. It never reads or changes your real hub, database or app settings. Every check runs even if an earlier one fails;
 the exit code is the number of failed checks (0 = all passed).
 """
+import concurrent.futures
 import hashlib
 import http.cookiejar
 import json
@@ -14,6 +15,7 @@ from pathlib import Path
 import queue
 import re
 import secrets
+import signal
 import socket
 import ssl
 import subprocess
@@ -564,14 +566,18 @@ def run_checks(hub, checks):
     print("Standing, orders, attention, pause")
 
     def poll_attention(who, kind, text=None):
+        """The first offer matching kind and text. Other offers are dismissed; one the hub closed meanwhile (NotFound) is fine."""
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             _, inbox = ok("check_inbox", who)
             offer = inbox.get("attention")
+            if offer:
+                state.setdefault("offers", []).append({key: offer.get(key) for key in ("id", "k", "t")})
             if offer and (kind is None or offer.get("k") == kind) and (text is None or text in json.dumps(offer)):
                 return offer
             if offer:
-                ok("attention_respond", {**who, "requestId": rid(), "itemId": offer["id"], "action": "dismiss"})
+                status, reply = tool("attention_respond", {**who, "requestId": rid(), "itemId": offer["id"], "action": "dismiss"})
+                expect(status == 200 or (isinstance(reply, dict) and reply.get("code") == "NotFound"), f"dismissing {offer['id']}: HTTP {status} {reply}")
             time.sleep(0.3)
         return None
 
@@ -600,8 +606,9 @@ def run_checks(hub, checks):
         blocked["blockers"] = [{"id": "b1", "kind": "missing_fixture", "summary": "No test database", "recheckCondition": "Database restored"}]
         ok("task_update", {**state["b"], "requestId": rid(), "taskId": "second", "expectedVersion": 2, "workflow": blocked}, hub.worker_token)
         offer = poll_attention(manager, "blocked")
-        expect(offer is not None, "the manager got no blocked item")
-        ok("attention_respond", {**manager, "requestId": rid(), "itemId": offer["id"], "action": "dismiss"})
+        expect(offer is not None, f"the manager got no blocked item; offers seen: {state.get('offers')}")
+        status, reply = tool("attention_respond", {**manager, "requestId": rid(), "itemId": offer["id"], "action": "dismiss"})
+        expect(status == 200, f"dismissing the offered blocked item {offer['id']}: HTTP {status} {reply}; offers seen: {state.get('offers')}")
         refused("attention_respond", {**manager, "requestId": rid(), "itemId": "no-such-item", "action": "dismiss"}, "NotFound", 404)
         _, task = ok("task_get", {"taskId": "second"})
         ready = workflow("ready")
@@ -640,6 +647,108 @@ def run_checks(hub, checks):
     checks.run("sad", "a worker can't force a doc sync", lambda: refused("doc_sync", {"requestId": rid()}, "AdministratorRequired", 403, hub.worker_token))
     checks.run("sad", "reading a section that doesn't exist is 404",
                lambda: refused("doc_section", {"path": "docs/guide.md", "anchor": "nope"}, "NotFound", 404, hub.worker_token))
+
+    # ---- Edge cases ----------------------------------------------------------------------------------------------
+    print("Edge cases")
+
+    def raw_body(body):
+        return request(f"{hub.origin}/api/tools/task_get", raw=body, token=hub.admin_token)
+
+    checks.run("sad", "a repeated JSON key is 400, not a server error",
+               lambda: expect(raw_body(b'{"repositoryId":"smoke","repositoryId":"other"}')[0] == 400, "not 400"))
+    checks.run("sad", "invalid UTF-8 is 400, not a server error",
+               lambda: expect(raw_body(b'{"repositoryId":"\xff\xfe"}')[0] == 400, "not 400"))
+    checks.run("sad", "a fractional or oversized version is refused, never read as 0",
+               lambda: [refused("task_update", {**state["a"], "requestId": rid(), "taskId": f"v-{i}", "expectedVersion": v}, "InvalidArguments", 400) for i, v in enumerate((1.5, 2**64))])
+    checks.run("sad", "IDs that are blank or hold control characters are refused",
+               lambda: [refused("task_update", {**state["a"], "requestId": rid(), "taskId": t, "expectedVersion": 0}, "InvalidArguments", 400) for t in ("   ", "a\nb", "a\u0000b")])
+
+    def quoted_and_null_numbers():
+        ok("task_update", {**state["a"], "requestId": rid(), "taskId": "quoted", "expectedVersion": "0"})
+        ok("task_claim", {**state["a"], "requestId": rid(), "taskId": "quoted", "expectedVersion": 1, "leaseSeconds": None})
+    checks.run("happy", "a quoted number works, and a null optional number counts as absent", quoted_and_null_numbers)
+
+    def unknown_recipient_drains():
+        ok("send_message", {**state["a"], "requestId": rid(), "recipientSessionId": "no-such-session", "text": "into the void"})
+        ok("send_message", {**state["a"], "requestId": rid(), "recipientSessionId": state["b"]["sessionId"], "text": "after the void"})
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            _, inbox = ok("check_inbox", state["b"], hub.worker_token)
+            if any("after the void" in json.dumps(item) for item in inbox["items"]):
+                return
+            time.sleep(0.2)
+        raise AssertionError("a message to an unknown session held up the sender's later messages")
+    checks.run("sad", "a message to an unknown session doesn't block later ones", unknown_recipient_drains)
+
+    def parallel_claims():
+        ok("task_update", {**state["a"], "requestId": rid(), "taskId": "race", "expectedVersion": 0, "workflow": workflow("ready")})
+        racers = [session() for _ in range(10)]
+        with concurrent.futures.ThreadPoolExecutor(10) as pool:
+            results = list(pool.map(lambda racer: tool("task_claim", {**racer, "requestId": rid(), "taskId": "race", "expectedVersion": 1}), racers))
+        winners = [result for result in results if result[0] == 200]
+        expect(len(winners) == 1, f"{len(winners)} chats won the same task")
+    checks.run("sad", "10 chats claiming one task at once: exactly one wins", parallel_claims)
+
+    def parallel_retries():
+        same = rid()
+        with concurrent.futures.ThreadPoolExecutor(10) as pool:
+            list(pool.map(lambda _: tool("task_update", {**state["a"], "requestId": same, "taskId": "once", "expectedVersion": 0, "patch": {"n": 1}}), range(10)))
+        _, task = ok("task_get", {"taskId": "once"})
+        expect(task["version"] == 1, f"the write ran {task['version']} times")
+    checks.run("sad", "the same write sent 10 times at once runs once", parallel_retries)
+
+    def lapsed_lease():
+        ok("task_update", {**state["a"], "requestId": rid(), "taskId": "lapse", "expectedVersion": 0, "workflow": workflow("ready")})
+        _, held = ok("task_claim", {**state["a"], "requestId": rid(), "taskId": "lapse", "expectedVersion": 1, "leaseSeconds": 1})
+        time.sleep(2.2)
+        ok("task_claim", {**state["b"], "requestId": rid(), "taskId": "lapse", "expectedVersion": 2}, hub.worker_token)
+        refused("claim_renew", {**state["a"], "requestId": rid(), "taskId": "lapse", "claimGeneration": held["claimGeneration"], "leaseSeconds": 60}, "StaleClaim", 409)
+    checks.run("sad", "after a lease runs out another chat can claim it, and the old claim can't be renewed", lapsed_lease)
+
+    def paging():
+        reader = session(hub.worker_token)
+        for i in range(45):
+            ok("send_message", {**state["a"], "requestId": rid(), "recipientSessionId": reader["sessionId"], "text": f"page {i:02}"})
+        deadline, texts = time.monotonic() + 15, set()
+        while len(texts) < 45 and time.monotonic() < deadline:
+            texts, cursor = set(), None
+            while True:
+                _, inbox = ok("check_inbox", {**reader, **({"cursor": cursor} if cursor else {})}, hub.worker_token)
+                texts |= {item["text"] for item in inbox["items"]}
+                cursor = inbox.get("nextCursor")
+                if not cursor:
+                    break
+            time.sleep(0.2)
+        expect(len(texts) == 45, f"read {len(texts)} of 45 across pages")
+        state["paging_reader"] = reader
+    checks.run("happy", "45 messages read exactly once across inbox pages", paging)
+
+    def ack_only_own():
+        _, inbox = ok("check_inbox", state["paging_reader"], hub.worker_token)
+        _, acked = ok("ack", {**state["a"], "requestId": rid(), "messageIds": [inbox["items"][0]["messageId"]]})
+        expect(acked.get("acknowledged") == 0, f"acknowledged {acked}")
+        _, after = ok("check_inbox", state["paging_reader"], hub.worker_token)
+        expect(after["total"] == inbox["total"], "another chat's acknowledgment removed a message")
+    checks.run("sad", "a chat can't acknowledge another chat's messages", ack_only_own)
+
+    def killed_mid_flight():
+        for i in range(10):
+            ok("send_message", {**state["a"], "requestId": rid(), "recipientSessionId": state["b"]["sessionId"], "text": f"crash {i}"})
+        os.kill(hub.process.pid, signal.SIGKILL)
+        hub.process.wait()
+        hub.start()
+        deadline, texts = time.monotonic() + 20, set()
+        while len(texts) < 10 and time.monotonic() < deadline:
+            texts, cursor = set(), None
+            while True:
+                _, inbox = ok("check_inbox", {**state["b"], **({"cursor": cursor} if cursor else {})}, hub.worker_token)
+                texts |= {item["text"] for item in inbox["items"] if item["text"].startswith("crash")}
+                cursor = inbox.get("nextCursor")
+                if not cursor:
+                    break
+            time.sleep(0.3)
+        expect(len(texts) == 10, f"{len(texts)} of 10 messages delivered after the hub was killed")
+    checks.run("happy", "messages in flight survive the hub being killed (kill -9)", killed_mid_flight)
 
     # ---- Restart -------------------------------------------------------------------------------------------------
     print("Restart")
