@@ -82,7 +82,7 @@ public sealed class StateEnvelope<T> : IHasDueWork, IHasSearchDocuments, IHasTas
     public T Value { get; set; } = new();
     public List<DurableEffect> Effects { get; set; } = [];
     public List<DueWorkItem> DueWork { get; set; } = [];
-    public IReadOnlyList<DueWorkItem> GetDueWork() => DueWork.Concat(Effects.Select(e => new DueWorkItem(e.Id, "effect", e.DueAt))).ToArray();
+    public IReadOnlyList<DueWorkItem> GetDueWork() => DueWork.Concat(Effects.Select(e => new DueWorkItem(e.Id, DueWorkKinds.Effect, e.DueAt))).ToArray();
     public IReadOnlyList<SearchDocument> GetSearchDocuments(string stateName) => Value is CoordinationDocument document ? SearchExtraction.Extract(stateName, document.Json) : [];
     /// <summary>Uses the parsed state the state machine kept for this commit, when there is one, so the document is not parsed again.</summary>
     public SearchUpdate GetSearchUpdate(string stateName, IReadOnlyDictionary<SearchDocumentKey, string> indexed)
@@ -135,6 +135,14 @@ public static class AggregateKinds
 
     /// <summary>The control aggregate is a singleton.</summary>
     public const string ControlKey = "hub";
+
+    public const string DefaultBoard = "default";
+
+    /// <summary>A board grain's key: the escaped repository and board IDs, so the first <c>/</c> always separates them.</summary>
+    public static string BoardKey(string repositoryId, string boardId) => Uri.EscapeDataString(repositoryId) + "/" + Uri.EscapeDataString(boardId);
+
+    /// <summary>The board ID in a board grain key, or null when it is not one.</summary>
+    public static string? BoardOf(string key) => key.IndexOf('/') is var slash and >= 0 && key.IndexOf('/', slash + 1) < 0 ? Uri.UnescapeDataString(key[(slash + 1)..]) : null;
 }
 
 /// <summary>Session roles the hub acts on. A role is given at <c>session_open</c>, compared ignoring case, and grants nothing.</summary>
@@ -153,6 +161,12 @@ public static class SessionRoles
 /// <summary>Kinds of an aggregate's own timers (due work), besides lease expiry.</summary>
 public static class DueWorkKinds
 {
+    /// <summary>A lease's end: the aggregate's own, or one task's (ID <c>lease:&lt;taskId&gt;</c>).</summary>
+    public const string Lease = "lease";
+
+    /// <summary>An outbox effect waiting for delivery.</summary>
+    public const string Effect = "effect";
+
     /// <summary>A lock's check, shortly before its lease ends, for an action still in flight (raises <c>claim_expiring</c>).</summary>
     public const string LeaseWarning = "lease_warning";
 
@@ -250,6 +264,9 @@ public static class Operations
     public const string OrderRunField = "orderRun";
 
     public static bool IsInternal(string operation) => operation.StartsWith("__", StringComparison.Ordinal);
+
+    /// <summary>Internal operations that only read: never deduplicated by requestId, never committed for themselves.</summary>
+    public static bool IsRead(string operation) => operation is Verify or Resolve or ResolveAll or NextWork or ClaimState or SessionOwners or Standing or Orders;
 
     /// <summary>Order effects run only while standing orders are on; a target that refuses one is not asked again.</summary>
     public static bool IsOrder(string operation) => operation is OrderFire or OrderWatch or OrderRelease or OrderFailed;

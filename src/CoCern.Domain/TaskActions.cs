@@ -15,8 +15,7 @@ internal static class TaskActions
     private const int MaxActionIdLength = 128;
     private const int MaxActions = 128;
     private const int MaxHistory = 256;
-    private static readonly string[] Outcomes = ["started", "completed", "failed", "canceled", "incomplete", "unknown"];
-    private static readonly string[] Restorations = ["pending", "blocked", "verified", "accepted", "not_required"];
+    private static readonly IReadOnlyList<string> Outcomes = ActionOutcomes.All;
 
     /// <summary>
     /// The status a recovery gives an action whose writer is gone without reporting it: terminal, and not an outcome. Only a recovery sets
@@ -156,7 +155,7 @@ internal static class TaskActions
         var kept = (adminAcceptance || recovery) && outcome == status;
         if (!kept && !Outcomes.Contains(outcome) && !(recovery && outcome == Abandoned)) return Error(InvalidOutcome);
         var restoration = update.ContainsKey("restoration") ? Text(update, "restoration") : Text(action, "restoration");
-        if (!Restorations.Contains(restoration)) return Error(InvalidRestoration);
+        if (!Restorations.All.Contains(restoration)) return Error(InvalidRestoration);
         if (Text(update, "restoration") == "accepted" && Text(action, "restoration") != "accepted" && !caller.IsAdministrator) return Error(AdministratorRequired);
         var history = ArrayAt(task, "reports");
         if (history.Count >= MaxHistory) return Error(CapacityExceeded);

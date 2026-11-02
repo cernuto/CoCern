@@ -208,10 +208,7 @@ internal static class StandingOrders
             });
             return Ok(new { released = false, failed = true });
         }
-        state["holder"] = "";
-        state["leaseUntil"] = context.Now.ToString("O");
-        AttentionSources.OnLeaseSettled(context, holder, context.Key);
-        OnLockReleased(context);
+        LockAggregate.Release(context, holder);
         return Ok(new { released = true });
     }
 
@@ -242,8 +239,7 @@ internal static class StandingOrders
                 var owner = Text(task, "owner");
                 if (owner.Length == 0) return null;
                 if (TaskActions.HasUnresolved(task)) return "task " + taskId + " has an unresolved action";
-                task.Remove("owner");
-                task["leaseUntil"] = context.Now.ToString("O");
+                TaskBoardAggregate.ReleaseClaim(task, context.Now);
                 // The triggering task's own change is already marked and versioned by its update; any other task is changed here.
                 if (!(context.Operation is RelayTools.TaskUpdate or RelayTools.ActionReport && Text(context.Args, "taskId") == taskId))
                 {

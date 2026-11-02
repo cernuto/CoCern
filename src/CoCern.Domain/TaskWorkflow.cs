@@ -22,7 +22,6 @@ internal static class TaskWorkflow
     private const int MaxPriority = 1000;
     private const int OfferBudgetBytes = 2048;
     private static readonly string[] PacketFields = ["goal", "target", "authorityRef", "restoration", "stopCondition"];
-    private static readonly string[] BlockerKinds = ["coordinator_hold", "provider_rejection", "tool_unavailable", "resource_busy", "missing_fixture", "prerequisite", "other"];
 
     /// <summary>A task without a workflow is always executable; with one it must be ready, unblocked and targeted at this session if targeted at all.</summary>
     public static bool AllowsExecution(JsonObject task, string session) =>
@@ -90,7 +89,7 @@ internal static class TaskWorkflow
     {
         if (Encoding.UTF8.GetByteCount(workflow.ToJsonString()) > MaxWorkflowBytes) return InvalidWorkflow;
         var state = Text(workflow, "state");
-        if (state is not ("ready" or "blocked" or "completed") || workflow["packet"] is not JsonObject packet || workflow["criteria"] is not JsonArray criteria || workflow["blockers"] is not JsonArray blockers) return InvalidWorkflow;
+        if (!WorkflowStates.All.Contains(state) || workflow["packet"] is not JsonObject packet || workflow["criteria"] is not JsonArray criteria || workflow["blockers"] is not JsonArray blockers) return InvalidWorkflow;
         static bool Value(JsonObject obj, string key, int max) => obj[key] is JsonValue value && value.TryGetValue<string>(out var text) && !string.IsNullOrWhiteSpace(text) && text.Length <= max;
         if (PacketFields.Any(key => !Value(packet, key, MaxTextLength))) return InvalidWorkflow;
         if (!Identifiers(workflow, "dependsOn", RelayLimits.MaxDependencies) || !Identifiers(packet, "resources", RelayLimits.MaxClaimResources)) return InvalidWorkflow;
@@ -100,13 +99,13 @@ internal static class TaskWorkflow
         var ids = new HashSet<string>(StringComparer.Ordinal);
         foreach (var item in criteria)
         {
-            if (item is not JsonObject criterion || !Value(criterion, "id", MaxItemIdLength) || !Value(criterion, "description", MaxTextLength) || !ids.Add(Text(criterion, "id")) || Text(criterion, "result") is not ("not_run" or "passed" or "failed")) return InvalidWorkflow;
+            if (item is not JsonObject criterion || !Value(criterion, "id", MaxItemIdLength) || !Value(criterion, "description", MaxTextLength) || !ids.Add(Text(criterion, "id")) || !CriterionResults.All.Contains(Text(criterion, "result"))) return InvalidWorkflow;
             if (criterion["evidenceRef"] is not null && !Value(criterion, "evidenceRef", MaxTextLength) || Text(criterion, "result") == "passed" && !Value(criterion, "evidenceRef", MaxTextLength)) return InvalidWorkflow;
         }
         ids.Clear();
         foreach (var item in blockers)
         {
-            if (item is not JsonObject blocker || !Value(blocker, "id", MaxItemIdLength) || !ids.Add(Text(blocker, "id")) || !Value(blocker, "summary", MaxTextLength) || !Value(blocker, "recheckCondition", MaxTextLength) || !BlockerKinds.Contains(Text(blocker, "kind"))) return InvalidWorkflow;
+            if (item is not JsonObject blocker || !Value(blocker, "id", MaxItemIdLength) || !ids.Add(Text(blocker, "id")) || !Value(blocker, "summary", MaxTextLength) || !Value(blocker, "recheckCondition", MaxTextLength) || !BlockerKinds.All.Contains(Text(blocker, "kind"))) return InvalidWorkflow;
         }
         if (state == "blocked" && blockers.Count == 0 || state != "blocked" && blockers.Count != 0) return InvalidWorkflow;
         if (state == "ready" && Text(prior ?? new(), "state") == "blocked" && !Value(workflow, "recheckEvidenceRef", MaxTextLength)) return WorkflowRecheckRequired;

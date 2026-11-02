@@ -35,7 +35,7 @@ public sealed partial class SqliteStore : ITaskArchive
     internal Action? ArchiveFault { get; set; }
 
     /// <summary>The board of a grain key, <c>escaped-repository/escaped-board</c>; <c>default</c> for any other shape.</summary>
-    private static string BoardOf(string grainKey) => grainKey.Split('/') is [_, var escaped] ? Uri.UnescapeDataString(escaped) : "default";
+    private static string BoardOf(string grainKey) => AggregateKinds.BoardOf(grainKey) ?? AggregateKinds.DefaultBoard;
 
     private void WriteArchive(SqliteTransaction transaction, string stateName, GrainId grainId, IReadOnlyList<ArchivedTask> archived)
     {

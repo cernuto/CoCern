@@ -171,14 +171,21 @@ public static class CoordinationStateMachine
 
     /// <summary>Mutations are deduplicated by requestId and committed; reads never are.</summary>
     public static bool IsMutation(string operation) =>
-        operation is not (Operations.Verify or Operations.Resolve or Operations.ResolveAll or Operations.NextWork or Operations.ClaimState or Operations.SessionOwners or Operations.Standing or Operations.Orders)
-        && (!RelayToolCatalog.TryGet(operation, out var tool) || tool.IsMutation);
+        !Operations.IsRead(operation) && (!RelayToolCatalog.TryGet(operation, out var tool) || tool.IsMutation);
 
     /// <summary>Whether a successful operation must be persisted. A legacy board's first read durably seeds current change markers without changing task versions.</summary>
     public static bool RequiresCommit(string kind, string operation, string? priorTaskRevision, StateEnvelope<CoordinationDocument> envelope) =>
         IsMutation(operation) || kind == AggregateKinds.Board && priorTaskRevision != TaskRevision(envelope);
 
     public static string? TaskRevision(StateEnvelope<CoordinationDocument> envelope) => JsonNode.Parse(envelope.Value.Json)?["taskRevision"]?.ToJsonString();
+
+    /// <summary>The board, task and action an <see cref="ActionKey"/> names; an older key without them reads as the default board.</summary>
+    public static (string BoardId, string TaskId, string ActionId) ParseActionKey(string actionKey)
+    {
+        var parts = actionKey.Split('/');
+        return parts.Length >= 4 ? (Uri.UnescapeDataString(parts[1]), Uri.UnescapeDataString(parts[2]), Uri.UnescapeDataString(parts[3]))
+            : parts.Length >= 3 ? (Uri.UnescapeDataString(parts[1]), Uri.UnescapeDataString(parts[2]), "") : (AggregateKinds.DefaultBoard, "", actionKey);
+    }
 
     /// <summary>Stable identity of one action attempt, shared by the board and the resource locks it blocks.</summary>
     public static string ActionKey(JsonObject args, string actionId, long attempt) => string.Join("/", new[]
@@ -193,16 +200,16 @@ public static class CoordinationStateMachine
     public static void ScheduleLeases(StateEnvelope<CoordinationDocument> envelope, int archiveAfterDays = 0)
     {
         var state = JsonNode.Parse(envelope.Value.Json)!.AsObject();
-        envelope.DueWork.RemoveAll(x => x.Kind is "lease" or DueWorkKinds.LeaseWarning or DueWorkKinds.AnomalyCheck or DueWorkKinds.TaskArchive);
+        envelope.DueWork.RemoveAll(x => x.Kind is DueWorkKinds.Lease or DueWorkKinds.LeaseWarning or DueWorkKinds.AnomalyCheck or DueWorkKinds.TaskArchive);
         // A board's next archive sweep, when a finished task will pass Relay:Board:ArchiveAfterDays.
         if (TaskArchiving.NextSweep(state, archiveAfterDays) is { } sweep) envelope.DueWork.Add(new(DueWorkKinds.TaskArchive, DueWorkKinds.TaskArchive, sweep));
         if (DateTimeOffset.TryParse(Text(state, "nextCheckAt"), out var check)) envelope.DueWork.Add(new(DueWorkKinds.AnomalyCheck, DueWorkKinds.AnomalyCheck, check));
-        if (DateTimeOffset.TryParse(Text(state, "leaseUntil"), out var lease)) envelope.DueWork.Add(new("lease", "lease", lease));
+        if (DateTimeOffset.TryParse(Text(state, "leaseUntil"), out var lease)) envelope.DueWork.Add(new(DueWorkKinds.Lease, DueWorkKinds.Lease, lease));
         // A lock whose holder has an action in flight checks its lease shortly before it ends (claim_expiring).
         if (AttentionSources.LeaseWarningAt(state) is { } warning) envelope.DueWork.Add(new(DueWorkKinds.LeaseWarning, DueWorkKinds.LeaseWarning, warning));
         if (state["tasks"] is JsonObject tasks)
             foreach (var entry in tasks)
-                if (entry.Value is JsonObject task && DateTimeOffset.TryParse(Text(task, "leaseUntil"), out var taskLease)) envelope.DueWork.Add(new("lease:" + entry.Key, "lease", taskLease));
+                if (entry.Value is JsonObject task && DateTimeOffset.TryParse(Text(task, "leaseUntil"), out var taskLease)) envelope.DueWork.Add(new(DueWorkKinds.Lease + ":" + entry.Key, DueWorkKinds.Lease, taskLease));
     }
 
     /// <summary>Records who caused new outbox effects so delivery runs with the originating caller's authority.</summary>
@@ -212,20 +219,31 @@ public static class CoordinationStateMachine
         {
             var effect = effects[index];
             var payload = JsonNode.Parse(effect.PayloadJson)!.AsObject();
-            // A session expiry carries its own caller, scoped to the dropped session's repository.
-            if (effect.Operation == Operations.SessionExpire && payload.ContainsKey("__principalId")) continue;
-            payload["__principalId"] = caller.PrincipalId;
-            payload["__administrator"] = caller.IsAdministrator;
-            payload["__repositories"] = JsonSerializer.SerializeToNode(caller.Repositories);
-            effects[index] = effect with { PayloadJson = payload.ToJsonString() };
+            // An effect emitted with its own caller keeps it.
+            if (payload.ContainsKey(CallerPrincipal)) continue;
+            effects[index] = effect with { PayloadJson = WithCaller(payload, caller).ToJsonString() };
         }
     }
 
     /// <summary>Removes the originating caller recorded by <see cref="StampEffects"/> and returns it as an internal caller.</summary>
     public static RelayCaller TakeEffectCaller(JsonObject payload)
     {
-        var caller = new RelayCaller(Text(payload, "__principalId"), payload["__administrator"]?.GetValue<bool>() ?? false, payload["__repositories"]?.Deserialize<string[]>() ?? [], true);
-        payload.Remove("__principalId"); payload.Remove("__administrator"); payload.Remove("__repositories");
+        var caller = new RelayCaller(Text(payload, CallerPrincipal), payload[CallerAdministrator]?.GetValue<bool>() ?? false, payload[CallerRepositories]?.Deserialize<string[]>() ?? [], true);
+        payload.Remove(CallerPrincipal); payload.Remove(CallerAdministrator); payload.Remove(CallerRepositories);
         return caller;
+    }
+
+    // An effect's caller rides in its payload under these keys (stripped from client arguments, see Fingerprint's "__" rule).
+    private const string CallerPrincipal = "__principalId";
+    private const string CallerAdministrator = "__administrator";
+    private const string CallerRepositories = "__repositories";
+
+    /// <summary>Records <paramref name="caller"/> in an effect's payload, so its delivery runs with that authority.</summary>
+    internal static JsonObject WithCaller(JsonObject payload, RelayCaller caller)
+    {
+        payload[CallerPrincipal] = caller.PrincipalId;
+        payload[CallerAdministrator] = caller.IsAdministrator;
+        payload[CallerRepositories] = JsonSerializer.SerializeToNode(caller.Repositories);
+        return payload;
     }
 }

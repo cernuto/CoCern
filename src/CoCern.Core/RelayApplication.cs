@@ -220,7 +220,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
                 ["priority"] = AttentionWeights.Low, ["note"] = tip.Text, ["revision"] = tip.Revision, ["expiryDays"] = RelayLimits.TipExpiryDays
             });
         if (actions.Proposal is { } proposal)
-            await Call(AggregateKinds.Board, Uri.EscapeDataString(proposal.RepositoryId) + "/default", HubProposer(proposal.RepositoryId), Operations.StandingProposeHub, new JsonObject
+            await Call(AggregateKinds.Board, AggregateKinds.BoardKey(proposal.RepositoryId, AggregateKinds.DefaultBoard), HubProposer(proposal.RepositoryId), Operations.StandingProposeHub, new JsonObject
             {
                 ["repositoryId"] = proposal.RepositoryId, ["boardId"] = "default", ["rule"] = proposal.Rule,
                 ["line"] = new JsonObject { ["id"] = proposal.LineId, ["text"] = proposal.Text }

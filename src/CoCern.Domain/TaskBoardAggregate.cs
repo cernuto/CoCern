@@ -223,7 +223,7 @@ internal static class TaskBoardAggregate
             // A recovered action no longer holds the task; its pending restoration still blocks new actions and completion.
             if (TaskActions.HoldsTask(task)) return Error(UnresolvedAction);
             if (!ExpectedVersionMatches(context.Args, version)) return VersionConflict(version);
-            task.Remove("owner"); task["leaseUntil"] = context.Now.ToString("O"); task["version"] = ++version;
+            ReleaseClaim(task, context.Now); task["version"] = ++version;
         }
         return Ok(new { claimGeneration = generation, leaseUntil = Text(task, "leaseUntil"), released = release }, version);
     }
@@ -234,12 +234,19 @@ internal static class TaskBoardAggregate
         var args = context.Args;
         if (Text(task, "owner") == context.SessionId && Number(task, "claimGeneration") == Number(args, "claimGeneration") && Text(task, "claimRequestId") == Text(args, "claimRequestId"))
         {
-            task.Remove("owner"); task["leaseUntil"] = context.Now.ToString("O"); task["version"] = Number(task, "version") + 1;
+            ReleaseClaim(task, context.Now); task["version"] = Number(task, "version") + 1;
             // The claim is undone, so its retry must run again rather than replay it.
             CoordinationStateMachine.ForgetRequest(context.State, context.Caller.PrincipalId, RelayTools.TaskClaim, Text(args, "claimRequestId"));
             AttentionSources.OnUnclaim(context, task);
         }
         return Ok(new { released = true }, Number(task, "version"));
+    }
+
+    /// <summary>Ends a task's claim; the caller bumps its version.</summary>
+    internal static void ReleaseClaim(JsonObject task, DateTimeOffset now)
+    {
+        task.Remove("owner");
+        task["leaseUntil"] = now.ToString("O");
     }
 
     private static RelayReply Claim(AggregateContext context, JsonObject task)

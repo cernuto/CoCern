@@ -254,7 +254,7 @@ public sealed class TaskBoardGrain([PersistentState("board", "relay")] IPersiste
     }
 
     /// <summary>The board ID of a board grain key (escaped repository, <c>/</c>, escaped board ID); the escaping keeps the first <c>/</c> the separator.</summary>
-    internal static string BoardId(string key) => key.IndexOf('/') is var slash and >= 0 ? Uri.UnescapeDataString(key[(slash + 1)..]) : "default";
+    internal static string BoardId(string key) => AggregateKinds.BoardOf(key) ?? AggregateKinds.DefaultBoard;
 }
 
 [GrainType("cocern.lock")]

@@ -165,8 +165,8 @@ internal static class ToolSchemas
                 Text("inputFingerprint", "Stable identity of this action's intended inputs."); Text("triggerId", "Optional delivery trigger consumed by this action."); Integer("attempt", "Explicit next attempt number after a resolved prior attempt.");
                 properties["requiresRestoration"] = new { type = "boolean" }; properties["explicitRetry"] = new { type = "boolean" }; break;
             case RelayTools.ActionReport:
-                properties["outcome"] = new { type = "string", @enum = new[] { "started", "completed", "failed", "canceled", "incomplete", "unknown" } };
-                properties["restoration"] = new { type = "string", @enum = new[] { "pending", "blocked", "verified", "accepted" } };
+                properties["outcome"] = new { type = "string", @enum = ActionOutcomes.All.ToArray() };
+                properties["restoration"] = new { type = "string", @enum = Restorations.Reported.ToArray() };
                 properties["report"] = new { description = "Bounded reported evidence; not a claim that the relay performed or verified external execution." };
                 properties["recover"] = new { type = "boolean", description = "Take over an action whose session is gone: an administrator, or its own principal once that claim lapsed. Without outcome it is abandoned." };
                 properties["usage"] = UsageSchema(); properties["attention"] = AttentionOptOut(); break;
@@ -327,7 +327,7 @@ internal static class ToolSchemas
             description = "Optional structured workflow, at most 12288 UTF-8 bytes. Reported evidence only; completed needs every criterion passed with evidence and no unresolved action or restoration. Blocked to ready needs recheckEvidenceRef.",
             properties = new
             {
-                state = new { type = "string", @enum = new[] { "ready", "blocked", "completed" } },
+                state = new { type = "string", @enum = WorkflowStates.All.ToArray() },
                 packet = new
                 {
                     type = "object",
@@ -337,12 +337,12 @@ internal static class ToolSchemas
                 criteria = new
                 {
                     type = "array", minItems = 1, maxItems = 32,
-                    items = new { type = "object", properties = new { id = Text(128, "Unique criterion ID."), description = Text(2048, "Acceptance criterion."), result = new { type = "string", @enum = new[] { "not_run", "passed", "failed" } }, evidenceRef = OptionalText(2048, "Nonempty evidence reference required for passed results.") }, required = new[] { "id", "description", "result" } }
+                    items = new { type = "object", properties = new { id = Text(128, "Unique criterion ID."), description = Text(2048, "Acceptance criterion."), result = new { type = "string", @enum = CriterionResults.All.ToArray() }, evidenceRef = OptionalText(2048, "Nonempty evidence reference required for passed results.") }, required = new[] { "id", "description", "result" } }
                 },
                 blockers = new
                 {
                     type = "array", maxItems = 16,
-                    items = new { type = "object", properties = new { id = Text(128, "Unique blocker ID."), kind = new { type = "string", @enum = new[] { "coordinator_hold", "provider_rejection", "tool_unavailable", "resource_busy", "missing_fixture", "prerequisite", "other" } }, summary = Text(2048, "Current blocking condition."), recheckCondition = Text(2048, "Evidence needed before clearing the blocker.") }, required = new[] { "id", "kind", "summary", "recheckCondition" } }
+                    items = new { type = "object", properties = new { id = Text(128, "Unique blocker ID."), kind = new { type = "string", @enum = BlockerKinds.All.ToArray() }, summary = Text(2048, "Current blocking condition."), recheckCondition = Text(2048, "Evidence needed before clearing the blocker.") }, required = new[] { "id", "kind", "summary", "recheckCondition" } }
                 },
                 targetSessionId = OptionalText(256, "Optional intended worker session ID; never its private token."),
                 priority = new { type = new[] { "integer", "null" }, minimum = -1000, maximum = 1000, description = "Higher is offered first." },

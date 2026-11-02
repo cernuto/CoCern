@@ -62,6 +62,9 @@ internal static class SessionAggregate
         WorkKey, WorkReportedKey
     };
 
+    /// <summary>What an expired session forgets: its secret, its mail and attention, and its tool binding.</summary>
+    private static readonly string[] ExpiredState = ["sessionToken", "inbox", "acked", "attention", "attentionClosed", "attentionRecent", "standingSeen", "binding"];
+
     private const string WorkKey = "work";
     private const string WorkReportedKey = "workReported";
 
@@ -97,7 +100,7 @@ internal static class SessionAggregate
     {
         var state = context.State;
         if (!state.ContainsKey("principalId") || state["expiredAt"] is not null) return Ok(new { expired = true });
-        foreach (var key in new[] { "sessionToken", "inbox", "acked", "attention", "attentionClosed", "attentionRecent", "standingSeen", "binding" }) state.Remove(key);
+        foreach (var key in ExpiredState) state.Remove(key);
         state["expiredAt"] = context.Now.ToString("O");
         return Ok(new { expired = true });
     }
@@ -188,8 +191,8 @@ internal static class SessionAggregate
         state["freshUntil"] = context.Now.AddSeconds(Math.Clamp(Number(args, "freshnessSeconds", DefaultFreshnessSeconds), MinFreshnessSeconds, MaxFreshnessSeconds)).ToString("O");
         state["availability"] = Text(args, "availability", "unknown");
         state["hubIncarnation"] = Text(args, "hubIncarnation");
-        var registration = state.DeepClone().AsObject();
-        foreach (var secretOrPrivate in new[] { "sessionToken", "requests", "requestTombstones", "inbox", "acked", "attention", "attentionClosed", "attentionRecent", "attentionSeq", "attentionBoundaryAt", "activeReportedAt" }) registration.Remove(secretOrPrivate);
+        var registration = new JsonObject { ["repositoryId"] = Text(state, "repositoryId"), ["sessionId"] = Text(state, "sessionId") };
+        foreach (var field in ControlAggregate.RegistrationFields) if (state.ContainsKey(field)) registration[field] = state[field]?.DeepClone();
         context.Emit(AggregateKinds.Control, AggregateKinds.ControlKey, Operations.Register, registration);
         return Ok(new { bindingVersion = current + 1 }, current + 1);
     }

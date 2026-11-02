@@ -133,7 +133,7 @@ internal static class AttentionSources
         if (holder.Length == 0 || lease.Length == 0) return;
         var action = (state["blockers"] as JsonObject ?? new JsonObject()).FirstOrDefault(x => x.Value is JsonObject blocker && Text(blocker, "sessionId") == holder);
         if (action.Key is null) return;
-        var (boardId, taskId, actionId) = ActionTask(action.Key);
+        var (boardId, taskId, actionId) = CoordinationStateMachine.ParseActionKey(action.Key);
         // Remembered so the closes name the same task: a close guards only the key it names, and the raises carry the task.
         state["warnedTask"] = new JsonObject { ["boardId"] = boardId, ["taskId"] = taskId };
         JsonObject Item(string kind, string note) => new()
@@ -200,13 +200,6 @@ internal static class AttentionSources
     }
 
     /// <summary>The board and task of an action key (<see cref="CoordinationStateMachine.ActionKey"/>): repository/board/task/action/attempt, each escaped.</summary>
-    private static (string BoardId, string TaskId, string ActionId) ActionTask(string actionKey)
-    {
-        var parts = actionKey.Split('/');
-        return parts.Length >= 4 ? (Uri.UnescapeDataString(parts[1]), Uri.UnescapeDataString(parts[2]), Uri.UnescapeDataString(parts[3]))
-            : parts.Length >= 3 ? (Uri.UnescapeDataString(parts[1]), Uri.UnescapeDataString(parts[2]), "") : ("default", "", actionKey);
-    }
-
     /// <summary>A provider rejection ranks first and a coordinator hold last, so the item takes the most urgent blocker's kind.</summary>
     private static int BlockerRank(string kind) => kind == AttentionWeights.ProviderRejection ? 0 : kind == AttentionWeights.CoordinatorHold ? 2 : 1;
 

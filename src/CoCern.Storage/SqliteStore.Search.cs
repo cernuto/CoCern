@@ -298,9 +298,8 @@ public sealed partial class SqliteStore : IFullTextSearch
     /// <summary>The board of a board hit when it is not <c>default</c>. Board grain keys are <c>escaped-repository/escaped-board</c>.</summary>
     private static string? BoardId(string stateName, string grainKey)
     {
-        if (stateName != AggregateKinds.Board || grainKey.Split('/') is not [_, var escaped]) return null;
-        var board = Uri.UnescapeDataString(escaped);
-        return board == "default" ? null : board;
+        if (stateName != AggregateKinds.Board || AggregateKinds.BoardOf(grainKey) is not { } board) return null;
+        return board == AggregateKinds.DefaultBoard ? null : board;
     }
 
     /// <summary>Prepared index commands for one transaction.</summary>
