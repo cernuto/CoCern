@@ -6,6 +6,8 @@ Three ways to see what is happening: the live dashboard, the activity log, and a
 
 Open `/dashboard/` on the hub. It shows sessions by PC, live requests and pushes, SQL table sizes, logs, each board's standing and orders, and token feedback. It is read-only and never opens sessions or reads inboxes.
 
+The **Document cache** page lists active document-directory and document grains on this relay. It shows repository/path, loaded state, sections, source reads, index builds, commit, and activation time. Counts and rows describe the last observation, refreshed while a dashboard viewer is connected. The list shows at most 200 grains and reports truncation when its row or frame limit is reached. It observes lifecycle updates without calling grains, so opening it neither loads idle documents nor delays their eviction. Rows disappear when Orleans deactivates the grain; this is an activation inventory, not a list of every synced file or every in-flight call.
+
 To turn it on, allow an administrator client's principal:
 
 ```json

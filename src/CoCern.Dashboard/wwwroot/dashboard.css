@@ -227,6 +227,10 @@ small { font-size: .8rem; }
 .metrics-table th:nth-child(3) { width: 27%; }
 .metrics-table th:nth-child(4) { width: 16%; }
 .metrics-table thead th { color: var(--muted); font-size: .75rem; font-weight: 550; }
+.doc-cache-table { overflow-x: auto; }
+.doc-cache-view .metrics-table { min-width: 950px; table-layout: auto; }
+.doc-cache-view .metrics-table th { width: auto; }
+.doc-cache-view .metrics-table th:first-child { min-width: 220px; }
 .standing-board { padding-bottom: 24px; }
 .standing-board + .standing-board { border-top: 1px solid var(--line); padding-top: 24px; }
 .standing-view .metrics-table { margin-bottom: 18px; }
@@ -320,7 +324,7 @@ small { font-size: .8rem; }
     .app-header { flex-wrap: wrap; padding: 15px 20px 12px; gap: 14px; }
     .brand { margin-right: auto; }
     .brand small { display: block; }
-    .main-nav { order: 3; flex-basis: 100%; display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 4px; }
+    .main-nav { order: 3; flex-basis: 100%; display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 4px; }
     .main-nav a { justify-content: center; font-size: .83rem; padding: 10px 6px; gap: 6px; }
     .dashboard-main { padding: 25px 20px 15px; }
     .board-layout { grid-template-columns: minmax(0,1fr); }

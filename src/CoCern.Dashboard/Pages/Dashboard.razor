@@ -3,6 +3,7 @@
 @page "/sql"
 @page "/logs"
 @page "/standing"
+@page "/documents"
 
 <PageTitle>@PageTitle · CoCern</PageTitle>
 @if (Connection.State == DashboardLinkState.SignIn)
@@ -25,6 +26,7 @@ else
                 <NavLink href="sql"><span aria-hidden="true">▤</span>SQL</NavLink>
                 <NavLink href="logs"><span aria-hidden="true">≋</span>Logs</NavLink>
                 <NavLink href="standing"><span aria-hidden="true">✓</span>Standing</NavLink>
+                <NavLink href="documents"><span aria-hidden="true">▤</span>Document cache</NavLink>
             </nav>
             <div class="header-actions">
                 <button type="button" class="theme-toggle" @onclick="ToggleThemeAsync" aria-pressed="@(_theme == "dark" ? "true" : "false")" aria-label="Dark appearance">@(_theme == "dark" ? "☾" : "☀")<span>@(_theme == "dark" ? "Dark" : "Light")</span></button>
@@ -59,6 +61,9 @@ else
                 }
                 @switch (View)
                 {
+                    case "documents":
+                        <DocCacheView Cache="@snapshot.DocCache" Now="@_now" />
+                        break;
                     case "sessions":
                         <div class="board-layout"><SessionList Sessions="@snapshot.Sessions" SelectedId="@_selectedId" OnSelect="SelectSession" Now="@_now" Truncated="@snapshot.SessionsTruncated" /><SessionInspector Session="@SelectedSession" Logs="@snapshot.Logs" Now="@_now" /></div>
                         <TrafficLane Entries="@snapshot.Traffic" Sessions="@snapshot.Sessions" SelectedSession="@SelectedSession" InstanceId="@snapshot.InstanceId" Now="@_now" Live="@IsLive" />

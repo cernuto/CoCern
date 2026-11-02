@@ -2,6 +2,7 @@ namespace CoCern.Contracts.Dashboard;
 
 public sealed record DashboardSnapshot
 {
+    public DashboardDocCache DocCache { get; init; } = new();
     public string InstanceId { get; init; } = "";
     public long Revision { get; init; }
     public DateTimeOffset ObservedAt { get; init; }
@@ -18,6 +19,29 @@ public sealed record DashboardSnapshot
     /// <summary>Estimated tokens of the tool definitions each role carries, and the tip rules that switched themselves off. Read-only.</summary>
     public DashboardTokens Tokens { get; init; } = new();
     public string[] Warnings { get; init; } = [];
+}
+
+public sealed record DashboardDocCache
+{
+    public DateTimeOffset? ObservedAt { get; init; }
+    public int ActiveDocuments { get; init; }
+    public int ActiveDirectories { get; init; }
+    public DashboardDocGrain[] Grains { get; init; } = [];
+    public bool Truncated { get; init; }
+}
+
+public sealed record DashboardDocGrain
+{
+    public string Kind { get; init; } = "";
+    public string Repository { get; init; } = "";
+    public string Path { get; init; } = "";
+    public DateTimeOffset ActivatedAt { get; init; }
+    public bool Loaded { get; init; }
+    public string Commit { get; init; } = "";
+    public int Sections { get; init; }
+    public int Reads { get; init; }
+    public int IndexRuns { get; init; }
+    public int Documents { get; init; }
 }
 
 public sealed record DashboardTokens
