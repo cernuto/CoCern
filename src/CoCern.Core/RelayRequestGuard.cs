@@ -95,3 +95,30 @@ internal static class RelayRequestGuard
 
     private static int Count(JsonObject args, string key) => args[key] is JsonArray array ? array.Count : 0;
 }
+
+/// <summary>
+/// The adapter's call controls: fields that steer how a call is composed or recorded and never reach an aggregate. <see cref="Take"/>
+/// reads and removes them (after <see cref="RelayRequestGuard.Validate"/> has checked their shapes).
+/// </summary>
+internal sealed record CallControls(bool OfferWanted, bool StatusDetail, bool PageSeen, string[] SeenIds, string? KnownEtag, JsonObject? Usage, bool ModelVisible)
+{
+    private static readonly string[] Fields = ["usage", "attention", "attentionDetail", "attentionStatus", "maxHoldMinutes", "seen", "seenMessageIds", "knownEtag"];
+
+    public static CallControls Take(JsonObject args)
+    {
+        var offerWanted = args["attention"] is not JsonValue optOut || optOut.GetValue<bool>();
+        var controls = new CallControls(
+            OfferWanted: offerWanted,
+            StatusDetail: args["attentionDetail"] is JsonValue detail && detail.GetValue<bool>(),
+            // A reader that showed the model a reply without an offer reports what it showed, so those info items close.
+            PageSeen: args["seen"] is JsonValue seen && seen.GetValue<bool>(),
+            SeenIds: args["seenMessageIds"] is JsonArray seenList ? JsonFields.Strings(seenList).ToArray() : [],
+            // The agent's ifNoneMatch, forwarded only so the feedback rules can tell an unchanged read.
+            KnownEtag: CallTelemetry.Bounded(JsonFields.Text(args, "knownEtag"), RelayLimits.MaxKnownEtagLength),
+            // Reported usage is telemetry only.
+            Usage: args["usage"] as JsonObject,
+            ModelVisible: offerWanted && !args.ContainsKey("waitSeconds"));
+        foreach (var field in Fields) args.Remove(field);
+        return controls;
+    }
+}

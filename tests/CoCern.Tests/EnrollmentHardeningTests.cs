@@ -186,6 +186,17 @@ public sealed class EnrollmentHardeningTests : IDisposable
     }
 
     [Theory]
+    [InlineData("http://0.0.0.0:5271", true)]
+    [InlineData("http://127.0.0.1:5272", false)]
+    [InlineData("https://0.0.0.0:5273", false)]
+    public void An_http_endpoint_in_kestrel_configuration_is_checked_too(string url, bool refused)
+    {
+        var configuration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["urls"] = "http://127.0.0.1:5271", ["Kestrel:Endpoints:Extra:Url"] = url }).Build();
+        var error = Record.Exception(() => HubNetwork.RefusePlainNetworkHttp(configuration));
+        Assert.Equal(refused, error is InvalidOperationException);
+    }
+
+    [Theory]
     [InlineData("/openapi/v1.json")]
     [InlineData("/scalar")]
     public async Task Api_reference_is_served_to_this_pc_only(string path)

@@ -62,24 +62,14 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         cancellationToken.ThrowIfCancellationRequested();
         if (!RelayToolCatalog.TryGet(tool, out var definition)) return Error(UnknownTool);
         if (RelayRequestGuard.Validate(caller, definition, arguments, out var args) is { } rejected) return rejected;
-        // Reported usage is telemetry only: it is recorded with the call and never reaches aggregate state.
-        if (args.TryGetPropertyValue("usage", out var usage))
+        var controls = CallControls.Take(args);
+        var (offerWanted, statusDetail, pageSeen, seenIds) = (controls.OfferWanted, controls.StatusDetail, controls.PageSeen, controls.SeenIds);
+        if (trace is not null)
         {
-            args.Remove("usage");
-            if (trace is not null && tool is RelayTools.TaskUpdate or RelayTools.ActionReport) trace.Usage = usage as JsonObject;
+            trace.Args = args;
+            if (tool is RelayTools.TaskUpdate or RelayTools.ActionReport) trace.Usage = controls.Usage;
+            (trace.ModelVisible, trace.KnownEtag) = (controls.ModelVisible, controls.KnownEtag);
         }
-        if (trace is not null) trace.Args = args;
-        // The attention opt-out and the adapter's status detail are read here and never reach an aggregate.
-        var offerWanted = args["attention"] is not JsonValue optOut || optOut.GetValue<bool>();
-        var statusDetail = args["attentionDetail"] is JsonValue detail && detail.GetValue<bool>();
-        // An adapter reader whose reply reaches the model without an offer (a waiting read, the waiter's printed inbox) reports what it
-        // showed: seen (the returned page) or seenMessageIds (the messages it printed), so their info items close.
-        var pageSeen = args["seen"] is JsonValue seenFlag && seenFlag.GetValue<bool>();
-        var seenIds = args["seenMessageIds"] is JsonArray seenList ? Strings(seenList).ToArray() : [];
-        // The etag the agent passed as ifNoneMatch, forwarded by the adapter only so the feedback rules can tell an unchanged read.
-        if (trace is not null) { trace.ModelVisible = offerWanted && !args.ContainsKey("waitSeconds"); trace.KnownEtag = CallTelemetry.Bounded(Text(args, "knownEtag"), RelayLimits.MaxKnownEtagLength); }
-        args.Remove("knownEtag");
-        args.Remove("attention"); args.Remove("attentionDetail"); args.Remove("attentionStatus"); args.Remove("maxHoldMinutes"); args.Remove("seen"); args.Remove("seenMessageIds");
         args["hubIncarnation"] = incarnation;
         var trusted = caller with { IsInternal = true };
         try
