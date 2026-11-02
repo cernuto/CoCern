@@ -5,12 +5,20 @@ using CoCern.Contracts;
 
 namespace CoCern.Domain;
 
-/// <summary>Tolerant readers over the JSON state documents and tool arguments. Missing or mistyped fields read as the fallback.</summary>
+/// <summary>
+/// Readers over the JSON state documents and tool arguments. Missing or mistyped fields read as the fallback, except
+/// <see cref="Flag"/>, which throws on a non-boolean (a client's mistyped flag is then refused as invalid arguments).
+/// </summary>
 public static class JsonFields
 {
     public static string Text(JsonObject node, string key, string fallback = "") => node[key] is JsonValue value && value.TryGetValue<string>(out var result) ? result : fallback;
     public static long Number(JsonObject node, string key, long fallback = 0) => long.TryParse(node[key]?.ToString(), out var value) ? value : fallback;
     public static bool Flag(JsonObject node, string key) => node[key]?.GetValue<bool>() ?? false;
+    /// <summary>True only for a boolean true; anything else, mistyped included, reads as false.</summary>
+    public static bool IsTrue(JsonObject node, string key) => node[key] is JsonValue value && value.TryGetValue<bool>(out var flag) && flag;
+    /// <summary>False only for a boolean false; anything else reads as true.</summary>
+    public static bool IsNotFalse(JsonObject node, string key) => !(node[key] is JsonValue value && value.TryGetValue<bool>(out var flag) && !flag);
+    public static DateTimeOffset? OptionalDate(JsonObject node, string key) => DateTimeOffset.TryParse(Text(node, key), out var result) ? result : null;
     public static DateTimeOffset Date(JsonObject node, string key) => DateTimeOffset.TryParse(Text(node, key), out var result) ? result : DateTimeOffset.MinValue;
 
     /// <summary>A nonempty identifier within the shared length bound; otherwise the operation fails as invalid arguments.</summary>

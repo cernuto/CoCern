@@ -91,8 +91,8 @@ public sealed class AdapterOptions
     /// <summary>Node mode: an enrolled machine is never an administrator, whatever <c>COCERN_ROLE</c> says.</summary>
     private static AdapterOptions? FromNode(Func<string, string?> environment, bool processEnvironment)
     {
-        var configured = environment("COCERN_NODE_DIR");
-        var folder = !string.IsNullOrWhiteSpace(configured) ? configured : processEnvironment ? NodeState.DefaultFolder : null;
+        // A test's own environment never falls back to this PC's real node folder.
+        var folder = processEnvironment ? NodeState.ConfiguredFolder(environment) : environment("COCERN_NODE_DIR") is { } configured && !string.IsNullOrWhiteSpace(configured) ? configured : null;
         if (folder is null || NodeState.ReadEnrollment(folder) is not { } node) return null;
         var client = ClientChatVariables.Select(x => (x.Provider, Id: environment(x.Variable))).FirstOrDefault(x => x.Id is not null && ChatLocators.IsUuid(x.Id));
         return new AdapterOptions(node.Hub.AbsoluteUri, node.Credential, admin: false, string.Equals(environment("COCERN_SIGNALR"), "true", StringComparison.OrdinalIgnoreCase))

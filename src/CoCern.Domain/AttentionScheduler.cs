@@ -31,9 +31,7 @@ public sealed record AttentionItem(
         Text(item, "note"), Date(item, "createdAt"), (int)Math.Max(0, Number(item, "snoozeBoundaries")), OptionalDate(item, "snoozeUntil"),
         OptionalDate(item, "shownAt"), Date(item, "expiresAt"), (int)Math.Max(0, Number(item, "snoozes")));
 
-    internal static bool IsTrue(JsonObject node, string key) => node[key] is JsonValue value && value.TryGetValue<bool>(out var flag) && flag;
 
-    private static DateTimeOffset? OptionalDate(JsonObject node, string key) => DateTimeOffset.TryParse(Text(node, key), out var date) ? date : null;
 }
 
 /// <summary>

@@ -242,6 +242,20 @@ internal static class TaskBoardAggregate
         return Ok(new { released = true }, Number(task, "version"));
     }
 
+    /// <summary>
+    /// What a retry gets instead of its stored reply: a begun action returns as it stands now, and a claim replays only while this session
+    /// still holds the same claim on a task it may still run.
+    /// </summary>
+    internal static RelayReply? ReplayRefusal(JsonObject board, string operation, JsonObject args, JsonObject stored, DateTimeOffset now)
+    {
+        var (session, task) = (Text(args, "sessionId"), ObjectAt(board, "tasks")[Text(args, "taskId")] as JsonObject);
+        if (operation == RelayTools.ActionBegin && task is not null && ObjectAt(task, "actions")[Text(args, "actionId")] is JsonObject action)
+            return Ok(new { action, replayAllowed = false, existing = true }, Number(task, "version"));
+        if (operation is not (RelayTools.ClaimAcquire or RelayTools.ClaimRenew or RelayTools.TaskClaim) || task is null) return null;
+        if (Text(task, "owner") != session || Number(task, "claimGeneration") != Number(stored, "claimGeneration")) return Error(StaleClaim);
+        return operation == RelayTools.TaskClaim ? TaskWorkflow.ExecutionRefusal(board, task, session, now) : null;
+    }
+
     /// <summary>Ends a task's claim; the caller bumps its version.</summary>
     internal static void ReleaseClaim(JsonObject task, DateTimeOffset now)
     {

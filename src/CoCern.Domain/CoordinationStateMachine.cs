@@ -96,23 +96,16 @@ public static class CoordinationStateMachine
     private static RelayReply Replay(string kind, JsonObject state, string operation, JsonObject arguments, JsonObject prior, string fingerprint, DateTimeOffset now)
     {
         if (Text(prior, "fingerprint") != fingerprint && Text(prior, "fingerprint") != LegacyFingerprint(arguments)) return Error(RequestConflict);
-        var tasks = ObjectAt(state, "tasks");
-        var taskId = Text(arguments, "taskId");
-        var session = Text(arguments, "sessionId");
-        if (operation == RelayTools.ActionBegin && tasks[taskId] is JsonObject actionTask && ObjectAt(actionTask, "actions")[Text(arguments, "actionId")] is JsonObject currentAction)
-            return Ok(new { action = currentAction, replayAllowed = false, existing = true }, Number(actionTask, "version"));
-        if (operation is RelayTools.ClaimAcquire or RelayTools.ClaimRenew or RelayTools.TaskClaim)
+        var stored = JsonNode.Parse(Text(prior, "json")) as JsonObject ?? new JsonObject();
+        // A grant is replayed only while it is still live; whether it is still the same grant is each aggregate's own rule.
+        if (operation is RelayTools.ClaimAcquire or RelayTools.ClaimRenew or RelayTools.TaskClaim && Date(stored, "leaseUntil") <= now) return Error(StaleClaim);
+        var refusal = kind switch
         {
-            var grant = JsonNode.Parse(Text(prior, "json"))!.AsObject();
-            if (Date(grant, "leaseUntil") <= now) return Error(StaleClaim);
-            if (kind == AggregateKinds.Lock && (Text(state, "holder") != session || Number(state, "generation") != Number(grant, "generation"))) return Error(StaleClaim);
-            if (kind == AggregateKinds.Board && tasks[taskId] is JsonObject task)
-            {
-                if (Text(task, "owner") != session || Number(task, "claimGeneration") != Number(grant, "claimGeneration")) return Error(StaleClaim);
-                if (operation == RelayTools.TaskClaim && TaskWorkflow.ExecutionRefusal(state, task, session, now) is { } refusal) return refusal;
-            }
-        }
-        return new(true, Text(prior, "code"), Text(prior, "json"), Number(prior, "version"));
+            AggregateKinds.Board => TaskBoardAggregate.ReplayRefusal(state, operation, arguments, stored, now),
+            AggregateKinds.Lock => LockAggregate.ReplayRefusal(state, operation, arguments, stored),
+            _ => null
+        };
+        return refusal ?? new(true, Text(prior, "code"), Text(prior, "json"), Number(prior, "version"));
     }
 
     /// <summary>

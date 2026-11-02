@@ -130,7 +130,7 @@ internal static class SessionAggregate
         var infoDays = message["attentionExpiryDays"] is JsonValue days && days.TryGetValue<int>(out var lifetime) ? lifetime : 0;
         message.Remove("attentionExpiryDays");
         inbox[id] = message;
-        if (infoDays > 0 && !(message["wake"] is JsonValue wake && wake.TryGetValue<bool>(out var wakes) && !wakes)) SessionAttention.AddMessage(state, message, infoDays, context.Now);
+        if (infoDays > 0 && IsNotFalse(message, "wake")) SessionAttention.AddMessage(state, message, infoDays, context.Now);
         return Ok(new { delivered = true, superseded });
     }
 
@@ -228,7 +228,7 @@ internal static class SessionAggregate
         };
         if (Flag(args, "supersede")) message["supersede"] = true;
         // A status or FYI message is stored like any other but never wakes the recipient; it is read with its next wake or inbox check.
-        if (args["wake"] is JsonValue wake && wake.TryGetValue<bool>(out var wakes) && !wakes) message["wake"] = false;
+        if (!IsNotFalse(args, "wake")) message["wake"] = false;
         // Measured as the recipient's check_inbox returns it, so a message escaping would make unreadable is never accepted.
         if (CheckReadable(message) is { } unreadable) return unreadable;
         context.Emit(AggregateKinds.Session, recipient, Operations.Deliver, message);

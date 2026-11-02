@@ -37,7 +37,7 @@ try
                 { acknowledge = ids; i++; }
                 else throw new AdapterConfigurationException(chatUsage);
             }
-            var folder = Environment.GetEnvironmentVariable("COCERN_NODE_DIR") is { Length: > 0 } configured ? configured : NodeState.DefaultFolder;
+            var folder = NodeState.ConfiguredFolder(Environment.GetEnvironmentVariable);
             using var stopping = new CancellationTokenSource();
             Console.CancelKeyPress += (_, cancel) => { cancel.Cancel = true; stopping.Cancel(); };
             var waited = await ClaudeWaiter.RunAsync(folder, args[2], Console.Out.WriteLine, limit, stopping.Token, printInbox, acknowledge);
@@ -59,7 +59,7 @@ try
     {
         // A UserPromptSubmit hook: one line on standard output, or nothing; it always exits 0 so it can never block a message.
         var folder = args.Length == 3 && args[1] == "--data-dir" && !string.IsNullOrWhiteSpace(args[2]) ? args[2]
-            : Environment.GetEnvironmentVariable("COCERN_NODE_DIR") is { Length: > 0 } configured ? configured : NodeState.DefaultFolder;
+            : NodeState.ConfiguredFolder(Environment.GetEnvironmentVariable);
         return await PromptHook.RunAsync(Console.In, Console.Out, folder);
     }
     if (args.Length > 0 && args[0] == "--setup")

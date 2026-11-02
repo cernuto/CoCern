@@ -91,7 +91,7 @@ internal static class StandingOrders
                 ["id"] = Text(order, "id"), ["on"] = Text(order["trigger"] as JsonObject ?? new JsonObject(), "on"), ["t"] = Target(order["trigger"] as JsonObject ?? new JsonObject()),
                 ["until"] = Text(order, "expiresAt"), ["runs"] = Number(order, "runs"), ["fails"] = Number(order, "failures")
             };
-            if (order["disabled"] is JsonValue off && off.TryGetValue<bool>(out var disabled) && disabled) item["off"] = true;
+            if (IsTrue(order, "disabled")) item["off"] = true;
             if (Date(order, "expiresAt") <= now) item["expired"] = true;
             if (Text(order, "lastError") is { Length: > 0 } error) item["err"] = Cap(error, 120);
             return (JsonNode)item;
@@ -145,7 +145,7 @@ internal static class StandingOrders
     {
         var args = context.Args;
         if (!context.OrdersEnabled || context.State["orders"] is not JsonObject orders || ObjectAt(orders, "items")[Text(args, "orderId")] is not JsonObject order) return Ok(new { counted = false });
-        var watch = args["watch"] is JsonValue flag && flag.TryGetValue<bool>(out var isWatch) && isWatch;
+        var watch = IsTrue(args, "watch");
         var run = Number(args, "run");
         // A failure from an earlier run of a replaced order, or a second failure in the same run, is not counted again.
         if (!watch && (Number(order, "runRevision") != run || Number(order, "failedRun") == run))
@@ -165,7 +165,7 @@ internal static class StandingOrders
         var board = Text(args, "boardKey");
         if (board.Length == 0) return Error(InvalidArguments, new { required = "boardKey" });
         var boards = ObjectAt(state, "orderBoards");
-        var watch = args["watch"] is JsonValue flag && flag.TryGetValue<bool>(out var on) && on;
+        var watch = IsTrue(args, "watch");
         if (watch && !boards.ContainsKey(board) && boards.Count >= RelayLimits.MaxOrderWatchBoards)
         {
             context.Emit(AggregateKinds.Board, board, Operations.OrderFailed, new JsonObject
@@ -397,7 +397,7 @@ internal static class StandingOrders
 
     private static string Target(JsonObject trigger) => Text(trigger, "on") == OrderTriggers.ClaimReleased ? Text(trigger, "resourceId") : Text(trigger, "taskId");
 
-    private static bool IsDisabled(JsonObject order) => order["disabled"] is JsonValue value && value.TryGetValue<bool>(out var disabled) && disabled;
+    private static bool IsDisabled(JsonObject order) => IsTrue(order, "disabled");
 
     /// <summary>
     /// The write revision moves only when an administrator puts or removes an order. An optional <c>expectedRevision</c> must match it,

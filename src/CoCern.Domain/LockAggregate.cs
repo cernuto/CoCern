@@ -28,6 +28,11 @@ internal static class LockAggregate
         _ => Error(UnknownTool)
     };
 
+    /// <summary>A retried claim replays only while this session still holds the same grant.</summary>
+    internal static RelayReply? ReplayRefusal(JsonObject state, string operation, JsonObject args, JsonObject grant) =>
+        operation is RelayTools.ClaimAcquire or RelayTools.ClaimRenew && (Text(state, "holder") != Text(args, "sessionId") || Number(state, "generation") != Number(grant, "generation"))
+            ? Error(StaleClaim) : null;
+
     private static RelayReply Block(AggregateContext context)
     {
         var state = context.State;
