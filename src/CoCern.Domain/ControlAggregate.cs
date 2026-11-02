@@ -1,5 +1,4 @@
 using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using CoCern.Contracts;
@@ -177,9 +176,27 @@ internal static class ControlAggregate
             availability = group.Any(x => Text(x.AsObject(), "availability") == "active") ? "active" : "unknown"
         }).ToArray();
         data["machines"] = JsonSerializer.SerializeToNode(machines.Take(MaxMachineSummaries)); data["machineSummariesTruncated"] = machines.Length > MaxMachineSummaries;
+        // The page fit the reply budget on its own; with the machine summary it may not. Keep the largest prefix that fits with it, and move the
+        // cursor to the first item left out, so the page is shortened rather than degraded and paging continues from the cut.
+        var page = data["items"]!.AsArray();
+        var offset = (int)Math.Clamp(Number(context.Args, "cursor"), 0, RelayLimits.MaxRecords);
+        if (page.Count > 1 && !FitsWorkers(data, page, offset, page.Count))
+        {
+            var low = 1; var high = page.Count - 1;
+            while (low < high) { var middle = (low + high + 1) / 2; if (FitsWorkers(data, page, offset, middle)) low = middle; else high = middle - 1; }
+            data["items"] = new JsonArray(page.Take(low).Select(x => x!.DeepClone()).ToArray()); data["nextCursor"] = offset + low; data["truncated"] = true;
+        }
         var machinePage = data["machines"]!.AsArray();
-        while (Encoding.UTF8.GetByteCount(data.ToJsonString()) > RelayLimits.MaxPayloadBytes && machinePage.Count > 0) { machinePage.RemoveAt(machinePage.Count - 1); data["machineSummariesTruncated"] = true; }
+        while (!FitsWire(Ok(data), RelayLimits.AggregateReplyBytes) && machinePage.Count > 0) { machinePage.RemoveAt(machinePage.Count - 1); data["machineSummariesTruncated"] = true; }
         return Ok(data);
+    }
+
+    /// <summary>Whether the worker reply fits the aggregate budget with only the first <paramref name="count"/> of <paramref name="page"/>, as the wire measures it.</summary>
+    private static bool FitsWorkers(JsonObject data, JsonArray page, int offset, int count)
+    {
+        var probe = data.DeepClone().AsObject();
+        if (count < page.Count) { probe["items"] = new JsonArray(page.Take(count).Select(x => x!.DeepClone()).ToArray()); probe["nextCursor"] = offset + count; probe["truncated"] = true; }
+        return FitsWire(Ok(probe), RelayLimits.AggregateReplyBytes);
     }
 
     private static RelayReply Status(AggregateContext context)
