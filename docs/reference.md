@@ -4,7 +4,7 @@ The technical details behind the [README](../README.md): every tool, rule, setti
 
 - [Tools](#tools)
 - [Calls](#calls)
-- [Tasks](#tasks): workflow, stranded actions, archive
+- [Tasks](#tasks): workflow, resources, stranded actions, archive
 - [Attention](#attention)
 - [Standing, orders and search](#standing)
 - [Documents](#documents)
@@ -43,7 +43,7 @@ Admin tools need a token with `IsAdministrator`. A session's `role` grants nothi
 | `doc_search`, `doc_section` | worker | Search docs by section; read one section. |
 | `standing_put` | admin | Write standing lines, grants and board settings. |
 | `order_put`, `order_remove` | admin | Add or remove a standing order. |
-| `control_request` | admin | Pause or resume dispatch, request cancellation, or revoke a PC. It never stops work already running. |
+| `control_request` | admin | Pause or resume dispatch, request cancellation, register a [resource](#resources), or revoke a PC. It never stops work already running. |
 | `analytics_query` | admin | Run a named analytics query, or ad hoc SQL. |
 | `doc_sync` | admin | Sync a repository's docs now. |
 
@@ -92,8 +92,20 @@ Add `workflow` to `task_update`:
 - Blocker kinds: `coordinator_hold`, `provider_rejection`, `tool_unavailable`, `resource_busy`, `missing_fixture`, `prerequisite`, `other`. Going back from `blocked` to `ready` needs `recheckEvidenceRef`.
 - `includeNextWork: true` returns a `nextWork` offer. It reserves nothing; claim it with `task_claim`. Tasks are offered only when their `dependsOn` tasks are completed, highest `priority` first, then those whose resources are free.
 - `task_claim` and `action_begin` refuse a task with an unfinished dependency: `DependenciesIncomplete` (409), listing them in `dependsOn`.
-- `packet.resources` must be claimed. A `task_claim` that leaves out a registered resource gets `ResourcesRequired` with `missing`; aliases resolve by your session's machine. `action_begin` refuses too (`Busy` or `ClaimRequired`) unless your session still holds each one. An unregistered name is refused only with the board setting `requireResources` (`unregistered`).
+- `packet.resources` must be claimed. A `task_claim` that leaves out a registered resource gets `ResourcesRequired` with `missing`; aliases resolve by your session's machine. `action_begin` refuses too (`Busy` or `ClaimRequired`) unless your session still holds each one. An unregistered name in `packet.resources` has no lock to take, so it is refused only with the board setting `requireResources` (`unregistered`). A claim's own names must be [registered](#resources).
 - `authorityRef: "grant:<id>"` makes `ready` check that [grant](#standing) (`GrantInvalid` if missing, expired or out of scope). `task_claim` and `action_begin` check it again.
+
+### Resources
+
+A resource is something only one chat may use at a time, such as a test rig. Claims take registered resources only: `claim_acquire`, and `task_claim` with `resourceIds`, get `ResourceUnknown` for any other name, so one name never means two locks. An administrator registers one with `control_request`:
+
+```json
+{ "repositoryId": "cocern", "requestId": "r-3", "command": "register_resource",
+  "resourceId": "rig-1", "machineId": "pc-7", "aliases": ["rig"] }
+```
+
+- `machineId` is required. Aliases belong to that machine: a claim resolves names by its session's machine, so `rig` can mean different resources on different PCs.
+- Registering again under a name the machine already has adds the new aliases to that resource. An alias that already means another resource gets `AliasConflict`; a resource another repository registered gets `RepositoryDenied`.
 
 ### Stranded actions
 
