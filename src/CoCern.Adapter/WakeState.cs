@@ -55,6 +55,17 @@ public sealed class WakeState : IDisposable
             return ("reserved", batch);
         }
     }
+    /// <summary>Forgets a reserved batch that was never sent (stopped or canceled first), so its route and messages can wake again.</summary>
+    public void Release(string batch)
+    {
+        lock (_gate)
+        {
+            using var transaction = _connection.BeginTransaction();
+            Execute("DELETE FROM messages WHERE batch=$batch", batch: batch);
+            Execute("DELETE FROM batches WHERE batch=$value AND status='reserved'", value: batch);
+            transaction.Commit();
+        }
+    }
     public void Complete(string batch, bool queued)
     {
         lock (_gate) Execute("UPDATE batches SET status=$route WHERE batch=$value", queued ? "queued" : "uncertain", batch);

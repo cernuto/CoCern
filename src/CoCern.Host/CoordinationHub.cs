@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.SignalR;
+using CoCern.Contracts;
 using CoCern.Core;
 using CoCern.Domain;
 
@@ -13,9 +14,9 @@ public sealed class CoordinationHub(IRelayApplication application) : Hub
 {
     public async Task WatchSession(string sessionId, string sessionToken, string repositoryId)
     {
-        if (string.IsNullOrWhiteSpace(sessionId) || string.IsNullOrWhiteSpace(sessionToken) || string.IsNullOrWhiteSpace(repositoryId) || sessionId.Length > 256 || sessionToken.Length > 256 || repositoryId.Length > 256) throw new HubException("Session access denied.");
+        if (string.IsNullOrWhiteSpace(sessionId) || string.IsNullOrWhiteSpace(sessionToken) || string.IsNullOrWhiteSpace(repositoryId) || sessionId.Length > RelayLimits.MaxIdentifierLength || sessionToken.Length > RelayLimits.MaxIdentifierLength || repositoryId.Length > RelayLimits.MaxIdentifierLength) throw new HubException("Session access denied.");
         var caller = RelayAuthentication.Caller(Context.User!);
-        var reply = await application.ExecuteAsync(caller, "get_status", JsonSerializer.SerializeToElement(new { repositoryId, sessionId, sessionToken }), Context.ConnectionAborted);
+        var reply = await application.ExecuteAsync(caller, RelayTools.GetStatus, JsonSerializer.SerializeToElement(new { repositoryId, sessionId, sessionToken }), Context.ConnectionAborted);
         if (!reply.Ok) throw new HubException("Session access denied.");
         await Groups.AddToGroupAsync(Context.ConnectionId, Group(sessionId), Context.ConnectionAborted);
     }

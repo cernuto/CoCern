@@ -4,6 +4,7 @@ using Microsoft.Extensions.Logging;
 using CoCern.Adapter;
 using CoCern.Adapter.Node;
 using CoCern.Adapter.Setup;
+using CoCern.Contracts;
 
 try
 {
@@ -32,7 +33,7 @@ try
                 if (args[i] == "--print-inbox" && !printInbox) printInbox = true;
                 else if (args[i] == "--timeout-minutes" && limit is null && i + 1 < args.Length && int.TryParse(args[i + 1], out var minutes) && minutes is > 0 and <= 1440) { limit = TimeSpan.FromMinutes(minutes); i++; }
                 else if (args[i] == "--ack" && acknowledge is null && i + 1 < args.Length &&
-                         args[i + 1].Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries) is { Length: > 0 and <= 100 } ids && ids.All(id => id.Length <= 256 && id.All(char.IsAsciiLetterOrDigit)))
+                         args[i + 1].Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries) is { Length: > 0 } ids && ids.Length <= RelayLimits.MaxAcknowledgedMessages && ids.All(id => id.Length <= RelayLimits.MaxIdentifierLength && id.All(char.IsAsciiLetterOrDigit)))
                 { acknowledge = ids; i++; }
                 else throw new AdapterConfigurationException(chatUsage);
             }

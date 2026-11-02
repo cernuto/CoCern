@@ -15,7 +15,6 @@ public partial class Dashboard : IAsyncDisposable
     private DateTimeOffset _now => Connection.ObservationNow;
     private string? _selectedId;
     private string _theme = "light";
-    private bool _motion = true;
     private bool _signingOut;
 
     private string View => Navigation.ToBaseRelativePath(Navigation.Uri).Split('?', '#')[0].Trim('/').ToLowerInvariant() switch
@@ -27,21 +26,18 @@ public partial class Dashboard : IAsyncDisposable
         "documents" => "documents",
         _ => "overview"
     };
-    private string PageTitle => View switch { "sessions" => "Session watch", "sql" => "Inside the database", "logs" => "Signals from the relay", "standing" => "Standing preferences", "documents" => "Document cache", _ => "Relay at a glance" };
-    private string PageDescription => View switch
+    private string PageTitle => View switch { "sessions" => "Sessions", "sql" => "Database", "logs" => "Logs", "standing" => "Standing", "documents" => "Documents", _ => "Overview" };
+    private string? PageDescription => View switch
     {
-        "sessions" => "Find a session and inspect its latest reported state.",
-        "sql" => "Real tables. Reported counts. A little more visibility.",
-        "logs" => "A quiet record of recent operational events.",
-        "standing" => "Settled lines and grants on each board, with who approved them.",
-        "documents" => "See which document directories and in-memory indexes are active on this relay.",
-        _ => "A place for every machine. A signal for every session."
+        "standing" => "Each board's settled lines, grants and orders, and who approved them.",
+        "documents" => "Document indexes loaded on this hub.",
+        _ => null
     };
     private bool IsLive => Connection.State == DashboardLinkState.Live && Connection.ObservationsFresh;
     private string ConnectionLabel => Connection.State switch
     {
-        DashboardLinkState.Live when !Connection.ObservationsConfirmed => "Waiting for a fresh observation",
-        DashboardLinkState.Live => IsLive ? "Live observations" : "Observations stale",
+        DashboardLinkState.Live when !Connection.ObservationsConfirmed => "Waiting for an update",
+        DashboardLinkState.Live => IsLive ? "Live" : "Stale",
         DashboardLinkState.Reconnecting => "Reconnecting",
         _ => "Connecting"
     };
@@ -59,13 +55,13 @@ public partial class Dashboard : IAsyncDisposable
         if (!firstRender) return;
         var preferences = await JavaScript.InvokeAsync<PresentationPreferences>("pkDashboard.preferences");
         _theme = preferences.Theme == "dark" ? "dark" : "light";
-        _motion = preferences.Motion;
         StateHasChanged();
     }
 
     private void Refresh() => _ = InvokeAsync(StateHasChanged);
     private void SelectSession(string sessionId) => _selectedId = sessionId;
-    private bool Pulse(string sessionId) => IsLive && _motion && Connection.IsPulsing(sessionId, DateTimeOffset.UtcNow);
+    // Motion follows the system's reduced-motion setting (see dashboard.css).
+    private bool Pulse(string sessionId) => IsLive && Connection.IsPulsing(sessionId, DateTimeOffset.UtcNow);
     private async Task SignInAsync(string token) => await Connection.LoginAsync(token);
 
     private async Task SignOutAsync()
@@ -81,13 +77,7 @@ public partial class Dashboard : IAsyncDisposable
         await SavePreferencesAsync();
     }
 
-    private async Task ChangeMotionAsync(ChangeEventArgs change)
-    {
-        _motion = change.Value is true;
-        await SavePreferencesAsync();
-    }
-
-    private async Task SavePreferencesAsync() => await JavaScript.InvokeVoidAsync("pkDashboard.setPreferences", _theme, _motion);
+    private async Task SavePreferencesAsync() => await JavaScript.InvokeVoidAsync("pkDashboard.setPreferences", _theme);
 
     private async Task TickAsync()
     {
@@ -113,7 +103,6 @@ public partial class Dashboard : IAsyncDisposable
     public sealed class PresentationPreferences
     {
         public string Theme { get; set; } = "light";
-        public bool Motion { get; set; } = true;
     }
 }
 

@@ -67,13 +67,15 @@ public sealed class WakeReconciler(WakeConfiguration configuration, WakeState st
             cancellationToken.ThrowIfCancellationRequested();
             var reservation = state.Reserve(key, wakeable, (clock ?? TimeProvider.System).GetUtcNow(), () => dispatcher.IsBusy(route.ThreadId));
             if (reservation.Batch is not { } batch) return reservation.Status;
-            var queued = false;
-            try
+            if (File.Exists(configuration.StopFile) || cancellationToken.IsCancellationRequested)
             {
-                if (!File.Exists(configuration.StopFile) && !cancellationToken.IsCancellationRequested)
-                    queued = await dispatcher.QueueAsync(route.ThreadId, Prompt(route, batch) + (attentionLine is null ? "" : "\n" + attentionLine), cancellationToken);
+                // Nothing was sent, so nothing is uncertain: release the reservation, or the route would never wake again.
+                state.Release(batch);
+                return "stopped";
             }
-            catch (Exception) { /* Any exception after reservation is uncertain, including cancellation. */ }
+            var queued = false;
+            try { queued = await dispatcher.QueueAsync(route.ThreadId, Prompt(route, batch) + (attentionLine is null ? "" : "\n" + attentionLine), cancellationToken); }
+            catch (Exception) { /* Once sending started, any failure is uncertain, cancellation included. */ }
             state.Complete(batch, queued);
             return queued ? "queued" : "uncertain";
         }

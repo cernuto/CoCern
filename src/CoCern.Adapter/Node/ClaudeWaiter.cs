@@ -95,7 +95,8 @@ public static class ClaudeWaiter
             if (Field(item, "senderSessionId") is { Length: > 0 } sender) line.Append(" from ").Append(sender);
             if (Field(item, "sentAt") is { Length: > 0 } sentAt)
                 line.Append(" at ").Append(DateTimeOffset.TryParse(sentAt, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var at) ? at.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture) : sentAt);
-            if (Field(item, "replyTo") is { Length: > 0 } replyTo) line.Append(" re ").Append(replyTo);
+            // One line, like the text below it: a sender's replyTo can never start a line that looks like another message.
+            if (Field(item, "replyTo") is { Length: > 0 } replyTo) line.Append(" re ").Append(replyTo.ReplaceLineEndings(" "));
             // An item too large for one page comes as a piece: say so, and leave it unseen so it is read in full with check_inbox.
             var oversized = item.TryGetProperty("truncated", out var truncated) && truncated.ValueKind == JsonValueKind.True && item.TryGetProperty("part", out _);
             line.Append(": ").Append(oversized ? "(oversized; call check_inbox with partOffset to read it)" : Field(item, "text").ReplaceLineEndings("\n  "));

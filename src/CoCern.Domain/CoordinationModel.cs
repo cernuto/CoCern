@@ -203,6 +203,8 @@ public static class Operations
     public const string ResolveDeclaredField = "resolveDeclared";
     /// <summary>Server-set on <c>action_begin</c>: the first declared resource whose lock this session does not hold (<c>code</c>, <c>resourceId</c>).</summary>
     public const string LockRefusalField = "lockRefusal";
+    /// <summary>Server-set on a rolled-back claim's lock release: the grant's requestId, whose stored reply is dropped so a retry acquires again.</summary>
+    public const string ForgetRequestField = "forgetRequestId";
     /// <summary>A board's due sweep: moves tasks finished longer than <c>Relay:Board:ArchiveAfterDays</c> to the archive.</summary>
     public const string TaskArchive = "__task_archive";
     /// <summary>Read-only: which of the given sessions in the repository the caller's principal opened.</summary>

@@ -74,6 +74,9 @@ public static class RelayAuthentication
         var clients = LoadClients(configuration, environment);
         if (clients.Any(c => string.IsNullOrWhiteSpace(c.Token) || string.IsNullOrWhiteSpace(c.PrincipalId) || c.Token.Length > 4096))
             throw new InvalidOperationException("Relay client configuration is invalid.");
+        // Two clients with one token would authenticate as whichever is listed last.
+        if (clients.Select(c => c.Token).Distinct(StringComparer.Ordinal).Count() != clients.Length)
+            throw new InvalidOperationException("Relay client configuration is invalid: two clients share a token.");
         var authority = configuration["Relay:OAuth:Authority"];
         var audience = configuration["Relay:OAuth:Audience"];
         var oauth = !string.IsNullOrWhiteSpace(authority);

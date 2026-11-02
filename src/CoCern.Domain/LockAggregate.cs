@@ -12,6 +12,7 @@ namespace CoCern.Domain;
 /// </summary>
 internal static class LockAggregate
 {
+
     private const int RetryAfterSeconds = 5;
 
     public static RelayReply Handle(AggregateContext context) => context.Operation switch
@@ -115,6 +116,8 @@ internal static class LockAggregate
             if (blockers.Count > 0) return Error(UnresolvedAction, new { blockers = blockers.Count });
             state["holder"] = "";
             state["leaseUntil"] = context.Now.ToString("O");
+            // A rolled-back task claim releases the grant it took, and its retry must acquire again rather than replay it.
+            CoordinationStateMachine.ForgetRequest(state, context.Caller.PrincipalId, RelayTools.ClaimAcquire, Text(context.Args, Operations.ForgetRequestField));
         }
         AttentionSources.OnLeaseSettled(context, context.SessionId, context.Key);
         if (release) StandingOrders.OnLockReleased(context);

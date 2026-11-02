@@ -235,6 +235,8 @@ internal static class TaskBoardAggregate
         if (Text(task, "owner") == context.SessionId && Number(task, "claimGeneration") == Number(args, "claimGeneration") && Text(task, "claimRequestId") == Text(args, "claimRequestId"))
         {
             task.Remove("owner"); task["leaseUntil"] = context.Now.ToString("O"); task["version"] = Number(task, "version") + 1;
+            // The claim is undone, so its retry must run again rather than replay it.
+            CoordinationStateMachine.ForgetRequest(context.State, context.Caller.PrincipalId, RelayTools.TaskClaim, Text(args, "claimRequestId"));
         }
         return Ok(new { released = true }, Number(task, "version"));
     }

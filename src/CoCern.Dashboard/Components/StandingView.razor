@@ -1,11 +1,7 @@
 <section class="surface sql-view standing-view" aria-labelledby="standing-heading">
-    <div class="section-heading"><div><h2 id="standing-heading">Standing preferences</h2><p>Each board's settled lines, typed grants and standing orders, who approved them, and recent changes. Read-only.</p></div><span class="small-symbol" aria-hidden="true">✓</span></div>
-    <table class="metrics-table">
-        <caption>Token feedback</caption>
-        <thead><tr><th scope="col">Worker tool definitions</th><th scope="col">Administrator tool definitions</th><th scope="col">Tip rules switched off</th></tr></thead>
-        <tbody><tr><td class="numeric">@Estimated(Tokens.WorkerToolTokens)</td><td class="numeric">@Estimated(Tokens.AdministratorToolTokens)</td><td>@(Tokens.TipRulesOff.Length == 0 ? "None" : string.Join(", ", Tokens.TipRulesOff))</td></tr></tbody>
-    </table>
-    @if (Boards.Length == 0) { <p class="empty-copy">No board has standing preferences yet.</p> }
+    <h2 id="standing-heading" class="visually-hidden">Standing by board</h2>
+    <dl class="database-summary" aria-label="Tool definition size"><div><dt>Worker tools</dt><dd>@Estimated(Tokens.WorkerToolTokens)</dd></div><div><dt>Administrator tools</dt><dd>@Estimated(Tokens.AdministratorToolTokens)</dd></div><div><dt>Tips off</dt><dd>@(Tokens.TipRulesOff.Length == 0 ? "None" : string.Join(", ", Tokens.TipRulesOff))</dd></div></dl>
+    @if (Boards.Length == 0) { <p class="empty-copy">No board has standing yet.</p> }
     @foreach (var board in Boards)
     {
         <article class="standing-board" @key="board.Board" aria-label="@($"Board {board.Board}")">
@@ -23,7 +19,7 @@
             @if (board.Proposals.Length > 0)
             {
                 <table class="metrics-table">
-                    <caption>Waiting for approval</caption>
+                    <caption>Awaiting approval</caption>
                     <thead><tr><th scope="col">Proposal</th><th scope="col">Kind</th><th scope="col">Summary</th><th scope="col">Proposed by</th></tr></thead>
                     <tbody>@foreach (var proposal in board.Proposals) { <tr><th scope="row">@proposal.Id</th><td>@proposal.Kind@(proposal.Replaces ? " (edit)" : "")</td><td>@proposal.Summary</td><td title="@DashboardFormat.Timestamp(proposal.ProposedAt)">@proposal.ProposedBy</td></tr> }</tbody>
                 </table>
@@ -39,7 +35,7 @@
             @if (board.OrderLog.Length > 0)
             {
                 <table class="metrics-table">
-                    <caption>Order log</caption>
+                    <caption>Order runs</caption>
                     <thead><tr><th scope="col">When</th><th scope="col">Order</th><th scope="col">What happened</th></tr></thead>
                     <tbody>@foreach (var entry in board.OrderLog) { <tr><td title="@DashboardFormat.Timestamp(entry.At)">@DashboardFormat.Ago(entry.At, Now)</td><td>@entry.OrderId</td><td>@entry.What</td></tr> }</tbody>
                 </table>
@@ -51,8 +47,8 @@
             </table>
         </article>
     }
-    @if (Truncated) { <p class="limit-note">The board list is bounded. Additional boards are not shown.</p> }
-    <p class="table-footnote">Changes: + added, ~ edited, - removed. An administrator changes standing with standing_put, and orders with order_put and order_remove.</p>
+    @if (Truncated) { <p class="limit-note">Some boards aren't shown.</p> }
+    @if (Boards.Length > 0) { <p class="table-footnote">+ added · ~ edited · − removed</p> }
 </section>
 
 @code {
@@ -61,5 +57,5 @@
     [Parameter] public DashboardTokens Tokens { get; set; } = new();
     [Parameter] public DateTimeOffset Now { get; set; }
 
-    private static string Estimated(int? tokens) => tokens is { } count ? $"{count:N0} estimated tokens" : "Not counted";
+    private static string Estimated(int? tokens) => tokens is { } count ? $"≈{count:N0} tokens" : "—";
 }

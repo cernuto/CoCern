@@ -206,14 +206,14 @@ internal static class AttentionSources
         context.Emit(AggregateKinds.Session, sessionId, operation, item);
     }
 
-    /// <summary>Asks the control aggregate to pass the effect to every manager session in the repository except the one that caused it.</summary>
+    /// <summary>Passes the effect to every manager session in the repository. A raise skips the session that caused it; a close reaches all.</summary>
     internal static void ToManagers(AggregateContext context, string operation, JsonObject item)
     {
         item["repositoryId"] = context.Repository;
         if (Text(context.Args, "boardId") is { Length: > 0 } board) item["boardId"] = board;
         context.Emit(AggregateKinds.Control, AggregateKinds.ControlKey, Operations.AttentionRoute, new JsonObject
         {
-            ["repositoryId"] = context.Repository, ["role"] = ManagerRole, ["operation"] = operation, ["exceptSessionId"] = context.SessionId, ["item"] = item
+            ["repositoryId"] = context.Repository, ["role"] = ManagerRole, ["operation"] = operation, ["exceptSessionId"] = operation == Operations.AttentionRaise ? context.SessionId : "", ["item"] = item
         });
     }
 }

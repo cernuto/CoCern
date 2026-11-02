@@ -48,9 +48,16 @@ internal static class SessionAggregate
         var state = context.State;
         if (state.ContainsKey("principalId"))
             return Text(state, "principalId") == Text(context.Args, "principalId") && Text(state, "sessionToken") == Text(context.Args, "sessionToken") ? Ok(new { initialized = true }) : Error(SessionDenied);
-        foreach (var property in context.Args) if (property.Key != "requestId") state[property.Key] = property.Value?.DeepClone();
+        foreach (var property in context.Args) if (property.Key != "requestId" && !HubState.Contains(property.Key)) state[property.Key] = property.Value?.DeepClone();
         return Ok(new { initialized = true });
     }
+
+    /// <summary>State only the session keeps for itself; <c>session_open</c>'s arguments can never preset it.</summary>
+    private static readonly HashSet<string> HubState = new(StringComparer.Ordinal)
+    {
+        "requests", "requestTombstones", "inbox", "acked", "attention", "attentionClosed", "attentionRecent", "attentionSeq", "attentionRevision",
+        "attentionBoundaryAt", "activeReportedAt", "expiredAt", "standingSeen", "tasks", "taskRevision", "holder", "leaseUntil", "warnedLease", "interruptedLease"
+    };
 
     /// <summary>
     /// The hub's directory dropped this long-stale session. Its secret, inbox and attention are cleared; afterwards its own calls get

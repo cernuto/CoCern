@@ -30,13 +30,15 @@ internal sealed class DueWorkPump(IDueWorkSource source, Func<DueWorkReference, 
     public async Task<int> DispatchNextBatchAsync(DateTimeOffset now, CancellationToken cancellationToken)
     {
         var due = await source.ReadDueAsync(now, 64, cancellationToken, offset);
+        var failed = 0;
         foreach (var item in due)
         {
             try { await dispatch(item, cancellationToken); }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
-            catch (Exception) { deliveryFailed(); }
+            catch (Exception) { failed++; deliveryFailed(); }
         }
-        offset = due.Count < 64 || offset > int.MaxValue - due.Count ? 0 : offset + due.Count;
+        // Delivered rows leave the table; skip only the ones that failed, so the oldest due work is never passed over.
+        offset = due.Count < 64 || offset > int.MaxValue - failed ? 0 : offset + failed;
         return due.Count;
     }
 }

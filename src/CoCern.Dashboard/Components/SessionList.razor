@@ -1,21 +1,21 @@
 <section class="surface session-list" aria-labelledby="sessions-heading">
-    <div class="section-heading"><h2 id="sessions-heading">Observed sessions</h2><span class="count-badge">@Sessions.Length</span></div>
-    <label class="search-field"><span>Find a session</span><input type="search" placeholder="Label, machine or repository" @bind="_query" @bind:event="oninput" /></label>
+    <div class="section-heading"><h2 id="sessions-heading">Sessions</h2><span class="count-badge">@Sessions.Length</span></div>
+    <label class="search-field"><span class="visually-hidden">Find a session</span><input type="search" placeholder="Find by label, machine or repository" @bind="_query" @bind:event="oninput" /></label>
     <div class="session-list-rows">
         @foreach (var session in FilteredSessions)
         {
             <button type="button" @key="session.SessionId" class="session-list-row @(SelectedId == session.SessionId ? "selected" : "")" aria-pressed="@(SelectedId == session.SessionId ? "true" : "false")" @onclick="() => OnSelect.InvokeAsync(session.SessionId)">
                 <span class="status-dot @(session.Reachable ? "teal" : "amber")" aria-hidden="true"></span>
-                <span class="session-row-label"><strong>@session.Label</strong><span>@session.Provider on @MachineLabel(session)</span></span>
+                <span class="session-row-label"><strong>@session.Label</strong><span>@session.Provider on @DashboardFormat.Machine(session)</span></span>
                 <span class="session-row-state">@DashboardFormat.Freshness(session, Now)<small>@DashboardFormat.Ago(session.LastActivityAt, Now)</small></span>
             </button>
         }
         @if (!FilteredSessions.Any())
         {
-            <p class="empty-copy">@(Sessions.Length == 0 ? "No sessions have been observed yet." : "No sessions match your search.")</p>
+            <p class="empty-copy">@(Sessions.Length == 0 ? "No sessions yet." : "No matches.")</p>
         }
     </div>
-    @if (Truncated) { <p class="limit-note">Showing a bounded window of sessions. The relay's total appears above.</p> }
+    @if (Truncated) { <p class="limit-note">Some sessions aren't shown.</p> }
 </section>
 
 @code {
@@ -25,7 +25,6 @@
     [Parameter] public DateTimeOffset Now { get; set; }
     [Parameter] public bool Truncated { get; set; }
     private string _query = "";
-    private static string MachineLabel(DashboardSession session) => !string.IsNullOrWhiteSpace(session.MachineName) ? session.MachineName : !string.IsNullOrWhiteSpace(session.MachineId) ? session.MachineId : "Not reported";
     private IEnumerable<DashboardSession> FilteredSessions => Sessions.Where(session => string.IsNullOrWhiteSpace(_query) || new[] { session.Label, session.Provider, session.MachineName, session.RepositoryId }.Any(value => value.Contains(_query, StringComparison.OrdinalIgnoreCase))).OrderBy(session => session.Label, StringComparer.OrdinalIgnoreCase);
 }
 

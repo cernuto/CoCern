@@ -39,7 +39,7 @@ public static class CoordinationStateMachine
 
         var requestId = Text(arguments, "requestId");
         var requests = ObjectAt(state, "requests");
-        var requestKey = caller.PrincipalId + ":" + operation + ":" + requestId;
+        var requestKey = RequestKey(caller.PrincipalId, operation, requestId);
         var fingerprint = Fingerprint(operation, arguments);
         if (requestId.Length > 0 && requests[requestKey] is JsonObject prior) return Replay(kind, state, operation, arguments, prior, fingerprint, now);
         // Its stored reply was evicted to make room before its window ended: refuse rather than run the write twice.
@@ -156,6 +156,18 @@ public static class CoordinationStateMachine
     }
 
     private static string Hash(JsonObject significant) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(significant.ToJsonString())));
+
+    /// <summary>Where a request's stored reply lives: replays are per principal and operation.</summary>
+    public static string RequestKey(string principalId, string operation, string requestId) => principalId + ":" + operation + ":" + requestId;
+
+    /// <summary>
+    /// Drops a stored reply whose effect was undone (a task claim rolled back because a resource was busy), so a retry with the same
+    /// requestId runs again instead of replaying a claim that no longer exists.
+    /// </summary>
+    public static void ForgetRequest(JsonObject state, string principalId, string operation, string requestId)
+    {
+        if (requestId.Length > 0 && state["requests"] is JsonObject requests) requests.Remove(RequestKey(principalId, operation, requestId));
+    }
 
     /// <summary>Mutations are deduplicated by requestId and committed; reads never are.</summary>
     public static bool IsMutation(string operation) =>

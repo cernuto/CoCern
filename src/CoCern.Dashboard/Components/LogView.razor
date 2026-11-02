@@ -1,8 +1,8 @@
 <section class="surface log-view" aria-labelledby="logs-heading">
-    <div class="section-heading"><div><h2 id="logs-heading">@(Compact ? "Recent signals" : "Operational logs")</h2><p>Safe relay event summaries.</p></div>
+    <div class="section-heading"><div><h2 id="logs-heading">@(Compact ? "Recent log" : "Log")</h2></div>
         @if (!Compact)
         {
-            <label class="log-filter">Level <select @bind="_level"><option value="">All levels</option><option>Error</option><option>Warning</option><option>Information</option><option>Debug</option></select></label>
+            <label class="log-filter"><span class="visually-hidden">Level</span><select @bind="_level"><option value="">All levels</option><option>Error</option><option>Warning</option><option>Information</option><option>Debug</option></select></label>
         }
     </div>
     <ol class="log-entries @(Compact ? "compact-logs" : "")">
@@ -11,8 +11,8 @@
             <li class="log-entry" @key="entry.Sequence"><time title="@DashboardFormat.Timestamp(entry.Timestamp)">@entry.Timestamp.ToLocalTime().ToString("HH:mm:ss")</time><span class="log-level @LevelClass(entry.Level)">@entry.Level</span><div><p>@entry.Message</p><small>@entry.Category</small></div></li>
         }
     </ol>
-    @if (!VisibleEntries.Any()) { <p class="empty-copy">No recent events@(string.IsNullOrEmpty(_level) ? "" : " at this level"). New observations will appear here.</p> }
-    @if (!Compact) { <p class="table-footnote">A bounded window of recent events. Times use your device's local time.</p> }
+    @if (!VisibleEntries.Any()) { <p class="empty-copy">No recent events@(string.IsNullOrEmpty(_level) ? "" : " at this level").</p> }
+    @if (!Compact) { <p class="table-footnote">Recent events only, in your local time.</p> }
 </section>
 
 @code {

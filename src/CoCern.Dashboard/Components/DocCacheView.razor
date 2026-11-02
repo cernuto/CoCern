@@ -1,22 +1,21 @@
 <section class="surface doc-cache-view" aria-labelledby="docs-heading">
-    <div class="section-heading"><div><h2 id="docs-heading">Active document-cache grains</h2><p>@Cache.ActiveDirectories directories · @Cache.ActiveDocuments documents on this relay</p></div></div>
-    <p class="table-footnote">Grains leave this list when Orleans deactivates them. Observing the cache does not load documents or extend their lifetime.</p>
+    <div class="section-heading"><div><h2 id="docs-heading">Loaded indexes</h2><p>@Cache.ActiveDirectories @(Cache.ActiveDirectories == 1 ? "repository" : "repositories") · @Cache.ActiveDocuments @(Cache.ActiveDocuments == 1 ? "document" : "documents")</p></div></div>
     @if (Cache.ObservedAt is null)
     {
-        <p class="empty-copy">Waiting for a cache observation.</p>
+        <p class="empty-copy">Waiting for the hub.</p>
     }
     else
     {
-        <p class="muted" title="@DashboardFormat.Timestamp(Cache.ObservedAt)">Collected @DashboardFormat.Ago(Cache.ObservedAt, Now)</p>
+        <p class="muted" title="@DashboardFormat.Timestamp(Cache.ObservedAt)">Updated @DashboardFormat.Ago(Cache.ObservedAt, Now).ToLowerInvariant()</p>
         <div class="doc-cache-table">
             <table class="metrics-table">
-                <caption class="visually-hidden">Active document directory and document grains on this relay</caption>
-                <thead><tr><th scope="col">Repository / path</th><th scope="col">Kind</th><th scope="col">Cache</th><th scope="col">Sections</th><th scope="col">Source reads</th><th scope="col">Index builds</th><th scope="col">Commit</th><th scope="col">Activated</th></tr></thead>
+                <caption class="visually-hidden">Loaded repository and document indexes</caption>
+                <thead><tr><th scope="col">Repository / path</th><th scope="col">Kind</th><th scope="col">State</th><th scope="col">Sections</th><th scope="col">Source reads</th><th scope="col">Index builds</th><th scope="col">Commit</th><th scope="col">Activated</th></tr></thead>
                 <tbody>
                     @foreach (var grain in Cache.Grains)
                     {
                         <tr>
-                            <th scope="row"><small>@grain.Repository</small> @(grain.Kind == "Directory" ? "Document directory" : grain.Path)</th>
+                            <th scope="row"><small>@grain.Repository</small> @(grain.Kind == "Directory" ? "All documents" : grain.Path)</th>
                             <td>@grain.Kind</td>
                             <td>@(grain.Kind == "Directory" ? $"{grain.Documents} documents" : grain.Loaded ? "Loaded" : "Not loaded")</td>
                             <td class="numeric">@(grain.Kind == "Directory" ? "—" : grain.Sections.ToString("N0"))</td>
@@ -29,8 +28,8 @@
                 </tbody>
             </table>
         </div>
-        @if (Cache.Grains.Length == 0 && !Cache.Truncated) { <p class="empty-copy">No document-cache grains are active on this relay.</p> }
-        @if (Cache.Truncated) { <p class="limit-note">This observation shows @Cache.Grains.Length of @(Cache.ActiveDirectories + Cache.ActiveDocuments) active grains.</p> }
+        @if (Cache.Grains.Length == 0 && !Cache.Truncated) { <p class="empty-copy">Nothing loaded. Indexes load when an agent searches or reads documents, and unload when idle.</p> }
+        @if (Cache.Truncated) { <p class="limit-note">Showing @Cache.Grains.Length of @(Cache.ActiveDirectories + Cache.ActiveDocuments).</p> }
     }
 </section>
 

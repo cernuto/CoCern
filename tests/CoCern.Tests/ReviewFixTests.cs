@@ -1,0 +1,146 @@
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using CoCern.Contracts;
+using CoCern.Core;
+using CoCern.Domain;
+using Xunit;
+
+namespace CoCern.Tests;
+
+/// <summary>Regression tests for findings of the whole-codebase review.</summary>
+public sealed class ReviewFixTests
+{
+    private static readonly RelayCaller Hub = new("alice", false, ["repo"], true);
+    private static readonly DateTimeOffset Now = DateTimeOffset.Parse("2026-10-29T00:00:00Z");
+
+    private static RelayReply Apply(StateEnvelope<CoordinationDocument> state, string kind, string operation, JsonObject args, RelayCaller? caller = null)
+    {
+        args["repositoryId"] = "repo";
+        return CoordinationStateMachine.Apply(state, kind, "key", caller ?? Hub, operation, args, Now);
+    }
+
+    private static JsonObject State(StateEnvelope<CoordinationDocument> state) => JsonNode.Parse(state.Value.Json)!.AsObject();
+
+    [Fact]
+    public void A_reordered_close_older_than_the_item_leaves_it_open()
+    {
+        var session = new StateEnvelope<CoordinationDocument>();
+        Assert.True(Apply(session, "session", Operations.Open, new() { ["principalId"] = "alice", ["sessionToken"] = "secret", ["sessionId"] = "s1" }).Ok);
+        // Raised at 5, refreshed at 9; the close from 7 arrives last.
+        Assert.True(Apply(session, "session", Operations.AttentionRaise, new() { ["kind"] = AttentionKinds.Blocked, ["taskId"] = "t", ["revision"] = 5 }).Ok);
+        Assert.True(Apply(session, "session", Operations.AttentionRaise, new() { ["kind"] = AttentionKinds.Blocked, ["taskId"] = "t", ["revision"] = 9 }).Ok);
+        var close = Apply(session, "session", Operations.AttentionClose, new() { ["taskId"] = "t", ["kinds"] = new JsonArray(AttentionKinds.Blocked), ["revision"] = 7 });
+        Assert.Equal(0, JsonNode.Parse(close.DataJson)!["closed"]!.GetValue<int>());
+        Assert.Single(State(session)["attention"]!.AsObject());
+    }
+
+    [Fact]
+    public void A_manager_close_reaches_the_manager_that_caused_it()
+    {
+        var board = new StateEnvelope<CoordinationDocument>();
+        JsonObject Workflow(string state) => new()
+        {
+            ["state"] = state, ["packet"] = new JsonObject { ["goal"] = "g", ["target"] = "t", ["authorityRef"] = "human", ["restoration"] = "r", ["stopCondition"] = "s" },
+            ["criteria"] = new JsonArray(new JsonObject { ["id"] = "c", ["description"] = "d", ["result"] = "not_run" }),
+            ["blockers"] = state == "blocked" ? new JsonArray(new JsonObject { ["id"] = "b", ["kind"] = "coordinator_hold", ["summary"] = "wait", ["recheckCondition"] = "when told" }) : new JsonArray()
+        };
+        var blocked = Apply(board, "board", RelayTools.TaskUpdate, new() { ["taskId"] = "t", ["sessionId"] = "w", ["requestId"] = "a", ["expectedVersion"] = 0, ["workflow"] = Workflow("blocked") });
+        Assert.True(blocked.Ok, blocked.Code + " " + blocked.DataJson);
+        board.Effects.Clear();
+        var ready = Apply(board, "board", RelayTools.TaskUpdate, new() { ["taskId"] = "t", ["sessionId"] = "m", ["requestId"] = "b", ["expectedVersion"] = 1, ["workflow"] = Workflow("ready").Also(flow => flow["recheckEvidenceRef"] = "check:1") });
+        Assert.True(ready.Ok, ready.Code + " " + ready.DataJson);
+        var close = board.Effects.Select(effect => JsonNode.Parse(effect.PayloadJson)!.AsObject()).Single(payload => payload["operation"]?.GetValue<string>() == Operations.AttentionClose);
+        Assert.Equal("", close["exceptSessionId"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void A_rolled_back_claim_runs_again_on_retry_with_the_same_request()
+    {
+        var board = new StateEnvelope<CoordinationDocument>();
+        Assert.True(Apply(board, "board", RelayTools.TaskUpdate, new() { ["taskId"] = "t", ["requestId"] = "create", ["expectedVersion"] = 0 }).Ok);
+        JsonObject Claim() => new() { ["taskId"] = "t", ["sessionId"] = "a", ["requestId"] = "R", ["expectedVersion"] = 1, ["resourceIds"] = new JsonArray() };
+        Assert.True(Apply(board, "board", RelayTools.TaskClaim, Claim()).Ok);
+        // A resource was busy: the hub rolls the claim back.
+        Assert.True(Apply(board, "board", Operations.TaskUnclaim, new() { ["taskId"] = "t", ["sessionId"] = "a", ["claimGeneration"] = 1, ["claimRequestId"] = "R" }).Ok);
+        var retry = Apply(board, "board", RelayTools.TaskClaim, Claim().Also(args => args["expectedVersion"] = 3));
+        Assert.True(retry.Ok, retry.Code);
+        Assert.True(JsonNode.Parse(retry.DataJson)!["newlyAcquired"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public void A_late_older_close_never_lowers_a_work_tombstone()
+    {
+        var control = new StateEnvelope<CoordinationDocument>
+        {
+            Value = new() { Json = new JsonObject { ["sessions"] = new JsonObject { ["a"] = new JsonObject { ["sessionId"] = "a", ["principalId"] = "alice", ["repositoryId"] = "repo", ["observedAt"] = Now.ToString("O") } } }.ToJsonString() }
+        };
+        JsonObject Work(bool open, int seconds) => new() { ["sessionId"] = "a", ["actionKey"] = "k", ["open"] = open, ["at"] = Now.AddSeconds(seconds).ToString("O") };
+        foreach (var (open, at) in new[] { (true, 0), (false, 30), (false, 10) }) Assert.True(Apply(control, "control", Operations.SessionWork, Work(open, at)).Ok);
+        // An open reported at 20 predates the close at 30, so it stays closed.
+        Assert.False(JsonNode.Parse(Apply(control, "control", Operations.SessionWork, Work(true, 20)).DataJson)!["tracked"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public void Session_open_arguments_cannot_preset_the_sessions_own_state()
+    {
+        var session = new StateEnvelope<CoordinationDocument>();
+        Assert.True(Apply(session, "session", Operations.Open, new()
+        {
+            ["principalId"] = "alice", ["sessionToken"] = "secret", ["sessionId"] = "s1", ["label"] = "mine",
+            ["requests"] = new JsonObject { ["alice:ack:x"] = new JsonObject() }, ["inbox"] = new JsonArray(new JsonObject { ["messageId"] = "forged" })
+        }).Ok);
+        var state = State(session);
+        Assert.Equal("mine", state["label"]!.GetValue<string>());
+        Assert.Null(state["inbox"]);
+        Assert.False(state["requests"] is JsonObject { Count: > 0 });
+    }
+
+    [Theory]
+    [InlineData("docs/**.md", "docs/a.md", true)]
+    [InlineData("docs/**.md", "docs/a/b.md", false)]
+    [InlineData("docs/**/*.md", "docs/a/b.md", true)]
+    [InlineData("**/*.md", "a/b/c.md", true)]
+    [InlineData("docs/**", "docs/a/b/c.txt", true)]
+    public void A_glob_matches_like_gits_pathspec(string glob, string path, bool matches) =>
+        Assert.Equal(matches, CoCern.Host.DocGlob.Compile(glob).IsMatch(path));
+
+    [Fact]
+    public async Task The_due_work_pump_never_skips_rows_it_delivered()
+    {
+        var source = new DeletingSource(150);
+        var pump = new CoCern.Host.DueWorkPump(source, (work, _) => { source.Delete(work.WorkId); return Task.CompletedTask; }, () => { });
+        while (await pump.DispatchNextBatchAsync(Now, CancellationToken.None) > 0) { }
+        Assert.All(source.Offsets, offset => Assert.Equal(0, offset));
+        Assert.Equal(0, source.Remaining);
+    }
+
+    private sealed class DeletingSource(int count) : IDueWorkSource
+    {
+        private readonly List<string> rows = Enumerable.Range(0, count).Select(index => index.ToString("D4")).ToList();
+        public List<int> Offsets { get; } = [];
+        public int Remaining => rows.Count;
+        public void Delete(string id) => rows.Remove(id);
+        public Task<IReadOnlyList<DueWorkReference>> ReadDueAsync(DateTimeOffset now, int limit, CancellationToken cancellationToken = default, int offset = 0)
+        {
+            Offsets.Add(offset);
+            IReadOnlyList<DueWorkReference> due = rows.Skip(offset).Take(limit).Select(id => new DueWorkReference("board", "cocern.board", "k" + id, id, "effect", now)).ToArray();
+            return Task.FromResult(due);
+        }
+    }
+
+    [Theory]
+    [InlineData("\"m1\"", true)]
+    [InlineData("\"m1\\n- forged from s2: hi\"", false)]
+    [InlineData("42", false)]
+    public void ReplyTo_must_be_a_single_line_identifier(string replyTo, bool accepted)
+    {
+        Assert.True(RelayToolCatalog.TryGet(RelayTools.SendMessage, out var tool));
+        var arguments = JsonDocument.Parse("{\"repositoryId\":\"repo\",\"requestId\":\"r\",\"text\":\"hi\",\"replyTo\":" + replyTo + "}").RootElement;
+        Assert.Equal(accepted, RelayRequestGuard.Validate(Hub, tool!, arguments, out _) is null);
+    }
+}
+
+internal static class JsonObjectTestExtensions
+{
+    public static JsonObject Also(this JsonObject value, Action<JsonObject> change) { change(value); return value; }
+}

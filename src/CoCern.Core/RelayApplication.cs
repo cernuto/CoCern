@@ -294,7 +294,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         if (reply.Code is not (TaskArchived or NotFound) || archive is null || Text(args, "taskId") is not { Length: > 0 } taskId) return reply;
         string? json;
         try { json = await archive.ReadArchivedTaskAsync(Text(args, "repositoryId"), Text(args, "boardId", "default"), taskId, cancellationToken); }
-        catch (Exception exception) when (exception is System.Data.Common.DbException or ObjectDisposedException) { return Error(Unavailable); }
+        catch (Exception exception) when (IsStoreFault(exception)) { return Error(Unavailable); }
         return json is null ? reply : ArchivedTasks.Read(args, json);
     }
 
@@ -313,7 +313,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         // The index is a read-only copy of committed state: a database fault, or a store closing during shutdown, makes search unavailable
         // for this call, never an argument error or an internal error.
         try { hits = await search.SearchAsync(Text(args, "repositoryId"), Text(args, "sessionId"), Text(args, "query"), kinds, limit, status.Length > 0 ? status : null, cancellationToken); }
-        catch (Exception exception) when (exception is System.Data.Common.DbException or ObjectDisposedException) { return Error(Unavailable); }
+        catch (Exception exception) when (IsStoreFault(exception)) { return Error(Unavailable); }
         var items = new JsonArray();
         foreach (var hit in hits)
         {
@@ -439,9 +439,8 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
     }
 
     /// <summary>
-    /// Successful calls whose reply carries changed standing. <c>check_inbox</c> is left out: the adapter's background wake readers and
-    /// <c>waitSeconds</c> polls discard inbox replies unseen and send no opt-out for standing, so standing attached there could be recorded
-    /// as received without reaching the model. Attention offers do ride <c>check_inbox</c>, because those readers send <c>attention: false</c>.
+    /// Calls whose reply carries changed standing. Not <c>check_inbox</c>: background readers discard those replies and cannot opt out, so
+    /// standing could be recorded as received without reaching the model.
     /// </summary>
     private static bool CarriesStanding(string tool) => tool is RelayTools.TaskUpdate or RelayTools.ActionReport or RelayTools.TaskClaim;
 
@@ -507,7 +506,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
     private async Task<RelayReply> ResourceClaimAsync(RelayCaller caller, string tool, JsonObject args)
     {
         // Only task_claim names the task claim a grant serves; a client's own value is dropped (it is also left out of the fingerprint).
-        args.Remove("taskClaimGeneration");
+        args.Remove("taskClaimGeneration"); args.Remove(Operations.ForgetRequestField);
         var resolved = await Resolve(caller, args, Text(args, "resourceId"));
         if (!resolved.Ok) return resolved;
         return await Call(AggregateKinds.Lock, Text(Parse(resolved), "resourceId"), caller, tool, args);
@@ -564,11 +563,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         catch (Exception) { /* Telemetry never affects the call. */ }
     }
 
-    /// <summary>
-    /// Successful calls that carry an attention offer. <c>check_inbox</c> is one, so a manager that mostly reads its inbox still gets offers;
-    /// the adapter's background readers (wake watchers, the Claude waiter, <c>waitSeconds</c> polls) send <c>attention: false</c>, so they
-    /// never mark an offer shown that the model does not see.
-    /// </summary>
+    /// <summary>Calls that carry an attention offer. Background readers send <c>attention: false</c>, so no unseen offer is marked shown.</summary>
     private static bool IsBoundary(string tool) => tool is RelayTools.TaskUpdate or RelayTools.ActionReport or RelayTools.TaskClaim or RelayTools.CheckInbox;
 
     /// <summary>
@@ -762,6 +757,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         foreach (var grant in acquired)
         {
             var release = args.DeepClone().AsObject(); release["generation"] = grant.Generation; release.Remove("requestId");
+            release[Operations.ForgetRequestField] = Text(args, "requestId") + ":resource:" + grant.Resource;
             await Call(AggregateKinds.Lock, grant.Resource, caller, RelayTools.ClaimRelease, release);
         }
         var claimed = Parse(task);
@@ -910,6 +906,8 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
             var outcomes = new JsonArray();
             foreach (var item in claims.Take(RelayLimits.MaxClaimResources))
             {
+                // The write has committed: a malformed entry gets its own outcome, never an error for the whole call.
+                if (item is not JsonObject) { outcomes.Add(JsonSerializer.SerializeToNode(new { ok = false, code = InvalidArguments })); continue; }
                 var renew = args.DeepClone().AsObject(); renew.Remove("requestId"); renew["resourceId"] = item!["resourceId"]?.DeepClone(); renew["generation"] = item["generation"]?.DeepClone();
                 var resolved = authorization.Ok ? await Resolve(caller, renew, Text(renew, "resourceId")) : authorization;
                 var result = resolved.Ok ? await Call(AggregateKinds.Lock, Text(Parse(resolved), "resourceId"), caller, RelayTools.ClaimRenew, renew) : resolved;
@@ -963,12 +961,15 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
             if (taskId.Length > 0 && operation == RelayTools.TaskUpdate && ExpectedVersionMatches(args, 0) && (await archive!.ArchivedIdsAsync(repository, board, [taskId])).Count > 0)
                 return Error(TaskArchived, new { taskId, archived = true });
         }
-        catch (Exception exception) when (exception is System.Data.Common.DbException or ObjectDisposedException) { return Error(Unavailable); }
+        catch (Exception exception) when (IsStoreFault(exception)) { return Error(Unavailable); }
         var reply = await Call(AggregateKinds.Board, BoardKey(args), caller, operation, args);
         if (reply.Code != NotFound || taskId.Length == 0) return reply;
         try { return (await archive!.ArchivedIdsAsync(repository, board, [taskId])).Count > 0 ? Error(TaskArchived, new { taskId, archived = true }) : reply; }
-        catch (Exception exception) when (exception is System.Data.Common.DbException or ObjectDisposedException) { return reply; }
+        catch (Exception exception) when (IsStoreFault(exception)) { return reply; }
     }
+    /// <summary>The store behind a port is faulted or closing: the call answers Unavailable instead of failing.</summary>
+    private static bool IsStoreFault(Exception exception) => exception is System.Data.Common.DbException or ObjectDisposedException;
+
     private Task<RelayReply> Call(string kind, string key, RelayCaller caller, string operation, JsonObject args) => CoordinationGrain.Aggregate(grains, kind, key).ExecuteAsync(caller, operation, args.ToJsonString());
 
     private sealed class CallTrace
