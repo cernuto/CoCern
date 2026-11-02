@@ -35,9 +35,12 @@ public sealed class RelayForwarder(HttpClient client, AdapterOptions options)
         using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(options.BaseUri, $"api/tools/{tool}"));
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", options.Token);
         request.Content = new StringContent(json, Encoding.UTF8, "application/json");
+        // HttpClient.Timeout stops at the headers under ResponseHeadersRead; this bounds the body read too.
+        using var bounded = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        bounded.CancelAfter(client.Timeout);
         try
         {
-            using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, bounded.Token);
             if ((int)response.StatusCode is >= 300 and < 400) return new(false, "redirect_rejected");
             var failureKind = DomainFailureKind(response.StatusCode);
             if (!response.IsSuccessStatusCode && failureKind is null) return new(false, TransportCode(response.StatusCode));
@@ -48,7 +51,7 @@ public sealed class RelayForwarder(HttpClient client, AdapterOptions options)
                 // anything else stays a generic transport code.
                 try
                 {
-                    var failure = await ReadEnvelopeAsync(response, cancellationToken);
+                    var failure = await ReadEnvelopeAsync(response, bounded.Token);
                     // Only the reader's own size error passes; a parsed hub envelope always carries a version.
                     if (failure is { Code: ResponseTooLarge, Version: null }) return failure;
                     return !failure.Ok && KnownCodes.Contains(failure.Code) && RelayErrorCodes.Classify(failure.Code) == kind ? failure : new(false, TransportCode(response.StatusCode));
@@ -56,7 +59,7 @@ public sealed class RelayForwarder(HttpClient client, AdapterOptions options)
                 catch (JsonException) { return new(false, TransportCode(response.StatusCode)); }
                 catch (InvalidOperationException) { return new(false, TransportCode(response.StatusCode)); }
             }
-            return await ReadEnvelopeAsync(response, cancellationToken);
+            return await ReadEnvelopeAsync(response, bounded.Token);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return new(false, "hub_timeout"); }
         catch (HttpRequestException) { return new(false, "hub_unavailable"); }

@@ -15,6 +15,8 @@ public static class InboxWait
     public const int MaxSeconds = 50;
     public static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan MinimumDelay = TimeSpan.FromMilliseconds(20);
+    /// <summary>How far past the wait one poll may run: <see cref="MaxSeconds"/> plus this stays under Codex's 60 seconds.</summary>
+    internal static readonly TimeSpan PollMargin = TimeSpan.FromSeconds(5);
 
     /// <summary>The property added to the advertised <c>check_inbox</c> schema.</summary>
     public static object Schema => new { type = "integer", minimum = 1, maximum = MaxSeconds, description = "Wait up to this many seconds for mail instead of polling; returns as soon as any message arrives." };
@@ -34,11 +36,20 @@ public static class InboxWait
         // A monotonic clock, and no read for a remainder shorter than a timer tick: the wall clock and the delay timer disagree by a
         // millisecond or so, which otherwise left a sliver that looped through near-zero delays, reading the hub each time.
         var elapsed = System.Diagnostics.Stopwatch.StartNew();
+        AdapterReply? last = null;
         while (true)
         {
-            var reply = await forwarder.ForwardAsync(RelayTools.CheckInbox, request, cancellationToken);
+            // A poll may itself take up to the client's timeout; bound it by the wait, answering with the last empty inbox if it overruns.
+            using var poll = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            var left = duration - elapsed.Elapsed;
+            poll.CancelAfter((left > TimeSpan.Zero ? left : TimeSpan.Zero) + PollMargin);
+            AdapterReply reply;
+            try { reply = await forwarder.ForwardAsync(RelayTools.CheckInbox, request, poll.Token); }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return last ?? new(false, "hub_timeout"); }
+            if (!reply.Ok && poll.IsCancellationRequested && !cancellationToken.IsCancellationRequested) return last ?? reply;
             var remaining = duration - elapsed.Elapsed;
             if (!reply.Ok || HasMail(reply) || remaining < MinimumDelay) return reply;
+            last = reply;
             await Task.Delay(remaining < pollInterval ? remaining : pollInterval, cancellationToken);
         }
     }

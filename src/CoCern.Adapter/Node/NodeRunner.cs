@@ -263,8 +263,7 @@ public sealed class NodeRunner : IAsyncDisposable
                 if (refusal == RelayErrorCodes.RepositoryDenied && chats.Count > 0)
                 {
                     response.Dispose();
-                    response = await LeaveOutDeniedAsync(chats, ct);
-                    refusal = null;
+                    (response, refusal) = await LeaveOutDeniedAsync(chats, ct);
                 }
             }
             if (response.StatusCode == HttpStatusCode.Unauthorized)
@@ -388,20 +387,25 @@ public sealed class NodeRunner : IAsyncDisposable
 
     /// <summary>
     /// The hub refuses a whole announcement when one chat names a repository this PC may not use. Adding one repository at a time finds which; each is reported once
-    /// and left out, and the rest are announced. Any other refusal stops the search and is handled like an ordinary failed announcement.
+    /// and left out, and the rest are announced. Any other failure stops the search and is returned, handled like an ordinary failed announcement.
     /// </summary>
-    private async Task<HttpResponseMessage> LeaveOutDeniedAsync(JsonArray chats, CancellationToken ct)
+    private async Task<(HttpResponseMessage Response, string? Refusal)> LeaveOutDeniedAsync(JsonArray chats, CancellationToken ct)
     {
         var allowed = new HashSet<string>(StringComparer.Ordinal);
         foreach (var repository in chats.Select(Repository).Distinct(StringComparer.Ordinal).ToArray())
         {
-            using var trial = await PostAnnounceAsync(Only(chats, chat => allowed.Contains(Repository(chat)) || Repository(chat) == repository), ct);
-            if (trial.IsSuccessStatusCode) { allowed.Add(repository); continue; }
-            if (trial.StatusCode != HttpStatusCode.Forbidden || Code(await ReadAsync(trial, ct)) != RelayErrorCodes.RepositoryDenied) break;
+            var trial = await PostAnnounceAsync(Only(chats, chat => allowed.Contains(Repository(chat)) || Repository(chat) == repository), ct);
+            if (trial.IsSuccessStatusCode) { trial.Dispose(); allowed.Add(repository); continue; }
+            string? refusal;
+            try { refusal = trial.StatusCode == HttpStatusCode.Forbidden ? Code(await ReadAsync(trial, ct)) : null; }
+            catch { trial.Dispose(); throw; }
+            // Any other failure is the cycle's own, so it retries with the full list; a reduced list is never posted for it.
+            if (refusal != RelayErrorCodes.RepositoryDenied) return (trial, refusal);
+            trial.Dispose();
             if (_denied.Add(repository))
                 _error.WriteLine($"The hub at {_hub} does not let this PC announce chats in repository '{Printable(repository)}'; they are left out until the node restarts.");
         }
-        return await PostAnnounceAsync(Only(chats, chat => allowed.Contains(Repository(chat))), ct);
+        return (await PostAnnounceAsync(Only(chats, chat => allowed.Contains(Repository(chat))), ct), null);
     }
 
     private static JsonArray Only(JsonArray chats, Func<JsonNode?, bool> keep) => new(chats.Where(keep).Select(x => x?.DeepClone()).ToArray());
@@ -418,9 +422,13 @@ public sealed class NodeRunner : IAsyncDisposable
         return await _http!.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
     }
 
-    private static async Task<JsonObject?> ReadAsync(HttpResponseMessage response, CancellationToken ct)
+    private async Task<JsonObject?> ReadAsync(HttpResponseMessage response, CancellationToken cancellationToken)
     {
         if (response.Content.Headers.ContentLength > MaxReplyBytes) return null;
+        // HttpClient.Timeout stops at the headers under ResponseHeadersRead; this bounds the body read too.
+        using var bounded = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        bounded.CancelAfter(_http!.Timeout);
+        var ct = bounded.Token;
         await using var stream = await response.Content.ReadAsStreamAsync(ct);
         using var bytes = new MemoryStream();
         var buffer = new byte[8192];
