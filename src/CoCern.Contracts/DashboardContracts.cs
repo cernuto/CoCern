@@ -262,6 +262,28 @@ public sealed record DashboardConnectClient
     public string? Detail { get; init; }
 }
 
+/// <summary>
+/// The Sessions page's "Close idle sessions": closes <see cref="RepositoryId"/>'s sessions idle for at least <see cref="IdleMinutes"/>
+/// and/or labelled starting with <see cref="LabelPrefix"/> (with both, a session must match both), through <c>control_request close_sessions</c>.
+/// </summary>
+public sealed record DashboardCloseSessionsRequest
+{
+    public string RepositoryId { get; init; } = "";
+    public int? IdleMinutes { get; init; }
+    public string? LabelPrefix { get; init; }
+}
+
+/// <summary>What closing sessions did: <see cref="Closed"/> and <see cref="Kept"/> (still answering for an open action), the first closed IDs, or the hub's error <see cref="Code"/>.</summary>
+public sealed record DashboardCloseSessionsResult
+{
+    public int Closed { get; init; }
+    public int Kept { get; init; }
+    public string[] Ids { get; init; } = [];
+    public string? Code { get; init; }
+    /// <summary>The argument the hub refused, when it named one.</summary>
+    public string? Field { get; init; }
+}
+
 public sealed record DashboardTrafficEvent
 {
     public long Sequence { get; init; }

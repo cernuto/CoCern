@@ -259,7 +259,9 @@ internal static class ToolSchemas
             case RelayTools.DocSync:
                 properties["branch"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxDocBranchLength, description = "Branch to follow from now on; default the configured one." }; break;
             case RelayTools.ControlRequest:
-                properties["command"] = new { type = "string", @enum = new[] { "pause", "resume", "stop", "cancel", "register_resource", "revoke_machine" } };
+                properties["command"] = new { type = "string", @enum = new[] { "pause", "resume", "stop", "cancel", "register_resource", "revoke_machine", "close_sessions" } };
+                properties["idleMinutes"] = new { type = "integer", minimum = RelayLimits.MinCloseSessionsIdleMinutes, description = "close_sessions: sessions not seen for at least this many minutes." };
+                properties["labelPrefix"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxIdentifierLength, description = "close_sessions: sessions whose label starts with this, ignoring case; with idleMinutes both must match." };
                 properties["aliases"] = new { type = "array", items = new { type = "string" } }; Text("reason", "Coordination control explanation."); Text("machineId", "Machine to revoke; required by revoke_machine."); break;
         }
         return properties;

@@ -280,6 +280,16 @@ public static class RelayLimits
     /// told so: its chat then gets <c>SessionUnknown</c> with <c>expired</c> and opens a new session. At least the attention route's idle limit.
     /// </summary>
     public const int StaleSessionHours = MaxAttentionRouteIdleHours;
+    /// <summary>Hours without being seen before the hub's periodic sweep closes a session (<c>Relay:Sessions:IdleHours</c>), and its limits.</summary>
+    public const int DefaultSessionIdleHours = 24;
+    public const int MinSessionIdleHours = 2;
+    public const int MaxSessionIdleHours = 720;
+    /// <summary>Least <c>idleMinutes</c> a <c>close_sessions</c> filter takes, so a bulk close never catches a chat that is merely between turns.</summary>
+    public const int MinCloseSessionsIdleMinutes = 60;
+    /// <summary>Sessions one sweep or <c>close_sessions</c> closes at most, so their expiry notices fit the outbox; the rest close on the next run.</summary>
+    public const int MaxSessionsClosedPerCall = MaxRecords / 4;
+    /// <summary>Closed session IDs a <c>close_sessions</c> reply lists; <c>closed</c> still counts them all.</summary>
+    public const int MaxClosedSessionIds = MaxPageSize;
     /// <summary>
     /// Unresolved actions the session directory remembers per session (so it never expires a session that still answers for one). Past
     /// this, the session is marked, and stays exempt until no new action has overflowed it for <see cref="SessionWorkRetentionDays"/>.

@@ -1,0 +1,162 @@
+@using System.Net
+@using System.Net.Http.Json
+@inject HttpClient Http
+
+@* Two siblings, so the toggle sits in the Sessions toolbar and the panel wraps under it at full width. *@
+<button type="button" class="close-sessions-toggle" aria-expanded="@(_open ? "true" : "false")" aria-controls="close-sessions-panel" @onclick="Toggle">Close idle sessions</button>
+@if (_open)
+{
+    <section id="close-sessions-panel" class="surface close-sessions-panel" aria-labelledby="close-sessions-heading">
+        <h2 id="close-sessions-heading">Close idle sessions</h2>
+        @if (Repositories.Length == 0)
+        {
+            <p class="close-sessions-note">No sessions are listed, so there is nothing to close.</p>
+        }
+        else if (!_confirming)
+        {
+            <form class="close-sessions-form" @onsubmit="Review">
+                @if (Repositories.Length == 1)
+                {
+                    <p class="close-sessions-repository">Repository <strong>@_repository</strong></p>
+                }
+                else
+                {
+                    <label class="close-sessions-repository">Repository
+                        <select @bind="_repository">
+                            @foreach (var repository in Repositories)
+                            {
+                                <option value="@repository">@repository</option>
+                            }
+                        </select>
+                    </label>
+                }
+                <fieldset>
+                    <legend>Close sessions that are</legend>
+                    <div class="close-sessions-options">
+                        <label class="close-sessions-option"><input type="radio" name="close-sessions-filter" checked="@(_filter == Filter.Day)" @onchange="() => Choose(Filter.Day)" />Idle for over a day</label>
+                        <label class="close-sessions-option"><input type="radio" name="close-sessions-filter" checked="@(_filter == Filter.Hour)" @onchange="() => Choose(Filter.Hour)" />Idle for over an hour</label>
+                        <span class="close-sessions-option close-sessions-prefix">
+                            <label class="close-sessions-option"><input type="radio" name="close-sessions-filter" checked="@(_filter == Filter.Label)" @onchange="() => Choose(Filter.Label)" />Labelled starting with</label>
+                            <input type="text" aria-label="Label prefix" placeholder="e.g. smoke" maxlength="256" autocomplete="off" spellcheck="false" @bind="_prefix" @bind:event="oninput" @onfocus="() => Choose(Filter.Label)" />
+                        </span>
+                    </div>
+                </fieldset>
+                <div class="close-sessions-actions">
+                    <button type="submit" class="connect-button" disabled="@(!CanReview)">Review</button>
+                    <button type="button" class="close-sessions-secondary" @onclick="Toggle">Cancel</button>
+                </div>
+            </form>
+        }
+        else
+        {
+            <p class="close-sessions-confirm-copy">Close every session in <strong>@_repository</strong> @Describe()?</p>
+            <p class="close-sessions-note">Each one leaves the session list, and its chat is told the session expired and can open a new one. Sessions still answering for an open action stay open. This can't be undone.</p>
+            <div class="close-sessions-actions">
+                <button type="button" class="connect-button" @ref="_confirmButton" disabled="@_busy" @onclick="CloseAsync">@(_busy ? "Closing…" : "Close sessions")</button>
+                <button type="button" class="close-sessions-secondary" disabled="@_busy" @onclick="Back">Back</button>
+            </div>
+        }
+        <p class="close-sessions-result" role="status">@_message</p>
+    </section>
+}
+
+@code {
+    [Parameter] public DashboardSession[] Sessions { get; set; } = [];
+
+    private enum Filter { Day, Hour, Label }
+    private const int DayMinutes = 1440;
+    private const int HourMinutes = 60;
+    private bool _open;
+    private bool _confirming;
+    private bool _busy;
+    private bool _focusConfirm;
+    private Filter _filter = Filter.Day;
+    private string _prefix = "";
+    private string? _repository;
+    private string? _message;
+    private ElementReference _confirmButton;
+
+    private string[] Repositories => Sessions.Select(session => session.RepositoryId).Where(id => !string.IsNullOrWhiteSpace(id)).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
+    private bool CanReview => _repository is not null && (_filter != Filter.Label || !string.IsNullOrWhiteSpace(_prefix));
+
+    protected override void OnParametersSet()
+    {
+        // Keep the chosen repository while it is still listed; otherwise take the first.
+        var repositories = Repositories;
+        if (_repository is null || !repositories.Contains(_repository, StringComparer.Ordinal)) _repository = repositories.FirstOrDefault();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!_focusConfirm) return;
+        _focusConfirm = false;
+        try { await _confirmButton.FocusAsync(); }
+        catch (InvalidOperationException) { }
+    }
+
+    private void Toggle()
+    {
+        _open = !_open;
+        _confirming = false;
+        _message = null;
+    }
+
+    private void Choose(Filter filter) => _filter = filter;
+
+    private void Review()
+    {
+        if (!CanReview) return;
+        _message = null;
+        _confirming = true;
+        _focusConfirm = true;
+    }
+
+    private void Back() => _confirming = false;
+
+    private string Describe() => _filter switch
+    {
+        Filter.Day => "that has not been seen for over a day",
+        Filter.Hour => "that has not been seen for over an hour",
+        _ => $"whose label starts with “{_prefix.Trim()}” (any case)"
+    };
+
+    private async Task CloseAsync()
+    {
+        if (_repository is null) return;
+        _busy = true;
+        var request = new DashboardCloseSessionsRequest
+        {
+            RepositoryId = _repository,
+            IdleMinutes = _filter switch { Filter.Day => DayMinutes, Filter.Hour => HourMinutes, _ => null },
+            LabelPrefix = _filter == Filter.Label ? _prefix.Trim() : null
+        };
+        try
+        {
+            using var response = await Http.PostAsJsonAsync("api/sessions/close", request);
+            DashboardCloseSessionsResult? result = null;
+            if (response.Content.Headers.ContentType?.MediaType == "application/json")
+                result = await response.Content.ReadFromJsonAsync<DashboardCloseSessionsResult>();
+            _message = response.IsSuccessStatusCode && result is not null
+                ? $"Closed {result.Closed}, kept {result.Kept}." + (result.Kept > 0 ? " Kept sessions still answer for an open action." : "") + (result.Closed > 0 ? " The list updates with the next snapshot." : "")
+                : Refused(response.StatusCode, result);
+            _confirming = false;
+        }
+        catch (Exception error) when (error is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException)
+        {
+            _message = "The hub did not answer. Nothing may have changed; try again.";
+        }
+        finally { _busy = false; }
+    }
+
+    private static string Refused(HttpStatusCode status, DashboardCloseSessionsResult? result) => (status, result?.Code, result?.Field) switch
+    {
+        (_, "InvalidArguments", "labelPrefix") => "Enter the start of a label to match.",
+        (_, "InvalidArguments", "idleMinutes") => "Choose an idle time of at least an hour.",
+        (_, "InvalidArguments", "repositoryId") => "Choose a repository.",
+        (_, "AdministratorRequired", _) => "Only an administrator can close sessions.",
+        (HttpStatusCode.Unauthorized, _, _) => "Your sign-in has ended. Reload the page and sign in again.",
+        (HttpStatusCode.Forbidden, null, _) => "This page could not confirm it is the hub's own dashboard. Reload it and try again.",
+        (_, { } code, _) => $"The hub did not close any sessions ({code}).",
+        _ => "The hub did not close any sessions. Try again."
+    };
+}

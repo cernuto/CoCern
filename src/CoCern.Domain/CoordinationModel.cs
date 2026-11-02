@@ -218,6 +218,11 @@ public static class Operations
     /// session tells the control directory (<c>owns</c>) when it starts or stops owning any. The directory never expires such a session.
     /// </summary>
     public const string SessionWork = "__session_work";
+    /// <summary>
+    /// The hub's periodic sweep, sent to the control directory: closes sessions in every repository not seen for <c>idleHours</c>, as the
+    /// full-directory cleanup does (each is sent <see cref="SessionExpire"/>); one that answers for an unresolved action is kept.
+    /// </summary>
+    public const string SweepSessions = "__sweep_sessions";
     /// <summary>Server-set on <c>task_claim</c> and <c>action_begin</c>: ask the board for the declared resources (<c>DeclaredResourcesNeeded</c>) when the task has any.</summary>
     public const string ResolveDeclaredField = "resolveDeclared";
     /// <summary>Server-set on <c>action_begin</c>: the first declared resource whose lock this session does not hold (<c>code</c>, <c>resourceId</c>).</summary>

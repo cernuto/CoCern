@@ -1,7 +1,10 @@
 <div class="sessions-view">
-    <div class="session-view-switch" role="group" aria-label="Session view">
-        <button type="button" aria-pressed="@(_graph ? "true" : "false")" @onclick="() => _graph = true">Interaction map</button>
-        <button type="button" aria-pressed="@(!_graph ? "true" : "false")" @onclick="() => _graph = false">Session list</button>
+    <div class="sessions-toolbar">
+        <div class="session-view-switch" role="group" aria-label="Session view">
+            <button type="button" aria-pressed="@(_graph ? "true" : "false")" @onclick="() => _graph = true">Interaction map</button>
+            <button type="button" aria-pressed="@(!_graph ? "true" : "false")" @onclick="() => _graph = false">Session list</button>
+        </div>
+        <CloseSessionsControl Sessions="@Sessions" />
     </div>
     @if (_graph)
     {

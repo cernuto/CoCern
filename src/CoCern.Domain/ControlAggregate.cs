@@ -22,6 +22,7 @@ internal static class ControlAggregate
             RelayTools.SessionOpen => OpenSession(context),
             Operations.Register => RegisterSession(context),
             Operations.SessionWork => TrackWork(context),
+            Operations.SweepSessions => SweepSessions(context),
             RelayTools.WorkerList => ListWorkers(context),
             RelayTools.GetStatus => Status(context),
             Operations.Resolve => ResolveResource(context),
@@ -77,17 +78,74 @@ internal static class ControlAggregate
     private static void DropStaleSessions(AggregateContext context, JsonObject sessions)
     {
         var cutoff = context.Now.AddHours(-RelayLimits.StaleSessionHours);
-        var stale = sessions.Select(entry => (entry.Key, Session: entry.Value as JsonObject, Seen: entry.Value is JsonObject record ? LastSeen(record) : DateTimeOffset.MinValue))
-            .Where(entry => entry.Seen <= cutoff && !(entry.Session is { } record && OwnsWork(record, context.Now))).OrderBy(entry => entry.Seen).ThenBy(entry => entry.Key, StringComparer.Ordinal)
-            .Take(sessions.Count - RelayLimits.RetainedEntriesAfterPrune).ToList();
-        foreach (var (id, session, _) in stale)
+        CloseSessions(context, sessions, (_, session) => session is null || LastSeen(session) <= cutoff, sessions.Count - RelayLimits.RetainedEntriesAfterPrune);
+    }
+
+    /// <summary>
+    /// The one way the directory closes sessions (a full directory's cleanup, the hub's sweep, <c>close_sessions</c>): of the entries
+    /// <paramref name="matches"/> accepts, closes up to <paramref name="limit"/>, least recently seen first, and returns their IDs in that order.
+    /// One that answers for an unresolved action is never closed (its expiry would leave nobody able to report it) and is counted as kept.
+    /// Each closed session leaves the directory and is sent <see cref="Operations.SessionExpire"/>, under its own repository, so its chat
+    /// gets a clean <c>SessionUnknown</c> and opens again.
+    /// </summary>
+    private static (List<string> Closed, int Kept) CloseSessions(AggregateContext context, JsonObject sessions, Func<string, JsonObject?, bool> matches, int limit)
+    {
+        var matched = sessions.Select(entry => (entry.Key, Session: entry.Value as JsonObject)).Where(entry => matches(entry.Key, entry.Session))
+            .Select(entry => (entry.Key, entry.Session, Seen: entry.Session is { } record ? LastSeen(record) : DateTimeOffset.MinValue, Owns: entry.Session is { } owner && OwnsWork(owner, context.Now))).ToList();
+        var closing = matched.Where(entry => !entry.Owns).OrderBy(entry => entry.Seen).ThenBy(entry => entry.Key, StringComparer.Ordinal).Take(Math.Max(0, limit)).ToList();
+        foreach (var (id, session, _, _) in closing)
         {
             sessions.Remove(id);
             var repository = session is null ? "" : Text(session, "repositoryId");
-            // Its own caller: the session belongs to its repository, which the caller opening a new session may not reach.
+            // Its own caller: the session belongs to its repository, which the caller that closed it may not reach (or may reach them all).
             context.Emit(AggregateKinds.Session, id, Operations.SessionExpire, new JsonObject { ["repositoryId"] = repository, ["sessionId"] = id },
                 new RelayCaller("relay-directory", false, [repository]));
         }
+        return (closing.Select(entry => entry.Key).ToList(), matched.Count(entry => entry.Owns));
+    }
+
+    /// <summary>
+    /// <see cref="Operations.SweepSessions"/>: the hub's periodic sweep, across every repository, closes sessions not seen (fresh, active or
+    /// observed) for <c>idleHours</c>. Replies how many it closed, and how many as idle it kept because they answer for unresolved actions.
+    /// </summary>
+    private static RelayReply SweepSessions(AggregateContext context)
+    {
+        var hours = Number(context.Args, "idleHours");
+        if (hours <= 0) return Error(InvalidArguments, new { field = "idleHours" });
+        var cutoff = context.Now.AddHours(-hours);
+        var (closed, kept) = CloseSessions(context, ObjectAt(context.State, "sessions"), (_, session) => session is null || LastSeen(session) <= cutoff, RelayLimits.MaxSessionsClosedPerCall);
+        return Ok(new { closed = closed.Count, kept });
+    }
+
+    /// <summary>
+    /// <c>control_request close_sessions</c>: closes this repository's sessions not seen for <c>idleMinutes</c> (at least
+    /// <see cref="RelayLimits.MinCloseSessionsIdleMinutes"/>) and/or whose label starts with <c>labelPrefix</c> (ignoring case); with both,
+    /// a session must match both. The caller's own session is never closed. Replies the count closed and kept, and the first closed IDs.
+    /// </summary>
+    private static RelayReply CloseSessionsByFilter(AggregateContext context)
+    {
+        var args = context.Args;
+        long? minutes = null;
+        if (args["idleMinutes"] is { } idle)
+        {
+            // A whole JSON number only: a quoted or fractional value would read as some other idle time.
+            if (idle is not JsonValue value || value.GetValueKind() != JsonValueKind.Number || !long.TryParse(value.ToJsonString(), out var parsed) || parsed < RelayLimits.MinCloseSessionsIdleMinutes)
+                return Error(InvalidArguments, new { field = "idleMinutes", minimum = RelayLimits.MinCloseSessionsIdleMinutes });
+            minutes = parsed;
+        }
+        string? prefix = null;
+        if (args["labelPrefix"] is { } label)
+        {
+            if (label is not JsonValue text || !text.TryGetValue<string>(out var parsed) || string.IsNullOrWhiteSpace(parsed) || parsed.Length > RelayLimits.MaxIdentifierLength)
+                return Error(InvalidArguments, new { field = "labelPrefix" });
+            prefix = parsed;
+        }
+        if (minutes is null && prefix is null) return Error(InvalidArguments, new { field = "idleMinutes", hint = "give idleMinutes, labelPrefix or both" });
+        var cutoff = minutes is { } span ? context.Now.AddMinutes(-span) : DateTimeOffset.MaxValue;
+        var own = context.SessionId;
+        var (closed, kept) = CloseSessions(context, ObjectAt(context.State, "sessions"), (id, session) => session is not null && id != own && Text(session, "repositoryId") == context.Repository
+            && LastSeen(session) <= cutoff && (prefix is null || Text(session, "label").StartsWith(prefix, StringComparison.OrdinalIgnoreCase)), RelayLimits.MaxSessionsClosedPerCall);
+        return Ok(new { closed = closed.Count, kept, ids = closed.Take(RelayLimits.MaxClosedSessionIds).ToArray() });
     }
 
     private const string OwnsWorkKey = "ownsWork";
@@ -274,6 +332,7 @@ internal static class ControlAggregate
         if (!context.Caller.IsAdministrator) return Error(AdministratorRequired);
         var command = Required(context.Args, "command");
         if (command == "register_resource") return RegisterResource(context);
+        if (command == "close_sessions") return CloseSessionsByFilter(context);
         var state = context.State;
         if (command is "pause" or "stop") state["paused"] = true;
         else if (command == "resume") state["paused"] = false;

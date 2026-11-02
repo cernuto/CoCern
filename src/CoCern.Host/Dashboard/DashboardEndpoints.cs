@@ -1,10 +1,13 @@
 using System.Security.Claims;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
+using CoCern.Contracts;
 using CoCern.Contracts.Dashboard;
 using CoCern.Core;
+using CoCern.Domain;
 using CoCern.Storage;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 
@@ -88,6 +91,8 @@ public static class DashboardEndpoints
             return DashboardConnect.ClientIds.Contains(client) ? Results.Ok(await connect.ConnectAsync(client, context.RequestAborted)) : Results.NotFound();
         }).RequireAuthorization(DashboardSecurity.Policy);
         api.MapGet("/snapshot", (DashboardCollector collector) => Results.Ok(collector.Current)).RequireAuthorization(DashboardSecurity.Policy);
+        // The Sessions page's "Close idle sessions": the cookie alone would let another site's form post this, so it also needs this origin.
+        api.MapPost("/sessions/close", CloseSessionsAsync).RequireAuthorization(DashboardSecurity.Policy);
         app.MapHub<DashboardHub>("/dashboard/hub", options =>
         {
             options.ApplicationMaxBufferSize = 256 * 1024;
@@ -119,11 +124,54 @@ public static class DashboardEndpoints
         return app;
     }
 
-    private static async Task<IResult> LoginAsync(HttpContext context, DashboardSecurity security, DashboardSignInLink link, DashboardAuthenticationSettings settings)
+    /// <summary>
+    /// Runs <c>control_request close_sessions</c> for one repository as the signed-in viewer (an administrator, or it could not have signed in).
+    /// Only the repository and the filter are forwarded, never a session, and the reply is the counts and closed IDs, never a session record.
+    /// </summary>
+    private static async Task<IResult> CloseSessionsAsync(HttpContext context, IRelayApplication application)
     {
         if (!DashboardSecurity.SecureTransport(context) || !DashboardSecurity.SameOrigin(context)) return Results.StatusCode(403);
+        if (context.User.FindFirstValue(ClaimTypes.NameIdentifier) is not { Length: > 0 } principalId) return Results.StatusCode(403);
+        if (await ReadBodyAsync(context) is not { } body) return Results.StatusCode(413);
+        var arguments = new JsonObject { ["requestId"] = "dashboard-close-" + Guid.NewGuid().ToString("N"), ["command"] = "close_sessions" };
+        string repository;
+        try
+        {
+            using var json = JsonDocument.Parse(body, new JsonDocumentOptions { MaxDepth = 4 });
+            if (json.RootElement.ValueKind != JsonValueKind.Object) return CloseRefused(RelayErrorCodes.InvalidArguments, null);
+            if (!json.RootElement.TryGetProperty("repositoryId", out var id) || id.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(id.GetString()))
+                return CloseRefused(RelayErrorCodes.InvalidArguments, "repositoryId");
+            repository = id.GetString()!;
+            arguments["repositoryId"] = repository;
+            // The filter goes to the hub as sent, so the hub alone decides what a valid one is.
+            foreach (var name in new[] { "idleMinutes", "labelPrefix" })
+                if (json.RootElement.TryGetProperty(name, out var value) && value.ValueKind != JsonValueKind.Null) arguments[name] = JsonNode.Parse(value.GetRawText());
+        }
+        catch (JsonException) { return CloseRefused(RelayErrorCodes.InvalidArguments, null); }
+        var reply = await application.ExecuteAsync(new RelayCaller(principalId, true, [repository]), RelayTools.ControlRequest,
+            JsonSerializer.SerializeToElement(arguments), context.RequestAborted);
+        JsonNode? data;
+        try { data = JsonNode.Parse(reply.DataJson); }
+        catch (JsonException) { data = null; }
+        if (!reply.Ok) return CloseRefused(reply.Code, (data as JsonObject)?["field"] is JsonValue field && field.TryGetValue<string>(out var name) ? name : null, ToolResults.Status(reply));
+        return Results.Ok(new DashboardCloseSessionsResult
+        {
+            Closed = Count(data?["closed"]),
+            Kept = Count(data?["kept"]),
+            Ids = (data?["ids"] as JsonArray)?.Select(item => item is JsonValue value && value.TryGetValue<string>(out var text) ? text : null).OfType<string>().ToArray() ?? []
+        });
+
+        static int Count(JsonNode? node) => node is JsonValue value && value.TryGetValue<int>(out var count) ? count : 0;
+    }
+
+    private static IResult CloseRefused(string code, string? field, int status = StatusCodes.Status400BadRequest) =>
+        Results.Json(new DashboardCloseSessionsResult { Code = code, Field = field }, statusCode: status);
+
+    /// <summary>The request body up to 16 KiB, or null when it is larger.</summary>
+    private static async Task<byte[]?> ReadBodyAsync(HttpContext context)
+    {
         const int maximumBytes = 16 * 1024;
-        if (context.Request.ContentLength > maximumBytes) return Results.StatusCode(413);
+        if (context.Request.ContentLength > maximumBytes) return null;
         using var body = new MemoryStream();
         var buffer = new byte[maximumBytes + 1];
         while (body.Length <= maximumBytes)
@@ -132,14 +180,20 @@ public static class DashboardEndpoints
             if (count == 0) break;
             body.Write(buffer, 0, count);
         }
-        if (body.Length > maximumBytes) return Results.StatusCode(413);
+        return body.Length > maximumBytes ? null : body.ToArray();
+    }
+
+    private static async Task<IResult> LoginAsync(HttpContext context, DashboardSecurity security, DashboardSignInLink link, DashboardAuthenticationSettings settings)
+    {
+        if (!DashboardSecurity.SecureTransport(context) || !DashboardSecurity.SameOrigin(context)) return Results.StatusCode(403);
+        if (await ReadBodyAsync(context) is not { } body) return Results.StatusCode(413);
         ClaimsPrincipal? principal;
         var now = DateTimeOffset.UtcNow;
         DateTimeOffset expires;
         var rememberBrowser = false;
         try
         {
-            using var json = JsonDocument.Parse(body.ToArray(), new JsonDocumentOptions { MaxDepth = 4 });
+            using var json = JsonDocument.Parse(body, new JsonDocumentOptions { MaxDepth = 4 });
             if (json.RootElement.ValueKind != JsonValueKind.Object) return Results.BadRequest();
             if (json.RootElement.TryGetProperty("rememberBrowser", out var remember))
             {

@@ -43,7 +43,7 @@ Admin tools need a token with `IsAdministrator`. A session's `role` grants nothi
 | `doc_search`, `doc_section` | worker | Search docs by section; read one section. |
 | `standing_put` | admin | Write standing lines, grants and board settings. |
 | `order_put`, `order_remove` | admin | Add or remove a standing order. |
-| `control_request` | admin | Pause or resume dispatch, request cancellation, register a [resource](#resources), or revoke a PC. It never stops work already running. |
+| `control_request` | admin | Pause or resume dispatch, request cancellation, register a [resource](#resources), close [sessions](#calls) in bulk, or revoke a PC. It never stops work already running. |
 | `analytics_query` | admin | Run a named analytics query, or ad hoc SQL. |
 | `doc_sync` | admin | Sync a repository's docs now. |
 
@@ -55,7 +55,7 @@ Every call takes `repositoryId`. Session calls also take `sessionId` and `sessio
 
 **Retries.** Retry a write with the same `requestId`. Within 24 hours it does not run again; it gets the first reply. Only your own arguments count as the same request, not what the hub adds. A very busy board or session (over about 7,500 writes in a day) may drop that reply early: the retry then gets `RequestExpired` (409), so read the current state and decide.
 
-**Sessions.** Keep one session per chat and reuse its handle across reconnects. A `session_open` retried with the same `requestId` and arguments returns the same session, token included, so a lost reply never makes a second session; other arguments under that `requestId` get `RequestConflict`. After `SessionUnknown`, open with a new `requestId`. The session list holds 2,048. When it is full, `session_open` closes sessions not seen for a day, except those with an action still open. A closed session's calls get `SessionUnknown` with `expired: true`: call `session_open` again. If only sessions with open actions fill it, `session_open` gets `CapacityExceeded` with `heldByUnresolvedActions`: report or [recover](#stranded-actions) those actions.
+**Sessions.** Keep one session per chat and reuse its handle across reconnects. A `session_open` retried with the same `requestId` and arguments returns the same session, token included, so a lost reply never makes a second session; other arguments under that `requestId` get `RequestConflict`. After `SessionUnknown`, open with a new `requestId`. The hub closes sessions not seen for `Relay:Sessions:IdleHours` (a day by default), and an administrator can close them sooner: `control_request` with `"command": "close_sessions"` and `idleMinutes` (60 or more) and/or `labelPrefix` (both must match when both are given) closes that repository's matching sessions, never the caller's own, and answers `closed`, `kept` and up to 50 `ids`. The Sessions page has the same as **Close idle sessions**. A session with an action still open is never closed. The session list holds 2,048; when it is full, `session_open` also closes sessions not seen for a day. A closed session's calls get `SessionUnknown` with `expired: true`: call `session_open` again. If only sessions with open actions fill it, `session_open` gets `CapacityExceeded` with `heldByUnresolvedActions`: report or [recover](#stranded-actions) those actions.
 
 **Large items.** A message or note too large to read back is refused with `PayloadTooLarge` (`maxBytes`, `bytes`). A stored item too large for any page comes back alone as a piece (`truncated: true`, `bytes`, `part`): call again with the same `cursor` and `partOffset` set to `nextPartOffset`. Joined, the pieces are the item's JSON.
 
@@ -336,6 +336,7 @@ Set them in `appsettings.json`, as environment variables (`Relay__Clients__0__To
 | `Relay:GatewayPort` | 0 (off) | An Orleans client gateway (loopback). Leave it off: nothing uses it, and it would let any local process call grains without a token. |
 | `Relay:ClusterId` | `CoCern` | Orleans cluster name. |
 | `Relay:Board:ArchiveAfterDays` | 30 | Days after completion before a task is archived (0 to 3650). |
+| `Relay:Sessions:IdleHours` | 24 | Hours without a call after which the hub closes a session, checked every 10 minutes (2 to 720). Activity is recorded about hourly, so closing is accurate to about an hour. |
 | `Relay:Dashboard:ViewerPrincipalIds:N` | | Administrator principals that may open the dashboard. The start script and Visual Studio profile set theirs. |
 | `Relay:Dashboard:OpenOnStart` | `false` | Open the dashboard in the default browser when the hub starts, already signed in with that start's one-time link. The Visual Studio launch profile turns it on. |
 | `Relay:Dashboard:SessionHours` | 8 | Hours a dashboard sign-in lasts in that browser session (1 to 168). The deadline is fixed at sign-in; use doesn't extend it. |
