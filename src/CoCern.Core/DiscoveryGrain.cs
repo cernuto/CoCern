@@ -49,7 +49,9 @@ public sealed class DiscoveryGrain([PersistentState("discovery", "relay")] IPers
             // Reload reconciles uncertain writes before any further operation.
             uncertainCommit = true;
             persistent.State = previous;
+            // A reload that fails too leaves the commit uncertain (the next call is refused until a fresh activation reloads); never a 500.
             try { await persistent.ReadStateAsync(); uncertainCommit = false; }
+            catch (Exception) { }
             finally { DeactivateOnIdle(); }
             return false;
         }

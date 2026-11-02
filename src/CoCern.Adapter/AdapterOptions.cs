@@ -74,9 +74,18 @@ public sealed class AdapterOptions
         }
         else token = environment("COCERN_TOKEN");
 
-        return new AdapterOptions(environment("COCERN_URL") ?? DefaultUrl, token ?? "",
+        var url = environment("COCERN_URL") ?? DefaultUrl;
+        // A pinned certificate (Connect sets it for the hub's loopback HTTPS): the token goes only to the hub that holds that certificate.
+        string? fingerprint = null;
+        if (environment("COCERN_FINGERPRINT") is { Length: > 0 } pinned)
+        {
+            fingerprint = pinned.Replace(":", "").Trim().ToUpperInvariant();
+            if (!PinnedCertificate.IsFingerprint(fingerprint)) throw new AdapterConfigurationException("COCERN_FINGERPRINT must be the hub certificate's SHA-256 fingerprint: 64 hexadecimal characters.");
+            if (!url.StartsWith("https://", StringComparison.OrdinalIgnoreCase)) throw new AdapterConfigurationException("COCERN_FINGERPRINT applies only to an https:// COCERN_URL.");
+        }
+        return new AdapterOptions(url, token ?? "",
             string.Equals(environment("COCERN_ROLE"), "admin", StringComparison.OrdinalIgnoreCase),
-            string.Equals(environment("COCERN_SIGNALR"), "true", StringComparison.OrdinalIgnoreCase)) { ChatOnly = chatOnly };
+            string.Equals(environment("COCERN_SIGNALR"), "true", StringComparison.OrdinalIgnoreCase)) { ChatOnly = chatOnly, PinnedFingerprint = fingerprint };
     }
 
     /// <summary>A copy of <paramref name="other"/>, so a caller can change one init-only setting.</summary>

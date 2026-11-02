@@ -214,7 +214,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
     {
         RelayTools.TaskClaim => claims.ClaimTaskAsync(caller, args, session),
         RelayTools.ClaimRenew or RelayTools.ClaimRelease when Text(args, "taskId").Length > 0 && Text(args, "resourceId").Length == 0 => CallBoard(caller, tool, args),
-        RelayTools.ClaimAcquire or RelayTools.ClaimRenew or RelayTools.ClaimRelease => claims.ResourceClaimAsync(caller, tool, args),
+        RelayTools.ClaimAcquire or RelayTools.ClaimRenew or RelayTools.ClaimRelease => claims.ResourceClaimAsync(caller, tool, args, session),
         RelayTools.ActionBegin => claims.BeginActionAsync(caller, args, session),
         RelayTools.SendMessage => SendMessageAsync(caller, args),
         RelayTools.GetStatus => StatusAsync(caller, args, false),
@@ -583,15 +583,15 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         if (args["renewClaims"] is not JsonArray && args["ackMessageIds"] is not JsonArray) return committed;
         var conveniences = new JsonObject();
         var authorization = await VerifySessionAsync(caller, args);
-        if (args["renewClaims"] is JsonArray claims)
+        if (args["renewClaims"] is JsonArray renewals)
         {
             var outcomes = new JsonArray();
-            foreach (var item in claims.Take(RelayLimits.MaxClaimResources))
+            foreach (var item in renewals.Take(RelayLimits.MaxClaimResources))
             {
                 // The write has committed: a malformed entry gets its own outcome, never an error for the whole call.
                 if (item is not JsonObject) { outcomes.Add(JsonSerializer.SerializeToNode(new { ok = false, code = InvalidArguments })); continue; }
                 var renew = args.DeepClone().AsObject(); renew.Remove("requestId"); renew["resourceId"] = item!["resourceId"]?.DeepClone(); renew["generation"] = item["generation"]?.DeepClone();
-                var resolved = authorization.Ok ? await Resolve(caller, renew, Text(renew, "resourceId")) : authorization;
+                var resolved = authorization.Ok ? await claims.ResolveForSession(caller, renew, Parse(authorization), Text(renew, "resourceId")) : authorization;
                 var result = resolved.Ok ? await Call(AggregateKinds.Lock, Text(Parse(resolved), "resourceId"), caller, RelayTools.ClaimRenew, renew) : resolved;
                 outcomes.Add(JsonSerializer.SerializeToNode(new { ok = result.Ok, code = result.Code, data = JsonNode.Parse(result.DataJson) }));
             }

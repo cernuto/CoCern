@@ -15,11 +15,19 @@ namespace CoCern.Core;
 /// </summary>
 internal sealed class ClaimComposer(Aggregates aggregates)
 {
-    public async Task<RelayReply> ResourceClaimAsync(RelayCaller caller, string tool, JsonObject args)
+    public async Task<RelayReply> ResourceClaimAsync(RelayCaller caller, string tool, JsonObject args, JsonObject? session)
     {
-            var resolved = await aggregates.Resolve(caller, args, Text(args, "resourceId"));
+        var resolved = await ResolveForSession(caller, args, session, Text(args, "resourceId"));
         if (!resolved.Ok) return resolved;
         return await aggregates.Call(AggregateKinds.Lock, Text(Aggregates.Parse(resolved), "resourceId"), caller, tool, args);
+    }
+
+    /// <summary>Resolves a resource name (or alias) by the session's machine, as every claim path must, so one name never means two locks.</summary>
+    public Task<RelayReply> ResolveForSession(RelayCaller caller, JsonObject args, JsonObject? session, string resource)
+    {
+        var lookup = args.DeepClone().AsObject();
+        lookup["machineId"] = SessionMachine(args, session);
+        return aggregates.Resolve(caller, lookup, resource);
     }
 
     /// <summary>
@@ -61,11 +69,19 @@ internal sealed class ClaimComposer(Aggregates aggregates)
             var resourceArgs = args.DeepClone().AsObject(); resourceArgs["requestId"] = Text(args, "requestId") + ":resource:" + resource;
             // The lock records which task claim its grant serves, so a standing order's release cannot drop a later claim.
             resourceArgs["taskClaimGeneration"] = Aggregates.Parse(task)["claimGeneration"]?.DeepClone();
-            var claim = await aggregates.Call(AggregateKinds.Lock, resource, caller, RelayTools.ClaimAcquire, resourceArgs);
+            RelayReply claim;
+            // A lock call that throws (a timeout, a storage fault) still undoes what this claim took, so nothing stays held for its lease.
+            try { claim = await aggregates.Call(AggregateKinds.Lock, resource, caller, RelayTools.ClaimAcquire, resourceArgs); }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                await RollBackClaimAsync(caller, args, acquired, held, task);
+                return Error(Unavailable, new { resourceId = resource, rollback = "new_grants_released" });
+            }
             if (!claim.Ok)
             {
                 await RollBackClaimAsync(caller, args, acquired, held, task);
-                return Error(Busy, new { resourceId = resource, detail = JsonNode.Parse(claim.DataJson), rollback = "new_grants_released" });
+                // Busy means another session holds it; any other refusal (a storage fault) keeps its own code so the agent knows to retry.
+                return Error(claim.Code, new { resourceId = resource, detail = JsonNode.Parse(claim.DataJson), rollback = "new_grants_released" });
             }
             var grant = Aggregates.Parse(claim);
             if (grant["newlyAcquired"]?.GetValue<bool>() == true) acquired.Add((resource, Number(grant, "generation")));
@@ -89,26 +105,32 @@ internal sealed class ClaimComposer(Aggregates aggregates)
         return FitsWire(preview, RelayLimits.AggregateReplyBytes);
     }
 
+    /// <remarks>Each undo runs on its own: one that fails (its lease simply lapses then) never skips the rest, the task's own unclaim included.</remarks>
     private async Task RollBackClaimAsync(RelayCaller caller, JsonObject args, List<(string Resource, long Generation)> acquired, List<(string Resource, string ClaimFor)> held, RelayReply task)
     {
+        static async Task Attempt(Func<Task<RelayReply>> undo)
+        {
+            try { await undo(); }
+            catch (Exception exception) when (exception is not OperationCanceledException) { }
+        }
         // A grant the session already held keeps it, serving the claim it served before.
         foreach (var (resource, claimFor) in held)
         {
             var restore = args.DeepClone().AsObject(); restore.Remove("requestId"); restore[Operations.RestoreClaimForField] = claimFor;
             restore[Operations.ForgetRequestField] = Text(args, "requestId") + ":resource:" + resource;
-            await aggregates.Call(AggregateKinds.Lock, resource, caller, RelayTools.ClaimAcquire, restore);
+            await Attempt(() => aggregates.Call(AggregateKinds.Lock, resource, caller, RelayTools.ClaimAcquire, restore));
         }
         foreach (var grant in acquired)
         {
             var release = args.DeepClone().AsObject(); release["generation"] = grant.Generation; release.Remove("requestId");
             release[Operations.ForgetRequestField] = Text(args, "requestId") + ":resource:" + grant.Resource;
-            await aggregates.Call(AggregateKinds.Lock, grant.Resource, caller, RelayTools.ClaimRelease, release);
+            await Attempt(() => aggregates.Call(AggregateKinds.Lock, grant.Resource, caller, RelayTools.ClaimRelease, release));
         }
         var claimed = Aggregates.Parse(task);
         if (claimed["newlyAcquired"]?.GetValue<bool>() == true)
         {
             var release = args.DeepClone().AsObject(); release["claimGeneration"] = claimed["claimGeneration"]?.DeepClone(); release["claimRequestId"] = Text(args, "requestId"); release.Remove("requestId");
-            await aggregates.Board(caller, Operations.TaskUnclaim, release);
+            await Attempt(() => aggregates.Board(caller, Operations.TaskUnclaim, release));
         }
     }
 

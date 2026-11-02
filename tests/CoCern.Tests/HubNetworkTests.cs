@@ -108,18 +108,32 @@ public sealed class HubNetworkTests : IDisposable
     }
 
     [Fact]
-    public async Task Disabled_network_opens_no_https_listener_and_creates_no_certificate()
+    public async Task Disabled_network_opens_no_network_https_listener_but_serves_this_pc_over_pinned_https()
     {
-        var (httpPort, httpsPort) = (FreePort(), FreePort());
-        await using var app = await StartAsync(httpPort, httpsPort, enabled: false);
+        var (httpPort, httpsPort, localPort) = (FreePort(), FreePort(), FreePort());
+        await using var app = await StartAsync(httpPort, httpsPort, enabled: false, localPort);
         using var loopback = new HttpClient();
         Assert.Equal(HttpStatusCode.OK, (await loopback.GetAsync($"http://127.0.0.1:{httpPort}/health")).StatusCode);
         using var probe = new TcpClient();
         await Assert.ThrowsAnyAsync<SocketException>(() => probe.ConnectAsync(IPAddress.Loopback, httpsPort));
+        // Local chats get loopback HTTPS with the hub certificate, recorded for Connect.
+        Assert.True(File.Exists(CertificatePath));
+        using var local = new TcpClient();
+        await local.ConnectAsync(IPAddress.Loopback, localPort);
+        Assert.True(File.Exists(Path.Combine(root, HubNetwork.LocalHubFile)));
+    }
+
+    [Fact]
+    public async Task With_both_https_listeners_off_no_certificate_is_made()
+    {
+        var (httpPort, httpsPort) = (FreePort(), FreePort());
+        await using var app = await StartAsync(httpPort, httpsPort, enabled: false, localPort: 0);
+        using var loopback = new HttpClient();
+        Assert.Equal(HttpStatusCode.OK, (await loopback.GetAsync($"http://127.0.0.1:{httpPort}/health")).StatusCode);
         Assert.False(File.Exists(CertificatePath));
     }
 
-    private async Task<WebApplication> StartAsync(int httpPort, int httpsPort, bool enabled)
+    private async Task<WebApplication> StartAsync(int httpPort, int httpsPort, bool enabled, int? localPort = null)
     {
         Directory.CreateDirectory(root);
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions { ContentRootPath = root });
@@ -135,6 +149,7 @@ public sealed class HubNetworkTests : IDisposable
             ["Relay:Clients:0:Repositories:0"] = "repo",
             ["Relay:Network:Enabled"] = enabled ? "true" : "false",
             ["Relay:Network:HttpsPort"] = httpsPort.ToString(),
+            ["Relay:Local:HttpsPort"] = (localPort ?? FreePort()).ToString(),
             ["Relay:Network:CertificatePath"] = Path.Combine("nested", "hub-certificate.pfx")
         });
         builder.AddRelayHost();

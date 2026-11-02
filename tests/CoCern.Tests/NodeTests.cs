@@ -39,7 +39,7 @@ public sealed class NodeTests : IDisposable
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public async Task Changed_hub_certificate_stops_the_node_without_retrusting(bool enrolled)
+    public async Task Changed_hub_certificate_is_never_retrusted_and_the_node_keeps_running(bool enrolled)
     {
         using var presented = HubCertificate.LoadOrCreate(Path.Combine(root, "f2.pfx"), "hub-pc");
         var port = FreePort();
@@ -54,14 +54,14 @@ public sealed class NodeTests : IDisposable
         var before = File.ReadAllBytes(NodeJson);
 
         using var state = NodeState.Open(DataDir);
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
-        var code = await NodeRunner.RunAsync(state, hub, Transport(), error, timeout.Token);
+        // A moment's spoofed name must not take the PC off the hub until the next sign-in: the node keeps trying, but sends nothing.
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+        await NodeRunner.RunAsync(state, hub, Transport(), error, timeout.Token);
 
-        Assert.Equal(4, code);
-        Assert.False(timeout.IsCancellationRequested);
+        Assert.True(timeout.IsCancellationRequested);
         Assert.Equal(before, File.ReadAllBytes(NodeJson));
-        Assert.Contains("fingerprint", error.ToString());
         Assert.Contains(HubCertificate.Fingerprint(presented), error.ToString());
+        Assert.Equal(1, System.Text.RegularExpressions.Regex.Matches(error.ToString(), "presented a certificate").Count);
         Assert.Equal(0, requests);
         Assert.Equal(enrolled ? new string('c', 64) : null, state.ReadCredential());
     }
@@ -1368,6 +1368,7 @@ public sealed class NodeTests : IDisposable
             ["Relay:Discovery:Repositories:0"] = "repo",
             ["Relay:Network:Enabled"] = "true",
             ["Relay:Network:HttpsPort"] = httpsPort.ToString(),
+            ["Relay:Local:HttpsPort"] = FreePort().ToString(),
             ["Relay:Network:CertificatePath"] = Path.Combine("nested", "hub-certificate.pfx"),
             ["Relay:Discovery:JoinCode"] = RelayHostFixture.JoinCode
         });

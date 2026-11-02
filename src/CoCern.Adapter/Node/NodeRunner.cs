@@ -84,6 +84,7 @@ public sealed class NodeRunner : IAsyncDisposable
     private string? _rejected;
     private bool _rejectionReported;
     private string? _mismatch;
+    private bool _mismatchReported;
     private HubConnection? _hints;
     private string? _hintsCredential;
     private Task _hintsTask = Task.CompletedTask;
@@ -175,9 +176,22 @@ public sealed class NodeRunner : IAsyncDisposable
             }
             if (_mismatch is { } presented)
             {
-                _error.WriteLine($"The hub at {_hub} presented a certificate with fingerprint {presented}, but this PC pinned {_state.Fingerprint}. The node stopped and changed nothing. If the hub's certificate was replaced on purpose, stop the node, delete '{_state.Folder}', and run --node --hub again.");
-                return MismatchExitCode;
+                // Setup stops at once. The running node sent nothing and keeps backing off: a moment's spoofed name or another network
+                // would otherwise leave this PC off the hub until the next sign-in. It says so once per episode.
+                if (_transport.SingleCycle)
+                {
+                    _error.WriteLine($"The hub at {_hub} presented a certificate with fingerprint {presented}, but this PC pinned {_state.Fingerprint}. Setup stopped and changed nothing. If the hub's certificate was replaced on purpose, delete '{_state.Folder}' and run setup again.");
+                    return MismatchExitCode;
+                }
+                if (!_mismatchReported)
+                    _error.WriteLine($"The hub at {_hub} presented a certificate with fingerprint {presented}, but this PC pinned {_state.Fingerprint}. Nothing was sent; the node keeps trying the pinned hub. If the hub's certificate was replaced on purpose, stop the node, delete '{_state.Folder}', and run setup again.");
+                _mismatchReported = true;
+                _mismatch = null;
+                _http?.Dispose(); _http = null;
+                _trouble = true;
+                next = Next.Retry;
             }
+            else if (next is not (Next.Retry or Next.Exit)) _mismatchReported = false;
             switch (next)
             {
                 case Next.Exit: return _exitCode;

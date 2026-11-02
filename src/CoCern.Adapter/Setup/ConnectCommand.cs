@@ -8,14 +8,14 @@ namespace CoCern.Adapter.Setup;
 internal static class ConnectCommand
 {
     private const string DefaultTokenFile = "data/local-client-token";
-    private const string Usage = "Use --connect [--token-file <path>] [--hub <url>] [--only claude-code|claude-desktop|codex] [--check] [--json].";
+    private const string Usage = "Use --connect [--token-file <path>] [--hub <url> [--fingerprint <sha256>]] [--only claude-code|claude-desktop|codex] [--check] [--json].";
 
     /// <summary>One app CoCern can be added to. <c>connected</c>: it has a CoCern entry; <c>available</c>: it can get one; <c>added</c>: this run added it.</summary>
     internal sealed record ClientState(string Id, string Name, string State, string? Detail = null);
 
     public static int Run(IReadOnlyList<string> args, string profile, string? appData, string dotnetPath, string adapterDll, TextWriter output, TextWriter error, TimeProvider? clock = null)
     {
-        string? tokenFile = null, hub = null, only = null;
+        string? tokenFile = null, hub = null, only = null, fingerprint = null;
         bool check = false, json = false;
         for (var i = 0; i < args.Count; i++)
         {
@@ -25,6 +25,10 @@ internal static class ConnectCommand
                 case "--only" when only is null && i + 1 < args.Count && args[i + 1] is "claude-code" or "claude-desktop" or "codex": only = args[++i]; break;
                 case "--check" when !check: check = true; break;
                 case "--json" when !json: json = true; break;
+                case "--fingerprint" when fingerprint is null && i + 1 < args.Count:
+                    fingerprint = args[++i].Replace(":", "").Trim().ToUpperInvariant();
+                    if (!Node.PinnedCertificate.IsFingerprint(fingerprint)) throw new AdapterConfigurationException("--fingerprint must be the hub certificate's SHA-256 fingerprint: 64 hexadecimal characters.");
+                    break;
                 case "--hub" when hub is null && i + 1 < args.Count:
                     if (!AdapterOptions.TryParseOrigin(args[++i], out var origin)) throw new AdapterConfigurationException("--hub must be a root https:// address, or http:// to this PC's loopback.");
                     hub = origin.ToString();
@@ -39,8 +43,13 @@ internal static class ConnectCommand
             if (json) output.WriteLine(System.Text.Json.JsonSerializer.Serialize(new { error = message })); else error.WriteLine(message);
             return 1;
         }
+        // Without an address given, the hub's own record beside the token: its loopback HTTPS and certificate, which the apps then pin.
+        if (hub is null && fingerprint is null && LocalHub(Path.GetDirectoryName(tokenFile)!) is { } local) (hub, fingerprint) = local;
+        if (fingerprint is not null && hub?.StartsWith("https://", StringComparison.OrdinalIgnoreCase) != true)
+            throw new AdapterConfigurationException("--fingerprint needs an https:// --hub.");
         var environment = new Dictionary<string, string> { ["COCERN_TOKEN_FILE"] = tokenFile };
         if (hub is not null) environment["COCERN_URL"] = hub;
+        if (fingerprint is not null) environment["COCERN_FINGERPRINT"] = fingerprint;
 
         var clients = new List<(string Id, string Name, Func<ClientPlan> Plan)>
         {
@@ -75,6 +84,20 @@ internal static class ConnectCommand
             if (!check && results.Any(result => result.State == "added")) output.WriteLine("Restart your chats (or the app) to load CoCern.");
         }
         return code;
+    }
+
+    /// <summary>The hub's loopback HTTPS address and certificate fingerprint from its <c>local-hub.json</c>, or null when it has none (an older hub).</summary>
+    internal static (string Url, string Fingerprint)? LocalHub(string folder)
+    {
+        try
+        {
+            using var document = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(folder, "local-hub.json")));
+            var url = document.RootElement.GetProperty("url").GetString();
+            var fingerprint = document.RootElement.GetProperty("fingerprint").GetString()?.ToUpperInvariant();
+            return url is not null && AdapterOptions.TryParseOrigin(url, out var origin) && origin.Scheme == Uri.UriSchemeHttps && fingerprint is not null && Node.PinnedCertificate.IsFingerprint(fingerprint)
+                ? (origin.ToString(), fingerprint) : null;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Text.Json.JsonException or KeyNotFoundException or InvalidOperationException) { return null; }
     }
 
     /// <summary>The hub's default token file, in the first folder at or above the adapter's that has one.</summary>

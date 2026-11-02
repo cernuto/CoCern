@@ -21,6 +21,14 @@ public static class InboxWait
     /// <summary>The property added to the advertised <c>check_inbox</c> schema.</summary>
     public static object Schema => new { type = "integer", minimum = 1, maximum = MaxSeconds, description = "Wait up to this many seconds for mail instead of polling; returns as soon as any message arrives." };
 
+    /// <summary>A number, or a quoted one (models send both); anything else waits for nothing rather than failing the read.</summary>
+    internal static int WaitSeconds(JsonElement wait) => wait.ValueKind switch
+    {
+        JsonValueKind.Number when wait.TryGetInt32(out var number) => number,
+        JsonValueKind.String when int.TryParse(wait.GetString(), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var quoted) => quoted,
+        _ => 0
+    };
+
     public static async Task<AdapterReply> CheckAsync(RelayForwarder forwarder, JsonElement arguments, TimeSpan pollInterval, CancellationToken cancellationToken)
     {
         if (arguments.ValueKind != JsonValueKind.Object || !arguments.TryGetProperty("waitSeconds", out var wait))
@@ -32,7 +40,7 @@ public static class InboxWait
         forwarded["attention"] = false;
         forwarded["seen"] = true;
         var request = JsonSerializer.SerializeToElement(forwarded);
-        var duration = TimeSpan.FromSeconds(wait.TryGetInt32(out var value) ? Math.Clamp(value, 0, MaxSeconds) : 0);
+        var duration = TimeSpan.FromSeconds(Math.Clamp(WaitSeconds(wait), 0, MaxSeconds));
         // A monotonic clock, and no read for a remainder shorter than a timer tick: the wall clock and the delay timer disagree by a
         // millisecond or so, which otherwise left a sliver that looped through near-zero delays, reading the hub each time.
         var elapsed = System.Diagnostics.Stopwatch.StartNew();

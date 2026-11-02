@@ -33,7 +33,9 @@ public static class CoordinationStateMachine
         if (kind != AggregateKinds.Control)
         {
             // Every non-control aggregate belongs to the first repository that touched it.
-            if (Text(state, "repositoryId") is { Length: > 0 } existing && existing != repository) return Error(RepositoryDenied);
+            if (Text(state, "repositoryId") is { Length: > 0 } existing && existing != repository)
+                // A message for a session in another repository can never be delivered; dropping it keeps the sender's outbox moving.
+                return operation == Operations.Deliver ? Ok(new { delivered = false, repositoryDenied = true }) : Error(RepositoryDenied);
             state["repositoryId"] = repository;
         }
 

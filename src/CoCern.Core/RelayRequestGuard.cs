@@ -73,7 +73,7 @@ internal static class RelayRequestGuard
         if (IdentifierFields.Any(field => Text(args, field).Length > RelayLimits.MaxIdentifierLength)) return false;
         if (IdentifierFields.Any(field => args[field] is JsonValue value && value.TryGetValue<string>(out var text) && text.Length > 0 && (string.IsNullOrWhiteSpace(text) || text.Any(char.IsControl)))) return false;
         try { return !Strings(args["resourceIds"]).Any(resource => resource.Length > RelayLimits.MaxIdentifierLength); }
-        catch (InvalidOperationException) { return false; }
+        catch (Exception exception) when (exception is InvalidOperationException or ArgumentException) { return false; }
     }
 
     /// <summary>The first invalid search argument, or null: a nonempty query within its length, known kinds, a bounded status and an integer limit.</summary>

@@ -126,6 +126,7 @@ Every setting: [Reference](docs/reference.md#settings).
 - **Keep the hub and its adapters on the same version.** Update both together.
 - **Don't rebuild a folder a hub or chat is running from.** Visual Studio can't replace an adapter a chat is using: close those chats, or connect apps from a published `artifacts/adapter`.
 - **One hub per database.** Don't put `data/` on a shared drive.
+- **Apps connected with an earlier version** use plain HTTP. To switch one to the safer pinned connection, remove its `cocern` entry and click **Connect** again.
 - **The token is an administrator token.** Every chat that uses it can use administrator tools. For worker-only chats, see the [Reference](docs/reference.md#clients-and-tokens).
 
 ## Development
