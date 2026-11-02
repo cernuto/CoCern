@@ -208,6 +208,24 @@ public sealed record DashboardConnectStatus
     public DashboardConnectClient[] Clients { get; init; } = [];
 }
 
+/// <summary>
+/// How another PC joins this hub: the adapter folder to copy and one setup command per address the hub can be reached at.
+/// <see cref="Unavailable"/> says why it cannot yet (settings off, adapter not published, or not viewed on the hub's PC).
+/// </summary>
+public sealed record DashboardAddPcStatus
+{
+    public string? Unavailable { get; init; }
+    public string? AdapterFolder { get; init; }
+    public DashboardHubAddress[] Addresses { get; init; } = [];
+    public string? FirewallCommand { get; init; }
+}
+
+public sealed record DashboardHubAddress
+{
+    public string Url { get; init; } = "";
+    public string Command { get; init; } = "";
+}
+
 /// <summary><see cref="State"/> is <c>connected</c>, <c>available</c>, <c>added</c> or <c>error</c> (see <see cref="Detail"/>).</summary>
 public sealed record DashboardConnectClient
 {
