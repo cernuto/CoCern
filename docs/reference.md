@@ -57,7 +57,7 @@ Every call takes `repositoryId`. Session calls also take `sessionId` and `sessio
 
 **Large items.** A message or note too large to read back is refused with `PayloadTooLarge` (`maxBytes`, `bytes`). A stored item too large for any page comes back alone as a piece (`truncated: true`, `bytes`, `part`): call again with the same `cursor` and `partOffset` set to `nextPartOffset`. Joined, the pieces are the item's JSON.
 
-**Spend fewer tokens.** Every model call re-reads the whole chat, so fewer calls matter most.
+**Spend fewer tokens.** Every model call re-reads the whole chat, so fewer calls matter most. `waitSeconds` and `ifNoneMatch` are handled by the adapter (agents always use it); a direct REST call ignores them.
 
 - Wait for mail with `check_inbox` and `waitSeconds` (up to 50) instead of polling.
 - Pass the `etag` from `task_get`, `get_status`, `worker_list`, `context_get` or `chat_directory` back as `ifNoneMatch`. An unchanged read returns only `{"unchanged":true,"etag":...}`.
@@ -475,7 +475,7 @@ Dependencies point inward; Domain knows nothing about Orleans or storage.
 
 ## Verification
 
-Beyond the automated tests:
+Beyond the unit and integration tests, `scripts/Smoke-CoCern.py` checks a real hub process end to end (46 checks, about a minute; see the README).
 
 **Checked live**
 
