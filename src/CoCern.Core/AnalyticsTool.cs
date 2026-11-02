@@ -15,7 +15,13 @@ namespace CoCern.Core;
 /// already checked to be an administrator. Every ad hoc query is logged, run or refused. The reply is compact rows within
 /// <see cref="RelayLimits.MaxAnalyticsReplyBytes"/>; a larger result is refused with a request for a narrower query.
 /// </summary>
-public sealed class AnalyticsTool(IAnalyticsQueries queries, bool allowAdHocSql, ILogger? logger = null)
+/// <summary><c>analytics_query</c> as the hub calls it; a hub with analytics off gets <see cref="AnalyticsTool.Off"/>.</summary>
+public interface IAnalyticsTool
+{
+    Task<RelayReply> RunAsync(RelayCaller caller, JsonObject args, CancellationToken cancellationToken);
+}
+
+public sealed class AnalyticsTool(IAnalyticsQueries queries, bool allowAdHocSql, ILogger? logger = null) : IAnalyticsTool
 {
     public bool AllowAdHocSql => allowAdHocSql;
 
@@ -71,4 +77,13 @@ public sealed class AnalyticsTool(IAnalyticsQueries queries, bool allowAdHocSql,
 
     /// <summary>The SQL as one JSON string literal: newlines and control characters are escaped, so a query cannot forge log lines.</summary>
     internal static string Escaped(string sql) => JsonSerializer.Serialize(sql);
+
+    /// <summary><c>analytics_query</c> on a hub with <c>Relay:Analytics:Enabled</c> off.</summary>
+    public static readonly IAnalyticsTool Off = new TurnedOff();
+
+    private sealed class TurnedOff : IAnalyticsTool
+    {
+        public Task<RelayReply> RunAsync(RelayCaller caller, JsonObject args, CancellationToken cancellationToken) =>
+            Task.FromResult(Replies.Error(RelayErrorCodes.AnalyticsUnavailable, new { message = "Analytics is turned off on this hub (Relay:Analytics:Enabled)." }));
+    }
 }

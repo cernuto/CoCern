@@ -16,7 +16,15 @@ namespace CoCern.Core;
 /// boundary. Replies fit <see cref="RelayLimits.MaxDocReplyTokens"/> tokens and <see cref="RelayLimits.MaxDocReplyBytes"/> bytes; what does
 /// not fit is reported as a count.
 /// </summary>
-public sealed class DocCacheTool(IGrainFactory grains, ITokenCounter tokens, IDocSync sync, IReadOnlyCollection<string> repositories)
+/// <summary>The doc cache tools as the hub calls them; a hub with the cache off gets <see cref="DocCacheTool.Off"/>.</summary>
+public interface IDocCacheTools
+{
+    Task<RelayReply> SearchAsync(JsonObject args);
+    Task<RelayReply> SectionAsync(JsonObject args);
+    Task<RelayReply> SyncAsync(JsonObject args, CancellationToken cancellationToken);
+}
+
+public sealed class DocCacheTool(IGrainFactory grains, ITokenCounter tokens, IDocSync sync, IReadOnlyCollection<string> repositories) : IDocCacheTools
 {
     private readonly HashSet<string> configured = new(repositories, StringComparer.Ordinal);
     private const int CommitLength = 12;
@@ -150,4 +158,16 @@ public sealed class DocCacheTool(IGrainFactory grains, ITokenCounter tokens, IDo
     private static RelayReply NotConfigured(int repositories) => repositories == 0
         ? Error(NoRepositoriesConfigured, new { message = "No repositories are configured for the doc cache on this hub (Relay:DocCache:Repositories)." })
         : Error(DocCacheUnavailable, new { message = "No docs are synced for this repository on this hub." });
+
+    /// <summary>Every doc cache tool on a hub with <c>Relay:DocCache:Enabled</c> off.</summary>
+    public static readonly IDocCacheTools Off = new TurnedOff();
+
+    private sealed class TurnedOff : IDocCacheTools
+    {
+        private static Task<RelayReply> Unavailable() =>
+            Task.FromResult(Replies.Error(RelayErrorCodes.DocCacheUnavailable, new { message = "The doc cache is turned off on this hub (Relay:DocCache:Enabled)." }));
+        public Task<RelayReply> SearchAsync(JsonObject args) => Unavailable();
+        public Task<RelayReply> SectionAsync(JsonObject args) => Unavailable();
+        public Task<RelayReply> SyncAsync(JsonObject args, CancellationToken cancellationToken) => Unavailable();
+    }
 }

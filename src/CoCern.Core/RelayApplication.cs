@@ -26,6 +26,9 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
     /// <summary>The shared token counter when <c>Relay:Tokens:Enabled</c> is on; null otherwise, and then nothing is counted or compacted.</summary>
     private readonly ITokenCounter? counter = tokenOptions?.Enabled == false ? null : tokens;
     private readonly TokenOptions tokenSettings = tokenOptions ?? new();
+    // A turned-off feature answers for itself, so no call site checks for it.
+    private readonly IDocCacheTools docTools = (IDocCacheTools?)docs ?? DocCacheTool.Off;
+    private readonly IAnalyticsTool analyticsTool = (IAnalyticsTool?)analytics ?? AnalyticsTool.Off;
     private readonly CallTelemetry? telemetry = activity is null ? null : new(activity, tokenOptions?.Enabled == false ? null : tokens);
     /// <summary>Estimated tokens of the tool definitions an agent carries, per role, counted once.</summary>
     private volatile ToolTotals? toolTokens;
@@ -268,10 +271,10 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         RelayTools.SessionBind or RelayTools.CheckInbox or RelayTools.Ack => CallSession(caller, tool, args),
         RelayTools.AttentionRespond => RespondToAttentionAsync(caller, args),
         RelayTools.OrderPut or RelayTools.OrderRemove => OrderAsync(caller, tool, args),
-        RelayTools.DocSearch => docs is null ? DocCacheOff() : docs.SearchAsync(args),
-        RelayTools.DocSection => docs is null ? DocCacheOff() : docs.SectionAsync(args),
+        RelayTools.DocSearch => docTools.SearchAsync(args),
+        RelayTools.DocSection => docTools.SectionAsync(args),
         // Administrator only, checked first, so a worker learns nothing about the hub's doc cache settings.
-        RelayTools.DocSync => !caller.IsAdministrator ? Task.FromResult(Error(AdministratorRequired)) : docs is null ? DocCacheOff() : docs.SyncAsync(args, cancellationToken),
+        RelayTools.DocSync => !caller.IsAdministrator ? Task.FromResult(Error(AdministratorRequired)) : docTools.SyncAsync(args, cancellationToken),
         RelayTools.WorkerList or RelayTools.ControlRequest => CallControl(caller, tool, args),
         RelayTools.TaskGet => ReadTaskAsync(caller, args, cancellationToken),
         _ => CallBoard(caller, tool, args)
@@ -324,17 +327,13 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         return Ok(reply);
     }
 
-    private static Task<RelayReply> DocCacheOff() =>
-        Task.FromResult(Error(DocCacheUnavailable, new { message = "The doc cache is turned off on this hub (Relay:DocCache:Enabled)." }));
-
     /// <summary>
     /// Administrator only, checked here because no aggregate handles this tool: a session's self-reported role is not an authority.
     /// An analytics-off hub answers <see cref="AnalyticsUnavailable"/> once the caller is known to be an administrator.
     /// </summary>
     private Task<RelayReply> AnalyticsAsync(RelayCaller caller, JsonObject args, CancellationToken cancellationToken) =>
         !caller.IsAdministrator ? Task.FromResult(Error(AdministratorRequired))
-        : analytics is null ? Task.FromResult(Error(AnalyticsUnavailable, new { message = "Analytics is turned off on this hub (Relay:Analytics:Enabled)." }))
-        : analytics.RunAsync(caller, args, cancellationToken);
+        : analyticsTool.RunAsync(caller, args, cancellationToken);
 
     /// <summary>
     /// Administrator only, like <c>standing_put</c>: a session's self-reported role is not an authority. An orders-off hub answers
