@@ -14,7 +14,12 @@ public static class RelayEndpoints
 {
     public static WebApplication UseRelayPipeline(this WebApplication app)
     {
-        app.UseSerilogRequestLogging(options => options.MessageTemplate = "HTTP {RequestMethod} {RequestPath} responded {StatusCode} in {Elapsed:0.0000} ms");
+        app.UseSerilogRequestLogging(options =>
+        {
+            // Hosts keep the static logger unchanged; request events must use this host's sink.
+            options.Logger = app.Services.GetRequiredService<Serilog.ILogger>();
+            options.MessageTemplate = "HTTP {RequestMethod} {RequestPath} responded {StatusCode} in {Elapsed:0.0000} ms";
+        });
         app.UseRelayErrorEnvelope();
         app.UseDashboardBoundary();
         app.UseLocalApiReference();

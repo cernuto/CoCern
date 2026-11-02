@@ -13,6 +13,18 @@ public sealed class DashboardLogBuffer : ILogEventSink
 
     public void Emit(LogEvent logEvent)
     {
+        if (logEvent.Properties.TryGetValue("SourceContext", out var source)
+            && source is ScalarValue { Value: "Microsoft.Hosting.Lifetime" })
+        {
+            var message = logEvent.MessageTemplate.Text switch
+            {
+                "Application started. Press Ctrl+C to shut down." => "Relay host started.",
+                "Application is shutting down..." => "Relay host is stopping.",
+                _ => null
+            };
+            if (message is not null) Add(logEvent.Timestamp, "Information", "Host", message);
+            return;
+        }
         if (logEvent.MessageTemplate.Text != "HTTP {RequestMethod} {RequestPath} responded {StatusCode} in {Elapsed:0.0000} ms") return;
         if (!logEvent.Properties.TryGetValue("RequestPath", out var path) || path is not ScalarValue { Value: string requestPath }
             || requestPath.StartsWith("/dashboard", StringComparison.OrdinalIgnoreCase)) return;

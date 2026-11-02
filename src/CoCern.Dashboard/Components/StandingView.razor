@@ -22,7 +22,7 @@
                         @foreach (var proposal in board.Proposals)
                         {
                             <li @key="proposal.Id">
-                                <div class="standing-proposal-heading"><strong>@proposal.Kind@(proposal.Replaces ? " (edit)" : "")</strong><span class="standing-pending-label">Pending approval</span></div>
+                                <div class="standing-proposal-heading"><strong>@(proposal.Kind switch { "line" => "Instruction", "grant" => "Access grant", _ => proposal.Kind })@(proposal.Replaces ? " (edit)" : "")</strong><span class="standing-pending-label">Pending approval</span></div>
                                 <p class="standing-proposal-text">@proposal.Summary</p>
                                 <div class="standing-meta"><span>Proposed by @proposal.ProposedBy</span><time title="@DashboardFormat.Timestamp(proposal.ProposedAt)">@DashboardFormat.Ago(proposal.ProposedAt, Now)</time></div>
                                 <p class="standing-id">Proposal ID: @proposal.Id</p>

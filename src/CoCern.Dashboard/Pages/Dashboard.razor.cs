@@ -30,8 +30,8 @@ public partial class Dashboard : IAsyncDisposable
     private string PageTitle => View switch { "sessions" => "Sessions", "sql" => "Database", "logs" => "Logs", "standing" => "Standing", "documents" => "Documents", "connect" => "Connect", _ => "Overview" };
     private string? PageDescription => View switch
     {
-        "standing" => "Each board's settled lines, grants and orders, and who approved them.",
-        "documents" => "Document indexes loaded on this hub.",
+        "standing" => "Instructions, access grants and pending proposals for each board.",
+        "documents" => "Indexed files and document activity for each repository.",
         "connect" => "Add CoCern to Claude and Codex, here and on your other PCs.",
         _ => null
     };
