@@ -3,9 +3,15 @@
     <p class="graph-intro">Arrows show successful direct sends in the retained last 24 hours. Select a session to inspect it, or a connection for its call details.</p>
     <div class="graph-controls">
         <label class="search-field"><span class="visually-hidden">Find sessions in the map</span><input type="search" placeholder="Find by label, ID or repository" @bind="Query" @bind:event="oninput" /></label>
+        <label class="graph-limit">Show <select @bind="VisibleLimit"><option value="12">12 sessions</option><option value="24">24 sessions</option><option value="200">All map sessions</option></select></label>
         <label class="graph-focus"><input type="checkbox" @bind="FocusSelected" disabled="@(SelectedId is null)" />Focus selected</label>
     </div>
-    <div class="graph-key"><span><i class="graph-key-node"></i>Durable session</span><span><i class="graph-key-edge"></i>Direct send</span><span>@_nodes.Length shown · @_visibleEdges.Length connections</span></div>
+    <p class="graph-view-summary" role="status">Showing @_nodes.Length of @_matchingSessionCount matching sessions · @_sessions.Count in map inventory</p>
+    <div class="graph-key"><span><i class="graph-key-node"></i>Durable session</span><span><i class="graph-key-edge"></i>Direct send</span><span>@_visibleEdges.Length connections between shown sessions</span></div>
+    @if (_nodes.Length < _matchingSessionCount)
+    {
+        <p class="graph-subset-note">The selected session stays visible when it matches these filters; remaining places prioritize sessions with the most retained sends and receives. Search covers all @_sessions.Count map sessions. Increase Show to see more, or use Session list for the full available inventory.</p>
+    }
     @if (_nodes.Length == 0)
     {
         <p class="empty-copy">@(Sessions.Length == 0 ? "Sessions appear here after a chat opens a CoCern session." : "No sessions match this view. Clear the search or turn off focus selected.")</p>
@@ -78,6 +84,8 @@
     [Parameter] public bool Truncated { get; set; }
     private string _query = "";
     private bool _focusSelected;
+    private int _visibleLimit = 12;
+    private int _matchingSessionCount;
     private string? _selectedEdgeKey;
     private int _height = 360;
     private Node[] _nodes = [];
@@ -86,7 +94,8 @@
     private Dictionary<string, (int Sent, int Received)> _counts = new(StringComparer.Ordinal);
     private string Query { get => _query; set { _query = value; BuildLayout(); } }
     private bool FocusSelected { get => _focusSelected; set { _focusSelected = value; BuildLayout(); } }
-    private DashboardInteractionEdge? SelectedEdge => Interactions.Edges.FirstOrDefault(edge => EdgeKey(edge) == _selectedEdgeKey);
+    private int VisibleLimit { get => _visibleLimit; set { _visibleLimit = value; BuildLayout(); } }
+    private DashboardInteractionEdge? SelectedEdge => _visibleEdges.Select(item => item.Edge).FirstOrDefault(edge => EdgeKey(edge) == _selectedEdgeKey);
 
     protected override void OnParametersSet()
     {
@@ -111,9 +120,15 @@
             foreach (var edge in Interactions.Edges.Take(300))
                 if (edge.SourceSessionId == SelectedId || edge.TargetSessionId == SelectedId) { neighbors.Add(edge.SourceSessionId); neighbors.Add(edge.TargetSessionId); }
         }
-        _nodes = _sessions.Values.Where(session => (neighbors.Count == 0 || neighbors.Contains(session.SessionId))
+        var matching = _sessions.Values.Where(session => (neighbors.Count == 0 || neighbors.Contains(session.SessionId))
             && (string.IsNullOrWhiteSpace(_query) || session.Label.Contains(_query, StringComparison.OrdinalIgnoreCase) || session.SessionId.Contains(_query, StringComparison.OrdinalIgnoreCase) || session.RepositoryId.Contains(_query, StringComparison.OrdinalIgnoreCase)))
-            .OrderBy(session => session.SessionId, StringComparer.Ordinal).Select((session, index) => new Node(session, 150 + index % 3 * 300, 90 + index / 3 * 135)).ToArray();
+            .OrderBy(session => session.SessionId != SelectedId).ThenBy(session => session.SessionId, StringComparer.Ordinal).ToArray();
+        _matchingSessionCount = matching.Length;
+        _nodes = matching.OrderBy(session => session.SessionId != SelectedId)
+            .ThenByDescending(session => (long)_counts.GetValueOrDefault(session.SessionId).Sent + _counts.GetValueOrDefault(session.SessionId).Received)
+            .ThenBy(session => session.SessionId, StringComparer.Ordinal).Take(_visibleLimit)
+            .OrderBy(session => session.SessionId != SelectedId).ThenBy(session => session.SessionId, StringComparer.Ordinal)
+            .Select((session, index) => new Node(session, 150 + index % 3 * 300, 90 + index / 3 * 135)).ToArray();
         _height = Math.Max(360, ((_nodes.Length + 2) / 3) * 135 + 45);
         var positions = _nodes.ToDictionary(node => node.Session.SessionId, StringComparer.Ordinal);
         _visibleEdges = Interactions.Edges.Take(300).Where(edge => positions.ContainsKey(edge.SourceSessionId) && positions.ContainsKey(edge.TargetSessionId))
@@ -121,7 +136,7 @@
     }
 
     private async Task SelectEdge(DashboardInteractionEdge edge) { _selectedEdgeKey = EdgeKey(edge); await OnSelect.InvokeAsync(edge.SourceSessionId); }
-    private string EdgeClass(DashboardInteractionEdge edge) => EdgeKey(edge) == _selectedEdgeKey ? "chosen" : edge.SourceSessionId == SelectedId || edge.TargetSessionId == SelectedId ? "connected" : "";
+    private string EdgeClass(DashboardInteractionEdge edge) => EdgeKey(edge) == _selectedEdgeKey ? "chosen" : edge.SourceSessionId == SelectedId || edge.TargetSessionId == SelectedId ? "connected" : SelectedId is not null ? "unrelated" : "";
     private string SessionLabel(string id) => _sessions.TryGetValue(id, out var session) ? $"{Label(session)} (#{ShortId(id)})" : $"#{ShortId(id)}";
     private string EdgeTitle(DashboardInteractionEdge edge) => $"{SessionLabel(edge.SourceSessionId)} → {SessionLabel(edge.TargetSessionId)}: {edge.CallCount} successful sends; {Duration(edge)} mean hub call";
     private string NodeCounts(string id) { var counts = _counts.GetValueOrDefault(id); return $"{counts.Sent} sent · {counts.Received} received"; }

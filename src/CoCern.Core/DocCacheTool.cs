@@ -16,18 +16,24 @@ public interface IDocCacheTools
     Task<RelayReply> SearchAsync(JsonObject args);
     Task<RelayReply> SectionAsync(JsonObject args);
     Task<RelayReply> SyncAsync(JsonObject args, CancellationToken cancellationToken);
+
+    /// <summary>Advisory, after a session opens: see <see cref="IDocSync.LearnAsync"/>. A hub with the cache off learns nothing.</summary>
+    Task<string?> LearnAsync(string repositoryId, string workspace) => Task.FromResult<string?>(null);
 }
 
 /// <summary>
 /// The doc cache tools: <c>doc_search</c> and <c>doc_section</c> read a repository's synced docs through its directory grain, and
 /// <c>doc_sync</c> runs the sync now (the caller is already checked to be an administrator). The repository scope was checked at the
 /// boundary. Replies fit <see cref="RelayLimits.MaxDocReplyTokens"/> tokens and <see cref="RelayLimits.MaxDocReplyBytes"/> bytes; what does
-/// not fit is reported as a count.
+/// not fit is reported as a count. <paramref name="repositories"/> is read on every call, so a live view sees repositories found later.
 /// </summary>
 public sealed class DocCacheTool(IGrainFactory grains, ITokenCounter tokens, IDocSync sync, IReadOnlyCollection<string> repositories) : IDocCacheTools
 {
-    private readonly HashSet<string> configured = new(repositories, StringComparer.Ordinal);
     private const int CommitLength = 12;
+
+    private bool Known(string repository) => repositories.Contains(repository, StringComparer.Ordinal);
+
+    public Task<string?> LearnAsync(string repositoryId, string workspace) => sync.LearnAsync(repositoryId, workspace);
 
     /// <summary>How long one search waits for its documents; tests shorten it.</summary>
     internal TimeSpan SearchTimeout { get; set; } = TimeSpan.FromSeconds(RelayLimits.DocSearchTimeoutSeconds);
@@ -35,7 +41,7 @@ public sealed class DocCacheTool(IGrainFactory grains, ITokenCounter tokens, IDo
     public async Task<RelayReply> SearchAsync(JsonObject args)
     {
         var repository = Text(args, "repositoryId");
-        if (!configured.Contains(repository)) return NotConfigured(configured.Count);
+        if (!Known(repository)) return NotConfigured(repositories.Count);
         var limit = args["limit"] is null ? RelayLimits.DefaultDocSearchResults : (int)Math.Clamp(Number(args, "limit", RelayLimits.DefaultDocSearchResults), 1, RelayLimits.MaxDocSearchResults);
         var outcome = await Directory(repository).SearchAsync(Text(args, "query"), Optional(args, "spec"), Optional(args, "path"), limit, SearchTimeout);
         if (outcome.PathUnknown) return Error(NotFound, new { field = "path" });
@@ -66,7 +72,7 @@ public sealed class DocCacheTool(IGrainFactory grains, ITokenCounter tokens, IDo
     public async Task<RelayReply> SectionAsync(JsonObject args)
     {
         var repository = Text(args, "repositoryId");
-        if (!configured.Contains(repository)) return NotConfigured(configured.Count);
+        if (!Known(repository)) return NotConfigured(repositories.Count);
         if (await Directory(repository).SectionAsync(Text(args, "path"), Text(args, "anchor")) is not { } section) return Error(NotFound, new { field = "anchor" });
         var reply = new JsonObject
         {
@@ -102,7 +108,7 @@ public sealed class DocCacheTool(IGrainFactory grains, ITokenCounter tokens, IDo
     public async Task<RelayReply> SyncAsync(JsonObject args, CancellationToken cancellationToken)
     {
         var repository = Text(args, "repositoryId");
-        if (!configured.Contains(repository)) return NotConfigured(configured.Count);
+        if (!Known(repository)) return NotConfigured(repositories.Count);
         try
         {
             var outcome = await sync.SyncNowAsync(repository, Optional(args, "branch"), Text(args, "requestId"), cancellationToken);
@@ -114,7 +120,7 @@ public sealed class DocCacheTool(IGrainFactory grains, ITokenCounter tokens, IDo
             {
                 DocSyncError.RateLimited => Error(RateLimited, new { retryAfterSeconds = exception.RetryAfterSeconds }),
                 DocSyncError.UnknownBranch => Error(InvalidArguments, new { field = "branch", message = exception.Message }),
-                DocSyncError.NotConfigured => NotConfigured(configured.Count),
+                DocSyncError.NotConfigured => NotConfigured(repositories.Count),
                 DocSyncError.RequestConflict => Error(RequestConflict, new { message = exception.Message }),
                 _ => Error(Unavailable, new { message = exception.Message })
             };
@@ -154,7 +160,7 @@ public sealed class DocCacheTool(IGrainFactory grains, ITokenCounter tokens, IDo
 
     private static string Short(string commit) => commit.Length > CommitLength ? commit[..CommitLength] : commit;
 
-    /// <summary>A hub with no repositories configured says so with its own code; otherwise this repository is just not one of them.</summary>
+    /// <summary>A hub with no repositories configured or found says so with its own code; otherwise this repository is just not one of them.</summary>
     private static RelayReply NotConfigured(int repositories) => repositories == 0
         ? Error(NoRepositoriesConfigured, new { message = "No repositories are configured for the doc cache on this hub (Relay:DocCache:Repositories)." })
         : Error(DocCacheUnavailable, new { message = "No docs are synced for this repository on this hub." });

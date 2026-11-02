@@ -38,6 +38,14 @@ internal sealed record DocRepository(string Id, string ClonePath, string Branch,
 /// <summary><c>Relay:DocCache:*</c>. On by default; with no repositories configured it does nothing.</summary>
 internal sealed record DocCacheSettings(bool Enabled, int SyncMinutes, int IdleMinutes, int MaxDocuments, IReadOnlyList<DocRepository> Repositories, long MaxRepositoryBytes = RelayLimits.MaxRepositoryDocBytes)
 {
+    /// <summary>Folders whose git repositories the doc cache finds and indexes on its own; also the only places a session's workspace may come from.</summary>
+    public IReadOnlyList<string> Roots { get; init; } = [];
+    /// <summary>How many folder levels below each root are searched for repositories.</summary>
+    public int RootDepth { get; init; } = DefaultRootDepth;
+
+    public const int DefaultRootDepth = 2;
+    public const int MaxRootDepth = 4;
+
     /// <summary>
     /// What the repository's documents were indexed under: patterns, excludes, branch and remote, the document and byte limits, and the
     /// splitters' limits. The directory stores it, and a change forces a full resync (and returns to the configured branch).
@@ -72,6 +80,12 @@ internal sealed record DocCacheSettings(bool Enabled, int SyncMinutes, int IdleM
         var maxDocuments = section.GetValue("MaxDocuments", RelayLimits.MaxDocsPerRepository);
         if (maxDocuments < 1 || maxDocuments > RelayLimits.MaxDocsPerRepositoryCeiling)
             throw new InvalidOperationException($"Relay:DocCache:MaxDocuments must be from 1 to {RelayLimits.MaxDocsPerRepositoryCeiling}.");
+        var rootDepth = section.GetValue("RootDepth", DefaultRootDepth);
+        if (rootDepth < 1 || rootDepth > MaxRootDepth) throw new InvalidOperationException($"Relay:DocCache:RootDepth must be from 1 to {MaxRootDepth}.");
+        string Resolve(string path) => Path.GetFullPath(Path.Combine(environment.ContentRootPath, path));
+        // A blank entry is skipped, so an override can switch one root off.
+        var roots = section.GetSection("Roots").GetChildren().Select(root => root.Value).Where(root => !string.IsNullOrWhiteSpace(root)).Select(root => Resolve(root!))
+            .Distinct(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal).ToArray();
         var repositories = new List<DocRepository>();
         foreach (var entry in section.GetSection("Repositories").GetChildren())
         {
@@ -96,10 +110,9 @@ internal sealed record DocCacheSettings(bool Enabled, int SyncMinutes, int IdleM
             var excludes = DocFormats.DefaultExcludes.Concat(entry.GetSection("Exclude").GetChildren().Select(item => item.Value ?? "")).Distinct(StringComparer.Ordinal).ToArray();
             foreach (var exclude in excludes)
                 if (!DocGlob.SafeGlob(exclude)) throw new InvalidOperationException($"{where}:Exclude pattern '{exclude}' must be a relative pattern of letters, digits, . _ - / * and ?.");
-            string Resolve(string path) => Path.GetFullPath(Path.Combine(environment.ContentRootPath, path));
             repositories.Add(new(id, Resolve(entry["ClonePath"]!), branch, remote, patterns, excludes, entry["TokenFile"] is { Length: > 0 } token ? Resolve(token) : null, entry.GetValue("Fetch", true)));
         }
-        return new(true, sync, idle, maxDocuments, repositories, maxBytes);
+        return new(true, sync, idle, maxDocuments, repositories, maxBytes) { Roots = roots, RootDepth = rootDepth };
     }
 }
 
@@ -356,22 +369,22 @@ internal sealed class DocGit(GitCli git, DocRepository repository, ILogger? logg
     }
 }
 
-/// <summary>Reads documents for the document grains, from configured repositories and included paths only.</summary>
-internal sealed class GitDocSource(DocCacheSettings settings, GitCli git) : IDocSource
+/// <summary>Reads documents for the document grains, from configured or discovered repositories and included paths only.</summary>
+internal sealed class GitDocSource(DocRepositoryRegistry registry, GitCli git) : IDocSource
 {
     public async Task<DocContent?> ReadAsync(string repositoryId, string path, string commit, CancellationToken cancellationToken = default)
     {
-        if (settings.Find(repositoryId) is not { } repository || repository.SpecOf(path) is null) return null;
+        if (registry.Find(repositoryId) is not { } repository || repository.SpecOf(path) is null) return null;
         var (text, _) = await new DocGit(git, repository).ShowAsync(commit, path, DocFormats.MaxBytes(DocFormats.Of(path)), cancellationToken);
         return text is null ? null : new DocContent(text, commit, DocHash.Of(text));
     }
 
     public async Task<bool> CommitExistsAsync(string repositoryId, string commit, CancellationToken cancellationToken = default) =>
-        settings.Find(repositoryId) is { } repository && await new DocGit(git, repository).CommitExistsAsync(commit, cancellationToken);
+        registry.Find(repositoryId) is { } repository && await new DocGit(git, repository).CommitExistsAsync(commit, cancellationToken);
 
     public async Task<DocContent?> ReadHeadAsync(string repositoryId, string path, string branch, CancellationToken cancellationToken = default)
     {
-        if (settings.Find(repositoryId) is not { } repository || !DocGlob.SafeRef(branch)) return null;
+        if (registry.Find(repositoryId) is not { } repository || !DocGlob.SafeRef(branch)) return null;
         return await new DocGit(git, repository).HeadAsync(branch, cancellationToken) is { } head ? await ReadAsync(repositoryId, path, head, cancellationToken) : null;
     }
 }
@@ -383,8 +396,12 @@ internal sealed class GitDocSource(DocCacheSettings settings, GitCli git) : IDoc
 /// Files that are too large, have too many sections, are not OpenAPI, are malformed, are symlinks, or are past the document or byte limit
 /// are skipped and counted. A change of the sync settings (its fingerprint) forces a full resync.
 /// </summary>
-internal sealed class DocSyncRunner(DocCacheSettings settings, GitCli git, IGrainFactory grains, ITokenCounter tokens, ILogger<DocSyncRunner> logger) : IDocSync
+internal sealed class DocSyncRunner(DocCacheSettings settings, DocRepositoryRegistry registry, GitCli git, IGrainFactory grains, ITokenCounter tokens, ILogger<DocSyncRunner> logger) : IDocSync
 {
+    /// <summary>A runner over the configured repositories only (and those it later discovers itself), for callers without the hub's registry.</summary>
+    public DocSyncRunner(DocCacheSettings settings, GitCli git, IGrainFactory grains, ITokenCounter tokens, ILogger<DocSyncRunner> logger)
+        : this(settings, new DocRepositoryRegistry(settings, git, Microsoft.Extensions.Logging.Abstractions.NullLogger<DocRepositoryRegistry>.Instance), git, grains, tokens, logger) { }
+
     private readonly ConcurrentDictionary<string, SemaphoreSlim> locks = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, long> lastManual = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, (string? Branch, Lazy<Task<DocSyncOutcome>> Run)> requests = new(StringComparer.Ordinal);
@@ -399,7 +416,7 @@ internal sealed class DocSyncRunner(DocCacheSettings settings, GitCli git, IGrai
     /// </summary>
     public async Task<DocSyncOutcome> SyncNowAsync(string repositoryId, string? branch, string requestId, CancellationToken cancellationToken = default)
     {
-        if (settings.Find(repositoryId) is null) throw new DocSyncException(DocSyncError.NotConfigured, "No docs are configured for this repository.");
+        if (registry.Find(repositoryId) is null) throw new DocSyncException(DocSyncError.NotConfigured, "No docs are configured for this repository.");
         if (branch is not null && !DocGlob.SafeRef(branch)) throw new DocSyncException(DocSyncError.UnknownBranch, "The branch name is not valid.");
         var key = repositoryId + "\n" + requestId;
         var run = new Lazy<Task<DocSyncOutcome>>(() => RateLimitedAsync(repositoryId, branch, CancellationToken.None));
@@ -421,6 +438,22 @@ internal sealed class DocSyncRunner(DocCacheSettings settings, GitCli git, IGrai
         catch (Exception) when (!cancellationToken.IsCancellationRequested) { requests.TryRemove(new KeyValuePair<string, (string?, Lazy<Task<DocSyncOutcome>>)>(key, stored)); throw; }
     }
 
+    /// <summary>
+    /// Registers a session's workspace (see <see cref="DocRepositoryRegistry.LearnAsync"/>) and syncs a newly added one in the background,
+    /// so the session open that reported it never waits for git.
+    /// </summary>
+    public async Task<string?> LearnAsync(string repositoryId, string workspace, CancellationToken cancellationToken = default)
+    {
+        var (id, added) = await registry.LearnAsync(repositoryId, workspace, cancellationToken);
+        if (id is not null && added)
+            _ = Task.Run(async () =>
+            {
+                try { await SyncAsync(id, null, CancellationToken.None); }
+                catch (Exception exception) { logger.LogWarning("Doc sync for {Repository} failed; the next sync run retries it. {Reason}", id, exception.Message); }
+            }, CancellationToken.None);
+        return id;
+    }
+
     private async Task<DocSyncOutcome> RateLimitedAsync(string repositoryId, string? branch, CancellationToken cancellationToken)
     {
         await Task.Yield();
@@ -435,7 +468,7 @@ internal sealed class DocSyncRunner(DocCacheSettings settings, GitCli git, IGrai
 
     public async Task<DocSyncOutcome> SyncAsync(string repositoryId, string? branchOverride, CancellationToken cancellationToken)
     {
-        var repository = settings.Find(repositoryId) ?? throw new DocSyncException(DocSyncError.NotConfigured, "No docs are configured for this repository.");
+        var repository = registry.Find(repositoryId) ?? throw new DocSyncException(DocSyncError.NotConfigured, "No docs are configured for this repository.");
         if (branchOverride is not null && !DocGlob.SafeRef(branchOverride)) throw new DocSyncException(DocSyncError.UnknownBranch, "The branch name is not valid.");
         var gate = locks.GetOrAdd(repositoryId, _ => new SemaphoreSlim(1, 1));
         await gate.WaitAsync(cancellationToken);
@@ -587,18 +620,19 @@ internal sealed class DocSyncRunner(DocCacheSettings settings, GitCli git, IGrai
 }
 
 /// <summary>
-/// The doc cache's own timer, outside the due-work pump, so a slow <c>git fetch</c> never holds up message delivery. It syncs every
-/// configured repository at startup and then every <c>Relay:DocCache:SyncMinutes</c> (0 turns the timer off; <c>doc_sync</c> still works).
-/// With the doc cache off it returns at once and never builds the sync runner.
+/// The doc cache's own timer, outside the due-work pump, so a slow <c>git fetch</c> never holds up message delivery. At startup and then
+/// every <c>Relay:DocCache:SyncMinutes</c> (0 turns the timer off; <c>doc_sync</c> still works) it scans the roots for new repositories and
+/// syncs every configured and discovered one. With the doc cache off it returns at once and never builds the sync runner.
 /// </summary>
 internal sealed class SpecSyncService(DocCacheSettings settings, IServiceProvider services, ILogger<SpecSyncService> logger) : BackgroundService
 {
     private DocSyncRunner Runner => services.GetRequiredService<DocSyncRunner>();
+    private DocRepositoryRegistry Registry => services.GetRequiredService<DocRepositoryRegistry>();
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        // With no repositories configured there is nothing to sync: no git runs at all.
-        if (!settings.Enabled || settings.SyncMinutes == 0 || settings.Repositories.Count == 0) return;
+        // With no repositories configured and no roots to search there is nothing to sync: no git runs at all.
+        if (!settings.Enabled || settings.SyncMinutes == 0 || settings.Repositories.Count == 0 && settings.Roots.Count == 0) return;
         await Task.Yield();
         try
         {
@@ -609,10 +643,13 @@ internal sealed class SpecSyncService(DocCacheSettings settings, IServiceProvide
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
     }
 
-    /// <summary>One timer run over every configured repository; a failing repository is logged and the others still sync.</summary>
+    /// <summary>One timer run: a root scan, then every configured and discovered repository; a failing one is logged and the others still sync.</summary>
     internal async Task RunOnceAsync(CancellationToken cancellationToken)
     {
-        foreach (var repository in settings.Repositories)
+        try { await Registry.ScanAsync(cancellationToken); }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception exception) { logger.LogWarning("Doc cache root scan failed; the repositories already known still sync. {Reason}", exception.Message); }
+        foreach (var repository in Registry.Repositories)
         {
             try { await Runner.SyncAsync(repository.Id, null, cancellationToken); }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }

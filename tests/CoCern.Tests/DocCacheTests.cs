@@ -28,6 +28,40 @@ public sealed class DocCacheCollection;
 public sealed class DocCacheTests
 {
     [Fact]
+    public async Task Directory_inventory_names_survive_cold_documents_and_refresh_after_sync()
+    {
+        using var git = GitRepositories.Create(new() { ["docs/a.md"] = "# Alpha\n\nCached text.\n", ["docs/old.md"] = "# Old\n" });
+        var watcher = new WatchingGit();
+        await using var host = DocHost(git, watcher);
+        await SyncAsync(host);
+        var activity = host.Services.GetRequiredService<DocCacheActivity>();
+        var commands = watcher.Commands;
+        for (var attempt = 0; attempt < 5; attempt++)
+        {
+            var snapshot = activity.Snapshot(DateTimeOffset.UtcNow);
+            Assert.Equal(0, snapshot.ActiveDocuments);
+            var directory = Assert.Single(snapshot.Grains, row => row.Kind == "Directory");
+            Assert.Equal(2, directory.Documents);
+            Assert.Equal(["docs/a.md", "docs/old.md"], InventoryPaths(directory));
+        }
+        Assert.Equal(commands, watcher.Commands);
+
+        git.Move("docs/old.md", "docs/new.md");
+        await SyncAsync(host);
+        await WaitUntilAsync(() => Task.FromResult(activity.Snapshot(DateTimeOffset.UtcNow).ActiveDocuments == 0));
+        var refreshed = Assert.Single(activity.Snapshot(DateTimeOffset.UtcNow).Grains, row => row.Kind == "Directory");
+        Assert.Equal(2, refreshed.Documents);
+        Assert.Equal(["docs/a.md", "docs/new.md"], InventoryPaths(refreshed));
+    }
+
+    private static string[] InventoryPaths(CoCern.Contracts.Dashboard.DashboardDocGrain grain)
+    {
+        var json = JsonSerializer.SerializeToElement(grain);
+        Assert.True(json.TryGetProperty("DocumentPaths", out var paths), "Directory observations must include indexed document paths.");
+        return paths.EnumerateArray().Select(path => path.GetString()!).ToArray();
+    }
+
+    [Fact]
     public async Task Active_cache_observations_follow_loading_and_deactivation_without_touching_grains()
     {
         using var git = GitRepositories.Create(new() { ["docs/a.md"] = "# Alpha\n\nCached text.\n" });

@@ -86,9 +86,10 @@
   </UsingTask>
 
   <Target Name="CoCernUnpackDuckDbExtensions" BeforeTargets="AssignTargetPaths">
-    <!-- IntermediateOutputPath is only known once the SDK targets are evaluated, so the folder is worked out here. -->
+    <!-- IntermediateOutputPath is only known once the SDK targets are evaluated, so the folder is worked out here. It is absolute under
+         dotnet build's artifacts layout (artifacts-path), so it is combined with the project folder rather than appended to it. -->
     <PropertyGroup>
-      <CoCernDuckDbUnpacked>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)/$(IntermediateOutputPath)duckdb_extensions/'))</CoCernDuckDbUnpacked>
+      <CoCernDuckDbUnpacked>$([System.IO.Path]::GetFullPath($([System.IO.Path]::Combine('$(MSBuildProjectDirectory)', '$(IntermediateOutputPath)duckdb_extensions/'))))</CoCernDuckDbUnpacked>
     </PropertyGroup>
     <CoCernUnpackDuckDbExtensions Bundle="$(CoCernDuckDbBundle)" Target="$(CoCernDuckDbUnpacked)" Platforms="$(CoCernDuckDbPlatforms)">
       <Output TaskParameter="Files" ItemName="CoCernDuckDbFile" />
