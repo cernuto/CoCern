@@ -42,6 +42,10 @@ internal sealed class NodeTransport
     public TimeSpan WakeInterval { get; init; } = TimeSpan.FromSeconds(15);
     /// <summary>Fixed event names for tests (enrolled, announced, watching, hint, unauthorized, waking, wake-target); never carries data.</summary>
     public Action<string>? Trace { get; init; }
+    /// <summary>The hub's join code, sent only when enrolling; enrolled PCs never need it again.</summary>
+    public string? JoinCode { get; set; }
+    /// <summary>The certificate fingerprint the operator read from the hub's log; when set, any other certificate is refused instead of pinned.</summary>
+    public string? ExpectedFingerprint { get; set; }
     /// <summary>Setup's one enrollment-and-first-announce: stop with exit 0 right after the first accepted announcement (and exit 1 if cancelled before it).</summary>
     public bool SingleCycle { get; set; }
 }
@@ -192,12 +196,14 @@ public sealed class NodeRunner : IAsyncDisposable
     {
         if (Https && _state.Fingerprint is null)
         {
-            // Trust on first use, recorded before anything secret is sent.
+            // Trust on first use unless the operator gave the fingerprint, recorded before anything secret is sent.
             var presented = await _transport.ProbeFingerprint(_hub, ct);
             if (!PinnedCertificate.IsFingerprint(presented)) return Next.Retry;
+            if (!ExpectedMatches(presented)) return Unexpected(presented);
             _state.SetFingerprint(presented);
             _error.WriteLine($"CoCern node pinned the certificate of the hub at {_hub}: {_state.Fingerprint}.");
         }
+        else if (Https && !ExpectedMatches(_state.Fingerprint!)) return Unexpected(_state.Fingerprint!);
         _http ??= new HttpClient(_transport.CreateHandler(Https ? _state.Fingerprint : null, presented => _mismatch ??= presented)) { Timeout = TimeSpan.FromSeconds(30) };
         if (_credential is null)
         {
@@ -207,11 +213,22 @@ public sealed class NodeRunner : IAsyncDisposable
         return await AnnounceAsync(ct);
     }
 
+    private bool ExpectedMatches(string fingerprint) => _transport.ExpectedFingerprint is not { } expected || string.Equals(fingerprint, expected, StringComparison.OrdinalIgnoreCase);
+
+    private Next Unexpected(string presented)
+    {
+        _exitCode = MismatchExitCode;
+        _error.WriteLine($"The hub at {_hub} presented a certificate with fingerprint {presented}, but --fingerprint expects {_transport.ExpectedFingerprint}. Nothing was pinned or sent. Check the address and the fingerprint in the hub's log.");
+        return Next.Exit;
+    }
+
     /// <summary>Again means enrolled: go on to announce.</summary>
     private async Task<Next> EnrollAsync(CancellationToken ct)
     {
         var machineId = _state.MachineId;
-        using var response = await PostAsync("api/discovery/enroll", new JsonObject { ["machineId"] = machineId, ["machineName"] = _transport.MachineName }, null, ct);
+        var body = new JsonObject { ["machineId"] = machineId, ["machineName"] = _transport.MachineName };
+        if (_transport.JoinCode is { } joinCode) body["joinCode"] = joinCode;
+        using var response = await PostAsync("api/discovery/enroll", body, null, ct);
         var reply = await ReadAsync(response, ct);
         if (response.StatusCode == HttpStatusCode.OK)
         {
@@ -241,6 +258,8 @@ public sealed class NodeRunner : IAsyncDisposable
                 return Next.Retry;
             case HttpStatusCode.Forbidden when code == "MachineRevoked":
                 return Stop($"The hub at {_hub} has revoked this PC (machine {machineId}). The node stopped; ask the hub administrator.");
+            case HttpStatusCode.Forbidden when code == RelayErrorCodes.JoinCodeRequired:
+                return Stop($"The hub at {_hub} needs its join code to enroll this PC{(_transport.JoinCode is null ? "" : ", and the one given is wrong")}. The node stopped. Run setup again with --join-code <code> (the hub logs it at startup).");
             case HttpStatusCode.Forbidden or HttpStatusCode.BadRequest:
                 return Stop($"The hub at {_hub} refused to enroll this PC ({code}). The node stopped.");
             case HttpStatusCode.NotFound:

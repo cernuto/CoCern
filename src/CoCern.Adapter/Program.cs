@@ -65,7 +65,7 @@ try
     if (args.Length > 0 && args[0] == "--setup")
     {
         // Exit codes: 0 done, 1 configuration problem or enrollment failure (the node's code, e.g. 4 for a changed hub certificate), 5 a client settings file could not be parsed.
-        var setup = SetupOptions.Parse(args[1..]);
+        var setup = SetupOptions.Parse(args[1..], Environment.GetEnvironmentVariable(SetupOptions.JoinCodeVariable));
         using var shutdown = new CancellationTokenSource();
         Console.CancelKeyPress += (_, cancel) => { cancel.Cancel = true; shutdown.Cancel(); };
         return await SetupCommand.RunAsync(setup, SetupEnvironment.Create(), shutdown.Token);
@@ -73,8 +73,10 @@ try
     if (args.Length > 0 && args[0] == "--node")
     {
         // Exit codes: 0 stopped, 1 configuration problem or revoked PC, 4 the hub presented a certificate other than the pinned one.
-        const string usage = "Use --node [--data-dir <path>] [--hub <https-url>].";
+        const string usage = "Use --node [--data-dir <path>] [--hub <https-url>] [--join-code <code>].";
         string? dataDir = null;
+        var joinCode = Environment.GetEnvironmentVariable(SetupOptions.JoinCodeVariable) is { Length: > 0 } fromEnvironment ? fromEnvironment.Trim() : null;
+        var typedJoinCode = false;
         Uri? hub = null;
         for (var i = 1; i < args.Length; i += 2)
         {
@@ -82,6 +84,7 @@ try
             switch (args[i])
             {
                 case "--data-dir" when dataDir is null: dataDir = args[i + 1]; break;
+                case "--join-code" when !typedJoinCode: (joinCode, typedJoinCode) = (args[i + 1].Trim(), true); break;
                 case "--hub" when hub is null:
                     if (!AdapterOptions.TryParseOrigin(args[i + 1], out var typed)) throw new AdapterConfigurationException("--hub must be a root https:// address, or http:// to this PC's loopback, without credentials, query, or fragment.");
                     hub = typed;
@@ -92,7 +95,7 @@ try
         using var state = NodeState.Open(dataDir);
         using var shutdown = new CancellationTokenSource();
         Console.CancelKeyPress += (_, cancel) => { cancel.Cancel = true; shutdown.Cancel(); };
-        return await NodeRunner.RunAsync(state, hub, shutdown.Token);
+        return await NodeRunner.RunAsync(state, hub, new NodeTransport { JoinCode = joinCode }, Console.Error, shutdown.Token);
     }
     var options = AdapterOptions.FromEnvironment();
     // On node credentials the hub certificate is pinned; with explicit settings this is the plain handler, as before.

@@ -1066,6 +1066,7 @@ public class HostTests
 internal sealed class RelayHostFixture : WebApplicationFactory<CoCern.Host.RelayHostMarker>
 {
     public const string Token = "host-test-secret-not-a-production-token";
+    public const string JoinCode = "host-test-join-code-not-production";
     public string DatabasePath { get; }
     private readonly bool disableDispatcher;
     private readonly bool configureJwt;
@@ -1094,7 +1095,8 @@ internal sealed class RelayHostFixture : WebApplicationFactory<CoCern.Host.Relay
             ["Relay:ClusterId"] = Guid.NewGuid().ToString("N"),
             ["Relay:Clients:0:Token"] = Token,
             ["Relay:Clients:0:PrincipalId"] = "test-user",
-            ["Relay:Clients:0:Repositories:0"] = "repo"
+            ["Relay:Clients:0:Repositories:0"] = "repo",
+            ["Relay:Discovery:JoinCode"] = JoinCode
         }));
         if (settings is not null) builder.ConfigureAppConfiguration((_, config) => config.AddInMemoryCollection(settings));
         if (configureServices is not null) builder.ConfigureServices(configureServices);

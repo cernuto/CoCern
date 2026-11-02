@@ -89,6 +89,8 @@ public static class RelayLimits
     /// <summary>A whole-task read carries only this many of the latest messages, reports and attempts; older ones stay in the paged sections.</summary>
     public const int RecentTaskEntries = 20;
     public const int MaxRecords = 2_048;
+    /// <summary>A machine not seen (announced) for this many days may be removed to make room when the machine table is full.</summary>
+    public const int MachineExpiryDays = 30;
     /// <summary>Days after completion before a finished task moves to the archive (<c>Relay:Board:ArchiveAfterDays</c>; 0: only when the board fills).</summary>
     public const int DefaultArchiveAfterDays = 30;
     public const int MaxArchiveAfterDays = 3_650;

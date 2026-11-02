@@ -6,7 +6,7 @@ A retry within 24 hours does not run again. Only your own arguments count as the
 
 ## The loop
 
-1. `session_open` once per chat. Give the managing chat `role: "manager"`. When the hub's session list is full, it closes sessions not seen for a day, except sessions with an action still open. A closed session's calls get `SessionUnknown` with `expired: true`. Call `session_open` again. If only sessions with open actions fill the list, `session_open` gets `CapacityExceeded` with `heldByUnresolvedActions`: report or recover those actions.
+1. `session_open` once per chat. Give the managing chat `role: "manager"`. The role is self-declared and only routes attention items: any session can claim it. When the hub's session list is full, it closes sessions not seen for a day, except sessions with an action still open. A closed session's calls get `SessionUnknown` with `expired: true`. Call `session_open` again. If only sessions with open actions fill the list, `session_open` gets `CapacityExceeded` with `heldByUnresolvedActions`: report or recover those actions.
 2. `task_claim` the task and its resources.
 3. Do the work with your own tools. The hub never runs them.
 4. `task_update` with what happened.

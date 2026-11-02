@@ -57,7 +57,7 @@ public static class HubCertificate
     }
 
     /// <summary>The private key must never be readable by anyone else, so the file is created already restricted to the current user under a temporary name and only then moved into place.</summary>
-    private static void WritePrivately(string path, byte[] pfx)
+    internal static void WritePrivately(string path, byte[] pfx)
     {
         var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
@@ -94,6 +94,18 @@ internal static class HubNetwork
     private const string DefaultCertificatePath = "data/hub-certificate.pfx";
 
     public static bool Enabled(IConfiguration configuration) => bool.TryParse(configuration["Relay:Network:Enabled"], out var enabled) && enabled;
+
+    /// <summary>Plain HTTP beyond loopback would carry bearer tokens in clear text before any handler could refuse them, so such a url stops startup.</summary>
+    public static void RefusePlainNetworkHttp(IConfiguration configuration)
+    {
+        foreach (var url in (configuration["urls"] ?? DefaultUrl).Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (!url.StartsWith("http://", StringComparison.OrdinalIgnoreCase)) continue;
+            var loopback = Uri.TryCreate(url.Replace("://+", "://0.0.0.0").Replace("://*", "://0.0.0.0"), UriKind.Absolute, out var uri)
+                && (uri.Host.Equals("localhost", StringComparison.OrdinalIgnoreCase) || IPAddress.TryParse(uri.Host.Trim('[', ']'), out var address) && IPAddress.IsLoopback(address));
+            if (!loopback) throw new InvalidOperationException($"The url '{url}' would serve plain HTTP beyond this PC, so tokens would cross the network in clear text. Bind http to 127.0.0.1 or localhost, and set Relay:Network:Enabled=true for HTTPS on the network.");
+        }
+    }
 
     /// <summary>Kestrel ignores <c>urls</c> once endpoints are set in code, so this recreates the loopback HTTP endpoint(s) itself and adds the HTTPS one.</summary>
     public static void Configure(IConfiguration configuration, IHostEnvironment environment, KestrelServerOptions options)

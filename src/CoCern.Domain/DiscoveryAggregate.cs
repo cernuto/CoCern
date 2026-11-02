@@ -41,7 +41,7 @@ public static class DiscoveryStateMachine
         {
             result = operation switch
             {
-                DiscoveryOperations.Enroll => Enroll(state, args),
+                DiscoveryOperations.Enroll => Enroll(state, args, now),
                 DiscoveryOperations.Validate => Validate(state, args),
                 DiscoveryOperations.Announce => Announce(state, args, now),
                 DiscoveryOperations.Directory => Directory(state, args, now),
@@ -60,7 +60,7 @@ public static class DiscoveryStateMachine
 
     private static string PrincipalOf(string machineId) => "machine:" + machineId;
 
-    private static RelayReply Enroll(JsonObject state, JsonObject args)
+    private static RelayReply Enroll(JsonObject state, JsonObject args, DateTimeOffset now)
     {
         var id = Required(args, "machineId");
         var name = Required(args, "machineName");
@@ -74,10 +74,20 @@ public static class DiscoveryStateMachine
         }
         else
         {
-            if (machines.Count >= DiscoveryLimits.MaxMachines) return Error(CapacityExceeded);
-            machines[id] = new JsonObject { ["machineName"] = name, ["credentialHash"] = hash, ["lastSeen"] = null, ["clients"] = new JsonArray(), ["chats"] = new JsonArray() };
+            if (machines.Count >= DiscoveryLimits.MaxMachines && !RemoveExpired(machines, now)) return Error(CapacityExceeded);
+            machines[id] = new JsonObject { ["machineName"] = name, ["credentialHash"] = hash, ["enrolledAt"] = now.ToString("O"), ["lastSeen"] = null, ["clients"] = new JsonArray(), ["chats"] = new JsonArray() };
         }
         return Ok(new { machineId = id, principalId = PrincipalOf(id) });
+    }
+
+    /// <summary>Frees one slot by removing the machine unseen longest, if unseen past the expiry, so strangers cannot hold the table forever.</summary>
+    private static bool RemoveExpired(JsonObject machines, DateTimeOffset now)
+    {
+        var cutoff = now - TimeSpan.FromDays(RelayLimits.MachineExpiryDays);
+        // A machine that never announced counts from its enrollment; one from before enrolledAt existed counts as oldest.
+        var oldest = machines.Select(x => (x.Key, Seen: Date(x.Value!.AsObject(), "lastSeen") is var seen && seen != DateTimeOffset.MinValue ? seen : Date(x.Value!.AsObject(), "enrolledAt")))
+            .Where(x => x.Seen < cutoff).OrderBy(x => x.Seen).ThenBy(x => x.Key, StringComparer.Ordinal).FirstOrDefault();
+        return oldest.Key is not null && machines.Remove(oldest.Key);
     }
 
     private static RelayReply Validate(JsonObject state, JsonObject args)
