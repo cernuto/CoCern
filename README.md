@@ -15,9 +15,28 @@ This page is everything you need to set up and use CoCern. Technical details, ev
 - **Next-work offers.** When a chat finishes a task, the hub offers it the next ready one.
 - **Attention.** One short "look at this" per reply. Only urgent items interrupt a chat.
 - **Standing rules.** A board's settled rules and permissions, given to every chat that opens.
-- **Search.** Tasks, notes, messages, and your repository's docs by section.
+- **Search.** Tasks, notes and messages, by keyword (SQLite full-text search).
+- **Document cache.** Your repository's docs (Markdown, text, OpenAPI), searchable by section. Each document is a Lucene.Net index kept in memory in its own Orleans grain: loaded on the first search, ranked with BM25, and dropped after 30 idle minutes. Synced from git commits, never your working tree.
+- **DuckDB analytics.** Every hour the hub snapshots the board and activity into DuckDB. Ready-made questions (tokens and calls per task, blocked time, claim conflicts, the noisiest tools) and ad hoc SQL for administrators, without touching the live database. Managers get an alert when a measure doubles.
 - **Live dashboard.** Sessions, requests, logs and rules in the browser, plus one-click setup.
-- **Token savings.** Short replies, and tips when an agent wastes tokens.
+
+## Faster, with fewer tokens
+
+Every call an agent makes re-reads its whole chat, so the cheapest call is one it never makes. CoCern cuts calls, and keeps the rest small:
+
+| How | What it saves |
+| --- | --- |
+| Agents wait for mail (`waitSeconds`, up to 50 s) instead of polling, and a joined PC wakes its Codex chats when mail arrives. | Idle polling turns. |
+| An unchanged read comes back as one line (`ifNoneMatch`), and board reads can be deltas (`sinceRevision`). | Re-reading a task or the board. |
+| Finishing a task returns the next one to do; acknowledgments and claim renewals ride along on other calls. | Round trips. |
+| Attention hands each reply one short item, and only urgent ones (blocked, failed, interrupted) wake a chat. | Needless wake-ups. |
+| Standing rules are sent when a chat opens, then again only when they change. | Repeating the same rules. |
+| Doc search returns the matching sections, under 2,000 tokens, not whole files. | Reading files to find one paragraph. |
+| Every reply has a token budget; an oversized one is compacted, with a cursor for the rest. | Surprise huge replies. |
+| Tool definitions are short (a test caps their size), and `COCERN_PROFILE=chat` gives a messaging-only chat just 5 tools. | Overhead on every turn. |
+| Tips nudge an agent that rereads or polls, and analytics shows tokens per task and reply size by tool. | Waste you couldn't see. |
+
+It stays fast because it's one local process. Orleans keeps active boards, sessions and locks in memory; each write is one transaction to a local SQLite file; logging and token counting run in the background; and analytics query a separate snapshot. None of it slows the calls agents wait on.
 
 ## Get started
 
