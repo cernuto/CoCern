@@ -3,6 +3,7 @@ using System.Text.Json.Nodes;
 using CoCern.Contracts;
 using CoCern.Core;
 using CoCern.Domain;
+using static CoCern.Domain.JsonFields;
 using Xunit;
 
 namespace CoCern.Tests;
@@ -111,6 +112,40 @@ public sealed class ReviewFixTests
         // The sweep is overdue, but the board refused it a moment ago: rescheduling keeps the backoff.
         CoordinationStateMachine.ScheduleLeases(board, RelayLimits.DefaultArchiveAfterDays);
         Assert.Equal(retryAt, Assert.Single(board.DueWork, item => item.Kind == DueWorkKinds.TaskArchive).DueAt);
+    }
+
+    [Fact]
+    public void A_retried_claim_after_a_rollback_points_an_already_held_lock_at_itself_again()
+    {
+        var lockState = new StateEnvelope<CoordinationDocument>();
+        JsonObject Acquire(string requestId, string taskId, long generation) => new() { ["sessionId"] = "a", ["resourceId"] = "rig", ["requestId"] = requestId, ["taskId"] = taskId, ["taskClaimGeneration"] = generation };
+        Assert.True(Apply(lockState, "lock", RelayTools.ClaimAcquire, Acquire("t0-claim:resource:rig", "t0", 1)).Ok);
+        var heldFor = State(lockState)["claimFor"]!.GetValue<string>();
+        // Claim R1 for t1 takes the held lock, then rolls back because another resource was busy.
+        var first = Apply(lockState, "lock", RelayTools.ClaimAcquire, Acquire("R1:resource:rig", "t1", 1));
+        Assert.True(Apply(lockState, "lock", RelayTools.ClaimAcquire, new()
+        {
+            ["sessionId"] = "a", ["resourceId"] = "rig", [Operations.RestoreClaimForField] = JsonNode.Parse(first.DataJson)!["previousClaimFor"]!.GetValue<string>(),
+            [Operations.ForgetRequestField] = "R1:resource:rig"
+        }).Ok);
+        Assert.Equal(heldFor, State(lockState)["claimFor"]!.GetValue<string>());
+        // The retry of R1 (now the board's claim generation 2) runs again instead of replaying, so the lock serves t1's new claim.
+        Assert.True(Apply(lockState, "lock", RelayTools.ClaimAcquire, Acquire("R1:resource:rig", "t1", 2)).Ok);
+        Assert.Contains("t1", State(lockState)["claimFor"]!.GetValue<string>());
+        Assert.NotEqual(heldFor, State(lockState)["claimFor"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void A_rollback_never_takes_back_a_lock_whose_lease_ran_out()
+    {
+        var lockState = new StateEnvelope<CoordinationDocument>();
+        Assert.True(Apply(lockState, "lock", RelayTools.ClaimAcquire, new() { ["sessionId"] = "a", ["resourceId"] = "rig", ["leaseSeconds"] = 1 }).Ok);
+        var generation = State(lockState)["generation"]!.GetValue<long>();
+        var restore = CoordinationStateMachine.Apply(lockState, "lock", "key", Hub, RelayTools.ClaimAcquire,
+            new JsonObject { ["repositoryId"] = "repo", ["sessionId"] = "a", ["resourceId"] = "rig", [Operations.RestoreClaimForField] = "" }, Now.AddSeconds(5));
+        Assert.False(JsonNode.Parse(restore.DataJson)!["restored"]!.GetValue<bool>());
+        Assert.Equal(generation, State(lockState)["generation"]!.GetValue<long>());
+        Assert.True(Date(State(lockState), "leaseUntil") < Now.AddSeconds(5));
     }
 
     [Fact]
