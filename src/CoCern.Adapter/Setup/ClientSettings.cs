@@ -87,11 +87,20 @@ internal static class ClientSettings
     }
 
     public static ClientPlan PlanClaudeCode(string path, string dotnetPath, string adapterDll, IReadOnlyDictionary<string, string>? environment = null) =>
-        PlanClaudeJson(path, new JsonObject { ["type"] = "stdio", ["command"] = dotnetPath, ["args"] = new JsonArray(adapterDll) }, environment);
+        PlanClaudeJson(path, Launch(dotnetPath, adapterDll, new JsonObject { ["type"] = "stdio" }), environment);
 
     /// <summary>The Claude desktop app's <c>claude_desktop_config.json</c>: the same <c>mcpServers</c> shape, without a transport type.</summary>
     public static ClientPlan PlanClaudeDesktop(string path, string dotnetPath, string adapterDll, IReadOnlyDictionary<string, string>? environment = null) =>
-        PlanClaudeJson(path, new JsonObject { ["command"] = dotnetPath, ["args"] = new JsonArray(adapterDll) }, environment);
+        PlanClaudeJson(path, Launch(dotnetPath, adapterDll, new JsonObject()), environment);
+
+    /// <summary>Adds <c>command</c> and <c>args</c> to <paramref name="entry"/>: the exe alone when one is beside the dll, else dotnet with the dll (see <see cref="SetupEnvironment.AdapterLaunch"/>).</summary>
+    private static JsonObject Launch(string dotnetPath, string adapterDll, JsonObject entry)
+    {
+        var (command, arguments) = SetupEnvironment.AdapterLaunch(dotnetPath, adapterDll);
+        entry["command"] = command;
+        entry["args"] = new JsonArray(arguments.Select(argument => (JsonNode?)argument).ToArray());
+        return entry;
+    }
 
     private static ClientPlan PlanClaudeJson(string path, JsonObject entry, IReadOnlyDictionary<string, string>? environment)
     {
@@ -175,9 +184,12 @@ internal static class ClientSettings
     private static ClientSettingsException Malformed(string path, string reason) => new($"Setup stopped: '{path}' could not be understood ({reason}). It was not changed, and nothing else was changed. Fix or move the file, or use --skip-client-config.");
 
     /// <summary>The table to append. Single-quoted literal strings need no escaping of Windows backslashes.</summary>
-    private static string Entry(string dotnetPath, string adapterDll, IReadOnlyDictionary<string, string>? environment, string eol) =>
-        $"[{Table}.{Name}]{eol}command = {TomlString(dotnetPath)}{eol}args = [{TomlString(adapterDll)}]{eol}"
-        + (environment is { Count: > 0 } ? $"env = {{ {string.Join(", ", environment.Select(pair => $"{pair.Key} = {TomlString(pair.Value)}"))} }}{eol}" : "");
+    private static string Entry(string dotnetPath, string adapterDll, IReadOnlyDictionary<string, string>? environment, string eol)
+    {
+        var (command, arguments) = SetupEnvironment.AdapterLaunch(dotnetPath, adapterDll);
+        return $"[{Table}.{Name}]{eol}command = {TomlString(command)}{eol}args = [{string.Join(", ", arguments.Select(TomlString))}]{eol}"
+            + (environment is { Count: > 0 } ? $"env = {{ {string.Join(", ", environment.Select(pair => $"{pair.Key} = {TomlString(pair.Value)}"))} }}{eol}" : "");
+    }
 
     internal static string TomlString(string value)
     {

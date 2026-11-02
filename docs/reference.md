@@ -281,15 +281,17 @@ Each joined PC runs a small background program, the **node**. It joins the hub o
 
 ### Setup by hand
 
-The dashboard's **Add another PC** fills this in for you. By hand, from a copy of `artifacts/adapter` on the other PC, with Claude Code closed:
+The dashboard's **Add another PC** shows one PowerShell command to paste on the other PC. It downloads the published adapter from this hub (`GET /join/adapter.zip`, over HTTPS with the hub's certificate pinned) into `%LOCALAPPDATA%\CoCern\adapter` and runs setup from there; the folder is self-contained, so the other PC needs no .NET install, and nothing is copied by hand. The command holds the join code, so keep it private. By hand instead, from any copy of `artifacts/adapter` on the other PC:
 
 ```powershell
-dotnet .\CoCern.Adapter.dll --setup --hub https://<hub-pc>:5273/ --join-code <code> --fingerprint <fingerprint>
+.\CoCern.Adapter.exe --setup --hub https://<hub-pc>:5273/ --join-code <code> --fingerprint <fingerprint>
 ```
+
+or, from a framework-dependent build with the .NET runtime installed, `dotnet .\CoCern.Adapter.dll --setup ...` with the same arguments.
 
 - The join code is in `join-code` next to the hub's database; the hub logs it once, when it creates it. Letter case doesn't matter. `COCERN_JOIN_CODE` can supply it instead.
 - The fingerprint is in the hub's log at every start. With it, setup refuses any other certificate (exit code 4).
-- Setup joins, adds a `cocern` server to `~/.codex/config.toml` and `~/.claude.json` (with a backup; `--skip-client-config` skips this), adds `CoCernNode` to the user's Run key, and starts the node. It keeps the join code, so a PC the hub dropped joins again by itself.
+- Setup joins, adds a `cocern` server to Claude Code and to `~/.codex/config.toml`, adds `CoCernNode` to the user's Run key, and starts the node. Claude Code's entry goes through `claude mcp add` when its command line is installed, so Claude Code need not be closed; otherwise `~/.claude.json` is edited (with a backup) and setup says to restart Claude Code if it is running. `--skip-client-config` skips both apps. Every entry names `CoCern.Adapter.exe` when it is beside the dll, else `dotnet` with the dll. Setup keeps the join code, so a PC the hub dropped joins again by itself.
 - Run it again any time; it leaves existing entries alone. `--data-dir <path>` moves the node folder (default `%LOCALAPPDATA%\CoCern\node`; set `COCERN_NODE_DIR` to match). Exit codes: 1 setup or join problem, 4 a hub certificate other than the pinned one, 5 an unreadable settings file. A running node that later meets another certificate sends nothing, says so once, and keeps retrying the pinned hub.
 - A chat whose adapter sets its own `COCERN_URL`, `COCERN_TOKEN_FILE` or `COCERN_TOKEN` is not seen by the node.
 
@@ -507,7 +509,7 @@ Beyond the unit and integration tests, `scripts/Smoke-CoCern.py` checks a real h
 - Two chats on one PC (Codex and Claude Code): messages, acknowledgments, version conflicts, busy claims and the Claude waiter.
 - Codex wake-ups: `codex queue` started real turns in two desktop chats; a watcher restart sent no duplicates.
 - Discovery with a separate hub and two nodes on one PC: joining, certificate pinning, `chat_directory`, refusals, and a stopped node turning unreachable within 90 seconds.
-- The dashboard at desktop and phone sizes: sign-in link, sessions, logs, themes, the Connect page writing an app's settings, and Add another PC's filled-in command.
+- The dashboard at desktop and phone sizes: sign-in link, sessions, logs, themes, the Connect page writing an app's settings, and Add another PC's one pasted command (download from the hub, join, Claude Code and Codex entries, start with Windows).
 
 **Not checked yet**
 

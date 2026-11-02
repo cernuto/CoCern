@@ -57,8 +57,12 @@ internal sealed class SetupEnvironment
     public TimeProvider Clock { get; init; } = TimeProvider.System;
     public TextWriter Out { get; init; } = Console.Out;
     public TextWriter Error { get; init; } = Console.Error;
+    /// <summary>Claude Code's own command line when this PC has one; null makes setup edit .claude.json itself. Tests leave it null or pass a fake, so a real installation is never touched.</summary>
+    public ClaudeCli? ClaudeCli { get; init; }
+    /// <summary>Whether Claude Code is running now. Only the .claude.json fallback asks, to say that a restart is needed; nothing waits on it.</summary>
+    public Func<bool> ClaudeCodeRunning { get; init; } = () => false;
 
-    /// <summary>The real thing: this user's profile, the dotnet host running setup, the published adapter next to it, the Run key.</summary>
+    /// <summary>The real thing: this user's profile, the dotnet host running setup, the published adapter next to it, the Run key, the claude launcher if any.</summary>
     public static SetupEnvironment Create()
     {
         var (dotnet, dll) = Host();
@@ -69,8 +73,27 @@ internal sealed class SetupEnvironment
             AdapterDll = dll,
             RunKey = OperatingSystem.IsWindows() ? new WindowsRunKey() : throw new AdapterConfigurationException("Setup is supported on Windows only."),
             Transport = new NodeTransport(),
-            StartNode = StartDetached
+            StartNode = StartDetached,
+            ClaudeCli = ClaudeCli.Find(),
+            ClaudeCodeRunning = IsClaudeCodeRunning
         };
+    }
+
+    /// <summary>A process named claude or Claude belongs to this user's Claude Code (or desktop app); a process list this user cannot read counts as not running.</summary>
+    private static bool IsClaudeCodeRunning()
+    {
+        foreach (var name in new[] { "claude", "Claude" })
+        {
+            try
+            {
+                var processes = Process.GetProcessesByName(name);
+                var any = processes.Length > 0;
+                foreach (var process in processes) process.Dispose();
+                if (any) return true;
+            }
+            catch (Exception exception) when (exception is InvalidOperationException or Win32Exception or PlatformNotSupportedException) { }
+        }
+        return false;
     }
 
     /// <summary>The folders selected by the caller of <c>--connect</c>, including explicitly isolated process environments.</summary>
@@ -100,20 +123,41 @@ internal sealed class SetupEnvironment
     /// <summary>The dotnet host running this command and the adapter beside it: what client settings start.</summary>
     public static (string Dotnet, string Dll) Host()
     {
+        var dll = Path.Combine(AppContext.BaseDirectory, "CoCern.Adapter.dll");
+        if (!File.Exists(dll)) throw new AdapterConfigurationException($"'{dll}' was not found. Run it from the published adapter folder.");
         var host = Environment.ProcessPath;
         var dotnet = host is not null && string.Equals(Path.GetFileNameWithoutExtension(host), "dotnet", StringComparison.OrdinalIgnoreCase) ? host
             : Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") is { Length: > 0 } hostPath && File.Exists(hostPath) ? hostPath
-            : throw new AdapterConfigurationException("Run it as 'dotnet CoCern.Adapter.dll ...' so the dotnet host to start CoCern with is known.");
-        var dll = Path.Combine(AppContext.BaseDirectory, "CoCern.Adapter.dll");
-        if (!File.Exists(dll)) throw new AdapterConfigurationException($"'{dll}' was not found. Run it from the published adapter folder.");
+            // Started as CoCern.Adapter.exe (the self-contained publish, where there may be no dotnet at all): the exe is what every entry names, so the host is never used.
+            : AdapterLaunch("dotnet", dll).Arguments.Count == 0 ? "dotnet"
+            : throw new AdapterConfigurationException("Run it as 'CoCern.Adapter.exe ...' or 'dotnet CoCern.Adapter.dll ...' so the host to start CoCern with is known.");
         return (dotnet, dll);
+    }
+
+    /// <summary>
+    /// What starts the adapter on this PC: <c>CoCern.Adapter.exe</c> alone when one is beside <paramref name="adapterDll"/> (the self-contained publish a joined PC
+    /// downloads from the hub, which needs no .NET install), else <paramref name="dotnetPath"/> with the dll as its one argument. The Claude Code, Claude desktop and
+    /// Codex entries, <c>claude mcp add</c>, the prompt hook, the Run key and the node start all go through here, so they agree.
+    /// </summary>
+    public static (string Command, IReadOnlyList<string> Arguments) AdapterLaunch(string dotnetPath, string adapterDll)
+    {
+        var exe = Path.Combine(Path.GetDirectoryName(adapterDll) ?? "", "CoCern.Adapter.exe");
+        return File.Exists(exe) ? (exe, []) : (dotnetPath, [adapterDll]);
+    }
+
+    /// <summary>The start of the adapter's command line as one string, every path quoted (for the Run key and hook files): <c>"exe"</c>, or <c>"dotnet" "dll"</c>.</summary>
+    public static string AdapterCommandLine(string dotnetPath, string adapterDll)
+    {
+        var (command, arguments) = AdapterLaunch(dotnetPath, adapterDll);
+        return string.Join(' ', arguments.Prepend(command).Select(LogonStart.Quote));
     }
 
     /// <summary>Shell-launched with a hidden window, so the node outlives this console and shares none of its handles.</summary>
     private static void StartDetached(string dotnet, string dll, string? dataDir)
     {
-        var arguments = $"{LogonStart.Quote(dll)} --node" + (dataDir is null ? "" : $" --data-dir {LogonStart.Quote(dataDir)}");
-        using var _ = Process.Start(new ProcessStartInfo(dotnet, arguments) { UseShellExecute = true, WindowStyle = ProcessWindowStyle.Hidden, CreateNoWindow = true });
+        var (command, launchArguments) = AdapterLaunch(dotnet, dll);
+        var arguments = string.Join(' ', launchArguments.Select(LogonStart.Quote).Append("--node")) + (dataDir is null ? "" : $" --data-dir {LogonStart.Quote(dataDir)}");
+        using var _ = Process.Start(new ProcessStartInfo(command, arguments) { UseShellExecute = true, WindowStyle = ProcessWindowStyle.Hidden, CreateNoWindow = true });
     }
 }
 
@@ -130,20 +174,21 @@ internal static class SetupCommand
     {
         var folder = NormalizeFolder(options.DataDir);
         // Planned once now only to refuse a file we cannot edit before enrolling; each file is planned again from its fresh bytes just before it is written.
-        var planners = new List<Func<ClientPlan>>();
+        // Claude Code's file is the exception when its own command line is on this PC: that registers the entry, and the file is only read if the command line fails.
+        var planners = new List<(Func<ClientPlan> Plan, bool ClaudeCode)>();
         if (!options.SkipClientConfig)
         {
-            planners.Add(() => ClientSettings.PlanCodex(Path.Combine(env.Profile, ".codex", "config.toml"), env.DotnetPath, env.AdapterDll));
-            planners.Add(() => ClientSettings.PlanClaudeCode(Path.Combine(env.Profile, ".claude.json"), env.DotnetPath, env.AdapterDll));
+            planners.Add((() => ClientSettings.PlanCodex(Path.Combine(env.Profile, ".codex", "config.toml"), env.DotnetPath, env.AdapterDll), false));
+            planners.Add((() => ClientSettings.PlanClaudeCode(Path.Combine(env.Profile, ".claude.json"), env.DotnetPath, env.AdapterDll), true));
             // The prompt hook is opt-in: one status line per human message, at no tool call for the model.
             if (options.PromptHook)
             {
-                var command = $"{LogonStart.Quote(env.DotnetPath)} {LogonStart.Quote(env.AdapterDll)} --prompt-hook" + (options.DataDir is null ? "" : $" --data-dir {LogonStart.Quote(folder)}");
-                planners.Add(() => ClientSettings.PlanPromptHook(Path.Combine(env.Profile, ".claude", "settings.json"), command));
-                planners.Add(() => ClientSettings.PlanPromptHook(Path.Combine(env.Profile, ".codex", "hooks.json"), command));
+                var command = $"{SetupEnvironment.AdapterCommandLine(env.DotnetPath, env.AdapterDll)} --prompt-hook" + (options.DataDir is null ? "" : $" --data-dir {LogonStart.Quote(folder)}");
+                planners.Add((() => ClientSettings.PlanPromptHook(Path.Combine(env.Profile, ".claude", "settings.json"), command), false));
+                planners.Add((() => ClientSettings.PlanPromptHook(Path.Combine(env.Profile, ".codex", "hooks.json"), command), false));
             }
         }
-        try { foreach (var planner in planners) planner(); }
+        try { foreach (var (planner, claudeCode) in planners) if (!claudeCode || env.ClaudeCli is null) planner(); }
         catch (ClientSettingsException exception) { env.Error.WriteLine(exception.Message); return MalformedClientFileExitCode; }
 
         var enrolled = await EnrollAsync(options, env, folder, ct);
@@ -152,10 +197,13 @@ internal static class SetupCommand
         try
         {
             // Planned again from the files as they are now, so anything written during enrollment survives; all are checked before any is written.
-            var fresh = planners.Select(planner => planner()).ToList();
-            foreach (var plan in fresh)
+            var fresh = planners.Select(entry => (Plan: entry.ClaudeCode && env.ClaudeCli is not null ? null : entry.Plan(), entry.Plan, entry.ClaudeCode)).ToList();
+            foreach (var (planned, planner, claudeCode) in fresh)
             {
+                if (claudeCode && env.ClaudeCli is { } cli && RegisterWithClaudeCli(cli, env)) continue;
+                var plan = planned ?? planner();
                 env.Out.WriteLine(plan.Apply(env.Clock) switch { ClientChange.Created => $"Created {plan.Path} with the CoCern entry.", ClientChange.Updated => $"Added the CoCern entry to {plan.Path} (backup kept next to it).", _ => $"{plan.Path} already has a CoCern entry; left as it was." });
+                if (claudeCode && !plan.IsUnchanged && env.ClaudeCodeRunning()) env.Out.WriteLine("Claude Code appears to be running: restart it to pick up the CoCern entry.");
             }
             LogonStart.Register(env.DotnetPath, env.AdapterDll, options.DataDir is null ? null : folder, env.RunKey);
             env.StartNode(env.DotnetPath, env.AdapterDll, options.DataDir is null ? null : folder);
@@ -170,6 +218,20 @@ internal static class SetupCommand
         env.Out.WriteLine($"Hub: {enrolled.Hub}");
         env.Out.WriteLine("The node was started in the background and will start at every sign-in.");
         return 0;
+    }
+
+    /// <summary>
+    /// Registers the same server the file plan would write (no variables for an enrolled node) through <c>claude mcp add</c>, after <c>claude mcp get</c> says there is none.
+    /// False when the command line did not succeed, so the caller edits .claude.json instead. One line says which way was taken; the join code is never printed.
+    /// </summary>
+    private static bool RegisterWithClaudeCli(ClaudeCli cli, SetupEnvironment env)
+    {
+        switch (cli.Register(env.DotnetPath, env.AdapterDll, environment: null))
+        {
+            case ClaudeRegistration.Existing: env.Out.WriteLine("Claude Code already has a CoCern entry ('claude mcp get'); left as it was."); return true;
+            case ClaudeRegistration.Added: env.Out.WriteLine($"Registered the CoCern entry with Claude Code through 'claude mcp add' ({cli.Executable})."); return true;
+            default: env.Out.WriteLine($"'claude mcp add' ({cli.Executable}) did not succeed or timed out; writing .claude.json instead."); return false;
+        }
     }
 
     /// <summary>The full data folder without a trailing separator (a drive root such as D:\ keeps its one).</summary>

@@ -16,36 +16,36 @@
     {
         <ol class="join-steps">
             <li>
-                <strong>Copy this folder to the other PC.</strong>
-                <div class="copy-field"><code>@_status.AdapterFolder</code><button type="button" class="copy-button" @onclick="() => CopyAsync(_status.AdapterFolder!, FolderKey)">@Label(FolderKey)</button></div>
-            </li>
-            <li>
-                <strong>On that PC, close Claude Code, then run this in PowerShell inside the copied folder.</strong>
-                @if (_status.Addresses.Length > 1)
-                {
-                    <label class="address-choice">Reach this hub at <select @bind="_address">@foreach (var address in _status.Addresses) { <option value="@address.Url">@address.Url</option> }</select></label>
-                }
-                <div class="copy-field"><code>@Selected.Command</code><button type="button" class="copy-button" @onclick="() => CopyAsync(Selected.Command, Selected.Url)">@Label(Selected.Url)</button></div>
-                <small>It joins this hub, adds CoCern to Claude Code and Codex there, and starts with Windows. The PC then shows up under Machines.</small>
+                <strong>On the other PC, open PowerShell and paste this.</strong>
+                <div class="copy-field"><code>@First.Command</code><button type="button" class="copy-button" @onclick="() => CopyAsync(First.Command, First.Url)">@Label(First.Url)</button></div>
+                <small>It downloads CoCern from this hub, joins it, and adds CoCern to Claude Code and Codex there; the PC then shows up under Machines.</small>
             </li>
         </ol>
         <details class="join-help">
             <summary>The other PC can't reach the hub?</summary>
             <p>Allow the hub's port on private networks. Run this once on this PC, in PowerShell as administrator:</p>
             <div class="copy-field"><code>@_status.FirewallCommand</code><button type="button" class="copy-button" @onclick="() => CopyAsync(_status.FirewallCommand!, FirewallKey)">@Label(FirewallKey)</button></div>
-            <p>Try the other address in step 2 if the PC name doesn't resolve.</p>
+            @if (_status.Addresses.Length > 1)
+            {
+                <p>If the PC name doesn't resolve, paste the command for one of this hub's addresses instead:</p>
+                @foreach (var address in _status.Addresses.Skip(1))
+                {
+                    <p class="address-choice">@address.Url</p>
+                    <div class="copy-field"><code>@address.Command</code><button type="button" class="copy-button" @onclick="() => CopyAsync(address.Command, address.Url)">@Label(address.Url)</button></div>
+                }
+            }
         </details>
         <p class="table-footnote">The command holds this hub's join code. Share it only with PCs you trust.</p>
     }
 </section>
 
 @code {
-    private const string FolderKey = "folder", FirewallKey = "firewall";
+    private const string FirewallKey = "firewall";
     private DashboardAddPcStatus? _status;
-    private string? _address;
     private string? _copied;
 
-    private DashboardHubAddress Selected => _status!.Addresses.FirstOrDefault(address => address.Url == _address) ?? _status.Addresses[0];
+    /// <summary>The address by this PC's name: the hub lists it first, and it is the one a PC on the same network can usually resolve.</summary>
+    private DashboardHubAddress First => _status!.Addresses[0];
 
     protected override async Task OnInitializedAsync()
     {

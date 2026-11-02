@@ -33,9 +33,9 @@ internal static class LogonStart
 {
     public const string ValueName = "CoCernNode";
 
-    /// <summary>The command line the Run value holds: every path quoted, with the data folder when one was chosen.</summary>
+    /// <summary>The command line the Run value holds: the adapter exe alone or dotnet with the dll (see <see cref="SetupEnvironment.AdapterLaunch"/>), every path quoted, with the data folder when one was chosen.</summary>
     public static string Command(string dotnetPath, string adapterDll, string? dataDir = null) =>
-        $"{Quote(dotnetPath)} {Quote(adapterDll)} --node" + (string.IsNullOrWhiteSpace(dataDir) ? "" : $" --data-dir {Quote(dataDir)}");
+        $"{SetupEnvironment.AdapterCommandLine(dotnetPath, adapterDll)} --node" + (string.IsNullOrWhiteSpace(dataDir) ? "" : $" --data-dir {Quote(dataDir)}");
 
     /// <summary>One argument in standard Windows command-line form (CommandLineToArgvW): always quoted, with backslashes doubled where they precede a quote and embedded quotes escaped.</summary>
     internal static string Quote(string argument)

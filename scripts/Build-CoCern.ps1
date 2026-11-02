@@ -17,7 +17,11 @@ try {
         & dotnet publish src/CoCern.Host/CoCern.Host.csproj -c Release -r win-x64 --self-contained false -o artifacts/host --nologo
         if ($LASTEXITCODE -ne 0) { throw 'Host publish failed.' }
         # Publishing for win-x64 unpacks the bundled windows_amd64 extension into artifacts/host/duckdb_extensions.
-        & dotnet publish src/CoCern.Adapter/CoCern.Adapter.csproj -c Release -o artifacts/adapter --no-restore --nologo
+        # The adapter is self-contained: the hub serves this folder as /join/adapter.zip, and the pasted "Add another PC" command runs
+        # CoCern.Adapter.exe from it on a PC that may have no .NET runtime. Not single-file or trimmed: the adapter loads its config from
+        # beside the exe, and the hub's DashboardConnect.AdapterDll() looks for CoCern.Adapter.dll in this folder. The runtime-specific
+        # restore happens here (the solution restore above has no runtime identifier, so --no-restore would fail for win-x64).
+        & dotnet publish src/CoCern.Adapter/CoCern.Adapter.csproj -c Release -r win-x64 --self-contained true -o artifacts/adapter --nologo
         if ($LASTEXITCODE -ne 0) { throw 'Adapter publish failed.' }
     }
 } finally { Pop-Location }

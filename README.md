@@ -69,14 +69,15 @@ No browser? From the adapter folder (`artifacts/adapter`), run `dotnet CoCern.Ad
 
 Chats on other PCs can join the same hub and message chats here. On the hub's PC, open **Connect** and scroll to **Add another PC**:
 
-1. Copy the folder it shows to the other PC.
-2. On that PC, close Claude Code, open PowerShell in the copied folder, and paste the command it shows.
+1. Copy the one command it shows.
+2. On the other PC, open PowerShell and paste it.
 
-That PC is then joined: CoCern is added to its Claude Code and Codex, and it starts with Windows. It shows up on the dashboard under Machines.
+Nothing is copied by hand and no .NET install is needed there: the command downloads CoCern from this hub over HTTPS with the hub's certificate pinned, joins, adds CoCern to Claude Code (through `claude mcp add` when Claude Code's command line is installed, else its settings file, with a restart hint if Claude Code is running) and Codex, and starts it with Windows. Claude Code no longer needs to be closed. The PC shows up on the dashboard under Machines.
 
 - **Turn it on first.** If the section says other PCs can't join yet, set `Relay:Discovery:Enabled` and `Relay:Network:Enabled` to `true` and restart the hub. The Visual Studio launch profile already does.
 - **The other PC can't reach the hub?** Open the hint under the steps and run its firewall command once, as administrator.
 - **Keep the command private.** It holds the hub's join code. Anyone with it can join a PC and message your chats.
+- **By hand instead?** From any copy of the adapter folder, run `.\CoCern.Adapter.exe --setup ...` (or `dotnet .\CoCern.Adapter.dll --setup ...`); see [Setup by hand](docs/reference.md#setup-by-hand).
 
 ## Use it in a chat
 

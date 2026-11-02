@@ -45,9 +45,78 @@ public sealed class AddPcTests : IDisposable
         Assert.Equal(Path.GetDirectoryName(Adapter), status.AdapterFolder);
         var byName = status.Addresses[0];
         Assert.Equal($"https://{Environment.MachineName}:5273/", byName.Url);
-        Assert.Equal($"dotnet .\\CoCern.Adapter.dll --setup --hub https://{Environment.MachineName}:5273/ --join-code JOIN-CODE-1234 --fingerprint {Fingerprint}", byName.Command);
-        Assert.All(status.Addresses, address => Assert.Contains("--fingerprint " + Fingerprint, address.Command));
+        Assert.All(status.Addresses, address =>
+        {
+            Assert.Contains($"{address.Url}join/adapter.zip", address.Command);
+            Assert.Contains($"--setup --hub {address.Url} --join-code JOIN-CODE-1234 --fingerprint {Fingerprint}", address.Command);
+            Assert.Contains("CoCern.Adapter.exe", address.Command);
+            Assert.Contains("CoCern.Adapter.dll", address.Command);
+            Assert.DoesNotContain(".\\CoCern.Adapter.dll --setup", address.Command);
+        });
         Assert.Contains("-LocalPort 5273", status.FirewallCommand);
+    }
+
+    [Fact]
+    public void The_one_paste_command_pins_the_hub_certificate_by_its_sha256_fingerprint()
+    {
+        var command = Status(discovery: true, (5273, Fingerprint)).Addresses[0].Command;
+        Assert.DoesNotContain("\n", command);
+        Assert.Contains("ServerCertificateValidationCallback", command);
+        Assert.Contains("SHA256", command);
+        Assert.Contains("OrdinalIgnoreCase", command);
+        // Once to pin the download, once for --fingerprint.
+        Assert.True(command.Split(Fingerprint).Length - 1 >= 2, "the fingerprint should pin the download as well as the join");
+        Assert.Contains("$env:TEMP", command);
+        Assert.Contains("$env:LOCALAPPDATA\\CoCern\\adapter", command);
+        Assert.Contains("Expand-Archive", command);
+        Assert.DoesNotContain("SkipCertificateCheck", command);
+    }
+
+    private static RelayHostFixture ZipHost(bool discovery, string adapterPath, IPAddress? remote = null) => new(remoteAddress: remote, settings: new Dictionary<string, string?>
+    {
+        ["Relay:Discovery:Enabled"] = discovery ? "true" : "false", ["Relay:Connect:AdapterPath"] = adapterPath
+    });
+
+    private static HttpClient Client(RelayHostFixture host, string scheme = "https") => host.CreateClient(new WebApplicationFactoryClientOptions { BaseAddress = new Uri(scheme + "://localhost"), AllowAutoRedirect = false });
+
+    [Fact]
+    public async Task The_zip_endpoint_streams_the_adapter_folder_without_a_dashboard_sign_in()
+    {
+        File.WriteAllText(Path.Combine(Path.GetDirectoryName(Adapter)!, "CoCern.Adapter.runtimeconfig.json"), "{}");
+        await using var host = ZipHost(discovery: true, Adapter, remote: IPAddress.Parse("192.168.1.20"));
+        using var client = Client(host);
+        using var response = await client.GetAsync("/join/adapter.zip");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("application/zip", response.Content.Headers.ContentType?.MediaType);
+        Assert.Equal("CoCern.Adapter.zip", response.Content.Headers.ContentDisposition?.FileName?.Trim('"'));
+        using var zip = new System.IO.Compression.ZipArchive(await response.Content.ReadAsStreamAsync(), System.IO.Compression.ZipArchiveMode.Read);
+        Assert.Contains("CoCern.Adapter.dll", zip.Entries.Select(entry => entry.FullName));
+        Assert.Contains("CoCern.Adapter.runtimeconfig.json", zip.Entries.Select(entry => entry.FullName));
+        Assert.DoesNotContain(zip.Entries, entry => entry.FullName.Contains("CoCern.Host"));
+    }
+
+    [Fact]
+    public async Task The_zip_endpoint_is_404_without_the_adapter_folder()
+    {
+        await using var host = ZipHost(discovery: true, Path.Combine(root, "missing", "CoCern.Adapter.dll"));
+        using var client = Client(host);
+        Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/join/adapter.zip")).StatusCode);
+    }
+
+    [Fact]
+    public async Task The_zip_endpoint_does_not_exist_while_discovery_is_off()
+    {
+        await using var host = ZipHost(discovery: false, Adapter);
+        using var client = Client(host);
+        Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/join/adapter.zip")).StatusCode);
+    }
+
+    [Fact]
+    public async Task The_zip_endpoint_refuses_plain_http_from_another_pc()
+    {
+        await using var host = ZipHost(discovery: true, Adapter, remote: IPAddress.Parse("192.168.1.20"));
+        using var client = Client(host, scheme: "http");
+        Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync("/join/adapter.zip")).StatusCode);
     }
 
     [Fact]

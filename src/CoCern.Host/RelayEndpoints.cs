@@ -41,6 +41,7 @@ public static class RelayEndpoints
             .Accepts<CoordinationRequest>("application/json").Produces<RelayReply>().Produces<RelayReply>(400).Produces(401).Produces<RelayReply>(403).Produces<RelayReply>(404).Produces<RelayReply>(409).Produces<RelayReply>(413)
             .WithDescription("Authenticated repository-scoped coordination. Arguments are the raw tool JSON object. Inspect GET /api/tools for the fixed catalog and required fields; actor identity always comes from authentication. dataJson is a JSON string containing structured domain data.");
         app.MapDiscoveryEndpoints();
+        app.MapJoinEndpoints();
         app.MapRelayDashboard();
         app.MapFallbackToFile("/dashboard/{*path:nonfile}", "dashboard/index.html");
         app.MapHub<CoordinationHub>("/hubs/coordination").RequireAuthorization();
