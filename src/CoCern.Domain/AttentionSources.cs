@@ -16,10 +16,12 @@ internal static class AttentionSources
     public const string ManagerRole = SessionRoles.Manager;
 
     /// <summary>
-    /// Board items after a <c>task_update</c> or <c>action_report</c>: <c>blocked</c> and <c>failed</c> to managers, <c>review_ready</c>
+    /// Board items after a <c>task_update</c> or <c>action_report</c>: <c>blocked</c> and <c>failed</c> (also for an action a recovery
+    /// abandoned) to managers, <c>review_ready</c>
     /// to managers on completion, and <c>next_work</c> to each unblocked task's target. Leaving a state closes the items it raised.
     /// </summary>
-    public static void OnTaskUpdate(AggregateContext context, JsonObject task, JsonObject? prior, IReadOnlyList<string> unblocked, IReadOnlyList<string> failedActions)
+    public static void OnTaskUpdate(AggregateContext context, JsonObject task, JsonObject? prior, IReadOnlyList<string> unblocked, IReadOnlyList<string> failedActions,
+        IReadOnlyList<string>? abandonedActions = null)
     {
         var tasks = ObjectAt(context.State, "tasks");
         var taskId = Text(task, "taskId");
@@ -44,10 +46,15 @@ internal static class AttentionSources
         }
         else if (was == "blocked" && now != "blocked") ToManagers(context, Operations.AttentionClose, Kinds(Item(AttentionKinds.Blocked), AttentionKinds.Blocked));
 
-        if (failedActions.Count > 0)
+        abandonedActions ??= [];
+        if (failedActions.Count > 0 || abandonedActions.Count > 0)
         {
             var item = Item(AttentionKinds.Failed);
-            item["note"] = "action " + string.Join(", ", failedActions) + " failed";
+            item["note"] = string.Join("; ", new[]
+            {
+                failedActions.Count > 0 ? "action " + string.Join(", ", failedActions) + " failed" : "",
+                abandonedActions.Count > 0 ? "action " + string.Join(", ", abandonedActions) + " abandoned by recovery; its external effects are unknown" : ""
+            }.Where(part => part.Length > 0));
             if (Blocking()) item["blocking"] = true;
             ToManagers(context, Operations.AttentionRaise, item);
         }

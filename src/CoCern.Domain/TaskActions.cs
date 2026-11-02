@@ -33,7 +33,8 @@ internal static class TaskActions
     /// Whether an unresolved action still holds its task against another session's claim or a release. A recovered one does not: its
     /// writer is gone, and its pending restoration still blocks new actions, completion and its resources until it is resolved.
     /// </summary>
-    public static bool HoldsTask(JsonObject task) => (task["actions"] as JsonObject ?? new()).Any(x => x.Value is JsonObject action && IsUnresolved(action) && action["recovery"] is not JsonObject);
+    public static bool HoldsTask(JsonObject task) =>
+        (task["actions"] as JsonObject ?? new()).Any(x => x.Value is JsonObject action && IsUnresolved(action) && action["recovery"] is not JsonObject && action["overridden"] is not JsonObject);
 
     private static bool IsTerminal(string status) => status is "completed" or "failed" or "canceled" or Abandoned;
 
@@ -106,6 +107,9 @@ internal static class TaskActions
     /// action's own principal on another session once the writer's claim has lapsed, takes it over. Without an outcome (an administrator
     /// can never give one) an action still in flight becomes <see cref="Abandoned"/>. The recovery is recorded with who and when; a required
     /// restoration stays pending, and the recovering session reports it. A recovered action no longer holds its task against claims.</item>
+    /// <item>An abandoned action's own principal (its writer, still there after all, or a new session of it) may replace
+    /// <see cref="Abandoned"/> with the real terminal outcome. The action keeps <c>overridden</c> (the recovery it replaced, who and when),
+    /// and answers to its writer's session again.</item>
     /// </list>
     /// </summary>
     public static RelayReply? ApplyReport(AggregateContext context, JsonObject task, JsonObject update)
@@ -126,9 +130,11 @@ internal static class TaskActions
         // Administrative acceptance is only a cleanup decision. It cannot supply an outcome.
         var adminAcceptance = caller.IsAdministrator && context.Operation == RelayTools.ActionReport && Text(update, "restoration") == "accepted" && !update.ContainsKey("outcome") && !CarriesMilestone(args);
         var recovery = context.Operation == RelayTools.ActionReport && !historical && Flag(update, "recover");
-        if (recovery) { if (RecoveryRefusal(context, task, action, update, originalWriter) is { } refused) return refused; }
-        else if (!originalWriter && !recoverer && !adminAcceptance) return Error(ActionDenied);
         var status = Text(action, "status");
+        // The writer was there after all (an administrator abandoned it during a live lease, say): its real outcome replaces abandoned.
+        var overriding = !recovery && !historical && status == Abandoned && Text(action, "principalId") == caller.PrincipalId && update.ContainsKey("outcome");
+        if (recovery) { if (RecoveryRefusal(context, task, action, update, originalWriter) is { } refused) return refused; }
+        else if (!originalWriter && !recoverer && !adminAcceptance && !overriding) return Error(ActionDenied);
         // A cleanup without an outcome keeps the action's status, whatever it is (an action still invoking included); a recovery without
         // one abandons an action still in flight.
         var outcome = recovery && !update.ContainsKey("outcome") ? (IsTerminal(status) ? status : Abandoned) : adminAcceptance ? status : Required(update, "outcome");
@@ -145,6 +151,7 @@ internal static class TaskActions
             ["at"] = context.Now.ToString("O"), ["author"] = caller.PrincipalId, ["sessionId"] = session
         };
         if (recovery) entry["recovered"] = true;
+        if (overriding && IsTerminal(outcome)) entry["overrode"] = Abandoned;
         if (historical)
         {
             // A late report on a superseded attempt is kept for the record; it changes no current state.
@@ -152,7 +159,8 @@ internal static class TaskActions
             history.Add(entry);
             return null;
         }
-        if (IsTerminal(status) && status != outcome) return Error(ActionConflict);
+        // Only a terminal outcome replaces abandoned: the action was already released, so it never becomes in flight again.
+        if (IsTerminal(status) && status != outcome && !(overriding && IsTerminal(outcome))) return Error(ActionConflict);
         var priorRestoration = Text(action, "restoration");
         var requiresRestoration = Flag(action, "requiresRestoration") || priorRestoration is "pending" or "blocked";
         if (requiresRestoration && restoration == "not_required") return Error(RestorationRequired);
@@ -162,6 +170,14 @@ internal static class TaskActions
         action["status"] = outcome;
         action["restoration"] = restoration;
         action["report"] = update["report"]?.DeepClone(); action["reportedAt"] = context.Now.ToString("O");
+        if (overriding && status != outcome)
+        {
+            action["overridden"] = new JsonObject
+            {
+                ["status"] = Abandoned, ["recovery"] = action["recovery"]?.DeepClone(), ["principalId"] = caller.PrincipalId, ["sessionId"] = session, ["at"] = context.Now.ToString("O")
+            };
+            action.Remove("recovery");
+        }
         if (recovery)
             action["recovery"] = new JsonObject
             {

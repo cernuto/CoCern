@@ -98,26 +98,26 @@ internal static class ControlAggregate
     private const string OpenOverflowKey = "openActionsOverflow";
 
     /// <summary>Whether the session answers for an unresolved action: it began one (or recovered one) that is still invoking, uncertain or awaiting restoration.</summary>
-    private static bool OwnsWork(JsonObject session) => session[OpenActionsKey] is JsonObject { Count: > 0 } || Number(session, OpenOverflowKey) > 0;
+    private static bool OwnsWork(JsonObject session) => session[OpenActionsKey] is JsonObject { Count: > 0 } || Flag(session, OpenOverflowKey);
 
     /// <summary>
     /// A board's report (<see cref="Operations.SessionWork"/>) that a session now answers for an unresolved action, or no longer does. The
-    /// record names at most <see cref="RelayLimits.MaxSessionOpenActions"/> actions and counts any more, so it stays bounded. A session missing
-    /// from the directory, or in another repository, is ignored: a refusal would make the board's outbox retry it forever.
+    /// record keeps each open action as a short hash of its key, at most <see cref="RelayLimits.MaxSessionOpenActions"/>, so it stays bounded.
+    /// A close for an action the directory never saw open (one begun before it tracked actions) is ignored. Past the bound the session
+    /// is marked <c>openActionsOverflow</c> and stays exempt for good, since the directory can no longer tell when its last action closes.
+    /// A session missing from the directory, or in another repository, is ignored: a refusal would make the board's outbox retry it forever.
     /// </summary>
     private static RelayReply TrackWork(AggregateContext context)
     {
         var id = Required(context.Args, "sessionId");
-        var key = Required(context.Args, "actionKey");
+        var key = Retention.Hash(Required(context.Args, "actionKey"));
         if (ObjectAt(context.State, "sessions")[id] is not JsonObject session || Text(session, "repositoryId") != context.Repository) return Ok(new { tracked = false });
         var open = ObjectAt(session, OpenActionsKey);
-        var overflow = Number(session, OpenOverflowKey);
-        if (Flag(context.Args, "open")) { if (!open.ContainsKey(key)) { if (open.Count < RelayLimits.MaxSessionOpenActions) open[key] = context.Now.ToUnixTimeSeconds(); else overflow++; } }
-        // A close for an action not named here was one of the counted ones (or began before the directory tracked actions).
-        else if (!open.Remove(key) && overflow > 0) overflow--;
-        if (overflow > 0) session[OpenOverflowKey] = overflow; else session.Remove(OpenOverflowKey);
+        var known = open.ContainsKey(key);
+        if (Flag(context.Args, "open")) { if (!known) { if (open.Count < RelayLimits.MaxSessionOpenActions) open[key] = context.Now.ToUnixTimeSeconds(); else session[OpenOverflowKey] = true; } }
+        else open.Remove(key);
         if (open.Count == 0) session.Remove(OpenActionsKey);
-        return Ok(new { tracked = true, openActions = open.Count + overflow });
+        return Ok(new { tracked = known || Flag(context.Args, "open"), openActions = open.Count, overflow = Flag(session, OpenOverflowKey) });
     }
 
     private static DateTimeOffset LastSeen(JsonObject session) =>

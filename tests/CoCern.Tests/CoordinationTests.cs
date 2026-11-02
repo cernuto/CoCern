@@ -1751,17 +1751,24 @@ public sealed class CoordinationTests
         Assert.True(Call(control, "control", closed.Operation, Payload(closed), worker, later).Ok);
         Assert.Null(StateJson(control)["sessions"]![a]!["openActions"]);
 
-        // A session names a bounded number of actions and counts the rest; it stays exempt until every one is closed.
+        // A close for an action the directory never saw open (one begun before it tracked actions) is ignored, so it cannot lift the
+        // exemption of an action that is still open.
         var counted = new StateEnvelope<CoordinationDocument> { Value = new() { Json = new JsonObject { ["sessions"] = new JsonObject { ["s"] = StaleRecord("s", Now) } }.ToJsonString() } };
         JsonObject Work(int i, bool open) => new() { ["sessionId"] = "s", ["actionKey"] = "k" + i, ["open"] = open };
-        for (var i = 0; i < RelayLimits.MaxSessionOpenActions + 2; i++) Assert.True(Call(counted, "control", Operations.SessionWork, Work(i, true), worker).Ok);
+        JsonNode Record() => StateJson(counted)["sessions"]!["s"]!;
         Assert.True(Call(counted, "control", Operations.SessionWork, Work(0, true), worker).Ok);
-        var record = StateJson(counted)["sessions"]!["s"]!;
-        Assert.Equal((RelayLimits.MaxSessionOpenActions, 2), (record["openActions"]!.AsObject().Count, record["openActionsOverflow"]!.GetValue<int>()));
-        for (var i = 0; i < RelayLimits.MaxSessionOpenActions; i++) Assert.True(Call(counted, "control", Operations.SessionWork, Work(i, false), worker).Ok);
-        Assert.Equal(1, Data(Call(counted, "control", Operations.SessionWork, Work(RelayLimits.MaxSessionOpenActions, false), worker))["openActions"]!.GetValue<int>());
-        Assert.True(Call(counted, "control", Operations.SessionWork, Work(RelayLimits.MaxSessionOpenActions + 1, false), worker).Ok);
-        Assert.DoesNotContain("openActions", StateJson(counted)["sessions"]!["s"]!.ToJsonString());
+        var legacy = Data(Call(counted, "control", Operations.SessionWork, new() { ["sessionId"] = "s", ["actionKey"] = "begun-before-tracking", ["open"] = false }, worker));
+        Assert.Equal((false, 1), (legacy["tracked"]!.GetValue<bool>(), legacy["openActions"]!.GetValue<int>()));
+        Assert.True(Call(counted, "control", Operations.SessionWork, Work(0, false), worker).Ok);
+        Assert.DoesNotContain("openActions", Record().ToJsonString());
+        // The record is bounded: past the limit the session is marked and stays exempt for good, even once every remembered one closed.
+        for (var i = 0; i <= RelayLimits.MaxSessionOpenActions; i++) Assert.True(Call(counted, "control", Operations.SessionWork, Work(i, true), worker).Ok);
+        Assert.True(Call(counted, "control", Operations.SessionWork, Work(0, true), worker).Ok);
+        Assert.Equal((RelayLimits.MaxSessionOpenActions, true), (Record()["openActions"]!.AsObject().Count, Record()["openActionsOverflow"]!.GetValue<bool>()));
+        Assert.False(Record()["openActions"]!.AsObject().ContainsKey("k1"));
+        for (var i = 0; i <= RelayLimits.MaxSessionOpenActions; i++) Assert.True(Call(counted, "control", Operations.SessionWork, Work(i, false), worker).Ok);
+        Assert.Null(Record()["openActions"]);
+        Assert.True(Record()["openActionsOverflow"]!.GetValue<bool>());
         // A report for a session the directory no longer has, or another repository's, is accepted and ignored.
         Assert.False(Data(Call(counted, "control", Operations.SessionWork, new() { ["sessionId"] = "gone", ["actionKey"] = "k", ["open"] = true }, worker))["tracked"]!.GetValue<bool>());
 
@@ -1873,6 +1880,68 @@ public sealed class CoordinationTests
         Assert.True(Call(board, "board", "action_report", restored, worker, 220).Ok);
         Assert.Equal([("a2", false)], board.Effects.Where(effect => effect.Operation == Operations.SessionWork).Select(effect => (Payload(effect)["sessionId"]!.GetValue<string>(), Payload(effect)["open"]!.GetValue<bool>())));
         Assert.True(Call(board, "board", "action_begin", Next(6), worker, 220).Ok);
+    }
+
+    [Fact]
+    public void The_writer_still_there_replaces_an_abandoned_status_with_its_real_outcome()
+    {
+        var worker = Caller with { IsAdministrator = false };
+        var admin = Caller with { PrincipalId = "bob" };
+        var board = new StateEnvelope<CoordinationDocument>();
+        Assert.True(Call(board, "board", "task_update", new() { ["taskId"] = "t", ["requestId"] = "create", ["expectedVersion"] = 0 }, worker).Ok);
+        Assert.True(Call(board, "board", "task_claim", new() { ["taskId"] = "t", ["sessionId"] = "a", ["requestId"] = "claim", ["expectedVersion"] = 1, ["leaseSeconds"] = 600 }, worker).Ok);
+        Assert.True(Call(board, "board", "action_begin", new() { ["taskId"] = "t", ["sessionId"] = "a", ["requestId"] = "begin", ["expectedVersion"] = 2, ["actionId"] = "deploy", ["inputFingerprint"] = "f" }, worker).Ok);
+        board.Effects.Clear();
+        // An administrator abandons the action while its writer's lease is still live.
+        var recover = StrandedReport("admin-session", 3); recover["recover"] = true;
+        Assert.True(Call(board, "board", "action_report", recover, admin, 60).Ok);
+        // Its external effects are unknown, so the managers get a failed item for it.
+        var raised = board.Effects.Where(effect => effect.Operation == Operations.AttentionRoute).Select(effect => Payload(effect)["item"]!).Single(item => item["kind"]!.GetValue<string>() == AttentionKinds.Failed);
+        Assert.Contains("deploy abandoned", raised["note"]!.GetValue<string>());
+        // Another principal cannot replace it, and an outcome that would put it back in flight is refused.
+        var other = StrandedReport("mallory-session", 4); other["outcome"] = "completed";
+        Assert.Equal("ActionDenied", Call(board, "board", "action_report", other, new RelayCaller("mallory", false, ["repo"], true), 90).Code);
+        var unknown = StrandedReport("a", 4); unknown["outcome"] = "unknown";
+        Assert.Equal("ActionConflict", Call(board, "board", "action_report", unknown, worker, 90).Code);
+        // The writer's real outcome replaces abandoned, and the action records what it replaced.
+        var real = StrandedReport("a", 4); real["outcome"] = "completed"; real["report"] = "deployed after all";
+        var replaced = Call(board, "board", "action_report", real, worker, 90);
+        Assert.True(replaced.Ok, replaced.Code);
+        var action = Data(replaced)["actions"]!["deploy"]!;
+        Assert.Equal("completed", action["status"]!.GetValue<string>());
+        Assert.Null(action["recovery"]);
+        Assert.Equal(("abandoned", "bob", "a", Now.AddSeconds(90).ToString("O")), (action["overridden"]!["status"]!.GetValue<string>(), action["overridden"]!["recovery"]!["principalId"]!.GetValue<string>(),
+            action["overridden"]!["sessionId"]!.GetValue<string>(), action["overridden"]!["at"]!.GetValue<string>()));
+        var entry = Data(Call(board, "board", "task_get", new() { ["taskId"] = "t", ["section"] = "reports" }, worker, 90))["items"]!.AsArray().Last()!;
+        Assert.Equal(("completed", "abandoned"), (entry["outcome"]!.GetValue<string>(), entry["overrode"]!.GetValue<string>()));
+        // Once replaced it is an ordinary terminal outcome: another one conflicts.
+        var again = StrandedReport("a", 5); again["outcome"] = "failed";
+        Assert.Equal("ActionConflict", Call(board, "board", "action_report", again, worker, 90).Code);
+    }
+
+    [Fact]
+    public void A_reply_stored_under_the_old_fingerprint_still_replays_for_the_same_arguments()
+    {
+        var board = new StateEnvelope<CoordinationDocument>();
+        Assert.True(Call(board, "board", "task_update", new() { ["taskId"] = "a", ["requestId"] = "create-a", ["expectedVersion"] = 0, ["workflow"] = DependentWorkflow("completed") }).Ok);
+        // A write the hub sent with an injected archivedDependsOn, stored before this change: its fingerprint covered every argument but hubIncarnation.
+        JsonObject Write(string incarnation) => new()
+        {
+            ["taskId"] = "b", ["requestId"] = "write-b", ["expectedVersion"] = 0, ["workflow"] = DependentWorkflow("ready", "a"), ["archivedDependsOn"] = new JsonArray("a"), ["hubIncarnation"] = incarnation
+        };
+        var first = Call(board, "board", "task_update", Write("h1"));
+        Assert.True(first.Ok, first.Code);
+        var legacy = Write("h1"); legacy["repositoryId"] = "repo"; legacy.Remove("hubIncarnation");
+        var state = StateJson(board);
+        state["requests"]!["alice:task_update:write-b"]!["fingerprint"] = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(legacy.ToJsonString())));
+        board.Value = new() { Json = state.ToJsonString() };
+        var stored = board.Value.Json;
+        // The same request from a restarted hub replays the stored reply and changes nothing.
+        Assert.Equal(first, Call(board, "board", "task_update", Write("h2")));
+        Assert.Equal(stored, board.Value.Json);
+        // The old fingerprint still names its injected arguments, so only an identical request matches it; a changed one conflicts.
+        var changed = Write("h2"); changed["workflow"]!["priority"] = 3;
+        Assert.Equal("RequestConflict", Call(board, "board", "task_update", changed).Code);
     }
 
     [Fact]

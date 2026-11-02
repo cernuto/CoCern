@@ -286,8 +286,8 @@ public static class RelayLimits
     /// </summary>
     public const int StaleSessionHours = MaxAttentionRouteIdleHours;
     /// <summary>
-    /// Unresolved actions the session directory names per session (so it never expires a session that still answers for one). Past this,
-    /// further ones are only counted; the session stays exempt either way.
+    /// Unresolved actions the session directory remembers per session (so it never expires a session that still answers for one). Past
+    /// this, the session is marked and stays exempt for good, since the directory can no longer tell when its last one closes.
     /// </summary>
     public const int MaxSessionOpenActions = 64;
     /// <summary>Least minutes between a session's reports to the control directory that it is still active (made at boundary replies).</summary>

@@ -315,8 +315,10 @@ internal static class TaskBoardAggregate
             if (completing) unblocked = TaskWorkflow.Unblocked(tasks, Text(task, "taskId"));
         }
         // Attention items for this change commit with it: blocked, failed and review_ready to managers, next_work to each unblocked target.
-        var failed = ObjectAt(task, "actions").Where(x => x.Value is JsonObject action && Text(action, "status") == "failed" && priorStatus.GetValueOrDefault(x.Key) != "failed").Select(x => x.Key).Order(StringComparer.Ordinal).ToArray();
-        AttentionSources.OnTaskUpdate(context, task, priorWorkflow, unblocked, failed);
+        string[] NewlyIn(string status) => ObjectAt(task, "actions").Where(x => x.Value is JsonObject action && Text(action, "status") == status && priorStatus.GetValueOrDefault(x.Key) != status)
+            .Select(x => x.Key).Order(StringComparer.Ordinal).ToArray();
+        // An abandoned action's external effects are unknown, so the managers hear of it like a failure.
+        AttentionSources.OnTaskUpdate(context, task, priorWorkflow, unblocked, NewlyIn("failed"), NewlyIn(TaskActions.Abandoned));
         StandingOrders.Detect(context, task, priorWorkflow);
         task["updatedAt"] = context.Now.ToString("O"); task["updatedBy"] = context.Caller.PrincipalId; task["version"] = ++version;
         // An acknowledgment, not the task: echoing the whole task (up to its 256-message conversation) put it into the updater's context again
