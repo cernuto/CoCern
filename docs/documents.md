@@ -18,6 +18,7 @@ Other JSON and YAML files are skipped. So are files over 256 KB (8 MB for OpenAP
 
 - The hub picks up new commits by itself every few minutes (5 by default).
 - `doc_sync` runs a sync now.
+- If the hub cannot save a sync, searches keep the last saved commit and the next sync tries again.
 - It reads committed files only, with `git show`. It never reads or changes your working tree, so uncommitted edits are not searched.
 - It fetches the branch and follows its commits on the remote. A branch the remote does not have yet, or a clone with no remote, is read from the local branch.
 - With `Fetch` set to `false` it never fetches and reads the local branch only. The start script sets this for its own checkout.

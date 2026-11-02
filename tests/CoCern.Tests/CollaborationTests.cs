@@ -552,6 +552,48 @@ public sealed class CollaborationTests
         Assert.Equal("unknown", Reason(Begin("begin-removed", 0)));
     }
 
+    private static JsonObject WideGrant(string id) =>
+        Grant(id, "resource", 3600, Enumerable.Range(0, RelayLimits.MaxGrantTargets).Select(i => id + "-" + i + "-" + new string('r', RelayLimits.MaxIdentifierLength - 12)).ToArray());
+
+    [Fact]
+    public void Standing_put_refuses_standing_too_large_to_deliver_and_keeps_what_is_delivered_readable()
+    {
+        // One put of six wide grants: well over the delivered-standing limit, so it is refused whole and nothing is stored.
+        var state = new StateEnvelope<CoordinationDocument>();
+        var before = state.Value.Json;
+        var oversized = Standing(state, "standing_put", Put(0, "grants", new JsonArray(Enumerable.Range(0, 6).Select(i => (JsonNode)WideGrant("g" + i)).ToArray())));
+        Assert.Equal("PayloadTooLarge", oversized.Code);
+        Assert.Equal(RelayLimits.MaxStandingBytes, Data(oversized)["maxBytes"]!.GetValue<int>());
+        Assert.True(Data(oversized)["bytes"]!.GetValue<int>() > RelayLimits.MaxStandingBytes);
+        Assert.Equal(before, state.Value.Json);
+
+        // Grow standing one grant, then one 200-character line, at a time until a put is refused: the last accepted one sits just under the limit.
+        long revision = 0;
+        bool Add(string field, JsonNode item)
+        {
+            var put = Standing(state, "standing_put", Put(revision, field, new JsonArray(item)));
+            if (put.Ok) { revision++; return true; }
+            Assert.Equal("PayloadTooLarge", put.Code);
+            return false;
+        }
+        var grants = 0; while (Add("grants", WideGrant("w" + grants))) grants++;
+        var lines = 0; while (Add("lines", new JsonObject { ["id"] = "l" + lines, ["text"] = new string('x', RelayLimits.MaxStandingLineLength) })) lines++;
+        Assert.True(grants > 0 && lines > 0);
+        var stored = state.Value.Json;
+        Assert.Equal("PayloadTooLarge", Standing(state, "standing_put", Put(revision, "lines", new JsonArray(new JsonObject { ["id"] = "over", ["text"] = new string('x', RelayLimits.MaxStandingLineLength) }))).Code);
+        Assert.Equal(stored, state.Value.Json);
+
+        // What sessions receive and what task_get shows are both readable, and the delivered standing is within its limit.
+        var delivered = Call(state, "__standing", new());
+        Assert.True(delivered.Ok, delivered.Code);
+        Assert.Equal(revision, delivered.Version);
+        Assert.InRange(JsonSerializer.SerializeToUtf8Bytes(delivered).Length, RelayLimits.MaxStandingBytes - 1_000, RelayLimits.MaxStandingBytes);
+        Assert.Equal(grants, Data(delivered)["grants"]!.AsArray().Count);
+        var view = Call(state, "task_get", new() { ["section"] = "standing" });
+        Assert.True(view.Ok, view.Code);
+        Assert.Equal(lines, Data(view)["lines"]!.AsArray().Count);
+    }
+
     [Fact]
     public void Standing_put_needs_an_administrator_and_the_expected_revision_within_limits()
     {

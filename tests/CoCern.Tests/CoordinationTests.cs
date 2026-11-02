@@ -578,6 +578,76 @@ public sealed class CoordinationTests
         Assert.Equal(["after-legacy"], StateJson(resource)["resolvedActions"]!.AsObject().Select(x => x.Key));
     }
 
+    [Fact]
+    public void A_message_that_escaping_would_make_unreadable_is_refused_when_sent()
+    {
+        // 7,500 backslashes are within the 8 KiB text limit, but JSON escaping doubles them twice on the way to a reader.
+        var text = new string('\\', 7_500);
+        var sender = new StateEnvelope<CoordinationDocument>();
+        Assert.True(Call(sender, "session", "__open", new() { ["principalId"] = "alice", ["sessionToken"] = "secret" }).Ok);
+        var direct = Call(sender, "session", "send_message", new() { ["sessionToken"] = "secret", ["requestId"] = "big", ["recipientSessionId"] = "r", ["text"] = text });
+        Assert.Equal("PayloadTooLarge", direct.Code);
+        Assert.Equal(RelayLimits.AggregateReplyBytes, Data(direct)["maxBytes"]!.GetValue<int>());
+        Assert.True(Data(direct)["bytes"]!.GetValue<int>() > RelayLimits.AggregateReplyBytes);
+        Assert.Empty(sender.Effects);
+        // The same text in plain letters is delivered and readable.
+        Assert.True(Call(sender, "session", "send_message", new() { ["sessionToken"] = "secret", ["requestId"] = "plain", ["recipientSessionId"] = "r", ["text"] = new string('x', 7_500) }).Ok);
+
+        var board = new StateEnvelope<CoordinationDocument>();
+        Assert.True(Call(board, "board", "task_update", new() { ["taskId"] = "t", ["requestId"] = "create", ["expectedVersion"] = 0 }).Ok);
+        Assert.Equal("PayloadTooLarge", Call(board, "board", "send_message", new() { ["taskId"] = "t", ["sessionId"] = "s", ["requestId"] = "big", ["text"] = text }).Code);
+        Assert.Equal("PayloadTooLarge", Call(board, "board", "task_update", new() { ["taskId"] = "t", ["sessionId"] = "s", ["requestId"] = "big-update", ["expectedVersion"] = 1, ["message"] = new JsonObject { ["text"] = text } }).Code);
+        Assert.Equal(1, Call(board, "board", "task_get", new() { ["taskId"] = "t" }).Version);
+        // A shared note under its own byte limits but unreadable once escaped is refused the same way.
+        Assert.Equal("PayloadTooLarge", Call(board, "board", "context_put", new() { ["contextId"] = "n", ["requestId"] = "note", ["expectedVersion"] = 0, ["content"] = new string('\\', 8_000) }).Code);
+        Assert.Equal("NotFound", Call(board, "board", "context_get", new() { ["contextId"] = "n" }).Code);
+    }
+
+    [Fact]
+    public void An_oversized_stored_item_is_read_in_pieces_and_never_blocks_the_items_after_it()
+    {
+        // A message stored before sends were measured: too large for any page once escaped.
+        var session = new StateEnvelope<CoordinationDocument>();
+        Assert.True(Call(session, "session", "__open", new() { ["principalId"] = "alice", ["sessionToken"] = "secret" }).Ok);
+        var big = new string('\\', 7_500) + "end";
+        foreach (var (id, text) in new[] { ("m1", "first"), ("big", big), ("m3", "after") })
+            Assert.True(Call(session, "session", "__deliver", new() { ["messageId"] = id, ["text"] = text }).Ok);
+        RelayReply Inbox(JsonObject paging) { paging["sessionToken"] = "secret"; return Call(session, "session", "check_inbox", paging); }
+
+        var first = Inbox(new() { ["limit"] = 50 });
+        Assert.True(first.Ok, first.Code);
+        Assert.Equal(["m1"], Data(first)["items"]!.AsArray().Select(x => x!["messageId"]!.GetValue<string>()));
+        Assert.Equal(1, Data(first)["nextCursor"]!.GetValue<int>());
+
+        // The oversized item comes back as its first piece, with its ID, full size and where the next piece starts; paging moves past it.
+        var json = new System.Text.StringBuilder();
+        long? partOffset = 0;
+        var pieces = 0;
+        while (partOffset is { } at)
+        {
+            var paging = new JsonObject { ["cursor"] = 1, ["limit"] = 1 };
+            if (at > 0) paging["partOffset"] = at;
+            var page = Inbox(paging);
+            Assert.True(page.Ok, page.Code);
+            var piece = Data(page)["items"]!.AsArray().Single()!.AsObject();
+            Assert.True(piece["truncated"]!.GetValue<bool>());
+            Assert.Equal("big", piece["messageId"]!.GetValue<string>());
+            Assert.Equal(at, piece["partOffset"]!.GetValue<long>());
+            Assert.True(piece["bytes"]!.GetValue<int>() > RelayLimits.AggregateReplyBytes / 4);
+            Assert.Equal(2, Data(page)["nextCursor"]!.GetValue<int>());
+            json.Append(piece["part"]!.GetValue<string>());
+            partOffset = piece["nextPartOffset"]?.GetValue<long>();
+            pieces++;
+        }
+        Assert.True(pieces > 1);
+        Assert.Equal(big, JsonNode.Parse(json.ToString())!["text"]!.GetValue<string>());
+        // A page that starts at it with room for more still returns only its first piece, and the next item stays reachable.
+        Assert.Single(Data(Inbox(new() { ["cursor"] = 1, ["limit"] = 50 }))["items"]!.AsArray());
+        Assert.Equal(["m3"], Data(Inbox(new() { ["cursor"] = 2 }))["items"]!.AsArray().Select(x => x!["messageId"]!.GetValue<string>()));
+        // It can be acknowledged like any other message.
+        Assert.Equal(1, Data(Call(session, "session", "ack", new() { ["sessionToken"] = "secret", ["requestId"] = "ack-big", ["messageId"] = "big" }))["acknowledged"]!.GetValue<int>());
+    }
+
     private static JsonObject DependentWorkflow(string state, params string[] dependsOn)
     {
         var workflow = new JsonObject

@@ -27,6 +27,69 @@ public sealed class DocCacheCollection;
 [Collection(nameof(DocCacheTests))]
 public sealed class DocCacheTests
 {
+    /// <summary>Grain state whose next <see cref="FailWrites"/> writes throw, as a database fault would; reads return what was last written.</summary>
+    private sealed class FlakyState<T>(Func<T, T> copy) : IPersistentState<T> where T : new()
+    {
+        public T Written { get; private set; } = new();
+        public int FailWrites { get; set; }
+        public int Writes { get; private set; }
+        public T State { get; set; } = new();
+        public string? Etag { get; private set; }
+        public bool RecordExists { get; private set; }
+        public Task ClearStateAsync() { State = new(); Written = new(); return Task.CompletedTask; }
+        public Task ReadStateAsync() { State = copy(Written); return Task.CompletedTask; }
+        public Task WriteStateAsync()
+        {
+            Writes++;
+            if (FailWrites > 0) { FailWrites--; throw new InvalidOperationException("storage is down"); }
+            Written = copy(State); RecordExists = true; Etag = Writes.ToString();
+            return Task.CompletedTask;
+        }
+    }
+
+    private static DocDirectoryState CopyDirectory(DocDirectoryState source) => new()
+    {
+        Branch = source.Branch, Commit = source.Commit, NeedsResync = source.NeedsResync, SyncedAt = source.SyncedAt, Fingerprint = source.Fingerprint,
+        Docs = new(source.Docs, StringComparer.Ordinal), Skipped = new(source.Skipped, StringComparer.Ordinal)
+    };
+
+    [Fact]
+    public async Task A_failed_directory_write_keeps_the_old_commit_active_and_the_next_sync_persists()
+    {
+        var storage = new FlakyState<DocDirectoryState>(CopyDirectory);
+        var directory = new DocDirectoryGrain(storage);
+        var entry = new DocEntry("docs/a.md", "", "c1", "h1", 1, 10, 100);
+        await directory.ApplyAsync(new DocDirectoryUpdate("main", "c1", true, [entry], [], [], []));
+
+        // A sync to c2 whose write fails: readers still see c1 and its documents, and the failure reaches the sync.
+        storage.FailWrites = 1;
+        var update = new DocDirectoryUpdate("main", "c2", false, [entry with { Commit = "c2", Hash = "h2" }, new DocEntry("docs/b.md", "", "c2", "h3", 1, 5, 50)], [], ["docs/big.md"], []);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => directory.ApplyAsync(update));
+        var view = await directory.ReadAsync();
+        Assert.Equal("c1", view.Commit);
+        Assert.Equal([("docs/a.md", "c1")], view.Entries.Select(x => (x.Path, x.Commit)));
+        Assert.Empty(view.Skipped);
+        Assert.Equal("c1", storage.Written.Commit);
+
+        // The next sync sees c1, not its own head, so it applies again, and this time the change is stored.
+        await directory.ApplyAsync(update);
+        Assert.Equal("c2", (await directory.ReadAsync()).Commit);
+        Assert.Equal("c2", storage.Written.Commit);
+        Assert.Equal(["docs/a.md", "docs/b.md"], storage.Written.Docs.Keys.Order(StringComparer.Ordinal));
+        Assert.Equal(["docs/big.md"], storage.Written.Skipped);
+
+        // A resync mark whose write fails is not remembered, so the next mark writes it.
+        storage.FailWrites = 1;
+        await Assert.ThrowsAsync<InvalidOperationException>(() => directory.MarkResyncAsync());
+        Assert.False((await directory.ReadAsync()).NeedsResync);
+        var writes = storage.Writes;
+        await directory.MarkResyncAsync();
+        Assert.Equal(writes + 1, storage.Writes);
+        Assert.True(storage.Written.NeedsResync);
+        Assert.True((await directory.ReadAsync()).NeedsResync);
+    }
+
+
     private static readonly ITokenCounter Tokens = new O200kTokenCounter();
     private const string AdminToken = "doc-cache-admin-test-secret-not-production";
 

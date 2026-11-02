@@ -104,9 +104,15 @@ internal static class TaskBoardAggregate
         if (args.ContainsKey("snapshotRevision") && Number(args, "snapshotRevision") != current) return Error(DeltaRestartRequired, new { restartRequired = true, currentRevision = current });
         var all = ObjectAt(state, "tasks").Where(x => Number(x.Value!.AsObject(), "changeRevision") > since).OrderBy(x => x.Key, StringComparer.Ordinal).Select(x => (JsonNode)Summary(x.Value!.AsObject())).ToArray();
         var limit = (int)Math.Clamp(Number(args, "limit", RelayLimits.DefaultPageSize), 1, RelayLimits.MaxPageSize);
-        var items = all.Skip((int)offset).Take(limit).Select(x => x.DeepClone()).ToList();
+        var items = all.Skip((int)offset).Take(args.ContainsKey("partOffset") ? 1 : limit).Select(x => x.DeepClone()).ToList();
         RelayReply Reply() => Ok(new { items, snapshotRevision = current, nextCursor = offset + items.Count < all.Length ? (long?)(offset + items.Count) : null, truncated = offset + items.Count < all.Length, total = all.Length });
         while (items.Count > 1 && !FitsWire(Reply(), RelayLimits.AggregateReplyBytes)) items.RemoveAt(items.Count - 1);
+        // A summary too large for any page comes back in pieces (partOffset), and the cursor still moves past it.
+        if (items.Count == 1 && (args.ContainsKey("partOffset") || !FitsWire(Reply(), RelayLimits.AggregateReplyBytes)))
+        {
+            var whole = items[0];
+            items[0] = Piece(whole, Number(args, "partOffset"), piece => { items[0] = piece; return FitsWire(Reply(), RelayLimits.AggregateReplyBytes); });
+        }
         return Reply();
     }
 
@@ -133,6 +139,8 @@ internal static class TaskBoardAggregate
             ["author"] = context.Caller.PrincipalId, ["updatedAt"] = context.Now.ToString("O")
         };
         if (ByteSize(entry) > MaxContextEntryBytes) return Error(PayloadTooLarge);
+        // Escaping for the wire can double a note's size; one context_get could not return it whole.
+        if (CheckReadable(entry) is { } unreadable) return unreadable;
         notes[id] = entry;
         return Ok(entry, version + 1);
     }
@@ -254,7 +262,7 @@ internal static class TaskBoardAggregate
             if (ByteSize(notes) > MaxSharedBytes) return Error(PayloadTooLarge);
             ObjectAt(task, "facts")["notes"] = notes.DeepClone();
         }
-        if (args["message"] is JsonObject message) AddMessage(context, task, message);
+        if (args["message"] is JsonObject message && AddMessage(context, task, message) is { } unreadable) return unreadable;
         IReadOnlyList<string> unblocked = [];
         var priorWorkflow = task["workflow"]?.DeepClone() as JsonObject;
         if (args.ContainsKey("workflow"))
@@ -290,14 +298,17 @@ internal static class TaskBoardAggregate
 
     private static RelayReply SendTaskMessage(AggregateContext context, JsonObject task)
     {
-        AddMessage(context, task, context.Args);
+        if (AddMessage(context, task, context.Args) is { } unreadable) return unreadable;
         var version = Number(task, "version") + 1;
         task["version"] = version;
         return Ok(new { messageId = ArrayAt(task, "messages").Last()!["messageId"]!.GetValue<string>() }, version);
     }
 
-    /// <summary>Appends to the shared task conversation and notifies the addressed session, or the current owner.</summary>
-    private static void AddMessage(AggregateContext context, JsonObject task, JsonObject message)
+    /// <summary>
+    /// Appends to the shared task conversation and notifies the addressed session, or the current owner. Returns <c>PayloadTooLarge</c>,
+    /// and changes nothing, when the entry escaped for the wire would not fit a <c>task_get</c> messages page.
+    /// </summary>
+    private static RelayReply? AddMessage(AggregateContext context, JsonObject task, JsonObject message)
     {
         var messages = ArrayAt(task, "messages");
         if (messages.Count >= MaxConversation) throw new ArgumentException("Task conversation limit reached.");
@@ -307,6 +318,7 @@ internal static class TaskBoardAggregate
             ["messageId"] = Guid.NewGuid().ToString("N"), ["taskId"] = Text(task, "taskId"), ["text"] = SessionAggregate.MessageText(message), ["kind"] = Text(message, "kind", "message"),
             ["replyTo"] = message["replyTo"]?.DeepClone(), ["author"] = context.Caller.PrincipalId, ["sessionId"] = context.SessionId, ["at"] = context.Now.ToString("O"), ["taskVersion"] = nextVersion
         };
+        if (CheckReadable(entry) is { } unreadable) return unreadable;
         messages.Add(entry);
         var recipient = Text(message, "recipientSessionId", Text(task, "owner"));
         if (recipient.Length > 0)
@@ -315,6 +327,7 @@ internal static class TaskBoardAggregate
                 ["repositoryId"] = context.Repository, ["messageId"] = Text(entry, "messageId"), ["taskId"] = Text(task, "taskId"), ["boardId"] = Text(context.Args, "boardId", "default"),
                 ["kind"] = "task.changed", ["taskVersion"] = nextVersion
             });
+        return null;
     }
 
     /// <summary>A bounded projection of a task: ownership, claim, workflow state and unresolved actions, without its detail sections.</summary>
