@@ -174,6 +174,7 @@ public static class RelayHostBuilderExtensions
     /// </summary>
     private static void AddDocCache(this IServiceCollection services)
     {
+        services.AddSingleton<DocCacheActivity>();
         services.AddSingleton(provider => DocCacheSettings.From(provider.GetRequiredService<IConfiguration>(), provider.GetRequiredService<IHostEnvironment>()));
         services.TryAddSingleton<GitCli>();
         services.AddSingleton<IDocSource>(provider => provider.GetRequiredService<DocCacheSettings>().Enabled ? new GitDocSource(provider.GetRequiredService<DocCacheSettings>(), provider.GetRequiredService<GitCli>()) : null!);

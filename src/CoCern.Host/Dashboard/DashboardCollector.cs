@@ -14,11 +14,12 @@ public sealed class DashboardCollector : BackgroundService
     private readonly DashboardTrafficBuffer traffic;
     private readonly DashboardSecurity security;
     private readonly RelayApplication application;
+    private readonly DocCacheActivity? docCache;
     private DateTimeOffset nextDatabaseAt;
     private DateTimeOffset nextStandingAt;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
-    public DashboardCollector(DashboardLogBuffer logs, DashboardConnections connections, IRelayObservationSource source, DashboardTrafficBuffer traffic, DashboardSecurity security, RelayApplication application)
+    public DashboardCollector(DashboardLogBuffer logs, DashboardConnections connections, IRelayObservationSource source, DashboardTrafficBuffer traffic, DashboardSecurity security, RelayApplication application, DocCacheActivity? docCache = null)
     {
         this.logs = logs;
         this.connections = connections;
@@ -26,6 +27,7 @@ public sealed class DashboardCollector : BackgroundService
         this.traffic = traffic;
         this.security = security;
         this.application = application;
+        this.docCache = docCache;
         var now = DateTimeOffset.UtcNow;
         current = new()
         {
@@ -120,7 +122,7 @@ public sealed class DashboardCollector : BackgroundService
         // Token totals are counted once at startup and tip rule state is in memory, so this read is free.
         try { snapshot = snapshot with { Tokens = application.TokenSummary() }; }
         catch (Exception) { logs.CollectionFailed(); }
-        return Bound(snapshot with { Revision = previous.Revision + 1, Logs = logs.Snapshot(), Traffic = traffic.Snapshot() });
+        return Bound(snapshot with { Revision = previous.Revision + 1, Logs = logs.Snapshot(), Traffic = traffic.Snapshot(), DocCache = docCache?.Snapshot(now) ?? new() });
     }
 
     private static DashboardSnapshot Bound(DashboardSnapshot snapshot)
@@ -137,6 +139,11 @@ public sealed class DashboardCollector : BackgroundService
         bytes -= EncodedLength(root.GetProperty("logs")) - 2;
         bytes += JsonSerializer.SerializeToUtf8Bytes(new[] { warning }, JsonOptions).Length - EncodedLength(root.GetProperty("warnings"));
         snapshot = snapshot with { Logs = [], Warnings = [warning] };
+        if (bytes <= maximumBytes) return snapshot;
+
+        bytes -= EncodedLength(root.GetProperty("docCache").GetProperty("grains")) - 2;
+        if (!snapshot.DocCache.Truncated) bytes--;
+        snapshot = snapshot with { DocCache = snapshot.DocCache with { Grains = [], Truncated = true } };
         if (bytes <= maximumBytes) return snapshot;
 
         // Standing stays readable through task_get, so it gives way before the live inventory.

@@ -11,6 +11,7 @@ using Orleans;
 using Orleans.Concurrency;
 using Orleans.Runtime;
 using CoCern.Contracts;
+using CoCern.Contracts.Dashboard;
 
 namespace CoCern.Core;
 
@@ -133,8 +134,22 @@ public interface IDocDirectoryGrain : IGrainWithStringKey
 /// headings weighted 3 times. Orleans runs one call at a time, which is Lucene's single-writer rule.
 /// </summary>
 [GrainType("cocern.doc")]
-public sealed class DocumentGrain(IDocSource source, ITokenCounter tokens) : Grain, IDocumentGrain
+public sealed class DocumentGrain(IDocSource source, ITokenCounter tokens, DocCacheActivity? activity = null) : Grain, IDocumentGrain
 {
+    private readonly Guid observationId = Guid.NewGuid();
+    private DateTimeOffset activatedAt;
+    private void Observe()
+    {
+        if (activity is null) return;
+        var key = this.GetPrimaryKeyString();
+        var separator = key.IndexOf('/');
+        activity.Update(observationId, new DashboardDocGrain
+        {
+            Kind = "Document", Repository = Uri.UnescapeDataString(key[..separator]), Path = key[(separator + 1)..],
+            ActivatedAt = activatedAt, Loaded = loadedFor is not null, Commit = commit,
+            Sections = sections.Count, Reads = reads, IndexRuns = indexRuns
+        });
+    }
     private const string AnchorField = "anchor";
     private const string PartField = "part";
     /// <summary>Separates a section anchor from a chunk number: <c>errors~2</c> is the second chunk of the section <c>errors</c>.</summary>
@@ -158,11 +173,14 @@ public sealed class DocumentGrain(IDocSource source, ITokenCounter tokens) : Gra
     {
         writer = new IndexWriter(directory, new IndexWriterConfig(LuceneVersion.LUCENE_48, analyzer) { Similarity = new BM25Similarity(), OpenMode = OpenMode.CREATE });
         searchers = new SearcherManager(writer, true, new Bm25SearcherFactory());
+        activatedAt = DateTimeOffset.UtcNow;
+        Observe();
         return Task.CompletedTask;
     }
 
     public override Task OnDeactivateAsync(DeactivationReason reason, CancellationToken cancellationToken)
     {
+        activity?.Remove(observationId);
         searchers.Dispose(); writer.Dispose(); directory.Dispose(); analyzer.Dispose();
         return Task.CompletedTask;
     }
@@ -245,6 +263,7 @@ public sealed class DocumentGrain(IDocSource source, ITokenCounter tokens) : Gra
         if (changed) Index(doc.Path, markdown, hash);
         commit = doc.Commit;
         loadedFor = doc.Hash;
+        Observe();
         return Task.FromResult(changed);
     }
 
@@ -265,6 +284,7 @@ public sealed class DocumentGrain(IDocSource source, ITokenCounter tokens) : Gra
     {
         if (loadedFor == doc.Hash) return false;
         reads++;
+        Observe();
         var content = await source.ReadAsync(doc.RepositoryId, doc.Path, doc.Commit);
         var fellBack = false;
         if (content is null)
@@ -278,6 +298,7 @@ public sealed class DocumentGrain(IDocSource source, ITokenCounter tokens) : Gra
         if (content.Hash != contentHash) Index(doc.Path, content.Text, content.Hash);
         commit = content.Commit;
         loadedFor = doc.Hash;
+        Observe();
         return fellBack;
     }
 
@@ -333,8 +354,29 @@ public sealed class DocumentGrain(IDocSource source, ITokenCounter tokens) : Gra
 /// <see cref="ReadOnlyAttribute"/>, so searches run side by side; a sync's update waits for them.
 /// </summary>
 [GrainType("cocern.docdir")]
-public sealed class DocDirectoryGrain([PersistentState("docs", "relay")] IPersistentState<DocDirectoryState> state) : Grain, IDocDirectoryGrain
+public sealed class DocDirectoryGrain([PersistentState("docs", "relay")] IPersistentState<DocDirectoryState> state, DocCacheActivity? activity = null) : Grain, IDocDirectoryGrain
 {
+    private readonly Guid observationId = Guid.NewGuid();
+    private DateTimeOffset activatedAt;
+    private void Observe() => activity?.Update(observationId, new DashboardDocGrain
+    {
+        Kind = "Directory", Repository = Repository, ActivatedAt = activatedAt,
+        Loaded = true, Commit = state.State.Commit, Documents = state.State.Docs.Count
+    });
+
+    public override Task OnActivateAsync(CancellationToken cancellationToken)
+    {
+        activatedAt = DateTimeOffset.UtcNow;
+        Observe();
+        return Task.CompletedTask;
+    }
+
+    public override Task OnDeactivateAsync(DeactivationReason reason, CancellationToken cancellationToken)
+    {
+        activity?.Remove(observationId);
+        return Task.CompletedTask;
+    }
+
     private string Repository => this.GetPrimaryKeyString();
 
     public Task<DocDirectoryView> ReadAsync() => Task.FromResult(new DocDirectoryView(state.State.Branch, state.State.Commit, state.State.NeedsResync, state.State.SyncedAt,
@@ -384,6 +426,7 @@ public sealed class DocDirectoryGrain([PersistentState("docs", "relay")] IPersis
             catch (Exception) { state.State = previous; }
             throw;
         }
+        finally { Observe(); }
     }
 
     private static DocDirectoryState Copy(DocDirectoryState source) => new()

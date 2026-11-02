@@ -1,0 +1,40 @@
+<section class="surface doc-cache-view" aria-labelledby="docs-heading">
+    <div class="section-heading"><div><h2 id="docs-heading">Active document-cache grains</h2><p>@Cache.ActiveDirectories directories · @Cache.ActiveDocuments documents on this relay</p></div></div>
+    <p class="table-footnote">Grains leave this list when Orleans deactivates them. Observing the cache does not load documents or extend their lifetime.</p>
+    @if (Cache.ObservedAt is null)
+    {
+        <p class="empty-copy">Waiting for a cache observation.</p>
+    }
+    else
+    {
+        <p class="muted" title="@DashboardFormat.Timestamp(Cache.ObservedAt)">Collected @DashboardFormat.Ago(Cache.ObservedAt, Now)</p>
+        <div class="doc-cache-table">
+            <table class="metrics-table">
+                <caption class="visually-hidden">Active document directory and document grains on this relay</caption>
+                <thead><tr><th scope="col">Repository / path</th><th scope="col">Kind</th><th scope="col">Cache</th><th scope="col">Sections</th><th scope="col">Source reads</th><th scope="col">Index builds</th><th scope="col">Commit</th><th scope="col">Activated</th></tr></thead>
+                <tbody>
+                    @foreach (var grain in Cache.Grains)
+                    {
+                        <tr>
+                            <th scope="row"><small>@grain.Repository</small> @(grain.Kind == "Directory" ? "Document directory" : grain.Path)</th>
+                            <td>@grain.Kind</td>
+                            <td>@(grain.Kind == "Directory" ? $"{grain.Documents} documents" : grain.Loaded ? "Loaded" : "Not loaded")</td>
+                            <td class="numeric">@(grain.Kind == "Directory" ? "—" : grain.Sections.ToString("N0"))</td>
+                            <td class="numeric">@(grain.Kind == "Directory" ? "—" : grain.Reads.ToString("N0"))</td>
+                            <td class="numeric">@(grain.Kind == "Directory" ? "—" : grain.IndexRuns.ToString("N0"))</td>
+                            <td title="@grain.Commit">@(grain.Commit.Length == 0 ? "—" : grain.Commit[..Math.Min(8, grain.Commit.Length)])</td>
+                            <td title="@DashboardFormat.Timestamp(grain.ActivatedAt)">@DashboardFormat.Ago(grain.ActivatedAt, Now)</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+        @if (Cache.Grains.Length == 0 && !Cache.Truncated) { <p class="empty-copy">No document-cache grains are active on this relay.</p> }
+        @if (Cache.Truncated) { <p class="limit-note">This observation shows @Cache.Grains.Length of @(Cache.ActiveDirectories + Cache.ActiveDocuments) active grains.</p> }
+    }
+</section>
+
+@code {
+    [Parameter, EditorRequired] public DashboardDocCache Cache { get; set; } = new();
+    [Parameter] public DateTimeOffset Now { get; set; }
+}

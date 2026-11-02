@@ -23,6 +23,65 @@ namespace CoCern.Tests;
 public sealed class DashboardTests
 {
     [Fact]
+    public void Cache_inventory_bounds_rows_without_losing_totals_and_removes_only_the_given_activation()
+    {
+        var activity = new DocCacheActivity();
+        var activation = Guid.NewGuid();
+        activity.Update(activation, new() { Kind = "Directory", Repository = "repo" });
+        for (var i = 0; i < 201; i++)
+            activity.Update(Guid.NewGuid(), new() { Kind = "Document", Repository = "repo", Path = $"docs/{i:D3}.md" });
+        var snapshot = activity.Snapshot(DateTimeOffset.UtcNow);
+        Assert.Equal(201, snapshot.ActiveDocuments);
+        Assert.Equal(1, snapshot.ActiveDirectories);
+        Assert.Equal(200, snapshot.Grains.Length);
+        Assert.True(snapshot.Truncated);
+        activity.Remove(activation);
+        var after = activity.Snapshot(DateTimeOffset.UtcNow);
+        Assert.Equal(0, after.ActiveDirectories);
+        Assert.Equal(201, after.ActiveDocuments);
+        Assert.Equal(1, snapshot.ActiveDirectories);
+    }
+
+    [Fact]
+    public async Task Dashboard_stream_includes_passive_document_cache_observations()
+    {
+        await using var host = new RelayHostFixture(settings: new Dictionary<string, string?>
+        {
+            ["Relay:Clients:0:IsAdministrator"] = "true", ["Relay:Dashboard:ViewerPrincipalIds:0"] = "test-user"
+        });
+        var activity = host.Services.GetRequiredService<DocCacheActivity>();
+        activity.Update(Guid.NewGuid(), new() { Kind = "Document", Repository = "repo", Path = "docs/guide.md", Loaded = true, Sections = 7, IndexRuns = 2 });
+        using var browser = BrowserClient(host);
+        (await browser.PostAsJsonAsync("/dashboard/api/login", new { token = RelayHostFixture.Token })).EnsureSuccessStatusCode();
+        await using var viewer = await StartViewerAsync(host, browser);
+        CoCern.Contracts.Dashboard.DashboardSnapshot? snapshot = null;
+        for (var attempt = 0; attempt < 50; attempt++)
+        {
+            snapshot = await browser.GetFromJsonAsync<CoCern.Contracts.Dashboard.DashboardSnapshot>("/dashboard/api/snapshot");
+            if (snapshot!.DocCache.ObservedAt is not null) break;
+            await Task.Delay(50);
+        }
+        Assert.Equal(1, snapshot!.DocCache.ActiveDocuments);
+        Assert.Equal("docs/guide.md", Assert.Single(snapshot.DocCache.Grains).Path);
+        // Oversized document paths must not break the SignalR frame bound.
+        activity.Update(Guid.NewGuid(), new() { Kind = "Document", Path = new string('x', 300_000) });
+        var revision = snapshot.Revision;
+        byte[] frame = [];
+        for (var attempt = 0; attempt < 70; attempt++)
+        {
+            frame = await browser.GetByteArrayAsync("/dashboard/api/snapshot");
+            snapshot = JsonSerializer.Deserialize<CoCern.Contracts.Dashboard.DashboardSnapshot>(frame, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+            if (snapshot!.Revision > revision) break;
+            await Task.Delay(50);
+        }
+        Assert.True(snapshot!.Revision > revision);
+        Assert.True(snapshot.DocCache.Truncated);
+        Assert.Equal(2, snapshot.DocCache.ActiveDocuments);
+        Assert.Empty(snapshot.DocCache.Grains);
+        Assert.True(frame.Length <= 255 * 1024);
+    }
+
+    [Fact]
     public async Task Traffic_reports_actual_correlated_calls_and_pushes_without_payload_or_observer_feedback()
     {
         await using var host = OperatorHost();

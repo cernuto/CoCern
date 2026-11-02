@@ -27,6 +27,44 @@ public sealed class DocCacheCollection;
 [Collection(nameof(DocCacheTests))]
 public sealed class DocCacheTests
 {
+    [Fact]
+    public async Task Active_cache_observations_follow_loading_and_deactivation_without_touching_grains()
+    {
+        using var git = GitRepositories.Create(new() { ["docs/a.md"] = "# Alpha\n\nCached text.\n" });
+        var watcher = new WatchingGit();
+        await using var host = DocHost(git, watcher);
+        await SyncAsync(host);
+        var activity = host.Services.GetRequiredService<DocCacheActivity>();
+        var grains = host.Services.GetRequiredService<IGrainFactory>();
+        var first = activity.Snapshot(DateTimeOffset.UtcNow);
+        Assert.Equal(1, first.ActiveDirectories);
+        var directory = Assert.Single(first.Grains, row => row.Kind == "Directory");
+        Assert.Equal(1, directory.Documents);
+        Assert.Equal(0, first.ActiveDocuments);
+        await grains.GetGrain<IDocDirectoryGrain>("repo").SearchAsync("cached", null, null, 3, TimeSpan.FromSeconds(10));
+        first = activity.Snapshot(DateTimeOffset.UtcNow);
+        var document = Assert.Single(first.Grains, row => row.Kind == "Document");
+        Assert.Equal(("repo", "docs/a.md", true, 1), (document.Repository, document.Path, document.Loaded, document.IndexRuns));
+        Assert.True(document.Sections > 0);
+        Assert.Equal(git.Head(), document.Commit);
+
+        await grains.GetGrain<IDocumentGrain>(DocKeys.Document("repo", "docs/a.md")).DropAsync();
+        await WaitUntilAsync(() => Task.FromResult(activity.Snapshot(DateTimeOffset.UtcNow).ActiveDocuments == 0));
+        var commands = watcher.Commands;
+        for (var i = 0; i < 5; i++) Assert.Equal(0, activity.Snapshot(DateTimeOffset.UtcNow).ActiveDocuments);
+        Assert.Equal(commands, watcher.Commands);
+
+        // An explicit call activates a new empty cache; a search then loads it once.
+        var doc = grains.GetGrain<IDocumentGrain>(DocKeys.Document("repo", "docs/a.md"));
+        await doc.StatsAsync();
+        Assert.False(Assert.Single(activity.Snapshot(DateTimeOffset.UtcNow).Grains, row => row.Kind == "Document").Loaded);
+        await grains.GetGrain<IDocDirectoryGrain>("repo").SearchAsync("cached", null, null, 3, TimeSpan.FromSeconds(10));
+        document = Assert.Single(activity.Snapshot(DateTimeOffset.UtcNow).Grains, row => row.Kind == "Document");
+        Assert.True(document.Loaded);
+        Assert.Equal(1, document.Reads);
+        Assert.Equal(1, document.IndexRuns);
+    }
+
     /// <summary>Grain state whose next <see cref="FailWrites"/> writes throw, as a database fault would; reads return what was last written.</summary>
     private sealed class FlakyState<T>(Func<T, T> copy) : IPersistentState<T> where T : new()
     {
