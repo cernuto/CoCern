@@ -85,7 +85,7 @@ public sealed class AdapterOptions
         PinnedFingerprint = other.PinnedFingerprint; NodeFolder = other.NodeFolder; ClientChat = other.ClientChat; ChatOnly = other.ChatOnly;
     }
 
-    /// <summary>The chat IDs a client exports to its MCP servers. Only these exact variables are read; Codex exports none (see docs/discovery.md).</summary>
+    /// <summary>The chat IDs a client exports to its MCP servers. Only these exact variables are read; Codex exports none (see docs/reference.md#wake-ups).</summary>
     private static readonly (string Provider, string Variable)[] ClientChatVariables = [("claude", "CLAUDE_CODE_SESSION_ID")];
 
     /// <summary>Node mode: an enrolled machine is never an administrator, whatever <c>COCERN_ROLE</c> says.</summary>

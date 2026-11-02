@@ -8,7 +8,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Package restore failed.' }
     # Analytics reads snapshots with DuckDB's sqlite extension. The Windows x64 build is bundled in extensions/duckdb and unpacked into
     # the build output (checksums checked), so on Windows neither the build nor the tests download anything. Elsewhere the tests use
-    # COCERN_DUCKDB_EXTENSIONS, or download it once into a temp cache. See docs/monitoring.md.
+    # COCERN_DUCKDB_EXTENSIONS, or download it once into a temp cache. See docs/reference.md#analytics.
     # Tests produce their own binaries and verify behavior before packaging.
     & dotnet test tests/CoCern.Tests/CoCern.Tests.csproj --no-restore --nologo
     if ($LASTEXITCODE -ne 0) { throw 'Tests failed.' }

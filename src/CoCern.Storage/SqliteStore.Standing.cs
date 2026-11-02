@@ -5,7 +5,7 @@ using CoCern.Core;
 
 namespace CoCern.Storage;
 
-/// <summary>The dashboard's read-only view of each board's standing preferences (see docs/collaboration.md).</summary>
+/// <summary>The dashboard's read-only view of each board's standing preferences (see docs/reference.md#standing).</summary>
 public sealed partial class SqliteStore
 {
     private const int MaximumStandingBoards = 20;

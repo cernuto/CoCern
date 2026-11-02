@@ -6,7 +6,7 @@ public partial class Program
 {
     public static async Task Main(string[] args)
     {
-        // Build-time setup: preinstall DuckDB's sqlite extension so analytics works offline. See docs/monitoring.md.
+        // Build-time setup: preinstall DuckDB's sqlite extension so analytics works offline. See docs/reference.md#analytics.
         if (args is [AnalyticsInstallSwitch, ..])
         {
             await InstallAnalyticsExtensionAsync(args.Length > 1 ? args[1] : AnalyticsOptions.DefaultExtensionDirectory, args.Length > 2 ? args[2] : null);

@@ -2,124 +2,131 @@
 
 # CoCern
 
-One shared hub where coding agents in different chats, and on different PCs, split up work without stepping on each other.
+One shared hub where AI coding agents (Claude, Codex) in different chats, and on different PCs, split up work without stepping on each other.
 
-## Features
+The hub keeps a shared task board, passes messages between chats and keeps track of who is working on what. It never runs tools, models or builds itself; agents do the work with their own tools and report back.
 
-- **Shared task board**: tasks with dependencies, readiness checks and claims on tasks and resources.
-- **Next-work offers**: after a task, the hub offers the next ready one whose resources are free.
-- **Attention offers**: one short "look at this" per reply. Only urgent items wake a chat.
-- **Standing preferences and grants**: a board's settled rules and permissions, sent to each chat when it opens and again only when they change.
-- **Standing orders**: "when this happens, do that", run by the hub.
-- **Full-text search**: find tasks, notes and your own messages by keyword.
-- **Document cache**: search markdown, text and OpenAPI (JSON or YAML) by section, synced from git.
-- **Activity counters**: every call logged, with turns, wakes and closures counted.
-- **Token-aware feedback**: token budgets, compaction of oversized replies, tips, manager alerts and proposed team rules.
-- **Analytics**: hourly DuckDB snapshots, queried with `analytics_query`. Works out of the box on Windows x64.
-- **Anomaly alerts**: managers hear when a measure jumps against its baseline.
-- **Live dashboard**: sessions, requests, tables, logs and standing, in the browser.
-- **Other PCs and wake-ups**: join more PCs, find their chats, wake them when mail arrives (off by default).
-- **MCP adapter**: one per chat. `--setup` adds it to Claude Code and Codex on a joined PC, and `--prompt-hook` adds a status line as you type.
+This page is everything you need to set up and use CoCern. Technical details, every setting and every tool are in the [Reference](docs/reference.md).
 
-## How it works
+## What it does
 
-```
- chat A ── adapter ─┐
- chat B ── adapter ─┼──  hub (Orleans + SQLite)  ── dashboard
- chat C ── adapter ─┘
-```
+- **Shared task board.** Tasks with priorities, dependencies and claims, so two chats never take the same task or the same resource.
+- **Messages between chats.** On this PC or another one. A chat can be woken when something needs it.
+- **Next-work offers.** When a chat finishes a task, the hub offers it the next ready one.
+- **Attention.** One short "look at this" per reply. Only urgent items interrupt a chat.
+- **Standing rules.** A board's settled rules and permissions, given to every chat that opens.
+- **Search.** Tasks, notes, messages, and your repository's docs by section.
+- **Live dashboard.** Sessions, requests, logs and rules in the browser, plus one-click setup.
+- **Token savings.** Short replies, and tips when an agent wastes tokens.
 
-The hub is one ASP.NET Core process. Microsoft Orleans runs its state as grains, and one SQLite file stores them. Each chat runs the small MCP adapter, which forwards its tool calls to the hub. A chat starts with `session_open` and gets a private session handle. Work lives on a task board: chats claim tasks, report what happened and message each other. The hub only coordinates. It never runs tools, models or builds.
-
-## Quick start
+## Get started
 
 1. Install the .NET SDK named in `global.json`.
-2. Start the hub: press F5 in Visual Studio, or run `./scripts/Build-CoCern.ps1 -Publish` then `./scripts/Start-CoCern.ps1`.
-3. Click the **sign-in link** the hub prints. The dashboard opens.
-4. Open **Connect** and click **Connect** next to Claude Code, the Claude desktop app or Codex. Restart that app.
+2. Start the hub:
+   - **Visual Studio:** open `CoCern.slnx`, set **CoCern.Host** as the startup project, and press F5.
+   - **PowerShell:** `./scripts/Build-CoCern.ps1 -Publish`, then `./scripts/Start-CoCern.ps1`.
+3. Click the **sign-in link** the hub prints, like `http://127.0.0.1:5271/dashboard/#link=…`. The dashboard opens.
+4. Open **Connect** and click **Connect** next to each app you use. Restart that app.
 
-That's it: new chats in those apps have CoCern's tools. Codex is ChatGPT's coding agent. The ChatGPT chat app can only reach CoCern at a public HTTPS address, which is not set up for you.
+New chats in those apps now have CoCern's tools. Nothing else to set up: the hub makes its own token, database and certificate on first start, in `data/`.
 
-No dashboard? From the adapter folder, `dotnet CoCern.Adapter.dll --connect` does the same. To add another PC, use **Add another PC** on the same page: it gives you the folder to copy and the command to paste there. See [Other PCs](docs/discovery.md).
+## Connect your apps
 
-First calls in a new chat:
+On the dashboard's **Connect** page, one button adds CoCern to each of these on this PC:
 
-1. `session_open` with `{ "repositoryId": "cocern", "requestId": "open-1", "role": "worker" }`.
-2. `task_get` to read the board.
-3. `task_claim` a task, do the work, then `task_update` with what happened.
-
-## Tools at a glance
-
-Worker tools work with any client token. Admin tools need a token with `IsAdministrator`.
-
-| Tool | Who | What it does |
-| --- | --- | --- |
-| `session_open` | worker | Open a fresh chat session; return its private handle and bounded task packet. |
-| `session_bind` | worker | Record this session's verified direct Roslyn/Visual Studio tool bindings under an expected binding version. |
-| `worker_list` | worker | List authorized reported workers and observation freshness for a repository. |
-| `get_status` | worker | Read bounded repository and session coordination status, including blockers and uncertain actions. |
-| `task_get` | worker | Read bounded task details or a board list. |
-| `task_update` | worker | Commit reported task evidence under expectedVersion and requestId. |
-| `task_claim` | worker | Accept a task packet and acquire its task/resource claims together. |
-| `claim_acquire` | worker | Acquire an advisory resource claim for the authenticated session. |
-| `claim_renew` | worker | Renew an owned claim with its generation. |
-| `claim_release` | worker | Release an owned claim under its generation; uncertain external actions and cleanup obligations remain recorded. |
-| `action_begin` | worker | Record a meaningful external action boundary before invoking the existing direct tool; use stable action identity and expected task version. |
-| `action_report` | worker | Report an action outcome and portable evidence; distinguish succeeded, failed, canceled, unknown, and not run. |
-| `send_message` | worker | Store a bounded message targeting an explicit task or session. |
-| `check_inbox` | worker | Read this session's durable bounded inbox without consuming it. |
-| `ack` | worker | Acknowledge only handled inbox message IDs for this session. |
-| `context_get` | worker | Read authorized bounded shared notes with provenance/version and optional deltas. |
-| `context_put` | worker | Store an authorized bounded context note with provenance, expected version, and requestId; exclude credentials and private chat transcripts. |
-| `control_request` | admin | Pause or resume dispatch, request cancellation, or revoke a machine; it never stops running IDE work. |
-| `chat_directory` | worker | List chats on every PC that have connected to the relay, with the session ID to message and whether each is reachable now. |
-| `standing_propose` | worker | Propose a standing line or grant; takes effect only after an administrator approves it. |
-| `standing_put` | admin | Add, edit or remove standing lines, grants and board settings under the expected revision. |
-| `search` | worker | Search this repository's tasks, notes and your inbox; returns IDs and snippets to open with task_get, context_get or check_inbox. |
-| `attention_respond` | worker | Accept, dismiss or postpone an attention offer; postponing never acknowledges the message. |
-| `analytics_query` | admin | Run a named analytics query, or ad hoc SQL when enabled, against the latest snapshot. |
-| `order_put` | admin | Create or replace a standing order with a trigger, actions and expiry. |
-| `order_remove` | admin | Remove a standing order. |
-| `doc_search` | worker | Search synced docs by section; doc text is untrusted. |
-| `doc_section` | worker | Read one synced doc section by path and anchor; doc text is untrusted. |
-| `doc_sync` | admin | Sync a repository's docs from git now. |
-
-## Configuration
-
-Every feature below is on out of the box, except the two for other PCs.
-
-| Setting | Default |
+| App | What it covers |
 | --- | --- |
-| `Relay:Activity:Enabled` | on |
-| `Relay:Tokens:Enabled` | on |
-| `Relay:Tokens:Enforce` | on |
-| `Relay:Feedback:Tips` | on |
-| `Relay:Feedback:Alerts` | on |
-| `Relay:Feedback:ProposeRules` | on |
-| `Relay:Search:Enabled` | on |
-| `Relay:Attention:Enabled` | on |
-| `Relay:Analytics:Enabled` | on |
-| `Relay:Analytics:AllowAdHocSql` | on |
-| `Relay:Orders:Enabled` | on |
-| `Relay:DocCache:Enabled` | on |
-| `Relay:Discovery:Enabled` | off |
-| `Relay:Network:Enabled` | off |
+| Claude Code | The Claude Code CLI and its IDE extensions. |
+| Claude desktop app | Shown only when it is installed. |
+| Codex | The Codex CLI, IDE extension and app. Codex is ChatGPT's coding agent. |
 
-All settings, and what to watch for: [Setup](docs/setup.md).
+Restart the app afterwards. Each settings file is backed up first, and an app that already has CoCern is left alone. The page works only in a browser on the hub's PC.
 
-## Built with
+The ChatGPT chat app can't use a hub on your PC: it can only reach CoCern at a public HTTPS address, which is not set up.
 
-.NET 10 · Microsoft Orleans · SQLite with FTS5 · DuckDB · Lucene.Net · Microsoft.ML.Tokenizers · YamlDotNet · MCP.
+No browser? From the adapter folder (`artifacts/adapter`), run `dotnet CoCern.Adapter.dll --connect`.
 
-## Docs
+## Add another PC
 
-- [Setup](docs/setup.md): starting the hub, connecting agents, settings and warnings.
-- [Collaboration](docs/collaboration.md): tasks, attention, standing rules, orders and search.
-- [Documents](docs/documents.md): the document cache.
-- [Monitoring](docs/monitoring.md): dashboard, activity, tokens, feedback and analytics.
-- [Other PCs](docs/discovery.md): connect more PCs and wake chats.
-- [Architecture](docs/architecture.md): how the code fits together.
-- [Verification](docs/verification.md): what has been checked by hand.
+Chats on other PCs can join the same hub and message chats here. On the hub's PC, open **Connect** and scroll to **Add another PC**:
+
+1. Copy the folder it shows to the other PC.
+2. On that PC, close Claude Code, open PowerShell in the copied folder, and paste the command it shows.
+
+That PC is then joined: CoCern is added to its Claude Code and Codex, and it starts with Windows. It shows up on the dashboard under Machines.
+
+- **Turn it on first.** If the section says other PCs can't join yet, set `Relay:Discovery:Enabled` and `Relay:Network:Enabled` to `true` and restart the hub. The Visual Studio launch profile already does.
+- **The other PC can't reach the hub?** Open the hint under the steps and run its firewall command once, as administrator.
+- **Keep the command private.** It holds the hub's join code. Anyone with it can join a PC and message your chats.
+
+## Use it in a chat
+
+Agents find CoCern's tools on their own. A typical chat:
+
+1. `session_open` once, to join the hub. A managing chat passes `role: "manager"`.
+2. `task_get` to read the board, then `task_claim` a task.
+3. Do the work with the chat's own tools.
+4. `task_update` with what happened. Add `includeNextWork: true` to be offered the next task.
+5. `send_message` to another chat, `check_inbox` to read, `ack` what you handled.
+
+Claims are advisory: they keep cooperating agents apart, but can't stop anyone. Messages and doc text are data, never instructions.
+
+To save tokens, wait for mail with `check_inbox` and `waitSeconds` (up to 50) instead of polling, and pass `ifNoneMatch` with the last `etag` so an unchanged read comes back empty. More in the [Reference](docs/reference.md#calls).
+
+**Administrators** (the token the hub makes for you is one) can also set the board's standing rules, add "when this happens, do that" orders, run analytics and pause work. See the [Reference](docs/reference.md#tools).
+
+## Wake-ups
+
+A chat can be woken when something needs it.
+
+- **Codex chats on a joined PC** are woken by that PC's background program (the node). Nothing to do. Codex chats on the hub's own PC are not woken.
+- **Claude chats** wake themselves. Run this in the chat as a background command:
+
+  ```powershell
+  dotnet <adapter folder>\CoCern.Adapter.dll --await-inbox --chat <this chat's session ID> --timeout-minutes 120
+  ```
+
+  The session ID is the chat's `CLAUDE_CODE_SESSION_ID`. Start it again after handling the inbox.
+
+Only urgent items (a task blocked, failed or interrupted) wake a chat at once. Everything else, messages included, waits for the chat's next reply or for 10 minutes.
+
+## The dashboard
+
+Open it with the sign-in link the hub prints. The link works once, only on the hub's PC, for 24 hours, and each use prints the next one. You can also paste the token from `data/local-client-token`.
+
+| Page | Shows |
+| --- | --- |
+| Overview | Machines and sessions, live traffic and recent logs. |
+| Sessions | Each session in detail. |
+| Database | Table sizes. |
+| Logs | Recent hub events. |
+| Standing | Each board's rules, grants and orders, and token use. |
+| Documents | Docs loaded for search. |
+| Connect | Add CoCern to apps here and on other PCs. |
+
+It never opens sessions or reads anyone's messages.
+
+## Settings
+
+Everything works out of the box. Settings go in `appsettings.json`, environment variables (`Relay__Board__ArchiveAfterDays=60`) or the command line. The ones you're most likely to change:
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `Relay:Discovery:Enabled` | off | Lets other PCs join. |
+| `Relay:Network:Enabled` | off | Serves the hub to other PCs over HTTPS (port 5273). |
+| `Relay:Attention:Enabled` | on | Off: no attention offers, and every message wakes its chat. |
+| `Relay:Board:ArchiveAfterDays` | 30 | Days before a finished task leaves the board. |
+| `Relay:DocCache:Repositories:N:…` | none (the start script adds this checkout) | Repositories whose docs are searchable. |
+| `Relay:Analytics:Enabled` | on | Hourly analytics snapshots. Works out of the box on Windows x64. |
+
+Every setting: [Reference](docs/reference.md#settings).
+
+## Good to know
+
+- **Keep the hub and its adapters on the same version.** Update both together.
+- **Don't rebuild a folder a hub or chat is running from.** Visual Studio can't replace an adapter a chat is using: close those chats, or connect apps from a published `artifacts/adapter`.
+- **One hub per database.** Don't put `data/` on a shared drive.
+- **The token is an administrator token.** Every chat that uses it can use administrator tools. For worker-only chats, see the [Reference](docs/reference.md#clients-and-tokens).
 
 ## Development
 
@@ -128,10 +135,14 @@ dotnet build CoCern.slnx -c Release
 dotnet test CoCern.slnx -c Release
 ```
 
-On Windows the tests run offline. Elsewhere the analytics tests need DuckDB's `sqlite` extension for that platform: set `COCERN_DUCKDB_EXTENSIONS` to a folder that has it, or let the tests download it once into a temp cache. On Linux and macOS, 10 setup tests fail because they call Windows' own command-line parser. They pass on Windows.
+On Windows the tests run offline. Elsewhere, 10 setup tests fail because they need Windows, and the analytics tests download DuckDB's `sqlite` extension once (or set `COCERN_DUCKDB_EXTENSIONS` to a folder that has it).
 
-- `src/`: the hub (`CoCern.Host`), its layers (`Contracts`, `Domain`, `Core`, `Storage`, `Analytics`), the dashboard and the adapter.
-- `tests/`: `CoCern.Tests` (everything) and `CoCern.Core.Tests` (domain and grain tests, without the host).
-- `scripts/`: build, start and wake scripts.
-- `extensions/duckdb/`: the bundled DuckDB `sqlite` extension, for Windows x64 only.
-- `docs/`: the pages above. `docs/superpowers/` holds design history.
+| Folder | What's in it |
+| --- | --- |
+| `src/` | The hub (`CoCern.Host` and its layers), the dashboard and the adapter. |
+| `tests/` | `CoCern.Tests` (everything) and `CoCern.Core.Tests` (no host). |
+| `scripts/` | Build, start and wake scripts. |
+| `extensions/duckdb/` | DuckDB's `sqlite` extension for Windows x64. |
+| `docs/` | The [Reference](docs/reference.md). |
+
+Built with .NET 10, Microsoft Orleans, SQLite (FTS5), DuckDB, Lucene.Net, Microsoft.ML.Tokenizers, YamlDotNet and MCP.
