@@ -44,7 +44,7 @@ It stays fast because it's one local process. Orleans keeps active boards, sessi
 2. Start the hub:
    - **Visual Studio:** open `CoCern.slnx`, set **CoCern.Host** as the startup project, and press F5.
    - **PowerShell:** `./scripts/Build-CoCern.ps1 -Publish`, then `./scripts/Start-CoCern.ps1`.
-3. Click the **sign-in link** the hub prints, like `http://127.0.0.1:5271/dashboard/#link=…`. The dashboard opens.
+3. The dashboard opens in your browser, already signed in (from Visual Studio). Otherwise click the **sign-in link** the hub prints, like `http://127.0.0.1:5271/dashboard/#link=…`.
 4. Open **Connect** and click **Connect** next to each app you use. Restart that app.
 
 New chats in those apps now have CoCern's tools. Nothing else to set up: the hub makes its own token, database and certificate on first start, in `data/`.
