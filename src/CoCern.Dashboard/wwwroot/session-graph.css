@@ -2,6 +2,27 @@
 .session-view-switch { display: flex; gap: 6px; margin-bottom: 12px; }
 .session-view-switch button { padding: 10px 16px; min-height: 44px; color: var(--ink); background: var(--surface); border: 1px solid var(--line); }
 .session-view-switch button[aria-pressed="true"] { background: var(--ink); color: var(--surface); border-color: var(--ink); }
+.sessions-toolbar { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 6px 12px; margin-bottom: 12px; }
+.sessions-toolbar .session-view-switch { margin-bottom: 0; }
+.close-sessions-toggle, .close-sessions-secondary { padding: 10px 16px; min-height: 44px; color: var(--ink); background: var(--surface); border: 1px solid var(--line); }
+.close-sessions-toggle[aria-expanded="true"] { border-color: var(--ink); }
+.close-sessions-secondary { font-weight: 600; }
+.close-sessions-panel { flex: 1 1 100%; padding: 16px 20px; }
+.close-sessions-panel h2 { font-size: .95rem; }
+.close-sessions-panel fieldset { border: 0; padding: 0; margin: 12px 0 0; min-width: 0; }
+.close-sessions-panel legend { padding: 0; font-size: .85rem; font-weight: 600; }
+.close-sessions-repository { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 10px; font-size: .85rem; }
+.close-sessions-repository strong { overflow-wrap: anywhere; }
+.close-sessions-options { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 20px; }
+.close-sessions-option { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-height: 44px; font-size: .88rem; font-weight: 450; }
+.close-sessions-option input[type="radio"] { width: 18px; height: 18px; min-height: 18px; margin: 0; accent-color: #137e77; flex: 0 0 auto; }
+.close-sessions-prefix input[type="text"] { width: 14rem; }
+.close-sessions-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.close-sessions-actions .connect-button { min-height: 44px; }
+.close-sessions-confirm-copy { margin-top: 10px; max-width: 75ch; font-size: .9rem; overflow-wrap: anywhere; }
+.close-sessions-note { margin-top: 6px; max-width: 75ch; color: var(--muted); font-size: .8rem; }
+.close-sessions-result { margin-top: 12px; font-size: .88rem; font-weight: 600; }
+.close-sessions-result:empty { margin: 0; }
 .session-graph { overflow: hidden; }
 .graph-intro, .graph-empty { margin: 0 22px 16px; max-width: 75ch; color: var(--muted); font-size: .9rem; }
 .graph-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding: 0 22px; }
@@ -45,4 +66,5 @@
 .graph-connection small { color: var(--muted); }
 .graph-footnote, .graph-sampled { font-size: .76rem; color: var(--muted); margin: 14px 22px; max-width: 90ch; }
 .session-graph .limit-note { margin: 14px 22px; }
+@media (max-width: 600px) { .close-sessions-panel { padding: 14px; } .close-sessions-prefix, .close-sessions-prefix input[type="text"], .close-sessions-repository select { width: 100%; } }
 @media (max-width: 600px) { .graph-controls { padding: 0 14px; } .graph-key { padding-left: 14px; } .graph-intro, .graph-view-summary, .graph-subset-note, .graph-footnote, .graph-sampled { margin-left: 14px; margin-right: 14px; } .graph-viewport { max-height: 430px; } }

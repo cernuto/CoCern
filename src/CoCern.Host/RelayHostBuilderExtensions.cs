@@ -32,6 +32,7 @@ public static class RelayHostBuilderExtensions
         });
         builder.Services.AddSerilog((services, configuration) => configuration.MinimumLevel.Information()
             .MinimumLevel.Override("Microsoft", LogEventLevel.Warning)
+            .MinimumLevel.Override("Microsoft.Hosting.Lifetime", LogEventLevel.Information)
             .MinimumLevel.Override("Orleans", LogEventLevel.Warning)
             .MinimumLevel.Override("ModelContextProtocol", LogEventLevel.Warning)
             .ReadFrom.Services(services).WriteTo.Console().WriteTo.Sink(services.GetRequiredService<DashboardLogBuffer>()),
@@ -98,6 +99,12 @@ public static class RelayHostBuilderExtensions
         builder.AddRelayOrleans();
         builder.Services.AddRelayDashboard();
         builder.Services.AddHostedService<DueWorkDispatcher>();
+        // Sessions idle longer than Relay:Sessions:IdleHours (default 24, 2 to 720) are closed every ten minutes, in every repository.
+        builder.Services.AddSingleton(services => new SessionCleanupOptions
+        {
+            IdleHours = services.GetRequiredService<IConfiguration>().GetValue("Relay:Sessions:IdleHours", RelayLimits.DefaultSessionIdleHours)
+        }.Validated());
+        builder.Services.AddHostedService<SessionSweepService>();
         builder.Services.AddRelayAnalytics();
         builder.Services.AddOpenApi();
         builder.Services.AddRelayMcp();

@@ -116,7 +116,7 @@ Open it with the sign-in link the hub prints. The link works once, only on the h
 | Page | Shows |
 | --- | --- |
 | Overview | Machines and sessions, live traffic and recent logs. |
-| Sessions | Each session in detail. |
+| Sessions | Each session in detail, and **Close idle sessions** to clear out finished chats (idle sessions also close on their own after a day). |
 | Database | Table sizes. |
 | Logs | Recent hub events. |
 | Standing | Each board's rules, grants and orders, and token use. |
