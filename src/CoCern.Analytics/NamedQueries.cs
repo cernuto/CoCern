@@ -128,7 +128,8 @@ public static class NamedQueries
                 WHERE ev = 'ready' AND next_ev = 'claim' AND next_at >= $prev)
             {Average("waits")}
             """,
-        // Counts: closures, reopened tasks (completed, then ready or blocked again), failed action reports, and retried actions
+        // Counts: closures, reopened tasks (completed, then ready or blocked again), failed action reports, actions a recovery abandoned
+        // (external effects unknown), and retried actions
         // (each attempt after the first).
         [QualityGuardrails] = $"""
             WITH {WorkflowStates},
@@ -138,11 +139,13 @@ public static class NamedQueries
                 UNION ALL
                 SELECT 'failed_actions', at_ticks FROM action_reports WHERE {Window} AND outcome = 'failed'
                 UNION ALL
+                SELECT 'abandoned_actions', at_ticks FROM action_reports WHERE {Window} AND outcome = 'abandoned'
+                UNION ALL
                 SELECT 'retried_actions', first_at FROM (
                     SELECT min(at_ticks) AS first_at FROM action_reports WHERE repository_id = $repository AND attempt > 1
                     GROUP BY board_id, task_id, action_id, attempt)
                 WHERE first_at >= $prev AND first_at < $now),
-            keys AS (SELECT unnest(['closures', 'reopened', 'failed_actions', 'retried_actions']) AS key)
+            keys AS (SELECT unnest(['abandoned_actions', 'closures', 'reopened', 'failed_actions', 'retried_actions']) AS key)
             SELECT k.key, count(e.at_ticks) FILTER (WHERE e.at_ticks >= $from) AS cur, count(e.at_ticks) FILTER (WHERE e.at_ticks < $from) AS prev,
                    count(e.at_ticks) FILTER (WHERE e.at_ticks >= $from) AS cur_n, count(e.at_ticks) FILTER (WHERE e.at_ticks < $from) AS prev_n
             FROM keys k LEFT JOIN events e USING (key) GROUP BY k.key ORDER BY k.key

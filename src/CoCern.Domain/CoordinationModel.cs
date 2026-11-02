@@ -194,6 +194,11 @@ public static class Operations
     /// <c>SessionUnknown</c> with <c>expired</c>, and drops deliveries. The effect carries its own caller, scoped to the session's repository.
     /// </summary>
     public const string SessionExpire = "__session_expire";
+    /// <summary>
+    /// Sent by a board to the control aggregate when a session starts answering for an unresolved action (<c>open: true</c>: it began it,
+    /// or recovered it) or stops (the action resolved, or another session recovered it). The directory never expires such a session.
+    /// </summary>
+    public const string SessionWork = "__session_work";
     /// <summary>A board's due sweep: moves tasks finished longer than <c>Relay:Board:ArchiveAfterDays</c> to the archive.</summary>
     public const string TaskArchive = "__task_archive";
     /// <summary>Read-only: which of the given sessions in the repository the caller's principal opened.</summary>

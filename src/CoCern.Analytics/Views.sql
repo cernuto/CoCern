@@ -73,10 +73,12 @@ SELECT t.repository_id, t.board_id, t.task_id, m.value ->> '$.messageId' AS mess
        length(m.value ->> '$.text') AS text_length
 FROM task_doc t, json_each(t.task -> '$.messages') m;
 
--- One row per action report on a task.
+-- One row per action report on a task. A recovery's report has recovered = true (outcome 'abandoned' when it gave none); a writer's
+-- report that replaced an abandoned status has overrode = 'abandoned'.
 CREATE VIEW action_reports AS
 SELECT t.repository_id, t.board_id, t.task_id, r.value ->> '$.actionId' AS action_id, TRY_CAST(r.value ->> '$.attempt' AS BIGINT) AS attempt,
        r.value ->> '$.outcome' AS outcome, r.value ->> '$.sessionId' AS session_id,
+       coalesce(TRY_CAST(r.value ->> '$.recovered' AS BOOLEAN), false) AS recovered, r.value ->> '$.overrode' AS overrode,
        cocern_ticks(r.value ->> '$.at') AS at_ticks, cocern_at(cocern_ticks(r.value ->> '$.at')) AS at_time
 FROM task_doc t, json_each(t.task -> '$.reports') r;
 

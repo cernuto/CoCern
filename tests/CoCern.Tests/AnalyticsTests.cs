@@ -271,6 +271,7 @@ public class AnalyticsTests
         Row(NamedQueries.QualityGuardrails, "closures", 0L, 1L, 0, 1);
         Row(NamedQueries.QualityGuardrails, "reopened", 0L, 1L, 0, 1);
         Row(NamedQueries.QualityGuardrails, "failed_actions", 0L, 0L, 0, 0);
+        Row(NamedQueries.QualityGuardrails, "abandoned_actions", 0L, 0L, 0, 0);
         Row(NamedQueries.AttentionOutcomesByKind, "blocked:shown", 2L, 0L, 3, 0);
         Row(NamedQueries.AttentionOutcomesByKind, "blocked:dismissed", 1L, 0L, 3, 0);
         Row(NamedQueries.AttentionOutcomesByKind, "review_ready:accepted", 0L, 1L, 0, 1);
@@ -284,6 +285,7 @@ public class AnalyticsTests
         var quality = (await analytics.RunNamedAsync(NamedQueries.QualityGuardrails, "repo")).Rows.ToDictionary(row => (string)row[0]!, row => row[1]);
         Assert.Equal(1L, quality["closures"]);
         Assert.Equal(1L, quality["failed_actions"]);
+        Assert.Equal(0L, quality["abandoned_actions"]);
         Assert.Equal(1L, quality["retried_actions"]);
         Assert.Equal(0L, quality["reopened"]);
         Assert.Equal(["all", 940.0, null, 1L, 0L], (await analytics.RunNamedAsync(NamedQueries.TokensPerTask, "repo")).Rows[0]);

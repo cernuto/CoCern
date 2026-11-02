@@ -149,10 +149,10 @@ Each named query compares the last `days` days (`cur`, 1 to 14, default 7) with 
 | `claim_conflicts_by_resource` | Refused claims, by resource. |
 | `noisiest_tools` | Reply bytes, by tool. |
 | `manager_assignment_latency` | Minutes from `ready` to first claim. |
-| `quality_guardrails` | Closures, reopened tasks, failed and retried actions. |
+| `quality_guardrails` | Closures, reopened tasks, failed, abandoned and retried actions. |
 | `attention_outcomes_by_kind` | Attention answers, by kind. |
 
-With ad hoc SQL on, `"name": "sql", "sql": "SELECT ..."` runs one `SELECT` over the views: `tasks`, `tool_calls`, `context_by_role`, `messages`, `action_reports`, `claim_conflicts`, `attention_outcomes`, `budget_events`, `board_doc`, `task_doc`, `archived_tasks`, `activity`. Archived tasks are included in `tasks` (column `archived`), `task_doc`, `messages` and `action_reports`. `relay_tokens` in `activity` is the hub's own token count for a call. Every ad hoc query is written to the hub log.
+With ad hoc SQL on, `"name": "sql", "sql": "SELECT ..."` runs one `SELECT` over the views: `tasks`, `tool_calls`, `context_by_role`, `messages`, `action_reports`, `claim_conflicts`, `attention_outcomes`, `budget_events`, `board_doc`, `task_doc`, `archived_tasks`, `activity`. Archived tasks are included in `tasks` (column `archived`), `task_doc`, `messages` and `action_reports`. `action_reports` marks a recovery's report with `recovered`, and a writer's report that replaced `abandoned` with `overrode`. `relay_tokens` in `activity` is the hub's own token count for a call. Every ad hoc query is written to the hub log.
 
 Errors: `AdministratorRequired`, `AnalyticsUnavailable` (off, no snapshot yet, or no usable extension), `AnalyticsRefused` (ad hoc SQL off, or not one `SELECT`), `AnalyticsTimeout`, `AnalyticsFailed`, `InvalidArguments`, `PayloadTooLarge` (reply over 8 KB).
 

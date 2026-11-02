@@ -738,6 +738,63 @@ public sealed class CoreSiloTests
     }
 
     [Fact]
+    public async Task An_archive_sweep_on_another_board_closes_the_archived_tasks_attention_at_its_target_session()
+    {
+        var clock = new ManualClock(DateTimeOffset.UtcNow);
+        using var host = new HostBuilder().ConfigureLogging(log => log.ClearProviders()).UseOrleans(silo => silo
+            .UseLocalhostClustering(siloPort: FreePort(), gatewayPort: FreePort(), serviceId: "core-archive-close-tests", clusterId: Guid.NewGuid().ToString("N"))
+            .AddMemoryGrainStorage("relay"))
+            .ConfigureServices(services => services.AddCoCernCore().AddSingleton(new BoardOptions { Time = clock })
+                .Configure<Orleans.Serialization.Configuration.TypeManifestOptions>(options => options.AllowAllTypes = true)).Build();
+        await host.StartAsync();
+        try
+        {
+            var application = host.Services.GetRequiredService<RelayApplication>();
+            var factory = host.Services.GetRequiredService<IGrainFactory>();
+            var storage = host.Services.GetRequiredKeyedService<Orleans.Storage.IGrainStorage>("relay");
+            var caller = new RelayCaller("alice", true, ["repo"]);
+            var opened = await application.ExecuteAsync(caller, "session_open", JsonSerializer.SerializeToElement(new { repositoryId = "repo", requestId = "open" }));
+            var sessionId = JsonNode.Parse(opened.DataJson)!["sessionId"]!.GetValue<string>();
+            // The target session holds an item about task t on board "side".
+            var raise = new JsonObject { ["repositoryId"] = "repo", ["kind"] = AttentionKinds.ReviewReady, ["taskId"] = "t", ["boardId"] = "side", ["revision"] = 1, ["note"] = "review t", ["expiryDays"] = 30 };
+            Assert.True((await factory.GetGrain<ISessionGrain>(sessionId).ExecuteAsync(caller with { IsInternal = true }, Operations.AttentionRaise, raise.ToJsonString())).Ok);
+            async Task<JsonObject> Attention()
+            {
+                var stored = new GrainState<StateEnvelope<CoordinationDocument>>(new());
+                await storage.ReadStateAsync("session", GrainId.Create("cocern.session", sessionId), stored);
+                return JsonNode.Parse(stored.State!.Value.Json)!["attention"] as JsonObject ?? new JsonObject();
+            }
+            Assert.Contains((await Attention()).Select(entry => entry.Value), item => item!["taskId"]!.GetValue<string>() == "t");
+            // On board "side", t finished long ago with that session as its target; its sweep is due.
+            var workflow = new JsonObject
+            {
+                ["state"] = "completed", ["targetSessionId"] = sessionId,
+                ["packet"] = new JsonObject { ["goal"] = "g", ["target"] = "t", ["authorityRef"] = "human", ["restoration"] = "r", ["stopCondition"] = "s" },
+                ["criteria"] = new JsonArray(new JsonObject { ["id"] = "c", ["description"] = "d", ["result"] = "passed", ["evidenceRef"] = "artifact:1" }), ["blockers"] = new JsonArray()
+            };
+            var board = new StateEnvelope<CoordinationDocument>
+            {
+                Value = new() { Json = new JsonObject { ["repositoryId"] = "repo", ["taskRevision"] = 1, ["tasks"] = new JsonObject { ["t"] = new JsonObject
+                {
+                    ["taskId"] = "t", ["version"] = 2, ["changeRevision"] = 1, ["actions"] = new JsonObject(), ["workflow"] = workflow,
+                    ["completedAt"] = clock.GetUtcNow().AddDays(-RelayLimits.DefaultArchiveAfterDays - 1).ToString("O")
+                } } }.ToJsonString() }
+            };
+            board.DueWork.Add(new(DueWorkKinds.TaskArchive, DueWorkKinds.TaskArchive, clock.GetUtcNow().AddMinutes(-1)));
+            await storage.WriteStateAsync("board", GrainId.Create("cocern.board", "repo/side"), new GrainState<StateEnvelope<CoordinationDocument>>(board));
+            var dispatched = await factory.GetGrain<ITaskBoardGrain>("repo/side").ExecuteAsync(new RelayCaller("relay-dispatcher", false, [], true), Operations.Dispatch, "{}");
+            Assert.True(dispatched.Ok, dispatched.Code);
+            // The sweep archived t, and its close, stamped with the sweep's authority and naming board "side", reached the session.
+            var swept = new GrainState<StateEnvelope<CoordinationDocument>>(new());
+            await storage.ReadStateAsync("board", GrainId.Create("cocern.board", "repo/side"), swept);
+            Assert.False(JsonNode.Parse(swept.State!.Value.Json)!["tasks"]!.AsObject().ContainsKey("t"));
+            Assert.Empty(swept.State.Effects);
+            Assert.DoesNotContain((await Attention()).Select(entry => entry.Value), item => item!["taskId"]!.GetValue<string>() == "t");
+        }
+        finally { await host.StopAsync(); }
+    }
+
+    [Fact]
     public async Task A_client_cannot_mark_its_own_dependencies_archived_even_without_an_archive_store()
     {
         using var host = new HostBuilder().ConfigureLogging(log => log.ClearProviders()).UseOrleans(silo => silo

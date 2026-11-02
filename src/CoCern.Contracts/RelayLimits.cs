@@ -285,6 +285,11 @@ public static class RelayLimits
     /// told so: its chat then gets <c>SessionUnknown</c> with <c>expired</c> and opens a new session. At least the attention route's idle limit.
     /// </summary>
     public const int StaleSessionHours = MaxAttentionRouteIdleHours;
+    /// <summary>
+    /// Unresolved actions the session directory remembers per session (so it never expires a session that still answers for one). Past
+    /// this, the session is marked and stays exempt for good, since the directory can no longer tell when its last one closes.
+    /// </summary>
+    public const int MaxSessionOpenActions = 64;
     /// <summary>Least minutes between a session's reports to the control directory that it is still active (made at boundary replies).</summary>
     public const int AttentionActivityReportMinutes = 60;
     /// <summary>Sessions whose last idle-hold wake the hub remembers for counting; past this the memory is cleared.</summary>
