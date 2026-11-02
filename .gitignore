@@ -12,3 +12,7 @@ logs/
 *.db-shm
 *.db-wal
 *.db.lock
+
+# Python bytecode
+__pycache__/
+*.pyc

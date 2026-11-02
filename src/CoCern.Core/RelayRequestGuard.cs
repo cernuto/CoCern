@@ -11,16 +11,35 @@ namespace CoCern.Core;
 /// <summary>Public-boundary validation: shape, size, repository scope and request identity, before any aggregate is touched.</summary>
 internal static class RelayRequestGuard
 {
-    private static readonly string[] IdentifierFields = ["requestId", "repositoryId", "sessionId", "sessionToken", "boardId", "machineId", "label", "taskId", "resourceId", "itemId"];
+    private static readonly string[] IdentifierFields = ["requestId", "repositoryId", "sessionId", "sessionToken", "boardId", "machineId", "label", "taskId", "resourceId", "itemId",
+        "actionId", "contextId", "orderId", "recipientSessionId", "messageId", "triggerId"];
+
+    /// <summary>Whole-number fields. A non-integer would otherwise read as 0, so a garbled version could match a task that doesn't exist yet.</summary>
+    private static readonly string[] IntegerFields = ["expectedVersion", "expectedRevision", "generation", "claimGeneration", "attempt", "leaseSeconds",
+        "sinceRevision", "snapshotRevision", "partOffset", "freshnessSeconds", "revision"];
 
     /// <summary>Returns a rejection, or null with the parsed arguments.</summary>
     public static RelayReply? Validate(RelayCaller caller, RelayTool tool, JsonElement arguments, out JsonObject args)
     {
         args = new();
         if (arguments.ValueKind != JsonValueKind.Object) return Replies.Error(InvalidArguments);
-        var raw = arguments.GetRawText();
-        if (Encoding.UTF8.GetByteCount(raw) > RelayLimits.MaxPayloadBytes) return Replies.Error(PayloadTooLarge);
-        args = JsonNode.Parse(raw)!.AsObject();
+        try
+        {
+            var raw = arguments.GetRawText();
+            if (Encoding.UTF8.GetByteCount(raw) > RelayLimits.MaxPayloadBytes) return Replies.Error(PayloadTooLarge);
+            // A repeated key would let checks and the operation read different values, so it is refused (building the object throws on one).
+            args = JsonNode.Parse(raw)!.AsObject();
+            _ = args.Count;
+        }
+        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or JsonException)
+        {
+            args = new();
+            return Replies.Error(InvalidArguments);
+        }
+        // Some clients send null for every optional parameter: a null number is absent, never 0.
+        foreach (var numeric in IntegerFields) if (args.ContainsKey(numeric) && args[numeric] is null) args.Remove(numeric);
+        if (NotWholeNumber(args) is { } numberField) return Replies.Error(InvalidArguments, new { field = numberField });
+        if (tool.Name == RelayTools.ContextPut && args["content"] is null) return Replies.Error(InvalidArguments, new { field = "content" });
         foreach (var flag in new[] { "includeNextWork", "attention", "attentionDetail", "seen" })
             if (args.ContainsKey(flag) && (args[flag] is not JsonValue value || !value.TryGetValue<bool>(out _))) return Replies.Error(InvalidArguments, new { field = flag });
         if (!caller.MayAccess(Text(args, "repositoryId"))) return Replies.Error(RepositoryDenied);
@@ -38,9 +57,21 @@ internal static class RelayRequestGuard
         return null;
     }
 
+    private static string? NotWholeNumber(JsonObject args) => IntegerFields.FirstOrDefault(field => args.ContainsKey(field) && !IsWholeNumber(args[field]));
+
+    /// <summary>A JSON integer within a long, or a string holding one (agents sometimes quote numbers).</summary>
+    private static bool IsWholeNumber(JsonNode? node) => node is JsonValue value && (value.GetValueKind() switch
+    {
+        JsonValueKind.Number => value.TryGetValue<long>(out _),
+        JsonValueKind.String => long.TryParse(value.GetValue<string>(), System.Globalization.NumberStyles.AllowLeadingSign, System.Globalization.CultureInfo.InvariantCulture, out _),
+        _ => false
+    });
+
+    /// <summary>Within their length, and (when present) not blank and free of control characters, which would break logs and displays.</summary>
     private static bool IdentifiersFit(JsonObject args)
     {
         if (IdentifierFields.Any(field => Text(args, field).Length > RelayLimits.MaxIdentifierLength)) return false;
+        if (IdentifierFields.Any(field => args[field] is JsonValue value && value.TryGetValue<string>(out var text) && text.Length > 0 && (string.IsNullOrWhiteSpace(text) || text.Any(char.IsControl)))) return false;
         try { return !Strings(args["resourceIds"]).Any(resource => resource.Length > RelayLimits.MaxIdentifierLength); }
         catch (InvalidOperationException) { return false; }
     }

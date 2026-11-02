@@ -132,4 +132,51 @@ public sealed class BugHuntTests
             .Select(route => JsonFields.Text(route["item"]!.AsObject(), "note")).Last();
         Assert.Equal("action a, b failed", note);
     }
+
+    private static RelayReply? Guard(string tool, string json)
+    {
+        Assert.True(RelayToolCatalog.TryGet(tool, out var definition));
+        return RelayRequestGuard.Validate(Hub, definition!, JsonDocument.Parse(System.Text.Encoding.UTF8.GetBytes(json)).RootElement, out _);
+    }
+
+    [Fact]
+    public void A_repeated_key_or_unreadable_text_is_refused_not_an_internal_error()
+    {
+        Assert.Equal(RelayErrorCodes.InvalidArguments, Guard(RelayTools.TaskGet, """{"repositoryId":"repo","repositoryId":"other"}""")?.Code);
+        Assert.True(RelayToolCatalog.TryGet(RelayTools.TaskGet, out var tool));
+        var unreadable = JsonDocument.Parse(new byte[] { (byte)'{', (byte)'"', (byte)'a', (byte)'"', (byte)':', (byte)'"', 0xFF, 0xFE, (byte)'"', (byte)'}' }).RootElement;
+        Assert.Equal(RelayErrorCodes.InvalidArguments, RelayRequestGuard.Validate(Hub, tool!, unreadable, out _)?.Code);
+    }
+
+    [Theory]
+    [InlineData("1.5", false)]
+    [InlineData("18446744073709551616", false)]
+    [InlineData("true", false)]
+    [InlineData("\"one\"", false)]
+    [InlineData("\"3\"", true)]
+    [InlineData("3", true)]
+    [InlineData("null", true)]
+    public void A_version_must_be_a_whole_number_never_read_as_zero(string version, bool accepted) =>
+        Assert.Equal(accepted, Guard(RelayTools.TaskUpdate, $$"""{"repositoryId":"repo","requestId":"r","taskId":"t","expectedVersion":{{version}}}""") is null);
+
+    [Theory]
+    [InlineData("\"   \"")]
+    [InlineData("\"a\\nb\"")]
+    [InlineData("\"a\\u0000b\"")]
+    public void An_identifier_may_not_be_blank_or_hold_control_characters(string taskId) =>
+        Assert.Equal(RelayErrorCodes.InvalidArguments, Guard(RelayTools.TaskUpdate, $$"""{"repositoryId":"repo","requestId":"r","taskId":{{taskId}},"expectedVersion":0}""")?.Code);
+
+    [Fact]
+    public void A_note_needs_content() =>
+        Assert.Equal(RelayErrorCodes.InvalidArguments, Guard(RelayTools.ContextPut, """{"repositoryId":"repo","requestId":"r","sessionId":"s","sessionToken":"t","contextId":"c","content":null,"expectedVersion":0}""")?.Code);
+
+    [Fact]
+    public void A_message_to_a_session_that_was_never_opened_is_dropped_not_retried_forever()
+    {
+        var nobody = new StateEnvelope<CoordinationDocument>();
+        var delivered = Apply(nobody, "session", Operations.Deliver, new() { ["messageId"] = "m1", ["text"] = "hi", ["senderSessionId"] = "s1" });
+        Assert.True(delivered.Ok);
+        Assert.False(JsonNode.Parse(delivered.DataJson)!["delivered"]!.GetValue<bool>());
+        Assert.Null(State(nobody)["inbox"]);
+    }
 }
