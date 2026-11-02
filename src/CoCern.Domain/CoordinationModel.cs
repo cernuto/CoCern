@@ -55,9 +55,29 @@ public interface IHasSearchDocuments
     void ReleaseSearchState();
 }
 
-/// <summary>An aggregate's persisted state plus its pending outbox and timers, committed atomically.</summary>
-public sealed class StateEnvelope<T> : IHasDueWork, IHasSearchDocuments where T : new()
+/// <summary>
+/// A finished task leaving its board for the archive: the task's JSON as it left, when it completed and when it was archived. Storage writes
+/// it in the board's own commit (<see cref="IHasTaskArchive"/>), so a task is never lost or kept twice.
+/// </summary>
+public sealed record ArchivedTask(string RepositoryId, string TaskId, DateTimeOffset CompletedAt, DateTimeOffset ArchivedAt, string Json);
+
+/// <summary>State whose commit also moves tasks to the archive. Storage writes <see cref="PendingArchive"/> in the same transaction.</summary>
+public interface IHasTaskArchive
 {
+    IReadOnlyList<ArchivedTask> PendingArchive();
+    /// <summary>Called once the commit that wrote them succeeded.</summary>
+    void ArchiveWritten();
+}
+
+/// <summary>An aggregate's persisted state plus its pending outbox and timers, committed atomically.</summary>
+public sealed class StateEnvelope<T> : IHasDueWork, IHasSearchDocuments, IHasTaskArchive where T : new()
+{
+    // A private field, so no serializer persists it: it lives only from the state machine to the commit that writes it.
+    private List<ArchivedTask> pendingArchive = [];
+    public IReadOnlyList<ArchivedTask> PendingArchive() => pendingArchive;
+    public void ArchiveWritten() => pendingArchive = [];
+    internal void QueueArchive(IEnumerable<ArchivedTask> tasks) => pendingArchive.AddRange(tasks);
+
     public int SchemaVersion { get; set; } = 1;
     public T Value { get; set; } = new();
     public List<DurableEffect> Effects { get; set; } = [];
@@ -138,6 +158,9 @@ public static class DueWorkKinds
 
     /// <summary>The anomaly monitor's next check, rebuilt from its state's <c>nextCheckAt</c>.</summary>
     public const string AnomalyCheck = "anomaly_check";
+
+    /// <summary>A board's next archive sweep: when its oldest finished, idle task passes <c>Relay:Board:ArchiveAfterDays</c>.</summary>
+    public const string TaskArchive = "task_archive";
 }
 
 /// <summary>Hub-internal operations. They compose public tools across aggregates and are never accepted from clients.</summary>
@@ -171,6 +194,8 @@ public static class Operations
     /// <c>SessionUnknown</c> with <c>expired</c>, and drops deliveries. The effect carries its own caller, scoped to the session's repository.
     /// </summary>
     public const string SessionExpire = "__session_expire";
+    /// <summary>A board's due sweep: moves tasks finished longer than <c>Relay:Board:ArchiveAfterDays</c> to the archive.</summary>
+    public const string TaskArchive = "__task_archive";
     /// <summary>Read-only: which of the given sessions in the repository the caller's principal opened.</summary>
     public const string SessionOwners = "__session_owners";
     /// <summary>

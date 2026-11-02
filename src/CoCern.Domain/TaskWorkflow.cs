@@ -105,7 +105,8 @@ internal static class TaskWorkflow
     public static string? CheckDependencies(JsonObject tasks, string taskId, JsonObject workflow)
     {
         var direct = Dependencies(workflow).ToArray();
-        if (direct.Any(id => tasks[id] is not JsonObject)) return DependencyUnknown;
+        // An archived task is a completed one that left the board; it is known and has no dependencies of its own.
+        if (direct.Any(id => tasks[id] is not JsonObject && !TaskArchiving.IsArchivedOnBoardOf(tasks, id))) return DependencyUnknown;
         var seen = new HashSet<string>(StringComparer.Ordinal);
         var pending = new Stack<string>(direct);
         while (pending.Count > 0)
@@ -120,9 +121,12 @@ internal static class TaskWorkflow
 
     private static bool DependenciesDone(JsonObject tasks, JsonObject workflow) => UnfinishedDependencies(tasks, workflow).Length == 0;
 
-    /// <summary>The <c>dependsOn</c> tasks whose workflow is not <c>completed</c>, including IDs no longer on the board. A legacy shape lists none.</summary>
+    /// <summary>
+    /// The <c>dependsOn</c> tasks whose workflow is not <c>completed</c>, including IDs no longer on the board. An archived task was
+    /// completed, so it counts as done. A legacy shape lists none.
+    /// </summary>
     private static string[] UnfinishedDependencies(JsonObject tasks, JsonObject workflow) =>
-        Dependencies(workflow).Where(id => tasks[id]?["workflow"] is not JsonObject dependency || Text(dependency, "state") != "completed").ToArray();
+        Dependencies(workflow).Where(id => (tasks[id]?["workflow"] is not JsonObject dependency || Text(dependency, "state") != "completed") && !TaskArchiving.IsArchivedOnBoardOf(tasks, id)).ToArray();
 
     /// <summary>Ready tasks that depend on <paramref name="completedTaskId"/> and now have every dependency completed.</summary>
     public static IReadOnlyList<string> Unblocked(JsonObject tasks, string completedTaskId) =>

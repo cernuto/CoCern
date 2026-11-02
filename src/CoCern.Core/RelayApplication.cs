@@ -20,7 +20,7 @@ namespace CoCern.Core;
 /// Aggregates enforce the rules; this layer authenticates the session, routes, composes and bounds replies.
 /// </summary>
 public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? machines = null, IActivitySink? activity = null, IFullTextSearch? search = null, AttentionOptions? attention = null, AnalyticsTool? analytics = null, AnomalyOptions? anomaly = null, OrderOptions? orders = null, DocCacheTool? docs = null,
-    ITokenCounter? tokens = null, TokenOptions? tokenOptions = null, FeedbackRules? feedback = null) : IRelayApplication
+    ITokenCounter? tokens = null, TokenOptions? tokenOptions = null, FeedbackRules? feedback = null, ITaskArchive? archive = null) : IRelayApplication
 {
     private readonly IMachineDirectory directory = machines ?? new MachineDirectory(grains);
     private readonly AttentionOptions attentionOptions = attention ?? new();
@@ -282,8 +282,20 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         // Administrator only, checked first, so a worker learns nothing about the hub's doc cache settings.
         RelayTools.DocSync => !caller.IsAdministrator ? Task.FromResult(Error(AdministratorRequired)) : docs is null ? DocCacheOff() : docs.SyncAsync(args, cancellationToken),
         RelayTools.WorkerList or RelayTools.ControlRequest => CallControl(caller, tool, args),
+        RelayTools.TaskGet => ReadTaskAsync(caller, args, cancellationToken),
         _ => CallBoard(caller, tool, args)
     };
+
+    /// <summary><c>task_get</c>: the board's reply, or for a task the board archived, the archived copy, read-only and marked <c>archived: true</c>.</summary>
+    private async Task<RelayReply> ReadTaskAsync(RelayCaller caller, JsonObject args, CancellationToken cancellationToken)
+    {
+        var reply = await CallBoard(caller, RelayTools.TaskGet, args);
+        if (reply.Code != TaskArchived || archive is null || Text(args, "taskId") is not { Length: > 0 } taskId) return reply;
+        string? json;
+        try { json = await archive.ReadArchivedTaskAsync(Text(args, "repositoryId"), Text(args, "boardId", "default"), taskId, cancellationToken); }
+        catch (Exception exception) when (exception is System.Data.Common.DbException or ObjectDisposedException) { return Error(Unavailable); }
+        return json is null ? reply : ArchivedTasks.Read(args, json);
+    }
 
     /// <summary>
     /// Full-text search over committed state, as the verified session (checked before dispatch): the request's repository plus that

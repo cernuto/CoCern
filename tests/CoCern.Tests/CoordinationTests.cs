@@ -724,6 +724,133 @@ public sealed class CoordinationTests
         Assert.DoesNotContain("secret", session.Value.Json);
     }
 
+    private static RelayReply Board(StateEnvelope<CoordinationDocument> state, string op, JsonObject args, double days = 0, int archiveAfterDays = RelayLimits.DefaultArchiveAfterDays)
+    {
+        args["repositoryId"] = "repo";
+        return CoordinationStateMachine.Apply(state, "board", "repo/default", Caller, op, args, Now.AddDays(days), archiveAfterDays: archiveAfterDays);
+    }
+
+    [Fact]
+    public void A_board_whose_tasks_finish_never_fills_and_a_board_of_open_tasks_says_how_many_are_open()
+    {
+        // More than three times the task limit over 63 days, completed as they go (every 64th left open), with the daily due sweep
+        // archiving what finished more than a day ago: no create is ever refused, and open tasks stay.
+        var state = new StateEnvelope<CoordinationDocument>();
+        var open = new List<string>();
+        var total = 3 * RelayLimits.MaxRecords + 100;
+        var perDay = total / 62;
+        for (var i = 0; i < total; i++)
+        {
+            var id = "t" + i;
+            var keepOpen = i % 64 == 0;
+            var day = i / perDay;
+            var created = Board(state, "task_update", new() { ["taskId"] = id, ["expectedVersion"] = 0, ["workflow"] = DependentWorkflow(keepOpen ? "ready" : "completed") }, days: day, archiveAfterDays: 1);
+            Assert.True(created.Ok, i + ": " + created.Code);
+            if (keepOpen) open.Add(id);
+            state.Effects.Clear(); // the outbox delivers between writes
+            if ((i + 1) % perDay == 0) Assert.True(Board(state, Operations.TaskArchive, new(), days: day + 0.5, archiveAfterDays: 1).Ok);
+        }
+        var stored = StateJson(state);
+        var tasks = stored["tasks"]!.AsObject();
+        var archived = stored["archivedTasks"]!.AsObject();
+        Assert.All(open, id => Assert.True(tasks.ContainsKey(id), id));
+        Assert.Equal(total, tasks.Count + archived.Count);
+        Assert.InRange(archived.Count, total - open.Count - 3 * perDay, total - open.Count);
+        Assert.Equal(archived.Count, state.PendingArchive().Count);
+        Assert.All(state.PendingArchive(), task => Assert.Equal("completed", JsonNode.Parse(task.Json)!["workflow"]!["state"]!.GetValue<string>()));
+
+        // With ArchiveAfterDays 0 only the cap archives: a write to a nearly full board moves its oldest finished tasks, even young ones,
+        // down to the low-water mark, and the task it names is never one of them.
+        var near = new JsonObject();
+        for (var i = 0; i < RelayLimits.ArchiveHighWater; i++)
+        {
+            var finished = i % 4 != 0;
+            near["n" + i] = new JsonObject
+            {
+                ["taskId"] = "n" + i, ["version"] = 1, ["changeRevision"] = i + 1, ["actions"] = new JsonObject(), ["workflow"] = DependentWorkflow(finished ? "completed" : "ready"),
+                ["completedAt"] = finished ? Now.AddMinutes(-i).ToString("O") : null
+            };
+            // A finished task someone still holds a live claim on stays.
+            if (i % 4 == 1) { near["n" + i]!["owner"] = "s"; near["n" + i]!["leaseUntil"] = Now.AddHours(1).ToString("O"); }
+        }
+        var capped = new StateEnvelope<CoordinationDocument> { Value = new() { Json = new JsonObject { ["repositoryId"] = "repo", ["taskRevision"] = RelayLimits.ArchiveHighWater, ["tasks"] = near }.ToJsonString() } };
+        var oldest = "n" + (RelayLimits.ArchiveHighWater - 1);
+        Assert.True(Board(capped, "task_update", new() { ["taskId"] = oldest, ["expectedVersion"] = 1, ["patch"] = new JsonObject { ["x"] = 1 } }, archiveAfterDays: 0).Ok);
+        var left = StateJson(capped)["tasks"]!.AsObject();
+        Assert.Equal(RelayLimits.ArchiveLowWater, left.Count);
+        Assert.True(left.ContainsKey(oldest));
+        Assert.True(left.ContainsKey("n1"));
+        Assert.False(left.ContainsKey("n" + (RelayLimits.ArchiveHighWater - 2)));
+        Assert.All(Enumerable.Range(0, RelayLimits.ArchiveHighWater).Where(i => i % 4 is 0 or 1), i => Assert.True(left.ContainsKey("n" + i)));
+
+        // A board whose every task is still open cannot archive anything: the create is refused and says why.
+        var full = new JsonObject();
+        for (var i = 0; i < RelayLimits.MaxRecords; i++) full["o" + i] = new JsonObject { ["taskId"] = "o" + i, ["version"] = 1, ["changeRevision"] = i + 1, ["actions"] = new JsonObject(), ["workflow"] = DependentWorkflow("ready") };
+        var busy = new StateEnvelope<CoordinationDocument> { Value = new() { Json = new JsonObject { ["repositoryId"] = "repo", ["taskRevision"] = RelayLimits.MaxRecords, ["tasks"] = full }.ToJsonString() } };
+        var refused = Board(busy, "task_update", new() { ["taskId"] = "more", ["expectedVersion"] = 0 });
+        Assert.Equal("CapacityExceeded", refused.Code);
+        Assert.Equal((RelayLimits.MaxRecords, RelayLimits.MaxRecords, 0), (Data(refused)["maxTasks"]!.GetValue<int>(), Data(refused)["openTasks"]!.GetValue<int>(), Data(refused)["archivable"]!.GetValue<int>()));
+    }
+
+    [Fact]
+    public void Archived_tasks_count_as_completed_refuse_writes_and_leave_deltas_as_removals()
+    {
+        var state = new StateEnvelope<CoordinationDocument>();
+        Assert.True(Board(state, "task_update", new() { ["taskId"] = "a", ["expectedVersion"] = 0, ["workflow"] = DependentWorkflow("ready") }).Ok);
+        Assert.True(Board(state, "task_update", new() { ["taskId"] = "b", ["expectedVersion"] = 0, ["workflow"] = DependentWorkflow("ready", "a") }).Ok);
+        // A finished task whose claim lapsed is archived like any other. (Completion already needs every action resolved.)
+        Assert.True(Board(state, "task_update", new() { ["taskId"] = "claimed", ["expectedVersion"] = 0, ["workflow"] = DependentWorkflow("ready") }).Ok);
+        Assert.True(Board(state, "task_claim", new() { ["taskId"] = "claimed", ["sessionId"] = "s", ["expectedVersion"] = 1, ["leaseSeconds"] = RelayLimits.MaxLeaseSeconds }).Ok);
+        Assert.True(Board(state, "task_update", new() { ["taskId"] = "claimed", ["sessionId"] = "s", ["expectedVersion"] = 2, ["workflow"] = DependentWorkflow("completed") }).Ok);
+        Assert.True(Board(state, "task_update", new() { ["taskId"] = "a", ["expectedVersion"] = 1, ["workflow"] = DependentWorkflow("completed") }).Ok);
+        var checkpoint = StateJson(state)["taskRevision"]!.GetValue<long>();
+        // The next sweep is due when a finished task passes the setting.
+        CoordinationStateMachine.ScheduleLeases(state, RelayLimits.DefaultArchiveAfterDays);
+        var due = Assert.Single(state.DueWork, work => work.Kind == DueWorkKinds.TaskArchive);
+        Assert.Equal(Now.AddDays(RelayLimits.DefaultArchiveAfterDays), due.DueAt);
+
+        // Before the setting nothing moves; after it, only a sits idle and finished.
+        Assert.Equal(0, Data(Board(state, Operations.TaskArchive, new(), days: RelayLimits.DefaultArchiveAfterDays - 1))["archived"]!.GetValue<int>());
+        Assert.Equal(2, Data(Board(state, Operations.TaskArchive, new(), days: RelayLimits.DefaultArchiveAfterDays + 1))["archived"]!.GetValue<int>());
+        var stored = StateJson(state);
+        Assert.False(stored["tasks"]!.AsObject().ContainsKey("a"));
+        Assert.False(stored["tasks"]!.AsObject().ContainsKey("claimed"));
+        var archived = Assert.Single(state.PendingArchive(), task => task.TaskId == "a");
+        Assert.Equal(("a", Now), (archived.TaskId, archived.CompletedAt));
+        Assert.Equal(Now.AddDays(RelayLimits.DefaultArchiveAfterDays + 1), JsonFields.Date(JsonNode.Parse(archived.Json)!.AsObject(), "archivedAt"));
+
+        // Writes to it are refused as a conflict; the hub reads it from the archive.
+        foreach (var (op, extra) in new (string, JsonObject)[]
+        {
+            ("task_update", new() { ["expectedVersion"] = 2, ["patch"] = new JsonObject { ["x"] = 1 } }), ("task_claim", new() { ["sessionId"] = "s", ["expectedVersion"] = 2 }),
+            ("action_begin", new() { ["sessionId"] = "s", ["expectedVersion"] = 2, ["actionId"] = "x", ["inputFingerprint"] = "f" }), ("task_get", new()),
+            ("task_update", new() { ["expectedVersion"] = 0 })
+        })
+        {
+            extra["taskId"] = "a";
+            var refused = Board(state, op, extra, days: 31);
+            Assert.Equal("TaskArchived", refused.Code);
+            Assert.Equal(RelayErrorKind.Conflict, RelayErrorCodes.Classify(refused.Code));
+        }
+        // It is gone from the list; a delta from before the sweep reports it removed, one from after does not.
+        Assert.DoesNotContain(Data(Board(state, "task_get", new(), days: 31))["items"]!.AsArray(), item => item!["taskId"]!.GetValue<string>() == "a");
+        var delta = Data(Board(state, "task_get", new() { ["sinceRevision"] = checkpoint }, days: 31))["items"]!.AsArray();
+        Assert.Equal(["a", "claimed"], delta.Select(item => item!["taskId"]!.GetValue<string>()));
+        Assert.All(delta, item => Assert.True(item!["archived"]!.GetValue<bool>()));
+        Assert.Empty(Data(Board(state, "task_get", new() { ["sinceRevision"] = StateJson(state)["taskRevision"]!.GetValue<long>() }, days: 31))["items"]!.AsArray());
+
+        // A dependency on it is satisfied: b is offered and claimable, and a new task may depend on it.
+        Assert.Equal("b", Data(Board(state, "__next_work", new() { ["sessionId"] = "w" }, days: 31))["offer"]!["taskId"]!.GetValue<string>());
+        Assert.True(Board(state, "task_claim", new() { ["taskId"] = "b", ["sessionId"] = "w", ["expectedVersion"] = 1 }, days: 31).Ok);
+        Assert.True(Board(state, "task_update", new() { ["taskId"] = "later", ["expectedVersion"] = 0, ["workflow"] = DependentWorkflow("ready", "a") }, days: 31).Ok);
+        Assert.Equal("DependencyUnknown", Board(state, "task_update", new() { ["taskId"] = "never", ["expectedVersion"] = 0, ["workflow"] = DependentWorkflow("ready", "nowhere") }, days: 31).Code);
+        // Reopening a completed task clears its completion time.
+        Assert.True(Board(state, "task_update", new() { ["taskId"] = "later", ["expectedVersion"] = 1, ["workflow"] = DependentWorkflow("completed", "a") }, days: 31).Ok);
+        Assert.NotNull(StateJson(state)["tasks"]!["later"]!["completedAt"]);
+        Assert.True(Board(state, "task_update", new() { ["taskId"] = "later", ["expectedVersion"] = 2, ["workflow"] = DependentWorkflow("ready", "a") }, days: 31).Ok);
+        Assert.Null(StateJson(state)["tasks"]!["later"]!["completedAt"]);
+    }
+
     private static JsonObject DependentWorkflow(string state, params string[] dependsOn)
     {
         var workflow = new JsonObject

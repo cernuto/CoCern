@@ -98,6 +98,12 @@ public static class RelayLimits
     /// <summary>A whole-task read carries only this many of the latest messages, reports and attempts; older ones stay in the paged sections.</summary>
     public const int RecentTaskEntries = 20;
     public const int MaxRecords = 2_048;
+    /// <summary>Days after completion before a finished task moves to the archive (<c>Relay:Board:ArchiveAfterDays</c>; 0: only when the board fills).</summary>
+    public const int DefaultArchiveAfterDays = 30;
+    public const int MaxArchiveAfterDays = 3_650;
+    /// <summary>A board write with this many tasks archives finished ones, oldest first, down to <see cref="ArchiveLowWater"/>, even if younger than the setting.</summary>
+    public const int ArchiveHighWater = MaxRecords * 7 / 8;
+    public const int ArchiveLowWater = MaxRecords * 3 / 4;
     public const int MaxTaskBytes = 262_144;
     public const int MaxReportBytes = 8_192;
     public const int MaxClaimResources = 16;

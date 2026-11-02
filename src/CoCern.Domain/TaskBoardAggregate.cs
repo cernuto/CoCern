@@ -26,6 +26,8 @@ internal static class TaskBoardAggregate
         foreach (var task in tasks.OrderBy(x => x.Key, StringComparer.Ordinal).Select(x => x.Value!.AsObject()))
             if (!task.ContainsKey("changeRevision")) MarkChanged(state, task);
         var taskId = Text(context.Args, "taskId");
+        // A write to a nearly full board first moves its oldest finished tasks to the archive.
+        if (CoordinationStateMachine.IsMutation(context.Operation) && context.Operation != Operations.TaskArchive) TaskArchiving.Run(context, sweep: false);
         var mutation = CoordinationStateMachine.IsMutation(context.Operation) && taskId.Length > 0;
         var before = mutation ? tasks[taskId]?.ToJsonString() : null;
         var result = Dispatch(context, tasks, taskId);
@@ -62,13 +64,18 @@ internal static class TaskBoardAggregate
             case Operations.Orders: return StandingOrders.Read(context.State, context.Now);
             case Operations.OrderFire: return StandingOrders.OnFire(context);
             case Operations.OrderFailed: return StandingOrders.OnFailed(context);
+            case Operations.TaskArchive: TaskArchiving.Run(context, sweep: true); return Ok(new { archived = context.Archived.Count });
         }
         if (taskId.Length == 0) return Error(InvalidArguments, new { required = "taskId" });
         if (tasks[taskId] is not JsonObject task)
         {
+            // An archived task is read from storage by the hub; every write to it, a new task under its ID included, is refused.
+            if (TaskArchiving.IsArchived(context.State, taskId)) return Error(TaskArchived, new { taskId, archived = true });
             // Only an explicit create (task_update at expected version 0) brings a task into existence.
             if (context.Operation != RelayTools.TaskUpdate || !ExpectedVersionMatches(context.Args, 0)) return Error(NotFound);
-            if (tasks.Count >= RelayLimits.MaxRecords) return Error(CapacityExceeded);
+            // Full even after archiving: every task is open, claimed or waiting on an action.
+            if (tasks.Count >= RelayLimits.MaxRecords)
+                return Error(CapacityExceeded, new { maxTasks = RelayLimits.MaxRecords, openTasks = tasks.Count(entry => entry.Value is JsonObject item && !TaskArchiving.IsFinished(item)), archivable = 0 });
             tasks[taskId] = task = new() { ["taskId"] = taskId, ["version"] = 0, ["actions"] = new JsonObject(), ["messages"] = new JsonArray(), ["reports"] = new JsonArray(), ["facts"] = new JsonObject() };
         }
         return context.Operation switch
@@ -102,7 +109,11 @@ internal static class TaskBoardAggregate
         var offset = Number(args, "cursor");
         if (since < 0 || since > current || offset < 0 || offset > RelayLimits.MaxRecords || offset > 0 && !args.ContainsKey("snapshotRevision")) return Error(InvalidArguments);
         if (args.ContainsKey("snapshotRevision") && Number(args, "snapshotRevision") != current) return Error(DeltaRestartRequired, new { restartRequired = true, currentRevision = current });
-        var all = ObjectAt(state, "tasks").Where(x => Number(x.Value!.AsObject(), "changeRevision") > since).OrderBy(x => x.Key, StringComparer.Ordinal).Select(x => (JsonNode)Summary(x.Value!.AsObject())).ToArray();
+        // Tasks moved to the archive since the checkpoint come back as removals: { taskId, archived: true, changeRevision }.
+        var removed = (state[TaskArchiving.ArchivedKey] as JsonObject ?? new JsonObject()).Where(x => Number(state[TaskArchiving.ArchivedKey]!.AsObject(), x.Key) > since)
+            .Select(x => (x.Key, Item: (JsonNode)new JsonObject { ["taskId"] = x.Key, ["archived"] = true, ["changeRevision"] = Number(state[TaskArchiving.ArchivedKey]!.AsObject(), x.Key) }));
+        var all = ObjectAt(state, "tasks").Where(x => Number(x.Value!.AsObject(), "changeRevision") > since).Select(x => (x.Key, Item: (JsonNode)Summary(x.Value!.AsObject())))
+            .Concat(removed).OrderBy(x => x.Key, StringComparer.Ordinal).Select(x => x.Item).ToArray();
         var limit = (int)Math.Clamp(Number(args, "limit", RelayLimits.DefaultPageSize), 1, RelayLimits.MaxPageSize);
         var items = all.Skip((int)offset).Take(args.ContainsKey("partOffset") ? 1 : limit).Select(x => x.DeepClone()).ToList();
         RelayReply Reply() => Ok(new { items, snapshotRevision = current, nextCursor = offset + items.Count < all.Length ? (long?)(offset + items.Count) : null, truncated = offset + items.Count < all.Length, total = all.Length });
@@ -143,6 +154,13 @@ internal static class TaskBoardAggregate
         if (CheckReadable(entry) is { } unreadable) return unreadable;
         notes[id] = entry;
         return Ok(entry, version + 1);
+    }
+
+    /// <summary>An archived task's read, from the JSON storage kept: the same sections and fallbacks as a live task.</summary>
+    internal static RelayReply ReadArchived(JsonObject args, JsonObject task)
+    {
+        var reply = ReadTask(args, task);
+        return reply.Ok && Text(args, "section").Length == 0 && !FitsWire(reply, RelayLimits.AggregateReplyBytes) ? Ok(Summary(task), reply.Version) : reply;
     }
 
     private static RelayReply ReadTask(JsonObject args, JsonObject task)
@@ -276,6 +294,9 @@ internal static class TaskBoardAggregate
             if (TaskWorkflow.CheckDependencies(tasks, Text(task, "taskId"), workflow) is { } dependency) return Error(dependency);
             var completing = Text(workflow, "state") == "completed" && (task["workflow"] is not JsonObject prior || Text(prior, "state") != "completed");
             task["workflow"] = workflow.DeepClone();
+            // Archiving counts from completion; reopening clears it.
+            if (completing) task["completedAt"] = context.Now.ToString("O");
+            else if (Text(workflow, "state") != "completed") task.Remove("completedAt");
             if (completing) unblocked = TaskWorkflow.Unblocked(tasks, Text(task, "taskId"));
         }
         // Attention items for this change commit with it: blocked, failed and review_ready to managers, next_work to each unblocked target.

@@ -1,6 +1,6 @@
 <section class="surface sql-view" aria-labelledby="sql-heading">
     <div class="section-heading"><div><h2 id="sql-heading">SQL table metrics</h2><p>Table sizes and row counts, as reported by the database provider.</p></div><span class="small-symbol" aria-hidden="true">▤</span></div>
-    <dl class="database-summary"><div><dt>Provider</dt><dd>@Known(Metrics.Provider)</dd></div><div><dt>Database</dt><dd>@Known(Metrics.Name)</dd></div><div><dt>Database size</dt><dd>@DashboardFormat.Bytes(Metrics.SizeBytes)</dd></div><div><dt>Collected</dt><dd title="@DashboardFormat.Timestamp(Metrics.ObservedAt)">@DashboardFormat.Ago(Metrics.ObservedAt, Now)</dd></div></dl>
+    <dl class="database-summary"><div><dt>Provider</dt><dd>@Known(Metrics.Provider)</dd></div><div><dt>Database</dt><dd>@Known(Metrics.Name)</dd></div><div><dt>Database size</dt><dd>@DashboardFormat.Bytes(Metrics.SizeBytes)</dd></div>@if (Metrics.ArchivedTasks is { } archived) { <div><dt>Archived tasks</dt><dd>@archived.ToString("N0")</dd></div> }<div><dt>Collected</dt><dd title="@DashboardFormat.Timestamp(Metrics.ObservedAt)">@DashboardFormat.Ago(Metrics.ObservedAt, Now)</dd></div></dl>
     @if (!string.IsNullOrWhiteSpace(Metrics.Warning)) { <p class="warning-note" role="status">@Metrics.Warning</p> }
     <table class="metrics-table">
         <caption class="visually-hidden">Database tables and reported row counts</caption>

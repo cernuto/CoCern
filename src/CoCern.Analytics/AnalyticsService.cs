@@ -293,7 +293,7 @@ public sealed class AnalyticsService(AnalyticsOptions options) : IAnalyticsQueri
         public DateTimeOffset TakenAt { get; }
 
         /// <summary>The tables copied out of the SQLite snapshot. Everything the views read is here.</summary>
-        private static readonly string[] Tables = ["grain_state", "due_work", "activity_log", "activity_daily"];
+        private static readonly string[] Tables = ["grain_state", "due_work", "activity_log", "activity_daily", "task_archive"];
 
         /// <summary>
         /// Copies the SQLite snapshot at <paramref name="path"/> into a DuckDB file beside it and deletes the SQLite copy, then opens a

@@ -20,7 +20,9 @@ public static class CoordinationStateMachine
     private const int MaxBindingBytes = 8_192;
 
     /// <param name="ordersEnabled">Whether the hub runs standing orders; the grain passes its setting, so the domain stays free of configuration.</param>
-    public static RelayReply Apply(StateEnvelope<CoordinationDocument> envelope, string kind, string key, RelayCaller caller, string operation, JsonObject arguments, DateTimeOffset now, bool ordersEnabled = false)
+    /// <param name="archiveAfterDays">Days after completion before a finished task is archived (<c>Relay:Board:ArchiveAfterDays</c>); 0 archives only when a board fills.</param>
+    public static RelayReply Apply(StateEnvelope<CoordinationDocument> envelope, string kind, string key, RelayCaller caller, string operation, JsonObject arguments, DateTimeOffset now, bool ordersEnabled = false,
+        int archiveAfterDays = RelayLimits.DefaultArchiveAfterDays)
     {
         if (ByteSize(arguments) > RelayLimits.MaxPayloadBytes) return Error(PayloadTooLarge);
         var repository = Text(arguments, "repositoryId");
@@ -43,7 +45,7 @@ public static class CoordinationStateMachine
         // Its stored reply was evicted to make room before its window ended: refuse rather than run the write twice.
         if (requestId.Length > 0 && IsMutation(operation) && Retention.IsBuried(state, requestKey, now)) return Error(RequestExpired, new { readCurrentState = true });
 
-        var context = new AggregateContext(state, caller, operation, arguments, now) { Key = key, OrdersEnabled = ordersEnabled };
+        var context = new AggregateContext(state, caller, operation, arguments, now) { Key = key, OrdersEnabled = ordersEnabled, ArchiveAfterDays = archiveAfterDays };
         RelayReply result;
         try
         {
@@ -82,6 +84,8 @@ public static class CoordinationStateMachine
         // Nothing changes the state object after this point, so the commit's search indexing can read it instead of parsing again.
         envelope.Value.KeepParsed(state);
         envelope.Effects.AddRange(context.Effects);
+        // Tasks this operation archived leave the board in this commit; storage writes them to the archive in the same transaction.
+        envelope.QueueArchive(context.Archived);
         return result;
     }
 
@@ -134,12 +138,14 @@ public static class CoordinationStateMachine
 
     /// <summary>
     /// Rebuilds the aggregate's timers from its own state: lease expiry from its own and its tasks' leases, a lock's lease check, and the
-    /// anomaly monitor's next check.
+    /// anomaly monitor's next check, and a board's next archive sweep (with <paramref name="archiveAfterDays"/> above 0).
     /// </summary>
-    public static void ScheduleLeases(StateEnvelope<CoordinationDocument> envelope)
+    public static void ScheduleLeases(StateEnvelope<CoordinationDocument> envelope, int archiveAfterDays = 0)
     {
         var state = JsonNode.Parse(envelope.Value.Json)!.AsObject();
-        envelope.DueWork.RemoveAll(x => x.Kind is "lease" or DueWorkKinds.LeaseWarning or DueWorkKinds.AnomalyCheck);
+        envelope.DueWork.RemoveAll(x => x.Kind is "lease" or DueWorkKinds.LeaseWarning or DueWorkKinds.AnomalyCheck or DueWorkKinds.TaskArchive);
+        // A board's next archive sweep, when a finished task will pass Relay:Board:ArchiveAfterDays.
+        if (TaskArchiving.NextSweep(state, archiveAfterDays) is { } sweep) envelope.DueWork.Add(new(DueWorkKinds.TaskArchive, DueWorkKinds.TaskArchive, sweep));
         if (DateTimeOffset.TryParse(Text(state, "nextCheckAt"), out var check)) envelope.DueWork.Add(new(DueWorkKinds.AnomalyCheck, DueWorkKinds.AnomalyCheck, check));
         if (DateTimeOffset.TryParse(Text(state, "leaseUntil"), out var lease)) envelope.DueWork.Add(new("lease", "lease", lease));
         // A lock whose holder has an action in flight checks its lease shortly before it ends (claim_expiring).

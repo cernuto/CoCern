@@ -52,6 +52,11 @@ public static class RelayHostBuilderExtensions
             }.Validated();
         });
         builder.Services.AddSingleton(services => AnomalySettings(services.GetRequiredService<IConfiguration>()));
+        // Finished tasks leave their board after Relay:Board:ArchiveAfterDays (default 30), or sooner when it nears its task limit.
+        builder.Services.AddSingleton(services => new BoardOptions
+        {
+            ArchiveAfterDays = services.GetRequiredService<IConfiguration>().GetValue("Relay:Board:ArchiveAfterDays", RelayLimits.DefaultArchiveAfterDays)
+        }.Validated());
         // Standing orders are on by default; the board grains read the same options to decide whether orders run.
         builder.Services.AddSingleton(services =>
         {
@@ -82,7 +87,9 @@ public static class RelayHostBuilderExtensions
             // The feedback rules exist only with tips or proposed team rules on, both on by default.
             services.GetRequiredService<FeedbackOptions>() is { Enabled: true } feedback
                 ? new FeedbackRules(feedback, services.GetRequiredService<ITokenCounter>(), services.GetService<SqliteStore>())
-                : null))));
+                : null,
+            // Archived tasks are read back from the store's task_archive.
+            services.GetService<SqliteStore>()))));
         // One shared tokenizer for every token count; it loads its vocabulary on first use.
         builder.Services.AddSingleton<ITokenCounter, O200kTokenCounter>();
         builder.Services.AddDocCache();

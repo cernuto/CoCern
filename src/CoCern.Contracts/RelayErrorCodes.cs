@@ -38,6 +38,8 @@ public static class RelayErrorCodes
 
     // Records
     public const string NotFound = "NotFound";
+    /// <summary>The task was finished and moved to the archive: <c>task_get</c> still reads it; claims, updates and actions are refused.</summary>
+    public const string TaskArchived = "TaskArchived";
     public const string SessionUnknown = "SessionUnknown";
     public const string ResourceUnknown = "ResourceUnknown";
     public const string ActionUnknown = "ActionUnknown";
@@ -111,7 +113,7 @@ public static class RelayErrorCodes
     private static readonly FrozenSet<string> Conflicts = new[]
     {
         VersionConflict, RequestConflict, RequestExpired, StaleClaim, Paused, Busy, ActionConflict, UnresolvedAction,
-        DeltaRestartRequired, WorkflowRecheckRequired, WorkflowIncomplete, WorkflowNotReady, DependenciesIncomplete, SnoozeLimit
+        DeltaRestartRequired, WorkflowRecheckRequired, WorkflowIncomplete, WorkflowNotReady, DependenciesIncomplete, TaskArchived, SnoozeLimit
     }.ToFrozenSet(StringComparer.Ordinal);
 
     private static readonly FrozenSet<string> Denials = new[] { RepositoryDenied, SessionDenied, AdministratorRequired, MachineRevoked, MachineRequired }.ToFrozenSet(StringComparer.Ordinal);

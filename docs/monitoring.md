@@ -152,7 +152,7 @@ Each named query compares the last `days` days (`cur`, 1 to 14, default 7) with 
 | `quality_guardrails` | Closures, reopened tasks, failed and retried actions. |
 | `attention_outcomes_by_kind` | Attention answers, by kind. |
 
-With ad hoc SQL on, `"name": "sql", "sql": "SELECT ..."` runs one `SELECT` over the views: `tasks`, `tool_calls`, `context_by_role`, `messages`, `action_reports`, `claim_conflicts`, `attention_outcomes`, `budget_events`, `board_doc`, `task_doc`, `activity`. `relay_tokens` in `activity` is the hub's own token count for a call. Every ad hoc query is written to the hub log.
+With ad hoc SQL on, `"name": "sql", "sql": "SELECT ..."` runs one `SELECT` over the views: `tasks`, `tool_calls`, `context_by_role`, `messages`, `action_reports`, `claim_conflicts`, `attention_outcomes`, `budget_events`, `board_doc`, `task_doc`, `archived_tasks`, `activity`. Archived tasks are included in `tasks` (column `archived`), `task_doc`, `messages` and `action_reports`. `relay_tokens` in `activity` is the hub's own token count for a call. Every ad hoc query is written to the hub log.
 
 Errors: `AdministratorRequired`, `AnalyticsUnavailable` (off, no snapshot yet, or no usable extension), `AnalyticsRefused` (ad hoc SQL off, or not one `SELECT`), `AnalyticsTimeout`, `AnalyticsFailed`, `InvalidArguments`, `PayloadTooLarge` (reply over 8 KB).
 

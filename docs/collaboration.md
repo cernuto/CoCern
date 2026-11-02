@@ -41,6 +41,20 @@ Add `workflow` to `task_update`:
 - A task is offered only when its `dependsOn` tasks are `completed`. Higher `priority` comes first, then tasks whose resources are free.
 - `task_claim` and `action_begin` check the same: a task with an unfinished dependency gets `DependenciesIncomplete` (409, the unfinished IDs in `dependsOn`).
 
+## Archive
+
+A completed task with no live claim and no open action moves off its board 30 days after it completed (`Relay:Board:ArchiveAfterDays`). A board close to its 2,048-task limit moves its oldest finished tasks sooner. So a board never fills up with finished work.
+
+- `task_get` with its `taskId` still reads it, with `archived: true`. Lists leave it out. A delta lists it once as `{ "taskId", "archived": true }`.
+- Search still finds it, with status `archived`. Analytics still counts it (the `archived_tasks` view, and `archived` on `tasks`).
+- Claims, updates and actions on it get `TaskArchived` (409). Its ID cannot be used for a new task.
+- A `dependsOn` naming it counts as completed.
+- A full board whose tasks are all still open refuses new tasks with `CapacityExceeded` and `openTasks`.
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `Relay:Board:ArchiveAfterDays` | 30 | Days after completion before a task is archived (0 to 3650). `0`: only when a board fills. |
+
 ## Attention
 
 On by default. A `check_inbox`, `task_update`, `action_report` or `task_claim` reply can carry one offer:

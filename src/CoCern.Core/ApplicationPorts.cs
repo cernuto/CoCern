@@ -24,6 +24,13 @@ public interface IDueWorkSource
 /// </summary>
 public sealed record SearchHit(string DocId, string Kind, string Status, DateTimeOffset UpdatedAt, string Snippet, string? BoardId = null, double Score = 0);
 
+/// <summary>Port implemented by storage: archived tasks, which left their board once finished. Reads only committed rows.</summary>
+public interface ITaskArchive
+{
+    /// <summary>The task's JSON as it was archived, or null when this board archived no task with that ID.</summary>
+    Task<string?> ReadArchivedTaskAsync(string repositoryId, string boardId, string taskId, CancellationToken cancellationToken = default);
+}
+
 /// <summary>Port implemented by storage: full-text search over committed state, scoped to one repository and one session's inbox.</summary>
 public interface IFullTextSearch
 {

@@ -34,6 +34,9 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
 
     private protected IServiceProvider Services => services;
 
+    /// <summary><c>Relay:Board:ArchiveAfterDays</c>, or its default when the host registers no board options.</summary>
+    private protected int ArchiveAfterDays => services.GetService<BoardOptions>()?.ArchiveAfterDays ?? RelayLimits.DefaultArchiveAfterDays;
+
     /// <summary>
     /// Runs this aggregate's own due checks before its outbox is delivered, committing what they change and raise. Returns false when
     /// that commit failed. <paramref name="workId"/> is empty for all due work. The anomaly monitor runs its analytics check here.
@@ -51,10 +54,10 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
         var candidate = Clone(persistent.State);
         var firstNewEffect = candidate.Effects.Count;
         var priorTaskRevision = Kind == AggregateKinds.Board ? CoordinationStateMachine.TaskRevision(candidate) : null;
-        var reply = CoordinationStateMachine.Apply(candidate, Kind, this.GetPrimaryKeyString(), caller, operation, args, Now, services.GetService<OrderOptions>() is { Enabled: true });
+        var reply = CoordinationStateMachine.Apply(candidate, Kind, this.GetPrimaryKeyString(), caller, operation, args, Now, services.GetService<OrderOptions>() is { Enabled: true }, ArchiveAfterDays);
         if (!reply.Ok || !CoordinationStateMachine.RequiresCommit(Kind, operation, priorTaskRevision, candidate)) return reply;
         CoordinationStateMachine.StampEffects(candidate.Effects, firstNewEffect, caller);
-        CoordinationStateMachine.ScheduleLeases(candidate);
+        CoordinationStateMachine.ScheduleLeases(candidate, Kind == AggregateKinds.Board ? ArchiveAfterDays : 0);
         return await CommitAsync(candidate) ? reply : Replies.Error(RelayErrorCodes.StorageFailure);
     }
 
@@ -233,7 +236,26 @@ public sealed class SessionGrain([PersistentState("session", "relay")] IPersiste
 
 [GrainType("cocern.board")]
 public sealed class TaskBoardGrain([PersistentState("board", "relay")] IPersistentState<StateEnvelope<CoordinationDocument>> state, IGrainFactory grains, IServiceProvider services) : CoordinationGrain(state, grains, services), ITaskBoardGrain
-{ protected override string Kind => AggregateKinds.Board; }
+{
+    protected override string Kind => AggregateKinds.Board;
+
+    protected override DateTimeOffset Now => (Services.GetService<BoardOptions>()?.Time ?? TimeProvider.System).GetUtcNow();
+
+    /// <summary>
+    /// The board's due archive sweep: moves tasks finished longer than <c>Relay:Board:ArchiveAfterDays</c> to the archive and commits that,
+    /// before the outbox is delivered. One in-memory pass and one commit, so the pump does not wait on anything slow.
+    /// </summary>
+    private protected override async Task<bool> RunDueChecksAsync(StateEnvelope<CoordinationDocument> candidate, DateTimeOffset now, string workId)
+    {
+        if (!candidate.DueWork.Any(x => x.Kind == DueWorkKinds.TaskArchive && x.DueAt <= now && (workId.Length == 0 || x.Id == workId))) return true;
+        var repository = JsonFields.Text(JsonNode.Parse(candidate.Value.Json)!.AsObject(), "repositoryId");
+        if (repository.Length == 0) return true;
+        var sweeper = new RelayCaller("relay-archive", false, [repository], true);
+        if (!CoordinationStateMachine.Apply(candidate, Kind, this.GetPrimaryKeyString(), sweeper, Operations.TaskArchive, new JsonObject { ["repositoryId"] = repository }, now, false, ArchiveAfterDays).Ok) return true;
+        CoordinationStateMachine.ScheduleLeases(candidate, ArchiveAfterDays);
+        return await CommitAsync(candidate);
+    }
+}
 
 [GrainType("cocern.lock")]
 public sealed class LockGrain([PersistentState("lock", "relay")] IPersistentState<StateEnvelope<CoordinationDocument>> state, IGrainFactory grains, IServiceProvider services) : CoordinationGrain(state, grains, services), ILockGrain

@@ -31,6 +31,10 @@ public static class SearchExtraction
     public static IReadOnlyList<SearchDocument> Extract(string stateName, JsonObject state) =>
         Guarded(() => Entries(stateName, state, null).Select(entry => entry.Document).ToArray(), () => []);
 
+    /// <summary>An archived task's document, from the JSON the archive kept, with status <c>archived</c>; null when it cannot be read.</summary>
+    public static SearchDocument? ArchivedTaskDocument(string repositoryId, string taskId, string json) =>
+        Guarded(() => Parse(json) is { } task && repositoryId.Length > 0 ? TaskDocument(taskId, task, repositoryId) with { Status = "archived" } : null, () => null);
+
     /// <summary>The documents of only the named tasks on a board. Unknown IDs are ignored.</summary>
     public static IReadOnlyList<SearchDocument> ExtractTasks(JsonObject board, IEnumerable<string> taskIds) =>
         Guarded(() => Repository(board) is { } repository && board["tasks"] is JsonObject tasks
@@ -59,7 +63,9 @@ public static class SearchExtraction
         {
             var upserts = Entries(stateName, current, (key, marker) => !indexed.TryGetValue(key, out var stored) || stored != marker);
             var kept = Markers(stateName, current);
-            return new SearchUpdate(upserts, indexed.Keys.Where(key => !kept.ContainsKey(key)).ToArray());
+            // An archived task left the board but stays findable: storage marks its row archived and keeps it.
+            var archived = stateName == AggregateKinds.Board && current[TaskArchiving.ArchivedKey] is JsonObject ids ? ids : null;
+            return new SearchUpdate(upserts, indexed.Keys.Where(key => !kept.ContainsKey(key) && !(key.Kind == SearchKinds.Task && archived?.ContainsKey(key.DocId) == true)).ToArray());
         }, () => new SearchUpdate([], indexed.Keys.ToArray()));
     }
 

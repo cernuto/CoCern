@@ -3,6 +3,9 @@ using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using Orleans.Hosting;
+using CoCern.Domain;
 using CoCern.Analytics;
 using CoCern.Contracts;
 using CoCern.Core;
@@ -585,6 +588,110 @@ public class AnalyticsTests
         QueryTimeout = timeout ?? TimeSpan.FromSeconds(10),
         LiveDatabasePath = store.DatabasePath
     });
+
+    /// <summary>A clock the test moves by hand.</summary>
+    private sealed class ArchiveClock(DateTimeOffset start) : TimeProvider
+    {
+        private DateTimeOffset now = start;
+        public override DateTimeOffset GetUtcNow() => now;
+        public void Advance(TimeSpan by) => now += by;
+    }
+
+    private static System.Text.Json.Nodes.JsonObject ArchiveWorkflow(string state, string goal, params string[] dependsOn)
+    {
+        var workflow = new System.Text.Json.Nodes.JsonObject
+        {
+            ["state"] = state,
+            ["packet"] = new System.Text.Json.Nodes.JsonObject { ["goal"] = goal, ["target"] = "t", ["authorityRef"] = "human", ["restoration"] = "r", ["stopCondition"] = "s" },
+            ["criteria"] = new System.Text.Json.Nodes.JsonArray(new System.Text.Json.Nodes.JsonObject { ["id"] = "c", ["description"] = "d", ["result"] = state == "completed" ? "passed" : "not_run", ["evidenceRef"] = state == "completed" ? "artifact:1" : null }),
+            ["blockers"] = new System.Text.Json.Nodes.JsonArray()
+        };
+        if (dependsOn.Length > 0) workflow["dependsOn"] = new System.Text.Json.Nodes.JsonArray(dependsOn.Select(id => (System.Text.Json.Nodes.JsonNode)id).ToArray());
+        return workflow;
+    }
+
+    [Fact]
+    public async Task An_archived_task_moves_atomically_and_stays_readable_searchable_counted_and_closed_to_writes()
+    {
+        var root = TempDirectory();
+        var database = Path.Combine(root, "relay.db");
+        var clock = new ArchiveClock(DateTimeOffset.UtcNow);
+        using var host = new HostBuilder().ConfigureLogging(log => log.ClearProviders()).UseOrleans(silo => silo
+            .UseLocalhostClustering(siloPort: FreePort(), gatewayPort: FreePort(), serviceId: "archive-tests", clusterId: Guid.NewGuid().ToString("N"))
+            .AddCoCernSqlite(database))
+            .ConfigureServices(services => services.AddCoCernCore().AddSingleton(new BoardOptions { Time = clock })
+                .AddSingleton(provider => new RelayApplication(provider.GetRequiredService<Orleans.IGrainFactory>(), search: provider.GetRequiredService<SqliteStore>(), archive: provider.GetRequiredService<SqliteStore>())))
+            .Build();
+        await host.StartAsync();
+        try
+        {
+            var application = host.Services.GetRequiredService<RelayApplication>();
+            var store = host.Services.GetRequiredService<SqliteStore>();
+            var caller = new RelayCaller("alice", true, ["repo"]);
+            async Task<RelayReply> Call(string tool, System.Text.Json.Nodes.JsonObject args)
+            {
+                args["repositoryId"] = "repo"; args["requestId"] ??= Guid.NewGuid().ToString("N");
+                return await application.ExecuteAsync(caller, tool, JsonSerializer.SerializeToElement(args));
+            }
+            System.Text.Json.Nodes.JsonObject Data(RelayReply reply) => System.Text.Json.Nodes.JsonNode.Parse(reply.DataJson)!.AsObject();
+            var session = Data(await Call("session_open", new()));
+            System.Text.Json.Nodes.JsonObject As(System.Text.Json.Nodes.JsonObject args) { args["sessionId"] = session["sessionId"]!.DeepClone(); args["sessionToken"] = session["sessionToken"]!.DeepClone(); return args; }
+            Assert.True((await Call("task_update", As(new() { ["taskId"] = "done", ["expectedVersion"] = 0, ["workflow"] = ArchiveWorkflow("ready", "Refund ledger cleanup") }))).Ok);
+            Assert.True((await Call("task_update", As(new() { ["taskId"] = "done", ["expectedVersion"] = 1, ["workflow"] = ArchiveWorkflow("completed", "Refund ledger cleanup"), ["message"] = new System.Text.Json.Nodes.JsonObject { ["text"] = "Shipped." } }))).Ok);
+            Assert.True((await Call("task_update", As(new() { ["taskId"] = "next", ["expectedVersion"] = 0, ["workflow"] = ArchiveWorkflow("ready", "Follow-up", "done") }))).Ok);
+
+            async Task Sweep()
+            {
+                var due = Assert.Single(await store.ReadDueAsync(clock.GetUtcNow(), 100), work => work.Kind == DueWorkKinds.TaskArchive);
+                await application.DispatchDueAsync(due);
+            }
+            clock.Advance(TimeSpan.FromDays(RelayLimits.DefaultArchiveAfterDays + 1));
+            // A commit that fails after writing its archive row rolls back both: the task stays on its board and the archive is empty.
+            store.ArchiveFault = () => throw new InvalidOperationException("disk full");
+            await Assert.ThrowsAsync<InvalidOperationException>(Sweep);
+            store.ArchiveFault = null;
+            Assert.Equal(0, Count(database, "SELECT COUNT(*) FROM task_archive"));
+            var live = await Call("task_get", As(new() { ["taskId"] = "done" }));
+            Assert.True(live.Ok, live.Code);
+            Assert.Null(Data(live)["archived"]);
+            // The due sweep runs again and moves it exactly once.
+            await Sweep();
+            Assert.Equal(1, Count(database, "SELECT COUNT(*) FROM task_archive WHERE task_id = 'done'"));
+
+            // Readable by ID, read-only and marked archived; gone from the board list; refused for writes.
+            var archived = await Call("task_get", As(new() { ["taskId"] = "done" }));
+            Assert.True(archived.Ok, archived.Code);
+            Assert.True(Data(archived)["archived"]!.GetValue<bool>());
+            Assert.Equal("Shipped.", Data(archived)["messages"]![0]!["text"]!.GetValue<string>());
+            Assert.Equal("Shipped.", Data(await Call("task_get", As(new() { ["taskId"] = "done", ["section"] = "messages" })))["items"]![0]!["text"]!.GetValue<string>());
+            Assert.DoesNotContain(Data(await Call("task_get", As(new())))["items"]!.AsArray(), item => item!["taskId"]!.GetValue<string>() == "done");
+            var write = await Call("task_update", As(new() { ["taskId"] = "done", ["expectedVersion"] = 3, ["patch"] = new System.Text.Json.Nodes.JsonObject { ["x"] = 1 } }));
+            Assert.Equal(RelayErrorCodes.TaskArchived, write.Code);
+            Assert.Equal(RelayErrorCodes.TaskArchived, (await Call("task_claim", As(new() { ["taskId"] = "done", ["expectedVersion"] = 3 }))).Code);
+            // Still found by search, marked archived.
+            var hit = Assert.Single(Data(await Call("search", As(new() { ["query"] = "refund ledger" })))["hits"]!.AsArray());
+            Assert.Equal(("done", "archived"), (hit!["id"]!.GetValue<string>(), hit["s"]!.GetValue<string>()));
+            // Its dependent is satisfied.
+            var claimed = await Call("task_claim", As(new() { ["taskId"] = "next", ["expectedVersion"] = 1 }));
+            Assert.True(claimed.Ok, claimed.Code);
+            // Still counted by analytics, and on the dashboard.
+            Assert.Equal(1L, (await store.ReadDatabaseMetricsAsync())!.ArchivedTasks);
+            var snapshot = Path.Combine(root, "analytics", "snapshot-archive.db");
+            await store.CreateAnalyticsSnapshotAsync(snapshot);
+            using var analytics = await Service(store, timeout: TimeSpan.FromSeconds(30));
+            await analytics.SwitchSnapshotAsync(snapshot);
+            Assert.Equal(1L, Single(await analytics.RunSqlAsync("SELECT count(*) FROM tasks WHERE archived AND task_id = 'done' AND state = 'completed'")));
+            Assert.Equal(1L, Single(await analytics.RunSqlAsync("SELECT count(*) FROM messages WHERE task_id = 'done'")));
+            Assert.Equal(1L, Single(await analytics.RunSqlAsync("SELECT count(*) FROM archived_tasks")));
+        }
+        finally { await host.StopAsync(); }
+    }
+
+    private static int FreePort()
+    {
+        var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0); listener.Start();
+        var port = ((System.Net.IPEndPoint)listener.LocalEndpoint).Port; listener.Stop(); return port;
+    }
 
     private static object? Single(AnalyticsResult result) => Assert.Single(Assert.Single(result.Rows));
 

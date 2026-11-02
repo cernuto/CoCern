@@ -100,7 +100,7 @@ public sealed partial class SqliteStore : IDueWorkSource, IDisposable, IAsyncDis
             );
             CREATE INDEX IF NOT EXISTS ix_due_work_due ON due_work(due_ticks, state_name, grain_type, grain_key, work_id);
             CREATE TABLE IF NOT EXISTS hub_metadata (name TEXT PRIMARY KEY, value TEXT NOT NULL);
-            """ + ActivitySchema + SearchSchema + """
+            """ + ActivitySchema + SearchSchema + ArchiveSchema + """
             CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
                 state_name UNINDEXED, grain_key UNINDEXED, doc_id UNINDEXED,
                 kind UNINDEXED, repository_id UNINDEXED, owner_session UNINDEXED,
@@ -159,7 +159,8 @@ public sealed partial class SqliteStore : IDueWorkSource, IDisposable, IAsyncDis
     /// Commits a grain's state, its due-work index and its search rows in one transaction. <paramref name="search"/> describes the
     /// state's searchable text; a cleared state (null <paramref name="payload"/>) deletes the grain's search rows.
     /// </summary>
-    internal async Task<string> CommitAsync(string stateName, GrainId grainId, string? expectedEtag, string? payload, IReadOnlyList<DueWorkItem> dueWork, CancellationToken cancellationToken, IHasSearchDocuments? search = null)
+    internal async Task<string> CommitAsync(string stateName, GrainId grainId, string? expectedEtag, string? payload, IReadOnlyList<DueWorkItem> dueWork, CancellationToken cancellationToken, IHasSearchDocuments? search = null,
+        IReadOnlyList<ArchivedTask>? archived = null)
     {
         await _gate.WaitAsync(cancellationToken);
         try
@@ -203,6 +204,9 @@ public sealed partial class SqliteStore : IDueWorkSource, IDisposable, IAsyncDis
                 due.ExecuteNonQuery();
             }
             var indexedSource = WriteSearch(transaction, stateName, grainId, expectedEtag, payload, search);
+            // Tasks leaving the board in this commit: their archive rows (and archived search rows) commit or roll back with it.
+            if (archived is { Count: > 0 }) WriteArchive(transaction, stateName, grainId, archived);
+            ArchiveFault?.Invoke();
             cancellationToken.ThrowIfCancellationRequested();
             transaction.Commit();
             RememberSearch(indexedSource, stateName, grainId, etag);

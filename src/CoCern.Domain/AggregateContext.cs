@@ -16,6 +16,10 @@ internal sealed class AggregateContext(JsonObject state, RelayCaller caller, str
     public string Key { get; init; } = "";
     /// <summary>Whether this hub runs standing orders (<c>Relay:Orders:Enabled</c>). Off, orders are neither written nor run.</summary>
     public bool OrdersEnabled { get; init; }
+    /// <summary>Days after completion before a finished task is archived (<c>Relay:Board:ArchiveAfterDays</c>); 0 archives only when the board fills.</summary>
+    public int ArchiveAfterDays { get; init; } = CoCern.Contracts.RelayLimits.DefaultArchiveAfterDays;
+    /// <summary>Tasks this operation moved to the archive; storage writes them in the same commit.</summary>
+    public List<ArchivedTask> Archived { get; } = [];
     /// <summary>Order triggers this operation caused (trigger, task ID), run once the change is marked; see <see cref="StandingOrders"/>.</summary>
     public List<(string On, string Target)> OrderTriggers { get; } = [];
 
