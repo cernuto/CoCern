@@ -513,6 +513,110 @@ public sealed class CollaborationTests
     }
 
     [Fact]
+    public void Claim_and_action_begin_recheck_the_grant_named_in_authorityRef()
+    {
+        var state = new StateEnvelope<CoordinationDocument>();
+        Assert.True(Standing(state, "standing_put", Put(0, "grants", new JsonArray(Grant("short", "resource", 60, "rig-1"), Grant("rigs", "resource", 3600, "rig-2")))).Ok);
+        foreach (var id in new[] { "early", "late", "begin-late", "retried" }) Assert.True(Call(state, "task_update", Update(id, 0, Authorized("grant:short", "rig-1"))).Ok);
+        foreach (var id in new[] { "removed", "begin-removed", "rescoped" }) Assert.True(Call(state, "task_update", Update(id, 0, Authorized("grant:rigs", "rig-2"))).Ok);
+        RelayReply Claim(string id, int seconds, string? requestId = null) =>
+            Call(state, "task_claim", new() { ["taskId"] = id, ["sessionId"] = "worker", ["requestId"] = requestId ?? Guid.NewGuid().ToString("N"), ["expectedVersion"] = 1, ["leaseSeconds"] = RelayLimits.MaxLeaseSeconds }, seconds);
+        RelayReply Begin(string id, int seconds) =>
+            Call(state, "action_begin", new() { ["taskId"] = id, ["sessionId"] = "worker", ["requestId"] = Guid.NewGuid().ToString("N"), ["expectedVersion"] = 2, ["actionId"] = "deploy", ["inputFingerprint"] = "f" }, seconds);
+        // The same code and reasons readiness gives.
+        string Reason(RelayReply reply) { Assert.Equal("GrantInvalid", reply.Code); return Data(reply)["reason"]!.GetValue<string>(); }
+
+        // Before the 60-second grant expires, claim and begin work.
+        Assert.True(Claim("early", 0).Ok);
+        Assert.True(Begin("early", 30).Ok);
+        Assert.True(Claim("begin-late", 30).Ok);
+        var retried = Claim("retried", 30, "claim-retried");
+        Assert.True(retried.Ok);
+        Assert.Equal(retried, Claim("retried", 59, "claim-retried"));
+        // After it, a new claim, a retried claim and a new action start are all refused, and none changes state.
+        var before = state.Value.Json;
+        var late = Claim("late", 120);
+        Assert.Equal("expired", Reason(late));
+        Assert.Equal("grant:short", Data(late)["authorityRef"]!.GetValue<string>());
+        Assert.Equal("expired", Reason(Claim("retried", 120, "claim-retried")));
+        Assert.Equal("expired", Reason(Begin("begin-late", 120)));
+        Assert.Equal(before, state.Value.Json);
+
+        // A grant removed by standing_put refuses both as unknown; one rescoped to an action grant refuses as scope.
+        Assert.True(Claim("begin-removed", 0).Ok);
+        var replaced = Grant("rigs", "action", 3600, "deploy-css");
+        Assert.True(Standing(state, "standing_put", Put(1, "grants", new JsonArray(replaced))).Ok);
+        Assert.Equal("scope", Reason(Claim("rescoped", 0)));
+        Assert.True(Standing(state, "standing_put", Put(2, "remove", new JsonArray("rigs"))).Ok);
+        Assert.Equal("unknown", Reason(Claim("removed", 0)));
+        Assert.Equal("unknown", Reason(Begin("begin-removed", 0)));
+    }
+
+    private static JsonObject WideGrant(string id) =>
+        Grant(id, "resource", 3600, Enumerable.Range(0, RelayLimits.MaxGrantTargets).Select(i => id + "-" + i + "-" + new string('r', RelayLimits.MaxIdentifierLength - 12)).ToArray());
+
+    [Fact]
+    public void Standing_put_refuses_standing_too_large_to_deliver_and_keeps_what_is_delivered_readable()
+    {
+        // One put of six wide grants: well over the delivered-standing limit, so it is refused whole and nothing is stored.
+        var state = new StateEnvelope<CoordinationDocument>();
+        var before = state.Value.Json;
+        var oversized = Standing(state, "standing_put", Put(0, "grants", new JsonArray(Enumerable.Range(0, 6).Select(i => (JsonNode)WideGrant("g" + i)).ToArray())));
+        Assert.Equal("PayloadTooLarge", oversized.Code);
+        Assert.Equal(RelayLimits.MaxStandingBytes, Data(oversized)["maxBytes"]!.GetValue<int>());
+        Assert.True(Data(oversized)["bytes"]!.GetValue<int>() > RelayLimits.MaxStandingBytes);
+        Assert.Equal(before, state.Value.Json);
+
+        // Grow standing one grant, then one 200-character line, at a time until a put is refused: the last accepted one sits just under the limit.
+        long revision = 0;
+        bool Add(string field, JsonNode item)
+        {
+            var put = Standing(state, "standing_put", Put(revision, field, new JsonArray(item)));
+            if (put.Ok) { revision++; return true; }
+            Assert.Equal("PayloadTooLarge", put.Code);
+            return false;
+        }
+        var grants = 0; while (Add("grants", WideGrant("w" + grants))) grants++;
+        var lines = 0; while (Add("lines", new JsonObject { ["id"] = "l" + lines, ["text"] = new string('x', RelayLimits.MaxStandingLineLength) })) lines++;
+        Assert.True(grants > 0 && lines > 0);
+        var stored = state.Value.Json;
+        Assert.Equal("PayloadTooLarge", Standing(state, "standing_put", Put(revision, "lines", new JsonArray(new JsonObject { ["id"] = "over", ["text"] = new string('x', RelayLimits.MaxStandingLineLength) }))).Code);
+        Assert.Equal(stored, state.Value.Json);
+
+        // What sessions receive and what task_get shows are both readable, and the delivered standing is within its limit.
+        var delivered = Call(state, "__standing", new());
+        Assert.True(delivered.Ok, delivered.Code);
+        Assert.Equal(revision, delivered.Version);
+        Assert.InRange(JsonSerializer.SerializeToUtf8Bytes(delivered).Length, RelayLimits.MaxStandingBytes - 1_000, RelayLimits.MaxStandingBytes);
+        Assert.Equal(grants, Data(delivered)["grants"]!.AsArray().Count);
+        var view = Call(state, "task_get", new() { ["section"] = "standing" });
+        Assert.True(view.Ok, view.Code);
+        Assert.Equal(lines, Data(view)["lines"]!.AsArray().Count);
+    }
+
+    [Fact]
+    public void After_the_grant_expires_reports_renewals_and_completion_still_work()
+    {
+        // Only a claim, its replay and action_begin start work, so only they recheck the grant; finishing work already started is never blocked.
+        var state = new StateEnvelope<CoordinationDocument>();
+        Assert.True(Standing(state, "standing_put", Put(0, "grants", new JsonArray(Grant("short", "resource", 60, "rig-1")))).Ok);
+        Assert.True(Call(state, "task_update", Update("t", 0, Authorized("grant:short", "rig-1"))).Ok);
+        Assert.True(Call(state, "task_claim", new() { ["taskId"] = "t", ["sessionId"] = "worker", ["requestId"] = "claim", ["expectedVersion"] = 1, ["leaseSeconds"] = RelayLimits.MaxLeaseSeconds }, 0).Ok);
+        Assert.True(Call(state, "action_begin", new() { ["taskId"] = "t", ["sessionId"] = "worker", ["requestId"] = "begin", ["expectedVersion"] = 2, ["actionId"] = "deploy", ["inputFingerprint"] = "f" }, 30).Ok);
+        // Two minutes on, the grant has expired.
+        var report = Call(state, "action_report", new() { ["taskId"] = "t", ["sessionId"] = "worker", ["requestId"] = "report", ["expectedVersion"] = 3, ["actionId"] = "deploy", ["attempt"] = 1, ["outcome"] = "completed" }, 120);
+        Assert.True(report.Ok, report.Code);
+        var renewed = Call(state, "claim_renew", new() { ["taskId"] = "t", ["sessionId"] = "worker", ["requestId"] = "renew", ["claimGeneration"] = 1, ["leaseSeconds"] = RelayLimits.MaxLeaseSeconds }, 150);
+        Assert.True(renewed.Ok, renewed.Code);
+        var done = Authorized("grant:short", "rig-1"); done["state"] = "completed";
+        done["criteria"]![0]!["result"] = "passed"; done["criteria"]![0]!["evidenceRef"] = "artifact:1";
+        var completed = Call(state, "task_update", new() { ["taskId"] = "t", ["sessionId"] = "worker", ["requestId"] = "done", ["expectedVersion"] = 4, ["workflow"] = done }, 180);
+        Assert.True(completed.Ok, completed.Code);
+        // A new start is still refused.
+        Assert.Equal("GrantInvalid", Call(state, "task_update", Update("again", 0, Authorized("grant:short", "rig-1")), 180).Code);
+    }
+
+    [Fact]
     public void Standing_put_needs_an_administrator_and_the_expected_revision_within_limits()
     {
         var state = new StateEnvelope<CoordinationDocument>();

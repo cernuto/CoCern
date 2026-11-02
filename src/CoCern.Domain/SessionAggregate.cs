@@ -17,10 +17,15 @@ internal static class SessionAggregate
     public static RelayReply Handle(AggregateContext context)
     {
         if (context.Operation == Operations.Open) return Initialize(context);
-        if (context.Operation == Operations.Deliver) return Deliver(context);
+        if (context.Operation == Operations.SessionExpire) return Expire(context);
+        var expired = context.State["expiredAt"] is not null;
+        // An expired session drops deliveries (a refusal would be retried forever) and refuses attention, which its sources then drop.
+        if (context.Operation == Operations.Deliver) return expired ? Ok(new { expired = true }) : Deliver(context);
+        if (expired && context.Operation is Operations.AttentionRaise or Operations.AttentionClose) return Error(SessionUnknown, new { expired = true });
         // Attention items arrive through other aggregates' outboxes, which carry no session secret, just like deliveries.
         if (context.Operation == Operations.AttentionRaise) return SessionAttention.Raise(context);
         if (context.Operation == Operations.AttentionClose) return SessionAttention.Close(context);
+        if (expired) return Text(context.State, "principalId") == context.Caller.PrincipalId ? Error(SessionUnknown, new { expired = true, reopen = RelayTools.SessionOpen }) : Error(SessionDenied);
         if (!Authenticates(context)) return Error(SessionDenied);
         return context.Operation switch
         {
@@ -47,6 +52,19 @@ internal static class SessionAggregate
         return Ok(new { initialized = true });
     }
 
+    /// <summary>
+    /// The hub's directory dropped this long-stale session. Its secret, inbox and attention are cleared; afterwards its own calls get
+    /// <c>SessionUnknown</c> with <c>expired</c>, and its chat opens a new session. Idempotent, and accepted for a session never opened here.
+    /// </summary>
+    private static RelayReply Expire(AggregateContext context)
+    {
+        var state = context.State;
+        if (!state.ContainsKey("principalId") || state["expiredAt"] is not null) return Ok(new { expired = true });
+        foreach (var key in new[] { "sessionToken", "inbox", "acked", "attention", "attentionClosed", "attentionRecent", "standingSeen", "binding" }) state.Remove(key);
+        state["expiredAt"] = context.Now.ToString("O");
+        return Ok(new { expired = true });
+    }
+
     private static RelayReply Deliver(AggregateContext context)
     {
         var state = context.State;
@@ -61,9 +79,9 @@ internal static class SessionAggregate
         if (Flag(context.Args, "supersede") && Text(context.Args, "senderSessionId") is { Length: > 0 } sender)
             foreach (var old in inbox.Where(x => x.Value is JsonObject m && Flag(m, "supersede") && Text(m, "senderSessionId") == sender).Select(x => x.Key).ToArray())
             {
-                // The acknowledged set is bounded like explicit acknowledgments; once full, older messages are simply kept.
-                if (ObjectAt(state, "acked").Count >= RelayLimits.MaxRecords) break;
-                inbox.Remove(old); ObjectAt(state, "acked")[old] = true; superseded++;
+                // The acknowledged set is bounded like explicit acknowledgments.
+                Retention.MakeRoom(ObjectAt(state, "acked"), context.Now);
+                inbox.Remove(old); ObjectAt(state, "acked")[old] = Retention.Stamp(context.Now); superseded++;
                 SessionAttention.CloseMessages(state, [old], context.Now);
             }
         if (inbox.Count >= RelayLimits.MaxRecords) return Error(CapacityExceeded);
@@ -82,6 +100,8 @@ internal static class SessionAggregate
     private static RelayReply Describe(AggregateContext context)
     {
         var state = context.State;
+        // Every verified call keeps the session's directory entry fresh, even with attention off or on attention: false calls.
+        if (context.Operation == Operations.Verify) SessionAttention.ReportActive(context);
         var current = Date(state, "freshUntil") > context.Now && Text(state, "hubIncarnation") == Text(context.Args, "hubIncarnation");
         var description = new JsonObject
         {
@@ -132,21 +152,25 @@ internal static class SessionAggregate
         state["availability"] = Text(args, "availability", "unknown");
         state["hubIncarnation"] = Text(args, "hubIncarnation");
         var registration = state.DeepClone().AsObject();
-        foreach (var secretOrPrivate in new[] { "sessionToken", "requests", "inbox", "acked", "attention", "attentionClosed", "attentionRecent", "attentionSeq", "attentionBoundaryAt", "activeReportedAt" }) registration.Remove(secretOrPrivate);
+        foreach (var secretOrPrivate in new[] { "sessionToken", "requests", "requestTombstones", "inbox", "acked", "attention", "attentionClosed", "attentionRecent", "attentionSeq", "attentionBoundaryAt", "activeReportedAt" }) registration.Remove(secretOrPrivate);
         context.Emit(AggregateKinds.Control, AggregateKinds.ControlKey, Operations.Register, registration);
         return Ok(new { bindingVersion = current + 1 }, current + 1);
     }
 
-    /// <summary>Acknowledgment is explicit and permanent: a later duplicate delivery of an acknowledged message is ignored.</summary>
+    /// <summary>
+    /// Acknowledgment is explicit: a later duplicate delivery of an acknowledged message is ignored. The acknowledged set keeps each ID for
+    /// the retry window (<see cref="RelayLimits.RequestReplayRetentionHours"/>), and a full set drops its oldest, so acknowledging never stops working.
+    /// </summary>
     private static RelayReply Acknowledge(AggregateContext context)
     {
         var ids = context.Args["messageIds"] as JsonArray ?? new JsonArray(Text(context.Args, "messageId"));
         var acknowledged = 0;
+        var acked = ObjectAt(context.State, "acked");
         foreach (var id in Strings(ids))
         {
-            if (!ObjectAt(context.State, "acked").ContainsKey(id) && ObjectAt(context.State, "acked").Count >= RelayLimits.MaxRecords) return Error(CapacityExceeded);
+            if (!acked.ContainsKey(id)) Retention.MakeRoom(acked, context.Now);
             if (ObjectAt(context.State, "inbox").Remove(id)) acknowledged++;
-            ObjectAt(context.State, "acked")[id] = true;
+            acked[id] = Retention.Stamp(context.Now);
         }
         SessionAttention.CloseMessages(context.State, Strings(ids), context.Now);
         return Ok(new { acknowledged });
@@ -165,6 +189,8 @@ internal static class SessionAggregate
         if (Flag(args, "supersede")) message["supersede"] = true;
         // A status or FYI message is stored like any other but never wakes the recipient; it is read with its next wake or inbox check.
         if (args["wake"] is JsonValue wake && wake.TryGetValue<bool>(out var wakes) && !wakes) message["wake"] = false;
+        // Measured as the recipient's check_inbox returns it, so a message escaping would make unreadable is never accepted.
+        if (CheckReadable(message) is { } unreadable) return unreadable;
         context.Emit(AggregateKinds.Session, recipient, Operations.Deliver, message);
         return Ok(new { messageId = id, delivery = "pending" });
     }

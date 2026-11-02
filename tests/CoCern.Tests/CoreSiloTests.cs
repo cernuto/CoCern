@@ -706,6 +706,67 @@ public sealed class CoreSiloTests
         Assert.Contains(new AnomalyOptions { Thresholds = new Dictionary<string, AnomalyThreshold> { [AnalyticsQueryNames.QualityGuardrails] = new(0, 5) } }.Checks(), check => check.Query == AnalyticsQueryNames.QualityGuardrails);
     }
 
+    [Fact]
+    public async Task A_board_archive_sweep_that_fails_waits_before_running_again()
+    {
+        var clock = new ManualClock(DateTimeOffset.Parse("2026-10-29T00:00:00Z"));
+        using var host = new HostBuilder().ConfigureLogging(log => log.ClearProviders()).UseOrleans(silo => silo
+            .UseLocalhostClustering(siloPort: FreePort(), gatewayPort: FreePort(), serviceId: "core-archive-retry-tests", clusterId: Guid.NewGuid().ToString("N"))
+            .AddMemoryGrainStorage("relay"))
+            .ConfigureServices(services => services.AddCoCernCore().AddSingleton(new BoardOptions { Time = clock })
+                .Configure<Orleans.Serialization.Configuration.TypeManifestOptions>(options => options.AllowAllTypes = true)).Build();
+        await host.StartAsync();
+        try
+        {
+            var storage = host.Services.GetRequiredKeyedService<Orleans.Storage.IGrainStorage>("relay");
+            var id = GrainId.Create("cocern.board", "repo/default");
+            // A board whose every write fails (one task is past the task byte limit) with an archive sweep due now.
+            var board = new StateEnvelope<CoordinationDocument>
+            {
+                Value = new() { Json = new JsonObject { ["repositoryId"] = "repo", ["tasks"] = new JsonObject { ["huge"] = new JsonObject { ["taskId"] = "huge", ["facts"] = new JsonObject { ["x"] = new string('x', RelayLimits.MaxTaskBytes) } } } }.ToJsonString() }
+            };
+            board.DueWork.Add(new(DueWorkKinds.TaskArchive, DueWorkKinds.TaskArchive, clock.GetUtcNow().AddMinutes(-1)));
+            await storage.WriteStateAsync("board", id, new GrainState<StateEnvelope<CoordinationDocument>>(board));
+            var dispatched = await host.Services.GetRequiredService<IGrainFactory>().GetGrain<ITaskBoardGrain>("repo/default").ExecuteAsync(new RelayCaller("relay-dispatcher", false, [], true), Operations.Dispatch, "{}");
+            Assert.True(dispatched.Ok, dispatched.Code);
+            var stored = new GrainState<StateEnvelope<CoordinationDocument>>(new());
+            await storage.ReadStateAsync("board", id, stored);
+            var due = Assert.Single(stored.State!.DueWork, work => work.Kind == DueWorkKinds.TaskArchive);
+            Assert.Equal(clock.GetUtcNow().AddMinutes(RelayLimits.ArchiveRetryMinutes), due.DueAt);
+        }
+        finally { await host.StopAsync(); }
+    }
+
+    [Fact]
+    public async Task A_client_cannot_mark_its_own_dependencies_archived_even_without_an_archive_store()
+    {
+        using var host = new HostBuilder().ConfigureLogging(log => log.ClearProviders()).UseOrleans(silo => silo
+            .UseLocalhostClustering(siloPort: FreePort(), gatewayPort: FreePort(), serviceId: "core-archive-inject-tests", clusterId: Guid.NewGuid().ToString("N"))
+            .AddMemoryGrainStorage("relay"))
+            .ConfigureServices(services => services.AddCoCernCore()).Build();
+        await host.StartAsync();
+        try
+        {
+            var application = host.Services.GetRequiredService<RelayApplication>();
+            var caller = new RelayCaller("alice", true, ["repo"]);
+            Task<RelayReply> Call(string tool, JsonObject args) { args["repositoryId"] = "repo"; args["requestId"] = Guid.NewGuid().ToString("N"); return application.ExecuteAsync(caller, tool, JsonSerializer.SerializeToElement(args)); }
+            var session = JsonNode.Parse((await Call("session_open", new())).DataJson)!.AsObject();
+            var workflow = new JsonObject
+            {
+                ["state"] = "ready", ["dependsOn"] = new JsonArray("never-archived"),
+                ["packet"] = new JsonObject { ["goal"] = "g", ["target"] = "t", ["authorityRef"] = "human", ["restoration"] = "r", ["stopCondition"] = "s" },
+                ["criteria"] = new JsonArray(new JsonObject { ["id"] = "c", ["description"] = "d", ["result"] = "not_run" }), ["blockers"] = new JsonArray()
+            };
+            var injected = await Call("task_update", new()
+            {
+                ["sessionId"] = session["sessionId"]!.DeepClone(), ["sessionToken"] = session["sessionToken"]!.DeepClone(), ["taskId"] = "t", ["expectedVersion"] = 0,
+                ["workflow"] = workflow, ["archivedDependsOn"] = new JsonArray("never-archived")
+            });
+            Assert.Equal(RelayErrorCodes.DependencyUnknown, injected.Code);
+        }
+        finally { await host.StopAsync(); }
+    }
+
     /// <summary>A clock the test moves by hand.</summary>
     private sealed class ManualClock(DateTimeOffset start) : TimeProvider
     {

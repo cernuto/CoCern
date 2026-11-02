@@ -20,7 +20,9 @@ public static class CoordinationStateMachine
     private const int MaxBindingBytes = 8_192;
 
     /// <param name="ordersEnabled">Whether the hub runs standing orders; the grain passes its setting, so the domain stays free of configuration.</param>
-    public static RelayReply Apply(StateEnvelope<CoordinationDocument> envelope, string kind, string key, RelayCaller caller, string operation, JsonObject arguments, DateTimeOffset now, bool ordersEnabled = false)
+    /// <param name="archiveAfterDays">Days after completion before a finished task is archived (<c>Relay:Board:ArchiveAfterDays</c>); 0 archives only when a board fills.</param>
+    public static RelayReply Apply(StateEnvelope<CoordinationDocument> envelope, string kind, string key, RelayCaller caller, string operation, JsonObject arguments, DateTimeOffset now, bool ordersEnabled = false,
+        int archiveAfterDays = RelayLimits.DefaultArchiveAfterDays)
     {
         if (ByteSize(arguments) > RelayLimits.MaxPayloadBytes) return Error(PayloadTooLarge);
         var repository = Text(arguments, "repositoryId");
@@ -40,8 +42,10 @@ public static class CoordinationStateMachine
         var requestKey = caller.PrincipalId + ":" + operation + ":" + requestId;
         var fingerprint = Fingerprint(arguments);
         if (requestId.Length > 0 && requests[requestKey] is JsonObject prior) return Replay(kind, state, operation, arguments, prior, fingerprint, now);
+        // Its stored reply was evicted to make room before its window ended: refuse rather than run the write twice.
+        if (requestId.Length > 0 && IsMutation(operation) && Retention.IsBuried(state, requestKey, now)) return Error(RequestExpired, new { readCurrentState = true });
 
-        var context = new AggregateContext(state, caller, operation, arguments, now) { Key = key, OrdersEnabled = ordersEnabled };
+        var context = new AggregateContext(state, caller, operation, arguments, now) { Key = key, OrdersEnabled = ordersEnabled, ArchiveAfterDays = archiveAfterDays };
         RelayReply result;
         try
         {
@@ -72,17 +76,20 @@ public static class CoordinationStateMachine
         if (envelope.Effects.Count + context.Effects.Count > RelayLimits.MaxRecords) return Error(CapacityExceeded);
         if (requestId.Length > 0 && IsMutation(operation))
         {
-            if (requests.Count >= RelayLimits.MaxRecords) return Error(CapacityExceeded);
-            requests[requestKey] = new JsonObject { ["fingerprint"] = fingerprint, ["code"] = result.Code, ["json"] = result.DataJson, ["version"] = result.Version };
+            // Bounded by age, then by count: a full map drops expired replays, then its oldest, and remembers those as tombstones.
+            if (requests.Count >= RelayLimits.MaxRecords) Retention.Bury(state, Retention.MakeRoom(requests, now), now);
+            requests[requestKey] = new JsonObject { ["fingerprint"] = fingerprint, ["code"] = result.Code, ["json"] = result.DataJson, ["version"] = result.Version, ["at"] = Retention.Stamp(now) };
         }
         envelope.Value = new() { Json = state.ToJsonString() };
         // Nothing changes the state object after this point, so the commit's search indexing can read it instead of parsing again.
         envelope.Value.KeepParsed(state);
         envelope.Effects.AddRange(context.Effects);
+        // Tasks this operation archived leave the board in this commit; storage writes them to the archive in the same transaction.
+        envelope.QueueArchive(context.Archived);
         return result;
     }
 
-    /// <summary>A retried request returns its original reply, unless its grant has since gone stale.</summary>
+    /// <summary>A retried request returns its original reply, unless its grant has since gone stale or its task may no longer run (the claim gate).</summary>
     private static RelayReply Replay(string kind, JsonObject state, string operation, JsonObject arguments, JsonObject prior, string fingerprint, DateTimeOffset now)
     {
         if (Text(prior, "fingerprint") != fingerprint) return Error(RequestConflict);
@@ -99,7 +106,7 @@ public static class CoordinationStateMachine
             if (kind == AggregateKinds.Board && tasks[taskId] is JsonObject task)
             {
                 if (Text(task, "owner") != session || Number(task, "claimGeneration") != Number(grant, "claimGeneration")) return Error(StaleClaim);
-                if (operation == RelayTools.TaskClaim && !TaskWorkflow.AllowsExecution(task, session)) return TaskWorkflow.NotReady(task);
+                if (operation == RelayTools.TaskClaim && TaskWorkflow.ExecutionRefusal(state, task, session, now) is { } refusal) return refusal;
             }
         }
         return new(true, Text(prior, "code"), Text(prior, "json"), Number(prior, "version"));
@@ -131,12 +138,14 @@ public static class CoordinationStateMachine
 
     /// <summary>
     /// Rebuilds the aggregate's timers from its own state: lease expiry from its own and its tasks' leases, a lock's lease check, and the
-    /// anomaly monitor's next check.
+    /// anomaly monitor's next check, and a board's next archive sweep (with <paramref name="archiveAfterDays"/> above 0).
     /// </summary>
-    public static void ScheduleLeases(StateEnvelope<CoordinationDocument> envelope)
+    public static void ScheduleLeases(StateEnvelope<CoordinationDocument> envelope, int archiveAfterDays = 0)
     {
         var state = JsonNode.Parse(envelope.Value.Json)!.AsObject();
-        envelope.DueWork.RemoveAll(x => x.Kind is "lease" or DueWorkKinds.LeaseWarning or DueWorkKinds.AnomalyCheck);
+        envelope.DueWork.RemoveAll(x => x.Kind is "lease" or DueWorkKinds.LeaseWarning or DueWorkKinds.AnomalyCheck or DueWorkKinds.TaskArchive);
+        // A board's next archive sweep, when a finished task will pass Relay:Board:ArchiveAfterDays.
+        if (TaskArchiving.NextSweep(state, archiveAfterDays) is { } sweep) envelope.DueWork.Add(new(DueWorkKinds.TaskArchive, DueWorkKinds.TaskArchive, sweep));
         if (DateTimeOffset.TryParse(Text(state, "nextCheckAt"), out var check)) envelope.DueWork.Add(new(DueWorkKinds.AnomalyCheck, DueWorkKinds.AnomalyCheck, check));
         if (DateTimeOffset.TryParse(Text(state, "leaseUntil"), out var lease)) envelope.DueWork.Add(new("lease", "lease", lease));
         // A lock whose holder has an action in flight checks its lease shortly before it ends (claim_expiring).
@@ -153,6 +162,8 @@ public static class CoordinationStateMachine
         {
             var effect = effects[index];
             var payload = JsonNode.Parse(effect.PayloadJson)!.AsObject();
+            // A session expiry carries its own caller, scoped to the dropped session's repository.
+            if (effect.Operation == Operations.SessionExpire && payload.ContainsKey("__principalId")) continue;
             payload["__principalId"] = caller.PrincipalId;
             payload["__administrator"] = caller.IsAdministrator;
             payload["__repositories"] = JsonSerializer.SerializeToNode(caller.Repositories);

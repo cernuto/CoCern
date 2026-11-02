@@ -27,8 +27,38 @@ public static class ReplyCompactor
     {
         "ok", "code", "error", "errors", "detail", "reason", "field", "version", "revision", "etag", "generation", "claimGeneration", "leaseUntil",
         "nextCursor", "cursor", "total", "truncated", "more", "compacted", "compactStep", "detailFetchRequired", "grants", "resourceIds",
-        "unresolvedActions", "refs", "sections", "complete", "newlyAcquired", "replayAllowed", "attention", "standing", "workflow"
+        "unresolvedActions", "refs", "sections", "complete", "newlyAcquired", "replayAllowed", "attention", "standing", "workflow",
+        // A piece of an oversized item: cutting its part would break reassembly, so FitPieces sizes it by tokens instead.
+        "part", "partOffset", "nextPartOffset", "bytes", "chars", "hint"
     };
+
+    /// <summary>
+    /// Shortens each oversized-item piece (an item with <c>part</c>; see <c>Replies.Piece</c>) until the reply is within the tool's token
+    /// budget, moving its <c>nextPartOffset</c> back to match, so joined parts still give the item exactly. Pieces are sized by wire bytes
+    /// in the domain; text that escapes or tokenizes densely (CJK, emoji, accents) can still be over the budget. Never splits a surrogate pair.
+    /// </summary>
+    public static RelayReply FitPieces(RelayReply reply, RelayTool tool, ITokenCounter tokens)
+    {
+        if (!reply.Ok || !reply.DataJson.Contains("\"part\"", StringComparison.Ordinal) || tokens.Count(reply.DataJson) <= tool.TokenBudget) return reply;
+        if (JsonNode.Parse(reply.DataJson) is not JsonObject data || data["items"] is not JsonArray items) return reply;
+        foreach (var piece in items.OfType<JsonObject>())
+        {
+            if (piece["part"] is not JsonValue partValue || !partValue.TryGetValue<string>(out var part) || piece["partOffset"] is not JsonValue offsetValue || !offsetValue.TryGetValue<long>(out var offset)) continue;
+            bool Fits(int length)
+            {
+                piece["part"] = part[..length];
+                return tokens.Count(data.ToJsonString()) <= tool.TokenBudget;
+            }
+            if (Fits(part.Length)) continue;
+            int low = 0, high = part.Length;
+            while (low < high) { var middle = (low + high + 1) / 2; if (Fits(middle)) low = middle; else high = middle - 1; }
+            if (low > 0 && low < part.Length && char.IsHighSurrogate(part[low - 1])) low--;
+            if (low == 0) { piece["part"] = part; continue; }
+            piece["part"] = part[..low];
+            piece["nextPartOffset"] = offset + low;
+        }
+        return reply with { DataJson = data.ToJsonString() };
+    }
 
     /// <summary>A required key: one of <see cref="Required"/>, or an ID, version or revision by its name.</summary>
     public static bool IsRequired(string key) =>

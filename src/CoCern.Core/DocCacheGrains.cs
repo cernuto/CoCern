@@ -340,27 +340,57 @@ public sealed class DocDirectoryGrain([PersistentState("docs", "relay")] IPersis
     public Task<DocDirectoryView> ReadAsync() => Task.FromResult(new DocDirectoryView(state.State.Branch, state.State.Commit, state.State.NeedsResync, state.State.SyncedAt,
         state.State.Docs.Values.OrderBy(entry => entry.Path, StringComparer.Ordinal).ToArray(), state.State.Skipped.ToArray(), state.State.Fingerprint));
 
-    public async Task ApplyAsync(DocDirectoryUpdate update)
+    /// <summary>
+    /// Builds the update on a copy and makes it current only once it is stored. A failed write leaves the old commit and documents in
+    /// place (and throws to the sync), so the next sync still sees its head as new and applies it again.
+    /// </summary>
+    public Task ApplyAsync(DocDirectoryUpdate update)
     {
-        var current = state.State;
-        current.Branch = update.Branch;
-        current.Commit = update.Commit;
-        current.Fingerprint = update.Fingerprint;
-        current.SyncedAt = DateTimeOffset.UtcNow;
-        foreach (var path in update.Removed) current.Docs.Remove(path);
-        foreach (var entry in update.Upserts) current.Docs[entry.Path] = entry;
-        if (update.Full) { current.NeedsResync = false; current.Skipped.Clear(); }
-        foreach (var path in update.Unskipped) current.Skipped.Remove(path);
-        foreach (var path in update.Skipped) if (current.Skipped.Count < RelayLimits.MaxDocsPerRepositoryCeiling) current.Skipped.Add(path);
-        await state.WriteStateAsync();
+        var candidate = Copy(state.State);
+        candidate.Branch = update.Branch;
+        candidate.Commit = update.Commit;
+        candidate.Fingerprint = update.Fingerprint;
+        candidate.SyncedAt = DateTimeOffset.UtcNow;
+        foreach (var path in update.Removed) candidate.Docs.Remove(path);
+        foreach (var entry in update.Upserts) candidate.Docs[entry.Path] = entry;
+        if (update.Full) { candidate.NeedsResync = false; candidate.Skipped.Clear(); }
+        foreach (var path in update.Unskipped) candidate.Skipped.Remove(path);
+        foreach (var path in update.Skipped) if (candidate.Skipped.Count < RelayLimits.MaxDocsPerRepositoryCeiling) candidate.Skipped.Add(path);
+        return CommitAsync(candidate);
     }
 
-    public async Task MarkResyncAsync()
+    /// <summary>Marks a full resync as needed. Like <see cref="ApplyAsync"/>, the mark counts only once stored, so a failed write is retried by the next mark.</summary>
+    public Task MarkResyncAsync()
     {
-        if (state.State.NeedsResync) return;
-        state.State.NeedsResync = true;
-        await state.WriteStateAsync();
+        if (state.State.NeedsResync) return Task.CompletedTask;
+        var candidate = Copy(state.State);
+        candidate.NeedsResync = true;
+        return CommitAsync(candidate);
     }
+
+    /// <summary>
+    /// Writes <paramref name="candidate"/> as the state. On failure it reloads what storage holds (a write that did land, or the previous
+    /// state, which also refreshes the ETag), keeps the previous state if even that fails, and rethrows.
+    /// </summary>
+    private async Task CommitAsync(DocDirectoryState candidate)
+    {
+        var previous = state.State;
+        state.State = candidate;
+        try { await state.WriteStateAsync(); }
+        catch (Exception)
+        {
+            state.State = previous;
+            try { await state.ReadStateAsync(); }
+            catch (Exception) { state.State = previous; }
+            throw;
+        }
+    }
+
+    private static DocDirectoryState Copy(DocDirectoryState source) => new()
+    {
+        Branch = source.Branch, Commit = source.Commit, NeedsResync = source.NeedsResync, SyncedAt = source.SyncedAt, Fingerprint = source.Fingerprint,
+        Docs = new Dictionary<string, DocEntry>(source.Docs, StringComparer.Ordinal), Skipped = new SortedSet<string>(source.Skipped, StringComparer.Ordinal)
+    };
 
     public async Task<DocSearchOutcome> SearchAsync(string query, string? spec, string? path, int limit, TimeSpan timeout)
     {

@@ -177,7 +177,7 @@ public sealed partial class SqliteStore : IRelayObservationSource
             using (var pages = Command("PRAGMA page_count;"))
             using (var pageSize = Command("PRAGMA page_size;"))
                 size = checked(Convert.ToInt64(pages.ExecuteScalar()) * Convert.ToInt64(pageSize.ExecuteScalar()));
-            return new() { Provider = "SQLite", Name = "CoCern", ObservedAt = DateTimeOffset.UtcNow, SizeBytes = size, Tables = tables.ToArray(), Truncated = truncated, Warning = truncated ? "Table metrics reached their count or time limit." : null };
+            return new() { Provider = "SQLite", Name = "CoCern", ObservedAt = DateTimeOffset.UtcNow, SizeBytes = size, Tables = tables.ToArray(), ArchivedTasks = CountArchived(), Truncated = truncated, Warning = truncated ? "Table metrics reached their count or time limit." : null };
         }
         finally { _gate.Release(); }
     }

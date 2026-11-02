@@ -26,6 +26,8 @@ internal static class TaskBoardAggregate
         foreach (var task in tasks.OrderBy(x => x.Key, StringComparer.Ordinal).Select(x => x.Value!.AsObject()))
             if (!task.ContainsKey("changeRevision")) MarkChanged(state, task);
         var taskId = Text(context.Args, "taskId");
+        // A write to a nearly full board first moves its oldest finished tasks to the archive.
+        if (CoordinationStateMachine.IsMutation(context.Operation) && context.Operation != Operations.TaskArchive) TaskArchiving.Run(context, sweep: false);
         var mutation = CoordinationStateMachine.IsMutation(context.Operation) && taskId.Length > 0;
         var before = mutation ? tasks[taskId]?.ToJsonString() : null;
         var result = Dispatch(context, tasks, taskId);
@@ -62,13 +64,23 @@ internal static class TaskBoardAggregate
             case Operations.Orders: return StandingOrders.Read(context.State, context.Now);
             case Operations.OrderFire: return StandingOrders.OnFire(context);
             case Operations.OrderFailed: return StandingOrders.OnFailed(context);
+            case Operations.TaskArchive: TaskArchiving.Run(context, sweep: true); return Ok(new { archived = context.Archived.Count });
         }
         if (taskId.Length == 0) return Error(InvalidArguments, new { required = "taskId" });
         if (tasks[taskId] is not JsonObject task)
         {
+            // An archived task is read from storage by the hub; every write to it, a new task under its ID included, is refused.
+            if (TaskArchiving.IsArchived(context.State, taskId)) return Error(TaskArchived, new { taskId, archived = true });
             // Only an explicit create (task_update at expected version 0) brings a task into existence.
             if (context.Operation != RelayTools.TaskUpdate || !ExpectedVersionMatches(context.Args, 0)) return Error(NotFound);
-            if (tasks.Count >= RelayLimits.MaxRecords) return Error(CapacityExceeded);
+            // Full even after archiving: every task is open, claimed or waiting on an action.
+            if (tasks.Count >= RelayLimits.MaxRecords)
+                return Error(CapacityExceeded, new
+                {
+                    maxTasks = RelayLimits.MaxRecords, openTasks = tasks.Count(entry => entry.Value is JsonObject item && !TaskArchiving.IsFinished(item)),
+                    // Finished tasks wait MinArchiveAgeHours, a claim's lease or an open action before they can leave.
+                    finishedTasks = tasks.Count(entry => entry.Value is JsonObject item && TaskArchiving.IsFinished(item)), archivable = 0
+                });
             tasks[taskId] = task = new() { ["taskId"] = taskId, ["version"] = 0, ["actions"] = new JsonObject(), ["messages"] = new JsonArray(), ["reports"] = new JsonArray(), ["facts"] = new JsonObject() };
         }
         return context.Operation switch
@@ -100,13 +112,29 @@ internal static class TaskBoardAggregate
         var since = Number(args, "sinceRevision");
         var current = Number(state, "taskRevision");
         var offset = Number(args, "cursor");
-        if (since < 0 || since > current || offset < 0 || offset > RelayLimits.MaxRecords || offset > 0 && !args.ContainsKey("snapshotRevision")) return Error(InvalidArguments);
+        // Live tasks plus, for a checkpoint, remembered removals: at most MaxRecords of each.
+        if (since < 0 || since > current || offset < 0 || offset > 2 * RelayLimits.MaxRecords || offset > 0 && !args.ContainsKey("snapshotRevision")) return Error(InvalidArguments);
         if (args.ContainsKey("snapshotRevision") && Number(args, "snapshotRevision") != current) return Error(DeltaRestartRequired, new { restartRequired = true, currentRevision = current });
-        var all = ObjectAt(state, "tasks").Where(x => Number(x.Value!.AsObject(), "changeRevision") > since).OrderBy(x => x.Key, StringComparer.Ordinal).Select(x => (JsonNode)Summary(x.Value!.AsObject())).ToArray();
+        // The board forgot archived IDs up to archiveFloor; a checkpoint older than that cannot learn every removal, so it starts over from 0.
+        var floor = Number(state, TaskArchiving.FloorKey);
+        if (since > 0 && since < floor) return Error(DeltaRestartRequired, new { restartRequired = true, currentRevision = current, archiveFloor = floor, sinceRevision = 0 });
+        // Tasks moved to the archive since the checkpoint come back as removals: { taskId, archived: true, changeRevision }. A reader from
+        // 0 has seen nothing yet, so it gets only live tasks.
+        var removed = since == 0 ? Enumerable.Empty<(string Key, JsonNode Item)>() : (state[TaskArchiving.ArchivedKey] as JsonObject ?? new JsonObject())
+            .Select(x => (x.Key, Revision: TaskArchiving.Revision(x.Value))).Where(x => x.Revision > since && x.Revision > floor)
+            .Select(x => (x.Key, Item: (JsonNode)new JsonObject { ["taskId"] = x.Key, ["archived"] = true, ["changeRevision"] = x.Revision }));
+        var all = ObjectAt(state, "tasks").Where(x => Number(x.Value!.AsObject(), "changeRevision") > since).Select(x => (x.Key, Item: (JsonNode)Summary(x.Value!.AsObject())))
+            .Concat(removed).OrderBy(x => x.Key, StringComparer.Ordinal).Select(x => x.Item).ToArray();
         var limit = (int)Math.Clamp(Number(args, "limit", RelayLimits.DefaultPageSize), 1, RelayLimits.MaxPageSize);
-        var items = all.Skip((int)offset).Take(limit).Select(x => x.DeepClone()).ToList();
+        var items = all.Skip((int)offset).Take(args.ContainsKey("partOffset") ? 1 : limit).Select(x => x.DeepClone()).ToList();
         RelayReply Reply() => Ok(new { items, snapshotRevision = current, nextCursor = offset + items.Count < all.Length ? (long?)(offset + items.Count) : null, truncated = offset + items.Count < all.Length, total = all.Length });
         while (items.Count > 1 && !FitsWire(Reply(), RelayLimits.AggregateReplyBytes)) items.RemoveAt(items.Count - 1);
+        // A summary too large for any page comes back in pieces (partOffset), and the cursor still moves past it.
+        if (items.Count == 1 && (args.ContainsKey("partOffset") || !FitsWire(Reply(), RelayLimits.AggregateReplyBytes)))
+        {
+            var whole = items[0];
+            items[0] = Piece(whole, Number(args, "partOffset"), piece => { items[0] = piece; return FitsWire(Reply(), RelayLimits.AggregateReplyBytes); });
+        }
         return Reply();
     }
 
@@ -133,8 +161,17 @@ internal static class TaskBoardAggregate
             ["author"] = context.Caller.PrincipalId, ["updatedAt"] = context.Now.ToString("O")
         };
         if (ByteSize(entry) > MaxContextEntryBytes) return Error(PayloadTooLarge);
+        // Escaping for the wire can double a note's size; one context_get could not return it whole.
+        if (CheckReadable(entry) is { } unreadable) return unreadable;
         notes[id] = entry;
         return Ok(entry, version + 1);
+    }
+
+    /// <summary>An archived task's read, from the JSON storage kept: the same sections and fallbacks as a live task.</summary>
+    internal static RelayReply ReadArchived(JsonObject args, JsonObject task)
+    {
+        var reply = ReadTask(args, task);
+        return reply.Ok && Text(args, "section").Length == 0 && !FitsWire(reply, RelayLimits.AggregateReplyBytes) ? Ok(Summary(task), reply.Version) : reply;
     }
 
     private static RelayReply ReadTask(JsonObject args, JsonObject task)
@@ -206,7 +243,7 @@ internal static class TaskBoardAggregate
         var args = context.Args;
         var session = context.SessionId;
         var version = Number(task, "version");
-        if (!TaskWorkflow.AllowsExecution(task, session)) return TaskWorkflow.NotReady(task);
+        if (TaskWorkflow.ExecutionRefusal(context.State, task, session, context.Now) is { } refusal) return refusal;
         var owned = Text(task, "owner") == session && Date(task, "leaseUntil") > context.Now;
         if (owned && !SameResources(task["resourceIds"], args["resourceIds"])) return Error(ResourceSetConflict, new { resourceIds = task["resourceIds"] }, version);
         var unresolved = TaskActions.HasUnresolved(task);
@@ -254,7 +291,7 @@ internal static class TaskBoardAggregate
             if (ByteSize(notes) > MaxSharedBytes) return Error(PayloadTooLarge);
             ObjectAt(task, "facts")["notes"] = notes.DeepClone();
         }
-        if (args["message"] is JsonObject message) AddMessage(context, task, message);
+        if (args["message"] is JsonObject message && AddMessage(context, task, message) is { } unreadable) return unreadable;
         IReadOnlyList<string> unblocked = [];
         var priorWorkflow = task["workflow"]?.DeepClone() as JsonObject;
         if (args.ContainsKey("workflow"))
@@ -263,11 +300,16 @@ internal static class TaskBoardAggregate
             if (TaskWorkflow.Validate(workflow, task["workflow"] as JsonObject, TaskActions.HasUnresolved(task)) is { } invalid) return Error(invalid);
             if (Text(workflow, "state") == "ready" && TaskWorkflow.RequiresResources(context.State) && workflow["packet"]?["resources"] is not JsonArray) return Error(InvalidWorkflow, new { required = "packet.resources" });
             // A packet whose authorityRef names a standing grant is ready only while that grant exists, covers it and has not expired.
-            if (Text(workflow, "state") == "ready" && StandingPreferences.GrantProblem(context.State, workflow, context.Now) is { } grant) return Error(GrantInvalid, new { authorityRef = Text(workflow["packet"]!.AsObject(), "authorityRef"), reason = grant });
+            if (Text(workflow, "state") == "ready" && TaskWorkflow.GrantRefusal(context.State, workflow, context.Now) is { } grant) return grant;
             var tasks = ObjectAt(context.State, "tasks");
+            // The hub passes the dependencies it found in the archive table (archivedDependsOn); they count as completed from now on.
+            TaskArchiving.Remember(context.State, Strings(args["archivedDependsOn"]).Intersect(TaskWorkflow.Dependencies(workflow), StringComparer.Ordinal), context.Now);
             if (TaskWorkflow.CheckDependencies(tasks, Text(task, "taskId"), workflow) is { } dependency) return Error(dependency);
             var completing = Text(workflow, "state") == "completed" && (task["workflow"] is not JsonObject prior || Text(prior, "state") != "completed");
             task["workflow"] = workflow.DeepClone();
+            // Archiving counts from completion; reopening clears it.
+            if (completing) task["completedAt"] = context.Now.ToString("O");
+            else if (Text(workflow, "state") != "completed") task.Remove("completedAt");
             if (completing) unblocked = TaskWorkflow.Unblocked(tasks, Text(task, "taskId"));
         }
         // Attention items for this change commit with it: blocked, failed and review_ready to managers, next_work to each unblocked target.
@@ -290,14 +332,17 @@ internal static class TaskBoardAggregate
 
     private static RelayReply SendTaskMessage(AggregateContext context, JsonObject task)
     {
-        AddMessage(context, task, context.Args);
+        if (AddMessage(context, task, context.Args) is { } unreadable) return unreadable;
         var version = Number(task, "version") + 1;
         task["version"] = version;
         return Ok(new { messageId = ArrayAt(task, "messages").Last()!["messageId"]!.GetValue<string>() }, version);
     }
 
-    /// <summary>Appends to the shared task conversation and notifies the addressed session, or the current owner.</summary>
-    private static void AddMessage(AggregateContext context, JsonObject task, JsonObject message)
+    /// <summary>
+    /// Appends to the shared task conversation and notifies the addressed session, or the current owner. Returns <c>PayloadTooLarge</c>,
+    /// and changes nothing, when the entry escaped for the wire would not fit a <c>task_get</c> messages page.
+    /// </summary>
+    private static RelayReply? AddMessage(AggregateContext context, JsonObject task, JsonObject message)
     {
         var messages = ArrayAt(task, "messages");
         if (messages.Count >= MaxConversation) throw new ArgumentException("Task conversation limit reached.");
@@ -307,6 +352,7 @@ internal static class TaskBoardAggregate
             ["messageId"] = Guid.NewGuid().ToString("N"), ["taskId"] = Text(task, "taskId"), ["text"] = SessionAggregate.MessageText(message), ["kind"] = Text(message, "kind", "message"),
             ["replyTo"] = message["replyTo"]?.DeepClone(), ["author"] = context.Caller.PrincipalId, ["sessionId"] = context.SessionId, ["at"] = context.Now.ToString("O"), ["taskVersion"] = nextVersion
         };
+        if (CheckReadable(entry) is { } unreadable) return unreadable;
         messages.Add(entry);
         var recipient = Text(message, "recipientSessionId", Text(task, "owner"));
         if (recipient.Length > 0)
@@ -315,6 +361,7 @@ internal static class TaskBoardAggregate
                 ["repositoryId"] = context.Repository, ["messageId"] = Text(entry, "messageId"), ["taskId"] = Text(task, "taskId"), ["boardId"] = Text(context.Args, "boardId", "default"),
                 ["kind"] = "task.changed", ["taskVersion"] = nextVersion
             });
+        return null;
     }
 
     /// <summary>A bounded projection of a task: ownership, claim, workflow state and unresolved actions, without its detail sections.</summary>

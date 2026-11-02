@@ -44,7 +44,7 @@ internal static class TaskActions
             if (Number(args, "attempt") != Number(prior, "attempt") + 1) return Error(AttemptConflict);
             previousAttempt = prior;
         }
-        if (!TaskWorkflow.AllowsExecution(task, session)) return TaskWorkflow.NotReady(task);
+        if (TaskWorkflow.ExecutionRefusal(context.State, task, session, context.Now) is { } refusal) return refusal;
         if (previousAttempt is not null) ArrayAt(task, "attemptHistory").Add(previousAttempt.DeepClone());
         if (Text(task, "owner") != session || Date(task, "leaseUntil") <= context.Now) return Error(ClaimRequired);
         if (actions.Any(x => x.Key != id && IsUnresolved(x.Value!.AsObject()))) return Error(ActionUncertain);

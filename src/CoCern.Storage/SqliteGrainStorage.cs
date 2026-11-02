@@ -29,9 +29,12 @@ public sealed class SqliteGrainStorage(SqliteStore store) : IGrainStorage
         var payload = JsonSerializer.Serialize(grainState.State, JsonOptions);
         var due = grainState.State is IHasDueWork indexed ? indexed.GetDueWork().ToArray() : [];
         var search = grainState.State as IHasSearchDocuments;
+        var archive = grainState.State as IHasTaskArchive;
         string etag;
-        try { etag = await store.CommitAsync(stateName, grainId, grainState.ETag, payload, due, cancellationToken, search); }
+        try { etag = await store.CommitAsync(stateName, grainId, grainState.ETag, payload, due, cancellationToken, search, archive?.PendingArchive() ?? []); }
         finally { search?.ReleaseSearchState(); }
+        // Written in that commit's transaction; a failed commit keeps them, and the grain discards the whole candidate state.
+        archive?.ArchiveWritten();
         grainState.ETag = etag;
         grainState.RecordExists = true;
     }

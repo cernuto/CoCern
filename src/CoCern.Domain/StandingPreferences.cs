@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using CoCern.Contracts;
 using static CoCern.Contracts.RelayErrorCodes;
@@ -124,7 +125,8 @@ internal static class StandingPreferences
         var standingChanged = changes.Any(change => !change.StartsWith("approve:", StringComparison.Ordinal) && !change.StartsWith("-proposal:", StringComparison.Ordinal));
         if (standingChanged) next["revision"] = revision + 1;
         var updated = Number(next, "revision");
-        if (ByteSize(Delivered(next, context.Now)) > RelayLimits.MaxStandingBytes) return Error(PayloadTooLarge, new { maxBytes = RelayLimits.MaxStandingBytes });
+        // Measure exactly what readers get from the new standing: the reply sessions' attachments come from, and the task_get view.
+        if (Oversized(next, context.Now) is { } tooLarge) return tooLarge;
         var history = ArrayAt(next, "history");
         var entry = new JsonObject { ["revision"] = updated, ["by"] = admin, ["at"] = now, ["changes"] = new JsonArray(changes.Take(RelayLimits.StandingHistoryChanges).Select(change => (JsonNode)change).ToArray()) };
         if (changes.Count > RelayLimits.StandingHistoryChanges) entry["changesTotal"] = changes.Count;
@@ -199,10 +201,28 @@ internal static class StandingPreferences
         return Ok(new { proposalId = id, pending = true }, revision);
     }
 
-    /// <summary>The standing a chat receives: lines and active grants without provenance, and settings when any are set.</summary>
-    public static JsonObject Delivered(JsonObject board, DateTimeOffset now)
+    /// <summary>
+    /// <c>PayloadTooLarge</c> (with <c>maxBytes</c> and <c>bytes</c>) when standing could not be read whole: its delivered reply, measured on the
+    /// wire as the hub reads it, is over <see cref="RelayLimits.MaxStandingBytes"/>, or its <c>task_get</c> view would not fit even with
+    /// history and proposals left out. Null when both fit.
+    /// </summary>
+    private static RelayReply? Oversized(JsonObject standing, DateTimeOffset now)
     {
-        var standing = board["standing"] as JsonObject ?? new JsonObject();
+        var delivered = DeliveredStanding(standing, now);
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(Ok(delivered, Number(delivered, "revision"))).Length;
+        if (bytes > RelayLimits.MaxStandingBytes) return Error(PayloadTooLarge, new { maxBytes = RelayLimits.MaxStandingBytes, bytes });
+        var core = standing.DeepClone().AsObject();
+        core.Remove("history"); core.Remove("proposals");
+        var view = ViewOf(core, now);
+        var viewBytes = JsonSerializer.SerializeToUtf8Bytes(view).Length;
+        return viewBytes > RelayLimits.AggregateReplyBytes ? Error(PayloadTooLarge, new { maxBytes = RelayLimits.AggregateReplyBytes, bytes = viewBytes }) : null;
+    }
+
+    /// <summary>The standing a chat receives: lines and active grants without provenance, and settings when any are set.</summary>
+    public static JsonObject Delivered(JsonObject board, DateTimeOffset now) => DeliveredStanding(board["standing"] as JsonObject ?? new JsonObject(), now);
+
+    private static JsonObject DeliveredStanding(JsonObject standing, DateTimeOffset now)
+    {
         var lines = (standing["lines"] as JsonObject ?? new()).Select(x => x.Value).OfType<JsonObject>()
             .Select(line => (JsonNode)new JsonObject { ["id"] = Text(line, "id"), ["text"] = Text(line, "text") });
         var grants = (standing["grants"] as JsonObject ?? new()).Select(x => x.Value).OfType<JsonObject>().Where(grant => Date(grant, "expiresAt") > now)
@@ -220,9 +240,10 @@ internal static class StandingPreferences
     }
 
     /// <summary>The full record for <c>task_get</c> with <c>section: "standing"</c>: provenance, expired grants, proposals and history, newest first.</summary>
-    public static RelayReply View(JsonObject board, DateTimeOffset now)
+    public static RelayReply View(JsonObject board, DateTimeOffset now) => ViewOf(board["standing"] as JsonObject ?? new JsonObject(), now);
+
+    private static RelayReply ViewOf(JsonObject standing, DateTimeOffset now)
     {
-        var standing = board["standing"] as JsonObject ?? new JsonObject();
         var grants = new JsonArray((standing["grants"] as JsonObject ?? new()).Select(x => x.Value).OfType<JsonObject>().Select(grant =>
         {
             var copy = grant.DeepClone().AsObject();

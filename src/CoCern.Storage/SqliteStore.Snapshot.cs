@@ -14,7 +14,7 @@ public sealed partial class SqliteStore
 
     /// <summary>
     /// Writes queued activity, copies the database to <paramref name="destination"/> with the backup API, then scrubs the copy: it keeps only
-    /// board and lock state, removes idempotency caches (<c>requests</c>, which hold earlier replies) and any session token, drops the search
+    /// board and lock state, removes idempotency caches (<c>requests</c>, which hold earlier replies, and their <c>requestTombstones</c>) and any session token, drops the search
     /// index, and vacuums so removed data does not stay in free pages. The live database is never changed.
     /// </summary>
     /// <remarks>
@@ -75,7 +75,7 @@ public sealed partial class SqliteStore
                 DELETE FROM due_work WHERE state_name NOT IN {SnapshotStates};
                 DELETE FROM grain_state WHERE state_name NOT IN {SnapshotStates};
                 UPDATE grain_state
-                SET payload = json_set(payload, '$.Value.Json', json_remove(json_extract(payload, '$.Value.Json'), '$.requests', '$.sessionToken') || '')
+                SET payload = json_set(payload, '$.Value.Json', json_remove(json_extract(payload, '$.Value.Json'), '$.requests', '$.requestTombstones', '$.sessionToken') || '')
                 WHERE payload IS NOT NULL AND json_valid(payload) AND json_valid(json_extract(payload, '$.Value.Json'));
                 DROP TABLE IF EXISTS search_index;
                 DROP TABLE IF EXISTS search_docs;

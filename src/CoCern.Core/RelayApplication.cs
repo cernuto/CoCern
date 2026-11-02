@@ -20,7 +20,7 @@ namespace CoCern.Core;
 /// Aggregates enforce the rules; this layer authenticates the session, routes, composes and bounds replies.
 /// </summary>
 public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? machines = null, IActivitySink? activity = null, IFullTextSearch? search = null, AttentionOptions? attention = null, AnalyticsTool? analytics = null, AnomalyOptions? anomaly = null, OrderOptions? orders = null, DocCacheTool? docs = null,
-    ITokenCounter? tokens = null, TokenOptions? tokenOptions = null, FeedbackRules? feedback = null) : IRelayApplication
+    ITokenCounter? tokens = null, TokenOptions? tokenOptions = null, FeedbackRules? feedback = null, ITaskArchive? archive = null) : IRelayApplication
 {
     private readonly IMachineDirectory directory = machines ?? new MachineDirectory(grains);
     private readonly AttentionOptions attentionOptions = attention ?? new();
@@ -151,7 +151,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
     {
         if (counter is null || !tokenSettings.Enforces(tool.Name) || !result.Ok || Encoding.UTF8.GetByteCount(result.DataJson) <= tool.TokenBudget) return BoundWire(result);
         Compaction compaction;
-        try { compaction = ReplyCompactor.Compact(result, tool, counter, enforce: true, Number(args, "cursor")); }
+        try { compaction = ReplyCompactor.Compact(ReplyCompactor.FitPieces(result, tool, counter), tool, counter, enforce: true, Number(args, "cursor")); }
         catch (Exception) { return BoundWire(result); }
         var bounded = BoundWire(compaction.Reply);
         if (trace is not null && ReferenceEquals(bounded, compaction.Reply)) { trace.ReplyTokens = compaction.Tokens; trace.CompactStep = compaction.Step; trace.OverBudget = compaction.OverBudget; }
@@ -282,8 +282,21 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         // Administrator only, checked first, so a worker learns nothing about the hub's doc cache settings.
         RelayTools.DocSync => !caller.IsAdministrator ? Task.FromResult(Error(AdministratorRequired)) : docs is null ? DocCacheOff() : docs.SyncAsync(args, cancellationToken),
         RelayTools.WorkerList or RelayTools.ControlRequest => CallControl(caller, tool, args),
+        RelayTools.TaskGet => ReadTaskAsync(caller, args, cancellationToken),
         _ => CallBoard(caller, tool, args)
     };
+
+    /// <summary><c>task_get</c>: the board's reply, or for a task the board archived, the archived copy, read-only and marked <c>archived: true</c>.</summary>
+    private async Task<RelayReply> ReadTaskAsync(RelayCaller caller, JsonObject args, CancellationToken cancellationToken)
+    {
+        var reply = await CallBoard(caller, RelayTools.TaskGet, args);
+        // The board answers TaskArchived for an ID it still remembers, and NotFound once it forgot it; the archive table has both.
+        if (reply.Code is not (TaskArchived or NotFound) || archive is null || Text(args, "taskId") is not { Length: > 0 } taskId) return reply;
+        string? json;
+        try { json = await archive.ReadArchivedTaskAsync(Text(args, "repositoryId"), Text(args, "boardId", "default"), taskId, cancellationToken); }
+        catch (Exception exception) when (exception is System.Data.Common.DbException or ObjectDisposedException) { return Error(Unavailable); }
+        return json is null ? reply : ArchivedTasks.Read(args, json);
+    }
 
     /// <summary>
     /// Full-text search over committed state, as the verified session (checked before dispatch): the request's repository plus that
@@ -853,7 +866,40 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
 
     private Task<RelayReply> CallControl(RelayCaller caller, string operation, JsonObject args) => Call(AggregateKinds.Control, AggregateKinds.ControlKey, caller, operation, args);
     private Task<RelayReply> CallSession(RelayCaller caller, string operation, JsonObject args) => Call(AggregateKinds.Session, Text(args, "sessionId"), caller, operation, args);
-    private Task<RelayReply> CallBoard(RelayCaller caller, string operation, JsonObject args) => Call(AggregateKinds.Board, BoardKey(args), caller, operation, args);
+    private Task<RelayReply> CallBoard(RelayCaller caller, string operation, JsonObject args)
+    {
+        // Only the hub names archived dependencies; a client's own archivedDependsOn is always dropped, with or without an archive store.
+        if (operation == RelayTools.TaskUpdate) args.Remove("archivedDependsOn");
+        return archive is not null && operation is RelayTools.TaskUpdate or RelayTools.TaskClaim or RelayTools.ActionBegin or RelayTools.ActionReport or RelayTools.SendMessage or RelayTools.ClaimRenew or RelayTools.ClaimRelease
+            ? CallTaskWriteAsync(caller, operation, args)
+            : Call(AggregateKinds.Board, BoardKey(args), caller, operation, args);
+    }
+
+    /// <summary>
+    /// A task write, checked against the archive table, which keeps every archived ID after the board forgets it: a new task under an
+    /// archived ID, or a write the board answers <c>NotFound</c> for one, gets <c>TaskArchived</c>; a workflow's <c>dependsOn</c> IDs found
+    /// there are passed as <c>archivedDependsOn</c>, so they count as completed. A client cannot supply <c>archivedDependsOn</c> itself.
+    /// </summary>
+    private async Task<RelayReply> CallTaskWriteAsync(RelayCaller caller, string operation, JsonObject args)
+    {
+        var (repository, board, taskId) = (Text(args, "repositoryId"), Text(args, "boardId", "default"), Text(args, "taskId"));
+        try
+        {
+            if (operation == RelayTools.TaskUpdate && args["workflow"] is JsonObject workflow && workflow["dependsOn"] is JsonArray dependsOn)
+            {
+                var ids = dependsOn.OfType<JsonValue>().Select(value => value.TryGetValue<string>(out var id) ? id : "").Where(id => id.Length > 0).Distinct(StringComparer.Ordinal).Take(RelayLimits.MaxDependencies).ToArray();
+                if (ids.Length > 0 && await archive!.ArchivedIdsAsync(repository, board, ids) is { Count: > 0 } found)
+                    args["archivedDependsOn"] = new JsonArray(found.Order(StringComparer.Ordinal).Select(id => (JsonNode)id).ToArray());
+            }
+            if (taskId.Length > 0 && operation == RelayTools.TaskUpdate && ExpectedVersionMatches(args, 0) && (await archive!.ArchivedIdsAsync(repository, board, [taskId])).Count > 0)
+                return Error(TaskArchived, new { taskId, archived = true });
+        }
+        catch (Exception exception) when (exception is System.Data.Common.DbException or ObjectDisposedException) { return Error(Unavailable); }
+        var reply = await Call(AggregateKinds.Board, BoardKey(args), caller, operation, args);
+        if (reply.Code != NotFound || taskId.Length == 0) return reply;
+        try { return (await archive!.ArchivedIdsAsync(repository, board, [taskId])).Count > 0 ? Error(TaskArchived, new { taskId, archived = true }) : reply; }
+        catch (Exception exception) when (exception is System.Data.Common.DbException or ObjectDisposedException) { return reply; }
+    }
     private Task<RelayReply> Call(string kind, string key, RelayCaller caller, string operation, JsonObject args) => CoordinationGrain.Aggregate(grains, kind, key).ExecuteAsync(caller, operation, args.ToJsonString());
 
     private sealed class CallTrace

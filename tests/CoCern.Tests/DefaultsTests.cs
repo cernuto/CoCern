@@ -55,6 +55,9 @@ public sealed class DefaultsTests
         Assert.Equal((HttpStatusCode.Forbidden, "AdministratorRequired"), Status(await Tool(client, "analytics_query", new { repositoryId = "repo", name = "sql", sql = "SELECT 1" })));
         // Standing orders.
         Assert.True(services.GetRequiredService<OrderOptions>().Enabled);
+        // Finished tasks are archived after 30 days, or sooner when a board fills.
+        Assert.Equal(RelayLimits.DefaultArchiveAfterDays, services.GetRequiredService<BoardOptions>().ArchiveAfterDays);
+        Assert.Contains("Relay:Board:ArchiveAfterDays", Assert.Throws<InvalidOperationException>(() => new BoardOptions { ArchiveAfterDays = -1 }.Validated()).Message);
         // The doc cache, which with no repositories configured does nothing and says so.
         Assert.True(services.GetRequiredService<DocCacheSettings>() is { Enabled: true, Repositories.Count: 0 });
         Assert.Equal((HttpStatusCode.BadRequest, "NoRepositoriesConfigured"), Status(await Tool(client, "doc_search", new { repositoryId = "repo", query = "claim" })));

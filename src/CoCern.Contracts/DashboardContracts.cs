@@ -146,6 +146,8 @@ public sealed record DatabaseMetrics
     public DateTimeOffset? ObservedAt { get; init; }
     public long? SizeBytes { get; init; }
     public DatabaseTableMetrics[] Tables { get; init; } = [];
+    /// <summary>Finished tasks moved off their boards into <c>task_archive</c>; null when the store keeps no archive.</summary>
+    public long? ArchivedTasks { get; init; }
     public bool Truncated { get; init; }
     public string? Warning { get; init; }
 }

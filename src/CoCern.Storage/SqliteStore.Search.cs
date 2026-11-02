@@ -99,6 +99,7 @@ public sealed partial class SqliteStore : IFullTextSearch
                     writer.Upsert(stateName, reader.GetString(1), reader.GetString(2), entry);
             }
         }
+        IndexArchive(transaction, writer);
         using var record = Command("INSERT INTO hub_metadata(name, value) VALUES ($name, $value) ON CONFLICT(name) DO UPDATE SET value=excluded.value;", transaction);
         record.Parameters.AddWithValue("$name", SearchVersionKey);
         record.Parameters.AddWithValue("$value", SearchIndexVersion);

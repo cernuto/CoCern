@@ -120,7 +120,8 @@ internal static class ToolSchemas
             ["actionId"] = new { type = "string" },
             ["recipientSessionId"] = new { type = "string" },
             ["cursor"] = new { type = "integer", minimum = 0, description = "Numeric continuation returned by a bounded list." },
-            ["limit"] = new { type = "integer", minimum = 1, maximum = RelayLimits.MaxPageSize }
+            ["limit"] = new { type = "integer", minimum = 1, maximum = RelayLimits.MaxPageSize },
+            ["partOffset"] = new { type = "integer", minimum = 0, description = "A truncated item's nextPartOffset; keep its cursor." }
         };
         void Text(string field, string description) => properties[field] = new { type = "string", description };
         void Integer(string field, string description) => properties[field] = new { type = "integer", minimum = 0, description };

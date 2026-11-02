@@ -98,6 +98,22 @@ public static class RelayLimits
     /// <summary>A whole-task read carries only this many of the latest messages, reports and attempts; older ones stay in the paged sections.</summary>
     public const int RecentTaskEntries = 20;
     public const int MaxRecords = 2_048;
+    /// <summary>Days after completion before a finished task moves to the archive (<c>Relay:Board:ArchiveAfterDays</c>; 0: only when the board fills).</summary>
+    public const int DefaultArchiveAfterDays = 30;
+    public const int MaxArchiveAfterDays = 3_650;
+    /// <summary>A board write with this many tasks archives finished ones, oldest first, down to <see cref="ArchiveLowWater"/>, even if younger than the setting.</summary>
+    public const int ArchiveHighWater = MaxRecords * 7 / 8;
+    public const int ArchiveLowWater = MaxRecords * 3 / 4;
+    /// <summary>Even near the cap, a task is archived no sooner than this after it completed, so a fresh result stays on the board for review.</summary>
+    public const int MinArchiveAgeHours = 24;
+    /// <summary>
+    /// The board remembers recently archived IDs (for deltas and quick refusals) for at most this many IDs or <see cref="ArchivedIdDays"/>,
+    /// whichever is fewer, plus any a live task's <c>dependsOn</c> still names. Older IDs resolve through the archive table.
+    /// </summary>
+    public const int MaxArchivedIds = MaxRecords;
+    public const int ArchivedIdDays = 30;
+    /// <summary>A board's archive sweep that fails waits this long before it runs again.</summary>
+    public const int ArchiveRetryMinutes = 60;
     public const int MaxTaskBytes = 262_144;
     public const int MaxReportBytes = 8_192;
     public const int MaxClaimResources = 16;
@@ -105,6 +121,24 @@ public static class RelayLimits
     /// <summary>Thirty minutes, so a chat holding a claim through a long turn renews rarely: each renewal is a model call over its whole context.</summary>
     public const int MaxLeaseSeconds = 1800;
     public const int DefaultLeaseSeconds = 120;
+
+    /// <summary>
+    /// How long an aggregate remembers a request (its stored reply), an acknowledged message and a resolved action. A retry within this
+    /// window replays or is refused; after it, the request runs as new.
+    /// </summary>
+    public const int RequestReplayRetentionHours = 24;
+    /// <summary>
+    /// When one of those maps reaches <see cref="MaxRecords"/>, it drops entries past the window and then its oldest down to this many,
+    /// so the prune runs at most once per 512 writes instead of scanning on every one.
+    /// </summary>
+    public const int RetainedEntriesAfterPrune = MaxRecords * 3 / 4;
+    /// <summary>
+    /// Hashed keys of replays evicted before their window ended, so their retries get <c>RequestExpired</c> instead of running again. Each
+    /// costs about 34 bytes in every parse and save of its aggregate, so 4 × <see cref="MaxRecords"/> (about 280 KB when full) rather than more.
+    /// </summary>
+    public const int MaxRequestTombstones = 4 * MaxRecords;
+    /// <summary>When the tombstones pass <see cref="MaxRequestTombstones"/>, the oldest are dropped down to this many.</summary>
+    public const int RequestTombstonesAfterPrune = MaxRequestTombstones * 3 / 4;
 
     /// <summary>Activity events waiting for the background writer. When full, new events are dropped; a call never waits.</summary>
     public const int ActivityQueueCapacity = 4_096;
@@ -246,6 +280,11 @@ public static class RelayLimits
     public const int OfferedWorkExpiryDays = 1;
     /// <summary>Hours a session may go without freshness or activity before it no longer receives routed (manager) attention items.</summary>
     public const int MaxAttentionRouteIdleHours = 24;
+    /// <summary>
+    /// A session not seen (open, bound or active) for this long may be dropped from the hub's session directory once it is full, and is
+    /// told so: its chat then gets <c>SessionUnknown</c> with <c>expired</c> and opens a new session. At least the attention route's idle limit.
+    /// </summary>
+    public const int StaleSessionHours = MaxAttentionRouteIdleHours;
     /// <summary>Least minutes between a session's reports to the control directory that it is still active (made at boundary replies).</summary>
     public const int AttentionActivityReportMinutes = 60;
     /// <summary>Sessions whose last idle-hold wake the hub remembers for counting; past this the memory is cleared.</summary>

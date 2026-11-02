@@ -90,6 +90,7 @@ Use `appsettings.json`, environment variables (`Relay__Clients__0__Token`) or th
 | `Relay:Clients:N:PrincipalId` | | Who the client is. |
 | `Relay:Clients:N:IsAdministrator` | `false` | Allows administrator tools. |
 | `Relay:Clients:N:Repositories:M` | | Repositories the client may use. |
+| `Relay:Board:ArchiveAfterDays` | 30 | Days after a task completes before it moves to the archive. `0`: only when a board fills. See [Collaboration](collaboration.md#archive). |
 
 The hub refuses to start with no clients and no OAuth issuer.
 

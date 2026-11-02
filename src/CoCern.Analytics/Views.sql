@@ -12,9 +12,17 @@ SELECT url_decode(split_part(grain_key, '/', 1)) AS repository_id,
        json_extract_string(payload, '$.Value.Json')::JSON AS doc
 FROM relay.grain_state WHERE state_name = 'board' AND payload IS NOT NULL;
 
+-- One row per finished task moved off its board (task_archive), with the task JSON as it left.
+CREATE VIEW archived_tasks AS
+SELECT repository_id, board_id, task_id, cocern_at(completed_ticks) AS completed_at, cocern_at(archived_ticks) AS archived_at, json::JSON AS task
+FROM relay.task_archive;
+
+-- Every task, on its board or archived, so the views below (and the named queries over them) still count archived tasks.
 CREATE VIEW task_doc AS
-SELECT b.repository_id, b.board_id, t.key AS task_id, t.value AS task
-FROM board_doc b, json_each(b.doc -> '$.tasks') t;
+SELECT b.repository_id, b.board_id, t.key AS task_id, t.value AS task, false AS archived
+FROM board_doc b, json_each(b.doc -> '$.tasks') t
+UNION ALL
+SELECT repository_id, board_id, task_id, task, true AS archived FROM archived_tasks;
 
 -- Every activity row. relay_tokens are the hub's own estimated tokens (o200k) for the request and reply. Targets are 'task:<repo>/<board>/<task>' and 'resource:<repo>/<resource>', each part escaped.
 CREATE VIEW activity AS
@@ -54,7 +62,8 @@ SELECT t.repository_id, t.board_id, t.task_id,
        coalesce(TRY_CAST(t.task ->> '$.claimGeneration' AS BIGINT), 0) AS claim_count,
        coalesce(json_array_length(t.task -> '$.messages'), 0) AS message_count,
        coalesce(json_array_length(t.task -> '$.reports'), 0) AS report_count,
-       TRY_CAST(t.task ->> '$.updatedAt' AS TIMESTAMPTZ) AS updated_at
+       TRY_CAST(t.task ->> '$.updatedAt' AS TIMESTAMPTZ) AS updated_at,
+       t.archived
 FROM task_doc t LEFT JOIN calls c USING (repository_id, board_id, task_id);
 
 -- One row per task message.
