@@ -740,8 +740,9 @@ public sealed class CoordinationTests
         // archiving what finished more than a day ago: no create is ever refused, and open tasks stay.
         var state = new StateEnvelope<CoordinationDocument>();
         var open = new List<string>();
-        var total = 3 * RelayLimits.MaxRecords + 100;
+        var total = 3 * RelayLimits.MaxRecords + 400;
         var perDay = total / 62;
+        var midSize = 0;
         for (var i = 0; i < total; i++)
         {
             var id = "t" + i;
@@ -752,14 +753,18 @@ public sealed class CoordinationTests
             if (keepOpen) open.Add(id);
             state.Effects.Clear(); // the outbox delivers between writes
             if ((i + 1) % perDay == 0) Assert.True(Board(state, Operations.TaskArchive, new(), days: day + 0.5, archiveAfterDays: 1).Ok);
+            if (i == 2 * total / 3) midSize = state.Value.Json.Length;
         }
         var stored = StateJson(state);
         var tasks = stored["tasks"]!.AsObject();
         var archived = stored["archivedTasks"]!.AsObject();
         Assert.All(open, id => Assert.True(tasks.ContainsKey(id), id));
-        Assert.Equal(total, tasks.Count + archived.Count);
-        Assert.InRange(archived.Count, total - open.Count - 3 * perDay, total - open.Count);
-        Assert.Equal(archived.Count, state.PendingArchive().Count);
+        // The board remembers only recent archived IDs: more than three times that bound went through, and its state stayed flat.
+        Assert.InRange(state.PendingArchive().Count, 3 * RelayLimits.MaxArchivedIds, total - open.Count);
+        Assert.InRange(archived.Count, 1, RelayLimits.MaxArchivedIds);
+        Assert.True(stored["archiveFloor"]!.GetValue<long>() > 0);
+        Assert.True(state.Value.Json.Length <= midSize * 11 / 10, $"{state.Value.Json.Length} > {midSize}");
+        Assert.Equal(total, tasks.Count + state.PendingArchive().Count);
         Assert.All(state.PendingArchive(), task => Assert.Equal("completed", JsonNode.Parse(task.Json)!["workflow"]!["state"]!.GetValue<string>()));
 
         // With ArchiveAfterDays 0 only the cap archives: a write to a nearly full board moves its oldest finished tasks, even young ones,
@@ -771,7 +776,7 @@ public sealed class CoordinationTests
             near["n" + i] = new JsonObject
             {
                 ["taskId"] = "n" + i, ["version"] = 1, ["changeRevision"] = i + 1, ["actions"] = new JsonObject(), ["workflow"] = DependentWorkflow(finished ? "completed" : "ready"),
-                ["completedAt"] = finished ? Now.AddMinutes(-i).ToString("O") : null
+                ["completedAt"] = finished ? Now.AddDays(-1).AddMinutes(-i).ToString("O") : null
             };
             // A finished task someone still holds a live claim on stays.
             if (i % 4 == 1) { near["n" + i]!["owner"] = "s"; near["n" + i]!["leaseUntil"] = Now.AddHours(1).ToString("O"); }
@@ -785,6 +790,17 @@ public sealed class CoordinationTests
         Assert.True(left.ContainsKey("n1"));
         Assert.False(left.ContainsKey("n" + (RelayLimits.ArchiveHighWater - 2)));
         Assert.All(Enumerable.Range(0, RelayLimits.ArchiveHighWater).Where(i => i % 4 is 0 or 1), i => Assert.True(left.ContainsKey("n" + i)));
+        // Each archived task's open attention items are closed, in batches, with the archive's revision.
+        var closes = capped.Effects.Select(effect => JsonNode.Parse(effect.PayloadJson)!.AsObject()).Where(payload => payload["operation"]?.GetValue<string>() == Operations.AttentionClose).ToList();
+        Assert.Equal(RelayLimits.ArchiveHighWater - RelayLimits.ArchiveLowWater, closes.Sum(payload => payload["item"]!["taskIds"]!.AsArray().Count));
+        Assert.All(closes, payload => Assert.Equal(StateJson(capped)["taskRevision"]!.GetValue<long>() - 1, payload["item"]!["revision"]!.GetValue<long>()));
+        // Near the cap a task is still archived no sooner than a day after it completed.
+        var fresh = new JsonObject();
+        for (var i = 0; i < RelayLimits.ArchiveHighWater; i++)
+            fresh["f" + i] = new JsonObject { ["taskId"] = "f" + i, ["version"] = 1, ["changeRevision"] = i + 1, ["actions"] = new JsonObject(), ["workflow"] = DependentWorkflow("completed"), ["completedAt"] = Now.AddHours(-1).ToString("O") };
+        var young = new StateEnvelope<CoordinationDocument> { Value = new() { Json = new JsonObject { ["repositoryId"] = "repo", ["taskRevision"] = RelayLimits.ArchiveHighWater, ["tasks"] = fresh }.ToJsonString() } };
+        Assert.True(Board(young, "context_put", new() { ["contextId"] = "n", ["expectedVersion"] = 0, ["content"] = "x" }, archiveAfterDays: 0).Ok);
+        Assert.Equal(RelayLimits.ArchiveHighWater, StateJson(young)["tasks"]!.AsObject().Count);
 
         // A board whose every task is still open cannot archive anything: the create is refused and says why.
         var full = new JsonObject();
@@ -792,7 +808,7 @@ public sealed class CoordinationTests
         var busy = new StateEnvelope<CoordinationDocument> { Value = new() { Json = new JsonObject { ["repositoryId"] = "repo", ["taskRevision"] = RelayLimits.MaxRecords, ["tasks"] = full }.ToJsonString() } };
         var refused = Board(busy, "task_update", new() { ["taskId"] = "more", ["expectedVersion"] = 0 });
         Assert.Equal("CapacityExceeded", refused.Code);
-        Assert.Equal((RelayLimits.MaxRecords, RelayLimits.MaxRecords, 0), (Data(refused)["maxTasks"]!.GetValue<int>(), Data(refused)["openTasks"]!.GetValue<int>(), Data(refused)["archivable"]!.GetValue<int>()));
+        Assert.Equal((RelayLimits.MaxRecords, RelayLimits.MaxRecords, 0, 0), (Data(refused)["maxTasks"]!.GetValue<int>(), Data(refused)["openTasks"]!.GetValue<int>(), Data(refused)["finishedTasks"]!.GetValue<int>(), Data(refused)["archivable"]!.GetValue<int>()));
     }
 
     [Fact]
@@ -879,6 +895,61 @@ public sealed class CoordinationTests
         Assert.True(Call(control, "control", "session_open", new() { ["requestId"] = "new" }, seconds: 30 * 3600 + 60).Ok);
         Assert.True(StateJson(control)["sessions"]!.AsObject().ContainsKey("busy"));
         Assert.False(StateJson(control)["sessions"]!.AsObject().ContainsKey("old-1"));
+    }
+
+    [Fact]
+    public void A_delta_from_zero_pages_every_live_task_and_one_older_than_the_archive_floor_restarts()
+    {
+        // 1,500 live tasks and the board's full memory of 2,048 archived IDs: more than the cursor ever pages through at once.
+        var tasks = new JsonObject();
+        for (var i = 0; i < 1_500; i++) tasks["live-" + i] = new JsonObject { ["taskId"] = "live-" + i, ["version"] = 1, ["changeRevision"] = 3_000 + i, ["actions"] = new JsonObject() };
+        var archived = new JsonObject();
+        for (var i = 0; i < RelayLimits.MaxArchivedIds; i++) archived["gone-" + i] = new JsonArray(2_000 + i % 900, Now.ToUnixTimeSeconds());
+        var state = new StateEnvelope<CoordinationDocument> { Value = new() { Json = new JsonObject { ["repositoryId"] = "repo", ["taskRevision"] = 5_000, ["tasks"] = tasks, ["archivedTasks"] = archived, ["archiveFloor"] = 1_000 }.ToJsonString() } };
+        List<JsonObject> All(long since)
+        {
+            var items = new List<JsonObject>();
+            long? cursor = 0;
+            while (cursor is { } at)
+            {
+                var args = new JsonObject { ["sinceRevision"] = since, ["limit"] = RelayLimits.MaxPageSize };
+                if (at > 0) { args["cursor"] = at; args["snapshotRevision"] = 5_000; }
+                var page = Call(state, "board", "task_get", args);
+                Assert.True(page.Ok, page.Code);
+                items.AddRange(Data(page)["items"]!.AsArray().Select(item => item!.AsObject()));
+                cursor = Data(page)["nextCursor"]?.GetValue<long>();
+            }
+            return items;
+        }
+        // A reader from 0 gets the live tasks only, every one of them.
+        var fromZero = All(0);
+        Assert.Equal(1_500, fromZero.Count);
+        Assert.DoesNotContain(fromZero, item => item["archived"] is not null);
+        // A checkpoint at the floor gets every live change and every remembered removal, past what one cursor range covered before.
+        var fromFloor = All(1_000);
+        Assert.Equal(1_500 + RelayLimits.MaxArchivedIds, fromFloor.Count);
+        // One older than the floor cannot learn every removal: it restarts from 0.
+        var stale = Call(state, "board", "task_get", new() { ["sinceRevision"] = 999 });
+        Assert.Equal("DeltaRestartRequired", stale.Code);
+        Assert.Equal((0L, 1_000L), (Data(stale)["sinceRevision"]!.GetValue<long>(), Data(stale)["archiveFloor"]!.GetValue<long>()));
+    }
+
+    [Fact]
+    public void An_archived_dependency_the_board_forgot_counts_as_completed_once_the_hub_names_it()
+    {
+        var state = new StateEnvelope<CoordinationDocument>();
+        // Without the hub's lookup, an ID the board no longer knows is unknown.
+        Assert.Equal("DependencyUnknown", Board(state, "task_update", new() { ["taskId"] = "b", ["expectedVersion"] = 0, ["workflow"] = DependentWorkflow("ready", "long-gone") }).Code);
+        // The hub found it in the archive table: it is remembered, and counts as completed for offers and claims.
+        Assert.True(Board(state, "task_update", new() { ["taskId"] = "b", ["expectedVersion"] = 0, ["workflow"] = DependentWorkflow("ready", "long-gone"), ["archivedDependsOn"] = new JsonArray("long-gone", "unrelated") }).Ok);
+        var remembered = StateJson(state)["archivedTasks"]!.AsObject();
+        Assert.Equal(["long-gone"], remembered.Select(x => x.Key));
+        Assert.Equal("b", Data(Board(state, "__next_work", new() { ["sessionId"] = "w" }))["offer"]!["taskId"]!.GetValue<string>());
+        Assert.True(Board(state, "task_claim", new() { ["taskId"] = "b", ["sessionId"] = "w", ["expectedVersion"] = 1 }).Ok);
+        // While b depends on it, the sweep never forgets it, however old; no delta lists it as a removal.
+        Assert.True(Board(state, Operations.TaskArchive, new(), days: RelayLimits.ArchivedIdDays + 5).Ok);
+        Assert.True(StateJson(state)["archivedTasks"]!.AsObject().ContainsKey("long-gone"));
+        Assert.DoesNotContain(Data(Board(state, "task_get", new() { ["sinceRevision"] = 1 }, days: 40))["items"]!.AsArray(), item => item!["taskId"]!.GetValue<string>() == "long-gone");
     }
 
     private static JsonObject DependentWorkflow(string state, params string[] dependsOn)
@@ -1018,6 +1089,21 @@ public sealed class CoordinationTests
         Assert.Equal("DependenciesIncomplete", unknown.Code);
         Assert.Equal(["gone"], Data(unknown)["dependsOn"]!.AsArray().Select(x => x!.GetValue<string>()));
         foreach (var legacy in new[] { "string", "numbers", "objects" }) Assert.True(Claim(legacy).Ok, legacy);
+    }
+
+    [Fact]
+    public void Archiving_closes_every_open_item_of_its_tasks_in_one_batch()
+    {
+        var session = AttentionSession();
+        Assert.True(RaiseAttention(session, "review_ready", "t1").Ok);
+        Assert.True(RaiseAttention(session, "failed", "t2").Ok);
+        Assert.True(RaiseAttention(session, "next_work", "t3").Ok);
+        var closed = Call(session, "session", "__attention_close", new() { ["taskIds"] = new JsonArray("t1", "t2"), ["revision"] = 9 });
+        Assert.Equal(2, Data(closed)["closed"]!.GetValue<int>());
+        Assert.Equal(["t3"], AttentionItems(session).Select(item => item.Value!["taskId"]!.GetValue<string>()));
+        // A late raise from before the archive, with an older revision, stays closed.
+        Assert.True(RaiseAttention(session, "review_ready", "t1", new() { ["revision"] = 5 }).Ok);
+        Assert.Equal(["t3"], AttentionItems(session).Select(item => item.Value!["taskId"]!.GetValue<string>()));
     }
 
     private static StateEnvelope<CoordinationDocument> AttentionSession()

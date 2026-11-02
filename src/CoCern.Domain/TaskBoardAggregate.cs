@@ -75,7 +75,12 @@ internal static class TaskBoardAggregate
             if (context.Operation != RelayTools.TaskUpdate || !ExpectedVersionMatches(context.Args, 0)) return Error(NotFound);
             // Full even after archiving: every task is open, claimed or waiting on an action.
             if (tasks.Count >= RelayLimits.MaxRecords)
-                return Error(CapacityExceeded, new { maxTasks = RelayLimits.MaxRecords, openTasks = tasks.Count(entry => entry.Value is JsonObject item && !TaskArchiving.IsFinished(item)), archivable = 0 });
+                return Error(CapacityExceeded, new
+                {
+                    maxTasks = RelayLimits.MaxRecords, openTasks = tasks.Count(entry => entry.Value is JsonObject item && !TaskArchiving.IsFinished(item)),
+                    // Finished tasks wait MinArchiveAgeHours, a claim's lease or an open action before they can leave.
+                    finishedTasks = tasks.Count(entry => entry.Value is JsonObject item && TaskArchiving.IsFinished(item)), archivable = 0
+                });
             tasks[taskId] = task = new() { ["taskId"] = taskId, ["version"] = 0, ["actions"] = new JsonObject(), ["messages"] = new JsonArray(), ["reports"] = new JsonArray(), ["facts"] = new JsonObject() };
         }
         return context.Operation switch
@@ -107,11 +112,17 @@ internal static class TaskBoardAggregate
         var since = Number(args, "sinceRevision");
         var current = Number(state, "taskRevision");
         var offset = Number(args, "cursor");
-        if (since < 0 || since > current || offset < 0 || offset > RelayLimits.MaxRecords || offset > 0 && !args.ContainsKey("snapshotRevision")) return Error(InvalidArguments);
+        // Live tasks plus, for a checkpoint, remembered removals: at most MaxRecords of each.
+        if (since < 0 || since > current || offset < 0 || offset > 2 * RelayLimits.MaxRecords || offset > 0 && !args.ContainsKey("snapshotRevision")) return Error(InvalidArguments);
         if (args.ContainsKey("snapshotRevision") && Number(args, "snapshotRevision") != current) return Error(DeltaRestartRequired, new { restartRequired = true, currentRevision = current });
-        // Tasks moved to the archive since the checkpoint come back as removals: { taskId, archived: true, changeRevision }.
-        var removed = (state[TaskArchiving.ArchivedKey] as JsonObject ?? new JsonObject()).Where(x => Number(state[TaskArchiving.ArchivedKey]!.AsObject(), x.Key) > since)
-            .Select(x => (x.Key, Item: (JsonNode)new JsonObject { ["taskId"] = x.Key, ["archived"] = true, ["changeRevision"] = Number(state[TaskArchiving.ArchivedKey]!.AsObject(), x.Key) }));
+        // The board forgot archived IDs up to archiveFloor; a checkpoint older than that cannot learn every removal, so it starts over from 0.
+        var floor = Number(state, TaskArchiving.FloorKey);
+        if (since > 0 && since < floor) return Error(DeltaRestartRequired, new { restartRequired = true, currentRevision = current, archiveFloor = floor, sinceRevision = 0 });
+        // Tasks moved to the archive since the checkpoint come back as removals: { taskId, archived: true, changeRevision }. A reader from
+        // 0 has seen nothing yet, so it gets only live tasks.
+        var removed = since == 0 ? Enumerable.Empty<(string Key, JsonNode Item)>() : (state[TaskArchiving.ArchivedKey] as JsonObject ?? new JsonObject())
+            .Select(x => (x.Key, Revision: TaskArchiving.Revision(x.Value))).Where(x => x.Revision > since)
+            .Select(x => (x.Key, Item: (JsonNode)new JsonObject { ["taskId"] = x.Key, ["archived"] = true, ["changeRevision"] = x.Revision }));
         var all = ObjectAt(state, "tasks").Where(x => Number(x.Value!.AsObject(), "changeRevision") > since).Select(x => (x.Key, Item: (JsonNode)Summary(x.Value!.AsObject())))
             .Concat(removed).OrderBy(x => x.Key, StringComparer.Ordinal).Select(x => x.Item).ToArray();
         var limit = (int)Math.Clamp(Number(args, "limit", RelayLimits.DefaultPageSize), 1, RelayLimits.MaxPageSize);
@@ -291,6 +302,8 @@ internal static class TaskBoardAggregate
             // A packet whose authorityRef names a standing grant is ready only while that grant exists, covers it and has not expired.
             if (Text(workflow, "state") == "ready" && TaskWorkflow.GrantRefusal(context.State, workflow, context.Now) is { } grant) return grant;
             var tasks = ObjectAt(context.State, "tasks");
+            // The hub passes the dependencies it found in the archive table (archivedDependsOn); they count as completed from now on.
+            TaskArchiving.Remember(context.State, Strings(args["archivedDependsOn"]).Intersect(TaskWorkflow.Dependencies(workflow), StringComparer.Ordinal), context.Now);
             if (TaskWorkflow.CheckDependencies(tasks, Text(task, "taskId"), workflow) is { } dependency) return Error(dependency);
             var completing = Text(workflow, "state") == "completed" && (task["workflow"] is not JsonObject prior || Text(prior, "state") != "completed");
             task["workflow"] = workflow.DeepClone();

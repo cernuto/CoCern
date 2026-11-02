@@ -706,6 +706,37 @@ public sealed class CoreSiloTests
         Assert.Contains(new AnomalyOptions { Thresholds = new Dictionary<string, AnomalyThreshold> { [AnalyticsQueryNames.QualityGuardrails] = new(0, 5) } }.Checks(), check => check.Query == AnalyticsQueryNames.QualityGuardrails);
     }
 
+    [Fact]
+    public async Task A_board_archive_sweep_that_fails_waits_before_running_again()
+    {
+        var clock = new ManualClock(DateTimeOffset.Parse("2026-10-29T00:00:00Z"));
+        using var host = new HostBuilder().ConfigureLogging(log => log.ClearProviders()).UseOrleans(silo => silo
+            .UseLocalhostClustering(siloPort: FreePort(), gatewayPort: FreePort(), serviceId: "core-archive-retry-tests", clusterId: Guid.NewGuid().ToString("N"))
+            .AddMemoryGrainStorage("relay"))
+            .ConfigureServices(services => services.AddCoCernCore().AddSingleton(new BoardOptions { Time = clock })
+                .Configure<Orleans.Serialization.Configuration.TypeManifestOptions>(options => options.AllowAllTypes = true)).Build();
+        await host.StartAsync();
+        try
+        {
+            var storage = host.Services.GetRequiredKeyedService<Orleans.Storage.IGrainStorage>("relay");
+            var id = GrainId.Create("cocern.board", "repo/default");
+            // A board whose every write fails (one task is past the task byte limit) with an archive sweep due now.
+            var board = new StateEnvelope<CoordinationDocument>
+            {
+                Value = new() { Json = new JsonObject { ["repositoryId"] = "repo", ["tasks"] = new JsonObject { ["huge"] = new JsonObject { ["taskId"] = "huge", ["facts"] = new JsonObject { ["x"] = new string('x', RelayLimits.MaxTaskBytes) } } } }.ToJsonString() }
+            };
+            board.DueWork.Add(new(DueWorkKinds.TaskArchive, DueWorkKinds.TaskArchive, clock.GetUtcNow().AddMinutes(-1)));
+            await storage.WriteStateAsync("board", id, new GrainState<StateEnvelope<CoordinationDocument>>(board));
+            var dispatched = await host.Services.GetRequiredService<IGrainFactory>().GetGrain<ITaskBoardGrain>("repo/default").ExecuteAsync(new RelayCaller("relay-dispatcher", false, [], true), Operations.Dispatch, "{}");
+            Assert.True(dispatched.Ok, dispatched.Code);
+            var stored = new GrainState<StateEnvelope<CoordinationDocument>>(new());
+            await storage.ReadStateAsync("board", id, stored);
+            var due = Assert.Single(stored.State!.DueWork, work => work.Kind == DueWorkKinds.TaskArchive);
+            Assert.Equal(clock.GetUtcNow().AddMinutes(RelayLimits.ArchiveRetryMinutes), due.DueAt);
+        }
+        finally { await host.StopAsync(); }
+    }
+
     /// <summary>A clock the test moves by hand.</summary>
     private sealed class ManualClock(DateTimeOffset start) : TimeProvider
     {

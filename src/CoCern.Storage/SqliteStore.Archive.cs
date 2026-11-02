@@ -40,13 +40,12 @@ public sealed partial class SqliteStore : ITaskArchive
         using var insert = Command("""
             INSERT INTO task_archive(repository_id, board_id, task_id, completed_ticks, archived_ticks, grain_type, grain_key, json)
             VALUES ($repository, $board, $task, $completed, $archived, $type, $key, $json)
-            ON CONFLICT(repository_id, board_id, task_id) DO UPDATE SET completed_ticks=excluded.completed_ticks, archived_ticks=excluded.archived_ticks,
-                grain_type=excluded.grain_type, grain_key=excluded.grain_key, json=excluded.json;
+            ON CONFLICT(repository_id, board_id, task_id) DO NOTHING;
             """, transaction);
         // The task's search row stays, marked archived; the board no longer lists it, and its marker never matches a live task again.
         using var mark = Command("""
             UPDATE search_index SET status='archived' WHERE rowid IN (SELECT id FROM search_docs WHERE state_name=$state AND grain_type=$type AND grain_key=$key AND kind='task' AND doc_id=$task);
-            UPDATE search_docs SET marker='archived' WHERE state_name=$state AND grain_type=$type AND grain_key=$key AND kind='task' AND doc_id=$task;
+            UPDATE search_docs SET marker=$marker WHERE state_name=$state AND grain_type=$type AND grain_key=$key AND kind='task' AND doc_id=$task;
             """, transaction);
         foreach (var task in archived)
         {
@@ -59,13 +58,16 @@ public sealed partial class SqliteStore : ITaskArchive
             insert.Parameters.AddWithValue("$type", type);
             insert.Parameters.AddWithValue("$key", key);
             insert.Parameters.AddWithValue("$json", task.Json);
-            insert.ExecuteNonQuery();
+            // The hub refuses to reuse an archived ID, so a row already there means the same task again: the first copy is kept.
+            if (insert.ExecuteNonQuery() == 0)
+                Console.Error.WriteLine($"CoCern archive: {task.RepositoryId}/{BoardOf(key)}/{task.TaskId} is already archived; the first copy is kept.");
             if (!_searchOptions.Enabled) continue;
             mark.Parameters.Clear();
             mark.Parameters.AddWithValue("$state", stateName);
             mark.Parameters.AddWithValue("$type", type);
             mark.Parameters.AddWithValue("$key", key);
             mark.Parameters.AddWithValue("$task", task.TaskId);
+            mark.Parameters.AddWithValue("$marker", SearchExtraction.ArchivedMarker);
             mark.ExecuteNonQuery();
         }
     }
@@ -77,7 +79,7 @@ public sealed partial class SqliteStore : ITaskArchive
         using var reader = rows.ExecuteReader();
         while (reader.Read())
             if (SearchExtraction.ArchivedTaskDocument(reader.GetString(0), reader.GetString(1), reader.GetString(4)) is { } document)
-                writer.Upsert(AggregateKinds.Board, reader.GetString(2), reader.GetString(3), new SearchEntry(document, "archived"));
+                writer.Upsert(AggregateKinds.Board, reader.GetString(2), reader.GetString(3), new SearchEntry(document, SearchExtraction.ArchivedMarker));
     }
 
     /// <summary>Reads on the read-only connection, which sees the last commit without waiting on the writer.</summary>
@@ -93,6 +95,28 @@ public sealed partial class SqliteStore : ITaskArchive
             command.Parameters.AddWithValue("$board", boardId);
             command.Parameters.AddWithValue("$task", taskId);
             return await command.ExecuteScalarAsync(cancellationToken) as string;
+        }
+        finally { _searchGate.Release(); }
+    }
+
+    /// <summary>Which of <paramref name="taskIds"/> this board archived. One query on the read-only connection.</summary>
+    public async Task<IReadOnlySet<string>> ArchivedIdsAsync(string repositoryId, string boardId, IReadOnlyCollection<string> taskIds, CancellationToken cancellationToken = default)
+    {
+        var found = new HashSet<string>(StringComparer.Ordinal);
+        if (taskIds.Count == 0) return found;
+        await _searchGate.WaitAsync(cancellationToken);
+        try
+        {
+            if (_searchConnection is not { } connection) return found;
+            using var command = connection.CreateCommand();
+            var names = taskIds.Distinct(StringComparer.Ordinal).Select((id, index) => (Id: id, Name: "$t" + index)).ToArray();
+            command.CommandText = $"SELECT task_id FROM task_archive WHERE repository_id=$repository AND board_id=$board AND task_id IN ({string.Join(", ", names.Select(name => name.Name))});";
+            command.Parameters.AddWithValue("$repository", repositoryId);
+            command.Parameters.AddWithValue("$board", boardId);
+            foreach (var (id, name) in names) command.Parameters.AddWithValue(name, id);
+            using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken)) found.Add(reader.GetString(0));
+            return found;
         }
         finally { _searchGate.Release(); }
     }

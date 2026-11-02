@@ -252,7 +252,13 @@ public sealed class TaskBoardGrain([PersistentState("board", "relay")] IPersiste
         var repository = JsonFields.Text(JsonNode.Parse(candidate.Value.Json)!.AsObject(), "repositoryId");
         if (repository.Length == 0) return true;
         var sweeper = new RelayCaller("relay-archive", false, [repository], true);
-        if (!CoordinationStateMachine.Apply(candidate, Kind, this.GetPrimaryKeyString(), sweeper, Operations.TaskArchive, new JsonObject { ["repositoryId"] = repository }, now, false, ArchiveAfterDays).Ok) return true;
+        if (!CoordinationStateMachine.Apply(candidate, Kind, this.GetPrimaryKeyString(), sweeper, Operations.TaskArchive, new JsonObject { ["repositoryId"] = repository }, now, false, ArchiveAfterDays).Ok)
+        {
+            // A sweep the board refuses would otherwise stay due and run on every pump: try again after a backoff.
+            candidate.DueWork.RemoveAll(x => x.Kind == DueWorkKinds.TaskArchive);
+            candidate.DueWork.Add(new(DueWorkKinds.TaskArchive, DueWorkKinds.TaskArchive, now.AddMinutes(RelayLimits.ArchiveRetryMinutes)));
+            return await CommitAsync(candidate);
+        }
         CoordinationStateMachine.ScheduleLeases(candidate, ArchiveAfterDays);
         return await CommitAsync(candidate);
     }

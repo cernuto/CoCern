@@ -638,7 +638,8 @@ public class AnalyticsTests
             System.Text.Json.Nodes.JsonObject As(System.Text.Json.Nodes.JsonObject args) { args["sessionId"] = session["sessionId"]!.DeepClone(); args["sessionToken"] = session["sessionToken"]!.DeepClone(); return args; }
             Assert.True((await Call("task_update", As(new() { ["taskId"] = "done", ["expectedVersion"] = 0, ["workflow"] = ArchiveWorkflow("ready", "Refund ledger cleanup") }))).Ok);
             Assert.True((await Call("task_update", As(new() { ["taskId"] = "done", ["expectedVersion"] = 1, ["workflow"] = ArchiveWorkflow("completed", "Refund ledger cleanup"), ["message"] = new System.Text.Json.Nodes.JsonObject { ["text"] = "Shipped." } }))).Ok);
-            Assert.True((await Call("task_update", As(new() { ["taskId"] = "next", ["expectedVersion"] = 0, ["workflow"] = ArchiveWorkflow("ready", "Follow-up", "done") }))).Ok);
+            var done = ArchiveWorkflow("ready", "Follow-up", "done");
+            Assert.True((await Call("task_update", As(new() { ["taskId"] = "next", ["expectedVersion"] = 0, ["workflow"] = done }))).Ok);
 
             async Task Sweep()
             {
@@ -683,6 +684,29 @@ public class AnalyticsTests
             Assert.Equal(1L, Single(await analytics.RunSqlAsync("SELECT count(*) FROM tasks WHERE archived AND task_id = 'done' AND state = 'completed'")));
             Assert.Equal(1L, Single(await analytics.RunSqlAsync("SELECT count(*) FROM messages WHERE task_id = 'done'")));
             Assert.Equal(1L, Single(await analytics.RunSqlAsync("SELECT count(*) FROM archived_tasks")));
+
+            // Once next finishes too, nothing depends on done, and a month later the board forgets both IDs; the archive table still knows them.
+            done = ArchiveWorkflow("completed", "Follow-up", "done");
+            Assert.True((await Call("task_update", As(new() { ["taskId"] = "next", ["expectedVersion"] = 2, ["workflow"] = done }))).Ok);
+            for (var month = 0; month < 3; month++)
+            {
+                clock.Advance(TimeSpan.FromDays(RelayLimits.ArchivedIdDays + 1));
+                if ((await store.ReadDueAsync(clock.GetUtcNow(), 100)).Any(work => work.Kind == DueWorkKinds.TaskArchive)) await Sweep();
+            }
+            Assert.Equal(2, Count(database, "SELECT COUNT(*) FROM task_archive"));
+            var board = System.Text.Json.Nodes.JsonNode.Parse(System.Text.Json.Nodes.JsonNode.Parse(Rows(database, "SELECT payload FROM grain_state WHERE state_name = 'board'"))!["Value"]!["Json"]!.GetValue<string>())!.AsObject();
+            Assert.Empty(board["archivedTasks"]?.AsObject() ?? new());
+            Assert.Empty(board["tasks"]!.AsObject());
+            // Writes to a forgotten archived ID, a new task under it included, are still refused; it still reads, and search still finds it.
+            Assert.Equal(RelayErrorCodes.TaskArchived, (await Call("task_update", As(new() { ["taskId"] = "done", ["expectedVersion"] = 0 }))).Code);
+            Assert.Equal(RelayErrorCodes.TaskArchived, (await Call("task_claim", As(new() { ["taskId"] = "done", ["expectedVersion"] = 3 }))).Code);
+            Assert.True(Data(await Call("task_get", As(new() { ["taskId"] = "done" })))["archived"]!.GetValue<bool>());
+            Assert.Equal("archived", Assert.Single(Data(await Call("search", As(new() { ["query"] = "refund ledger" })))["hits"]!.AsArray())!["s"]!.GetValue<string>());
+            // A new dependency on it counts as completed, and a client cannot claim one itself.
+            var later = await Call("task_update", As(new() { ["taskId"] = "later", ["expectedVersion"] = 0, ["workflow"] = ArchiveWorkflow("ready", "Later", "done") }));
+            Assert.True(later.Ok, later.Code);
+            Assert.True((await Call("task_claim", As(new() { ["taskId"] = "later", ["expectedVersion"] = 1 }))).Ok);
+            Assert.Equal(RelayErrorCodes.DependencyUnknown, (await Call("task_update", As(new() { ["taskId"] = "fake", ["expectedVersion"] = 0, ["workflow"] = ArchiveWorkflow("ready", "Fake", "never"), ["archivedDependsOn"] = new System.Text.Json.Nodes.JsonArray("never") }))).Code);
         }
         finally { await host.StopAsync(); }
     }
@@ -694,6 +718,15 @@ public class AnalyticsTests
     }
 
     private static object? Single(AnalyticsResult result) => Assert.Single(Assert.Single(result.Rows));
+
+    private static string Rows(string database, string sql)
+    {
+        using var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = database, Mode = SqliteOpenMode.ReadOnly, Pooling = false }.ToString());
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        return (string)command.ExecuteScalar()!;
+    }
 
     private static long Count(string database, string sql)
     {

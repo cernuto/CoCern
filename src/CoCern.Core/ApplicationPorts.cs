@@ -29,6 +29,9 @@ public interface ITaskArchive
 {
     /// <summary>The task's JSON as it was archived, or null when this board archived no task with that ID.</summary>
     Task<string?> ReadArchivedTaskAsync(string repositoryId, string boardId, string taskId, CancellationToken cancellationToken = default);
+
+    /// <summary>Which of <paramref name="taskIds"/> this board archived. IDs stay resolvable here long after the board forgot them.</summary>
+    Task<IReadOnlySet<string>> ArchivedIdsAsync(string repositoryId, string boardId, IReadOnlyCollection<string> taskIds, CancellationToken cancellationToken = default);
 }
 
 /// <summary>Port implemented by storage: full-text search over committed state, scoped to one repository and one session's inbox.</summary>

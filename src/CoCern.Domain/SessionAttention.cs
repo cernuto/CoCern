@@ -87,14 +87,15 @@ internal static class SessionAttention
         return dropped == id ? Ok(new { raised = false, reason = "full" }) : Ok(new { raised = true, itemId = id, refreshed = false, dropped });
     }
 
-    /// <summary>Closes the items of one task (all kinds, or only <c>kinds</c>), of one subject, or one item by ID.</summary>
+    /// <summary>Closes the items of one task, or of several (<c>taskIds</c>, as archiving sends; all kinds, or only <c>kinds</c>), of one subject, or one item by ID.</summary>
     public static RelayReply Close(AggregateContext context)
     {
         var state = context.State;
         if (!state.ContainsKey("principalId")) return Error(SessionUnknown);
         var args = context.Args;
         var (taskId, boardId, subject, itemId) = (Optional(args, "taskId"), Optional(args, "boardId") is { Length: > 0 } board ? board : "default", Optional(args, "subject"), Optional(args, "itemId"));
-        if (taskId.Length == 0 && subject.Length == 0 && itemId.Length == 0) return Error(InvalidArguments, new { required = "taskId" });
+        var taskIds = args["taskIds"] is JsonArray named ? named.OfType<JsonValue>().Select(x => x.TryGetValue<string>(out var id) ? id : "").Where(id => id.Length > 0).ToHashSet(StringComparer.Ordinal) : null;
+        if (taskId.Length == 0 && taskIds is not { Count: > 0 } && subject.Length == 0 && itemId.Length == 0) return Error(InvalidArguments, new { required = "taskId" });
         var kinds = args["kinds"] is JsonArray list ? list.OfType<JsonValue>().Select(x => x.TryGetValue<string>(out var kind) ? kind : "").Where(AttentionKinds.All.Contains).ToHashSet(StringComparer.Ordinal) : null;
         var items = ObjectAt(state, "attention");
         RemoveExpired(items, context.Now);
@@ -103,7 +104,8 @@ internal static class SessionAttention
         foreach (var item in AttentionScheduler.Items(items))
         {
             var matches = itemId.Length > 0 ? item.Id == itemId
-                : (taskId.Length == 0 || item.TaskId == taskId && item.BoardId == boardId) && (subject.Length == 0 || item.Subject == subject) && (kinds is null || kinds.Contains(item.Kind));
+                : (taskId.Length == 0 || item.TaskId == taskId && item.BoardId == boardId) && (taskIds is null || taskIds.Contains(item.TaskId) && item.BoardId == boardId)
+                  && (subject.Length == 0 || item.Subject == subject) && (kinds is null || kinds.Contains(item.Kind));
             if (!matches) continue;
             RememberClosed(state, item.Key, Math.Max(revision, Number(items[item.Id]!.AsObject(), "revision")));
             Tombstone(state, item.Key, items[item.Id]!.AsObject(), context.Now);

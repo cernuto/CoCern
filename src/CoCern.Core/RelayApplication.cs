@@ -290,7 +290,8 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
     private async Task<RelayReply> ReadTaskAsync(RelayCaller caller, JsonObject args, CancellationToken cancellationToken)
     {
         var reply = await CallBoard(caller, RelayTools.TaskGet, args);
-        if (reply.Code != TaskArchived || archive is null || Text(args, "taskId") is not { Length: > 0 } taskId) return reply;
+        // The board answers TaskArchived for an ID it still remembers, and NotFound once it forgot it; the archive table has both.
+        if (reply.Code is not (TaskArchived or NotFound) || archive is null || Text(args, "taskId") is not { Length: > 0 } taskId) return reply;
         string? json;
         try { json = await archive.ReadArchivedTaskAsync(Text(args, "repositoryId"), Text(args, "boardId", "default"), taskId, cancellationToken); }
         catch (Exception exception) when (exception is System.Data.Common.DbException or ObjectDisposedException) { return Error(Unavailable); }
@@ -865,7 +866,37 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
 
     private Task<RelayReply> CallControl(RelayCaller caller, string operation, JsonObject args) => Call(AggregateKinds.Control, AggregateKinds.ControlKey, caller, operation, args);
     private Task<RelayReply> CallSession(RelayCaller caller, string operation, JsonObject args) => Call(AggregateKinds.Session, Text(args, "sessionId"), caller, operation, args);
-    private Task<RelayReply> CallBoard(RelayCaller caller, string operation, JsonObject args) => Call(AggregateKinds.Board, BoardKey(args), caller, operation, args);
+    private Task<RelayReply> CallBoard(RelayCaller caller, string operation, JsonObject args) =>
+        archive is not null && operation is RelayTools.TaskUpdate or RelayTools.TaskClaim or RelayTools.ActionBegin or RelayTools.ActionReport or RelayTools.SendMessage or RelayTools.ClaimRenew or RelayTools.ClaimRelease
+            ? CallTaskWriteAsync(caller, operation, args)
+            : Call(AggregateKinds.Board, BoardKey(args), caller, operation, args);
+
+    /// <summary>
+    /// A task write, checked against the archive table, which keeps every archived ID after the board forgets it: a new task under an
+    /// archived ID, or a write the board answers <c>NotFound</c> for one, gets <c>TaskArchived</c>; a workflow's <c>dependsOn</c> IDs found
+    /// there are passed as <c>archivedDependsOn</c>, so they count as completed. A client cannot supply <c>archivedDependsOn</c> itself.
+    /// </summary>
+    private async Task<RelayReply> CallTaskWriteAsync(RelayCaller caller, string operation, JsonObject args)
+    {
+        var (repository, board, taskId) = (Text(args, "repositoryId"), Text(args, "boardId", "default"), Text(args, "taskId"));
+        args.Remove("archivedDependsOn");
+        try
+        {
+            if (operation == RelayTools.TaskUpdate && args["workflow"] is JsonObject workflow && workflow["dependsOn"] is JsonArray dependsOn)
+            {
+                var ids = dependsOn.OfType<JsonValue>().Select(value => value.TryGetValue<string>(out var id) ? id : "").Where(id => id.Length > 0).Distinct(StringComparer.Ordinal).Take(RelayLimits.MaxDependencies).ToArray();
+                if (ids.Length > 0 && await archive!.ArchivedIdsAsync(repository, board, ids) is { Count: > 0 } found)
+                    args["archivedDependsOn"] = new JsonArray(found.Order(StringComparer.Ordinal).Select(id => (JsonNode)id).ToArray());
+            }
+            if (taskId.Length > 0 && operation == RelayTools.TaskUpdate && ExpectedVersionMatches(args, 0) && (await archive!.ArchivedIdsAsync(repository, board, [taskId])).Count > 0)
+                return Error(TaskArchived, new { taskId, archived = true });
+        }
+        catch (Exception exception) when (exception is System.Data.Common.DbException or ObjectDisposedException) { return Error(Unavailable); }
+        var reply = await Call(AggregateKinds.Board, BoardKey(args), caller, operation, args);
+        if (reply.Code != NotFound || taskId.Length == 0) return reply;
+        try { return (await archive!.ArchivedIdsAsync(repository, board, [taskId])).Count > 0 ? Error(TaskArchived, new { taskId, archived = true }) : reply; }
+        catch (Exception exception) when (exception is System.Data.Common.DbException or ObjectDisposedException) { return reply; }
+    }
     private Task<RelayReply> Call(string kind, string key, RelayCaller caller, string operation, JsonObject args) => CoordinationGrain.Aggregate(grains, kind, key).ExecuteAsync(caller, operation, args.ToJsonString());
 
     private sealed class CallTrace

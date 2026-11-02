@@ -104,6 +104,16 @@ public static class RelayLimits
     /// <summary>A board write with this many tasks archives finished ones, oldest first, down to <see cref="ArchiveLowWater"/>, even if younger than the setting.</summary>
     public const int ArchiveHighWater = MaxRecords * 7 / 8;
     public const int ArchiveLowWater = MaxRecords * 3 / 4;
+    /// <summary>Even near the cap, a task is archived no sooner than this after it completed, so a fresh result stays on the board for review.</summary>
+    public const int MinArchiveAgeHours = 24;
+    /// <summary>
+    /// The board remembers recently archived IDs (for deltas and quick refusals) for at most this many IDs or <see cref="ArchivedIdDays"/>,
+    /// whichever is fewer, plus any a live task's <c>dependsOn</c> still names. Older IDs resolve through the archive table.
+    /// </summary>
+    public const int MaxArchivedIds = MaxRecords;
+    public const int ArchivedIdDays = 30;
+    /// <summary>A board's archive sweep that fails waits this long before it runs again.</summary>
+    public const int ArchiveRetryMinutes = 60;
     public const int MaxTaskBytes = 262_144;
     public const int MaxReportBytes = 8_192;
     public const int MaxClaimResources = 16;

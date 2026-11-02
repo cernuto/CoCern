@@ -203,9 +203,10 @@ public sealed partial class SqliteStore : IDueWorkSource, IDisposable, IAsyncDis
                 due.Parameters.AddWithValue("$ticks", work.DueAt.UtcTicks);
                 due.ExecuteNonQuery();
             }
-            var indexedSource = WriteSearch(transaction, stateName, grainId, expectedEtag, payload, search);
-            // Tasks leaving the board in this commit: their archive rows (and archived search rows) commit or roll back with it.
+            // Tasks leaving the board in this commit: their archive rows commit or roll back with it. Their search rows are marked
+            // archived first, so the index update below keeps them although the board no longer holds the tasks.
             if (archived is { Count: > 0 }) WriteArchive(transaction, stateName, grainId, archived);
+            var indexedSource = WriteSearch(transaction, stateName, grainId, expectedEtag, payload, search);
             ArchiveFault?.Invoke();
             cancellationToken.ThrowIfCancellationRequested();
             transaction.Commit();
