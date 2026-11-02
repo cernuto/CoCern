@@ -513,6 +513,46 @@ public sealed class CollaborationTests
     }
 
     [Fact]
+    public void Claim_and_action_begin_recheck_the_grant_named_in_authorityRef()
+    {
+        var state = new StateEnvelope<CoordinationDocument>();
+        Assert.True(Standing(state, "standing_put", Put(0, "grants", new JsonArray(Grant("short", "resource", 60, "rig-1"), Grant("rigs", "resource", 3600, "rig-2")))).Ok);
+        foreach (var id in new[] { "early", "late", "begin-late", "retried" }) Assert.True(Call(state, "task_update", Update(id, 0, Authorized("grant:short", "rig-1"))).Ok);
+        foreach (var id in new[] { "removed", "begin-removed", "rescoped" }) Assert.True(Call(state, "task_update", Update(id, 0, Authorized("grant:rigs", "rig-2"))).Ok);
+        RelayReply Claim(string id, int seconds, string? requestId = null) =>
+            Call(state, "task_claim", new() { ["taskId"] = id, ["sessionId"] = "worker", ["requestId"] = requestId ?? Guid.NewGuid().ToString("N"), ["expectedVersion"] = 1, ["leaseSeconds"] = RelayLimits.MaxLeaseSeconds }, seconds);
+        RelayReply Begin(string id, int seconds) =>
+            Call(state, "action_begin", new() { ["taskId"] = id, ["sessionId"] = "worker", ["requestId"] = Guid.NewGuid().ToString("N"), ["expectedVersion"] = 2, ["actionId"] = "deploy", ["inputFingerprint"] = "f" }, seconds);
+        // The same code and reasons readiness gives.
+        string Reason(RelayReply reply) { Assert.Equal("GrantInvalid", reply.Code); return Data(reply)["reason"]!.GetValue<string>(); }
+
+        // Before the 60-second grant expires, claim and begin work.
+        Assert.True(Claim("early", 0).Ok);
+        Assert.True(Begin("early", 30).Ok);
+        Assert.True(Claim("begin-late", 30).Ok);
+        var retried = Claim("retried", 30, "claim-retried");
+        Assert.True(retried.Ok);
+        Assert.Equal(retried, Claim("retried", 59, "claim-retried"));
+        // After it, a new claim, a retried claim and a new action start are all refused, and none changes state.
+        var before = state.Value.Json;
+        var late = Claim("late", 120);
+        Assert.Equal("expired", Reason(late));
+        Assert.Equal("grant:short", Data(late)["authorityRef"]!.GetValue<string>());
+        Assert.Equal("expired", Reason(Claim("retried", 120, "claim-retried")));
+        Assert.Equal("expired", Reason(Begin("begin-late", 120)));
+        Assert.Equal(before, state.Value.Json);
+
+        // A grant removed by standing_put refuses both as unknown; one rescoped to an action grant refuses as scope.
+        Assert.True(Claim("begin-removed", 0).Ok);
+        var replaced = Grant("rigs", "action", 3600, "deploy-css");
+        Assert.True(Standing(state, "standing_put", Put(1, "grants", new JsonArray(replaced))).Ok);
+        Assert.Equal("scope", Reason(Claim("rescoped", 0)));
+        Assert.True(Standing(state, "standing_put", Put(2, "remove", new JsonArray("rigs"))).Ok);
+        Assert.Equal("unknown", Reason(Claim("removed", 0)));
+        Assert.Equal("unknown", Reason(Begin("begin-removed", 0)));
+    }
+
+    [Fact]
     public void Standing_put_needs_an_administrator_and_the_expected_revision_within_limits()
     {
         var state = new StateEnvelope<CoordinationDocument>();

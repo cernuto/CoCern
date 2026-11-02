@@ -45,6 +45,8 @@ public static class RelayErrorCodes
     // Optimistic concurrency, claims and coordination state
     public const string VersionConflict = "VersionConflict";
     public const string RequestConflict = "RequestConflict";
+    /// <summary>A retry of a request whose stored reply was evicted early to make room; it did not run again. Read the current state.</summary>
+    public const string RequestExpired = "RequestExpired";
     public const string StaleClaim = "StaleClaim";
     public const string Paused = "Paused";
     public const string Busy = "Busy";
@@ -75,6 +77,8 @@ public static class RelayErrorCodes
     public const string WorkflowNotReady = "WorkflowNotReady";
     public const string DependencyCycle = "DependencyCycle";
     public const string DependencyUnknown = "DependencyUnknown";
+    /// <summary><c>task_claim</c> or <c>action_begin</c> on a task whose <c>dependsOn</c> tasks are not all completed; <c>dependsOn</c> lists the unfinished ones.</summary>
+    public const string DependenciesIncomplete = "DependenciesIncomplete";
     public const string GrantInvalid = "GrantInvalid";
 
     // Attention
@@ -106,8 +110,8 @@ public static class RelayErrorCodes
 
     private static readonly FrozenSet<string> Conflicts = new[]
     {
-        VersionConflict, RequestConflict, StaleClaim, Paused, Busy, ActionConflict, UnresolvedAction,
-        DeltaRestartRequired, WorkflowRecheckRequired, WorkflowIncomplete, WorkflowNotReady, SnoozeLimit
+        VersionConflict, RequestConflict, RequestExpired, StaleClaim, Paused, Busy, ActionConflict, UnresolvedAction,
+        DeltaRestartRequired, WorkflowRecheckRequired, WorkflowIncomplete, WorkflowNotReady, DependenciesIncomplete, SnoozeLimit
     }.ToFrozenSet(StringComparer.Ordinal);
 
     private static readonly FrozenSet<string> Denials = new[] { RepositoryDenied, SessionDenied, AdministratorRequired, MachineRevoked, MachineRequired }.ToFrozenSet(StringComparer.Ordinal);

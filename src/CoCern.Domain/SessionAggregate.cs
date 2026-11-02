@@ -61,9 +61,9 @@ internal static class SessionAggregate
         if (Flag(context.Args, "supersede") && Text(context.Args, "senderSessionId") is { Length: > 0 } sender)
             foreach (var old in inbox.Where(x => x.Value is JsonObject m && Flag(m, "supersede") && Text(m, "senderSessionId") == sender).Select(x => x.Key).ToArray())
             {
-                // The acknowledged set is bounded like explicit acknowledgments; once full, older messages are simply kept.
-                if (ObjectAt(state, "acked").Count >= RelayLimits.MaxRecords) break;
-                inbox.Remove(old); ObjectAt(state, "acked")[old] = true; superseded++;
+                // The acknowledged set is bounded like explicit acknowledgments.
+                Retention.MakeRoom(ObjectAt(state, "acked"), context.Now);
+                inbox.Remove(old); ObjectAt(state, "acked")[old] = Retention.Stamp(context.Now); superseded++;
                 SessionAttention.CloseMessages(state, [old], context.Now);
             }
         if (inbox.Count >= RelayLimits.MaxRecords) return Error(CapacityExceeded);
@@ -132,21 +132,25 @@ internal static class SessionAggregate
         state["availability"] = Text(args, "availability", "unknown");
         state["hubIncarnation"] = Text(args, "hubIncarnation");
         var registration = state.DeepClone().AsObject();
-        foreach (var secretOrPrivate in new[] { "sessionToken", "requests", "inbox", "acked", "attention", "attentionClosed", "attentionRecent", "attentionSeq", "attentionBoundaryAt", "activeReportedAt" }) registration.Remove(secretOrPrivate);
+        foreach (var secretOrPrivate in new[] { "sessionToken", "requests", "requestTombstones", "inbox", "acked", "attention", "attentionClosed", "attentionRecent", "attentionSeq", "attentionBoundaryAt", "activeReportedAt" }) registration.Remove(secretOrPrivate);
         context.Emit(AggregateKinds.Control, AggregateKinds.ControlKey, Operations.Register, registration);
         return Ok(new { bindingVersion = current + 1 }, current + 1);
     }
 
-    /// <summary>Acknowledgment is explicit and permanent: a later duplicate delivery of an acknowledged message is ignored.</summary>
+    /// <summary>
+    /// Acknowledgment is explicit: a later duplicate delivery of an acknowledged message is ignored. The acknowledged set keeps each ID for
+    /// the retry window (<see cref="RelayLimits.RequestReplayRetentionHours"/>), and a full set drops its oldest, so acknowledging never stops working.
+    /// </summary>
     private static RelayReply Acknowledge(AggregateContext context)
     {
         var ids = context.Args["messageIds"] as JsonArray ?? new JsonArray(Text(context.Args, "messageId"));
         var acknowledged = 0;
+        var acked = ObjectAt(context.State, "acked");
         foreach (var id in Strings(ids))
         {
-            if (!ObjectAt(context.State, "acked").ContainsKey(id) && ObjectAt(context.State, "acked").Count >= RelayLimits.MaxRecords) return Error(CapacityExceeded);
+            if (!acked.ContainsKey(id)) Retention.MakeRoom(acked, context.Now);
             if (ObjectAt(context.State, "inbox").Remove(id)) acknowledged++;
-            ObjectAt(context.State, "acked")[id] = true;
+            acked[id] = Retention.Stamp(context.Now);
         }
         SessionAttention.CloseMessages(context.State, Strings(ids), context.Now);
         return Ok(new { acknowledged });

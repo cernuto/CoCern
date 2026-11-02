@@ -48,9 +48,10 @@ internal static class LockAggregate
         var id = Text(context.Args, "actionKey", Required(context.Args, "actionId"));
         var administrativeAcceptance = context.Caller.IsAdministrator && Flag(context.Args, "administrativeAcceptance");
         if (blockers[id] is JsonObject blocker && (Text(blocker, "sessionId") != context.SessionId || Text(blocker, "principalId") != context.Caller.PrincipalId && !administrativeAcceptance)) return Error(ActionDenied);
+        // Remembered for the retry window so a late block for this action is ignored; a full set drops its oldest, so unblocking never fails.
         var resolved = ObjectAt(state, "resolvedActions");
-        if (!resolved.ContainsKey(id) && resolved.Count >= RelayLimits.MaxRecords) return Error(CapacityExceeded);
-        blockers.Remove(id); resolved[id] = true;
+        if (!resolved.ContainsKey(id)) Retention.MakeRoom(resolved, context.Now);
+        blockers.Remove(id); resolved[id] = Retention.Stamp(context.Now);
         // With no action left in flight, a lease nearing its end is no longer worth a claim_expiring item.
         if (blockers.Count == 0) AttentionSources.OnLeaseSettled(context, Text(state, "holder"), context.Key);
         return Ok(new { resolved = true });

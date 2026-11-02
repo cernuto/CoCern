@@ -206,7 +206,7 @@ internal static class TaskBoardAggregate
         var args = context.Args;
         var session = context.SessionId;
         var version = Number(task, "version");
-        if (!TaskWorkflow.AllowsExecution(task, session)) return TaskWorkflow.NotReady(task);
+        if (TaskWorkflow.ExecutionRefusal(context.State, task, session, context.Now) is { } refusal) return refusal;
         var owned = Text(task, "owner") == session && Date(task, "leaseUntil") > context.Now;
         if (owned && !SameResources(task["resourceIds"], args["resourceIds"])) return Error(ResourceSetConflict, new { resourceIds = task["resourceIds"] }, version);
         var unresolved = TaskActions.HasUnresolved(task);
@@ -263,7 +263,7 @@ internal static class TaskBoardAggregate
             if (TaskWorkflow.Validate(workflow, task["workflow"] as JsonObject, TaskActions.HasUnresolved(task)) is { } invalid) return Error(invalid);
             if (Text(workflow, "state") == "ready" && TaskWorkflow.RequiresResources(context.State) && workflow["packet"]?["resources"] is not JsonArray) return Error(InvalidWorkflow, new { required = "packet.resources" });
             // A packet whose authorityRef names a standing grant is ready only while that grant exists, covers it and has not expired.
-            if (Text(workflow, "state") == "ready" && StandingPreferences.GrantProblem(context.State, workflow, context.Now) is { } grant) return Error(GrantInvalid, new { authorityRef = Text(workflow["packet"]!.AsObject(), "authorityRef"), reason = grant });
+            if (Text(workflow, "state") == "ready" && TaskWorkflow.GrantRefusal(context.State, workflow, context.Now) is { } grant) return grant;
             var tasks = ObjectAt(context.State, "tasks");
             if (TaskWorkflow.CheckDependencies(tasks, Text(task, "taskId"), workflow) is { } dependency) return Error(dependency);
             var completing = Text(workflow, "state") == "completed" && (task["workflow"] is not JsonObject prior || Text(prior, "state") != "completed");

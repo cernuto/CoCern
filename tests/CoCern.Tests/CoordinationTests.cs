@@ -467,6 +467,117 @@ public sealed class CoordinationTests
         Assert.Equal("SessionDenied", (await Invoke(bob, "action_report", spoof)).Code);
     }
 
+    private static JsonObject StateJson(StateEnvelope<CoordinationDocument> state) => JsonNode.Parse(state.Value.Json)!.AsObject();
+    private static JsonObject Note(string requestId, long version) => new() { ["contextId"] = "note", ["requestId"] = requestId, ["expectedVersion"] = version, ["content"] = "v" + version };
+
+    [Fact]
+    public void Request_replays_are_bounded_so_one_note_takes_three_times_the_record_limit()
+    {
+        var state = new StateEnvelope<CoordinationDocument>();
+        Assert.True(Call(state, "board", "task_update", new() { ["taskId"] = "t", ["requestId"] = "create", ["expectedVersion"] = 0 }).Ok);
+        // A request that would change state again if it ran twice: a task message has no expected version.
+        var message = new JsonObject { ["taskId"] = "t", ["sessionId"] = "s", ["requestId"] = "first-message", ["text"] = "hello" };
+        Assert.True(Call(state, "board", "send_message", message.DeepClone().AsObject()).Ok);
+        RelayReply last = default!;
+        for (var version = 0; version < 3 * RelayLimits.MaxRecords; version++)
+        {
+            last = Call(state, "board", "context_put", Note("note-" + version, version));
+            Assert.True(last.Ok, version + ": " + last.Code);
+        }
+        var stored = StateJson(state);
+        Assert.InRange(stored["requests"]!.AsObject().Count, 1, RelayLimits.MaxRecords);
+        Assert.InRange(stored["requestTombstones"]!.AsObject().Count, 1, RelayLimits.MaxRequestTombstones);
+        // A recent retry still replays its original reply.
+        Assert.Equal(last, Call(state, "board", "context_put", Note("note-" + (3 * RelayLimits.MaxRecords - 1), 3 * RelayLimits.MaxRecords - 1)));
+        // An evicted request is refused, not run again, and changes nothing.
+        var before = state.Value.Json;
+        var expired = Call(state, "board", "send_message", message.DeepClone().AsObject());
+        Assert.Equal("RequestExpired", expired.Code);
+        Assert.True(Data(expired)["readCurrentState"]!.GetValue<bool>());
+        Assert.Equal(RelayErrorKind.Conflict, RelayErrorCodes.Classify(expired.Code));
+        Assert.Equal(before, state.Value.Json);
+        Assert.Single(StateJson(state)["tasks"]!["t"]!["messages"]!.AsArray());
+        // Reads are never stored, so they never hit a tombstone.
+        Assert.True(Call(state, "board", "task_get", new() { ["taskId"] = "t", ["requestId"] = "first-message" }).Ok);
+    }
+
+    [Fact]
+    public void Request_replays_past_the_window_are_pruned_and_old_format_entries_count_as_old()
+    {
+        var state = new StateEnvelope<CoordinationDocument>();
+        Assert.True(Call(state, "board", "context_put", Note("legacy", 0)).Ok);
+        // Entries written before retention carry no time; one still replays its original reply.
+        var stored = StateJson(state);
+        var legacyKey = "alice:context_put:legacy";
+        stored["requests"]![legacyKey]!.AsObject().Remove("at");
+        state.Value = new() { Json = stored.ToJsonString() };
+        Assert.Equal(1, Call(state, "board", "context_put", Note("legacy", 0)).Version);
+
+        // Fill the map: old-format and day-old entries go by time, not count; a recent one stays and none becomes a tombstone.
+        stored = StateJson(state);
+        var requests = stored["requests"]!.AsObject();
+        var prior = requests[legacyKey]!.DeepClone().AsObject();
+        for (var i = 0; requests.Count < RelayLimits.MaxRecords - 1; i++)
+        {
+            var old = prior.DeepClone().AsObject(); old["at"] = Now.AddHours(-RelayLimits.RequestReplayRetentionHours - 1).ToString("O");
+            requests["alice:context_put:old-" + i] = old;
+        }
+        var recent = prior.DeepClone().AsObject(); recent["at"] = Now.AddHours(-1).ToString("O");
+        requests["alice:context_put:recent"] = recent;
+        state.Value = new() { Json = stored.ToJsonString() };
+        Assert.Equal(RelayLimits.MaxRecords, StateJson(state)["requests"]!.AsObject().Count);
+
+        Assert.True(Call(state, "board", "context_put", Note("new", 1)).Ok);
+        stored = StateJson(state);
+        Assert.Equal(["alice:context_put:recent", "alice:context_put:new"], stored["requests"]!.AsObject().Select(x => x.Key));
+        Assert.Null(stored["requestTombstones"]);
+        Assert.Equal(Now.ToString("O"), stored["requests"]!["alice:context_put:new"]!["at"]!.GetValue<string>());
+        // Past its window a request runs as new (here its stale expected version conflicts), as before any retention.
+        Assert.Equal("VersionConflict", Call(state, "board", "context_put", Note("legacy", 0)).Code);
+    }
+
+    [Fact]
+    public void Acknowledgments_and_resolved_actions_stay_bounded_and_keep_ignoring_recent_duplicates()
+    {
+        var session = new StateEnvelope<CoordinationDocument>();
+        Assert.True(Call(session, "session", "__open", new() { ["principalId"] = "alice", ["sessionToken"] = "secret" }).Ok);
+        var total = 3 * RelayLimits.MaxRecords;
+        for (var batch = 0; batch < total / RelayLimits.MaxAcknowledgedMessages + 1; batch++)
+        {
+            var ids = Enumerable.Range(batch * RelayLimits.MaxAcknowledgedMessages, RelayLimits.MaxAcknowledgedMessages).Select(i => (JsonNode)("m-" + i)).ToArray();
+            var ack = Call(session, "session", "ack", new() { ["sessionToken"] = "secret", ["requestId"] = "ack-" + batch, ["messageIds"] = new JsonArray(ids) });
+            Assert.True(ack.Ok, batch + ": " + ack.Code);
+        }
+        Assert.InRange(StateJson(session)["acked"]!.AsObject().Count, 1, RelayLimits.MaxRecords);
+        // A late redelivery of a recently acknowledged message is still ignored.
+        Assert.True(Data(Call(session, "session", "__deliver", new() { ["messageId"] = "m-" + (total - 1), ["text"] = "again" }))["duplicate"]!.GetValue<bool>());
+        // Acknowledgments stored as true (before retention) count as old and are pruned first.
+        var stored = StateJson(session);
+        stored["acked"] = new JsonObject(Enumerable.Range(0, RelayLimits.MaxRecords).Select(i => KeyValuePair.Create("legacy-" + i, (JsonNode?)true)));
+        session.Value = new() { Json = stored.ToJsonString() };
+        Assert.True(Call(session, "session", "ack", new() { ["sessionToken"] = "secret", ["requestId"] = "ack-after-legacy", ["messageIds"] = new JsonArray("fresh") }).Ok);
+        Assert.Equal(["fresh"], StateJson(session)["acked"]!.AsObject().Select(x => x.Key));
+
+        // A resource that resolved MaxRecords actions within the window still unblocks: the oldest are dropped, and recent ones are kept.
+        var resource = new StateEnvelope<CoordinationDocument>();
+        Assert.True(Call(resource, "lock", "claim_acquire", new() { ["sessionId"] = "s1", ["requestId"] = "c", ["leaseSeconds"] = RelayLimits.MaxLeaseSeconds }).Ok);
+        for (var i = 0; i < RelayLimits.MaxRecords; i++)
+            Assert.True(Call(resource, "lock", "__unblock", new() { ["actionKey"] = "action-" + i, ["actionId"] = "a", ["sessionId"] = "s1" }, seconds: i).Ok, i.ToString());
+        Assert.True(Call(resource, "lock", "__unblock", new() { ["actionKey"] = "action-new", ["actionId"] = "a", ["sessionId"] = "s1" }, seconds: RelayLimits.MaxRecords).Ok);
+        var resolved = StateJson(resource)["resolvedActions"]!.AsObject();
+        Assert.Equal(RelayLimits.RetainedEntriesAfterPrune + 1, resolved.Count);
+        Assert.False(resolved.ContainsKey("action-0"));
+        // A late block for a recently resolved action is still ignored, so it cannot strand the resource.
+        Assert.True(Data(Call(resource, "lock", "__block", new() { ["actionKey"] = "action-" + (RelayLimits.MaxRecords - 1), ["actionId"] = "a", ["sessionId"] = "s1" }, seconds: RelayLimits.MaxRecords))["resolved"]!.GetValue<bool>());
+        Assert.Null(StateJson(resource)["blockers"]?.AsObject().FirstOrDefault().Key);
+        // Resolutions stored as true (before retention) count as old.
+        stored = StateJson(resource);
+        stored["resolvedActions"] = new JsonObject(Enumerable.Range(0, RelayLimits.MaxRecords).Select(i => KeyValuePair.Create("legacy-" + i, (JsonNode?)true)));
+        resource.Value = new() { Json = stored.ToJsonString() };
+        Assert.True(Call(resource, "lock", "__unblock", new() { ["actionKey"] = "after-legacy", ["actionId"] = "a", ["sessionId"] = "s1" }).Ok);
+        Assert.Equal(["after-legacy"], StateJson(resource)["resolvedActions"]!.AsObject().Select(x => x.Key));
+    }
+
     private static JsonObject DependentWorkflow(string state, params string[] dependsOn)
     {
         var workflow = new JsonObject
@@ -554,6 +665,56 @@ public sealed class CoordinationTests
         var next = Data(Call(state, "board", "__next_work", new() { ["sessionId"] = "worker", ["limit"] = RelayLimits.NextWorkCandidates, ["busyResources"] = new JsonArray("a") }));
         Assert.Equal("c", next["offer"]!["taskId"]!.GetValue<string>());
         Assert.Single(next["candidates"]!.AsArray());
+    }
+
+    [Fact]
+    public void Claims_and_action_starts_wait_for_every_dependency_as_offers_do()
+    {
+        var state = new StateEnvelope<CoordinationDocument>();
+        Assert.True(WriteWorkflow(state, "a", 0, DependentWorkflow("ready")).Ok);
+        Assert.True(WriteWorkflow(state, "b", 0, DependentWorkflow("ready", "a")).Ok);
+        RelayReply Claim(string requestId, long version) => Call(state, "board", "task_claim", new() { ["taskId"] = "b", ["sessionId"] = "worker", ["requestId"] = requestId, ["expectedVersion"] = version, ["leaseSeconds"] = RelayLimits.MaxLeaseSeconds });
+        RelayReply Begin(long version) => Call(state, "board", "action_begin", new() { ["taskId"] = "b", ["sessionId"] = "worker", ["requestId"] = Guid.NewGuid().ToString("N"), ["expectedVersion"] = version, ["actionId"] = "deploy", ["inputFingerprint"] = "f" });
+        string[] Unfinished(RelayReply reply) { Assert.Equal("DependenciesIncomplete", reply.Code); return Data(reply)["dependsOn"]!.AsArray().Select(x => x!.GetValue<string>()).ToArray(); }
+
+        var before = state.Value.Json;
+        var refused = Claim("early", 1);
+        Assert.Equal(["a"], Unfinished(refused));
+        Assert.Equal(1, refused.Version);
+        Assert.Equal(RelayErrorKind.Conflict, RelayErrorCodes.Classify(refused.Code));
+        Assert.Equal(before, state.Value.Json);
+
+        Assert.True(WriteWorkflow(state, "a", 1, DependentWorkflow("completed")).Ok);
+        var claimed = Claim("claim", 1);
+        Assert.True(claimed.Ok, claimed.Code);
+        // a is reopened: b keeps its claim, but its retried claim and a new action start are refused until a completes again.
+        Assert.True(WriteWorkflow(state, "a", 2, DependentWorkflow("ready")).Ok);
+        Assert.Equal(["a"], Unfinished(Claim("claim", 1)));
+        Assert.Equal(["a"], Unfinished(Begin(2)));
+        Assert.True(WriteWorkflow(state, "a", 3, DependentWorkflow("completed")).Ok);
+        Assert.Equal(claimed, Claim("claim", 1));
+        var begun = Begin(2);
+        Assert.True(begun.Ok, begun.Code);
+    }
+
+    [Fact]
+    public void Claims_read_unknown_and_legacy_dependsOn_exactly_as_offers_do()
+    {
+        // A string-array dependsOn naming a task not on the board is unfinished; any other shape reads as no dependencies, so it never throws.
+        var tasks = new JsonObject();
+        foreach (var (id, dependsOn) in new (string, JsonNode?)[] { ("unknown", new JsonArray("gone")), ("string", JsonValue.Create("gone")), ("numbers", new JsonArray(1, 2)), ("objects", new JsonArray(new JsonObject { ["id"] = "gone" })) })
+        {
+            var workflow = DependentWorkflow("ready"); workflow["dependsOn"] = dependsOn;
+            tasks[id] = new JsonObject { ["taskId"] = id, ["version"] = 1, ["changeRevision"] = tasks.Count + 1, ["actions"] = new JsonObject(), ["workflow"] = workflow };
+        }
+        var state = new StateEnvelope<CoordinationDocument> { Value = new() { Json = new JsonObject { ["repositoryId"] = "repo", ["taskRevision"] = tasks.Count, ["tasks"] = tasks }.ToJsonString() } };
+        // Offers skip all four: the unknown ID is unfinished, and the legacy shapes fail workflow validation.
+        Assert.Empty(Data(Call(state, "board", "__next_work", new() { ["sessionId"] = "worker", ["limit"] = RelayLimits.NextWorkCandidates }))["candidates"]!.AsArray());
+        RelayReply Claim(string id) => Call(state, "board", "task_claim", new() { ["taskId"] = id, ["sessionId"] = "worker", ["requestId"] = "claim-" + id, ["expectedVersion"] = 1 });
+        var unknown = Claim("unknown");
+        Assert.Equal("DependenciesIncomplete", unknown.Code);
+        Assert.Equal(["gone"], Data(unknown)["dependsOn"]!.AsArray().Select(x => x!.GetValue<string>()));
+        foreach (var legacy in new[] { "string", "numbers", "objects" }) Assert.True(Claim(legacy).Ok, legacy);
     }
 
     private static StateEnvelope<CoordinationDocument> AttentionSession()
@@ -710,12 +871,16 @@ public sealed class CoordinationTests
         var state = new StateEnvelope<CoordinationDocument>();
         var seen = 0;
         Assert.True(WriteWorkflow(state, "a", 0, DependentWorkflow("ready")).Ok);
-        Assert.True(WriteWorkflow(state, "b", 0, DependentWorkflow("ready", "a"), "worker-b").Ok);
+        Assert.True(WriteWorkflow(state, "b", 0, DependentWorkflow("ready"), "worker-b").Ok);
         Assert.Empty(NewEffects(state, ref seen));
-        // b's worker claims it; a's claim by another worker means a blocks someone else's claimed task.
+        // b's worker claims it; a's claim by another worker means a blocks someone else's claimed task. A claim needs every dependency
+        // completed, so b takes its dependency on a after it is claimed.
         Assert.True(Call(state, "board", "task_claim", new() { ["taskId"] = "b", ["sessionId"] = "worker-b", ["requestId"] = "claim-b", ["expectedVersion"] = 1 }).Ok);
         var claimed = NewEffects(state, ref seen);
         Assert.Equal(("worker-b", "__attention_close", "next_work"), (claimed.Single().Target, claimed.Single().Operation, claimed.Single().Item["kinds"]![0]!.GetValue<string>()));
+        var dependent = DependentWorkflow("ready", "a"); dependent["targetSessionId"] = "worker-b";
+        Assert.True(Call(state, "board", "task_update", new() { ["taskId"] = "b", ["sessionId"] = "worker-b", ["requestId"] = "depend-b", ["expectedVersion"] = 2, ["workflow"] = dependent }).Ok);
+        Assert.Empty(NewEffects(state, ref seen));
         Assert.True(Call(state, "board", "task_claim", new() { ["taskId"] = "a", ["sessionId"] = "worker-a", ["requestId"] = "claim-a", ["expectedVersion"] = 1 }).Ok);
         Assert.Empty(NewEffects(state, ref seen));
 

@@ -31,6 +31,23 @@ internal static class TaskWorkflow
 
     public static RelayReply NotReady(JsonObject task) => Error(WorkflowNotReady, new { state = Text(task["workflow"]!.AsObject(), "state") }, Number(task, "version"));
 
+    /// <summary>
+    /// The gate <c>task_claim</c> (and its replay) and <c>action_begin</c> share, or null when this session may run the task now: the workflow
+    /// allows it (<see cref="AllowsExecution"/>), every <c>dependsOn</c> task is completed, and a grant named in <c>authorityRef</c> is still
+    /// valid. Dependencies and grants are read exactly as offers read them (<see cref="IsOfferable"/>), so the two cannot drift.
+    /// </summary>
+    public static RelayReply? ExecutionRefusal(JsonObject board, JsonObject task, string session, DateTimeOffset now)
+    {
+        if (!AllowsExecution(task, session)) return NotReady(task);
+        if (task["workflow"] is not JsonObject workflow) return null;
+        if (UnfinishedDependencies(ObjectAt(board, "tasks"), workflow) is { Length: > 0 } unfinished) return Error(DependenciesIncomplete, new { dependsOn = unfinished }, Number(task, "version"));
+        return GrantRefusal(board, workflow, now) is { } refusal ? refusal with { Version = Number(task, "version") } : null;
+    }
+
+    /// <summary>The <c>GrantInvalid</c> reply when the workflow's <c>authorityRef</c> names a grant that is unknown, expired or out of scope; readiness and execution both use it.</summary>
+    public static RelayReply? GrantRefusal(JsonObject board, JsonObject workflow, DateTimeOffset now) =>
+        StandingPreferences.GrantProblem(board, workflow, now) is { } reason ? Error(GrantInvalid, new { authorityRef = Text(workflow["packet"]!.AsObject(), "authorityRef"), reason }) : null;
+
     private static bool TargetsSession(JsonObject workflow, string session) => Text(workflow, "targetSessionId").Length == 0 || Text(workflow, "targetSessionId") == session;
 
     /// <summary>Returns the failure code, or null when the workflow may replace <paramref name="prior"/>.</summary>
@@ -101,8 +118,11 @@ internal static class TaskWorkflow
         return null;
     }
 
-    private static bool DependenciesDone(JsonObject tasks, JsonObject workflow) =>
-        Dependencies(workflow).All(id => tasks[id]?["workflow"] is JsonObject dependency && Text(dependency, "state") == "completed");
+    private static bool DependenciesDone(JsonObject tasks, JsonObject workflow) => UnfinishedDependencies(tasks, workflow).Length == 0;
+
+    /// <summary>The <c>dependsOn</c> tasks whose workflow is not <c>completed</c>, including IDs no longer on the board. A legacy shape lists none.</summary>
+    private static string[] UnfinishedDependencies(JsonObject tasks, JsonObject workflow) =>
+        Dependencies(workflow).Where(id => tasks[id]?["workflow"] is not JsonObject dependency || Text(dependency, "state") != "completed").ToArray();
 
     /// <summary>Ready tasks that depend on <paramref name="completedTaskId"/> and now have every dependency completed.</summary>
     public static IReadOnlyList<string> Unblocked(JsonObject tasks, string completedTaskId) =>

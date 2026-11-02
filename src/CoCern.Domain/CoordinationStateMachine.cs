@@ -40,6 +40,8 @@ public static class CoordinationStateMachine
         var requestKey = caller.PrincipalId + ":" + operation + ":" + requestId;
         var fingerprint = Fingerprint(arguments);
         if (requestId.Length > 0 && requests[requestKey] is JsonObject prior) return Replay(kind, state, operation, arguments, prior, fingerprint, now);
+        // Its stored reply was evicted to make room before its window ended: refuse rather than run the write twice.
+        if (requestId.Length > 0 && IsMutation(operation) && Retention.IsBuried(state, requestKey, now)) return Error(RequestExpired, new { readCurrentState = true });
 
         var context = new AggregateContext(state, caller, operation, arguments, now) { Key = key, OrdersEnabled = ordersEnabled };
         RelayReply result;
@@ -72,8 +74,9 @@ public static class CoordinationStateMachine
         if (envelope.Effects.Count + context.Effects.Count > RelayLimits.MaxRecords) return Error(CapacityExceeded);
         if (requestId.Length > 0 && IsMutation(operation))
         {
-            if (requests.Count >= RelayLimits.MaxRecords) return Error(CapacityExceeded);
-            requests[requestKey] = new JsonObject { ["fingerprint"] = fingerprint, ["code"] = result.Code, ["json"] = result.DataJson, ["version"] = result.Version };
+            // Bounded by age, then by count: a full map drops expired replays, then its oldest, and remembers those as tombstones.
+            if (requests.Count >= RelayLimits.MaxRecords) Retention.Bury(state, Retention.MakeRoom(requests, now), now);
+            requests[requestKey] = new JsonObject { ["fingerprint"] = fingerprint, ["code"] = result.Code, ["json"] = result.DataJson, ["version"] = result.Version, ["at"] = Retention.Stamp(now) };
         }
         envelope.Value = new() { Json = state.ToJsonString() };
         // Nothing changes the state object after this point, so the commit's search indexing can read it instead of parsing again.
@@ -82,7 +85,7 @@ public static class CoordinationStateMachine
         return result;
     }
 
-    /// <summary>A retried request returns its original reply, unless its grant has since gone stale.</summary>
+    /// <summary>A retried request returns its original reply, unless its grant has since gone stale or its task may no longer run (the claim gate).</summary>
     private static RelayReply Replay(string kind, JsonObject state, string operation, JsonObject arguments, JsonObject prior, string fingerprint, DateTimeOffset now)
     {
         if (Text(prior, "fingerprint") != fingerprint) return Error(RequestConflict);
@@ -99,7 +102,7 @@ public static class CoordinationStateMachine
             if (kind == AggregateKinds.Board && tasks[taskId] is JsonObject task)
             {
                 if (Text(task, "owner") != session || Number(task, "claimGeneration") != Number(grant, "claimGeneration")) return Error(StaleClaim);
-                if (operation == RelayTools.TaskClaim && !TaskWorkflow.AllowsExecution(task, session)) return TaskWorkflow.NotReady(task);
+                if (operation == RelayTools.TaskClaim && TaskWorkflow.ExecutionRefusal(state, task, session, now) is { } refusal) return refusal;
             }
         }
         return new(true, Text(prior, "code"), Text(prior, "json"), Number(prior, "version"));

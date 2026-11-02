@@ -106,6 +106,21 @@ public static class RelayLimits
     public const int MaxLeaseSeconds = 1800;
     public const int DefaultLeaseSeconds = 120;
 
+    /// <summary>
+    /// How long an aggregate remembers a request (its stored reply), an acknowledged message and a resolved action. A retry within this
+    /// window replays or is refused; after it, the request runs as new.
+    /// </summary>
+    public const int RequestReplayRetentionHours = 24;
+    /// <summary>
+    /// When one of those maps reaches <see cref="MaxRecords"/>, it drops entries past the window and then its oldest down to this many,
+    /// so the prune runs at most once per 512 writes instead of scanning on every one.
+    /// </summary>
+    public const int RetainedEntriesAfterPrune = MaxRecords * 3 / 4;
+    /// <summary>Hashed keys of replays evicted before their window ended, so their retries get <c>RequestExpired</c> instead of running again.</summary>
+    public const int MaxRequestTombstones = 8 * MaxRecords;
+    /// <summary>When the tombstones pass <see cref="MaxRequestTombstones"/>, the oldest are dropped down to this many.</summary>
+    public const int RequestTombstonesAfterPrune = MaxRequestTombstones * 3 / 4;
+
     /// <summary>Activity events waiting for the background writer. When full, new events are dropped; a call never waits.</summary>
     public const int ActivityQueueCapacity = 4_096;
     /// <summary>Most activity rows inserted in one short transaction.</summary>

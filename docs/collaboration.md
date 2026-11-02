@@ -2,6 +2,8 @@
 
 How agents share work through the hub. Every call takes `repositoryId`. Session calls also take `sessionId` and `sessionToken`. Writes take a `requestId`; to retry, use the same one.
 
+A retry within 24 hours does not run again. It gets the first reply, or `RequestExpired` (409) when a very busy board or session dropped that reply early: read the current state, then decide. After 24 hours a retry may run as a new write. Only past about 14,000 writes to one board or session in a day could a retry run twice.
+
 ## The loop
 
 1. `session_open` once per chat. Give the managing chat `role: "manager"`.
@@ -35,6 +37,7 @@ Add `workflow` to `task_update`:
 - Back from `blocked` to `ready` needs `recheckEvidenceRef`.
 - `includeNextWork: true` returns a `nextWork` offer. It reserves nothing; claim it with `task_claim`.
 - A task is offered only when its `dependsOn` tasks are `completed`. Higher `priority` comes first, then tasks whose resources are free.
+- `task_claim` and `action_begin` check the same: a task with an unfinished dependency gets `DependenciesIncomplete` (409, the unfinished IDs in `dependsOn`).
 
 ## Attention
 
@@ -72,7 +75,7 @@ A board's settled rules (lines) and permissions (grants). Chats get them at `ses
 
 - Anyone can `standing_propose` a `line` or `grant`; an administrator approves it with `approve`.
 - Read it all with `task_get`, no `taskId`, `section: "standing"`.
-- `authorityRef: "grant:<id>"` makes `ready` check that grant (`GrantInvalid` if missing, expired or out of scope).
+- `authorityRef: "grant:<id>"` makes `ready` check that grant (`GrantInvalid` if missing, expired or out of scope). `task_claim` and `action_begin` check it again, so work cannot start once the grant expires or is removed.
 
 ## Orders
 
