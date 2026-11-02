@@ -51,7 +51,7 @@ public sealed class DiscoveryHostTests
     private static async Task<string> EnrollAsync(RelayHostFixture host, string machineId, string name = "PC")
     {
         using var client = Client(host);
-        var (status, body) = await PostAsync(client, "/api/discovery/enroll", new { machineId, machineName = name });
+        var (status, body) = await PostAsync(client, "/api/discovery/enroll", new { machineId, machineName = name, joinCode = RelayHostFixture.JoinCode });
         Assert.Equal(HttpStatusCode.OK, status);
         Assert.Equal(machineId, body.GetProperty("machineId").GetString());
         return body.GetProperty("credential").GetString()!;
@@ -113,8 +113,8 @@ public sealed class DiscoveryHostTests
     {
         await using var host = Host();
         using var client = Client(host);
-        for (var i = 0; i < 10; i++) Assert.Equal(HttpStatusCode.OK, (await PostAsync(client, "/api/discovery/enroll", new { machineId = "pc-" + i, machineName = "PC" })).Status);
-        var limited = await PostAsync(client, "/api/discovery/enroll", new { machineId = "pc-10", machineName = "PC" });
+        for (var i = 0; i < 10; i++) Assert.Equal(HttpStatusCode.OK, (await PostAsync(client, "/api/discovery/enroll", new { machineId = "pc-" + i, machineName = "PC", joinCode = RelayHostFixture.JoinCode })).Status);
+        var limited = await PostAsync(client, "/api/discovery/enroll", new { machineId = "pc-10", machineName = "PC", joinCode = RelayHostFixture.JoinCode });
         Assert.Equal(HttpStatusCode.TooManyRequests, limited.Status);
         Assert.Equal("RateLimited", limited.Body.GetProperty("code").GetString());
     }
@@ -214,20 +214,20 @@ public sealed class DiscoveryHostTests
         await using var host = Host();
         await EnrollAsync(host, "pc-a");
         using var anonymous = Client(host);
-        var duplicate = await PostAsync(anonymous, "/api/discovery/enroll", new { machineId = "pc-a", machineName = "PC" });
+        var duplicate = await PostAsync(anonymous, "/api/discovery/enroll", new { machineId = "pc-a", machineName = "PC", joinCode = RelayHostFixture.JoinCode });
         Assert.Equal(HttpStatusCode.Conflict, duplicate.Status);
         Assert.Equal("AliasConflict", duplicate.Body.GetProperty("code").GetString());
         Assert.DoesNotContain("credential", duplicate.Body.GetRawText());
 
         using var admin = Client(host, AdminToken);
         Assert.Equal(HttpStatusCode.OK, (await PostAsync(admin, "/api/tools/control_request", new { repositoryId = "repo", requestId = "rv", command = "revoke_machine", machineId = "pc-a", reason = "test" })).Status);
-        var revoked = await PostAsync(anonymous, "/api/discovery/enroll", new { machineId = "pc-a", machineName = "PC" });
+        var revoked = await PostAsync(anonymous, "/api/discovery/enroll", new { machineId = "pc-a", machineName = "PC", joinCode = RelayHostFixture.JoinCode });
         Assert.Equal(HttpStatusCode.Forbidden, revoked.Status);
         Assert.Equal("MachineRevoked", revoked.Body.GetProperty("code").GetString());
 
         var directory = host.Services.GetRequiredService<IMachineDirectory>();
         for (var i = 0; i < DiscoveryLimits.MaxMachines; i++) Assert.NotNull(await directory.EnrollAsync("fill-" + i, "Fill", "secret-" + i, CancellationToken.None));
-        var full = await PostAsync(anonymous, "/api/discovery/enroll", new { machineId = "one-too-many", machineName = "PC" });
+        var full = await PostAsync(anonymous, "/api/discovery/enroll", new { machineId = "one-too-many", machineName = "PC", joinCode = RelayHostFixture.JoinCode });
         Assert.Equal(HttpStatusCode.ServiceUnavailable, full.Status);
         Assert.Equal("CapacityExceeded", full.Body.GetProperty("code").GetString());
     }
@@ -275,7 +275,7 @@ public sealed class DiscoveryHostTests
         };
         await using var host = new RelayHostFixture(settings: settings);
         using var client = Client(host);
-        var refused = await PostAsync(client, "/api/discovery/enroll", new { machineId = "pc-a", machineName = "PC" });
+        var refused = await PostAsync(client, "/api/discovery/enroll", new { machineId = "pc-a", machineName = "PC", joinCode = RelayHostFixture.JoinCode });
         Assert.Equal(HttpStatusCode.Conflict, refused.Status);
         Assert.Equal("AliasConflict", refused.Body.GetProperty("code").GetString());
     }
@@ -285,7 +285,7 @@ public sealed class DiscoveryHostTests
     {
         await using var host = Host(remote: IPAddress.Parse("203.0.113.9"));
         using var plain = Client(host, scheme: "http");
-        var refused = await PostAsync(plain, "/api/discovery/enroll", new { machineId = "pc-a", machineName = "PC" });
+        var refused = await PostAsync(plain, "/api/discovery/enroll", new { machineId = "pc-a", machineName = "PC", joinCode = RelayHostFixture.JoinCode });
         Assert.Equal(HttpStatusCode.Forbidden, refused.Status);
         Assert.Equal("HttpsRequired", refused.Body.GetProperty("code").GetString());
         Assert.DoesNotContain("credential", refused.Body.GetRawText());
@@ -299,7 +299,7 @@ public sealed class DiscoveryHostTests
     {
         await using var host = Host(remote: IPAddress.Loopback);
         using var plain = Client(host, scheme: "http");
-        Assert.Equal(HttpStatusCode.OK, (await PostAsync(plain, "/api/discovery/enroll", new { machineId = "pc-a", machineName = "PC" })).Status);
+        Assert.Equal(HttpStatusCode.OK, (await PostAsync(plain, "/api/discovery/enroll", new { machineId = "pc-a", machineName = "PC", joinCode = RelayHostFixture.JoinCode })).Status);
     }
 
     [Fact]

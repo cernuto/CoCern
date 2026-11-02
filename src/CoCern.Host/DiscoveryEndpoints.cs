@@ -30,6 +30,39 @@ internal static class DiscoverySettings
     public static bool IsCredential(string token) => token.Length == CredentialLength && token.All(Uri.IsHexDigit);
 }
 
+/// <summary>The secret a new PC must present to enroll: <c>Relay:Discovery:JoinCode</c>, or one generated once and kept owner-only in <c>join-code</c> next to the database.</summary>
+internal sealed class HubJoinCode
+{
+    public const string FileName = "join-code";
+    private const int MinLength = 8;
+    private const string Alphabet = "ABCDEFGHJKMNPQRSTVWXYZ0123456789";
+    private readonly byte[] digest;
+
+    private HubJoinCode(string value, string source) { Value = value; Source = source; digest = SHA256.HashData(Encoding.UTF8.GetBytes(value)); }
+
+    public string Value { get; }
+    /// <summary>Where the code came from: the setting name or the file path.</summary>
+    public string Source { get; }
+
+    /// <summary>Constant-time; hashing first keeps the comparison length-independent.</summary>
+    public bool Matches(string? candidate) => candidate is not null && CryptographicOperations.FixedTimeEquals(SHA256.HashData(Encoding.UTF8.GetBytes(candidate)), digest);
+
+    public static HubJoinCode Load(IConfiguration configuration, IHostEnvironment environment)
+    {
+        if (configuration["Relay:Discovery:JoinCode"] is { } configured && !string.IsNullOrWhiteSpace(configured))
+            return configured.Trim().Length >= MinLength ? new(configured.Trim(), "Relay:Discovery:JoinCode") : throw new InvalidOperationException($"Relay:Discovery:JoinCode must be at least {MinLength} characters.");
+        var path = Path.Combine(Path.GetDirectoryName(RelayHostBuilderExtensions.DatabasePath(configuration, environment))!, FileName);
+        if (!File.Exists(path))
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            var code = string.Join('-', RandomNumberGenerator.GetItems<char>(Alphabet, 20).Chunk(5).Select(x => new string(x)));
+            HubCertificate.WritePrivately(path, Encoding.UTF8.GetBytes(code));
+        }
+        var stored = File.ReadAllText(path).Trim();
+        return stored.Length >= MinLength ? new(stored, path) : throw new InvalidOperationException($"The join code file '{path}' is shorter than {MinLength} characters. Delete it to generate a new code, or set Relay:Discovery:JoinCode.");
+    }
+}
+
 /// <summary>Remembers each machine's last announced routes so a change can be told from a repeat. In memory only: after a restart the first change simply sends one extra hint.</summary>
 internal sealed class MachineRouteHints
 {
@@ -96,7 +129,7 @@ internal sealed class MachineCredentialLimiter(TimeProvider? clock = null)
     }
 }
 
-/// <summary>Anonymous enrollment and machine announcements. Neither endpoint exists unless <c>Relay:Discovery:Enabled</c> is true; neither logs request or response bodies.</summary>
+/// <summary>Enrollment (anonymous but for the join code) and machine announcements. Neither endpoint exists unless <c>Relay:Discovery:Enabled</c> is true; neither logs request or response bodies.</summary>
 internal static partial class DiscoveryEndpoints
 {
     public const string EnrollPolicy = "discovery-enroll";
@@ -109,6 +142,7 @@ internal static partial class DiscoveryEndpoints
     public static void AddDiscovery(this IServiceCollection services)
     {
         services.AddSingleton<MachineRouteHints>();
+        services.AddSingleton(provider => HubJoinCode.Load(provider.GetRequiredService<IConfiguration>(), provider.GetRequiredService<IHostEnvironment>()));
         services.AddRateLimiter(options =>
         {
             options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
@@ -127,6 +161,9 @@ internal static partial class DiscoveryEndpoints
     public static void MapDiscoveryEndpoints(this WebApplication app)
     {
         if (!DiscoverySettings.Enabled(app.Configuration)) return;
+        // Created now, not on first enroll, so a bad setting stops startup and the operator sees the code in the log.
+        var joinCode = app.Services.GetRequiredService<HubJoinCode>();
+        app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("CoCern.Host.Discovery").LogInformation("Discovery join code {JoinCode} (from {Source}); new PCs pass it to setup with --join-code", joinCode.Value, joinCode.Source);
         app.MapPost("/api/discovery/enroll", EnrollAsync).AllowAnonymous().RequireRateLimiting(EnrollPolicy);
         app.MapPost("/api/discovery/announce", AnnounceAsync).RequireAuthorization();
     }
@@ -141,21 +178,24 @@ internal static partial class DiscoveryEndpoints
 
     private static IResult Failure(int status, string code) => Results.Json(ToolResults.Failure(code), statusCode: status);
 
-    private static async Task<IResult> EnrollAsync(HttpContext context, IMachineDirectory machines, RelayClient[] clients, IConfiguration configuration)
+    private static async Task<IResult> EnrollAsync(HttpContext context, IMachineDirectory machines, RelayClient[] clients, IConfiguration configuration, HubJoinCode joinCode)
     {
         // The reply carries a bearer secret, so it never travels in clear text off the machine.
         if (!context.Request.IsHttps && !(context.Connection.RemoteIpAddress is { } remote && IPAddress.IsLoopback(remote))) return Failure(StatusCodes.Status403Forbidden, RelayErrorCodes.HttpsRequired);
-        string? machineId, machineName;
+        string? machineId, machineName, code;
         try
         {
             using var document = await JsonDocument.ParseAsync(context.Request.Body, new JsonDocumentOptions { MaxDepth = 8 }, context.RequestAborted);
             if (document.RootElement.ValueKind != JsonValueKind.Object) return Failure(StatusCodes.Status400BadRequest, RelayErrorCodes.InvalidArguments);
             machineId = Text(document.RootElement, "machineId");
             machineName = Text(document.RootElement, "machineName");
+            code = Text(document.RootElement, "joinCode");
         }
         catch (JsonException) { return Failure(StatusCodes.Status400BadRequest, RelayErrorCodes.InvalidArguments); }
         if (machineId is null || !MachineIdPattern().IsMatch(machineId) || !ValidMachineName(machineName))
             return Failure(StatusCodes.Status400BadRequest, RelayErrorCodes.InvalidArguments);
+        // Checked before anything that depends on hub state, so a stranger learns nothing; each attempt spends a rate-limit permit.
+        if (!joinCode.Matches(code)) return Failure(StatusCodes.Status403Forbidden, RelayErrorCodes.JoinCodeRequired);
         // An enrolled machine must never share a principal with a configured client or OAuth subject.
         var principalId = "machine:" + machineId;
         if (ConfiguredPrincipals(clients, configuration).Contains(principalId)) return Failure(StatusCodes.Status409Conflict, RelayErrorCodes.AliasConflict);
@@ -220,7 +260,7 @@ internal static partial class DiscoveryEndpoints
 
     private static int EnrollStatus(string? code) => code switch
     {
-        RelayErrorCodes.MachineRevoked => StatusCodes.Status403Forbidden,
+        RelayErrorCodes.MachineRevoked or RelayErrorCodes.JoinCodeRequired => StatusCodes.Status403Forbidden,
         RelayErrorCodes.AliasConflict => StatusCodes.Status409Conflict,
         RelayErrorCodes.CapacityExceeded or RelayErrorCodes.StorageFailure => StatusCodes.Status503ServiceUnavailable,
         RelayErrorCodes.PayloadTooLarge => StatusCodes.Status413PayloadTooLarge,

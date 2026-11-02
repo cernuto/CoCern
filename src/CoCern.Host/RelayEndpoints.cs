@@ -1,3 +1,4 @@
+using System.Net;
 using System.Text.Json;
 using CoCern.Contracts;
 using CoCern.Core;
@@ -16,6 +17,7 @@ public static class RelayEndpoints
         app.UseSerilogRequestLogging(options => options.MessageTemplate = "HTTP {RequestMethod} {RequestPath} responded {StatusCode} in {Elapsed:0.0000} ms");
         app.UseRelayErrorEnvelope();
         app.UseDashboardBoundary();
+        app.UseLocalApiReference();
         app.UseBlazorFrameworkFiles("/dashboard");
         app.UseStaticFiles();
         app.UseRouting();
@@ -43,6 +45,18 @@ public static class RelayEndpoints
         app.MapProtectedResourceMetadata();
         return app;
     }
+
+    /// <summary>The API reference describes every route, so only this PC may read it; a connection without an IP (in-process, pipes) is local.</summary>
+    private static void UseLocalApiReference(this WebApplication app) => app.Use((context, next) =>
+    {
+        if ((context.Request.Path.StartsWithSegments("/openapi") || context.Request.Path.StartsWithSegments("/scalar"))
+            && context.Connection.RemoteIpAddress is { } address && !IPAddress.IsLoopback(address))
+        {
+            context.Response.StatusCode = StatusCodes.Status404NotFound;
+            return Task.CompletedTask;
+        }
+        return next(context);
+    });
 
     private static async Task<IResult> ExecuteToolAsync(string tool, HttpContext context, IRelayApplication application)
     {

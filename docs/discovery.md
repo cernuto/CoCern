@@ -2,7 +2,7 @@
 
 Each PC runs a small background program, the node. It joins the hub once, lists that PC's chats in `chat_directory`, and wakes its own Codex chats when mail arrives. A chat on one PC can then message a chat on another.
 
-**Warning: there is no join code.** Any device that can reach the hub's HTTPS port can join and message your chats. Open the port only on a network you trust.
+A new PC needs the hub's **join code** to join. A joined PC can message your chats, so share the code only with PCs you trust, and open the port only on a network you trust.
 
 ## On the hub PC
 
@@ -10,9 +10,14 @@ Each PC runs a small background program, the node. It joins the hub once, lists 
 | --- | --- | --- |
 | `Relay:Discovery:Enabled` | `false` | Lets PCs join and announce chats. |
 | `Relay:Discovery:Repositories` | `["cocern"]` | Repositories joined PCs may use. |
+| `Relay:Discovery:JoinCode` | generated | The code a new PC must give. Unset: one is made on first start and kept in `join-code` next to the database, readable by this user only. Change it by setting this or deleting the file. At least 8 characters. |
 | `Relay:Network:Enabled` | `false` | Also serves HTTPS on every network interface. |
 | `Relay:Network:HttpsPort` | 5273 | The HTTPS port. |
 | `Relay:Network:CertificatePath` | `data/hub-certificate.pfx` | Self-signed certificate, made on first start. Keep it: PCs pin its fingerprint. |
+
+At startup the hub logs the join code and, with the network listener on, the certificate fingerprint. You need both to join a PC.
+
+The hub refuses to start when an `http://` address binds anything but loopback (for example `http://0.0.0.0:5271`), because tokens would cross the network unencrypted. Use the HTTPS listener for other PCs.
 
 The Visual Studio launch profile turns on both switches. Setup never changes the firewall. To open the port on private networks only, run this once in an elevated PowerShell:
 
@@ -27,8 +32,10 @@ New-NetFirewallRule -DisplayName "CoCern hub (HTTPS 5273)" -Direction Inbound -A
 3. From the copied folder, run:
 
 ```powershell
-dotnet .\CoCern.Adapter.dll --setup --hub https://<hub-pc>:5273/
+dotnet .\CoCern.Adapter.dll --setup --hub https://<hub-pc>:5273/ --join-code <code> --fingerprint <fingerprint>
 ```
+
+`--join-code` can also come from the `COCERN_JOIN_CODE` variable. `--fingerprint` is the certificate fingerprint from the hub's log; colons are allowed. Always pass it: setup then refuses any other certificate (exit code 4) instead of trusting the first one it sees.
 
 Setup then:
 
@@ -37,7 +44,7 @@ Setup then:
 - adds the `CoCernNode` value to the current user's Run key, so the node starts at sign-in;
 - starts the node and prints the machine ID.
 
-Run it again any time: it leaves existing entries alone. `--data-dir <path>` moves the node folder. Exit code 1 is a setup or join problem, 4 a changed hub certificate, 5 a settings file it could not read.
+Run it again any time: it leaves existing entries alone. A PC that has joined needs the code only to join again. `--data-dir <path>` moves the node folder. Exit code 1 is a setup or join problem, 4 a changed hub certificate, 5 a settings file it could not read.
 
 | Variable | Default | What it does |
 | --- | --- | --- |
@@ -78,7 +85,8 @@ It only reads and never blocks. Codex asks you to approve a new hook in `/hooks`
 
 - **Stop waking on a PC:** create a file named `stop` in the node folder. Delete it to start again.
 - **Stop the node:** end its `dotnet` process. Remove the `CoCernNode` Run value to keep it from starting.
-- **Revoke a PC:** an administrator calls `control_request` with `"command": "revoke_machine"` and the `machineId`. The device can still join again under a new ID, so keep the port closed to devices you do not trust.
+- **Revoke a PC:** an administrator calls `control_request` with `"command": "revoke_machine"` and the `machineId`. A device that knows the join code can join again under a new ID, so change the code too.
+- **Expiry:** the hub holds up to 256 PCs. When it is full, a new PC replaces the one not seen longest, if that one has not announced for 30 days. A replaced PC's node stops; run setup on it again with the join code.
 
 ## Hand-written wake configs
 
