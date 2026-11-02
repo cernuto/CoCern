@@ -27,14 +27,19 @@ public sealed class DashboardSecurity(IConfiguration configuration, IHostEnviron
         Enrollment? match = null;
         foreach (var enrollment in CurrentClients())
             if (CryptographicOperations.FixedTimeEquals(digest, enrollment.Digest)) match = enrollment;
-        if (match is null || !Allowed(match.Client)) return null;
-        return new(new ClaimsIdentity([
+        return match is null || !Allowed(match.Client) ? null : Principal(match, now);
+    }
+
+    /// <summary>The first configured viewer, for a sign-in link: the hub's own administrator on this PC.</summary>
+    public ClaimsPrincipal? LocalViewer(DateTimeOffset now) => CurrentClients().FirstOrDefault(enrollment => Allowed(enrollment.Client)) is { } viewer ? Principal(viewer, now) : null;
+
+    private static ClaimsPrincipal Principal(Enrollment match, DateTimeOffset now) =>
+        new(new ClaimsIdentity([
             new Claim(ClaimTypes.NameIdentifier, match.Client.PrincipalId),
             new Claim(Policy, "true"),
             new Claim(EnrollmentClaim, match.Fingerprint),
             new Claim(ExpiryClaim, now.AddMinutes(30).UtcTicks.ToString(System.Globalization.CultureInfo.InvariantCulture))
         ], Scheme));
-    }
 
     public bool IsValid(ClaimsPrincipal? principal, DateTimeOffset now)
     {

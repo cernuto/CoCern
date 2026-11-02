@@ -14,9 +14,10 @@ To turn it on, allow an administrator client's principal:
 { "Relay": { "Dashboard": { "ViewerPrincipalIds": ["your-admin-principal"] } } }
 ```
 
-- Sign in with that client's token. The browser swaps it for a 30-minute cookie.
-- Sign-in sends an administrator token. From another device, use trusted HTTPS only, and never click through a certificate warning.
-- The Visual Studio launch profile already allows `PaulC`.
+- **First sign-in:** the hub prints a sign-in link when it starts, like `http://127.0.0.1:5271/dashboard/#link=…`. Open it on the hub's PC and you are in. It works once, only from that PC, for 24 hours; each use prints the next one.
+- Or paste that client's token. The browser swaps it for a 30-minute cookie either way.
+- A token sign-in sends an administrator token. From another device, use trusted HTTPS only, and never click through a certificate warning.
+- The start script and the Visual Studio launch profile already allow their administrator. A `TokenFile` that does not exist yet is created at startup, owner-only, so neither needs a token made by hand.
 - Reload open dashboard tabs after you update the hub.
 
 ## Activity

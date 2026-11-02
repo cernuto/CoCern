@@ -16,6 +16,7 @@ public static class DashboardEndpoints
     public static IServiceCollection AddRelayDashboard(this IServiceCollection services)
     {
         services.AddSingleton<DashboardSecurity>();
+        services.AddSingleton<DashboardSignInLink>();
         services.AddSingleton<DashboardLogBuffer>();
         services.AddSingleton<DashboardTrafficBuffer>();
         services.Replace(ServiceDescriptor.Singleton<IRelayApplication, DashboardRelayApplication>());
@@ -47,6 +48,12 @@ public static class DashboardEndpoints
 
     public static WebApplication MapRelayDashboard(this WebApplication app)
     {
+        // Checked once started, when the configuration is final: no viewer configured, no link.
+        app.Lifetime.ApplicationStarted.Register(() =>
+        {
+            if (app.Services.GetRequiredService<DashboardSecurity>().Enabled)
+                app.Services.GetRequiredService<DashboardSignInLink>().IssueAtStart(app.Services.GetRequiredService<Microsoft.AspNetCore.Hosting.Server.IServer>());
+        });
         var api = app.MapGroup("/dashboard/api");
         api.MapGet("/auth", (HttpContext context) => Results.Ok(new DashboardAuthStatus { Authenticated = true, PrincipalId = context.User.FindFirstValue(ClaimTypes.NameIdentifier) }))
             .RequireAuthorization(DashboardSecurity.Policy);
@@ -89,7 +96,7 @@ public static class DashboardEndpoints
         return app;
     }
 
-    private static async Task<IResult> LoginAsync(HttpContext context, DashboardSecurity security)
+    private static async Task<IResult> LoginAsync(HttpContext context, DashboardSecurity security, DashboardSignInLink link)
     {
         if (!DashboardSecurity.SecureTransport(context) || !DashboardSecurity.SameOrigin(context)) return Results.StatusCode(403);
         const int maximumBytes = 16 * 1024;
@@ -107,8 +114,18 @@ public static class DashboardEndpoints
         try
         {
             using var json = JsonDocument.Parse(body.ToArray(), new JsonDocumentOptions { MaxDepth = 4 });
-            if (json.RootElement.ValueKind != JsonValueKind.Object || !json.RootElement.TryGetProperty("token", out var value) || value.ValueKind != JsonValueKind.String) return Results.BadRequest();
-            principal = security.Exchange(value.GetString()!, DateTimeOffset.UtcNow);
+            if (json.RootElement.ValueKind != JsonValueKind.Object) return Results.BadRequest();
+            var now = DateTimeOffset.UtcNow;
+            if (json.RootElement.TryGetProperty("link", out var code) && code.ValueKind == JsonValueKind.String)
+            {
+                // A logged link signs in only from this PC, so a copy of the log elsewhere is no use.
+                if (context.Connection.RemoteIpAddress is not { } remote || !System.Net.IPAddress.IsLoopback(remote)) return Results.StatusCode(403);
+                if (!link.Redeem(code.GetString(), now)) return Results.Unauthorized();
+                principal = security.LocalViewer(now);
+                link.Issue(now);
+            }
+            else if (json.RootElement.TryGetProperty("token", out var value) && value.ValueKind == JsonValueKind.String) principal = security.Exchange(value.GetString()!, now);
+            else return Results.BadRequest();
         }
         catch (JsonException) { return Results.BadRequest(); }
         if (principal is null) return Results.Unauthorized();

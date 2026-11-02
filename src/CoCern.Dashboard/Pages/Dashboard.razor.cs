@@ -46,7 +46,14 @@ public partial class Dashboard : IAsyncDisposable
     protected override void OnInitialized()
     {
         Connection.Changed += Refresh;
-        Connection.Start();
+        // A sign-in link from the hub's log: spend it once and drop it from the address bar and history.
+        var fragment = new Uri(Navigation.Uri).Fragment;
+        if (fragment.StartsWith("#link=", StringComparison.Ordinal))
+        {
+            Navigation.NavigateTo(Navigation.Uri[..Navigation.Uri.IndexOf('#')], replace: true);
+            _ = Connection.StartWithLinkAsync(Uri.UnescapeDataString(fragment["#link=".Length..]));
+        }
+        else Connection.Start();
         _clock = TickAsync();
     }
 

@@ -40,7 +40,7 @@ Install the .NET SDK named in `global.json`. Then, from this folder:
 ./scripts/Start-CoCern.ps1             # hub on http://127.0.0.1:5271
 ```
 
-The start script prints where it saved your token file (`data/local-client-token`). That token is an administrator token; see [Setup](docs/setup.md) for a worker-only one. It also points the document cache at this checkout, read from its local commits only and never fetched.
+To see the dashboard, open the sign-in link the hub prints when it starts. The start script prints where it saved your token file (`data/local-client-token`). That token is an administrator token; see [Setup](docs/setup.md) for a worker-only one. It also points the document cache at this checkout, read from its local commits only and never fetched.
 
 Add CoCern to your agent as an MCP server:
 

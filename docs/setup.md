@@ -7,6 +7,7 @@
 ./scripts/Start-CoCern.ps1                # loopback hub on http://127.0.0.1:5271
 ```
 
+- Open the dashboard with the one-time sign-in link the hub prints at startup. See [Monitoring](monitoring.md).
 - The start script makes a private **administrator** token in `data/local-client-token`. `-RepositoryId <id>` sets its repository (default `cocern`). Every chat that uses this token file can use the administrator tools, ad hoc SQL included.
 - For worker-only chats, issue a second token before starting the hub, in the same PowerShell window, and give those chats `COCERN_TOKEN_FILE=data/worker-token` (keep the file private; `IsAdministrator` defaults to `false`):
 
@@ -86,7 +87,7 @@ Use `appsettings.json`, environment variables (`Relay__Clients__0__Token`) or th
 | `Relay:GatewayPort` | 31111 | Orleans gateway port (loopback). |
 | `Relay:ClusterId` | `CoCern` | Change it, and the ports, for a second test hub. |
 | `Relay:Clients:N:Token` | | A client's bearer token. |
-| `Relay:Clients:N:TokenFile` | | Read the token from this file instead. |
+| `Relay:Clients:N:TokenFile` | | Read the token from this file instead. If it does not exist at startup, it is created with a new token, owner-only. |
 | `Relay:Clients:N:PrincipalId` | | Who the client is. |
 | `Relay:Clients:N:IsAdministrator` | `false` | Allows administrator tools. |
 | `Relay:Clients:N:Repositories:M` | | Repositories the client may use. |
