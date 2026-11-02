@@ -287,9 +287,16 @@ public static class RelayLimits
     public const int StaleSessionHours = MaxAttentionRouteIdleHours;
     /// <summary>
     /// Unresolved actions the session directory remembers per session (so it never expires a session that still answers for one). Past
-    /// this, the session is marked and stays exempt for good, since the directory can no longer tell when its last one closes.
+    /// this, the session is marked, and stays exempt until no new action has overflowed it for <see cref="SessionWorkRetentionDays"/>.
     /// </summary>
     public const int MaxSessionOpenActions = 64;
+    /// <summary>Closed actions the session directory remembers per session, so a late, reordered open for one is ignored.</summary>
+    public const int MaxSessionClosedActions = 2 * MaxSessionOpenActions;
+    /// <summary>
+    /// Days a tracked open action (or closed tombstone, or overflow mark) counts without a new report from its board. Past this the
+    /// directory forgets it, so a lost or reordered report never protects a session from expiry for good.
+    /// </summary>
+    public const int SessionWorkRetentionDays = 7;
     /// <summary>Least minutes between a session's reports to the control directory that it is still active (made at boundary replies).</summary>
     public const int AttentionActivityReportMinutes = 60;
     /// <summary>Sessions whose last idle-hold wake the hub remembers for counting; past this the memory is cleared.</summary>

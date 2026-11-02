@@ -301,7 +301,7 @@ public sealed class SearchExtractionTests
         Step("task_update", new() { ["expectedVersion"] = version, ["message"] = new JsonObject { ["text"] = "a message in the update" } }, changesText: true);
         Step("send_message", new() { ["text"] = "a task message" }, changesText: true);
         Step("task_update", new() { ["expectedVersion"] = version, ["workflow"] = Workflow("ready") }, changesText: true);
-        Step("task_claim", new() { ["expectedVersion"] = version, ["resourceIds"] = new JsonArray() }, changesText: false);
+        Step("task_claim", new() { ["expectedVersion"] = version, ["resourceIds"] = new JsonArray("rig-1", "db-2") }, changesText: false);
         var claim = JsonNode.Parse(board.Value.Json)!["tasks"]!["t"]!;
         Step("action_begin", new() { ["expectedVersion"] = version, ["actionId"] = "a", ["inputFingerprint"] = "f" }, changesText: false);
         Step("action_report", new() { ["expectedVersion"] = version, ["actionId"] = "a", ["attempt"] = 1, ["outcome"] = "completed", ["report"] = new JsonObject { ["summary"] = "deployed the fix" } }, changesText: true);
@@ -309,7 +309,7 @@ public sealed class SearchExtractionTests
         Step("action_begin", new() { ["expectedVersion"] = version, ["actionId"] = "b", ["inputFingerprint"] = "g" }, changesText: false);
         Step("action_report", new() { ["expectedVersion"] = version, ["actionId"] = "b", ["attempt"] = 1, ["outcome"] = "failed", ["report"] = "rig offline" }, changesText: true);
         Step("claim_release", new() { ["expectedVersion"] = version, ["claimGeneration"] = claim["claimGeneration"]!.DeepClone() }, changesText: false);
-        Step("task_claim", new() { ["expectedVersion"] = version, ["resourceIds"] = new JsonArray(), ["requestId"] = "reclaim" }, changesText: false);
+        Step("task_claim", new() { ["expectedVersion"] = version, ["resourceIds"] = new JsonArray("rig-1", "db-2"), ["requestId"] = "reclaim" }, changesText: false);
         var reclaimed = JsonNode.Parse(board.Value.Json)!["tasks"]!["t"]!;
         Step("__task_unclaim", new() { ["claimGeneration"] = reclaimed["claimGeneration"]!.DeepClone(), ["claimRequestId"] = "reclaim" }, changesText: false);
         Step("task_update", new() { ["expectedVersion"] = version, ["workflow"] = Workflow("blocked", new JsonArray(new JsonObject { ["id"] = "b", ["kind"] = "other", ["summary"] = "waiting on rig", ["recheckCondition"] = "rig back" })) }, changesText: true);

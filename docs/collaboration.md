@@ -40,6 +40,7 @@ Add `workflow` to `task_update`:
 - `includeNextWork: true` returns a `nextWork` offer. It reserves nothing; claim it with `task_claim`.
 - A task is offered only when its `dependsOn` tasks are `completed`. Higher `priority` comes first, then tasks whose resources are free.
 - `task_claim` and `action_begin` check the same: a task with an unfinished dependency gets `DependenciesIncomplete` (409, the unfinished IDs in `dependsOn`).
+- `packet.resources` must be claimed. A `task_claim` whose `resourceIds` leave out a registered resource the packet names gets `ResourcesRequired` with `missing`. Aliases count, resolved by your session's machine. `action_begin` refuses too (`Busy` or `ClaimRequired`) unless your session still holds each one. A name no resource is registered under is only refused with `requireResources` (`unregistered`).
 
 ## Stranded actions
 

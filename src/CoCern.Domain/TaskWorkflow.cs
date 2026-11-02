@@ -44,6 +44,29 @@ internal static class TaskWorkflow
         return GrantRefusal(board, workflow, now) is { } refusal ? refusal with { Version = Number(task, "version") } : null;
     }
 
+    /// <summary>
+    /// The <c>ResourcesRequired</c> refusal when <paramref name="held"/> (canonical resource IDs: a claim's <c>resourceIds</c>, or the
+    /// task's claimed set at <c>action_begin</c>) does not cover every resource the packet declares, or null. The hub resolves each declared
+    /// name (aliases too, by the session's machine) and passes the map as <c>declaredResources</c>, with <c>""</c> for a name no resource
+    /// answers to. A name missing from the map (the packet changed since, or no hub) must be listed as itself. An unregistered name has no
+    /// lock to take, so it is only refused on a board with <c>requireResources</c>.
+    /// </summary>
+    public static RelayReply? ResourceRefusal(JsonObject board, JsonObject task, JsonObject args, IEnumerable<string> held)
+    {
+        if (task["workflow"] is not JsonObject workflow || Resources(workflow).ToArray() is not { Length: > 0 } declared) return null;
+        var resolved = args["declaredResources"] as JsonObject;
+        var have = held.ToHashSet(StringComparer.Ordinal);
+        var missing = new List<string>();
+        var unregistered = new List<string>();
+        foreach (var name in declared)
+        {
+            var canonical = resolved?[name] is JsonValue value && value.TryGetValue<string>(out var id) ? id : name;
+            if (canonical.Length == 0) { if (RequiresResources(board)) unregistered.Add(name); }
+            else if (!have.Contains(canonical)) missing.Add(name);
+        }
+        return missing.Count + unregistered.Count == 0 ? null : Error(ResourcesRequired, new { missing, unregistered, declared }, Number(task, "version"));
+    }
+
     /// <summary>The <c>GrantInvalid</c> reply when the workflow's <c>authorityRef</c> names a grant that is unknown, expired or out of scope; readiness and execution both use it.</summary>
     public static RelayReply? GrantRefusal(JsonObject board, JsonObject workflow, DateTimeOffset now) =>
         StandingPreferences.GrantProblem(board, workflow, now) is { } reason ? Error(GrantInvalid, new { authorityRef = Text(workflow["packet"]!.AsObject(), "authorityRef"), reason }) : null;

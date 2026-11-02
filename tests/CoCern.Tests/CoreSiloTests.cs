@@ -738,6 +738,90 @@ public sealed class CoreSiloTests
     }
 
     [Fact]
+    public async Task A_claim_must_take_the_resources_its_packet_declares_and_nothing_starts_while_another_session_holds_one()
+    {
+        using var host = new HostBuilder().ConfigureLogging(log => log.ClearProviders()).UseOrleans(silo => silo
+            .UseLocalhostClustering(siloPort: FreePort(), gatewayPort: FreePort(), serviceId: "core-declared-resources-tests", clusterId: Guid.NewGuid().ToString("N"))
+            .AddMemoryGrainStorage("relay"))
+            .ConfigureServices(services => services.AddCoCernCore()).Build();
+        await host.StartAsync();
+        try
+        {
+            var application = host.Services.GetRequiredService<RelayApplication>();
+            var caller = new RelayCaller("alice", true, ["repo"]);
+            async Task<RelayReply> Call(string tool, JsonObject args)
+            {
+                args["repositoryId"] = "repo"; if (!args.ContainsKey("requestId")) args["requestId"] = Guid.NewGuid().ToString("N");
+                return await application.ExecuteAsync(caller, tool, JsonSerializer.SerializeToElement(args));
+            }
+            JsonObject Data(RelayReply reply) { Assert.True(reply.Ok, reply.Code + " " + reply.DataJson); return JsonNode.Parse(reply.DataJson)!.AsObject(); }
+            var a = Data(await Call("session_open", new() { ["machineId"] = "pc" })); var b = Data(await Call("session_open", new() { ["machineId"] = "pc" }));
+            JsonObject For(JsonObject session, string? taskId = null)
+            {
+                var args = new JsonObject { ["sessionId"] = session["sessionId"]!.DeepClone(), ["sessionToken"] = session["sessionToken"]!.DeepClone() };
+                if (taskId is not null) args["taskId"] = taskId;
+                return args;
+            }
+            Data(await Call("control_request", new() { ["command"] = "register_resource", ["resourceId"] = "rig-1", ["aliases"] = new JsonArray("bench"), ["machineId"] = "pc" }));
+            Data(await Call("control_request", new() { ["command"] = "register_resource", ["resourceId"] = "rig-2", ["machineId"] = "pc" }));
+            Data(await Call("standing_put", new() { ["expectedRevision"] = 0, ["settings"] = new JsonObject { ["requireResources"] = true } }));
+            JsonObject Ready(params string[] resources) => new()
+            {
+                ["state"] = "ready", ["criteria"] = new JsonArray(new JsonObject { ["id"] = "c", ["description"] = "d", ["result"] = "not_run" }), ["blockers"] = new JsonArray(),
+                ["packet"] = new JsonObject { ["goal"] = "g", ["target"] = "t", ["authorityRef"] = "human", ["restoration"] = "r", ["stopCondition"] = "s", ["resources"] = new JsonArray(resources.Select(id => (JsonNode)id).ToArray()) }
+            };
+            foreach (var (id, resource) in new[] { ("t", "rig-1"), ("alias", "bench"), ("u", "rig-2") })
+            {
+                var create = For(a, id); create["expectedVersion"] = 0; create["workflow"] = Ready(resource);
+                Data(await Call("task_update", create));
+            }
+            JsonObject Claim(JsonObject session, string taskId, params string[] resources)
+            {
+                var claim = For(session, taskId); claim["expectedVersion"] = 1; claim["resourceIds"] = new JsonArray(resources.Select(id => (JsonNode)id).ToArray());
+                return claim;
+            }
+
+            // The reviewer's sequence: a claim with resourceIds [] on a task declaring rig-1 is refused, so no action can begin unguarded.
+            var bare = await Call("task_claim", Claim(a, "t"));
+            Assert.Equal(RelayErrorCodes.ResourcesRequired, bare.Code);
+            Assert.Equal(["rig-1"], JsonNode.Parse(bare.DataJson)!["missing"]!.AsArray().Select(name => name!.GetValue<string>()));
+            var unclaimed = For(a, "t"); unclaimed["expectedVersion"] = 1; unclaimed["actionId"] = "x"; unclaimed["inputFingerprint"] = "f";
+            Assert.Equal(RelayErrorCodes.ClaimRequired, (await Call("action_begin", unclaimed)).Code);
+            // While another session holds rig-1, the claim that names it is refused and rolled back.
+            var held = For(b); held["resourceId"] = "rig-1";
+            var heldGrant = Data(await Call("claim_acquire", held));
+            Assert.Equal(RelayErrorCodes.Busy, (await Call("task_claim", Claim(a, "t", "rig-1"))).Code);
+            var release = For(b); release["resourceId"] = "rig-1"; release["generation"] = heldGrant["generation"]!.DeepClone();
+            Data(await Call("claim_release", release));
+            // With the declared resource named, the claim takes it and the action begins guarded by it. (The rolled-back claim moved the
+            // task to version 3.)
+            var named = Claim(a, "t", "rig-1"); named["expectedVersion"] = 3;
+            Data(await Call("task_claim", named));
+            var begin = For(a, "t"); begin["expectedVersion"] = 4; begin["actionId"] = "x"; begin["inputFingerprint"] = "f";
+            Assert.True(Data(await Call("action_begin", begin))["replayAllowed"]!.GetValue<bool>());
+            // A declared alias resolves by the session's machine, as offers resolve it: "bench" on pc is rig-1, which A now holds.
+            Assert.Equal(RelayErrorCodes.ResourcesRequired, (await Call("task_claim", Claim(b, "alias"))).Code);
+            Assert.Equal(RelayErrorCodes.Busy, (await Call("task_claim", Claim(b, "alias", "rig-1"))).Code);
+
+            // action_begin checks the declared resources are held by this session: here A gave rig-2 up and B took it.
+            var claimed = Data(await Call("task_claim", Claim(a, "u", "rig-2")));
+            var giveUp = For(a); giveUp["resourceId"] = "rig-2"; giveUp["generation"] = claimed["grants"]![0]!["generation"]!.DeepClone();
+            Data(await Call("claim_release", giveUp));
+            var taken = For(b); taken["resourceId"] = "rig-2";
+            var takenGrant = Data(await Call("claim_acquire", taken));
+            var start = For(a, "u"); start["expectedVersion"] = 2; start["actionId"] = "y"; start["inputFingerprint"] = "f";
+            Assert.Equal(RelayErrorCodes.Busy, (await Call("action_begin", start)).Code);
+            var back = For(b); back["resourceId"] = "rig-2"; back["generation"] = takenGrant["generation"]!.DeepClone();
+            Data(await Call("claim_release", back));
+            start["requestId"] = Guid.NewGuid().ToString("N");
+            Assert.Equal(RelayErrorCodes.ClaimRequired, (await Call("action_begin", start)).Code);
+            var read = For(a, "u"); read["section"] = "actions";
+            Assert.Empty(Data(await Call("task_get", read))["items"]!.AsArray());
+        }
+        finally { await host.StopAsync(); }
+    }
+
+    [Fact]
     public async Task An_archive_sweep_on_another_board_closes_the_archived_tasks_attention_at_its_target_session()
     {
         var clock = new ManualClock(DateTimeOffset.UtcNow);
