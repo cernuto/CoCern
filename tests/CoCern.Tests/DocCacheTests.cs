@@ -1126,6 +1126,34 @@ public sealed class DocCacheTests
     }
 
     [Fact]
+    public async Task Of_the_files_waiting_for_room_only_those_that_fit_are_reread()
+    {
+        var a = "# A\n\n" + new string('a', 50) + "\n";
+        var b = "# B\n\n" + new string('b', 50) + "\n";
+        var c = "# C\n\n" + new string('c', 14) + "\n";
+        var d = "# D\n\ndddd\n";
+        using var git = GitRepositories.Create(new() { ["docs/a.md"] = a, ["docs/b.md"] = b, ["docs/c.md"] = c, ["docs/d.md"] = d });
+        var watcher = new WatchingGit();
+        await using var host = DocHost(git, watcher, settings: new() { ["Relay:DocCache:MaxRepositoryBytes"] = "80" });
+        var directory = host.Services.GetRequiredService<IGrainFactory>().GetGrain<IDocDirectoryGrain>("repo");
+        var runner = host.Services.GetRequiredService<DocSyncRunner>();
+        await SyncAsync(host);
+        // a (56) and c (20) use 76 bytes; b (56) and d (10) wait.
+        Assert.Equal([new DocWaiting("docs/b.md", 56), new DocWaiting("docs/d.md", 10)], (await directory.ReadAsync()).CapacitySkipped!);
+        int Reads(string path) => watcher.Shows.Count(show => show.EndsWith(":" + path, StringComparison.Ordinal));
+        var (readsB, readsD) = (Reads("docs/b.md"), Reads("docs/d.md"));
+        // c shrinks to 8 bytes: 64 used, so d fits and b still cannot. Room a commit frees by shrinking a file counts from the next sync,
+        // and then only d is read again.
+        git.Commit(new() { ["docs/c.md"] = "# C\n\nc\n" });
+        await runner.SyncAsync("repo", null, CancellationToken.None);
+        await runner.SyncNowAsync("repo", null, "unchanged");
+        Assert.Equal((readsB, readsD + 1), (Reads("docs/b.md"), Reads("docs/d.md")));
+        var view = await directory.ReadAsync();
+        Assert.Equal(new[] { "docs/a.md", "docs/c.md", "docs/d.md" }, view.Entries.Select(entry => entry.Path));
+        Assert.Equal([new DocWaiting("docs/b.md", 56)], view.CapacitySkipped!);
+    }
+
+    [Fact]
     public async Task The_repository_byte_cap_skips_and_counts_files_past_it()
     {
         using var git = GitRepositories.Create(new() { ["docs/a.md"] = "# A\n\n" + new string('a', 50) + "\n", ["docs/b.md"] = "# B\n\n" + new string('b', 50) + "\n", ["docs/c.md"] = "# C\n\nc\n" });

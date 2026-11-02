@@ -88,6 +88,11 @@ public static class RelayErrorCodes
     /// to, which a board with <c>requireResources</c> refuses).
     /// </summary>
     public const string ResourcesRequired = "ResourcesRequired";
+    /// <summary>
+    /// Internal: the board asks the hub to resolve the task's declared <c>packet.resources</c> (<c>declared</c>) and call again. Only a call
+    /// that set <c>resolveDeclared</c> gets it, so the hub reads nothing extra for a task that declares none. Never reaches a client.
+    /// </summary>
+    public const string DeclaredResourcesNeeded = "DeclaredResourcesNeeded";
 
     // Attention
     /// <summary>An item that blocks another session cannot be postponed again (at most 2 snoozes and 30 minutes).</summary>

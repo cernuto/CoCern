@@ -246,6 +246,7 @@ internal static class TaskBoardAggregate
         var version = Number(task, "version");
         if (TaskWorkflow.ExecutionRefusal(context.State, task, session, context.Now) is { } refusal) return refusal;
         // The claim must take every resource the packet declares, so no work runs while another session holds one.
+        if (TaskWorkflow.DeclaredResourcesNeeded(task, args) is { } needed) return needed;
         if (TaskWorkflow.ResourceRefusal(context.State, task, args, Strings(args["resourceIds"])) is { } resources) return resources;
         var owned = Text(task, "owner") == session && Date(task, "leaseUntil") > context.Now;
         if (owned && !SameResources(task["resourceIds"], args["resourceIds"])) return Error(ResourceSetConflict, new { resourceIds = task["resourceIds"] }, version);
@@ -320,7 +321,10 @@ internal static class TaskBoardAggregate
         string[] NewlyIn(string status) => ObjectAt(task, "actions").Where(x => x.Value is JsonObject action && Text(action, "status") == status && priorStatus.GetValueOrDefault(x.Key) != status)
             .Select(x => x.Key).Order(StringComparer.Ordinal).ToArray();
         // An abandoned action's external effects are unknown, so the managers hear of it like a failure.
-        AttentionSources.OnTaskUpdate(context, task, priorWorkflow, unblocked, NewlyIn("failed"), NewlyIn(TaskActions.Abandoned));
+        // A writer's real outcome that replaced abandoned (not a failure: that one is NewlyIn("failed")).
+        var replaced = ObjectAt(task, "actions").Where(x => x.Value is JsonObject action && priorStatus.GetValueOrDefault(x.Key) == TaskActions.Abandoned && Text(action, "status") is not (TaskActions.Abandoned or "failed"))
+            .Select(x => x.Key).Order(StringComparer.Ordinal).ToArray();
+        AttentionSources.OnTaskUpdate(context, task, priorWorkflow, unblocked, NewlyIn("failed"), NewlyIn(TaskActions.Abandoned), replaced);
         StandingOrders.Detect(context, task, priorWorkflow);
         task["updatedAt"] = context.Now.ToString("O"); task["updatedBy"] = context.Caller.PrincipalId; task["version"] = ++version;
         // An acknowledgment, not the task: echoing the whole task (up to its 256-message conversation) put it into the updater's context again

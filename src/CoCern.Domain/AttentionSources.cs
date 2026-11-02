@@ -17,11 +17,12 @@ internal static class AttentionSources
 
     /// <summary>
     /// Board items after a <c>task_update</c> or <c>action_report</c>: <c>blocked</c> and <c>failed</c> (also for an action a recovery
-    /// abandoned) to managers, <c>review_ready</c>
+    /// abandoned) to managers, <c>review_ready</c>. When a writer replaces abandoned with its real outcome (<paramref name="replacedActions"/>),
+    /// the <c>failed</c> item is closed, or restated for the actions still failed or abandoned, so it never keeps saying effects are unknown.
     /// to managers on completion, and <c>next_work</c> to each unblocked task's target. Leaving a state closes the items it raised.
     /// </summary>
     public static void OnTaskUpdate(AggregateContext context, JsonObject task, JsonObject? prior, IReadOnlyList<string> unblocked, IReadOnlyList<string> failedActions,
-        IReadOnlyList<string>? abandonedActions = null)
+        IReadOnlyList<string> abandonedActions, IReadOnlyList<string> replacedActions)
     {
         var tasks = ObjectAt(context.State, "tasks");
         var taskId = Text(task, "taskId");
@@ -46,15 +47,21 @@ internal static class AttentionSources
         }
         else if (was == "blocked" && now != "blocked") ToManagers(context, Operations.AttentionClose, Kinds(Item(AttentionKinds.Blocked), AttentionKinds.Blocked));
 
-        abandonedActions ??= [];
+        if (failedActions.Count == 0 && abandonedActions.Count == 0 && replacedActions.Count > 0)
+        {
+            // Only replaced abandons changed: restate the item for what is still failed or abandoned, or close it.
+            var actions = ObjectAt(task, "actions");
+            string[] Still(string status) => actions.Where(x => x.Value is JsonObject action && Text(action, "status") == status).Select(x => x.Key).Order(StringComparer.Ordinal).ToArray();
+            (failedActions, abandonedActions) = (Still("failed"), Still(TaskActions.Abandoned));
+            if (failedActions.Count == 0 && abandonedActions.Count == 0) ToManagers(context, Operations.AttentionClose, Kinds(Item(AttentionKinds.Failed), AttentionKinds.Failed));
+        }
         if (failedActions.Count > 0 || abandonedActions.Count > 0)
         {
             var item = Item(AttentionKinds.Failed);
-            item["note"] = string.Join("; ", new[]
-            {
-                failedActions.Count > 0 ? "action " + string.Join(", ", failedActions) + " failed" : "",
-                abandonedActions.Count > 0 ? "action " + string.Join(", ", abandonedActions) + " abandoned by recovery; its external effects are unknown" : ""
-            }.Where(part => part.Length > 0));
+            var parts = new List<string>();
+            if (failedActions.Count > 0) parts.Add("action " + string.Join(", ", failedActions) + " failed");
+            if (abandonedActions.Count > 0) parts.Add("action " + string.Join(", ", abandonedActions) + " abandoned by recovery; its external effects are unknown");
+            item["note"] = string.Join("; ", parts);
             if (Blocking()) item["blocking"] = true;
             ToManagers(context, Operations.AttentionRaise, item);
         }

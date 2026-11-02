@@ -199,6 +199,10 @@ public static class Operations
     /// or recovered it) or stops (the action resolved, or another session recovered it). The directory never expires such a session.
     /// </summary>
     public const string SessionWork = "__session_work";
+    /// <summary>Server-set on <c>task_claim</c> and <c>action_begin</c>: ask the board for the declared resources (<c>DeclaredResourcesNeeded</c>) when the task has any.</summary>
+    public const string ResolveDeclaredField = "resolveDeclared";
+    /// <summary>Server-set on <c>action_begin</c>: the first declared resource whose lock this session does not hold (<c>code</c>, <c>resourceId</c>).</summary>
+    public const string LockRefusalField = "lockRefusal";
     /// <summary>A board's due sweep: moves tasks finished longer than <c>Relay:Board:ArchiveAfterDays</c> to the archive.</summary>
     public const string TaskArchive = "__task_archive";
     /// <summary>Read-only: which of the given sessions in the repository the caller's principal opened.</summary>

@@ -47,10 +47,10 @@ Add `workflow` to `task_update`:
 An action whose session closed before it reported is stranded. Recover it with `action_report` and `recover: true`:
 
 - An administrator can recover any action, from its own session. It cannot give an `outcome`.
-- The action's own principal can recover it from a new session once the old session's task claim has ended. It may give the `outcome`.
+- The action's own principal can recover it from a new session once the claim of the session that answers for it (its writer, or the session that recovered it) has ended. It may give a final `outcome`: `completed`, `failed` or `canceled`. Any other gets `InvalidOutcome`.
 - Anyone else gets `ActionDenied`.
 - Without an `outcome`, an action still in flight becomes `abandoned`: its external effects are unknown. `recovery` records who, which session and when. Managers get a `failed` item for it.
-- If the writer was still there after all, its own principal can report the real final outcome (`completed`, `failed` or `canceled`). It replaces `abandoned`, and `overridden` records what it replaced.
+- If the writer was still there after all, its own principal can report the real final outcome (`completed`, `failed` or `canceled`). It replaces `abandoned`, and `overridden` records what it replaced. From the writer's own session, the action is the writer's again and holds its task like any other. From another session, that session answers for it from then on (`recovery` with `override: true`) and reports any owed restoration. The managers' `failed` item is closed, or restated for actions still failed or abandoned.
 - A required restoration stays `pending`. The recovering session reports it later, again with `recover: true`, or an administrator accepts it.
 - Once the old claim's lease has ended, another session can claim the task. New actions on it wait until the restoration is resolved.
 

@@ -24,6 +24,9 @@ internal static class TaskActions
     /// </summary>
     public const string Abandoned = "abandoned";
 
+    /// <summary>When the board last told the control directory that the action's session answers for it.</summary>
+    private const string TrackedAtField = "trackedAt";
+
     public static bool IsUnresolved(JsonObject action) =>
         Text(action, "status") is "invoking" or "started" or "unknown" or "incomplete" || Text(action, "restoration") is "pending" or "blocked";
 
@@ -31,12 +34,16 @@ internal static class TaskActions
 
     /// <summary>
     /// Whether an unresolved action still holds its task against another session's claim or a release. A recovered one does not: its
-    /// writer is gone, and its pending restoration still blocks new actions, completion and its resources until it is resolved.
+    /// writer is gone, and its pending restoration still blocks new actions, completion and its resources until it is resolved. One its
+    /// writer took back (an override from the writer's own session) holds the task again, like any other action of its writer.
     /// </summary>
     public static bool HoldsTask(JsonObject task) =>
-        (task["actions"] as JsonObject ?? new()).Any(x => x.Value is JsonObject action && IsUnresolved(action) && action["recovery"] is not JsonObject && action["overridden"] is not JsonObject);
+        (task["actions"] as JsonObject ?? new()).Any(x => x.Value is JsonObject action && IsUnresolved(action) && action["recovery"] is not JsonObject);
 
     private static bool IsTerminal(string status) => status is "completed" or "failed" or "canceled" or Abandoned;
+
+    /// <summary>The outcomes a recovery may give: it settles the action, so it can never leave it in flight under a session that did not start it.</summary>
+    private static bool IsFinalOutcome(string outcome) => outcome is "completed" or "failed" or "canceled";
 
     /// <summary>The session that answers for an action: the one that recovered it, else its writer.</summary>
     private static string OwnerSession(JsonObject action) => action["recovery"] is JsonObject recovery ? Text(recovery, "sessionId") : Text(action, "sessionId");
@@ -77,7 +84,11 @@ internal static class TaskActions
         if (previousAttempt is not null) ArrayAt(task, "attemptHistory").Add(previousAttempt.DeepClone());
         if (Text(task, "owner") != session || Date(task, "leaseUntil") <= context.Now) return Error(ClaimRequired);
         // The task's claim must cover the packet's declared resources (it may have changed since the claim); the hub checks they are held.
+        if (TaskWorkflow.DeclaredResourcesNeeded(task, args) is { } needed) return needed;
         if (TaskWorkflow.ResourceRefusal(context.State, task, args, Strings(task["resourceIds"])) is { } resources) return resources;
+        // The hub found a declared resource's lock not held by this session: nothing is recorded, so no action starts unguarded.
+        if (args[TaskWorkflow.LockRefusalField] is JsonObject locks)
+            return Error(Text(locks, "code") == Busy ? Busy : ClaimRequired, new { resourceId = Text(locks, "resourceId"), replayAllowed = false }, version);
         if (actions.Any(x => x.Key != id && IsUnresolved(x.Value!.AsObject()))) return Error(ActionUncertain);
         if (!ExpectedVersionMatches(args, version)) return VersionConflict(version);
         var trigger = Text(args, "triggerId");
@@ -90,6 +101,7 @@ internal static class TaskActions
             ["startedAt"] = context.Now.ToString("O"), ["restoration"] = Flag(args, "requiresRestoration") ? "pending" : "not_required", ["resourceIds"] = task["resourceIds"]?.DeepClone()
         };
         action["requiresRestoration"] = Flag(args, "requiresRestoration");
+        action[TrackedAtField] = context.Now.ToString("O");
         actions[id] = action; task["version"] = ++version;
         foreach (var resource in Strings(action["resourceIds"]))
             context.Emit(AggregateKinds.Lock, resource, Operations.Block, new JsonObject
@@ -135,11 +147,12 @@ internal static class TaskActions
         var status = Text(action, "status");
         // The writer was there after all (an administrator abandoned it during a live lease, say): its real outcome replaces abandoned.
         var overriding = !recovery && !historical && status == Abandoned && Text(action, "principalId") == caller.PrincipalId && update.ContainsKey("outcome");
-        if (recovery) { if (RecoveryRefusal(context, task, action, update, originalWriter) is { } refused) return refused; }
+        if (recovery) { if (RecoveryRefusal(context, task, action, update) is { } refused) return refused; }
         else if (!originalWriter && !recoverer && !adminAcceptance && !overriding) return Error(ActionDenied);
         // A cleanup without an outcome keeps the action's status, whatever it is (an action still invoking included); a recovery without
         // one abandons an action still in flight.
         var outcome = recovery && !update.ContainsKey("outcome") ? (IsTerminal(status) ? status : Abandoned) : adminAcceptance ? status : Required(update, "outcome");
+        if (recovery && update.ContainsKey("outcome") && !IsFinalOutcome(outcome) && outcome != Abandoned) return Error(InvalidOutcome, new { recovery = true, allowed = new[] { "completed", "failed", "canceled" } });
         var kept = (adminAcceptance || recovery) && outcome == status;
         if (!kept && !Outcomes.Contains(outcome) && !(recovery && outcome == Abandoned)) return Error(InvalidOutcome);
         var restoration = update.ContainsKey("restoration") ? Text(update, "restoration") : Text(action, "restoration");
@@ -179,6 +192,14 @@ internal static class TaskActions
                 ["status"] = Abandoned, ["recovery"] = action["recovery"]?.DeepClone(), ["principalId"] = caller.PrincipalId, ["sessionId"] = session, ["at"] = context.Now.ToString("O")
             };
             action.Remove("recovery");
+            // Taken back from another session of the principal: that session answers for it now (the writer's is gone), so it can still
+            // report an owed restoration, and the directory keeps that session while it does.
+            if (session != Text(action, "sessionId"))
+                action["recovery"] = new JsonObject
+                {
+                    ["principalId"] = caller.PrincipalId, ["sessionId"] = session, ["administrator"] = caller.IsAdministrator, ["at"] = context.Now.ToString("O"), ["priorStatus"] = status,
+                    ["override"] = true
+                };
         }
         if (recovery)
             action["recovery"] = new JsonObject
@@ -189,8 +210,13 @@ internal static class TaskActions
         var actionKey = CoordinationStateMachine.ActionKey(args, id, Number(action, "attempt"));
         var (owner, unresolved) = (OwnerSession(action), IsUnresolved(action));
         if (wasUnresolved && (!unresolved || owner != priorOwner)) Track(context, priorOwner, actionKey, open: false);
-        // A report that leaves it unresolved with the same session refreshes the directory's record, so a long-running action stays tracked.
-        if (unresolved) Track(context, owner, actionKey, open: true);
+        // A new owner is told at once. The same owner's record is refreshed at most every SessionWorkRefreshHours, so a long-running action
+        // stays tracked without a directory write on every progress report.
+        if (unresolved && (owner != priorOwner || !wasUnresolved || Date(action, TrackedAtField) <= context.Now.AddHours(-RelayLimits.SessionWorkRefreshHours)))
+        {
+            Track(context, owner, actionKey, open: true);
+            action[TrackedAtField] = context.Now.ToString("O");
+        }
         // An administrator unblocks another principal's action only through cleanup: acceptance, a recovery, or a report on one it recovered.
         var administrativeAcceptance = caller.IsAdministrator && (adminAcceptance || recovery || recoverer);
         if (!unresolved)
@@ -205,18 +231,19 @@ internal static class TaskActions
 
     /// <summary>
     /// Why this caller may not recover the action, or null. Another principal must be an administrator, and gives no outcome; the action's
-    /// own principal on another session must wait until the writer's claim on the task has lapsed, since until then the writer is still
-    /// there to report. A recovery changes no shared task content, and an action already resolved has nothing to recover.
+    /// own principal on another session must wait until the claim of the session that answers for it (its writer, or the session that
+    /// recovered it) has lapsed, since until then that session is still there to report. A recovery changes no shared task content, and
+    /// an action already resolved has nothing to recover.
     /// </summary>
-    private static RelayReply? RecoveryRefusal(AggregateContext context, JsonObject task, JsonObject action, JsonObject update, bool originalWriter)
+    private static RelayReply? RecoveryRefusal(AggregateContext context, JsonObject task, JsonObject action, JsonObject update)
     {
         var caller = context.Caller;
         var samePrincipal = Text(action, "principalId") == caller.PrincipalId;
         if (!samePrincipal && (!caller.IsAdministrator || update.ContainsKey("outcome")) || CarriesMilestone(context.Args)) return Error(ActionDenied);
         if (!IsUnresolved(action)) return Error(ActionConflict, new { status = Text(action, "status"), restoration = Text(action, "restoration") });
-        var writer = Text(action, "sessionId");
-        if (!caller.IsAdministrator && !originalWriter && Text(task, "owner") == writer && Date(task, "leaseUntil") > context.Now)
-            return Error(OwnerConflict, new { holder = writer, leaseUntil = Text(task, "leaseUntil") });
+        var (writer, answering, owner) = (Text(action, "sessionId"), OwnerSession(action), Text(task, "owner"));
+        if (!caller.IsAdministrator && context.SessionId != answering && owner.Length > 0 && (owner == writer || owner == answering) && Date(task, "leaseUntil") > context.Now)
+            return Error(OwnerConflict, new { holder = owner, leaseUntil = Text(task, "leaseUntil") });
         return null;
     }
 

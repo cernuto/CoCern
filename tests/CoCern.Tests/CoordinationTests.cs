@@ -2047,6 +2047,162 @@ public sealed class CoordinationTests
         Assert.Equal(["rig-1"], Data(claimed)["resourceIds"]!.AsArray().Select(id => id!.GetValue<string>()));
     }
 
+    private static long TaskVersion(StateEnvelope<CoordinationDocument> board) => StateJson(board)["tasks"]!["t"]!["version"]!.GetValue<long>();
+    private static IEnumerable<(string Session, bool Open)> Tracking(StateEnvelope<CoordinationDocument> board) =>
+        board.Effects.Where(effect => effect.Operation == Operations.SessionWork).Select(effect => (Payload(effect)["sessionId"]!.GetValue<string>(), Payload(effect)["open"]!.GetValue<bool>()));
+
+    /// <summary>A task t claimed by session a for <paramref name="lease"/> seconds, with action deploy invoking (and owing a restoration).</summary>
+    private static StateEnvelope<CoordinationDocument> Invoking(RelayCaller worker, int lease, bool restoration = true)
+    {
+        var board = new StateEnvelope<CoordinationDocument>();
+        Assert.True(Call(board, "board", "task_update", new() { ["taskId"] = "t", ["requestId"] = "create", ["expectedVersion"] = 0 }, worker).Ok);
+        Assert.True(Call(board, "board", "task_claim", new() { ["taskId"] = "t", ["sessionId"] = "a", ["requestId"] = "claim", ["expectedVersion"] = 1, ["leaseSeconds"] = lease }, worker).Ok);
+        Assert.True(Call(board, "board", "action_begin", new() { ["taskId"] = "t", ["sessionId"] = "a", ["requestId"] = "begin", ["expectedVersion"] = 2, ["actionId"] = "deploy", ["inputFingerprint"] = "f", ["requiresRestoration"] = restoration }, worker).Ok);
+        board.Effects.Clear();
+        return board;
+    }
+
+    [Fact]
+    public void Another_session_that_takes_back_an_abandoned_action_answers_for_it_and_its_restoration()
+    {
+        var worker = Caller with { IsAdministrator = false };
+        var admin = Caller with { PrincipalId = "bob" };
+        var board = Invoking(worker, 120);
+        var recover = StrandedReport("admin-session", 3); recover["recover"] = true;
+        Assert.True(Call(board, "board", "action_report", recover, admin, 200).Ok);
+        board.Effects.Clear();
+        // A new session of the writer's principal reports the real outcome; the writer's own session is gone.
+        var real = StrandedReport("a3", 4); real["outcome"] = "completed";
+        var replaced = Call(board, "board", "action_report", real, worker, 210);
+        Assert.True(replaced.Ok, replaced.Code);
+        var action = Data(replaced)["actions"]!["deploy"]!;
+        Assert.Equal(("completed", "pending", "a3", true), (action["status"]!.GetValue<string>(), action["restoration"]!.GetValue<string>(),
+            action["recovery"]!["sessionId"]!.GetValue<string>(), action["recovery"]!["override"]!.GetValue<bool>()));
+        // The directory moves the action from the administrator's session to a3, not back to the writer's dead session.
+        Assert.Equal([("admin-session", false), ("a3", true)], Tracking(board));
+        // Nothing is abandoned any more, so the managers' failed item is closed rather than left saying the effects are unknown.
+        Assert.Contains(board.Effects, effect => effect.Operation == Operations.AttentionRoute && Payload(effect)["operation"]!.GetValue<string>() == Operations.AttentionClose
+            && Payload(effect)["item"]!["kinds"]!.AsArray().Any(kind => kind!.GetValue<string>() == AttentionKinds.Failed));
+        // a3 reports the owed restoration like any session that answers for an action.
+        var restored = StrandedReport("a3", 5); restored["outcome"] = "completed"; restored["restoration"] = "verified";
+        Assert.True(Call(board, "board", "action_report", restored, worker, 220).Ok);
+    }
+
+    [Fact]
+    public void The_writer_that_takes_back_an_abandoned_action_holds_its_task_until_the_restoration_is_reported()
+    {
+        var worker = Caller with { IsAdministrator = false };
+        var admin = Caller with { PrincipalId = "bob" };
+        var board = Invoking(worker, 600);
+        var recover = StrandedReport("admin-session", 3); recover["recover"] = true;
+        Assert.True(Call(board, "board", "action_report", recover, admin, 60).Ok);
+        var real = StrandedReport("a", 4); real["outcome"] = "completed";
+        var replaced = Call(board, "board", "action_report", real, worker, 90);
+        Assert.True(replaced.Ok, replaced.Code);
+        Assert.Null(Data(replaced)["actions"]!["deploy"]!["recovery"]);
+        // Its writer answers for it again, so the owed restoration keeps the claim, as for any of its writer's actions.
+        var release = Call(board, "board", "claim_release", new() { ["taskId"] = "t", ["sessionId"] = "a", ["claimGeneration"] = 1, ["requestId"] = "release", ["expectedVersion"] = TaskVersion(board) }, worker, 100);
+        Assert.Equal("UnresolvedAction", release.Code);
+    }
+
+    [Fact]
+    public void A_recovery_waits_for_the_claim_of_the_session_that_recovered_the_action_and_settles_it()
+    {
+        var worker = Caller with { IsAdministrator = false };
+        var board = Invoking(worker, 120);
+        var first = StrandedReport("a2", 3); first["recover"] = true;
+        Assert.True(Call(board, "board", "action_report", first, worker, 200).Ok);
+        // a2 answers for the action and claims the task to work on the restoration.
+        Assert.True(Call(board, "board", "task_claim", new() { ["taskId"] = "t", ["sessionId"] = "a2", ["requestId"] = "a2-claim", ["expectedVersion"] = TaskVersion(board), ["leaseSeconds"] = 60 }, worker, 200).Ok);
+        // While a2's claim is live, another session of the same principal cannot take the action from it; a2 itself still can.
+        var steal = StrandedReport("a3", TaskVersion(board)); steal["recover"] = true;
+        Assert.Equal("OwnerConflict", Call(board, "board", "action_report", steal, worker, 210).Code);
+        // A recovery settles the action: it never leaves it in flight under a session that did not start it.
+        var running = StrandedReport("a3", TaskVersion(board)); running["recover"] = true; running["outcome"] = "started";
+        Assert.Equal("InvalidOutcome", Call(board, "board", "action_report", running, worker, 300).Code);
+        // Once a2's claim has lapsed, a3 may take it over.
+        var later = StrandedReport("a3", TaskVersion(board)); later["recover"] = true;
+        Assert.True(Call(board, "board", "action_report", later, worker, 300).Ok);
+    }
+
+    [Fact]
+    public void A_session_the_action_comes_back_to_is_tracked_again_but_a_reordered_open_is_not()
+    {
+        var worker = Caller with { IsAdministrator = false };
+        var control = new StateEnvelope<CoordinationDocument> { Value = new() { Json = new JsonObject { ["sessions"] = new JsonObject { ["a"] = StaleRecord("a", Now) } }.ToJsonString() } };
+        JsonObject Work(bool open, int seconds) => new() { ["sessionId"] = "a", ["actionKey"] = "k", ["open"] = open, ["at"] = Now.AddSeconds(seconds).ToString("O") };
+        Assert.True(Call(control, "control", Operations.SessionWork, Work(true, 0), worker, 0).Ok);
+        Assert.True(Call(control, "control", Operations.SessionWork, Work(false, 10), worker, 10).Ok);
+        // A refresh reported before the close, delivered after it, changes nothing.
+        Assert.False(Data(Call(control, "control", Operations.SessionWork, Work(true, 5), worker, 20))["tracked"]!.GetValue<bool>());
+        Assert.Null(StateJson(control)["sessions"]!["a"]!["openActions"]);
+        // An open reported after the close is real (the writer took the action back), and opens it again.
+        Assert.True(Data(Call(control, "control", Operations.SessionWork, Work(true, 30), worker, 30))["tracked"]!.GetValue<bool>());
+        Assert.Equal(1, StateJson(control)["sessions"]!["a"]!["openActions"]!.AsObject().Count);
+    }
+
+    [Fact]
+    public void Progress_on_a_long_action_refreshes_the_directory_at_most_once_a_day()
+    {
+        var worker = Caller with { IsAdministrator = false };
+        var board = Invoking(worker, RelayLimits.MaxLeaseSeconds, restoration: false);
+        JsonObject Progress(string outcome) { var report = StrandedReport("a", TaskVersion(board)); report["outcome"] = outcome; return report; }
+        Assert.True(Call(board, "board", "action_report", Progress("started"), worker, 60).Ok);
+        Assert.Empty(Tracking(board));
+        Assert.True(Call(board, "board", "action_report", Progress("incomplete"), worker, (RelayLimits.SessionWorkRefreshHours + 1) * 3600).Ok);
+        Assert.Equal([("a", true)], Tracking(board));
+    }
+
+    [Fact]
+    public void Only_a_task_that_declares_resources_asks_the_hub_to_resolve_them_and_a_held_lock_refusal_records_nothing()
+    {
+        var worker = Caller with { IsAdministrator = false };
+        var board = new StateEnvelope<CoordinationDocument>();
+        var workflow = DependentWorkflow("ready"); workflow["packet"]!["resources"] = new JsonArray("rig-1");
+        Assert.True(Call(board, "board", "task_update", new() { ["taskId"] = "t", ["requestId"] = "create", ["expectedVersion"] = 0, ["workflow"] = workflow }, worker).Ok);
+        Assert.True(Call(board, "board", "task_update", new() { ["taskId"] = "plain", ["requestId"] = "create-plain", ["expectedVersion"] = 0 }, worker).Ok);
+        // A task without declared resources answers the hub's request at once.
+        Assert.True(Call(board, "board", "task_claim", new() { ["taskId"] = "plain", ["sessionId"] = "a", ["requestId"] = "plain-claim", ["expectedVersion"] = 1, [Operations.ResolveDeclaredField] = true }, worker).Ok);
+        var needed = Call(board, "board", "task_claim", new() { ["taskId"] = "t", ["sessionId"] = "a", ["requestId"] = "claim", ["expectedVersion"] = 1, ["resourceIds"] = new JsonArray(), [Operations.ResolveDeclaredField] = true }, worker);
+        Assert.Equal(RelayErrorCodes.DeclaredResourcesNeeded, needed.Code);
+        Assert.Equal(["rig-1"], Data(needed)["declared"]!.AsArray().Select(name => name!.GetValue<string>()));
+        Assert.True(Call(board, "board", "task_claim", new() { ["taskId"] = "t", ["sessionId"] = "a", ["requestId"] = "claim", ["expectedVersion"] = 1, ["resourceIds"] = new JsonArray("rig-1") }, worker).Ok);
+        JsonObject Begin(string requestId, JsonObject? refusal)
+        {
+            var args = new JsonObject { ["taskId"] = "t", ["sessionId"] = "a", ["requestId"] = requestId, ["expectedVersion"] = 2, ["actionId"] = "deploy", ["inputFingerprint"] = "f", ["declaredResources"] = new JsonObject { ["rig-1"] = "rig-1" } };
+            if (refusal is not null) args[Operations.LockRefusalField] = refusal;
+            return args;
+        }
+        // The hub found rig-1 held by another session: Busy, and no action is recorded.
+        Assert.Equal("Busy", Call(board, "board", "action_begin", Begin("busy", new JsonObject { ["code"] = "Busy", ["resourceId"] = "rig-1" }), worker).Code);
+        Assert.Empty(StateJson(board)["tasks"]!["t"]!["actions"]!.AsObject());
+        Assert.True(Call(board, "board", "action_begin", Begin("begin", null), worker).Ok);
+        // An action already recorded is returned as it stands, whatever its locks look like now.
+        var existing = Call(board, "board", "action_begin", Begin("again", new JsonObject { ["code"] = "ClaimRequired", ["resourceId"] = "rig-1" }), worker);
+        Assert.True(existing.Ok, existing.Code);
+        Assert.True(Data(existing)["existing"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public void A_claim_retry_is_identified_by_the_clients_own_resource_names_and_a_grant_retry_ignores_the_declared_map()
+    {
+        var board = new StateEnvelope<CoordinationDocument>();
+        Assert.True(Call(board, "board", "task_update", new() { ["taskId"] = "t", ["requestId"] = "create", ["expectedVersion"] = 0 }).Ok);
+        JsonObject Claim(string canonical, string named) => new()
+        {
+            ["taskId"] = "t", ["sessionId"] = "a", ["requestId"] = "claim", ["expectedVersion"] = 1, ["resourceIds"] = new JsonArray(canonical),
+            [CoordinationStateMachine.RequestedResourcesField] = new JsonArray(named)
+        };
+        Assert.True(Call(board, "board", "task_claim", Claim("rig-1", "bench")).Ok);
+        // The alias now names another resource: the same request still replays.
+        Assert.True(Call(board, "board", "task_claim", Claim("rig-9", "bench")).Ok);
+        Assert.Equal("RequestConflict", Call(board, "board", "task_claim", Claim("rig-1", "other")).Code);
+        var lockState = new StateEnvelope<CoordinationDocument>();
+        JsonObject Acquire(string declared) => new() { ["sessionId"] = "a", ["resourceId"] = "rig-1", ["requestId"] = "claim:resource:rig-1", ["declaredResources"] = new JsonObject { ["x"] = declared } };
+        Assert.True(Call(lockState, "lock", "claim_acquire", Acquire("rig-1")).Ok);
+        Assert.True(Call(lockState, "lock", "claim_acquire", Acquire("rig-9")).Ok);
+    }
+
     private sealed class FakeArchive : ITaskArchive
     {
         public HashSet<string> Archived { get; } = new(StringComparer.Ordinal);
