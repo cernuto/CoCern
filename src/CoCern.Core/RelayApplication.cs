@@ -264,7 +264,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
 
     private Task<RelayReply> DispatchAsync(RelayCaller caller, string tool, JsonObject args, JsonObject? session, CancellationToken cancellationToken = default) => tool switch
     {
-        RelayTools.TaskClaim => ClaimTaskAsync(caller, args),
+        RelayTools.TaskClaim => ClaimTaskAsync(caller, args, session),
         RelayTools.ClaimRenew or RelayTools.ClaimRelease when Text(args, "taskId").Length > 0 && Text(args, "resourceId").Length == 0 => CallBoard(caller, tool, args),
         RelayTools.ClaimAcquire or RelayTools.ClaimRenew or RelayTools.ClaimRelease => ResourceClaimAsync(caller, tool, args),
         RelayTools.ActionBegin => BeginActionAsync(caller, args, session),
@@ -696,8 +696,11 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
     /// Claims the task, then each canonical resource in a stable order. If any resource is busy, the grants this
     /// request newly acquired are released and a newly acquired task claim is rolled back.
     /// </summary>
-    private async Task<RelayReply> ClaimTaskAsync(RelayCaller caller, JsonObject args)
+    private async Task<RelayReply> ClaimTaskAsync(RelayCaller caller, JsonObject args, JsonObject? session)
     {
+        // The board refuses a claim that leaves out a resource the packet declares; it needs the declared names resolved like the claim's own.
+        args.Remove("declaredResources");
+        if (await DeclaredResourcesAsync(caller, args, session) is { } declared) args["declaredResources"] = declared;
         var canonical = new SortedSet<string>(StringComparer.Ordinal);
         foreach (var resource in Strings(args["resourceIds"]))
         {
@@ -764,6 +767,20 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
     private async Task<RelayReply> BeginActionAsync(RelayCaller caller, JsonObject args, JsonObject? session)
     {
         args["bindingVersion"] = session?["bindingVersion"]?.DeepClone(); args["binding"] = session?["binding"]?.DeepClone();
+        // Nothing starts while a resource the packet declares is held by another session, or not held by this one.
+        args.Remove("declaredResources");
+        if (await DeclaredResourcesAsync(caller, args, session) is { } declared)
+        {
+            args["declaredResources"] = declared;
+            var lookup = new JsonObject { ["repositoryId"] = Text(args, "repositoryId"), ["sessionId"] = Text(args, "sessionId") };
+            foreach (var resource in declared.Select(entry => entry.Value is JsonValue value && value.TryGetValue<string>(out var id) ? id : "").Where(id => id.Length > 0).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal))
+            {
+                var state = await Call(AggregateKinds.Lock, resource, caller, Operations.ClaimState, lookup);
+                if (!state.Ok) return state;
+                if (Parse(state)["held"]?.GetValue<bool>() == true) continue;
+                return Parse(state)["busy"]?.GetValue<bool>() == true ? Error(Busy, new { resourceId = resource, replayAllowed = false }) : Error(ClaimRequired, new { resourceId = resource, replayAllowed = false });
+            }
+        }
         var result = await CallBoard(caller, RelayTools.ActionBegin, args);
         if (!result.Ok || Parse(result)["replayAllowed"]?.GetValue<bool>() != true) return result;
         var actionId = Text(args, "actionId");
@@ -773,6 +790,34 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         var current = await CallBoard(caller, RelayTools.TaskGet, args);
         if (!current.Ok || current.Version != result.Version) return Error(ActionChanged, new { actionId, replayAllowed = false });
         return result;
+    }
+
+    /// <summary>
+    /// The task's declared <c>packet.resources</c>, each resolved to its canonical resource as a claim resolves its own (aliases by the
+    /// session's machine), with <c>""</c> for a name no resource answers to; null when the task declares none or cannot be read (the board
+    /// then answers the call itself). One read of the task's workflow, and one control lookup only when it declares resources.
+    /// </summary>
+    private async Task<JsonObject?> DeclaredResourcesAsync(RelayCaller caller, JsonObject args, JsonObject? session)
+    {
+        if (Text(args, "taskId").Length == 0) return null;
+        var read = await Call(AggregateKinds.Board, BoardKey(args), caller, RelayTools.TaskGet, new JsonObject
+        {
+            ["repositoryId"] = Text(args, "repositoryId"), ["boardId"] = Text(args, "boardId", "default"), ["taskId"] = Text(args, "taskId"), ["section"] = "workflow"
+        });
+        if (!read.Ok || Parse(read)["packet"]?["resources"] is not JsonArray listed) return null;
+        var names = listed.OfType<JsonValue>().Select(value => value.TryGetValue<string>(out var name) ? name : "").Where(name => name.Length > 0).Distinct(StringComparer.Ordinal).ToArray();
+        if (names.Length == 0) return null;
+        var resolved = await CallControl(caller, Operations.ResolveAll, new JsonObject
+        {
+            ["repositoryId"] = Text(args, "repositoryId"), ["machineId"] = session is not null && Text(session, "machineId").Length > 0 ? Text(session, "machineId") : Text(args, "machineId"),
+            ["resourceIds"] = JsonSerializer.SerializeToNode(names)
+        });
+        // Without the lookup the board checks each declared name as listed, which only refuses more.
+        if (!resolved.Ok) return null;
+        var map = Parse(resolved)["resolved"] as JsonObject;
+        var declared = new JsonObject();
+        foreach (var name in names) declared[name] = map?[name] is JsonValue canonical && canonical.TryGetValue<string>(out var id) ? id : "";
+        return declared;
     }
 
     /// <summary>Adds an advisory next-work offer to a committed milestone. The milestone stands whatever the offer's outcome.</summary>

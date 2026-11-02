@@ -245,6 +245,8 @@ internal static class TaskBoardAggregate
         var session = context.SessionId;
         var version = Number(task, "version");
         if (TaskWorkflow.ExecutionRefusal(context.State, task, session, context.Now) is { } refusal) return refusal;
+        // The claim must take every resource the packet declares, so no work runs while another session holds one.
+        if (TaskWorkflow.ResourceRefusal(context.State, task, args, Strings(args["resourceIds"])) is { } resources) return resources;
         var owned = Text(task, "owner") == session && Date(task, "leaseUntil") > context.Now;
         if (owned && !SameResources(task["resourceIds"], args["resourceIds"])) return Error(ResourceSetConflict, new { resourceIds = task["resourceIds"] }, version);
         // A recovered action (its writer gone, see TaskActions.ApplyReport) no longer holds the task once its writer's lease has lapsed.

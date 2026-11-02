@@ -1046,6 +1046,41 @@ public sealed class DocCacheTests
         Assert.Equal(1, watcher.FetchesStarted);
     }
 
+    [Theory]
+    [InlineData("MaxDocuments", "1")]
+    [InlineData("MaxRepositoryBytes", "80")]
+    public async Task A_file_skipped_for_room_is_indexed_once_room_frees_up(string setting, string limit)
+    {
+        var a = "# A\n\n" + new string('a', 50) + "\n";
+        var b = "# B\n\n" + new string('b', 50) + "\n";
+        using var git = GitRepositories.Create(new() { ["docs/a.md"] = a, ["docs/b.md"] = b });
+        await using var host = DocHost(git, settings: new() { ["Relay:DocCache:" + setting] = limit });
+        var directory = host.Services.GetRequiredService<IGrainFactory>().GetGrain<IDocDirectoryGrain>("repo");
+        var runner = host.Services.GetRequiredService<DocSyncRunner>();
+        await SyncAsync(host);
+        Assert.Equal(new[] { "docs/a.md" }, (await directory.ReadAsync()).Entries.Select(entry => entry.Path));
+        Assert.Equal(new[] { "docs/b.md" }, (await directory.ReadAsync()).Skipped);
+        // Deleting a frees the room; the incremental sync sees only a's path change, yet the unchanged b comes in from the current commit.
+        git.Delete("docs/a.md");
+        var freed = await runner.SyncAsync("repo", null, CancellationToken.None);
+        var view = await directory.ReadAsync();
+        Assert.Equal(new[] { "docs/b.md" }, view.Entries.Select(entry => entry.Path));
+        Assert.Empty(view.Skipped);
+        Assert.Equal((git.Head(), 2), (freed.Commit, freed.Changed));
+
+        // A directory already at the head with a file waiting for room (as one synced before this change, or where room came back
+        // without a commit): a doc_sync on the unchanged commit reconsiders it.
+        var waiting = new DocDirectoryUpdate(view.Branch, view.Commit, false, [], ["docs/b.md"], ["docs/b.md"], [], view.Fingerprint, ["docs/b.md"]);
+        await directory.ApplyAsync(waiting);
+        Assert.Empty((await directory.ReadAsync()).Entries);
+        var manual = await runner.SyncNowAsync("repo", null, "same-commit");
+        Assert.Equal((git.Head(), 1), (manual.Commit, manual.Changed));
+        Assert.Equal(new[] { "docs/b.md" }, (await directory.ReadAsync()).Entries.Select(entry => entry.Path));
+        Assert.Empty((await directory.ReadAsync()).Skipped);
+        // With nothing waiting, an unchanged commit still does nothing.
+        Assert.Equal(0, (await runner.SyncAsync("repo", null, CancellationToken.None)).Changed);
+    }
+
     [Fact]
     public async Task The_repository_byte_cap_skips_and_counts_files_past_it()
     {

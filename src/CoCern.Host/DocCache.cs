@@ -474,12 +474,17 @@ internal sealed class DocSyncRunner(DocCacheSettings settings, GitCli git, IGrai
             localNoted.TryRemove(repository.Id + "\n" + branch, out _);
         }
         var full = view.Commit.Length == 0 || view.NeedsResync || settingsChanged || branch != view.Branch || !await git.CommitExistsAsync(view.Commit, cancellationToken);
-        if (!full && head == view.Commit) return new(head, 0, 0, fetched);
-
         var entries = view.Entries.ToDictionary(entry => entry.Path, StringComparer.Ordinal);
+        // Files left out only for room come back once there is room: on a sync that removes documents, or on any sync (doc_sync on an
+        // unchanged commit included) while some wait and the directory has room for another document and byte.
+        var waiting = (view.CapacitySkipped ?? []).ToHashSet(StringComparer.Ordinal);
+        var room = entries.Count < settings.MaxDocuments && entries.Values.Sum(entry => (long)entry.Bytes) < settings.MaxRepositoryBytes;
+        if (!full && head == view.Commit && (waiting.Count == 0 || !room)) return new(head, 0, 0, fetched);
+
         var skippedBefore = view.Skipped.ToHashSet(StringComparer.Ordinal);
         List<string> present;
         var removed = new List<string>();
+        var unskippedGone = new List<string>();
         var skipped = new List<string>();
         if (full)
         {
@@ -493,17 +498,23 @@ internal sealed class DocSyncRunner(DocCacheSettings settings, GitCli git, IGrai
         else
         {
             present = [];
-            foreach (var (path, isPresent, regular) in await git.DiffAsync(view.Commit, head, cancellationToken))
+            var gone = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var (path, isPresent, regular) in head == view.Commit ? Array.Empty<(string, bool, bool)>() : await git.DiffAsync(view.Commit, head, cancellationToken))
             {
                 if (isPresent && regular) { present.Add(path); continue; }
                 if (entries.ContainsKey(path)) removed.Add(path);
                 if (isPresent && repository.SpecOf(path) is not null) skipped.Add(path);
+                // A skipped file that was deleted is no longer skipped.
+                if (!isPresent && skippedBefore.Contains(path)) { unskippedGone.Add(path); gone.Add(path); }
             }
+            // The unchanged files waiting for room are read again from this commit, once a document left or while there is room.
+            if (removed.Count > 0 || room) present.AddRange(waiting.Where(path => !gone.Contains(path)));
         }
         var active = await ActiveAsync(repository.Id);
         var upserts = new List<DocEntry>();
         var pushes = new List<(DocEntry Entry, string Text)>();
-        var unskipped = new List<string>();
+        var unskipped = new List<string>(unskippedGone);
+        var forRoom = new List<string>();
         var count = entries.Count - removed.Count;
         var bytes = entries.Values.Where(entry => !removed.Contains(entry.Path)).Sum(entry => (long)entry.Bytes);
         foreach (var path in present.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal))
@@ -511,7 +522,7 @@ internal sealed class DocSyncRunner(DocCacheSettings settings, GitCli git, IGrai
             cancellationToken.ThrowIfCancellationRequested();
             if (repository.SpecOf(path) is not { } spec) continue;
             var known = entries.TryGetValue(path, out var existing) && !removed.Contains(path);
-            if (!known && count >= settings.MaxDocuments) { skipped.Add(path); continue; }
+            if (!known && count >= settings.MaxDocuments) { skipped.Add(path); forRoom.Add(path); continue; }
             var (text, tooLarge) = await git.ShowAsync(head, path, DocFormats.MaxBytes(DocFormats.Of(path)), cancellationToken);
             var reason = DocSkipReason.None;
             var sections = text is null ? null : DocFormats.Build(path, text, tokens, out reason);
@@ -528,7 +539,7 @@ internal sealed class DocSyncRunner(DocCacheSettings settings, GitCli git, IGrai
             if (after > settings.MaxRepositoryBytes)
             {
                 logger.LogInformation("Doc sync for {Repository}: skipped {Path} (the repository's {Limit} bytes are used).", repository.Id, path, settings.MaxRepositoryBytes);
-                skipped.Add(path);
+                skipped.Add(path); forRoom.Add(path);
                 if (known) { removed.Add(path); count--; bytes -= existing!.Bytes; }
                 continue;
             }
@@ -543,7 +554,7 @@ internal sealed class DocSyncRunner(DocCacheSettings settings, GitCli git, IGrai
             if (active.Contains(DocKeys.Document(repository.Id, path))) pushes.Add((entry, text));
         }
         unskipped.AddRange(removed.Where(skippedBefore.Contains));
-        await directory.ApplyAsync(new DocDirectoryUpdate(branch, head, full, [.. upserts], [.. removed.Distinct(StringComparer.Ordinal)], [.. skipped], [.. unskipped], fingerprint));
+        await directory.ApplyAsync(new DocDirectoryUpdate(branch, head, full, [.. upserts], [.. removed.Distinct(StringComparer.Ordinal)], [.. skipped], [.. unskipped], fingerprint, [.. forRoom]));
         foreach (var (entry, text) in pushes)
         {
             try { await grains.GetGrain<IDocumentGrain>(DocKeys.Document(repository.Id, entry.Path)).ReplaceAsync(new DocRef(repository.Id, entry.Path, entry.Spec, entry.Commit, entry.Hash, branch), text); }
