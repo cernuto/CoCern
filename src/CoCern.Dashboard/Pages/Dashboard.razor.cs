@@ -24,13 +24,15 @@ public partial class Dashboard : IAsyncDisposable
         "logs" => "logs",
         "standing" => "standing",
         "documents" => "documents",
+        "connect" => "connect",
         _ => "overview"
     };
-    private string PageTitle => View switch { "sessions" => "Sessions", "sql" => "Database", "logs" => "Logs", "standing" => "Standing", "documents" => "Documents", _ => "Overview" };
+    private string PageTitle => View switch { "sessions" => "Sessions", "sql" => "Database", "logs" => "Logs", "standing" => "Standing", "documents" => "Documents", "connect" => "Connect", _ => "Overview" };
     private string? PageDescription => View switch
     {
         "standing" => "Each board's settled lines, grants and orders, and who approved them.",
         "documents" => "Document indexes loaded on this hub.",
+        "connect" => "Add CoCern to Claude and Codex on this PC.",
         _ => null
     };
     private bool IsLive => Connection.State == DashboardLinkState.Live && Connection.ObservationsFresh;

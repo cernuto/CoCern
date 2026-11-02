@@ -61,12 +61,7 @@ internal sealed class SetupEnvironment
     /// <summary>The real thing: this user's profile, the dotnet host running setup, the published adapter next to it, the Run key.</summary>
     public static SetupEnvironment Create()
     {
-        var host = Environment.ProcessPath;
-        var dotnet = host is not null && string.Equals(Path.GetFileNameWithoutExtension(host), "dotnet", StringComparison.OrdinalIgnoreCase) ? host
-            : Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") is { Length: > 0 } hostPath && File.Exists(hostPath) ? hostPath
-            : throw new AdapterConfigurationException("Run setup as 'dotnet CoCern.Adapter.dll --setup --hub <https-url> --join-code <code>' so the dotnet host to start the node with is known.");
-        var dll = Path.Combine(AppContext.BaseDirectory, "CoCern.Adapter.dll");
-        if (!File.Exists(dll)) throw new AdapterConfigurationException($"'{dll}' was not found. Run setup from the copied published folder.");
+        var (dotnet, dll) = Host();
         return new()
         {
             Profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
@@ -76,6 +71,18 @@ internal sealed class SetupEnvironment
             Transport = new NodeTransport(),
             StartNode = StartDetached
         };
+    }
+
+    /// <summary>The dotnet host running this command and the adapter beside it: what client settings start.</summary>
+    public static (string Dotnet, string Dll) Host()
+    {
+        var host = Environment.ProcessPath;
+        var dotnet = host is not null && string.Equals(Path.GetFileNameWithoutExtension(host), "dotnet", StringComparison.OrdinalIgnoreCase) ? host
+            : Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") is { Length: > 0 } hostPath && File.Exists(hostPath) ? hostPath
+            : throw new AdapterConfigurationException("Run it as 'dotnet CoCern.Adapter.dll ...' so the dotnet host to start CoCern with is known.");
+        var dll = Path.Combine(AppContext.BaseDirectory, "CoCern.Adapter.dll");
+        if (!File.Exists(dll)) throw new AdapterConfigurationException($"'{dll}' was not found. Run it from the published adapter folder.");
+        return (dotnet, dll);
     }
 
     /// <summary>Shell-launched with a hidden window, so the node outlives this console and shares none of its handles.</summary>

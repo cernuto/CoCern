@@ -33,21 +33,14 @@ The hub is one ASP.NET Core process. Microsoft Orleans runs its state as grains,
 
 ## Quick start
 
-Install the .NET SDK named in `global.json`. Then, from this folder:
+1. Install the .NET SDK named in `global.json`.
+2. Start the hub: press F5 in Visual Studio, or run `./scripts/Build-CoCern.ps1 -Publish` then `./scripts/Start-CoCern.ps1`.
+3. Click the **sign-in link** the hub prints. The dashboard opens.
+4. Open **Connect** and click **Connect** next to Claude Code, the Claude desktop app or Codex. Restart that app.
 
-```powershell
-./scripts/Build-CoCern.ps1 -Publish    # build, test, publish to artifacts/
-./scripts/Start-CoCern.ps1             # hub on http://127.0.0.1:5271
-```
+That's it: new chats in those apps have CoCern's tools. Codex is ChatGPT's coding agent. The ChatGPT chat app can only reach CoCern at a public HTTPS address, which is not set up for you.
 
-To see the dashboard, open the sign-in link the hub prints when it starts. The start script prints where it saved your token file (`data/local-client-token`). That token is an administrator token; see [Setup](docs/setup.md) for a worker-only one. It also points the document cache at this checkout, read from its local commits only and never fetched.
-
-Add CoCern to your agent as an MCP server:
-
-```
-command:  dotnet <this folder>/artifacts/adapter/CoCern.Adapter.dll
-env:      COCERN_TOKEN_FILE=<this folder>/data/local-client-token
-```
+No dashboard? From the adapter folder, `dotnet CoCern.Adapter.dll --connect` does the same. Other PCs join with one command too: see [Other PCs](docs/discovery.md).
 
 First calls in a new chat:
 

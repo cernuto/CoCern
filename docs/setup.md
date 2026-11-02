@@ -23,7 +23,13 @@
 
 ## Connect an agent
 
-Run the adapter as an MCP server: `dotnet <path>/CoCern.Adapter.dll`.
+**The easy way:** in the dashboard, open **Connect** and click **Connect** next to each app. Then restart the app. It adds CoCern to Claude Code (`~/.claude.json`), the Claude desktop app (`claude_desktop_config.json`, offered when it is installed) and Codex (`~/.codex/config.toml`, used by the Codex CLI, IDE extension and app). Each file is backed up first, and an existing `cocern` entry is left alone. The page works only in a browser on the hub's PC.
+
+**From a terminal:** `dotnet <adapter folder>/CoCern.Adapter.dll --connect` does the same for every app. It finds `data/local-client-token` above the adapter folder; `--token-file <path>` picks another. `--check` only reports.
+
+Both use the published adapter in `artifacts/adapter` when it exists, else the build output. Prefer the published one: a build can't replace an adapter that chats are running.
+
+**By hand:** run the adapter as an MCP server, `dotnet <path>/CoCern.Adapter.dll`, with these variables:
 
 | Variable | Default | What it does |
 | --- | --- | --- |

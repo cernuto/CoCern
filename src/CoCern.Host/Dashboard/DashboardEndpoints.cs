@@ -17,6 +17,7 @@ public static class DashboardEndpoints
     {
         services.AddSingleton<DashboardSecurity>();
         services.AddSingleton<DashboardSignInLink>();
+        services.AddSingleton<DashboardConnect>();
         services.AddSingleton<DashboardLogBuffer>();
         services.AddSingleton<DashboardTrafficBuffer>();
         services.Replace(ServiceDescriptor.Singleton<IRelayApplication, DashboardRelayApplication>());
@@ -63,6 +64,15 @@ public static class DashboardEndpoints
             if (!DashboardSecurity.SecureTransport(context) || !DashboardSecurity.SameOrigin(context)) return Results.StatusCode(403);
             await context.SignOutAsync(DashboardSecurity.Scheme);
             return Results.Ok(new DashboardAuthStatus());
+        }).RequireAuthorization(DashboardSecurity.Policy);
+        // Adding CoCern to this PC's apps edits this user's app settings, so only a viewer on this PC may do it.
+        api.MapGet("/connect", async (HttpContext context, DashboardConnect connect) =>
+            DashboardConnect.OnThisPc(context) ? Results.Ok(await connect.StatusAsync(context.RequestAborted)) : Results.Ok(new DashboardConnectStatus { Unavailable = "Open the dashboard on the hub's PC to connect its apps." }))
+            .RequireAuthorization(DashboardSecurity.Policy);
+        api.MapPost("/connect/{client}", async (HttpContext context, string client, DashboardConnect connect) =>
+        {
+            if (!DashboardConnect.OnThisPc(context) || !DashboardSecurity.SameOrigin(context)) return Results.StatusCode(403);
+            return DashboardConnect.ClientIds.Contains(client) ? Results.Ok(await connect.ConnectAsync(client, context.RequestAborted)) : Results.NotFound();
         }).RequireAuthorization(DashboardSecurity.Policy);
         api.MapGet("/snapshot", (DashboardCollector collector) => Results.Ok(collector.Current)).RequireAuthorization(DashboardSecurity.Policy);
         app.MapHub<DashboardHub>("/dashboard/hub", options =>

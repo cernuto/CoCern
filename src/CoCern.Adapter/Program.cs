@@ -62,6 +62,12 @@ try
             : NodeState.ConfiguredFolder(Environment.GetEnvironmentVariable);
         return await PromptHook.RunAsync(Console.In, Console.Out, folder);
     }
+    if (args.Length > 0 && args[0] == "--connect")
+    {
+        var (dotnet, dll) = SetupEnvironment.Host();
+        return ConnectCommand.Run(args[1..], Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            dotnet, dll, Console.Out, Console.Error);
+    }
     if (args.Length > 0 && args[0] == "--setup")
     {
         // Exit codes: 0 done, 1 configuration problem or enrollment failure (the node's code, e.g. 4 for a changed hub certificate), 5 a client settings file could not be parsed.

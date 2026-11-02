@@ -43,7 +43,7 @@ if ($IsWindows) {
 $settings = @{
     ASPNETCORE_URLS = $Url
     Relay__DatabasePath = (Join-Path $DataDirectory 'relay.db')
-    Relay__Clients__0__Token = $token
+    Relay__Clients__0__TokenFile = $tokenPath
     Relay__Clients__0__PrincipalId = [Environment]::UserName
     Relay__Clients__0__IsAdministrator = 'true'
     Relay__Clients__0__Repositories__0 = $RepositoryId
@@ -83,6 +83,7 @@ try {
     }
     Write-Host "Starting CoCern at $Url. API reference: $Url/scalar"
     Write-Host "Local adapter token file: $tokenPath"
+    Write-Host 'Next: click the dashboard sign-in link the hub prints, then open Connect to add CoCern to Claude and Codex.'
     & dotnet $HostDll
     if ($LASTEXITCODE -ne 0) { throw "CoCern exited with code $LASTEXITCODE." }
 } finally {
