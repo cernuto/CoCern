@@ -157,6 +157,19 @@ public sealed class ReviewFixTests
     }
 
     [Theory]
+    [InlineData(Operations.Deliver, RelayErrorCodes.StorageFailure, false, "Retry")]
+    [InlineData(Operations.AttentionRaise, RelayErrorCodes.DeliveryUnavailable, false, "Retry")]
+    [InlineData(Operations.AttentionRaise, RelayErrorCodes.SessionUnknown, false, "Drop")]
+    [InlineData(Operations.AttentionRaise, RelayErrorCodes.SessionUnknown, true, "DropAsFailedOrderRun")]
+    [InlineData(Operations.Block, RelayErrorCodes.ClaimRequired, false, "Retry")]
+    public void A_refused_delivery_is_retried_dropped_or_counted_as_a_failed_order_run(string operation, string code, bool fromOrder, string expected)
+    {
+        var effect = new DurableEffect("e", AggregateKinds.Session, "s", operation, "{}", Now);
+        var payload = fromOrder ? new JsonObject { [Operations.OrderIdField] = "o" } : new JsonObject();
+        Assert.Equal(expected, EffectDelivery.OnFailure(effect, payload, code, AggregateKinds.Board, ordersOn: true).ToString());
+    }
+
+    [Theory]
     [InlineData("docs/**.md", "docs/a.md", true)]
     [InlineData("docs/**.md", "docs/a/b.md", false)]
     [InlineData("docs/**/*.md", "docs/a/b.md", true)]

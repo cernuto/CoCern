@@ -89,21 +89,14 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
         {
             var payload = JsonNode.Parse(effect.PayloadJson)!.AsObject();
             var effectCaller = CoordinationStateMachine.TakeEffectCaller(payload);
-            // With attention turned off, items are neither stored nor routed: the effect is dropped.
-            // Likewise with standing orders turned off, order effects (watches, releases, runs) are dropped.
-            if (Operations.IsAttention(effect.Operation) && attention is { Enabled: false } || Operations.IsOrder(effect.Operation) && !ordersOn)
+            if (EffectDelivery.Dropped(effect, attention, ordersOn))
             {
                 candidate.Effects.RemoveAll(x => x.Id == effect.Id);
                 if (!await CommitAsync(candidate)) return Replies.Error(RelayErrorCodes.StorageFailure);
                 candidate = Clone(persistent.State);
                 continue;
             }
-            // A raised item takes the hub's configured lifetime unless its source set one.
-            if (effect.Operation == Operations.AttentionRaise && !payload.ContainsKey("expiryDays") && !payload.ContainsKey("expiresAt") && attention is not null)
-                payload["expiryDays"] = attention.ItemExpiryDays;
-            // With attention on, a message is an info item: it waits for a boundary or the idle-hold wake instead of waking its chat.
-            if (effect.Operation == Operations.Deliver && effect.TargetKind == AggregateKinds.Session && attention is not { Enabled: false })
-                payload["attentionExpiryDays"] = attention?.ItemExpiryDays ?? RelayLimits.DefaultAttentionExpiryDays;
+            EffectDelivery.Prepare(effect, payload, attention);
             RelayReply result;
             try
             {
@@ -116,19 +109,15 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
                 else result = await Aggregate(grains, effect.TargetKind, effect.TargetKey).ExecuteAsync(effectCaller, effect.Operation, payload.ToJsonString());
             }
             catch (Exception) { result = Replies.Error(RelayErrorCodes.DeliveryUnavailable); }
-            // Attention and order effects are advisory. A session that refuses an item (unknown session, another repository, a malformed item) would refuse
-            // it on every retry, so the effect is dropped rather than retried every few seconds forever. Infrastructure failures still retry.
-            // A standing order's offer or notice that its session refuses (unknown session, another repository) is a failed run of that
-            // order: it is applied here, on this board's own state, so it is logged, raised to the managers and counted.
-            if (!result.Ok && !IsTransient(result.Code) && ordersOn && Kind == AggregateKinds.Board && effect.Operation == Operations.AttentionRaise && JsonFields.Text(payload, Operations.OrderIdField) is { Length: > 0 } orderId)
-            {
+            var failure = result.Ok ? (EffectDelivery.Failure?)null : EffectDelivery.OnFailure(effect, payload, result.Code, Kind, ordersOn);
+            // The failed order run is applied on this board's own state, so it is logged, raised to the managers and counted.
+            if (failure == EffectDelivery.Failure.DropAsFailedOrderRun)
                 ApplyInternal(candidate, effectCaller, Operations.OrderFailed, new JsonObject
                 {
-                    ["repositoryId"] = JsonFields.Text(payload, "repositoryId"), ["boardId"] = JsonFields.Text(payload, "boardId", "default"), ["orderId"] = orderId,
+                    ["repositoryId"] = JsonFields.Text(payload, "repositoryId"), ["boardId"] = JsonFields.Text(payload, "boardId", "default"), ["orderId"] = JsonFields.Text(payload, Operations.OrderIdField),
                     ["run"] = JsonFields.Number(payload, Operations.OrderRunField), ["reason"] = "session " + effect.TargetKey + " refused the " + JsonFields.Text(payload, "kind") + " item (" + result.Code + ")"
                 }, now, ordersEnabled: true);
-            }
-            if (!result.Ok && !((Operations.IsAttention(effect.Operation) || Operations.IsOrder(effect.Operation)) && !IsTransient(result.Code)))
+            if (failure == EffectDelivery.Failure.Retry)
             {
                 candidate.Effects[candidate.Effects.FindIndex(x => x.Id == effect.Id)] = effect with { DueAt = DateTimeOffset.UtcNow.Add(RedeliveryDelay) };
                 if (!await CommitAsync(candidate)) return Replies.Error(RelayErrorCodes.StorageFailure);
@@ -139,7 +128,7 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
             // A message wakes its chat only with attention off; with it on, only top-tier items (and the idle hold) wake.
             if (effect.TargetKind == AggregateKinds.Session && effect.Operation == Operations.Deliver && attention is { Enabled: false }) RecordWake(effect.TargetKey, payload, result);
             // Only a new top-tier attention item may wake its chat, so only that one counts as a wake and sends a hint.
-            var urgent = effect.TargetKind == AggregateKinds.Session && effect.Operation == Operations.AttentionRaise && result.Ok && UrgentRaise(payload, result);
+            var urgent = effect.TargetKind == AggregateKinds.Session && effect.Operation == Operations.AttentionRaise && result.Ok && EffectDelivery.UrgentRaise(payload, result);
             if (urgent) RecordWake(effect.TargetKey, payload, Replies.Ok(new { delivered = true }));
             if (effect.TargetKind == AggregateKinds.Session && (effect.Operation == Operations.Deliver || urgent) && services.GetService<ICoordinationNotifier>() is { } notifier)
             {
@@ -179,18 +168,6 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
         if (reply.Ok) CoordinationStateMachine.StampEffects(candidate.Effects, first, caller);
         return reply;
     }
-
-    /// <summary>Whether a delivered raise stored a new item whose tier may wake a chat.</summary>
-    private static bool UrgentRaise(JsonObject payload, RelayReply result)
-    {
-        var data = JsonNode.Parse(result.DataJson) as JsonObject;
-        if (data?["raised"] is not JsonValue raised || !raised.TryGetValue<bool>(out var isRaised) || !isRaised || data["refreshed"] is not JsonValue refreshed || !refreshed.TryGetValue<bool>(out var isRefresh) || isRefresh) return false;
-        var blocking = payload["blocking"] is JsonValue flag && flag.TryGetValue<bool>(out var value) && value;
-        return AttentionWeights.Wakes(AttentionWeights.Tier(JsonFields.Text(payload, "kind"), JsonFields.Text(payload, "blocker") is { Length: > 0 } blocker ? blocker : null, blocking));
-    }
-
-    /// <summary>Failures a later attempt can succeed past: the target's storage or the grain call itself failed.</summary>
-    private static bool IsTransient(string code) => code is RelayErrorCodes.StorageFailure or RelayErrorCodes.DeliveryUnavailable or RelayErrorCodes.DeliveryPending or RelayErrorCodes.Unavailable;
 
     /// <summary>Counts one wake: a message newly stored in a session inbox that may wake its chat. Redeliveries and <c>wake: false</c> messages are not wakes.</summary>
     private void RecordWake(string sessionId, JsonObject payload, RelayReply delivered)

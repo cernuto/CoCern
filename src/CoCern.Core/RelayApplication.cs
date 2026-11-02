@@ -116,7 +116,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
             if (result.Ok && tool == RelayTools.TaskClaim && attentionOptions.Enabled && search is not null)
             {
                 var claimed = result;
-                _ = Task.Run(() => RaiseRelatedWorkAsync(trusted, args, claimed), CancellationToken.None);
+                Advisory(() => RaiseRelatedWorkAsync(trusted, args, claimed));
             }
             var sent = Bound(definition, args, result, trace);
             if (markSeen && sent.Ok) await MarkSeenAsync(trusted, args, sent, pageSeen || offers, seenIds);
@@ -134,11 +134,7 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
     private void StartAnomalyMonitor(RelayCaller caller, string repository)
     {
         if (anomaly is not { Enabled: true } || !attentionOptions.Enabled) return;
-        _ = Task.Run(async () =>
-        {
-            try { await Call(AggregateKinds.Anomaly, repository, caller, Operations.AnomalyStart, new() { ["repositoryId"] = repository }); }
-            catch (Exception) { /* The next manager session starts it. */ }
-        }, CancellationToken.None);
+        Advisory(() => Call(AggregateKinds.Anomaly, repository, caller, Operations.AnomalyStart, new() { ["repositoryId"] = repository })); // else the next manager starts it
     }
 
     /// <summary>
@@ -210,45 +206,40 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
                 trace.ModelVisible, trace.KnownEtag, reply.Ok ? CallTelemetry.Target(tool, args) : null, reply.Ok ? CallTelemetry.ContentHash(tool, args) : null, CallTelemetry.Bounded(Text(args, "requestId"))));
             if (trace.SessionId is { Length: > 0 } verified)
             {
-                _ = Task.Run(() => Deliver(trusted, Observe(verified)), CancellationToken.None);
+                Advisory(() => Deliver(trusted, Observe(verified)));
                 return;
             }
             // A read that needs no session (task_get) counts only for a session that proves itself, so no caller can run up another
             // session's counts or send it tips. The check runs off the call's path.
             if (!reply.Ok || Text(args, "sessionId").Length == 0 || Text(args, "sessionToken").Length == 0) return;
-            _ = Task.Run(async () =>
-            {
-                try { if ((await VerifySessionAsync(trusted, args)).Ok) Deliver(trusted, Observe(Text(args, "sessionId"))); }
-                catch (Exception) { /* Advisory. */ }
-            }, CancellationToken.None);
+            Advisory(async () => { if ((await VerifySessionAsync(trusted, args)).Ok) await Deliver(trusted, Observe(Text(args, "sessionId"))); });
         }
         catch (Exception) { /* Feedback never affects the call. */ }
     }
 
-    /// <summary>Delivers what the rules decided, off the call's path. Advisory: any failure is ignored.</summary>
-    private void Deliver(RelayCaller trusted, FeedbackActions actions)
+    /// <summary>Delivers what the rules decided; callers run it off the call's path.</summary>
+    private async Task Deliver(RelayCaller trusted, FeedbackActions actions)
     {
-        if (actions.Tip is null && actions.Proposal is null) return;
-        _ = Task.Run(async () =>
-        {
-            try
+        if (actions.Tip is { } tip && attentionOptions.Enabled)
+            await CallSession(trusted, Operations.AttentionRaise, new JsonObject
             {
-                if (actions.Tip is { } tip && attentionOptions.Enabled)
-                    await CallSession(trusted, Operations.AttentionRaise, new JsonObject
-                    {
-                        ["repositoryId"] = tip.RepositoryId, ["sessionId"] = tip.SessionId, ["kind"] = AttentionKinds.Tip, ["subject"] = tip.Rule,
-                        ["priority"] = AttentionWeights.Low, ["note"] = tip.Text, ["revision"] = tip.Revision, ["expiryDays"] = RelayLimits.TipExpiryDays
-                    });
-                if (actions.Proposal is { } proposal)
-                    await Call(AggregateKinds.Board, Uri.EscapeDataString(proposal.RepositoryId) + "/default", HubProposer(proposal.RepositoryId), Operations.StandingProposeHub, new JsonObject
-                    {
-                        ["repositoryId"] = proposal.RepositoryId, ["boardId"] = "default", ["rule"] = proposal.Rule,
-                        ["line"] = new JsonObject { ["id"] = proposal.LineId, ["text"] = proposal.Text }
-                    });
-            }
-            catch (Exception) { /* Advisory: the call stands either way. */ }
-        }, CancellationToken.None);
+                ["repositoryId"] = tip.RepositoryId, ["sessionId"] = tip.SessionId, ["kind"] = AttentionKinds.Tip, ["subject"] = tip.Rule,
+                ["priority"] = AttentionWeights.Low, ["note"] = tip.Text, ["revision"] = tip.Revision, ["expiryDays"] = RelayLimits.TipExpiryDays
+            });
+        if (actions.Proposal is { } proposal)
+            await Call(AggregateKinds.Board, Uri.EscapeDataString(proposal.RepositoryId) + "/default", HubProposer(proposal.RepositoryId), Operations.StandingProposeHub, new JsonObject
+            {
+                ["repositoryId"] = proposal.RepositoryId, ["boardId"] = "default", ["rule"] = proposal.Rule,
+                ["line"] = new JsonObject { ["id"] = proposal.LineId, ["text"] = proposal.Text }
+            });
     }
+
+    /// <summary>Runs advisory work off the call's path. It never affects the call: any failure is dropped.</summary>
+    private static void Advisory(Func<Task> work) => _ = Task.Run(async () =>
+    {
+        try { await work(); }
+        catch (Exception) { /* Advisory: the call stands either way. */ }
+    }, CancellationToken.None);
 
     /// <summary>The hub's own identity for proposals: internal, so only this hub can use it, and scoped to the one repository.</summary>
     private static RelayCaller HubProposer(string repository) => new(SessionRoles.HubProposer, false, [repository], true);
