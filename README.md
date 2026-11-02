@@ -40,7 +40,7 @@ The hub is one ASP.NET Core process. Microsoft Orleans runs its state as grains,
 
 That's it: new chats in those apps have CoCern's tools. Codex is ChatGPT's coding agent. The ChatGPT chat app can only reach CoCern at a public HTTPS address, which is not set up for you.
 
-No dashboard? From the adapter folder, `dotnet CoCern.Adapter.dll --connect` does the same. Other PCs join with one command too: see [Other PCs](docs/discovery.md).
+No dashboard? From the adapter folder, `dotnet CoCern.Adapter.dll --connect` does the same. To add another PC, use **Add another PC** on the same page: it gives you the folder to copy and the command to paste there. See [Other PCs](docs/discovery.md).
 
 First calls in a new chat:
 

@@ -32,7 +32,7 @@ public partial class Dashboard : IAsyncDisposable
     {
         "standing" => "Each board's settled lines, grants and orders, and who approved them.",
         "documents" => "Document indexes loaded on this hub.",
-        "connect" => "Add CoCern to Claude and Codex on this PC.",
+        "connect" => "Add CoCern to Claude and Codex, here and on your other PCs.",
         _ => null
     };
     private bool IsLive => Connection.State == DashboardLinkState.Live && Connection.ObservationsFresh;

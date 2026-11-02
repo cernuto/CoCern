@@ -16,6 +16,8 @@
     matchMedia("(prefers-color-scheme: dark)").addEventListener?.("change", () => { if (!chosen) apply(); });
     window.pkDashboard = {
         preferences: () => ({ theme: theme() }),
+        // True once the text is on the clipboard; false where the browser refuses (the viewer can still select it).
+        copy: async (text) => { try { await navigator.clipboard.writeText(text); return true; } catch { return false; } },
         setPreferences: (value) => {
             chosen = value === "dark" ? "dark" : "light";
             apply();

@@ -27,6 +27,10 @@ New-NetFirewallRule -DisplayName "CoCern hub (HTTPS 5273)" -Direction Inbound -A
 
 ## Join a PC
 
+**The easy way:** on the hub's PC, open the dashboard's **Connect** page. **Add another PC** shows the folder to copy and the setup command with this hub's address, join code and fingerprint already filled in, each with a Copy button. It also has the firewall command if the other PC can't reach the hub. The section shows only in a browser on the hub's PC, since the command holds the join code.
+
+**By hand:**
+
 1. Copy `artifacts/adapter` (from `./scripts/Build-CoCern.ps1 -Publish`) to the PC, and leave it there.
 2. Close Claude Code on that PC. Setup edits `.claude.json`, which Claude Code overwrites while it runs.
 3. From the copied folder, run:

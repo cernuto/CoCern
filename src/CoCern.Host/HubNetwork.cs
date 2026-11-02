@@ -78,12 +78,18 @@ public static class HubCertificate
         return new FileInfo(path).Create(FileMode.CreateNew, FileSystemRights.FullControl, FileShare.None, 4096, FileOptions.None, security);
     }
 
-    private static IEnumerable<IPAddress> NonLoopbackIPv4Addresses() => NetworkInterface.GetAllNetworkInterfaces()
+    internal static IEnumerable<IPAddress> NonLoopbackIPv4Addresses() => NetworkInterface.GetAllNetworkInterfaces()
         .Where(i => i.OperationalStatus == OperationalStatus.Up && i.NetworkInterfaceType != NetworkInterfaceType.Loopback)
         .SelectMany(i => i.GetIPProperties().UnicastAddresses)
         .Select(a => a.Address)
         .Where(a => a.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(a))
         .Distinct();
+}
+
+/// <summary>What the network listener serves, once Kestrel has set it up: its HTTPS port and certificate fingerprint. Null while it is off.</summary>
+internal sealed class HubListener
+{
+    public (int Port, string Fingerprint)? Https { get; set; }
 }
 
 /// <summary>The optional network listener: HTTPS on every interface with the hub certificate, beside the loopback HTTP endpoint that keeps working unchanged. Off unless <c>Relay:Network:Enabled</c> is true.</summary>
@@ -124,6 +130,7 @@ internal static class HubNetwork
         options.ListenAnyIP(port, listen => listen.UseHttps(certificate));
         var logger = options.ApplicationServices.GetService<ILoggerFactory>()?.CreateLogger("CoCern.Host.HubNetwork");
         logger?.LogInformation("Hub listening on https port {Port}; certificate fingerprint {Fingerprint}", port, HubCertificate.Fingerprint(certificate));
+        options.ApplicationServices.GetRequiredService<HubListener>().Https = (port, HubCertificate.Fingerprint(certificate));
     }
 
     private static void ListenHttp(KestrelServerOptions options, string url)

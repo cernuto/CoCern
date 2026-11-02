@@ -18,6 +18,8 @@ public static class DashboardEndpoints
         services.AddSingleton<DashboardSecurity>();
         services.AddSingleton<DashboardSignInLink>();
         services.AddSingleton<DashboardConnect>();
+        services.AddSingleton<HubListener>();
+        services.AddSingleton<DashboardAddPc>();
         services.AddSingleton<DashboardLogBuffer>();
         services.AddSingleton<DashboardTrafficBuffer>();
         services.Replace(ServiceDescriptor.Singleton<IRelayApplication, DashboardRelayApplication>());
@@ -68,6 +70,10 @@ public static class DashboardEndpoints
         // Adding CoCern to this PC's apps edits this user's app settings, so only a viewer on this PC may do it.
         api.MapGet("/connect", async (HttpContext context, DashboardConnect connect) =>
             DashboardConnect.OnThisPc(context) ? Results.Ok(await connect.StatusAsync(context.RequestAborted)) : Results.Ok(new DashboardConnectStatus { Unavailable = "Open the dashboard on the hub's PC to connect its apps." }))
+            .RequireAuthorization(DashboardSecurity.Policy);
+        // It shows the join code, so only a viewer on this PC sees it.
+        api.MapGet("/add-pc", (HttpContext context, DashboardAddPc addPc) =>
+            Results.Ok(DashboardConnect.OnThisPc(context) ? addPc.Status() : new DashboardAddPcStatus { Unavailable = "Open the dashboard on the hub's PC to see how another PC joins." }))
             .RequireAuthorization(DashboardSecurity.Policy);
         api.MapPost("/connect/{client}", async (HttpContext context, string client, DashboardConnect connect) =>
         {
