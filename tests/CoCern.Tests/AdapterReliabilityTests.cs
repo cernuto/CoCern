@@ -120,6 +120,38 @@ public sealed class AdapterReliabilityTests : IDisposable
     }
 
     [Fact]
+    public async Task A_node_the_hub_dropped_joins_again_under_a_new_id_with_the_join_code_setup_kept()
+    {
+        var folder = Path.Combine(root, "dropped-node");
+        using var state = NodeState.Open(folder);
+        state.SetHub(Relay, null);
+        state.SaveJoinCode("ABCDE-FGHJK");
+        var first = state.MachineId;
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var enrolls = new ConcurrentQueue<JsonObject>();
+        using var hub = new Stub(async (request, ct) =>
+        {
+            if (!request.RequestUri!.AbsolutePath.EndsWith("/enroll")) { stop.Cancel(); return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable); }
+            var body = JsonNode.Parse(await request.Content!.ReadAsStringAsync(ct))!.AsObject();
+            enrolls.Enqueue(body);
+            return enrolls.Count == 1
+                ? new HttpResponseMessage(HttpStatusCode.Conflict) { Content = new StringContent("{\"ok\":false,\"code\":\"MachineExpired\"}", Encoding.UTF8, "application/json") }
+                : new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new { machineId = body["machineId"]!.GetValue<string>(), credential = new string('c', 64) }), Encoding.UTF8, "application/json") };
+        });
+        var transport = new NodeTransport
+        {
+            CreateHandler = (_, _) => hub, HubHandler = () => new Stub((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound))), MachineName = "Node PC", Clients = () => [],
+            Chats = _ => Task.FromResult(new JsonArray()), FirstRetry = TimeSpan.FromMilliseconds(10), CodexExecutable = () => null
+        };
+        try { await NodeRunner.RunAsync(state, null, transport, new StringWriter(), stop.Token); } catch (OperationCanceledException) { }
+        var bodies = enrolls.ToArray();
+        Assert.Equal(2, bodies.Length);
+        Assert.All(bodies, body => Assert.Equal("ABCDE-FGHJK", body["joinCode"]!.GetValue<string>()));
+        Assert.Equal(first, bodies[0]["machineId"]!.GetValue<string>());
+        Assert.NotEqual(first, bodies[1]["machineId"]!.GetValue<string>());
+    }
+
+    [Fact]
     public async Task An_announcement_whose_body_stalls_after_the_headers_is_bounded_by_the_request_timeout()
     {
         var folder = Path.Combine(root, "stalled-node");

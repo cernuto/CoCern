@@ -50,20 +50,25 @@ internal static class SessionAggregate
         var state = context.State;
         if (state.ContainsKey("principalId"))
             return Text(state, "principalId") == Text(context.Args, "principalId") && Text(state, "sessionToken") == Text(context.Args, "sessionToken") ? Ok(new { initialized = true }) : Error(SessionDenied);
-        foreach (var property in context.Args) if (property.Key != "requestId" && !HubState.Contains(property.Key)) state[property.Key] = property.Value?.DeepClone();
+        foreach (var field in OpenFields) if (context.Args[field] is { } value) state[field] = value.DeepClone();
+        if (Text(state, "role").Length > RelayLimits.MaxActivityRoleLength) state.Remove("role");
+        // The direct call from session_open carries only the client's fields; the control record's freshness defaults fill the rest.
+        state["bindingVersion"] ??= 0;
+        state["observedAt"] ??= context.Now.ToString("O");
+        state["freshUntil"] ??= context.Now.Add(ControlAggregate.InitialFreshness).ToString("O");
+        state["availability"] ??= "unknown";
         return Ok(new { initialized = true });
     }
 
-    /// <summary>State only the session keeps for itself; <c>session_open</c>'s arguments can never preset it.</summary>
-    private static readonly HashSet<string> HubState = new(StringComparer.Ordinal)
-    {
-        "requests", "requestTombstones", "inbox", "acked", "attention", "attentionClosed", "attentionRecent", "attentionSeq", "attentionRevision",
-        "attentionBoundaryAt", "activeReportedAt", "expiredAt", "standingSeen", "tasks", "taskRevision", "holder", "leaseUntil", "warnedLease", "interruptedLease",
-        WorkKey, WorkReportedKey
-    };
+    /// <summary>What a session copies when it opens; anything else in <c>session_open</c>'s arguments could forge freshness or hub state.</summary>
+    internal static readonly string[] OpenFields =
+    [
+        "sessionId", "sessionToken", "principalId", "repositoryId", "hubIncarnation", "machineId", "label", "binding", "role",
+        "bindingVersion", "observedAt", "freshUntil", "availability"
+    ];
 
     /// <summary>What an expired session forgets: its secret, its mail and attention, and its tool binding.</summary>
-    private static readonly string[] ExpiredState = ["sessionToken", "inbox", "acked", "attention", "attentionClosed", "attentionRecent", "standingSeen", "binding"];
+    private static readonly string[] ExpiredState = ["sessionToken", "inbox", "acked", "attention", "attentionClosed", "attentionArchived", "attentionRecent", "standingSeen", "binding"];
 
     private const string WorkKey = "work";
     private const string WorkReportedKey = "workReported";
@@ -83,10 +88,12 @@ internal static class SessionAggregate
         var (wasOwning, reportedAt) = reported is null ? (false, DateTimeOffset.MinValue) : (Flag(reported, "owns"), Date(reported, "at"));
         if (owns != wasOwning || owns && reportedAt <= now.AddHours(-RelayLimits.SessionWorkRefreshHours))
         {
-            state[WorkReportedKey] = new JsonObject { ["owns"] = owns, ["at"] = now.ToString("O") };
+            // The sequence orders reports that share a second, which board times alone cannot.
+            var seq = (reported is null ? 0 : Number(reported, "seq")) + 1;
+            state[WorkReportedKey] = new JsonObject { ["owns"] = owns, ["at"] = now.ToString("O"), ["seq"] = seq };
             context.Emit(AggregateKinds.Control, AggregateKinds.ControlKey, Operations.SessionWork, new JsonObject
             {
-                ["repositoryId"] = context.Repository, ["sessionId"] = Text(state, "sessionId"), ["owns"] = owns, ["at"] = now.ToString("O")
+                ["repositoryId"] = context.Repository, ["sessionId"] = Text(state, "sessionId"), ["owns"] = owns, ["at"] = now.ToString("O"), ["seq"] = seq
             });
         }
         return Ok(new { tracked, owns });

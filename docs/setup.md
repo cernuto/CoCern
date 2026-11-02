@@ -72,7 +72,7 @@ Every model call re-reads the whole chat, so fewer calls matter most.
 - **Every reply is held to its token budget.** Budgets sit at the byte limit, so in practice only a reply that would be cut anyway is compacted. `Relay:Tokens:Enforce=false` only measures.
 - **Administrator tools need an administrator token:** `analytics_query` (ad hoc SQL too), `standing_put`, `order_put`, `order_remove`, `control_request` and `doc_sync`.
 - **Analytics works out of the box on Windows x64 only**, where its DuckDB extension is bundled. Elsewhere the hub logs one warning and `analytics_query` answers `AnalyticsUnavailable` until you install the extension. See [Monitoring](monitoring.md#analytics).
-- **Other PCs stay off.** Discovery and the network listener are off by default. The network listener serves the hub beyond loopback, so turn it on only on purpose. New PCs need the join code the hub logs, and setup should get the certificate fingerprint with `--fingerprint`. See [Other PCs](discovery.md).
+- **Other PCs stay off.** Discovery and the network listener are off by default. The network listener serves the hub beyond loopback, so turn it on only on purpose. New PCs need the join code (the hub logs it once, when it creates it, and keeps it in `join-code` next to the database), and setup should get the certificate fingerprint with `--fingerprint`. See [Other PCs](discovery.md).
 
 ## Hub settings
 

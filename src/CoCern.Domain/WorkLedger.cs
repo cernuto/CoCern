@@ -67,7 +67,8 @@ internal static class WorkLedger
             }
             else
             {
-                tracked = open.Remove(key);
+                // An open reported after this close (the action came back) outlives it; a reordered, older close leaves it open.
+                tracked = open.ContainsKey(key) && Seconds(open[key]) <= at && open.Remove(key);
                 if (!closed.ContainsKey(key) && closed.Count >= RelayLimits.MaxSessionClosedActions)
                     closed.Remove(closed.OrderBy(entry => Seconds(entry.Value)).ThenBy(entry => entry.Key, StringComparer.Ordinal).First().Key);
                 closed[key] = Math.Max(at, Seconds(closed[key])); // a late, older close never lowers it

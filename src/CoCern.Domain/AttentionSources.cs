@@ -47,9 +47,9 @@ internal static class AttentionSources
         }
         else if (was == "blocked" && now != "blocked") ToManagers(context, Operations.AttentionClose, Kinds(Item(AttentionKinds.Blocked), AttentionKinds.Blocked));
 
-        if (failedActions.Count == 0 && abandonedActions.Count == 0 && replacedActions.Count > 0)
+        if (failedActions.Count > 0 || abandonedActions.Count > 0 || replacedActions.Count > 0)
         {
-            // Only replaced abandons changed: restate the item for what is still failed or abandoned, or close it.
+            // A raise replaces the item's note, so it states every action still failed or abandoned, not just this change's; none left closes it.
             var actions = ObjectAt(task, "actions");
             string[] Still(string status) => actions.Where(x => x.Value is JsonObject action && Text(action, "status") == status).Select(x => x.Key).Order(StringComparer.Ordinal).ToArray();
             (failedActions, abandonedActions) = (Still("failed"), Still(TaskActions.Abandoned));

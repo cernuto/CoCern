@@ -69,7 +69,9 @@ public sealed partial class SqliteStore : IDueWorkSource, IDisposable, IAsyncDis
             try { using var _ = new FileStream(path, new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write, UnixCreateMode = owner }); }
             catch (IOException) when (File.Exists(path)) { }
         }
-        if ((File.GetUnixFileMode(path) & ~owner) != 0) File.SetUnixFileMode(path, owner);
+        // Tightening is best effort: a file this user can use but not chmod (another owner, a read-only mount) must not stop the hub.
+        try { if ((File.GetUnixFileMode(path) & ~owner) != 0) File.SetUnixFileMode(path, owner); }
+        catch (Exception exception) when (exception is UnauthorizedAccessException or IOException) { }
     }
 
     // Keep the lease file after closing: unlinking it could create a second independent lock inode.

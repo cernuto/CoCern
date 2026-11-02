@@ -38,28 +38,36 @@ internal sealed class HubJoinCode
     private const string Alphabet = "ABCDEFGHJKMNPQRSTVWXYZ0123456789";
     private readonly byte[] digest;
 
-    private HubJoinCode(string value, string source) { Value = value; Source = source; digest = SHA256.HashData(Encoding.UTF8.GetBytes(value)); }
+    private HubJoinCode(string value, string source, bool generated)
+    {
+        Value = value; Source = source; Generated = generated; digest = Digest(value);
+    }
 
     public string Value { get; }
     /// <summary>Where the code came from: the setting name or the file path.</summary>
     public string Source { get; }
+    /// <summary>Whether this start created the code, the only time its value is logged.</summary>
+    public bool Generated { get; }
 
-    /// <summary>Constant-time; hashing first keeps the comparison length-independent.</summary>
-    public bool Matches(string? candidate) => candidate is not null && CryptographicOperations.FixedTimeEquals(SHA256.HashData(Encoding.UTF8.GetBytes(candidate)), digest);
+    /// <summary>Constant-time; hashing first keeps the comparison length-independent. Case and surrounding space never matter, since people retype it.</summary>
+    public bool Matches(string? candidate) => candidate is not null && CryptographicOperations.FixedTimeEquals(Digest(candidate), digest);
+
+    private static byte[] Digest(string code) => SHA256.HashData(Encoding.UTF8.GetBytes(code.Trim().ToUpperInvariant()));
 
     public static HubJoinCode Load(IConfiguration configuration, IHostEnvironment environment)
     {
         if (configuration["Relay:Discovery:JoinCode"] is { } configured && !string.IsNullOrWhiteSpace(configured))
-            return configured.Trim().Length >= MinLength ? new(configured.Trim(), "Relay:Discovery:JoinCode") : throw new InvalidOperationException($"Relay:Discovery:JoinCode must be at least {MinLength} characters.");
+            return configured.Trim().Length >= MinLength ? new(configured.Trim(), "Relay:Discovery:JoinCode", false) : throw new InvalidOperationException($"Relay:Discovery:JoinCode must be at least {MinLength} characters.");
         var path = Path.Combine(Path.GetDirectoryName(RelayHostBuilderExtensions.DatabasePath(configuration, environment))!, FileName);
-        if (!File.Exists(path))
+        var generated = !File.Exists(path);
+        if (generated)
         {
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             var code = string.Join('-', RandomNumberGenerator.GetItems<char>(Alphabet, 20).Chunk(5).Select(x => new string(x)));
             HubCertificate.WritePrivately(path, Encoding.UTF8.GetBytes(code));
         }
         var stored = File.ReadAllText(path).Trim();
-        return stored.Length >= MinLength ? new(stored, path) : throw new InvalidOperationException($"The join code file '{path}' is shorter than {MinLength} characters. Delete it to generate a new code, or set Relay:Discovery:JoinCode.");
+        return stored.Length >= MinLength ? new(stored, path, generated) : throw new InvalidOperationException($"The join code file '{path}' is shorter than {MinLength} characters. Delete it to generate a new code, or set Relay:Discovery:JoinCode.");
     }
 }
 
@@ -161,9 +169,11 @@ internal static partial class DiscoveryEndpoints
     public static void MapDiscoveryEndpoints(this WebApplication app)
     {
         if (!DiscoverySettings.Enabled(app.Configuration)) return;
-        // Created now, not on first enroll, so a bad setting stops startup and the operator sees the code in the log.
+        // Created now, not on first enroll, so a bad setting stops startup. Logs outlive the code, so its value is logged only the once it is created.
         var joinCode = app.Services.GetRequiredService<HubJoinCode>();
-        app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("CoCern.Host.Discovery").LogInformation("Discovery join code {JoinCode} (from {Source}); new PCs pass it to setup with --join-code", joinCode.Value, joinCode.Source);
+        var log = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("CoCern.Host.Discovery");
+        if (joinCode.Generated) log.LogWarning("Discovery join code {JoinCode} created in {Source}; new PCs pass it to setup with --join-code. It is not logged again", joinCode.Value, joinCode.Source);
+        else log.LogInformation("Discovery join code is in {Source}; new PCs pass it to setup with --join-code", joinCode.Source);
         app.MapPost("/api/discovery/enroll", EnrollAsync).AllowAnonymous().RequireRateLimiting(EnrollPolicy);
         app.MapPost("/api/discovery/announce", AnnounceAsync).RequireAuthorization();
     }
@@ -261,7 +271,7 @@ internal static partial class DiscoveryEndpoints
     private static int EnrollStatus(string? code) => code switch
     {
         RelayErrorCodes.MachineRevoked or RelayErrorCodes.JoinCodeRequired => StatusCodes.Status403Forbidden,
-        RelayErrorCodes.AliasConflict => StatusCodes.Status409Conflict,
+        RelayErrorCodes.AliasConflict or RelayErrorCodes.MachineExpired => StatusCodes.Status409Conflict,
         RelayErrorCodes.CapacityExceeded or RelayErrorCodes.StorageFailure => StatusCodes.Status503ServiceUnavailable,
         RelayErrorCodes.PayloadTooLarge => StatusCodes.Status413PayloadTooLarge,
         RelayErrorCodes.InvalidArguments => StatusCodes.Status400BadRequest,

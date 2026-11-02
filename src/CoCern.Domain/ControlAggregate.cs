@@ -13,7 +13,7 @@ namespace CoCern.Domain;
 internal static class ControlAggregate
 {
     private const int MaxMachineSummaries = 50;
-    private static readonly TimeSpan InitialFreshness = TimeSpan.FromMinutes(2);
+    internal static readonly TimeSpan InitialFreshness = TimeSpan.FromMinutes(2);
 
     public static RelayReply Handle(AggregateContext context)
     {
@@ -93,6 +93,7 @@ internal static class ControlAggregate
 
     private const string OwnsWorkKey = "ownsWork";
     private const string ClearedWorkKey = "ownsWorkCleared";
+    private const string WorkSeqKey = "ownsWorkSeq";
 
     /// <summary>
     /// Whether the session answers for an unresolved action: its session reported so within <see cref="RelayLimits.SessionWorkRetentionDays"/>,
@@ -117,10 +118,17 @@ internal static class ControlAggregate
             var tracked = WorkLedger.Apply(session, Required(context.Args, "actionKey"), Flag(context.Args, "open"), at, context.Now);
             return Ok(new { tracked, openActions = WorkLedger.OpenCount(session), overflow = WorkLedger.Overflowing(session) });
         }
-        var (owns, cleared) = (WorkLedger.Seconds(session[OwnsWorkKey]), WorkLedger.Seconds(session[ClearedWorkKey]));
-        if (at <= Math.Max(owns, cleared)) return Ok(new { tracked = false });
+        // The session numbers its reports, so a reordered one is told apart even within one second; a report from before that falls back to its time.
+        if (Number(context.Args, "seq") is var seq and > 0)
+        {
+            if (seq <= Number(session, WorkSeqKey)) return Ok(new { tracked = false });
+            session[WorkSeqKey] = seq;
+        }
+        else if (at <= Math.Max(WorkLedger.Seconds(session[OwnsWorkKey]), WorkLedger.Seconds(session[ClearedWorkKey]))) return Ok(new { tracked = false });
         if (Flag(context.Args, "owns")) session[OwnsWorkKey] = at;
         else { session.Remove(OwnsWorkKey); session[ClearedWorkKey] = at; }
+        // The session now speaks for all its work, so the per-action ledger older boards kept here is superseded.
+        foreach (var field in WorkLedger.Fields) session.Remove(field);
         return Ok(new { tracked = true });
     }
 
@@ -146,7 +154,7 @@ internal static class ControlAggregate
     {
         var workers = ObjectAt(context.State, "sessions").Select(x => x.Value!.AsObject()).Where(x => Text(x, "repositoryId") == context.Repository).Select(x =>
         {
-            var copy = x.DeepClone().AsObject(); copy.Remove("sessionToken"); copy.Remove("principalId"); foreach (var field in WorkLedger.Fields) copy.Remove(field); copy.Remove(OwnsWorkKey); copy.Remove(ClearedWorkKey);
+            var copy = x.DeepClone().AsObject(); copy.Remove("sessionToken"); copy.Remove("principalId"); foreach (var field in WorkLedger.Fields) copy.Remove(field); copy.Remove(OwnsWorkKey); copy.Remove(ClearedWorkKey); copy.Remove(WorkSeqKey);
             var stale = Date(copy, "freshUntil") <= context.Now || Text(copy, "hubIncarnation") != Text(context.Args, "hubIncarnation");
             copy["stale"] = stale; copy.Remove("hubIncarnation");
             if (stale) copy["availability"] = "unknown";

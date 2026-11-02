@@ -20,6 +20,8 @@ public static class DiscoveryOperations
 public static class DiscoveryLimits
 {
     public const int MaxMachines = 256;
+    /// <summary>Expired machine IDs kept so none is reissued; the oldest goes first. Freeing a slot takes 30 idle days, so this lasts years.</summary>
+    public const int MaxExpiredIds = 4 * MaxMachines;
     public const int MaxChatsPerMachine = 64;
     public static readonly TimeSpan AnnounceInterval = TimeSpan.FromSeconds(30);
     public static readonly TimeSpan LivenessTimeout = TimeSpan.FromSeconds(90);
@@ -27,7 +29,7 @@ public static class DiscoveryLimits
 
 /// <summary>
 /// The machine-scoped discovery aggregate: enrolled machines, their hashed credentials, the chats each announced and a deny list.
-/// It decides identity and wiring only. State is <c>{ machines: { id: {...} }, denied: { id: true } }</c>; the envelope changes only when a mutation succeeds.
+/// It decides identity and wiring only. State is <c>{ machines: { id: {...} }, denied: { id: true }, expired: { id: seconds } }</c>; the envelope changes only when a mutation succeeds.
 /// </summary>
 public static class DiscoveryStateMachine
 {
@@ -66,6 +68,8 @@ public static class DiscoveryStateMachine
         var name = Required(args, "machineName");
         var hash = Required(args, "credentialHash");
         if (ObjectAt(state, "denied").ContainsKey(id)) return Error(MachineRevoked);
+        // A machine's ID is its principal, which owns actions and sessions; reissuing it would hand those to whoever enrolled next.
+        if (ObjectAt(state, "expired").ContainsKey(id)) return Error(MachineExpired);
         var machines = ObjectAt(state, "machines");
         if (machines[id] is JsonObject existing)
         {
@@ -74,20 +78,26 @@ public static class DiscoveryStateMachine
         }
         else
         {
-            if (machines.Count >= DiscoveryLimits.MaxMachines && !RemoveExpired(machines, now)) return Error(CapacityExceeded);
+            if (machines.Count >= DiscoveryLimits.MaxMachines && !RemoveExpired(state, machines, now)) return Error(CapacityExceeded);
             machines[id] = new JsonObject { ["machineName"] = name, ["credentialHash"] = hash, ["enrolledAt"] = now.ToString("O"), ["lastSeen"] = null, ["clients"] = new JsonArray(), ["chats"] = new JsonArray() };
         }
         return Ok(new { machineId = id, principalId = PrincipalOf(id) });
     }
 
     /// <summary>Frees one slot by removing the machine unseen longest, if unseen past the expiry, so strangers cannot hold the table forever.</summary>
-    private static bool RemoveExpired(JsonObject machines, DateTimeOffset now)
+    private static bool RemoveExpired(JsonObject state, JsonObject machines, DateTimeOffset now)
     {
         var cutoff = now - TimeSpan.FromDays(RelayLimits.MachineExpiryDays);
         // A machine that never announced counts from its enrollment; one from before enrolledAt existed counts as oldest.
         var oldest = machines.Select(x => (x.Key, Seen: Date(x.Value!.AsObject(), "lastSeen") is var seen && seen != DateTimeOffset.MinValue ? seen : Date(x.Value!.AsObject(), "enrolledAt")))
             .Where(x => x.Seen < cutoff).OrderBy(x => x.Seen).ThenBy(x => x.Key, StringComparer.Ordinal).FirstOrDefault();
-        return oldest.Key is not null && machines.Remove(oldest.Key);
+        if (oldest.Key is null) return false;
+        machines.Remove(oldest.Key);
+        var expired = ObjectAt(state, "expired");
+        if (expired.Count >= DiscoveryLimits.MaxExpiredIds)
+            expired.Remove(expired.OrderBy(x => Number(expired, x.Key)).ThenBy(x => x.Key, StringComparer.Ordinal).First().Key);
+        expired[oldest.Key] = now.ToUnixTimeSeconds();
+        return true;
     }
 
     private static RelayReply Validate(JsonObject state, JsonObject args)

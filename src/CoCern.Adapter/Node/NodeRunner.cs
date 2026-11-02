@@ -247,6 +247,12 @@ public sealed class NodeRunner : IAsyncDisposable
         var code = Code(reply);
         switch (response.StatusCode)
         {
+            case HttpStatusCode.Conflict when code == RelayErrorCodes.MachineExpired:
+                // The hub dropped this PC while it was away and never reissues an ID: join again under a new one.
+                _error.WriteLine($"The hub at {_hub} dropped this PC (machine {machineId}) after a long absence. The node joins again under a new machine ID.");
+                (_rejected, _credential) = (null, null);
+                _state.RenewMachineId();
+                return Next.Retry;
             case HttpStatusCode.Conflict when _rejected is not null:
                 // The hub refused the credential yet still holds this ID under another one. That is ambiguous (a hub fault or a replaced record), so keep both and back off.
                 _credential = _rejected;
@@ -262,7 +268,7 @@ public sealed class NodeRunner : IAsyncDisposable
             case HttpStatusCode.Forbidden when code == "MachineRevoked":
                 return Stop($"The hub at {_hub} has revoked this PC (machine {machineId}). The node stopped; ask the hub administrator.");
             case HttpStatusCode.Forbidden when code == RelayErrorCodes.JoinCodeRequired:
-                return Stop($"The hub at {_hub} needs its join code to enroll this PC{((_transport.JoinCode ?? _state.ReadJoinCode()) is null ? "" : ", and the one this PC has is wrong")}. The node stopped. Run setup again with --join-code <code> (the hub logs it at startup).");
+                return Stop($"The hub at {_hub} needs its join code to enroll this PC{((_transport.JoinCode ?? _state.ReadJoinCode()) is null ? "" : ", and the one this PC has is wrong")}. The node stopped. Run setup again with --join-code <code> (it is in the join-code file next to the hub's database).");
             case HttpStatusCode.Forbidden or HttpStatusCode.BadRequest:
                 return Stop($"The hub at {_hub} refused to enroll this PC ({code}). The node stopped.");
             case HttpStatusCode.NotFound:

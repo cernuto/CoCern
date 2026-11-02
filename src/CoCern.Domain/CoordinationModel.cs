@@ -224,6 +224,9 @@ public static class Operations
     public const string LockRefusalField = "lockRefusal";
     /// <summary>Server-set on a rolled-back claim's lock release: the grant's requestId, whose stored reply is dropped so a retry acquires again.</summary>
     public const string ForgetRequestField = "forgetRequestId";
+
+    /// <summary>The <c>session_open</c> fields a session's direct initialization takes from the client; freshness comes only from the hub.</summary>
+    public static readonly string[] SessionClientFields = ["hubIncarnation", "machineId", "label", "binding", "role"];
     /// <summary>Server-set on a rolled-back claim's re-acquire of a grant it already held: the claim that grant served before.</summary>
     public const string RestoreClaimForField = "restoreClaimFor";
     /// <summary>A board's due sweep: moves tasks finished longer than <c>Relay:Board:ArchiveAfterDays</c> to the archive.</summary>
@@ -292,7 +295,7 @@ public static class ServerArguments
     private static readonly Dictionary<string, string[]> ByTool = new(StringComparer.Ordinal)
     {
         [RelayTools.TaskUpdate] = ["archivedDependsOn"],
-        [RelayTools.TaskClaim] = ["declaredResources", Operations.ResolveDeclaredField, Operations.LockRefusalField, Operations.RestoreClaimForField, Operations.ForgetRequestField, RequestedResources],
+        [RelayTools.TaskClaim] = ["taskClaimGeneration", "declaredResources", Operations.ResolveDeclaredField, Operations.LockRefusalField, Operations.RestoreClaimForField, Operations.ForgetRequestField, RequestedResources],
         [RelayTools.ActionBegin] = ["binding", "bindingVersion", "declaredResources", Operations.ResolveDeclaredField, Operations.LockRefusalField, Operations.RestoreClaimForField, Operations.ForgetRequestField, RequestedResources],
         [RelayTools.ClaimAcquire] = ["taskClaimGeneration", "declaredResources", Operations.ForgetRequestField, Operations.RestoreClaimForField],
         [RelayTools.ClaimRenew] = ["taskClaimGeneration", Operations.ForgetRequestField, Operations.RestoreClaimForField],

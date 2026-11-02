@@ -15,7 +15,7 @@ A new PC needs the hub's **join code** to join. A joined PC can message your cha
 | `Relay:Network:HttpsPort` | 5273 | The HTTPS port. |
 | `Relay:Network:CertificatePath` | `data/hub-certificate.pfx` | Self-signed certificate, made on first start. Keep it: PCs pin its fingerprint. |
 
-At startup the hub logs the join code and, with the network listener on, the certificate fingerprint. You need both to join a PC.
+The hub logs the join code once, on the start that creates it; after that it logs only where the code is kept (the `join-code` file, readable by the hub's user). With the network listener on, it also logs the certificate fingerprint at every start. You need both to join a PC. Letter case in the code doesn't matter.
 
 The hub refuses to start when an `http://` address binds anything but loopback (for example `http://0.0.0.0:5271`), because tokens would cross the network unencrypted. Use the HTTPS listener for other PCs.
 
@@ -35,7 +35,7 @@ New-NetFirewallRule -DisplayName "CoCern hub (HTTPS 5273)" -Direction Inbound -A
 dotnet .\CoCern.Adapter.dll --setup --hub https://<hub-pc>:5273/ --join-code <code> --fingerprint <fingerprint>
 ```
 
-`--join-code` can also come from the `COCERN_JOIN_CODE` variable. `--fingerprint` is the certificate fingerprint from the hub's log; colons are allowed. Always pass it: setup then refuses any other certificate (exit code 4) instead of trusting the first one it sees.
+`--join-code` can also come from the `COCERN_JOIN_CODE` variable, which keeps it out of your shell history. Setup keeps the code in the node's folder, readable by this user only, so a PC the hub dropped joins again by itself. `--fingerprint` is the certificate fingerprint from the hub's log; colons are allowed. Always pass it: setup then refuses any other certificate (exit code 4) instead of trusting the first one it sees.
 
 Setup then:
 
@@ -86,7 +86,7 @@ It only reads and never blocks. Codex asks you to approve a new hook in `/hooks`
 - **Stop waking on a PC:** create a file named `stop` in the node folder. Delete it to start again.
 - **Stop the node:** end its `dotnet` process. Remove the `CoCernNode` Run value to keep it from starting.
 - **Revoke a PC:** an administrator calls `control_request` with `"command": "revoke_machine"` and the `machineId`. A device that knows the join code can join again under a new ID, so change the code too.
-- **Expiry:** the hub holds up to 256 PCs. When it is full, a new PC replaces the one not seen longest, if that one has not announced for 30 days. A replaced PC's node stops; run setup on it again with the join code.
+- **Expiry:** the hub holds up to 256 PCs. When it is full, a new PC replaces the one not seen longest, if that one has not announced for 30 days. A replaced PC's ID is never given out again, so no other PC can act as it: when it comes back, its node joins again under a new ID with the join code setup kept.
 
 ## Hand-written wake configs
 

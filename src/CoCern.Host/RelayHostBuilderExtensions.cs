@@ -244,7 +244,7 @@ public static class RelayHostBuilderExtensions
 
     /// <summary>A relative configured path resolves from the content root, so a launch profile can point at the repository's data folder.</summary>
     internal static string DatabasePath(IConfiguration configuration, IHostEnvironment environment) =>
-        configuration["Relay:DatabasePath"] is { } configured ? Path.Combine(environment.ContentRootPath, configured) : DefaultDatabasePath(environment);
+        configuration["Relay:DatabasePath"] is { } configured && !string.IsNullOrWhiteSpace(configured) ? Path.Combine(environment.ContentRootPath, configured) : DefaultDatabasePath(environment);
 
     private static string DefaultDatabasePath(IHostEnvironment environment) => Path.Combine(environment.ContentRootPath, "data", "relay.db");
 }
