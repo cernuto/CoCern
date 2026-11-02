@@ -203,7 +203,7 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
             sink.Record(new ActivityEvent
             {
                 Timestamp = DateTimeOffset.UtcNow, Kind = ActivityEvent.Wake, RepositoryId = JsonFields.Text(payload, "repositoryId"), SessionId = sessionId,
-                Ok = true, Code = "Ok", Target = JsonFields.Text(payload, "taskId") is { Length: > 0 } taskId ? "task:" + Uri.EscapeDataString(JsonFields.Text(payload, "repositoryId")) + "/" + Uri.EscapeDataString(JsonFields.Text(payload, "boardId", "default")) + "/" + Uri.EscapeDataString(taskId) : null
+                Ok = true, Code = "Ok", Target = JsonFields.Text(payload, "taskId") is { Length: > 0 } taskId ? CallTelemetry.TaskTarget(payload, taskId) : null
             });
         }
         catch (Exception) { /* Telemetry never affects delivery. */ }
