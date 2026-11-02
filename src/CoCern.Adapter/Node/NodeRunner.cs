@@ -229,7 +229,8 @@ public sealed class NodeRunner : IAsyncDisposable
     {
         var machineId = _state.MachineId;
         var body = new JsonObject { ["machineId"] = machineId, ["machineName"] = _transport.MachineName };
-        if (_transport.JoinCode is { } joinCode) body["joinCode"] = joinCode;
+        // A code given now wins; otherwise the one setup kept, so a node the hub dropped enrolls again by itself.
+        if ((_transport.JoinCode ?? _state.ReadJoinCode()) is { } joinCode) body["joinCode"] = joinCode;
         using var response = await PostAsync("api/discovery/enroll", body, null, ct);
         var reply = await ReadAsync(response, ct);
         if (response.StatusCode == HttpStatusCode.OK)
@@ -261,7 +262,7 @@ public sealed class NodeRunner : IAsyncDisposable
             case HttpStatusCode.Forbidden when code == "MachineRevoked":
                 return Stop($"The hub at {_hub} has revoked this PC (machine {machineId}). The node stopped; ask the hub administrator.");
             case HttpStatusCode.Forbidden when code == RelayErrorCodes.JoinCodeRequired:
-                return Stop($"The hub at {_hub} needs its join code to enroll this PC{(_transport.JoinCode is null ? "" : ", and the one given is wrong")}. The node stopped. Run setup again with --join-code <code> (the hub logs it at startup).");
+                return Stop($"The hub at {_hub} needs its join code to enroll this PC{((_transport.JoinCode ?? _state.ReadJoinCode()) is null ? "" : ", and the one this PC has is wrong")}. The node stopped. Run setup again with --join-code <code> (the hub logs it at startup).");
             case HttpStatusCode.Forbidden or HttpStatusCode.BadRequest:
                 return Stop($"The hub at {_hub} refused to enroll this PC ({code}). The node stopped.");
             case HttpStatusCode.NotFound:

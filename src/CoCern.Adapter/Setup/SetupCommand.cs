@@ -163,7 +163,7 @@ internal static class SetupCommand
         using (state)
         {
             env.Transport.SingleCycle = true;
-            if (options.JoinCode is not null) env.Transport.JoinCode = options.JoinCode;
+            if (options.JoinCode is not null) { env.Transport.JoinCode = options.JoinCode; state.SaveJoinCode(options.JoinCode); }
             if (options.Fingerprint is not null) env.Transport.ExpectedFingerprint = options.Fingerprint;
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeout.CancelAfter(env.EnrollTimeout);
