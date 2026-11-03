@@ -3,6 +3,7 @@ using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using CoCern.Contracts;
 
 namespace CoCern.Adapter.Node;
 
@@ -97,7 +98,7 @@ public sealed class NodeState : IDisposable
     /// <summary>Pins the hub certificate on first use. Once pinned, the fingerprint never changes for this hub.</summary>
     internal void SetFingerprint(string fingerprint)
     {
-        if (Fingerprint is not null || !PinnedCertificate.IsFingerprint(fingerprint)) throw new InvalidOperationException("The hub certificate is already pinned.");
+        if (Fingerprint is not null || !CertificateFingerprint.IsValid(fingerprint)) throw new InvalidOperationException("The hub certificate is already pinned.");
         Fingerprint = fingerprint.ToUpperInvariant();
         Save();
     }
@@ -159,7 +160,7 @@ public sealed class NodeState : IDisposable
         var hubUrl = Text(root, "hubUrl");
         var fingerprint = Text(root, "fingerprint");
         if (machineId is null || machineId.Length is 0 or > 128 || !machineId.All(c => char.IsAsciiLetterOrDigit(c) || c is '.' or '_' or '-') || !char.IsAsciiLetterOrDigit(machineId[0]) ||
-            (hubUrl is not null && !AdapterOptions.TryParseOrigin(hubUrl, out _)) || (fingerprint is not null && !PinnedCertificate.IsFingerprint(fingerprint)))
+            (hubUrl is not null && !AdapterOptions.TryParseOrigin(hubUrl, out _)) || (fingerprint is not null && !CertificateFingerprint.IsValid(fingerprint)))
             throw new JsonException();
         return (machineId, hubUrl, fingerprint?.ToUpperInvariant(), root["enrolled"] is JsonValue enrolled && enrolled.TryGetValue<bool>(out var value) && value);
     }
@@ -266,7 +267,7 @@ public sealed class NodeState : IDisposable
     }
 
     private static ChatLocation? Location(JsonNode? node, string idName) =>
-        node is JsonObject given && Text(given, "provider") is "codex" or "claude" && Text(given, idName) is { } id && ChatLocators.IsUuid(id) ? new(Text(given, "provider")!, id) : null;
+        node is JsonObject given && Text(given, "provider") is ChatProviders.Codex or ChatProviders.Claude && Text(given, idName) is { } id && ChatLocators.IsUuid(id) ? new(Text(given, "provider")!, id) : null;
 
     /// <summary>The handle file for a relay session; the ID must be one that can name a file.</summary>
     internal static string SessionHandlePath(string nodeFolder, string sessionId) => IsFileId(sessionId) ? Path.Combine(nodeFolder, SessionsFolder, sessionId + ".json") : throw new ArgumentException("Not a session ID that can name a file.", nameof(sessionId));

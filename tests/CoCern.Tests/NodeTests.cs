@@ -1,3 +1,4 @@
+using CoCern.Contracts;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
@@ -60,7 +61,7 @@ public sealed class NodeTests : IDisposable
 
         Assert.True(timeout.IsCancellationRequested);
         Assert.Equal(before, File.ReadAllBytes(NodeJson));
-        Assert.Contains(HubCertificate.Fingerprint(presented), error.ToString());
+        Assert.Contains(CertificateFingerprint.Of(presented), error.ToString());
         Assert.Single(System.Text.RegularExpressions.Regex.Matches(error.ToString(), "presented a certificate"));
         Assert.Equal(0, requests);
         Assert.Equal(enrolled ? new string('c', 64) : null, state.ReadCredential());
@@ -364,8 +365,8 @@ public sealed class NodeTests : IDisposable
             Assert.Equal(0, await run);
         }
         using var stored = HubCertificate.LoadOrCreate(Path.Combine(root, "nested", "hub-certificate.pfx"), "unused");
-        Assert.Equal(HubCertificate.Fingerprint(stored), state.Fingerprint);
-        Assert.Equal(HubCertificate.Fingerprint(stored), JsonNode.Parse(File.ReadAllText(NodeJson))!["fingerprint"]!.GetValue<string>());
+        Assert.Equal(CertificateFingerprint.Of(stored), state.Fingerprint);
+        Assert.Equal(CertificateFingerprint.Of(stored), JsonNode.Parse(File.ReadAllText(NodeJson))!["fingerprint"]!.GetValue<string>());
         Assert.True(state.Enrolled);
 
         // The hint channel accepts only the pinned certificate too.
@@ -630,7 +631,7 @@ public sealed class NodeTests : IDisposable
             variables["CLAUDE_CODE_SESSION_ID"] = Guid.NewGuid().ToString();
             var options = AdapterOptions.FromEnvironment(key => variables.GetValueOrDefault(key), _ => "file-token");
             Assert.Equal(variables.ContainsKey("COCERN_TOKEN_FILE") ? "file-token" : "env-token", options.Token);
-            Assert.Equal(new Uri(variables.GetValueOrDefault("COCERN_URL") ?? AdapterOptions.DefaultUrl), options.BaseUri);
+            Assert.Equal(new Uri(variables.GetValueOrDefault("COCERN_URL") ?? HubAddresses.LocalUrl), options.BaseUri);
             Assert.Null(options.PinnedFingerprint);
             Assert.Null(options.NodeFolder);
             Assert.Null(options.ClientChat);

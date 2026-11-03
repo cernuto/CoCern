@@ -44,7 +44,7 @@ public static class RelayEndpoints
         app.MapJoinEndpoints();
         app.MapRelayDashboard();
         app.MapFallbackToFile("/dashboard/{*path:nonfile}", "dashboard/index.html");
-        app.MapHub<CoordinationHub>("/hubs/coordination").RequireAuthorization();
+        app.MapHub<CoordinationHub>("/" + HubEvents.Path).RequireAuthorization();
         app.MapMcp("/mcp").RequireAuthorization();
         app.MapOpenApi();
         app.MapScalarApiReference("/scalar", options => options.WithTitle("CoCern coordination API"));

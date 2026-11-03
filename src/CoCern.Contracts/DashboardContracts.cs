@@ -298,6 +298,33 @@ public sealed record DashboardHubAddress
 }
 
 /// <summary><see cref="State"/> is <c>connected</c>, <c>available</c>, <c>added</c> or <c>error</c> (see <see cref="Detail"/>).</summary>
+/// <summary>The apps Connect adds CoCern to, by the ID the adapter's <c>--connect --only</c> and the Connect page use.</summary>
+public static class ConnectClients
+{
+    public const string ClaudeCode = "claude-code";
+    public const string ClaudeDesktop = "claude-desktop";
+    public const string Codex = "codex";
+    public static readonly IReadOnlyList<string> All = [ClaudeCode, ClaudeDesktop, Codex];
+}
+
+/// <summary>What the adapter's <c>--connect --json</c> reports for each app (<see cref="DashboardConnectClient.State"/>).</summary>
+public static class ConnectStates
+{
+    /// <summary>It has a CoCern entry.</summary>
+    public const string Connected = "connected";
+    /// <summary>It can get one.</summary>
+    public const string Available = "available";
+    /// <summary>This run added one.</summary>
+    public const string Added = "added";
+    /// <summary>Its entry is this hub's but names an old address or certificate, or other tools than asked for (<c>--check</c>).</summary>
+    public const string Outdated = "outdated";
+    /// <summary>This run updated that entry.</summary>
+    public const string Updated = "updated";
+    /// <summary>See the detail.</summary>
+    public const string Error = "error";
+}
+
+/// <summary>One app in the adapter's <c>--connect --json</c> reply, as the Connect page shows it.</summary>
 public sealed record DashboardConnectClient
 {
     public string Id { get; init; } = "";

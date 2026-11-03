@@ -1,18 +1,17 @@
 using Microsoft.AspNetCore.Http.Connections;
 using Microsoft.AspNetCore.SignalR.Client;
 using CoCern.Adapter.Node;
+using CoCern.Contracts;
 
 namespace CoCern.Adapter;
 
 /// <summary>The one way this adapter opens the hub's SignalR hint channel: pinned origin, no redirects, bounded buffers.</summary>
 internal static class RelayHubConnection
 {
-    public const string ChangedEvent = "coordination.changed";
-    public const string DiscoveryChangedEvent = "discovery.changed";
 
     /// <summary>Builds the connection. With <see cref="AdapterOptions.PinnedFingerprint"/> set, SignalR's own handler accepts only that certificate; <paramref name="handler"/> replaces it in tests.</summary>
     public static HubConnection Create(AdapterOptions options, Func<HttpMessageHandler>? handler = null) => new HubConnectionBuilder()
-        .WithUrl(new Uri(options.BaseUri, "hubs/coordination"), connection =>
+        .WithUrl(new Uri(options.BaseUri, HubEvents.Path), connection =>
         {
             connection.AccessTokenProvider = () => Task.FromResult<string?>(options.Token);
             connection.Transports = HttpTransportType.LongPolling;
@@ -31,17 +30,17 @@ internal static class RelayHubConnection
         .Build();
 
     public static Task WatchSessionAsync(this HubConnection connection, string sessionId, string sessionToken, string repositoryId, CancellationToken cancellationToken) =>
-        connection.InvokeAsync("WatchSession", sessionId, sessionToken, repositoryId, cancellationToken);
+        connection.InvokeAsync(HubEvents.WatchSession, sessionId, sessionToken, repositoryId, cancellationToken);
 
     public static Task WatchMachineAsync(this HubConnection connection, CancellationToken cancellationToken) =>
-        connection.InvokeAsync("WatchMachine", cancellationToken);
+        connection.InvokeAsync(HubEvents.WatchMachine, cancellationToken);
 
     /// <summary>Sets the pinned-certificate check on every TLS-capable handler in the chain; false when there is none, so the caller fails closed.</summary>
     private static bool Pin(HttpMessageHandler handler, string fingerprint)
     {
         var pinned = false;
-        if (handler is HttpClientHandler clientHandler) { clientHandler.ServerCertificateCustomValidationCallback = (_, certificate, _, _) => PinnedCertificate.Matches(certificate, fingerprint); pinned = true; }
-        if (handler is SocketsHttpHandler socketsHandler) { socketsHandler.SslOptions.RemoteCertificateValidationCallback = (_, certificate, _, _) => PinnedCertificate.Matches(certificate, fingerprint); pinned = true; }
+        if (handler is HttpClientHandler clientHandler) { clientHandler.ServerCertificateCustomValidationCallback = (_, certificate, _, _) => CertificateFingerprint.Matches(certificate, fingerprint); pinned = true; }
+        if (handler is SocketsHttpHandler socketsHandler) { socketsHandler.SslOptions.RemoteCertificateValidationCallback = (_, certificate, _, _) => CertificateFingerprint.Matches(certificate, fingerprint); pinned = true; }
         if (handler is DelegatingHandler { InnerHandler: { } inner }) pinned |= Pin(inner, fingerprint);
         return pinned;
     }

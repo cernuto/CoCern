@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Microsoft.AspNetCore.SignalR.Client;
+using CoCern.Contracts;
 
 namespace CoCern.Adapter;
 
@@ -81,7 +82,7 @@ public sealed class SessionHints(AdapterOptions options, Action<string>? writeHi
         public Subscription(SessionHints owner, HubConnection connection, string sessionId, string sessionToken, string repositoryId)
         {
             (_owner, _connection, _sessionId, _sessionToken, _repositoryId) = (owner, connection, sessionId, sessionToken, repositoryId);
-            connection.On<JsonElement>(RelayHubConnection.ChangedEvent, hint =>
+            connection.On<JsonElement>(HubEvents.CoordinationChanged, hint =>
             {
                 if (TryString(hint, "sessionId", out var recipient) && recipient == sessionId && Interlocked.Exchange(ref owner._hintPending, 1) == 0)
                     owner._writeHint("CoCern coordination changed; use check_inbox for durable messages.");

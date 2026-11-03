@@ -1,3 +1,4 @@
+@using CoCern.Contracts
 @using System.Net.Http.Json
 @implements IDisposable
 @inject HttpClient Http
@@ -33,16 +34,16 @@
         @if (AdditionalMessage(data) is { Length: > 0 } message) { <p class="warning-note" role="status">@message</p> }
         <p class="analytics-key">Paired bars use teal for current and gold for previous; stacked bars use the labeled category colors. Not measured means unknown; 0 is a measured zero. Sample counts appear with each report.</p>
         <div class="analytics-grid">
-            <AnalyticsChart Query="@Query("tokens_per_task")" Title="Tokens per task" Description="Average reported tokens for each task." Unit="tokens/task" SampleUnit="tasks" />
-            <AnalyticsChart Query="@Query("calls_per_task")" Title="Tool calls per task" Description="Average tool calls for each task." Unit="calls/task" SampleUnit="tasks" />
-            <AnalyticsChart Query="@Query("messages_per_task")" Title="Messages per task" Description="Average task messages for each task." Unit="messages/task" SampleUnit="tasks" />
-            <AnalyticsChart Query="@Query("context_by_role")" Title="Reply bytes by role" Description="Average reply bytes per session, grouped by role." Unit="bytes/session" SampleUnit="sessions" />
-            <AnalyticsChart Query="@Query("noisiest_tools")" Title="Noisiest tools" Description="Reply bytes by tool. Counts show the calls behind each value." Unit="bytes" SampleUnit="calls" Mode="horizontal" />
-            <AnalyticsChart Query="@Query("claim_conflicts_by_resource")" Title="Claim conflicts" Description="Refused claims, grouped by resource." Unit="conflicts" SampleUnit="samples" Mode="horizontal" />
-            <AnalyticsChart Query="@Query("quality_guardrails")" Title="Quality guardrails" Description="Closures, reopened tasks, and failed, abandoned or retried actions. Stacked categories are separate event counts." Unit="events" Mode="stacked" />
-            <AnalyticsChart Query="@Query("attention_outcomes_by_kind")" Title="Attention offer outcomes" Description="Shown, accepted, later and dismissed offer events, grouped by kind. Each kind's event denominator is shown once." Unit="events" SampleUnit="events" Mode="stacked" GroupByKind />
-            <AnalyticsChart Query="@Query("manager_assignment_latency")" Title="Assignment latency" Description="Average minutes from ready to first claim; a proxy for assignment latency." Unit="minutes" Mode="numeric" />
-            <AnalyticsChart Query="@Query("blocked_time")" Title="Blocked time" Description="Average hours of ended blocked spells, with open blocked-spell counts shown separately." Unit="hours/spell" Mode="numeric" />
+            <AnalyticsChart Query="@Query(AnalyticsQueryNames.TokensPerTask)" Title="Tokens per task" Description="Average reported tokens for each task." Unit="tokens/task" SampleUnit="tasks" />
+            <AnalyticsChart Query="@Query(AnalyticsQueryNames.CallsPerTask)" Title="Tool calls per task" Description="Average tool calls for each task." Unit="calls/task" SampleUnit="tasks" />
+            <AnalyticsChart Query="@Query(AnalyticsQueryNames.MessagesPerTask)" Title="Messages per task" Description="Average task messages for each task." Unit="messages/task" SampleUnit="tasks" />
+            <AnalyticsChart Query="@Query(AnalyticsQueryNames.ContextByRole)" Title="Reply bytes by role" Description="Average reply bytes per session, grouped by role." Unit="bytes/session" SampleUnit="sessions" />
+            <AnalyticsChart Query="@Query(AnalyticsQueryNames.NoisiestTools)" Title="Noisiest tools" Description="Reply bytes by tool. Counts show the calls behind each value." Unit="bytes" SampleUnit="calls" Mode="horizontal" />
+            <AnalyticsChart Query="@Query(AnalyticsQueryNames.ClaimConflictsByResource)" Title="Claim conflicts" Description="Refused claims, grouped by resource." Unit="conflicts" SampleUnit="samples" Mode="horizontal" />
+            <AnalyticsChart Query="@Query(AnalyticsQueryNames.QualityGuardrails)" Title="Quality guardrails" Description="Closures, reopened tasks, and failed, abandoned or retried actions. Stacked categories are separate event counts." Unit="events" Mode="stacked" />
+            <AnalyticsChart Query="@Query(AnalyticsQueryNames.AttentionOutcomesByKind)" Title="Attention offer outcomes" Description="Shown, accepted, later and dismissed offer events, grouped by kind. Each kind's event denominator is shown once." Unit="events" SampleUnit="events" Mode="stacked" GroupByKind />
+            <AnalyticsChart Query="@Query(AnalyticsQueryNames.ManagerAssignmentLatency)" Title="Assignment latency" Description="Average minutes from ready to first claim; a proxy for assignment latency." Unit="minutes" Mode="numeric" />
+            <AnalyticsChart Query="@Query(AnalyticsQueryNames.BlockedTime)" Title="Blocked time" Description="Average hours of ended blocked spells, with open blocked-spell counts shown separately." Unit="hours/spell" Mode="numeric" />
         </div>
     }
 </section>

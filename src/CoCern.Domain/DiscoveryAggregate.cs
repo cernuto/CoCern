@@ -108,7 +108,7 @@ public static class DiscoveryStateMachine
     }
 
     /// <summary>The provider a node announces for a session it has not mapped to a chat.</summary>
-    private const string UnmappedProvider = "unknown";
+    private const string UnmappedProvider = ChatProviders.Unknown;
 
     /// <summary>When the announced chat's session was opened, or the earliest time when absent or unreadable.</summary>
     private static DateTimeOffset OpenedAt(JsonObject chat) =>
@@ -155,7 +155,7 @@ public static class DiscoveryStateMachine
             foreach (var chat in ArrayAt(machine, "chats").Select(x => x!.AsObject()).Where(x => repositories.Contains(Text(x, "repositoryId"))))
             {
                 var provider = Text(chat, "provider");
-                var ready = provider.ToLowerInvariant() switch { "codex" => Flag(chat, "wakeable"), "claude" => Flag(chat, "waiterRunning"), _ => false };
+                var ready = provider.ToLowerInvariant() switch { ChatProviders.Codex => Flag(chat, "wakeable"), ChatProviders.Claude => Flag(chat, "waiterRunning"), _ => false };
                 items.Add(new { label = Text(chat, "label"), provider, machineName = Text(machine, "machineName"), relaySessionId = Text(chat, "relaySessionId"), repositoryId = Text(chat, "repositoryId"), reachable = live && ready });
             }
         }

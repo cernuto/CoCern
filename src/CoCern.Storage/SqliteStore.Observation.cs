@@ -5,6 +5,7 @@ using System.Text.Json;
 using CoCern.Contracts.Dashboard;
 using CoCern.Core;
 using CoCern.Domain;
+using CoCern.Contracts;
 
 namespace CoCern.Storage;
 
@@ -287,8 +288,8 @@ public sealed partial class SqliteStore : IRelayObservationSource
                 var session = new DashboardSession
                 {
                     SessionId = Safe(grainKey), RepositoryId = Text(chat, "repositoryId"), Label = Text(chat, "label"), Provider = provider,
-                    MachineId = id, MachineName = name, IsMapped = provider.Length > 0 && !provider.Equals("unknown", StringComparison.OrdinalIgnoreCase),
-                    Reachable = live && (provider.Equals("codex", StringComparison.OrdinalIgnoreCase) ? Flag(chat, "wakeable") : provider.Equals("claude", StringComparison.OrdinalIgnoreCase) && Flag(chat, "waiterRunning")),
+                    MachineId = id, MachineName = name, IsMapped = provider.Length > 0 && !provider.Equals(ChatProviders.Unknown, StringComparison.OrdinalIgnoreCase),
+                    Reachable = live && (provider.Equals(ChatProviders.Codex, StringComparison.OrdinalIgnoreCase) ? Flag(chat, "wakeable") : provider.Equals(ChatProviders.Claude, StringComparison.OrdinalIgnoreCase) && Flag(chat, "waiterRunning")),
                     ReportedAt = lastSeen, FreshUntil = lastSeen?.Add(DiscoveryLimits.LivenessTimeout)
                 };
                 if (string.IsNullOrEmpty(session.SessionId)) continue;

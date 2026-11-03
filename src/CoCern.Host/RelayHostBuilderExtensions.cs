@@ -23,7 +23,7 @@ public static class RelayHostBuilderExtensions
 
     public static WebApplicationBuilder AddRelayHost(this WebApplicationBuilder builder)
     {
-        if (string.IsNullOrWhiteSpace(builder.Configuration["urls"])) builder.WebHost.UseUrls(HubNetwork.DefaultUrl);
+        if (string.IsNullOrWhiteSpace(builder.Configuration["urls"])) builder.WebHost.UseUrls(HubAddresses.LocalUrl);
         builder.WebHost.ConfigureKestrel((context, options) =>
         {
             options.Limits.MaxRequestBodySize = RelayLimits.MaxPayloadBytes;

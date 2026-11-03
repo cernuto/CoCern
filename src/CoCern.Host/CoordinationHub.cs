@@ -12,6 +12,7 @@ namespace CoCern.Host;
 [Authorize]
 public sealed class CoordinationHub(IRelayApplication application) : Hub
 {
+    [HubMethodName(HubEvents.WatchSession)]
     public async Task WatchSession(string sessionId, string sessionToken, string repositoryId)
     {
         if (string.IsNullOrWhiteSpace(sessionId) || string.IsNullOrWhiteSpace(sessionToken) || string.IsNullOrWhiteSpace(repositoryId) || sessionId.Length > RelayLimits.MaxIdentifierLength || sessionToken.Length > RelayLimits.MaxIdentifierLength || repositoryId.Length > RelayLimits.MaxIdentifierLength) throw new HubException("Session access denied.");
@@ -22,6 +23,7 @@ public sealed class CoordinationHub(IRelayApplication application) : Hub
     }
 
     /// <summary>Subscribes this connection to hints for its own machine. Only a connection authenticated by a machine credential may call it, and only for that machine.</summary>
+    [HubMethodName(HubEvents.WatchMachine)]
     public async Task WatchMachine()
     {
         var machine = RelayAuthentication.Machine(Context.User!) ?? throw new HubException("Machine access denied.");
@@ -37,7 +39,7 @@ internal sealed class CoordinationNotifier(IHubContext<CoordinationHub> hub, Das
 {
     public async Task NotifyAsync(string sessionId, string eventId, CancellationToken cancellationToken = default)
     {
-        await hub.Clients.Group(CoordinationHub.Group(sessionId)).SendAsync("coordination.changed", new { sessionId, eventId }, cancellationToken);
+        await hub.Clients.Group(CoordinationHub.Group(sessionId)).SendAsync(HubEvents.CoordinationChanged, new { sessionId, eventId }, cancellationToken);
         traffic.Push(sessionId);
     }
 }

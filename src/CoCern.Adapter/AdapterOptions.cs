@@ -1,4 +1,5 @@
 using CoCern.Adapter.Node;
+using CoCern.Contracts;
 
 namespace CoCern.Adapter;
 
@@ -6,7 +7,6 @@ public sealed class AdapterConfigurationException(string message) : Exception(me
 
 public sealed class AdapterOptions
 {
-    public const string DefaultUrl = "http://127.0.0.1:5271";
 
     public AdapterOptions(string url, string token, bool admin = false, bool signalR = false)
     {
@@ -40,7 +40,7 @@ public sealed class AdapterOptions
     public string? PinnedFingerprint
     {
         get;
-        init => field = value is null ? null : PinnedCertificate.IsFingerprint(value) ? value.ToUpperInvariant() : throw new AdapterConfigurationException("A pinned certificate fingerprint must be 64 hexadecimal characters.");
+        init => field = value is null ? null : CertificateFingerprint.IsValid(value) ? value.ToUpperInvariant() : throw new AdapterConfigurationException("A pinned certificate fingerprint must be 64 hexadecimal characters.");
     }
 
     /// <summary>True for a root HTTPS origin, or HTTP to a loopback host, without credentials, query or fragment.</summary>
@@ -77,7 +77,7 @@ public sealed class AdapterOptions
         }
         else token = environment("COCERN_TOKEN");
 
-        var url = environment("COCERN_URL") ?? DefaultUrl;
+        var url = environment("COCERN_URL") ?? HubAddresses.LocalUrl;
         // A pinned certificate (Connect sets it for the hub's loopback HTTPS): the token goes only to the hub that holds that certificate.
         var fingerprint = ParseFingerprint(url, environment("COCERN_FINGERPRINT"));
         return new AdapterOptions(url, token ?? "",
@@ -89,8 +89,8 @@ public sealed class AdapterOptions
     internal static string? ParseFingerprint(string url, string? value)
     {
         if (value is not { Length: > 0 }) return null;
-        var fingerprint = value.Replace(":", "").Trim().ToUpperInvariant();
-        if (!PinnedCertificate.IsFingerprint(fingerprint)) throw new AdapterConfigurationException("COCERN_FINGERPRINT must be the hub certificate's SHA-256 fingerprint: 64 hexadecimal characters.");
+        var fingerprint = CertificateFingerprint.Normalize(value)!;
+        if (!CertificateFingerprint.IsValid(fingerprint)) throw new AdapterConfigurationException("COCERN_FINGERPRINT must be the hub certificate's SHA-256 fingerprint: 64 hexadecimal characters.");
         if (!url.StartsWith("https://", StringComparison.OrdinalIgnoreCase)) throw new AdapterConfigurationException("COCERN_FINGERPRINT applies only to an https:// COCERN_URL.");
         return fingerprint;
     }
@@ -102,7 +102,7 @@ public sealed class AdapterOptions
     }
 
     /// <summary>The chat IDs a client exports to its MCP servers. Only these exact variables are read; Codex exports none (see docs/reference.md#wake-ups).</summary>
-    private static readonly (string Provider, string Variable)[] ClientChatVariables = [("claude", "CLAUDE_CODE_SESSION_ID")];
+    private static readonly (string Provider, string Variable)[] ClientChatVariables = [(ChatProviders.Claude, "CLAUDE_CODE_SESSION_ID")];
 
     /// <summary>The chat ID the client exported, when it is one of the variables above and a UUID.</summary>
     private static ChatLocation? Exported(Func<string, string?> environment) =>

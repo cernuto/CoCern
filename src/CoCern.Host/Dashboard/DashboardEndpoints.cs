@@ -97,7 +97,7 @@ public static class DashboardEndpoints
         api.MapPost("/connect/{client}", async (HttpContext context, string client, DashboardConnect connect) =>
         {
             if (!DashboardConnect.OnThisPc(context) || !DashboardSecurity.SameOrigin(context)) return Results.StatusCode(403);
-            return DashboardConnect.ClientIds.Contains(client) ? Results.Ok(await connect.ConnectAsync(client, DashboardConnect.AdminChoice(context), context.RequestAborted)) : Results.NotFound();
+            return ConnectClients.All.Contains(client) ? Results.Ok(await connect.ConnectAsync(client, DashboardConnect.AdminChoice(context), context.RequestAborted)) : Results.NotFound();
         }).RequireAuthorization(DashboardSecurity.Policy);
         api.MapGet("/snapshot", (DashboardCollector collector) => Results.Ok(collector.Current)).RequireAuthorization(DashboardSecurity.Policy);
         api.MapGet("/analytics", (HttpContext context, DashboardAnalytics analytics) => analytics.GetAsync(context)).RequireAuthorization(DashboardSecurity.Policy);

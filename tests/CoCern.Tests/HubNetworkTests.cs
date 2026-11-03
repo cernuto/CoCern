@@ -1,3 +1,4 @@
+using CoCern.Contracts;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.Versioning;
@@ -29,8 +30,8 @@ public sealed class HubNetworkTests : IDisposable
     {
         using var first = HubCertificate.LoadOrCreate(CertificatePath, "hub-pc");
         using var second = HubCertificate.LoadOrCreate(CertificatePath, "hub-pc");
-        Assert.Equal(HubCertificate.Fingerprint(first), HubCertificate.Fingerprint(second));
-        Assert.Matches("^[0-9A-F]{64}$", HubCertificate.Fingerprint(first));
+        Assert.Equal(CertificateFingerprint.Of(first), CertificateFingerprint.Of(second));
+        Assert.Matches("^[0-9A-F]{64}$", CertificateFingerprint.Of(first));
         Assert.True(second.HasPrivateKey);
         using var key = second.GetECDsaPublicKey();
         Assert.Equal(256, key!.KeySize);
@@ -45,7 +46,7 @@ public sealed class HubNetworkTests : IDisposable
         Assert.Contains("hub-pc", names.EnumerateDnsNames());
         Assert.DoesNotContain(names.EnumerateIPAddresses(), IPAddress.IsLoopback);
         using var reloaded = X509CertificateLoader.LoadPkcs12FromFile(CertificatePath, null);
-        Assert.Equal(HubCertificate.Fingerprint(certificate), HubCertificate.Fingerprint(reloaded));
+        Assert.Equal(CertificateFingerprint.Of(certificate), CertificateFingerprint.Of(reloaded));
     }
 
     [Fact]
@@ -90,7 +91,7 @@ public sealed class HubNetworkTests : IDisposable
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         using var stored = HubCertificate.LoadOrCreate(CertificatePath, "ignored-because-reused");
         Assert.NotNull(presented);
-        Assert.Equal(HubCertificate.Fingerprint(stored), HubCertificate.Fingerprint(presented!));
+        Assert.Equal(CertificateFingerprint.Of(stored), CertificateFingerprint.Of(presented!));
         using var loopback = new HttpClient();
         Assert.Equal(HttpStatusCode.OK, (await loopback.GetAsync($"http://127.0.0.1:{httpPort}/health")).StatusCode);
         await app.StopAsync();
@@ -149,7 +150,7 @@ public sealed class HubNetworkTests : IDisposable
         Assert.True(File.Exists(CertificatePath));
         using var local = new TcpClient();
         await local.ConnectAsync(IPAddress.Loopback, localPort);
-        Assert.True(File.Exists(Path.Combine(root, HubNetwork.LocalHubFile)));
+        Assert.True(File.Exists(Path.Combine(root, LocalHubRecord.FileName)));
     }
 
     [Fact]
@@ -175,13 +176,13 @@ public sealed class HubNetworkTests : IDisposable
         var content = Path.Combine(root, "src", "CoCern.Host");
         var earlier = Path.Combine(content, "data", HubNetwork.CertificateFile);
         string fingerprint;
-        using (var made = HubCertificate.LoadOrCreate(earlier, "hub-pc")) fingerprint = HubCertificate.Fingerprint(made);
+        using (var made = HubCertificate.LoadOrCreate(earlier, "hub-pc")) fingerprint = CertificateFingerprint.Of(made);
 
         var path = HubNetwork.CertificatePath(Settings("../../data/relay.db"), new HubEnvironment(content));
         Assert.Equal(Path.Combine(root, "data", HubNetwork.CertificateFile), path);
         Assert.False(File.Exists(earlier));
         using var moved = HubCertificate.LoadOrCreate(path, "ignored-because-reused");
-        Assert.Equal(fingerprint, HubCertificate.Fingerprint(moved));
+        Assert.Equal(fingerprint, CertificateFingerprint.Of(moved));
         if (!OperatingSystem.IsWindows()) Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(path));
         Assert.Equal([path], Directory.GetFiles(Path.GetDirectoryName(path)!));
         // Started the other way, from the repository with the same database, the hub finds the same certificate.
@@ -196,13 +197,13 @@ public sealed class HubNetworkTests : IDisposable
         var beside = Path.Combine(root, "data", HubNetwork.CertificateFile);
         using (HubCertificate.LoadOrCreate(earlier, "hub-pc")) { }
         string fingerprint;
-        using (var current = HubCertificate.LoadOrCreate(beside, "hub-pc")) fingerprint = HubCertificate.Fingerprint(current);
+        using (var current = HubCertificate.LoadOrCreate(beside, "hub-pc")) fingerprint = CertificateFingerprint.Of(current);
         var before = File.ReadAllBytes(earlier);
 
         Assert.Equal(beside, HubNetwork.CertificatePath(Settings("../../data/relay.db"), new HubEnvironment(content)));
         Assert.Equal(before, File.ReadAllBytes(earlier));
         using var used = HubCertificate.LoadOrCreate(beside, "ignored-because-reused");
-        Assert.Equal(fingerprint, HubCertificate.Fingerprint(used));
+        Assert.Equal(fingerprint, CertificateFingerprint.Of(used));
     }
 
     [Fact]
@@ -212,8 +213,8 @@ public sealed class HubNetworkTests : IDisposable
         await using var app = await StartAsync(httpPort, httpsPort, enabled: false, localPort, configureCertificate: false);
         var path = Path.Combine(root, HubNetwork.CertificateFile);
         using var stored = HubCertificate.LoadOrCreate(path, "ignored-because-reused");
-        using var local = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(root, HubNetwork.LocalHubFile)));
-        Assert.Equal(HubCertificate.Fingerprint(stored), local.RootElement.GetProperty("fingerprint").GetString());
+        using var local = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(root, LocalHubRecord.FileName)));
+        Assert.Equal(CertificateFingerprint.Of(stored), local.RootElement.GetProperty("fingerprint").GetString());
         Assert.False(File.Exists(CertificatePath));
     }
 

@@ -6,6 +6,7 @@ using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Security.Principal;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
+using CoCern.Contracts;
 
 namespace CoCern.Host;
 
@@ -20,9 +21,6 @@ public static class HubCertificate
         if (!File.Exists(path)) Create(path, hostName);
         return Load(path);
     }
-
-    /// <summary>Uppercase hex SHA-256 of the raw certificate; comparisons are case-insensitive.</summary>
-    public static string Fingerprint(X509Certificate2 certificate) => Convert.ToHexString(SHA256.HashData(certificate.RawData));
 
     private static X509Certificate2 Load(string path)
     {
@@ -97,9 +95,6 @@ internal sealed class HubListener
 /// <summary>The optional network listener: HTTPS on every interface with the hub certificate, beside the loopback HTTP endpoint that keeps working unchanged. Off unless <c>Relay:Network:Enabled</c> is true.</summary>
 internal static class HubNetwork
 {
-    public const string DefaultUrl = "http://127.0.0.1:5271";
-    private const int DefaultHttpsPort = 5273;
-    private const int DefaultLocalHttpsPort = 5272;
     public const string CertificateFile = "hub-certificate.pfx";
     /// <summary>Where the certificate was made before it moved beside the database: the content root's data folder.</summary>
     private const string ContentRootCertificatePath = "data/" + CertificateFile;
@@ -110,7 +105,7 @@ internal static class HubNetwork
     public static void RefusePlainNetworkHttp(IConfiguration configuration)
     {
         // Both places Kestrel reads addresses from: urls, and any endpoints in configuration (Kestrel:Endpoints:<name>:Url).
-        var urls = (configuration["urls"] ?? DefaultUrl).Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+        var urls = (configuration["urls"] ?? HubAddresses.LocalUrl).Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Concat(configuration.GetSection("Kestrel:Endpoints").GetChildren().Select(endpoint => endpoint["Url"] ?? "").Where(url => url.Length > 0));
         foreach (var url in urls)
         {
@@ -134,15 +129,15 @@ internal static class HubNetwork
     public static void Configure(IConfiguration configuration, IHostEnvironment environment, KestrelServerOptions options)
     {
         var network = Enabled(configuration);
-        var localPort = configuration.GetValue("Relay:Local:HttpsPort", DefaultLocalHttpsPort);
+        var localPort = configuration.GetValue("Relay:Local:HttpsPort", HubAddresses.LocalHttpsPort);
         if (!network && localPort == 0) return;
-        var port = configuration.GetValue("Relay:Network:HttpsPort", DefaultHttpsPort);
+        var port = configuration.GetValue("Relay:Network:HttpsPort", HubAddresses.NetworkHttpsPort);
         var logger = options.ApplicationServices.GetService<ILoggerFactory>()?.CreateLogger("CoCern.Host.HubNetwork");
-        foreach (var url in (configuration["urls"] ?? DefaultUrl).Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)) ListenHttp(options, url);
+        foreach (var url in (configuration["urls"] ?? HubAddresses.LocalUrl).Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)) ListenHttp(options, url);
         var certificate = HubCertificate.LoadOrCreate(CertificatePath(configuration, environment, logger), Environment.MachineName);
         // The certificate's private key is a persisted Windows key container that only Dispose removes, so release it when the host stops.
         options.ApplicationServices.GetRequiredService<IHostApplicationLifetime>().ApplicationStopped.Register(certificate.Dispose);
-        var fingerprint = HubCertificate.Fingerprint(certificate);
+        var fingerprint = CertificateFingerprint.Of(certificate);
         var listener = options.ApplicationServices.GetRequiredService<HubListener>();
         if (localPort != 0)
         {
@@ -158,7 +153,6 @@ internal static class HubNetwork
         logger?.LogInformation("Hub HTTPS: this PC on port {LocalPort}, other PCs {Network}; certificate fingerprint {Fingerprint}", localPort, network ? $"on port {port}" : "off", fingerprint);
     }
 
-    public const string LocalHubFile = "local-hub.json";
 
     /// <summary>
     /// The hub certificate's file: <c>Relay:Network:CertificatePath</c> when set (relative to the content root), else
@@ -204,12 +198,12 @@ internal static class HubNetwork
         {
             var folder = Path.GetDirectoryName(RelayHostBuilderExtensions.DatabasePath(configuration, environment))!;
             Directory.CreateDirectory(folder);
-            var target = Path.Combine(folder, LocalHubFile);
+            var target = Path.Combine(folder, LocalHubRecord.FileName);
             var temporary = target + "." + Guid.NewGuid().ToString("N") + ".tmp";
-            File.WriteAllText(temporary, System.Text.Json.JsonSerializer.Serialize(new { url = $"https://127.0.0.1:{port}/", fingerprint }));
+            File.WriteAllText(temporary, new LocalHubRecord($"https://127.0.0.1:{port}/", fingerprint).ToJson());
             File.Move(temporary, target, overwrite: true);
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { logger?.LogWarning("Could not write {File}; Connect will use plain HTTP on this PC.", LocalHubFile); }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { logger?.LogWarning("Could not write {File}; Connect will use plain HTTP on this PC.", LocalHubRecord.FileName); }
     }
 
     private static void ListenHttp(KestrelServerOptions options, string url)

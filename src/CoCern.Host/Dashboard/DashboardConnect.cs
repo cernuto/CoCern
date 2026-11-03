@@ -4,6 +4,7 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 using CoCern.Contracts.Dashboard;
+using CoCern.Contracts;
 
 namespace CoCern.Host.Dashboard;
 
@@ -15,7 +16,6 @@ internal sealed class DashboardConnect(IConfiguration configuration, IHostEnviro
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(20);
     private static readonly JsonSerializerOptions Web = new(JsonSerializerDefaults.Web);
-    internal static readonly string[] ClientIds = ["claude-code", "claude-desktop", "codex"];
 
     public static bool OnThisPc(HttpContext context) => context.Connection.RemoteIpAddress is { } remote && IPAddress.IsLoopback(remote);
 
@@ -69,8 +69,8 @@ internal sealed class DashboardConnect(IConfiguration configuration, IHostEnviro
     /// </summary>
     internal static DashboardConnectClient PageState(DashboardConnectClient client) => client.State switch
     {
-        "outdated" => client with { State = "available" },
-        "updated" => client with { State = "added" },
+        ConnectStates.Outdated => client with { State = ConnectStates.Available },
+        ConnectStates.Updated => client with { State = ConnectStates.Added },
         _ => client
     };
 
@@ -133,7 +133,7 @@ internal sealed class DashboardConnect(IConfiguration configuration, IHostEnviro
     {
         if (listener?.Local is { } local) return ["--hub", $"https://127.0.0.1:{local.Port}/", "--fingerprint", local.Fingerprint];
         var url = DashboardSignInLink.LoopbackUrl(server.Features.Get<IServerAddressesFeature>()?.Addresses ?? [])?.Replace("/dashboard/", "/");
-        return url is null || url == "http://127.0.0.1:5271/" ? [] : ["--hub", url];
+        return url is null || url == HubAddresses.LocalUrl + "/" ? [] : ["--hub", url];
     }
 
     private static string DotnetHost()
