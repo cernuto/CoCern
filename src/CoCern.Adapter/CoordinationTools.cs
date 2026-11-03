@@ -19,10 +19,10 @@ public static class CoordinationTools
         RelayToolCatalog.TryGet(name, out var tool) && (admin || !tool.AdministratorOnly) && (!chatOnly || ChatTools.Contains(tool.Name));
 
     /// <param name="chat">The chat ID the client exported to this process (<see cref="AdapterOptions.ExportedChat"/>), if any; it keeps the chat's request IDs its own across adapter restarts.</param>
-    public static IEnumerable<McpServerTool> Create(RelayForwarder forwarder, bool admin, SessionHints? hints = null, SessionHandoff? handoff = null, bool chatOnly = false, ChatLocation? chat = null)
+    public static IEnumerable<McpServerTool> Create(RelayForwarder forwarder, bool admin, SessionHints? hints = null, SessionHandoff? handoff = null, bool chatOnly = false, ChatLocation? chat = null, LocalChatWake? localWake = null)
     {
         // One per adapter, so every tool sees the session this chat opened.
-        var calls = new ChatCalls(forwarder, hints, handoff, RequestScope(chat));
+        var calls = new ChatCalls(forwarder, hints, handoff, RequestScope(chat), localWake: localWake);
         return Surface(admin, chatOnly).Select(tool => new ForwardedTool(tool, calls));
     }
 
@@ -157,7 +157,7 @@ public static class CoordinationTools
 /// One chat's calls through this adapter: what it adds to them (its own request IDs and workspace on <c>session_open</c>, its own session on
 /// <c>close_sessions</c>) and what it takes from their replies (the chat's current session, the node's session handle, the optional hints).
 /// </summary>
-internal sealed class ChatCalls(RelayForwarder forwarder, SessionHints? hints, SessionHandoff? handoff, string requestScope, Func<string?>? workspace = null)
+internal sealed class ChatCalls(RelayForwarder forwarder, SessionHints? hints, SessionHandoff? handoff, string requestScope, Func<string?>? workspace = null, LocalChatWake? localWake = null)
 {
     private readonly Func<string?> _workspace = workspace ?? (() => CoordinationTools.Workspace);
     private string? _session;
@@ -170,11 +170,13 @@ internal sealed class ChatCalls(RelayForwarder forwarder, SessionHints? hints, S
         arguments = RelayForwarder.WithOrigin(arguments, background: false);
         if (tool == RelayTools.SessionOpen) arguments = CoordinationTools.OwnRequestId(arguments, _workspace(), requestScope);
         else if (tool == RelayTools.ControlRequest) arguments = CoordinationTools.WithOwnSession(arguments, CurrentSession);
+        AdapterReply? originalReply = null;
         var reply = tool == RelayTools.CheckInbox
             ? await InboxWait.CheckAsync(forwarder, arguments, InboxWait.PollInterval, cancellationToken)
-            : await ConditionalRead.ForwardAsync(forwarder, tool, arguments, cancellationToken);
+            : await ConditionalRead.ForwardAsync(forwarder, tool, arguments, cancellationToken, value => originalReply = value);
         if (!reply.Ok) return reply;
         Learn(tool, arguments, reply);
+        localWake?.Observe(tool, arguments, originalReply ?? reply);
         if (tool == RelayTools.SessionOpen) handoff?.Record(arguments, reply);
         else
         {

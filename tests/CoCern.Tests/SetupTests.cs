@@ -140,8 +140,9 @@ public sealed class SetupTests : IDisposable
         var claudeSettings = Path.Combine(Profile, ".claude", "settings.json");
         var codexHooks = Path.Combine(Profile, ".codex", "hooks.json");
         Assert.Equal(0, await Run(host));
-        // Off by default: no hook file is created or changed.
-        Assert.False(File.Exists(claudeSettings));
+        // The prompt hook is off by default; only Claude Code's Stop hook, which wakes an idle chat, is installed.
+        Assert.DoesNotContain("--prompt-hook", File.ReadAllText(claudeSettings));
+        Assert.Contains("--stop-hook", File.ReadAllText(claudeSettings));
         Assert.False(File.Exists(codexHooks));
 
         Write(claudeSettings, "{\n  \"model\": \"opus\",\n  \"hooks\": { \"UserPromptSubmit\": [ { \"hooks\": [ { \"type\": \"command\", \"command\": \"echo mine\" } ] } ] }\n}\n");

@@ -252,33 +252,92 @@ internal static class ClientSettings
     /// hooks.json; both use <c>{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command",...}]}]}}</c>). Every other entry is kept; a file
     /// that already runs <c>--prompt-hook</c> is left as it was.
     /// </summary>
-    public static ClientPlan PlanPromptHook(string path, string command)
+    public static ClientPlan PlanPromptHook(string path, string command) => PlanHooks(path, PromptHook(command));
+
+    /// <summary>
+    /// Adds the CoCern Stop hook to Claude Code's settings.json: when a turn ends it waits on the chat's inbox in the background and, with
+    /// <c>asyncRewake</c>, wakes the idle chat when the hub queues a wake. Every other hook is kept; an older CoCern Stop handler (another
+    /// adapter path or timeout) is replaced, so setup moves it forward, and a file that already has this exact handler is left as it was.
+    /// </summary>
+    public static ClientPlan PlanStopHook(string path, string command) => PlanHooks(path, StopHook(command));
+
+    /// <summary>Claude Code's settings.json with the Stop hook and, when asked, the prompt hook: one plan, so neither write loses the other.</summary>
+    public static ClientPlan PlanClaudeHooks(string path, string stopCommand, string? promptCommand) =>
+        promptCommand is null ? PlanHooks(path, StopHook(stopCommand)) : PlanHooks(path, StopHook(stopCommand), PromptHook(promptCommand));
+
+    /// <summary>
+    /// A CoCern command handler for one hook event. A handler whose command contains <paramref name="Marker"/> is ours, and with
+    /// <paramref name="AdapterOnly"/> only when the command also runs the CoCern adapter, so another tool's handler that happens to use the
+    /// same switch is never replaced or removed.
+    /// </summary>
+    private sealed record HookSpec(string Event, string Marker, JsonObject Handler, bool ReplaceOwned, bool AdapterOnly = false)
     {
-        const string Event = "UserPromptSubmit";
+        public bool Owns(string command) => command.Contains(Marker, StringComparison.Ordinal)
+            && (!AdapterOnly || command.Contains("CoCern.Adapter.dll", StringComparison.OrdinalIgnoreCase) || command.Contains("CoCern.Adapter.exe", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static HookSpec PromptHook(string command) =>
+        new("UserPromptSubmit", "--prompt-hook", new JsonObject { ["type"] = "command", ["command"] = command, ["timeout"] = PromptHookTimeoutSeconds }, ReplaceOwned: false);
+
+    private static HookSpec StopHook(string command) =>
+        new("Stop", "--stop-hook", new JsonObject { ["type"] = "command", ["command"] = command, ["asyncRewake"] = true, ["timeout"] = StopHookTimeoutSeconds }, ReplaceOwned: true, AdapterOnly: true);
+
+    /// <summary>
+    /// CoCern command handlers in a JSON hooks file (<c>{"hooks":{"Event":[{"hooks":[{...}]}]}}</c>), all applied to one copy of the file.
+    /// Without <see cref="HookSpec.ReplaceOwned"/> a handler of ours already present is left as it was; with it, ours is rewritten in place
+    /// and any duplicate of ours removed. Every other handler is kept.
+    /// </summary>
+    private static ClientPlan PlanHooks(string path, params HookSpec[] specs)
+    {
         var original = ReadAll(path);
-        var handler = new JsonObject { ["type"] = "command", ["command"] = command, ["timeout"] = PromptHookTimeoutSeconds };
-        var group = new JsonObject { ["hooks"] = new JsonArray(handler) };
-        if (original is null) return ClientPlan.Write(path, Encoding.UTF8.GetBytes(Render(new JsonObject { ["hooks"] = new JsonObject { [Event] = new JsonArray(group) } }, "\n") + "\n"), existed: false);
         JsonObject root;
-        try
+        if (original is null) root = new JsonObject();
+        else
         {
-            var text = Strict.GetString(original, Bom(original), original.Length - Bom(original));
-            root = (text.Trim().Length == 0 ? new JsonObject() : JsonNode.Parse(text, null, new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Disallow, AllowTrailingCommas = false }) as JsonObject) ?? throw new JsonException("the top level is not an object");
+            try
+            {
+                var text = Strict.GetString(original, Bom(original), original.Length - Bom(original));
+                root = (text.Trim().Length == 0 ? new JsonObject() : JsonNode.Parse(text, null, new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Disallow, AllowTrailingCommas = false }) as JsonObject) ?? throw new JsonException("the top level is not an object");
+            }
+            catch (Exception exception) when (exception is JsonException or DecoderFallbackException or ArgumentException) { throw Malformed(path, exception is DecoderFallbackException ? "it is not valid UTF-8" : "it is not valid JSON"); }
         }
-        catch (Exception exception) when (exception is JsonException or DecoderFallbackException or ArgumentException) { throw Malformed(path, exception is DecoderFallbackException ? "it is not valid UTF-8" : "it is not valid JSON"); }
+        var changed = false;
+        foreach (var spec in specs) changed |= ApplyHook(path, root, spec);
+        if (original is null) return ClientPlan.Write(path, Encoding.UTF8.GetBytes(Render(root, "\n") + "\n"), existed: false);
+        return changed ? ClientPlan.Write(path, Rewrite(original, root), existed: true) : ClientPlan.Unchanged(path);
+    }
+
+    /// <summary>Applies one handler to <paramref name="root"/>; true when that changed it.</summary>
+    private static bool ApplyHook(string path, JsonObject root, HookSpec spec)
+    {
         if (root["hooks"] is { } hooksNode && hooksNode is not JsonObject) throw Malformed(path, "'hooks' is not an object");
         var hooks = root["hooks"] as JsonObject ?? (JsonObject)(root["hooks"] = new JsonObject());
-        if (hooks[Event] is { } eventNode && eventNode is not JsonArray) throw Malformed(path, $"'hooks.{Event}' is not an array");
-        var groups = hooks[Event] as JsonArray ?? (JsonArray)(hooks[Event] = new JsonArray());
-        var present = groups.OfType<JsonObject>().SelectMany(entry => entry["hooks"] as JsonArray ?? []).OfType<JsonObject>()
-            .Any(entry => entry["command"] is JsonValue existing && existing.TryGetValue<string>(out var text) && text.Contains("--prompt-hook", StringComparison.Ordinal));
-        if (present) return ClientPlan.Unchanged(path);
-        groups.Add(group);
-        return ClientPlan.Write(path, Rewrite(original, root), existed: true);
+        if (hooks[spec.Event] is { } eventNode && eventNode is not JsonArray) throw Malformed(path, $"'hooks.{spec.Event}' is not an array");
+        var groups = hooks[spec.Event] as JsonArray ?? (JsonArray)(hooks[spec.Event] = new JsonArray());
+        var owned = groups.OfType<JsonObject>().Select(entry => entry["hooks"] as JsonArray).OfType<JsonArray>()
+            .SelectMany(list => list.OfType<JsonObject>().Where(entry => JsonText(entry["command"]) is { } text && spec.Owns(text)).Select(entry => (List: list, Entry: entry)))
+            .ToArray();
+        if (owned.Length == 0)
+        {
+            groups.Add(new JsonObject { ["hooks"] = new JsonArray(spec.Handler.DeepClone()) });
+            return true;
+        }
+        if (!spec.ReplaceOwned || owned.Length == 1 && JsonNode.DeepEquals(owned[0].Entry, spec.Handler)) return false;
+        owned[0].List[owned[0].List.IndexOf(owned[0].Entry)] = spec.Handler.DeepClone();
+        foreach (var (list, entry) in owned.Skip(1)) list.Remove(entry);
+        foreach (var empty in groups.OfType<JsonObject>().Where(entry => entry["hooks"] is JsonArray { Count: 0 }).ToArray()) groups.Remove(empty);
+        return true;
     }
 
     /// <summary>The client-side limit on one prompt hook run; the hook itself gives up on the hub much sooner (about one second).</summary>
     internal const int PromptHookTimeoutSeconds = 5;
+
+    /// <summary>
+    /// The client-side limit on one Stop hook run: a day, the same as the hub's default idle limit for sessions. Claude Code enforces a hook's
+    /// timeout even with <c>asyncRewake</c> (60 seconds by default), so the default would silently end every wait; the hook stops waiting
+    /// itself shortly before this (<see cref="Node.StopHook.WaitLimit"/>).
+    /// </summary>
+    internal const int StopHookTimeoutSeconds = 24 * 60 * 60;
 
     private static string Render(JsonObject root, string eol)
     {

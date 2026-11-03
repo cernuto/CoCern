@@ -65,8 +65,10 @@ internal static class ConnectCommand
         // Per app: whether its existing entry gives the administrator tools (for the reply) and what this run changes in it (for the detail).
         // Without a current address (an older hub, no --hub) the address and certificate are left as they are; without --role, the tools.
         var seen = new Dictionary<string, (bool Admin, IReadOnlyDictionary<string, string?>? Changes)>(StringComparer.Ordinal);
+        var owned = new HashSet<string>(StringComparer.Ordinal);
         EntryRefresh RefreshFor(string id) => variables =>
         {
+            if (BelongsToHub(variables, tokenFile, hub, fingerprint, localHub?.Url)) owned.Add(id);
             var changes = Refresh(variables, tokenFile, hub, fingerprint, localHub?.Url, admin);
             seen[id] = (IsAdmin(variables), changes);
             return changes;
@@ -87,8 +89,15 @@ internal static class ConnectCommand
             try
             {
                 var plan = client.Plan();
+                var hook = client.Id == ConnectClients.ClaudeCode && (!plan.IsUnchanged || owned.Contains(client.Id))
+                    ? ClientSettings.PlanStopHook(Path.Combine(profile, ".claude", "settings.json"), SetupEnvironment.AdapterCommandLine(dotnetPath, adapterDll) + " --stop-hook")
+                    : null;
                 var state = plan.IsUnchanged ? ConnectStates.Connected : plan.Refreshes ? check ? ConnectStates.Outdated : ConnectStates.Updated : check ? ConnectStates.Available : ConnectStates.Added;
-                if (state is ConnectStates.Added or ConnectStates.Updated) plan.Apply(clock ?? TimeProvider.System);
+                if (state is ConnectStates.Added or ConnectStates.Updated)
+                {
+                    plan.Apply(clock ?? TimeProvider.System);
+                }
+                if (!check) hook?.Apply(clock ?? TimeProvider.System);
                 var entry = seen.TryGetValue(client.Id, out var found) ? found : ((bool Admin, IReadOnlyDictionary<string, string?>? Changes)?)null;
                 var changes = plan.Refreshes ? entry?.Changes : null;
                 bool? gives = state switch
@@ -153,14 +162,9 @@ internal static class ConnectCommand
     /// </summary>
     internal static IReadOnlyDictionary<string, string?>? Refresh(IReadOnlyDictionary<string, string> variables, string tokenFile, string? hub, string? fingerprint, string? localUrl, bool? admin = null)
     {
-        if (!HubVariables.Any(variables.ContainsKey)) return null;
+        if (!BelongsToHub(variables, tokenFile, hub, fingerprint, localUrl)) return null;
         var url = variables.GetValueOrDefault("COCERN_URL")?.Trim() is { Length: > 0 } given ? given : HubAddresses.LocalUrl;
         var pinned = CertificateFingerprint.Normalize(variables.GetValueOrDefault("COCERN_FINGERPRINT")) is { Length: > 0 } pin ? pin : null;
-        var ours = variables.GetValueOrDefault("COCERN_TOKEN_FILE")?.Trim() is { Length: > 0 } file
-            ? InFolder(file, Path.GetDirectoryName(Path.GetFullPath(tokenFile))!)
-            : AdapterOptions.TryParseOrigin(url, out var origin) && (origin.Scheme == Uri.UriSchemeHttp && origin.IsLoopback || hub is not null && SameOrigin(origin, hub) || localUrl is not null && SameOrigin(origin, localUrl))
-              || fingerprint is not null && pinned == fingerprint;
-        if (!ours) return null;
         var changes = new Dictionary<string, string?>(StringComparer.Ordinal);
         if (hub is not null)
         {
@@ -169,6 +173,17 @@ internal static class ConnectCommand
         }
         if (admin is { } wanted && IsAdmin(variables) != wanted) changes[RoleVariable] = wanted ? "admin" : null;
         return changes.Count == 0 ? null : changes;
+    }
+
+    private static bool BelongsToHub(IReadOnlyDictionary<string, string> variables, string tokenFile, string? hub, string? fingerprint, string? localUrl)
+    {
+        if (!HubVariables.Any(variables.ContainsKey)) return false;
+        var url = variables.GetValueOrDefault("COCERN_URL")?.Trim() is { Length: > 0 } given ? given : HubAddresses.LocalUrl;
+        var pinned = CertificateFingerprint.Normalize(variables.GetValueOrDefault("COCERN_FINGERPRINT"));
+        return variables.GetValueOrDefault("COCERN_TOKEN_FILE")?.Trim() is { Length: > 0 } file
+            ? InFolder(file, Path.GetDirectoryName(Path.GetFullPath(tokenFile))!)
+            : AdapterOptions.TryParseOrigin(url, out var origin) && (origin.Scheme == Uri.UriSchemeHttp && origin.IsLoopback || hub is not null && SameOrigin(origin, hub) || localUrl is not null && SameOrigin(origin, localUrl))
+              || fingerprint is not null && pinned == fingerprint;
     }
 
     private static bool SameOrigin(Uri origin, string other) => AdapterOptions.TryParseOrigin(other, out var parsed) && Uri.Compare(origin, parsed, UriComponents.AbsoluteUri, UriFormat.SafeUnescaped, StringComparison.OrdinalIgnoreCase) == 0;

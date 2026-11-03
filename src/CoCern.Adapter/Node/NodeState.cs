@@ -197,7 +197,7 @@ public sealed class NodeState : IDisposable
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }
 
-    private static FileStream CreatePrivateFile(string path)
+    internal static FileStream CreatePrivateFile(string path)
     {
         if (!OperatingSystem.IsWindows()) return new FileStream(path, new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write, Share = FileShare.None, UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite });
         var security = new FileSecurity();

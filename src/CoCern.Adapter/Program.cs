@@ -77,6 +77,17 @@ try
             : NodeState.ConfiguredFolder(Environment.GetEnvironmentVariable);
         return await PromptHook.RunAsync(Console.In, Console.Out, folder);
     }
+    if (args.Length > 0 && args[0] == "--stop-hook")
+    {
+        // A Claude Code Stop hook run with asyncRewake: exit 2 with the waiting messages on standard error wakes the idle chat; anything else exits 0.
+        var folder = args.Length == 3 && args[1] == "--data-dir" && !string.IsNullOrWhiteSpace(args[2]) ? args[2]
+            : NodeState.ConfiguredFolder(Environment.GetEnvironmentVariable);
+        using var stopping = new CancellationTokenSource();
+        Console.CancelKeyPress += (_, cancel) => { cancel.Cancel = true; stopping.Cancel(); };
+        // Messages carry any text; the console's code page would turn non-ASCII into '?' before the chat reads it.
+        using var error = new StreamWriter(Console.OpenStandardError(), new System.Text.UTF8Encoding(false)) { AutoFlush = true };
+        return await StopHook.RunAsync(Console.In, error, folder, stopping.Token);
+    }
     if (args.Length > 0 && args[0] == "--connect")
     {
         var (dotnet, dll) = SetupEnvironment.Host();
@@ -123,6 +134,7 @@ try
     // On node credentials the hub certificate is pinned; with explicit settings this is the plain handler, as before.
     using var http = new HttpClient(RelayForwarder.CreateHandler(options)) { Timeout = TimeSpan.FromSeconds(60) };
     await using var hints = new SessionHints(options);
+    await using var localWake = LocalChatWake.TryCreate(options, Environment.GetEnvironmentVariable("COCERN_TOKEN_FILE"));
     var forwarder = new RelayForwarder(http, options);
     var builder = Host.CreateApplicationBuilder(args);
     // Library request/exception logging can contain handles. Emit only our fixed stderr hints.
@@ -130,8 +142,9 @@ try
     builder.Services.AddMcpServer(server =>
     {
         server.ServerInstructions = AdapterInstructions.Server;
-    }).WithStdioServerTransport().WithTools(CoordinationTools.Create(forwarder, options.Admin, hints, SessionHandoff.For(options), options.ChatOnly, options.ExportedChat));
+    }).WithStdioServerTransport().WithTools(CoordinationTools.Create(forwarder, options.Admin, hints, SessionHandoff.For(options), options.ChatOnly, options.ExportedChat, localWake: localWake));
     using var host = builder.Build();
+    _ = localWake?.RunAsync(host.Services.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping);
     await host.RunAsync();
     return 0;
 }
