@@ -394,6 +394,76 @@ public sealed class SessionLifecycleTests
     }
 
     [Fact]
+    public void A_close_that_overtakes_a_new_sessions_open_leaves_no_session_open_outside_the_directory()
+    {
+        // The directory records a new session and queues its open; the hub's direct open has not landed yet. An administrator closes it.
+        var hub = new AggregateHub { HoldDirectCalls = true };
+        var chat = hub.Open("smoke", T0);
+        var queued = Assert.Single(hub.Discard(Operations.Open));
+        Assert.Equal(1, Data(hub.Close(new() { ["targetSessionId"] = chat.Id }, T0.AddMinutes(1)))["closed"]!.GetValue<int>());
+        // The close reaches the session before either copy of its open, so the session was never opened when it closed.
+        var expire = Assert.Single(hub.Discard(Operations.SessionExpire));
+        AggregateHub.Accept(expire, hub.Deliver(expire, T0.AddMinutes(1)));
+        // Then the direct open lands, and the directory's queued copy after it: neither opens a session the directory no longer lists.
+        hub.DeliverAll(T0.AddMinutes(1));
+        AggregateHub.Accept(queued, hub.Deliver(queued, T0.AddMinutes(2)));
+        hub.AssertInvariants(T0.AddMinutes(2));
+        Assert.False(hub.Directory().ContainsKey(chat.Id));
+        // The session stays a closed one that was never opened: it holds no principal or secret, and no call is let through.
+        var session = hub.State(AggregateKinds.Session, chat.Id);
+        Assert.Equal((true, null, null), (session["expiredAt"] is not null, session["principalId"], session["sessionToken"]));
+        Assert.False(hub.Verify(chat, T0.AddMinutes(2)).Ok);
+    }
+
+    [Fact]
+    public void A_close_racing_a_new_sessions_two_opens_settles_in_every_delivery_order()
+    {
+        var hub = new AggregateHub { HoldDirectCalls = true };
+        var chat = hub.Open("smoke", T0);
+        Assert.Equal(1, Data(hub.Close(new() { ["targetSessionId"] = chat.Id }, T0.AddMinutes(1)))["closed"]!.GetValue<int>());
+        // Whichever of the direct open, the queued open and the close lands first, and with any of them delivered twice, the session ends
+        // closed, nothing is refused (a refused open would be retried forever), and the directory keeps no fence for it.
+        var drained = hub.Explore(T0.AddMinutes(1), state =>
+        {
+            state.AssertInvariants(T0.AddMinutes(1));
+            Assert.NotNull(state.State(AggregateKinds.Session, chat.Id)["expiredAt"]);
+            Assert.Null(state.State(AggregateKinds.Control, AggregateKinds.ControlKey)["closing"]);
+        });
+        Assert.True(drained > 1);
+    }
+
+    [Fact]
+    public async Task A_retried_session_open_whose_session_has_since_closed_says_so_and_the_chat_opens_another()
+    {
+        var host = new HostBuilder().ConfigureLogging(log => log.ClearProviders()).UseOrleans(silo => silo
+            .UseLocalhostClustering(siloPort: FreePort(), gatewayPort: FreePort(), serviceId: "session-replay-tests", clusterId: Guid.NewGuid().ToString("N"))
+            .AddMemoryGrainStorage("relay"))
+            .ConfigureServices(services => services.AddCoCernCore()).Build();
+        await host.StartAsync();
+        try
+        {
+            var application = host.Services.GetRequiredService<RelayApplication>();
+            var factory = host.Services.GetRequiredService<IGrainFactory>();
+            Task<RelayReply> Call(RelayCaller caller, string tool, object args) => application.ExecuteAsync(caller, tool, JsonSerializer.SerializeToElement(args));
+            var opened = Data(await Call(Alice, RelayTools.SessionOpen, new { repositoryId = "repo", requestId = "open-1", label = "smoke" }));
+            var id = opened["sessionId"]!.GetValue<string>();
+            Assert.True((await Call(new RelayCaller("admin", true, ["repo"]), RelayTools.ControlRequest, new { repositoryId = "repo", requestId = "close-1", command = "close_sessions", targetSessionId = id })).Ok);
+            // The directory's outbox delivers the queued open (already applied) and the close.
+            Assert.True((await factory.GetGrain<IControlGrain>(AggregateKinds.ControlKey).ExecuteAsync(Alice with { IsInternal = true }, Operations.Dispatch, "{}")).Ok);
+
+            // The chat's reply to its session_open was lost, so it retries with the same requestId: the directory replays the same handle,
+            // and the hub's direct open finds that session closed.
+            var replayed = await Call(Alice, RelayTools.SessionOpen, new { repositoryId = "repo", requestId = "open-1", label = "smoke" });
+            Assert.Equal(RelayErrorCodes.SessionUnknown, replayed.Code);
+            Assert.True(JsonNode.Parse(replayed.DataJson)!["expired"]!.GetValue<bool>());
+            // As SessionUnknown asks, the chat opens again with a new requestId, and gets a new session.
+            var fresh = Data(await Call(Alice, RelayTools.SessionOpen, new { repositoryId = "repo", requestId = "open-2", label = "smoke" }));
+            Assert.NotEqual(id, fresh["sessionId"]!.GetValue<string>());
+        }
+        finally { await host.StopAsync(); host.Dispose(); }
+    }
+
+    [Fact]
     public void A_repeated_restore_from_an_earlier_close_cannot_bring_back_a_session_that_closed_since()
     {
         var hub = new AggregateHub();

@@ -353,6 +353,9 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         var record = SessionRecord.Opened(Text(data, "sessionId"), Text(data, "sessionToken"), caller.PrincipalId, Text(args, "repositoryId"), args);
         var initialized = await Call(AggregateKinds.Session, record.SessionId, caller, SessionOpen.Operation, new SessionOpen(record).ToJson());
         if (!initialized.Ok) return initialized;
+        // The session closed before this open reached it: a close overtook it, or this retry replays the handle of a session closed since.
+        // The chat opens a new one, as after any SessionUnknown.
+        if (Parse(initialized)["expired"]?.GetValue<bool>() == true) return Error(SessionUnknown, new { expired = true, reopen = RelayTools.SessionOpen });
         // The queued initialization remains a retryable durable effect and deduplicates at its recipient.
         if (Text(args, "taskId").Length > 0)
         {

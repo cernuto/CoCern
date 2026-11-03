@@ -55,11 +55,16 @@ internal static class SessionAggregate
     /// <summary>
     /// Copies the session's record on its first <see cref="SessionOpen"/> (the direct call's or the directory's, whichever lands first); a
     /// later one with the same secret is idempotent. The record's activity time is the directory's, never the session's own.
+    /// <para>A session already closed stays closed: its close overtook this open (see <see cref="Expire"/>), or this is a late copy, or a
+    /// retried <c>session_open</c> replaying the handle of a session that has closed since. The open is accepted as <c>expired</c> and
+    /// changes nothing, so the directory's copy is not retried forever and no session opens that the directory no longer lists;
+    /// <c>session_open</c> then answers <c>SessionUnknown</c>, and the chat opens a new session.</para>
     /// </summary>
     private static RelayReply Initialize(AggregateContext context)
     {
         var state = context.State;
         if (!SessionOpen.Decode(context.Args).TryGet(out var open, out var malformed)) return Malformed(malformed);
+        if (state["expiredAt"] is not null) return Ok(new { initialized = false, expired = true });
         var record = open.Record;
         if (state.ContainsKey("principalId"))
             return Text(state, "principalId") == record.PrincipalId && Text(state, "sessionToken") == record.SessionToken ? Ok(new { initialized = true }) : Error(SessionDenied);
@@ -108,7 +113,8 @@ internal static class SessionAggregate
     /// <summary>
     /// The hub's directory closed this session (idle, by an administrator's filter, or to make room). Its secret, inbox and attention are
     /// cleared; afterwards its own calls get <c>SessionUnknown</c> with <c>expired</c>, its chat opens a new session, and each board with a
-    /// task targeting it is told (<see cref="Operations.SessionClosed"/>). Idempotent, and accepted for a session never opened here.
+    /// task targeting it is told (<see cref="Operations.SessionClosed"/>). Idempotent. A session never opened here is closed too: its close
+    /// overtook its open, which then finds it closed rather than opening a session the directory has already dropped.
     /// <para>The directory decided from what it knew, which can lag what this session knows, so the session checks once more and refuses
     /// (see <see cref="KeepOpen"/>) when it answers for an unresolved action (a board's report that it began one reaches this session
     /// before the directory), or when the close is an idle one (<c>idle: true</c>) and its inbox holds unread mail, which expiry would delete.</para>
@@ -117,7 +123,12 @@ internal static class SessionAggregate
     {
         var state = context.State;
         if (!SessionExpire.Decode(context.Args).TryGet(out var expire, out var malformed)) return Malformed(malformed);
-        if (!state.ContainsKey("principalId") || state["expiredAt"] is not null) return Settled(context, expire, Ok(new { expired = true }));
+        if (state["expiredAt"] is not null) return Settled(context, expire, Ok(new { expired = true }));
+        if (!state.ContainsKey("principalId"))
+        {
+            state["expiredAt"] = context.Now.ToString("O");
+            return Settled(context, expire, Ok(new { expired = true }));
+        }
         var force = expire.Force;
         var owns = state[WorkKey] is JsonObject ledger && WorkLedger.Owns(ledger, context.Now);
         var mail = expire.Idle && state["inbox"] is JsonObject { Count: > 0 };
