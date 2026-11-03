@@ -165,4 +165,37 @@ public sealed class EffectMessageTests
             Assert.True(drained > 1);
         }
     }
+
+    /// <summary>
+    /// Internal operations without a typed message yet. Typing one means taking it off this list (the test fails while a typed operation
+    /// is still listed) and lowering <see cref="PinnedUntyped"/>; a new internal operation must be typed, since listing it here would
+    /// need the pin raised. So the list only shrinks.
+    /// </summary>
+    private static readonly string[] Untyped =
+    [
+        Operations.Verify, Operations.Deliver, Operations.Resolve, Operations.ResolveAll, Operations.Block, Operations.Unblock, Operations.Dispatch,
+        Operations.TaskUnclaim, Operations.NextWork, Operations.ClaimState, Operations.Standing, Operations.StandingSeen, Operations.StandingProposeHub,
+        Operations.SessionTargetWatch, Operations.SweepSessions, Operations.TaskArchive, Operations.SessionOwners, Operations.SessionsOpen,
+        Operations.AttentionRaise, Operations.AttentionClose, Operations.AttentionOffer, Operations.AttentionSeen, Operations.AttentionRoute,
+        Operations.LeaseCheck, Operations.AnomalyStart, Operations.AnomalyCheck, Operations.Orders, Operations.OrderFire, Operations.OrderWatch,
+        Operations.OrderRelease, Operations.OrderFailed
+    ];
+
+    /// <summary>The number of untyped internal operations. It may only go down.</summary>
+    private const int PinnedUntyped = 31;
+
+    [Fact]
+    public void Every_internal_operation_has_a_typed_message_or_is_on_an_untyped_list_that_only_shrinks()
+    {
+        var internalOperations = typeof(Operations).GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
+            .Where(field => field.IsLiteral && field.FieldType == typeof(string)).Select(field => (string)field.GetRawConstantValue()!).Where(Operations.IsInternal).ToList();
+        var typed = EffectMessages.ByOperation.Keys.ToList();
+        Assert.Empty(typed.Except(internalOperations));
+        Assert.Empty(Untyped.Intersect(typed));
+        Assert.Equal(Untyped.Length, Untyped.Distinct().Count());
+        Assert.Equal(internalOperations.Order(StringComparer.Ordinal), typed.Concat(Untyped).Order(StringComparer.Ordinal));
+        Assert.True(Untyped.Length == PinnedUntyped, "The untyped list holds " + Untyped.Length + " operations, pinned at " + PinnedUntyped + ": type a new operation instead of listing it, and lower the pin when you type one.");
+        // Each typed message names the operation it is listed under.
+        Assert.All(EffectMessages.ByOperation, entry => Assert.Equal(entry.Key, entry.Value.Operation));
+    }
 }
