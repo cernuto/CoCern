@@ -100,7 +100,9 @@ internal static class HubNetwork
     public const string DefaultUrl = "http://127.0.0.1:5271";
     private const int DefaultHttpsPort = 5273;
     private const int DefaultLocalHttpsPort = 5272;
-    private const string DefaultCertificatePath = "data/hub-certificate.pfx";
+    public const string CertificateFile = "hub-certificate.pfx";
+    /// <summary>Where the certificate was made before it moved beside the database: the content root's data folder.</summary>
+    private const string ContentRootCertificatePath = "data/" + CertificateFile;
 
     public static bool Enabled(IConfiguration configuration) => bool.TryParse(configuration["Relay:Network:Enabled"], out var enabled) && enabled;
 
@@ -119,9 +121,8 @@ internal static class HubNetwork
         }
     }
 
-    /// <summary>Kestrel ignores <c>urls</c> once endpoints are set in code, so this recreates the loopback HTTP endpoint(s) itself and adds the HTTPS one.</summary>
     /// <summary>
-    /// The HTTPS listeners, both with the hub certificate:
+    /// The HTTPS listeners, both with the hub certificate (see <see cref="CertificatePath"/>):
     /// <list type="bullet">
     /// <item>Loopback HTTPS (<c>Relay:Local:HttpsPort</c>, default 5272; 0 turns it off): local chats connect here and pin the certificate,
     /// so a process that takes the port while the hub is down never receives their token. Its address and fingerprint go to
@@ -136,14 +137,12 @@ internal static class HubNetwork
         var localPort = configuration.GetValue("Relay:Local:HttpsPort", DefaultLocalHttpsPort);
         if (!network && localPort == 0) return;
         var port = configuration.GetValue("Relay:Network:HttpsPort", DefaultHttpsPort);
-        var configured = configuration["Relay:Network:CertificatePath"];
-        var path = Path.Combine(environment.ContentRootPath, string.IsNullOrWhiteSpace(configured) ? DefaultCertificatePath : configured);
+        var logger = options.ApplicationServices.GetService<ILoggerFactory>()?.CreateLogger("CoCern.Host.HubNetwork");
         foreach (var url in (configuration["urls"] ?? DefaultUrl).Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)) ListenHttp(options, url);
-        var certificate = HubCertificate.LoadOrCreate(path, Environment.MachineName);
+        var certificate = HubCertificate.LoadOrCreate(CertificatePath(configuration, environment, logger), Environment.MachineName);
         // The certificate's private key is a persisted Windows key container that only Dispose removes, so release it when the host stops.
         options.ApplicationServices.GetRequiredService<IHostApplicationLifetime>().ApplicationStopped.Register(certificate.Dispose);
         var fingerprint = HubCertificate.Fingerprint(certificate);
-        var logger = options.ApplicationServices.GetService<ILoggerFactory>()?.CreateLogger("CoCern.Host.HubNetwork");
         var listener = options.ApplicationServices.GetRequiredService<HubListener>();
         if (localPort != 0)
         {
@@ -160,6 +159,43 @@ internal static class HubNetwork
     }
 
     public const string LocalHubFile = "local-hub.json";
+
+    /// <summary>
+    /// The hub certificate's file: <c>Relay:Network:CertificatePath</c> when set (relative to the content root), else
+    /// <c>hub-certificate.pfx</c> beside the database, with <c>local-hub.json</c>. The content root depends on how the hub starts (Visual
+    /// Studio uses <c>src/CoCern.Host</c>, <c>dotnet CoCern.Host.dll</c> the current folder) while the database does not, so every way of
+    /// starting one hub finds the one certificate whose fingerprint other PCs and this PC's apps pinned. A certificate made before at the
+    /// content root's <c>data</c> folder, with none beside the database yet, is moved there, so its fingerprint survives; when the move
+    /// fails, it is used where it is.
+    /// </summary>
+    internal static string CertificatePath(IConfiguration configuration, IHostEnvironment environment, ILogger? logger = null)
+    {
+        var configured = configuration["Relay:Network:CertificatePath"];
+        if (!string.IsNullOrWhiteSpace(configured)) return Path.Combine(environment.ContentRootPath, configured);
+        var path = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(RelayHostBuilderExtensions.DatabasePath(configuration, environment))!, CertificateFile));
+        var earlier = Path.GetFullPath(Path.Combine(environment.ContentRootPath, ContentRootCertificatePath));
+        if (File.Exists(path) || !File.Exists(earlier) || string.Equals(path, earlier, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal)) return path;
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            // Written afresh rather than moved, so the copy is private to this user however the old file's permissions were inherited.
+            HubCertificate.WritePrivately(path, File.ReadAllBytes(earlier));
+            File.Delete(earlier);
+            logger?.LogInformation("Moved the hub certificate from {From} to {To}, beside the database; its fingerprint is unchanged.", earlier, path);
+            return path;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // A copy that did land is the same certificate; otherwise the old file still serves, so the fingerprint stays the same either way.
+            if (File.Exists(path))
+            {
+                logger?.LogWarning("Copied the hub certificate from {From} to {To}, beside the database, but could not remove the old copy; delete it. {Reason}", earlier, path, exception.Message);
+                return path;
+            }
+            logger?.LogWarning("Could not move the hub certificate from {From} to {To}; using it where it is. {Reason}", earlier, path, exception.Message);
+            return earlier;
+        }
+    }
 
     /// <summary>Records where local chats reach the hub over pinned HTTPS. Not a secret; rewritten each start. Best effort.</summary>
     private static void WriteLocalHub(IConfiguration configuration, IHostEnvironment environment, int port, string fingerprint, ILogger? logger)
