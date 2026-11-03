@@ -177,12 +177,12 @@ public sealed class EffectMessageTests
         Operations.TaskUnclaim, Operations.NextWork, Operations.ClaimState, Operations.Standing, Operations.StandingSeen, Operations.StandingProposeHub,
         Operations.SessionTargetWatch, Operations.SweepSessions, Operations.TaskArchive, Operations.SessionOwners, Operations.SessionsOpen,
         Operations.AttentionRaise, Operations.AttentionClose, Operations.AttentionOffer, Operations.AttentionSeen, Operations.AttentionRoute,
-        Operations.LeaseCheck, Operations.AnomalyStart, Operations.AnomalyCheck, Operations.Orders, Operations.OrderFire, Operations.OrderWatch,
+        Operations.LeaseCheck, Operations.Orders, Operations.OrderFire, Operations.OrderWatch,
         Operations.OrderRelease, Operations.OrderFailed
     ];
 
     /// <summary>The number of untyped internal operations. It may only go down.</summary>
-    private const int PinnedUntyped = 29;
+    private const int PinnedUntyped = 27;
 
     [Fact]
     public void Lock_messages_read_back_name_their_missing_fields_and_the_lock_answers_a_malformed_one()
@@ -226,7 +226,9 @@ public sealed class EffectMessageTests
     {
         var internalOperations = typeof(Operations).GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
             .Where(field => field.IsLiteral && field.FieldType == typeof(string)).Select(field => (string)field.GetRawConstantValue()!).Where(Operations.IsInternal).ToList();
-        var typed = EffectMessages.ByOperation.Keys.ToList();
+        var typed = EffectMessages.ByOperation.Keys.Concat(InternalRequests.ByOperation.Keys).ToList();
+        // An operation is an outbox message or a direct request, never both.
+        Assert.Empty(EffectMessages.ByOperation.Keys.Intersect(InternalRequests.ByOperation.Keys));
         Assert.Empty(typed.Except(internalOperations));
         Assert.Empty(Untyped.Intersect(typed));
         Assert.Equal(Untyped.Length, Untyped.Distinct().Count());
@@ -234,5 +236,6 @@ public sealed class EffectMessageTests
         Assert.True(Untyped.Length == PinnedUntyped, "The untyped list holds " + Untyped.Length + " operations, pinned at " + PinnedUntyped + ": type a new operation instead of listing it, and lower the pin when you type one.");
         // Each typed message names the operation it is listed under.
         Assert.All(EffectMessages.ByOperation, entry => Assert.Equal(entry.Key, entry.Value.Operation));
+        Assert.All(InternalRequests.ByOperation, entry => Assert.Equal(entry.Key, entry.Value.Operation));
     }
 }

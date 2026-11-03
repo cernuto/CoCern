@@ -37,19 +37,24 @@ internal static class EffectDelivery
 
     /// <summary>
     /// What a refused delivery becomes. Infrastructure failures retry. A typed message's own delivery class decides any other refusal: a
-    /// state transfer retries, and a report its sender sends again whole is dropped and counted (<see cref="EffectMessages"/>). Of the
-    /// untyped effects, attention and order effects are advisory: a refusal would repeat on every retry, so they are dropped, and a standing
-    /// order's item its session refused also counts as a failed run of that order. Any other refusal retries.
+    /// state transfer retries, a report its sender sends again whole is dropped and counted, and advice is dropped
+    /// (<see cref="EffectMessages"/>); an untyped attention or order effect counts as advice, any other as a state transfer. A standing
+    /// order's attention item its session refused also counts as a failed run of that order.
     /// </summary>
     public static Failure OnFailure(DurableEffect effect, JsonObject payload, string code, string sourceKind, bool ordersOn)
     {
         // The hub blocks each lock itself when an action begins; the board's own copy refused as busy or unclaimed never runs, and would otherwise retry forever.
         if (effect.Operation == ActionBlock.Operation && ActionBlock.SettledBy.Contains(code)) return Failure.Drop;
         if (IsTransient(code)) return Failure.Retry;
-        if (EffectMessages.DeliveryOf(effect.Operation) is { } delivery) return delivery == DeliveryClass.Retry ? Failure.Retry : Failure.DropAndCount;
-        if (!(Operations.IsAttention(effect.Operation) || Operations.IsOrder(effect.Operation))) return Failure.Retry;
-        return ordersOn && sourceKind == AggregateKinds.Board && effect.Operation == Operations.AttentionRaise && JsonFields.Text(payload, Operations.OrderIdField).Length > 0
-            ? Failure.DropAsFailedOrderRun : Failure.Drop;
+        var delivery = EffectMessages.DeliveryOf(effect.Operation)
+            ?? (Operations.IsAttention(effect.Operation) || Operations.IsOrder(effect.Operation) ? DeliveryClass.Advisory : DeliveryClass.Retry);
+        return delivery switch
+        {
+            DeliveryClass.Retry => Failure.Retry,
+            DeliveryClass.DropAndCount => Failure.DropAndCount,
+            _ => ordersOn && sourceKind == AggregateKinds.Board && effect.Operation == Operations.AttentionRaise && JsonFields.Text(payload, Operations.OrderIdField).Length > 0
+                ? Failure.DropAsFailedOrderRun : Failure.Drop
+        };
     }
 
     /// <summary>

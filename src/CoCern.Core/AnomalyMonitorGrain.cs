@@ -5,6 +5,7 @@ using Orleans;
 using Orleans.Runtime;
 using CoCern.Contracts;
 using CoCern.Domain;
+using CoCern.Domain.Messages;
 using static CoCern.Domain.JsonFields;
 
 namespace CoCern.Core;
@@ -36,8 +37,8 @@ public sealed class AnomalyMonitorGrain([PersistentState("anomaly", "relay")] IP
         // outbox) never waits on DuckDB. The findings come back through __anomaly_check; a run that is lost skips one check.
         var open = AnomalyMonitor.OpenKeys(candidate.Value.Json);
         var monitor = Monitor(repository);
-        var schedule = new JsonObject { ["repositoryId"] = repository, ["intervalSeconds"] = (long)options.Interval.TotalSeconds };
-        if (!ApplyInternal(candidate, monitor, Operations.AnomalyCheck, schedule, now).Ok) return true;
+        var schedule = new AnomalySchedule(repository, (long)options.Interval.TotalSeconds);
+        if (!ApplyInternal(candidate, monitor, AnomalySchedule.Operation, schedule.ToJson(), now).Ok) return true;
         if (!await CommitAsync(candidate)) return false;
         var self = GrainFactory.GetGrain<IAnomalyMonitorGrain>(this.GetPrimaryKeyString());
         var checks = options.Checks().ToArray();
@@ -54,8 +55,7 @@ public sealed class AnomalyMonitorGrain([PersistentState("anomaly", "relay")] IP
         try
         {
             var findings = await FindAsync(queries, repository, checks, open);
-            var args = new JsonObject { ["repositoryId"] = repository, ["checkAt"] = checkAt.ToString("O"), ["findings"] = findings };
-            await self.ExecuteAsync(Monitor(repository), Operations.AnomalyCheck, args.ToJsonString());
+            await self.ExecuteAsync(Monitor(repository), AnomalyCheck.Operation, new AnomalyCheck(repository, checkAt, findings).ToJson().ToJsonString());
         }
         catch (Exception) { /* A lost run skips one check; the next one is already scheduled. */ }
     }
@@ -64,10 +64,10 @@ public sealed class AnomalyMonitorGrain([PersistentState("anomaly", "relay")] IP
     /// Runs each check's query, within <see cref="RelayLimits.AnomalyCheckBudgetSeconds"/> in all. A query that fails is skipped; with no
     /// snapshot yet, or once the budget is spent, the rest wait for the next check.
     /// </summary>
-    private static async Task<JsonArray> FindAsync(IAnalyticsQueries queries, string repository, IEnumerable<(string Query, AnomalyThreshold Threshold)> checks, IReadOnlyDictionary<string, string> open)
+    private static async Task<List<AnomalyFinding>> FindAsync(IAnalyticsQueries queries, string repository, IEnumerable<(string Query, AnomalyThreshold Threshold)> checks, IReadOnlyDictionary<string, string> open)
     {
         using var budget = new CancellationTokenSource(TimeSpan.FromSeconds(RelayLimits.AnomalyCheckBudgetSeconds));
-        var findings = new JsonArray();
+        var findings = new List<AnomalyFinding>();
         foreach (var (query, threshold) in checks)
         {
             AnalyticsResult result;
@@ -75,11 +75,11 @@ public sealed class AnomalyMonitorGrain([PersistentState("anomaly", "relay")] IP
             catch (AnalyticsException exception) when (exception.Error == AnalyticsError.Unavailable) { break; }
             catch (Exception) when (!budget.IsCancellationRequested) { continue; }
             catch (Exception) { break; }
-            findings.Add(Finding(query, result, threshold, open.TryGetValue(query, out var key) ? key : null));
+            findings.Add(threshold.Judge(query, result, open.TryGetValue(query, out var key) ? key : null));
         }
         return findings;
     }
 
     /// <summary>One query's result judged by <paramref name="threshold"/>; see <see cref="AnomalyThreshold.Judge"/>.</summary>
-    public static JsonObject Finding(string query, AnalyticsResult result, AnomalyThreshold threshold, string? openKey = null) => threshold.Judge(query, result, openKey);
+    public static JsonObject Finding(string query, AnalyticsResult result, AnomalyThreshold threshold, string? openKey = null) => threshold.Judge(query, result, openKey).ToJson();
 }

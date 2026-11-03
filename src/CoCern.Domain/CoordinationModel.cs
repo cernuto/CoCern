@@ -296,7 +296,9 @@ public static class Operations
     public const string LeaseCheck = "__lease_check";
     /// <summary>Starts a repository's anomaly monitor: its first check is due now unless one is already scheduled.</summary>
     public const string AnomalyStart = "__anomaly_start";
-    /// <summary>The anomaly monitor's due check, with the findings the hub read from the analytics snapshot.</summary>
+    /// <summary>The anomaly monitor's due check begins: the next one is scheduled (<see cref="Messages.AnomalySchedule"/>).</summary>
+    public const string AnomalySchedule = "__anomaly_schedule";
+    /// <summary>The findings the hub read from the analytics snapshot for one check (<see cref="Messages.AnomalyCheck"/>).</summary>
     public const string AnomalyCheck = "__anomaly_check";
 
     /// <summary>Read-only: a board's standing orders in the compact form <c>get_status</c> lists.</summary>

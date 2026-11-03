@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json.Nodes;
 using CoCern.Contracts;
+using CoCern.Domain.Messages;
 
 namespace CoCern.Core;
 
@@ -20,9 +21,9 @@ public sealed record AnomalyThreshold(double Ratio, int MinSamples, double DropR
     /// the worst row as <c>anomaly</c>. <c>inRange</c> needs <paramref name="openKey"/>'s row measured with enough samples: too little data
     /// is not "back in range".
     /// </summary>
-    public JsonObject Judge(string query, AnalyticsResult result, string? openKey = null)
+    public AnomalyFinding Judge(string query, AnalyticsResult result, string? openKey = null)
     {
-        var finding = new JsonObject { ["query"] = query, ["period"] = result.SnapshotAt.UtcDateTime.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) };
+        var finding = new AnomalyFinding(query, result.SnapshotAt.UtcDateTime.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
         int Column(string name) => result.Columns.ToList().IndexOf(name);
         var (key, cur, prev, curN, prevN) = (Column("key"), Column("cur"), Column("prev"), Column("cur_n"), Column("prev_n"));
         if (key < 0 || cur < 0 || prev < 0 || curN < 0 || prevN < 0) return finding;
@@ -46,10 +47,8 @@ public sealed record AnomalyThreshold(double Ratio, int MinSamples, double DropR
                 : (Ratio > 0 && current >= baseline * Ratio ? current / baseline : 0);
             if (severity > 0 && (worst is null || severity > worst.Value.Severity)) worst = (name, current, baseline, (long)(down ? baselineSamples : samples), severity);
         }
-        if (worst is { } found)
-            finding["anomaly"] = new JsonObject { ["key"] = found.Key, ["value"] = Math.Round(found.Value, 2), ["baseline"] = Math.Round(found.Baseline, 2), ["samples"] = found.Samples };
-        else if (openMeasured) finding["inRange"] = true;
-        return finding;
+        if (worst is { } found) return finding with { Anomaly = new AnomalyRow(found.Key, Math.Round(found.Value, 2), Math.Round(found.Baseline, 2), found.Samples) };
+        return openMeasured ? finding with { InRange = true } : finding;
     }
 
     private static double? Real(object? value) => value switch
