@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
@@ -218,12 +217,6 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
 
     /// <summary>The hub's own identity for proposals: internal, so only this hub can use it, and scoped to the one repository.</summary>
     private static RelayCaller HubProposer(string repository) => new(SessionRoles.HubProposer, false, [repository], true);
-
-    /// <summary>Delivers one aggregate's due outbox effects; called by the hub's due-work pump.</summary>
-    public async Task DispatchDueAsync(DueWorkReference reference, CancellationToken cancellationToken = default)
-    {
-        await CoordinationGrain.DispatchDueAsync(grains, reference, cancellationToken);
-    }
 
     private Task<RelayReply> DispatchAsync(RelayCaller caller, string tool, JsonObject args, JsonObject? session, CancellationToken cancellationToken = default) => tool switch
     {
@@ -629,7 +622,6 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
     private Task<RelayReply> CallSession(RelayCaller caller, string operation, JsonObject args) => aggregates.Session(caller, operation, args);
     private Task<RelayReply> CallBoard(RelayCaller caller, string operation, JsonObject args) => aggregates.Board(caller, operation, args);
     private Task<RelayReply> Call(string kind, string key, RelayCaller caller, string operation, JsonObject args) => aggregates.Call(kind, key, caller, operation, args);
-    private static string BoardKey(JsonObject args) => Aggregates.BoardKey(args);
     private static JsonObject Parse(RelayReply reply) => Aggregates.Parse(reply);
     private static JsonNode Outcome(bool ok, string code) => JsonSerializer.SerializeToNode(new { ok, code })!;
 }
