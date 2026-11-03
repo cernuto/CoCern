@@ -68,7 +68,7 @@ public sealed class CoordinationTests
     public void Inbox_delivery_deduplicates_and_requires_both_identity_and_secret()
     {
         var state = new StateEnvelope<CoordinationDocument>();
-        Assert.True(Call(state, "session", "__open", new() { ["principalId"] = "alice", ["sessionToken"] = "secret" }).Ok);
+        Assert.True(Call(state, "session", "__open", new() { ["principalId"] = "alice", ["sessionToken"] = "secret", ["sessionId"] = "key" }).Ok);
         var message = new JsonObject { ["messageId"] = "m", ["text"] = "hello" };
         Assert.True(Call(state, "session", "__deliver", message).Ok);
         Assert.True(Call(state, "session", "__deliver", message).Ok);
@@ -543,7 +543,7 @@ public sealed class CoordinationTests
     public void Acknowledgments_and_resolved_actions_stay_bounded_and_keep_ignoring_recent_duplicates()
     {
         var session = new StateEnvelope<CoordinationDocument>();
-        Assert.True(Call(session, "session", "__open", new() { ["principalId"] = "alice", ["sessionToken"] = "secret" }).Ok);
+        Assert.True(Call(session, "session", "__open", new() { ["principalId"] = "alice", ["sessionToken"] = "secret", ["sessionId"] = "key" }).Ok);
         var total = 3 * RelayLimits.MaxRecords;
         for (var batch = 0; batch < total / RelayLimits.MaxAcknowledgedMessages + 1; batch++)
         {
@@ -587,7 +587,7 @@ public sealed class CoordinationTests
         // 7,500 backslashes are within the 8 KiB text limit, but JSON escaping doubles them twice on the way to a reader.
         var text = new string('\\', 7_500);
         var sender = new StateEnvelope<CoordinationDocument>();
-        Assert.True(Call(sender, "session", "__open", new() { ["principalId"] = "alice", ["sessionToken"] = "secret" }).Ok);
+        Assert.True(Call(sender, "session", "__open", new() { ["principalId"] = "alice", ["sessionToken"] = "secret", ["sessionId"] = "key" }).Ok);
         var direct = Call(sender, "session", "send_message", new() { ["sessionToken"] = "secret", ["requestId"] = "big", ["recipientSessionId"] = "r", ["text"] = text });
         Assert.Equal("PayloadTooLarge", direct.Code);
         Assert.Equal(RelayLimits.AggregateReplyBytes, Data(direct)["maxBytes"]!.GetValue<int>());
@@ -611,7 +611,7 @@ public sealed class CoordinationTests
     {
         // A message stored before sends were measured: too large for any page once escaped.
         var session = new StateEnvelope<CoordinationDocument>();
-        Assert.True(Call(session, "session", "__open", new() { ["principalId"] = "alice", ["sessionToken"] = "secret" }).Ok);
+        Assert.True(Call(session, "session", "__open", new() { ["principalId"] = "alice", ["sessionToken"] = "secret", ["sessionId"] = "key" }).Ok);
         var big = new string('\\', 7_500) + "end";
         foreach (var (id, text) in new[] { ("m1", "first"), ("big", big), ("m3", "after") })
             Assert.True(Call(session, "session", "__deliver", new() { ["messageId"] = id, ["text"] = text }).Ok);
@@ -694,8 +694,12 @@ public sealed class CoordinationTests
         CoordinationStateMachine.StampEffects(delivered, 0, Caller with { Repositories = ["repo"] });
         var other = delivered.First(effect => effect.Operation == Operations.SessionExpire && JsonNode.Parse(effect.PayloadJson)!["repositoryId"]!.GetValue<string>() == "other");
         Assert.Equal(["other"], CoordinationStateMachine.TakeEffectCaller(JsonNode.Parse(other.PayloadJson)!.AsObject()).Repositories);
-        // A late registration from a dropped session is accepted and ignored, so its outbox never retries it forever.
-        Assert.True(Call(control, "control", "__register", new() { ["sessionId"] = "s-" + (RelayLimits.MaxRecords - 1), ["activeAt"] = Now.ToString("O") }).Ok);
+        // A late registration or activity report from a dropped session is accepted and ignored, so its outbox never retries it forever.
+        Assert.True(Call(control, "control", Operations.SessionActive, new() { ["sessionId"] = "s-" + (RelayLimits.MaxRecords - 1), ["activeAt"] = Now.ToString("O") }).Ok);
+        Assert.True(Call(control, "control", Operations.Register, new SessionRegistration("repo", "s-" + (RelayLimits.MaxRecords - 1), new SessionPresence
+        {
+            BindingVersion = 1, ObservedAt = Now, FreshUntil = Now.AddMinutes(2)
+        }).ToJson()).Ok);
 
         // When every session was seen within the day, an open is refused for now and works again once some go stale.
         var busy = new StateEnvelope<CoordinationDocument> { Value = new() { Json = new JsonObject { ["sessions"] = new JsonObject(sessions.Select(x =>
@@ -712,10 +716,10 @@ public sealed class CoordinationTests
     {
         var session = new StateEnvelope<CoordinationDocument>();
         Assert.True(Call(session, "session", "__open", new() { ["principalId"] = "alice", ["sessionToken"] = "secret", ["sessionId"] = "s" }).Ok);
-        Assert.True(Call(session, "session", Operations.SessionExpire, new()).Ok);
+        Assert.True(Call(session, "session", Operations.SessionExpire, new SessionExpire("repo", "s", 1).ToJson()).Ok);
         // Repeated expiry, or one for a session this grain never held, is accepted.
-        Assert.True(Call(session, "session", Operations.SessionExpire, new()).Ok);
-        Assert.True(Call(new StateEnvelope<CoordinationDocument>(), "session", Operations.SessionExpire, new()).Ok);
+        Assert.True(Call(session, "session", Operations.SessionExpire, new SessionExpire("repo", "s", 1).ToJson()).Ok);
+        Assert.True(Call(new StateEnvelope<CoordinationDocument>(), "session", Operations.SessionExpire, new SessionExpire("repo", "other", 2).ToJson()).Ok);
         var inbox = Call(session, "session", "check_inbox", new() { ["sessionToken"] = "secret" });
         Assert.Equal("SessionUnknown", inbox.Code);
         Assert.True(Data(inbox)["expired"]!.GetValue<bool>());
@@ -887,8 +891,8 @@ public sealed class CoordinationTests
         for (var hour = 0; hour <= 30; hour++)
         {
             Assert.True(Call(session, "session", "__verify", new() { ["sessionToken"] = "secret" }, seconds: hour * 3600).Ok);
-            foreach (var effect in session.Effects.Where(effect => effect.Operation == Operations.Register))
-                Assert.True(Call(control, "control", "__register", JsonNode.Parse(effect.PayloadJson)!.AsObject(), seconds: hour * 3600).Ok);
+            foreach (var effect in session.Effects.Where(effect => effect.Operation == Operations.SessionActive))
+                Assert.True(Call(control, "control", effect.Operation, JsonNode.Parse(effect.PayloadJson)!.AsObject(), seconds: hour * 3600).Ok);
             session.Effects.Clear();
         }
         Assert.Equal(Now.AddHours(30).ToString("O"), StateJson(control)["sessions"]!["busy"]!["activeAt"]!.GetValue<string>());
@@ -1358,7 +1362,7 @@ public sealed class CoordinationTests
         // A manager chat neither fresh nor active for over a day (a closed chat) is skipped, unless it reported activity since.
         Open("manager", daysAgo: 2);
         var active = Open("manager", daysAgo: 3);
-        Assert.True(Call(control, "control", "__register", new() { ["sessionId"] = active, ["activeAt"] = Now.AddHours(-1).ToString("O") }).Ok);
+        Assert.True(Call(control, "control", Operations.SessionActive, new() { ["sessionId"] = active, ["activeAt"] = Now.AddHours(-1).ToString("O") }).Ok);
         var before = control.Effects.Count;
         var routed = Call(control, "control", "__attention_route", new()
         {
@@ -1891,7 +1895,7 @@ public sealed class CoordinationTests
         // The session ends (an explicit end, or a directory from before this fix) while the action is still invoking.
         var session = new StateEnvelope<CoordinationDocument>();
         Assert.True(Call(session, "session", "__open", new() { ["principalId"] = "alice", ["sessionToken"] = "secret", ["sessionId"] = "a" }, worker).Ok);
-        Assert.True(Call(session, "session", Operations.SessionExpire, new(), worker).Ok);
+        Assert.True(Call(session, "session", Operations.SessionExpire, new SessionExpire("repo", "a", 1).ToJson(), worker).Ok);
         Assert.Equal("SessionUnknown", Call(session, "session", "__verify", new() { ["sessionToken"] = "secret" }, worker).Code);
         // Its chat reopens as another session; a plain report from there is still not the writer's.
         var reopened = StrandedReport("a2", 3); reopened["outcome"] = "completed";

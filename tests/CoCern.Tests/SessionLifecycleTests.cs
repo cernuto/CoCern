@@ -450,7 +450,7 @@ public sealed class SessionLifecycleTests
         // After hours of quiet the chat calls again; its activity report is still on its way when an idle close decides from older news.
         Assert.True(hub.Verify(worker, T0.AddHours(5)).Ok);
         var report = Assert.Single(hub.Of(AggregateKinds.Session, worker.Id).Effects);
-        Assert.Equal(Operations.Register, report.Operation);
+        Assert.Equal(Operations.SessionActive, report.Operation);
         Assert.Equal(1, Data(hub.Close(new() { ["idleMinutes"] = 60 }, T0.AddHours(5)))["closed"]!.GetValue<int>());
 
         var refused = Data(hub.Deliver(Assert.Single(hub.Of(AggregateKinds.Control, AggregateKinds.ControlKey).Effects), T0.AddHours(5)));

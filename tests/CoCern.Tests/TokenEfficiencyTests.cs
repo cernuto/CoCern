@@ -289,7 +289,7 @@ public sealed class TokenEfficiencyTests(ITestOutputHelper output)
         var now = DateTimeOffset.Parse("2026-10-30T00:00:00Z");
         CoCern.Domain.RelayReply Call(string op, System.Text.Json.Nodes.JsonObject args) { args["repositoryId"] = "repo"; return CoCern.Domain.CoordinationStateMachine.Apply(state, "session", "key", alice, op, args, now); }
         System.Text.Json.Nodes.JsonObject Message(string id, string sender, bool supersede) => new() { ["messageId"] = id, ["senderSessionId"] = sender, ["text"] = "status?", ["supersede"] = supersede };
-        Assert.True(Call("__open", new() { ["principalId"] = "alice", ["sessionToken"] = "secret" }).Ok);
+        Assert.True(Call("__open", new() { ["principalId"] = "alice", ["sessionToken"] = "secret", ["sessionId"] = "s1" }).Ok);
 
         Assert.True(Call("__deliver", Message("h1", "heartbeat", true)).Ok);
         Assert.True(Call("__deliver", Message("q1", "heartbeat", false)).Ok);
@@ -312,7 +312,7 @@ public sealed class TokenEfficiencyTests(ITestOutputHelper output)
         var alice = new CoCern.Domain.RelayCaller("alice", true, ["repo"], true);
         var now = DateTimeOffset.Parse("2026-10-30T00:00:00Z");
         CoCern.Domain.RelayReply Call(string op, System.Text.Json.Nodes.JsonObject args) { args["repositoryId"] = "repo"; return CoCern.Domain.CoordinationStateMachine.Apply(state, "session", "key", alice, op, args, now); }
-        Assert.True(Call("__open", new() { ["principalId"] = "alice", ["sessionToken"] = "secret" }).Ok);
+        Assert.True(Call("__open", new() { ["principalId"] = "alice", ["sessionToken"] = "secret", ["sessionId"] = "s1" }).Ok);
         Assert.True(Call("send_message", new() { ["sessionToken"] = "secret", ["requestId"] = "q", ["recipientSessionId"] = "bob", ["text"] = "fyi", ["wake"] = false }).Ok);
         Assert.True(Call("send_message", new() { ["sessionToken"] = "secret", ["requestId"] = "l", ["recipientSessionId"] = "bob", ["text"] = "act" }).Ok);
         var delivered = state.Effects.Select(effect => JsonDocument.Parse(effect.PayloadJson).RootElement).ToArray();

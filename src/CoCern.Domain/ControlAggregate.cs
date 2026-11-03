@@ -22,6 +22,7 @@ internal static class ControlAggregate
         {
             RelayTools.SessionOpen => OpenSession(context),
             Operations.Register => RegisterSession(context),
+            Operations.SessionActive => RecordActivity(context),
             Operations.SessionOwns => TrackOwnership(context),
             Operations.SweepSessions => SweepSessions(context),
             Operations.SessionRestore => RestoreSession(context),
@@ -58,17 +59,10 @@ internal static class ControlAggregate
         }
         var id = Guid.NewGuid().ToString("N");
         var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
-        var session = new JsonObject
-        {
-            ["sessionId"] = id, ["principalId"] = context.Caller.PrincipalId, ["repositoryId"] = context.Repository, ["sessionToken"] = token, ["bindingVersion"] = 0,
-            ["machineId"] = Text(args, "machineId"), ["label"] = Text(args, "label"), ["binding"] = args["binding"]?.DeepClone(),
-            ["observedAt"] = context.Now.ToString("O"), ["freshUntil"] = context.Now.Add(InitialFreshness).ToString("O"), ["availability"] = "unknown"
-        };
-        session["hubIncarnation"] = Text(args, "hubIncarnation");
         // The role given at session_open routes manager-bound attention items; it grants nothing.
-        if (Text(args, "role") is { Length: > 0 and <= RelayLimits.MaxActivityRoleLength } role) session["role"] = role;
-        sessions[id] = session;
-        context.Emit(AggregateKinds.Session, id, Operations.Open, session);
+        var record = SessionRecord.Opened(id, token, context.Caller.PrincipalId, context.Repository, args).WithInitialFreshness(context.Now);
+        sessions[id] = record.ToJson();
+        context.Send(id, new SessionOpen(record));
         return Ok(new { sessionId = id, sessionToken = token, bindingVersion = 0, binding = args["binding"] });
     }
 
@@ -125,14 +119,13 @@ internal static class ControlAggregate
         {
             sessions.Remove(id);
             var repository = session is null ? "" : Text(session, "repositoryId");
-            var expire = new JsonObject { ["repositoryId"] = repository, ["sessionId"] = id, ["closeSeq"] = Fence(context.State, id) };
-            if (force) { expire["force"] = true; expire["requestedBy"] = context.Caller.PrincipalId; }
-            // What the directory had heard when it decided; a session that has reported activity since was working, and refuses.
-            else if (seen > DateTimeOffset.MinValue) expire["seenAt"] = seen.ToString("O");
-            // A session whose hold lapsed already had its grace, so this idle close takes it as it is.
-            if (idle && hold == Hold.None) expire["idle"] = true;
+            var expire = new SessionExpire(repository, id, Fence(context.State, id),
+                // What the directory had heard when it decided; a session that has reported activity since was working, and refuses.
+                SeenAt: !force && seen > DateTimeOffset.MinValue ? seen : null,
+                // A session whose hold lapsed already had its grace, so this idle close takes it as it is.
+                Idle: idle && hold == Hold.None, Force: force, RequestedBy: force ? context.Caller.PrincipalId : null);
             // Its own caller: the session belongs to its repository, which the caller that closed it may not reach (or may reach them all).
-            context.Emit(AggregateKinds.Session, id, Operations.SessionExpire, expire, new RelayCaller("relay-directory", false, [repository]));
+            context.Send(id, expire, new RelayCaller("relay-directory", false, [repository]));
         }
         return new(closing.Select(entry => entry.Key).ToList(), force ? 0 : matched.Count(entry => entry.Owns), idle && !force ? matched.Count(entry => !entry.Owns && entry.Hold == Hold.Holding) : 0,
             closable.Count > closing.Count);
@@ -224,40 +217,30 @@ internal static class ControlAggregate
         return held > now.AddDays(-RelayLimits.SessionMailHoldDays) ? Hold.Holding : Hold.Lapsed;
     }
 
-    /// <summary>The record fields a refused expiry brings back (<see cref="Operations.SessionRestore"/>): what the directory keeps of a session, as the session keeps it.</summary>
-    private static IEnumerable<string> RestoredFields => RegistrationFields.Concat(["principalId", "sessionToken", "role"]);
-
     /// <summary>
     /// <see cref="Operations.SessionRestore"/>: a session this directory closed refused its expiry, because it answers for an unresolved
     /// action (a report of it may not have arrived here before the close) or, for an idle close, because it has unread mail. Its record comes
-    /// back from the session's copy, with ownership (<c>owns</c>, ordered by the session's report <c>seq</c>) or the mail hold (<c>mail</c>),
-    /// so later closes keep it. It returns even to a full directory: it never left the hub. A session still listed (a redelivery) only gains
-    /// the ownership or hold; one in another repository, or a malformed copy, is ignored, since a refusal would be retried forever.
+    /// back from the session's copy (<see cref="SessionRestore.Record"/>), with ownership (ordered by the session's report number) or the
+    /// mail hold, so later closes keep it. It returns even to a full directory: it never left the hub. A session still listed only gains the
+    /// ownership or hold; one in another repository is ignored.
     /// </summary>
     private static RelayReply RestoreSession(AggregateContext context)
     {
-        var args = context.Args;
-        var id = Text(args, "sessionId");
+        if (!SessionRestore.Decode(context.Args).TryGet(out var restore, out var malformed)) return Malformed(malformed);
+        var id = restore.SessionId;
         var sessions = ObjectAt(context.State, "sessions");
         // Only the answer to this directory's latest close of the session counts, once: a delayed or duplicated restore from an earlier
         // close would otherwise bring back a session that has since closed (a forced close, or a later one it accepted).
-        if (id.Length == 0 || !Fenced(context.State, id, args)) return Ok(new { restored = false });
-        if (sessions[id] is not JsonObject record)
-        {
-            if (args["record"] is not JsonObject copy || Text(copy, "principalId").Length == 0) return Ok(new { restored = false });
-            record = new JsonObject();
-            foreach (var field in RestoredFields) if (copy[field] is { } value) record[field] = value.DeepClone();
-            record["sessionId"] = id; record["repositoryId"] = context.Repository;
-            sessions[id] = record;
-        }
+        if (!Fenced(context.State, id, restore.CloseSeq)) return Ok(new { restored = false });
+        if (sessions[id] is not JsonObject record) sessions[id] = record = (restore.Record with { SessionId = id, RepositoryId = context.Repository }).ToJson();
         else if (Text(record, "repositoryId") != context.Repository) return Ok(new { restored = false });
         // A redelivered restore never undoes a newer report that the work ended.
-        if (IsTrue(args, "owns") && Number(args, "seq") >= Number(record, WorkSeqKey))
+        if (restore.Owns && restore.Seq >= Number(record, WorkSeqKey))
         {
             record[OwnsWorkKey] = context.Now.ToUnixTimeSeconds();
-            record[WorkSeqKey] = Number(args, "seq");
+            record[WorkSeqKey] = restore.Seq;
         }
-        if (IsTrue(args, "mail")) record[MailHeldKey] = context.Now.ToString("O");
+        if (restore.Mail) record[MailHeldKey] = context.Now.ToString("O");
         Unfence(context.State, id);
         return Ok(new { restored = true });
     }
@@ -282,9 +265,9 @@ internal static class ControlAggregate
         return seq;
     }
 
-    /// <summary>Whether <paramref name="args"/> answers the close of <paramref name="id"/> still in flight.</summary>
-    private static bool Fenced(JsonObject state, string id, JsonObject args) =>
-        state[ClosingKey] is JsonObject closing && closing[id] is JsonValue fence && fence.TryGetValue<long>(out var seq) && Number(args, "closeSeq") == seq;
+    /// <summary>Whether <paramref name="closeSeq"/> answers the close of <paramref name="id"/> still in flight.</summary>
+    private static bool Fenced(JsonObject state, string id, long closeSeq) =>
+        state[ClosingKey] is JsonObject closing && closing[id] is JsonValue fence && fence.TryGetValue<long>(out var seq) && closeSeq == seq;
 
     private static void Unfence(JsonObject state, string id)
     {
@@ -296,9 +279,9 @@ internal static class ControlAggregate
     /// <summary><see cref="Operations.SessionExpired"/>: a session closed as this directory asked, so that close is settled. Any other copy is ignored.</summary>
     private static RelayReply SettleClose(AggregateContext context)
     {
-        var id = Text(context.Args, "sessionId");
-        if (id.Length == 0 || !Fenced(context.State, id, context.Args)) return Ok(new { settled = false });
-        Unfence(context.State, id);
+        if (!SessionExpired.Decode(context.Args).TryGet(out var expired, out var malformed)) return Malformed(malformed);
+        if (!Fenced(context.State, expired.SessionId, expired.CloseSeq)) return Ok(new { settled = false });
+        Unfence(context.State, expired.SessionId);
         return Ok(new { settled = true });
     }
 
@@ -328,28 +311,39 @@ internal static class ControlAggregate
     private static DateTimeOffset LastSeen(JsonObject session) =>
         new[] { Date(session, "freshUntil"), Date(session, "activeAt"), Date(session, "observedAt") }.Max();
 
+    /// <summary>
+    /// <see cref="Operations.Register"/>: a session's presence after <c>session_bind</c>. Registrations can arrive reordered (a retried
+    /// delivery), so one older than the binding the directory has (<c>bindingVersion</c>) is stale: it changes no binding or label, and
+    /// either way times never move back. A session dropped from the directory may still send a late one, which is accepted unchanged.
+    /// </summary>
     private static RelayReply RegisterSession(AggregateContext context)
     {
-        var id = Required(context.Args, "sessionId");
-        // A session dropped from the directory may still send a late registration; accept it unchanged so its outbox does not retry forever.
-        if (ObjectAt(context.State, "sessions")[id] is not JsonObject session) return Ok(new { registered = false });
+        if (!SessionRegistration.Decode(context.Args).TryGet(out var registration, out var malformed)) return Malformed(malformed);
+        if (ObjectAt(context.State, "sessions")[registration.SessionId] is not JsonObject session) return Ok(new { registered = false });
         if (Text(session, "repositoryId") != context.Repository) return Error(SessionDenied);
-        // Registrations can arrive reordered (a retried delivery): an older binding never replaces a newer one, and times never move back.
-        var stale = context.Args.ContainsKey("bindingVersion") && Number(context.Args, "bindingVersion") < Number(session, "bindingVersion");
-        foreach (var property in RegistrationFields)
-        {
-            if (!context.Args.ContainsKey(property)) continue;
-            if (property is "observedAt" or "freshUntil" or "activeAt")
-            {
-                if (Date(context.Args, property) > Date(session, property)) session[property] = context.Args[property]?.DeepClone();
-            }
-            else if (!stale) session[property] = context.Args[property]?.DeepClone();
-        }
+        var presence = registration.Presence;
+        var stale = presence.BindingVersion < Number(session, "bindingVersion");
+        var reported = new JsonObject();
+        (stale ? new SessionPresence { ObservedAt = presence.ObservedAt, FreshUntil = presence.FreshUntil } : presence).WriteTo(reported);
+        foreach (var (property, value) in reported)
+            if (property is not ("observedAt" or "freshUntil") || Date(reported, property) > Date(session, property)) session[property] = value?.DeepClone();
         return Ok(new { registered = !stale });
     }
 
-    /// <summary>What a session reports to the directory about itself; nothing else of its state ever leaves it.</summary>
-    internal static readonly string[] RegistrationFields = ["binding", "bindingVersion", "observedAt", "freshUntil", "availability", "machineId", "label", "hubIncarnation", "activeAt"];
+    /// <summary>
+    /// <see cref="Operations.SessionActive"/>: a session's report that it was active, which keeps routed manager items reaching it and a full
+    /// directory from dropping it. One no later than the activity the directory has is stale and changes nothing; one for a session no
+    /// longer listed is accepted unchanged.
+    /// </summary>
+    private static RelayReply RecordActivity(AggregateContext context)
+    {
+        if (!SessionActivity.Decode(context.Args).TryGet(out var activity, out var malformed)) return Malformed(malformed);
+        if (ObjectAt(context.State, "sessions")[activity.SessionId] is not JsonObject session) return Ok(new { recorded = false });
+        if (Text(session, "repositoryId") != context.Repository) return Error(SessionDenied);
+        if (activity.ActiveAt <= Date(session, "activeAt")) return Ok(new { recorded = false });
+        session["activeAt"] = activity.ActiveAt.ToString("O");
+        return Ok(new { recorded = true });
+    }
 
     /// <summary>Reported presence only. A record from another hub incarnation or past its freshness is shown as stale.</summary>
     private static RelayReply ListWorkers(AggregateContext context)

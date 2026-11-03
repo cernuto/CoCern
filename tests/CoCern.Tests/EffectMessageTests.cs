@@ -74,4 +74,95 @@ public sealed class EffectMessageTests
         Assert.Equal(RelayErrorCodes.UnknownTool, CoordinationStateMachine.Apply(control, AggregateKinds.Control, AggregateKinds.ControlKey, Hub, Operations.SessionWork,
             new ActionWorkReport("repo", "s1", "default", "t", "a", 1, true, Now).ToJson(), Now).Code);
     }
+
+    private static string Json<T>(T message) where T : class, IEffectMessage<T> => message.ToJson().ToJsonString();
+
+    private static SessionRecord Record(JsonObject json)
+    {
+        Assert.True(SessionRecord.Decode(json).TryGet(out var record, out var fields), string.Join(", ", fields));
+        return record;
+    }
+
+    private static readonly SessionRecord Opened = SessionRecord.Opened("s1", "T0KEN", "alice", "repo", new JsonObject
+    {
+        ["label"] = "chat", ["machineId"] = "pc-1", ["hubIncarnation"] = "hub-1", ["role"] = "manager", ["binding"] = new JsonObject { ["roslyn"] = "codelens" },
+        // session_open's other arguments are never part of the record, so a client cannot forge freshness or activity through them.
+        ["freshUntil"] = "9999-12-31T00:00:00Z", ["activeAt"] = "9999-12-31T00:00:00Z", ["bindingVersion"] = 41, ["requestId"] = "open-1"
+    });
+
+    [Fact]
+    public void Every_session_lifecycle_message_reads_back_exactly_what_it_writes()
+    {
+        var fresh = Opened.WithInitialFreshness(Now);
+        Assert.Equal(Json(new SessionOpen(fresh)), Json(RoundTrip(new SessionOpen(fresh))));
+        Assert.Equal(Json(new SessionOpen(Opened)), Json(RoundTrip(new SessionOpen(Opened))));
+        Assert.Equal(new SessionExpire("repo", "s1", 7, Now, Idle: true), RoundTrip(new SessionExpire("repo", "s1", 7, Now, Idle: true)));
+        Assert.Equal(new SessionExpire("repo", "s1", 8, Force: true, RequestedBy: "admin"), RoundTrip(new SessionExpire("repo", "s1", 8, Force: true, RequestedBy: "admin")));
+        var restore = new SessionRestore("repo", "s1", 7, fresh with { ActiveAt = Now }, Owns: true, Seq: 4, Mail: true);
+        Assert.Equal(Json(restore), Json(RoundTrip(restore)));
+        Assert.Equal(new SessionExpired("repo", "s1", 7), RoundTrip(new SessionExpired("repo", "s1", 7)));
+        Assert.Equal(new SessionClosed("repo", "ops", "s1"), RoundTrip(new SessionClosed("repo", "ops", "s1")));
+        var registration = new SessionRegistration("repo", "s1", fresh.Presence with { BindingVersion = 3 });
+        Assert.Equal(Json(registration), Json(RoundTrip(registration)));
+        Assert.Equal(new SessionActivity("repo", "s1", Now), RoundTrip(new SessionActivity("repo", "s1", Now)));
+
+        // A record takes only the client's own fields, and a role only within its bound.
+        Assert.Equal(("chat", "pc-1", "manager", null, null, null), (Opened.Presence.Label, Opened.Presence.MachineId, Opened.Role, Opened.Presence.FreshUntil, Opened.Presence.BindingVersion, Opened.ActiveAt));
+        Assert.Null(SessionRecord.Opened("s1", "t", "alice", "repo", new JsonObject { ["role"] = new string('m', RelayLimits.MaxActivityRoleLength + 1) }).Role);
+    }
+
+    [Fact]
+    public void Each_lifecycle_message_names_the_fields_it_is_missing()
+    {
+        Assert.Equal(["principalId", "sessionToken"], Malformed<SessionOpen>(Without(Opened.ToJson(), "principalId", "sessionToken")));
+        var expire = new SessionExpire("repo", "s1", 7).ToJson();
+        Assert.Equal(["closeSeq"], Malformed<SessionExpire>(Without(expire, "closeSeq")));
+        var forced = new SessionExpire("repo", "s1", 7, Force: true, RequestedBy: "admin").ToJson();
+        Assert.Equal(["requestedBy"], Malformed<SessionExpire>(Without(forced, "requestedBy")));
+        var restore = new SessionRestore("repo", "s1", 7, Opened, Owns: true, Seq: 2).ToJson();
+        restore["record"]!.AsObject().Remove("principalId");
+        Assert.Equal(["record.principalId", "seq"], Malformed<SessionRestore>(Without(restore, "seq")));
+        Assert.Equal(["record"], Malformed<SessionRestore>(Without(restore, "record")));
+        Assert.Equal(["closeSeq"], Malformed<SessionExpired>(Without(new SessionExpired("repo", "s1", 7).ToJson(), "closeSeq")));
+        Assert.Equal(["boardId"], Malformed<SessionClosed>(Without(new SessionClosed("repo", "ops", "s1").ToJson(), "boardId")));
+        Assert.Equal(["observedAt", "freshUntil"], Malformed<SessionRegistration>(Without(new SessionRegistration("repo", "s1", Opened.WithInitialFreshness(Now).Presence).ToJson(), "observedAt", "freshUntil")));
+        Assert.Equal(["activeAt"], Malformed<SessionActivity>(Without(new SessionActivity("repo", "s1", Now).ToJson(), "activeAt")));
+    }
+
+    [Fact]
+    public void A_bind_registers_presence_and_a_verified_call_reports_activity_each_as_its_own_message()
+    {
+        var hub = new AggregateHub();
+        var chat = hub.Open("chat", Now);
+        hub.DeliverAll(Now);
+        Assert.True(hub.Session(chat, RelayTools.SessionBind, new() { ["expectedVersion"] = 0, ["binding"] = new JsonObject { ["v"] = 1 } }, Now).Ok);
+        var bound = Assert.Single(hub.Queued);
+        Assert.Equal((Operations.Register, DeliveryClass.Retry), (bound.Operation, SessionRegistration.Delivery));
+        Assert.DoesNotContain("activeAt", bound.PayloadJson);
+        Assert.DoesNotContain(chat.Token, bound.PayloadJson);
+        hub.DeliverAll(Now);
+        Assert.True(hub.Verify(chat, Now.AddMinutes(1)).Ok);
+        var active = Assert.Single(hub.Queued);
+        Assert.Equal((Operations.SessionActive, DeliveryClass.DropAndCount), (active.Operation, SessionActivity.Delivery));
+        Assert.Equal(["activeAt", "repositoryId", "sessionId"], JsonNode.Parse(active.PayloadJson)!.AsObject().Select(entry => entry.Key).Where(key => !key.StartsWith("__", StringComparison.Ordinal)).Order());
+        hub.DeliverAll(Now.AddMinutes(1));
+        Assert.Equal(Now.AddMinutes(1), DateTimeOffset.Parse(hub.Directory()[chat.Id]!["activeAt"]!.GetValue<string>()));
+    }
+
+    [Fact]
+    public void A_session_and_its_directory_entry_hold_one_record_whichever_copy_of_its_open_lands_first()
+    {
+        foreach (var role in new[] { "manager", new string('m', RelayLimits.MaxActivityRoleLength + 1) })
+        {
+            var hub = new AggregateHub { HoldDirectCalls = true };
+            var chat = hub.Open("chat", Now, machineId: "pc-1", role: role);
+            var drained = hub.Explore(Now, state =>
+            {
+                var session = Record(state.State(AggregateKinds.Session, chat.Id));
+                Assert.Equal(Record(state.Directory()[chat.Id]!.AsObject()).ToJson().ToJsonString(), session.ToJson().ToJsonString());
+                Assert.Equal(role.Length <= RelayLimits.MaxActivityRoleLength ? role : null, session.Role);
+            });
+            Assert.True(drained > 1);
+        }
+    }
 }

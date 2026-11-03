@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json.Nodes;
 using CoCern.Contracts;
 using CoCern.Domain;
+using CoCern.Domain.Messages;
 using Xunit;
 
 namespace CoCern.Tests;
@@ -59,16 +60,20 @@ internal sealed class AggregateHub
 
     /// <summary>
     /// Opens a session as the hub does: the directory records it and queues the session's initialization, and the hub initializes the
-    /// session directly as well. The queued copy stays in the directory's outbox; it deduplicates at the session.
+    /// session directly as well, from the client's fields (<see cref="SessionRecord.Opened"/>). The queued copy stays in the directory's
+    /// outbox; it deduplicates at the session.
     /// </summary>
-    public Chat Open(string label, DateTimeOffset now, string? machineId = null)
+    public Chat Open(string label, DateTimeOffset now, string? machineId = null, string? role = null, string? requestId = null)
     {
-        var args = new JsonObject { ["requestId"] = "open-" + ++requests, ["label"] = label, ["hubIncarnation"] = "hub-1" };
+        var args = new JsonObject { ["requestId"] = requestId ?? "open-" + ++requests, ["label"] = label, ["hubIncarnation"] = "hub-1" };
         if (machineId is not null) args["machineId"] = machineId;
+        if (role is not null) args["role"] = role;
         var opened = Data(Apply(AggregateKinds.Control, AggregateKinds.ControlKey, RelayTools.SessionOpen, args, Alice, now));
         var chat = new Chat(opened["sessionId"]!.GetValue<string>(), opened["sessionToken"]!.GetValue<string>());
-        var queued = Of(AggregateKinds.Control, AggregateKinds.ControlKey).Effects.Single(effect => effect.Operation == Operations.Open && effect.TargetKey == chat.Id);
-        Call(queued with { Id = "direct-" + queued.Id }, now);
+        var record = SessionRecord.Opened(chat.Id, chat.Token, Alice.PrincipalId, Repository, args);
+        List<DurableEffect> initialize = [new("direct-open-" + ++requests, SessionOpen.TargetKind, chat.Id, SessionOpen.Operation, new SessionOpen(record).ToJson().ToJsonString(), now)];
+        CoordinationStateMachine.StampEffects(initialize, 0, Alice);
+        Call(initialize[0], now);
         return chat;
     }
 

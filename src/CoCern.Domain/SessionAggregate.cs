@@ -52,13 +52,18 @@ internal static class SessionAggregate
         };
     }
 
-    /// <summary>Copies the control directory's record on first delivery; a retry with the same secret is idempotent.</summary>
+    /// <summary>
+    /// Copies the session's record on its first <see cref="SessionOpen"/> (the direct call's or the directory's, whichever lands first); a
+    /// later one with the same secret is idempotent. The record's activity time is the directory's, never the session's own.
+    /// </summary>
     private static RelayReply Initialize(AggregateContext context)
     {
         var state = context.State;
+        if (!SessionOpen.Decode(context.Args).TryGet(out var open, out var malformed)) return Malformed(malformed);
+        var record = open.Record;
         if (state.ContainsKey("principalId"))
-            return Text(state, "principalId") == Text(context.Args, "principalId") && Text(state, "sessionToken") == Text(context.Args, "sessionToken") ? Ok(new { initialized = true }) : Error(SessionDenied);
-        foreach (var field in OpenFields) if (context.Args[field] is { } value) state[field] = value.DeepClone();
+            return Text(state, "principalId") == record.PrincipalId && Text(state, "sessionToken") == record.SessionToken ? Ok(new { initialized = true }) : Error(SessionDenied);
+        foreach (var (field, value) in (record with { ActiveAt = null }).ToJson()) state[field] = value?.DeepClone();
         state["openedAt"] = context.Now.ToString("O");
         if (Text(state, "role").Length > RelayLimits.MaxActivityRoleLength) state.Remove("role");
         // The direct call from session_open carries only the client's fields; the control record's freshness defaults fill the rest.
@@ -68,13 +73,6 @@ internal static class SessionAggregate
         state["availability"] ??= "unknown";
         return Ok(new { initialized = true });
     }
-
-    /// <summary>What a session copies when it opens; anything else in <c>session_open</c>'s arguments could forge freshness or hub state.</summary>
-    internal static readonly string[] OpenFields =
-    [
-        "sessionId", "sessionToken", "principalId", "repositoryId", "hubIncarnation", "machineId", "label", "binding", "role",
-        "bindingVersion", "observedAt", "freshUntil", "availability"
-    ];
 
     /// <summary>What an expired session forgets: its secret, its mail and attention, its tool binding, and the boards waiting on it (told as it closes).</summary>
     private static readonly string[] ExpiredState = ["sessionToken", "inbox", "acked", "attention", "attentionClosed", "attentionArchived", "attentionRecent", "standingSeen", "binding", TargetBoardsKey, WorkBoardsKey];
@@ -118,15 +116,16 @@ internal static class SessionAggregate
     private static RelayReply Expire(AggregateContext context)
     {
         var state = context.State;
-        if (!state.ContainsKey("principalId") || state["expiredAt"] is not null) return Settled(context, Ok(new { expired = true }));
-        var force = Flag(context.Args, "force");
+        if (!SessionExpire.Decode(context.Args).TryGet(out var expire, out var malformed)) return Malformed(malformed);
+        if (!state.ContainsKey("principalId") || state["expiredAt"] is not null) return Settled(context, expire, Ok(new { expired = true }));
+        var force = expire.Force;
         var owns = state[WorkKey] is JsonObject ledger && WorkLedger.Owns(ledger, context.Now);
-        var mail = IsTrue(context.Args, "idle") && state["inbox"] is JsonObject { Count: > 0 };
+        var mail = expire.Idle && state["inbox"] is JsonObject { Count: > 0 };
         // The directory decided from what it had heard (seenAt). Activity this session has reported since, still on its way there, means it
         // was working when it was closed, so it refuses as it does for unresolved work.
-        var working = Date(context.Args, "seenAt") is var seen && seen > DateTimeOffset.MinValue && Date(state, "activeReportedAt") > seen;
-        if (!force && (owns || mail || working)) return KeepOpen(context, owns, mail);
-        if (force) state["forceClosedBy"] = Text(context.Args, "requestedBy");
+        var working = expire.SeenAt is { } seen && Date(state, "activeReportedAt") > seen;
+        if (!force && (owns || mail || working)) return KeepOpen(context, expire, owns, mail);
+        if (force) state["forceClosedBy"] = expire.RequestedBy;
         // Each board waiting on it hears once: those whose tasks target it, and, when it still answers for work (a forced close), those
         // holding that work, which then make it recoverable at once instead of after its claim's lease.
         var told = new HashSet<string>(StringComparer.Ordinal);
@@ -136,18 +135,13 @@ internal static class SessionAggregate
         ReturnUnread(context, state);
         foreach (var key in ExpiredState) state.Remove(key);
         state["expiredAt"] = context.Now.ToString("O");
-        return Settled(context, Ok(new { expired = true }));
+        return Settled(context, expire, Ok(new { expired = true }));
     }
 
-    /// <summary>Acknowledges a close the directory fenced (<c>closeSeq</c>), so it stops waiting for this session's answer.</summary>
-    private static RelayReply Settled(AggregateContext context, RelayReply reply)
+    /// <summary>Acknowledges the close the directory fenced (<see cref="SessionExpire.CloseSeq"/>), so it stops waiting for this session's answer.</summary>
+    private static RelayReply Settled(AggregateContext context, SessionExpire expire, RelayReply reply)
     {
-        if (context.Args["closeSeq"] is not null)
-            context.Emit(AggregateKinds.Control, AggregateKinds.ControlKey, Operations.SessionExpired, new JsonObject
-            {
-                ["repositoryId"] = context.Repository, ["sessionId"] = Text(context.State, "sessionId") is { Length: > 0 } self ? self : context.Key,
-                ["closeSeq"] = Number(context.Args, "closeSeq")
-            });
+        context.Send(AggregateKinds.ControlKey, new SessionExpired(context.Repository, expire.SessionId, expire.CloseSeq));
         return reply;
     }
 
@@ -180,20 +174,19 @@ internal static class SessionAggregate
     /// as the directory keeps it, with the work it answers for (and its report sequence, so the directory orders later reports after it) or
     /// the unread mail that holds it open. Nothing here changes; the chat never sees the close.
     /// </summary>
-    private static RelayReply KeepOpen(AggregateContext context, bool owns, bool mail)
+    private static RelayReply KeepOpen(AggregateContext context, SessionExpire expire, bool owns, bool mail)
     {
         var state = context.State;
-        var record = new JsonObject();
-        foreach (var field in OpenFields) if (state[field] is { } value) record[field] = value.DeepClone();
         // The directory's activity time is the last one this session reported.
-        if (Text(state, "activeReportedAt") is { Length: > 0 } active) record["activeAt"] = active;
-        var restore = new JsonObject { ["repositoryId"] = context.Repository, ["sessionId"] = Text(state, "sessionId"), ["record"] = record };
-        if (owns) { restore["owns"] = true; restore["seq"] = state[WorkReportedKey] is JsonObject reported ? Number(reported, "seq") : 0; }
-        if (mail) restore["mail"] = true;
-        if (context.Args["closeSeq"] is not null) restore["closeSeq"] = Number(context.Args, "closeSeq");
-        context.Emit(AggregateKinds.Control, AggregateKinds.ControlKey, Operations.SessionRestore, restore);
+        var record = OwnRecord(state) with { ActiveAt = OptionalDate(state, "activeReportedAt") };
+        var seq = owns && state[WorkReportedKey] is JsonObject reported ? Number(reported, "seq") : 0;
+        context.Send(AggregateKinds.ControlKey, new SessionRestore(context.Repository, expire.SessionId, expire.CloseSeq, record, owns, seq, mail));
         return Ok(new { expired = false, keptFor = owns ? "work" : mail ? "mail" : "active" });
     }
+
+    /// <summary>This open session's own copy of its record. It always reads: only a decoded <see cref="SessionOpen"/> opens a session.</summary>
+    private static SessionRecord OwnRecord(JsonObject state) =>
+        SessionRecord.Decode(state).TryGet(out var record, out var malformed) ? record : throw new InvalidOperationException("The session's own record lacks " + string.Join(", ", malformed) + ".");
 
     private const string TargetBoardsKey = "targetBoards";
 
@@ -218,10 +211,7 @@ internal static class SessionAggregate
     }
 
     private static void TellBoard(AggregateContext context, string boardKey, string boardId) =>
-        context.Emit(AggregateKinds.Board, boardKey, Operations.SessionClosed, new JsonObject
-        {
-            ["repositoryId"] = context.Repository, ["boardId"] = boardId, ["sessionId"] = Text(context.State, "sessionId") is { Length: > 0 } self ? self : context.Key
-        });
+        context.Send(boardKey, new SessionClosed(context.Repository, boardId, Text(context.State, "sessionId") is { Length: > 0 } self ? self : context.Key));
 
     /// <summary>The kind of the notice a sender gets when its message could not be delivered.</summary>
     private const string UndeliveredKind = "delivery.failed";
@@ -387,9 +377,7 @@ internal static class SessionAggregate
         if (Text(args, "availability") is { Length: > 0 } availability) state["availability"] = availability;
         else state["availability"] ??= "unknown";
         state["hubIncarnation"] = Text(args, "hubIncarnation");
-        var registration = new JsonObject { ["repositoryId"] = Text(state, "repositoryId"), ["sessionId"] = Text(state, "sessionId") };
-        foreach (var field in ControlAggregate.RegistrationFields) if (state.ContainsKey(field)) registration[field] = state[field]?.DeepClone();
-        context.Emit(AggregateKinds.Control, AggregateKinds.ControlKey, Operations.Register, registration);
+        context.Send(AggregateKinds.ControlKey, new SessionRegistration(context.Repository, Text(state, "sessionId"), OwnRecord(state).Presence));
         return Ok(new { bindingVersion = current + 1 }, current + 1);
     }
 
