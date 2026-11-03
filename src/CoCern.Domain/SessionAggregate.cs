@@ -20,7 +20,7 @@ internal static class SessionAggregate
         if (context.Operation == Operations.Open) return Initialize(context);
         if (context.Operation == Operations.SessionExpire) return Expire(context);
         if (context.Operation == Operations.SessionTargetWatch) return WatchTarget(context);
-        var expired = context.State["expiredAt"] is not null;
+        var expired = ReadModels.IsClosed(context.State);
         // An expired session takes no deliveries (a refusal would be retried forever; the sender is told instead) and refuses attention,
         // which its sources then drop.
         if (context.Operation == Operations.Deliver) return expired ? Undelivered(context, Ok(new { expired = true }), "closed") : Deliver(context);
@@ -64,7 +64,7 @@ internal static class SessionAggregate
     {
         var state = context.State;
         if (!SessionOpen.Decode(context.Args).TryGet(out var open, out var malformed)) return Malformed(malformed);
-        if (state["expiredAt"] is not null) return Ok(new { initialized = false, expired = true });
+        if (ReadModels.IsClosed(state)) return Ok(new { initialized = false, expired = true });
         var record = open.Record;
         if (state.ContainsKey("principalId"))
             return Text(state, "principalId") == record.PrincipalId && Text(state, "sessionToken") == record.SessionToken ? Ok(new { initialized = true }) : Error(SessionDenied);
@@ -123,10 +123,10 @@ internal static class SessionAggregate
     {
         var state = context.State;
         if (!SessionExpire.Decode(context.Args).TryGet(out var expire, out var malformed)) return Malformed(malformed);
-        if (state["expiredAt"] is not null) return Settled(context, expire, Ok(new { expired = true }));
+        if (ReadModels.IsClosed(state)) return Settled(context, expire, Ok(new { expired = true }));
         if (!state.ContainsKey("principalId"))
         {
-            state["expiredAt"] = context.Now.ToString("O");
+            state[ReadModels.ClosedAtKey] = context.Now.ToString("O");
             return Settled(context, expire, Ok(new { expired = true }));
         }
         var force = expire.Force;
@@ -145,7 +145,7 @@ internal static class SessionAggregate
                 if (told.Add(board.Key)) TellBoard(context, board.Key, Text(board.Value as JsonObject ?? new JsonObject(), "boardId", "default"));
         ReturnUnread(context, state);
         foreach (var key in ExpiredState) state.Remove(key);
-        state["expiredAt"] = context.Now.ToString("O");
+        state[ReadModels.ClosedAtKey] = context.Now.ToString("O");
         return Settled(context, expire, Ok(new { expired = true }));
     }
 
@@ -213,7 +213,7 @@ internal static class SessionAggregate
         var board = Text(context.Args, "boardKey");
         var boardId = Text(context.Args, "boardId", "default");
         if (board.Length == 0 || !state.ContainsKey("principalId")) return Ok(new { watching = false });
-        if (state["expiredAt"] is not null) { TellBoard(context, board, boardId); return Ok(new { watching = false, closed = true }); }
+        if (ReadModels.IsClosed(state)) { TellBoard(context, board, boardId); return Ok(new { watching = false, closed = true }); }
         var boards = ObjectAt(state, TargetBoardsKey);
         boards.Remove(board);
         boards[board] = new JsonObject { ["boardId"] = boardId };

@@ -55,7 +55,7 @@ Every call takes `repositoryId`. Session calls also take `sessionId` and `sessio
 
 **Retries.** Retry a write with the same `requestId`. Within 24 hours it does not run again; it gets the first reply. Only your own arguments count as the same request, not what the hub adds. A very busy board or session (over about 7,500 writes in a day) may drop that reply early: the retry then gets `RequestExpired` (409), so read the current state and decide.
 
-**Sessions.** Keep one session per chat and reuse its handle across reconnects. A `session_open` retried with the same `requestId` and arguments returns the same session, token included, so a lost reply never makes a second session; other arguments under that `requestId` get `RequestConflict`. Through the adapter this holds across app restarts in Claude Code, and in Codex only until the app restarts CoCern. After `SessionUnknown`, open with a new `requestId`.
+**Sessions.** Keep one session per chat and reuse its handle across reconnects. A `session_open` retried with the same `requestId` and arguments returns the same session, token included, so a lost reply never makes a second session (unless that session has closed since: then it gets `SessionUnknown` with `expired: true`); other arguments under that `requestId` get `RequestConflict`. Through the adapter this holds across app restarts in Claude Code, and in Codex only until the app restarts CoCern. After `SessionUnknown`, open with a new `requestId`.
 
 **Closing sessions.** The hub closes sessions with no call for `Relay:Sessions:IdleHours` (a day by default). An administrator can close them sooner: `control_request` with `"command": "close_sessions"` and `idleMinutes` (60 or more) and/or `labelPrefix` (both must match when both are given) closes that repository's matching sessions. It never closes the session named by the call's `sessionId`; the adapter adds the chat's own when it is left out. It answers `closed`, `kept`, `held`, `active`, `more` and up to 50 `ids`; one call closes at most 512, and `more: true` means call again. The Sessions page's **Close idle sessions** offers idle over an hour, idle over a day, or a label prefix. Idle times count from the last call and are never cut short, but activity is recorded about hourly, so a session may stay up to an hour longer.
 
@@ -217,7 +217,7 @@ Replies stay under 2,000 tokens; hits that don't fit are counted in `more`. Erro
 
 ### Activity
 
-Every tool call goes to the `activity_log` table: time, session, role, tool, result, sizes and duration, never arguments or reply text. Wakes and attention offers and answers are logged too. Logging never slows or fails a call. Raw rows are kept 30 days, then rolled up into `activity_daily`.
+Every tool call goes to the `activity_log` table: time, session, role, tool, result, sizes and duration, never arguments or reply text. Wakes and attention offers and answers are logged too, and so is each hub-internal message a grain refused for good (kind `effect_refused`, which should stay at zero). Logging never slows or fails a call. Raw rows are kept 30 days, then rolled up into `activity_daily`.
 
 | Counter | Definition |
 | --- | --- |
@@ -319,6 +319,8 @@ New-NetFirewallRule -DisplayName "CoCern hub (HTTPS 5273)" -Direction Inbound -A
 **Codex chats** are woken by the node with `codex queue`: never mid-turn, at most one waiting wake per chat, at most one every 3 seconds and 20 per 10 minutes. If a wake's outcome is unknown (the dispatch failed or was cut off), that chat isn't woken again for 10 minutes, and that wake's messages are never sent twice. Codex gives the adapter no chat ID, so the node finds each chat from its transcript.
 
 **Claude chats** on a joined PC wake themselves with `--await-inbox --chat <CLAUDE_CODE_SESSION_ID>` (see the README). The chat must have called `session_open` on this PC first, through the node's credentials; the waiter needs the node, so on the hub's own PC it exits 1. Exit codes: 0 mail arrived, 1 no session for that chat, 2 timed out, 3 stopped. `--print-inbox` also prints the messages; `--ack <id,id>` acknowledges them, then waits again. The chat shows as reachable only while it runs.
+
+A chat is **reachable** when its PC announced within the last 90 seconds of the hub's clock (either side, so a clock set back never keeps a silent PC live for long) and its wake path is running: the node's for Codex, the waiter for Claude. `chat_directory` and the dashboard apply the same rule.
 
 `--wake <config>` and `--await-inbox <config>` also take a hand-written config; see `scripts/Start-CoCernWake.ps1`. Watch each chat with only one of them. For an `https://` `relayUrl`, give the hub certificate's SHA-256 `fingerprint` in the config (it wins over `COCERN_FINGERPRINT`); only that certificate is accepted.
 
@@ -514,7 +516,7 @@ Dependencies point inward; Domain knows nothing about Orleans or storage.
 | `DiscoveryGrain` | `hub` | Joined PCs and their chats. |
 | `AnomalyMonitorGrain` | repository | The next anomaly check. |
 
-**A call.** The client calls `POST /api/tools/{tool}` or `/mcp` (the stdio adapter forwards to REST). The host authenticates the token; identity never comes from the JSON. `RelayApplication` validates the call and the session handle, then calls the grain, which runs `CoordinationStateMachine.Apply` on a copy of its state. On success, one SQLite transaction saves the state, its outbox of effects for other grains, its due work and its search rows. `DueWorkDispatcher` delivers the effects; receivers ignore ones they already applied. A message sends a SignalR hint; the inbox stays the source of truth. The activity log is written in the background.
+**A call.** The client calls `POST /api/tools/{tool}` or `/mcp` (the stdio adapter forwards to REST). The host authenticates the token; identity never comes from the JSON. `RelayApplication` validates the call and the session handle, then calls the grain, which runs `CoordinationStateMachine.Apply` on a copy of its state. On success, one SQLite transaction saves the state, its outbox of effects for other grains, its due work and its search rows. `DueWorkDispatcher` delivers the effects; receivers ignore ones they already applied, and may get them late, reordered or twice. A message sends a SignalR hint; the inbox stays the source of truth. The activity log is written in the background.
 
 | Place | What |
 | --- | --- |
@@ -523,6 +525,10 @@ Dependencies point inward; Domain knows nothing about Orleans or storage.
 | `data/local-client-token` | The administrator token, where the start script and Visual Studio profile put it. Owner-only. |
 | `data/hub-certificate.pfx` | The HTTPS certificate, beside the database. One an earlier version made under the content root (`src/CoCern.Host/data` from Visual Studio) is moved here, keeping its fingerprint. |
 | `%LOCALAPPDATA%\CoCern\node` | On each joined PC: the node's credential, pinned fingerprint, join code, session handles and wake state. |
+
+**Messages between aggregates.** The session lifecycle's internal messages are typed records in `CoCern.Domain.Messages` (`SessionOpen`, `SessionExpire`, `SessionRestore`, `SessionExpired`, `SessionClosed`, `ActionWorkReport`, `SessionOwnership`, `SessionRegistration`, `SessionActivity`), built around one `SessionRecord`. Each has one shape, one sender and one delivery class. A state transfer (`Retry`) is retried until it lands; a report its sender sends again whole (`DropAndCount`) is dropped and counted as `effect_refused` when refused. A payload missing a required field is answered `MalformedEffect`, logged once at Error naming the fields (never their values), and then retried or dropped by its class. A test keeps every other internal operation on an untyped list that may only shrink, and `tests/CoCern.Tests/Support/AggregateHub.cs` runs lifecycle scenarios through every delivery order, with duplicates, checking the invariants after each step.
+
+**Reading stored state.** Code outside the Domain asks `ReadModels` instead of reading aggregate JSON itself: whether a session is closed (stored as `grain_state.closed` on each commit) and whether a chat is reachable. A test checks every JSON path in `Views.sql` and the standing query against a board the Domain built.
 
 **Rules to keep.** Claims are advisory. Every fixed limit lives in `RelayLimits`. Keep tool descriptions and schemas short: they are sent on every model turn, and a test caps their size.
 
