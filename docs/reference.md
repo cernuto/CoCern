@@ -23,7 +23,7 @@ Admin tools need a token with `IsAdministrator`. A session's `role` grants nothi
 | Tool | Who | What it does |
 | --- | --- | --- |
 | `session_open` | worker | Open a session for this chat; returns its private handle and the board's standing. |
-| `session_bind` | worker | Record this session's IDE tool bindings. Optional `label` renames the session (to match its chat's title) and `machineId` reports its PC; a bind that leaves out `binding` keeps the current one. |
+| `session_bind` | worker | Record this session's IDE tool bindings. Optional `label` renames the session (to match its chat's title) and `machineId` reports its PC, once (a later one is ignored); a bind that leaves out `binding` or `availability`, or sends `null`, keeps the current one. |
 | `worker_list` | worker | List reported workers and how fresh each report is. |
 | `get_status` | worker | Repository and session status, including blockers and uncertain actions. |
 | `task_get` | worker | One task, or the board. |
@@ -51,11 +51,19 @@ Admin tools need a token with `IsAdministrator`. A session's `role` grants nothi
 
 Every call takes `repositoryId`. Session calls also take `sessionId` and `sessionToken`; keep the token private to the chat. Writes take a `requestId`.
 
-**Arguments.** IDs (`taskId`, `sessionId`, `resourceId` and the like) are at most 256 characters, not blank, and without control characters. Versions, revisions, generations, attempts and leases are whole numbers; a quoted one (`"3"`) works, and `null` counts as left out. A repeated key or unreadable text is `InvalidArguments`. Out-of-range leases are clamped to 1 to 1800 seconds. A message to a session that doesn't exist is accepted and then dropped.
+**Arguments.** IDs (`taskId`, `sessionId`, `resourceId` and the like) are at most 256 characters, not blank, and without control characters. Versions, revisions, generations, attempts and leases are whole numbers; a quoted one (`"3"`) works, and `null` counts as left out. A repeated key or unreadable text is `InvalidArguments`. Out-of-range leases are clamped to 1 to 1800 seconds. A message to a session that doesn't exist is accepted, then comes back to the sender (see Sessions).
 
 **Retries.** Retry a write with the same `requestId`. Within 24 hours it does not run again; it gets the first reply. Only your own arguments count as the same request, not what the hub adds. A very busy board or session (over about 7,500 writes in a day) may drop that reply early: the retry then gets `RequestExpired` (409), so read the current state and decide.
 
-**Sessions.** Keep one session per chat and reuse its handle across reconnects. A `session_open` retried with the same `requestId` and arguments returns the same session, token included, so a lost reply never makes a second session; other arguments under that `requestId` get `RequestConflict`. After `SessionUnknown`, open with a new `requestId`. The hub closes sessions not seen for `Relay:Sessions:IdleHours` (a day by default), and an administrator can close them sooner: `control_request` with `"command": "close_sessions"` and `idleMinutes` (60 or more) and/or `labelPrefix` (both must match when both are given) closes that repository's matching sessions, never the caller's own, and answers `closed`, `kept` and up to 50 `ids`. The Sessions page has the same as **Close idle sessions**. A session with an action still open is never closed. The session list holds 2,048; when it is full, `session_open` also closes sessions not seen for a day. A closed session's calls get `SessionUnknown` with `expired: true`: call `session_open` again. If only sessions with open actions fill it, `session_open` gets `CapacityExceeded` with `heldByUnresolvedActions`: report or [recover](#stranded-actions) those actions.
+**Sessions.** Keep one session per chat and reuse its handle across reconnects. A `session_open` retried with the same `requestId` and arguments returns the same session, token included, so a lost reply never makes a second session; other arguments under that `requestId` get `RequestConflict`. Through the adapter this holds across app restarts in Claude Code, and in Codex only until the app restarts CoCern. After `SessionUnknown`, open with a new `requestId`.
+
+**Closing sessions.** The hub closes sessions with no call for `Relay:Sessions:IdleHours` (a day by default). An administrator can close them sooner: `control_request` with `"command": "close_sessions"` and `idleMinutes` (60 or more) and/or `labelPrefix` (both must match when both are given) closes that repository's matching sessions. It never closes the session named by the call's `sessionId`; the adapter adds the chat's own when it is left out. It answers `closed`, `kept`, `held`, `more` and up to 50 `ids`; one call closes at most 512, and `more: true` means call again. The Sessions page's **Close idle sessions** offers idle over an hour, idle over a day, or a label prefix. Idle times count from the last call and are never cut short, but activity is recorded about hourly, so a session may stay up to an hour longer.
+
+- Never closed: a session with an action still open. Not closed when idle: a session with unread messages (counted as `held`), for up to 7 days without a call; a label-only close does close it.
+- The session list holds 2,048; when it is full, `session_open` also closes sessions not seen for a day. If only sessions with open actions fill it, `session_open` gets `CapacityExceeded` with `heldByUnresolvedActions`: report or [recover](#stranded-actions) those actions.
+- A closed session's calls get `SessionUnknown` with `expired: true`: call `session_open` again.
+- A message to a closed or unknown session, or to a full inbox, comes back to the sender as an inbox message with `kind: "delivery.failed"`, `reason` (`closed`, `unknown` or `full`), `recipientSessionId`, `undeliveredMessageId` and the `text`.
+- A task whose `targetSessionId` names a session that closed loses the target, so anyone may claim it.
 
 **Large items.** A message or note too large to read back is refused with `PayloadTooLarge` (`maxBytes`, `bytes`). A stored item too large for any page comes back alone as a piece (`truncated: true`, `bytes`, `part`): call again with the same `cursor` and `partOffset` set to `nextPartOffset`. Joined, the pieces are the item's JSON.
 
@@ -338,7 +346,7 @@ Set them in `appsettings.json`, as environment variables (`Relay__Clients__0__To
 | `Relay:GatewayPort` | 0 (off) | An Orleans client gateway (loopback). Leave it off: nothing uses it, and it would let any local process call grains without a token. |
 | `Relay:ClusterId` | `CoCern` | Orleans cluster name. |
 | `Relay:Board:ArchiveAfterDays` | 30 | Days after completion before a task is archived (0 to 3650). |
-| `Relay:Sessions:IdleHours` | 24 | Hours without a call after which the hub closes a session, checked every 10 minutes (2 to 720). Activity is recorded about hourly, so closing is accurate to about an hour. |
+| `Relay:Sessions:IdleHours` | 24 | Hours without a call after which the hub closes a session, checked every 10 minutes (2 to 720). Never sooner; activity is recorded about hourly, so up to an hour later. A session with unread messages is kept. |
 | `Relay:Dashboard:ViewerPrincipalIds:N` | | Administrator principals that may open the dashboard. The start script and Visual Studio profile set theirs. |
 | `Relay:Dashboard:OpenOnStart` | `false` | Open the dashboard in the default browser when the hub starts, already signed in with that start's one-time link. The Visual Studio launch profile turns it on. |
 | `Relay:Dashboard:SessionHours` | 8 | Hours a dashboard sign-in lasts in that browser session (1 to 168). The deadline is fixed at sign-in; use doesn't extend it. |
@@ -515,19 +523,19 @@ Dependencies point inward; Domain knows nothing about Orleans or storage.
 
 ## Verification
 
-Beyond the unit and integration tests, `scripts/Smoke-CoCern.py` checks a real hub process end to end (84 checks, about 20 seconds; see the README).
+Beyond the unit and integration tests, `scripts/Smoke-CoCern.py` checks a real hub process end to end (94 checks; see the README).
 
 **Checked live**
 
 - Two chats on one PC (Codex and Claude Code): messages, acknowledgments, version conflicts, busy claims and the Claude waiter.
 - Codex wake-ups: `codex queue` started real turns in two desktop chats; a watcher restart sent no duplicates.
 - Discovery with a separate hub and two nodes on one PC: joining, certificate pinning, `chat_directory`, refusals, and a stopped node turning unreachable within 90 seconds.
-- The dashboard at desktop and phone sizes: sign-in link, sessions, logs, themes, the Connect page writing an app's settings, and Add another PC's one pasted command (download from the hub, join, Claude Code and Codex entries, start with Windows).
+- The dashboard at desktop and phone sizes: sign-in link, sessions, logs, themes, and the Connect page writing an app's settings.
 
 **Not checked yet**
 
 - Discovery or the dashboard from a second physical PC or phone, through a real firewall.
-- `--setup` and `--connect` on a real Windows PC (the Run key and client settings edits are covered by tests only), and the Claude desktop app's settings.
+- The current Add another PC command on a real Windows PC. It changed after its last live run; tests compile its certificate pin and run it end to end in PowerShell 7 here, and in Windows PowerShell 5.1 only on Windows. Also the Claude desktop app's settings.
 - A real Codex chat woken by the node and found from its transcript.
 - Remote HTTPS with an external OAuth issuer, and the ChatGPT chat app.
 - Analytics loading the bundled extension on a real Windows hub.

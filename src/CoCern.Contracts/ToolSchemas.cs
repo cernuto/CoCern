@@ -143,7 +143,7 @@ internal static class ToolSchemas
             case RelayTools.SessionOpen:
                 Text("label", "Display label for this chat's session."); properties["requestId"] = new { type = "string", maxLength = RelayLimits.MaxIdentifierLength, description = SessionOpenRequestId }; Object("binding", "Reported configured Roslyn/Visual Studio binding and source identity."); break;
             case RelayTools.SessionBind:
-                Object("binding", "Reported configured Roslyn/Visual Studio binding; update under expectedVersion. Left out, the current binding stays."); Text("label", "New display label for this session, such as its chat's title."); Text("availability", "Reported current worker availability."); Integer("freshnessSeconds", "Freshness duration, at most 600 seconds."); break;
+                Object("binding", "Reported configured Roslyn/Visual Studio binding; update under expectedVersion. Left out or null, the current binding stays."); Text("label", "New display label for this session, such as its chat's title."); Text("availability", "Reported current worker availability."); Integer("freshnessSeconds", "Freshness duration, at most 600 seconds."); break;
             case RelayTools.TaskGet:
                 properties["taskId"] = new { type = "string", maxLength = RelayLimits.MaxIdentifierLength, description = "Omit for a bounded board list or delta." };
                 properties["section"] = new { type = "string", @enum = new[] { "facts", "messages", "reports", "actions", "workflow", "standing" }, description = "standing needs no taskId." };
