@@ -9,51 +9,57 @@
             <button type="button" class="traffic-pause" aria-pressed="@(_paused ? "true" : "false")" @onclick="TogglePause">@(_paused ? "Resume" : "Pause")</button>
         </div>
     </div>
-    <div class="traffic-legend"><span><i class="traffic-key request" aria-hidden="true"></i>Request</span><span><i class="traffic-key response" aria-hidden="true"></i>Response</span><span><i class="traffic-key push" aria-hidden="true"></i>Push</span><span class="traffic-count">@VisibleEvents.Length shown</span></div>
+    <div class="traffic-legend"><span><i class="traffic-key request" aria-hidden="true"></i>Request</span><span><i class="traffic-key response" aria-hidden="true"></i>Response</span><span><i class="traffic-key push" aria-hidden="true"></i>Push</span><span><i class="traffic-key error" aria-hidden="true"></i>Error</span><span class="traffic-count">@VisibleEvents.Length shown</span></div>
     @if (_sessionOnly && SelectedSession is not null)
     {
         <p class="traffic-scope">Following @SelectedSession.Label</p>
     }
     <div class="traffic-stream" @onwheel="Pause" @ontouchmove="Pause" @onkeydown="PauseForScrollKey" tabindex="0" aria-label="Recent traffic. Scrolling or opening an event pauses it.">
-        <ol class="traffic-events">
-            @foreach (var entry in VisibleEvents)
-            {
-                var inspecting = _selectedSequence == entry.Sequence;
-                <li class="traffic-event @KindClass(entry.Kind) @(IsNew(entry.Sequence) ? "traffic-arrival" : "") @(inspecting ? "inspecting" : "")" @key="entry.Sequence">
-                    <button type="button" class="traffic-event-summary" aria-expanded="@(inspecting ? "true" : "false")" @onclick="() => Inspect(entry.Sequence)">
-                        <span class="traffic-direction" aria-hidden="true"></span>
-                        <span class="traffic-kind">@KindLabel(entry.Kind)</span>
-                        <span class="traffic-operation">@entry.Name</span>
-                        @if (entry.Code is not null) { <span class="traffic-code">@entry.Code</span> }
-                        @if (entry.DurationMilliseconds is not null) { <span class="traffic-duration">@Duration(entry.DurationMilliseconds)</span> }
-                        <time title="@DashboardFormat.Timestamp(entry.Timestamp)">@entry.Timestamp.ToLocalTime().ToString("HH:mm:ss")</time>
-                        <span class="traffic-expand" aria-hidden="true">@(inspecting ? "−" : "+")</span>
-                    </button>
-                    @if (inspecting)
-                    {
-                        <div class="traffic-event-detail">
-                            <dl><div><dt>Time</dt><dd>@DashboardFormat.Timestamp(entry.Timestamp)</dd></div><div><dt>Session</dt><dd>@SessionLabel(entry.SessionId)</dd></div>
-                                @if (entry.CorrelationId is not null) { <div><dt>Correlation</dt><dd>@entry.CorrelationId</dd></div> }
-                            </dl>
-                            @if (PairedEvent(entry) is { } paired)
-                            {
-                                <p class="traffic-pair">Matching @KindLabel(paired.Kind).ToLowerInvariant(): @paired.Name@if (paired.Code is not null) { <span> (@paired.Code)</span> }@if (paired.DurationMilliseconds is not null) { <span>, @Duration(paired.DurationMilliseconds)</span> }</p>
-                            }
-                            else if (entry.CorrelationId is not null)
-                            {
-                                <p class="traffic-pair">The matching event isn't shown.</p>
-                            }
-                        </div>
-                    }
-                </li>
-            }
-        </ol>
+        <table class="traffic-table">
+            <caption class="visually-hidden">Tool traffic through the hub, newest first. Select an event to inspect its metadata.</caption>
+            <thead><tr><th scope="col">No.</th><th scope="col">Time</th><th scope="col">Source</th><th scope="col">Destination</th><th scope="col">Type</th><th scope="col">Info</th></tr></thead>
+            <tbody>
+                @foreach (var entry in VisibleEvents)
+                {
+                    var inspecting = _selectedSequence == entry.Sequence;
+                    <tr class="traffic-event @KindClass(entry.Kind) @(IsError(entry) ? "traffic-error" : "") @(IsNew(entry.Sequence) ? "traffic-arrival" : "") @(inspecting ? "inspecting" : "")" data-sequence="@entry.Sequence" @key="entry.Sequence" @onclick="() => Inspect(entry.Sequence)">
+                        <td class="traffic-sequence">@entry.Sequence</td>
+                        <td class="traffic-time"><time title="@DashboardFormat.Timestamp(entry.Timestamp)">@entry.Timestamp.ToLocalTime().ToString("HH:mm:ss.fff")</time></td>
+                        <td class="traffic-endpoint" title="@EndpointTitle(entry, true)">@TrafficSource(entry)</td>
+                        <td class="traffic-endpoint" title="@EndpointTitle(entry, false)">@TrafficDestination(entry)</td>
+                        <td class="traffic-kind">@KindLabel(entry.Kind)</td>
+                        <td class="traffic-info"><button type="button" class="traffic-inspect" aria-expanded="@(inspecting ? "true" : "false")" aria-controls="traffic-selected-event" aria-label="@($"Inspect {KindLabel(entry.Kind).ToLowerInvariant()} {entry.Name}, event {entry.Sequence}")" @onclick="() => Inspect(entry.Sequence)" @onclick:stopPropagation="true">@EventInfo(entry)</button></td>
+                    </tr>
+                }
+            </tbody>
+        </table>
         @if (VisibleEvents.Length == 0)
         {
             <p class="empty-copy">@(_sessionOnly ? "No recent traffic for this session." : "No recent traffic.")</p>
         }
     </div>
-    <p class="traffic-footnote">The latest 120 events, names and timings only.</p>
+    @if (SelectedEvent is { } selected)
+    {
+        <div class="traffic-event-detail" id="traffic-selected-event" role="region" aria-label="Selected traffic event">
+            <div class="traffic-detail-heading"><h3>Event @selected.Sequence · @KindLabel(selected.Kind)</h3><button type="button" @onclick="() => Inspect(selected.Sequence)" aria-label="Close event details">Close</button></div>
+            <dl>
+                <div><dt>Time</dt><dd>@selected.Timestamp.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss.fff zzz")</dd></div>
+                <div><dt>Source</dt><dd>@EndpointTitle(selected, true)</dd></div>
+                <div><dt>Destination</dt><dd>@EndpointTitle(selected, false)</dd></div>
+                <div><dt>Info</dt><dd>@EventInfo(selected)</dd></div>
+                @if (selected.CorrelationId is not null) { <div><dt>Correlation</dt><dd>@selected.CorrelationId</dd></div> }
+            </dl>
+            @if (PairedEvent(selected) is { } paired)
+            {
+                <p class="traffic-pair">Matching @KindLabel(paired.Kind).ToLowerInvariant(): @EventInfo(paired)</p>
+            }
+            else if (selected.CorrelationId is not null)
+            {
+                <p class="traffic-pair">The matching event isn't shown.</p>
+            }
+        </div>
+    }
+    <p class="traffic-footnote">Latest 120 tool events through the hub. Metadata only; a stored send doesn't prove delivery.</p>
 </section>
 
 @code {
@@ -75,6 +81,7 @@
     private bool _sessionOnly;
     private string TrafficDescription => !Live ? "Waiting for the hub. Showing the last traffic seen." : _paused ? "Paused." : "Requests, responses and pushes as they happen.";
     private DashboardTrafficEvent[] VisibleEvents => _sessionOnly && SelectedSession is not null ? _window.Where(entry => entry.SessionId == SelectedSession.SessionId).ToArray() : _window;
+    private DashboardTrafficEvent? SelectedEvent => VisibleEvents.FirstOrDefault(entry => entry.Sequence == _selectedSequence);
 
     protected override void OnParametersSet()
     {
@@ -141,7 +148,26 @@
     }
 
     private DashboardTrafficEvent? PairedEvent(DashboardTrafficEvent entry) => entry.CorrelationId is null ? null : _window.FirstOrDefault(candidate => candidate.Sequence != entry.Sequence && candidate.CorrelationId == entry.CorrelationId);
-    private string SessionLabel(string? id) => id is null ? "Relay-wide" : Sessions.FirstOrDefault(session => session.SessionId == id)?.Label ?? id;
+    private string ClientLabel(string? id, bool full = false)
+    {
+        if (string.IsNullOrWhiteSpace(id)) return "Unknown client";
+        var session = Sessions.FirstOrDefault(candidate => candidate.SessionId == id);
+        var identity = full ? id : id[..Math.Min(8, id.Length)];
+        if (session is null) return $"Session #{identity}";
+        var machine = string.IsNullOrWhiteSpace(session.MachineName) ? session.MachineId : session.MachineName;
+        if (!full) return $"{(string.IsNullOrWhiteSpace(machine) ? "Session" : machine)} #{identity}";
+        return $"{session.Label}{(string.IsNullOrWhiteSpace(machine) ? "" : $" · {machine}")} #{identity}";
+    }
+    private string TrafficSource(DashboardTrafficEvent entry) => entry.Kind.ToLowerInvariant() switch { "request" => ClientLabel(entry.SessionId), "response" or "push" => "Hub", _ => "Unknown" };
+    private string TrafficDestination(DashboardTrafficEvent entry) => entry.Kind.ToLowerInvariant() switch { "request" => "Hub", "response" or "push" => ClientLabel(entry.SessionId), _ => "Unknown" };
+    private string EndpointTitle(DashboardTrafficEvent entry, bool source) => entry.Kind.ToLowerInvariant() switch
+    {
+        "request" => source ? ClientLabel(entry.SessionId, true) : "Hub",
+        "response" or "push" => source ? "Hub" : ClientLabel(entry.SessionId, true),
+        _ => "Unknown"
+    };
+    private static bool IsError(DashboardTrafficEvent entry) => entry.Kind.Equals("response", StringComparison.OrdinalIgnoreCase) && entry.Code is { Length: > 0 } code && !code.Equals("Ok", StringComparison.OrdinalIgnoreCase);
+    private static string EventInfo(DashboardTrafficEvent entry) => entry.Name + (entry.Code is null ? "" : $" · {entry.Code}") + (entry.DurationMilliseconds is null ? "" : $" · {Duration(entry.DurationMilliseconds)}");
     private static string KindClass(string kind) => kind.ToLowerInvariant() switch { "response" => "response", "push" => "push", _ => "request" };
     private static string KindLabel(string kind) => kind.ToLowerInvariant() switch { "request" => "Request", "response" => "Response", "push" => "Push", _ => "Event" };
     private static string Duration(double? milliseconds) => milliseconds is null ? "—" : milliseconds < 1000 ? $"{milliseconds:0.#} ms" : $"{milliseconds / 1000:0.##} s";

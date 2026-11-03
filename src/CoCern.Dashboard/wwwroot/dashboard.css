@@ -88,7 +88,7 @@ small { font-size: .8rem; }
 .summary-stat span { color: var(--muted); font-size: .8rem; }
 .surface { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; min-width: 0; }
 .board-layout { display: grid; grid-template-columns: minmax(0, 1fr) 306px; gap: 20px; align-items: start; margin-bottom: 22px; }
-.overview-layout { display: grid; grid-template-columns: minmax(0,1fr) 306px; grid-template-areas: "board inspector" "traffic inspector"; gap: 20px; align-items: start; margin-bottom: 22px; }
+.overview-layout { display: grid; grid-template-columns: minmax(0,1fr) 306px; grid-template-areas: "board inspector" "traffic traffic"; gap: 20px; align-items: start; margin-bottom: 22px; }
 .overview-board { grid-area: board; min-width: 0; }
 .overview-inspector { grid-area: inspector; min-width: 0; }
 .overview-traffic { grid-area: traffic; min-width: 0; }
@@ -453,55 +453,69 @@ small { font-size: .8rem; }
 :root[data-motion="off"] *, :root[data-motion="off"] *::before, :root[data-motion="off"] *::after { animation: none !important; transition: none !important; }
 :root[data-motion="off"] .signal .session-token::after, :root[data-motion="off"] .signal-trail { display: none; }
 
-/* Recovered TrafficLane rules. Append to the current merged dashboard.css, preserving game-board rules. */
-.traffic-lane { margin-bottom: 22px; overflow: hidden; }
+/* Traffic uses a dense packet-list layout; color identifies event kind, never delivery state. */
+.traffic-lane { margin-bottom: 22px; overflow: hidden; --traffic-request: #e5f5fb; --traffic-response: #e8f4ee; --traffic-push: #fff3d7; --traffic-error: #fde8e8; --traffic-selected: #c9e5f5; }
+:root[data-theme="dark"] .traffic-lane { --traffic-request: #163b4d; --traffic-response: #173d37; --traffic-push: #463c24; --traffic-error: #512e35; --traffic-selected: #245973; }
 .traffic-lane .section-heading { padding-bottom: 13px; }
 .traffic-controls { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .traffic-controls button { min-height: 44px; padding: 8px 12px; font-size: .76rem; color: var(--ink); background: transparent; border: 1px solid var(--line); border-radius: 7px; }
 .traffic-controls button:hover { background: var(--surface-alt); }
-.traffic-filter.active { background: var(--surface-alt); border-color: var(--focus); }
-.traffic-pause[aria-pressed="true"] { color: var(--ink); border-color: var(--focus); }
+.traffic-filter.active, .traffic-pause[aria-pressed="true"] { border-color: var(--focus); }
 .traffic-legend { display: flex; flex-wrap: wrap; gap: 18px; align-items: center; margin: 0 22px 13px; color: var(--muted); font-size: .7rem; }
 .traffic-legend > span { display: inline-flex; gap: 6px; align-items: center; }
-.traffic-key { width: 9px; height: 9px; display: inline-block; border-radius: 50%; }
-.traffic-key.request { background: #6d97b6; }
-.traffic-key.response { background: #358c7d; }
-.traffic-key.push { background: #b18d41; }
+.traffic-key { width: 10px; height: 10px; display: inline-block; border-radius: 2px; border: 1px solid var(--line); }
+.traffic-key.request { background: #73c5e5; }
+.traffic-key.response { background: #81bea5; }
+.traffic-key.push { background: #dfbf6c; }
+.traffic-key.error { background: #dc9095; }
 .traffic-count { margin-left: auto; font-variant-numeric: tabular-nums; }
 .traffic-scope { margin: 0 22px 12px; font-size: .76rem; color: var(--muted); }
-.traffic-stream { max-height: 318px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--line) transparent; overscroll-behavior-y: contain; border-top: 1px solid var(--line); }
+.traffic-stream { max-height: 390px; overflow: auto; scrollbar-width: thin; scrollbar-color: var(--line) transparent; overscroll-behavior: contain; border-top: 1px solid var(--line); }
 .traffic-stream:focus-visible { outline-offset: -4px; }
-.traffic-events { list-style: none; margin: 0; padding: 0 22px; }
-.traffic-event { position: relative; border-bottom: 1px solid var(--line); }
-.traffic-event:last-child { border-bottom: 0; }
-.traffic-event-summary { display: flex; width: 100%; align-items: center; gap: 11px; min-height: 48px; padding: 9px 0; border: 0; border-radius: 0; text-align: left; background: transparent; color: var(--ink); }
-.traffic-event-summary:focus-visible { outline-offset: -2px; }
-.traffic-event-summary:hover .traffic-operation { text-decoration: underline; text-underline-offset: 3px; }
-.traffic-direction { width: 9px; height: 9px; flex-shrink: 0; border-radius: 50%; margin-inline: 4px; background: currentColor; }
-.traffic-event.request .traffic-direction { color: #4d7899; }
-.traffic-event.response .traffic-direction { color: #287b6d; }
-.traffic-event.push .traffic-direction { color: #936d25; }
-:root[data-theme="dark"] .traffic-event.request .traffic-direction { color: #a4c6df; }
-:root[data-theme="dark"] .traffic-event.response .traffic-direction { color: #93d7c6; }
-:root[data-theme="dark"] .traffic-event.push .traffic-direction { color: #e5c687; }
-.traffic-kind { width: 63px; flex-shrink: 0; color: var(--muted); font-size: .72rem; }
-.traffic-operation { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: .83rem; font-weight: 550; }
-.traffic-code { max-width: 110px; overflow-wrap: anywhere; color: var(--muted); font-size: .72rem; }
-.traffic-duration { font-variant-numeric: tabular-nums; color: var(--muted); font-size: .72rem; flex-shrink: 0; }
-.traffic-event-summary time { color: var(--muted); font-size: .7rem; font-variant-numeric: tabular-nums; flex-shrink: 0; margin-left: 8px; }
-.traffic-expand { color: var(--muted); width: 15px; text-align: right; flex-shrink: 0; }
-.traffic-event-detail { margin: 0 0 13px 35px; padding: 12px 14px; border-left: 2px solid var(--line); background: var(--surface-alt); border-radius: 0 7px 7px 0; }
-.traffic-event-detail dl { margin: 0; display: grid; gap: 7px; font-size: .73rem; }
-.traffic-event-detail dl > div { display: grid; grid-template-columns: 80px minmax(0,1fr); gap: 12px; }
+.traffic-table { width: 100%; min-width: 900px; border-collapse: separate; border-spacing: 0; table-layout: fixed; text-align: left; font-size: .75rem; line-height: 1.35; color: var(--ink); }
+.traffic-table th { position: sticky; top: 0; z-index: 1; padding: 9px 12px; background: var(--surface-alt); border-bottom: 1px solid var(--line); color: var(--muted); font-size: .7rem; font-weight: 600; white-space: nowrap; }
+.traffic-table th:first-child { width: 68px; }
+.traffic-table th:nth-child(2) { width: 115px; }
+.traffic-table th:nth-child(3), .traffic-table th:nth-child(4) { width: 200px; }
+.traffic-table th:nth-child(5) { width: 85px; }
+.traffic-table td { padding: 5px 12px; border-bottom: 1px solid var(--line); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.traffic-event { cursor: pointer; background: var(--traffic-request); }
+.traffic-event.response { background: var(--traffic-response); }
+.traffic-event.push { background: var(--traffic-push); }
+.traffic-event.traffic-error { background: var(--traffic-error); }
+.traffic-event:hover, .traffic-event:focus-within { filter: brightness(.97); }
+:root[data-theme="dark"] .traffic-event:hover, :root[data-theme="dark"] .traffic-event:focus-within { filter: brightness(1.12); }
+.traffic-event.inspecting { background: var(--traffic-selected); box-shadow: inset 3px 0 var(--focus); }
+.traffic-sequence, .traffic-time { font-variant-numeric: tabular-nums; }
+.traffic-sequence { text-align: right; color: var(--muted); }
+.traffic-kind { font-size: .7rem; }
+.traffic-table td.traffic-info { padding: 0; }
+.traffic-inspect { display: block; width: 100%; min-height: 30px; padding: 5px 12px; border: 0; border-radius: 0; text-align: left; color: inherit; background: transparent; font: inherit; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.traffic-inspect:focus-visible { outline: 2px solid var(--focus); outline-offset: -3px; }
+.traffic-event-detail { padding: 16px 22px; background: var(--surface-alt); border-top: 1px solid var(--line); }
+.traffic-detail-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 14px; }
+.traffic-detail-heading h3 { margin: 0; font-size: .85rem; }
+.traffic-detail-heading button { padding: 5px 10px; border: 1px solid var(--line); border-radius: 5px; background: transparent; color: var(--ink); font-size: .72rem; }
+.traffic-event-detail dl { margin: 0; display: grid; gap: 8px; font-size: .73rem; }
+.traffic-event-detail dl > div { display: grid; grid-template-columns: 95px minmax(0,1fr); gap: 12px; }
 .traffic-event-detail dt { color: var(--muted); }
 .traffic-event-detail dd { margin: 0; overflow-wrap: anywhere; }
 .traffic-pair { font-size: .73rem; color: var(--muted); margin-top: 12px; }
-.traffic-pair > span:first-child { margin-right: 4px; }
 .traffic-footnote { padding: 11px 22px; color: var(--muted); background: var(--surface-alt); border-top: 1px solid var(--line); font-size: .68rem; }
-.traffic-arrival .traffic-direction { animation: traffic-arrival .8s ease-out 1; }
-@keyframes traffic-arrival { from { transform: translateX(-3px); opacity: .4; } to { transform: none; opacity: 1; } }
-.traffic-disconnected .traffic-arrival .traffic-direction { animation: none; }
-
+.traffic-arrival { animation: traffic-arrival .6s ease-out 1; }
+@keyframes traffic-arrival { from { opacity: .55; } to { opacity: 1; } }
+@media (max-width: 700px) {
+    .traffic-table { min-width: 0; }
+    .traffic-table th:first-child, .traffic-table td:first-child,
+    .traffic-table th:nth-child(2), .traffic-table td:nth-child(2),
+    .traffic-table th:nth-child(5), .traffic-table td:nth-child(5) { display: none; }
+    .traffic-table th:nth-child(3), .traffic-table th:nth-child(4) { width: 30%; }
+    .traffic-table th:last-child { width: 40%; }
+    .traffic-table th { padding: 8px; }
+    .traffic-table td { padding: 6px 8px; font-size: .68rem; }
+    .traffic-table td.traffic-endpoint { white-space: normal; overflow-wrap: anywhere; }
+    .traffic-inspect { min-height: 44px; padding-inline: 8px; font-size: .68rem; }
+}
 @media (max-width: 560px) {
     .traffic-lane .section-heading { flex-wrap: wrap; gap: 13px; }
     .traffic-lane .section-heading p { font-size: .76rem; }
@@ -509,26 +523,11 @@ small { font-size: .8rem; }
     .traffic-controls button { font-size: .72rem; }
     .traffic-legend { margin-inline: 16px; gap: 13px; font-size: .65rem; }
     .traffic-scope { margin-inline: 16px; }
-    .traffic-events { padding-inline: 16px; }
-    .traffic-event-summary { display: grid; grid-template-columns: 24px minmax(0,1fr) auto 13px; gap: 4px 8px; padding: 11px 0; }
-    .traffic-direction { grid-row: 1 / 3; }
-    .traffic-kind { width: auto; font-size: .66rem; grid-column: 2; grid-row: 1; }
-    .traffic-operation { grid-column: 2 / 4; grid-row: 2; font-size: .8rem; }
-    .traffic-code { grid-column: 2; grid-row: 3; font-size: .66rem; }
-    .traffic-duration { grid-column: 3; grid-row: 3; font-size: .66rem; text-align: right; }
-    .traffic-event-summary time { grid-column: 3; grid-row: 1; font-size: .66rem; margin: 0; }
-    .traffic-expand { grid-column: 4; grid-row: 1 / 4; }
-    .traffic-event-detail { margin-left: 0; }
-    .traffic-event-detail dl > div { grid-template-columns: 65px minmax(0,1fr); gap: 8px; }
-    .traffic-footnote { padding-inline: 16px; }
+    .traffic-event-detail, .traffic-footnote { padding-inline: 16px; }
+    .traffic-event-detail dl > div { grid-template-columns: 80px minmax(0,1fr); gap: 8px; }
 }
-
-/* Keep these last if the merged theme no longer has its global motion rules. */
-@media (prefers-reduced-motion: reduce) {
-    .traffic-arrival .traffic-direction { animation: none !important; transition: none !important; }
-}
-:root[data-motion="off"] .traffic-arrival .traffic-direction { animation: none !important; transition: none !important; }
-
+@media (prefers-reduced-motion: reduce) { .traffic-arrival { animation: none !important; } }
+:root[data-motion="off"] .traffic-arrival { animation: none !important; }
 /* Icons and finishing details. */
 .icon { flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
 .main-nav a { transition: background-color 140ms ease, color 140ms ease; }
