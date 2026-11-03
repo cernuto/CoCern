@@ -3,6 +3,7 @@ using System.Text.Json;
 using CoCern.Contracts.Dashboard;
 using CoCern.Core;
 using CoCern.Domain;
+using CoCern.Domain.State;
 using CoCern.Contracts;
 
 namespace CoCern.Storage;
@@ -266,28 +267,28 @@ public sealed partial class SqliteStore : IRelayObservationSource
     {
         using var envelope = JsonDocument.Parse(payload, new JsonDocumentOptions { MaxDepth = 64 });
         using var document = Document(envelope.RootElement);
-        var source = Property(document.RootElement, "machines");
+        var source = Property(document.RootElement, DiscoveryState.MachinesKey);
         if (source.ValueKind != JsonValueKind.Object) return;
         foreach (var property in source.EnumerateObject())
         {
             if (machines.Count >= 256) { warnings.Add("The machine observation is truncated."); break; }
             var machine = property.Value;
             var id = Safe(property.Name);
-            var name = Text(machine, "machineName");
-            var lastSeen = Date(machine, "lastSeen");
-            var announced = Property(machine, "chats");
+            var name = Text(machine, EnrolledMachine.NameKey);
+            var lastSeen = Date(machine, EnrolledMachine.LastSeenKey);
+            var announced = Property(machine, EnrolledMachine.ChatsKey);
             var count = announced.ValueKind == JsonValueKind.Array ? announced.GetArrayLength() : 0;
             machines.Add(new() { MachineId = id, Name = name, LastSeenAt = lastSeen, Reachable = ReadModels.IsLive(lastSeen, now), SessionCount = count });
             if (announced.ValueKind != JsonValueKind.Array) continue;
             foreach (var chat in announced.EnumerateArray().Take(64))
             {
-                var grainKey = RawText(chat, "relaySessionId");
-                var provider = Text(chat, "provider");
+                var grainKey = RawText(chat, AnnouncedChat.RelaySessionIdKey);
+                var provider = Text(chat, AnnouncedChat.ProviderKey);
                 var session = new DashboardSession
                 {
-                    SessionId = Safe(grainKey), RepositoryId = Text(chat, "repositoryId"), Label = Text(chat, "label"), Provider = provider,
+                    SessionId = Safe(grainKey), RepositoryId = Text(chat, AnnouncedChat.RepositoryIdKey), Label = Text(chat, AnnouncedChat.LabelKey), Provider = provider,
                     MachineId = id, MachineName = name, IsMapped = provider.Length > 0 && !provider.Equals(ChatProviders.Unknown, StringComparison.OrdinalIgnoreCase),
-                    Reachable = ReadModels.IsReachable(provider, Flag(chat, "wakeable"), Flag(chat, "waiterRunning"), lastSeen, now),
+                    Reachable = ReadModels.IsReachable(provider, Flag(chat, AnnouncedChat.WakeableKey), Flag(chat, AnnouncedChat.WaiterRunningKey), lastSeen, now),
                     ReportedAt = lastSeen, FreshUntil = lastSeen?.Add(DiscoveryLimits.LivenessTimeout)
                 };
                 if (string.IsNullOrEmpty(session.SessionId)) continue;
