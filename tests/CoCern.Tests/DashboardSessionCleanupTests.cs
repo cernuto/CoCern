@@ -143,7 +143,7 @@ public sealed class DashboardSessionCleanupTests
         Assert.DoesNotContain(RelayHostFixture.Token, text);
         Assert.DoesNotContain("token", text, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("label", text, StringComparison.OrdinalIgnoreCase);
-        Assert.Equal(["closed", "code", "field", "ids", "kept"], JsonNode.Parse(text)!.AsObject().Select(property => property.Key).Order(StringComparer.Ordinal));
+        Assert.Equal(["closed", "code", "field", "held", "ids", "kept", "more"], JsonNode.Parse(text)!.AsObject().Select(property => property.Key).Order(StringComparer.Ordinal));
         Assert.Equal([smoke.Id], JsonNode.Parse(text)!["ids"]!.AsArray().Select(id => id!.GetValue<string>()));
         // A session named in the body is not the viewer's own: the dashboard forwards only the repository and the filter.
         Assert.Equal([work.Id], await LiveAsync(host));

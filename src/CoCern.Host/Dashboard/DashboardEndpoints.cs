@@ -168,6 +168,8 @@ public static class DashboardEndpoints
         {
             Closed = Count(data?["closed"]),
             Kept = Count(data?["kept"]),
+            Held = Count(data?["held"]),
+            More = data?["more"] is JsonValue more && more.TryGetValue<bool>(out var remaining) && remaining,
             Ids = (data?["ids"] as JsonArray)?.Select(item => item is JsonValue value && value.TryGetValue<string>(out var text) ? text : null).OfType<string>().ToArray() ?? []
         });
 
