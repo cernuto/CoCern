@@ -1,4 +1,5 @@
 using CoCern.Adapter.Setup;
+using System.Text.Json.Nodes;
 
 namespace CoCern.Adapter.Development;
 
@@ -16,7 +17,16 @@ public static class DevelopmentSetup
     /// </summary>
     public static bool ConfigureClaudeCode(string configurationPath, string dotnet, string launcherDll, string deploymentRoot, string tokenFile, bool replaceLauncher = false)
     {
-        try { return ClientSettings.PlanDevelopmentClaudeCode(configurationPath, dotnet, launcherDll, deploymentRoot, tokenFile, replaceLauncher).Apply(TimeProvider.System) != ClientChange.Unchanged; }
+        try
+        {
+            var client = ClientSettings.PlanDevelopmentClaudeCode(configurationPath, dotnet, launcherDll, deploymentRoot, tokenFile, replaceLauncher);
+            if (!File.Exists(configurationPath) || JsonNode.Parse(File.ReadAllText(configurationPath))?["mcpServers"]?["cocern"] is not JsonObject) return false;
+            var hookPath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(configurationPath))!, ".claude", "settings.json");
+            var hook = ClientSettings.PlanStopHook(hookPath, SetupEnvironment.AdapterCommandLine(dotnet, launcherDll) + " --stop-hook");
+            // Plan both files first: malformed hook settings must not leave the MCP entry half-updated.
+            var changed = client.Apply(TimeProvider.System) != ClientChange.Unchanged;
+            return hook.Apply(TimeProvider.System) != ClientChange.Unchanged || changed;
+        }
         catch (ClientSettingsException error) { throw new IOException("The existing Claude Code CoCern entry could not be configured for development.", error); }
     }
 }

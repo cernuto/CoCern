@@ -31,6 +31,56 @@ public sealed class SessionHandoff
     /// <summary>A hand-off writing into <paramref name="folder"/> directly (tests).</summary>
     internal static SessionHandoff ForFolder(string folder, ChatLocation? client = null) => new(folder, client, TextWriter.Null);
 
+    /// <summary>Restores an established handle only after its authenticated tool call succeeded; never opens a replacement session.</summary>
+    internal void Restore(string tool, JsonElement arguments, AdapterReply reply)
+    {
+        if (!IsSessionReply(tool, arguments, reply) ||
+            ChatLocators.Text(arguments, "sessionId") is not { } sessionId || !NodeState.IsFileId(sessionId) ||
+            ChatLocators.Text(arguments, "sessionToken") is not { Length: > 0 } token ||
+            ChatLocators.Text(arguments, "repositoryId") is not { Length: > 0 and <= NodeState.MaxIdentifierLength } repository) return;
+        var path = NodeState.SessionHandlePath(_folder, sessionId);
+        using var owner = Acquire(sessionId);
+        if (owner is null) return;
+        var previous = NodeState.ReadSessionHandle(path);
+        if (previous is not null)
+        {
+            // Neither a reused ID nor a new adapter may move a cached handle onto a different repository or native chat.
+            if (previous.RepositoryId != repository || previous.SessionToken != token || !OwnsNative(previous)) return;
+            if (previous.Client is null && previous.Chat is null && _client is not null)
+                NodeState.WriteSessionHandle(_folder, previous with { Client = _client, Unmapped = false });
+            Touch(arguments);
+            return;
+        }
+        NodeState.WriteSessionHandle(_folder, new(sessionId, token, repository, Label(arguments) ?? DefaultLabel, DateTimeOffset.UtcNow, _client));
+    }
+
+    internal void RecordLocal(JsonElement arguments, AdapterReply reply)
+    {
+        if (!reply.Ok || reply.Data is not { ValueKind: JsonValueKind.Object } data || ChatLocators.Text(data, "sessionId") is not { } session || !NodeState.IsFileId(session)) return;
+        using var owner = Acquire(session);
+        if (owner is null) return;
+        var previous = NodeState.ReadSessionHandle(NodeState.SessionHandlePath(_folder, session));
+        if (previous is null) Record(arguments, reply);
+        else if (previous.RepositoryId == ChatLocators.Text(arguments, "repositoryId") && previous.SessionToken == ChatLocators.Text(data, "sessionToken") && OwnsNative(previous)) Touch(arguments);
+    }
+
+    private bool OwnsNative(SessionHandle handle) => _client is null ||
+        ((handle.Client is null || handle.Client == _client) && (handle.Chat is null || handle.Chat == _client));
+
+    private FileStream? Acquire(string sessionId)
+    {
+        var directory = Path.Combine(_folder, "sessions");
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, sessionId + ".restore.lock");
+        try { return File.Exists(path) ? new(path, FileMode.Open, FileAccess.Write, FileShare.None) : NodeState.CreatePrivateFile(path); }
+        catch (IOException) { return null; } // A competing adapter keeps the first native owner; a later successful call may retry.
+    }
+
+    internal static bool IsSessionReply(string tool, JsonElement arguments, AdapterReply reply) => reply.Ok &&
+        CoCern.Contracts.RelayToolCatalog.TryGet(tool, out var definition) && (definition.RequiresSession ||
+        (tool == CoCern.Contracts.RelayTools.GetStatus && reply.Data is { ValueKind: JsonValueKind.Object } data &&
+         ChatLocators.Text(arguments, "sessionId") is { Length: > 0 } session && ChatLocators.Text(data, "sessionId") == session));
+
     /// <summary>A hand-off only when the adapter runs on the node's credentials; with explicit COCERN_* settings nothing is written.</summary>
     public static SessionHandoff? For(AdapterOptions options, TextWriter? error = null) => options.NodeFolder is { } folder ? new(folder, options.ClientChat, error ?? Console.Error) : null;
 

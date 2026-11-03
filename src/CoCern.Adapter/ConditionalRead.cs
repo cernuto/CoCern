@@ -21,7 +21,7 @@ public static class ConditionalRead
     /// <summary>The property added to the advertised schema of each read it applies to.</summary>
     public static object Schema => new { type = "string", description = "The etag of your previous identical read; an unchanged result returns only {unchanged, etag}." };
 
-    public static async Task<AdapterReply> ForwardAsync(RelayForwarder forwarder, string tool, JsonElement arguments, CancellationToken cancellationToken)
+    public static async Task<AdapterReply> ForwardAsync(RelayForwarder forwarder, string tool, JsonElement arguments, CancellationToken cancellationToken, Action<AdapterReply>? originalReply = null)
     {
         if (!Applies(tool) || arguments.ValueKind != JsonValueKind.Object) return await forwarder.ForwardAsync(tool, arguments, cancellationToken);
         string? ifNoneMatch = null;
@@ -36,6 +36,7 @@ public static class ConditionalRead
             request = JsonSerializer.SerializeToElement(forwarded);
         }
         var reply = await forwarder.ForwardAsync(tool, request, cancellationToken);
+        originalReply?.Invoke(reply);
         if (!reply.Ok || reply.Data is not { ValueKind: JsonValueKind.Object } data) return reply;
         var etag = RelayEtag.Of(data.GetRawText());
         if (etag == ifNoneMatch) return reply with { Data = JsonSerializer.SerializeToElement(new { unchanged = true, etag }) };

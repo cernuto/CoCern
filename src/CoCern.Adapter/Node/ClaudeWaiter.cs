@@ -78,8 +78,7 @@ public static class ClaudeWaiter
     private static async Task<AdapterReply?> CallAsSessionAsync(string nodeFolder, string claudeSessionId, HttpMessageHandler? handler, string tool, JsonObject arguments, CancellationToken cancellationToken)
     {
         var folder = Path.GetFullPath(nodeFolder);
-        if (NodeState.ReadEnrollment(folder) is not { } enrollment || FindHandle(folder, Normalize(claudeSessionId)) is not { } handle) return null;
-        var options = new AdapterOptions(enrollment.Hub.AbsoluteUri, enrollment.Credential) { PinnedFingerprint = enrollment.Fingerprint };
+        if (ConnectionOptions(folder) is not { } options || FindHandle(folder, Normalize(claudeSessionId)) is not { } handle) return null;
         using var http = new HttpClient(handler ?? RelayForwarder.CreateHandler(options), disposeHandler: handler is null) { Timeout = TimeSpan.FromSeconds(15) };
         arguments["repositoryId"] = handle.RepositoryId; arguments["sessionId"] = handle.SessionId; arguments["sessionToken"] = handle.SessionToken;
         return await new RelayForwarder(http, options).ForwardAsync(tool, RelayForwarder.WithOrigin(JsonSerializer.SerializeToElement(arguments), background: true), cancellationToken);
@@ -122,9 +121,8 @@ public static class ClaudeWaiter
         var folder = Path.GetFullPath(nodeFolder);
         if (!ChatLocators.IsUuid(claudeSessionId)) throw new AdapterConfigurationException(ChatUsage);
         var threadId = Normalize(claudeSessionId);
-        var enrollment = NodeState.ReadEnrollment(folder) ?? throw new AdapterConfigurationException($"This PC's node in '{folder}' is not enrolled with a hub yet. Start it once with --node --hub https://<hub-address>:{HubAddresses.NetworkHttpsPort}/.");
+        var options = ConnectionOptions(folder) ?? throw new AdapterConfigurationException($"No enrolled node or local CoCern connection is available in '{folder}'.");
         var handle = FindHandle(folder, threadId) ?? throw new AdapterConfigurationException($"No relay session on this PC belongs to Claude chat {threadId}. Call session_open from that chat first, with CoCern running on the node's credentials.");
-        var options = new AdapterOptions(enrollment.Hub.AbsoluteUri, enrollment.Credential, signalR: true) { PinnedFingerprint = enrollment.Fingerprint };
         var statePath = Path.Combine(folder, WaitersFolder, threadId + ".db");
         WakeTarget[] targets = [new(new WakeRoute(handle.RepositoryId, "default", NodeState.SessionHandlePath(folder, handle.SessionId), threadId, Environment.MachineName), new WakeSession(handle.SessionId, handle.SessionToken), new InboxWaitDispatcher(deliver))];
         // One waiter per chat: the exclusive state is taken before the pid file is written, so a losing second waiter never touches the live one's file.
@@ -135,7 +133,7 @@ public static class ClaudeWaiter
         catch (IOException) { throw new AdapterConfigurationException(running); }
         using (state)
         {
-            var runtime = new WakeRuntime(options, statePath, Path.Combine(folder, StopFile), enrollment.Hub.AbsoluteUri) { HubHandler = hubHandler, State = state };
+            var runtime = new WakeRuntime(options, statePath, Path.Combine(folder, StopFile), options.BaseUri.AbsoluteUri) { HubHandler = hubHandler, State = state };
             using var self = Process.GetCurrentProcess();
             var written = WritePid(folder, threadId, self.Id, self.StartTime.ToUniversalTime());
             try { return await WakeWatcher.RunAsync(runtime, _ => Task.FromResult<IReadOnlyList<WakeTarget>>(targets), exitWhenQueued: true, timeout, cancellationToken, handler, clock); }
@@ -144,6 +142,9 @@ public static class ClaudeWaiter
     }
 
     /// <summary>The handle whose captured or located Claude chat ID is this one; the newest when several are.</summary>
+    internal static AdapterOptions? ConnectionOptions(string folder) => LocalWakeConnection.Read(folder)?.Options ??
+        (NodeState.ReadEnrollment(folder) is { } node ? new AdapterOptions(node.Hub.AbsoluteUri, node.Credential, signalR: true) { PinnedFingerprint = node.Fingerprint } : null);
+
     internal static SessionHandle? FindHandle(string nodeFolder, string claudeSessionId) =>
         NodeState.ReadSessionHandles(nodeFolder).Where(handle => IsClaude(handle.Client, claudeSessionId) || IsClaude(handle.Chat, claudeSessionId)).OrderByDescending(handle => handle.OpenedAt).FirstOrDefault();
 
