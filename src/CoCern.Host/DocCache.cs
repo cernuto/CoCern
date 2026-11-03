@@ -605,10 +605,21 @@ internal sealed class DocSyncRunner(DocCacheSettings settings, DocRepositoryRegi
             try { await grains.GetGrain<IDocumentGrain>(DocKeys.Document(repository.Id, path)).DropAsync(); }
             catch (Exception) { /* It is gone from the directory, so it is never asked again. */ }
         }
+        // After the directory has the update, never from inside it: a first search's build reads the directory, which would wait on the
+        // update, which would wait on the patch. A search index not loaded is built from the directory when next used.
+        if ((upserts.Count > 0 || removed.Count > 0) && await SearchActiveAsync(repository.Id))
+        {
+            try { await grains.GetGrain<IDocSearchGrain>(repository.Id).PatchAsync([.. upserts.Select(entry => new DocRef(repository.Id, entry.Path, entry.Spec, entry.Commit, entry.Hash, branch))], [.. removed.Distinct(StringComparer.Ordinal)]); }
+            catch (Exception exception) { logger.LogWarning("Doc sync for {Repository}: could not patch the search index; its next search reads the directory again. {Reason}", repository.Id, exception.Message); }
+        }
         var changed = upserts.Count + removed.Distinct(StringComparer.Ordinal).Count();
         logger.LogInformation("Doc sync for {Repository}: {Commit} on {Branch}, {Changed} changed, {Skipped} skipped{Full}.", repository.Id, head, branch, changed, skipped.Count, full ? " (full)" : "");
         return new(head, changed, skipped.Count, fetched);
     }
+
+    /// <summary>Whether this repository's search index is active now; only then is it patched.</summary>
+    private async Task<bool> SearchActiveAsync(string repositoryId) =>
+        (await grains.GetGrain<IManagementGrain>(0).GetActiveGrains(DocKeys.SearchType)).Any(id => id.Key.ToString() == repositoryId);
 
     /// <summary>The keys of this repository's document grains that are active now; only those get pushed content.</summary>
     private async Task<HashSet<string>> ActiveAsync(string repositoryId)

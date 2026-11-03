@@ -190,7 +190,7 @@ A board's settled rules (lines) and permissions (grants). Chats get them at `ses
 
 Also skipped: files over 256 KB (8 MB for OpenAPI), symlinks, malformed files, and files past the document or byte limit (until there is room again).
 
-**Sync.** The hub picks up new commits every 5 minutes, and `doc_sync` syncs now (once per 30 seconds). It reads committed files with `git show` only, never your working tree. It fetches and follows the branch on the remote, unless `Fetch` is `false` (the start script's setting): then it reads the local branch only and never fetches. If a sync can't be saved, searches keep the last saved commit.
+**Sync.** The hub picks up new commits every 5 minutes, and `doc_sync` syncs now (once per 30 seconds). It reads committed files with `git show` only, never your working tree. It fetches and follows the branch on the remote, unless `Fetch` is `false` (the start script's setting): then it reads the local branch only and never fetches. If a sync can't be saved, searches keep the last saved commit. Searches answer from one in-memory index per repository, built at the first search and patched by each sync; `doc_section` loads only the file it reads.
 
 | Tool | What it does |
 | --- | --- |
@@ -389,7 +389,7 @@ All on by default except the two for other PCs.
 | --- | --- | --- |
 | `Relay:DocCache:Enabled` | `true` | Doc search. |
 | `Relay:DocCache:SyncMinutes` | 5 | Minutes between syncs. `0`: only `doc_sync`. |
-| `Relay:DocCache:IdleMinutes` | 30 | Minutes before an unused document leaves memory (2 to 1440). |
+| `Relay:DocCache:IdleMinutes` | 30 | Minutes before an unused document, or a repository's search index, leaves memory (2 to 1440). |
 | `Relay:DocCache:MaxDocuments` | 500 | Documents per repository (up to 5,000). |
 | `Relay:DocCache:MaxRepositoryBytes` | 128 MB | Text per repository (up to 1 GB). |
 | `Relay:DocCache:Roots:N` | | Folders whose git repositories are found and indexed on their own (relative to the content root). |
