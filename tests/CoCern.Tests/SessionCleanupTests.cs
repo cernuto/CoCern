@@ -12,6 +12,8 @@ using CoCern.Contracts;
 using CoCern.Core;
 using CoCern.Domain;
 using CoCern.Host;
+using CoCern.Storage;
+using Orleans.Runtime;
 using Xunit;
 
 namespace CoCern.Tests;
@@ -208,20 +210,52 @@ public sealed class SessionCleanupTests
     }
 
     [Fact]
-    public async Task The_sweep_service_sends_the_sweep_to_the_control_directory_and_keeps_fresh_sessions()
+    public async Task The_sweep_service_closes_a_stored_idle_session_by_its_idle_hours_and_keeps_fresh_sessions()
     {
-        using var host = await StartAsync();
+        // A directory as the hub stored it: one session last seen 30 hours ago. With the hour the directory allows for activity reports,
+        // 24 idle hours close it and 48 do not.
+        var database = Path.Combine(Path.GetTempPath(), "cocern-sweep-" + Guid.NewGuid().ToString("N"), "relay.db");
+        using (var store = new SqliteStore(database))
+        {
+            // The silo runs on the real clock.
+            var directory = new GrainState<StateEnvelope<CoordinationDocument>>(Directory(Record("idle", TimeSpan.FromHours(30), "Old chat", now: DateTimeOffset.UtcNow)));
+            await new SqliteGrainStorage(store).WriteStateAsync("control", GrainId.Create("cocern.control", AggregateKinds.ControlKey), directory);
+        }
+        using var host = await StartAsync(database);
         try
         {
             var application = host.Services.GetRequiredService<RelayApplication>();
             var opened = Data(await application.ExecuteAsync(Worker, RelayTools.SessionOpen, JsonSerializer.SerializeToElement(new { repositoryId = "repo", requestId = "open-1", label = "Chat" })));
-            var sweeper = new SessionSweepService(host.Services.GetRequiredService<IGrainFactory>(), new SessionCleanupOptions { IdleHours = 24 }, NullLogger<SessionSweepService>.Instance);
-            var swept = Data(await sweeper.SweepAsync());
-            Assert.Equal((0, 0), (swept["closed"]!.GetValue<int>(), swept["kept"]!.GetValue<int>()));
-            var workers = Data(await application.ExecuteAsync(Admin, RelayTools.WorkerList, JsonSerializer.SerializeToElement(new { repositoryId = "repo" })))["items"]!.AsArray();
-            Assert.Contains(workers, worker => worker!["sessionId"]!.GetValue<string>() == opened["sessionId"]!.GetValue<string>());
+            async Task<string[]> Workers() => Data(await application.ExecuteAsync(Admin, RelayTools.WorkerList, JsonSerializer.SerializeToElement(new { repositoryId = "repo" })))["items"]!.AsArray()
+                .Select(worker => worker!["sessionId"]!.GetValue<string>()).Order(StringComparer.Ordinal).ToArray();
+            SessionSweepService Sweeper(int hours) => new(host.Services.GetRequiredService<IGrainFactory>(), new SessionCleanupOptions { IdleHours = hours }, NullLogger<SessionSweepService>.Instance);
+            Assert.Equal(new[] { "idle", opened["sessionId"]!.GetValue<string>() }.Order(StringComparer.Ordinal), await Workers());
+
+            var kept = Data(await Sweeper(48).SweepAsync());
+            Assert.Equal((0, 0, false), (kept["closed"]!.GetValue<int>(), kept["kept"]!.GetValue<int>(), kept["more"]!.GetValue<bool>()));
+            Assert.Contains("idle", await Workers());
+
+            var swept = Data(await Sweeper(24).SweepAsync());
+            Assert.Equal((1, 0), (swept["closed"]!.GetValue<int>(), swept["kept"]!.GetValue<int>()));
+            Assert.Equal([opened["sessionId"]!.GetValue<string>()], await Workers());
         }
         finally { await host.StopAsync(); }
+    }
+
+    [Fact]
+    public void A_close_capped_at_its_batch_says_more_remain_and_the_next_one_takes_the_rest()
+    {
+        var extra = 88;
+        var control = Directory(Enumerable.Range(0, RelayLimits.MaxSessionsClosedPerCall + extra).Select(i => Record("idle-" + i, TimeSpan.FromHours(30))).ToArray());
+        var first = Data(Close(control, new() { ["idleMinutes"] = 60 }));
+        Assert.Equal((RelayLimits.MaxSessionsClosedPerCall, true), (first["closed"]!.GetValue<int>(), first["more"]!.GetValue<bool>()));
+        var second = Data(Close(control, new() { ["idleMinutes"] = 60 }));
+        Assert.Equal((extra, false), (second["closed"]!.GetValue<int>(), second["more"]!.GetValue<bool>()));
+        Assert.Empty(Sessions(control));
+
+        var swept = Directory(Enumerable.Range(0, RelayLimits.MaxSessionsClosedPerCall + 1).Select(i => Record("s-" + i, TimeSpan.FromHours(30))).ToArray());
+        Assert.True(Data(Sweep(swept, 24))["more"]!.GetValue<bool>());
+        Assert.False(Data(Sweep(swept, 24))["more"]!.GetValue<bool>());
     }
 
     [Fact]
@@ -270,9 +304,10 @@ public sealed class SessionCleanupTests
     private static void Owns(StateEnvelope<CoordinationDocument> state, string id, string repository = "repo") =>
         Assert.True(Call(state, Operations.SessionWork, new() { ["sessionId"] = id, ["owns"] = true, ["seq"] = 1 }, Hub, repository).Ok);
 
-    private static JsonObject Record(string id, TimeSpan idle, string label = "", string repository = "repo")
+    /// <summary>A directory record last seen <paramref name="idle"/> before <paramref name="now"/> (the tests' fixed time unless given).</summary>
+    private static JsonObject Record(string id, TimeSpan idle, string label = "", string repository = "repo", DateTimeOffset? now = null)
     {
-        var seen = Now - idle;
+        var seen = (now ?? Now) - idle;
         return new()
         {
             ["sessionId"] = id, ["principalId"] = "alice", ["repositoryId"] = repository, ["sessionToken"] = "t-" + id, ["bindingVersion"] = 0, ["label"] = label,
@@ -295,11 +330,14 @@ public sealed class SessionCleanupTests
         return JsonNode.Parse(reply.DataJson)!.AsObject();
     }
 
-    private static async Task<IHost> StartAsync()
+    /// <summary>A silo with in-memory storage, or with the hub's SQLite store at <paramref name="database"/>.</summary>
+    private static async Task<IHost> StartAsync(string? database = null)
     {
-        var host = new HostBuilder().ConfigureLogging(log => log.ClearProviders()).UseOrleans(silo => silo
-            .UseLocalhostClustering(siloPort: FreePort(), gatewayPort: FreePort(), serviceId: "session-cleanup-tests", clusterId: Guid.NewGuid().ToString("N"))
-            .AddMemoryGrainStorage("relay"))
+        var host = new HostBuilder().ConfigureLogging(log => log.ClearProviders()).UseOrleans(silo =>
+            {
+                silo.UseLocalhostClustering(siloPort: FreePort(), gatewayPort: FreePort(), serviceId: "session-cleanup-tests", clusterId: Guid.NewGuid().ToString("N"));
+                if (database is null) silo.AddMemoryGrainStorage("relay"); else silo.AddCoCernSqlite(database);
+            })
             .ConfigureServices(services => services.AddCoCernCore()).Build();
         await host.StartAsync();
         return host;

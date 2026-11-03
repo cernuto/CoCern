@@ -210,9 +210,23 @@ public static class Operations
     public const string StandingProposeHub = "__standing_propose_hub";
     /// <summary>
     /// Sent by the control aggregate to a session it dropped from its directory (long stale, directory full). The session then answers
-    /// <c>SessionUnknown</c> with <c>expired</c>, and drops deliveries. The effect carries its own caller, scoped to the session's repository.
+    /// <c>SessionUnknown</c> with <c>expired</c>, and returns deliveries to their senders. The effect carries its own caller, scoped to the
+    /// session's repository. A session that answers for an unresolved action refuses it, and so does one with unread mail when the
+    /// expiry is an idle close (<c>idle: true</c>); either sends <see cref="SessionRestore"/> instead.
     /// </summary>
     public const string SessionExpire = "__session_expire";
+    /// <summary>
+    /// Sent by a session that refused <see cref="SessionExpire"/> to the control directory, which had already dropped it: its record comes
+    /// back as the session keeps it, with the work it answers for (<c>owns</c>) or the unread mail that exempts it from idle closes (<c>mail</c>).
+    /// </summary>
+    public const string SessionRestore = "__session_restore";
+    /// <summary>
+    /// Sent by a board to the session one of its tasks now targets (<c>workflow.targetSessionId</c>): tell this board when you close. A
+    /// session already closed answers at once with <see cref="SessionClosed"/>.
+    /// </summary>
+    public const string SessionTargetWatch = "__session_target_watch";
+    /// <summary>Sent by a closed session to each board watching it: tasks that still target it lose the target, so any session may claim them.</summary>
+    public const string SessionClosed = "__session_closed";
     /// <summary>
     /// A board tells a session it starts answering for an unresolved action (<c>open: true</c>: it began or recovered it) or stops; the
     /// session tells the control directory (<c>owns</c>) when it starts or stops owning any. The directory never expires such a session.
@@ -220,7 +234,8 @@ public static class Operations
     public const string SessionWork = "__session_work";
     /// <summary>
     /// The hub's periodic sweep, sent to the control directory: closes sessions in every repository not seen for <c>idleHours</c>, as the
-    /// full-directory cleanup does (each is sent <see cref="SessionExpire"/>); one that answers for an unresolved action is kept.
+    /// full-directory cleanup does (each is sent <see cref="SessionExpire"/>); one that answers for an unresolved action is kept, and so is
+    /// one holding unread mail.
     /// </summary>
     public const string SweepSessions = "__sweep_sessions";
     /// <summary>Server-set on <c>task_claim</c> and <c>action_begin</c>: ask the board for the declared resources (<c>DeclaredResourcesNeeded</c>) when the task has any.</summary>

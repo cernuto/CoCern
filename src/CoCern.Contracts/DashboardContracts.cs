@@ -313,11 +313,17 @@ public sealed record DashboardCloseSessionsRequest
     public string? LabelPrefix { get; init; }
 }
 
-/// <summary>What closing sessions did: <see cref="Closed"/> and <see cref="Kept"/> (still answering for an open action), the first closed IDs, or the hub's error <see cref="Code"/>.</summary>
+/// <summary>
+/// What closing sessions did: <see cref="Closed"/>, <see cref="Kept"/> (still answering for an open action), <see cref="Held"/> (an idle
+/// close's sessions kept for unread mail), whether <see cref="More"/> matching sessions remain for another run, the first closed IDs, or
+/// the hub's error <see cref="Code"/>.
+/// </summary>
 public sealed record DashboardCloseSessionsResult
 {
     public int Closed { get; init; }
     public int Kept { get; init; }
+    public int Held { get; init; }
+    public bool More { get; init; }
     public string[] Ids { get; init; } = [];
     public string? Code { get; init; }
     /// <summary>The argument the hub refused, when it named one.</summary>
