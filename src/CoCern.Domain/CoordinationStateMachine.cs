@@ -181,10 +181,12 @@ public static class CoordinationStateMachine
     }
 
     /// <summary>Stable identity of one action attempt, shared by the board and the resource locks it blocks.</summary>
-    public static string ActionKey(JsonObject args, string actionId, long attempt) => string.Join("/", new[]
-    {
-        Text(args, "repositoryId"), Text(args, "boardId", "default"), Text(args, "taskId"), actionId, attempt.ToString(CultureInfo.InvariantCulture)
-    }.Select(Uri.EscapeDataString));
+    public static string ActionKey(JsonObject args, string actionId, long attempt) =>
+        ActionKey(Text(args, "repositoryId"), Text(args, "boardId", "default"), Text(args, "taskId"), actionId, attempt);
+
+    /// <inheritdoc cref="ActionKey(JsonObject, string, long)"/>
+    public static string ActionKey(string repositoryId, string boardId, string taskId, string actionId, long attempt) =>
+        string.Join("/", new[] { repositoryId, boardId, taskId, actionId, attempt.ToString(CultureInfo.InvariantCulture) }.Select(Uri.EscapeDataString));
 
     /// <summary>
     /// Rebuilds the aggregate's timers from its own state: lease expiry from its own and its tasks' leases, a lock's lease check, and the

@@ -6,6 +6,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Orleans;
 using CoCern.Contracts;
 using CoCern.Domain;
+using CoCern.Domain.Messages;
 using static CoCern.Contracts.RelayErrorCodes;
 using static CoCern.Domain.JsonFields;
 using static CoCern.Domain.Replies;
@@ -341,13 +342,13 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         var opened = await CallControl(caller, RelayTools.SessionOpen, args);
         if (!opened.Ok) return opened;
         var data = Parse(opened);
-        var initialize = new JsonObject
-        {
-            ["sessionId"] = Text(data, "sessionId"), ["sessionToken"] = Text(data, "sessionToken"), ["principalId"] = caller.PrincipalId, ["repositoryId"] = Text(args, "repositoryId")
-        };
-        foreach (var field in Operations.SessionClientFields) if (args[field] is { } value) initialize[field] = value.DeepClone();
-        var initialized = await Call(AggregateKinds.Session, Text(data, "sessionId"), caller, Operations.Open, initialize);
+        // The same record the directory queued, from the client's fields only: the session takes its freshness from the same defaults.
+        var record = SessionRecord.Opened(Text(data, "sessionId"), Text(data, "sessionToken"), caller.PrincipalId, Text(args, "repositoryId"), args);
+        var initialized = await Call(AggregateKinds.Session, record.SessionId, caller, SessionOpen.Operation, new SessionOpen(record).ToJson());
         if (!initialized.Ok) return initialized;
+        // The session closed before this open reached it: a close overtook it, or this retry replays the handle of a session closed since.
+        // The chat opens a new one, as after any SessionUnknown.
+        if (Parse(initialized)["expired"]?.GetValue<bool>() == true) return Error(SessionUnknown, new { expired = true, reopen = RelayTools.SessionOpen });
         // The queued initialization remains a retryable durable effect and deduplicates at its recipient.
         if (Text(args, "taskId").Length > 0)
         {

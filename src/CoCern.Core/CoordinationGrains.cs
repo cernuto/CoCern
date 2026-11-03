@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Orleans;
 using Orleans.Runtime;
 using CoCern.Contracts;
@@ -28,6 +29,9 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
     private static readonly TimeSpan RedeliveryDelay = TimeSpan.FromSeconds(5);
     protected abstract string Kind { get; }
     private bool uncertainCommit;
+
+    /// <summary>The malformed effects this activation has logged, so each is logged once though a state transfer is retried every few seconds.</summary>
+    private readonly HashSet<string> malformedLogged = new(StringComparer.Ordinal);
 
     /// <summary>The time operations and due work are judged by. The anomaly monitor reads it from its options, so tests can move it.</summary>
     protected virtual DateTimeOffset Now => DateTimeOffset.UtcNow;
@@ -109,6 +113,7 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
             }
             catch (Exception) { result = Replies.Error(RelayErrorCodes.DeliveryUnavailable); }
             var failure = result.Ok ? (EffectDelivery.Failure?)null : EffectDelivery.OnFailure(effect, payload, result.Code, Kind, ordersOn);
+            if (result.Code == RelayErrorCodes.MalformedEffect) ReportMalformed(effect, payload, result, failure!.Value);
             // The failed order run is applied on this board's own state, so it is logged, raised to the managers and counted.
             if (failure == EffectDelivery.Failure.DropAsFailedOrderRun)
                 ApplyInternal(candidate, effectCaller, Operations.OrderFailed, new JsonObject
@@ -124,6 +129,7 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
             }
             candidate.Effects.RemoveAll(x => x.Id == effect.Id);
             if (!await CommitAsync(candidate)) return Replies.Error(RelayErrorCodes.StorageFailure);
+            if (failure == EffectDelivery.Failure.DropAndCount) RecordRefused(effect, payload, result);
             // A message wakes its chat only with attention off; with it on, only top-tier items (and the idle hold) wake.
             if (effect.TargetKind == AggregateKinds.Session && effect.Operation == Operations.Deliver && attention is { Enabled: false }) RecordWake(effect.TargetKey, payload, result);
             // Only a new top-tier attention item may wake its chat, so only that one counts as a wake and sends a hint.
@@ -157,6 +163,38 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
     /// <summary>Applies an operation to this aggregate's working copy, with the hub's archive setting; every call and self-driven check goes through it.</summary>
     private protected RelayReply ApplyInternal(StateEnvelope<CoordinationDocument> candidate, RelayCaller caller, string operation, JsonObject args, DateTimeOffset now, bool ordersEnabled = false) =>
         CoordinationStateMachine.Apply(candidate, Kind, this.GetPrimaryKeyString(), caller, operation, args, now, ordersEnabled, ArchiveAfterDays);
+
+    /// <summary>
+    /// A malformed effect is logged once per effect at Error level (<see cref="EffectDelivery.LogMalformed"/>). One that is retried is also
+    /// counted once here, as a dropped one is counted when it leaves the outbox, so the count of malformed effects reads zero only when none
+    /// was sent.
+    /// </summary>
+    private void ReportMalformed(DurableEffect effect, JsonObject payload, RelayReply result, EffectDelivery.Failure failure)
+    {
+        if (malformedLogged.Count >= RelayLimits.MaxRecords) malformedLogged.Clear();
+        if (!malformedLogged.Add(effect.Id)) return;
+        if (services.GetService<ILoggerFactory>()?.CreateLogger<CoordinationGrain>() is { } logger)
+            EffectDelivery.LogMalformed(logger, Kind, this.GetPrimaryKeyString(), effect, result, failure);
+        if (failure == EffectDelivery.Failure.Retry) RecordRefused(effect, payload, result);
+    }
+
+    /// <summary>
+    /// Counts, durably, an effect its target refused for good: a dropped report (its delivery class is drop and count), or a malformed
+    /// one. Recorded as activity of kind <see cref="ActivityEvent.EffectRefused"/>, its operation as the tool and the refusal as the code.
+    /// </summary>
+    private void RecordRefused(DurableEffect effect, JsonObject payload, RelayReply result)
+    {
+        if (services.GetService<IActivitySink>() is not { } sink) return;
+        try
+        {
+            sink.Record(new ActivityEvent
+            {
+                Timestamp = DateTimeOffset.UtcNow, Kind = ActivityEvent.EffectRefused, RepositoryId = JsonFields.Text(payload, "repositoryId"),
+                SessionId = JsonFields.Text(payload, "sessionId") is { Length: > 0 } session ? session : null, Tool = effect.Operation, Ok = false, Code = result.Code
+            });
+        }
+        catch (Exception) { /* Telemetry never affects delivery. */ }
+    }
 
     /// <summary>Counts one wake: a message newly stored in a session inbox that may wake its chat. Redeliveries and <c>wake: false</c> messages are not wakes.</summary>
     private void RecordWake(string sessionId, JsonObject payload, RelayReply delivered)

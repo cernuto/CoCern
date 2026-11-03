@@ -124,6 +124,11 @@ public static class RelayErrorCodes
     /// <summary>The doc cache is on, but no repositories are configured for it (<c>Relay:DocCache:Repositories</c>).</summary>
     public const string NoRepositoriesConfigured = "NoRepositoriesConfigured";
     public const string InternalError = "InternalError";
+    /// <summary>
+    /// Internal: an outbox effect's payload lacked a field its message requires, or had one of the wrong type; <c>fields</c> names them.
+    /// The hub logs it once and retries or drops it by the message's delivery class. Never reaches a client.
+    /// </summary>
+    public const string MalformedEffect = "MalformedEffect";
 
     private static readonly FrozenSet<string> Conflicts = new[]
     {

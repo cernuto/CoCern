@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 using CoCern.Contracts;
+using CoCern.Domain.Messages;
 using static CoCern.Contracts.RelayErrorCodes;
 using static CoCern.Domain.JsonFields;
 using static CoCern.Domain.Replies;
@@ -114,16 +115,15 @@ internal static class TaskActions
     private static string OwnerSession(JsonObject action) => action["recovery"] is JsonObject recovery ? Text(recovery, "sessionId") : Text(action, "sessionId");
 
     /// <summary>
-    /// Tells <paramref name="sessionId"/>'s session that it now answers for an unresolved action (<paramref name="open"/>), or no longer
-    /// does; the session tells the directory when that changes, so a full directory never expires a session that owns work.
+    /// Tells <paramref name="sessionId"/>'s session that it now answers for attempt <paramref name="attempt"/> of action
+    /// <paramref name="actionId"/> (<paramref name="open"/>), or no longer does; the session tells the directory when that changes, so a
+    /// full directory never expires a session that owns work.
     /// </summary>
-    private static void Track(AggregateContext context, string sessionId, string actionKey, bool open)
+    private static void Track(AggregateContext context, string sessionId, string actionId, long attempt, bool open)
     {
         if (sessionId.Length == 0) return;
-        context.Emit(AggregateKinds.Session, sessionId, Operations.SessionWork, new JsonObject
-        {
-            ["repositoryId"] = context.Repository, ["sessionId"] = sessionId, ["actionKey"] = actionKey, ["open"] = open, ["at"] = context.Now.ToString("O")
-        });
+        context.Send(sessionId, new ActionWorkReport(context.Repository, sessionId, Text(context.Args, "boardId", AggregateKinds.DefaultBoard), Text(context.Args, "taskId"),
+            actionId, attempt, open, context.Now));
     }
 
     public static RelayReply Begin(AggregateContext context, JsonObject task)
@@ -176,7 +176,7 @@ internal static class TaskActions
             {
                 ["repositoryId"] = context.Repository, ["actionId"] = id, ["actionKey"] = CoordinationStateMachine.ActionKey(args, id, Number(action, "attempt")), ["sessionId"] = session
             });
-        Track(context, session, CoordinationStateMachine.ActionKey(args, id, Number(action, "attempt")), open: true);
+        Track(context, session, id, Number(action, "attempt"), open: true);
         return Ok(new { action, replayAllowed = true, existing = false }, version);
     }
 
@@ -281,12 +281,12 @@ internal static class TaskActions
         if (settling) MakeRoom(task, history, id);
         var actionKey = CoordinationStateMachine.ActionKey(args, id, Number(action, "attempt"));
         var (owner, unresolved) = (OwnerSession(action), IsUnresolved(action));
-        if (wasUnresolved && (!unresolved || owner != priorOwner)) Track(context, priorOwner, actionKey, open: false);
+        if (wasUnresolved && (!unresolved || owner != priorOwner)) Track(context, priorOwner, id, Number(action, "attempt"), open: false);
         // A new owner is told at once. The same owner's record is refreshed at most every SessionWorkRefreshHours, so a long-running action
         // stays tracked without a directory write on every progress report.
         if (unresolved && (owner != priorOwner || !wasUnresolved || Date(action, TrackedAtField) <= context.Now.AddHours(-RelayLimits.SessionWorkRefreshHours)))
         {
-            Track(context, owner, actionKey, open: true);
+            Track(context, owner, id, Number(action, "attempt"), open: true);
             action[TrackedAtField] = context.Now.ToString("O");
         }
         // An administrator unblocks another principal's action only through cleanup: acceptance, a recovery, or a report on one it recovered.

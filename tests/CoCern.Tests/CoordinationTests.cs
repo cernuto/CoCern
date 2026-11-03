@@ -4,6 +4,7 @@ using System.Reflection;
 using Orleans;
 using CoCern.Core;
 using CoCern.Domain;
+using CoCern.Domain.Messages;
 using CoCern.Contracts;
 using Xunit;
 
@@ -67,7 +68,7 @@ public sealed class CoordinationTests
     public void Inbox_delivery_deduplicates_and_requires_both_identity_and_secret()
     {
         var state = new StateEnvelope<CoordinationDocument>();
-        Assert.True(Call(state, "session", "__open", new() { ["principalId"] = "alice", ["sessionToken"] = "secret" }).Ok);
+        Assert.True(Call(state, "session", "__open", new() { ["principalId"] = "alice", ["sessionToken"] = "secret", ["sessionId"] = "key" }).Ok);
         var message = new JsonObject { ["messageId"] = "m", ["text"] = "hello" };
         Assert.True(Call(state, "session", "__deliver", message).Ok);
         Assert.True(Call(state, "session", "__deliver", message).Ok);
@@ -542,7 +543,7 @@ public sealed class CoordinationTests
     public void Acknowledgments_and_resolved_actions_stay_bounded_and_keep_ignoring_recent_duplicates()
     {
         var session = new StateEnvelope<CoordinationDocument>();
-        Assert.True(Call(session, "session", "__open", new() { ["principalId"] = "alice", ["sessionToken"] = "secret" }).Ok);
+        Assert.True(Call(session, "session", "__open", new() { ["principalId"] = "alice", ["sessionToken"] = "secret", ["sessionId"] = "key" }).Ok);
         var total = 3 * RelayLimits.MaxRecords;
         for (var batch = 0; batch < total / RelayLimits.MaxAcknowledgedMessages + 1; batch++)
         {
@@ -586,7 +587,7 @@ public sealed class CoordinationTests
         // 7,500 backslashes are within the 8 KiB text limit, but JSON escaping doubles them twice on the way to a reader.
         var text = new string('\\', 7_500);
         var sender = new StateEnvelope<CoordinationDocument>();
-        Assert.True(Call(sender, "session", "__open", new() { ["principalId"] = "alice", ["sessionToken"] = "secret" }).Ok);
+        Assert.True(Call(sender, "session", "__open", new() { ["principalId"] = "alice", ["sessionToken"] = "secret", ["sessionId"] = "key" }).Ok);
         var direct = Call(sender, "session", "send_message", new() { ["sessionToken"] = "secret", ["requestId"] = "big", ["recipientSessionId"] = "r", ["text"] = text });
         Assert.Equal("PayloadTooLarge", direct.Code);
         Assert.Equal(RelayLimits.AggregateReplyBytes, Data(direct)["maxBytes"]!.GetValue<int>());
@@ -610,7 +611,7 @@ public sealed class CoordinationTests
     {
         // A message stored before sends were measured: too large for any page once escaped.
         var session = new StateEnvelope<CoordinationDocument>();
-        Assert.True(Call(session, "session", "__open", new() { ["principalId"] = "alice", ["sessionToken"] = "secret" }).Ok);
+        Assert.True(Call(session, "session", "__open", new() { ["principalId"] = "alice", ["sessionToken"] = "secret", ["sessionId"] = "key" }).Ok);
         var big = new string('\\', 7_500) + "end";
         foreach (var (id, text) in new[] { ("m1", "first"), ("big", big), ("m3", "after") })
             Assert.True(Call(session, "session", "__deliver", new() { ["messageId"] = id, ["text"] = text }).Ok);
@@ -693,8 +694,12 @@ public sealed class CoordinationTests
         CoordinationStateMachine.StampEffects(delivered, 0, Caller with { Repositories = ["repo"] });
         var other = delivered.First(effect => effect.Operation == Operations.SessionExpire && JsonNode.Parse(effect.PayloadJson)!["repositoryId"]!.GetValue<string>() == "other");
         Assert.Equal(["other"], CoordinationStateMachine.TakeEffectCaller(JsonNode.Parse(other.PayloadJson)!.AsObject()).Repositories);
-        // A late registration from a dropped session is accepted and ignored, so its outbox never retries it forever.
-        Assert.True(Call(control, "control", "__register", new() { ["sessionId"] = "s-" + (RelayLimits.MaxRecords - 1), ["activeAt"] = Now.ToString("O") }).Ok);
+        // A late registration or activity report from a dropped session is accepted and ignored, so its outbox never retries it forever.
+        Assert.True(Call(control, "control", Operations.SessionActive, new() { ["sessionId"] = "s-" + (RelayLimits.MaxRecords - 1), ["activeAt"] = Now.ToString("O") }).Ok);
+        Assert.True(Call(control, "control", Operations.Register, new SessionRegistration("repo", "s-" + (RelayLimits.MaxRecords - 1), new SessionPresence
+        {
+            BindingVersion = 1, ObservedAt = Now, FreshUntil = Now.AddMinutes(2)
+        }).ToJson()).Ok);
 
         // When every session was seen within the day, an open is refused for now and works again once some go stale.
         var busy = new StateEnvelope<CoordinationDocument> { Value = new() { Json = new JsonObject { ["sessions"] = new JsonObject(sessions.Select(x =>
@@ -711,10 +716,10 @@ public sealed class CoordinationTests
     {
         var session = new StateEnvelope<CoordinationDocument>();
         Assert.True(Call(session, "session", "__open", new() { ["principalId"] = "alice", ["sessionToken"] = "secret", ["sessionId"] = "s" }).Ok);
-        Assert.True(Call(session, "session", Operations.SessionExpire, new()).Ok);
+        Assert.True(Call(session, "session", Operations.SessionExpire, new SessionExpire("repo", "s", 1).ToJson()).Ok);
         // Repeated expiry, or one for a session this grain never held, is accepted.
-        Assert.True(Call(session, "session", Operations.SessionExpire, new()).Ok);
-        Assert.True(Call(new StateEnvelope<CoordinationDocument>(), "session", Operations.SessionExpire, new()).Ok);
+        Assert.True(Call(session, "session", Operations.SessionExpire, new SessionExpire("repo", "s", 1).ToJson()).Ok);
+        Assert.True(Call(new StateEnvelope<CoordinationDocument>(), "session", Operations.SessionExpire, new SessionExpire("repo", "other", 2).ToJson()).Ok);
         var inbox = Call(session, "session", "check_inbox", new() { ["sessionToken"] = "secret" });
         Assert.Equal("SessionUnknown", inbox.Code);
         Assert.True(Data(inbox)["expired"]!.GetValue<bool>());
@@ -886,8 +891,8 @@ public sealed class CoordinationTests
         for (var hour = 0; hour <= 30; hour++)
         {
             Assert.True(Call(session, "session", "__verify", new() { ["sessionToken"] = "secret" }, seconds: hour * 3600).Ok);
-            foreach (var effect in session.Effects.Where(effect => effect.Operation == Operations.Register))
-                Assert.True(Call(control, "control", "__register", JsonNode.Parse(effect.PayloadJson)!.AsObject(), seconds: hour * 3600).Ok);
+            foreach (var effect in session.Effects.Where(effect => effect.Operation == Operations.SessionActive))
+                Assert.True(Call(control, "control", effect.Operation, JsonNode.Parse(effect.PayloadJson)!.AsObject(), seconds: hour * 3600).Ok);
             session.Effects.Clear();
         }
         Assert.Equal(Now.AddHours(30).ToString("O"), StateJson(control)["sessions"]!["busy"]!["activeAt"]!.GetValue<string>());
@@ -1357,7 +1362,7 @@ public sealed class CoordinationTests
         // A manager chat neither fresh nor active for over a day (a closed chat) is skipped, unless it reported activity since.
         Open("manager", daysAgo: 2);
         var active = Open("manager", daysAgo: 3);
-        Assert.True(Call(control, "control", "__register", new() { ["sessionId"] = active, ["activeAt"] = Now.AddHours(-1).ToString("O") }).Ok);
+        Assert.True(Call(control, "control", Operations.SessionActive, new() { ["sessionId"] = active, ["activeAt"] = Now.AddHours(-1).ToString("O") }).Ok);
         var before = control.Effects.Count;
         var routed = Call(control, "control", "__attention_route", new()
         {
@@ -1718,72 +1723,97 @@ public sealed class CoordinationTests
         ["sessionId"] = id, ["principalId"] = "alice", ["repositoryId"] = "repo", ["observedAt"] = seen.ToString("O"), ["freshUntil"] = seen.ToString("O")
     };
 
+    /// <summary>A hub whose directory holds <paramref name="others"/> sessions besides those a test opens, each last seen at <paramref name="seen"/>.</summary>
+    private static AggregateHub HubWithDirectory(int others, DateTimeOffset seen)
+    {
+        var hub = new AggregateHub();
+        var sessions = new JsonObject();
+        for (var i = 1; i <= others; i++) sessions["old-" + i] = StaleRecord("old-" + i, seen);
+        hub.Of(AggregateKinds.Control, AggregateKinds.ControlKey).Value.Json = new JsonObject { ["sessions"] = sessions }.ToJsonString();
+        return hub;
+    }
+
+    /// <summary>Task t on the hub's board claimed by <paramref name="session"/>, with action deploy begun at <paramref name="at"/>; nothing is delivered.</summary>
+    private static void BeginDeploy(AggregateHub hub, RelayCaller worker, string session, DateTimeOffset at)
+    {
+        Assert.True(hub.Board("task_update", new() { ["taskId"] = "t", ["expectedVersion"] = 0 }, at, worker).Ok);
+        Assert.True(hub.Board("task_claim", new() { ["taskId"] = "t", ["sessionId"] = session, ["expectedVersion"] = 1 }, at, worker).Ok);
+        Assert.True(hub.Board("action_begin", new() { ["taskId"] = "t", ["sessionId"] = session, ["expectedVersion"] = 2, ["actionId"] = "deploy", ["inputFingerprint"] = "f" }, at, worker).Ok);
+    }
+
+    private static RelayReply ReportDeploy(AggregateHub hub, RelayCaller worker, string session, DateTimeOffset at) =>
+        hub.Board("action_report", new() { ["taskId"] = "t", ["sessionId"] = session, ["expectedVersion"] = 3, ["actionId"] = "deploy", ["attempt"] = 1, ["outcome"] = "completed" }, at, worker);
+
+    /// <summary>The board's queued report that <paramref name="session"/> starts or stops answering for an action.</summary>
+    private static DurableEffect WorkReport(AggregateHub hub, string session) =>
+        Assert.Single(hub.Queued, effect => effect.Operation == Operations.SessionWork && effect.TargetKind == AggregateKinds.Session && effect.TargetKey == session);
+
+    /// <summary>A board's report to the session <paramref name="session"/> that it starts or stops answering for action <paramref name="action"/>.</summary>
+    private static JsonObject ActionWork(string session, string action, bool open, DateTimeOffset at) =>
+        new ActionWorkReport("repo", session, AggregateKinds.DefaultBoard, "t", action, 1, open, at).ToJson();
+
     [Fact]
     public void A_full_directory_never_expires_a_session_that_owns_an_unresolved_action()
     {
         var worker = Caller with { IsAdministrator = false };
         // A directory one short of full; every other session was last seen an hour after A, and all of them go stale.
-        var sessions = new JsonObject();
-        for (var i = 1; i < RelayLimits.MaxRecords; i++) sessions["old-" + i] = StaleRecord("old-" + i, Now.AddHours(1));
-        var control = new StateEnvelope<CoordinationDocument> { Value = new() { Json = new JsonObject { ["sessions"] = sessions }.ToJsonString() } };
-        var a = Data(Call(control, "control", "session_open", new() { ["requestId"] = "open-a" }, worker))["sessionId"]!.GetValue<string>();
-        control.Effects.Clear();
-        // A claims a task and begins an action; the board tells the directory that A answers for it.
-        var board = new StateEnvelope<CoordinationDocument>();
-        Assert.True(Call(board, "board", "task_update", new() { ["taskId"] = "t", ["requestId"] = "create", ["expectedVersion"] = 0 }, worker).Ok);
-        Assert.True(Call(board, "board", "task_claim", new() { ["taskId"] = "t", ["sessionId"] = a, ["requestId"] = "claim", ["expectedVersion"] = 1 }, worker).Ok);
-        Assert.True(Call(board, "board", "action_begin", new() { ["taskId"] = "t", ["sessionId"] = a, ["requestId"] = "begin", ["expectedVersion"] = 2, ["actionId"] = "deploy", ["inputFingerprint"] = "f" }, worker).Ok);
-        var opened = Assert.Single(board.Effects, effect => effect.Operation == Operations.SessionWork);
-        Assert.True(Payload(opened)["open"]!.GetValue<bool>());
-        Assert.True(Call(control, "control", opened.Operation, Payload(opened), worker).Ok);
-        board.Effects.Clear();
+        var hub = HubWithDirectory(RelayLimits.MaxRecords - 1, Now.AddHours(1));
+        var a = hub.Open("a", Now).Id;
+        hub.DeliverAll(Now);
+        // A claims a task and begins an action; the board tells A's session, which tells the directory that A answers for it.
+        BeginDeploy(hub, worker, a, Now);
+        Assert.True(Payload(WorkReport(hub, a))["open"]!.GetValue<bool>());
+        hub.DeliverAll(Now);
+        Assert.NotNull(hub.Directory()[a]!["ownsWork"]);
 
         // A day and more later A has gone quiet with its action still invoking. A new open fills the directory and drops the least
         // recently seen stale sessions; A is the least recently seen, and it stays.
-        var later = (RelayLimits.StaleSessionHours + 6) * 3600;
-        Assert.True(Call(control, "control", "session_open", new() { ["requestId"] = "open-b" }, worker, later).Ok);
-        var directory = StateJson(control)["sessions"]!.AsObject();
+        var later = Now.AddHours(RelayLimits.StaleSessionHours + 6);
+        Assert.True(hub.Apply(AggregateKinds.Control, AggregateKinds.ControlKey, "session_open", new() { ["requestId"] = "open-b" }, worker, later).Ok);
+        var directory = hub.Directory();
         Assert.True(directory.ContainsKey(a));
         Assert.Equal(RelayLimits.RetainedEntriesAfterPrune + 1, directory.Count);
-        Assert.DoesNotContain(control.Effects, effect => effect.Operation == Operations.SessionExpire && effect.TargetKey == a);
-        Assert.DoesNotContain("openActions", Call(control, "control", "worker_list", new(), worker, later).DataJson);
+        Assert.DoesNotContain(hub.Queued, effect => effect.Operation == Operations.SessionExpire && effect.TargetKey == a);
+        Assert.DoesNotContain("ownsWork", hub.Apply(AggregateKinds.Control, AggregateKinds.ControlKey, "worker_list", new(), worker, later).DataJson);
+        hub.DeliverAll(later);
         // So A can still report it. Once it is resolved, the directory may drop A like any other stale session.
-        Assert.True(Call(board, "board", "action_report", new() { ["taskId"] = "t", ["sessionId"] = a, ["requestId"] = "report", ["expectedVersion"] = 3, ["actionId"] = "deploy", ["attempt"] = 1, ["outcome"] = "completed" }, worker, later).Ok);
-        var closed = Assert.Single(board.Effects, effect => effect.Operation == Operations.SessionWork);
-        Assert.False(Payload(closed)["open"]!.GetValue<bool>());
-        Assert.True(Call(control, "control", closed.Operation, Payload(closed), worker, later).Ok);
-        Assert.Null(StateJson(control)["sessions"]![a]!["openActions"]);
+        Assert.True(ReportDeploy(hub, worker, a, later).Ok);
+        Assert.False(Payload(WorkReport(hub, a))["open"]!.GetValue<bool>());
+        hub.DeliverAll(later);
+        Assert.Null(hub.Directory()[a]!["ownsWork"]);
 
-        // A close for an action the directory never saw open (one begun before it tracked actions) is ignored, so it cannot lift the
-        // exemption of an action that is still open.
-        var counted = new StateEnvelope<CoordinationDocument> { Value = new() { Json = new JsonObject { ["sessions"] = new JsonObject { ["s"] = StaleRecord("s", Now) } }.ToJsonString() } };
-        JsonObject Work(int i, bool open) => new() { ["sessionId"] = "s", ["actionKey"] = "k" + i, ["open"] = open };
-        JsonNode Record() => StateJson(counted)["sessions"]!["s"]!;
-        Assert.True(Call(counted, "control", Operations.SessionWork, Work(0, true), worker).Ok);
-        var legacy = Data(Call(counted, "control", Operations.SessionWork, new() { ["sessionId"] = "s", ["actionKey"] = "begun-before-tracking", ["open"] = false }, worker));
-        Assert.Equal((false, 1), (legacy["tracked"]!.GetValue<bool>(), legacy["openActions"]!.GetValue<int>()));
-        Assert.True(Call(counted, "control", Operations.SessionWork, Work(0, false), worker).Ok);
-        Assert.DoesNotContain("openActions", Record().ToJsonString());
+        // A session's ledger ignores a close for an action it never saw open (one begun before it tracked actions), so that close cannot
+        // lift the exemption of an action that is still open.
+        var counted = new AggregateHub();
+        var s = counted.Open("s", Now).Id;
+        JsonObject Report(int i, bool open, int seconds = 0) => Data(counted.Apply(AggregateKinds.Session, s, Operations.SessionWork, ActionWork(s, "k" + i, open, Now.AddSeconds(seconds)),
+            AggregateHub.BoardCaller, Now.AddSeconds(seconds)));
+        JsonNode? Ledger() => counted.State(AggregateKinds.Session, s)["work"];
+        Assert.True(Report(0, true)["owns"]!.GetValue<bool>());
+        var legacy = Data(counted.Apply(AggregateKinds.Session, s, Operations.SessionWork, ActionWork(s, "begun-before-tracking", false, Now), AggregateHub.BoardCaller, Now));
+        Assert.Equal((false, true), (legacy["tracked"]!.GetValue<bool>(), legacy["owns"]!.GetValue<bool>()));
+        Assert.False(Report(0, false)["owns"]!.GetValue<bool>());
+        Assert.Null(Ledger()!["openActions"]);
         // A late open for an action already closed (reordered delivery) is ignored.
-        Assert.False(Data(Call(counted, "control", Operations.SessionWork, Work(0, true), worker))["tracked"]!.GetValue<bool>());
-        Assert.Null(Record()["openActions"]);
-        // The record is bounded: past the limit the session is marked, and the mark lapses a week after the last overflow.
-        for (var i = 1; i <= RelayLimits.MaxSessionOpenActions + 1; i++) Assert.True(Call(counted, "control", Operations.SessionWork, Work(i, true), worker).Ok);
-        Assert.Equal((RelayLimits.MaxSessionOpenActions, Now.ToUnixTimeSeconds()), (Record()["openActions"]!.AsObject().Count, Record()["openActionsOverflow"]!.GetValue<long>()));
-        Assert.False(Record()["openActions"]!.AsObject().ContainsKey("k1"));
-        for (var i = 1; i <= RelayLimits.MaxSessionOpenActions + 1; i++) Assert.True(Call(counted, "control", Operations.SessionWork, Work(i, false), worker).Ok);
-        Assert.Null(Record()["openActions"]);
-        Assert.NotNull(Record()["openActionsOverflow"]);
-        Assert.True(Call(counted, "control", Operations.SessionWork, Work(999, false), worker, (RelayLimits.SessionWorkRetentionDays * 24 + 1) * 3600).Ok);
-        Assert.Null(Record()["openActionsOverflow"]);
-        // A report for a session the directory no longer has, or another repository's, is accepted and ignored.
-        Assert.False(Data(Call(counted, "control", Operations.SessionWork, new() { ["sessionId"] = "gone", ["actionKey"] = "k", ["open"] = true }, worker))["tracked"]!.GetValue<bool>());
+        Assert.False(Report(0, true)["tracked"]!.GetValue<bool>());
+        Assert.Null(Ledger()!["openActions"]);
+        // The ledger is bounded: past the limit the session is marked, and the mark lapses a week after the last overflow.
+        for (var i = 1; i <= RelayLimits.MaxSessionOpenActions + 1; i++) Assert.True(Report(i, true)["owns"]!.GetValue<bool>());
+        Assert.Equal((RelayLimits.MaxSessionOpenActions, Now.ToUnixTimeSeconds()), (Ledger()!["openActions"]!.AsObject().Count, Ledger()!["openActionsOverflow"]!.GetValue<long>()));
+        Assert.False(Ledger()!["openActions"]!.AsObject().ContainsKey("k1"));
+        for (var i = 1; i <= RelayLimits.MaxSessionOpenActions + 1; i++) Report(i, false);
+        Assert.Null(Ledger()!["openActions"]);
+        Assert.NotNull(Ledger()!["openActionsOverflow"]);
+        Assert.False(Report(999, false, (RelayLimits.SessionWorkRetentionDays * 24 + 1) * 3600)["owns"]!.GetValue<bool>());
+        Assert.Null(Ledger()?["openActionsOverflow"]);
+        // A report to a session never opened here is accepted and ignored.
+        Assert.False(Data(counted.Apply(AggregateKinds.Session, "gone", Operations.SessionWork, ActionWork("gone", "k", true, Now), AggregateHub.BoardCaller, Now))["tracked"]!.GetValue<bool>());
 
         // When stale sessions that own unresolved actions alone fill the directory, an open is refused, says why, and expires nobody.
         var held = new JsonObject();
         for (var i = 0; i < RelayLimits.MaxRecords; i++)
         {
-            var heldRecord = StaleRecord("h-" + i, Now.AddDays(-3)); heldRecord["openActions"] = new JsonObject { ["k" + i] = Now.ToUnixTimeSeconds() };
+            var heldRecord = StaleRecord("h-" + i, Now.AddDays(-3)); heldRecord["ownsWork"] = Now.ToUnixTimeSeconds();
             held["h-" + i] = heldRecord;
         }
         var full = new StateEnvelope<CoordinationDocument> { Value = new() { Json = new JsonObject { ["sessions"] = held }.ToJsonString() } };
@@ -1799,47 +1829,47 @@ public sealed class CoordinationTests
     public void A_late_open_after_its_close_and_a_forgotten_open_never_keep_a_session_from_expiring()
     {
         var worker = Caller with { IsAdministrator = false };
-        StateEnvelope<CoordinationDocument> Directory(string id)
-        {
-            // One short of full, every other session last seen an hour after the one under test.
-            var sessions = new JsonObject();
-            for (var i = 1; i < RelayLimits.MaxRecords; i++) sessions["old-" + i] = StaleRecord("old-" + i, Now.AddHours(1));
-            sessions[id] = StaleRecord(id, Now);
-            return new StateEnvelope<CoordinationDocument> { Value = new() { Json = new JsonObject { ["sessions"] = sessions }.ToJsonString() } };
-        }
-        // A begins and finishes an action. The open's delivery fails, the close is delivered, and then the open's retry arrives.
-        var control = Directory("a");
-        var board = new StateEnvelope<CoordinationDocument>();
-        Assert.True(Call(board, "board", "task_update", new() { ["taskId"] = "t", ["requestId"] = "create", ["expectedVersion"] = 0 }, worker).Ok);
-        Assert.True(Call(board, "board", "task_claim", new() { ["taskId"] = "t", ["sessionId"] = "a", ["requestId"] = "claim", ["expectedVersion"] = 1 }, worker).Ok);
-        Assert.True(Call(board, "board", "action_begin", new() { ["taskId"] = "t", ["sessionId"] = "a", ["requestId"] = "begin", ["expectedVersion"] = 2, ["actionId"] = "deploy", ["inputFingerprint"] = "f" }, worker).Ok);
-        var open = Assert.Single(board.Effects, effect => effect.Operation == Operations.SessionWork);
-        board.Effects.Clear();
-        Assert.True(Call(board, "board", "action_report", new() { ["taskId"] = "t", ["sessionId"] = "a", ["requestId"] = "report", ["expectedVersion"] = 3, ["actionId"] = "deploy", ["attempt"] = 1, ["outcome"] = "completed" }, worker, 60).Ok);
-        var close = Assert.Single(board.Effects, effect => effect.Operation == Operations.SessionWork);
-        Assert.True(Call(control, "control", close.Operation, Payload(close), worker, 70).Ok);
-        var late = Call(control, "control", open.Operation, Payload(open), worker, 80);
+        // One short of full, every other session last seen an hour after the one under test.
+        var hub = HubWithDirectory(RelayLimits.MaxRecords - 1, Now.AddHours(1));
+        var a = hub.Open("a", Now).Id;
+        hub.DeliverAll(Now);
+        // A begins and finishes an action. The open's delivery to A's session fails, the close is delivered, and then the open's retry arrives.
+        BeginDeploy(hub, worker, a, Now);
+        var open = WorkReport(hub, a);
+        Assert.True(ReportDeploy(hub, worker, a, Now.AddSeconds(60)).Ok);
+        var close = Assert.Single(hub.Queued, effect => effect.Operation == Operations.SessionWork && effect.Id != open.Id);
+        Assert.True(hub.Deliver(close, Now.AddSeconds(70)).Ok);
+        var late = hub.Deliver(open, Now.AddSeconds(80));
         Assert.True(late.Ok);
         Assert.False(Data(late)["tracked"]!.GetValue<bool>());
-        Assert.Null(StateJson(control)["sessions"]!["a"]!["openActions"]);
+        hub.DeliverAll(Now.AddSeconds(80));
+        Assert.Null(hub.State(AggregateKinds.Session, a)["work"]!["openActions"]);
+        Assert.Null(hub.Directory()[a]!["ownsWork"]);
         // So A is not protected: a full directory a day later drops it with the other stale sessions.
-        Assert.True(Call(control, "control", "session_open", new() { ["requestId"] = "open" }, worker, (RelayLimits.StaleSessionHours + 6) * 3600).Ok);
-        Assert.False(StateJson(control)["sessions"]!.AsObject().ContainsKey("a"));
-        Assert.Contains(control.Effects, effect => effect.Operation == Operations.SessionExpire && effect.TargetKey == "a");
+        Assert.True(hub.Apply(AggregateKinds.Control, AggregateKinds.ControlKey, "session_open", new() { ["requestId"] = "open" }, worker, Now.AddHours(RelayLimits.StaleSessionHours + 6)).Ok);
+        Assert.False(hub.Directory().ContainsKey(a));
+        Assert.Contains(hub.Queued, effect => effect.Operation == Operations.SessionExpire && effect.TargetKey == a);
 
         // An open whose close never arrives protects its session only for SessionWorkRetentionDays without a report.
-        var forgotten = Directory("b");
-        Assert.True(Call(forgotten, "control", Operations.SessionWork, new() { ["sessionId"] = "b", ["actionKey"] = "lost", ["open"] = true, ["at"] = Now.ToString("O") }, worker).Ok);
-        Assert.True(Call(forgotten, "control", "session_open", new() { ["requestId"] = "early" }, worker, (RelayLimits.StaleSessionHours + 6) * 3600).Ok);
-        Assert.True(StateJson(forgotten)["sessions"]!.AsObject().ContainsKey("b"));
-        var week = Directory("b");
-        Assert.True(Call(week, "control", Operations.SessionWork, new() { ["sessionId"] = "b", ["actionKey"] = "lost", ["open"] = true, ["at"] = Now.ToString("O") }, worker).Ok);
-        Assert.True(Call(week, "control", "session_open", new() { ["requestId"] = "late" }, worker, (RelayLimits.SessionWorkRetentionDays * 24 + 1) * 3600).Ok);
-        Assert.False(StateJson(week)["sessions"]!.AsObject().ContainsKey("b"));
+        AggregateHub Forgotten(out string b)
+        {
+            var forgotten = HubWithDirectory(RelayLimits.MaxRecords - 1, Now.AddHours(1));
+            b = forgotten.Open("b", Now).Id;
+            Assert.True(forgotten.Apply(AggregateKinds.Session, b, Operations.SessionWork, ActionWork(b, "lost", true, Now), AggregateHub.BoardCaller, Now).Ok);
+            forgotten.DeliverAll(Now);
+            return forgotten;
+        }
+        var early = Forgotten(out var b);
+        Assert.True(early.Apply(AggregateKinds.Control, AggregateKinds.ControlKey, "session_open", new() { ["requestId"] = "early" }, worker, Now.AddHours(RelayLimits.StaleSessionHours + 6)).Ok);
+        Assert.True(early.Directory().ContainsKey(b));
+        var week = Forgotten(out var c);
+        Assert.True(week.Apply(AggregateKinds.Control, AggregateKinds.ControlKey, "session_open", new() { ["requestId"] = "late" }, worker, Now.AddHours(RelayLimits.SessionWorkRetentionDays * 24 + 1)).Ok);
+        Assert.False(week.Directory().ContainsKey(c));
         // An open delivered later than the window is ignored outright, and the lapsed one is forgotten.
-        var stale = Call(forgotten, "control", Operations.SessionWork, new() { ["sessionId"] = "b", ["actionKey"] = "delayed", ["open"] = true, ["at"] = Now.ToString("O") }, worker, (RelayLimits.SessionWorkRetentionDays * 24 + 1) * 3600);
-        Assert.Equal((false, 0), (Data(stale)["tracked"]!.GetValue<bool>(), Data(stale)["openActions"]!.GetValue<int>()));
-        Assert.Null(StateJson(forgotten)["sessions"]!["b"]!["openActions"]);
+        var lapse = Now.AddHours(RelayLimits.SessionWorkRetentionDays * 24 + 1);
+        var stale = Data(early.Apply(AggregateKinds.Session, b, Operations.SessionWork, ActionWork(b, "delayed", true, Now), AggregateHub.BoardCaller, lapse));
+        Assert.Equal((false, false), (stale["tracked"]!.GetValue<bool>(), stale["owns"]!.GetValue<bool>()));
+        Assert.Null(early.State(AggregateKinds.Session, b)["work"]?["openActions"]);
     }
 
     private static JsonObject StrandedReport(string sessionId, long version) => new()
@@ -1865,7 +1895,7 @@ public sealed class CoordinationTests
         // The session ends (an explicit end, or a directory from before this fix) while the action is still invoking.
         var session = new StateEnvelope<CoordinationDocument>();
         Assert.True(Call(session, "session", "__open", new() { ["principalId"] = "alice", ["sessionToken"] = "secret", ["sessionId"] = "a" }, worker).Ok);
-        Assert.True(Call(session, "session", Operations.SessionExpire, new(), worker).Ok);
+        Assert.True(Call(session, "session", Operations.SessionExpire, new SessionExpire("repo", "a", 1).ToJson(), worker).Ok);
         Assert.Equal("SessionUnknown", Call(session, "session", "__verify", new() { ["sessionToken"] = "secret" }, worker).Code);
         // Its chat reopens as another session; a plain report from there is still not the writer's.
         var reopened = StrandedReport("a2", 3); reopened["outcome"] = "completed";
@@ -2131,17 +2161,20 @@ public sealed class CoordinationTests
     [Fact]
     public void A_session_the_action_comes_back_to_is_tracked_again_but_a_reordered_open_is_not()
     {
-        var worker = Caller with { IsAdministrator = false };
-        var control = new StateEnvelope<CoordinationDocument> { Value = new() { Json = new JsonObject { ["sessions"] = new JsonObject { ["a"] = StaleRecord("a", Now) } }.ToJsonString() } };
-        JsonObject Work(bool open, int seconds) => new() { ["sessionId"] = "a", ["actionKey"] = "k", ["open"] = open, ["at"] = Now.AddSeconds(seconds).ToString("O") };
-        Assert.True(Call(control, "control", Operations.SessionWork, Work(true, 0), worker, 0).Ok);
-        Assert.True(Call(control, "control", Operations.SessionWork, Work(false, 10), worker, 10).Ok);
+        var hub = new AggregateHub();
+        var a = hub.Open("a", Now).Id;
+        JsonObject Work(bool open, int seconds, int delivered) =>
+            Data(hub.Apply(AggregateKinds.Session, a, Operations.SessionWork, ActionWork(a, "k", open, Now.AddSeconds(seconds)), AggregateHub.BoardCaller, Now.AddSeconds(delivered)));
+        Assert.True(Work(true, 0, 0)["owns"]!.GetValue<bool>());
+        Assert.False(Work(false, 10, 10)["owns"]!.GetValue<bool>());
         // A refresh reported before the close, delivered after it, changes nothing.
-        Assert.False(Data(Call(control, "control", Operations.SessionWork, Work(true, 5), worker, 20))["tracked"]!.GetValue<bool>());
-        Assert.Null(StateJson(control)["sessions"]!["a"]!["openActions"]);
+        Assert.False(Work(true, 5, 20)["tracked"]!.GetValue<bool>());
+        Assert.Null(hub.State(AggregateKinds.Session, a)["work"]!["openActions"]);
         // An open reported after the close is real (the writer took the action back), and opens it again.
-        Assert.True(Data(Call(control, "control", Operations.SessionWork, Work(true, 30), worker, 30))["tracked"]!.GetValue<bool>());
-        Assert.Single(StateJson(control)["sessions"]!["a"]!["openActions"]!.AsObject());
+        Assert.True(Work(true, 30, 30)["tracked"]!.GetValue<bool>());
+        Assert.Single(hub.State(AggregateKinds.Session, a)["work"]!["openActions"]!.AsObject());
+        hub.DeliverAll(Now.AddSeconds(30));
+        Assert.NotNull(hub.Directory()[a]!["ownsWork"]);
     }
 
     [Fact]

@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using CoCern.Domain.Messages;
 using static CoCern.Domain.JsonFields;
 
 namespace CoCern.Domain;
@@ -32,4 +33,11 @@ internal sealed class AggregateContext(JsonObject state, RelayCaller caller, str
     /// <summary>Emits an effect delivered with its own caller instead of the one whose call caused it.</summary>
     public void Emit(string targetKind, string targetKey, string operation, JsonObject payload, RelayCaller asCaller) =>
         Emit(targetKind, targetKey, operation, CoordinationStateMachine.WithCaller(payload, asCaller));
+
+    /// <summary>Sends a typed message to the aggregate <paramref name="targetKey"/> of its kind, as its operation, in its one shape.</summary>
+    public void Send<T>(string targetKey, T message) where T : class, IEffectMessage<T> => Emit(T.TargetKind, targetKey, T.Operation, message.ToJson());
+
+    /// <summary>Sends a typed message delivered with its own caller instead of the one whose call caused it.</summary>
+    public void Send<T>(string targetKey, T message, RelayCaller asCaller) where T : class, IEffectMessage<T> =>
+        Emit(T.TargetKind, targetKey, T.Operation, message.ToJson(), asCaller);
 }

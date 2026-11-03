@@ -10,6 +10,7 @@ using Orleans.Hosting;
 using CoCern.Contracts;
 using CoCern.Core;
 using CoCern.Domain;
+using CoCern.Domain.Messages;
 using Xunit;
 
 namespace CoCern.Tests;
@@ -23,16 +24,14 @@ namespace CoCern.Tests;
 public sealed class SessionLifecycleTests
 {
     private static readonly DateTimeOffset T0 = DateTimeOffset.Parse("2026-11-02T12:00:00Z");
-    private static readonly RelayCaller Alice = new("alice", false, ["repo"]);
-    private static readonly RelayCaller Admin = new("admin", true, ["repo"]);
-    private static readonly RelayCaller Sweeper = new("relay-sweep", true, [], true);
-    private static readonly RelayCaller BoardCaller = new("board", false, ["repo"], true);
-    private static readonly string BoardKey = AggregateKinds.BoardKey("repo", "default");
+    private static readonly RelayCaller Alice = AggregateHub.Alice;
+    private static readonly RelayCaller BoardCaller = AggregateHub.BoardCaller;
+    private static readonly string BoardKey = AggregateHub.BoardKey;
 
     [Fact]
     public void An_idle_close_counts_from_the_last_call_even_though_activity_reaches_the_directory_only_hourly()
     {
-        var hub = new Hub();
+        var hub = new AggregateHub();
         var working = hub.Open("working", T0);
         var idle = hub.Open("idle", T0);
         hub.Verify(working, T0); hub.Verify(idle, T0);
@@ -56,7 +55,7 @@ public sealed class SessionLifecycleTests
         Assert.Equal([idle.Id], hub.Directory().Select(entry => entry.Key));
 
         // The sweep judges the same way: an hour more than its idle hours.
-        var swept = new Hub();
+        var swept = new AggregateHub();
         var chat = swept.Open("chat", T0);
         swept.Verify(chat, T0);
         swept.DeliverAll(T0);
@@ -67,7 +66,7 @@ public sealed class SessionLifecycleTests
     [Fact]
     public void An_idle_session_with_unread_mail_refuses_the_sweep_and_stays_until_it_is_seen_again_or_the_hold_lapses()
     {
-        var hub = new Hub();
+        var hub = new AggregateHub();
         var worker = hub.Open("worker", T0);
         var sender = hub.Open("sender", T0);
         hub.Verify(worker, T0); hub.Verify(sender, T0);
@@ -99,7 +98,7 @@ public sealed class SessionLifecycleTests
         var closed = Data(hub.Close(new() { ["idleMinutes"] = 60 }, T0.AddHours(30)));
         Assert.Equal((1, 1, false), (closed["closed"]!.GetValue<int>(), closed["held"]!.GetValue<int>(), closed["more"]!.GetValue<bool>()));
         Assert.Equal([sender.Id], closed["ids"]!.AsArray().Select(id => id!.GetValue<string>()));
-        hub.Of(AggregateKinds.Control, AggregateKinds.ControlKey).Effects.Clear();
+        Assert.Single(hub.Discard(Operations.SessionExpire));
 
         // Past the hold, an idle close takes it as it is: the expiry no longer asks.
         var lapsed = Data(hub.Sweep(24, T0.AddHours(26).AddDays(RelayLimits.SessionMailHoldDays).AddMinutes(1)));
@@ -113,7 +112,7 @@ public sealed class SessionLifecycleTests
     [Fact]
     public void A_session_seen_again_after_its_mail_hold_is_asked_again_and_an_empty_inbox_lets_it_close()
     {
-        var hub = new Hub();
+        var hub = new AggregateHub();
         var worker = hub.Open("worker", T0);
         var sender = hub.Open("sender", T0);
         hub.Verify(worker, T0); hub.Verify(sender, T0);
@@ -140,7 +139,7 @@ public sealed class SessionLifecycleTests
     [Fact]
     public void A_close_that_is_not_idle_takes_a_session_with_mail_and_later_messages_to_it_come_back_to_their_sender()
     {
-        var hub = new Hub();
+        var hub = new AggregateHub();
         var worker = hub.Open("smoke worker", T0);
         var sender = hub.Open("sender", T0);
         hub.Verify(worker, T0); hub.Verify(sender, T0);
@@ -181,19 +180,15 @@ public sealed class SessionLifecycleTests
     [Fact]
     public void A_close_that_races_the_report_of_a_new_action_is_refused_by_the_session_which_comes_back_owning_it()
     {
-        var hub = new Hub();
+        var hub = new AggregateHub();
         var worker = hub.Open("smoke 1", T0);
         hub.Verify(worker, T0);
         hub.DeliverAll(T0);
         // A board records the session's new action and tells the session, which tells the directory; that last report is still queued
         // when an administrator closes the session by label.
-        Assert.True(hub.Apply(AggregateKinds.Session, worker.Id, Operations.SessionWork, new()
-        {
-            ["sessionId"] = worker.Id, ["actionKey"] = "repo/default/t/a/1", ["open"] = true, ["at"] = T0.AddMinutes(1).ToString("O")
-        }, BoardCaller, T0.AddMinutes(1)).Ok);
-        var report = Assert.Single(hub.Of(AggregateKinds.Session, worker.Id).Effects);
-        Assert.Equal(Operations.SessionWork, report.Operation);
-        hub.Of(AggregateKinds.Session, worker.Id).Effects.Clear();
+        Assert.True(hub.Apply(AggregateKinds.Session, worker.Id, Operations.SessionWork, Work(worker.Id, true, T0.AddMinutes(1)), BoardCaller, T0.AddMinutes(1)).Ok);
+        var report = Assert.Single(hub.Discard(Operations.SessionOwns));
+        Assert.Equal(AggregateKinds.Control, report.TargetKind);
 
         Assert.Equal(1, Data(hub.Close(new() { ["targetSessionId"] = worker.Id }, T0.AddMinutes(2)))["closed"]!.GetValue<int>());
         Assert.False(hub.Directory().ContainsKey(worker.Id));
@@ -217,16 +212,13 @@ public sealed class SessionLifecycleTests
     [Fact]
     public void Force_closing_an_exact_session_expires_it_despite_unread_mail_and_unresolved_work()
     {
-        var hub = new Hub();
+        var hub = new AggregateHub();
         var target = hub.Open("Same label", T0);
         var peer = hub.Open("Same label", T0);
         hub.Verify(target, T0); hub.Verify(peer, T0);
         hub.DeliverAll(T0);
         Assert.True(hub.Send(peer, target.Id, "unread", T0).Ok);
-        Assert.True(hub.Apply(AggregateKinds.Session, target.Id, Operations.SessionWork, new()
-        {
-            ["sessionId"] = target.Id, ["actionKey"] = "repo/default/t/a/1", ["open"] = true, ["at"] = T0.ToString("O")
-        }, BoardCaller, T0).Ok);
+        Assert.True(hub.Apply(AggregateKinds.Session, target.Id, Operations.SessionWork, Work(target.Id, true, T0), BoardCaller, T0).Ok);
         hub.DeliverAll(T0);
 
         var kept = hub.Close(new() { ["targetSessionId"] = target.Id }, T0.AddMinutes(1));
@@ -242,10 +234,7 @@ public sealed class SessionLifecycleTests
         Assert.True(hub.Verify(peer, T0.AddMinutes(3)).Ok);
         Assert.Null(hub.State(AggregateKinds.Session, target.Id)["inbox"]);
         // A late work report cannot revive the closed session.
-        Assert.True(hub.Apply(AggregateKinds.Session, target.Id, Operations.SessionWork, new()
-        {
-            ["sessionId"] = target.Id, ["actionKey"] = "repo/default/t/a/1", ["open"] = true, ["at"] = T0.AddMinutes(4).ToString("O")
-        }, BoardCaller, T0.AddMinutes(4)).Ok);
+        Assert.True(hub.Apply(AggregateKinds.Session, target.Id, Operations.SessionWork, Work(target.Id, true, T0.AddMinutes(4)), BoardCaller, T0.AddMinutes(4)).Ok);
         hub.DeliverAll(T0.AddMinutes(4));
         Assert.False(hub.Directory().ContainsKey(target.Id));
     }
@@ -253,15 +242,12 @@ public sealed class SessionLifecycleTests
     [Fact]
     public void A_late_restore_cannot_bring_back_a_force_closed_session()
     {
-        var hub = new Hub();
+        var hub = new AggregateHub();
         var target = hub.Open("target", T0);
         hub.Verify(target, T0); hub.DeliverAll(T0);
-        Assert.True(hub.Apply(AggregateKinds.Session, target.Id, Operations.SessionWork, new()
-        {
-            ["sessionId"] = target.Id, ["actionKey"] = "repo/default/t/a/1", ["open"] = true, ["at"] = T0.ToString("O")
-        }, BoardCaller, T0).Ok);
+        Assert.True(hub.Apply(AggregateKinds.Session, target.Id, Operations.SessionWork, Work(target.Id, true, T0), BoardCaller, T0).Ok);
         // The directory has not yet heard the work report, so a normal close is refused by the session.
-        hub.Of(AggregateKinds.Session, target.Id).Effects.Clear();
+        Assert.Single(hub.Discard(Operations.SessionOwns));
         Assert.True(hub.Close(new() { ["targetSessionId"] = target.Id }, T0.AddMinutes(1)).Ok);
         var expiry = Assert.Single(hub.Of(AggregateKinds.Control, AggregateKinds.ControlKey).Effects);
         Assert.True(hub.Deliver(expiry, T0.AddMinutes(1)).Ok);
@@ -274,8 +260,11 @@ public sealed class SessionLifecycleTests
         Assert.Equal(RelayErrorCodes.SessionUnknown, hub.Verify(target, T0.AddMinutes(3)).Code);
     }
 
-    /// <summary>A board task <c>t</c> claimed by <paramref name="owner"/> for an hour, with one unresolved action <c>a</c> that session began.</summary>
-    private static void SeedBoard(Hub hub, string owner)
+    /// <summary>
+    /// A board task <c>t</c> claimed by <paramref name="owner"/> for an hour, at version 3, with one unresolved action <c>a</c> that session
+    /// began, or (without <paramref name="begun"/>) none yet.
+    /// </summary>
+    private static void SeedBoard(AggregateHub hub, string owner, bool begun = true)
     {
         var action = new JsonObject
         {
@@ -285,23 +274,23 @@ public sealed class SessionLifecycleTests
         var task = new JsonObject
         {
             ["taskId"] = "t", ["version"] = 3, ["owner"] = owner, ["leaseUntil"] = T0.AddHours(1).ToString("O"), ["claimGeneration"] = 1,
-            ["actions"] = new JsonObject { ["a"] = action }, ["messages"] = new JsonArray(), ["reports"] = new JsonArray(), ["facts"] = new JsonObject()
+            ["actions"] = begun ? new JsonObject { ["a"] = action } : new JsonObject(), ["messages"] = new JsonArray(), ["reports"] = new JsonArray(), ["facts"] = new JsonObject()
         };
         hub.Of(AggregateKinds.Board, BoardKey).Value.Json = new JsonObject { ["repositoryId"] = "repo", ["tasks"] = new JsonObject { ["t"] = task } }.ToJsonString();
     }
 
-    private static JsonObject BoardTask(Hub hub) => hub.State(AggregateKinds.Board, BoardKey)["tasks"]!["t"]!.AsObject();
+    private static JsonObject BoardTask(AggregateHub hub) => hub.State(AggregateKinds.Board, BoardKey)["tasks"]!["t"]!.AsObject();
 
-    private static RelayReply ReportWork(Hub hub, Chat chat, bool open, DateTimeOffset at) =>
-        hub.Apply(AggregateKinds.Session, chat.Id, Operations.SessionWork, new()
-        {
-            ["sessionId"] = chat.Id, ["actionKey"] = "repo/default/t/a/1", ["open"] = open, ["at"] = at.ToString("O")
-        }, BoardCaller, at);
+    private static RelayReply ReportWork(AggregateHub hub, Chat chat, bool open, DateTimeOffset at) =>
+        hub.Apply(AggregateKinds.Session, chat.Id, Operations.SessionWork, Work(chat.Id, open, at), BoardCaller, at);
+
+    /// <summary>The board's report that <paramref name="session"/> starts or stops answering for attempt 1 of action a on task t.</summary>
+    private static JsonObject Work(string session, bool open, DateTimeOffset at) => new ActionWorkReport("repo", session, "default", "t", "a", 1, open, at).ToJson();
 
     [Fact]
     public void A_forced_close_tells_the_board_which_makes_the_sessions_actions_recoverable_at_once()
     {
-        var hub = new Hub();
+        var hub = new AggregateHub();
         var worker = hub.Open("worker", T0);
         hub.Verify(worker, T0); hub.DeliverAll(T0);
         SeedBoard(hub, worker.Id);
@@ -326,7 +315,7 @@ public sealed class SessionLifecycleTests
     [Fact]
     public void A_report_of_new_work_that_lands_after_a_close_makes_the_action_recoverable()
     {
-        var hub = new Hub();
+        var hub = new AggregateHub();
         var worker = hub.Open("smoke worker", T0);
         hub.Verify(worker, T0); hub.DeliverAll(T0);
         SeedBoard(hub, worker.Id);
@@ -344,15 +333,145 @@ public sealed class SessionLifecycleTests
         Assert.Null(Data(ReportWork(hub, worker, false, T0.AddMinutes(3)))["toldBoard"]);
     }
 
+    private static RelayReply Begin(AggregateHub hub, Chat chat, DateTimeOffset at) =>
+        hub.Board(RelayTools.ActionBegin, new() { ["taskId"] = "t", ["sessionId"] = chat.Id, ["actionId"] = "a", ["inputFingerprint"] = "f", ["expectedVersion"] = 3 }, at);
+
+    private static RelayReply Settle(AggregateHub hub, Chat chat, DateTimeOffset at) =>
+        hub.Board(RelayTools.ActionReport, new() { ["taskId"] = "t", ["sessionId"] = chat.Id, ["actionId"] = "a", ["attempt"] = 1, ["outcome"] = "completed", ["expectedVersion"] = 4 }, at);
+
+    [Fact]
+    public void Work_reports_delivered_in_any_order_and_twice_leave_the_directory_knowing_whether_the_session_owns_work()
+    {
+        var hub = new AggregateHub();
+        var worker = hub.Open("worker", T0);
+        hub.Verify(worker, T0); hub.DeliverAll(T0);
+        SeedBoard(hub, worker.Id, begun: false);
+
+        // Begun and not yet reported: however the board's report and the session's reach their targets, the directory knows.
+        Assert.True(Begin(hub, worker, T0.AddMinutes(1)).Ok);
+        var owning = hub.Explore(T0.AddMinutes(2), drained =>
+        {
+            drained.AssertInvariants(T0.AddMinutes(2));
+            Assert.NotNull(drained.Directory()[worker.Id]!["ownsWork"]);
+        });
+        Assert.True(owning > 1);
+
+        // Begun and reported: in every order, with any report delivered twice, the session ends up owning nothing, and so does its entry.
+        Assert.True(Settle(hub, worker, T0.AddMinutes(2)).Ok);
+        var settled = hub.Explore(T0.AddMinutes(3), drained =>
+        {
+            drained.AssertInvariants(T0.AddMinutes(3));
+            Assert.Null(drained.State(AggregateKinds.Session, worker.Id)["work"]!["openActions"]);
+            Assert.Null(drained.Directory()[worker.Id]!["ownsWork"]);
+        });
+        Assert.True(settled > 1);
+    }
+
+    [Fact]
+    public void A_close_racing_the_report_of_a_new_action_never_strands_it_in_any_delivery_order()
+    {
+        foreach (var force in new[] { false, true })
+        {
+            var hub = new AggregateHub();
+            var worker = hub.Open("smoke worker", T0);
+            hub.Verify(worker, T0); hub.DeliverAll(T0);
+            SeedBoard(hub, worker.Id, begun: false);
+            // The session begins an action, and an administrator closes it before anything is delivered.
+            Assert.True(Begin(hub, worker, T0.AddMinutes(1)).Ok);
+            var close = new JsonObject { ["targetSessionId"] = worker.Id };
+            if (force) close["force"] = true;
+            Assert.Equal(1, Data(hub.Close(close, T0.AddMinutes(2)))["closed"]!.GetValue<int>());
+            // Either the session hears of the action first and refuses (comes back owning it), or it closes first and the late report makes
+            // the action recoverable; a forced close takes it either way, and the board hears.
+            var closed = new HashSet<bool>();
+            hub.Explore(T0.AddMinutes(2), drained =>
+            {
+                drained.AssertInvariants(T0.AddMinutes(2));
+                closed.Add(drained.State(AggregateKinds.Session, worker.Id)["expiredAt"] is not null);
+            });
+            Assert.Equal(force ? [true] : [false, true], closed.Order());
+        }
+    }
+
+    [Fact]
+    public void A_close_that_overtakes_a_new_sessions_open_leaves_no_session_open_outside_the_directory()
+    {
+        // The directory records a new session and queues its open; the hub's direct open has not landed yet. An administrator closes it.
+        var hub = new AggregateHub { HoldDirectCalls = true };
+        var chat = hub.Open("smoke", T0);
+        var queued = Assert.Single(hub.Discard(Operations.Open));
+        Assert.Equal(1, Data(hub.Close(new() { ["targetSessionId"] = chat.Id }, T0.AddMinutes(1)))["closed"]!.GetValue<int>());
+        // The close reaches the session before either copy of its open, so the session was never opened when it closed.
+        var expire = Assert.Single(hub.Discard(Operations.SessionExpire));
+        AggregateHub.Accept(expire, hub.Deliver(expire, T0.AddMinutes(1)));
+        // Then the direct open lands, and the directory's queued copy after it: neither opens a session the directory no longer lists.
+        hub.DeliverAll(T0.AddMinutes(1));
+        AggregateHub.Accept(queued, hub.Deliver(queued, T0.AddMinutes(2)));
+        hub.AssertInvariants(T0.AddMinutes(2));
+        Assert.False(hub.Directory().ContainsKey(chat.Id));
+        // The session stays a closed one that was never opened: it holds no principal or secret, and no call is let through.
+        var session = hub.State(AggregateKinds.Session, chat.Id);
+        Assert.Equal((true, null, null), (session["expiredAt"] is not null, session["principalId"], session["sessionToken"]));
+        Assert.False(hub.Verify(chat, T0.AddMinutes(2)).Ok);
+    }
+
+    [Fact]
+    public void A_close_racing_a_new_sessions_two_opens_settles_in_every_delivery_order()
+    {
+        var hub = new AggregateHub { HoldDirectCalls = true };
+        var chat = hub.Open("smoke", T0);
+        Assert.Equal(1, Data(hub.Close(new() { ["targetSessionId"] = chat.Id }, T0.AddMinutes(1)))["closed"]!.GetValue<int>());
+        // Whichever of the direct open, the queued open and the close lands first, and with any of them delivered twice, the session ends
+        // closed, nothing is refused (a refused open would be retried forever), and the directory keeps no fence for it.
+        var drained = hub.Explore(T0.AddMinutes(1), state =>
+        {
+            state.AssertInvariants(T0.AddMinutes(1));
+            Assert.NotNull(state.State(AggregateKinds.Session, chat.Id)["expiredAt"]);
+            Assert.Null(state.State(AggregateKinds.Control, AggregateKinds.ControlKey)["closing"]);
+        });
+        Assert.True(drained > 1);
+    }
+
+    [Fact]
+    public async Task A_retried_session_open_whose_session_has_since_closed_says_so_and_the_chat_opens_another()
+    {
+        var host = new HostBuilder().ConfigureLogging(log => log.ClearProviders()).UseOrleans(silo => silo
+            .UseLocalhostClustering(siloPort: FreePort(), gatewayPort: FreePort(), serviceId: "session-replay-tests", clusterId: Guid.NewGuid().ToString("N"))
+            .AddMemoryGrainStorage("relay"))
+            .ConfigureServices(services => services.AddCoCernCore()).Build();
+        await host.StartAsync();
+        try
+        {
+            var application = host.Services.GetRequiredService<RelayApplication>();
+            var factory = host.Services.GetRequiredService<IGrainFactory>();
+            Task<RelayReply> Call(RelayCaller caller, string tool, object args) => application.ExecuteAsync(caller, tool, JsonSerializer.SerializeToElement(args));
+            var opened = Data(await Call(Alice, RelayTools.SessionOpen, new { repositoryId = "repo", requestId = "open-1", label = "smoke" }));
+            var id = opened["sessionId"]!.GetValue<string>();
+            Assert.True((await Call(new RelayCaller("admin", true, ["repo"]), RelayTools.ControlRequest, new { repositoryId = "repo", requestId = "close-1", command = "close_sessions", targetSessionId = id })).Ok);
+            // The directory's outbox delivers the queued open (already applied) and the close.
+            Assert.True((await factory.GetGrain<IControlGrain>(AggregateKinds.ControlKey).ExecuteAsync(Alice with { IsInternal = true }, Operations.Dispatch, "{}")).Ok);
+
+            // The chat's reply to its session_open was lost, so it retries with the same requestId: the directory replays the same handle,
+            // and the hub's direct open finds that session closed.
+            var replayed = await Call(Alice, RelayTools.SessionOpen, new { repositoryId = "repo", requestId = "open-1", label = "smoke" });
+            Assert.Equal(RelayErrorCodes.SessionUnknown, replayed.Code);
+            Assert.True(JsonNode.Parse(replayed.DataJson)!["expired"]!.GetValue<bool>());
+            // As SessionUnknown asks, the chat opens again with a new requestId, and gets a new session.
+            var fresh = Data(await Call(Alice, RelayTools.SessionOpen, new { repositoryId = "repo", requestId = "open-2", label = "smoke" }));
+            Assert.NotEqual(id, fresh["sessionId"]!.GetValue<string>());
+        }
+        finally { await host.StopAsync(); host.Dispose(); }
+    }
+
     [Fact]
     public void A_repeated_restore_from_an_earlier_close_cannot_bring_back_a_session_that_closed_since()
     {
-        var hub = new Hub();
+        var hub = new AggregateHub();
         var worker = hub.Open("smoke worker", T0);
         hub.Verify(worker, T0); hub.DeliverAll(T0);
         // The session begins work the directory has not heard of, so the first close is refused and the session restores itself.
         Assert.True(ReportWork(hub, worker, true, T0.AddMinutes(1)).Ok);
-        hub.Of(AggregateKinds.Session, worker.Id).Effects.Clear();
+        Assert.Single(hub.Discard(Operations.SessionOwns));
         Assert.True(hub.Close(new() { ["targetSessionId"] = worker.Id }, T0.AddMinutes(2)).Ok);
         Assert.True(hub.Deliver(Assert.Single(hub.Of(AggregateKinds.Control, AggregateKinds.ControlKey).Effects), T0.AddMinutes(2)).Ok);
         var restore = Assert.Single(hub.Of(AggregateKinds.Session, worker.Id).Effects, effect => effect.Operation == Operations.SessionRestore);
@@ -375,7 +494,7 @@ public sealed class SessionLifecycleTests
     [Fact]
     public void A_close_by_label_skips_a_chat_working_right_now_and_takes_it_once_it_is_quiet()
     {
-        var hub = new Hub();
+        var hub = new AggregateHub();
         var worker = hub.Open("smoke worker", T0);
         hub.Verify(worker, T0); hub.DeliverAll(T0);
 
@@ -395,13 +514,13 @@ public sealed class SessionLifecycleTests
     [Fact]
     public void A_session_whose_new_activity_has_not_reached_the_directory_refuses_the_close_and_comes_back()
     {
-        var hub = new Hub();
+        var hub = new AggregateHub();
         var worker = hub.Open("worker", T0);
         hub.Verify(worker, T0); hub.DeliverAll(T0);
         // After hours of quiet the chat calls again; its activity report is still on its way when an idle close decides from older news.
         Assert.True(hub.Verify(worker, T0.AddHours(5)).Ok);
         var report = Assert.Single(hub.Of(AggregateKinds.Session, worker.Id).Effects);
-        Assert.Equal(Operations.Register, report.Operation);
+        Assert.Equal(Operations.SessionActive, report.Operation);
         Assert.Equal(1, Data(hub.Close(new() { ["idleMinutes"] = 60 }, T0.AddHours(5)))["closed"]!.GetValue<int>());
 
         var refused = Data(hub.Deliver(Assert.Single(hub.Of(AggregateKinds.Control, AggregateKinds.ControlKey).Effects), T0.AddHours(5)));
@@ -424,7 +543,7 @@ public sealed class SessionLifecycleTests
     [Fact]
     public void Bind_keeps_the_first_machine_and_leaves_binding_and_availability_alone_when_they_are_null_or_left_out()
     {
-        var hub = new Hub();
+        var hub = new AggregateHub();
         var session = hub.Open("chat", T0, machineId: "PC-1");
         Assert.True(hub.Session(session, RelayTools.SessionBind, new() { ["expectedVersion"] = 0, ["binding"] = new JsonObject { ["roslyn"] = "codelens" }, ["availability"] = "active", ["machineId"] = "PC-2" }, T0).Ok);
         Assert.True(hub.Session(session, RelayTools.SessionBind, new() { ["expectedVersion"] = 1, ["binding"] = null, ["availability"] = null, ["label"] = "renamed" }, T0.AddMinutes(1)).Ok);
@@ -448,7 +567,7 @@ public sealed class SessionLifecycleTests
     [Fact]
     public void A_task_targeting_a_session_that_closes_loses_the_target_and_anyone_may_claim_it()
     {
-        var hub = new Hub();
+        var hub = new AggregateHub();
         var target = hub.Open("target", T0);
         Assert.True(hub.Board(RelayTools.TaskUpdate, new() { ["taskId"] = "t", ["expectedVersion"] = 0, ["workflow"] = ReadyWorkflow(target.Id) }, T0).Ok);
         var watch = Assert.Single(hub.Of(AggregateKinds.Board, BoardKey).Effects, effect => effect.Operation == Operations.SessionTargetWatch);
@@ -564,95 +683,5 @@ public sealed class SessionLifecycleTests
         using var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
         return ((IPEndPoint)listener.LocalEndpoint).Port;
-    }
-
-    private sealed record Chat(string Id, string Token);
-
-    /// <summary>Every aggregate's envelope, with the hub's own calls and a hand-driven outbox: nothing is delivered until a test says so.</summary>
-    private sealed class Hub
-    {
-        private readonly Dictionary<(string Kind, string Key), StateEnvelope<CoordinationDocument>> aggregates = new();
-        private int requests;
-
-        public StateEnvelope<CoordinationDocument> Of(string kind, string key) =>
-            aggregates.TryGetValue((kind, key), out var envelope) ? envelope : aggregates[(kind, key)] = new();
-
-        public JsonObject State(string kind, string key) => JsonNode.Parse(Of(kind, key).Value.Json)!.AsObject();
-        public JsonObject Directory() => State(AggregateKinds.Control, AggregateKinds.ControlKey)["sessions"] as JsonObject ?? new JsonObject();
-
-        public RelayReply Apply(string kind, string key, string operation, JsonObject args, RelayCaller caller, DateTimeOffset now)
-        {
-            args["repositoryId"] ??= "repo";
-            return CoordinationStateMachine.Apply(Of(kind, key), kind, key, caller, operation, args, now);
-        }
-
-        /// <summary>Opens a session as the hub does: the directory records it, and the session initializes from the directory's record.</summary>
-        public Chat Open(string label, DateTimeOffset now, string? machineId = null)
-        {
-            var args = new JsonObject { ["requestId"] = "open-" + ++requests, ["label"] = label, ["hubIncarnation"] = "hub-1" };
-            if (machineId is not null) args["machineId"] = machineId;
-            var opened = Data(Apply(AggregateKinds.Control, AggregateKinds.ControlKey, RelayTools.SessionOpen, args, Alice, now));
-            var chat = new Chat(opened["sessionId"]!.GetValue<string>(), opened["sessionToken"]!.GetValue<string>());
-            var control = Of(AggregateKinds.Control, AggregateKinds.ControlKey);
-            Assert.True(Deliver(control.Effects.Single(effect => effect.Operation == Operations.Open && effect.TargetKey == chat.Id), now).Ok);
-            return chat;
-        }
-
-        /// <summary>The hub's check of the session behind every call; it reports activity at most hourly.</summary>
-        public RelayReply Verify(Chat chat, DateTimeOffset now) => Session(chat, Operations.Verify, new(), now);
-
-        public RelayReply Session(Chat chat, string operation, JsonObject args, DateTimeOffset now)
-        {
-            args["sessionId"] = chat.Id; args["sessionToken"] = chat.Token; args["hubIncarnation"] = "hub-1";
-            if (CoordinationStateMachine.IsMutation(operation)) args["requestId"] ??= "r-" + ++requests;
-            return Apply(AggregateKinds.Session, chat.Id, operation, args, Alice with { IsInternal = true }, now);
-        }
-
-        public RelayReply Send(Chat from, string to, string text, DateTimeOffset now, bool supersede = false)
-        {
-            var args = new JsonObject { ["recipientSessionId"] = to, ["text"] = text };
-            if (supersede) args["supersede"] = true;
-            return Session(from, RelayTools.SendMessage, args, now);
-        }
-
-        public List<JsonObject> Inbox(Chat chat, DateTimeOffset now) =>
-            Data(Session(chat, RelayTools.CheckInbox, new(), now))["items"]!.AsArray().Select(item => item!.AsObject()).ToList();
-
-        public RelayReply Board(string tool, JsonObject args, DateTimeOffset now)
-        {
-            args["requestId"] ??= "b-" + ++requests;
-            return Apply(AggregateKinds.Board, BoardKey, tool, args, Alice, now);
-        }
-
-        public RelayReply Close(JsonObject args, DateTimeOffset now)
-        {
-            args["command"] = "close_sessions"; args["requestId"] = "close-" + ++requests;
-            return Apply(AggregateKinds.Control, AggregateKinds.ControlKey, RelayTools.ControlRequest, args, Admin, now);
-        }
-
-        public RelayReply Sweep(int idleHours, DateTimeOffset now) =>
-            Apply(AggregateKinds.Control, AggregateKinds.ControlKey, Operations.SweepSessions, new() { ["repositoryId"] = "*", ["idleHours"] = idleHours }, Sweeper, now);
-
-        /// <summary>Delivers one effect to its target with the caller it carries, and removes it from whichever outbox held it.</summary>
-        public RelayReply Deliver(DurableEffect effect, DateTimeOffset now)
-        {
-            foreach (var envelope in aggregates.Values) envelope.Effects.RemoveAll(queued => queued.Id == effect.Id);
-            var payload = JsonNode.Parse(effect.PayloadJson)!.AsObject();
-            var caller = CoordinationStateMachine.TakeEffectCaller(payload);
-            return CoordinationStateMachine.Apply(Of(effect.TargetKind, effect.TargetKey), effect.TargetKind, effect.TargetKey, caller, effect.Operation, payload, now);
-        }
-
-        /// <summary>Delivers every queued effect, and what those deliveries queue, until every outbox is empty.</summary>
-        public void DeliverAll(DateTimeOffset now)
-        {
-            for (var round = 0; round < 20; round++)
-            {
-                var queued = aggregates.Values.SelectMany(envelope => envelope.Effects).ToList();
-                if (queued.Count == 0) return;
-                // As the outbox does, a refused attention effect is dropped; any other refusal would be retried, so here it fails the test.
-                foreach (var effect in queued) Assert.True(Deliver(effect, now) is { } reply && (reply.Ok || Operations.IsAttention(effect.Operation)), effect.Operation + " to " + effect.TargetKey);
-            }
-            Assert.Fail("Effects kept queuing more effects.");
-        }
     }
 }

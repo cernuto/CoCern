@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json.Nodes;
 using CoCern.Contracts;
+using CoCern.Domain.Messages;
 using static CoCern.Contracts.RelayErrorCodes;
 using static CoCern.Domain.JsonFields;
 using static CoCern.Domain.Replies;
@@ -138,7 +139,7 @@ internal static class SessionAttention
         if (now - (DateTimeOffset.TryParse(Text(state, "activeReportedAt"), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var reported) ? reported : DateTimeOffset.MinValue) < TimeSpan.FromMinutes(RelayLimits.AttentionActivityReportMinutes)
             || Text(state, "sessionId") is not { Length: > 0 } self) return;
         state["activeReportedAt"] = now.ToString("O");
-        context.Emit(AggregateKinds.Control, AggregateKinds.ControlKey, Operations.Register, new JsonObject { ["repositoryId"] = context.Repository, ["sessionId"] = self, ["activeAt"] = now.ToString("O") });
+        context.Send(AggregateKinds.ControlKey, new SessionActivity(context.Repository, self, now));
     }
 
     /// <summary>

@@ -185,9 +185,13 @@ public static class DueWorkKinds
 /// <summary>Hub-internal operations. They compose public tools across aggregates and are never accepted from clients.</summary>
 public static class Operations
 {
+    /// <summary>Initializes a session from its record (<see cref="Messages.SessionOpen"/>).</summary>
     public const string Open = "__open";
     public const string Verify = "__verify";
+    /// <summary>A session gives the control directory its presence after <c>session_bind</c> (<see cref="Messages.SessionRegistration"/>).</summary>
     public const string Register = "__register";
+    /// <summary>A session tells the control directory it is still active, at most hourly (<see cref="Messages.SessionActivity"/>).</summary>
+    public const string SessionActive = "__session_active";
     public const string Deliver = "__deliver";
     public const string Resolve = "__resolve";
     /// <summary>Read-only: resolves several resource names in one control call.</summary>
@@ -236,10 +240,16 @@ public static class Operations
     /// </summary>
     public const string SessionClosed = "__session_closed";
     /// <summary>
-    /// A board tells a session it starts answering for an unresolved action (<c>open: true</c>: it began or recovered it) or stops; the
-    /// session tells the control directory (<c>owns</c>) when it starts or stops owning any. The directory never expires such a session.
+    /// A board tells a session it starts answering for an unresolved action (<c>open: true</c>: it began or recovered it) or stops
+    /// (<see cref="Messages.ActionWorkReport"/>); the session then tells the control directory when it starts or stops owning any
+    /// (<see cref="SessionOwns"/>).
     /// </summary>
     public const string SessionWork = "__session_work";
+    /// <summary>
+    /// A session tells the control directory it now answers for unresolved work, or no longer does (<see cref="Messages.SessionOwnership"/>).
+    /// The directory never expires such a session.
+    /// </summary>
+    public const string SessionOwns = "__session_owns";
     /// <summary>
     /// The hub's periodic sweep, sent to the control directory: closes sessions in every repository not seen for <c>idleHours</c>, as the
     /// full-directory cleanup does (each is sent <see cref="SessionExpire"/>); one that answers for an unresolved action is kept, and so is
@@ -253,8 +263,6 @@ public static class Operations
     /// <summary>Server-set on a rolled-back claim's lock release: the grant's requestId, whose stored reply is dropped so a retry acquires again.</summary>
     public const string ForgetRequestField = "forgetRequestId";
 
-    /// <summary>The <c>session_open</c> fields a session's direct initialization takes from the client; freshness comes only from the hub.</summary>
-    public static readonly string[] SessionClientFields = ["hubIncarnation", "machineId", "label", "binding", "role"];
     /// <summary>Server-set on a rolled-back claim's re-acquire of a grant it already held: the claim that grant served before.</summary>
     public const string RestoreClaimForField = "restoreClaimFor";
     /// <summary>A board's due sweep: moves tasks finished longer than <c>Relay:Board:ArchiveAfterDays</c> to the archive.</summary>
