@@ -207,7 +207,7 @@ public static class CoordinationStateMachine
         if (TaskArchiving.NextSweep(state, archiveAfterDays) is { } sweep)
             envelope.DueWork.Add(backoff > sweep ? new(DueWorkKinds.TaskArchiveRetry, DueWorkKinds.TaskArchive, backoff.Value) : new(DueWorkKinds.TaskArchive, DueWorkKinds.TaskArchive, sweep));
         if (DateTimeOffset.TryParse(Text(state, State.AnomalyState.NextCheckAtKey), out var check)) envelope.DueWork.Add(new(DueWorkKinds.AnomalyCheck, DueWorkKinds.AnomalyCheck, check));
-        if (DateTimeOffset.TryParse(Text(state, "leaseUntil"), out var lease) && lease > now) envelope.DueWork.Add(new(DueWorkKinds.Lease, DueWorkKinds.Lease, lease));
+        if (DateTimeOffset.TryParse(Text(state, State.LockState.LeaseUntilKey), out var lease) && lease > now) envelope.DueWork.Add(new(DueWorkKinds.Lease, DueWorkKinds.Lease, lease));
         // A lock whose holder has an action in flight checks its lease shortly before it ends (claim_expiring).
         if (AttentionSources.LeaseWarningAt(state) is { } warning) envelope.DueWork.Add(new(DueWorkKinds.LeaseWarning, DueWorkKinds.LeaseWarning, warning));
         if (state["tasks"] is JsonObject tasks)
