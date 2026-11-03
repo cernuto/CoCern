@@ -4,6 +4,7 @@ using CoCern.Contracts;
 using CoCern.Core;
 using Orleans;
 using CoCern.Domain;
+using CoCern.Domain.Messages;
 using Xunit;
 
 namespace CoCern.Tests;
@@ -72,12 +73,12 @@ public sealed class BugHuntTests
         JsonObject Report(bool owns, long seq) => new() { ["sessionId"] = "s1", ["owns"] = owns, ["at"] = Now.ToString("O"), ["seq"] = seq };
         bool Owns() => State(control)["sessions"]!["s1"]!["ownsWork"] is not null;
         // Open, close and open again within one second, the close delivered last.
-        Assert.True(Apply(control, "control", Operations.SessionWork, Report(true, 1)).Ok);
-        Assert.True(Apply(control, "control", Operations.SessionWork, Report(true, 3)).Ok);
-        Assert.False(JsonNode.Parse(Apply(control, "control", Operations.SessionWork, Report(false, 2)).DataJson)!["tracked"]!.GetValue<bool>());
+        Assert.True(Apply(control, "control", Operations.SessionOwns, Report(true, 1)).Ok);
+        Assert.True(Apply(control, "control", Operations.SessionOwns, Report(true, 3)).Ok);
+        Assert.False(JsonNode.Parse(Apply(control, "control", Operations.SessionOwns, Report(false, 2)).DataJson)!["tracked"]!.GetValue<bool>());
         Assert.True(Owns());
         // A later close in the same second still lands.
-        Assert.True(Apply(control, "control", Operations.SessionWork, Report(false, 4)).Ok);
+        Assert.True(Apply(control, "control", Operations.SessionOwns, Report(false, 4)).Ok);
         Assert.False(Owns());
     }
 
@@ -85,17 +86,17 @@ public sealed class BugHuntTests
     public void The_session_numbers_its_work_reports()
     {
         var session = OpenSession();
-        JsonObject Work(bool open) => new() { ["actionKey"] = "k", ["open"] = open, ["at"] = Now.ToString("O") };
+        JsonObject Work(bool open) => new ActionWorkReport("repo", "s1", "default", "t", "k", 1, open, Now).ToJson();
         Assert.True(Apply(session, "session", Operations.SessionWork, Work(true)).Ok);
         Assert.True(Apply(session, "session", Operations.SessionWork, Work(false), 1).Ok);
-        Assert.Equal([1L, 2L], session.Effects.Where(effect => effect.Operation == Operations.SessionWork).Select(effect => Payload(effect)["seq"]!.GetValue<long>()));
+        Assert.Equal([1L, 2L], session.Effects.Where(effect => effect.Operation == Operations.SessionOwns).Select(effect => Payload(effect)["seq"]!.GetValue<long>()));
     }
 
     [Fact]
     public void A_reordered_older_close_leaves_a_newer_open_in_the_ledger()
     {
         var session = OpenSession();
-        JsonObject Work(bool open, int at) => new() { ["actionKey"] = "k", ["open"] = open, ["at"] = Now.AddSeconds(at).ToString("O") };
+        JsonObject Work(bool open, int at) => new ActionWorkReport("repo", "s1", "default", "t", "k", 1, open, Now.AddSeconds(at)).ToJson();
         bool Owns(RelayReply reply) => JsonNode.Parse(reply.DataJson)!["owns"]!.GetValue<bool>();
         Assert.True(Owns(Apply(session, "session", Operations.SessionWork, Work(true, 9), 10)));
         // The close from 7 arrives after the reopen at 9: the action came back to this session, so it stays open.

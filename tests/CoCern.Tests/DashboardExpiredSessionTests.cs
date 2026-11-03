@@ -63,6 +63,30 @@ public sealed class DashboardExpiredSessionTests
         Assert.False(observation.SessionsTruncated);
     }
 
+    /// <summary>
+    /// A session's binding is the client's own and may use any key, expiredAt included. Only the record's own top-level expiredAt closes a
+    /// session, so a binding that names it must neither hide an open session from the list nor drop it from the count, whether its chat is
+    /// announced or not; and the count and the list always agree.
+    /// </summary>
+    [Fact]
+    public async Task A_binding_that_names_expiredAt_does_not_hide_an_open_session()
+    {
+        using var store = new SqliteStore(Path.Combine(Path.GetTempPath(), "cocern-expired-sessions-" + Guid.NewGuid().ToString("N"), "relay.db"));
+        var now = DateTimeOffset.UtcNow;
+        var binding = new JsonObject { ["expiredAt"] = now.AddDays(-1).ToString("O"), ["tools"] = new JsonArray("check_inbox") };
+        await WriteSession(store, "bound-stored", now, expiredAt: null, binding);
+        await WriteSession(store, "bound-announced", now, expiredAt: null, binding);
+        await WriteSession(store, "closed", now.AddHours(-30), expiredAt: now);
+        await WriteSession(store, "closed-announced", now.AddHours(-30), expiredAt: now);
+        await WriteDiscovery(store, now, Chat("bound-announced", "Announced chat"), Chat("closed-announced", "Closed chat"));
+
+        var observation = Assert.IsType<RelayObservation>(await store.ReadObservationAsync(now, "current-incarnation"));
+
+        Assert.Equal(["bound-announced", "bound-stored"], observation.Sessions.Select(session => session.SessionId).Order(StringComparer.Ordinal));
+        Assert.Equal(observation.Sessions.Length, observation.SessionCount);
+        Assert.False(observation.SessionsTruncated);
+    }
+
     /// <summary>A rename through session_bind changes the stored label at once; the node's announced copy can lag behind it, so the stored one is shown.</summary>
     [Fact]
     public async Task The_stored_label_wins_over_a_lagging_announced_one()
@@ -93,12 +117,12 @@ public sealed class DashboardExpiredSessionTests
         return new SqliteGrainStorage(store).WriteStateAsync("discovery", GrainId.Create("cocern.discovery", "machines"), state);
     }
 
-    private static Task WriteSession(SqliteStore store, string id, DateTimeOffset reported, DateTimeOffset? expiredAt)
+    private static Task WriteSession(SqliteStore store, string id, DateTimeOffset reported, DateTimeOffset? expiredAt, JsonObject? binding = null)
     {
         var document = new JsonObject
         {
             ["sessionId"] = id, ["repositoryId"] = "repo", ["label"] = "chat " + id,
-            ["observedAt"] = reported.ToString("O"), ["freshUntil"] = reported.AddMinutes(1).ToString("O")
+            ["observedAt"] = reported.ToString("O"), ["freshUntil"] = reported.AddMinutes(1).ToString("O"), ["binding"] = binding?.DeepClone()
         };
         if (expiredAt is { } expired) document["expiredAt"] = expired.ToString("O");
         var state = new GrainState<StateEnvelope<CoordinationDocument>>(new() { Value = new() { Json = document.ToJsonString() } });

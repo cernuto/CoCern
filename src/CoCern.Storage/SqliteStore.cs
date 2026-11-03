@@ -120,6 +120,7 @@ public sealed partial class SqliteStore : IDueWorkSource, IDisposable, IAsyncDis
                 generation INTEGER NOT NULL,
                 etag TEXT NOT NULL,
                 payload TEXT,
+                closed INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (state_name, grain_type, grain_key)
             );
             CREATE TABLE IF NOT EXISTS due_work (
@@ -145,6 +146,7 @@ public sealed partial class SqliteStore : IDueWorkSource, IDisposable, IAsyncDis
             """, transaction))
             schema.ExecuteNonQuery();
         AddLateActivityColumns(transaction);
+        AddClosedColumn(transaction);
         using (var createService = Command("INSERT OR IGNORE INTO hub_metadata(name, value) VALUES ('service_id', $value);", transaction))
         {
             createService.Parameters.AddWithValue("$value", Guid.NewGuid().ToString("N"));
@@ -161,6 +163,42 @@ public sealed partial class SqliteStore : IDueWorkSource, IDisposable, IAsyncDis
         // The backfill shares the migration transaction, so a database is never left at version 2 with a half-built index.
         PrepareSearchIndex(transaction);
         transaction.Commit();
+    }
+
+    /// <summary>
+    /// The dashboard lists open sessions by <c>grain_state.closed</c>, which each commit sets from the Domain's rule
+    /// (<see cref="ReadModels.IsClosed(string)"/>), instead of searching each record's JSON for expiredAt, which also matched one inside a
+    /// client's binding. A database from before the column gets it here, set for each stored session by the same rule. The index lets the
+    /// list skip closed records, which are kept and pile up, without reading them.
+    /// </summary>
+    private void AddClosedColumn(SqliteTransaction transaction)
+    {
+        bool present;
+        using (var column = Command("SELECT 1 FROM pragma_table_info('grain_state') WHERE name='closed';", transaction))
+            present = column.ExecuteScalar() is not null;
+        if (!present)
+        {
+            using (var alter = Command("ALTER TABLE grain_state ADD COLUMN closed INTEGER NOT NULL DEFAULT 0;", transaction))
+                alter.ExecuteNonQuery();
+            var closed = new List<(string Type, string Key)>();
+            using (var rows = Command("SELECT grain_type, grain_key, payload FROM grain_state WHERE state_name=$session AND payload IS NOT NULL;", transaction))
+            {
+                rows.Parameters.AddWithValue("$session", AggregateKinds.Session);
+                using var reader = rows.ExecuteReader();
+                while (reader.Read())
+                    if (StateDocument(reader.GetString(2)) is { } state && ReadModels.IsClosed(state)) closed.Add((reader.GetString(0), reader.GetString(1)));
+            }
+            foreach (var (type, key) in closed)
+            {
+                using var mark = Command("UPDATE grain_state SET closed=1 WHERE state_name=$session AND grain_type=$type AND grain_key=$key;", transaction);
+                mark.Parameters.AddWithValue("$session", AggregateKinds.Session);
+                mark.Parameters.AddWithValue("$type", type);
+                mark.Parameters.AddWithValue("$key", key);
+                mark.ExecuteNonQuery();
+            }
+        }
+        using var index = Command("CREATE INDEX IF NOT EXISTS ix_grain_state_closed ON grain_state(state_name, grain_type, closed, grain_key);", transaction);
+        index.ExecuteNonQuery();
     }
 
     /// <summary>Fails with a clear message when this host's SQLite build lacks a required virtual-table module, before anything is migrated.</summary>
@@ -191,10 +229,11 @@ public sealed partial class SqliteStore : IDueWorkSource, IDisposable, IAsyncDis
 
     /// <summary>
     /// Commits a grain's state, its due-work index and its search rows in one transaction. <paramref name="search"/> describes the
-    /// state's searchable text; a cleared state (null <paramref name="payload"/>) deletes the grain's search rows.
+    /// state's searchable text; a cleared state (null <paramref name="payload"/>) deletes the grain's search rows. <paramref name="closed"/>
+    /// marks a session's record as closed (see <see cref="AddClosedColumn"/>).
     /// </summary>
     internal async Task<string> CommitAsync(string stateName, GrainId grainId, string? expectedEtag, string? payload, IReadOnlyList<DueWorkItem> dueWork, CancellationToken cancellationToken, IHasSearchDocuments? search = null,
-        IReadOnlyList<ArchivedTask>? archived = null)
+        IReadOnlyList<ArchivedTask>? archived = null, bool closed = false)
     {
         await _gate.WaitAsync(cancellationToken);
         try
@@ -217,14 +256,15 @@ public sealed partial class SqliteStore : IDueWorkSource, IDisposable, IAsyncDis
                 throw new InconsistentStateException("The grain state changed; reload before retrying.", storedEtag!, expectedEtag!);
             var etag = Guid.NewGuid().ToString("N");
             using (var write = KeyCommand("""
-                INSERT INTO grain_state(state_name, grain_type, grain_key, generation, etag, payload)
-                VALUES ($state, $type, $key, $generation, $etag, $payload)
-                ON CONFLICT(state_name, grain_type, grain_key) DO UPDATE SET generation=excluded.generation, etag=excluded.etag, payload=excluded.payload;
+                INSERT INTO grain_state(state_name, grain_type, grain_key, generation, etag, payload, closed)
+                VALUES ($state, $type, $key, $generation, $etag, $payload, $closed)
+                ON CONFLICT(state_name, grain_type, grain_key) DO UPDATE SET generation=excluded.generation, etag=excluded.etag, payload=excluded.payload, closed=excluded.closed;
                 """, stateName, grainId, transaction))
             {
                 write.Parameters.AddWithValue("$generation", checked(generation + 1));
                 write.Parameters.AddWithValue("$etag", etag);
                 write.Parameters.AddWithValue("$payload", (object?)payload ?? DBNull.Value);
+                write.Parameters.AddWithValue("$closed", closed ? 1 : 0);
                 write.ExecuteNonQuery();
             }
             using (var deleteDue = KeyCommand("DELETE FROM due_work WHERE state_name=$state AND grain_type=$type AND grain_key=$key;", stateName, grainId, transaction))

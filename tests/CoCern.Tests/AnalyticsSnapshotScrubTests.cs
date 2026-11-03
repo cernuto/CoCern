@@ -38,9 +38,9 @@ public sealed class AnalyticsSnapshotScrubTests
             using (var seed = live.CreateCommand())
             {
                 seed.CommandText = """
-                    INSERT INTO grain_state VALUES ($state, 'fixture', 'private', 1, 'etag', $payload);
-                    INSERT INTO grain_state VALUES ('board', 'fixture', 'board', 1, 'etag', $payload);
-                    INSERT INTO grain_state VALUES ('lock', 'fixture', 'lock', 1, 'etag', $payload);
+                    INSERT INTO grain_state(state_name, grain_type, grain_key, generation, etag, payload) VALUES ($state, 'fixture', 'private', 1, 'etag', $payload);
+                    INSERT INTO grain_state(state_name, grain_type, grain_key, generation, etag, payload) VALUES ('board', 'fixture', 'board', 1, 'etag', $payload);
+                    INSERT INTO grain_state(state_name, grain_type, grain_key, generation, etag, payload) VALUES ('lock', 'fixture', 'lock', 1, 'etag', $payload);
                     INSERT INTO due_work VALUES ($state, 'fixture', 'private', 'timer', 'timer', 1);
                     INSERT INTO due_work VALUES ('board', 'fixture', 'board', 'timer', 'timer', 1);
                     INSERT INTO search_docs (state_name, grain_type, grain_key, kind, doc_id, marker)

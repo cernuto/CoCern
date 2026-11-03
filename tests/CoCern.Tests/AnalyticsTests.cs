@@ -646,7 +646,7 @@ public class AnalyticsTests
             async Task Sweep()
             {
                 var due = Assert.Single(await store.ReadDueAsync(clock.GetUtcNow(), 100), work => work.Kind == DueWorkKinds.TaskArchive);
-                await application.DispatchDueAsync(due);
+                await CoordinationGrain.DispatchDueAsync(host.Services.GetRequiredService<Orleans.IGrainFactory>(), due);
             }
             clock.Advance(TimeSpan.FromDays(RelayLimits.DefaultArchiveAfterDays + 1));
             // A commit that fails after writing its archive row rolls back both: the task stays on its board and the archive is empty.

@@ -68,6 +68,11 @@ public sealed record ActivityEvent
     public const string Attention = "attention";
     /// <summary>One reply over its token budget; <see cref="Code"/> says how it was handled (<c>over</c>, <c>over:&lt;part&gt;</c>, or the compaction step).</summary>
     public const string Budget = "budget";
+    /// <summary>
+    /// One outbox effect its target refused for good: a report dropped by its delivery class, or a malformed effect (counted once, also when
+    /// it is retried). <see cref="Tool"/> is the effect's operation and <see cref="Code"/> the refusal; it should read zero.
+    /// </summary>
+    public const string EffectRefused = "effect_refused";
 
     public DateTimeOffset Timestamp { get; init; }
     public string Kind { get; init; } = Call;

@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
@@ -7,6 +6,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Orleans;
 using CoCern.Contracts;
 using CoCern.Domain;
+using CoCern.Domain.Messages;
 using static CoCern.Contracts.RelayErrorCodes;
 using static CoCern.Domain.JsonFields;
 using static CoCern.Domain.Replies;
@@ -219,12 +219,6 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
     /// <summary>The hub's own identity for proposals: internal, so only this hub can use it, and scoped to the one repository.</summary>
     private static RelayCaller HubProposer(string repository) => new(SessionRoles.HubProposer, false, [repository], true);
 
-    /// <summary>Delivers one aggregate's due outbox effects; called by the hub's due-work pump.</summary>
-    public async Task DispatchDueAsync(DueWorkReference reference, CancellationToken cancellationToken = default)
-    {
-        await CoordinationGrain.DispatchDueAsync(grains, reference, cancellationToken);
-    }
-
     private Task<RelayReply> DispatchAsync(RelayCaller caller, string tool, JsonObject args, JsonObject? session, CancellationToken cancellationToken = default) => tool switch
     {
         RelayTools.TaskClaim => claims.ClaimTaskAsync(caller, args, session),
@@ -348,13 +342,13 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
         var opened = await CallControl(caller, RelayTools.SessionOpen, args);
         if (!opened.Ok) return opened;
         var data = Parse(opened);
-        var initialize = new JsonObject
-        {
-            ["sessionId"] = Text(data, "sessionId"), ["sessionToken"] = Text(data, "sessionToken"), ["principalId"] = caller.PrincipalId, ["repositoryId"] = Text(args, "repositoryId")
-        };
-        foreach (var field in Operations.SessionClientFields) if (args[field] is { } value) initialize[field] = value.DeepClone();
-        var initialized = await Call(AggregateKinds.Session, Text(data, "sessionId"), caller, Operations.Open, initialize);
+        // The same record the directory queued, from the client's fields only: the session takes its freshness from the same defaults.
+        var record = SessionRecord.Opened(Text(data, "sessionId"), Text(data, "sessionToken"), caller.PrincipalId, Text(args, "repositoryId"), args);
+        var initialized = await Call(AggregateKinds.Session, record.SessionId, caller, SessionOpen.Operation, new SessionOpen(record).ToJson());
         if (!initialized.Ok) return initialized;
+        // The session closed before this open reached it: a close overtook it, or this retry replays the handle of a session closed since.
+        // The chat opens a new one, as after any SessionUnknown.
+        if (Parse(initialized)["expired"]?.GetValue<bool>() == true) return Error(SessionUnknown, new { expired = true, reopen = RelayTools.SessionOpen });
         // The queued initialization remains a retryable durable effect and deduplicates at its recipient.
         if (Text(args, "taskId").Length > 0)
         {
@@ -629,7 +623,6 @@ public sealed class RelayApplication(IGrainFactory grains, IMachineDirectory? ma
     private Task<RelayReply> CallSession(RelayCaller caller, string operation, JsonObject args) => aggregates.Session(caller, operation, args);
     private Task<RelayReply> CallBoard(RelayCaller caller, string operation, JsonObject args) => aggregates.Board(caller, operation, args);
     private Task<RelayReply> Call(string kind, string key, RelayCaller caller, string operation, JsonObject args) => aggregates.Call(kind, key, caller, operation, args);
-    private static string BoardKey(JsonObject args) => Aggregates.BoardKey(args);
     private static JsonObject Parse(RelayReply reply) => Aggregates.Parse(reply);
     private static JsonNode Outcome(bool ok, string code) => JsonSerializer.SerializeToNode(new { ok, code })!;
 }

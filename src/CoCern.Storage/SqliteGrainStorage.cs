@@ -30,8 +30,10 @@ public sealed class SqliteGrainStorage(SqliteStore store) : IGrainStorage
         var due = grainState.State is IHasDueWork indexed ? indexed.GetDueWork().ToArray() : [];
         var search = grainState.State as IHasSearchDocuments;
         var archive = grainState.State as IHasTaskArchive;
+        // The session list reads this flag, not the JSON; what makes a session closed is the Domain's rule.
+        var closed = stateName == AggregateKinds.Session && grainState.State is StateEnvelope<CoordinationDocument> session && ReadModels.IsClosed(session.Value.Json);
         string etag;
-        try { etag = await store.CommitAsync(stateName, grainId, grainState.ETag, payload, due, cancellationToken, search, archive?.PendingArchive() ?? []); }
+        try { etag = await store.CommitAsync(stateName, grainId, grainState.ETag, payload, due, cancellationToken, search, archive?.PendingArchive() ?? [], closed); }
         finally { search?.ReleaseSearchState(); }
         // Written in that commit's transaction; a failed commit keeps them, and the grain discards the whole candidate state.
         archive?.ArchiveWritten();

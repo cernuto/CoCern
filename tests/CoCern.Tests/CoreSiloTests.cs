@@ -317,7 +317,7 @@ public sealed class CoreSiloTests
             {
                 var due = await storage.ReadDueAsync(clock.GetUtcNow() > DateTimeOffset.UtcNow ? clock.GetUtcNow() : DateTimeOffset.UtcNow, 64);
                 if (due.Count == 0) return;
-                foreach (var item in due) await host.Services.GetRequiredService<RelayApplication>().DispatchDueAsync(item);
+                foreach (var item in due) await CoordinationGrain.DispatchDueAsync(host.Services.GetRequiredService<IGrainFactory>(), item);
             }
         }
         StateEnvelope<CoordinationDocument> Monitor() => storage.Envelope("anomaly", GrainId.Create("cocern.anomaly", "repo"))!;
@@ -432,7 +432,7 @@ public sealed class CoreSiloTests
             var monitor = host.Services.GetRequiredService<IGrainFactory>().GetGrain<IAnomalyMonitorGrain>("repo");
             Assert.True((await monitor.ExecuteAsync(caller with { IsInternal = true }, Operations.AnomalyStart, """{"repositoryId":"repo"}""")).Ok);
             var due = Assert.Single(await storage.ReadDueAsync(clock.GetUtcNow(), 64), work => work.Kind == DueWorkKinds.AnomalyCheck);
-            await application.DispatchDueAsync(due);
+            await CoordinationGrain.DispatchDueAsync(host.Services.GetRequiredService<IGrainFactory>(), due);
             Assert.Empty(analytics.Queries);
             Assert.Empty(storage.Envelope("anomaly", monitorId)!.Effects);
             Assert.Empty(storage.Envelope("anomaly", monitorId)!.DueWork);
@@ -473,13 +473,13 @@ public sealed class CoreSiloTests
         var deadline = DateTime.UtcNow.AddSeconds(20);
         while (storage.Envelope("anomaly", monitorId) is null && DateTime.UtcNow < deadline) await Task.Delay(25);
         // Deliver the session openings first, so only the check and the message are due.
-        foreach (var item in await storage.ReadDueAsync(DateTimeOffset.UtcNow, 64)) if (item.Kind != DueWorkKinds.AnomalyCheck) await application.DispatchDueAsync(item);
+        foreach (var item in await storage.ReadDueAsync(DateTimeOffset.UtcNow, 64)) if (item.Kind != DueWorkKinds.AnomalyCheck) await CoordinationGrain.DispatchDueAsync(host.Services.GetRequiredService<IGrainFactory>(), item);
         await Call("send_message", new() { ["sessionId"] = worker["sessionId"]!.DeepClone(), ["sessionToken"] = worker["sessionToken"]!.DeepClone(), ["recipientSessionId"] = manager["sessionId"]!.DeepClone(), ["text"] = "same time" });
 
         // Like the hub's pump, one due item at a time: the check comes first, and its query never returns while the gate is shut.
         var due = await storage.ReadDueAsync(DateTimeOffset.UtcNow, 64);
         Assert.Equal(DueWorkKinds.AnomalyCheck, due[0].Kind);
-        var pumped = Task.Run(async () => { foreach (var item in due) await application.DispatchDueAsync(item); });
+        var pumped = Task.Run(async () => { foreach (var item in due) await CoordinationGrain.DispatchDueAsync(host.Services.GetRequiredService<IGrainFactory>(), item); });
         Assert.Same(pumped, await Task.WhenAny(pumped, Task.Delay(TimeSpan.FromSeconds(10))));
         await pumped;
         var inbox = await Call("check_inbox", new() { ["sessionId"] = manager["sessionId"]!.DeepClone(), ["sessionToken"] = manager["sessionToken"]!.DeepClone(), ["attention"] = false });

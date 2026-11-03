@@ -61,8 +61,14 @@ public sealed class MinorFixTests : IDisposable
     public void A_reordered_older_registration_never_replaces_a_newer_binding_or_moves_times_back()
     {
         var control = Directory(("s1", Now));
-        var reply = Apply(control, "control", Operations.Register, new() { ["sessionId"] = "s1", ["bindingVersion"] = 1, ["binding"] = new JsonObject { ["v"] = 1 }, ["freshUntil"] = Now.AddHours(-1).ToString("O"), ["activeAt"] = Now.AddMinutes(5).ToString("O") });
+        var reply = Apply(control, "control", Operations.Register, new()
+        {
+            ["sessionId"] = "s1", ["bindingVersion"] = 1, ["binding"] = new JsonObject { ["v"] = 1 }, ["observedAt"] = Now.AddHours(-1).ToString("O"), ["freshUntil"] = Now.AddHours(-1).ToString("O")
+        });
         Assert.True(reply.Ok);
+        Assert.True(Apply(control, "control", Operations.SessionActive, new() { ["sessionId"] = "s1", ["activeAt"] = Now.AddMinutes(5).ToString("O") }).Ok);
+        // An older activity report, delivered later, never moves it back.
+        Assert.True(Apply(control, "control", Operations.SessionActive, new() { ["sessionId"] = "s1", ["activeAt"] = Now.AddMinutes(1).ToString("O") }).Ok);
         var session = State(control)["sessions"]!["s1"]!;
         Assert.Equal(2, session["binding"]!["v"]!.GetValue<int>());
         Assert.Equal(Now, DateTimeOffset.Parse(session["freshUntil"]!.GetValue<string>()));

@@ -61,8 +61,8 @@ public sealed class DashboardSessionCleanupTests
         var target = await OpenAsync(host, "Same label");
         var peer = await OpenAsync(host, "Same label");
         var directory = host.Services.GetRequiredService<IGrainFactory>().GetGrain<IControlGrain>(AggregateKinds.ControlKey);
-        var tracked = await directory.ExecuteAsync(new RelayCaller("test-internal", false, ["repo"], true), Operations.SessionWork,
-            JsonSerializer.Serialize(new { repositoryId = "repo", sessionId = target.Id, owns = true, seq = 1 }));
+        var tracked = await directory.ExecuteAsync(new RelayCaller("test-internal", false, ["repo"], true), Operations.SessionOwns,
+            JsonSerializer.Serialize(new { repositoryId = "repo", sessionId = target.Id, owns = true, at = DateTimeOffset.UtcNow, seq = 1 }));
         Assert.True(tracked.Ok, tracked.DataJson);
         using var browser = await SignedInAsync(host);
         using (var normal = await browser.PostAsync(Route, Json(new { repositoryId = "repo", targetSessionId = target.Id })))

@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using CoCern.Contracts;
+using CoCern.Domain.Messages;
 using static CoCern.Contracts.RelayErrorCodes;
 using static CoCern.Domain.JsonFields;
 using static CoCern.Domain.Replies;
@@ -252,9 +253,9 @@ internal static class TaskBoardAggregate
     /// </summary>
     private static RelayReply Untarget(AggregateContext context, JsonObject tasks)
     {
-        var session = Text(context.Args, "sessionId");
+        if (!SessionClosed.Decode(context.Args).TryGet(out var closed, out var malformed)) return Malformed(malformed);
+        var session = closed.SessionId;
         var (cleared, stranded) = (0, 0);
-        if (session.Length == 0) return Ok(new { cleared, stranded });
         foreach (var task in tasks.Select(entry => entry.Value).OfType<JsonObject>())
         {
             var changed = false;

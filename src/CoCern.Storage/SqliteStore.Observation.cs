@@ -56,7 +56,7 @@ public sealed partial class SqliteStore : IRelayObservationSource
             truncated |= warnings.Contains("The discovery session observation is truncated.") || warnings.Contains("The machine observation is truncated.");
         }
 
-        var rawSessions = new List<string>();
+        var rawSessions = new List<(string Payload, bool Closed)>();
         var rowsRead = 0;
         var keys = chats.Values.Select(chat => chat.GrainKey).Distinct(StringComparer.Ordinal).ToArray();
         if (Stopwatch.GetElapsedTime(started) <= ObservationBudget)
@@ -79,13 +79,13 @@ public sealed partial class SqliteStore : IRelayObservationSource
         // Sessions whose stored record says they were closed. A node's last announcement can still name one (until it announces again, or for
         // as long as its PC stays off), and such a chat is no longer one to show or to message.
         var closed = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var payload in rawSessions)
+        foreach (var (payload, isClosed) in rawSessions)
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (Stopwatch.GetElapsedTime(started) > ObservationBudget) { truncated = true; break; }
             try
             {
-                var session = ProjectSession(payload, incarnationId, out var closedId);
+                var session = ProjectSession(payload, isClosed, incarnationId, out var closedId);
                 if (closedId is not null) { closed.Add(closedId); continue; }
                 if (session is null) { truncated = true; continue; }
                 if (!persisted.TryGetValue(session.SessionId, out var existing) || PreferPersisted(session, existing, chats))
@@ -152,20 +152,20 @@ public sealed partial class SqliteStore : IRelayObservationSource
     }
 
     /// <summary>
-    /// Leaves out closed sessions, which keep a record marked expiredAt. The state is stored as an escaped JSON string (quotes as "), so only
-    /// the key itself matches: a label holding the same text is escaped once more (\\u0022) and never does.
+    /// Leaves out closed sessions, whose records are kept: each commit marks one <c>closed</c> by the Domain's rule (see
+    /// <see cref="AddClosedColumn"/>), so the list never searches the JSON, where an expiredAt inside a client's binding looked the same.
     /// </summary>
-    private const string OpenSessionsOnly = " AND CAST(payload AS TEXT) NOT LIKE '%\\u0022expiredAt\\u0022%' AND CAST(payload AS TEXT) NOT LIKE '%\\\"expiredAt\\\"%'";
+    private const string OpenSessionsOnly = " AND payload IS NOT NULL AND closed=0";
 
     /// <summary>
     /// Copies stored sessions: those the discovery announcement names (closed ones included, so a closed chat can be left out), or the rest,
     /// open ones only, so that closed records, which are kept, never use up the bounded read before the sessions still open.
     /// </summary>
-    private void CopySessionRows(string[] keys, bool announcedOnly, List<string> payloads, ref int rowsRead, ref int bytes, ref bool truncated, long started, HashSet<string> warnings, CancellationToken cancellationToken)
+    private void CopySessionRows(string[] keys, bool announcedOnly, List<(string Payload, bool Closed)> payloads, ref int rowsRead, ref int bytes, ref bool truncated, long started, HashSet<string> warnings, CancellationToken cancellationToken)
     {
         var parameters = string.Join(", ", Enumerable.Range(0, keys.Length).Select(index => "$key" + index));
         var filter = (keys.Length == 0 ? "" : $" AND grain_key {(announcedOnly ? "IN" : "NOT IN")} ({parameters})") + (announcedOnly ? "" : OpenSessionsOnly);
-        using var command = Command($"SELECT CASE WHEN length(CAST(payload AS BLOB)) <= $maximum THEN payload ELSE NULL END, length(CAST(payload AS BLOB)) FROM grain_state WHERE state_name='session' AND grain_type='cocern.session'{filter} ORDER BY grain_key LIMIT $limit;");
+        using var command = Command($"SELECT CASE WHEN length(CAST(payload AS BLOB)) <= $maximum THEN payload ELSE NULL END, length(CAST(payload AS BLOB)), closed FROM grain_state WHERE state_name='session' AND grain_type='cocern.session'{filter} ORDER BY grain_key LIMIT $limit;");
         command.Parameters.AddWithValue("$maximum", MaximumStateBytes);
         command.Parameters.AddWithValue("$limit", MaximumSessions + 1 - rowsRead);
         for (var index = 0; index < keys.Length; index++) command.Parameters.AddWithValue("$key" + index, keys[index]);
@@ -179,7 +179,7 @@ public sealed partial class SqliteStore : IRelayObservationSource
             var size = reader.GetInt32(1);
             if (size > MaximumSampleBytes - bytes) { truncated = true; rowsRead = MaximumSessions + 1; break; }
             bytes += size;
-            payloads.Add(reader.GetString(0));
+            payloads.Add((reader.GetString(0), reader.GetInt64(2) != 0));
         }
     }
 
@@ -232,10 +232,11 @@ public sealed partial class SqliteStore : IRelayObservationSource
     }
 
     /// <summary>
-    /// The stored session as the dashboard shows it, or null. A closed session keeps its record (marked expiredAt) so its chat is told it
-    /// expired; it is no longer a session to show, and <paramref name="closedId"/> names it so that an announcement of it is left out too.
+    /// The stored session as the dashboard shows it, or null. A closed session (its row marked <paramref name="closed"/>) keeps its record so
+    /// its chat is told it expired; it is no longer a session to show, and <paramref name="closedId"/> names it so that an announcement of it
+    /// is left out too.
     /// </summary>
-    private static DashboardSession? ProjectSession(string payload, string incarnation, out string? closedId)
+    private static DashboardSession? ProjectSession(string payload, bool closed, string incarnation, out string? closedId)
     {
         closedId = null;
         using var envelope = JsonDocument.Parse(payload, new JsonDocumentOptions { MaxDepth = 64 });
@@ -243,7 +244,7 @@ public sealed partial class SqliteStore : IRelayObservationSource
         var state = document.RootElement;
         var id = Text(state, "sessionId");
         if (string.IsNullOrEmpty(id)) return null;
-        if (Property(state, "expiredAt").ValueKind == JsonValueKind.String) { closedId = id; return null; }
+        if (closed) { closedId = id; return null; }
         var inbox = Property(state, "inbox");
         var effects = Property(envelope.RootElement, "Effects");
         var bindingVersion = Property(state, "bindingVersion");
@@ -276,10 +277,9 @@ public sealed partial class SqliteStore : IRelayObservationSource
             var id = Safe(property.Name);
             var name = Text(machine, "machineName");
             var lastSeen = Date(machine, "lastSeen");
-            var live = lastSeen is { } seen && seen <= now && now - seen <= DiscoveryLimits.LivenessTimeout;
             var announced = Property(machine, "chats");
             var count = announced.ValueKind == JsonValueKind.Array ? announced.GetArrayLength() : 0;
-            machines.Add(new() { MachineId = id, Name = name, LastSeenAt = lastSeen, Reachable = live, SessionCount = count });
+            machines.Add(new() { MachineId = id, Name = name, LastSeenAt = lastSeen, Reachable = ReadModels.IsLive(lastSeen, now), SessionCount = count });
             if (announced.ValueKind != JsonValueKind.Array) continue;
             foreach (var chat in announced.EnumerateArray().Take(64))
             {
@@ -289,7 +289,7 @@ public sealed partial class SqliteStore : IRelayObservationSource
                 {
                     SessionId = Safe(grainKey), RepositoryId = Text(chat, "repositoryId"), Label = Text(chat, "label"), Provider = provider,
                     MachineId = id, MachineName = name, IsMapped = provider.Length > 0 && !provider.Equals(ChatProviders.Unknown, StringComparison.OrdinalIgnoreCase),
-                    Reachable = live && (provider.Equals(ChatProviders.Codex, StringComparison.OrdinalIgnoreCase) ? Flag(chat, "wakeable") : provider.Equals(ChatProviders.Claude, StringComparison.OrdinalIgnoreCase) && Flag(chat, "waiterRunning")),
+                    Reachable = ReadModels.IsReachable(provider, Flag(chat, "wakeable"), Flag(chat, "waiterRunning"), lastSeen, now),
                     ReportedAt = lastSeen, FreshUntil = lastSeen?.Add(DiscoveryLimits.LivenessTimeout)
                 };
                 if (string.IsNullOrEmpty(session.SessionId)) continue;

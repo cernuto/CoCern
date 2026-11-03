@@ -353,7 +353,7 @@ public sealed class SessionCleanupTests
 
     /// <summary>The session's own report that it answers for an unresolved action, as the session aggregate sends it.</summary>
     private static void Owns(StateEnvelope<CoordinationDocument> state, string id, string repository = "repo") =>
-        Assert.True(Call(state, Operations.SessionWork, new() { ["sessionId"] = id, ["owns"] = true, ["seq"] = 1 }, Hub, repository).Ok);
+        Assert.True(Call(state, Operations.SessionOwns, new() { ["sessionId"] = id, ["owns"] = true, ["at"] = Now.ToString("O"), ["seq"] = 1 }, Hub, repository).Ok);
 
     /// <summary>A directory record last seen <paramref name="idle"/> before <paramref name="now"/> (the tests' fixed time unless given).</summary>
     private static JsonObject Record(string id, TimeSpan idle, string label = "", string repository = "repo", DateTimeOffset? now = null)

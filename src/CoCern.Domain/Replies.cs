@@ -13,6 +13,12 @@ public static class Replies
     public static RelayReply Error(string code, object? data = null, long version = 0) => new(false, code, JsonSerializer.Serialize(data ?? new { }), version);
     public static RelayReply VersionConflict(long current) => Error(RelayErrorCodes.VersionConflict, new { currentVersion = current }, current);
 
+    /// <summary>
+    /// A typed message that did not decode: its missing or invalid fields by name, never their values. Distinct from any other refusal, so
+    /// the outbox can log it and the test hub fail on it, whatever the message's delivery class.
+    /// </summary>
+    public static RelayReply Malformed(IReadOnlyList<string> fields) => Error(RelayErrorCodes.MalformedEffect, new { fields });
+
     public static bool FitsWire(RelayReply reply, int maxBytes = RelayLimits.MaxPayloadBytes) => JsonSerializer.SerializeToUtf8Bytes(reply).Length <= maxBytes;
 
     public static RelayReply BoundWire(RelayReply reply, int maxBytes = RelayLimits.MaxPayloadBytes)
