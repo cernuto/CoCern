@@ -182,7 +182,9 @@ public sealed class DiscoveryDomainTests
         Assert.True(Data(reply)["truncated"]!.GetValue<bool>());
         Assert.True(Replies.FitsWire(reply, RelayLimits.AggregateReplyBytes));
         Assert.InRange(Items(reply).Count, 1, DiscoveryLimits.MaxMachines * DiscoveryLimits.MaxChatsPerMachine - 1);
-        Assert.True(clock.Elapsed < TimeSpan.FromSeconds(2), "Directory took " + clock.Elapsed);
+        // A loose bound, so a busy machine can't fail it: serializing every prefix of these thousands of items, as the binary search avoids,
+        // takes minutes, while the search takes well under a second.
+        Assert.True(clock.Elapsed < TimeSpan.FromSeconds(10), "Directory took " + clock.Elapsed);
     }
 
     [Fact]

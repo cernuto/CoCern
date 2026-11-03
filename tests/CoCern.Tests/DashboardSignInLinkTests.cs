@@ -23,12 +23,12 @@ public sealed partial class DashboardSignInLinkTests
         var log = new CapturedLog();
         await using var host = new RelayHostFixture(remoteAddress: IPAddress.Loopback, settings: Viewer, configureServices: services => services.AddSingleton<Serilog.Core.ILogEventSink>(log));
         using var browser = Browser(host);
-        var first = log.LastCode();
+        var first = await log.CodeAsync();
         var signedIn = await browser.PostAsJsonAsync("/dashboard/api/login", new { link = first.ToLowerInvariant() });
         Assert.Equal(HttpStatusCode.OK, signedIn.StatusCode);
         Assert.Contains("test-user", await signedIn.Content.ReadAsStringAsync());
         Assert.Equal(HttpStatusCode.Unauthorized, (await browser.PostAsJsonAsync("/dashboard/api/login", new { link = first })).StatusCode);
-        var next = log.LastCode();
+        var next = await log.CodeAsync(other: first);
         Assert.NotEqual(first, next);
         Assert.Equal(HttpStatusCode.OK, (await browser.PostAsJsonAsync("/dashboard/api/login", new { link = next })).StatusCode);
     }
@@ -39,7 +39,7 @@ public sealed partial class DashboardSignInLinkTests
         var log = new CapturedLog();
         await using var host = new RelayHostFixture(remoteAddress: IPAddress.Parse("192.168.1.20"), settings: Viewer, configureServices: services => services.AddSingleton<Serilog.Core.ILogEventSink>(log));
         using var browser = Browser(host);
-        Assert.Equal(HttpStatusCode.Forbidden, (await browser.PostAsJsonAsync("/dashboard/api/login", new { link = log.LastCode() })).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await browser.PostAsJsonAsync("/dashboard/api/login", new { link = await log.CodeAsync() })).StatusCode);
     }
 
     [Fact]
@@ -107,7 +107,24 @@ public sealed partial class DashboardSignInLinkTests
         public bool IsEnabled(LogLevel logLevel) => true;
         public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) => lines.Enqueue(formatter(state, exception));
         public void Dispose() { }
-        public string LastCode() => lines.Select(line => LinkCode().Match(line)).Last(match => match.Success).Groups[1].Value;
+        public string LastCode() => Newest() ?? throw new InvalidOperationException("No sign-in link was logged.");
+
+        /// <summary>
+        /// The newest logged code (other than <paramref name="other"/>), waiting up to 10 seconds for one. The hub logs its first link from an
+        /// ApplicationStarted callback, and the test host can hand the test its client before that callback has run, most often under load.
+        /// </summary>
+        public async Task<string> CodeAsync(string? other = null)
+        {
+            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+            while (Newest() is not { } code || code == other)
+            {
+                if (DateTime.UtcNow > deadline) throw new TimeoutException("No new sign-in link was logged within 10 seconds.");
+                await Task.Delay(20);
+            }
+            return Newest()!;
+        }
+
+        private string? Newest() => lines.Select(line => LinkCode().Match(line)).LastOrDefault(match => match.Success)?.Groups[1].Value;
         [GeneratedRegex("/dashboard/#link=([A-Z0-9]{24})")] private static partial Regex LinkCode();
     }
 }

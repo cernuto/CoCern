@@ -23,7 +23,7 @@ public sealed class InboxWaitAttentionTests
         Assert.Equal("blocked", reply.Data!.Value.GetProperty("attention").GetProperty("k").GetString());
         // Only the read that returns may take the offer; every poll before it declined one.
         Assert.Equal(1, hub.OfferingReads);
-        Assert.False(hub.CheckBodies[^1].Contains("\"attention\":false"));
+        Assert.DoesNotContain("\"attention\":false", hub.CheckBodies[^1]);
         Assert.All(hub.CheckBodies[..^1], body => Assert.Contains("\"attention\":false", body));
         Assert.All(hub.StatusBodies, body => Assert.Contains("\"attentionDetail\":true", body));
     }

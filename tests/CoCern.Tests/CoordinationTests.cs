@@ -962,7 +962,7 @@ public sealed class CoordinationTests
         var after = StateJson(state);
         Assert.Equal(0, after["archivedTasks"]!["a"]![0]!.GetValue<long>());
         Assert.Equal(revision, after["archiveFloor"]!.GetValue<long>());
-        Assert.Empty(Data(Board(state, "task_get", new() { ["sinceRevision"] = revision }, days: 102))["items"]!.AsArray().Where(item => item!["archived"] is not null));
+        Assert.DoesNotContain(Data(Board(state, "task_get", new() { ["sinceRevision"] = revision }, days: 102))["items"]!.AsArray(), item => item!["archived"] is not null);
         Assert.True(Board(state, "task_claim", new() { ["taskId"] = "c", ["sessionId"] = "w", ["expectedVersion"] = 1 }, days: 102).Ok);
     }
 
@@ -2141,7 +2141,7 @@ public sealed class CoordinationTests
         Assert.Null(StateJson(control)["sessions"]!["a"]!["openActions"]);
         // An open reported after the close is real (the writer took the action back), and opens it again.
         Assert.True(Data(Call(control, "control", Operations.SessionWork, Work(true, 30), worker, 30))["tracked"]!.GetValue<bool>());
-        Assert.Equal(1, StateJson(control)["sessions"]!["a"]!["openActions"]!.AsObject().Count);
+        Assert.Single(StateJson(control)["sessions"]!["a"]!["openActions"]!.AsObject());
     }
 
     [Fact]
