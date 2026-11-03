@@ -13,9 +13,12 @@ try
         deploymentRoot = Path.GetFullPath(deploymentRoot);
         var manifest = CoCern.Adapter.Development.AdapterDeployment.Publish(sourceDirectory, deploymentRoot);
         var profile = SetupEnvironment.ConnectFolders().Profile;
+        var launcher = CoCern.Adapter.Development.AdapterDeployment.AdapterPath(deploymentRoot, manifest);
         var changed = CoCern.Adapter.Development.DevelopmentSetup.ConfigureCodex(Path.Combine(profile, ".codex", "config.toml"), SetupEnvironment.Host().Dotnet,
-            CoCern.Adapter.Development.AdapterDeployment.AdapterPath(deploymentRoot, manifest), deploymentRoot, Path.GetFullPath(developmentTokenFile), replaceLauncher: true);
-        Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new { manifest.Version, manifest.Generation, ConfigurationChanged = changed }));
+            launcher, deploymentRoot, Path.GetFullPath(developmentTokenFile), replaceLauncher: true);
+        var claudeChanged = CoCern.Adapter.Development.DevelopmentSetup.ConfigureClaudeCode(Path.Combine(profile, ".claude.json"), SetupEnvironment.Host().Dotnet,
+            launcher, deploymentRoot, Path.GetFullPath(developmentTokenFile), replaceLauncher: true);
+        Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new { manifest.Version, manifest.Generation, ConfigurationChanged = changed, ClaudeConfigurationChanged = claudeChanged }));
         return 0;
     }
     if (args is ["--dev-launch", var developmentRoot])

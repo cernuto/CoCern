@@ -21,7 +21,7 @@ internal sealed class DevelopmentAdapterService(IConfiguration configuration, IH
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException)
         {
             // Settings can contain credentials. The exception's text is deliberately not logged.
-            logger.LogError("Development adapter deployment failed ({FailureType}). The previous connection remains available; check the source path and the existing Codex CoCern entry.", error.GetType().Name);
+            logger.LogError("Development adapter deployment failed ({FailureType}). The previous connection remains available; check the source path and the existing Codex and Claude Code CoCern entries.", error.GetType().Name);
         }
     }
 
@@ -43,6 +43,12 @@ internal sealed class DevelopmentAdapterService(IConfiguration configuration, IH
         var changed = DevelopmentSetup.ConfigureCodex(Path.GetFullPath(config, environment.ContentRootPath), DashboardConnect.DotnetHost(), AdapterDeployment.AdapterPath(root, manifest), root,
             Path.GetFullPath(tokenFile, environment.ContentRootPath));
         configuration["Relay:Connect:AdapterPath"] = AdapterDeployment.AdapterPath(root, manifest);
-        logger.LogInformation("Development adapter deployed: {Version}; requested fresh MCP generation {Generation}. Codex launch entry changed: {Changed}.", manifest.Version[..12], manifest.Generation, changed);
+        // Claude Code chats follow the same launcher once their user-scope entry points at it; a PC without one is left alone.
+        var claudeConfig = configuration["Relay:DevelopmentAdapter:ClaudeConfigPath"]
+            ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude.json");
+        var claudeChanged = DevelopmentSetup.ConfigureClaudeCode(Path.GetFullPath(claudeConfig, environment.ContentRootPath), DashboardConnect.DotnetHost(), AdapterDeployment.AdapterPath(root, manifest), root,
+            Path.GetFullPath(tokenFile, environment.ContentRootPath));
+        logger.LogInformation("Development adapter deployed: {Version}; requested fresh MCP generation {Generation}. Codex launch entry changed: {Changed}; Claude Code launch entry changed: {ClaudeChanged}.",
+            manifest.Version[..12], manifest.Generation, changed, claudeChanged);
     }
 }

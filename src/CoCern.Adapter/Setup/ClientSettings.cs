@@ -87,9 +87,7 @@ internal static class ClientSettings
         if (!reader.HasCoCern()) throw Malformed(path, "no existing CoCern connection was found");
         IReadOnlyDictionary<string, string>? variables = null;
         RefreshCodex(text, current => { variables = current; return null; });
-        if (variables is null || !variables.TryGetValue("COCERN_TOKEN_FILE", out var configuredToken) || !Path.IsPathFullyQualified(configuredToken)
-            || !string.Equals(Path.GetFullPath(configuredToken), Path.GetFullPath(tokenFile), OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
-            throw Malformed(path, "its CoCern entry is not tied to this hub's token file");
+        if (variables is null || !TiedToToken(variables, tokenFile)) throw Malformed(path, "its CoCern entry is not tied to this hub's token file");
         string[] entry = [Table, Name];
         var command = reader.Assignments.Where(x => x.Table.SequenceEqual(entry) && x.Key.SequenceEqual(new[] { "command" })).ToArray();
         var arguments = reader.Assignments.Where(x => x.Table.SequenceEqual(entry) && x.Key.SequenceEqual(new[] { "args" })).ToArray();
@@ -99,11 +97,7 @@ internal static class ClientSettings
         var rawArguments = text[arguments[0].ValueStart..arguments[0].ValueEnd];
         var suffix = $", '--dev-launch', {TomlString(deploymentRoot)}]";
         if (!replaceLauncher && rawArguments.StartsWith('[') && rawArguments.EndsWith(suffix, StringComparison.Ordinal)
-            && TomlInline.String(rawArguments, 1, rawArguments.Length - suffix.Length) is { } existingLauncher
-            && File.Exists(existingLauncher) && Path.GetFileName(existingLauncher) == "CoCern.Adapter.dll"
-            && Path.GetDirectoryName(existingLauncher) is { } versionFolder && Path.GetFileName(versionFolder) is { Length: 64 } version
-            && version.All(char.IsAsciiHexDigit)
-            && string.Equals(Path.GetFullPath(existingLauncher), Development.AdapterDeployment.AdapterPath(deploymentRoot, new(version, "")), OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+            && TomlInline.String(rawArguments, 1, rawArguments.Length - suffix.Length) is { } existingLauncher && IsDeployedLauncher(existingLauncher, deploymentRoot))
             return ClientPlan.Unchanged(path);
         var edits = new[]
         {
@@ -114,6 +108,44 @@ internal static class ClientSettings
         foreach (var edit in edits.OrderByDescending(x => x.Line.ValueStart)) result = result[..edit.Line.ValueStart] + edit.Text + result[edit.Line.ValueEnd..];
         return result == text ? ClientPlan.Unchanged(path) : ClientPlan.Write(path, [.. original.AsSpan(0, Bom(original)), .. Encoding.UTF8.GetBytes(result)], existed: true, refreshes: true);
     }
+
+    /// <summary>
+    /// The Claude Code counterpart of <see cref="PlanDevelopmentCodex"/>: points the user-scope <c>cocern</c> entry in <c>~/.claude.json</c> at the
+    /// development launcher, so each new deployment reaches Claude chats through <c>current.json</c> instead of a stale fixed adapter path.
+    /// Claude is optional on a development PC: with no settings file or no <c>cocern</c> entry there is nothing to change.
+    /// </summary>
+    internal static ClientPlan PlanDevelopmentClaudeCode(string path, string dotnetPath, string launcherDll, string deploymentRoot, string tokenFile, bool replaceLauncher = false)
+    {
+        if (ReadAll(path) is not { } original) return ClientPlan.Unchanged(path);
+        var root = ParseClaudeJson(path, original);
+        if (root["mcpServers"] is not JsonObject servers || servers[Name] is not JsonObject entry) return ClientPlan.Unchanged(path);
+        if (Variables(entry) is not { } variables || !TiedToToken(variables, tokenFile)) throw Malformed(path, "its CoCern entry is not tied to this hub's token file");
+        // As for Codex, a launcher entry already in place stays put: the launcher follows current.json to each new version.
+        if (!replaceLauncher && entry["args"] is JsonArray { Count: 3 } current && JsonText(current[1]) == "--dev-launch"
+            && JsonText(current[2]) is { } configuredRoot && SamePath(configuredRoot, deploymentRoot)
+            && JsonText(current[0]) is { } existingLauncher && IsDeployedLauncher(existingLauncher, deploymentRoot))
+            return ClientPlan.Unchanged(path);
+        var arguments = new JsonArray(launcherDll, "--dev-launch", deploymentRoot);
+        if (JsonText(entry["command"]) == dotnetPath && JsonNode.DeepEquals(entry["args"], arguments)) return ClientPlan.Unchanged(path);
+        entry["command"] = dotnetPath;
+        entry["args"] = arguments;
+        return ClientPlan.Write(path, Rewrite(original, root), existed: true, refreshes: true);
+    }
+
+    /// <summary>A development entry belongs to this hub only when its <c>COCERN_TOKEN_FILE</c> is the hub's own token file.</summary>
+    private static bool TiedToToken(IReadOnlyDictionary<string, string> variables, string tokenFile) =>
+        variables.TryGetValue("COCERN_TOKEN_FILE", out var configured) && Path.IsPathFullyQualified(configured) && SamePath(configured, tokenFile);
+
+    /// <summary>A launcher path is one of this deployment's immutable versions: <c>versions/&lt;64 hex&gt;/CoCern.Adapter.dll</c> under the root, and present.</summary>
+    private static bool IsDeployedLauncher(string launcher, string deploymentRoot) =>
+        File.Exists(launcher) && Path.GetFileName(launcher) == "CoCern.Adapter.dll"
+        && Path.GetDirectoryName(launcher) is { } versionFolder && Path.GetFileName(versionFolder) is { Length: 64 } version && version.All(char.IsAsciiHexDigit)
+        && SamePath(launcher, Development.AdapterDeployment.AdapterPath(deploymentRoot, new(version, "")));
+
+    private static bool SamePath(string left, string right) =>
+        string.Equals(Path.GetFullPath(left), Path.GetFullPath(right), OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+
+    private static string? JsonText(JsonNode? node) => node is JsonValue value && value.TryGetValue<string>(out var text) ? text : null;
 
     /// <param name="environment">Variables for the adapter, such as <c>COCERN_TOKEN_FILE</c> on the hub's own PC; none for an enrolled node.</param>
     /// <param name="refresh">How to change the variables of a <c>cocern</c> entry the file already has; without one, such an entry is left as it is.</param>
@@ -159,13 +191,7 @@ internal static class ClientSettings
         var original = ReadAll(path);
         if (environment is { Count: > 0 }) entry["env"] = new JsonObject(environment.Select(pair => KeyValuePair.Create(pair.Key, (JsonNode?)pair.Value)));
         if (original is null) return ClientPlan.Write(path, Encoding.UTF8.GetBytes(Render(new JsonObject { ["mcpServers"] = new JsonObject { [Name] = entry } }, "\n") + "\n"), existed: false);
-        JsonObject root;
-        try
-        {
-            var text = Strict.GetString(original, Bom(original), original.Length - Bom(original));
-            root = JsonNode.Parse(text, null, new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Disallow, AllowTrailingCommas = false }) as JsonObject ?? throw new JsonException("the top level is not an object");
-        }
-        catch (Exception exception) when (exception is JsonException or DecoderFallbackException or ArgumentException) { throw Malformed(path, exception is DecoderFallbackException ? "it is not valid UTF-8" : "it is not valid JSON"); }
+        var root = ParseClaudeJson(path, original);
         JsonObject servers;
         if (root["mcpServers"] is { } existing)
         {
@@ -185,6 +211,17 @@ internal static class ClientSettings
         else root["mcpServers"] = servers = new JsonObject();
         servers[Name] = entry;
         return ClientPlan.Write(path, Rewrite(original, root), existed: true);
+    }
+
+    /// <summary>A Claude JSON settings file as an object: strict UTF-8 and JSON, no comments or trailing commas, an object at the top.</summary>
+    private static JsonObject ParseClaudeJson(string path, byte[] original)
+    {
+        try
+        {
+            var text = Strict.GetString(original, Bom(original), original.Length - Bom(original));
+            return JsonNode.Parse(text, null, new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Disallow, AllowTrailingCommas = false }) as JsonObject ?? throw new JsonException("the top level is not an object");
+        }
+        catch (Exception exception) when (exception is JsonException or DecoderFallbackException or ArgumentException) { throw Malformed(path, exception is DecoderFallbackException ? "it is not valid UTF-8" : "it is not valid JSON"); }
     }
 
     /// <summary>An entry's <c>env</c> as names and values: empty when it has none, null when it is anything but an object of strings.</summary>
