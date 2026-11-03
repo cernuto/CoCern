@@ -299,6 +299,8 @@ public static class RelayLimits
     public const int SessionMailHoldDays = 7;
     /// <summary>Most boards a session tells when it closes because one of their tasks targets it; past this the oldest is forgotten.</summary>
     public const int MaxSessionTargetBoards = 64;
+    /// <summary>Unread messages a closing session returns to their senders as <c>delivery.failed</c>; the rest are dropped with it.</summary>
+    public const int MaxMessagesReturnedOnClose = 64;
     /// <summary>Closed session IDs a <c>close_sessions</c> reply lists; <c>closed</c> still counts them all.</summary>
     public const int MaxClosedSessionIds = MaxPageSize;
     /// <summary>

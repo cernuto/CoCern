@@ -12,11 +12,11 @@
         <div class="close-session-confirm" role="group" aria-label="Close session confirmation">
             <p>Close <strong>@_target!.Label</strong> on @DashboardFormat.Machine(_target)?</p>
             <p class="close-session-id">Session @_target.SessionId · Repository @_target.RepositoryId</p>
-            <p>Unread messages will be discarded. This can't be undone. The chat can open a new session if it returns.</p>
+            <p>Unread messages go back to their senders. This can't be undone. The chat can open a new session if it returns.</p>
             <label class="close-session-override"><input type="checkbox" @bind="_force" disabled="@_busy" />Override unresolved actions</label>
             @if (_force)
             {
-                <p class="warning-note">The session will close even if it has unresolved actions. Action records and resource safeguards remain for recovery. Closing a session does not stop running tools.</p>
+                <p class="warning-note">The session will close even if it has unresolved actions. They stay on record with their resource safeguards, and its other sessions can recover them at once. Closing a session does not stop running tools.</p>
             }
             else
             {
@@ -75,7 +75,8 @@
             if (response.IsSuccessStatusCode && result is not null)
             {
                 _closed = result.Closed > 0;
-                _message = _closed ? "Session closed. The list updates with the next snapshot."
+                _message = _closed ? (request.Force ? "Session closed. The list updates with the next snapshot."
+                        : "Session closed. If it had just started an action the hub hadn't heard of yet, it stays open and comes back to the list.")
                     : result.Kept > 0 ? "Session kept open because it has unresolved actions. Select the override to force close it."
                     : "This session is no longer listed in that repository.";
                 _confirming = result.Kept > 0;

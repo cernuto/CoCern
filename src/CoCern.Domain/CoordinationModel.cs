@@ -212,7 +212,9 @@ public static class Operations
     /// Sent by the control aggregate to a session it dropped from its directory (long stale, directory full). The session then answers
     /// <c>SessionUnknown</c> with <c>expired</c>, and returns deliveries to their senders. The effect carries its own caller, scoped to the
     /// session's repository. A session that answers for an unresolved action refuses it, and so does one with unread mail when the
-    /// expiry is an idle close (<c>idle: true</c>); either sends <see cref="SessionRestore"/> instead.
+    /// expiry is an idle close (<c>idle: true</c>); either sends <see cref="SessionRestore"/> instead. Otherwise it closes and sends
+    /// <see cref="SessionExpired"/>. Both answers carry the close's <c>closeSeq</c>, which the directory uses to count only the answer to
+    /// its latest close of that session, once.
     /// </summary>
     public const string SessionExpire = "__session_expire";
     /// <summary>
@@ -220,12 +222,18 @@ public static class Operations
     /// back as the session keeps it, with the work it answers for (<c>owns</c>) or the unread mail that exempts it from idle closes (<c>mail</c>).
     /// </summary>
     public const string SessionRestore = "__session_restore";
+    /// <summary>Sent by a session that accepted <see cref="SessionExpire"/> to the control directory: that close is settled.</summary>
+    public const string SessionExpired = "__session_expired";
     /// <summary>
     /// Sent by a board to the session one of its tasks now targets (<c>workflow.targetSessionId</c>): tell this board when you close. A
     /// session already closed answers at once with <see cref="SessionClosed"/>.
     /// </summary>
     public const string SessionTargetWatch = "__session_target_watch";
-    /// <summary>Sent by a closed session to each board watching it: tasks that still target it lose the target, so any session may claim them.</summary>
+    /// <summary>
+    /// Sent by a closed session to each board watching it or holding work it answered for (and by an expired session that hears late of
+    /// new work): tasks that still target it lose the target, so any session may claim them, and its unresolved actions there are marked
+    /// <c>ownerClosed</c> with their task's claim lapsed, so they can be recovered at once.
+    /// </summary>
     public const string SessionClosed = "__session_closed";
     /// <summary>
     /// A board tells a session it starts answering for an unresolved action (<c>open: true</c>: it began or recovered it) or stops; the

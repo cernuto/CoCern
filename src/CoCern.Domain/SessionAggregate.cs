@@ -23,8 +23,10 @@ internal static class SessionAggregate
         // An expired session takes no deliveries (a refusal would be retried forever; the sender is told instead) and refuses attention,
         // which its sources then drop.
         if (context.Operation == Operations.Deliver) return expired ? Undelivered(context, Ok(new { expired = true }), "closed") : Deliver(context);
-        // Boards report through their outboxes, without the session secret; an expired or unknown session ignores them.
-        if (context.Operation == Operations.SessionWork) return expired || !context.State.ContainsKey("principalId") ? Ok(new { tracked = false }) : TrackWork(context);
+        // Boards report through their outboxes, without the session secret; an unknown session ignores them, and an expired one tells the
+        // board of new work it can no longer answer for.
+        if (context.Operation == Operations.SessionWork)
+            return !context.State.ContainsKey("principalId") ? Ok(new { tracked = false }) : expired ? LateWork(context) : TrackWork(context);
         if (expired && context.Operation is Operations.AttentionRaise or Operations.AttentionClose) return Error(SessionUnknown, new { expired = true });
         // Attention items arrive through other aggregates' outboxes, which carry no session secret, just like deliveries.
         if (context.Operation == Operations.AttentionRaise) return SessionAttention.Raise(context);
@@ -71,7 +73,7 @@ internal static class SessionAggregate
     ];
 
     /// <summary>What an expired session forgets: its secret, its mail and attention, its tool binding, and the boards waiting on it (told as it closes).</summary>
-    private static readonly string[] ExpiredState = ["sessionToken", "inbox", "acked", "attention", "attentionClosed", "attentionArchived", "attentionRecent", "standingSeen", "binding", TargetBoardsKey];
+    private static readonly string[] ExpiredState = ["sessionToken", "inbox", "acked", "attention", "attentionClosed", "attentionArchived", "attentionRecent", "standingSeen", "binding", TargetBoardsKey, WorkBoardsKey];
 
     private const string WorkKey = "work";
     private const string WorkReportedKey = "workReported";
@@ -84,8 +86,10 @@ internal static class SessionAggregate
     {
         var (state, args, now) = (context.State, context.Args, context.Now);
         var ledger = ObjectAt(state, WorkKey);
-        var tracked = WorkLedger.Apply(ledger, Required(args, "actionKey"), Flag(args, "open"), WorkLedger.ReportedAt(args, now), now);
+        var actionKey = Required(args, "actionKey");
+        var tracked = WorkLedger.Apply(ledger, actionKey, Flag(args, "open"), WorkLedger.ReportedAt(args, now), now);
         var owns = WorkLedger.Owns(ledger, now);
+        if (tracked && Flag(args, "open")) RememberWorkBoard(context, actionKey);
         if (ledger.Count == 0) state.Remove(WorkKey);
         var reported = state[WorkReportedKey] as JsonObject;
         var (wasOwning, reportedAt) = reported is null ? (false, DateTimeOffset.MinValue) : (Flag(reported, "owns"), Date(reported, "at"));
@@ -113,16 +117,60 @@ internal static class SessionAggregate
     private static RelayReply Expire(AggregateContext context)
     {
         var state = context.State;
-        if (!state.ContainsKey("principalId") || state["expiredAt"] is not null) return Ok(new { expired = true });
+        if (!state.ContainsKey("principalId") || state["expiredAt"] is not null) return Settled(context, Ok(new { expired = true }));
+        var force = Flag(context.Args, "force");
         var owns = state[WorkKey] is JsonObject ledger && WorkLedger.Owns(ledger, context.Now);
         var mail = IsTrue(context.Args, "idle") && state["inbox"] is JsonObject { Count: > 0 };
-        if (!Flag(context.Args, "force") && (owns || mail)) return KeepOpen(context, owns, mail);
-        if (Flag(context.Args, "force")) state["forceClosedBy"] = Text(context.Args, "requestedBy");
-        if (state[TargetBoardsKey] is JsonObject boards)
-            foreach (var board in boards) TellBoard(context, board.Key, Text(board.Value as JsonObject ?? new JsonObject(), "boardId", "default"));
+        if (!force && (owns || mail)) return KeepOpen(context, owns, mail);
+        if (force) state["forceClosedBy"] = Text(context.Args, "requestedBy");
+        // Each board waiting on it hears once: those whose tasks target it, and, when it still answers for work (a forced close), those
+        // holding that work, which then make it recoverable at once instead of after its claim's lease.
+        var told = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var watched in new[] { state[TargetBoardsKey], owns ? state[WorkBoardsKey] : null }.OfType<JsonObject>())
+            foreach (var board in watched)
+                if (told.Add(board.Key)) TellBoard(context, board.Key, Text(board.Value as JsonObject ?? new JsonObject(), "boardId", "default"));
+        ReturnUnread(context, state);
         foreach (var key in ExpiredState) state.Remove(key);
         state["expiredAt"] = context.Now.ToString("O");
-        return Ok(new { expired = true });
+        return Settled(context, Ok(new { expired = true }));
+    }
+
+    /// <summary>Acknowledges a close the directory fenced (<c>closeSeq</c>), so it stops waiting for this session's answer.</summary>
+    private static RelayReply Settled(AggregateContext context, RelayReply reply)
+    {
+        if (context.Args["closeSeq"] is not null)
+            context.Emit(AggregateKinds.Control, AggregateKinds.ControlKey, Operations.SessionExpired, new JsonObject
+            {
+                ["repositoryId"] = context.Repository, ["sessionId"] = Text(context.State, "sessionId") is { Length: > 0 } self ? self : context.Key,
+                ["closeSeq"] = Number(context.Args, "closeSeq")
+            });
+        return reply;
+    }
+
+    /// <summary>
+    /// A board reports work to a session that has already closed: the report raced the close (a close by label lands before the board's
+    /// report of an action just begun). The session can no longer answer for it, so it tells that board, which makes the action
+    /// recoverable at once (<see cref="Operations.SessionClosed"/>). A report that work ended needs nothing.
+    /// </summary>
+    private static RelayReply LateWork(AggregateContext context)
+    {
+        if (!Flag(context.Args, "open") || Text(context.Args, "actionKey") is not { Length: > 0 } actionKey) return Ok(new { tracked = false });
+        var boardId = CoordinationStateMachine.ParseActionKey(actionKey).BoardId;
+        TellBoard(context, AggregateKinds.BoardKey(context.Repository, boardId), boardId);
+        return Ok(new { tracked = false, toldBoard = true });
+    }
+
+    private const string WorkBoardsKey = "workBoards";
+
+    /// <summary>Remembers the board holding an action this session answers for, so a forced close can tell it; the oldest of <see cref="RelayLimits.MaxSessionTargetBoards"/> is forgotten first.</summary>
+    private static void RememberWorkBoard(AggregateContext context, string actionKey)
+    {
+        var boardId = CoordinationStateMachine.ParseActionKey(actionKey).BoardId;
+        var boards = ObjectAt(context.State, WorkBoardsKey);
+        var key = AggregateKinds.BoardKey(context.Repository, boardId);
+        boards.Remove(key);
+        boards[key] = new JsonObject { ["boardId"] = boardId };
+        while (boards.Count > RelayLimits.MaxSessionTargetBoards) boards.Remove(boards.First().Key);
     }
 
     /// <summary>
@@ -140,6 +188,7 @@ internal static class SessionAggregate
         var restore = new JsonObject { ["repositoryId"] = context.Repository, ["sessionId"] = Text(state, "sessionId"), ["record"] = record };
         if (owns) { restore["owns"] = true; restore["seq"] = state[WorkReportedKey] is JsonObject reported ? Number(reported, "seq") : 0; }
         if (mail) restore["mail"] = true;
+        if (context.Args["closeSeq"] is not null) restore["closeSeq"] = Number(context.Args, "closeSeq");
         context.Emit(AggregateKinds.Control, AggregateKinds.ControlKey, Operations.SessionRestore, restore);
         return Ok(new { expired = false, keptFor = owns ? "work" : "mail" });
     }
@@ -186,28 +235,50 @@ internal static class SessionAggregate
     /// </summary>
     private static RelayReply Undelivered(AggregateContext context, RelayReply reply, string reason)
     {
-        var args = context.Args;
+        if (!ReturnToSender(context, context.Args, reason)) return reply;
+        var data = JsonNode.Parse(reply.DataJson)!.AsObject();
+        data["returned"] = true;
+        return Ok(data);
+    }
+
+    /// <summary>
+    /// Unread direct messages a closing session would drop with its inbox go back to their senders as <c>delivery.failed</c>
+    /// (<c>unread</c>), so no sender waits for an answer that will never come. At most <see cref="RelayLimits.MaxMessagesReturnedOnClose"/>,
+    /// oldest first; the rest are dropped with the inbox.
+    /// </summary>
+    private static void ReturnUnread(AggregateContext context, JsonObject state)
+    {
+        if (state["inbox"] is not JsonObject inbox) return;
+        var returned = 0;
+        foreach (var message in inbox.Select(entry => entry.Value).OfType<JsonObject>())
+        {
+            if (returned == RelayLimits.MaxMessagesReturnedOnClose) break;
+            if (ReturnToSender(context, message, "unread")) returned++;
+        }
+    }
+
+    /// <summary>Sends <paramref name="message"/>'s sender the notice for <paramref name="reason"/>; false when it has no sender session or is itself a notice.</summary>
+    private static bool ReturnToSender(AggregateContext context, JsonObject args, string reason)
+    {
         var sender = Text(args, "senderSessionId");
         var id = Text(args, "messageId");
-        if (sender.Length == 0 || id.Length == 0 || Text(args, "kind") == UndeliveredKind) return reply;
+        if (sender.Length == 0 || id.Length == 0 || Text(args, "kind") == UndeliveredKind) return false;
         var recipient = Text(context.State, "sessionId") is { Length: > 0 } self ? self : context.Key;
         var notice = new JsonObject
         {
             // Derived from the message, so a redelivery of it returns the same notice and the sender's inbox keeps one.
             ["messageId"] = "undelivered-" + Retention.Hash(id), ["repositoryId"] = context.Repository, ["kind"] = UndeliveredKind,
-            ["text"] = "Message " + id + " to session " + recipient + " was not delivered: " + reason switch
+            ["text"] = "Message " + id + " to session " + recipient + " was not " + (reason == "unread" ? "read: that session closed first." : "delivered: " + reason switch
             {
                 "closed" => "that session is closed.", "unknown" => "no such session was opened.", _ => "that session's inbox is full."
-            },
+            }),
             ["undeliveredMessageId"] = id, ["recipientSessionId"] = recipient, ["reason"] = reason, ["sentAt"] = context.Now.ToString("O")
         };
         if (!IsNotFalse(args, "wake")) notice["wake"] = false;
         // Superseding is keyed by the sender, so only then does the notice name the closed session as its own.
         if (IsTrue(args, "supersede")) { notice["supersede"] = true; notice["senderSessionId"] = recipient; }
         context.Emit(AggregateKinds.Session, sender, Operations.Deliver, notice);
-        var data = JsonNode.Parse(reply.DataJson)!.AsObject();
-        data["returned"] = true;
-        return Ok(data);
+        return true;
     }
 
     private static RelayReply Deliver(AggregateContext context)

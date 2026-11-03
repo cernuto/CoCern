@@ -24,6 +24,7 @@ internal static class ControlAggregate
             Operations.SessionWork => TrackWork(context),
             Operations.SweepSessions => SweepSessions(context),
             Operations.SessionRestore => RestoreSession(context),
+            Operations.SessionExpired => SettleClose(context),
             RelayTools.WorkerList => ListWorkers(context),
             RelayTools.GetStatus => Status(context),
             Operations.Resolve => ResolveResource(context),
@@ -107,6 +108,7 @@ internal static class ControlAggregate
     /// </list>
     /// Each closed session leaves the directory and is sent <see cref="Operations.SessionExpire"/>, under its own repository, so its chat
     /// gets a clean <c>SessionUnknown</c> and opens again. One that refuses sends <see cref="Operations.SessionRestore"/> and comes back.
+    /// Each close is fenced (see <see cref="Fence"/>), so only the session's answer to this close can bring it back.
     /// </summary>
     private static Closing CloseSessions(AggregateContext context, JsonObject sessions, Func<string, JsonObject?, bool> matches, int limit, bool idle, bool force = false)
     {
@@ -122,16 +124,8 @@ internal static class ControlAggregate
         {
             sessions.Remove(id);
             var repository = session is null ? "" : Text(session, "repositoryId");
-            var expire = new JsonObject { ["repositoryId"] = repository, ["sessionId"] = id };
-            if (force)
-            {
-                expire["force"] = true; expire["requestedBy"] = context.Caller.PrincipalId;
-                // A delayed refusal of an earlier, ordinary close must not restore this session after the explicit override.
-                var forced = ObjectAt(context.State, "forceClosedSessions");
-                forced.Remove(id);
-                forced[id] = now.ToString("O");
-                while (forced.Count > RelayLimits.MaxRecords) forced.Remove(forced.First().Key);
-            }
+            var expire = new JsonObject { ["repositoryId"] = repository, ["sessionId"] = id, ["closeSeq"] = Fence(context.State, id) };
+            if (force) { expire["force"] = true; expire["requestedBy"] = context.Caller.PrincipalId; }
             // A session whose hold lapsed already had its grace, so this idle close takes it as it is.
             if (idle && hold == Hold.None) expire["idle"] = true;
             // Its own caller: the session belongs to its repository, which the caller that closed it may not reach (or may reach them all).
@@ -234,7 +228,9 @@ internal static class ControlAggregate
         var args = context.Args;
         var id = Text(args, "sessionId");
         var sessions = ObjectAt(context.State, "sessions");
-        if (id.Length == 0 || (context.State["forceClosedSessions"] as JsonObject)?.ContainsKey(id) == true) return Ok(new { restored = false });
+        // Only the answer to this directory's latest close of the session counts, once: a delayed or duplicated restore from an earlier
+        // close would otherwise bring back a session that has since closed (a forced close, or a later one it accepted).
+        if (id.Length == 0 || !Fenced(context.State, id, args)) return Ok(new { restored = false });
         if (sessions[id] is not JsonObject record)
         {
             if (args["record"] is not JsonObject copy || Text(copy, "principalId").Length == 0) return Ok(new { restored = false });
@@ -251,7 +247,48 @@ internal static class ControlAggregate
             record[WorkSeqKey] = Number(args, "seq");
         }
         if (IsTrue(args, "mail")) record[MailHeldKey] = context.Now.ToString("O");
+        Unfence(context.State, id);
         return Ok(new { restored = true });
+    }
+
+    private const string ClosingKey = "closing";
+    private const string CloseSeqKey = "closeSeq";
+
+    /// <summary>
+    /// Fences one close of <paramref name="id"/>: returns its new <c>closeSeq</c>, which the session's one answer carries back, a restore
+    /// (<see cref="RestoreSession"/>) or an acknowledgement (<see cref="SettleClose"/>). Either settles the fence. A fence lives only while
+    /// its close is in flight, so the directory keeps none for sessions long closed; past <see cref="RelayLimits.MaxRecords"/> in flight the
+    /// oldest is dropped, and its late answer is then ignored.
+    /// </summary>
+    private static long Fence(JsonObject state, string id)
+    {
+        var seq = Number(state, CloseSeqKey) + 1;
+        state[CloseSeqKey] = seq;
+        var closing = ObjectAt(state, ClosingKey);
+        closing.Remove(id);
+        closing[id] = seq;
+        while (closing.Count > RelayLimits.MaxRecords) closing.Remove(closing.First().Key);
+        return seq;
+    }
+
+    /// <summary>Whether <paramref name="args"/> answers the close of <paramref name="id"/> still in flight.</summary>
+    private static bool Fenced(JsonObject state, string id, JsonObject args) =>
+        state[ClosingKey] is JsonObject closing && closing[id] is JsonValue fence && fence.TryGetValue<long>(out var seq) && Number(args, "closeSeq") == seq;
+
+    private static void Unfence(JsonObject state, string id)
+    {
+        if (state[ClosingKey] is not JsonObject closing) return;
+        closing.Remove(id);
+        if (closing.Count == 0) state.Remove(ClosingKey);
+    }
+
+    /// <summary><see cref="Operations.SessionExpired"/>: a session closed as this directory asked, so that close is settled. Any other copy is ignored.</summary>
+    private static RelayReply SettleClose(AggregateContext context)
+    {
+        var id = Text(context.Args, "sessionId");
+        if (id.Length == 0 || !Fenced(context.State, id, context.Args)) return Ok(new { settled = false });
+        Unfence(context.State, id);
+        return Ok(new { settled = true });
     }
 
     private const string OwnsWorkKey = "ownsWork";

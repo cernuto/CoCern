@@ -773,6 +773,27 @@ def run_checks(hub, checks):
             time.sleep(0.2)
         raise AssertionError("the closed session still answers")
     checks.run("happy", "close_sessions by label prefix closes that chat, which then gets SessionUnknown expired", close_by_label)
+    def close_one():
+        label = "smoke-one-" + uuid.uuid4().hex[:8]
+        chats = []
+        for _ in range(2):
+            _, opened = ok("session_open", {"requestId": rid(), "label": label}, hub.worker_token)
+            chats.append({"sessionId": opened["sessionId"], "sessionToken": opened["sessionToken"]})
+        # Two chats share the label; the exact target closes only the first, through the dashboard's Close session.
+        status, reply = request(hub.origin + "/dashboard/api/sessions/close", {"repositoryId": REPO, "targetSessionId": chats[0]["sessionId"]},
+                                headers=same_origin, opener=browser)
+        expect(status == 200 and reply.get("closed") == 1, f"HTTP {status} {reply}")
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            _, answer = tool("check_inbox", chats[0], hub.worker_token)
+            if isinstance(answer, dict) and answer.get("code") == "SessionUnknown":
+                ok("check_inbox", chats[1], hub.worker_token)  # the other chat with the same label is untouched
+                return
+            time.sleep(0.2)
+        raise AssertionError("the closed session still answers")
+    checks.run("happy", "Close session on the dashboard closes exactly one chat, even with a shared label", close_one)
+    checks.run("sad", "force is refused without one exact targetSessionId",
+               lambda: refused("control_request", {"requestId": rid(), "command": "close_sessions", "labelPrefix": "smoke", "force": True}, "InvalidArguments", 400))
     checks.run("sad", "close_sessions with idleMinutes under the minimum is refused",
                lambda: refused("control_request", {"requestId": rid(), "command": "close_sessions", "idleMinutes": 5}, "InvalidArguments", 400))
 

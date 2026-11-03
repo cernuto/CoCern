@@ -120,7 +120,7 @@ Open it with the sign-in link the hub prints. The link works once, only on the h
 | Page | Shows |
 | --- | --- |
 | Overview | Machines and sessions, live traffic and recent logs. |
-| Sessions | Each session in detail, and **Close idle sessions** to clear out finished chats (idle sessions also close on their own after a day, unless they have unread messages). |
+| Sessions | Each session in detail. **Close idle sessions** clears out finished chats (idle sessions also close on their own after a day, unless they have unread messages), and **Close session** closes one, optionally forcing it past unresolved actions. |
 | Analytics | Ten reports for one repository from the hourly snapshot, this period against the one before (1–14 days). |
 | Database | Table sizes. |
 | Logs | Recent hub events. |
@@ -160,7 +160,7 @@ dotnet build CoCern.slnx -c Release
 dotnet test CoCern.slnx -c Release
 ```
 
-For an end-to-end check, `python scripts/Smoke-CoCern.py` starts a throwaway hub from the build and runs 95 happy- and sad-path checks: sign-in, tasks, claims, actions, messages, notes, search, standing rules, orders, attention, pausing, closing sessions, doc search and re-sync, analytics, the adapter, the dashboard, Connect, the adapter download, a real node joining over HTTPS, races, malformed input, a hub killed mid-flight, and a restart. Before any settings writes, it verifies that the adapter reads the exact temporary profile and application-data paths; an older adapter that ignores these paths stops the run. It uses its own temporary folders and ports, and its exit code is the number of failed checks.
+For an end-to-end check, `python scripts/Smoke-CoCern.py` starts a throwaway hub from the build and runs 97 happy- and sad-path checks: sign-in, tasks, claims, actions, messages, notes, search, standing rules, orders, attention, pausing, closing sessions, doc search and re-sync, analytics, the adapter, the dashboard, Connect, the adapter download, a real node joining over HTTPS, races, malformed input, a hub killed mid-flight, and a restart. Before any settings writes, it verifies that the adapter reads the exact temporary profile and application-data paths; an older adapter that ignores these paths stops the run. It uses its own temporary folders and ports, and its exit code is the number of failed checks.
 
 On Windows the tests run offline. Elsewhere, 12 setup tests fail because they need Windows, 2 tests report as skipped (they need Windows, or PowerShell installed), and the analytics tests download DuckDB's `sqlite` extension once (or set `COCERN_DUCKDB_EXTENSIONS` to a folder that has it).
 

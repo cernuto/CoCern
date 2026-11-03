@@ -39,6 +39,32 @@ internal static class TaskActions
     public static bool HoldsTask(JsonObject task) =>
         (task["actions"] as JsonObject ?? new()).Any(x => x.Value is JsonObject action && IsUnresolved(action) && action["recovery"] is not JsonObject);
 
+    /// <summary>
+    /// A closed session's unresolved actions on <paramref name="task"/> (those it answers for: it wrote them, or recovered them): each is
+    /// marked <c>ownerClosed</c> once, and the task's claim, while that session holds it, lapses now. The principal's other session may then
+    /// recover them at once (<see cref="RecoveryRefusal"/>) rather than waiting out the lease, which the closed session can no longer renew.
+    /// The owner, the action records and their resource blocks stay, and nothing about the outcome is assumed. Returns whether anything
+    /// changed, so a repeated notice changes nothing.
+    /// </summary>
+    internal static bool Strand(JsonObject task, string session, DateTimeOffset now)
+    {
+        var answered = (task["actions"] as JsonObject ?? new()).Select(entry => entry.Value).OfType<JsonObject>()
+            .Where(action => IsUnresolved(action) && OwnerSession(action) == session).ToList();
+        if (answered.Count == 0) return false;
+        var changed = false;
+        foreach (var action in answered.Where(action => action["ownerClosed"] is null))
+        {
+            action["ownerClosed"] = new JsonObject { ["sessionId"] = session, ["at"] = now.ToString("O") };
+            changed = true;
+        }
+        if (Text(task, "owner") == session && Date(task, "leaseUntil") > now)
+        {
+            task["leaseUntil"] = now.ToString("O");
+            changed = true;
+        }
+        return changed;
+    }
+
     /// <summary>The bulky parts of a report or an action record: its report text and its tool binding. Dropping one keeps the record itself.</summary>
     private static readonly string[] BodyFields = ["report", "binding"];
 
