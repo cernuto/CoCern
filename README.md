@@ -59,7 +59,7 @@ On the dashboard's **Connect** page, one button adds CoCern to each of these on 
 | Claude desktop app | Shown only when it is installed. |
 | Codex | The Codex CLI, IDE extension and app. Codex is ChatGPT's coding agent. |
 
-Restart the app afterwards. Each settings file is backed up first, and an app that already has CoCern is left alone. The page works only in a browser on the hub's PC.
+Restart the app afterwards. Each settings file is backed up first. An app that already has CoCern keeps its entry, unless that entry points at this hub's old address or certificate: then **Connect** updates it. The page works only in a browser on the hub's PC.
 
 The ChatGPT chat app can't use a hub on your PC: it can only reach CoCern at a public HTTPS address, which is not set up.
 
@@ -85,7 +85,7 @@ Nothing is copied by hand: the command downloads CoCern from this hub over HTTPS
 
 Agents find CoCern's tools on their own. A typical chat:
 
-1. `session_open` once, to join the hub, and keep its handle for the whole chat. Retry an uncertain open with the same `requestId` and arguments: it returns the same session, not a second one. A managing chat passes `role: "manager"`.
+1. `session_open` once, to join the hub, and keep its handle for the whole chat. Retry an uncertain open with the same `requestId` and arguments: it returns the same session, not a second one (in Codex, only until the app restarts CoCern; then reuse the handle you kept). A managing chat passes `role: "manager"`.
 2. `task_get` to read the board, then `task_claim` a task.
 3. Do the work with the chat's own tools.
 4. `task_update` with what happened. Add `includeNextWork: true` to be offered the next task.
@@ -150,7 +150,7 @@ Every setting: [Reference](docs/reference.md#settings).
 - **Keep the hub and its adapters on the same version.** Update both together: on a joined PC, paste its Add another PC command again.
 - **Don't rebuild a folder a hub or chat is running from.** Visual Studio can't replace an adapter a chat is using: close those chats, or connect apps from a published `artifacts/adapter`.
 - **One hub per database.** Don't put `data/` on a shared drive.
-- **Apps connected with an earlier version** use plain HTTP. To switch one to the safer pinned connection, remove its `cocern` entry and click **Connect** again.
+- **Apps connected with an earlier version** may use plain HTTP, or a certificate the hub no longer has. Click **Connect** again: it switches them to the pinned connection.
 - **The token is an administrator token.** Any program holding it can call administrator tools, even where a chat doesn't list them. For worker-only chats, see the [Reference](docs/reference.md#clients-and-tokens).
 
 ## Development
