@@ -504,6 +504,33 @@ public sealed class StorageTests : IDisposable
         Assert.Equal("1", Text(Database, "SELECT value FROM hub_metadata WHERE name='search_index_version';"));
     }
 
+    /// <summary>
+    /// A database from before <c>grain_state.closed</c> opens with the column added and set for each stored session by the Domain's rule:
+    /// its closed session stays off the dashboard, and one whose binding names expiredAt stays on it.
+    /// </summary>
+    [Fact]
+    public async Task An_older_database_gets_the_closed_flag_from_each_stored_session()
+    {
+        static StateEnvelope<CoordinationDocument> Session(string id, string extraKey, System.Text.Json.Nodes.JsonNode extra) => new()
+        {
+            Value = new() { Json = new System.Text.Json.Nodes.JsonObject { ["sessionId"] = id, ["repositoryId"] = "repo", ["label"] = "chat " + id, [extraKey] = extra }.ToJsonString() }
+        };
+        CreateVersion1Database("kept",
+            ("session", GrainId.Create("cocern.session", "open"), Session("open", "binding", new System.Text.Json.Nodes.JsonObject { ["expiredAt"] = Now.ToString("O") })),
+            ("session", GrainId.Create("cocern.session", "closed"), Session("closed", "expiredAt", Now.ToString("O"))));
+        using (var store = new SqliteStore(Database))
+        {
+            var observation = Assert.IsType<RelayObservation>(await store.ReadObservationAsync(Now, "incarnation"));
+            Assert.Equal("open", Assert.Single(observation.Sessions).SessionId);
+            Assert.Equal(1, observation.SessionCount);
+        }
+        Assert.Equal("closed", Text(Database, "SELECT grain_key FROM grain_state WHERE closed=1;"));
+        Assert.Equal(1L, Scalar(Database, "SELECT COUNT(*) FROM grain_state WHERE closed=1;"));
+        // Opening it again finds the column and changes nothing.
+        using (new SqliteStore(Database)) { }
+        Assert.Equal(1L, Scalar(Database, "SELECT COUNT(*) FROM grain_state WHERE closed=1;"));
+    }
+
     [Fact]
     public async Task Version_2_database_without_a_built_index_is_backfilled_once_and_turning_search_off_empties_it()
     {
