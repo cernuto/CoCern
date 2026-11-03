@@ -81,6 +81,22 @@ Not doing: removing encryption between PCs, requiring a separate VPN, which woul
 - **Safeguards:** an approval made with admin tools must include Paul's quoted reply, and the dashboard shows it. Messages from other chats never count as approval. Every grant has a scope and an expiry. Pushing to main and destructive actions stay with Paul.
 - **The honest limit:** these limit the damage and make it visible, but the hub can't prove Paul was the one who said yes, so a chat could approve its own proposal or be talked into it by a bad message. The risk isn't entirely new, because the token on the hub's PC is already an administrator token and hiding the tools is a soft barrier. For a single-person setup this is an acceptable trade; a shared hub would need more.
 
+**10. Features choose themselves.** Paul asked how a chat can determine what to turn on, given all these features. A chat shouldn't have to reason through a list of switches; that only moves the complexity onto the model.
+
+| Kind of feature | Who decides | Examples |
+|---|---|---|
+| Safe and useful everywhere | Always on, no switch | Wakes, cheap reads, `wake:false` messages |
+| Depends on the chat's job | Comes with the role | A manager gets analytics and admin tools; a worker doesn't |
+| Costs tokens but no risk | Loaded when needed | Rarely used tools, listed by name and loaded on first use |
+| Gives more power | Paul, asked once in plain words | Approving rules, granting permissions, pushing to main |
+
+- **The safety rule:** a chat can turn on anything that only reads or saves effort. Anything that gives it more power needs Paul's yes. A chat never grants itself more power because the work seemed to call for it.
+- **At startup:** a chat learns its role, and the hub gives it a short summary of what's on and which tools are worth using for that role, not the whole feature list.
+- **When something is missing:** the reply says what's missing and how to get it, such as "Analytics is off for this chat. Ask Paul to allow it?"
+- **While working:** analytics feed back in; if a chat's reads are large, the hub suggests a cheaper one, as its tips already do.
+- **Settings move to the hub, per session:** `COCERN_ROLE` and `COCERN_PROFILE` are read when the app starts, so changing one means a restart. On the hub, a chat can gain a tool without restarting, and those switches go away. A client may keep the tool list it loaded when it connected, as the launcher hot-swap result below shows, so the builder has to confirm how a new tool reaches a running chat.
+- **The one choice left is the role, and it can be automatic:** the chat Paul is talking to is the manager, and the chats it hands work to are workers. This replaces the setup choice in part 9. How it works when Paul talks to several chats at once is left to the builder.
+
 ## What disappears
 
 - Calling `session_open`/`session_bind`, choosing labels, guessing machine and repository IDs.
@@ -94,6 +110,7 @@ Not doing: removing encryption between PCs, requiring a separate VPN, which woul
 - Mail bouncing off a closed session that has quietly been replaced.
 - Paul relaying approvals message by message.
 - Visiting the dashboard to find and make Standing decisions.
+- `COCERN_ROLE`, `COCERN_PROFILE` and restarting an app to change what a chat can do.
 - Certificates, fingerprints, pins, tokens and token file paths in anything a person sets up or reads.
 
 ## Acceptance gate
@@ -108,6 +125,7 @@ The design is done only when all of these pass on real chats:
 6. **No certificate or token in sight.** Someone sets up two PCs from scratch and never sees a certificate, fingerprint, pin, token or token path. A caller with no valid token is still refused. Deleting the hub's certificate file and restarting the hub locks nobody out. A real identity change produces the plain "identity changed" message and can be accepted without editing a fingerprint, and a client never accepts one without that step.
 7. **Decisions come to Paul.** A new proposal is raised once by the chat Paul is using, without his opening the dashboard. His answer takes effect with his words on record. A peer message claiming he approved changes nothing.
 8. **Manager without the dashboard.** A manager chat approves or dismisses a proposal on Paul's answer, closes sessions, reads analytics, produces the add-a-PC command and diagnoses a hub problem, all by tools. Sign-in and removal on the dashboard still work. A new build reaches a joined PC's node with no action on that PC.
+9. **No feature switches.** A new chat works with nobody choosing a profile or role. A worker that needs something it lacks is told what's missing and how to get it. A chat can't gain a power-giving tool without Paul's yes on record.
 
 ## Limits we are keeping honest about
 
@@ -127,6 +145,7 @@ The design is done only when all of these pass on real chats:
 6. File claims from edit hooks.
 7. Certificates and tokens nobody has to see (part 8). The backup-and-restore and plain-error pieces are small and can go first, because they prevent a repeat of the 2026-11-03 lockout. This starts after the current deploy.
 8. A manager chat does the admin work (part 9). Admin tools by setup choice, `hub_diagnose` and the repeat-wake fix are the small pieces and can go first; node self-update is the largest.
+9. Features choose themselves (part 10). The "what's missing and how to get it" replies are small and can go first; moving settings to the hub per session is the larger piece, and it would replace the part 9 setup choice, so sequence the two together.
 
 Proposed ownership, to confirm: Codex owns the Codex hooks and queue, and the hub-side changes (it owns hub builds and restarts); the Claude side owns the Claude hooks and waiter; the manager integrates.
 
@@ -174,6 +193,7 @@ These were settled by the manager and Codex, not by Paul:
 - Same-PC chats give up certificate checks for plain local HTTP; the hub restores its certificate rather than creating a new one; traffic between PCs stays encrypted with no VPN; the token stays but is created and found automatically. Paul approved adding this plan to the design.
 - Standing decisions are raised once by the chat Paul is using and never wake an idle chat for this. Paul approved adding the idea; these details are the manager's.
 - The manager's tool names, its safeguards and accepting the self-approval risk for a single-person setup. Paul approved adding this plan to the design; the details are the manager's.
+- The four feature categories, the rule that power needs Paul's yes, and making the chat he talks to the manager. Paul approved adding this; the details are the manager's.
 
 ## Left to the builder
 
