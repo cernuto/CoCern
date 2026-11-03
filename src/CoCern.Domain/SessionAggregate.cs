@@ -29,7 +29,7 @@ internal static class SessionAggregate
         if (context.Operation == Operations.SessionWork)
         {
             if (!ActionWorkReport.Decode(context.Args).TryGet(out var report, out var malformed)) return Malformed(malformed);
-            return !context.State.ContainsKey("principalId") ? Ok(new { tracked = false }) : expired ? LateWork(context, report) : TrackWork(context, report);
+            return expired ? LateWork(context, report) : !context.State.ContainsKey("principalId") ? Ok(new { tracked = false }) : TrackWork(context, report);
         }
         if (expired && context.Operation is Operations.AttentionRaise or Operations.AttentionClose) return Error(SessionUnknown, new { expired = true });
         // Attention items arrive through other aggregates' outboxes, which carry no session secret, just like deliveries.
@@ -67,7 +67,7 @@ internal static class SessionAggregate
         if (ReadModels.IsClosed(state)) return Ok(new { initialized = false, expired = true });
         var record = open.Record;
         if (state.ContainsKey("principalId"))
-            return Text(state, "principalId") == record.PrincipalId && Text(state, "sessionToken") == record.SessionToken ? Ok(new { initialized = true }) : Error(SessionDenied);
+            return Text(state, "principalId") == record.PrincipalId && Text(state, ReadModels.SessionTokenKey) == record.SessionToken ? Ok(new { initialized = true }) : Error(SessionDenied);
         foreach (var (field, value) in (record with { ActiveAt = null }).ToJson()) state[field] = value?.DeepClone();
         state["openedAt"] = context.Now.ToString("O");
         if (Text(state, "role").Length > RelayLimits.MaxActivityRoleLength) state.Remove("role");
@@ -80,7 +80,7 @@ internal static class SessionAggregate
     }
 
     /// <summary>What an expired session forgets: its secret, its mail and attention, its tool binding, and the boards waiting on it (told as it closes).</summary>
-    private static readonly string[] ExpiredState = ["sessionToken", "inbox", "acked", "attention", "attentionClosed", "attentionArchived", "attentionRecent", "standingSeen", "binding", TargetBoardsKey, WorkBoardsKey];
+    private static readonly string[] ExpiredState = [ReadModels.SessionTokenKey, "inbox", "acked", "attention", "attentionClosed", "attentionArchived", "attentionRecent", "standingSeen", "binding", TargetBoardsKey, WorkBoardsKey];
 
     private const string WorkKey = "work";
     private const string WorkReportedKey = "workReported";
@@ -203,17 +203,19 @@ internal static class SessionAggregate
 
     /// <summary>
     /// <see cref="Operations.SessionTargetWatch"/>: a board has a task targeting this session and asks to hear when it closes, so the task
-    /// does not wait for a session that will never claim it. A closed session tells the board at once. At most
-    /// <see cref="RelayLimits.MaxSessionTargetBoards"/> boards are remembered, the oldest forgotten first. A session never opened here is
-    /// left alone (nothing names it but the target), and a malformed request is ignored, since a refusal would be retried forever.
+    /// does not wait for a session that will never claim it. A closed session tells the board at once, including one closed before it
+    /// opened (<see cref="Expire"/>). At most <see cref="RelayLimits.MaxSessionTargetBoards"/> boards are remembered, the oldest forgotten
+    /// first. A session never opened or closed here is left alone (nothing names it but the target), and a malformed request is ignored,
+    /// since a refusal would be retried forever.
     /// </summary>
     private static RelayReply WatchTarget(AggregateContext context)
     {
         var state = context.State;
         var board = Text(context.Args, "boardKey");
         var boardId = Text(context.Args, "boardId", "default");
-        if (board.Length == 0 || !state.ContainsKey("principalId")) return Ok(new { watching = false });
+        if (board.Length == 0) return Ok(new { watching = false });
         if (ReadModels.IsClosed(state)) { TellBoard(context, board, boardId); return Ok(new { watching = false, closed = true }); }
+        if (!state.ContainsKey("principalId")) return Ok(new { watching = false });
         var boards = ObjectAt(state, TargetBoardsKey);
         boards.Remove(board);
         boards[board] = new JsonObject { ["boardId"] = boardId };
@@ -317,7 +319,7 @@ internal static class SessionAggregate
     }
 
     private static bool Authenticates(AggregateContext context) =>
-        Text(context.State, "principalId") == context.Caller.PrincipalId && SecretEquals(Text(context.State, "sessionToken"), Text(context.Args, "sessionToken"));
+        Text(context.State, "principalId") == context.Caller.PrincipalId && SecretEquals(Text(context.State, ReadModels.SessionTokenKey), Text(context.Args, "sessionToken"));
 
     private static RelayReply Describe(AggregateContext context)
     {

@@ -1,12 +1,105 @@
+using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
+using CoCern.Contracts;
+using CoCern.Domain;
 using CoCern.Storage;
 using Microsoft.Data.Sqlite;
+using Orleans.Runtime;
 using Xunit;
 
 namespace CoCern.Tests;
 
 public sealed class AnalyticsSnapshotScrubTests
 {
+    /// <summary>
+    /// State the Domain built through its own operations, written as the hub writes it. The snapshot keeps only the kinds the Domain lets
+    /// leave (<see cref="ReadModels.SnapshotKinds"/>), each without the top-level keys it names private (<see cref="ReadModels.PrivateStateKeys"/>)
+    /// and otherwise as it was, so the board's tasks survive. Every private key was there to remove: the board's and the lock's stored
+    /// replies, the lock's tombstones once its replies overflowed, and the session's secret.
+    /// </summary>
+    [Fact]
+    public async Task Domain_built_state_leaves_only_as_the_kinds_the_domain_allows_without_the_keys_it_names_private()
+    {
+        var now = DateTimeOffset.Parse("2026-11-03T00:00:00Z");
+        var hub = new AggregateHub();
+        var chat = hub.Open("worker", now);
+        Assert.True(hub.Board(RelayTools.TaskUpdate, new() { ["taskId"] = "T-1", ["expectedVersion"] = 0 }, now).Ok);
+        Assert.True(hub.Board(RelayTools.TaskUpdate, new() { ["taskId"] = "T-2", ["expectedVersion"] = 0 }, now).Ok);
+        Assert.True(hub.Board(RelayTools.SendMessage, new() { ["taskId"] = "T-1", ["sessionId"] = chat.Id, ["text"] = "Starting." }, now).Ok);
+        const string Resource = "rig-1";
+        RelayReply Claim(string operation, JsonObject args)
+        {
+            args["sessionId"] = chat.Id; args["leaseSeconds"] = 3600;
+            return hub.Apply(AggregateKinds.Lock, Resource, operation, args, AggregateHub.Alice, now);
+        }
+        Assert.True(Claim(RelayTools.ClaimAcquire, new() { ["requestId"] = "acquire" }).Ok);
+        // Enough renewals that the lock's stored replies overflow: it drops the oldest before their window ends and keeps tombstones for them.
+        for (var renewal = 0; renewal < RelayLimits.MaxRecords; renewal++)
+            Assert.True(Claim(RelayTools.ClaimRenew, new() { ["requestId"] = "renew-" + renewal, ["generation"] = 1 }).Ok);
+
+        var directory = Path.Combine(Path.GetTempPath(), "cocern-snapshot-domain-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var snapshotPath = Path.Combine(directory, "snapshot.db");
+            using var store = new SqliteStore(Path.Combine(directory, "live.db"));
+            var storage = new SqliteGrainStorage(store);
+            foreach (var (kind, grainType, key) in new[]
+            {
+                (AggregateKinds.Board, "cocern.board", AggregateHub.BoardKey), (AggregateKinds.Lock, "cocern.lock", Resource),
+                (AggregateKinds.Session, "cocern.session", chat.Id), (AggregateKinds.Control, "cocern.control", AggregateKinds.ControlKey)
+            })
+                await storage.WriteStateAsync(kind, GrainId.Create(grainType, key), new GrainState<StateEnvelope<CoordinationDocument>>(hub.Of(kind, key)));
+            using var live = Open(Path.Combine(directory, "live.db"));
+            var stored = States(live);
+            var lastRenewal = CoordinationStateMachine.RequestKey(AggregateHub.Alice.PrincipalId, chat.Id, RelayTools.ClaimRenew, "renew-" + (RelayLimits.MaxRecords - 1));
+            Assert.True(stored[AggregateKinds.Board].ContainsKey(ReadModels.RequestsKey));
+            Assert.True(stored[AggregateKinds.Lock][ReadModels.RequestsKey]!.AsObject().ContainsKey(lastRenewal));
+            Assert.Equal(1L, Count(live, $"SELECT count(*) FROM grain_state WHERE instr(payload, '{lastRenewal}') > 0"));
+            Assert.True(stored[AggregateKinds.Lock].ContainsKey(ReadModels.RequestTombstonesKey));
+            Assert.Equal(chat.Token, stored[AggregateKinds.Session][ReadModels.SessionTokenKey]!.GetValue<string>());
+            Assert.All(ReadModels.PrivateStateKeys, key => Assert.Contains(stored.Values, state => state.ContainsKey(key)));
+
+            await store.CreateAnalyticsSnapshotAsync(snapshotPath);
+
+            using (var snapshot = Open(snapshotPath))
+            {
+                var copied = States(snapshot);
+                Assert.Equal(ReadModels.SnapshotKinds.Order(), copied.Keys.Order());
+                foreach (var (kind, state) in copied)
+                {
+                    Assert.DoesNotContain(state, entry => ReadModels.PrivateStateKeys.Contains(entry.Key));
+                    var expected = stored[kind].DeepClone().AsObject();
+                    foreach (var key in ReadModels.PrivateStateKeys) expected.Remove(key);
+                    Assert.True(JsonNode.DeepEquals(expected, state), $"The snapshot changed more of the {kind} state than its private keys.");
+                }
+                Assert.Equal(["T-1", "T-2"], copied[AggregateKinds.Board]["tasks"]!.AsObject().Select(task => task.Key));
+                Assert.Equal("Starting.", copied[AggregateKinds.Board]["tasks"]!["T-1"]!["messages"]![0]!["text"]!.GetValue<string>());
+                Assert.Equal(0L, Count(snapshot, $"SELECT count(*) FROM grain_state WHERE instr(payload, '{lastRenewal}') > 0"));
+            }
+            // Nor are the session's secret and the lock's latest stored reply anywhere in the file, free pages included.
+            var file = File.ReadAllBytes(snapshotPath);
+            Assert.Equal(-1, file.AsSpan().IndexOf(Encoding.UTF8.GetBytes(chat.Token)));
+            Assert.Equal(-1, file.AsSpan().IndexOf(Encoding.UTF8.GetBytes(lastRenewal)));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    /// <summary>Each stored state's document (<c>$.Value.Json</c>), by state name.</summary>
+    private static Dictionary<string, JsonObject> States(SqliteConnection connection)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT state_name, payload FROM grain_state";
+        using var reader = command.ExecuteReader();
+        var states = new Dictionary<string, JsonObject>();
+        while (reader.Read()) states.Add(reader.GetString(0), JsonNode.Parse(JsonNode.Parse(reader.GetString(1))!["Value"]!["Json"]!.GetValue<string>())!.AsObject());
+        return states;
+    }
+
     [Theory]
     [InlineData("session")]
     [InlineData("control")]

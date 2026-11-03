@@ -22,7 +22,7 @@ internal static class StandingPreferences
     {
         if (!context.Caller.IsAdministrator) return Error(AdministratorRequired);
         var args = context.Args;
-        var current = context.State["standing"] as JsonObject ?? new JsonObject();
+        var current = context.State[BoardReadModels.StandingKey] as JsonObject ?? new JsonObject();
         var revision = Number(current, "revision");
         if (args["expectedRevision"] is not JsonValue expected || !long.TryParse(expected.ToJsonString(), out var expectedRevision) || expectedRevision != revision)
             return Error(RelayErrorCodes.VersionConflict, new { currentRevision = revision }, revision);
@@ -132,7 +132,7 @@ internal static class StandingPreferences
         if (changes.Count > RelayLimits.StandingHistoryChanges) entry["changesTotal"] = changes.Count;
         history.Add(entry);
         while (history.Count > RelayLimits.StandingHistoryEntries) history.RemoveAt(0);
-        context.State["standing"] = next;
+        context.State[BoardReadModels.StandingKey] = next;
         foreach (var decided in changes.Where(change => change.StartsWith("approve:", StringComparison.Ordinal) || change.StartsWith("-proposal:", StringComparison.Ordinal)))
             AttentionSources.OnProposalDecided(context, decided[(decided.IndexOf(':') + 1)..]);
         return Ok(new { revision = updated, changed = standingChanged, lines = lines.Count, grants = grants.Count, pending = proposals.Count }, updated);
@@ -146,7 +146,7 @@ internal static class StandingPreferences
     {
         var args = context.Args;
         if (args.ContainsKey("line") == args.ContainsKey("grant")) return Error(InvalidArguments, new { required = "line or grant" });
-        var standing = context.State["standing"] as JsonObject ?? new JsonObject();
+        var standing = context.State[BoardReadModels.StandingKey] as JsonObject ?? new JsonObject();
         var proposals = ObjectAt(standing, "proposals");
         if (proposals.Count >= RelayLimits.MaxStandingProposals) return Error(CapacityExceeded);
         if (proposals.Count(x => x.Value is JsonObject pending && Text(pending, "sessionId") == context.SessionId) >= RelayLimits.MaxStandingProposalsPerSession)
@@ -164,7 +164,7 @@ internal static class StandingPreferences
             proposal["grant"] = grant;
         }
         proposals[id] = proposal;
-        context.State["standing"] = standing;
+        context.State[BoardReadModels.StandingKey] = standing;
         AttentionSources.OnProposal(context, id, proposal["line"] is JsonObject proposed ? "line: " + Text(proposed, "text")
             : "grant: " + Text(proposal["grant"]!.AsObject(), "scope") + " " + string.Join(",", Strings(proposal["grant"]!["targets"])));
         return Ok(new { proposalId = id, pending = true }, Number(standing, "revision"));
@@ -180,7 +180,7 @@ internal static class StandingPreferences
     public static RelayReply ProposeFromHub(AggregateContext context)
     {
         if (ReadLine(context.Args["line"], idRequired: true, out var lineId, out var text) is { } field) return Invalid("line." + field);
-        var standing = context.State["standing"] as JsonObject ?? new JsonObject();
+        var standing = context.State[BoardReadModels.StandingKey] as JsonObject ?? new JsonObject();
         var revision = Number(standing, "revision");
         var proposals = standing["proposals"] as JsonObject ?? new JsonObject();
         if ((standing["lines"] as JsonObject)?.ContainsKey(lineId) == true) return Ok(new { pending = false, reason = "exists" }, revision);
@@ -196,7 +196,7 @@ internal static class StandingPreferences
         };
         ObjectAt(standing, "proposals")[id] = proposal;
         ObjectAt(standing, "hubProposals")[lineId] = context.Now.ToString("O");
-        context.State["standing"] = standing;
+        context.State[BoardReadModels.StandingKey] = standing;
         AttentionSources.OnProposal(context, id, "line: " + text);
         return Ok(new { proposalId = id, pending = true }, revision);
     }
@@ -219,7 +219,7 @@ internal static class StandingPreferences
     }
 
     /// <summary>The standing a chat receives: lines and active grants without provenance, and settings when any are set.</summary>
-    public static JsonObject Delivered(JsonObject board, DateTimeOffset now) => DeliveredStanding(board["standing"] as JsonObject ?? new JsonObject(), now);
+    public static JsonObject Delivered(JsonObject board, DateTimeOffset now) => DeliveredStanding(board[BoardReadModels.StandingKey] as JsonObject ?? new JsonObject(), now);
 
     private static JsonObject DeliveredStanding(JsonObject standing, DateTimeOffset now)
     {
@@ -240,7 +240,7 @@ internal static class StandingPreferences
     }
 
     /// <summary>The full record for <c>task_get</c> with <c>section: "standing"</c>: provenance, expired grants, proposals and history, newest first.</summary>
-    public static RelayReply View(JsonObject board, DateTimeOffset now) => ViewOf(board["standing"] as JsonObject ?? new JsonObject(), now);
+    public static RelayReply View(JsonObject board, DateTimeOffset now) => ViewOf(board[BoardReadModels.StandingKey] as JsonObject ?? new JsonObject(), now);
 
     private static RelayReply ViewOf(JsonObject standing, DateTimeOffset now)
     {
@@ -288,7 +288,7 @@ internal static class StandingPreferences
         var reference = workflow["packet"] is JsonObject packet ? Text(packet, "authorityRef") : "";
         if (!reference.StartsWith(GrantPrefix, StringComparison.Ordinal)) return null;
         var id = reference[GrantPrefix.Length..];
-        if ((board["standing"] as JsonObject)?["grants"] is not JsonObject grants || grants[id] is not JsonObject grant) return "unknown";
+        if ((board[BoardReadModels.StandingKey] as JsonObject)?["grants"] is not JsonObject grants || grants[id] is not JsonObject grant) return "unknown";
         if (Date(grant, "expiresAt") <= now) return "expired";
         var targets = StringSet(grant["targets"]);
         var resources = TaskWorkflow.Resources(workflow).ToArray();

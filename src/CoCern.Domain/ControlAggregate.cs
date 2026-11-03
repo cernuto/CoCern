@@ -350,7 +350,7 @@ internal static class ControlAggregate
     {
         var workers = ObjectAt(context.State, "sessions").Select(x => x.Value!.AsObject()).Where(x => Text(x, "repositoryId") == context.Repository).Select(x =>
         {
-            var copy = x.DeepClone().AsObject(); copy.Remove("sessionToken"); copy.Remove("principalId"); copy.Remove(OwnsWorkKey); copy.Remove(WorkSeqKey); copy.Remove(MailHeldKey);
+            var copy = x.DeepClone().AsObject(); copy.Remove(ReadModels.SessionTokenKey); copy.Remove("principalId"); copy.Remove(OwnsWorkKey); copy.Remove(WorkSeqKey); copy.Remove(MailHeldKey);
             var stale = Date(copy, "freshUntil") <= context.Now || Text(copy, "hubIncarnation") != Text(context.Args, "hubIncarnation");
             copy["stale"] = stale; copy.Remove("hubIncarnation");
             if (stale) copy["availability"] = "unknown";

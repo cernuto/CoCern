@@ -44,7 +44,7 @@ internal static class EffectDelivery
     public static Failure OnFailure(DurableEffect effect, JsonObject payload, string code, string sourceKind, bool ordersOn)
     {
         // The hub blocks each lock itself when an action begins; the board's own copy refused as busy or unclaimed never runs, and would otherwise retry forever.
-        if (effect.Operation == Operations.Block && code is RelayErrorCodes.Busy or RelayErrorCodes.ClaimRequired) return Failure.Drop;
+        if (effect.Operation == ActionBlock.Operation && ActionBlock.SettledBy.Contains(code)) return Failure.Drop;
         if (IsTransient(code)) return Failure.Retry;
         if (EffectMessages.DeliveryOf(effect.Operation) is { } delivery) return delivery == DeliveryClass.Retry ? Failure.Retry : Failure.DropAndCount;
         if (!(Operations.IsAttention(effect.Operation) || Operations.IsOrder(effect.Operation))) return Failure.Retry;

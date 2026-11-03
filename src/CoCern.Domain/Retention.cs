@@ -73,8 +73,8 @@ internal static class Retention
     /// </summary>
     public static void Bury(JsonObject state, IReadOnlyList<(string Key, DateTimeOffset At)> evicted, DateTimeOffset now)
     {
-        if (evicted.Count == 0 && state["requestTombstones"] is null) return;
-        var tombstones = JsonFields.ObjectAt(state, "requestTombstones");
+        if (evicted.Count == 0 && state[ReadModels.RequestTombstonesKey] is null) return;
+        var tombstones = JsonFields.ObjectAt(state, ReadModels.RequestTombstonesKey);
         foreach (var (key, at) in evicted) tombstones[Hash(key)] = at.ToUnixTimeSeconds();
         // Called only when the replay map was pruned, so this scan is amortized the same way.
         var cutoff = now - Window;
@@ -82,10 +82,10 @@ internal static class Retention
         if (keep.Count > RelayLimits.MaxRequestTombstones) keep = keep.OrderBy(entry => WrittenAt(entry.Value)).Skip(keep.Count - RelayLimits.RequestTombstonesAfterPrune).ToList();
         tombstones.Clear();
         foreach (var (key, value) in keep) tombstones[key] = value;
-        if (tombstones.Count == 0) state.Remove("requestTombstones");
+        if (tombstones.Count == 0) state.Remove(ReadModels.RequestTombstonesKey);
     }
 
     /// <summary>Whether a retry names a request, still within its window, whose replay was evicted early. One lookup.</summary>
     public static bool IsBuried(JsonObject state, string key, DateTimeOffset now) =>
-        state["requestTombstones"] is JsonObject { Count: > 0 } tombstones && tombstones[Hash(key)] is JsonNode tombstone && WrittenAt(tombstone) > now - Window;
+        state[ReadModels.RequestTombstonesKey] is JsonObject { Count: > 0 } tombstones && tombstones[Hash(key)] is JsonNode tombstone && WrittenAt(tombstone) > now - Window;
 }

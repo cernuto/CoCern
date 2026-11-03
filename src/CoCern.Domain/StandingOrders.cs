@@ -36,7 +36,7 @@ internal static class StandingOrders
         if (args["expiresAt"] is null) expires = context.Now.AddDays(Math.Clamp(Number(args, "defaultExpiryDays", RelayLimits.DefaultOrderExpiryDays), 1, RelayLimits.MaxOrderExpiryDays));
         else if (!DateTimeOffset.TryParse(Text(args, "expiresAt"), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out expires) || expires <= context.Now || expires > context.Now.AddDays(RelayLimits.MaxOrderExpiryDays)) return Invalid("expiresAt");
 
-        var orders = context.State["orders"] as JsonObject ?? new JsonObject();
+        var orders = context.State[BoardReadModels.OrdersKey] as JsonObject ?? new JsonObject();
         if (WriteConflict(args, orders) is { } conflict) return conflict;
         var items = ObjectAt(orders, "items");
         var watchedBefore = Watched(items);
@@ -57,7 +57,7 @@ internal static class StandingOrders
             ["expiresAt"] = expires.ToUniversalTime().ToString("O"), ["runs"] = 0, ["failures"] = 0
         };
         Log(orders, context, id, (replaced ? "replaced by " : "put by ") + context.Caller.PrincipalId);
-        context.State["orders"] = orders;
+        context.State[BoardReadModels.OrdersKey] = orders;
         // A replaced order starts clean: its open failure item at the managers closes.
         if (replaced) CloseFailure(context, id, NextRevision(orders));
         UpdateWatches(context, watchedBefore, Watched(items), on == OrderTriggers.ClaimReleased ? target : null, id);
@@ -69,7 +69,7 @@ internal static class StandingOrders
         if (!context.Caller.IsAdministrator) return Error(AdministratorRequired);
         if (!context.OrdersEnabled) return Error(OrdersUnavailable);
         if (!Identifier(context.Args["orderId"], RelayLimits.MaxStandingIdLength, out var id)) return Invalid("orderId");
-        if (context.State["orders"] is not JsonObject orders || orders["items"] is not JsonObject items || !items.ContainsKey(id)) return Error(NotFound, new { orderId = id });
+        if (context.State[BoardReadModels.OrdersKey] is not JsonObject orders || orders["items"] is not JsonObject items || !items.ContainsKey(id)) return Error(NotFound, new { orderId = id });
         if (WriteConflict(context.Args, orders) is { } conflict) return conflict;
         var watchedBefore = Watched(items);
         items.Remove(id);
@@ -83,7 +83,7 @@ internal static class StandingOrders
     /// <summary>The compact list <c>get_status</c> shows: trigger, target, expiry, runs and failures, and whether each is off or expired.</summary>
     public static RelayReply Read(JsonObject board, DateTimeOffset now)
     {
-        var orders = board["orders"] as JsonObject ?? new JsonObject();
+        var orders = board[BoardReadModels.OrdersKey] as JsonObject ?? new JsonObject();
         var list = new JsonArray(Items(orders["items"] as JsonObject ?? new JsonObject()).OrderBy(order => Text(order, "id"), StringComparer.Ordinal).Select(order =>
         {
             var item = new JsonObject
@@ -102,7 +102,7 @@ internal static class StandingOrders
     /// <summary>Records the order triggers a task change caused: completion, and leaving the blocked state. They run once the change is marked.</summary>
     public static void Detect(AggregateContext context, JsonObject task, JsonObject? prior)
     {
-        if (!context.OrdersEnabled || context.State["orders"] is not JsonObject) return;
+        if (!context.OrdersEnabled || context.State[BoardReadModels.OrdersKey] is not JsonObject) return;
         var was = prior is null ? "" : Text(prior, "state");
         var now = task["workflow"] is JsonObject workflow ? Text(workflow, "state") : "";
         var taskId = Text(task, "taskId");
@@ -116,7 +116,7 @@ internal static class StandingOrders
     /// </summary>
     public static void Run(AggregateContext context, string on, string target, string triggerRevision)
     {
-        if (!context.OrdersEnabled || context.State["orders"] is not JsonObject orders) return;
+        if (!context.OrdersEnabled || context.State[BoardReadModels.OrdersKey] is not JsonObject orders) return;
         var order = Items(ObjectAt(orders, "items")).FirstOrDefault(item => SameTrigger(item, on, target));
         if (order is null || IsDisabled(order) || Date(order, "expiresAt") <= context.Now || Text(order, "lastRun") == triggerRevision) return;
         var revision = NextRevision(orders);
@@ -131,7 +131,7 @@ internal static class StandingOrders
     {
         if (!context.OrdersEnabled) return Ok(new { ran = false });
         var resource = Text(context.Args, "resourceId");
-        if (context.State["orders"] is not JsonObject orders || !Items(ObjectAt(orders, "items")).Any(order => SameTrigger(order, OrderTriggers.ClaimReleased, resource)))
+        if (context.State[BoardReadModels.OrdersKey] is not JsonObject orders || !Items(ObjectAt(orders, "items")).Any(order => SameTrigger(order, OrderTriggers.ClaimReleased, resource)))
         {
             Watch(context, resource, false, "");
             return Ok(new { ran = false });
@@ -144,7 +144,7 @@ internal static class StandingOrders
     public static RelayReply OnFailed(AggregateContext context)
     {
         var args = context.Args;
-        if (!context.OrdersEnabled || context.State["orders"] is not JsonObject orders || ObjectAt(orders, "items")[Text(args, "orderId")] is not JsonObject order) return Ok(new { counted = false });
+        if (!context.OrdersEnabled || context.State[BoardReadModels.OrdersKey] is not JsonObject orders || ObjectAt(orders, "items")[Text(args, "orderId")] is not JsonObject order) return Ok(new { counted = false });
         var watch = IsTrue(args, "watch");
         var run = Number(args, "run");
         // A failure from an earlier run of a replaced order, or a second failure in the same run, is not counted again.

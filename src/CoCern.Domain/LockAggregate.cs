@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 using CoCern.Contracts;
+using CoCern.Domain.Messages;
 using static CoCern.Contracts.RelayErrorCodes;
 using static CoCern.Domain.JsonFields;
 using static CoCern.Domain.Replies;
@@ -49,10 +50,10 @@ internal static class LockAggregate
 
     private static RelayReply Block(AggregateContext context)
     {
+        if (!ActionBlock.Decode(context.Args).TryGet(out var block, out var malformed)) return Malformed(malformed);
         var state = context.State;
-        var session = context.SessionId;
+        var (session, actionKey) = (block.SessionId, block.ActionKey);
         var blockers = ObjectAt(state, "blockers");
-        var actionKey = Text(context.Args, "actionKey", Required(context.Args, "actionId"));
         if (ObjectAt(state, "resolvedActions").ContainsKey(actionKey)) return Ok(new { resolved = true });
         if (Text(state, "holder") != session || Date(state, "leaseUntil") <= context.Now) return Error(ClaimRequired);
         if (blockers.Count > 0 && !blockers.ContainsKey(actionKey)) return Error(Busy, new { holder = Text(state, "holder"), unresolved = true });
@@ -63,11 +64,12 @@ internal static class LockAggregate
     /// <summary>Only the action's own writer may unblock, or an administrator explicitly accepting its cleanup.</summary>
     private static RelayReply Unblock(AggregateContext context)
     {
+        if (!ActionUnblock.Decode(context.Args).TryGet(out var unblock, out var malformed)) return Malformed(malformed);
         var state = context.State;
         var blockers = ObjectAt(state, "blockers");
-        var id = Text(context.Args, "actionKey", Required(context.Args, "actionId"));
-        var administrativeAcceptance = context.Caller.IsAdministrator && Flag(context.Args, "administrativeAcceptance");
-        if (blockers[id] is JsonObject blocker && (Text(blocker, "sessionId") != context.SessionId || Text(blocker, "principalId") != context.Caller.PrincipalId && !administrativeAcceptance)) return Error(ActionDenied);
+        var id = unblock.ActionKey;
+        var administrativeAcceptance = context.Caller.IsAdministrator && unblock.AdministrativeAcceptance;
+        if (blockers[id] is JsonObject blocker && (Text(blocker, "sessionId") != unblock.SessionId || Text(blocker, "principalId") != context.Caller.PrincipalId && !administrativeAcceptance)) return Error(ActionDenied);
         // Remembered for the retry window so a late block for this action is ignored; a full set drops its oldest, so unblocking never fails.
         var resolved = ObjectAt(state, "resolvedActions");
         if (!resolved.ContainsKey(id)) Retention.MakeRoom(resolved, context.Now);

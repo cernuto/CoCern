@@ -93,7 +93,7 @@ public sealed record SessionRecord
 
     public JsonObject ToJson()
     {
-        var json = new JsonObject { ["sessionId"] = SessionId, ["principalId"] = PrincipalId, ["repositoryId"] = RepositoryId, ["sessionToken"] = SessionToken };
+        var json = new JsonObject { ["sessionId"] = SessionId, ["principalId"] = PrincipalId, ["repositoryId"] = RepositoryId, [ReadModels.SessionTokenKey] = SessionToken };
         if (Role is not null) json["role"] = Role;
         Presence.WriteTo(json);
         if (ActiveAt is { } active) json["activeAt"] = active.ToString("O");
@@ -110,7 +110,7 @@ public sealed record SessionRecord
 
     internal static SessionRecord Read(MessageReader read) => new()
     {
-        SessionId = read.Text("sessionId"), PrincipalId = read.Text("principalId"), RepositoryId = read.Text("repositoryId"), SessionToken = read.Text("sessionToken"),
+        SessionId = read.Text("sessionId"), PrincipalId = read.Text("principalId"), RepositoryId = read.Text("repositoryId"), SessionToken = read.Text(ReadModels.SessionTokenKey),
         Role = read.OptionalText("role"), Presence = SessionPresence.Read(read), ActiveAt = read.OptionalDate("activeAt")
     };
 }

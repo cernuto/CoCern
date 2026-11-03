@@ -13,7 +13,12 @@ public sealed record RelayCaller(string PrincipalId, bool IsAdministrator, strin
 public sealed record RelayReply(bool Ok, string Code, string DataJson, long Version = 0);
 
 /// <summary>An operation another aggregate must apply. Persisted with its source until delivered (transactional outbox).</summary>
-public sealed record DurableEffect(string Id, string TargetKind, string TargetKey, string Operation, string PayloadJson, DateTimeOffset DueAt);
+/// <summary>
+/// One queued effect for another aggregate, removed only after its target accepted it. <paramref name="MalformedReported"/> records, with
+/// the effect, that its target answered <c>MalformedEffect</c> and the hub logged and counted that once, so a retried state transfer is
+/// not logged again after its grain reloads.
+/// </summary>
+public sealed record DurableEffect(string Id, string TargetKind, string TargetKey, string Operation, string PayloadJson, DateTimeOffset DueAt, bool MalformedReported = false);
 
 public sealed record DueWorkItem(string Id, string Kind, DateTimeOffset DueAt);
 
