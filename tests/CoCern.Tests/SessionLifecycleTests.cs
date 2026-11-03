@@ -151,6 +151,12 @@ public sealed class SessionLifecycleTests
         hub.DeliverAll(T0.AddMinutes(2));
         Assert.Equal(RelayErrorCodes.SessionUnknown, hub.Verify(worker, T0.AddMinutes(3)).Code);
 
+        // The message it never read goes back to its sender rather than vanishing with the inbox.
+        var unread = Assert.Single(hub.Inbox(sender, T0.AddMinutes(3)));
+        Assert.Equal(("delivery.failed", "unread", worker.Id), (unread["kind"]!.GetValue<string>(), unread["reason"]!.GetValue<string>(), unread["recipientSessionId"]!.GetValue<string>()));
+        Assert.Contains("closed first", unread["text"]!.GetValue<string>());
+        Assert.True(hub.Session(sender, RelayTools.Ack, new() { ["messageIds"] = new JsonArray(unread["messageId"]!.GetValue<string>()) }, T0.AddMinutes(3)).Ok);
+
         // A message to the closed session is not dropped silently: the sender gets a notice naming it.
         var sent = Data(hub.Send(sender, worker.Id, "are you there?", T0.AddMinutes(4)));
         hub.DeliverAll(T0.AddMinutes(4));
@@ -266,6 +272,113 @@ public sealed class SessionLifecycleTests
         Assert.True(hub.Deliver(restore, T0.AddMinutes(3)).Ok);
         Assert.False(hub.Directory().ContainsKey(target.Id));
         Assert.Equal(RelayErrorCodes.SessionUnknown, hub.Verify(target, T0.AddMinutes(3)).Code);
+    }
+
+    /// <summary>A board task <c>t</c> claimed by <paramref name="owner"/> for an hour, with one unresolved action <c>a</c> that session began.</summary>
+    private static void SeedBoard(Hub hub, string owner)
+    {
+        var action = new JsonObject
+        {
+            ["actionId"] = "a", ["attempt"] = 1, ["status"] = "invoking", ["sessionId"] = owner, ["principalId"] = "alice", ["restoration"] = "not_required",
+            ["requiresRestoration"] = false, ["resourceIds"] = new JsonArray(), ["startedAt"] = T0.ToString("O"), ["inputFingerprint"] = "f"
+        };
+        var task = new JsonObject
+        {
+            ["taskId"] = "t", ["version"] = 3, ["owner"] = owner, ["leaseUntil"] = T0.AddHours(1).ToString("O"), ["claimGeneration"] = 1,
+            ["actions"] = new JsonObject { ["a"] = action }, ["messages"] = new JsonArray(), ["reports"] = new JsonArray(), ["facts"] = new JsonObject()
+        };
+        hub.Of(AggregateKinds.Board, BoardKey).Value.Json = new JsonObject { ["repositoryId"] = "repo", ["tasks"] = new JsonObject { ["t"] = task } }.ToJsonString();
+    }
+
+    private static JsonObject BoardTask(Hub hub) => hub.State(AggregateKinds.Board, BoardKey)["tasks"]!["t"]!.AsObject();
+
+    private static RelayReply ReportWork(Hub hub, Chat chat, bool open, DateTimeOffset at) =>
+        hub.Apply(AggregateKinds.Session, chat.Id, Operations.SessionWork, new()
+        {
+            ["sessionId"] = chat.Id, ["actionKey"] = "repo/default/t/a/1", ["open"] = open, ["at"] = at.ToString("O")
+        }, BoardCaller, at);
+
+    [Fact]
+    public void A_forced_close_tells_the_board_which_makes_the_sessions_actions_recoverable_at_once()
+    {
+        var hub = new Hub();
+        var worker = hub.Open("worker", T0);
+        hub.Verify(worker, T0); hub.DeliverAll(T0);
+        SeedBoard(hub, worker.Id);
+        Assert.True(ReportWork(hub, worker, true, T0.AddMinutes(1)).Ok);
+        hub.DeliverAll(T0.AddMinutes(1));
+
+        Assert.Equal(1, Data(hub.Close(new() { ["targetSessionId"] = worker.Id, ["force"] = true }, T0.AddMinutes(2)))["closed"]!.GetValue<int>());
+        hub.DeliverAll(T0.AddMinutes(2));
+
+        // The task keeps its owner and the action its record, but the claim has lapsed and the action says whose session closed.
+        var task = BoardTask(hub);
+        Assert.Equal((worker.Id, 4L), (task["owner"]!.GetValue<string>(), task["version"]!.GetValue<long>()));
+        Assert.Equal(T0.AddMinutes(2), DateTimeOffset.Parse(task["leaseUntil"]!.GetValue<string>()));
+        Assert.Equal(("invoking", worker.Id), (task["actions"]!["a"]!["status"]!.GetValue<string>(), task["actions"]!["a"]!["ownerClosed"]!["sessionId"]!.GetValue<string>()));
+        // A repeated notice changes nothing.
+        Assert.True(hub.Apply(AggregateKinds.Board, BoardKey, Operations.SessionClosed, new() { ["boardId"] = "default", ["sessionId"] = worker.Id }, BoardCaller, T0.AddMinutes(3)).Ok);
+        Assert.Equal(4L, BoardTask(hub)["version"]!.GetValue<long>());
+        // The session answered the close, so the directory keeps no fence for it.
+        Assert.Null(hub.State(AggregateKinds.Control, AggregateKinds.ControlKey)["closing"]);
+    }
+
+    [Fact]
+    public void A_report_of_new_work_that_lands_after_a_close_makes_the_action_recoverable()
+    {
+        var hub = new Hub();
+        var worker = hub.Open("smoke worker", T0);
+        hub.Verify(worker, T0); hub.DeliverAll(T0);
+        SeedBoard(hub, worker.Id);
+        // The close by label lands before the board's report of the action it just began.
+        Assert.Equal(1, Data(hub.Close(new() { ["labelPrefix"] = "smoke" }, T0.AddMinutes(1)))["closed"]!.GetValue<int>());
+        hub.DeliverAll(T0.AddMinutes(1));
+        Assert.Equal(RelayErrorCodes.SessionUnknown, hub.Verify(worker, T0.AddMinutes(1)).Code);
+
+        Assert.True(Data(ReportWork(hub, worker, true, T0.AddMinutes(2)))["toldBoard"]!.GetValue<bool>());
+        hub.DeliverAll(T0.AddMinutes(2));
+        var task = BoardTask(hub);
+        Assert.Equal(T0.AddMinutes(2), DateTimeOffset.Parse(task["leaseUntil"]!.GetValue<string>()));
+        Assert.Equal(worker.Id, task["actions"]!["a"]!["ownerClosed"]!["sessionId"]!.GetValue<string>());
+        // A late report that work ended asks nothing of the board.
+        Assert.Null(Data(ReportWork(hub, worker, false, T0.AddMinutes(3)))["toldBoard"]);
+    }
+
+    [Fact]
+    public void A_repeated_restore_from_an_earlier_close_cannot_bring_back_a_session_that_closed_since()
+    {
+        var hub = new Hub();
+        var worker = hub.Open("smoke worker", T0);
+        hub.Verify(worker, T0); hub.DeliverAll(T0);
+        // The session begins work the directory has not heard of, so the first close is refused and the session restores itself.
+        Assert.True(ReportWork(hub, worker, true, T0.AddMinutes(1)).Ok);
+        hub.Of(AggregateKinds.Session, worker.Id).Effects.Clear();
+        Assert.True(hub.Close(new() { ["labelPrefix"] = "smoke" }, T0.AddMinutes(2)).Ok);
+        Assert.True(hub.Deliver(Assert.Single(hub.Of(AggregateKinds.Control, AggregateKinds.ControlKey).Effects), T0.AddMinutes(2)).Ok);
+        var restore = Assert.Single(hub.Of(AggregateKinds.Session, worker.Id).Effects, effect => effect.Operation == Operations.SessionRestore);
+        Assert.True(Data(hub.Deliver(restore, T0.AddMinutes(2)))["restored"]!.GetValue<bool>());
+        Assert.True(hub.Directory().ContainsKey(worker.Id));
+
+        // The work ends and a second close is accepted.
+        Assert.True(ReportWork(hub, worker, false, T0.AddMinutes(3)).Ok);
+        hub.DeliverAll(T0.AddMinutes(3));
+        Assert.Equal(1, Data(hub.Close(new() { ["labelPrefix"] = "smoke" }, T0.AddMinutes(4)))["closed"]!.GetValue<int>());
+        hub.DeliverAll(T0.AddMinutes(4));
+
+        // A copy of the first restore, delivered late (its outbox removal failed after the directory committed), is ignored.
+        Assert.False(Data(hub.Deliver(restore, T0.AddMinutes(5)))["restored"]!.GetValue<bool>());
+        Assert.False(hub.Directory().ContainsKey(worker.Id));
+        Assert.Equal(RelayErrorCodes.SessionUnknown, hub.Verify(worker, T0.AddMinutes(5)).Code);
+        Assert.Null(hub.State(AggregateKinds.Control, AggregateKinds.ControlKey)["closing"]);
+    }
+
+    [Fact]
+    public void Close_sessions_advertises_the_exact_target_and_force_to_agents()
+    {
+        Assert.True(RelayToolCatalog.TryGet(RelayTools.ControlRequest, out var tool));
+        var properties = RelayToolCatalog.InputSchema(tool).GetProperty("properties");
+        Assert.Equal("string", properties.GetProperty("targetSessionId").GetProperty("type").GetString());
+        Assert.Equal("boolean", properties.GetProperty("force").GetProperty("type").GetString());
     }
 
     [Fact]

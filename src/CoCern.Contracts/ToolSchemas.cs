@@ -262,6 +262,8 @@ internal static class ToolSchemas
                 properties["command"] = new { type = "string", @enum = new[] { "pause", "resume", "stop", "cancel", "register_resource", "revoke_machine", "close_sessions" } };
                 properties["idleMinutes"] = new { type = "integer", minimum = RelayLimits.MinCloseSessionsIdleMinutes, description = "close_sessions: sessions not seen for at least this many minutes." };
                 properties["labelPrefix"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxIdentifierLength, description = "close_sessions: sessions whose label starts with this, ignoring case; with idleMinutes both must match." };
+                properties["targetSessionId"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxIdentifierLength, description = "close_sessions: only this session, instead of the filters." };
+                properties["force"] = new { type = "boolean", description = "close_sessions with targetSessionId: close it despite unresolved actions." };
                 properties["aliases"] = new { type = "array", items = new { type = "string" } }; Text("reason", "Coordination control explanation."); Text("machineId", "Machine to revoke; required by revoke_machine."); break;
         }
         return properties;

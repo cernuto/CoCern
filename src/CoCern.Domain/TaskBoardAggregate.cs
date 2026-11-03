@@ -244,24 +244,31 @@ internal static class TaskBoardAggregate
     }
 
     /// <summary>
-    /// <see cref="Operations.SessionClosed"/>: a session this board's tasks targeted has closed (the board asked it to say so when the target
-    /// was set). Each task that still targets it loses the target, as a lapsed claim frees a task: a target only the closed session could
-    /// claim would leave the task unclaimable by anyone. Each changed task gets a new version and change revision, so readers and offers see it.
+    /// <see cref="Operations.SessionClosed"/>: a session this board's tasks targeted, or one that answered for work here, has closed. Each
+    /// task that still targets it loses the target, as a lapsed claim frees a task: a target only the closed session could claim would leave
+    /// the task unclaimable by anyone. Its unresolved actions here are stranded (see <see cref="TaskActions.Strand"/>): marked and made
+    /// recoverable at once. Each changed task gets a new version and change revision, so readers and offers see it; a repeated notice
+    /// changes nothing.
     /// </summary>
     private static RelayReply Untarget(AggregateContext context, JsonObject tasks)
     {
         var session = Text(context.Args, "sessionId");
-        var cleared = 0;
-        if (session.Length == 0) return Ok(new { cleared });
+        var (cleared, stranded) = (0, 0);
+        if (session.Length == 0) return Ok(new { cleared, stranded });
         foreach (var task in tasks.Select(entry => entry.Value).OfType<JsonObject>())
         {
-            if (task["workflow"] is not JsonObject workflow || Text(workflow, "targetSessionId") != session) continue;
-            workflow.Remove("targetSessionId");
+            var changed = false;
+            if (task["workflow"] is JsonObject workflow && Text(workflow, "targetSessionId") == session)
+            {
+                workflow.Remove("targetSessionId");
+                changed = true; cleared++;
+            }
+            if (TaskActions.Strand(task, session, context.Now)) { changed = true; stranded++; }
+            if (!changed) continue;
             task["version"] = Number(task, "version") + 1;
             MarkChanged(context.State, task);
-            cleared++;
         }
-        return Ok(new { cleared });
+        return Ok(new { cleared, stranded });
     }
 
     /// <summary>
