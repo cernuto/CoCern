@@ -300,6 +300,11 @@ public static class RelayLimits
     /// <summary>Most boards a session tells when it closes because one of their tasks targets it; past this the oldest is forgotten.</summary>
     public const int MaxSessionTargetBoards = 64;
     /// <summary>
+    /// Longest field name the log line for a malformed outbox effect shows. A longer one, or one with anything but letters and dots, shows
+    /// as <c>?</c>: every message field name passes, and no secret, ID or time can pass for one.
+    /// </summary>
+    public const int MaxLoggedFieldNameLength = 40;
+    /// <summary>
     /// A close by label alone skips chats working right now: those that made a call within this many minutes. Activity reaches the directory
     /// about hourly, so the cutoff allows for that (see ControlAggregate.IdleCutoff) and may also skip chats quiet for up to about an hour
     /// longer; Close session closes one of those on purpose.
