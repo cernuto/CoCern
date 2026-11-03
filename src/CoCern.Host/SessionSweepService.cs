@@ -1,6 +1,7 @@
 using System.Text.Json.Nodes;
 using CoCern.Core;
 using CoCern.Domain;
+using CoCern.Domain.Messages;
 
 namespace CoCern.Host;
 
@@ -18,14 +19,12 @@ internal sealed class SessionSweepService(Orleans.IGrainFactory grains, SessionC
     private static readonly TimeSpan Interval = TimeSpan.FromMinutes(10);
     // The sweep spans every repository: an administrator hub caller passes the directory's repository check for any nonempty scope.
     private static readonly RelayCaller Sweeper = new("relay-sweep", true, [], true);
-    private const string HubScope = "*";
 
-    /// <summary>One sweep: sends <see cref="Operations.SweepSessions"/> to the control directory and returns its reply.</summary>
+    /// <summary>One sweep: sends <see cref="SessionSweep"/> to the control directory and returns its reply.</summary>
     public Task<RelayReply> SweepAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var args = new JsonObject { ["repositoryId"] = HubScope, ["idleHours"] = options.IdleHours };
-        return grains.GetGrain<IControlGrain>(AggregateKinds.ControlKey).ExecuteAsync(Sweeper, Operations.SweepSessions, args.ToJsonString());
+        return grains.GetGrain<IControlGrain>(AggregateKinds.ControlKey).ExecuteAsync(Sweeper, SessionSweep.Operation, new SessionSweep(options.IdleHours).ToJson().ToJsonString());
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)

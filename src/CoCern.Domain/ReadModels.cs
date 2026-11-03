@@ -67,7 +67,7 @@ public static class ReadModels
     public static readonly IReadOnlyList<string> PrivateStateKeys = [RequestsKey, RequestTombstonesKey, SessionTokenKey];
 
     /// <summary>
-    /// Whether a machine announced recently enough to count as live: its <c>lastSeen</c> lies within
+    /// Whether a machine announced recently enough to count as live: its <see cref="State.EnrolledMachine.LastSeenKey"/> lies within
     /// <see cref="DiscoveryLimits.LivenessTimeout"/> of <paramref name="now"/>, on either side. A stamp a little ahead is normal: the dashboard
     /// takes its time before it reads, and an announcement that lands in between is stamped later, which must not show a live machine as
     /// gone. A stamp further ahead comes from a clock since set back and is no evidence of recent contact, so it never keeps a silent machine
@@ -78,9 +78,9 @@ public static class ReadModels
 
     /// <summary>
     /// Whether a message can wake an announced chat now: its machine is live (<see cref="IsLive"/>) and its provider's own wake path is
-    /// running. A Codex chat is woken by the node (<c>wakeable</c>); a Claude chat by its waiting inbox call (<c>waiterRunning</c>). A chat
-    /// of any other provider, or one the node could not map (<see cref="ChatProviders.Unknown"/>), is never reachable. Providers compare
-    /// ignoring case, as nodes announce them.
+    /// running. A Codex chat is woken by the node (<see cref="State.AnnouncedChat.WakeableKey"/>); a Claude chat by its waiting inbox call
+    /// (<see cref="State.AnnouncedChat.WaiterRunningKey"/>). A chat of any other provider, or one the node could not map
+    /// (<see cref="ChatProviders.Unknown"/>), is never reachable. Providers compare ignoring case, as nodes announce them.
     /// </summary>
     public static bool IsReachable(string provider, bool wakeable, bool waiterRunning, DateTimeOffset? machineLastSeen, DateTimeOffset now) =>
         IsLive(machineLastSeen, now) && (string.Equals(provider, ChatProviders.Codex, StringComparison.OrdinalIgnoreCase) ? wakeable

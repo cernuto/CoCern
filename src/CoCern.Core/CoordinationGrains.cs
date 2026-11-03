@@ -6,6 +6,7 @@ using Orleans;
 using Orleans.Runtime;
 using CoCern.Contracts;
 using CoCern.Domain;
+using CoCern.Domain.Messages;
 
 namespace CoCern.Core;
 
@@ -51,7 +52,7 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
         try { args = JsonNode.Parse(argumentsJson)?.AsObject() ?? new(); }
         catch (JsonException) { return Replies.Error(RelayErrorCodes.InvalidArguments); }
         if (!caller.IsInternal) return Replies.Error(RelayErrorCodes.InternalOnly);
-        if (operation == Operations.Dispatch) return await DispatchAsync(args);
+        if (operation == OutboxDispatch.Operation) return await DispatchAsync(args);
         var candidate = Clone(persistent.State);
         var firstNewEffect = candidate.Effects.Count;
         var priorTaskRevision = Kind == AggregateKinds.Board ? CoordinationStateMachine.TaskRevision(candidate) : null;
@@ -64,9 +65,8 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
     /// <summary>Delivers due outbox effects (optionally one work item, operation or action) and removes each only after its target accepted it.</summary>
     private async Task<RelayReply> DispatchAsync(JsonObject args)
     {
-        var workId = JsonFields.Text(args, "workId");
-        var operation = JsonFields.Text(args, "operation");
-        var actionKey = JsonFields.Text(args, "actionKey");
+        if (!OutboxDispatch.Decode(args).TryGet(out var dispatch, out var malformed)) return Replies.Malformed(malformed);
+        var (workId, operation, actionKey) = (dispatch.WorkId ?? "", dispatch.EffectOperation ?? "", dispatch.ActionKey ?? "");
         bool Selected(DurableEffect effect) =>
             (workId.Length == 0 || effect.Id == workId) && (operation.Length == 0 || effect.Operation == operation)
             && (actionKey.Length == 0 || JsonNode.Parse(effect.PayloadJson)?["actionKey"]?.ToString() == actionKey);
@@ -157,7 +157,7 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
         var checker = new RelayCaller("relay-dispatcher", false, [repository], true);
         // Cleared first, so a check the lock refuses does not stay due; a check that runs reschedules the lock's timers itself.
         candidate.DueWork.RemoveAll(x => x.Kind == DueWorkKinds.LeaseWarning && x.DueAt <= now);
-        ApplyInternal(candidate, checker, Operations.LeaseCheck, new JsonObject { ["repositoryId"] = repository }, now);
+        ApplyInternal(candidate, checker, LockLeaseCheck.Operation, new LockLeaseCheck(repository).ToJson(), now);
         return await CommitAsync(candidate);
     }
 
@@ -241,7 +241,7 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
     {
         cancellationToken.ThrowIfCancellationRequested();
         var dispatcher = new RelayCaller("relay-dispatcher", false, [], true);
-        var reply = await Aggregate(grains, reference.GrainType, reference.GrainKey).ExecuteAsync(dispatcher, Operations.Dispatch, new JsonObject { ["workId"] = reference.WorkId }.ToJsonString());
+        var reply = await Aggregate(grains, reference.GrainType, reference.GrainKey).ExecuteAsync(dispatcher, OutboxDispatch.Operation, new OutboxDispatch(reference.WorkId).ToJson().ToJsonString());
         if (!reply.Ok) throw new InvalidOperationException("Durable dispatch remains pending: " + reply.Code);
     }
 

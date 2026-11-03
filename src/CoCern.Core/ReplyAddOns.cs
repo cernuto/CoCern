@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using CoCern.Contracts;
 using CoCern.Domain;
+using CoCern.Domain.Messages;
 using static CoCern.Contracts.RelayErrorCodes;
 using static CoCern.Domain.JsonFields;
 using static CoCern.Domain.Replies;
@@ -352,14 +353,15 @@ internal sealed class ReplyAddOns(Aggregates aggregates, ClaimComposer claims, S
         {
             var listed = candidates.SelectMany(candidate => Strings(candidate?["resources"])).Distinct(StringComparer.Ordinal).Take(RelayLimits.MaxOfferResourceLookups).ToArray();
             if (listed.Length == 0) return [];
-            var lookup = new JsonObject { ["repositoryId"] = Text(args, "repositoryId"), ["sessionId"] = Text(args, "sessionId"), ["machineId"] = session is null ? "" : Text(session, "machineId") };
-            var resolve = lookup.DeepClone().AsObject(); resolve["resourceIds"] = JsonSerializer.SerializeToNode(listed);
-            var resolved = await aggregates.Control(caller, Operations.ResolveAll, resolve);
+            var repository = Text(args, "repositoryId");
+            var resolve = new ResourceResolveAll(repository, listed, session is null ? "" : Text(session, "machineId"));
+            var resolved = await aggregates.Request(AggregateKinds.ControlKey, caller, resolve);
             if (!resolved.Ok || Parse(resolved)["resolved"] is not JsonObject canonical) return [];
+            var lookup = new ClaimStateQuery(repository, Text(args, "sessionId"));
             async Task<bool> IsBusy(string resource)
             {
                 if (canonical[resource] is not JsonValue id) return false;
-                var claim = await aggregates.Call(AggregateKinds.Lock, id.GetValue<string>(), caller, Operations.ClaimState, lookup);
+                var claim = await aggregates.Request(id.GetValue<string>(), caller, lookup);
                 return claim.Ok && Parse(claim)["busy"]?.GetValue<bool>() == true;
             }
             var busy = await Task.WhenAll(listed.Select(IsBusy));

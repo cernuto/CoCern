@@ -49,7 +49,7 @@ internal sealed class StatusTools(Aggregates aggregates, StandingDelivery standi
             args["defaultExpiryDays"] = orders.DefaultExpiryDays;
             if (args["trigger"] is JsonObject trigger && Text(trigger, "on") == OrderTriggers.ClaimReleased && Text(trigger, "resourceId") is { Length: > 0 } resource)
             {
-                var resolved = await aggregates.Resolve(caller, new JsonObject { ["repositoryId"] = Text(args, "repositoryId") }, resource);
+                var resolved = await aggregates.Resolve(caller, Text(args, "repositoryId"), "", resource);
                 if (!resolved.Ok) return resolved;
                 trigger["resourceId"] = Text(Aggregates.Parse(resolved), "resourceId");
             }
