@@ -162,7 +162,7 @@ dotnet test CoCern.slnx -c Release
 
 For an end-to-end check, `python scripts/Smoke-CoCern.py` starts a throwaway hub from the build and runs 94 happy- and sad-path checks: sign-in, tasks, claims, actions, messages, notes, search, standing rules, orders, attention, pausing, closing sessions, doc search and re-sync, analytics, the adapter, the dashboard, Connect, the adapter download, a real node joining over HTTPS, races, malformed input, a hub killed mid-flight, and a restart. Before any settings writes, it verifies that the adapter reads the exact temporary profile and application-data paths; an older adapter that ignores these paths stops the run. It uses its own temporary folders and ports, and its exit code is the number of failed checks.
 
-On Windows the tests run offline. Elsewhere, 10 setup tests fail because they need Windows, and the analytics tests download DuckDB's `sqlite` extension once (or set `COCERN_DUCKDB_EXTENSIONS` to a folder that has it).
+On Windows the tests run offline. Elsewhere, 12 setup tests fail because they need Windows, and the analytics tests download DuckDB's `sqlite` extension once (or set `COCERN_DUCKDB_EXTENSIONS` to a folder that has it).
 
 | Folder | What's in it |
 | --- | --- |
