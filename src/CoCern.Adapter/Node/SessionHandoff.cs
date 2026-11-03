@@ -12,7 +12,10 @@ public sealed record SessionHandle(string SessionId, string SessionToken, string
     public override string ToString() => $"SessionHandle {{ SessionId = {SessionId}, RepositoryId = {RepositoryId}, Client = {Client}, Chat = {Chat}, Unmapped = {Unmapped} }}";
 }
 
-/// <summary>Runs in the stdio adapter on node credentials: after each successful <c>session_open</c> it hands the new session to the node by writing its handle file.</summary>
+/// <summary>
+/// Runs in the stdio adapter on node credentials: after each successful <c>session_open</c> it hands the new session to the node by writing its
+/// handle file, and after a rename through <c>session_bind</c> it updates that file's label.
+/// </summary>
 public sealed class SessionHandoff
 {
     private const string DefaultLabel = "Unnamed chat";
@@ -58,11 +61,35 @@ public sealed class SessionHandoff
         if (!reply.Ok || reply.Data is not { ValueKind: JsonValueKind.Object } data ||
             ChatLocators.Text(data, "sessionId") is not { } sessionId || ChatLocators.Text(data, "sessionToken") is not { Length: > 0 } sessionToken ||
             ChatLocators.Text(arguments, "repositoryId") is not { Length: > 0 and <= NodeState.MaxIdentifierLength } repositoryId) return;
-        var label = ChatLocators.Text(arguments, "label")?.Trim() is { Length: > 0 } given && !given.Any(char.IsControl) ? given[..Math.Min(given.Length, NodeState.MaxIdentifierLength)] : DefaultLabel;
+        var label = Label(arguments) ?? DefaultLabel;
         try { NodeState.WriteSessionHandle(_folder, new SessionHandle(sessionId, sessionToken, repositoryId, label, DateTimeOffset.UtcNow, _client)); }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
             _error.WriteLine("CoCern could not hand this chat's session to the node, so other PCs will not see it.");
         }
     }
+
+    /// <summary>
+    /// After a successful <c>session_bind</c> that gave a <c>label</c>, writes that name into the session's handle, so the node announces the name
+    /// the hub now holds instead of the one the session opened with. Everything else in the handle (its token, the node's outcome) is kept as read.
+    /// Only a handle this PC already has is renamed. Best effort: a failure is reported without details and never fails the call that renamed the session.
+    /// </summary>
+    public void Rename(JsonElement arguments)
+    {
+        if (arguments.ValueKind != JsonValueKind.Object || ChatLocators.Text(arguments, "sessionId") is not { Length: > 0 } sessionId || !NodeState.IsFileId(sessionId) ||
+            Label(arguments) is not { } label) return;
+        try
+        {
+            if (NodeState.ReadSessionHandle(NodeState.SessionHandlePath(_folder, sessionId)) is not { } handle || handle.Label == label) return;
+            NodeState.WriteSessionHandle(_folder, handle with { Label = label });
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            _error.WriteLine("CoCern could not pass this chat's new name to the node, so other PCs may still show the old one.");
+        }
+    }
+
+    /// <summary>The label a call gave, trimmed and within the hub's bound; null when it gave none that can be a label.</summary>
+    private static string? Label(JsonElement arguments) =>
+        ChatLocators.Text(arguments, "label")?.Trim() is { Length: > 0 } given && !given.Any(char.IsControl) ? given[..Math.Min(given.Length, NodeState.MaxIdentifierLength)] : null;
 }

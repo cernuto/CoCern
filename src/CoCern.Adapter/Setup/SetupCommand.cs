@@ -66,15 +66,16 @@ internal sealed class SetupEnvironment
     public static SetupEnvironment Create()
     {
         var (dotnet, dll) = Host();
+        var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         return new()
         {
-            Profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            Profile = profile,
             DotnetPath = dotnet,
             AdapterDll = dll,
             RunKey = OperatingSystem.IsWindows() ? new WindowsRunKey() : throw new AdapterConfigurationException("Setup is supported on Windows only."),
             Transport = new NodeTransport(),
             StartNode = StartDetached,
-            ClaudeCli = ClaudeCli.Find(),
+            ClaudeCli = ClaudeCli.Find(profile),
             ClaudeCodeRunning = IsClaudeCodeRunning
         };
     }
@@ -121,15 +122,21 @@ internal sealed class SetupEnvironment
     }
 
     /// <summary>The dotnet host running this command and the adapter beside it: what client settings start.</summary>
-    public static (string Dotnet, string Dll) Host()
+    public static (string Dotnet, string Dll) Host() => Host(Environment.ProcessPath, Environment.GetEnvironmentVariable("DOTNET_HOST_PATH"), AppContext.BaseDirectory, File.Exists);
+
+    /// <summary>
+    /// The decision behind <see cref="Host()"/>, from what it reads. The adapter dll in <paramref name="baseDirectory"/> must exist. Started by a
+    /// dotnet host (<paramref name="processPath"/>), that host; else the one DOTNET_HOST_PATH names, when it exists; else, started as
+    /// CoCern.Adapter.exe with the exe beside the dll (the self-contained publish a joined PC downloads, where there may be no dotnet at all),
+    /// "dotnet", which no entry names, since every one starts the exe. Anything else is refused: the host would be a guess.
+    /// </summary>
+    internal static (string Dotnet, string Dll) Host(string? processPath, string? dotnetHostPath, string baseDirectory, Func<string, bool> exists)
     {
-        var dll = Path.Combine(AppContext.BaseDirectory, "CoCern.Adapter.dll");
-        if (!File.Exists(dll)) throw new AdapterConfigurationException($"'{dll}' was not found. Run it from the published adapter folder.");
-        var host = Environment.ProcessPath;
-        var dotnet = host is not null && string.Equals(Path.GetFileNameWithoutExtension(host), "dotnet", StringComparison.OrdinalIgnoreCase) ? host
-            : Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") is { Length: > 0 } hostPath && File.Exists(hostPath) ? hostPath
-            // Started as CoCern.Adapter.exe (the self-contained publish, where there may be no dotnet at all): the exe is what every entry names, so the host is never used.
-            : AdapterLaunch("dotnet", dll).Arguments.Count == 0 ? "dotnet"
+        var dll = Path.Combine(baseDirectory, "CoCern.Adapter.dll");
+        if (!exists(dll)) throw new AdapterConfigurationException($"'{dll}' was not found. Run it from the published adapter folder.");
+        var dotnet = processPath is not null && string.Equals(Path.GetFileNameWithoutExtension(processPath), "dotnet", StringComparison.OrdinalIgnoreCase) ? processPath
+            : dotnetHostPath is { Length: > 0 } hostPath && exists(hostPath) ? hostPath
+            : AdapterLaunch("dotnet", dll, exists).Arguments.Count == 0 ? "dotnet"
             : throw new AdapterConfigurationException("Run it as 'CoCern.Adapter.exe ...' or 'dotnet CoCern.Adapter.dll ...' so the host to start CoCern with is known.");
         return (dotnet, dll);
     }
@@ -139,10 +146,12 @@ internal sealed class SetupEnvironment
     /// downloads from the hub, which needs no .NET install), else <paramref name="dotnetPath"/> with the dll as its one argument. The Claude Code, Claude desktop and
     /// Codex entries, <c>claude mcp add</c>, the prompt hook, the Run key and the node start all go through here, so they agree.
     /// </summary>
-    public static (string Command, IReadOnlyList<string> Arguments) AdapterLaunch(string dotnetPath, string adapterDll)
+    public static (string Command, IReadOnlyList<string> Arguments) AdapterLaunch(string dotnetPath, string adapterDll) => AdapterLaunch(dotnetPath, adapterDll, File.Exists);
+
+    internal static (string Command, IReadOnlyList<string> Arguments) AdapterLaunch(string dotnetPath, string adapterDll, Func<string, bool> exists)
     {
         var exe = Path.Combine(Path.GetDirectoryName(adapterDll) ?? "", "CoCern.Adapter.exe");
-        return File.Exists(exe) ? (exe, []) : (dotnetPath, [adapterDll]);
+        return exists(exe) ? (exe, []) : (dotnetPath, [adapterDll]);
     }
 
     /// <summary>The start of the adapter's command line as one string, every path quoted (for the Run key and hook files): <c>"exe"</c>, or <c>"dotnet" "dll"</c>.</summary>
@@ -163,7 +172,7 @@ internal sealed class SetupEnvironment
 
 /// <summary>
 /// The one-time per-PC setup. Order matters so that a failure leaves the PC as it was (apart from the node folder):
-/// 1 check both client files can be edited (read only); 2 enroll and announce once; 3 edit client files; 4 write the sign-in value; 5 start the node.
+/// 1 check both client files can be edited (read only); 2 enroll and announce once; 3 plan every client again, then edit their files; 4 write the sign-in value; 5 start the node.
 /// Exit codes: 0 done, 1 configuration problem or enrollment failure (the node's own code, e.g. 4 for a changed hub certificate), 5 a client settings file could not be parsed.
 /// </summary>
 internal static class SetupCommand
@@ -196,12 +205,14 @@ internal static class SetupCommand
 
         try
         {
-            // Planned again from the files as they are now, so anything written during enrollment survives; all are checked before any is written.
-            var fresh = planners.Select(entry => (Plan: entry.ClaudeCode && env.ClaudeCli is not null ? null : entry.Plan(), entry.Plan, entry.ClaudeCode)).ToList();
-            foreach (var (planned, planner, claudeCode) in fresh)
+            // Planned again from the files as they are now, so anything written during enrollment survives, and every client is planned before any
+            // file is written: one that cannot be understood stops setup with no client half-configured. Claude Code's command line, when this PC has
+            // one, runs once the other files are planned and before any is written; only if it fails is .claude.json planned, and still before any write.
+            var plans = planners.Where(entry => !entry.ClaudeCode || env.ClaudeCli is null).Select(entry => (Plan: entry.Plan(), entry.ClaudeCode)).ToList();
+            if (env.ClaudeCli is { } cli && planners.FirstOrDefault(entry => entry.ClaudeCode).Plan is { } claudeJson && !RegisterWithClaudeCli(cli, env))
+                plans.Add((claudeJson(), true));
+            foreach (var (plan, claudeCode) in plans)
             {
-                if (claudeCode && env.ClaudeCli is { } cli && RegisterWithClaudeCli(cli, env)) continue;
-                var plan = planned ?? planner();
                 env.Out.WriteLine(plan.Apply(env.Clock) switch { ClientChange.Created => $"Created {plan.Path} with the CoCern entry.", ClientChange.Updated => $"Added the CoCern entry to {plan.Path} (backup kept next to it).", _ => $"{plan.Path} already has a CoCern entry; left as it was." });
                 if (claudeCode && !plan.IsUnchanged && env.ClaudeCodeRunning()) env.Out.WriteLine("Claude Code appears to be running: restart it to pick up the CoCern entry.");
             }
@@ -230,6 +241,7 @@ internal static class SetupCommand
         {
             case ClaudeRegistration.Existing: env.Out.WriteLine("Claude Code already has a CoCern entry ('claude mcp get'); left as it was."); return true;
             case ClaudeRegistration.Added: env.Out.WriteLine($"Registered the CoCern entry with Claude Code through 'claude mcp add' ({cli.Executable})."); return true;
+            case ClaudeRegistration.Unsafe: env.Out.WriteLine($"'claude' ({cli.Executable}) is a batch file, and the CoCern paths hold characters cmd.exe would misread; writing .claude.json instead."); return false;
             default: env.Out.WriteLine($"'claude mcp add' ({cli.Executable}) did not succeed or timed out; writing .claude.json instead."); return false;
         }
     }

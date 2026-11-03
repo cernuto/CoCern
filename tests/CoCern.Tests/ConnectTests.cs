@@ -106,5 +106,155 @@ public sealed class ConnectTests : IDisposable
         }
     }
 
+    // ---- A pinned entry for this hub follows the hub's current address and certificate ----
+
+    private const string OldPin = "1111111111111111111111111111111111111111111111111111111111111111";
+    private const string NewPin = "ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789";
+    private const string NewUrl = "https://127.0.0.1:5443/";
+    private string ClaudeJson => Path.Combine(Profile, ".claude.json");
+    private string Desktop => Path.Combine(AppData, "Claude", "claude_desktop_config.json");
+    private string Toml => Path.Combine(Profile, ".codex", "config.toml");
+    private string[] Backups(string path) => Directory.GetFiles(Path.GetDirectoryName(path)!, Path.GetFileName(path) + ".cocern-backup-*");
+
+    /// <summary>The hub's own record beside its token: where its loopback HTTPS is now and which certificate it presents.</summary>
+    private void LocalHubRecord(string url = NewUrl, string fingerprint = NewPin) =>
+        File.WriteAllText(Path.Combine(Path.GetDirectoryName(Token)!, "local-hub.json"), JsonSerializer.Serialize(new { url, fingerprint }));
+
+    private static void WriteFile(string path, string text) { Directory.CreateDirectory(Path.GetDirectoryName(path)!); File.WriteAllText(path, text); }
+
+    private Dictionary<string, string?> States(string output) =>
+        JsonDocument.Parse(output).RootElement.GetProperty("clients").EnumerateArray().ToDictionary(client => client.GetProperty("id").GetString()!, client => client.GetProperty("state").GetString());
+
+    [Fact]
+    public void A_claude_code_entry_pinned_to_this_hubs_old_certificate_is_updated_and_reported()
+    {
+        LocalHubRecord();
+        var entry = new JsonObject
+        {
+            ["type"] = "stdio", ["command"] = "custom-dotnet", ["args"] = new JsonArray("custom.dll"),
+            ["env"] = new JsonObject { ["COCERN_TOKEN_FILE"] = Token, ["COCERN_URL"] = "https://127.0.0.1:5272/", ["COCERN_FINGERPRINT"] = OldPin, ["COCERN_PROFILE"] = "chat" }
+        };
+        var original = new JsonObject { ["numStartups"] = 4, ["mcpServers"] = new JsonObject { ["other"] = new JsonObject { ["command"] = "x" }, ["cocern"] = entry } }.ToJsonString(new JsonSerializerOptions { WriteIndented = true }) + "\n";
+        WriteFile(ClaudeJson, original);
+
+        var check = Connect("--check", "--json", "--only", "claude-code");
+        Assert.Equal("outdated", States(check.Output)["claude-code"]);
+        Assert.Equal(original, File.ReadAllText(ClaudeJson));
+
+        var (code, output, _) = Connect("--json", "--only", "claude-code");
+        Assert.Equal(0, code);
+        Assert.Equal("updated", States(output)["claude-code"]);
+        var after = JsonNode.Parse(File.ReadAllText(ClaudeJson))!;
+        var env = after["mcpServers"]!["cocern"]!["env"]!;
+        Assert.Equal((NewUrl, NewPin), (env["COCERN_URL"]!.GetValue<string>(), env["COCERN_FINGERPRINT"]!.GetValue<string>()));
+        // Everything else in the entry and the file stays as it was, and the old file is kept beside it.
+        Assert.Equal((Token, "chat"), (env["COCERN_TOKEN_FILE"]!.GetValue<string>(), env["COCERN_PROFILE"]!.GetValue<string>()));
+        Assert.Equal("custom-dotnet", after["mcpServers"]!["cocern"]!["command"]!.GetValue<string>());
+        Assert.Equal(4, after["numStartups"]!.GetValue<int>());
+        Assert.Equal("x", after["mcpServers"]!["other"]!["command"]!.GetValue<string>());
+        Assert.Equal(original, File.ReadAllText(Assert.Single(Backups(ClaudeJson))));
+
+        // Once current, it is connected again, and the text output says what happened before.
+        Assert.Equal("connected", States(Connect("--json", "--only", "claude-code").Output)["claude-code"]);
+        WriteFile(ClaudeJson, original);
+        var text = Connect("--only", "claude-code").Output;
+        Assert.Contains("Claude Code: updated", text);
+        Assert.Contains("Restart your chats", text);
+    }
+
+    [Fact]
+    public void A_desktop_entry_on_the_old_plain_http_address_moves_to_the_pinned_one()
+    {
+        LocalHubRecord();
+        Directory.CreateDirectory(Path.Combine(AppData, "Claude"));
+        WriteFile(Desktop, "{\r\n  \"mcpServers\": {\r\n    \"cocern\": {\r\n      \"command\": \"dotnet\",\r\n      \"args\": [\"a.dll\"],\r\n      \"env\": { \"COCERN_URL\": \"http://127.0.0.1:5271/\", \"COCERN_TOKEN\": \"inline-secret\" }\r\n    }\r\n  }\r\n}\r\n");
+
+        var (code, output, _) = Connect("--json", "--only", "claude-desktop");
+
+        Assert.Equal(0, code);
+        Assert.Equal("updated", States(output)["claude-desktop"]);
+        var text = File.ReadAllText(Desktop);
+        var env = JsonNode.Parse(text)!["mcpServers"]!["cocern"]!["env"]!;
+        Assert.Equal((NewUrl, NewPin, "inline-secret"), (env["COCERN_URL"]!.GetValue<string>(), env["COCERN_FINGERPRINT"]!.GetValue<string>(), env["COCERN_TOKEN"]!.GetValue<string>()));
+        Assert.DoesNotContain("\n", text.Replace("\r\n", ""));
+        Assert.Single(Backups(Desktop));
+    }
+
+    [Fact]
+    public void A_codex_entry_written_by_connect_is_updated_in_place_byte_for_byte_elsewhere()
+    {
+        LocalHubRecord();
+        var head = "# mine\nmodel = \"gpt\"\n\n[mcp_servers.cocern]\ncommand = 'dotnet'\nargs = ['a.dll']\n";
+        var tail = "\n\n[mcp_servers.other]\ncommand = 'other' # keep\n";
+        WriteFile(Toml, head + $"env = {{ COCERN_TOKEN_FILE = '{Token}', COCERN_URL = 'https://127.0.0.1:5272/', COCERN_FINGERPRINT = '{OldPin}' }}  # pinned" + tail);
+
+        Assert.Equal("outdated", States(Connect("--check", "--json", "--only", "codex").Output)["codex"]);
+        var (code, output, _) = Connect("--json", "--only", "codex");
+
+        Assert.Equal(0, code);
+        Assert.Equal("updated", States(output)["codex"]);
+        Assert.Equal(head + $"env = {{ COCERN_TOKEN_FILE = '{Token}', COCERN_URL = '{NewUrl}', COCERN_FINGERPRINT = '{NewPin}' }}  # pinned" + tail, File.ReadAllText(Toml));
+        Assert.True(ClientSettings.CodexHasCoCern(File.ReadAllText(Toml)));
+        Assert.Single(Backups(Toml));
+        Assert.Equal("connected", States(Connect("--json", "--only", "codex").Output)["codex"]);
+    }
+
+    [Fact]
+    public void A_codex_entry_with_an_env_table_gains_the_pin_and_keeps_its_other_lines()
+    {
+        LocalHubRecord();
+        var text = $"[mcp_servers.cocern]\r\ncommand = 'dotnet'\r\n\r\n[mcp_servers.cocern.env]\r\nCOCERN_TOKEN_FILE = \"{Token.Replace("\\", "\\\\")}\"\r\nCOCERN_URL = 'http://127.0.0.1:5271/'\r\nCOCERN_PROFILE = 'chat'\r\n";
+        WriteFile(Toml, text);
+
+        Assert.Equal("updated", States(Connect("--json", "--only", "codex").Output)["codex"]);
+
+        Assert.Equal(text.Replace("COCERN_URL = 'http://127.0.0.1:5271/'", $"COCERN_URL = '{NewUrl}'") + $"COCERN_FINGERPRINT = '{NewPin}'\r\n", File.ReadAllText(Toml));
+    }
+
+    [Fact]
+    public void Entries_for_another_hub_or_a_joined_pcs_node_are_left_alone()
+    {
+        LocalHubRecord();
+        var elsewhere = Path.Combine(root, "other-hub", "data", "local-client-token");
+        var foreign = new JsonObject { ["mcpServers"] = new JsonObject { ["cocern"] = new JsonObject { ["command"] = "dotnet", ["env"] = new JsonObject { ["COCERN_TOKEN_FILE"] = elsewhere, ["COCERN_URL"] = "https://127.0.0.1:6000/", ["COCERN_FINGERPRINT"] = OldPin } } } }.ToJsonString();
+        WriteFile(ClaudeJson, foreign);
+        // A remote hub's entry with an inline token, and a node entry (no CoCern variables at all, so it runs on the node's credential).
+        var remote = $"[mcp_servers.cocern]\ncommand = 'dotnet'\nenv = {{ COCERN_URL = 'https://hub.example/', COCERN_TOKEN = 'x', COCERN_FINGERPRINT = '{OldPin}' }}\n";
+        WriteFile(Toml, remote);
+        Directory.CreateDirectory(Path.Combine(AppData, "Claude"));
+        var node = "{\"mcpServers\":{\"cocern\":{\"command\":\"C:\\\\CoCern\\\\CoCern.Adapter.exe\",\"args\":[]}}}";
+        WriteFile(Desktop, node);
+
+        var states = States(Connect("--json").Output);
+
+        Assert.Equal(3, states.Count);
+        Assert.All(states.Values, state => Assert.Equal("connected", state));
+        Assert.Equal(foreign, File.ReadAllText(ClaudeJson));
+        Assert.Equal(remote, File.ReadAllText(Toml));
+        Assert.Equal(node, File.ReadAllText(Desktop));
+        Assert.Empty(Backups(ClaudeJson));
+    }
+
+    [Fact]
+    public void Without_a_current_address_an_existing_entry_is_left_alone_as_before()
+    {
+        var entry = "{\"mcpServers\":{\"cocern\":{\"command\":\"dotnet\",\"env\":{\"COCERN_TOKEN_FILE\":" + JsonSerializer.Serialize(Token) + ",\"COCERN_URL\":\"https://127.0.0.1:5272/\",\"COCERN_FINGERPRINT\":\"" + OldPin + "\"}}}}";
+        WriteFile(ClaudeJson, entry);
+
+        Assert.Equal("connected", States(Connect("--json", "--only", "claude-code").Output)["claude-code"]);
+        Assert.Equal(entry, File.ReadAllText(ClaudeJson));
+    }
+
+    [Theory]
+    [InlineData("outdated", "available")]
+    [InlineData("updated", "added")]
+    [InlineData("connected", "connected")]
+    [InlineData("error", "error")]
+    public void The_connect_page_shows_the_new_outcomes_as_states_it_knows(string adapter, string page)
+    {
+        var client = new DashboardConnectClient { Id = "codex", Name = "Codex", State = adapter, Detail = "detail" };
+        Assert.Equal(client with { State = page }, CoCern.Host.Dashboard.DashboardConnect.PageState(client));
+    }
+
     private static StringContent JsonContent(object value) => new(JsonSerializer.Serialize(value), System.Text.Encoding.UTF8, "application/json");
 }

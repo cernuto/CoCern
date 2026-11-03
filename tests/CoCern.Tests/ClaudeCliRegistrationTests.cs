@@ -27,12 +27,18 @@ public sealed class ClaudeCliRegistrationTests : IDisposable
 
     private static RelayHostFixture NewHub() => new(remoteAddress: System.Net.IPAddress.Loopback, settings: new Dictionary<string, string?> { ["Relay:Discovery:Enabled"] = "true", ["Relay:Discovery:Repositories:0"] = "repo" });
 
-    /// <summary>A fake <c>claude</c>: <paramref name="get"/> and <paramref name="add"/> are the exit codes of <c>mcp get</c> and <c>mcp add</c>; null is a timeout.</summary>
-    private ClaudeCli Fake(int? get, int? add) => new(@"C:\fake\claude.cmd", (executable, arguments) =>
+    /// <summary>What <c>claude mcp get</c> prints for an entry in the user's own settings.</summary>
+    private const string UserScoped = "cocern:\n  Scope: User config (available in all your projects)\n  Status: ✓ Connected\n  Type: stdio\n\nTo remove this server, run: claude mcp remove \"cocern\" -s user\n";
+
+    /// <summary>
+    /// A fake <c>claude</c>: <paramref name="get"/> and <paramref name="add"/> are the exit codes of <c>mcp get</c> and <c>mcp add</c>; null is a timeout.
+    /// A found entry prints <paramref name="getOutput"/>, a user entry unless told otherwise.
+    /// </summary>
+    private ClaudeCli Fake(int? get, int? add, string getOutput = UserScoped, string executable = @"C:\fake\claude.cmd") => new(executable, (exe, arguments) =>
     {
-        calls.Add((executable, arguments));
+        calls.Add((exe, arguments));
         var code = arguments[1] == "get" ? get : add;
-        return code is null ? null : new CliResult(code.Value, "", "");
+        return code is null ? null : new CliResult(code.Value, arguments[1] == "get" && code == 0 ? getOutput : "", "");
     });
 
     private SetupEnvironment Env(RelayHostFixture host, ClaudeCli? cli, bool running = false) => new()
@@ -203,6 +209,112 @@ public sealed class ClaudeCliRegistrationTests : IDisposable
         File.Delete(ClaudeJson);
         Assert.Equal(0, await Run(host, Fake(get: 1, add: 0), running: true));
         Assert.DoesNotContain("restart", output.ToString() + error, StringComparison.OrdinalIgnoreCase);
+    }
+
+    // ---- Only the user's own entry counts ----
+
+    [Theory]
+    [InlineData(UserScoped, true)]
+    [InlineData("cocern:\n  Scope: Project config (shared via .mcp.json)\n  Type: stdio\n", false)]
+    [InlineData("cocern:\n  Scope: Local config (private to you in this project)\n\nTo remove this server, run: claude mcp remove \"cocern\" -s local\n", false)]
+    [InlineData("cocern:\n  Type: stdio\n\nTo remove this server, run: claude mcp remove \"cocern\" -s user\n", true)]
+    [InlineData("cocern:\n  Type: stdio\n", false)]
+    public void Mcp_get_counts_only_an_entry_in_the_users_own_settings(string printed, bool user)
+    {
+        Assert.Equal(user, ClaudeCli.IsUserEntry(new CliResult(0, printed, "")));
+        Assert.False(ClaudeCli.IsUserEntry(new CliResult(1, printed, "")));
+        Assert.False(ClaudeCli.IsUserEntry(null));
+    }
+
+    [Fact]
+    public async Task A_project_entry_seen_by_mcp_get_does_not_stop_cocern_being_added_for_the_user()
+    {
+        await using var host = NewHub();
+
+        Assert.Equal(0, await Run(host, Fake(get: 0, add: 0, getOutput: "cocern:\n  Scope: Project config (shared via .mcp.json)\n")));
+
+        Assert.Equal(2, calls.Count);
+        Assert.Equal(ClaudeCli.AddArguments(Dotnet, Dll, null), calls[1].Arguments);
+        Assert.Equal(["--scope", "user"], calls[1].Arguments.Skip(2).Take(2));
+    }
+
+    [Fact]
+    public void The_launcher_runs_in_the_folder_it_is_given()
+    {
+        var folder = Directory.CreateDirectory(Path.Combine(root, "user profile")).FullName;
+        Directory.CreateDirectory(Launchers);
+        string launcher;
+        if (OperatingSystem.IsWindows())
+        {
+            launcher = Path.Combine(Launchers, "where.cmd");
+            File.WriteAllText(launcher, "@echo off\r\ncd\r\n", new UTF8Encoding(false));
+        }
+        else
+        {
+            launcher = Path.Combine(Launchers, "where");
+            File.WriteAllText(launcher, "#!/bin/sh\npwd\n", new UTF8Encoding(false));
+            File.SetUnixFileMode(launcher, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+
+        var result = ClaudeCli.Run(launcher, [], TimeSpan.FromSeconds(30), folder);
+
+        Assert.NotNull(result);
+        Assert.Equal(Path.TrimEndingDirectorySeparator(folder), Path.TrimEndingDirectorySeparator(result.Output.Trim()));
+    }
+
+    // ---- A batch-file claude never gets arguments cmd.exe would misread ----
+
+    [Theory]
+    [InlineData(@"C:\Program Files (x86)\CoCern\CoCern.Adapter.dll", true)]
+    [InlineData(@"C:\Users\pat\CoCern\CoCern.Adapter.dll", true)]
+    [InlineData(@"C:\Tools & More\CoCern.Adapter.dll", false)]
+    [InlineData(@"C:\a|b\CoCern.Adapter.dll", false)]
+    [InlineData(@"C:\a<b>\CoCern.Adapter.dll", false)]
+    [InlineData(@"C:\caret^\CoCern.Adapter.dll", false)]
+    [InlineData(@"C:\%TEMP%\CoCern.Adapter.dll", false)]
+    [InlineData(@"C:\wow!\CoCern.Adapter.dll", false)]
+    [InlineData("C:\\quote\"d\\CoCern.Adapter.dll", false)]
+    [InlineData("C:\\line\nbreak\\CoCern.Adapter.dll", false)]
+    [InlineData("C:\\return\rhere\\CoCern.Adapter.dll", false)]
+    public void Arguments_for_a_batch_file_are_checked_for_cmd_metacharacters(string adapterDll, bool safe)
+    {
+        Assert.Equal(safe, ClaudeCli.SafeForBatch(ClaudeCli.AddArguments(Dotnet, adapterDll, null)));
+        Assert.Equal(safe, ClaudeCli.SafeForBatch(ClaudeCli.AddArguments(Dotnet, @"C:\Apps\CoCern.Adapter.dll", new Dictionary<string, string> { ["COCERN_TOKEN_FILE"] = adapterDll })));
+    }
+
+    [Fact]
+    public void A_batch_file_claude_with_unsafe_arguments_is_not_run_and_setup_falls_back_to_the_file()
+    {
+        const string unsafeDll = @"C:\Tools & More\CoCern.Adapter.dll";
+        Assert.True(ClaudeCli.IsBatchFile(@"C:\npm\claude.CMD"));
+        Assert.True(ClaudeCli.IsBatchFile(@"C:\npm\claude.bat"));
+        Assert.False(ClaudeCli.IsBatchFile(@"C:\Programs\claude.exe"));
+
+        Assert.Equal(ClaudeRegistration.Unsafe, Fake(get: 1, add: 0).Register(Dotnet, unsafeDll, null));
+        // Only the fixed 'mcp get' ran; the add was never started.
+        Assert.Equal(["mcp", "get", "cocern"], Assert.Single(calls).Arguments);
+
+        // A launcher that is no batch file gets each argument exactly as given.
+        calls.Clear();
+        Assert.Equal(ClaudeRegistration.Added, Fake(get: 1, add: 0, executable: @"C:\Programs\claude.exe").Register(Dotnet, unsafeDll, null));
+        Assert.Equal(ClaudeCli.AddArguments(Dotnet, unsafeDll, null), calls[1].Arguments);
+    }
+
+    // ---- Every client is planned before any file is written ----
+
+    [Fact]
+    public async Task A_claude_json_it_cannot_read_when_the_command_line_fails_leaves_codex_unwritten()
+    {
+        await using var host = NewHub();
+        Directory.CreateDirectory(Profile);
+        File.WriteAllText(ClaudeJson, "{ \"mcpServers\": { ");
+
+        Assert.Equal(SetupCommand.MalformedClientFileExitCode, await Run(host, Fake(get: 1, add: 2)));
+
+        Assert.Contains(ClaudeJson, error.ToString());
+        Assert.Equal("{ \"mcpServers\": { ", File.ReadAllText(ClaudeJson));
+        Assert.False(File.Exists(Path.Combine(Profile, ".codex", "config.toml")));
+        Assert.Empty(Directory.GetFiles(Profile, "*.cocern-backup-*", SearchOption.AllDirectories));
     }
 
     private sealed class FakeRunKey : IRunKey

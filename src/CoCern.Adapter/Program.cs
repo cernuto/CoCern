@@ -115,7 +115,7 @@ try
     builder.Services.AddMcpServer(server =>
     {
         server.ServerInstructions = AdapterInstructions.Server;
-    }).WithStdioServerTransport().WithTools(CoordinationTools.Create(forwarder, options.Admin, hints, SessionHandoff.For(options), options.ChatOnly));
+    }).WithStdioServerTransport().WithTools(CoordinationTools.Create(forwarder, options.Admin, hints, SessionHandoff.For(options), options.ChatOnly, options.ExportedChat));
     using var host = builder.Build();
     await host.RunAsync();
     return 0;

@@ -31,8 +31,10 @@ public sealed class AdapterOptions
     public bool ChatOnly { get; init; }
     /// <summary>Set only when the adapter runs on the node's credentials; successful <c>session_open</c> calls are then handed to the node there.</summary>
     public string? NodeFolder { get; init; }
-    /// <summary>The chat ID the client exported to this process, if any (node mode only).</summary>
+    /// <summary>The chat ID the client exported to this process, if any (node mode only), as handed to the node with each session.</summary>
     public ChatLocation? ClientChat { get; init; }
+    /// <summary>The chat ID the client exported to this process, if any, in either mode. It keeps this chat's request IDs its own across adapter restarts (see <see cref="CoordinationTools.RequestScope"/>).</summary>
+    public ChatLocation? ExportedChat { get; init; }
 
     /// <summary>When set, only a hub certificate with this SHA-256 fingerprint is accepted (stored uppercase).</summary>
     public string? PinnedFingerprint
@@ -61,7 +63,8 @@ public sealed class AdapterOptions
         environment ??= Environment.GetEnvironmentVariable;
         readFile ??= File.ReadAllText;
         var chatOnly = string.Equals(environment("COCERN_PROFILE"), "chat", StringComparison.OrdinalIgnoreCase);
-        if (environment("COCERN_URL") is null && environment("COCERN_TOKEN_FILE") is null && environment("COCERN_TOKEN") is null && FromNode(environment, processEnvironment) is { } node) return new(node) { ChatOnly = chatOnly };
+        var chat = Exported(environment);
+        if (environment("COCERN_URL") is null && environment("COCERN_TOKEN_FILE") is null && environment("COCERN_TOKEN") is null && FromNode(environment, processEnvironment) is { } node) return new(node) { ChatOnly = chatOnly, ExportedChat = chat };
         string? token;
         var tokenFile = environment("COCERN_TOKEN_FILE");
         if (!string.IsNullOrWhiteSpace(tokenFile))
@@ -79,7 +82,7 @@ public sealed class AdapterOptions
         var fingerprint = ParseFingerprint(url, environment("COCERN_FINGERPRINT"));
         return new AdapterOptions(url, token ?? "",
             string.Equals(environment("COCERN_ROLE"), "admin", StringComparison.OrdinalIgnoreCase),
-            string.Equals(environment("COCERN_SIGNALR"), "true", StringComparison.OrdinalIgnoreCase)) { ChatOnly = chatOnly, PinnedFingerprint = fingerprint };
+            string.Equals(environment("COCERN_SIGNALR"), "true", StringComparison.OrdinalIgnoreCase)) { ChatOnly = chatOnly, PinnedFingerprint = fingerprint, ExportedChat = chat };
     }
 
     /// <summary>Normalizes an optional configured certificate pin and refuses using one with plaintext HTTP.</summary>
@@ -95,11 +98,15 @@ public sealed class AdapterOptions
     /// <summary>A copy of <paramref name="other"/>, so a caller can change one init-only setting.</summary>
     private AdapterOptions(AdapterOptions other) : this(other.BaseUri.AbsoluteUri, other.Token, other.Admin, other.SignalR)
     {
-        PinnedFingerprint = other.PinnedFingerprint; NodeFolder = other.NodeFolder; ClientChat = other.ClientChat; ChatOnly = other.ChatOnly;
+        PinnedFingerprint = other.PinnedFingerprint; NodeFolder = other.NodeFolder; ClientChat = other.ClientChat; ChatOnly = other.ChatOnly; ExportedChat = other.ExportedChat;
     }
 
     /// <summary>The chat IDs a client exports to its MCP servers. Only these exact variables are read; Codex exports none (see docs/reference.md#wake-ups).</summary>
     private static readonly (string Provider, string Variable)[] ClientChatVariables = [("claude", "CLAUDE_CODE_SESSION_ID")];
+
+    /// <summary>The chat ID the client exported, when it is one of the variables above and a UUID.</summary>
+    private static ChatLocation? Exported(Func<string, string?> environment) =>
+        ClientChatVariables.Select(x => (x.Provider, Id: environment(x.Variable))).FirstOrDefault(x => x.Id is not null && ChatLocators.IsUuid(x.Id)) is { Id: { } id } client ? new(client.Provider, id) : null;
 
     /// <summary>Node mode: an enrolled machine is never an administrator, whatever <c>COCERN_ROLE</c> says.</summary>
     private static AdapterOptions? FromNode(Func<string, string?> environment, bool processEnvironment)
@@ -107,10 +114,9 @@ public sealed class AdapterOptions
         // A test's own environment never falls back to this PC's real node folder.
         var folder = processEnvironment ? NodeState.ConfiguredFolder(environment) : environment("COCERN_NODE_DIR") is { } configured && !string.IsNullOrWhiteSpace(configured) ? configured : null;
         if (folder is null || NodeState.ReadEnrollment(folder) is not { } node) return null;
-        var client = ClientChatVariables.Select(x => (x.Provider, Id: environment(x.Variable))).FirstOrDefault(x => x.Id is not null && ChatLocators.IsUuid(x.Id));
         return new AdapterOptions(node.Hub.AbsoluteUri, node.Credential, admin: false, string.Equals(environment("COCERN_SIGNALR"), "true", StringComparison.OrdinalIgnoreCase))
         {
-            PinnedFingerprint = node.Fingerprint, NodeFolder = node.Folder, ClientChat = client.Id is null ? null : new ChatLocation(client.Provider, client.Id)
+            PinnedFingerprint = node.Fingerprint, NodeFolder = node.Folder, ClientChat = Exported(environment)
         };
     }
 }
