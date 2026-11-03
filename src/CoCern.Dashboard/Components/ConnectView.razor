@@ -23,6 +23,10 @@ else
         }
         else
         {
+            <label class="admin-tools">
+                <input type="checkbox" checked="@_admin" disabled="@(_busy is not null)" @onchange="ChooseAdminAsync" />
+                <span><strong>Administrator tools</strong><small>Chats in these apps can also set standing rules, add orders, run analytics, pause work and close sessions. Leave it off unless you trust every chat in them.</small></span>
+            </label>
             <ul class="connect-list">
                 @foreach (var client in _status.Clients)
                 {
@@ -31,7 +35,7 @@ else
                         <div><strong>@client.Name</strong><small>@Describe(client)</small></div>
                         @if (client.State is "connected" or "added")
                         {
-                            <span class="tag good">@(client.State == "added" ? "Connected · restart it" : "Connected")</span>
+                            <span class="tag good">@(client.State == "added" ? "Connected · restart it" : client.Admin == true ? "Connected · admin tools" : "Connected")</span>
                         }
                         else
                         {
@@ -49,15 +53,33 @@ else
     [Parameter] public bool Compact { get; set; }
     private DashboardConnectStatus? _status;
     private string? _busy;
+    // Starts ticked when every app that has CoCern already gives the administrator tools. Connect always follows it; the states follow it once
+    // it is changed, so opening the page never marks an app whose entry gives other tools as needing an update.
+    private bool _admin;
 
-    protected override async Task OnInitializedAsync() => _status = await LoadAsync(() => Http.GetFromJsonAsync<DashboardConnectStatus>("api/connect"));
+    protected override async Task OnInitializedAsync()
+    {
+        _status = await LoadAsync(() => Http.GetFromJsonAsync<DashboardConnectStatus>("api/connect"));
+        var entries = _status?.Clients.Where(client => client.Admin is not null).ToArray() ?? [];
+        _admin = entries.Length > 0 && entries.All(client => client.Admin == true);
+    }
+
+    private string Choice => $"?admin={(_admin ? "true" : "false")}";
+
+    private async Task ChooseAdminAsync(ChangeEventArgs change)
+    {
+        _admin = change.Value is true;
+        _busy = "";
+        _status = await LoadAsync(() => Http.GetFromJsonAsync<DashboardConnectStatus>("api/connect" + Choice));
+        _busy = null;
+    }
 
     private async Task ConnectAsync(string id)
     {
         _busy = id;
         var result = await LoadAsync(async () =>
         {
-            using var response = await Http.PostAsync($"api/connect/{id}", null);
+            using var response = await Http.PostAsync($"api/connect/{id}{Choice}", null);
             return response.IsSuccessStatusCode ? await response.Content.ReadFromJsonAsync<DashboardConnectStatus>() : new DashboardConnectStatus { Unavailable = "Connecting is only possible from the hub's PC." };
         });
         _busy = null;
@@ -76,6 +98,7 @@ else
     private static string Describe(DashboardConnectClient client) => client.State switch
     {
         "error" => client.Detail ?? "Its settings could not be changed.",
+        "available" when client.Detail is { } detail => detail,
         _ => client.Id switch { "claude-code" => "The Claude Code CLI and its IDE extensions.", "claude-desktop" => "Claude for desktop.", "codex" => "Codex CLI, IDE extension and app.", _ => "" }
     };
 }

@@ -88,7 +88,7 @@ public static class DashboardEndpoints
         }).RequireAuthorization(DashboardSecurity.Policy);
         // Adding CoCern to this PC's apps edits this user's app settings, so only a viewer on this PC may do it.
         api.MapGet("/connect", async (HttpContext context, DashboardConnect connect) =>
-            DashboardConnect.OnThisPc(context) ? Results.Ok(await connect.StatusAsync(context.RequestAborted)) : Results.Ok(new DashboardConnectStatus { Unavailable = "Open the dashboard on the hub's PC to connect its apps." }))
+            DashboardConnect.OnThisPc(context) ? Results.Ok(await connect.StatusAsync(DashboardConnect.AdminChoice(context), context.RequestAborted)) : Results.Ok(new DashboardConnectStatus { Unavailable = "Open the dashboard on the hub's PC to connect its apps." }))
             .RequireAuthorization(DashboardSecurity.Policy);
         // It shows the join code, so only a viewer on this PC sees it.
         api.MapGet("/add-pc", (HttpContext context, DashboardAddPc addPc) =>
@@ -97,7 +97,7 @@ public static class DashboardEndpoints
         api.MapPost("/connect/{client}", async (HttpContext context, string client, DashboardConnect connect) =>
         {
             if (!DashboardConnect.OnThisPc(context) || !DashboardSecurity.SameOrigin(context)) return Results.StatusCode(403);
-            return DashboardConnect.ClientIds.Contains(client) ? Results.Ok(await connect.ConnectAsync(client, context.RequestAborted)) : Results.NotFound();
+            return DashboardConnect.ClientIds.Contains(client) ? Results.Ok(await connect.ConnectAsync(client, DashboardConnect.AdminChoice(context), context.RequestAborted)) : Results.NotFound();
         }).RequireAuthorization(DashboardSecurity.Policy);
         api.MapGet("/snapshot", (DashboardCollector collector) => Results.Ok(collector.Current)).RequireAuthorization(DashboardSecurity.Policy);
         api.MapGet("/analytics", (HttpContext context, DashboardAnalytics analytics) => analytics.GetAsync(context)).RequireAuthorization(DashboardSecurity.Policy);

@@ -245,6 +245,106 @@ public sealed class ConnectTests : IDisposable
         Assert.Equal(entry, File.ReadAllText(ClaudeJson));
     }
 
+    // ---- The administrator tools box: COCERN_ROLE in this hub's entries ----
+
+    private (string? State, bool? Admin, string? Detail) Client(string output, string id)
+    {
+        var client = JsonDocument.Parse(output).RootElement.GetProperty("clients").EnumerateArray().Single(x => x.GetProperty("id").GetString() == id);
+        return (client.GetProperty("state").GetString(), client.GetProperty("admin").ValueKind == JsonValueKind.Null ? null : client.GetProperty("admin").GetBoolean(),
+            client.TryGetProperty("detail", out var detail) && detail.ValueKind == JsonValueKind.String ? detail.GetString() : null);
+    }
+
+    [Fact]
+    public void Role_admin_adds_the_administrator_tools_to_new_entries_and_reports_them()
+    {
+        LocalHubRecord();
+        Assert.Equal(("available", null, null), Client(Connect("--check", "--json", "--role", "admin").Output, "codex"));
+
+        var (code, output, _) = Connect("--json", "--role", "admin");
+
+        Assert.Equal(0, code);
+        Assert.Equal(("added", true, null), Client(output, "claude-code"));
+        Assert.Equal(("added", true, null), Client(output, "codex"));
+        Assert.Equal("admin", JsonNode.Parse(File.ReadAllText(ClaudeJson))!["mcpServers"]!["cocern"]!["env"]!["COCERN_ROLE"]!.GetValue<string>());
+        Assert.Contains("COCERN_ROLE = 'admin'", File.ReadAllText(Toml));
+        // Left out, --role changes nothing, and an entry's tools are still reported.
+        Assert.Equal(("connected", true, null), Client(Connect("--json").Output, "claude-code"));
+        Assert.Contains("Claude Code: already connected, with administrator tools", Connect().Output);
+    }
+
+    [Fact]
+    public void Changing_the_role_updates_this_hubs_entries_in_place_and_back()
+    {
+        LocalHubRecord();
+        Connect("--json");
+        var claude = File.ReadAllText(ClaudeJson);
+        var codex = File.ReadAllText(Toml);
+
+        // Asked for, the administrator tools make each entry outdated, and connecting adds only COCERN_ROLE.
+        var (state, admin, detail) = Client(Connect("--check", "--json", "--role", "admin").Output, "claude-code");
+        Assert.Equal(("outdated", false), (state, admin));
+        Assert.Contains("doesn't give its chats the administrator tools", detail);
+        Assert.Equal(claude, File.ReadAllText(ClaudeJson));
+        var output = Connect("--json", "--role", "admin").Output;
+        Assert.Equal(("updated", true), (Client(output, "claude-code").State, Client(output, "claude-code").Admin));
+        Assert.Equal(("updated", true), (Client(output, "codex").State, Client(output, "codex").Admin));
+        Assert.Contains("now gives its chats the administrator tools", Client(output, "codex").Detail);
+        var env = JsonNode.Parse(File.ReadAllText(ClaudeJson))!["mcpServers"]!["cocern"]!["env"]!.AsObject();
+        Assert.Equal(["COCERN_TOKEN_FILE", "COCERN_URL", "COCERN_FINGERPRINT", "COCERN_ROLE"], env.Select(x => x.Key));
+        Assert.Equal(codex.Replace($"COCERN_FINGERPRINT = '{NewPin}' }}", $"COCERN_FINGERPRINT = '{NewPin}', COCERN_ROLE = 'admin' }}"), File.ReadAllText(Toml));
+        Assert.Single(Backups(ClaudeJson));
+
+        // And back: worker removes it again, leaving the files as Connect first wrote them.
+        output = Connect("--json", "--role", "worker").Output;
+        Assert.Equal(("updated", false), (Client(output, "claude-code").State, Client(output, "claude-code").Admin));
+        Assert.Contains("no longer gives its chats the administrator tools", Client(output, "claude-code").Detail);
+        Assert.Equal(JsonNode.Parse(claude)!.ToJsonString(), JsonNode.Parse(File.ReadAllText(ClaudeJson))!.ToJsonString());
+        Assert.Equal(codex, File.ReadAllText(Toml));
+        Assert.Equal(("connected", false, null), Client(Connect("--json", "--role", "worker").Output, "codex"));
+    }
+
+    [Fact]
+    public void A_codex_env_table_gains_and_loses_the_role_line()
+    {
+        LocalHubRecord();
+        var table = $"[mcp_servers.cocern]\ncommand = 'dotnet'\nargs = ['a.dll']\n\n[mcp_servers.cocern.env]\nCOCERN_TOKEN_FILE = '{Token}'\nCOCERN_URL = '{NewUrl}'\nCOCERN_FINGERPRINT = '{NewPin}'\n";
+        WriteFile(Toml, table);
+
+        Assert.Equal("updated", Client(Connect("--json", "--only", "codex", "--role", "admin").Output, "codex").State);
+        Assert.Equal(table + "COCERN_ROLE = 'admin'\n", File.ReadAllText(Toml));
+        Assert.Equal("updated", Client(Connect("--json", "--only", "codex", "--role", "worker").Output, "codex").State);
+        Assert.Equal(table, File.ReadAllText(Toml));
+    }
+
+    [Fact]
+    public void The_role_follows_even_without_a_current_address_and_never_touches_another_hubs_entry()
+    {
+        // No local-hub.json: the address and certificate are left alone, but the tools still follow --role.
+        var ours = "{\"mcpServers\":{\"cocern\":{\"command\":\"dotnet\",\"env\":{\"COCERN_TOKEN_FILE\":" + JsonSerializer.Serialize(Token) + ",\"COCERN_URL\":\"https://127.0.0.1:5272/\",\"COCERN_FINGERPRINT\":\"" + OldPin + "\"}}}}";
+        WriteFile(ClaudeJson, ours);
+        Assert.Equal(("updated", true), (Client(Connect("--json", "--only", "claude-code", "--role", "admin").Output, "claude-code").State, Client(Connect("--json", "--only", "claude-code").Output, "claude-code").Admin));
+        var env = JsonNode.Parse(File.ReadAllText(ClaudeJson))!["mcpServers"]!["cocern"]!["env"]!;
+        Assert.Equal(("https://127.0.0.1:5272/", OldPin, "admin"), (env["COCERN_URL"]!.GetValue<string>(), env["COCERN_FINGERPRINT"]!.GetValue<string>(), env["COCERN_ROLE"]!.GetValue<string>()));
+
+        var theirs = "{\"mcpServers\":{\"cocern\":{\"command\":\"dotnet\",\"env\":{\"COCERN_TOKEN_FILE\":\"/elsewhere/other-hub-token\"}}}}";
+        WriteFile(ClaudeJson, theirs);
+        Assert.Equal("connected", Client(Connect("--json", "--only", "claude-code", "--role", "admin").Output, "claude-code").State);
+        Assert.Equal(theirs, File.ReadAllText(ClaudeJson));
+    }
+
+    [Theory]
+    [InlineData("?admin=true", true)]
+    [InlineData("?admin=false", false)]
+    [InlineData("", null)]
+    [InlineData("?admin=yes", null)]
+    [InlineData("?admin=true&admin=false", null)]
+    public void The_page_asks_for_the_tools_only_with_a_clear_choice(string query, bool? expected)
+    {
+        var context = new Microsoft.AspNetCore.Http.DefaultHttpContext();
+        context.Request.QueryString = new Microsoft.AspNetCore.Http.QueryString(query);
+        Assert.Equal(expected, CoCern.Host.Dashboard.DashboardConnect.AdminChoice(context));
+    }
+
     [Theory]
     [InlineData("outdated", "available")]
     [InlineData("updated", "added")]
