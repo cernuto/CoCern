@@ -23,6 +23,131 @@ public sealed class DiscoveryGrainTests
     private static readonly RelayCaller Ordinary = new("machine:pc-a", false, ["cocern"]);
 
     [Fact]
+    public async Task Chat_directory_includes_local_sessions_and_enriches_each_only_once_when_announced()
+    {
+        using var host = await StartAsync();
+        try
+        {
+            var directory = host.Services.GetRequiredService<IMachineDirectory>();
+            var application = host.Services.GetRequiredService<RelayApplication>();
+            var machine = (await directory.EnrollAsync("pc-a", "PC A", "secret-a", CancellationToken.None))!;
+            var caller = new RelayCaller(machine.PrincipalId, false, ["cocern", "private"]);
+            var id = await OpenAsync(application, caller, "cocern", "local chat");
+            await OpenAsync(application, caller, "private", "private chat");
+            var closing = await OpenAsync(application, caller, "cocern", "closed local chat");
+            Assert.True((await application.ExecuteAsync(Administrator, RelayTools.ControlRequest, JsonSerializer.SerializeToElement(new { repositoryId = "cocern", requestId = "close-local", command = "close_sessions", targetSessionId = closing }))).Ok);
+
+            var local = Assert.Single(Items(await directory.DirectoryAsync(["cocern"], CancellationToken.None)));
+            Assert.Equal(id, local["relaySessionId"]!.GetValue<string>());
+            Assert.Equal("local chat", local["label"]!.GetValue<string>());
+            Assert.False(local["reachable"]!.GetValue<bool>());
+            Assert.Null(local["provider"]);
+            Assert.Null(local["binding"]);
+            Assert.Null(local["sessionToken"]);
+
+            var announced = Announcement("pc-a", "PC A", "announced label");
+            announced["chats"]![0]!["relaySessionId"] = id;
+            Assert.True((await directory.AnnounceAsync(machine, announced, CancellationToken.None)).Ok);
+            var enriched = Assert.Single(Items(await directory.DirectoryAsync(["cocern"], CancellationToken.None)));
+            Assert.Equal(id, enriched["relaySessionId"]!.GetValue<string>());
+            Assert.Equal("announced label", enriched["label"]!.GetValue<string>());
+            Assert.Equal("codex", enriched["provider"]!.GetValue<string>());
+            Assert.Equal("PC A", enriched["machineName"]!.GetValue<string>());
+            Assert.True(enriched["reachable"]!.GetValue<bool>());
+
+            Assert.True((await directory.RevokeAsync(Administrator, machine.MachineId, CancellationToken.None)).Ok);
+            var revoked = Assert.Single(Items(await directory.DirectoryAsync(["cocern"], CancellationToken.None)));
+            Assert.Equal(id, revoked["relaySessionId"]!.GetValue<string>());
+            Assert.False(revoked["reachable"]!.GetValue<bool>());
+            Assert.Null(revoked["provider"]);
+        }
+        finally { await host.StopAsync(); }
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Chat_directory_uses_local_identity_when_announcements_are_unavailable(bool throws)
+    {
+        var source = new DirectorySources { DiscoveryUnavailable = true, Throw = throws };
+        source.Workers.Add(new JsonObject { ["sessionId"] = "local", ["repositoryId"] = "cocern", ["machineId"] = "pc-known", ["label"] = "local chat", ["binding"] = new JsonObject { ["secret"] = "private binding" } });
+        var reply = await new MachineDirectory(DirectoryFactory.For(source)).DirectoryAsync(["cocern"], CancellationToken.None);
+        var item = Assert.Single(Items(reply));
+        Assert.Equal("local", item["relaySessionId"]!.GetValue<string>());
+        Assert.Equal("pc-known", item["machineId"]!.GetValue<string>());
+        Assert.False(item["reachable"]!.GetValue<bool>());
+        Assert.True(JsonNode.Parse(reply.DataJson)!["truncated"]!.GetValue<bool>());
+        Assert.DoesNotContain("private binding", reply.DataJson);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Chat_directory_retains_announced_reachability_when_workers_are_unavailable(bool throws)
+    {
+        var source = new DirectorySources { ControlUnavailable = true, Throw = throws };
+        source.Announced.Add(new JsonObject { ["relaySessionId"] = "routed", ["repositoryId"] = "cocern", ["label"] = "routed chat", ["provider"] = "codex", ["reachable"] = false });
+        var reply = await new MachineDirectory(DirectoryFactory.For(source)).DirectoryAsync(["cocern"], CancellationToken.None);
+        var item = Assert.Single(Items(reply));
+        Assert.Equal("routed", item["relaySessionId"]!.GetValue<string>());
+        Assert.False(item["reachable"]!.GetValue<bool>());
+        Assert.True(JsonNode.Parse(reply.DataJson)!["truncated"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public async Task Chat_directory_pages_local_sessions_and_bounds_the_merged_reply()
+    {
+        var source = new DirectorySources();
+        for (var i = 0; i < 120; i++) source.Workers.Add(new JsonObject { ["sessionId"] = "local-" + i, ["repositoryId"] = "cocern", ["label"] = new string('x', 80) + i });
+        // A route beyond the first worker page must survive; a closed route must disappear.
+        source.Announced.Add(new JsonObject { ["relaySessionId"] = "local-119", ["repositoryId"] = "cocern", ["label"] = "last routed", ["provider"] = "codex", ["reachable"] = true });
+        source.Announced.Add(new JsonObject { ["relaySessionId"] = "closed", ["repositoryId"] = "cocern", ["label"] = "closed route", ["reachable"] = true });
+        var reply = await new MachineDirectory(DirectoryFactory.For(source)).DirectoryAsync(["cocern"], CancellationToken.None);
+        var items = Items(reply);
+        Assert.Contains(items, x => x["relaySessionId"]!.GetValue<string>() == "local-119" && x["reachable"]!.GetValue<bool>());
+        Assert.DoesNotContain(items, x => x["relaySessionId"]!.GetValue<string>() == "closed");
+        Assert.True(items.Count > RelayLimits.MaxPageSize);
+        Assert.True(items.Count < 120);
+        Assert.Equal(items.Count, items.Select(x => x["relaySessionId"]!.GetValue<string>()).Distinct().Count());
+        Assert.True(Replies.FitsWire(reply, RelayLimits.AggregateReplyBytes));
+        Assert.True(JsonNode.Parse(reply.DataJson)!["truncated"]!.GetValue<bool>());
+    }
+
+    private sealed class DirectorySources : IDiscoveryGrain, IControlGrain
+    {
+        public bool DiscoveryUnavailable, ControlUnavailable, Throw;
+        public JsonArray Workers { get; } = [];
+        public JsonArray Announced { get; } = [];
+        public Task<RelayReply> ExecuteAsync(RelayCaller caller, string operation, string argumentsJson)
+        {
+            var discovery = operation == DiscoveryOperations.Directory;
+            if (discovery ? DiscoveryUnavailable : ControlUnavailable)
+            {
+                if (Throw) throw new InvalidOperationException("source unavailable");
+                return Task.FromResult(Replies.Error(RelayErrorCodes.StorageFailure));
+            }
+            if (discovery) return Task.FromResult(Replies.Ok(new { items = Announced, truncated = false }));
+            Assert.Equal(RelayTools.WorkerList, operation);
+            var args = JsonNode.Parse(argumentsJson)!.AsObject();
+            Assert.True(caller.IsInternal);
+            Assert.Equal(new[] { "cocern" }, caller.Repositories);
+            return Task.FromResult(Replies.Page(Workers.Where(x => x!["repositoryId"]!.GetValue<string>() == args["repositoryId"]!.GetValue<string>())!, args));
+        }
+    }
+
+    private class DirectoryFactory : DispatchProxy
+    {
+        private DirectorySources? sources;
+        public static IGrainFactory For(DirectorySources sources)
+        {
+            var factory = Create<IGrainFactory, DirectoryFactory>();
+            ((DirectoryFactory)(object)factory).sources = sources;
+            return factory;
+        }
+        protected override object? Invoke(MethodInfo? targetMethod, object?[]? args) => targetMethod!.Name == "GetGrain" ? sources : throw new NotSupportedException(targetMethod.Name);
+    }
+
+    [Fact]
     public async Task Enrollment_survives_grain_deactivation()
     {
         using var host = await StartAsync();
@@ -263,9 +388,12 @@ public sealed class DiscoveryGrainTests
             var ghost = Announced(a, "ghost", "Ghost", "chat-g", await Open(a, "chat-g"));
             Assert.True((await directory.AnnounceAsync(a, ghost, CancellationToken.None)).Ok);
             items = Items(await directory.DirectoryAsync(["cocern"], CancellationToken.None));
-            Assert.Equal(2, items.Count);
+            Assert.Equal(3, items.Count);
             Assert.Contains(items, x => x["label"]!.GetValue<string>() == "chat-b" && x["machineName"]!.GetValue<string>() == "PC B");
             Assert.Contains(items, x => x["label"]!.GetValue<string>() == "chat-g" && x["machineName"]!.GetValue<string>() == "Ghost");
+            var noLongerAnnounced = Assert.Single(items, x => x["label"]!.GetValue<string>() == "chat-a");
+            Assert.False(noLongerAnnounced["reachable"]!.GetValue<bool>());
+            Assert.Null(noLongerAnnounced["provider"]);
         }
         finally { await host.StopAsync(); }
     }
@@ -330,7 +458,7 @@ public sealed class DiscoveryGrainTests
         })
     };
 
-    /// <summary>Opens a real session, labelled <paramref name="label"/>, and returns its ID: the directory lists only announced chats whose session is open.</summary>
+    /// <summary>Opens a real session, labelled <paramref name="label"/>, and returns its ID.</summary>
     private static async Task<string> OpenAsync(RelayApplication application, RelayCaller caller, string repository, string label)
     {
         var reply = await application.ExecuteAsync(caller, RelayTools.SessionOpen, JsonSerializer.SerializeToElement(new { repositoryId = repository, requestId = "open-" + label, label }));

@@ -36,7 +36,7 @@ public sealed class WakeReconciler(WakeConfiguration configuration, WakeState st
             var covered = false;
             for (var page = 0; page < 20; page++)
             {
-                var reply = await forwarder.ForwardAsync("check_inbox", Arguments(cursor), cancellationToken);
+                var reply = await forwarder.ForwardAsync("check_inbox", RelayForwarder.WithOrigin(Arguments(cursor), background: true), cancellationToken);
                 if (!reply.Ok || reply.Data is not { ValueKind: JsonValueKind.Object } data) return "inbox-unavailable";
                 if (!data.TryGetProperty("items", out var items) || items.ValueKind != JsonValueKind.Array || items.GetArrayLength() > 50 ||
                     !data.TryGetProperty("total", out var count) || !count.TryGetInt32(out var countValue) || countValue < 0 ||
@@ -86,7 +86,7 @@ public sealed class WakeReconciler(WakeConfiguration configuration, WakeState st
         async Task<bool> Permitted(bool readAttention = false)
         {
             var arguments = readAttention ? JsonSerializer.SerializeToElement(new { repositoryId = route.RepositoryId, boardId = route.BoardId, sessionId = session.SessionId, sessionToken = session.SessionToken, attentionDetail = true }) : Arguments();
-            var status = await forwarder.ForwardAsync("get_status", arguments, cancellationToken);
+            var status = await forwarder.ForwardAsync("get_status", RelayForwarder.WithOrigin(arguments, background: true), cancellationToken);
             if (readAttention && status.Ok && status.Data is { ValueKind: JsonValueKind.Object } detail) (urgentOnly, attentionWake, attentionLine) = Attention(detail);
             if (!status.Ok || status.Data is not { ValueKind: JsonValueKind.Object } data ||
                 !data.TryGetProperty("sessionId", out var identity) || identity.GetString() != session.SessionId ||

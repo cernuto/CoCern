@@ -68,6 +68,15 @@ public sealed class RelayForwarder(HttpClient client, AdapterOptions options)
         catch (InvalidOperationException) { return new(false, "invalid_hub_reply"); }
     }
 
+    /// <summary>Stamps reported origin at the adapter boundary; this field grants no permission and changes no call behavior.</summary>
+    internal static JsonElement WithOrigin(JsonElement arguments, bool background)
+    {
+        if (arguments.ValueKind != JsonValueKind.Object) return arguments;
+        var values = System.Text.Json.Nodes.JsonNode.Parse(arguments.GetRawText())!.AsObject();
+        values["backgroundCall"] = background;
+        return JsonSerializer.SerializeToElement(values);
+    }
+
     /// <summary>Every published domain reply code; a failure body naming anything else is never passed through.</summary>
     private static readonly FrozenSet<string> KnownCodes = typeof(RelayErrorCodes)
         .GetFields(BindingFlags.Public | BindingFlags.Static)

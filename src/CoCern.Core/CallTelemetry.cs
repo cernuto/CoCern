@@ -18,8 +18,10 @@ public JsonObject? Args { get; set; }
 public JsonObject? Usage { get; set; }
 public string? SessionId { get; set; }
 public string? Role { get; set; }
-/// <summary>False for an adapter's background read (<c>attention: false</c>) or a <c>waitSeconds</c> long-poll.</summary>
+/// <summary>Existing feedback eligibility heuristic, based on attention opt-out and waiting; not the reported traffic origin.</summary>
 public bool ModelVisible { get; set; } = true;
+/// <summary>Adapter-reported origin, independent of attention and never used for authorization.</summary>
+public bool? BackgroundCall { get; set; }
 public string? KnownEtag { get; set; }
 /// <summary>The reply's tokens when compaction already counted the reply as sent, and the step it reached.</summary>
 public int? ReplyTokens { get; set; }
@@ -52,7 +54,7 @@ internal sealed class CallTelemetry(IActivitySink activity, ITokenCounter? count
             activity.Record(new ActivityEvent
             {
                 Timestamp = trace.At, Kind = ActivityEvent.Call, RepositoryId = repository.Length <= RelayLimits.MaxIdentifierLength ? repository : "",
-                SessionId = Bounded(trace.SessionId), Role = role, Tool = tool, Ok = ok,
+                SessionId = Bounded(trace.SessionId), Role = role, Tool = tool, Ok = ok, BackgroundCall = trace.BackgroundCall,
                 Code = reply?.Code ?? (canceled ? "Canceled" : Unavailable),
                 RequestBytes = raw is null ? 0 : Encoding.UTF8.GetByteCount(raw),
                 ReplyBytes = reply is null ? 0 : Encoding.UTF8.GetByteCount(reply.DataJson), DurationMilliseconds = elapsed.TotalMilliseconds,

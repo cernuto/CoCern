@@ -41,7 +41,7 @@ public static class InboxWait
             arguments.TryGetProperty("sessionId", out var session) && session.ValueKind == JsonValueKind.String &&
             arguments.TryGetProperty("sessionToken", out var token) && token.ValueKind == JsonValueKind.String)
         {
-            var status = new JsonObject { ["attentionDetail"] = true };
+            var status = new JsonObject { ["attentionDetail"] = true, ["backgroundCall"] = true };
             foreach (var key in new[] { "repositoryId", "boardId", "sessionId", "sessionToken" })
                 if (forwarded.TryGetPropertyValue(key, out var value)) status[key] = value?.DeepClone();
             attentionRequest = JsonSerializer.SerializeToElement(status);
@@ -49,6 +49,7 @@ public static class InboxWait
         // Most polls are discarded unseen, so none of them takes an attention offer. The poll that returns
         // reaches the model, so the hub closes the info items of the messages on its page (seen); an empty poll lists none.
         forwarded["attention"] = false;
+        forwarded["backgroundCall"] = true;
         forwarded["seen"] = true;
         var request = JsonSerializer.SerializeToElement(forwarded);
         var duration = TimeSpan.FromSeconds(Math.Clamp(WaitSeconds(wait), 0, MaxSeconds));

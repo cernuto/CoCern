@@ -356,7 +356,14 @@ public sealed class DiscoveryHostTests
         using var admin = Client(host, AdminToken);
         var directory = await PostAsync(admin, "/api/tools/chat_directory", new { repositoryId = "repo" });
         using var items = JsonDocument.Parse(directory.Body.GetProperty("dataJson").GetString()!);
-        Assert.Equal([own], items.RootElement.GetProperty("items").EnumerateArray().Select(x => x.GetProperty("relaySessionId").GetString()));
+        var chats = items.RootElement.GetProperty("items").EnumerateArray().ToArray();
+        Assert.Equal(new[] { own, others, users }.Order(), chats.Select(x => x.GetProperty("relaySessionId").GetString()).Order());
+        Assert.True(Assert.Single(chats, x => x.GetProperty("relaySessionId").GetString() == own).GetProperty("reachable").GetBoolean());
+        foreach (var local in chats.Where(x => x.GetProperty("relaySessionId").GetString() != own))
+        {
+            Assert.False(local.GetProperty("reachable").GetBoolean());
+            Assert.False(local.TryGetProperty("provider", out _));
+        }
     }
 
     [Theory]

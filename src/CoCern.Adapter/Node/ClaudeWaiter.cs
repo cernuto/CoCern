@@ -82,7 +82,7 @@ public static class ClaudeWaiter
         var options = new AdapterOptions(enrollment.Hub.AbsoluteUri, enrollment.Credential) { PinnedFingerprint = enrollment.Fingerprint };
         using var http = new HttpClient(handler ?? RelayForwarder.CreateHandler(options), disposeHandler: handler is null) { Timeout = TimeSpan.FromSeconds(15) };
         arguments["repositoryId"] = handle.RepositoryId; arguments["sessionId"] = handle.SessionId; arguments["sessionToken"] = handle.SessionToken;
-        return await new RelayForwarder(http, options).ForwardAsync(tool, JsonSerializer.SerializeToElement(arguments), cancellationToken);
+        return await new RelayForwarder(http, options).ForwardAsync(tool, RelayForwarder.WithOrigin(JsonSerializer.SerializeToElement(arguments), background: true), cancellationToken);
     }
 
     internal static string? FormatInbox(JsonElement data, string repositoryId) => FormatInbox(data, repositoryId, null);

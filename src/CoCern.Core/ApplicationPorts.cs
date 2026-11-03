@@ -101,6 +101,8 @@ public sealed record ActivityEvent
     public string? WorkflowState { get; init; }
     /// <summary>The task a next-work offer in this call's reply pointed at, as a <see cref="Target"/>.</summary>
     public string? OfferTarget { get; init; }
+    /// <summary>Reported adapter origin only: true for internal automation, false for a model-facing call, null when unrecorded. Never authorization or proof of model execution.</summary>
+    public bool? BackgroundCall { get; init; }
 }
 
 /// <summary>Port implemented by storage: records telemetry without waiting. It never throws and drops events rather than slow a call.</summary>

@@ -26,6 +26,9 @@ public sealed class InboxWaitAttentionTests
         Assert.DoesNotContain("\"attention\":false", hub.CheckBodies[^1]);
         Assert.All(hub.CheckBodies[..^1], body => Assert.Contains("\"attention\":false", body));
         Assert.All(hub.StatusBodies, body => Assert.Contains("\"attentionDetail\":true", body));
+        Assert.All(hub.CheckBodies[..^1], body => Assert.Contains("\"backgroundCall\":true", body));
+        Assert.All(hub.StatusBodies, body => Assert.Contains("\"backgroundCall\":true", body));
+        Assert.DoesNotContain("\"backgroundCall\":true", hub.CheckBodies[^1]);
     }
 
     [Fact]

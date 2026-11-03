@@ -17,7 +17,7 @@ This page is everything you need to set up and use CoCern. Technical details, ev
 - **Standing rules.** A board's settled rules and permissions, given to every chat that opens.
 - **Search.** Tasks, notes and messages, by keyword (SQLite full-text search).
 - **Document cache.** Your repositories' docs (Markdown, text, OpenAPI), searchable by section: configured ones, every git repository under the folders you list as roots, and the repository each chat works in when it is under one of those roots. Each repository's docs are one Lucene.Net index, kept in memory by an Orleans grain: built at the first search, ranked with BM25, patched by each sync, and dropped after 30 idle minutes. Reading a section loads only that file. Synced from git commits, never your working tree.
-- **DuckDB analytics.** Every hour the hub snapshots the board and activity into DuckDB. Ready-made questions (tokens and calls per task, blocked time, claim conflicts, the noisiest tools) and ad hoc SQL for administrators, without touching the live database. Managers get an alert when a measure doubles.
+- **DuckDB analytics.** Every hour the hub snapshots the board and activity into DuckDB. Ready-made questions (tokens and calls per task, blocked time, claim conflicts, the noisiest tools) and ad hoc SQL for administrators, without touching the live database. Noisiest tools separates reported model-facing calls from background readers; older unmarked calls stay unknown. Managers get an alert when a measure doubles.
 - **Live dashboard.** Sessions, requests, logs and rules in the browser, plus one-click setup.
 
 ## Faster, with fewer tokens

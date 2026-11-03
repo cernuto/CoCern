@@ -266,7 +266,7 @@ public class AnalyticsTests
         Row(NamedQueries.ClaimConflictsByResource, "task:C-1", 1L, 0L, 1, 0);
         // A stale version (VersionConflict) is not a conflict, so C-1 counts once.
         Assert.Equal("build-agent", (await analytics.RunNamedAsync(NamedQueries.ClaimConflictsByResource, "past")).Rows[0][0]);
-        Row(NamedQueries.NoisiestTools, "task_update", 200L, 900L, 2, 9);
+        Row(NamedQueries.NoisiestTools, "task_update [unknown]", 200L, 900L, 2, 9);
         Row(NamedQueries.ManagerAssignmentLatency, "all", 20.0, 30.0, 1, 1);
         Row(NamedQueries.QualityGuardrails, "closures", 0L, 1L, 0, 1);
         Row(NamedQueries.QualityGuardrails, "reopened", 0L, 1L, 0, 1);

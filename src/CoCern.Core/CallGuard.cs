@@ -39,6 +39,7 @@ internal sealed class CallGuard(Aggregates aggregates, string incarnation)
             trace.Args = args;
             if (tool is RelayTools.TaskUpdate or RelayTools.ActionReport) trace.Usage = controls.Usage;
             (trace.ModelVisible, trace.KnownEtag) = (controls.ModelVisible, controls.KnownEtag);
+            trace.BackgroundCall = controls.BackgroundCall;
         }
         args["hubIncarnation"] = incarnation;
         call = new(caller with { IsInternal = true }, tool, definition, args, controls);

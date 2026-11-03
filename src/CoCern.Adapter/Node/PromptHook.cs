@@ -62,7 +62,7 @@ public static class PromptHook
         var options = new AdapterOptions(enrollment.Hub.AbsoluteUri, enrollment.Credential) { PinnedFingerprint = enrollment.Fingerprint };
         using var http = new HttpClient(handler ?? RelayForwarder.CreateHandler(options), disposeHandler: handler is null);
         var arguments = new JsonObject { ["repositoryId"] = handle.RepositoryId, ["sessionId"] = handle.SessionId, ["sessionToken"] = handle.SessionToken, ["attentionDetail"] = true };
-        var reply = await new RelayForwarder(http, options).ForwardAsync(RelayTools.GetStatus, JsonSerializer.SerializeToElement(arguments), cancellationToken);
+        var reply = await new RelayForwarder(http, options).ForwardAsync(RelayTools.GetStatus, RelayForwarder.WithOrigin(JsonSerializer.SerializeToElement(arguments), background: true), cancellationToken);
         if (!reply.Ok || reply.Data is not { ValueKind: JsonValueKind.Object } data || Format(data) is not { } formatted) return "";
         Remember(cache, now, formatted);
         return formatted;

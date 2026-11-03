@@ -47,7 +47,8 @@ public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
             workflow_state TEXT,
             offer_target TEXT,
             request_tokens INTEGER,
-            reply_tokens INTEGER
+            reply_tokens INTEGER,
+            background_call INTEGER
         );
         CREATE INDEX IF NOT EXISTS ix_activity_log_at ON activity_log(at_ticks);
         CREATE INDEX IF NOT EXISTS ix_activity_log_repository ON activity_log(repository_id, at_ticks);
@@ -75,19 +76,26 @@ public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
     /// Columns added to <c>activity_log</c> after schema 2 was first written. Schema 2 has not shipped, so they join it rather than a
     /// schema 3; a development database already at 2 gets them here, once, by checking <c>pragma table_info</c>.
     /// </summary>
-    private static readonly (string Column, string Type)[] LateActivityColumns = [("request_tokens", "INTEGER"), ("reply_tokens", "INTEGER")];
+    private static readonly (string Column, string Type)[] LateActivityColumns = [("request_tokens", "INTEGER"), ("reply_tokens", "INTEGER"), ("background_call", "INTEGER")];
+    // Keep the original totals and primary key. Historical totals have zero classified counts, so their origin stays unknown.
+    private static readonly string[] OriginDailyColumns = ["model_calls", "background_calls", "model_request_bytes", "background_request_bytes", "model_reply_bytes", "background_reply_bytes"];
 
     private void AddLateActivityColumns(SqliteTransaction transaction)
     {
-        var existing = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        using (var columns = Command("SELECT name FROM pragma_table_info('activity_log');", transaction))
-        using (var reader = columns.ExecuteReader())
-            while (reader.Read()) existing.Add(reader.GetString(0));
-        foreach (var (column, type) in LateActivityColumns.Where(late => !existing.Contains(late.Column)))
+        AddColumns("activity_log", LateActivityColumns);
+        AddColumns("activity_daily", OriginDailyColumns.Select(column => (column, "INTEGER NOT NULL DEFAULT 0")));
+        void AddColumns(string table, IEnumerable<(string Column, string Type)> additions)
         {
-            // The names are code constants, never caller input.
-            using var alter = Command($"ALTER TABLE activity_log ADD COLUMN {column} {type};", transaction);
-            alter.ExecuteNonQuery();
+            var existing = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            using (var columns = Command($"SELECT name FROM pragma_table_info('{table}');", transaction))
+            using (var reader = columns.ExecuteReader())
+                while (reader.Read()) existing.Add(reader.GetString(0));
+            foreach (var (column, type) in additions.Where(late => !existing.Contains(late.Column)))
+            {
+                // The names are code constants, never caller input.
+                using var alter = Command($"ALTER TABLE {table} ADD COLUMN {column} {type};", transaction);
+                alter.ExecuteNonQuery();
+            }
         }
     }
 
@@ -197,11 +205,11 @@ public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
             using var transaction = connection.BeginTransaction(deferred: false);
             using var insert = ActivityCommand("""
                 INSERT INTO activity_log(at_ticks, kind, repository_id, session_id, role, tool, ok, code, request_bytes, reply_bytes, duration_ms,
-                    input_tokens, output_tokens, request_id, target, content_hash, workflow_state, offer_target, request_tokens, reply_tokens)
+                    input_tokens, output_tokens, request_id, target, content_hash, workflow_state, offer_target, request_tokens, reply_tokens, background_call)
                 VALUES ($at, $kind, $repository, $session, $role, $tool, $ok, $code, $requestBytes, $replyBytes, $duration,
-                    $input, $output, $request, $target, $hash, $state, $offer, $requestTokens, $replyTokens);
+                    $input, $output, $request, $target, $hash, $state, $offer, $requestTokens, $replyTokens, $background);
                 """, transaction);
-            string[] names = ["$at", "$kind", "$repository", "$session", "$role", "$tool", "$ok", "$code", "$requestBytes", "$replyBytes", "$duration", "$input", "$output", "$request", "$target", "$hash", "$state", "$offer", "$requestTokens", "$replyTokens"];
+            string[] names = ["$at", "$kind", "$repository", "$session", "$role", "$tool", "$ok", "$code", "$requestBytes", "$replyBytes", "$duration", "$input", "$output", "$request", "$target", "$hash", "$state", "$offer", "$requestTokens", "$replyTokens", "$background"];
             var parameters = names.Select(name => insert.Parameters.Add(new SqliteParameter { ParameterName = name })).ToArray();
             foreach (var item in batch)
             {
@@ -209,7 +217,7 @@ public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
                 [
                     item.Timestamp.UtcTicks, item.Kind, item.RepositoryId, item.SessionId, item.Role, item.Tool, item.Ok ? 1 : 0, item.Code,
                     item.RequestBytes, item.ReplyBytes, item.DurationMilliseconds, item.InputTokens, item.OutputTokens, item.RequestId, item.Target,
-                    item.ContentHash, item.WorkflowState, item.OfferTarget, item.RequestTokens, item.ReplyTokens
+                    item.ContentHash, item.WorkflowState, item.OfferTarget, item.RequestTokens, item.ReplyTokens, item.BackgroundCall is { } background ? (background ? 1 : 0) : null
                 ];
                 for (var index = 0; index < values.Length; index++) parameters[index].Value = values[index] ?? DBNull.Value;
                 insert.ExecuteNonQuery();
@@ -238,15 +246,22 @@ public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
             var connection = _activityConnection ?? throw new ObjectDisposedException(nameof(SqliteStore));
             using var transaction = connection.BeginTransaction(deferred: false);
             using (var rollup = ActivityCommand($"""
-                INSERT INTO activity_daily(day, repository_id, kind, role, tool, calls, errors, request_bytes, reply_bytes, duration_ms, input_tokens, output_tokens)
+                INSERT INTO activity_daily(day, repository_id, kind, role, tool, calls, errors, request_bytes, reply_bytes, duration_ms, input_tokens, output_tokens,
+                    model_calls, background_calls, model_request_bytes, background_request_bytes, model_reply_bytes, background_reply_bytes)
                 SELECT date((at_ticks - {UnixEpochTicks}) / 10000000, 'unixepoch'), repository_id, kind, COALESCE(role, ''), COALESCE(tool, ''),
-                       COUNT(*), SUM(1 - ok), SUM(request_bytes), SUM(reply_bytes), SUM(duration_ms), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0)
+                       COUNT(*), SUM(1 - ok), SUM(request_bytes), SUM(reply_bytes), SUM(duration_ms), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+                       SUM(CASE WHEN background_call = 0 THEN 1 ELSE 0 END), SUM(CASE WHEN background_call = 1 THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN background_call = 0 THEN request_bytes ELSE 0 END), SUM(CASE WHEN background_call = 1 THEN request_bytes ELSE 0 END),
+                       SUM(CASE WHEN background_call = 0 THEN reply_bytes ELSE 0 END), SUM(CASE WHEN background_call = 1 THEN reply_bytes ELSE 0 END)
                 FROM activity_log WHERE at_ticks < $cutoff
                 GROUP BY 1, 2, 3, 4, 5
                 ON CONFLICT(day, repository_id, kind, role, tool) DO UPDATE SET
                     calls = calls + excluded.calls, errors = errors + excluded.errors, request_bytes = request_bytes + excluded.request_bytes,
                     reply_bytes = reply_bytes + excluded.reply_bytes, duration_ms = duration_ms + excluded.duration_ms,
-                    input_tokens = input_tokens + excluded.input_tokens, output_tokens = output_tokens + excluded.output_tokens;
+                    input_tokens = input_tokens + excluded.input_tokens, output_tokens = output_tokens + excluded.output_tokens,
+                    model_calls = model_calls + excluded.model_calls, background_calls = background_calls + excluded.background_calls,
+                    model_request_bytes = model_request_bytes + excluded.model_request_bytes, background_request_bytes = background_request_bytes + excluded.background_request_bytes,
+                    model_reply_bytes = model_reply_bytes + excluded.model_reply_bytes, background_reply_bytes = background_reply_bytes + excluded.background_reply_bytes;
                 """, transaction))
             {
                 rollup.Parameters.AddWithValue("$cutoff", cutoff);

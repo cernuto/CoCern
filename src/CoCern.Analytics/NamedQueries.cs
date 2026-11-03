@@ -105,11 +105,12 @@ public static class NamedQueries
                    count(*) FILTER (WHERE at_ticks >= $from) AS cur_n, count(*) FILTER (WHERE at_ticks < $from) AS prev_n
             FROM claim_conflicts WHERE {Window} GROUP BY resource_id ORDER BY cur DESC, key
             """,
-        // Reply bytes per tool, with its number of calls.
+        // Reply bytes and calls per tool and reported origin, including daily totals after raw retention.
         [NoisiestTools] = $"""
-            SELECT tool AS key, sum(reply_bytes) FILTER (WHERE at_ticks >= $from) AS cur, sum(reply_bytes) FILTER (WHERE at_ticks < $from) AS prev,
-                   count(*) FILTER (WHERE at_ticks >= $from) AS cur_n, count(*) FILTER (WHERE at_ticks < $from) AS prev_n
-            FROM tool_calls WHERE {Window} GROUP BY tool ORDER BY coalesce(cur, 0) DESC, key
+            SELECT tool || ' [' || CASE WHEN background_call THEN 'background' WHEN NOT background_call THEN 'model-facing' ELSE 'unknown' END || ']' AS key,
+                   sum(reply_bytes) FILTER (WHERE at_ticks >= $from) AS cur, sum(reply_bytes) FILTER (WHERE at_ticks < $from) AS prev,
+                   coalesce(sum(calls) FILTER (WHERE at_ticks >= $from), 0)::BIGINT AS cur_n, coalesce(sum(calls) FILTER (WHERE at_ticks < $from), 0)::BIGINT AS prev_n
+            FROM tool_traffic WHERE {Window} GROUP BY tool, background_call ORDER BY coalesce(cur, 0) DESC, key
             """,
         // Minutes from a task's workflow becoming ready to its first claim, for claims in the period: a proxy for how long ready work
         // waits for an owner, since the hub records no assignment.

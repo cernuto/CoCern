@@ -178,31 +178,77 @@ public sealed class MachineDirectory(IGrainFactory grains, TimeProvider? clock =
     }
 
     /// <summary>
-    /// The announced chats in <paramref name="repositories"/>, less those whose session has closed. A node's last announcement can name a session
-    /// closed since: a running node drops it at its next announce, but a PC that is off would keep listing it until it comes back. The list is
-    /// informational, so when the session directory can't be read now the announcements are shown as they are.
+    /// Open registered chats in <paramref name="repositories"/>, enriched by announced native routes. Registration alone never implies
+    /// reachability. An unavailable source leaves the other source visible, with the result marked incomplete.
     /// </summary>
     public async Task<RelayReply> DirectoryAsync(IReadOnlyList<string> repositories, CancellationToken ct)
     {
-        var reply = await CallAsync(Internal, DiscoveryOperations.Directory, new() { ["repositories"] = new JsonArray(repositories.Select(x => (JsonNode)JsonValue.Create(x)!).ToArray()) }, ct);
-        if (!reply.Ok || JsonNode.Parse(reply.DataJson) is not JsonObject data || data["items"] is not JsonArray items || items.Count == 0) return reply;
+        RelayReply reply;
+        JsonObject? announced = null;
+        try
+        {
+            reply = await CallAsync(Internal, DiscoveryOperations.Directory, new() { ["repositories"] = new JsonArray(repositories.Select(x => (JsonNode)JsonValue.Create(x)!).ToArray()) }, ct);
+            if (reply.Ok && JsonNode.Parse(reply.DataJson) is JsonObject data && data["items"] is JsonArray) announced = data;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException) { reply = Replies.Error(RelayErrorCodes.StorageFailure); }
         static string? Field(JsonNode? item, string name) => item?[name] is JsonValue value && value.TryGetValue<string>(out var text) ? text : null;
-        var open = new HashSet<(string, string)>();
-        foreach (var group in items.GroupBy(item => Field(item, "repositoryId") ?? "", StringComparer.Ordinal).Where(group => group.Key.Length > 0))
+        var items = new List<JsonNode>();
+        var seen = new HashSet<(string, string)>();
+        var incomplete = announced is null || announced["truncated"]?.GetValue<bool>() == true;
+        var anySource = announced is not null;
+        foreach (var repository in repositories.Distinct(StringComparer.Ordinal))
         {
             ct.ThrowIfCancellationRequested();
-            var ids = group.Select(item => Field(item, "relaySessionId")).OfType<string>().Distinct(StringComparer.Ordinal).ToArray();
-            var query = new SessionsOpenQuery(group.Key, ids);
-            RelayReply found;
-            try { found = await grains.GetGrain<IControlGrain>(AggregateKinds.ControlKey).ExecuteAsync(new RelayCaller(Internal.PrincipalId, false, [group.Key], true), SessionsOpenQuery.Operation, query.ToJson().ToJsonString()); }
-            catch (Exception exception) when (exception is not OperationCanceledException) { return reply; }
-            if (!found.Ok) return reply;
-            foreach (var id in JsonNode.Parse(found.DataJson)?["open"] as JsonArray ?? []) if (id is JsonValue value && value.TryGetValue<string>(out var text)) open.Add((group.Key, text));
+            var (workers, complete, available) = await DirectoryWorkersAsync(repository, ct);
+            anySource |= available;
+            incomplete |= !complete;
+            var open = workers.Select(item => Field(item, "sessionId")).OfType<string>().ToHashSet(StringComparer.Ordinal);
+            foreach (var item in announced?["items"] as JsonArray ?? [])
+                if (Field(item, "repositoryId") == repository && Field(item, "relaySessionId") is { Length: > 0 } id && (!complete || open.Contains(id)) && seen.Add((repository, id))) items.Add(item!.DeepClone());
+            foreach (var worker in workers)
+                if (Field(worker, "sessionId") is { Length: > 0 } id && seen.Add((repository, id)))
+                {
+                    var item = new JsonObject { ["repositoryId"] = repository, ["relaySessionId"] = id, ["label"] = Field(worker, "label") ?? "", ["reachable"] = false };
+                    if (Field(worker, "machineId") is { Length: > 0 } machineId) item["machineId"] = machineId;
+                    items.Add(item);
+                }
         }
-        var kept = items.Where(item => Field(item, "relaySessionId") is { } id && open.Contains((Field(item, "repositoryId") ?? "", id))).Select(item => item!.DeepClone()).ToArray();
-        if (kept.Length == items.Count) return reply;
-        data["items"] = new JsonArray(kept);
-        return reply with { DataJson = data.ToJsonString() };
+        if (!anySource) return reply;
+        RelayReply Result(int count) => Replies.Ok(new { items = items.Take(count), truncated = incomplete || count < items.Count });
+        if (Replies.FitsWire(Result(items.Count), RelayLimits.AggregateReplyBytes)) return Result(items.Count);
+        var low = 0; var high = items.Count;
+        while (low < high) { var middle = (low + high + 1) / 2; if (Replies.FitsWire(Result(middle), RelayLimits.AggregateReplyBytes)) low = middle; else high = middle - 1; }
+        return Result(low);
+    }
+
+    /// <summary>Read the existing bounded worker pages; only a complete listing can prove an announced session has closed.</summary>
+    private async Task<(List<JsonObject> Workers, bool Complete, bool Available)> DirectoryWorkersAsync(string repository, CancellationToken ct)
+    {
+        var workers = new List<JsonObject>();
+        var cursor = 0;
+        var available = false;
+        try
+        {
+            while (cursor < RelayLimits.MaxRecords)
+            {
+                ct.ThrowIfCancellationRequested();
+                var args = new JsonObject { ["repositoryId"] = repository, ["cursor"] = cursor, ["limit"] = RelayLimits.MaxPageSize };
+                var found = await grains.GetGrain<IControlGrain>(AggregateKinds.ControlKey).ExecuteAsync(new RelayCaller(Internal.PrincipalId, false, [repository], true), RelayTools.WorkerList, args.ToJsonString());
+                if (!found.Ok || JsonNode.Parse(found.DataJson) is not JsonObject data || data["items"] is not JsonArray page) break;
+                available = true;
+                foreach (var item in page.OfType<JsonObject>())
+                {
+                    if (item["sessionId"] is not JsonValue || item["repositoryId"]?.GetValue<string>() != repository) return (workers, false, available);
+                    workers.Add(item);
+                }
+                if (data["nextCursor"] is null) return (workers, data["truncated"]?.GetValue<bool>() != true, available);
+                var next = data["nextCursor"]!.GetValue<int>();
+                if (next <= cursor || next >= RelayLimits.MaxRecords) break;
+                cursor = next;
+            }
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException) { }
+        return (workers, false, available);
     }
 
     public async Task<IReadOnlySet<string>?> OwnedSessionsAsync(MachineIdentity machine, string repository, IReadOnlyCollection<string> sessionIds, CancellationToken ct)

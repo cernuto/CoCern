@@ -8,6 +8,7 @@ logs/
 *.log
 *.user
 .superpowers/
+.codex-attachments/
 *.db
 *.db-shm
 *.db-wal

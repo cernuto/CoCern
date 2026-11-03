@@ -24,7 +24,7 @@ Admin tools need a token with `IsAdministrator`. A session's `role` grants nothi
 | --- | --- | --- |
 | `session_open` | worker | Open a session for this chat; returns its private handle and the board's standing. |
 | `session_bind` | worker | Record this session's IDE tool bindings. Optional `label` renames the session (to match its chat's title) and `machineId` reports its PC, once (a later one is ignored); a bind that leaves out `binding` or `availability`, or sends `null`, keeps the current one. |
-| `worker_list` | worker | List reported workers and how fresh each report is. |
+| `worker_list` | worker | List reported worker state and freshness; use `chat_directory` to find a chat to message. |
 | `get_status` | worker | Repository and session status, including blockers and uncertain actions. |
 | `task_get` | worker | One task, or the board. |
 | `task_update` | worker | Create or update a task under `expectedVersion`. |
@@ -36,7 +36,7 @@ Admin tools need a token with `IsAdministrator`. A session's `role` grants nothi
 | `check_inbox` | worker | Read this session's inbox without consuming it. |
 | `ack` | worker | Acknowledge handled messages. |
 | `context_get`, `context_put` | worker | Read or write shared notes. Never store credentials or chat transcripts. |
-| `chat_directory` | worker | Chats on every PC, with the session ID to message and whether each is reachable now. |
+| `chat_directory` | worker | Open registered chats, including hub-local ones, with their session ID and announced direct-wake reachability. |
 | `search` | worker | Search tasks, notes and your inbox. |
 | `attention_respond` | worker | Accept, dismiss or postpone an attention offer. |
 | `standing_propose` | worker | Propose a standing line or grant. |
@@ -77,6 +77,7 @@ Every call takes `repositoryId`. Session calls also take `sessionId` and `sessio
 
 - Wait with `check_inbox` and `waitSeconds` (up to 50) instead of polling. Mail, urgent attention, or an eligible idle reminder ends the wait; the returning attention read offers one item. Internal polls consume no offers, and `attention: false` opts out of attention wakes.
 - Pass the `etag` from `task_get`, `get_status`, `worker_list`, `context_get` or `chat_directory` back as `ifNoneMatch`. An unchanged read returns only `{"unchanged":true,"etag":...}`.
+- Find task IDs with `search`, then read the needed `task_get` section. For a synchronized board, use `sinceRevision` and finish every page before saving its checkpoint. Reuse shared notes and cached documentation when the context will be needed again.
 - Acknowledge in your reply: `send_message` with `ackMessageIds`.
 - `supersede: true` replaces your previous status message; `wake: false` sends a note nobody must act on now and never causes a wake, even after the idle hold.
 - Renew claims rarely: `claim_renew` takes `leaseSeconds` up to 1800.
@@ -282,7 +283,7 @@ Each named query compares the last `days` days (`cur`, 1 to 14, default 7) with 
 | `context_by_role` | Average reply bytes per session, by role. |
 | `blocked_time` | Average hours of ended blocked spells, and the count of open spells. |
 | `claim_conflicts_by_resource` | Refused claims, by resource. |
-| `noisiest_tools` | Reply bytes, by tool. |
+| `noisiest_tools` | Reply bytes and calls, by tool and reported origin: model-facing, background or unknown. |
 | `manager_assignment_latency` | Minutes from `ready` to first claim. |
 | `quality_guardrails` | Closures, reopened tasks, and failed, abandoned and retried actions. |
 | `attention_outcomes_by_kind` | Attention offer events (shown, accepted, later and dismissed), by kind. |
@@ -291,7 +292,9 @@ Ad hoc SQL: `"name": "sql", "sql": "SELECT ..."` runs one `SELECT` over the view
 
 ## Other PCs
 
-Each joined PC runs a small background program, the **node**. It joins the hub once, lists the PC's chats in `chat_directory`, and wakes its Codex chats when mail arrives. New chats show up within about a minute. A chat that hasn't called CoCern for 7 days is no longer listed (a running Claude waiter keeps it).
+Each joined PC runs a small background program, the **node**. It joins the hub once, announces the PC's chat routes, and wakes its Codex chats when mail arrives. `chat_directory` also lists open registered sessions without a node, including hub-local chats; those rows have `reachable: false` until a direct route is announced. Existing routes are enriched within about a minute. Nodes match chats that called CoCern within the last 7 days (a running Claude waiter keeps that match fresh).
+
+Directory rows are keyed by repository and session ID. A registered row without a route keeps its reported machine ID and has no invented provider. Registration does not prove a model is running. Closed sessions are removed; revoking a node removes its route, while an otherwise open registered session remains unreachable until normal closure or expiry. `truncated: true` also marks a source that is temporarily unavailable, so absence from an incomplete list does not establish closure.
 
 ### Setup by hand
 
@@ -471,6 +474,8 @@ The dashboard provides Overview, Sessions, Analytics, Database, Logs, Standing, 
 Open **Analytics** to compare one repository over 1–14 days with the preceding equal period. Both periods end relative to the displayed hourly snapshot time, not the current hub connection time. The repository selector uses repository IDs known to the dashboard and defaults conservatively when none are present. Changing either selector fetches one combined report; an older response cannot overwrite the latest selection.
 
 The ten public named reports cover average tokens, calls and messages per task; average reply bytes per session by role; noisiest tools by reply bytes; claim conflicts by resource; quality guardrail events; attention offer events (shown, accepted, later and dismissed) by kind and outcome; average ready-to-first-claim latency in minutes (an assignment proxy); and average hours of ended blocked spells, with open blocked spells counted separately. Charts include numeric equivalents, units and sample counts. Attention event denominators are per kind and are not summed across outcome categories.
+
+Noisiest tools groups each tool by its reported adapter path: model-facing, background or unknown. Current adapters mark ordinary MCP calls separately from internal inbox, watcher and hook reads; an explicit `attention: false` alone does not make a model-facing call background. Older adapters and unmarked raw callers remain unknown. Origin is telemetry, not proof that a model ran or consumed a reply. Counts and bytes survive raw-log retention through daily totals, whose boundary days have day precision rather than exact rolling timestamps.
 
 `GET /dashboard/api/analytics?repositoryId=cocern&days=7` returns the fixed reports under the existing dashboard viewer policy. It accepts no SQL and preserves the existing analytics row and payload limits. Missing snapshots, unavailable analytics, per-report failures and truncated results are shown explicitly. Unknown values display as **Not measured**; measured zeros remain **0**. History coverage always shows as unknown, because the hub doesn't record when tracking began, so a short history and incomplete comparison periods are labeled as possible; no sample data is substituted.
 

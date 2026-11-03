@@ -131,9 +131,9 @@ internal static class RelayRequestGuard
 /// The adapter's call controls: fields that steer how a call is composed or recorded and never reach an aggregate. <see cref="Take"/>
 /// reads and removes them (after <see cref="RelayRequestGuard.Validate"/> has checked their shapes).
 /// </summary>
-internal sealed record CallControls(bool OfferWanted, bool StatusDetail, bool PageSeen, string[] SeenIds, string? KnownEtag, JsonObject? Usage, bool ModelVisible)
+internal sealed record CallControls(bool OfferWanted, bool StatusDetail, bool PageSeen, string[] SeenIds, string? KnownEtag, JsonObject? Usage, bool ModelVisible, bool? BackgroundCall)
 {
-    private static readonly string[] Fields = ["usage", "attention", "attentionDetail", "attentionStatus", "maxHoldMinutes", "seen", "seenMessageIds", "knownEtag"];
+    private static readonly string[] Fields = ["usage", "attention", "attentionDetail", "attentionStatus", "maxHoldMinutes", "seen", "seenMessageIds", "knownEtag", "backgroundCall"];
 
     public static CallControls Take(JsonObject args)
     {
@@ -148,7 +148,9 @@ internal sealed record CallControls(bool OfferWanted, bool StatusDetail, bool Pa
             KnownEtag: CallTelemetry.Bounded(JsonFields.Text(args, "knownEtag"), RelayLimits.MaxKnownEtagLength),
             // Reported usage is telemetry only.
             Usage: args["usage"] as JsonObject,
-            ModelVisible: offerWanted && !args.ContainsKey("waitSeconds"));
+            ModelVisible: offerWanted && !args.ContainsKey("waitSeconds"),
+            // This untrusted report affects telemetry only. Unmarked older adapters and malformed reports remain unknown.
+            BackgroundCall: args["backgroundCall"] is JsonValue origin && origin.TryGetValue<bool>(out var background) ? background : null);
         foreach (var field in Fields) args.Remove(field);
         return controls;
     }

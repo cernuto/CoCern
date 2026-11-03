@@ -39,6 +39,14 @@ public sealed class SessionGuidanceTests
     }
 
     [Fact]
+    public void Server_guidance_points_to_reads_of_only_what_changed()
+    {
+        // Rereading whole tasks and boards was the largest share of hub reply bytes; the instructions name the cheaper reads once.
+        foreach (var term in new[] { "ifNoneMatch", "sinceRevision", "task_get section", "ackMessageIds", "chat_directory" })
+            Assert.Contains(term, AdapterInstructions.Server, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Retrying_session_open_with_the_same_requestId_and_arguments_returns_the_same_session()
     {
         using var host = new HostBuilder().ConfigureLogging(log => log.ClearProviders()).UseOrleans(silo => silo

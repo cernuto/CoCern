@@ -278,6 +278,7 @@ public sealed class AdapterTests
             {
                 Assert.Equal(("s-hook", "synthetic-token-hook", true), (body.RootElement.GetProperty("sessionId").GetString(), body.RootElement.GetProperty("sessionToken").GetString(), body.RootElement.GetProperty("attentionDetail").GetBoolean()));
                 Assert.DoesNotContain("UNTRUSTED", sent);
+                Assert.True(body.RootElement.GetProperty("backgroundCall").GetBoolean());
             }
             // Within 30 seconds the cached line is printed without calling the hub; after that the hub is asked again.
             clock.Now += TimeSpan.FromSeconds(29);

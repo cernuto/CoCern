@@ -30,6 +30,8 @@ public sealed class WakeTests
         using var fixture = new Fixture();
         Assert.Equal("empty", await fixture.Reconcile());
         Assert.Empty(fixture.Dispatcher.Prompts);
+        Assert.Equal(3, fixture.CallBodies.Count);
+        Assert.All(fixture.CallBodies, body => { using var json = JsonDocument.Parse(body); Assert.True(json.RootElement.GetProperty("backgroundCall").GetBoolean()); });
     }
 
     [Theory]
@@ -407,6 +409,7 @@ public sealed class WakeTests
         public readonly List<int> Cursors = [];
         /// <summary>The body of every check_inbox request.</summary>
         public readonly List<string> InboxBodies = [];
+        public readonly List<string> CallBodies = [];
         public Fixture()
         {
             Directory.CreateDirectory(_directory);
@@ -444,6 +447,7 @@ public sealed class WakeTests
             {
                 Assert.Equal("client-secret", request.Headers.Authorization?.Parameter);
                 var body = await request.Content!.ReadAsStringAsync(cancellationToken);
+                fixture.CallBodies.Add(body);
                 if (request.RequestUri!.AbsolutePath.EndsWith("check_inbox")) fixture.InboxBodies.Add(body);
                 using var args = JsonDocument.Parse(body);
                 Assert.Equal("session-secret", args.RootElement.GetProperty("sessionToken").GetString());

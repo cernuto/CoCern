@@ -29,6 +29,7 @@ CREATE VIEW activity AS
 SELECT id, at_ticks, cocern_at(at_ticks) AS at_time, kind, repository_id, session_id, role, tool, ok = 1 AS ok, code,
        request_bytes, reply_bytes, duration_ms, input_tokens, output_tokens, request_id, target, workflow_state, offer_target,
        request_tokens, reply_tokens, coalesce(request_tokens, 0) + coalesce(reply_tokens, 0) AS relay_tokens,
+       background_call = 1 AS background_call,
        CASE WHEN target LIKE 'task:%' THEN url_decode(split_part(target, '/', 2)) END AS board_id,
        CASE WHEN target LIKE 'task:%' THEN url_decode(split_part(target, '/', 3)) END AS task_id,
        CASE WHEN target LIKE 'resource:%' THEN url_decode(split_part(target, '/', 2)) END AS resource_id
@@ -36,6 +37,19 @@ FROM relay.activity_log;
 
 -- One row per public tool call.
 CREATE VIEW tool_calls AS SELECT * EXCLUDE (kind) FROM activity WHERE kind = 'call';
+
+-- Traffic totals survive raw retention. Daily timestamps have day precision; unclassified historical totals stay unknown.
+-- Reported origin describes the adapter path, not whether a model actually executed or consumed the reply.
+CREATE VIEW tool_traffic AS
+SELECT repository_id, at_ticks, tool, background_call, 1::BIGINT AS calls, request_bytes, reply_bytes FROM tool_calls
+UNION ALL
+SELECT d.repository_id, cocern_ticks(d.day), d.tool, t.background_call, t.calls, t.request_bytes, t.reply_bytes
+FROM relay.activity_daily d, LATERAL (VALUES
+    (false, d.model_calls, d.model_request_bytes, d.model_reply_bytes),
+    (true, d.background_calls, d.background_request_bytes, d.background_reply_bytes),
+    (NULL::BOOLEAN, d.calls - d.model_calls - d.background_calls, d.request_bytes - d.model_request_bytes - d.background_request_bytes, d.reply_bytes - d.model_reply_bytes - d.background_reply_bytes)
+) t(background_call, calls, request_bytes, reply_bytes)
+WHERE d.kind = 'call' AND t.calls > 0;
 
 -- One row per reply over its token budget: code 'over' (measure-only), 'over:attention' or 'over:nextWork', or 'step1' to 'step3' (compacted).
 CREATE VIEW budget_events AS
