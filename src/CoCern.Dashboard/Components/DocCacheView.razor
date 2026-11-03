@@ -87,6 +87,17 @@
     [Parameter, EditorRequired] public DashboardDocCache Cache { get; set; } = new();
     [Parameter] public DateTimeOffset Now { get; set; }
 
+    // The page re-renders every second and gets a new snapshot every two; up to a few hundred documents are redrawn only when what they
+    // show changed (see DocCacheRender).
+    private int _key;
+    private int? _shown;
+
+    protected override void OnParametersSet() => _key = DocCacheRender.Key(Cache, Now);
+
+    protected override bool ShouldRender() => _key != _shown;
+
+    protected override void OnAfterRender(bool firstRender) => _shown = _key;
+
     private bool IsFirstRepository(DashboardDocGrain directory) =>
         directory == Cache.Grains.FirstOrDefault(grain => grain.Kind == "Directory" && grain.Documents > 0);
 
