@@ -44,7 +44,7 @@ internal sealed class DashboardConnect(IConfiguration configuration, IHostEnviro
             using var reply = JsonDocument.Parse(output.Trim() is { Length: > 0 } text ? text : "{}");
             if (reply.RootElement.TryGetProperty("error", out var error))
                 return new() { Unavailable = error.ValueKind == JsonValueKind.String ? error.GetString() : "The adapter failed." };
-            return new() { Clients = reply.RootElement.TryGetProperty("clients", out var clients) ? clients.Deserialize<DashboardConnectClient[]>(Web) ?? [] : [] };
+            return new() { Clients = reply.RootElement.TryGetProperty("clients", out var clients) ? (clients.Deserialize<DashboardConnectClient[]>(Web) ?? []).Select(PageState).ToArray() : [] };
         }
         catch (Exception exception) when (exception is OperationCanceledException or JsonException)
         {
@@ -52,6 +52,17 @@ internal sealed class DashboardConnect(IConfiguration configuration, IHostEnviro
             return new() { Unavailable = "The adapter did not answer. Try again." };
         }
     }
+
+    /// <summary>
+    /// The page shows four states. An entry the adapter reports <c>outdated</c> (this hub's, but pinned to an old address or certificate) is one to
+    /// connect, so the page offers Connect; one it <c>updated</c> was just changed, so the page says to restart the app, as for one just added.
+    /// </summary>
+    internal static DashboardConnectClient PageState(DashboardConnectClient client) => client.State switch
+    {
+        "outdated" => client with { State = "available" },
+        "updated" => client with { State = "added" },
+        _ => client
+    };
 
     /// <summary>The published adapter if there is one (it outlives rebuilds), else the build output beside the hub's.</summary>
     internal string? AdapterDll()
