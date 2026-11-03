@@ -111,21 +111,21 @@ public sealed class ControlState(JsonObject json)
 /// </summary>
 public sealed class DirectoryEntry(JsonObject json)
 {
-    // The record's fields, as SessionRecord and SessionPresence write them.
-    public const string SessionIdKey = "sessionId";
-    public const string PrincipalIdKey = "principalId";
-    public const string RepositoryIdKey = "repositoryId";
-    public const string SessionTokenKey = ReadModels.SessionTokenKey;
-    public const string RoleKey = "role";
-    public const string HubIncarnationKey = "hubIncarnation";
-    public const string MachineIdKey = "machineId";
-    public const string LabelKey = "label";
-    public const string BindingKey = "binding";
-    public const string BindingVersionKey = "bindingVersion";
-    public const string ObservedAtKey = "observedAt";
-    public const string FreshUntilKey = "freshUntil";
-    public const string AvailabilityKey = "availability";
-    public const string ActiveAtKey = "activeAt";
+    // The record's fields, under the names SessionRecord and SessionPresence write them.
+    public const string SessionIdKey = SessionRecord.SessionIdKey;
+    public const string PrincipalIdKey = SessionRecord.PrincipalIdKey;
+    public const string RepositoryIdKey = SessionRecord.RepositoryIdKey;
+    public const string SessionTokenKey = SessionRecord.SessionTokenKey;
+    public const string RoleKey = SessionRecord.RoleKey;
+    public const string HubIncarnationKey = SessionPresence.HubIncarnationKey;
+    public const string MachineIdKey = SessionPresence.MachineIdKey;
+    public const string LabelKey = SessionPresence.LabelKey;
+    public const string BindingKey = SessionPresence.BindingKey;
+    public const string BindingVersionKey = SessionPresence.BindingVersionKey;
+    public const string ObservedAtKey = SessionPresence.ObservedAtKey;
+    public const string FreshUntilKey = SessionPresence.FreshUntilKey;
+    public const string AvailabilityKey = SessionPresence.AvailabilityKey;
+    public const string ActiveAtKey = SessionRecord.ActiveAtKey;
 
     // The directory's own marks.
     public const string OwnsWorkKey = "ownsWork";

@@ -180,3 +180,68 @@ public sealed record SessionActivity(string RepositoryId, string SessionId, Date
         return read.Result(new SessionActivity(read.Text("repositoryId"), read.Text("sessionId"), read.Date("activeAt")));
     }
 }
+
+/// <summary>
+/// <see cref="Operations.SessionTargetWatch"/>: a board (<see cref="BoardKey"/>, <see cref="BoardId"/>) has a task that now targets this
+/// session, and asks to hear when it closes (<see cref="SessionClosed"/>), so the task does not wait for a session that will never claim
+/// it. Retried until it lands: the board asks once, when the target is named, and a lost watch would leave the task waiting.
+/// </summary>
+public sealed record SessionTargetWatch(string RepositoryId, string SessionId, string BoardKey, string BoardId) : IEffectMessage<SessionTargetWatch>
+{
+    public static string Operation => Operations.SessionTargetWatch;
+    public static string TargetKind => AggregateKinds.Session;
+    public static DeliveryClass Delivery => DeliveryClass.Retry;
+
+    public JsonObject ToJson() => new() { ["repositoryId"] = RepositoryId, ["sessionId"] = SessionId, ["boardKey"] = BoardKey, ["boardId"] = BoardId };
+
+    public static Decoding<SessionTargetWatch> Decode(JsonObject payload)
+    {
+        var read = new MessageReader(payload);
+        return read.Result(new SessionTargetWatch(read.Text("repositoryId"), read.Text("sessionId"), read.Text("boardKey"), read.Text("boardId")));
+    }
+}
+
+/// <summary>
+/// <see cref="Operations.Verify"/>: before a call that presents a session handle (<see cref="SessionId"/>, <see cref="SessionToken"/>), the
+/// hub asks the session to check it, and gets the session's record back: its binding (current only for this hub's
+/// <see cref="HubIncarnation"/>), role, machine and the standing it last received. The session also reports its activity, at most hourly.
+/// </summary>
+public sealed record SessionVerify(string RepositoryId, string SessionId, string SessionToken, string? HubIncarnation = null) : IInternalRequest<SessionVerify>
+{
+    public static string Operation => Operations.Verify;
+    public static string TargetKind => AggregateKinds.Session;
+
+    public JsonObject ToJson()
+    {
+        var json = new JsonObject { ["repositoryId"] = RepositoryId, ["sessionId"] = SessionId, ["sessionToken"] = SessionToken };
+        if (HubIncarnation is not null) json["hubIncarnation"] = HubIncarnation;
+        return json;
+    }
+
+    public static Decoding<SessionVerify> Decode(JsonObject payload)
+    {
+        var read = new MessageReader(payload);
+        return read.Result(new SessionVerify(read.Text("repositoryId"), read.Text("sessionId"), read.Text("sessionToken"), read.OptionalText("hubIncarnation")));
+    }
+}
+
+/// <summary>
+/// <see cref="Operations.StandingSeen"/>: the session (its handle: <see cref="SessionId"/>, <see cref="SessionToken"/>) received board
+/// <see cref="BoardId"/>'s standing at <see cref="StandingRevision"/>, so later replies carry that board's standing only when it changed.
+/// </summary>
+public sealed record StandingSeen(string RepositoryId, string SessionId, string SessionToken, string BoardId, long StandingRevision) : IInternalRequest<StandingSeen>
+{
+    public static string Operation => Operations.StandingSeen;
+    public static string TargetKind => AggregateKinds.Session;
+
+    public JsonObject ToJson() => new()
+    {
+        ["repositoryId"] = RepositoryId, ["sessionId"] = SessionId, ["sessionToken"] = SessionToken, ["boardId"] = BoardId, ["standingRevision"] = StandingRevision
+    };
+
+    public static Decoding<StandingSeen> Decode(JsonObject payload)
+    {
+        var read = new MessageReader(payload);
+        return read.Result(new StandingSeen(read.Text("repositoryId"), read.Text("sessionId"), read.Text("sessionToken"), read.Text("boardId"), read.Number("standingRevision", minimum: 0)));
+    }
+}

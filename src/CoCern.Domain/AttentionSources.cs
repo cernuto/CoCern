@@ -1,5 +1,7 @@
 using System.Text.Json.Nodes;
 using CoCern.Contracts;
+using CoCern.Domain.Messages;
+using CoCern.Domain.State;
 using static CoCern.Domain.JsonFields;
 
 namespace CoCern.Domain;
@@ -29,23 +31,23 @@ internal static class AttentionSources
         var revision = Number(context.State, "taskRevision") + 1;
         var workflow = task["workflow"] as JsonObject;
         var (was, now) = (prior is null ? "" : Text(prior, "state"), workflow is null ? "" : Text(workflow, "state"));
-        var priority = workflow is null ? 0 : Number(workflow, "priority");
+        var priority = AttentionWeights.PriorityLevel(workflow is null ? 0 : Number(workflow, "priority"));
         // Read only when an item needs them: the tasks that depend on this one, and whether one of them is claimed by another session,
         // which from a manager's view means this task blocks someone.
         var dependents = new Lazy<JsonObject[]>(() => tasks.Select(x => x.Value).OfType<JsonObject>().Where(other => other["workflow"] is JsonObject flow && TaskWorkflow.Dependencies(flow).Contains(taskId, StringComparer.Ordinal)).ToArray());
         bool Blocking() => dependents.Value.Any(other => Text(other, "owner") is { Length: > 0 } owner && owner != Text(task, "owner") && Date(other, "leaseUntil") > context.Now);
-        JsonObject Item(string kind) => new() { ["kind"] = kind, ["taskId"] = taskId, ["priority"] = priority, ["revision"] = revision };
+        AttentionContent Item(string kind) => new() { Kind = kind, TaskId = taskId, Priority = priority, Revision = revision };
 
         if (now == "blocked" && (was != "blocked" || BlockerIds(prior) != BlockerIds(workflow)))
         {
-            var blockers = (workflow!["blockers"] as JsonArray ?? []).OfType<JsonObject>().OrderBy(blocker => BlockerRank(Text(blocker, "kind"))).ToArray();
-            var item = Item(AttentionKinds.Blocked);
-            if (blockers.FirstOrDefault() is { } first) { item["blocker"] = Text(first, "kind"); item["note"] = Text(first, "summary"); }
-            if (Blocking()) item["blocking"] = true;
-            item["refs"] = new JsonArray(dependents.Value.Select(other => (JsonNode)Text(other, "taskId")).ToArray());
-            ToManagers(context, Operations.AttentionRaise, item);
+            var first = (workflow!["blockers"] as JsonArray ?? []).OfType<JsonObject>().OrderBy(blocker => BlockerRank(Text(blocker, "kind"))).FirstOrDefault();
+            ToManagers(context, Item(AttentionKinds.Blocked) with
+            {
+                Blocker = first is null ? null : Text(first, "kind"), Note = first is null ? null : Text(first, "summary"), Blocking = Blocking(),
+                Refs = dependents.Value.Select(other => Text(other, "taskId")).ToArray()
+            });
         }
-        else if (was == "blocked" && now != "blocked") ToManagers(context, Operations.AttentionClose, Kinds(Item(AttentionKinds.Blocked), AttentionKinds.Blocked));
+        else if (was == "blocked" && now != "blocked") ToManagers(context, Kinds(Item(AttentionKinds.Blocked), AttentionKinds.Blocked));
 
         if (failedActions.Count > 0 || abandonedActions.Count > 0 || replacedActions.Count > 0)
         {
@@ -53,39 +55,34 @@ internal static class AttentionSources
             var actions = ObjectAt(task, "actions");
             string[] Still(string status) => actions.Where(x => x.Value is JsonObject action && Text(action, "status") == status).Select(x => x.Key).Order(StringComparer.Ordinal).ToArray();
             (failedActions, abandonedActions) = (Still("failed"), Still(TaskActions.Abandoned));
-            if (failedActions.Count == 0 && abandonedActions.Count == 0) ToManagers(context, Operations.AttentionClose, Kinds(Item(AttentionKinds.Failed), AttentionKinds.Failed));
+            if (failedActions.Count == 0 && abandonedActions.Count == 0) ToManagers(context, Kinds(Item(AttentionKinds.Failed), AttentionKinds.Failed));
         }
         if (failedActions.Count > 0 || abandonedActions.Count > 0)
         {
-            var item = Item(AttentionKinds.Failed);
             var parts = new List<string>();
             if (failedActions.Count > 0) parts.Add("action " + string.Join(", ", failedActions) + " failed");
             if (abandonedActions.Count > 0) parts.Add("action " + string.Join(", ", abandonedActions) + " abandoned by recovery; its external effects are unknown");
-            item["note"] = string.Join("; ", parts);
-            if (Blocking()) item["blocking"] = true;
-            ToManagers(context, Operations.AttentionRaise, item);
+            ToManagers(context, Item(AttentionKinds.Failed) with { Note = string.Join("; ", parts), Blocking = Blocking() });
         }
 
         if (now == "completed" && was != "completed")
         {
-            ToManagers(context, Operations.AttentionClose, Kinds(Item(AttentionKinds.Blocked), AttentionKinds.Blocked, AttentionKinds.Failed));
-            var review = Item(AttentionKinds.ReviewReady);
-            review["note"] = "completed with " + ((workflow!["criteria"] as JsonArray)?.Count ?? 0) + " criteria passed; review the evidence";
-            ToManagers(context, Operations.AttentionRaise, review);
+            ToManagers(context, Kinds(Item(AttentionKinds.Blocked), AttentionKinds.Blocked, AttentionKinds.Failed));
+            ToManagers(context, Item(AttentionKinds.ReviewReady) with { Note = "completed with " + ((workflow!["criteria"] as JsonArray)?.Count ?? 0) + " criteria passed; review the evidence" });
             // Related work and duplicate warnings were raised to the claimer; the task is closed now.
             if (Text(task, "owner") is { Length: > 0 } owner)
-                Emit(context, owner, Operations.AttentionClose, new JsonObject { ["subject"] = taskId, ["kinds"] = new JsonArray(AttentionKinds.RelatedWork, AttentionKinds.DuplicateWarning), ["revision"] = revision });
+                Emit(context, owner, new AttentionSelection { Subject = taskId, Kinds = [AttentionKinds.RelatedWork, AttentionKinds.DuplicateWarning], Revision = revision });
             foreach (var id in unblocked)
             {
                 if (tasks[id]?["workflow"] is not JsonObject next || Text(next, "targetSessionId") is not { Length: > 0 } target || target == context.SessionId) continue;
-                Emit(context, target, Operations.AttentionRaise, new JsonObject
+                Emit(context, target, new AttentionContent
                 {
-                    ["kind"] = AttentionKinds.NextWork, ["taskId"] = id, ["priority"] = Number(next, "priority"), ["note"] = "ready: " + taskId + " completed",
-                    ["refs"] = new JsonArray(taskId), ["revision"] = revision
+                    Kind = AttentionKinds.NextWork, TaskId = id, Priority = AttentionWeights.PriorityLevel(Number(next, "priority")), Note = "ready: " + taskId + " completed",
+                    Refs = [taskId], Revision = revision
                 });
             }
         }
-        else if (was == "completed" && now != "completed") ToManagers(context, Operations.AttentionClose, Kinds(Item(AttentionKinds.ReviewReady), AttentionKinds.ReviewReady));
+        else if (was == "completed" && now != "completed") ToManagers(context, Kinds(Item(AttentionKinds.ReviewReady), AttentionKinds.ReviewReady));
     }
 
     /// <summary>
@@ -95,30 +92,27 @@ internal static class AttentionSources
     public static void OnClaim(AggregateContext context, JsonObject task)
     {
         if (task["workflow"] is not JsonObject workflow || Text(workflow, "targetSessionId") is not { Length: > 0 } target) return;
-        Emit(context, target, Operations.AttentionClose, new JsonObject
-        {
-            ["taskId"] = Text(task, "taskId"), ["kinds"] = new JsonArray(AttentionKinds.NextWork), ["revision"] = Number(context.State, "taskRevision") + 1
-        });
+        Emit(context, target, new AttentionSelection { TaskId = Text(task, "taskId"), Kinds = [AttentionKinds.NextWork], Revision = Number(context.State, "taskRevision") + 1 });
     }
 
     /// <summary>A claim rolled back (a resource was busy) offers the task to its target again, since the claim closed that offer.</summary>
     public static void OnUnclaim(AggregateContext context, JsonObject task)
     {
         if (task["workflow"] is not JsonObject workflow || Text(workflow, "state") != "ready" || Text(workflow, "targetSessionId") is not { Length: > 0 } target) return;
-        Emit(context, target, Operations.AttentionRaise, new JsonObject
+        Emit(context, target, new AttentionContent
         {
-            ["kind"] = AttentionKinds.NextWork, ["taskId"] = Text(task, "taskId"), ["priority"] = Number(workflow, "priority"), ["note"] = "ready again: a claim was rolled back",
-            ["revision"] = Number(context.State, "taskRevision") + 1
+            Kind = AttentionKinds.NextWork, TaskId = Text(task, "taskId"), Priority = AttentionWeights.PriorityLevel(Number(workflow, "priority")), Note = "ready again: a claim was rolled back",
+            Revision = Number(context.State, "taskRevision") + 1
         });
     }
 
     /// <summary>A new proposal is raised to the managers; each proposal ID is raised once (revision 1) and closed once (revision 2).</summary>
     public static void OnProposal(AggregateContext context, string proposalId, string note) =>
-        ToManagers(context, Operations.AttentionRaise, new JsonObject { ["kind"] = AttentionKinds.StandingProposal, ["subject"] = proposalId, ["note"] = note, ["revision"] = 1 });
+        ToManagers(context, new AttentionContent { Kind = AttentionKinds.StandingProposal, Subject = proposalId, Note = note, Revision = 1 });
 
     /// <summary>An approved or rejected proposal's item is closed at the managers.</summary>
     public static void OnProposalDecided(AggregateContext context, string proposalId) =>
-        ToManagers(context, Operations.AttentionClose, new JsonObject { ["subject"] = proposalId, ["kinds"] = new JsonArray(AttentionKinds.StandingProposal), ["revision"] = 2 });
+        ToManagers(context, new AttentionSelection { Subject = proposalId, Kinds = [AttentionKinds.StandingProposal], Revision = 2 });
 
     /// <summary>
     /// A lock's due check, run twice per lease while its holder has an action in flight. Shortly before the lease ends the holder gets one
@@ -128,33 +122,33 @@ internal static class AttentionSources
     public static void OnLeaseCheck(AggregateContext context, string resourceId)
     {
         var state = context.State;
-        var holder = Text(state, "holder");
-        var lease = Text(state, "leaseUntil");
+        var holder = Text(state, LockState.HolderKey);
+        var lease = Text(state, LockState.LeaseUntilKey);
         if (holder.Length == 0 || lease.Length == 0) return;
-        var action = (state["blockers"] as JsonObject ?? new JsonObject()).FirstOrDefault(x => x.Value is JsonObject blocker && Text(blocker, "sessionId") == holder);
+        var action = (state[LockState.BlockersKey] as JsonObject ?? new JsonObject()).FirstOrDefault(x => x.Value is JsonObject blocker && Text(blocker, Blocker.SessionIdKey) == holder);
         if (action.Key is null) return;
         var (boardId, taskId, actionId) = CoordinationStateMachine.ParseActionKey(action.Key);
         // Remembered so the closes name the same task: a close guards only the key it names, and the raises carry the task.
-        state["warnedTask"] = new JsonObject { ["boardId"] = boardId, ["taskId"] = taskId };
-        JsonObject Item(string kind, string note) => new()
+        state[LockState.WarnedTaskKey] = new JsonObject { [LockState.WarnedBoardIdKey] = boardId, [LockState.WarnedTaskIdKey] = taskId };
+        AttentionContent Item(string kind, string note) => new()
         {
-            ["kind"] = kind, ["taskId"] = taskId, ["boardId"] = boardId, ["subject"] = resourceId, ["priority"] = AttentionWeights.High, ["note"] = note, ["revision"] = NextLockRevision(state)
+            Kind = kind, TaskId = taskId, BoardId = boardId, Subject = resourceId, Priority = AttentionWeights.High, Note = note, Revision = NextLockRevision(state)
         };
-        if (Date(state, "leaseUntil") > context.Now)
+        if (Date(state, LockState.LeaseUntilKey) > context.Now)
         {
-            if (Text(state, "warnedLease") == lease) return;
-            state["warnedLease"] = lease;
-            Emit(context, holder, Operations.AttentionRaise, Item(AttentionKinds.ClaimExpiring, "claim on " + resourceId + " ends " + lease + " with an action in flight; renew it"));
+            if (Text(state, LockState.WarnedLeaseKey) == lease) return;
+            state[LockState.WarnedLeaseKey] = lease;
+            Emit(context, holder, Item(AttentionKinds.ClaimExpiring, "claim on " + resourceId + " ends " + lease + " with an action in flight; renew it"));
             return;
         }
-        if (Text(state, "interruptedLease") == lease) return;
-        state["interruptedLease"] = lease;
-        if (state.ContainsKey("warnedLease"))
-            Emit(context, holder, Operations.AttentionClose, WarnedClose(state, resourceId, AttentionKinds.ClaimExpiring));
-        state["warnedLease"] = lease;
+        if (Text(state, LockState.InterruptedLeaseKey) == lease) return;
+        state[LockState.InterruptedLeaseKey] = lease;
+        if (state.ContainsKey(LockState.WarnedLeaseKey))
+            Emit(context, holder, WarnedClose(state, resourceId, AttentionKinds.ClaimExpiring));
+        state[LockState.WarnedLeaseKey] = lease;
         var note = "claim on " + resourceId + " ended with action " + actionId + " unresolved; report its outcome";
-        Emit(context, holder, Operations.AttentionRaise, Item(AttentionKinds.Interrupted, note));
-        ToManagers(context, Operations.AttentionRaise, Item(AttentionKinds.Interrupted, note));
+        Emit(context, holder, Item(AttentionKinds.Interrupted, note));
+        ToManagers(context, Item(AttentionKinds.Interrupted, note));
     }
 
     /// <summary>
@@ -164,19 +158,18 @@ internal static class AttentionSources
     public static void OnLeaseSettled(AggregateContext context, string holder, string resourceId)
     {
         var state = context.State;
-        var interrupted = state.Remove("interruptedLease");
-        if (!state.Remove("warnedLease") || holder.Length == 0) { state.Remove("warnedTask"); return; }
-        Emit(context, holder, Operations.AttentionClose, WarnedClose(state, resourceId, AttentionKinds.ClaimExpiring, AttentionKinds.Interrupted));
-        if (interrupted) ToManagers(context, Operations.AttentionClose, WarnedClose(state, resourceId, AttentionKinds.Interrupted));
-        state.Remove("warnedTask");
+        var interrupted = state.Remove(LockState.InterruptedLeaseKey);
+        if (!state.Remove(LockState.WarnedLeaseKey) || holder.Length == 0) { state.Remove(LockState.WarnedTaskKey); return; }
+        Emit(context, holder, WarnedClose(state, resourceId, AttentionKinds.ClaimExpiring, AttentionKinds.Interrupted));
+        if (interrupted) ToManagers(context, WarnedClose(state, resourceId, AttentionKinds.Interrupted));
+        state.Remove(LockState.WarnedTaskKey);
     }
 
     /// <summary>A close for the lock's warned items, naming the task they were raised for.</summary>
-    private static JsonObject WarnedClose(JsonObject state, string resourceId, params string[] kinds)
+    private static AttentionSelection WarnedClose(JsonObject state, string resourceId, params string[] kinds)
     {
-        var close = new JsonObject { ["subject"] = resourceId, ["kinds"] = new JsonArray(kinds.Select(kind => (JsonNode)kind).ToArray()), ["revision"] = NextLockRevision(state) };
-        if (state["warnedTask"] is JsonObject task) { close["taskId"] = Text(task, "taskId"); close["boardId"] = Text(task, "boardId"); }
-        return close;
+        var close = new AttentionSelection { Subject = resourceId, Kinds = kinds, Revision = NextLockRevision(state) };
+        return state[LockState.WarnedTaskKey] is JsonObject task ? close with { TaskId = Text(task, LockState.WarnedTaskIdKey), BoardId = Text(task, LockState.WarnedBoardIdKey) } : close;
     }
 
     /// <summary>
@@ -194,40 +187,42 @@ internal static class AttentionSources
 
     private static long NextLockRevision(JsonObject state)
     {
-        var revision = Number(state, "attentionRevision") + 1;
-        state["attentionRevision"] = revision;
+        var revision = Number(state, LockState.AttentionRevisionKey) + 1;
+        state[LockState.AttentionRevisionKey] = revision;
         return revision;
     }
 
-    /// <summary>The board and task of an action key (<see cref="CoordinationStateMachine.ActionKey"/>): repository/board/task/action/attempt, each escaped.</summary>
     /// <summary>A provider rejection ranks first and a coordinator hold last, so the item takes the most urgent blocker's kind.</summary>
     private static int BlockerRank(string kind) => kind == AttentionWeights.ProviderRejection ? 0 : kind == AttentionWeights.CoordinatorHold ? 2 : 1;
 
     private static string BlockerIds(JsonObject? workflow) =>
         string.Join("\n", (workflow?["blockers"] as JsonArray ?? []).OfType<JsonObject>().Select(blocker => Text(blocker, "id")).Order(StringComparer.Ordinal));
 
-    private static JsonObject Kinds(JsonObject item, params string[] kinds)
-    {
-        var close = new JsonObject { ["taskId"] = item["taskId"]!.DeepClone(), ["revision"] = item["revision"]!.DeepClone() };
-        close["kinds"] = new JsonArray(kinds.Select(kind => (JsonNode)kind).ToArray());
-        return close;
-    }
+    /// <summary>The close of <paramref name="kinds"/> for the task an item was raised for, at its revision.</summary>
+    private static AttentionSelection Kinds(AttentionContent item, params string[] kinds) => new() { TaskId = item.TaskId, Revision = item.Revision, Kinds = kinds };
 
-    internal static void Emit(AggregateContext context, string sessionId, string operation, JsonObject item)
-    {
-        item["repositoryId"] = context.Repository;
-        if (Text(context.Args, "boardId") is { Length: > 0 } board && !item.ContainsKey("boardId")) item["boardId"] = board;
-        context.Emit(AggregateKinds.Session, sessionId, operation, item);
-    }
+    /// <summary>
+    /// Raises <paramref name="item"/> at one session through this aggregate's outbox; a standing order's raise names its order and run. The
+    /// item is on the call's board unless it names its own.
+    /// </summary>
+    internal static void Emit(AggregateContext context, string sessionId, AttentionContent item, string? orderId = null, long? orderRun = null) =>
+        context.Send(sessionId, new AttentionRaise(context.Repository, item.BoardId is null && CallBoard(context) is { } board ? item with { BoardId = board } : item, orderId, orderRun));
 
-    /// <summary>Passes the effect to every manager session in the repository. A raise skips the session that caused it; a close reaches all.</summary>
-    internal static void ToManagers(AggregateContext context, string operation, JsonObject item)
-    {
-        item["repositoryId"] = context.Repository;
-        if (Text(context.Args, "boardId") is { Length: > 0 } board) item["boardId"] = board;
-        context.Emit(AggregateKinds.Control, AggregateKinds.ControlKey, Operations.AttentionRoute, new JsonObject
-        {
-            ["repositoryId"] = context.Repository, ["role"] = ManagerRole, ["operation"] = operation, ["exceptSessionId"] = operation == Operations.AttentionRaise ? context.SessionId : "", ["item"] = item
-        });
-    }
+    /// <summary>Closes the items <paramref name="close"/> names at one session; they are on the call's board unless it names its own.</summary>
+    internal static void Emit(AggregateContext context, string sessionId, AttentionSelection close) =>
+        context.Send(sessionId, new AttentionClose(context.Repository, close.BoardId is null && CallBoard(context) is { } board ? close with { BoardId = board } : close));
+
+    /// <summary>
+    /// Raises <paramref name="item"/> at every manager session in the repository but the one whose call caused it, on that call's board
+    /// when it names one (<see cref="AttentionRoute"/>).
+    /// </summary>
+    internal static void ToManagers(AggregateContext context, AttentionContent item) =>
+        context.Send(AggregateKinds.ControlKey, AttentionRoute.Raising(ManagerRole, new AttentionRaise(context.Repository, CallBoard(context) is { } board ? item with { BoardId = board } : item), context.SessionId));
+
+    /// <summary>Closes the items <paramref name="close"/> names at every manager session in the repository, on the call's board when it names one.</summary>
+    internal static void ToManagers(AggregateContext context, AttentionSelection close) =>
+        context.Send(AggregateKinds.ControlKey, AttentionRoute.Closing(ManagerRole, new AttentionClose(context.Repository, CallBoard(context) is { } board ? close with { BoardId = board } : close)));
+
+    /// <summary>The board the call that caused an item names, if it names one.</summary>
+    private static string? CallBoard(AggregateContext context) => Text(context.Args, "boardId") is { Length: > 0 } board ? board : null;
 }

@@ -73,9 +73,9 @@ public static class AnomalyMonitor
                 var period = Cap(finding.Period, 32);
                 // Cooldown first: a query that raised recently stays quiet, whichever row is out of range now.
                 if (record.RaisedAt > context.Now - cooldown || record.Key == key && record.Period == period) { suppressed++; continue; }
-                AttentionSources.ToManagers(context, Operations.AttentionRaise, new JsonObject
+                AttentionSources.ToManagers(context, new AttentionContent
                 {
-                    ["kind"] = AttentionKinds.Anomaly, ["subject"] = finding.Query, ["priority"] = AttentionWeights.Normal, ["note"] = Note(finding.Query, key, anomaly), ["revision"] = state.NextRevision()
+                    Kind = AttentionKinds.Anomaly, Subject = finding.Query, Priority = AttentionWeights.Normal, Note = Note(finding.Query, key, anomaly), Revision = state.NextRevision()
                 });
                 state.Raised(finding.Query, key, period, context.Now);
                 raised++;
@@ -83,10 +83,7 @@ public static class AnomalyMonitor
             // Only a check that measured the raised row with enough samples, and found it in range, closes the item. Too little data is not "back in range".
             else if (record.Open && finding.InRange)
             {
-                AttentionSources.ToManagers(context, Operations.AttentionClose, new JsonObject
-                {
-                    ["subject"] = finding.Query, ["kinds"] = new JsonArray(AttentionKinds.Anomaly), ["revision"] = state.NextRevision()
-                });
+                AttentionSources.ToManagers(context, new AttentionSelection { Subject = finding.Query, Kinds = [AttentionKinds.Anomaly], Revision = state.NextRevision() });
                 record.Open = false;
                 closed++;
             }

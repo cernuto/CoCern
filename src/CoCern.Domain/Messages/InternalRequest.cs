@@ -47,6 +47,7 @@ public static class InternalRequests
         Of<TaskUnclaim>(), Of<NextWorkRead>(), Of<StandingRead>(), Of<OrdersRead>(), Of<TaskArchiveSweep>(), Of<HubStandingProposal>(),
         Of<AnomalyStart>(), Of<AnomalySchedule>(), Of<AnomalyCheck>(),
         Of<ResourceResolve>(), Of<ResourceResolveAll>(), Of<SessionSweep>(), Of<SessionOwnersQuery>(), Of<SessionsOpenQuery>(),
-        Of<ClaimStateQuery>(), Of<LockLeaseCheck>(), Of<OutboxDispatch>()
+        Of<ClaimStateQuery>(), Of<LockLeaseCheck>(), Of<OutboxDispatch>(),
+        Of<SessionVerify>(), Of<StandingSeen>(), Of<AttentionOffer>(), Of<AttentionSeen>(), Of<AttentionSuggestion>(), Of<AttentionClaimed>()
     }.ToFrozenDictionary(kind => kind.Operation, StringComparer.Ordinal);
 }
