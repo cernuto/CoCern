@@ -123,7 +123,7 @@ internal static class ControlAggregate
         {
             state.Leave(id);
             var repository = session?.RepositoryId ?? "";
-            var expire = new SessionExpire(repository, id, state.Fence(id),
+            var expire = new SessionExpire(repository, id, state.Fence(id, now),
                 // What the directory had heard when it decided; a session that has reported activity since was working, and refuses.
                 SeenAt: !force && seen > DateTimeOffset.MinValue ? seen : null,
                 // A session whose hold lapsed already had its grace, so this idle close takes it as it is.
@@ -261,13 +261,15 @@ internal static class ControlAggregate
     /// <summary>
     /// <see cref="Operations.SessionOwns"/>: a session's report that it now answers for unresolved work, or no longer does, sent only when
     /// that changes and as a daily refresh, so each action does not write this directory. A report numbered no later than the last one
-    /// applied (<c>seq</c>) is stale and ignored, so reordered or repeated reports never flip it back. A session missing from the
-    /// directory, or in another repository, is ignored.
+    /// applied (<c>seq</c>) is stale and ignored, so reordered or repeated reports never flip it back. A session in another repository is
+    /// ignored; one the directory does not list is closed (<see cref="CloseUnlisted"/>).
     /// </summary>
     private static RelayReply TrackOwnership(AggregateContext context)
     {
         if (!SessionOwnership.Decode(context.Args).TryGet(out var report, out var malformed)) return Malformed(malformed);
-        if (new ControlState(context.State).Entry(report.SessionId) is not { } session || session.RepositoryId != context.Repository) return Ok(new { tracked = false });
+        var state = new ControlState(context.State);
+        if (state.Entry(report.SessionId) is not { } session) return CloseUnlisted(context, state, report.SessionId, Ok(new { tracked = false, unlisted = true }));
+        if (session.RepositoryId != context.Repository) return Ok(new { tracked = false });
         if (report.Seq <= session.WorkSeq) return Ok(new { tracked = false });
         session.WorkSeq = report.Seq;
         session.OwnsWorkAt = report.Owns ? WorkLedger.ReportedAt(report.At, context.Now) : null;
@@ -277,12 +279,14 @@ internal static class ControlAggregate
     /// <summary>
     /// <see cref="Operations.Register"/>: a session's presence after <c>session_bind</c>. Registrations can arrive reordered (a retried
     /// delivery), so one older than the binding the directory has (<c>bindingVersion</c>) is stale: it changes no binding or label, and
-    /// either way times never move back. A session dropped from the directory may still send a late one, which is accepted unchanged.
+    /// either way times never move back. One from a session the directory does not list changes nothing there and closes the session
+    /// (<see cref="CloseUnlisted"/>).
     /// </summary>
     private static RelayReply RegisterSession(AggregateContext context)
     {
         if (!SessionRegistration.Decode(context.Args).TryGet(out var registration, out var malformed)) return Malformed(malformed);
-        if (new ControlState(context.State).Entry(registration.SessionId) is not { } session) return Ok(new { registered = false });
+        var state = new ControlState(context.State);
+        if (state.Entry(registration.SessionId) is not { } session) return CloseUnlisted(context, state, registration.SessionId, Ok(new { registered = false, unlisted = true }));
         if (session.RepositoryId != context.Repository) return Error(SessionDenied);
         var presence = registration.Presence;
         var stale = presence.BindingVersion < session.BindingVersion;
@@ -292,17 +296,36 @@ internal static class ControlAggregate
 
     /// <summary>
     /// <see cref="Operations.SessionActive"/>: a session's report that it was active, which keeps routed manager items reaching it and a full
-    /// directory from dropping it. One no later than the activity the directory has is stale and changes nothing; one for a session no
-    /// longer listed is accepted unchanged.
+    /// directory from dropping it. One no later than the activity the directory has is stale and changes nothing; one from a session the
+    /// directory does not list closes the session (<see cref="CloseUnlisted"/>).
     /// </summary>
     private static RelayReply RecordActivity(AggregateContext context)
     {
         if (!SessionActivity.Decode(context.Args).TryGet(out var activity, out var malformed)) return Malformed(malformed);
-        if (new ControlState(context.State).Entry(activity.SessionId) is not { } session) return Ok(new { recorded = false });
+        var state = new ControlState(context.State);
+        if (state.Entry(activity.SessionId) is not { } session) return CloseUnlisted(context, state, activity.SessionId, Ok(new { recorded = false, unlisted = true }));
         if (session.RepositoryId != context.Repository) return Error(SessionDenied);
         if (activity.ActiveAt <= session.ActiveAt) return Ok(new { recorded = false });
         session.ActiveAt = activity.ActiveAt;
         return Ok(new { recorded = true });
+    }
+
+    /// <summary>
+    /// A report (activity, a bind's presence, ownership) from a session this directory does not list. Either the session closed and the report
+    /// was already on its way, or it is a ghost: open on its own grain, but invisible to <c>worker_list</c>, routing, closes and the
+    /// dashboard, because a close's answer was lost. Nothing else would ever repair a ghost, so the directory closes it as it closes any
+    /// session. One that still answers for work refuses and restores itself into the directory; any other closes, and its chat opens a new
+    /// session. A session that had already closed acknowledges at once.
+    /// <para>While a close of the session still awaits its answer (<see cref="ControlState.AwaitingAnswer"/>) nothing is sent: that answer
+    /// may restore it, and this report may be the very activity that made the session refuse a close by label. A new close then would
+    /// close a chat that is working. <paramref name="reply"/> is what the report itself is answered.</para>
+    /// </summary>
+    private static RelayReply CloseUnlisted(AggregateContext context, ControlState state, string sessionId, RelayReply reply)
+    {
+        if (state.AwaitingAnswer(sessionId, context.Now)) return reply;
+        // Its own caller, as for any close: the session belongs to the report's repository.
+        context.Send(sessionId, new SessionExpire(context.Repository, sessionId, state.Fence(sessionId, context.Now)), new RelayCaller("relay-directory", false, [context.Repository]));
+        return reply;
     }
 
     /// <summary>Reported presence only. A record from another hub incarnation or past its freshness is shown as stale.</summary>

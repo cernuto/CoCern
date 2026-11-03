@@ -300,6 +300,12 @@ public static class RelayLimits
     /// <summary>Most boards a session tells when it closes because one of their tasks targets it; past this the oldest is forgotten.</summary>
     public const int MaxSessionTargetBoards = 64;
     /// <summary>
+    /// Minutes after which a close the session has not answered is taken as lost. An answer is retried until it lands and normally does
+    /// within seconds; until this passes, a report from the session (whose entry the close removed) waits for that answer instead of
+    /// closing the session again, since the answer may bring it back.
+    /// </summary>
+    public const int LostCloseAnswerMinutes = 30;
+    /// <summary>
     /// Longest field name the log line for a malformed outbox effect shows. A longer one, or one with anything but letters and dots, shows
     /// as <c>?</c>: every message field name passes, and no secret, ID or time can pass for one.
     /// </summary>

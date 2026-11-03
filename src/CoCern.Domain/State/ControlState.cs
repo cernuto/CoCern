@@ -17,6 +17,9 @@ public sealed class ControlState(JsonObject json)
     public const string SessionsKey = "sessions";
     public const string ClosingKey = "closing";
     public const string CloseSeqKey = "closeSeq";
+    /// <summary>A fence's own fields: the close's number and when it was sent.</summary>
+    public const string FenceSeqKey = "closeSeq";
+    public const string FenceAtKey = "at";
     public const string ResourcesKey = "resources";
     public const string AliasesKey = "aliases";
     public const string PausedKey = "paused";
@@ -24,7 +27,7 @@ public sealed class ControlState(JsonObject json)
 
     /// <summary>Every key the directory stores: its entries by session ID, close fences by session ID, resources by ID, aliases by machine and name, and cancellations by session and action.</summary>
     public static StateShape Shape { get; } = CommonState.Shape.With(
-        (SessionsKey, StateShape.Map(DirectoryEntry.Shape)), (ClosingKey, StateShape.Map(null)), (CloseSeqKey, null),
+        (SessionsKey, StateShape.Map(DirectoryEntry.Shape)), (ClosingKey, StateShape.Map(StateShape.Object((FenceSeqKey, null), (FenceAtKey, null)))), (CloseSeqKey, null),
         (ResourcesKey, StateShape.Map(RegisteredResource.Shape)), (AliasesKey, StateShape.Map(null)),
         (PausedKey, null), (CancellationsKey, StateShape.Map(Cancellation.Shape)));
 
@@ -52,25 +55,32 @@ public sealed class ControlState(JsonObject json)
     public void Leave(string sessionId) => Sessions.Remove(sessionId);
 
     /// <summary>
-    /// Fences one close of <paramref name="sessionId"/>: returns its new <c>closeSeq</c>, which the session's one answer carries back, a
-    /// restore or an acknowledgement. Either settles the fence (<see cref="Unfence"/>). A fence lives only while its close is in flight, so
-    /// the directory keeps none for sessions long closed; past <see cref="RelayLimits.MaxRecords"/> in flight the oldest is dropped, and its
-    /// late answer is then ignored.
+    /// Fences one close of <paramref name="sessionId"/>, sent at <paramref name="now"/>: returns its new <c>closeSeq</c>, which the
+    /// session's one answer carries back, a restore or an acknowledgement. Either settles the fence (<see cref="Unfence"/>). A fence lives
+    /// only while its close is in flight, so the directory keeps none for sessions long closed; past <see cref="RelayLimits.MaxRecords"/> in
+    /// flight the oldest is dropped, and its late answer is then ignored.
     /// </summary>
-    public long Fence(string sessionId)
+    public long Fence(string sessionId, DateTimeOffset now)
     {
         var seq = Number(json, CloseSeqKey) + 1;
         json[CloseSeqKey] = seq;
         var closing = ObjectAt(json, ClosingKey);
         closing.Remove(sessionId);
-        closing[sessionId] = seq;
+        closing[sessionId] = new JsonObject { [FenceSeqKey] = seq, [FenceAtKey] = now.ToString("O") };
         while (closing.Count > RelayLimits.MaxRecords) closing.Remove(closing.First().Key);
         return seq;
     }
 
     /// <summary>Whether <paramref name="closeSeq"/> answers the close of <paramref name="sessionId"/> still in flight.</summary>
     public bool Fenced(string sessionId, long closeSeq) =>
-        json[ClosingKey] is JsonObject closing && closing[sessionId] is JsonValue fence && fence.TryGetValue<long>(out var seq) && closeSeq == seq;
+        json[ClosingKey] is JsonObject closing && closing[sessionId] is JsonObject fence && Number(fence, FenceSeqKey) == closeSeq;
+
+    /// <summary>
+    /// Whether a close of <paramref name="sessionId"/> is still awaiting its answer at <paramref name="now"/>: fenced, unanswered, and sent
+    /// within <see cref="RelayLimits.LostCloseAnswerMinutes"/>. An older one's answer is taken as lost.
+    /// </summary>
+    public bool AwaitingAnswer(string sessionId, DateTimeOffset now) =>
+        json[ClosingKey] is JsonObject closing && closing[sessionId] is JsonObject fence && Date(fence, FenceAtKey) > now.AddMinutes(-RelayLimits.LostCloseAnswerMinutes);
 
     /// <summary>Settles the close of <paramref name="sessionId"/> in flight, if any.</summary>
     public void Unfence(string sessionId)
