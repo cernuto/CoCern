@@ -151,14 +151,12 @@ public sealed class ReviewFixTests
     [Fact]
     public void A_late_older_close_never_lowers_a_work_tombstone()
     {
-        var control = new StateEnvelope<CoordinationDocument>
-        {
-            Value = new() { Json = new JsonObject { ["sessions"] = new JsonObject { ["a"] = new JsonObject { ["sessionId"] = "a", ["principalId"] = "alice", ["repositoryId"] = "repo", ["observedAt"] = Now.ToString("O") } } }.ToJsonString() }
-        };
+        var session = new StateEnvelope<CoordinationDocument>();
+        Assert.True(Apply(session, "session", Operations.Open, new() { ["principalId"] = "alice", ["sessionToken"] = "secret", ["sessionId"] = "a" }).Ok);
         JsonObject Work(bool open, int seconds) => new() { ["sessionId"] = "a", ["actionKey"] = "k", ["open"] = open, ["at"] = Now.AddSeconds(seconds).ToString("O") };
-        foreach (var (open, at) in new[] { (true, 0), (false, 30), (false, 10) }) Assert.True(Apply(control, "control", Operations.SessionWork, Work(open, at)).Ok);
+        foreach (var (open, at) in new[] { (true, 0), (false, 30), (false, 10) }) Assert.True(Apply(session, "session", Operations.SessionWork, Work(open, at)).Ok);
         // An open reported at 20 predates the close at 30, so it stays closed.
-        Assert.False(JsonNode.Parse(Apply(control, "control", Operations.SessionWork, Work(true, 20)).DataJson)!["tracked"]!.GetValue<bool>());
+        Assert.False(JsonNode.Parse(Apply(session, "session", Operations.SessionWork, Work(true, 20)).DataJson)!["tracked"]!.GetValue<bool>());
     }
 
     [Fact]
