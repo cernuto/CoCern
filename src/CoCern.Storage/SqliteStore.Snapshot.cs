@@ -1,3 +1,4 @@
+using CoCern.Domain;
 using Microsoft.Data.Sqlite;
 
 namespace CoCern.Storage;
@@ -5,17 +6,19 @@ namespace CoCern.Storage;
 /// <summary>Analytics snapshots: a consistent copy of the database with private and credential data removed, for DuckDB to read.</summary>
 public sealed partial class SqliteStore
 {
-    /// <summary>
-    /// The states an analytics snapshot keeps. Session state (private inboxes, attention notes, bindings), control (the session
-    /// directory) and discovery (machine credentials) never leave the live database; analytics reads sessions only through
-    /// <c>activity_log</c>.
-    /// </summary>
-    private const string SnapshotStates = "('board', 'lock')";
+    /// <summary>The states an analytics snapshot keeps, the Domain's <see cref="ReadModels.SnapshotKinds"/>, as an SQL list.</summary>
+    private static readonly string SnapshotStates = "(" + string.Join(", ", ReadModels.SnapshotKinds.Select(SqlText)) + ")";
+
+    /// <summary>The paths of the top-level keys a snapshot removes from each state it keeps (<see cref="ReadModels.PrivateStateKeys"/>), as SQL arguments.</summary>
+    private static readonly string PrivateStatePaths = string.Join(", ", ReadModels.PrivateStateKeys.Select(key => SqlText("$." + key)));
+
+    private static string SqlText(string value) => "'" + value.Replace("'", "''", StringComparison.Ordinal) + "'";
 
     /// <summary>
     /// Writes queued activity, copies the database to <paramref name="destination"/> with the backup API, then scrubs the copy: it keeps only
-    /// board and lock state, removes idempotency caches (<c>requests</c>, which hold earlier replies, and their <c>requestTombstones</c>) and any session token, drops the search
-    /// index, and vacuums so removed data does not stay in free pages. The live database is never changed.
+    /// the states the Domain lets leave (board and lock), removes the top-level keys it names private (the idempotency caches, which hold
+    /// earlier replies, and any session token), drops the search index, and vacuums so removed data does not stay in free pages. The live
+    /// database is never changed.
     /// </summary>
     /// <remarks>
     /// The copy is read on its own read-only connection, not under the grain writer's gate: under WAL it reads the last committed
@@ -79,7 +82,7 @@ public sealed partial class SqliteStore
                 DELETE FROM due_work WHERE state_name NOT IN {SnapshotStates};
                 DELETE FROM grain_state WHERE state_name NOT IN {SnapshotStates};
                 UPDATE grain_state
-                SET payload = json_set(payload, '$.Value.Json', json_remove(json_extract(payload, '$.Value.Json'), '$.requests', '$.requestTombstones', '$.sessionToken') || '')
+                SET payload = json_set(payload, '$.Value.Json', json_remove(json_extract(payload, '$.Value.Json'), {PrivateStatePaths}) || '')
                 WHERE payload IS NOT NULL AND json_valid(payload) AND json_valid(json_extract(payload, '$.Value.Json'));
                 DELETE FROM hub_metadata;
                 """, transaction);

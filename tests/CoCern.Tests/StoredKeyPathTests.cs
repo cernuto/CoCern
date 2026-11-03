@@ -1,7 +1,7 @@
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using CoCern.Analytics;
-using CoCern.Contracts;
 using CoCern.Core;
 using CoCern.Domain;
 using CoCern.Storage;
@@ -18,10 +18,6 @@ namespace CoCern.Tests;
 /// </summary>
 public sealed class StoredKeyPathTests
 {
-    private static readonly DateTimeOffset Now = DateTimeOffset.Parse("2026-11-03T00:00:00Z");
-    private static readonly RelayCaller Writer = new("alice", false, ["repo"], true);
-    private static readonly RelayCaller Administrator = new("bob", true, ["repo"], true);
-
     [Fact]
     public async Task Every_path_the_analytics_views_read_resolves_in_a_board_the_domain_built()
     {
@@ -45,7 +41,7 @@ public sealed class StoredKeyPathTests
         using (store)
         {
             Assert.Equal(3, AssertPathsResolve(SqliteStore.StandingQuery, fixture));
-            // Read through that query, the panel shows what the Domain wrote.
+            // Read through that query, the panel shows what the Domain wrote, exactly as the Domain projects the board it holds.
             var board = Assert.Single(Assert.IsType<DashboardStandingObservation>(await store.ReadStandingAsync()).Boards);
             Assert.NotEmpty(board.Lines);
             Assert.NotEmpty(board.Grants);
@@ -53,59 +49,20 @@ public sealed class StoredKeyPathTests
             Assert.NotEmpty(board.History);
             Assert.NotEmpty(board.Orders);
             Assert.NotEmpty(board.OrderLog);
+            var projected = BoardReadModels.Standing(DomainBoard.Key, fixture.Board[BoardReadModels.StandingKey]!.ToJsonString(), fixture.Board[BoardReadModels.OrdersKey]!.ToJsonString());
+            Assert.Equal(JsonSerializer.Serialize(projected), JsonSerializer.Serialize(board));
         }
     }
 
     /// <summary>The stored envelope (<c>grain_state.payload</c>) and the board document inside it (<c>$.Value.Json</c>).</summary>
     private sealed record Fixture(JsonNode Envelope, JsonObject Board);
 
-    /// <summary>
-    /// One board holding every kind of entry the readers name: a planned task whose packet declares resources; a task claimed and worked,
-    /// whose action an administrator's recovery abandoned and its writer then completed after all, with a message; standing lines, grants, a
-    /// proposal and their history; and a standing order with its log. Storage writes it as the hub does.
-    /// </summary>
+    /// <summary>The board <see cref="DomainBoard"/> builds, written by storage as the hub writes it.</summary>
     private static async Task<(Fixture, SqliteStore)> StoredBoard()
     {
-        var board = new StateEnvelope<CoordinationDocument>();
-        void Apply(RelayCaller caller, string operation, JsonObject args, int seconds = 0)
-        {
-            args["repositoryId"] = "repo";
-            args["requestId"] ??= Guid.NewGuid().ToString("N");
-            var reply = CoordinationStateMachine.Apply(board, AggregateKinds.Board, AggregateKinds.BoardKey("repo", AggregateKinds.DefaultBoard), caller, operation, args, Now.AddSeconds(seconds), ordersEnabled: true);
-            Assert.True(reply.Ok, $"{operation}: {reply.Code} {reply.DataJson}");
-        }
-        var workflow = new JsonObject
-        {
-            ["state"] = "ready",
-            ["packet"] = new JsonObject
-            {
-                ["goal"] = "Deploy the stylesheet", ["target"] = "repo at revision abc", ["authorityRef"] = "human-grant:17", ["restoration"] = "Restore the previous stylesheet",
-                ["stopCondition"] = "Stop if the target differs", ["resources"] = new JsonArray("rig-1")
-            },
-            ["criteria"] = new JsonArray(new JsonObject { ["id"] = "live", ["description"] = "The new stylesheet is live", ["result"] = "not_run" }),
-            ["blockers"] = new JsonArray()
-        };
-        Apply(Writer, RelayTools.TaskUpdate, new() { ["taskId"] = "plan", ["expectedVersion"] = 0, ["workflow"] = workflow });
-        Apply(Writer, RelayTools.TaskUpdate, new() { ["taskId"] = "t", ["expectedVersion"] = 0 });
-        Apply(Writer, RelayTools.TaskClaim, new() { ["taskId"] = "t", ["sessionId"] = "a", ["expectedVersion"] = 1, ["leaseSeconds"] = 600 });
-        Apply(Writer, RelayTools.ActionBegin, new() { ["taskId"] = "t", ["sessionId"] = "a", ["expectedVersion"] = 2, ["actionId"] = "deploy", ["inputFingerprint"] = "f" });
-        Apply(Administrator, RelayTools.ActionReport, new() { ["taskId"] = "t", ["sessionId"] = "admin-session", ["expectedVersion"] = 3, ["actionId"] = "deploy", ["attempt"] = 1, ["recover"] = true }, 60);
-        Apply(Writer, RelayTools.ActionReport, new() { ["taskId"] = "t", ["sessionId"] = "a", ["expectedVersion"] = 4, ["actionId"] = "deploy", ["attempt"] = 1, ["outcome"] = "completed", ["report"] = "Deployed after all." }, 90);
-        Apply(Writer, RelayTools.SendMessage, new() { ["taskId"] = "t", ["sessionId"] = "a", ["text"] = "Deployed; please review." }, 100);
-        Apply(Administrator, RelayTools.StandingPut, new()
-        {
-            ["expectedRevision"] = 0, ["lines"] = new JsonArray(new JsonObject { ["id"] = "css", ["text"] = "Never deploy CSS without a restoration receipt." }),
-            ["grants"] = new JsonArray(new JsonObject { ["id"] = "rigs", ["scope"] = "resource", ["targets"] = new JsonArray("rig-1"), ["expiresAt"] = Now.AddDays(1).ToString("O") })
-        }, 110);
-        Apply(Writer, RelayTools.StandingPropose, new() { ["sessionId"] = "a", ["line"] = new JsonObject { ["text"] = "Report before releasing a rig." } }, 120);
-        Apply(Administrator, RelayTools.OrderPut, new()
-        {
-            ["orderId"] = "o-1", ["trigger"] = new JsonObject { ["on"] = OrderTriggers.WorkflowCompleted, ["taskId"] = "plan" },
-            ["actions"] = new JsonArray(new JsonObject { ["do"] = OrderActions.ReleaseClaims }), ["defaultExpiryDays"] = 7
-        }, 130);
-
+        var (board, _) = DomainBoard.Build();
         var store = new SqliteStore(Path.Combine(Path.GetTempPath(), "cocern-key-paths-" + Guid.NewGuid().ToString("N"), "relay.db"));
-        var grain = GrainId.Create("cocern.board", AggregateKinds.BoardKey("repo", AggregateKinds.DefaultBoard));
+        var grain = GrainId.Create("cocern.board", DomainBoard.Key);
         await new SqliteGrainStorage(store).WriteStateAsync(AggregateKinds.Board, grain, new GrainState<StateEnvelope<CoordinationDocument>>(board));
         var envelope = JsonNode.Parse((await store.ReadAsync(AggregateKinds.Board, grain, CancellationToken.None))!.Payload!)!;
         return (new(envelope, JsonNode.Parse(envelope["Value"]!["Json"]!.GetValue<string>())!.AsObject()), store);

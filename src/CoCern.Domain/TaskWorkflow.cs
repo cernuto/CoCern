@@ -131,7 +131,7 @@ internal static class TaskWorkflow
         node is JsonArray items && items.All(item => item is JsonValue value && value.GetValueKind() == JsonValueKind.String) ? items.Select(item => item!.GetValue<string>()) : [];
 
     /// <summary>The board setting that refuses <c>ready</c> without <c>packet.resources</c>. Off unless set with <c>standing_put</c>.</summary>
-    public static bool RequiresResources(JsonObject board) => board["standing"]?["settings"]?["requireResources"] is JsonValue value && value.TryGetValue<bool>(out var required) && required;
+    public static bool RequiresResources(JsonObject board) => board[BoardReadModels.StandingKey]?["settings"]?["requireResources"] is JsonValue value && value.TryGetValue<bool>(out var required) && required;
 
     /// <summary>Returns the failure code, or null when every dependency names a task on this board and none leads back to <paramref name="taskId"/>.</summary>
     public static string? CheckDependencies(JsonObject tasks, string taskId, JsonObject workflow)
