@@ -268,6 +268,7 @@ internal static class StandingOrders
                     Kind = AttentionKinds.NextWork, TaskId = taskId, Subject = id, Priority = AttentionWeights.PriorityLevel(Number(workflow, "priority")),
                     Note = "order " + id + ": " + on + " " + target + "; claim it with task_claim", Revision = revision, Refs = triggerTask.Length > 0 ? [triggerTask] : null
                 };
+                // Each order raise names its order and run; if the session refuses it, the dispatcher reports a failed run.
                 AttentionSources.Emit(context, Text(action, "sessionId"), item, id, revision);
                 return null;
             }
@@ -278,7 +279,6 @@ internal static class StandingOrders
                     Kind = AttentionKinds.Info, Subject = id, Note = Text(action, "note", "order " + id + ": " + on + " " + target), Revision = revision,
                     TaskId = triggerTask.Length > 0 ? triggerTask : null
                 };
-                // The raise names its order and run; if the session refuses it, the dispatcher reports a failed run.
                 AttentionSources.Emit(context, Text(action, "sessionId"), item, id, revision);
                 return null;
             }

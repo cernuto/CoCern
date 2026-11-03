@@ -1,0 +1,131 @@
+using System.Text.Json.Nodes;
+using CoCern.Contracts;
+using CoCern.Domain;
+using CoCern.Domain.Messages;
+using CoCern.Domain.State;
+using Xunit;
+
+namespace CoCern.Tests;
+
+/// <summary>
+/// The session's state class declares every key its document stores. These tests build session documents through the aggregate hub, as
+/// the hub does (open, bind, mail, acknowledgments, attention, work reports, a close), and check that each holds no key
+/// <see cref="SessionState.Shape"/> leaves out, and that the shape is not vacuous: what the sessions wrote covers what it declares.
+/// </summary>
+public sealed class SessionStateShapeTests
+{
+    private static readonly DateTimeOffset Now = DateTimeOffset.Parse("2026-11-03T09:00:00Z");
+    private const string Repository = AggregateHub.Repository;
+
+    private static RelayReply Effect<T>(AggregateHub hub, Chat chat, T message, DateTimeOffset at) where T : class, IEffectMessage<T>
+    {
+        var reply = hub.Apply(T.TargetKind, chat.Id, T.Operation, message.ToJson(), AggregateHub.BoardCaller, at);
+        Assert.True(reply.Ok, T.Operation + ": " + reply.Code + " " + reply.DataJson);
+        return reply;
+    }
+
+    private static RelayReply Request<T>(AggregateHub hub, Chat chat, T request, DateTimeOffset at) where T : class, IInternalRequest<T>
+    {
+        var reply = hub.Session(chat, T.Operation, request.ToJson(), at);
+        Assert.True(reply.Ok, T.Operation + ": " + reply.Code + " " + reply.DataJson);
+        return reply;
+    }
+
+    private static IEnumerable<string> Keys(JsonNode? node) => node is JsonObject json ? json.Select(entry => entry.Key) : [];
+
+    private static IEnumerable<string> EntryKeys(JsonObject state, string map) =>
+        state[map] is JsonObject entries ? entries.SelectMany(entry => Keys(entry.Value)) : [];
+
+    [Fact]
+    public void A_session_stores_only_the_keys_its_state_declares()
+    {
+        var hub = new AggregateHub();
+        var chat = hub.Open("chat", Now, machineId: "pc-1", role: SessionRoles.Manager);
+        var peer = hub.Open("peer", Now);
+        var gone = hub.Open("gone", Now);
+        hub.DeliverAll(Now);
+
+        // Its binding, activity, standing and the board watching it.
+        Assert.True(hub.Session(chat, RelayTools.SessionBind, new() { ["expectedVersion"] = 0, ["binding"] = new JsonObject { ["roslyn"] = "codelens" }, ["availability"] = "available" }, Now).Ok);
+        Assert.True(hub.Verify(chat, Now).Ok);
+        Request(hub, chat, new StandingSeen(Repository, chat.Id, chat.Token, AggregateKinds.DefaultBoard, 3), Now);
+        Effect(hub, chat, new SessionTargetWatch(Repository, chat.Id, AggregateHub.BoardKey, AggregateKinds.DefaultBoard), Now);
+
+        // Mail: a superseding status request, a quiet message, a board's notice that becomes an info item, an acknowledgment, and the
+        // notice of a message to a session that never opened.
+        Assert.True(hub.Send(peer, chat.Id, "status?", Now, supersede: true).Ok);
+        Assert.True(hub.Session(peer, RelayTools.SendMessage, new() { ["recipientSessionId"] = chat.Id, ["text"] = "fyi", ["wake"] = false, ["replyTo"] = "m-0" }, Now).Ok);
+        Assert.True(hub.Send(peer, chat.Id, "read me", Now).Ok);
+        Assert.True(hub.Send(chat, "nobody", "hello?", Now).Ok);
+        hub.DeliverAll(Now);
+        Effect(hub, chat, new MessageDelivery(InboxMessage.TaskChanged(Repository, "n-1", "ops", "t-9", 2), AttentionExpiryDays: 7), Now);
+        var read = hub.Inbox(chat, Now).Single(message => message["text"]?.GetValue<string>() == "read me")["messageId"]!.GetValue<string>();
+        Assert.True(hub.Session(chat, RelayTools.Ack, new() { ["messageIds"] = new JsonArray(read) }, Now).Ok);
+
+        // Attention: a blocking item on another board, an item closed without a revision and one with, an archived task, the hub's own
+        // offered work and its close after a claim, an offer, a snooze, and an info item closed as seen.
+        Effect(hub, chat, new AttentionRaise(Repository, new AttentionContent
+        {
+            Kind = AttentionKinds.Blocked, TaskId = "t-1", BoardId = "ops", Subject = "printer", Blocker = AttentionWeights.ProviderRejection, Blocking = true,
+            Priority = AttentionWeights.High, Refs = ["t-2"], Note = "waiting on the provider", Revision = 2, ExpiryDays = 3
+        }), Now);
+        Effect(hub, chat, new AttentionRaise(Repository, new AttentionContent { Kind = AttentionKinds.ReviewReady, TaskId = "t-3" }), Now);
+        Effect(hub, chat, new AttentionClose(Repository, new AttentionSelection { TaskId = "t-3" }), Now);
+        Effect(hub, chat, new AttentionClose(Repository, new AttentionSelection { TaskId = "t-6", Kinds = [AttentionKinds.Failed], Revision = 4 }), Now);
+        Effect(hub, chat, new AttentionClose(Repository, new AttentionSelection { TaskIds = ["t-4"], Revision = 9 }), Now);
+        Request(hub, chat, new AttentionSuggestion(Repository, chat.Id, new AttentionContent { Kind = AttentionKinds.NextWork, TaskId = "t-5", Revision = 1, ExpiryDays = 1 }), Now);
+        Request(hub, chat, new AttentionClaimed(Repository, chat.Id, AggregateKinds.DefaultBoard, "t-5", 2), Now);
+        var offered = AggregateHub.Data(Request(hub, chat, new AttentionOffer(Repository, chat.Id, chat.Token) { SnoozeBoundaries = 2 }, Now))["attention"]!["id"]!.GetValue<string>();
+        Assert.True(hub.Session(chat, RelayTools.AttentionRespond, new() { ["itemId"] = offered, ["action"] = AttentionActions.Later }, Now).Ok);
+        Request(hub, chat, new AttentionOffer(Repository, chat.Id, chat.Token), Now.AddMinutes(1));
+        Request(hub, chat, new AttentionSeen(Repository, chat.Id, chat.Token, ["n-1"]), Now.AddMinutes(1));
+
+        // Work it answers for, one action of which ended, and a forced close of another session.
+        Effect(hub, chat, new ActionWorkReport(Repository, chat.Id, AggregateKinds.DefaultBoard, "t-7", "deploy", 1, true, Now), Now);
+        Effect(hub, chat, new ActionWorkReport(Repository, chat.Id, AggregateKinds.DefaultBoard, "t-8", "deploy", 1, true, Now), Now);
+        Effect(hub, chat, new ActionWorkReport(Repository, chat.Id, AggregateKinds.DefaultBoard, "t-8", "deploy", 1, false, Now.AddMinutes(1)), Now.AddMinutes(1));
+        Assert.True(hub.Close(new() { ["targetSessionId"] = gone.Id, ["force"] = true }, Now).Ok);
+        hub.DeliverAll(Now.AddMinutes(1));
+
+        var documents = new[] { chat, peer, gone }.Select(session => hub.State(AggregateKinds.Session, session.Id)).ToArray();
+        foreach (var document in documents) Assert.Empty(SessionState.Shape.Undeclared(document));
+
+        // The shape is not vacuous: between them the sessions wrote every key it declares, but the request tombstones (written only once a
+        // full replay cache evicts a reply early) and the work ledger's overflow mark (only past its open-action limit).
+        var state = documents[0];
+        Assert.Equal(SessionState.Shape.Fields.Keys.Except([ReadModels.RequestTombstonesKey]).Order(StringComparer.Ordinal),
+            documents.SelectMany(Keys).Distinct().Order(StringComparer.Ordinal));
+        Assert.Equal(InboxMessage.Keys.Order(StringComparer.Ordinal), EntryKeys(state, SessionState.InboxKey).Distinct().Order(StringComparer.Ordinal));
+        Assert.Equal(QueuedItem.Shape.Fields.Keys.Order(StringComparer.Ordinal), EntryKeys(state, AttentionQueue.ItemsKey).Distinct().Order(StringComparer.Ordinal));
+        Assert.Equal([WorkLedger.ClosedKey, WorkLedger.OpenKey], Keys(state[SessionState.WorkKey]).Order(StringComparer.Ordinal));
+        Assert.Equal(WorkReport.Shape.Fields.Keys.Order(StringComparer.Ordinal), Keys(state[SessionState.WorkReportedKey]).Order(StringComparer.Ordinal));
+        Assert.Equal(RecentClose.Shape.Fields.Keys.Order(StringComparer.Ordinal), EntryKeys(state, AttentionQueue.RecentKey).Distinct().Order(StringComparer.Ordinal));
+        Assert.Equal([BoardWatches.BoardIdKey], EntryKeys(state, SessionState.TargetBoardsKey).Concat(EntryKeys(state, SessionState.WorkBoardsKey)).Distinct());
+
+        // The typed members read what the handlers wrote.
+        var session = new SessionState(state);
+        Assert.Equal((chat.Id, SessionRoles.Manager, "pc-1", 1L, "available"), (session.SessionId, session.Role, session.MachineId, session.BindingVersion, session.Availability));
+        Assert.Equal(3, session.StandingSeen.Of(AggregateKinds.DefaultBoard));
+        Assert.True(session.Acked.Holds(read));
+        Assert.Equal((true, 1L), (session.WorkReported!.Owns, session.WorkReported.Seq));
+        Assert.Equal(Now.AddMinutes(1), session.Attention.BoundaryAt);
+        // The forced close landed when it was delivered.
+        var closed = new SessionState(documents[2]);
+        Assert.Equal((true, Now.AddMinutes(1), "admin"), (closed.Closed, closed.ClosedAt, closed.ForceClosedBy));
+    }
+
+    [Fact]
+    public void A_shape_names_an_inbox_or_attention_key_the_session_does_not_declare()
+    {
+        var hub = new AggregateHub();
+        var chat = hub.Open("chat", Now);
+        hub.DeliverAll(Now);
+        Effect(hub, chat, new AttentionRaise(Repository, new AttentionContent { Kind = AttentionKinds.Info, TaskId = "t-1" }), Now);
+        var state = hub.State(AggregateKinds.Session, chat.Id);
+        state[SessionState.InboxKey] = new JsonObject { ["m"] = new JsonObject { [InboxMessage.MessageIdKey] = "m", ["requestId"] = "r" } };
+        state[AttentionQueue.ItemsKey]!.AsObject().First().Value!["stray"] = true;
+        state["activeAt"] = Now.ToString("O");
+        // A session's own copy of its record never holds the directory's activity time.
+        Assert.Equal(["activeAt", "attention.*.stray", "inbox.*.requestId"], SessionState.Shape.Undeclared(state).Order(StringComparer.Ordinal));
+    }
+}

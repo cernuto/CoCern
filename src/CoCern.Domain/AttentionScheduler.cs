@@ -1,11 +1,12 @@
 using System.Text.Json.Nodes;
 using CoCern.Contracts;
+using CoCern.Domain.State;
 using static CoCern.Domain.JsonFields;
 
 namespace CoCern.Domain;
 
 /// <summary>
-/// One open attention item, read from a session's <c>attention</c> state. <see cref="SnoozeUntil"/> ends any snooze when it passes;
+/// One open attention item, read from a session's queue as it stores it (<see cref="QueuedItem"/>). <see cref="SnoozeUntil"/> ends any snooze when it passes;
 /// <see cref="SnoozeBoundaries"/> counts the boundaries a "later" item still sits out.
 /// </summary>
 public sealed record AttentionItem(
@@ -24,13 +25,13 @@ public sealed record AttentionItem(
 
     public bool IsSnoozed(DateTimeOffset now) => SnoozeUntil is { } until ? now < until : SnoozeBoundaries > 0;
 
+    /// <summary>Reads one stored item (<see cref="QueuedItem"/>).</summary>
     public static AttentionItem From(string id, JsonObject item) => new(
-        id, Text(item, "kind"), Text(item, "taskId"), Text(item, "boardId", "default"), Text(item, "subject"),
-        Text(item, "blocker") is { Length: > 0 } blocker ? blocker : null, IsTrue(item, "blocking"), Text(item, "priority", AttentionWeights.Normal),
-        item["refs"] is JsonArray refs ? refs.OfType<JsonValue>().Select(x => x.TryGetValue<string>(out var s) ? s : null).OfType<string>().ToArray() : [],
-        Text(item, "note"), Date(item, "createdAt"), (int)Math.Max(0, Number(item, "snoozeBoundaries")), OptionalDate(item, "snoozeUntil"),
-        OptionalDate(item, "shownAt"), Date(item, "expiresAt"), (int)Math.Max(0, Number(item, "snoozes")));
-
+        id, Text(item, QueuedItem.KindKey), Text(item, QueuedItem.TaskIdKey), Text(item, QueuedItem.BoardIdKey, AggregateKinds.DefaultBoard), Text(item, QueuedItem.SubjectKey),
+        Text(item, QueuedItem.BlockerKey) is { Length: > 0 } blocker ? blocker : null, IsTrue(item, QueuedItem.BlockingKey), Text(item, QueuedItem.PriorityKey, AttentionWeights.Normal),
+        item[QueuedItem.RefsKey] is JsonArray refs ? refs.OfType<JsonValue>().Select(x => x.TryGetValue<string>(out var s) ? s : null).OfType<string>().ToArray() : [],
+        Text(item, QueuedItem.NoteKey), Date(item, QueuedItem.CreatedAtKey), (int)Math.Max(0, Number(item, QueuedItem.SnoozeBoundariesKey)), OptionalDate(item, QueuedItem.SnoozeUntilKey),
+        OptionalDate(item, QueuedItem.ShownAtKey), Date(item, QueuedItem.ExpiresAtKey), (int)Math.Max(0, Number(item, QueuedItem.SnoozesKey)));
 
 }
 
