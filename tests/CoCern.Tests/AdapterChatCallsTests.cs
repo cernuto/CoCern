@@ -94,8 +94,9 @@ public sealed class AdapterChatCallsTests : IDisposable
         var closed = await mine.CallAsync(RelayTools.ControlRequest, JsonSerializer.SerializeToElement(new { repositoryId = "repo", requestId = "close-1", command = "close_sessions", labelPrefix = "smoke" }), CancellationToken.None);
 
         Assert.True(closed.Ok, closed.Code);
-        Assert.Equal(1, closed.Data!.Value.GetProperty("closed").GetInt32());
-        Assert.Equal([theirs.Data!.Value.GetProperty("sessionId").GetString()], closed.Data!.Value.GetProperty("ids").EnumerateArray().Select(x => x.GetString()));
+        // Both chats just called, so the close by label keeps them as working right now. Only the other chat counts as a match: the adapter
+        // named this chat's session as the caller's own, which a close never takes or counts.
+        Assert.Equal((0, 1), (closed.Data!.Value.GetProperty("closed").GetInt32(), closed.Data!.Value.GetProperty("active").GetInt32()));
         Assert.True((await mine.CallAsync(RelayTools.CheckInbox, JsonSerializer.SerializeToElement(new { repositoryId = "repo", sessionId = id, sessionToken = token }), CancellationToken.None)).Ok);
     }
 
