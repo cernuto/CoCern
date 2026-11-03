@@ -19,9 +19,19 @@ internal sealed class DashboardConnect(IConfiguration configuration, IHostEnviro
 
     public static bool OnThisPc(HttpContext context) => context.Connection.RemoteIpAddress is { } remote && IPAddress.IsLoopback(remote);
 
-    public Task<DashboardConnectStatus> StatusAsync(CancellationToken cancellationToken) => RunAsync(["--check"], cancellationToken);
+    /// <summary>
+    /// Each app's state. With <paramref name="admin"/> given (the page's administrator tools box was changed), an entry for this hub that gives
+    /// other tools shows as one to connect again; without it, the tools an entry gives are only reported.
+    /// </summary>
+    public Task<DashboardConnectStatus> StatusAsync(bool? admin, CancellationToken cancellationToken) => RunAsync(["--check", .. Role(admin)], cancellationToken);
 
-    public Task<DashboardConnectStatus> ConnectAsync(string client, CancellationToken cancellationToken) => RunAsync(["--only", client], cancellationToken);
+    /// <summary>Connects one app; with <paramref name="admin"/> given, its entry gives the administrator tools or not to match.</summary>
+    public Task<DashboardConnectStatus> ConnectAsync(string client, bool? admin, CancellationToken cancellationToken) => RunAsync(["--only", client, .. Role(admin)], cancellationToken);
+
+    private static string[] Role(bool? admin) => admin is { } wanted ? ["--role", wanted ? "admin" : "worker"] : [];
+
+    /// <summary>The page's <c>admin</c> query value: <c>true</c> or <c>false</c>, else absent (leave the tools as they are).</summary>
+    public static bool? AdminChoice(HttpContext context) => context.Request.Query["admin"].ToString() switch { "true" => true, "false" => false, _ => null };
 
     private async Task<DashboardConnectStatus> RunAsync(string[] arguments, CancellationToken cancellationToken)
     {

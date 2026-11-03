@@ -628,3 +628,6 @@ small { font-size: .8rem; }
     .analytics-page-tools .connection-chip { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
     .analytics-page-tools .status-dot { flex-shrink: 0; }
 }
+.connect-view .admin-tools { display: flex; align-items: flex-start; gap: 10px; margin: 0 22px 6px; padding: 12px 0 4px; }
+.connect-view .admin-tools input { margin-top: 2px; }
+.connect-view .admin-tools small { display: block; color: var(--muted); font-size: .8rem; margin-top: 3px; max-width: 72ch; }

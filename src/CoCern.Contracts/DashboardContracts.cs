@@ -304,6 +304,8 @@ public sealed record DashboardConnectClient
     public string Name { get; init; } = "";
     public string State { get; init; } = "";
     public string? Detail { get; init; }
+    /// <summary>Whether the app's CoCern entry gives its chats the administrator tools; null when it has no entry, or it could not be read.</summary>
+    public bool? Admin { get; init; }
 }
 
 /// <summary>

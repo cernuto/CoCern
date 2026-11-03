@@ -59,7 +59,7 @@ On the dashboard's **Connect** page, one button adds CoCern to each of these on 
 | Claude desktop app | Shown only when it is installed. |
 | Codex | The Codex CLI, IDE extension and app. Codex is ChatGPT's coding agent. |
 
-Restart the app afterwards. Each settings file is backed up first. An app that already has CoCern keeps its entry, unless that entry points at this hub's old address or certificate: then **Connect** updates it. The page works only in a browser on the hub's PC.
+Restart the app afterwards. Each settings file is backed up first. An app that already has CoCern keeps its entry, unless that entry points at this hub's old address or certificate: then **Connect** updates it. The page works only in a browser on the hub's PC. Tick **Administrator tools** above the list to give an app's chats the administrator tools too; changing it shows which apps to connect again.
 
 The ChatGPT chat app can't use a hub on your PC: it can only reach CoCern at a public HTTPS address, which is not set up.
 
@@ -95,7 +95,7 @@ Claims are advisory: they keep cooperating agents apart, but can't stop anyone. 
 
 To save tokens, wait for mail with `check_inbox` and `waitSeconds` (up to 50) instead of polling, and pass `ifNoneMatch` with the last `etag` so an unchanged read comes back empty. More in the [Reference](docs/reference.md#calls).
 
-**Administrators** can also set the board's standing rules, add "when this happens, do that" orders, run analytics and pause work. The token the hub makes for you is an administrator token, but a chat lists these tools only when its `cocern` entry also sets `COCERN_ROLE=admin`, which Connect doesn't add. See the [Reference](docs/reference.md#tools).
+**Administrators** can also set the board's standing rules, add "when this happens, do that" orders, run analytics and pause work. Chats get these tools when **Administrator tools** is ticked on the Connect page as you connect their app; it is off by default, so leave it off unless you trust every chat in that app. See the [Reference](docs/reference.md#tools).
 
 ## Wake-ups
 
@@ -151,7 +151,7 @@ Every setting: [Reference](docs/reference.md#settings).
 - **Don't rebuild a folder a hub or chat is running from.** Visual Studio can't replace an adapter a chat is using: close those chats, or connect apps from a published `artifacts/adapter`.
 - **One hub per database.** Don't put `data/` on a shared drive.
 - **Apps connected with an earlier version** may use plain HTTP, or a certificate the hub no longer has. Click **Connect** again: it switches them to the pinned connection.
-- **The token is an administrator token.** Any program holding it can call administrator tools, even where a chat doesn't list them. For worker-only chats, see the [Reference](docs/reference.md#clients-and-tokens).
+- **The token is an administrator token.** Any program holding it can call administrator tools, even where a chat doesn't list them (Administrator tools off). For worker-only chats, see the [Reference](docs/reference.md#clients-and-tokens).
 
 ## Development
 
@@ -160,7 +160,7 @@ dotnet build CoCern.slnx -c Release
 dotnet test CoCern.slnx -c Release
 ```
 
-For an end-to-end check, `python scripts/Smoke-CoCern.py` starts a throwaway hub from the build and runs 94 happy- and sad-path checks: sign-in, tasks, claims, actions, messages, notes, search, standing rules, orders, attention, pausing, closing sessions, doc search and re-sync, analytics, the adapter, the dashboard, Connect, the adapter download, a real node joining over HTTPS, races, malformed input, a hub killed mid-flight, and a restart. Before any settings writes, it verifies that the adapter reads the exact temporary profile and application-data paths; an older adapter that ignores these paths stops the run. It uses its own temporary folders and ports, and its exit code is the number of failed checks.
+For an end-to-end check, `python scripts/Smoke-CoCern.py` starts a throwaway hub from the build and runs 95 happy- and sad-path checks: sign-in, tasks, claims, actions, messages, notes, search, standing rules, orders, attention, pausing, closing sessions, doc search and re-sync, analytics, the adapter, the dashboard, Connect, the adapter download, a real node joining over HTTPS, races, malformed input, a hub killed mid-flight, and a restart. Before any settings writes, it verifies that the adapter reads the exact temporary profile and application-data paths; an older adapter that ignores these paths stops the run. It uses its own temporary folders and ports, and its exit code is the number of failed checks.
 
 On Windows the tests run offline. Elsewhere, 12 setup tests fail because they need Windows, and the analytics tests download DuckDB's `sqlite` extension once (or set `COCERN_DUCKDB_EXTENSIONS` to a folder that has it).
 

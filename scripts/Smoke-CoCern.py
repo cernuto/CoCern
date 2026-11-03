@@ -499,6 +499,19 @@ def run_checks(hub, checks):
         expect({client["id"]: client["state"] for client in data["clients"]}.get("codex") == "connected", "codex not shown as connected afterwards")
     checks.run("happy", "Connect adds CoCern to Codex (in a temporary home folder)", connect_page)
 
+    def connect_admin_tools():
+        expect(hub.connect_isolated, "Connect settings writes require a successful isolation preflight")
+        config = hub.home / ".codex" / "config.toml"
+        status, data = request(hub.origin + "/dashboard/api/connect?admin=true", opener=browser)
+        codex = next(client for client in data["clients"] if client["id"] == "codex")
+        # Ticking the box makes the entry Connect wrote one to connect again, and changes nothing until then.
+        expect(status == 200 and codex["state"] == "available" and codex["admin"] is False and "COCERN_ROLE" not in config.read_text(), f"HTTP {status} {codex}")
+        for admin, written in (("true", True), ("false", False)):
+            status, data = request(hub.origin + f"/dashboard/api/connect/codex?admin={admin}", raw=b"", headers=same_origin, opener=browser, method="POST")
+            expect(status == 200 and data["clients"][0]["state"] == "added" and data["clients"][0]["admin"] is written, f"HTTP {status} {data}")
+            expect(("COCERN_ROLE = 'admin'" in config.read_text()) is written, f"admin={admin}: COCERN_ROLE {'missing' if written else 'still there'}")
+    checks.run("happy", "the administrator tools box adds COCERN_ROLE to Codex's entry, and takes it out again", connect_admin_tools)
+
     def connect_cli():
         result = subprocess.run(["dotnet", str(ADAPTER), "--connect", "--check", "--token-file", str(hub.token_file)],
                                 env=hub.env, capture_output=True, text=True, timeout=60)

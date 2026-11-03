@@ -416,7 +416,7 @@ Changing a repository's settings makes its next sync re-read everything.
 
 ### Adapter
 
-Connect sets `COCERN_TOKEN_FILE`, `COCERN_URL` and `COCERN_FINGERPRINT`; add the others to an app's `cocern` entry by hand. By hand, run `dotnet <path>/CoCern.Adapter.dll` as an MCP server with:
+Connect sets `COCERN_TOKEN_FILE`, `COCERN_URL` and `COCERN_FINGERPRINT`, and `COCERN_ROLE=admin` when the page's **Administrator tools** box is ticked; add the others to an app's `cocern` entry by hand. By hand, run `dotnet <path>/CoCern.Adapter.dll` as an MCP server with:
 
 | Variable | Default | What it does |
 | --- | --- | --- |
@@ -430,7 +430,7 @@ Connect sets `COCERN_TOKEN_FILE`, `COCERN_URL` and `COCERN_FINGERPRINT`; add the
 
 With none of the first three set, the adapter uses this PC's node.
 
-`--connect` options: `--token-file <path>` (default: `data/local-client-token` above the adapter folder), `--hub <url>` and `--fingerprint <sha256>` (default: the pinned loopback HTTPS from `local-hub.json` beside the token file), `--only claude-code|claude-desktop|codex`, `--check` (report only) and `--json`. An app that already has a `cocern` entry keeps it, unless the entry is this hub's (its token file is in the hub's data folder, or, with no token file, it points at a loopback address of this PC or pins the current certificate) and its `COCERN_URL` or `COCERN_FINGERPRINT` differs from the current ones: `--check` reports that as `outdated`, and connecting rewrites those two values (state `updated`; restart the app). Entries for other hubs, and node entries, are never changed.
+`--connect` options: `--token-file <path>` (default: `data/local-client-token` above the adapter folder), `--hub <url>` and `--fingerprint <sha256>` (default: the pinned loopback HTTPS from `local-hub.json` beside the token file), `--only claude-code|claude-desktop|codex`, `--role admin|worker` (add or remove `COCERN_ROLE=admin`; left out, entries keep theirs), `--check` (report only) and `--json`. Each app in the JSON reply has `admin`: whether its entry gives the administrator tools. An app that already has a `cocern` entry keeps it, unless the entry is this hub's (its token file is in the hub's data folder, or, with no token file, it points at a loopback address of this PC or pins the current certificate) and its `COCERN_URL` or `COCERN_FINGERPRINT` differs from the current ones, or its `COCERN_ROLE` from what `--role` asks for: `--check` reports that as `outdated`, and connecting rewrites just those values (state `updated`; restart the app). Entries for other hubs, and node entries, are never changed.
 
 ## Clients and tokens
 
@@ -523,7 +523,7 @@ Dependencies point inward; Domain knows nothing about Orleans or storage.
 
 ## Verification
 
-Beyond the unit and integration tests, `scripts/Smoke-CoCern.py` checks a real hub process end to end (94 checks; see the README).
+Beyond the unit and integration tests, `scripts/Smoke-CoCern.py` checks a real hub process end to end (95 checks; see the README).
 
 **Checked live**
 
