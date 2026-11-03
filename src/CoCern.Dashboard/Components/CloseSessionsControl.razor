@@ -51,7 +51,7 @@
         else
         {
             <p class="close-sessions-confirm-copy">Close every session in <strong>@_confirmRepository</strong> @Describe()?</p>
-            <p class="close-sessions-note">Each one leaves the session list, and its chat is told the session expired and can open a new one. Sessions still answering for an open action stay open@(_confirmFilter == Filter.Label ? "" : ", and so do sessions with unread messages"). This can't be undone.</p>
+            <p class="close-sessions-note">Each one leaves the session list, and its chat is told the session expired and can open a new one. Sessions still answering for an open action stay open@(_confirmFilter == Filter.Label ? ", and so do chats working right now (a call in the last 10 minutes)" : ", and so do sessions with unread messages"). This can't be undone.</p>
             <div class="close-sessions-actions">
                 <button type="button" class="connect-button" @ref="_confirmButton" disabled="@_busy" @onclick="CloseAsync">@(_busy ? "Closing…" : "Close sessions")</button>
                 <button type="button" class="close-sessions-secondary" disabled="@_busy" @onclick="Back">Back</button>
@@ -155,9 +155,10 @@
     }
 
     private static string Outcome(DashboardCloseSessionsResult result) =>
-        $"Closed {result.Closed}, kept {result.Kept + result.Held}."
+        $"Closed {result.Closed}, kept {result.Kept + result.Held + result.Active}."
         + (result.Kept switch { 0 => "", 1 => " One kept session still answers for an open action.", var kept => $" {kept} kept sessions still answer for an open action." })
         + (result.Held switch { 0 => "", 1 => " One kept session has unread messages.", var held => $" {held} kept sessions have unread messages." })
+        + (result.Active switch { 0 => "", 1 => " One kept chat is working right now.", var active => $" {active} kept chats are working right now." })
         + (result.More ? " More sessions match: close sessions again for the rest." : "")
         + (result.Closed > 0 ? " The list updates with the next snapshot." : "");
 

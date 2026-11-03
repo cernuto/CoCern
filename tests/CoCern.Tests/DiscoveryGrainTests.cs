@@ -127,7 +127,7 @@ public sealed class DiscoveryGrainTests
             Assert.Equal(["kept-chat", "closing-chat"], await Labels());
 
             var closed = await application.ExecuteAsync(Administrator, RelayTools.ControlRequest,
-                JsonSerializer.SerializeToElement(new { repositoryId = "cocern", requestId = "close-closing", command = "close_sessions", labelPrefix = "closing" }));
+                JsonSerializer.SerializeToElement(new { repositoryId = "cocern", requestId = "close-closing", command = "close_sessions", targetSessionId = closing["relaySessionId"]!.GetValue<string>() }));
             Assert.True(closed.Ok, closed.Code);
             Assert.Equal(1, JsonNode.Parse(closed.DataJson)!["closed"]!.GetValue<int>());
             // The PC is off and never announces again, so only the session directory can tell that this chat is gone.

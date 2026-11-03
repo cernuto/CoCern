@@ -299,6 +299,12 @@ public static class RelayLimits
     public const int SessionMailHoldDays = 7;
     /// <summary>Most boards a session tells when it closes because one of their tasks targets it; past this the oldest is forgotten.</summary>
     public const int MaxSessionTargetBoards = 64;
+    /// <summary>
+    /// A close by label alone skips chats working right now: those that made a call within this many minutes. Activity reaches the directory
+    /// about hourly, so the cutoff allows for that (see ControlAggregate.IdleCutoff) and may also skip chats quiet for up to about an hour
+    /// longer; Close session closes one of those on purpose.
+    /// </summary>
+    public const int LabelCloseActiveMinutes = 10;
     /// <summary>Unread messages a closing session returns to their senders as <c>delivery.failed</c>; the rest are dropped with it.</summary>
     public const int MaxMessagesReturnedOnClose = 64;
     /// <summary>Closed session IDs a <c>close_sessions</c> reply lists; <c>closed</c> still counts them all.</summary>

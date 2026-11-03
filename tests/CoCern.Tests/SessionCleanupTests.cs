@@ -156,16 +156,17 @@ public sealed class SessionCleanupTests
     [Fact]
     public void Close_sessions_by_label_prefix_matches_the_start_of_the_label_ignoring_case()
     {
-        var control = Directory(Record("a", TimeSpan.Zero, "Smoke test 1"), Record("b", TimeSpan.FromHours(3), "SMOKE-2"), Record("c", TimeSpan.FromHours(3), "Run a smoke test"),
-            Record("d", TimeSpan.FromHours(3)), Record("e", TimeSpan.FromHours(3), "smoke elsewhere", "other"), Record("busy", TimeSpan.FromHours(3), "smoke busy"));
+        var control = Directory(Record("a", TimeSpan.FromHours(3), "Smoke test 1"), Record("b", TimeSpan.FromHours(3), "SMOKE-2"), Record("c", TimeSpan.FromHours(3), "Run a smoke test"),
+            Record("d", TimeSpan.FromHours(3)), Record("e", TimeSpan.FromHours(3), "smoke elsewhere", "other"), Record("busy", TimeSpan.FromHours(3), "smoke busy"),
+            Record("now", TimeSpan.FromMinutes(1), "smoke now"));
         Owns(control, "busy");
         control.Effects.Clear();
 
         var closed = Data(Close(control, new() { ["labelPrefix"] = "smoke" }));
-        Assert.Equal((2, 1), (closed["closed"]!.GetValue<int>(), closed["kept"]!.GetValue<int>()));
+        Assert.Equal((2, 1, 1), (closed["closed"]!.GetValue<int>(), closed["kept"]!.GetValue<int>(), closed["active"]!.GetValue<int>()));
         Assert.Equal(["a", "b"], closed["ids"]!.AsArray().Select(id => id!.GetValue<string>()).Order(StringComparer.Ordinal));
-        // A label that only contains the prefix, an unlabeled session, another repository's and a busy one stay.
-        Assert.Equal(["busy", "c", "d", "e"], Sessions(control).Select(entry => entry.Key).Order(StringComparer.Ordinal));
+        // A label that only contains the prefix, an unlabeled session, another repository's, a busy one and one working right now stay.
+        Assert.Equal(["busy", "c", "d", "e", "now"], Sessions(control).Select(entry => entry.Key).Order(StringComparer.Ordinal));
         Assert.Equal(["a", "b"], Expiries(control).Select(effect => effect.TargetKey).Order(StringComparer.Ordinal));
         Assert.DoesNotContain("sessionToken", closed.ToJsonString());
     }
@@ -241,7 +242,7 @@ public sealed class SessionCleanupTests
             var kept = await Open(Worker, "Real work");
             var own = await Open(Admin, "smoke admin");
 
-            var closed = Data(await Call(Admin, RelayTools.ControlRequest, new { repositoryId = "repo", requestId = "close-1", command = "close_sessions", labelPrefix = "SMOKE", sessionId = own.Id, sessionToken = own.Token }));
+            var closed = Data(await Call(Admin, RelayTools.ControlRequest, new { repositoryId = "repo", requestId = "close-1", command = "close_sessions", targetSessionId = smoke.Id, sessionId = own.Id, sessionToken = own.Token }));
             Assert.Equal(1, closed["closed"]!.GetValue<int>());
             Assert.Equal([smoke.Id], closed["ids"]!.AsArray().Select(id => id!.GetValue<string>()));
             Assert.True((await factory.GetGrain<IControlGrain>(AggregateKinds.ControlKey).ExecuteAsync(Admin with { IsInternal = true }, Operations.Dispatch, "{}")).Ok);

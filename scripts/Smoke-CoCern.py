@@ -755,24 +755,17 @@ def run_checks(hub, checks):
     def close_by_label():
         prefix = "smoke-close-" + uuid.uuid4().hex[:8]
         _, opened = ok("session_open", {"requestId": rid(), "label": prefix + "-chat"}, hub.worker_token)
-        doomed = {"sessionId": opened["sessionId"], "sessionToken": opened["sessionToken"]}
-        # The label reaches the hub's session directory a moment after the open.
-        deadline, closed = time.monotonic() + 10, 0
-        while not closed and time.monotonic() < deadline:
+        working = {"sessionId": opened["sessionId"], "sessionToken": opened["sessionToken"]}
+        ok("check_inbox", working, hub.worker_token)
+        # A close by label alone skips a chat working right now: this one just called.
+        deadline, active, reply = time.monotonic() + 10, 0, {}
+        while not active and time.monotonic() < deadline:
             _, reply = ok("control_request", {"requestId": rid(), "sessionId": state["a"]["sessionId"], "command": "close_sessions", "labelPrefix": prefix})
-            closed = reply.get("closed", 0)
-            time.sleep(0 if closed else 0.2)
-        expect(closed == 1, f"closed {closed}")
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline:
-            _, answer = tool("check_inbox", doomed, hub.worker_token)
-            if isinstance(answer, dict) and answer.get("code") == "SessionUnknown":
-                expect(json.loads(answer.get("dataJson") or "{}").get("expired") is True, f"reply {answer}")
-                ok("check_inbox", state["a"])  # the caller's own session is untouched
-                return
-            time.sleep(0.2)
-        raise AssertionError("the closed session still answers")
-    checks.run("happy", "close_sessions by label prefix closes that chat, which then gets SessionUnknown expired", close_by_label)
+            active = reply.get("active", 0)
+            time.sleep(0 if active else 0.2)
+        expect(active == 1 and reply.get("closed") == 0, f"reply {reply}")
+        ok("check_inbox", working, hub.worker_token)  # still open
+    checks.run("happy", "close_sessions by label prefix skips a chat working right now", close_by_label)
     def close_one():
         label = "smoke-one-" + uuid.uuid4().hex[:8]
         chats = []
