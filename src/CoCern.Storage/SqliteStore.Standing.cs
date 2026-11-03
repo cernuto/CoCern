@@ -10,6 +10,18 @@ public sealed partial class SqliteStore
 {
     private const int MaximumStandingBoards = 20;
 
+    /// <summary>
+    /// Each board's standing and orders sub-documents. SQLite extracts only those, so a large board is never copied out whole. Its JSON paths
+    /// name Domain keys, so a test checks each one against a board the Domain built.
+    /// </summary>
+    internal const string StandingQuery = """
+        SELECT grain_key, standing, orders FROM (
+            SELECT grain_key, json_extract(document, '$.standing') AS standing, json_extract(document, '$.orders') AS orders FROM (
+                SELECT grain_key, json_extract(payload, '$.Value.Json') AS document
+                FROM grain_state WHERE state_name='board' AND grain_type='cocern.board' AND json_valid(payload) AND (instr(payload, 'standing') > 0 OR instr(payload, 'orders') > 0)))
+        WHERE (standing IS NOT NULL OR orders IS NOT NULL) AND coalesce(length(standing), 0) + coalesce(length(orders), 0) <= $maximum ORDER BY grain_key LIMIT $limit;
+        """;
+
     public async Task<DashboardStandingObservation?> ReadStandingAsync(CancellationToken cancellationToken = default)
     {
         var rows = new List<(string Key, string Json, string Orders)>();
@@ -17,14 +29,7 @@ public sealed partial class SqliteStore
         try
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            // SQLite extracts only the standing and orders sub-documents, so a large board is never copied out whole.
-            using var command = Command("""
-                SELECT grain_key, standing, orders FROM (
-                    SELECT grain_key, json_extract(document, '$.standing') AS standing, json_extract(document, '$.orders') AS orders FROM (
-                        SELECT grain_key, json_extract(payload, '$.Value.Json') AS document
-                        FROM grain_state WHERE state_name='board' AND grain_type='cocern.board' AND json_valid(payload) AND (instr(payload, 'standing') > 0 OR instr(payload, 'orders') > 0)))
-                WHERE (standing IS NOT NULL OR orders IS NOT NULL) AND coalesce(length(standing), 0) + coalesce(length(orders), 0) <= $maximum ORDER BY grain_key LIMIT $limit;
-                """);
+            using var command = Command(StandingQuery);
             command.Parameters.AddWithValue("$maximum", MaximumStateBytes);
             command.Parameters.AddWithValue("$limit", MaximumStandingBoards + 1);
             using var reader = command.ExecuteReader();
