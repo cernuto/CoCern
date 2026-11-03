@@ -222,7 +222,7 @@ public sealed class DocDiscoveryTests
 
         Assert.Equal("repo", await sync.LearnAsync("repo", TopLevel(alpha)));
         Assert.Equal("beta-docs", await sync.LearnAsync("repo", TopLevel(beta)));
-        // "repo" has docs, and "bad name" is not an id.
+        // A repository is already registered under "repo" (whether or not it has docs), and "bad name" is not an id.
         Assert.Null(await sync.LearnAsync("repo", TopLevel(badName)));
         AssertSamePath(alpha, registry.Find("repo")!.ClonePath);
         AssertSamePath(beta, registry.Find("beta-docs")!.ClonePath);
@@ -240,6 +240,38 @@ public sealed class DocDiscoveryTests
         using var worker = host.AuthorizedClient();
         worker.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", WorkerToken);
         Assert.Equal((HttpStatusCode.Forbidden, "RepositoryDenied"), Status(await Tool(worker, "doc_search", new { repositoryId = "beta-docs", query = "quokka" })));
+    }
+
+    [Fact]
+    public async Task A_workspace_already_registered_under_another_repository_keeps_that_id_and_never_binds_the_sessions()
+    {
+        using var temp = new TempFolder();
+        var root = temp.Folder("roots");
+        var scanned = Repo(Path.Combine(root, "alpha-docs"), files: new() { ["docs/a.md"] = "# Zebra\n\nThe zebra guide.\n" });
+        await using var host = LearnHost(root);
+        using var admin = Admin(host);
+        var registry = host.Services.GetRequiredService<DocRepositoryRegistry>();
+        var sync = host.Services.GetRequiredService<IDocSync>();
+
+        // Found by a scan under its folder name, then reported as the workspace of a session of repo2, which has no repository yet.
+        await registry.ScanAsync(CancellationToken.None);
+        AssertSamePath(scanned, registry.Find("alpha-docs")!.ClonePath);
+        Assert.Equal("alpha-docs", await sync.LearnAsync("repo2", TopLevel(scanned)));
+        Assert.Null(registry.Find("repo2"));
+
+        // Learned for a session of repo, then reported by a session of repo2: still only repo's.
+        var learned = Repo(Path.Combine(root, "beta-docs"), files: new() { ["docs/b.md"] = "# Quokka\n\nThe quokka guide.\n" });
+        Assert.Equal("repo", await sync.LearnAsync("repo", TopLevel(learned)));
+        Assert.Equal("repo", await sync.LearnAsync("repo2", TopLevel(learned)));
+        Assert.Null(registry.Find("repo2"));
+        // Nor under its folder name, though that ID is free, for a session whose own ID is taken: one path, one ID.
+        Assert.Equal("repo", await sync.LearnAsync("alpha-docs", TopLevel(learned)));
+        Assert.Null(registry.Find("beta-docs"));
+        Assert.Equal(2, registry.Repositories.Count);
+
+        // repo2 gained no docs: the admin, who may read repo2, finds nothing configured there.
+        Assert.Equal(HttpStatusCode.BadRequest, (await Tool(admin, "doc_search", new { repositoryId = "repo2", query = "zebra" })).Status);
+        Assert.Equal(HttpStatusCode.BadRequest, (await Tool(admin, "doc_search", new { repositoryId = "repo2", query = "quokka" })).Status);
     }
 
     // ---- The adapter reports its workspace ----

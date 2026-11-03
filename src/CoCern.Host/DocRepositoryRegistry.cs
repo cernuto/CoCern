@@ -9,8 +9,8 @@ namespace CoCern.Host;
 /// <summary>
 /// The doc cache's repositories: the configured ones plus those found under <c>Relay:DocCache:Roots</c> or learned from sessions'
 /// workspaces, up to <see cref="RelayLimits.MaxDiscoveredDocRepositories"/>. A configured ID always wins. The roots are the only allow-list:
-/// nothing outside them is ever added. A discovered repository is the user's own checkout, so it is never fetched and, as for every
-/// repository, only its committed content is read.
+/// nothing outside them is ever added. A path is registered under one ID only, so its docs are never searchable under a second one. A
+/// discovered repository is the user's own checkout, so it is never fetched and, as for every repository, only its committed content is read.
 /// </summary>
 internal sealed class DocRepositoryRegistry
 {
@@ -68,34 +68,35 @@ internal sealed class DocRepositoryRegistry
 
     /// <summary>
     /// A session's workspace: an existing git top-level strictly inside a root, given as a full path (forward slashes allowed, no <c>..</c>).
-    /// It is registered under <paramref name="repositoryId"/> when that ID has no repository yet, else under its folder-name ID (as a scan
-    /// names it). Returns the ID it is registered under (also when it already was) and whether this call added it; null when refused.
-    /// Learning adds docs, never access: the caller's repository scope still decides who may read them.
+    /// A path already registered (configured, found by a scan or learned before) keeps the ID it has, whatever the caller's: a session of
+    /// repository X whose workspace is Y's checkout never makes Y's docs searchable under X. A new path is registered under
+    /// <paramref name="repositoryId"/> when no repository is registered under that ID yet (whether or not that one has documents), else
+    /// under its folder-name ID (as a scan names it) when that ID is free. Returns the ID the path is registered under (also when it already
+    /// was, under any ID) and whether this call added it; null when refused. Learning adds docs, never access: the caller's repository scope
+    /// still decides who may read them.
     /// </summary>
     public async Task<(string? Id, bool Added)> LearnAsync(string repositoryId, string workspace, CancellationToken cancellationToken)
     {
         if (!settings.Enabled || settings.Roots.Count == 0 || string.IsNullOrWhiteSpace(repositoryId) || repositoryId.Length > RelayLimits.MaxIdentifierLength) return (null, false);
         if (Normalize(workspace) is not { } path || settings.Roots.FirstOrDefault(candidate => Inside(path, candidate)) is not { } root || !IsRepository(path) || Linked(path, root)) return (null, false);
-        var id = repositoryId;
-        if (Find(repositoryId) is { } taken)
-        {
-            if (SamePath(taken.ClonePath, path)) return (repositoryId, false);
-            if (IdOf(path) is not { } named) return (null, false);
-            if (Find(named) is { } existing) return (SamePath(existing.ClonePath, path) ? named : null, false);
-            id = named;
-        }
+        if (RegisteredAs(path) is { } known) return (known, false);
+        var id = Find(repositoryId) is null ? repositoryId : IdOf(path);
+        if (id is null || Find(id) is not null) return (null, false);
         if (await BranchAsync(path, cancellationToken) is not { } branch) return (null, false);
         if (Add(Discovered(id, path, branch))) return (id, true);
-        // Another call registered it first, or the cap is reached.
-        return (Find(id) is { } raced && SamePath(raced.ClonePath, path) ? id : null, false);
+        // Another call registered this path or this ID first, or the cap is reached.
+        return (RegisteredAs(path), false);
     }
 
-    /// <summary>Adds a discovered repository unless its ID is taken or the cap is reached; checked and added under one lock, so concurrent scans never pass the cap.</summary>
+    /// <summary>
+    /// Adds a discovered repository unless its ID is taken, its path is already registered or the cap is reached; checked and added under
+    /// one lock, so concurrent scans and sessions never pass the cap or register one path twice.
+    /// </summary>
     private bool Add(DocRepository repository)
     {
         lock (gate)
         {
-            if (settings.Find(repository.Id) is not null || discovered.ContainsKey(repository.Id)) return false;
+            if (settings.Find(repository.Id) is not null || discovered.ContainsKey(repository.Id) || Registered(repository.ClonePath)) return false;
             if (discovered.Count >= RelayLimits.MaxDiscoveredDocRepositories) { NoteCap(repository.ClonePath); return false; }
             // Readers take the snapshots without the lock; each is replaced whole.
             DocRepository[] next = [.. all, repository];
@@ -115,7 +116,10 @@ internal sealed class DocRepositoryRegistry
             logger.LogWarning("The doc cache has found {Limit} repositories, its limit; {Path} and any others are not indexed.", RelayLimits.MaxDiscoveredDocRepositories, path);
     }
 
-    private bool Registered(string path) => Volatile.Read(ref all).Any(repository => SamePath(repository.ClonePath, path));
+    private bool Registered(string path) => RegisteredAs(path) is not null;
+
+    /// <summary>The ID <paramref name="path"/> is registered under, configured or discovered; null when it is not.</summary>
+    private string? RegisteredAs(string path) => Volatile.Read(ref all).FirstOrDefault(repository => SamePath(repository.ClonePath, path))?.Id;
 
     private static DocRepository Discovered(string id, string path, string branch) =>
         new(id, path, branch, "origin", DocFormats.DefaultPatterns.Select(glob => new DocPattern(glob, DocFormats.DefaultSpec)).ToArray(), [.. DocFormats.DefaultExcludes], null, Fetch: false);
