@@ -123,7 +123,7 @@ A resource is something only one chat may use at a time, such as a test rig. Cla
 
 ### Stranded actions
 
-An action whose session closed before it reported is stranded. Recover it with `action_report` and `recover: true`:
+An action whose session closed before it reported is stranded. The board marks it `ownerClosed`, ends the task's claim, and raises a `stranded` item to the repository's managers, one per action, which closes once the action is reported or recovered. Recover it with `action_report` and `recover: true`:
 
 - An administrator can recover any action, from its own session, without an `outcome`.
 - The action's own principal can recover it from a new session once the claim of the session answering for it has ended. It may give a final `outcome` (`completed`, `failed` or `canceled`; anything else gets `InvalidOutcome`).
@@ -151,7 +151,7 @@ A `check_inbox`, `task_update`, `action_report` or `task_claim` reply can carry 
 
 Answer with `attention_respond`: `accept` or `dismiss` closes it; `later` hides it for 3 replies (or until `until`). Ignoring it counts as `later`. Pass `"attention": false` on a call to skip offers.
 
-Only `blocked` (except by a `coordinator_hold`), `failed` and `interrupted` wake a chat at once. Everything else, messages included, waits for the next reply. A chat with no reply for 10 minutes gets one wake.
+Only `blocked` (except by a `coordinator_hold`), `failed`, `interrupted` and `stranded` wake a chat at once. Everything else, messages included, waits for the next reply. A chat with no reply for 10 minutes gets one wake.
 
 **Manager items.** `role: "manager"` on `session_open` routes manager items (blocked, failed, review ready, anomalies) to that session. The role is self-declared.
 

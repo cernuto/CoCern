@@ -754,4 +754,62 @@ public sealed class SessionLifecycleTests
         Assert.Equal(1L, Control(hub)["closeSeq"]!.GetValue<long>());
         hub.AssertInvariants(T0.AddMinutes(76));
     }
+
+    /// <summary>The kinds of the open attention items at <paramref name="chat"/>'s session, with what each is about.</summary>
+    private static List<(string Kind, string? Subject)> Items(AggregateHub hub, Chat chat) =>
+        (hub.State(AggregateKinds.Session, chat.Id)["attention"] as JsonObject ?? []).Select(entry => entry.Value!.AsObject())
+            .Select(item => (item["kind"]!.GetValue<string>(), item["subject"]?.GetValue<string>())).ToList();
+
+    [Fact]
+    public void A_stranded_action_is_raised_to_the_managers_and_closes_when_it_is_recovered()
+    {
+        var hub = new AggregateHub();
+        var manager = hub.Open("manager", T0, role: SessionRoles.Manager);
+        var worker = hub.Open("worker", T0);
+        var recoverer = hub.Open("worker again", T0);
+        hub.Verify(manager, T0); hub.Verify(worker, T0); hub.Verify(recoverer, T0); hub.DeliverAll(T0);
+        SeedBoard(hub, worker.Id);
+        Assert.True(ReportWork(hub, worker, true, T0.AddMinutes(1)).Ok);
+        hub.DeliverAll(T0.AddMinutes(1));
+
+        // A forced close strands the worker's action: the managers hear, once, about that action.
+        Assert.Equal(1, Data(hub.Close(new() { ["targetSessionId"] = worker.Id, ["force"] = true }, T0.AddMinutes(2)))["closed"]!.GetValue<int>());
+        hub.DeliverAll(T0.AddMinutes(2));
+        Assert.Contains((AttentionKinds.Stranded, "a"), Items(hub, manager));
+        Assert.True(hub.Apply(AggregateKinds.Board, BoardKey, Operations.SessionClosed, new SessionClosed("repo", "default", worker.Id).ToJson(), BoardCaller, T0.AddMinutes(3)).Ok);
+        hub.DeliverAll(T0.AddMinutes(3));
+        Assert.Single(Items(hub, manager), item => item.Kind == AttentionKinds.Stranded);
+
+        // The principal's other session recovers it (no outcome, so it is abandoned): the stranded item closes, and the failed one replaces it.
+        Assert.True(hub.Board(RelayTools.ActionReport, new() { ["taskId"] = "t", ["sessionId"] = recoverer.Id, ["actionId"] = "a", ["attempt"] = 1, ["recover"] = true, ["expectedVersion"] = 4 }, T0.AddMinutes(4)).Ok);
+        hub.DeliverAll(T0.AddMinutes(4));
+        Assert.DoesNotContain(Items(hub, manager), item => item.Kind == AttentionKinds.Stranded);
+        Assert.Contains(Items(hub, manager), item => item.Kind == AttentionKinds.Failed);
+        hub.AssertInvariants(T0.AddMinutes(4));
+    }
+
+    [Fact]
+    public void A_stranded_action_recovered_with_its_real_outcome_closes_the_item_and_raises_no_failure()
+    {
+        var hub = new AggregateHub();
+        var manager = hub.Open("manager", T0, role: SessionRoles.Manager);
+        var worker = hub.Open("worker", T0);
+        hub.Verify(manager, T0); hub.Verify(worker, T0); hub.DeliverAll(T0);
+        SeedBoard(hub, worker.Id);
+        Assert.True(ReportWork(hub, worker, true, T0.AddMinutes(1)).Ok);
+        hub.DeliverAll(T0.AddMinutes(1));
+        Assert.Equal(1, Data(hub.Close(new() { ["targetSessionId"] = worker.Id, ["force"] = true }, T0.AddMinutes(2)))["closed"]!.GetValue<int>());
+        hub.DeliverAll(T0.AddMinutes(2));
+        Assert.Contains((AttentionKinds.Stranded, "a"), Items(hub, manager));
+
+        // The principal knows the action finished, and says so as it recovers it.
+        Assert.True(hub.Board(RelayTools.ActionReport, new()
+        {
+            ["taskId"] = "t", ["sessionId"] = manager.Id, ["actionId"] = "a", ["attempt"] = 1, ["recover"] = true, ["outcome"] = "completed", ["expectedVersion"] = 4
+        }, T0.AddMinutes(4)).Ok);
+        hub.DeliverAll(T0.AddMinutes(4));
+        Assert.Equal("completed", BoardTask(hub)["actions"]!["a"]!["status"]!.GetValue<string>());
+        Assert.DoesNotContain(Items(hub, manager), item => item.Kind is AttentionKinds.Stranded or AttentionKinds.Failed);
+        hub.AssertInvariants(T0.AddMinutes(4));
+    }
 }
