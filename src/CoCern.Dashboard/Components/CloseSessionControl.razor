@@ -1,0 +1,99 @@
+@using System.Net
+@using System.Net.Http.Json
+@inject HttpClient Http
+
+<div class="close-session-control">
+    @if (!_confirming)
+    {
+        <button type="button" class="close-session-toggle" disabled="@(_closed || string.IsNullOrWhiteSpace(Session.RepositoryId))" aria-label="@($"Close session {Session.Label}, #{ShortId(Session.SessionId)}")" @onclick="Review">Close session</button>
+    }
+    else
+    {
+        <div class="close-session-confirm" role="group" aria-label="Close session confirmation">
+            <p>Close <strong>@_target!.Label</strong> on @DashboardFormat.Machine(_target)?</p>
+            <p class="close-session-id">Session @_target.SessionId · Repository @_target.RepositoryId</p>
+            <p>Unread messages will be discarded. This can't be undone. The chat can open a new session if it returns.</p>
+            <label class="close-session-override"><input type="checkbox" @bind="_force" disabled="@_busy" />Override unresolved actions</label>
+            @if (_force)
+            {
+                <p class="warning-note">The session will close even if it has unresolved actions. Action records and resource safeguards remain for recovery. Closing a session does not stop running tools.</p>
+            }
+            else
+            {
+                <p>Sessions with unresolved actions stay open unless you select the override.</p>
+            }
+            <div class="close-sessions-actions">
+                <button type="button" class="connect-button" @ref="_confirmButton" disabled="@_busy" @onclick="CloseAsync">@(_busy ? "Closing…" : _force ? "Force close session" : "Close session")</button>
+                <button type="button" class="close-sessions-secondary" disabled="@_busy" @onclick="Cancel">Cancel</button>
+            </div>
+        </div>
+    }
+    @if (_message is not null) { <p class="close-sessions-result" role="status">@_message</p> }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public DashboardSession Session { get; set; } = default!;
+    private DashboardSession? _target;
+    private bool _confirming;
+    private bool _force;
+    private bool _busy;
+    private bool _closed;
+    private string? _message;
+    private bool _focusConfirm;
+    private ElementReference _confirmButton;
+    private static string ShortId(string id) => id[..Math.Min(8, id.Length)];
+
+    private void Review()
+    {
+        _target = Session;
+        _force = false;
+        _message = null;
+        _confirming = true;
+        _focusConfirm = true;
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!_focusConfirm) return;
+        _focusConfirm = false;
+        try { await _confirmButton.FocusAsync(); }
+        catch (InvalidOperationException) { }
+    }
+
+    private void Cancel() => _confirming = false;
+
+    private async Task CloseAsync()
+    {
+        if (_busy || _target is null) return;
+        _busy = true;
+        var request = new DashboardCloseSessionsRequest { RepositoryId = _target.RepositoryId, TargetSessionId = _target.SessionId, Force = _force };
+        try
+        {
+            using var response = await Http.PostAsJsonAsync("api/sessions/close", request);
+            var result = response.Content.Headers.ContentType?.MediaType == "application/json"
+                ? await response.Content.ReadFromJsonAsync<DashboardCloseSessionsResult>() : null;
+            if (response.IsSuccessStatusCode && result is not null)
+            {
+                _closed = result.Closed > 0;
+                _message = _closed ? "Session closed. The list updates with the next snapshot."
+                    : result.Kept > 0 ? "Session kept open because it has unresolved actions. Select the override to force close it."
+                    : "This session is no longer listed in that repository.";
+                _confirming = result.Kept > 0;
+            }
+            else
+            {
+                _message = response.StatusCode switch
+                {
+                    HttpStatusCode.Unauthorized => "Your sign-in has ended. Reload the page and sign in again.",
+                    HttpStatusCode.Forbidden => "The close was refused. Reload the page and check your administrator access.",
+                    _ => $"The hub could not close this session{(result?.Code is { } code ? $" ({code})" : "")}. Try again."
+                };
+            }
+        }
+        catch (Exception error) when (error is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException)
+        {
+            _message = "The hub did not confirm the close. Check the session list before trying again.";
+        }
+        finally { _busy = false; }
+    }
+}

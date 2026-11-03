@@ -116,7 +116,8 @@ internal static class SessionAggregate
         if (!state.ContainsKey("principalId") || state["expiredAt"] is not null) return Ok(new { expired = true });
         var owns = state[WorkKey] is JsonObject ledger && WorkLedger.Owns(ledger, context.Now);
         var mail = IsTrue(context.Args, "idle") && state["inbox"] is JsonObject { Count: > 0 };
-        if (owns || mail) return KeepOpen(context, owns, mail);
+        if (!Flag(context.Args, "force") && (owns || mail)) return KeepOpen(context, owns, mail);
+        if (Flag(context.Args, "force")) state["forceClosedBy"] = Text(context.Args, "requestedBy");
         if (state[TargetBoardsKey] is JsonObject boards)
             foreach (var board in boards) TellBoard(context, board.Key, Text(board.Value as JsonObject ?? new JsonObject(), "boardId", "default"));
         foreach (var key in ExpiredState) state.Remove(key);

@@ -214,6 +214,15 @@ small { font-size: .8rem; }
 .search-field input { width: 100%; font-weight: 400; }
 .count-badge { font-variant-numeric: tabular-nums; color: var(--muted); font-size: .8rem; }
 .session-list-rows { padding: 0 12px 12px; }
+.session-list-entry > .close-session-control { padding: 0 10px 12px; }
+.close-session-control { margin-top: 10px; }
+.close-session-toggle { min-height: 36px; padding: 6px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); font: inherit; font-size: .8rem; cursor: pointer; }
+.close-session-toggle:hover:not(:disabled) { border-color: var(--focus); }
+.close-session-confirm { padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-alt); font-size: .85rem; }
+.close-session-confirm p + p { margin-top: 8px; }
+.close-session-id { color: var(--muted); font-size: .75rem; overflow-wrap: anywhere; }
+.close-session-override { display: flex; align-items: center; gap: 8px; margin: 12px 0; cursor: pointer; }
+.close-session-override input { flex-shrink: 0; }
 .session-list-row { width: 100%; padding: 15px 10px; min-height: 76px; border: 1px solid transparent; border-top-color: var(--line); border-radius: 0; background: transparent; color: var(--ink); display: flex; align-items: center; gap: 13px; text-align: left; }
 .session-list-row:hover { background: var(--surface-alt); }
 .session-list-row.selected { background: var(--surface-alt); border: 1px solid var(--focus); border-radius: 8px; }

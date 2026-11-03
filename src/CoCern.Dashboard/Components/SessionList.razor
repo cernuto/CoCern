@@ -4,25 +4,28 @@
     <div class="session-list-rows">
         @foreach (var session in FilteredSessions)
         {
-            <button type="button" @key="session.SessionId" class="session-list-row @(SelectedId == session.SessionId ? "selected" : "")" aria-pressed="@(SelectedId == session.SessionId ? "true" : "false")" @onclick="() => OnSelect.InvokeAsync(session.SessionId)">
-                <span class="status-dot @(session.Reachable ? "teal" : "amber")" aria-hidden="true"></span>
-                <span class="session-row-label"><strong>@session.Label</strong><span>@session.Provider on @DashboardFormat.Machine(session)</span><span title="@session.SessionId">#@ShortId(session.SessionId) · @(session.OpenedAt is { } opened ? $"Opened {DashboardFormat.Timestamp(opened)}" : "Opened time unavailable")</span></span>
-                <span class="session-row-state">
-                    @if (session.HasBindingReport is null)
-                    {
-                        <span>Tool binding not reported</span>
-                    }
-                    else if (session.HasBindingReport == false)
-                    {
-                        <span>No tool binding reported</span>
-                    }
-                    else
-                    {
-                        <span title="Freshness of reported binding metadata, not a verified IDE connection. Relay calls do not renew this report.">Report: @DashboardFormat.Freshness(session, Now)</span>
-                    }
-                    <small title="Most recent recorded successful tool call, including background polling. This does not indicate whether a model is running.">Last relay call: @DashboardFormat.Ago(session.LastActivityAt, Now)</small>
-                </span>
-            </button>
+            <div class="session-list-entry" @key="session.SessionId">
+                <button type="button" class="session-list-row @(SelectedId == session.SessionId ? "selected" : "")" aria-pressed="@(SelectedId == session.SessionId ? "true" : "false")" @onclick="() => OnSelect.InvokeAsync(session.SessionId)">
+                    <span class="status-dot @(session.Reachable ? "teal" : "amber")" aria-hidden="true"></span>
+                    <span class="session-row-label"><strong>@session.Label</strong><span>@session.Provider on @DashboardFormat.Machine(session)</span><span title="@session.SessionId">#@ShortId(session.SessionId) · @(session.OpenedAt is { } opened ? $"Opened {DashboardFormat.Timestamp(opened)}" : "Opened time unavailable")</span></span>
+                    <span class="session-row-state">
+                        @if (session.HasBindingReport is null)
+                        {
+                            <span>Tool binding not reported</span>
+                        }
+                        else if (session.HasBindingReport == false)
+                        {
+                            <span>No tool binding reported</span>
+                        }
+                        else
+                        {
+                            <span title="Freshness of reported binding metadata, not a verified IDE connection. Relay calls do not renew this report.">Report: @DashboardFormat.Freshness(session, Now)</span>
+                        }
+                        <small title="Most recent recorded successful tool call, including background polling. This does not indicate whether a model is running.">Last relay call: @DashboardFormat.Ago(session.LastActivityAt, Now)</small>
+                    </span>
+                </button>
+                <CloseSessionControl Session="@session" />
+            </div>
         }
         @if (!FilteredSessions.Any())
         {

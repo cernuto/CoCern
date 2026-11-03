@@ -136,7 +136,7 @@ public static class DashboardEndpoints
 
     /// <summary>
     /// Runs <c>control_request close_sessions</c> for one repository as the signed-in viewer (an administrator, or it could not have signed in).
-    /// Only the repository and the filter are forwarded, never a session, and the reply is the counts and closed IDs, never a session record.
+    /// Only the repository, filters, explicit target and override are forwarded, never caller session credentials. The reply contains counts and closed IDs.
     /// </summary>
     private static async Task<IResult> CloseSessionsAsync(HttpContext context, IRelayApplication application)
     {
@@ -154,7 +154,7 @@ public static class DashboardEndpoints
             repository = id.GetString()!;
             arguments["repositoryId"] = repository;
             // The filter goes to the hub as sent, so the hub alone decides what a valid one is.
-            foreach (var name in new[] { "idleMinutes", "labelPrefix" })
+            foreach (var name in new[] { "idleMinutes", "labelPrefix", "targetSessionId", "force" })
                 if (json.RootElement.TryGetProperty(name, out var value) && value.ValueKind != JsonValueKind.Null) arguments[name] = JsonNode.Parse(value.GetRawText());
         }
         catch (JsonException) { return CloseRefused(RelayErrorCodes.InvalidArguments, null); }

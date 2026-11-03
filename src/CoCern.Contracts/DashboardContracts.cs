@@ -311,12 +311,17 @@ public sealed record DashboardConnectClient
 /// <summary>
 /// The Sessions page's "Close idle sessions": closes <see cref="RepositoryId"/>'s sessions idle for at least <see cref="IdleMinutes"/>
 /// and/or labelled starting with <see cref="LabelPrefix"/> (with both, a session must match both), through <c>control_request close_sessions</c>.
+/// Alternatively, <see cref="TargetSessionId"/> closes one session, optionally overriding unresolved work with <see cref="Force"/>.
 /// </summary>
 public sealed record DashboardCloseSessionsRequest
 {
     public string RepositoryId { get; init; } = "";
     public int? IdleMinutes { get; init; }
     public string? LabelPrefix { get; init; }
+    /// <summary>Close exactly this session instead of using the bulk filters.</summary>
+    public string? TargetSessionId { get; init; }
+    /// <summary>For an exact target only, override unresolved work. Action records and resource safeguards remain for recovery.</summary>
+    public bool Force { get; init; }
 }
 
 /// <summary>

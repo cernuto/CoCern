@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
+using Orleans;
 using CoCern.Contracts;
 using CoCern.Contracts.Dashboard;
 using CoCern.Core;
@@ -50,6 +51,31 @@ public sealed class DashboardSessionCleanupTests
         Assert.Null(result.Code);
         Assert.Equal(new[] { smoke.Id, smoke2.Id }.Order(StringComparer.Ordinal), result.Ids.Order(StringComparer.Ordinal));
         Assert.Equal([work.Id], await LiveAsync(host));
+    }
+
+    [Fact]
+    public async Task A_viewer_can_close_one_exact_session_without_closing_an_identically_labelled_peer()
+    {
+        await using var host = ViewerHost();
+        var target = await OpenAsync(host, "Same label");
+        var peer = await OpenAsync(host, "Same label");
+        var directory = host.Services.GetRequiredService<IGrainFactory>().GetGrain<IControlGrain>(AggregateKinds.ControlKey);
+        var tracked = await directory.ExecuteAsync(new RelayCaller("test-internal", false, ["repo"], true), Operations.SessionWork,
+            JsonSerializer.Serialize(new { repositoryId = "repo", sessionId = target.Id, owns = true, seq = 1 }));
+        Assert.True(tracked.Ok, tracked.DataJson);
+        using var browser = await SignedInAsync(host);
+        using (var normal = await browser.PostAsync(Route, Json(new { repositoryId = "repo", targetSessionId = target.Id })))
+        {
+            Assert.Equal(HttpStatusCode.OK, normal.StatusCode);
+            var kept = (await normal.Content.ReadFromJsonAsync<DashboardCloseSessionsResult>())!;
+            Assert.Equal((0, 1), (kept.Closed, kept.Kept));
+        }
+        using var response = await browser.PostAsync(Route, Json(new { repositoryId = "repo", targetSessionId = target.Id, force = true }));
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var result = (await response.Content.ReadFromJsonAsync<DashboardCloseSessionsResult>())!;
+        Assert.Equal((1, 0), (result.Closed, result.Kept));
+        Assert.Equal([target.Id], result.Ids);
+        Assert.Equal([peer.Id], await LiveAsync(host));
     }
 
     [Fact]
@@ -107,6 +133,9 @@ public sealed class DashboardSessionCleanupTests
 
     [Theory]
     [InlineData("{\"repositoryId\":\"repo\",\"idleMinutes\":30}", "idleMinutes")]
+    [InlineData("{\"repositoryId\":\"repo\",\"targetSessionId\":\"\"}", "targetSessionId")]
+    [InlineData("{\"repositoryId\":\"repo\",\"labelPrefix\":\"smoke\",\"force\":true}", "force")]
+    [InlineData("{\"repositoryId\":\"repo\",\"targetSessionId\":\"s\",\"force\":\"true\"}", "force")]
     [InlineData("{\"repositoryId\":\"repo\",\"idleMinutes\":\"an hour\"}", "idleMinutes")]
     [InlineData("{\"repositoryId\":\"repo\",\"labelPrefix\":\"\"}", null)]
     [InlineData("{\"repositoryId\":\"repo\"}", "idleMinutes")]

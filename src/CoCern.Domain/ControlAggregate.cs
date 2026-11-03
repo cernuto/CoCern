@@ -108,13 +108,13 @@ internal static class ControlAggregate
     /// Each closed session leaves the directory and is sent <see cref="Operations.SessionExpire"/>, under its own repository, so its chat
     /// gets a clean <c>SessionUnknown</c> and opens again. One that refuses sends <see cref="Operations.SessionRestore"/> and comes back.
     /// </summary>
-    private static Closing CloseSessions(AggregateContext context, JsonObject sessions, Func<string, JsonObject?, bool> matches, int limit, bool idle)
+    private static Closing CloseSessions(AggregateContext context, JsonObject sessions, Func<string, JsonObject?, bool> matches, int limit, bool idle, bool force = false)
     {
         var now = context.Now;
         var matched = sessions.Select(entry => (entry.Key, Session: entry.Value as JsonObject)).Where(entry => matches(entry.Key, entry.Session))
             .Select(entry => (entry.Key, entry.Session, Seen: entry.Session is { } record ? LastSeen(record) : DateTimeOffset.MinValue,
                 Owns: entry.Session is { } owner && OwnsWork(owner, now), Hold: entry.Session is { } holder ? MailHold(holder, now) : Hold.None)).ToList();
-        var closable = matched.Where(entry => !entry.Owns && !(idle && entry.Hold == Hold.Holding))
+        var closable = matched.Where(entry => force || !entry.Owns && !(idle && entry.Hold == Hold.Holding))
             // A forced close takes sessions without mail waiting first.
             .OrderBy(entry => entry.Hold == Hold.Holding).ThenBy(entry => entry.Seen).ThenBy(entry => entry.Key, StringComparer.Ordinal).ToList();
         var closing = closable.Take(Math.Max(0, limit)).ToList();
@@ -123,12 +123,21 @@ internal static class ControlAggregate
             sessions.Remove(id);
             var repository = session is null ? "" : Text(session, "repositoryId");
             var expire = new JsonObject { ["repositoryId"] = repository, ["sessionId"] = id };
+            if (force)
+            {
+                expire["force"] = true; expire["requestedBy"] = context.Caller.PrincipalId;
+                // A delayed refusal of an earlier, ordinary close must not restore this session after the explicit override.
+                var forced = ObjectAt(context.State, "forceClosedSessions");
+                forced.Remove(id);
+                forced[id] = now.ToString("O");
+                while (forced.Count > RelayLimits.MaxRecords) forced.Remove(forced.First().Key);
+            }
             // A session whose hold lapsed already had its grace, so this idle close takes it as it is.
             if (idle && hold == Hold.None) expire["idle"] = true;
             // Its own caller: the session belongs to its repository, which the caller that closed it may not reach (or may reach them all).
             context.Emit(AggregateKinds.Session, id, Operations.SessionExpire, expire, new RelayCaller("relay-directory", false, [repository]));
         }
-        return new(closing.Select(entry => entry.Key).ToList(), matched.Count(entry => entry.Owns), idle ? matched.Count(entry => !entry.Owns && entry.Hold == Hold.Holding) : 0,
+        return new(closing.Select(entry => entry.Key).ToList(), force ? 0 : matched.Count(entry => entry.Owns), idle && !force ? matched.Count(entry => !entry.Owns && entry.Hold == Hold.Holding) : 0,
             closable.Count > closing.Count);
     }
 
@@ -152,10 +161,24 @@ internal static class ControlAggregate
     /// (ignoring case); with both, a session must match both. The caller's own session is never closed. With <c>idleMinutes</c> it is an
     /// idle close, so sessions holding unread mail stay (<c>held</c>); a label-only close takes them. Replies the counts closed, kept and
     /// held, the first closed IDs, and <c>more</c> when matching sessions are left for another call.
+    /// An exact <c>targetSessionId</c> replaces the bulk filters; only this form permits <c>force: true</c>, which also overrides unresolved work.
     /// </summary>
     private static RelayReply CloseSessionsByFilter(AggregateContext context)
     {
         var args = context.Args;
+        var force = false;
+        if (args["force"] is { } forceNode && (forceNode is not JsonValue flag || !flag.TryGetValue(out force)))
+            return Error(InvalidArguments, new { field = "force" });
+        string? target = null;
+        if (args["targetSessionId"] is { } targetNode)
+        {
+            if (targetNode is not JsonValue text || !text.TryGetValue<string>(out var parsed) || string.IsNullOrWhiteSpace(parsed) || parsed.Length > RelayLimits.MaxIdentifierLength)
+                return Error(InvalidArguments, new { field = "targetSessionId" });
+            target = parsed;
+            if (args["idleMinutes"] is not null || args["labelPrefix"] is not null)
+                return Error(InvalidArguments, new { field = "targetSessionId", hint = "choose one session or a bulk filter" });
+        }
+        if (force && target is null) return Error(InvalidArguments, new { field = "force", hint = "force requires targetSessionId" });
         long? minutes = null;
         if (args["idleMinutes"] is { } idle)
         {
@@ -171,11 +194,11 @@ internal static class ControlAggregate
                 return Error(InvalidArguments, new { field = "labelPrefix" });
             prefix = parsed;
         }
-        if (minutes is null && prefix is null) return Error(InvalidArguments, new { field = "idleMinutes", hint = "give idleMinutes, labelPrefix or both" });
+        if (minutes is null && prefix is null && target is null) return Error(InvalidArguments, new { field = "idleMinutes", hint = "give targetSessionId, idleMinutes, labelPrefix or both bulk filters" });
         var cutoff = minutes is { } span ? IdleCutoff(context.Now, TimeSpan.FromMinutes(span)) : DateTimeOffset.MaxValue;
         var own = context.SessionId;
         var result = CloseSessions(context, ObjectAt(context.State, "sessions"), (id, session) => session is not null && id != own && Text(session, "repositoryId") == context.Repository
-            && LastSeen(session) <= cutoff && (prefix is null || Text(session, "label").StartsWith(prefix, StringComparison.OrdinalIgnoreCase)), RelayLimits.MaxSessionsClosedPerCall, idle: minutes is not null);
+            && (target is null || id == target) && LastSeen(session) <= cutoff && (prefix is null || Text(session, "label").StartsWith(prefix, StringComparison.OrdinalIgnoreCase)), RelayLimits.MaxSessionsClosedPerCall, idle: minutes is not null, force: force);
         return Ok(new { closed = result.Closed.Count, kept = result.Kept, held = result.Held, more = result.More, ids = result.Closed.Take(RelayLimits.MaxClosedSessionIds).ToArray() });
     }
 
@@ -211,7 +234,7 @@ internal static class ControlAggregate
         var args = context.Args;
         var id = Text(args, "sessionId");
         var sessions = ObjectAt(context.State, "sessions");
-        if (id.Length == 0) return Ok(new { restored = false });
+        if (id.Length == 0 || (context.State["forceClosedSessions"] as JsonObject)?.ContainsKey(id) == true) return Ok(new { restored = false });
         if (sessions[id] is not JsonObject record)
         {
             if (args["record"] is not JsonObject copy || Text(copy, "principalId").Length == 0) return Ok(new { restored = false });

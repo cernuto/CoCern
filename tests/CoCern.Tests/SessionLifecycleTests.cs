@@ -209,6 +209,66 @@ public sealed class SessionLifecycleTests
     }
 
     [Fact]
+    public void Force_closing_an_exact_session_expires_it_despite_unread_mail_and_unresolved_work()
+    {
+        var hub = new Hub();
+        var target = hub.Open("Same label", T0);
+        var peer = hub.Open("Same label", T0);
+        hub.Verify(target, T0); hub.Verify(peer, T0);
+        hub.DeliverAll(T0);
+        Assert.True(hub.Send(peer, target.Id, "unread", T0).Ok);
+        Assert.True(hub.Apply(AggregateKinds.Session, target.Id, Operations.SessionWork, new()
+        {
+            ["sessionId"] = target.Id, ["actionKey"] = "repo/default/t/a/1", ["open"] = true, ["at"] = T0.ToString("O")
+        }, BoardCaller, T0).Ok);
+        hub.DeliverAll(T0);
+
+        var kept = hub.Close(new() { ["targetSessionId"] = target.Id }, T0.AddMinutes(1));
+        Assert.True(kept.Ok, kept.DataJson);
+        Assert.Equal(1, Data(kept)["kept"]!.GetValue<int>());
+        Assert.Single(hub.Inbox(target, T0.AddMinutes(1)));
+        var forced = hub.Close(new() { ["targetSessionId"] = target.Id, ["force"] = true }, T0.AddMinutes(2));
+        Assert.True(forced.Ok, forced.DataJson);
+        Assert.Equal([target.Id], Data(forced)["ids"]!.AsArray().Select(id => id!.GetValue<string>()));
+        hub.DeliverAll(T0.AddMinutes(2));
+        Assert.False(hub.Directory().ContainsKey(target.Id));
+        Assert.Equal(RelayErrorCodes.SessionUnknown, hub.Verify(target, T0.AddMinutes(3)).Code);
+        Assert.True(hub.Verify(peer, T0.AddMinutes(3)).Ok);
+        Assert.Null(hub.State(AggregateKinds.Session, target.Id)["inbox"]);
+        // A late work report cannot revive the closed session.
+        Assert.True(hub.Apply(AggregateKinds.Session, target.Id, Operations.SessionWork, new()
+        {
+            ["sessionId"] = target.Id, ["actionKey"] = "repo/default/t/a/1", ["open"] = true, ["at"] = T0.AddMinutes(4).ToString("O")
+        }, BoardCaller, T0.AddMinutes(4)).Ok);
+        hub.DeliverAll(T0.AddMinutes(4));
+        Assert.False(hub.Directory().ContainsKey(target.Id));
+    }
+
+    [Fact]
+    public void A_late_restore_cannot_bring_back_a_force_closed_session()
+    {
+        var hub = new Hub();
+        var target = hub.Open("target", T0);
+        hub.Verify(target, T0); hub.DeliverAll(T0);
+        Assert.True(hub.Apply(AggregateKinds.Session, target.Id, Operations.SessionWork, new()
+        {
+            ["sessionId"] = target.Id, ["actionKey"] = "repo/default/t/a/1", ["open"] = true, ["at"] = T0.ToString("O")
+        }, BoardCaller, T0).Ok);
+        // The directory has not yet heard the work report, so a normal close is refused by the session.
+        hub.Of(AggregateKinds.Session, target.Id).Effects.Clear();
+        Assert.True(hub.Close(new() { ["labelPrefix"] = "target" }, T0.AddMinutes(1)).Ok);
+        var expiry = Assert.Single(hub.Of(AggregateKinds.Control, AggregateKinds.ControlKey).Effects);
+        Assert.True(hub.Deliver(expiry, T0.AddMinutes(1)).Ok);
+        var restore = Assert.Single(hub.Of(AggregateKinds.Session, target.Id).Effects, effect => effect.Operation == Operations.SessionRestore);
+        Assert.True(hub.Deliver(restore, T0.AddMinutes(1)).Ok);
+        Assert.True(hub.Close(new() { ["targetSessionId"] = target.Id, ["force"] = true }, T0.AddMinutes(2)).Ok);
+        hub.DeliverAll(T0.AddMinutes(2));
+        Assert.True(hub.Deliver(restore, T0.AddMinutes(3)).Ok);
+        Assert.False(hub.Directory().ContainsKey(target.Id));
+        Assert.Equal(RelayErrorCodes.SessionUnknown, hub.Verify(target, T0.AddMinutes(3)).Code);
+    }
+
+    [Fact]
     public void Bind_keeps_the_first_machine_and_leaves_binding_and_availability_alone_when_they_are_null_or_left_out()
     {
         var hub = new Hub();

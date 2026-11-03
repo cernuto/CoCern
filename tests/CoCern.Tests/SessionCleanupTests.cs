@@ -104,6 +104,56 @@ public sealed class SessionCleanupTests
     }
 
     [Fact]
+    public void An_exact_session_target_closes_only_that_session_even_with_duplicate_labels()
+    {
+        var control = Directory(Record("one", TimeSpan.Zero, "Same label"), Record("two", TimeSpan.Zero, "Same label"), Record("foreign", TimeSpan.Zero, "Same label", "other"));
+        var reply = Close(control, new() { ["targetSessionId"] = "one" });
+        Assert.True(reply.Ok, reply.DataJson);
+        Assert.Equal(["one"], Data(reply)["ids"]!.AsArray().Select(id => id!.GetValue<string>()));
+        Assert.Equal(["foreign", "two"], Sessions(control).Select(entry => entry.Key).Order(StringComparer.Ordinal));
+        Assert.Equal("one", Assert.Single(Expiries(control)).TargetKey);
+        Assert.Equal(0, Data(Close(control, new() { ["targetSessionId"] = "foreign", ["force"] = true }))["closed"]!.GetValue<int>());
+        Assert.Equal(0, Data(Close(control, new() { ["targetSessionId"] = "two", ["sessionId"] = "two", ["force"] = true }))["closed"]!.GetValue<int>());
+        Assert.Equal(RelayErrorCodes.AdministratorRequired, Close(control, new() { ["targetSessionId"] = "two", ["force"] = true }, Worker).Code);
+        Assert.True(Sessions(control).ContainsKey("two"));
+    }
+
+    [Fact]
+    public void Only_an_explicit_force_close_of_one_session_overrides_its_unresolved_work()
+    {
+        var control = Directory(Record("busy", TimeSpan.Zero), Record("peer", TimeSpan.Zero));
+        Owns(control, "busy");
+        control.Effects.Clear();
+        var kept = Close(control, new() { ["targetSessionId"] = "busy" });
+        Assert.True(kept.Ok, kept.DataJson);
+        Assert.Equal((0, 1), (Data(kept)["closed"]!.GetValue<int>(), Data(kept)["kept"]!.GetValue<int>()));
+        Assert.Empty(Expiries(control));
+        var forced = Close(control, new() { ["targetSessionId"] = "busy", ["force"] = true });
+        Assert.True(forced.Ok, forced.DataJson);
+        Assert.Equal((1, 0), (Data(forced)["closed"]!.GetValue<int>(), Data(forced)["kept"]!.GetValue<int>()));
+        var expiry = JsonNode.Parse(Assert.Single(Expiries(control)).PayloadJson)!;
+        Assert.True(expiry["force"]!.GetValue<bool>());
+        Assert.Null(expiry["idle"]);
+        Assert.Equal(["peer"], Sessions(control).Select(entry => entry.Key));
+    }
+
+    [Theory]
+    [InlineData("{\"force\":true}")]
+    [InlineData("{\"labelPrefix\":\"smoke\",\"force\":true}")]
+    [InlineData("{\"targetSessionId\":\"\"}")]
+    [InlineData("{\"targetSessionId\":12}")]
+    [InlineData("{\"targetSessionId\":\"s\",\"force\":\"true\"}")]
+    [InlineData("{\"targetSessionId\":\"s\",\"idleMinutes\":60}")]
+    [InlineData("{\"targetSessionId\":\"s\",\"labelPrefix\":\"smoke\"}")]
+    public void A_force_close_requires_one_unambiguous_session_target(string json)
+    {
+        var control = Directory(Record("s", TimeSpan.Zero, "smoke"));
+        Assert.Equal(RelayErrorCodes.InvalidArguments, Close(control, JsonNode.Parse(json)!.AsObject()).Code);
+        Assert.Single(Sessions(control));
+        Assert.Empty(control.Effects);
+    }
+
+    [Fact]
     public void Close_sessions_by_label_prefix_matches_the_start_of_the_label_ignoring_case()
     {
         var control = Directory(Record("a", TimeSpan.Zero, "Smoke test 1"), Record("b", TimeSpan.FromHours(3), "SMOKE-2"), Record("c", TimeSpan.FromHours(3), "Run a smoke test"),
