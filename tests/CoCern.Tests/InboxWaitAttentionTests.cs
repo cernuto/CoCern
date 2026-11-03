@@ -14,10 +14,11 @@ public sealed class InboxWaitAttentionTests
     [Fact]
     public async Task Waiting_check_inbox_ends_early_and_offers_an_urgent_item()
     {
+        // A long wait and a loose bound: the reply's offer already proves the wait ended early; the time only rules out waiting it out.
         var hub = new AttentionHub { UrgentFromStatusCall = 2 };
-        var reply = await Wait(hub, waitSeconds: 10, out var elapsed);
+        var reply = await Wait(hub, waitSeconds: 30, out var elapsed);
         Assert.True(reply.Ok);
-        Assert.True(elapsed.Elapsed < TimeSpan.FromSeconds(5), $"The wait ran {elapsed.Elapsed} although an urgent item was waiting.");
+        Assert.True(elapsed.Elapsed < TimeSpan.FromSeconds(20), $"The wait ran {elapsed.Elapsed} although an urgent item was waiting.");
         Assert.Equal(0, reply.Data!.Value.GetProperty("total").GetInt32());
         Assert.Equal("blocked", reply.Data!.Value.GetProperty("attention").GetProperty("k").GetString());
         // Only the read that returns may take the offer; every poll before it declined one.
@@ -36,17 +37,17 @@ public sealed class InboxWaitAttentionTests
         Assert.True(elapsed.Elapsed >= TimeSpan.FromSeconds(0.9), $"The wait ended after {elapsed.Elapsed} with nothing urgent waiting.");
         Assert.False(reply.Data!.Value.TryGetProperty("attention", out _));
         Assert.Equal(0, hub.OfferingReads);
-        // The status read is bounded by the polls: at most one per poll.
-        Assert.InRange(hub.StatusBodies.Count, 0, hub.CheckBodies.Count);
+        // Every poll but a last one too short to wait after consults attention, and none consults it twice.
+        Assert.InRange(hub.StatusBodies.Count, 1, hub.CheckBodies.Count);
     }
 
     [Fact]
     public async Task Waiting_check_inbox_ends_early_for_an_eligible_idle_hold_wake()
     {
         var hub = new AttentionHub { UrgentFromStatusCall = 2, Wake = "hold:638000000000000000", Kind = "review_ready", Urgent = 0 };
-        var reply = await Wait(hub, waitSeconds: 10, out var elapsed, attention: true);
+        var reply = await Wait(hub, waitSeconds: 30, out var elapsed, attention: true);
         Assert.True(reply.Ok);
-        Assert.True(elapsed.Elapsed < TimeSpan.FromSeconds(5), $"The wait ran {elapsed.Elapsed} although an idle hold wake was eligible.");
+        Assert.True(elapsed.Elapsed < TimeSpan.FromSeconds(20), $"The wait ran {elapsed.Elapsed} although an idle hold wake was eligible.");
         Assert.Equal("review_ready", reply.Data!.Value.GetProperty("attention").GetProperty("k").GetString());
         Assert.Equal(1, hub.OfferingReads);
         Assert.Contains("\"attention\":true", hub.CheckBodies[^1]);

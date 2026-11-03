@@ -49,8 +49,8 @@
         }
         else
         {
-            <p class="close-sessions-confirm-copy">Close every session in <strong>@_repository</strong> @Describe()?</p>
-            <p class="close-sessions-note">Each one leaves the session list, and its chat is told the session expired and can open a new one. Sessions still answering for an open action stay open. This can't be undone.</p>
+            <p class="close-sessions-confirm-copy">Close every session in <strong>@_confirmRepository</strong> @Describe()?</p>
+            <p class="close-sessions-note">Each one leaves the session list, and its chat is told the session expired and can open a new one. Sessions still answering for an open action stay open@(_confirmFilter == Filter.Label ? "" : ", and so do sessions with unread messages"). This can't be undone.</p>
             <div class="close-sessions-actions">
                 <button type="button" class="connect-button" @ref="_confirmButton" disabled="@_busy" @onclick="CloseAsync">@(_busy ? "Closing…" : "Close sessions")</button>
                 <button type="button" class="close-sessions-secondary" disabled="@_busy" @onclick="Back">Back</button>
@@ -73,6 +73,10 @@
     private Filter _filter = Filter.Day;
     private string _prefix = "";
     private string? _repository;
+    // What the confirm prompt shows, taken when it opens: a repository list that changes underneath never changes what is closed.
+    private string? _confirmRepository;
+    private Filter _confirmFilter = Filter.Day;
+    private string _confirmPrefix = "";
     private string? _message;
     private ElementReference _confirmButton;
 
@@ -107,28 +111,29 @@
     {
         if (!CanReview) return;
         _message = null;
+        (_confirmRepository, _confirmFilter, _confirmPrefix) = (_repository, _filter, _prefix.Trim());
         _confirming = true;
         _focusConfirm = true;
     }
 
     private void Back() => _confirming = false;
 
-    private string Describe() => _filter switch
+    private string Describe() => _confirmFilter switch
     {
         Filter.Day => "that has not been seen for over a day",
         Filter.Hour => "that has not been seen for over an hour",
-        _ => $"whose label starts with “{_prefix.Trim()}” (any case)"
+        _ => $"whose label starts with “{_confirmPrefix}” (any case)"
     };
 
     private async Task CloseAsync()
     {
-        if (_repository is null) return;
+        if (_confirmRepository is null) return;
         _busy = true;
         var request = new DashboardCloseSessionsRequest
         {
-            RepositoryId = _repository,
-            IdleMinutes = _filter switch { Filter.Day => DayMinutes, Filter.Hour => HourMinutes, _ => null },
-            LabelPrefix = _filter == Filter.Label ? _prefix.Trim() : null
+            RepositoryId = _confirmRepository,
+            IdleMinutes = _confirmFilter switch { Filter.Day => DayMinutes, Filter.Hour => HourMinutes, _ => null },
+            LabelPrefix = _confirmFilter == Filter.Label ? _confirmPrefix : null
         };
         try
         {
@@ -137,7 +142,7 @@
             if (response.Content.Headers.ContentType?.MediaType == "application/json")
                 result = await response.Content.ReadFromJsonAsync<DashboardCloseSessionsResult>();
             _message = response.IsSuccessStatusCode && result is not null
-                ? $"Closed {result.Closed}, kept {result.Kept}." + (result.Kept > 0 ? " Kept sessions still answer for an open action." : "") + (result.Closed > 0 ? " The list updates with the next snapshot." : "")
+                ? Outcome(result)
                 : Refused(response.StatusCode, result);
             _confirming = false;
         }
@@ -147,6 +152,13 @@
         }
         finally { _busy = false; }
     }
+
+    private static string Outcome(DashboardCloseSessionsResult result) =>
+        $"Closed {result.Closed}, kept {result.Kept + result.Held}."
+        + (result.Kept switch { 0 => "", 1 => " One kept session still answers for an open action.", var kept => $" {kept} kept sessions still answer for an open action." })
+        + (result.Held switch { 0 => "", 1 => " One kept session has unread messages.", var held => $" {held} kept sessions have unread messages." })
+        + (result.More ? " More sessions match: close sessions again for the rest." : "")
+        + (result.Closed > 0 ? " The list updates with the next snapshot." : "");
 
     private static string Refused(HttpStatusCode status, DashboardCloseSessionsResult? result) => (status, result?.Code, result?.Field) switch
     {

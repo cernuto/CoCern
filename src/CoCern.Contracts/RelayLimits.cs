@@ -286,8 +286,19 @@ public static class RelayLimits
     public const int MaxSessionIdleHours = 720;
     /// <summary>Least <c>idleMinutes</c> a <c>close_sessions</c> filter takes, so a bulk close never catches a chat that is merely between turns.</summary>
     public const int MinCloseSessionsIdleMinutes = 60;
-    /// <summary>Sessions one sweep or <c>close_sessions</c> closes at most, so their expiry notices fit the outbox; the rest close on the next run.</summary>
+    /// <summary>
+    /// Sessions one sweep or <c>close_sessions</c> closes at most, so their expiry notices fit the outbox; the reply then says <c>more</c>,
+    /// and the rest close on the next run.
+    /// </summary>
     public const int MaxSessionsClosedPerCall = MaxRecords / 4;
+    /// <summary>
+    /// Days a session kept open for unread mail stays exempt from idle closes (the sweep, <c>close_sessions</c> with <c>idleMinutes</c>)
+    /// while it is not seen again. Past this an idle close takes it, mail and all, so chats that ended with mail waiting never fill the
+    /// directory. A session seen again loses the exemption, and its next idle close asks it once more.
+    /// </summary>
+    public const int SessionMailHoldDays = 7;
+    /// <summary>Most boards a session tells when it closes because one of their tasks targets it; past this the oldest is forgotten.</summary>
+    public const int MaxSessionTargetBoards = 64;
     /// <summary>Closed session IDs a <c>close_sessions</c> reply lists; <c>closed</c> still counts them all.</summary>
     public const int MaxClosedSessionIds = MaxPageSize;
     /// <summary>
@@ -307,7 +318,11 @@ public static class RelayLimits
     /// inside <see cref="SessionWorkRetentionDays"/>, so a reported long-running action never lapses.
     /// </summary>
     public const int SessionWorkRefreshHours = 24;
-    /// <summary>Least minutes between a session's reports to the control directory that it is still active (made at boundary replies).</summary>
+    /// <summary>
+    /// Least minutes between a session's reports to the control directory that it is still active (made on its verified calls, with or
+    /// without attention). The directory's view of a working session can therefore lag its last call by up to this long, so every idle
+    /// judgment (the sweep, <c>close_sessions</c>, a full directory) waits this much longer than the idle time it is given.
+    /// </summary>
     public const int AttentionActivityReportMinutes = 60;
     /// <summary>Sessions whose last idle-hold wake the hub remembers for counting; past this the memory is cleared.</summary>
     public const int MaxHoldWakeSessions = 1_024;

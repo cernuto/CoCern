@@ -39,19 +39,44 @@ internal static class TaskActions
     public static bool HoldsTask(JsonObject task) =>
         (task["actions"] as JsonObject ?? new()).Any(x => x.Value is JsonObject action && IsUnresolved(action) && action["recovery"] is not JsonObject);
 
+    /// <summary>The bulky parts of a report or an action record: its report text and its tool binding. Dropping one keeps the record itself.</summary>
+    private static readonly string[] BodyFields = ["report", "binding"];
+
     /// <summary>
-    /// Brings a task back under <see cref="RelayLimits.MaxTaskBytes"/> for a report that settles an action: drops the bodies of the oldest
-    /// reports, then the oldest reports, then the oldest messages, always keeping the newest of each.
+    /// Brings a task back under <see cref="RelayLimits.MaxTaskBytes"/> for a report that settles an action, which must always land (an
+    /// unsettled action holds its task and locks for good). Every history a task keeps is trimmed, bodies before entries and oldest first:
+    /// the bodies of older reports, of superseded attempts (<c>attemptHistory</c>, whole action copies) and of other settled actions; then
+    /// the oldest reports, superseded attempts and messages. The newest entry of each list keeps its body, and an unresolved action is never
+    /// touched. Counts stay bounded by their own limits (<see cref="MaxHistory"/>, <see cref="MaxActions"/>); this bounds their bytes.
     /// </summary>
-    private static void MakeRoom(JsonObject task, JsonArray history)
+    private static void MakeRoom(JsonObject task, JsonArray history, string settledId)
     {
         var size = ByteSize(task);
-        for (var i = 0; i < history.Count - 1 && size > RelayLimits.MaxTaskBytes; i++)
-            if (history[i] is JsonObject old && old["report"] is { } body) { size -= ByteSize(body) - 4; old["report"] = null; }
-        size = ByteSize(task);
-        while (history.Count > 1 && size > RelayLimits.MaxTaskBytes) { size -= ByteSize(history[0]) + 1; history.RemoveAt(0); }
-        if (task["messages"] is JsonArray messages)
-            while (messages.Count > 1 && size > RelayLimits.MaxTaskBytes) { size -= ByteSize(messages[0]) + 1; messages.RemoveAt(0); }
+        bool Over() => size > RelayLimits.MaxTaskBytes;
+        void DropBodies(IEnumerable<JsonObject> entries)
+        {
+            foreach (var entry in entries)
+            {
+                if (!Over()) return;
+                foreach (var field in BodyFields)
+                    if (entry[field] is { } body) { size -= ByteSize(body) - 4; entry[field] = null; }
+            }
+            size = ByteSize(task);
+        }
+        void DropOldest(JsonArray? entries)
+        {
+            while (entries is { Count: > 1 } && Over()) { size -= ByteSize(entries[0]) + 1; entries.RemoveAt(0); }
+            size = ByteSize(task);
+        }
+        static IEnumerable<JsonObject> AllButNewest(JsonArray? entries) => entries is null ? [] : entries.Take(entries.Count - 1).OfType<JsonObject>();
+        var attempts = task["attemptHistory"] as JsonArray;
+        DropBodies(AllButNewest(history));
+        DropBodies(AllButNewest(attempts));
+        DropBodies(ObjectAt(task, "actions").Where(entry => entry.Key != settledId && entry.Value is JsonObject action && !IsUnresolved(action))
+            .Select(entry => entry.Value!.AsObject()).OrderBy(action => Date(action, "startedAt")).ToArray());
+        DropOldest(history);
+        DropOldest(attempts);
+        DropOldest(task["messages"] as JsonArray);
     }
 
     private static bool IsTerminal(string status) => status is "completed" or "failed" or "canceled" or Abandoned;
@@ -227,7 +252,7 @@ internal static class TaskActions
                 ["principalId"] = caller.PrincipalId, ["sessionId"] = session, ["administrator"] = caller.IsAdministrator, ["at"] = context.Now.ToString("O"), ["priorStatus"] = status
             };
         history.Add(entry);
-        if (settling) MakeRoom(task, history);
+        if (settling) MakeRoom(task, history, id);
         var actionKey = CoordinationStateMachine.ActionKey(args, id, Number(action, "attempt"));
         var (owner, unresolved) = (OwnerSession(action), IsUnresolved(action));
         if (wasUnresolved && (!unresolved || owner != priorOwner)) Track(context, priorOwner, actionKey, open: false);

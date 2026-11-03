@@ -546,6 +546,7 @@ small { font-size: .8rem; }
 
 /* Add another PC: numbered steps, each value copyable. */
 .connect-view + .connect-view { margin-top: 18px; }
+.connect-view .warning-note { margin: 0 22px 18px; }
 .join-steps { margin: 0; padding: 0 22px 6px 44px; display: grid; gap: 22px; }
 .join-steps li { padding-left: 4px; }
 .join-steps li::marker { font-weight: 650; }

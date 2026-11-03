@@ -40,8 +40,9 @@ public interface IDocSearchGrain : IGrainWithStringKey
 /// directory's documents and loads each at its recorded commit, as a document grain does (falling back to the branch head only when the
 /// commit is gone), at most <see cref="RelayLimits.MaxDocFanOut"/> reads at a time; a search past its timeout searches what has loaded and
 /// counts the rest as not searched, while they keep loading. Patches, and a search that finds the directory changed, reread only paths
-/// whose directory hash changed. Searches are <see cref="ReadOnlyAttribute"/> and run side by side; nothing is persisted, so a deactivated
-/// index is built again on next use.
+/// whose directory hash changed. A finished read is staged, and staged files are indexed together (one merge and one refresh for the lot)
+/// when the last read in flight finishes or a search needs them, so a sync of many changed files does not merge and refresh once per file.
+/// Searches are <see cref="ReadOnlyAttribute"/> and run side by side; nothing is persisted, so a deactivated index is built again on next use.
 /// </summary>
 [GrainType("cocern.docsearch")]
 public sealed class DocSearchGrain(IDocSource source, ITokenCounter tokens) : Grain, IDocSearchGrain
@@ -61,6 +62,8 @@ public sealed class DocSearchGrain(IDocSource source, ITokenCounter tokens) : Gr
     private readonly SemaphoreSlim gate = new(RelayLimits.MaxDocFanOut);
     private readonly Dictionary<string, string> loadedFor = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Load> loads = new(StringComparer.Ordinal);
+    /// <summary>Files read but not yet in the index, by path; <see cref="IndexStaged"/> adds them in one batch.</summary>
+    private readonly Dictionary<string, DocSearchDocument> staged = new(StringComparer.Ordinal);
     private DocSearchIndex? index;
     /// <summary>What each path should hold, from the directory's view and the patches since; null until built.</summary>
     private Dictionary<string, DocRef>? wanted;
@@ -95,6 +98,8 @@ public sealed class DocSearchGrain(IDocSource source, ITokenCounter tokens) : Gr
         // A file answers once its read finished, even with nothing to index (a refused read keeps what it held, as a document grain does).
         var waiting = pending.Where(load => !load.Task.IsCompletedSuccessfully || load.Task.Result == Loaded.Failed).Select(load => load.Doc.Path).ToHashSet(StringComparer.Ordinal);
         var answered = candidates.Select(doc => doc.Path).Where(candidate => !waiting.Contains(candidate)).ToHashSet(StringComparer.Ordinal);
+        // Reads that finished while others still run are staged: index them now, so every answered file is searched at what it read.
+        IndexStaged();
         // The candidates already applied spec and path from the directory's entries, which a same-content patch may have changed.
         var result = index!.Search(query, null, null, limit, answered.Contains);
         var searched = candidates.Where(doc => answered.Contains(doc.Path)).Select(doc => new DocPathMatches(doc.Path, result.Matches.GetValueOrDefault(doc.Path))).ToArray();
@@ -151,11 +156,29 @@ public sealed class DocSearchGrain(IDocSource source, ITokenCounter tokens) : Gr
         followed = ViewVersion(view.Commit, view.SyncedAt);
     }
 
-    /// <summary>Drops removed paths from the index; a read still running for one finds it gone and indexes nothing.</summary>
+    /// <summary>Drops removed paths from the index and from the staged files; a read still running for one finds it gone and indexes nothing.</summary>
     private void Forget(string[] removed)
     {
-        foreach (var path in removed) { wanted!.Remove(path); loadedFor.Remove(path); loads.Remove(path); }
+        if (removed.Length == 0) return;
+        foreach (var path in removed) { wanted!.Remove(path); loadedFor.Remove(path); loads.Remove(path); staged.Remove(path); }
         index!.Apply([], removed);
+    }
+
+    /// <summary>
+    /// Indexes every staged file in one <see cref="DocSearchIndex.Apply"/>. When that fails, none of them counts as loaded, so the next
+    /// search reads them again; the failure goes to the search that asked, while a read finishing in the background drops it.
+    /// </summary>
+    private void IndexStaged()
+    {
+        if (staged.Count == 0 || index is null) return;
+        var batch = staged.Values.ToArray();
+        staged.Clear();
+        try { index.Apply(batch, []); }
+        catch (Exception)
+        {
+            foreach (var doc in batch) loadedFor.Remove(doc.Path);
+            throw;
+        }
     }
 
     /// <summary>The read that brings <paramref name="doc"/> up to date: null when it is, the read in flight for that version, or a new one.</summary>
@@ -170,9 +193,10 @@ public sealed class DocSearchGrain(IDocSource source, ITokenCounter tokens) : Gr
     }
 
     /// <summary>
-    /// Reads the file at its recorded commit and indexes it, as <c>DocumentGrain.EnsureLoadedAsync</c> does: only a commit that is really
-    /// gone falls back to the branch head; a refused or missing read indexes nothing and is tried again by the next search; a read that
-    /// throws counts as not searched. A newer patch or a removal while it read has the last word.
+    /// Reads the file at its recorded commit and stages it for the index, as <c>DocumentGrain.EnsureLoadedAsync</c> loads it: only a commit
+    /// that is really gone falls back to the branch head; a refused or missing read indexes nothing and is tried again by the next search; a
+    /// read that throws counts as not searched. A newer patch or a removal while it read has the last word. The last read in flight indexes
+    /// everything staged.
     /// </summary>
     private async Task<Loaded> LoadAsync(Load load)
     {
@@ -193,13 +217,21 @@ public sealed class DocSearchGrain(IDocSource source, ITokenCounter tokens) : Gr
                     if (content is null) return Loaded.Empty;
                 }
                 if (wanted?.GetValueOrDefault(doc.Path)?.Hash != doc.Hash || index is null) return Loaded.Empty;
-                index.Upsert(new DocSearchDocument(doc.Path, doc.Spec, content.Commit, content.Hash, content.Text));
+                staged[doc.Path] = new DocSearchDocument(doc.Path, doc.Spec, content.Commit, content.Hash, content.Text);
                 loadedFor[doc.Path] = doc.Hash;
                 return Loaded.Indexed;
             }
             finally { load.Batch.Running--; gate.Release(); }
         }
         catch (Exception) { return Loaded.Failed; }
-        finally { if (loads.GetValueOrDefault(doc.Path) == load) loads.Remove(doc.Path); }
+        finally
+        {
+            if (loads.GetValueOrDefault(doc.Path) == load) loads.Remove(doc.Path);
+            if (loads.Count == 0)
+            {
+                try { IndexStaged(); }
+                catch (Exception) { /* Staged reads that cannot be indexed are read again by the next search. */ }
+            }
+        }
     }
 }

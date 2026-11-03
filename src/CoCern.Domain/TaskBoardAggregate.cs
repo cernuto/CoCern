@@ -65,6 +65,7 @@ internal static class TaskBoardAggregate
             case Operations.OrderFire: return StandingOrders.OnFire(context);
             case Operations.OrderFailed: return StandingOrders.OnFailed(context);
             case Operations.TaskArchive: TaskArchiving.Run(context, sweep: true); return Ok(new { archived = context.Archived.Count });
+            case Operations.SessionClosed: return Untarget(context, tasks);
         }
         if (taskId.Length == 0) return Error(InvalidArguments, new { required = "taskId" });
         if (tasks[taskId] is not JsonObject task)
@@ -243,6 +244,27 @@ internal static class TaskBoardAggregate
     }
 
     /// <summary>
+    /// <see cref="Operations.SessionClosed"/>: a session this board's tasks targeted has closed (the board asked it to say so when the target
+    /// was set). Each task that still targets it loses the target, as a lapsed claim frees a task: a target only the closed session could
+    /// claim would leave the task unclaimable by anyone. Each changed task gets a new version and change revision, so readers and offers see it.
+    /// </summary>
+    private static RelayReply Untarget(AggregateContext context, JsonObject tasks)
+    {
+        var session = Text(context.Args, "sessionId");
+        var cleared = 0;
+        if (session.Length == 0) return Ok(new { cleared });
+        foreach (var task in tasks.Select(entry => entry.Value).OfType<JsonObject>())
+        {
+            if (task["workflow"] is not JsonObject workflow || Text(workflow, "targetSessionId") != session) continue;
+            workflow.Remove("targetSessionId");
+            task["version"] = Number(task, "version") + 1;
+            MarkChanged(context.State, task);
+            cleared++;
+        }
+        return Ok(new { cleared });
+    }
+
+    /// <summary>
     /// What a retry gets instead of its stored reply: a begun action returns as it stands now, and a claim replays only while this session
     /// still holds the same claim on a task it may still run.
     /// </summary>
@@ -336,6 +358,12 @@ internal static class TaskBoardAggregate
             if (TaskWorkflow.CheckDependencies(tasks, Text(task, "taskId"), workflow) is { } dependency) return Error(dependency);
             var completing = Text(workflow, "state") == "completed" && (task["workflow"] is not JsonObject prior || Text(prior, "state") != "completed");
             task["workflow"] = workflow.DeepClone();
+            // A newly named target is asked to tell this board when it closes, so the task never waits on a session that is gone.
+            if (Text(workflow, "targetSessionId") is { Length: > 0 } target && (priorWorkflow is null || Text(priorWorkflow, "targetSessionId") != target) && context.Key.Length > 0)
+                context.Emit(AggregateKinds.Session, target, Operations.SessionTargetWatch, new JsonObject
+                {
+                    ["repositoryId"] = context.Repository, ["sessionId"] = target, ["boardKey"] = context.Key, ["boardId"] = Text(args, "boardId", "default")
+                });
             // Archiving counts from completion; reopening clears it.
             if (completing) task["completedAt"] = context.Now.ToString("O");
             else if (Text(workflow, "state") != "completed") task.Remove("completedAt");

@@ -285,6 +285,10 @@ public sealed record DashboardAddPcStatus
     public string? AdapterFolder { get; init; }
     public DashboardHubAddress[] Addresses { get; init; } = [];
     public string? FirewallCommand { get; init; }
+    /// <summary>The adapter this hub serves is a framework-dependent build, so the other PC needs the .NET 10 runtime; <see cref="Warning"/> then says what to do.</summary>
+    public bool NeedsDotnet { get; init; }
+    /// <summary>Something to read before pasting the command, shown as a warning on the page; null when there is nothing.</summary>
+    public string? Warning { get; init; }
 }
 
 public sealed record DashboardHubAddress
@@ -313,11 +317,17 @@ public sealed record DashboardCloseSessionsRequest
     public string? LabelPrefix { get; init; }
 }
 
-/// <summary>What closing sessions did: <see cref="Closed"/> and <see cref="Kept"/> (still answering for an open action), the first closed IDs, or the hub's error <see cref="Code"/>.</summary>
+/// <summary>
+/// What closing sessions did: <see cref="Closed"/>, <see cref="Kept"/> (still answering for an open action), <see cref="Held"/> (an idle
+/// close's sessions kept for unread mail), whether <see cref="More"/> matching sessions remain for another run, the first closed IDs, or
+/// the hub's error <see cref="Code"/>.
+/// </summary>
 public sealed record DashboardCloseSessionsResult
 {
     public int Closed { get; init; }
     public int Kept { get; init; }
+    public int Held { get; init; }
+    public bool More { get; init; }
     public string[] Ids { get; init; } = [];
     public string? Code { get; init; }
     /// <summary>The argument the hub refused, when it named one.</summary>

@@ -23,7 +23,7 @@ Admin tools need a token with `IsAdministrator`. A session's `role` grants nothi
 | Tool | Who | What it does |
 | --- | --- | --- |
 | `session_open` | worker | Open a session for this chat; returns its private handle and the board's standing. |
-| `session_bind` | worker | Record this session's IDE tool bindings. Optional `label` renames the session (to match its chat's title) and `machineId` reports its PC; a bind that leaves out `binding` keeps the current one. |
+| `session_bind` | worker | Record this session's IDE tool bindings. Optional `label` renames the session (to match its chat's title) and `machineId` reports its PC, once (a later one is ignored); a bind that leaves out `binding` or `availability`, or sends `null`, keeps the current one. |
 | `worker_list` | worker | List reported workers and how fresh each report is. |
 | `get_status` | worker | Repository and session status, including blockers and uncertain actions. |
 | `task_get` | worker | One task, or the board. |
@@ -51,11 +51,19 @@ Admin tools need a token with `IsAdministrator`. A session's `role` grants nothi
 
 Every call takes `repositoryId`. Session calls also take `sessionId` and `sessionToken`; keep the token private to the chat. Writes take a `requestId`.
 
-**Arguments.** IDs (`taskId`, `sessionId`, `resourceId` and the like) are at most 256 characters, not blank, and without control characters. Versions, revisions, generations, attempts and leases are whole numbers; a quoted one (`"3"`) works, and `null` counts as left out. A repeated key or unreadable text is `InvalidArguments`. Out-of-range leases are clamped to 1 to 1800 seconds. A message to a session that doesn't exist is accepted and then dropped.
+**Arguments.** IDs (`taskId`, `sessionId`, `resourceId` and the like) are at most 256 characters, not blank, and without control characters. Versions, revisions, generations, attempts and leases are whole numbers; a quoted one (`"3"`) works, and `null` counts as left out. A repeated key or unreadable text is `InvalidArguments`. Out-of-range leases are clamped to 1 to 1800 seconds. A message to a session that doesn't exist is accepted, then comes back to the sender (see Sessions).
 
 **Retries.** Retry a write with the same `requestId`. Within 24 hours it does not run again; it gets the first reply. Only your own arguments count as the same request, not what the hub adds. A very busy board or session (over about 7,500 writes in a day) may drop that reply early: the retry then gets `RequestExpired` (409), so read the current state and decide.
 
-**Sessions.** Keep one session per chat and reuse its handle across reconnects. A `session_open` retried with the same `requestId` and arguments returns the same session, token included, so a lost reply never makes a second session; other arguments under that `requestId` get `RequestConflict`. After `SessionUnknown`, open with a new `requestId`. The hub closes sessions not seen for `Relay:Sessions:IdleHours` (a day by default), and an administrator can close them sooner: `control_request` with `"command": "close_sessions"` and `idleMinutes` (60 or more) and/or `labelPrefix` (both must match when both are given) closes that repository's matching sessions, never the caller's own, and answers `closed`, `kept` and up to 50 `ids`. The Sessions page has the same as **Close idle sessions**. A session with an action still open is never closed. The session list holds 2,048; when it is full, `session_open` also closes sessions not seen for a day. A closed session's calls get `SessionUnknown` with `expired: true`: call `session_open` again. If only sessions with open actions fill it, `session_open` gets `CapacityExceeded` with `heldByUnresolvedActions`: report or [recover](#stranded-actions) those actions.
+**Sessions.** Keep one session per chat and reuse its handle across reconnects. A `session_open` retried with the same `requestId` and arguments returns the same session, token included, so a lost reply never makes a second session; other arguments under that `requestId` get `RequestConflict`. Through the adapter this holds across app restarts in Claude Code, and in Codex only until the app restarts CoCern. After `SessionUnknown`, open with a new `requestId`.
+
+**Closing sessions.** The hub closes sessions with no call for `Relay:Sessions:IdleHours` (a day by default). An administrator can close them sooner: `control_request` with `"command": "close_sessions"` and `idleMinutes` (60 or more) and/or `labelPrefix` (both must match when both are given) closes that repository's matching sessions. It never closes the session named by the call's `sessionId`; the adapter adds the chat's own when it is left out. It answers `closed`, `kept`, `held`, `more` and up to 50 `ids`; one call closes at most 512, and `more: true` means call again. The Sessions page's **Close idle sessions** offers idle over an hour, idle over a day, or a label prefix. Idle times count from the last call and are never cut short, but activity is recorded about hourly, so a session may stay up to an hour longer.
+
+- Never closed: a session with an action still open. Not closed when idle: a session with unread messages (counted as `held`), for up to 7 days without a call; a label-only close does close it.
+- The session list holds 2,048; when it is full, `session_open` also closes sessions not seen for a day. If only sessions with open actions fill it, `session_open` gets `CapacityExceeded` with `heldByUnresolvedActions`: report or [recover](#stranded-actions) those actions.
+- A closed session's calls get `SessionUnknown` with `expired: true`: call `session_open` again.
+- A message to a closed or unknown session, or to a full inbox, comes back to the sender as an inbox message with `kind: "delivery.failed"`, `reason` (`closed`, `unknown` or `full`), `recipientSessionId`, `undeliveredMessageId` and the `text`.
+- A task whose `targetSessionId` names a session that closed loses the target, so anyone may claim it.
 
 **Large items.** A message or note too large to read back is refused with `PayloadTooLarge` (`maxBytes`, `bytes`). A stored item too large for any page comes back alone as a piece (`truncated: true`, `bytes`, `part`): call again with the same `cursor` and `partOffset` set to `nextPartOffset`. Joined, the pieces are the item's JSON.
 
@@ -180,7 +188,7 @@ A board's settled rules (lines) and permissions (grants). Chats get them at `ses
 
 ## Documents
 
-`doc_search` searches a repository's committed docs by section instead of reading whole files. Nothing is searchable until a repository is configured; the start script adds the checkout it runs from as `cocern` (`-NoDocs` skips this).
+`doc_search` searches a repository's committed docs by section instead of reading whole files. Nothing is searchable until a repository is configured; the start script adds the checkout it runs from as `cocern` (`-NoDocs` skips this). The Visual Studio profile adds it too, and makes the folder holding the checkout a root, so the repositories beside it are found as well.
 
 | File | Split into |
 | --- | --- |
@@ -281,7 +289,7 @@ Each joined PC runs a small background program, the **node**. It joins the hub o
 
 ### Setup by hand
 
-The dashboard's **Add another PC** shows one PowerShell command to paste on the other PC. It downloads the published adapter from this hub (`GET /join/adapter.zip`, over HTTPS with the hub's certificate pinned) into `%LOCALAPPDATA%\CoCern\adapter` and runs setup from there; the folder is self-contained, so the other PC needs no .NET install, and nothing is copied by hand. The command holds the join code, so keep it private. By hand instead, from any copy of `artifacts/adapter` on the other PC:
+The dashboard's **Add another PC** shows one PowerShell command to paste on the other PC (Windows PowerShell 5.1 or PowerShell 7). It downloads the adapter from this hub (`GET /join/adapter.zip`, over HTTPS with the hub's certificate pinned for that download only) and runs setup from `%LOCALAPPDATA%\CoCern\adapter`. Any failure stops it before anything is unpacked or run, and it leaves the window's settings as they were. The zip is unpacked into a fresh folder: a folder holding the same files is left alone, any other is swapped whole (never unpacked over), and when a running node or chat holds the old folder nothing changes and it says to close those chats and stop the node (`Stop-Process -Name CoCern.Adapter`) first. Pasting it again is how a joined PC updates; files added to the folder by hand are not kept. The other PC needs no .NET when the hub serves a self-contained adapter (`artifacts/adapter` from `Build-CoCern.ps1 -Publish`, preferred when present); otherwise it needs the .NET 10 runtime, and the page warns. The command holds the join code, so keep it private. By hand instead, from any copy of `artifacts/adapter` on the other PC:
 
 ```powershell
 .\CoCern.Adapter.exe --setup --hub https://<hub-pc>:5273/ --join-code <code> --fingerprint <fingerprint>
@@ -291,7 +299,7 @@ or, from a framework-dependent build with the .NET runtime installed, `dotnet .\
 
 - The join code is in `join-code` next to the hub's database; the hub logs it once, when it creates it. Letter case doesn't matter. `COCERN_JOIN_CODE` can supply it instead.
 - The fingerprint is in the hub's log at every start. With it, setup refuses any other certificate (exit code 4).
-- Setup joins, adds a `cocern` server to Claude Code and to `~/.codex/config.toml`, adds `CoCernNode` to the user's Run key, and starts the node. Claude Code's entry goes through `claude mcp add` when its command line is installed, so Claude Code need not be closed; otherwise `~/.claude.json` is edited (with a backup) and setup says to restart Claude Code if it is running. `--skip-client-config` skips both apps. Every entry names `CoCern.Adapter.exe` when it is beside the dll, else `dotnet` with the dll. Setup keeps the join code, so a PC the hub dropped joins again by itself.
+- Setup joins, adds a `cocern` server to Claude Code and to `~/.codex/config.toml`, adds `CoCernNode` to the user's Run key, and starts the node. Claude Code's entry goes through `claude mcp add --scope user` (run from the profile folder, so a project's own `cocern` entry doesn't count) when its command line is installed, so Claude Code need not be closed; otherwise, or when a batch-file `claude` would get paths with characters `cmd` treats specially, `~/.claude.json` is edited (with a backup) and setup says to restart Claude Code if it is running. Every settings file is planned before any is written. `--skip-client-config` skips both apps. Every entry names `CoCern.Adapter.exe` when it is beside the dll, else `dotnet` with the dll. Setup keeps the join code, so a PC the hub dropped joins again by itself.
 - Run it again any time; it leaves existing entries alone. `--data-dir <path>` moves the node folder (default `%LOCALAPPDATA%\CoCern\node`; set `COCERN_NODE_DIR` to match). Exit codes: 1 setup or join problem, 4 a hub certificate other than the pinned one, 5 an unreadable settings file. A running node that later meets another certificate sends nothing, says so once, and keeps retrying the pinned hub.
 - A chat whose adapter sets its own `COCERN_URL`, `COCERN_TOKEN_FILE` or `COCERN_TOKEN` is not seen by the node.
 
@@ -305,7 +313,7 @@ New-NetFirewallRule -DisplayName "CoCern hub (HTTPS 5273)" -Direction Inbound -A
 
 **Codex chats** are woken by the node with `codex queue`: never mid-turn, at most one waiting wake per chat, at most one every 3 seconds and 20 per 10 minutes. If a wake's outcome is unknown (the dispatch failed or was cut off), that chat isn't woken again for 10 minutes, and that wake's messages are never sent twice. Codex gives the adapter no chat ID, so the node finds each chat from its transcript.
 
-**Claude chats** wake themselves with `--await-inbox --chat <CLAUDE_CODE_SESSION_ID>` (see the README). The chat must have called `session_open` on this PC first. Exit codes: 0 mail arrived, 1 no session for that chat, 2 timed out, 3 stopped. `--print-inbox` also prints the messages; `--ack <id,id>` acknowledges them, then waits again. The chat shows as reachable only while it runs.
+**Claude chats** on a joined PC wake themselves with `--await-inbox --chat <CLAUDE_CODE_SESSION_ID>` (see the README). The chat must have called `session_open` on this PC first, through the node's credentials; the waiter needs the node, so on the hub's own PC it exits 1. Exit codes: 0 mail arrived, 1 no session for that chat, 2 timed out, 3 stopped. `--print-inbox` also prints the messages; `--ack <id,id>` acknowledges them, then waits again. The chat shows as reachable only while it runs.
 
 `--wake <config>` and `--await-inbox <config>` also take a hand-written config; see `scripts/Start-CoCernWake.ps1`. Watch each chat with only one of them. For an `https://` `relayUrl`, give the hub certificate's SHA-256 `fingerprint` in the config (it wins over `COCERN_FINGERPRINT`); only that certificate is accepted.
 
@@ -338,12 +346,12 @@ Set them in `appsettings.json`, as environment variables (`Relay__Clients__0__To
 | `Relay:GatewayPort` | 0 (off) | An Orleans client gateway (loopback). Leave it off: nothing uses it, and it would let any local process call grains without a token. |
 | `Relay:ClusterId` | `CoCern` | Orleans cluster name. |
 | `Relay:Board:ArchiveAfterDays` | 30 | Days after completion before a task is archived (0 to 3650). |
-| `Relay:Sessions:IdleHours` | 24 | Hours without a call after which the hub closes a session, checked every 10 minutes (2 to 720). Activity is recorded about hourly, so closing is accurate to about an hour. |
+| `Relay:Sessions:IdleHours` | 24 | Hours without a call after which the hub closes a session, checked every 10 minutes (2 to 720). Never sooner; activity is recorded about hourly, so up to an hour later. A session with unread messages is kept. |
 | `Relay:Dashboard:ViewerPrincipalIds:N` | | Administrator principals that may open the dashboard. The start script and Visual Studio profile set theirs. |
 | `Relay:Dashboard:OpenOnStart` | `false` | Open the dashboard in the default browser when the hub starts, already signed in with that start's one-time link. The Visual Studio launch profile turns it on. |
 | `Relay:Dashboard:SessionHours` | 8 | Hours a dashboard sign-in lasts in that browser session (1 to 168). The deadline is fixed at sign-in; use doesn't extend it. |
-| `Relay:Dashboard:RememberDays` | 30 | Days a sign-in lasts, across browser restarts, when "Remember this browser" is ticked (1 to 90, and at least `SessionHours`). |
-| `Relay:Connect:AdapterPath` | found | The adapter the Connect page uses. Default: `artifacts/adapter`, else the build output. |
+| `Relay:Dashboard:RememberDays` | 7 | Days a sign-in lasts, across browser restarts, when "Remember this browser" is ticked (1 to 30, and at least `SessionHours`). |
+| `Relay:Connect:AdapterPath` | found | The adapter the Connect page uses, and the folder `/join/adapter.zip` serves. Default: `artifacts/adapter`, else the build output, looked for only inside this checkout or beside a published hub. Other PCs get a self-contained `artifacts/adapter` whenever there is one. |
 
 ### Features
 
@@ -381,7 +389,7 @@ All on by default except the two for other PCs.
 | `Relay:Local:HttpsPort` | 5272 | HTTPS for chats on this PC, loopback only, with the hub certificate. Connect points apps here and pins the certificate, so a program that takes the port while the hub is down never gets their token. Its address and fingerprint are written to `local-hub.json` beside the database. `0` turns it off. |
 | `Relay:Network:Enabled` | `false` | Also serve HTTPS on every network interface. |
 | `Relay:Network:HttpsPort` | 5273 | The HTTPS port. |
-| `Relay:Network:CertificatePath` | `data/hub-certificate.pfx` | Self-signed certificate, made on first start. Keep it: PCs pin its fingerprint. |
+| `Relay:Network:CertificatePath` | beside the database | Self-signed certificate, made on first start. Keep it: PCs and Connect's app entries pin its fingerprint. A set path is relative to the content root. |
 
 ### Documents
 
@@ -404,11 +412,11 @@ All on by default except the two for other PCs.
 
 Changing a repository's settings makes its next sync re-read everything.
 
-**Found repositories.** With `Roots` set, every sync also looks for git repositories under them (a folder holding `.git`, never inside another repository) and indexes each one's current branch under its folder name in lower case, without fetching. A session's workspace is learned too: the adapter sends its git top-level folder with `session_open`, and when that folder is a repository inside a root the hub indexes it at once, under the session's repository if that has no documents yet, otherwise under its folder name. Roots are the only folders the hub reads this way; a configured repository's ID always wins, at most 64 are added, and access still follows each client's repositories.
+**Found repositories.** With `Roots` set, every sync also looks for git repositories under them (a folder holding `.git`, never inside another repository) and indexes each one's current branch under its folder name in lower case, without fetching. A session's workspace is learned too: the adapter sends its git top-level folder with `session_open`, and when that folder is a repository inside a root the hub indexes it at once: a folder already indexed keeps its ID; otherwise it goes under the session's repository if no repository has that ID yet, else under its folder name if that is free. Roots are the only folders the hub reads this way; a configured repository's ID always wins, at most 64 are added, and access still follows each client's repositories (an administrator client, such as the generated token, may read every one).
 
 ### Adapter
 
-The Connect page sets these. By hand, run `dotnet <path>/CoCern.Adapter.dll` as an MCP server with:
+Connect sets `COCERN_TOKEN_FILE`, `COCERN_URL` and `COCERN_FINGERPRINT`; add the others to an app's `cocern` entry by hand. By hand, run `dotnet <path>/CoCern.Adapter.dll` as an MCP server with:
 
 | Variable | Default | What it does |
 | --- | --- | --- |
@@ -416,13 +424,13 @@ The Connect page sets these. By hand, run `dotnet <path>/CoCern.Adapter.dll` as 
 | `COCERN_TOKEN_FILE` | | File holding the client token. Wins over `COCERN_TOKEN`. |
 | `COCERN_TOKEN` | | The token itself. |
 | `COCERN_PROFILE` | | `chat`: only `session_open`, `send_message`, `check_inbox`, `ack` and `chat_directory`. |
-| `COCERN_ROLE` | | `admin` also lists administrator tools. The hub still checks the token. |
+| `COCERN_ROLE` | | `admin` also lists administrator tools, for a chat whose token is an administrator's (Connect's is). The hub still checks the token. |
 | `COCERN_SIGNALR` | `false` | `true` prints a hint on standard error when the inbox changes. |
 | `COCERN_FINGERPRINT` | | The hub certificate's SHA-256 fingerprint, for an `https://` `COCERN_URL`: only that certificate is accepted. Connect sets it. |
 
 With none of the first three set, the adapter uses this PC's node.
 
-`--connect` options: `--token-file <path>` (default: `data/local-client-token` above the adapter folder), `--hub <url>` and `--fingerprint <sha256>` (default: the pinned loopback HTTPS from `local-hub.json` beside the token file), `--only claude-code|claude-desktop|codex`, `--check` (report only) and `--json`. An app that already has a `cocern` entry keeps it; to switch an older entry to the pinned connection, remove it and connect again.
+`--connect` options: `--token-file <path>` (default: `data/local-client-token` above the adapter folder), `--hub <url>` and `--fingerprint <sha256>` (default: the pinned loopback HTTPS from `local-hub.json` beside the token file), `--only claude-code|claude-desktop|codex`, `--check` (report only) and `--json`. An app that already has a `cocern` entry keeps it, unless the entry is this hub's (its token file is in the hub's data folder, or, with no token file, it points at a loopback address of this PC or pins the current certificate) and its `COCERN_URL` or `COCERN_FINGERPRINT` differs from the current ones: `--check` reports that as `outdated`, and connecting rewrites those two values (state `updated`; restart the app). Entries for other hubs, and node entries, are never changed.
 
 ## Clients and tokens
 
@@ -432,9 +440,9 @@ With none of the first three set, the adapter uses this PC's node.
 | `Relay:Clients:N:TokenFile` | Read the token from this file instead. A missing file is created at startup with a new token, owner-only. |
 | `Relay:Clients:N:PrincipalId` | Who the client is. |
 | `Relay:Clients:N:IsAdministrator` | Allows administrator tools (default `false`). |
-| `Relay:Clients:N:Repositories:M` | Repositories it may use. |
+| `Relay:Clients:N:Repositories:M` | Repositories it may use. An administrator may use every repository. |
 
-The hub refuses to start with no clients and no OAuth issuer. The start script and the Visual Studio profile configure one administrator client with `data/local-client-token`; the start script's `-RepositoryId` sets its repository (default `cocern`).
+The hub refuses to start with no clients and no OAuth issuer. The start script and the Visual Studio profile configure one administrator client with `data/local-client-token`; the start script's `-RepositoryId` (default `cocern`) names this checkout's repository, for the client and the doc cache.
 
 **A worker-only token.** In the PowerShell window you start the hub from, before starting it:
 
@@ -456,7 +464,7 @@ Open **Analytics** to compare one repository over 1–14 days with the preceding
 
 The ten public named reports cover average tokens, calls and messages per task; average reply bytes per session by role; noisiest tools by reply bytes; claim conflicts by resource; quality guardrail events; attention offer events (shown, accepted, later and dismissed) by kind and outcome; average ready-to-first-claim latency in minutes (an assignment proxy); and average hours of ended blocked spells, with open blocked spells counted separately. Charts include numeric equivalents, units and sample counts. Attention event denominators are per kind and are not summed across outcome categories.
 
-`GET /dashboard/api/analytics?repositoryId=cocern&days=7` returns the fixed reports under the existing dashboard viewer policy. It accepts no SQL and preserves the existing analytics row and payload limits. Missing snapshots, unavailable analytics, per-report failures and truncated results are shown explicitly. Unknown values display as **Not measured**; measured zeros remain **0**. Earliest recorded activity, when known, can identify short history but does not prove continuous tracking. Unknown history and incomplete comparison periods are labeled; no sample data is substituted.
+`GET /dashboard/api/analytics?repositoryId=cocern&days=7` returns the fixed reports under the existing dashboard viewer policy. It accepts no SQL and preserves the existing analytics row and payload limits. Missing snapshots, unavailable analytics, per-report failures and truncated results are shown explicitly. Unknown values display as **Not measured**; measured zeros remain **0**. History coverage always shows as unknown, because the hub doesn't record when tracking began, so a short history and incomplete comparison periods are labeled as possible; no sample data is substituted.
 
 ## Addresses
 
@@ -466,6 +474,7 @@ The ten public named reports cover average tokens, calls and messages per task; 
 | `/api/tools`, `/api/tools/{tool}` | List tools, call a tool. Needs a token. |
 | `/hubs/coordination` | SignalR inbox hints. Needs a token. |
 | `/api/discovery/enroll`, `/api/discovery/announce` | Joining PCs (with discovery on). |
+| `/join/adapter.zip` | The adapter folder that Add another PC's command downloads. No token (it holds no secret); HTTPS, or this PC only; with discovery on. |
 | `/dashboard/` | The dashboard. |
 | `/scalar`, `/openapi/v1.json` | API reference. This PC only. |
 | `/health` | Health check. |
@@ -505,28 +514,28 @@ Dependencies point inward; Domain knows nothing about Orleans or storage.
 | Place | What |
 | --- | --- |
 | `data/relay.db` | One SQLite file (WAL): grain state, due work, search index, activity. Only the hub opens it. |
-| `analytics/`, `join-code` | Beside the database: DuckDB snapshots, and the join code (owner-only). |
+| `analytics/`, `join-code`, `adapter-zip/` | Beside the database: DuckDB snapshots, the join code (owner-only), and the zip `/join/adapter.zip` serves (owner-only, rebuilt when the adapter changes). |
 | `data/local-client-token` | The administrator token, where the start script and Visual Studio profile put it. Owner-only. |
-| `data/hub-certificate.pfx` | The HTTPS certificate, under the hub's content root (the folder it runs from). |
+| `data/hub-certificate.pfx` | The HTTPS certificate, beside the database. One an earlier version made under the content root (`src/CoCern.Host/data` from Visual Studio) is moved here, keeping its fingerprint. |
 | `%LOCALAPPDATA%\CoCern\node` | On each joined PC: the node's credential, pinned fingerprint, join code, session handles and wake state. |
 
 **Rules to keep.** Claims are advisory. Every fixed limit lives in `RelayLimits`. Keep tool descriptions and schemas short: they are sent on every model turn, and a test caps their size.
 
 ## Verification
 
-Beyond the unit and integration tests, `scripts/Smoke-CoCern.py` checks a real hub process end to end (84 checks, about 20 seconds; see the README).
+Beyond the unit and integration tests, `scripts/Smoke-CoCern.py` checks a real hub process end to end (94 checks; see the README).
 
 **Checked live**
 
 - Two chats on one PC (Codex and Claude Code): messages, acknowledgments, version conflicts, busy claims and the Claude waiter.
 - Codex wake-ups: `codex queue` started real turns in two desktop chats; a watcher restart sent no duplicates.
 - Discovery with a separate hub and two nodes on one PC: joining, certificate pinning, `chat_directory`, refusals, and a stopped node turning unreachable within 90 seconds.
-- The dashboard at desktop and phone sizes: sign-in link, sessions, logs, themes, the Connect page writing an app's settings, and Add another PC's one pasted command (download from the hub, join, Claude Code and Codex entries, start with Windows).
+- The dashboard at desktop and phone sizes: sign-in link, sessions, logs, themes, and the Connect page writing an app's settings.
 
 **Not checked yet**
 
 - Discovery or the dashboard from a second physical PC or phone, through a real firewall.
-- `--setup` and `--connect` on a real Windows PC (the Run key and client settings edits are covered by tests only), and the Claude desktop app's settings.
+- The current Add another PC command on a real Windows PC. It changed after its last live run; tests compile its certificate pin and run it end to end in PowerShell 7 here, and in Windows PowerShell 5.1 only on Windows. Also the Claude desktop app's settings.
 - A real Codex chat woken by the node and found from its transcript.
 - Remote HTTPS with an external OAuth issuer, and the ChatGPT chat app.
 - Analytics loading the bundled extension on a real Windows hub.

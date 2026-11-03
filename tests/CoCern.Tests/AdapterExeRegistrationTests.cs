@@ -90,6 +90,55 @@ public sealed class AdapterExeRegistrationTests : IDisposable
         Assert.Equal(expected, key.Values[LogonStart.ValueName]);
     }
 
+    /// <summary>
+    /// The one-command join starts setup as the downloaded CoCern.Adapter.exe, often on a PC with no dotnet: setup must then accept the exe beside
+    /// the dll as the way to start CoCern, and must refuse to guess a host when neither a dotnet host nor that exe is there.
+    /// </summary>
+    [Fact]
+    public void Setup_started_as_the_exe_beside_the_dll_needs_no_dotnet()
+    {
+        var folder = Path.Combine(root, "adapter");
+        var (dll, exe) = (Path.Combine(folder, "CoCern.Adapter.dll"), Path.Combine(folder, "CoCern.Adapter.exe"));
+        var present = new HashSet<string>(StringComparer.Ordinal) { dll, exe };
+
+        Assert.Equal(("dotnet", dll), SetupEnvironment.Host(exe, null, folder, present.Contains));
+        // Whatever entry setup then writes names the exe alone, so the placeholder host is never started.
+        Assert.Equal((exe, Array.Empty<string>()), (SetupEnvironment.AdapterLaunch("dotnet", dll, present.Contains).Command, SetupEnvironment.AdapterLaunch("dotnet", dll, present.Contains).Arguments.ToArray()));
+    }
+
+    [Fact]
+    public void Setup_started_as_an_exe_without_the_exe_beside_the_dll_is_refused()
+    {
+        var folder = Path.Combine(root, "adapter");
+        var dll = Path.Combine(folder, "CoCern.Adapter.dll");
+        var present = new HashSet<string>(StringComparer.Ordinal) { dll };
+
+        var refusal = Assert.Throws<CoCern.Adapter.AdapterConfigurationException>(() => SetupEnvironment.Host(Path.Combine(root, "elsewhere", "CoCern.Adapter.exe"), null, folder, present.Contains));
+        Assert.Contains("CoCern.Adapter.exe", refusal.Message);
+        // A DOTNET_HOST_PATH that names no file does not help either.
+        Assert.Throws<CoCern.Adapter.AdapterConfigurationException>(() => SetupEnvironment.Host(Path.Combine(root, "CoCern.Adapter.exe"), Path.Combine(root, "missing", "dotnet"), folder, present.Contains));
+        // Nor does anything run without the adapter dll itself.
+        Assert.Contains("was not found", Assert.Throws<CoCern.Adapter.AdapterConfigurationException>(() => SetupEnvironment.Host(Path.Combine(root, "dotnet"), null, Path.Combine(root, "empty"), present.Contains)).Message);
+    }
+
+    [Theory]
+    [InlineData("dotnet")]
+    [InlineData("dotnet.exe")]
+    [InlineData("DOTNET.EXE")]
+    public void Setup_started_by_dotnet_uses_that_host(string hostName)
+    {
+        var folder = Path.Combine(root, "adapter");
+        var dll = Path.Combine(folder, "CoCern.Adapter.dll");
+        var host = Path.Combine(root, "sdk", hostName);
+        var present = new HashSet<string>(StringComparer.Ordinal) { dll };
+
+        Assert.Equal((host, dll), SetupEnvironment.Host(host, Path.Combine(root, "other", "dotnet"), folder, present.Contains));
+        // Started some other way, an existing DOTNET_HOST_PATH is the host.
+        var named = Path.Combine(root, "named", "dotnet");
+        present.Add(named);
+        Assert.Equal((named, dll), SetupEnvironment.Host(Path.Combine(root, "tool"), named, folder, present.Contains));
+    }
+
     private sealed class FakeRunKey : IRunKey
     {
         public Dictionary<string, string> Values { get; } = [];

@@ -1019,8 +1019,8 @@ public sealed class CoordinationTests
             Assert.Equal(["a"], item["refs"]!.AsArray().Select(x => x!.GetValue<string>()));
             Assert.Equal(Data(completed)["changeRevision"]!.GetValue<long>(), item["revision"]!.GetValue<long>());
         });
-        // The task still waiting on b gets nothing yet.
-        Assert.DoesNotContain(state.Effects, effect => effect.TargetKey == "worker-c");
+        // The task still waiting on b gets nothing yet (beyond the board's request, when it was targeted, to hear if worker-c closes).
+        Assert.DoesNotContain(state.Effects, effect => effect.TargetKey == "worker-c" && effect.Operation != Operations.SessionTargetWatch);
         Assert.Equal("b", Offered("worker-b"));
         Assert.Equal("d", Offered("worker-d"));
         Assert.Null(Offered("worker-c"));
@@ -1254,10 +1254,13 @@ public sealed class CoordinationTests
         return workflow;
     }
 
-    /// <summary>The outbox effects a board write added, read as (target, operation, payload); a manager-bound item is unwrapped from its route.</summary>
+    /// <summary>
+    /// The attention effects a board write added, read as (target, operation, payload); a manager-bound item is unwrapped from its route.
+    /// A target's request to hear when it closes is not attention, so it is left out.
+    /// </summary>
     private static List<(string Target, string Operation, JsonObject Item)> NewEffects(StateEnvelope<CoordinationDocument> state, ref int seen)
     {
-        var added = state.Effects.Skip(seen).Select(effect =>
+        var added = state.Effects.Skip(seen).Where(effect => effect.Operation != Operations.SessionTargetWatch).Select(effect =>
         {
             var payload = JsonNode.Parse(effect.PayloadJson)!.AsObject();
             return effect.Operation == "__attention_route"

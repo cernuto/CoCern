@@ -2,6 +2,9 @@
   <PropertyGroup><IsTestProject>true</IsTestProject><IsPackable>false</IsPackable></PropertyGroup>
   <ItemGroup>
     <Compile Include="../../src/CoCern.Dashboard/Services/AnalyticsPresentation.cs" Link="Dashboard/AnalyticsPresentation.cs" Condition="Exists('../../src/CoCern.Dashboard/Services/AnalyticsPresentation.cs')" />
+    <!-- The Documents view's redraw key, with the formatting it reads times through. -->
+    <Compile Include="../../src/CoCern.Dashboard/Services/DocCacheRender.cs" Link="Dashboard/DocCacheRender.cs" />
+    <Compile Include="../../src/CoCern.Dashboard/Services/DashboardFormat.cs" Link="Dashboard/DashboardFormat.cs" />
     <ProjectReference Include="../../src/CoCern.Core/CoCern.Core.csproj" />
     <ProjectReference Include="../../src/CoCern.Storage/CoCern.Storage.csproj" />
     <ProjectReference Include="../../src/CoCern.Host/CoCern.Host.csproj" />
@@ -12,5 +15,7 @@
     <PackageReference Include="xunit.runner.visualstudio"><PrivateAssets>all</PrivateAssets></PackageReference>
     <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" />
     <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" />
+    <PackageReference Include="Xunit.SkippableFact" />
   </ItemGroup>
 </Project>

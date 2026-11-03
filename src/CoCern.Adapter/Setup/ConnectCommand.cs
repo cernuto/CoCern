@@ -2,7 +2,8 @@ namespace CoCern.Adapter.Setup;
 
 /// <summary>
 /// <c>--connect</c>: on the hub's own PC, adds CoCern to Claude Code, the Claude desktop app (when installed) and Codex, using the hub's
-/// local token file. No join code or node: the adapter talks to the loopback hub directly. Existing <c>cocern</c> entries are left alone.
+/// local token file. No join code or node: the adapter talks to the loopback hub directly. An existing <c>cocern</c> entry is left alone,
+/// unless it is this hub's and names an address or certificate other than the hub's current ones (see <see cref="Refresh"/>): then those are updated.
 /// Exit codes: 0 done, 1 no token file found, 5 a client settings file could not be parsed (nothing is written then).
 /// </summary>
 internal static class ConnectCommand
@@ -10,8 +11,14 @@ internal static class ConnectCommand
     private const string DefaultTokenFile = "data/local-client-token";
     private const string Usage = "Use --connect [--token-file <path>] [--hub <url> [--fingerprint <sha256>]] [--only claude-code|claude-desktop|codex] [--check] [--json].";
 
-    /// <summary>One app CoCern can be added to. <c>connected</c>: it has a CoCern entry; <c>available</c>: it can get one; <c>added</c>: this run added it.</summary>
+    /// <summary>
+    /// One app CoCern can be added to. <c>connected</c>: it has a CoCern entry; <c>available</c>: it can get one; <c>added</c>: this run added it;
+    /// <c>outdated</c>: its entry is this hub's but names an old address or certificate (<c>--check</c>); <c>updated</c>: this run updated that entry; <c>error</c>: see the detail.
+    /// </summary>
     internal sealed record ClientState(string Id, string Name, string State, string? Detail = null);
+
+    /// <summary>The variables a Connect entry carries; an entry with none of them is a joined PC's node entry, which is never this hub's to change.</summary>
+    private static readonly string[] HubVariables = ["COCERN_TOKEN_FILE", "COCERN_TOKEN", "COCERN_URL", "COCERN_FINGERPRINT"];
 
     public static int Run(IReadOnlyList<string> args, string profile, string? appData, string dotnetPath, string adapterDll, TextWriter output, TextWriter error, TimeProvider? clock = null)
     {
@@ -44,21 +51,24 @@ internal static class ConnectCommand
             return 1;
         }
         // Without an address given, the hub's own record beside the token: its loopback HTTPS and certificate, which the apps then pin.
-        if (hub is null && fingerprint is null && LocalHub(Path.GetDirectoryName(tokenFile)!) is { } local) (hub, fingerprint) = local;
+        var localHub = LocalHub(Path.GetDirectoryName(tokenFile)!);
+        if (hub is null && fingerprint is null && localHub is { } local) (hub, fingerprint) = local;
         if (fingerprint is not null && hub?.StartsWith("https://", StringComparison.OrdinalIgnoreCase) != true)
             throw new AdapterConfigurationException("--fingerprint needs an https:// --hub.");
         var environment = new Dictionary<string, string> { ["COCERN_TOKEN_FILE"] = tokenFile };
         if (hub is not null) environment["COCERN_URL"] = hub;
         if (fingerprint is not null) environment["COCERN_FINGERPRINT"] = fingerprint;
+        // Only with a current address to compare against: without one (an older hub, no --hub), an existing entry is left alone as before.
+        EntryRefresh? refresh = hub is null ? null : variables => Refresh(variables, tokenFile, hub, fingerprint, localHub?.Url);
 
         var clients = new List<(string Id, string Name, Func<ClientPlan> Plan)>
         {
-            ("claude-code", "Claude Code", () => ClientSettings.PlanClaudeCode(Path.Combine(profile, ".claude.json"), dotnetPath, adapterDll, environment)),
-            ("codex", "Codex", () => ClientSettings.PlanCodex(Path.Combine(profile, ".codex", "config.toml"), dotnetPath, adapterDll, environment))
+            ("claude-code", "Claude Code", () => ClientSettings.PlanClaudeCode(Path.Combine(profile, ".claude.json"), dotnetPath, adapterDll, environment, refresh)),
+            ("codex", "Codex", () => ClientSettings.PlanCodex(Path.Combine(profile, ".codex", "config.toml"), dotnetPath, adapterDll, environment, refresh))
         };
         // The desktop app is offered only where it is installed; its config file may not exist yet.
         if (appData is not null && Directory.Exists(Path.Combine(appData, "Claude")))
-            clients.Insert(1, ("claude-desktop", "Claude desktop app", () => ClientSettings.PlanClaudeDesktop(Path.Combine(appData, "Claude", "claude_desktop_config.json"), dotnetPath, adapterDll, environment)));
+            clients.Insert(1, ("claude-desktop", "Claude desktop app", () => ClientSettings.PlanClaudeDesktop(Path.Combine(appData, "Claude", "claude_desktop_config.json"), dotnetPath, adapterDll, environment, refresh)));
         var results = new List<ClientState>();
         var code = 0;
         foreach (var client in clients.Where(client => only is null || client.Id == only))
@@ -66,9 +76,9 @@ internal static class ConnectCommand
             try
             {
                 var plan = client.Plan();
-                var state = plan.IsUnchanged ? "connected" : check ? "available" : "added";
-                if (state == "added") plan.Apply(clock ?? TimeProvider.System);
-                results.Add(new(client.Id, client.Name, state));
+                var state = plan.IsUnchanged ? "connected" : plan.Refreshes ? check ? "outdated" : "updated" : check ? "available" : "added";
+                if (state is "added" or "updated") plan.Apply(clock ?? TimeProvider.System);
+                results.Add(new(client.Id, client.Name, state, plan.Refreshes ? check ? OutdatedDetail : UpdatedDetail : null));
             }
             catch (Exception exception) when (exception is ClientSettingsException or IOException or UnauthorizedAccessException)
             {
@@ -80,10 +90,52 @@ internal static class ConnectCommand
         else
         {
             foreach (var result in results)
-                (result.State == "error" ? error : output).WriteLine($"{result.Name}: {result.State switch { "connected" => "already connected", "available" => "not connected yet", "added" => "connected", _ => result.Detail }}");
-            if (!check && results.Any(result => result.State == "added")) output.WriteLine("Restart your chats (or the app) to load CoCern.");
+                (result.State == "error" ? error : output).WriteLine($"{result.Name}: {result.State switch { "connected" => "already connected", "available" => "not connected yet", "added" => "connected", "outdated" => "connected to this hub's old address or certificate; connect again to update it", "updated" => "updated to this hub's current address and certificate (backup kept next to its settings file)", _ => result.Detail }}");
+            if (!check && results.Any(result => result.State is "added" or "updated")) output.WriteLine("Restart your chats (or the app) to load CoCern.");
         }
         return code;
+    }
+
+    private const string OutdatedDetail = "Its CoCern entry is for this hub but names an old address or certificate, so it cannot connect. Connect updates it.";
+    private const string UpdatedDetail = "Its CoCern entry now names this hub's current address and certificate. Restart the app to use it.";
+
+    /// <summary>
+    /// What an existing <c>cocern</c> entry needs so it reaches this hub again: <c>COCERN_URL</c> set to <paramref name="hub"/> and
+    /// <c>COCERN_FINGERPRINT</c> to <paramref name="fingerprint"/> (removed when the hub has none) wherever they differ; null when nothing differs
+    /// or the entry is not this hub's. The hub's certificate can change (a new one, or a new place for it), and an entry still pinning the old one
+    /// stops connecting. An entry counts as this hub's when its token file is in this hub's data folder (beside <paramref name="tokenFile"/>);
+    /// without a token file, when its address is this hub's (<paramref name="hub"/>, or the hub's own record <paramref name="localUrl"/>), any
+    /// plain-HTTP address on this PC (as before the hub had loopback HTTPS), or it pins this hub's current certificate. A token file anywhere else
+    /// is another hub's, and an entry with none of the CoCern variables is a node's; both are left alone, as is everything else in the entry.
+    /// </summary>
+    internal static IReadOnlyDictionary<string, string?>? Refresh(IReadOnlyDictionary<string, string> variables, string tokenFile, string hub, string? fingerprint, string? localUrl)
+    {
+        if (!HubVariables.Any(variables.ContainsKey)) return null;
+        var url = variables.GetValueOrDefault("COCERN_URL")?.Trim() is { Length: > 0 } given ? given : AdapterOptions.DefaultUrl;
+        var pinned = variables.GetValueOrDefault("COCERN_FINGERPRINT")?.Replace(":", "").Trim().ToUpperInvariant() is { Length: > 0 } pin ? pin : null;
+        var ours = variables.GetValueOrDefault("COCERN_TOKEN_FILE")?.Trim() is { Length: > 0 } file
+            ? InFolder(file, Path.GetDirectoryName(Path.GetFullPath(tokenFile))!)
+            : AdapterOptions.TryParseOrigin(url, out var origin) && (origin.Scheme == Uri.UriSchemeHttp && origin.IsLoopback || SameOrigin(origin, hub) || localUrl is not null && SameOrigin(origin, localUrl))
+              || fingerprint is not null && pinned == fingerprint;
+        if (!ours) return null;
+        var changes = new Dictionary<string, string?>(StringComparer.Ordinal);
+        if (!(AdapterOptions.TryParseOrigin(url, out var current) && SameOrigin(current, hub))) changes["COCERN_URL"] = hub;
+        if (pinned != fingerprint) changes["COCERN_FINGERPRINT"] = fingerprint;
+        return changes.Count == 0 ? null : changes;
+    }
+
+    private static bool SameOrigin(Uri origin, string other) => AdapterOptions.TryParseOrigin(other, out var parsed) && Uri.Compare(origin, parsed, UriComponents.AbsoluteUri, UriFormat.SafeUnescaped, StringComparison.OrdinalIgnoreCase) == 0;
+
+    /// <summary>Whether <paramref name="path"/>, an absolute file path, lies directly in <paramref name="folder"/>; a relative one names no folder for certain and never does.</summary>
+    private static bool InFolder(string path, string folder)
+    {
+        try
+        {
+            if (!Path.IsPathFullyQualified(path)) return false;
+            var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+            return string.Equals(Path.GetDirectoryName(Path.GetFullPath(path)), Path.TrimEndingDirectorySeparator(Path.GetFullPath(folder)), comparison);
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException) { return false; }
     }
 
     /// <summary>The hub's loopback HTTPS address and certificate fingerprint from its <c>local-hub.json</c>, or null when it has none (an older hub).</summary>

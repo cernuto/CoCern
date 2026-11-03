@@ -42,9 +42,14 @@ public static class DashboardEndpoints
         services.AddAuthentication().AddCookie(DashboardSecurity.Scheme, options =>
         {
             options.Cookie.Name = "CoCern.Dashboard";
+            // A browser sends a host's cookies to every port on it, so the cookie is scoped to the dashboard's own paths: every route that
+            // needs it (sign-in and sign-out under /dashboard/api, the API, the /dashboard/hub stream) is under /dashboard, and another
+            // local service's other paths never receive it. HttpOnly keeps it from scripts, Strict from other sites' requests.
             options.Cookie.Path = "/dashboard";
             options.Cookie.HttpOnly = true;
             options.Cookie.SameSite = SameSiteMode.Strict;
+            // Secure whenever the dashboard is reached over HTTPS (the network listener). Over plain loopback HTTP it is not, since not every
+            // browser keeps a Secure cookie set over http://127.0.0.1; the path and a short remembered lifetime bound it there instead.
             options.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
             options.SlidingExpiration = false;
             options.Events.OnValidatePrincipal = DashboardSecurity.ValidateCookie;
@@ -163,6 +168,8 @@ public static class DashboardEndpoints
         {
             Closed = Count(data?["closed"]),
             Kept = Count(data?["kept"]),
+            Held = Count(data?["held"]),
+            More = data?["more"] is JsonValue more && more.TryGetValue<bool>(out var remaining) && remaining,
             Ids = (data?["ids"] as JsonArray)?.Select(item => item is JsonValue value && value.TryGetValue<string>(out var text) ? text : null).OfType<string>().ToArray() ?? []
         });
 

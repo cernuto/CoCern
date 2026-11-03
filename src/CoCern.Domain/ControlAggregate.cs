@@ -23,11 +23,13 @@ internal static class ControlAggregate
             Operations.Register => RegisterSession(context),
             Operations.SessionWork => TrackWork(context),
             Operations.SweepSessions => SweepSessions(context),
+            Operations.SessionRestore => RestoreSession(context),
             RelayTools.WorkerList => ListWorkers(context),
             RelayTools.GetStatus => Status(context),
             Operations.Resolve => ResolveResource(context),
             Operations.ResolveAll => ResolveAll(context),
             Operations.SessionOwners => OwnedSessions(context),
+            Operations.SessionsOpen => OpenSessions(context),
             Operations.AttentionRoute => RouteAttention(context),
             RelayTools.ControlRequest => Control(context),
             _ => Error(UnknownTool)
@@ -44,7 +46,7 @@ internal static class ControlAggregate
         // sessions go stale; the second only once those actions are reported or recovered, since expiring their sessions would strand them.
         if (sessions.Count >= RelayLimits.MaxRecords)
         {
-            var cutoff = context.Now.AddHours(-RelayLimits.StaleSessionHours);
+            var cutoff = IdleCutoff(context.Now, TimeSpan.FromHours(RelayLimits.StaleSessionHours));
             var held = sessions.Count(entry => entry.Value is JsonObject record && OwnsWork(record, context.Now) && LastSeen(record) <= cutoff);
             return Error(CapacityExceeded, new
             {
@@ -73,54 +75,83 @@ internal static class ControlAggregate
     /// least recently seen first, down to <see cref="RelayLimits.RetainedEntriesAfterPrune"/>, so it runs at most once per 512 opens.
     /// A session seen within that time is never dropped, nor one that answers for an unresolved action (its expiry would leave nobody able
     /// to report it). Each dropped session is sent <see cref="Operations.SessionExpire"/>, under its own repository, so its chat gets a
-    /// clean <c>SessionUnknown</c> and opens again.
+    /// clean <c>SessionUnknown</c> and opens again. This is the directory's capacity valve, so unread mail does not keep a session here.
     /// </summary>
     private static void DropStaleSessions(AggregateContext context, JsonObject sessions)
     {
-        var cutoff = context.Now.AddHours(-RelayLimits.StaleSessionHours);
-        CloseSessions(context, sessions, (_, session) => session is null || LastSeen(session) <= cutoff, sessions.Count - RelayLimits.RetainedEntriesAfterPrune);
+        var cutoff = IdleCutoff(context.Now, TimeSpan.FromHours(RelayLimits.StaleSessionHours));
+        CloseSessions(context, sessions, (_, session) => session is null || LastSeen(session) <= cutoff, sessions.Count - RelayLimits.RetainedEntriesAfterPrune, idle: false);
     }
 
     /// <summary>
-    /// The one way the directory closes sessions (a full directory's cleanup, the hub's sweep, <c>close_sessions</c>): of the entries
-    /// <paramref name="matches"/> accepts, closes up to <paramref name="limit"/>, least recently seen first, and returns their IDs in that order.
-    /// One that answers for an unresolved action is never closed (its expiry would leave nobody able to report it) and is counted as kept.
-    /// Each closed session leaves the directory and is sent <see cref="Operations.SessionExpire"/>, under its own repository, so its chat
-    /// gets a clean <c>SessionUnknown</c> and opens again.
+    /// The latest last-seen time a session may have and still count as idle for <paramref name="idle"/>. A working session reports its
+    /// activity at most once per <see cref="RelayLimits.AttentionActivityReportMinutes"/>, so the directory may see it that much earlier
+    /// than its last call; judging by that time alone, "idle for an hour" would close a chat that called 59 minutes after its last report.
+    /// The report interval is added, so a session closed as idle made no call for at least <paramref name="idle"/> (once its last report
+    /// has left its outbox); one may stay up to the interval longer.
     /// </summary>
-    private static (List<string> Closed, int Kept) CloseSessions(AggregateContext context, JsonObject sessions, Func<string, JsonObject?, bool> matches, int limit)
+    private static DateTimeOffset IdleCutoff(DateTimeOffset now, TimeSpan idle) => now - idle - TimeSpan.FromMinutes(RelayLimits.AttentionActivityReportMinutes);
+
+    /// <summary>What one close did: the IDs it closed, least recently seen first, how many it kept for unresolved actions or for unread mail, and whether it left matching sessions for a later run.</summary>
+    private readonly record struct Closing(List<string> Closed, int Kept, int Held, bool More);
+
+    /// <summary>
+    /// The one way the directory closes sessions (a full directory's cleanup, the hub's sweep, <c>close_sessions</c>): of the entries
+    /// <paramref name="matches"/> accepts, closes up to <paramref name="limit"/>, least recently seen first.
+    /// <list type="bullet">
+    /// <item>One that answers for an unresolved action is never closed (its expiry would leave nobody able to report it) and counts as kept.
+    /// The session checks again when its expiry arrives, since a report that it took an action may still be on its way here.</item>
+    /// <item>An <paramref name="idle"/> close (the sweep, <c>close_sessions</c> with <c>idleMinutes</c>) skips a session held for unread mail
+    /// (see <see cref="MailHold"/>) and counts it as held. Any other session it closes is asked to refuse if it has unread mail, unless its
+    /// hold has lapsed; a label-only close or a full directory closes it, mail and all.</item>
+    /// </list>
+    /// Each closed session leaves the directory and is sent <see cref="Operations.SessionExpire"/>, under its own repository, so its chat
+    /// gets a clean <c>SessionUnknown</c> and opens again. One that refuses sends <see cref="Operations.SessionRestore"/> and comes back.
+    /// </summary>
+    private static Closing CloseSessions(AggregateContext context, JsonObject sessions, Func<string, JsonObject?, bool> matches, int limit, bool idle)
     {
+        var now = context.Now;
         var matched = sessions.Select(entry => (entry.Key, Session: entry.Value as JsonObject)).Where(entry => matches(entry.Key, entry.Session))
-            .Select(entry => (entry.Key, entry.Session, Seen: entry.Session is { } record ? LastSeen(record) : DateTimeOffset.MinValue, Owns: entry.Session is { } owner && OwnsWork(owner, context.Now))).ToList();
-        var closing = matched.Where(entry => !entry.Owns).OrderBy(entry => entry.Seen).ThenBy(entry => entry.Key, StringComparer.Ordinal).Take(Math.Max(0, limit)).ToList();
-        foreach (var (id, session, _, _) in closing)
+            .Select(entry => (entry.Key, entry.Session, Seen: entry.Session is { } record ? LastSeen(record) : DateTimeOffset.MinValue,
+                Owns: entry.Session is { } owner && OwnsWork(owner, now), Hold: entry.Session is { } holder ? MailHold(holder, now) : Hold.None)).ToList();
+        var closable = matched.Where(entry => !entry.Owns && !(idle && entry.Hold == Hold.Holding))
+            // A forced close takes sessions without mail waiting first.
+            .OrderBy(entry => entry.Hold == Hold.Holding).ThenBy(entry => entry.Seen).ThenBy(entry => entry.Key, StringComparer.Ordinal).ToList();
+        var closing = closable.Take(Math.Max(0, limit)).ToList();
+        foreach (var (id, session, _, _, hold) in closing)
         {
             sessions.Remove(id);
             var repository = session is null ? "" : Text(session, "repositoryId");
+            var expire = new JsonObject { ["repositoryId"] = repository, ["sessionId"] = id };
+            // A session whose hold lapsed already had its grace, so this idle close takes it as it is.
+            if (idle && hold == Hold.None) expire["idle"] = true;
             // Its own caller: the session belongs to its repository, which the caller that closed it may not reach (or may reach them all).
-            context.Emit(AggregateKinds.Session, id, Operations.SessionExpire, new JsonObject { ["repositoryId"] = repository, ["sessionId"] = id },
-                new RelayCaller("relay-directory", false, [repository]));
+            context.Emit(AggregateKinds.Session, id, Operations.SessionExpire, expire, new RelayCaller("relay-directory", false, [repository]));
         }
-        return (closing.Select(entry => entry.Key).ToList(), matched.Count(entry => entry.Owns));
+        return new(closing.Select(entry => entry.Key).ToList(), matched.Count(entry => entry.Owns), idle ? matched.Count(entry => !entry.Owns && entry.Hold == Hold.Holding) : 0,
+            closable.Count > closing.Count);
     }
 
     /// <summary>
     /// <see cref="Operations.SweepSessions"/>: the hub's periodic sweep, across every repository, closes sessions not seen (fresh, active or
-    /// observed) for <c>idleHours</c>. Replies how many it closed, and how many as idle it kept because they answer for unresolved actions.
+    /// observed) for <c>idleHours</c> (see <see cref="IdleCutoff"/>). Replies how many it closed, how many idle ones it kept because they
+    /// answer for unresolved actions (<c>kept</c>) or hold unread mail (<c>held</c>), and <c>more</c> when it left some for the next run.
     /// </summary>
     private static RelayReply SweepSessions(AggregateContext context)
     {
         var hours = Number(context.Args, "idleHours");
         if (hours <= 0) return Error(InvalidArguments, new { field = "idleHours" });
-        var cutoff = context.Now.AddHours(-hours);
-        var (closed, kept) = CloseSessions(context, ObjectAt(context.State, "sessions"), (_, session) => session is null || LastSeen(session) <= cutoff, RelayLimits.MaxSessionsClosedPerCall);
-        return Ok(new { closed = closed.Count, kept });
+        var cutoff = IdleCutoff(context.Now, TimeSpan.FromHours(hours));
+        var result = CloseSessions(context, ObjectAt(context.State, "sessions"), (_, session) => session is null || LastSeen(session) <= cutoff, RelayLimits.MaxSessionsClosedPerCall, idle: true);
+        return Ok(new { closed = result.Closed.Count, kept = result.Kept, held = result.Held, more = result.More });
     }
 
     /// <summary>
     /// <c>control_request close_sessions</c>: closes this repository's sessions not seen for <c>idleMinutes</c> (at least
-    /// <see cref="RelayLimits.MinCloseSessionsIdleMinutes"/>) and/or whose label starts with <c>labelPrefix</c> (ignoring case); with both,
-    /// a session must match both. The caller's own session is never closed. Replies the count closed and kept, and the first closed IDs.
+    /// <see cref="RelayLimits.MinCloseSessionsIdleMinutes"/>; see <see cref="IdleCutoff"/>) and/or whose label starts with <c>labelPrefix</c>
+    /// (ignoring case); with both, a session must match both. The caller's own session is never closed. With <c>idleMinutes</c> it is an
+    /// idle close, so sessions holding unread mail stay (<c>held</c>); a label-only close takes them. Replies the counts closed, kept and
+    /// held, the first closed IDs, and <c>more</c> when matching sessions are left for another call.
     /// </summary>
     private static RelayReply CloseSessionsByFilter(AggregateContext context)
     {
@@ -141,11 +172,63 @@ internal static class ControlAggregate
             prefix = parsed;
         }
         if (minutes is null && prefix is null) return Error(InvalidArguments, new { field = "idleMinutes", hint = "give idleMinutes, labelPrefix or both" });
-        var cutoff = minutes is { } span ? context.Now.AddMinutes(-span) : DateTimeOffset.MaxValue;
+        var cutoff = minutes is { } span ? IdleCutoff(context.Now, TimeSpan.FromMinutes(span)) : DateTimeOffset.MaxValue;
         var own = context.SessionId;
-        var (closed, kept) = CloseSessions(context, ObjectAt(context.State, "sessions"), (id, session) => session is not null && id != own && Text(session, "repositoryId") == context.Repository
-            && LastSeen(session) <= cutoff && (prefix is null || Text(session, "label").StartsWith(prefix, StringComparison.OrdinalIgnoreCase)), RelayLimits.MaxSessionsClosedPerCall);
-        return Ok(new { closed = closed.Count, kept, ids = closed.Take(RelayLimits.MaxClosedSessionIds).ToArray() });
+        var result = CloseSessions(context, ObjectAt(context.State, "sessions"), (id, session) => session is not null && id != own && Text(session, "repositoryId") == context.Repository
+            && LastSeen(session) <= cutoff && (prefix is null || Text(session, "label").StartsWith(prefix, StringComparison.OrdinalIgnoreCase)), RelayLimits.MaxSessionsClosedPerCall, idle: minutes is not null);
+        return Ok(new { closed = result.Closed.Count, kept = result.Kept, held = result.Held, more = result.More, ids = result.Closed.Take(RelayLimits.MaxClosedSessionIds).ToArray() });
+    }
+
+    /// <summary>When the session refused an idle close because it had unread mail; see <see cref="MailHold"/>.</summary>
+    private const string MailHeldKey = "mailHeldAt";
+
+    private enum Hold { None, Holding, Lapsed }
+
+    /// <summary>
+    /// Whether the record is held open for unread mail. A session refuses an idle expiry while its inbox has unread messages (a chat that
+    /// cannot be woken may idle for a day waiting on mail, which its expiry would delete), and the directory then remembers when. The hold
+    /// lasts while the session is not seen again, for <see cref="RelayLimits.SessionMailHoldDays"/>; after that it has lapsed and the next
+    /// idle close takes the session as it is. Once the session is seen again the hold no longer applies: its next idle close asks again.
+    /// </summary>
+    private static Hold MailHold(JsonObject record, DateTimeOffset now)
+    {
+        if (OptionalDate(record, MailHeldKey) is not { } held || LastSeen(record) > held) return Hold.None;
+        return held > now.AddDays(-RelayLimits.SessionMailHoldDays) ? Hold.Holding : Hold.Lapsed;
+    }
+
+    /// <summary>The record fields a refused expiry brings back (<see cref="Operations.SessionRestore"/>): what the directory keeps of a session, as the session keeps it.</summary>
+    private static IEnumerable<string> RestoredFields => RegistrationFields.Concat(["principalId", "sessionToken", "role"]);
+
+    /// <summary>
+    /// <see cref="Operations.SessionRestore"/>: a session this directory closed refused its expiry, because it answers for an unresolved
+    /// action (a report of it may not have arrived here before the close) or, for an idle close, because it has unread mail. Its record comes
+    /// back from the session's copy, with ownership (<c>owns</c>, ordered by the session's report <c>seq</c>) or the mail hold (<c>mail</c>),
+    /// so later closes keep it. It returns even to a full directory: it never left the hub. A session still listed (a redelivery) only gains
+    /// the ownership or hold; one in another repository, or a malformed copy, is ignored, since a refusal would be retried forever.
+    /// </summary>
+    private static RelayReply RestoreSession(AggregateContext context)
+    {
+        var args = context.Args;
+        var id = Text(args, "sessionId");
+        var sessions = ObjectAt(context.State, "sessions");
+        if (id.Length == 0) return Ok(new { restored = false });
+        if (sessions[id] is not JsonObject record)
+        {
+            if (args["record"] is not JsonObject copy || Text(copy, "principalId").Length == 0) return Ok(new { restored = false });
+            record = new JsonObject();
+            foreach (var field in RestoredFields) if (copy[field] is { } value) record[field] = value.DeepClone();
+            record["sessionId"] = id; record["repositoryId"] = context.Repository;
+            sessions[id] = record;
+        }
+        else if (Text(record, "repositoryId") != context.Repository) return Ok(new { restored = false });
+        // A redelivered restore never undoes a newer report that the work ended.
+        if (IsTrue(args, "owns") && Number(args, "seq") >= Number(record, WorkSeqKey))
+        {
+            record[OwnsWorkKey] = context.Now.ToUnixTimeSeconds(); record.Remove(ClearedWorkKey);
+            record[WorkSeqKey] = Number(args, "seq");
+        }
+        if (IsTrue(args, "mail")) record[MailHeldKey] = context.Now.ToString("O");
+        return Ok(new { restored = true });
     }
 
     private const string OwnsWorkKey = "ownsWork";
@@ -220,7 +303,7 @@ internal static class ControlAggregate
     {
         var workers = ObjectAt(context.State, "sessions").Select(x => x.Value!.AsObject()).Where(x => Text(x, "repositoryId") == context.Repository).Select(x =>
         {
-            var copy = x.DeepClone().AsObject(); copy.Remove("sessionToken"); copy.Remove("principalId"); foreach (var field in WorkLedger.Fields) copy.Remove(field); copy.Remove(OwnsWorkKey); copy.Remove(ClearedWorkKey); copy.Remove(WorkSeqKey);
+            var copy = x.DeepClone().AsObject(); copy.Remove("sessionToken"); copy.Remove("principalId"); foreach (var field in WorkLedger.Fields) copy.Remove(field); copy.Remove(OwnsWorkKey); copy.Remove(ClearedWorkKey); copy.Remove(WorkSeqKey); copy.Remove(MailHeldKey);
             var stale = Date(copy, "freshUntil") <= context.Now || Text(copy, "hubIncarnation") != Text(context.Args, "hubIncarnation");
             copy["stale"] = stale; copy.Remove("hubIncarnation");
             if (stale) copy["availability"] = "unknown";
@@ -304,6 +387,15 @@ internal static class ControlAggregate
         var owned = Strings(context.Args["sessionIds"]).Distinct(StringComparer.Ordinal)
             .Where(id => sessions[id] is JsonObject session && Text(session, "principalId") == context.Caller.PrincipalId && Text(session, "repositoryId") == context.Repository).ToArray();
         return Ok(new { owned });
+    }
+
+    /// <summary>The given session IDs still open in this repository, whoever opened them. Read-only; nothing else about them is returned.</summary>
+    private static RelayReply OpenSessions(AggregateContext context)
+    {
+        var sessions = ObjectAt(context.State, "sessions");
+        var open = Strings(context.Args["sessionIds"]).Distinct(StringComparer.Ordinal)
+            .Where(id => sessions[id] is JsonObject session && Text(session, "repositoryId") == context.Repository).ToArray();
+        return Ok(new { open });
     }
 
     /// <summary>Maps a resource ID or a machine-scoped alias to its canonical registered resource.</summary>

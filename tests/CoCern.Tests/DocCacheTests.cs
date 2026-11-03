@@ -112,15 +112,18 @@ public sealed class DocCacheTests
         var watcher = new WatchingGit { SlowPath = "docs/slow.md" };
         await using var host = DocHost(git, watcher);
         await SyncAsync(host);
-        watcher.ShowDelay = TimeSpan.FromSeconds(2);
-        var directory = host.Services.GetRequiredService<IGrainFactory>().GetGrain<IDocDirectoryGrain>("repo");
-        var result = await directory.SearchAsync("cached", null, null, 3, TimeSpan.FromMilliseconds(600));
+        // slow.md's read waits until it is released, after the search gave up on it; fast.md's real git show has a generous budget.
+        watcher.HoldSlow();
+        var grains = host.Services.GetRequiredService<IGrainFactory>();
+        var directory = grains.GetGrain<IDocDirectoryGrain>("repo");
+        var result = await directory.SearchAsync("cached", null, null, 3, TimeSpan.FromSeconds(5));
         Assert.Equal(1, result.NotSearched);
         Assert.Equal(1, UsageCount(DocumentUsage(host, "repo", "docs/fast.md"), "Searches"));
         Assert.Equal(0, UsageCount(DocumentUsage(host, "repo", "docs/slow.md"), "Searches"));
-        await Task.Delay(TimeSpan.FromSeconds(2.5));
+        // The late read lands in the search index, and still counts no search of slow.md.
+        watcher.ReleaseSlow();
+        await WaitUntilAsync(async () => (await grains.GetGrain<IDocSearchGrain>("repo").StatsAsync()).Indexed == 2);
         Assert.Equal(0, UsageCount(DocumentUsage(host, "repo", "docs/slow.md"), "Searches"));
-        watcher.ShowDelay = TimeSpan.Zero;
         // The late read did land in the search index: deactivate it, so the next search reads slow.md again, and that read fails.
         var management = host.Services.GetRequiredService<IGrainFactory>().GetGrain<IManagementGrain>(0);
         await management.ForceActivationCollection(TimeSpan.Zero);
@@ -131,10 +134,36 @@ public sealed class DocCacheTests
     }
 
     [Fact]
-    public async Task A_document_utilization_write_failure_does_not_fail_the_document_response_or_the_next_sync()
+    public async Task Document_usage_is_counted_in_memory_and_written_on_deactivation_not_on_every_lookup()
     {
         using var git = GitRepositories.Create(new() { ["docs/a.md"] = "# Alpha\n\nCached alpha.\n" });
-        await using var host = DocHost(git);
+        await using var host = DocHost(git, usageWrites: TimeSpan.FromHours(1));
+        await SyncAsync(host);
+        var grains = host.Services.GetRequiredService<IGrainFactory>();
+        var directory = grains.GetGrain<IDocDirectoryGrain>("repo");
+        for (var i = 0; i < 3; i++) Assert.Single((await directory.SearchAsync("cached", null, null, 3, TimeSpan.FromSeconds(10))).Hits);
+        Assert.NotNull(await directory.SectionAsync("docs/a.md", "alpha"));
+
+        // The dashboard sees every use at once; storage holds none of them yet.
+        var shown = DocumentUsage(host, "repo", "docs/a.md");
+        Assert.Equal((3L, 3L, 1L), (UsageCount(shown, "Searches"), UsageCount(shown, "MatchedSections"), UsageCount(shown, "SectionReads")));
+        Assert.Equal((0L, 0L), (await PersistedUsageAsync(host, "docs/a.md", "Searches"), await PersistedUsageAsync(host, "docs/a.md", "SectionReads")));
+
+        // Idle collection writes them before the directory goes, and the next activation starts from them.
+        var management = grains.GetGrain<IManagementGrain>(0);
+        await management.ForceActivationCollection(TimeSpan.Zero);
+        await WaitUntilAsync(async () => await PersistedUsageAsync(host, "docs/a.md", "Searches") == 3);
+        Assert.Equal((3L, 1L), (await PersistedUsageAsync(host, "docs/a.md", "MatchedSections"), await PersistedUsageAsync(host, "docs/a.md", "SectionReads")));
+        await directory.ReadAsync();
+        shown = DocumentUsage(host, "repo", "docs/a.md");
+        Assert.Equal((3L, 1L), (UsageCount(shown, "Searches"), UsageCount(shown, "SectionReads")));
+    }
+
+    [Fact]
+    public async Task A_document_utilization_write_failure_does_not_fail_the_document_response_and_keeps_the_counts_for_the_next_write()
+    {
+        using var git = GitRepositories.Create(new() { ["docs/a.md"] = "# Alpha\n\nCached alpha.\n" });
+        await using var host = DocHost(git, usageWrites: TimeSpan.FromMilliseconds(100));
         await SyncAsync(host);
         var directory = host.Services.GetRequiredService<IGrainFactory>().GetGrain<IDocDirectoryGrain>("repo");
         using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={host.DatabasePath}");
@@ -144,15 +173,22 @@ public sealed class DocCacheTests
         await command.ExecuteNonQueryAsync();
         Assert.Single((await directory.SearchAsync("cached", null, null, 3, TimeSpan.FromSeconds(10))).Hits);
         Assert.NotNull(await directory.SectionAsync("docs/a.md", "alpha"));
-        Assert.Equal(0, UsageCount(DocumentUsage(host, "repo", "docs/a.md"), "Searches"));
-        Assert.Equal(0, UsageCount(DocumentUsage(host, "repo", "docs/a.md"), "SectionReads"));
+        // Every timed write fails meanwhile; the counts stay, shown and unwritten.
+        await Task.Delay(TimeSpan.FromSeconds(1));
+        Assert.Equal((1L, 1L), (UsageCount(DocumentUsage(host, "repo", "docs/a.md"), "Searches"), UsageCount(DocumentUsage(host, "repo", "docs/a.md"), "SectionReads")));
+        Assert.Equal(0, await PersistedUsageAsync(host, "docs/a.md", "Searches"));
+
+        // Storage is back: the next timed write stores them once, and the next sync still applies.
         command.CommandText = "DROP TRIGGER fail_doc_usage;";
         await command.ExecuteNonQueryAsync();
+        await WaitUntilAsync(async () => await PersistedUsageAsync(host, "docs/a.md", "Searches") == 1);
+        Assert.Equal(1, await PersistedUsageAsync(host, "docs/a.md", "SectionReads"));
         await directory.SearchAsync("cached", null, null, 3, TimeSpan.FromSeconds(10));
         git.Commit(new() { ["docs/a.md"] = "# Alpha\n\nUpdated cached alpha.\n" });
         await SyncAsync(host);
         Assert.Equal(git.Head(), (await directory.ReadAsync()).Commit);
-        Assert.Equal(1, UsageCount(DocumentUsage(host, "repo", "docs/a.md"), "Searches"));
+        Assert.Equal((2L, 1L), (UsageCount(DocumentUsage(host, "repo", "docs/a.md"), "Searches"), UsageCount(DocumentUsage(host, "repo", "docs/a.md"), "SectionReads")));
+        await WaitUntilAsync(async () => await PersistedUsageAsync(host, "docs/a.md", "Searches") == 2);
     }
 
     private static JsonElement DirectoryObservation(RelayHostFixture host, string repository) => JsonSerializer.SerializeToElement(
@@ -205,7 +241,10 @@ public sealed class DocCacheTests
         {
             Assert.False(observation.GetProperty("DocumentUsage").TryGetProperty("docs/a.md", out _));
             Assert.NotNull(await directory.SectionAsync("docs/a.md", "alpha"));
-            Assert.False(DirectoryObservation(restarted, "repo").GetProperty("DocumentUsage").TryGetProperty("docs/a.md", out _));
+            // Counted in memory from that read on, which starts a.md's tracking period; written once storage takes it.
+            var counted = DocumentUsage(restarted, "repo", "docs/a.md");
+            Assert.Equal((0L, 1L), (UsageCount(counted, "Searches"), UsageCount(counted, "SectionReads")));
+            Assert.True(counted.GetProperty("TrackingSince").GetDateTimeOffset() >= restartedAt);
             command.CommandText = "DROP TRIGGER fail_usage_migration;";
             await command.ExecuteNonQueryAsync();
         }
@@ -218,7 +257,7 @@ public sealed class DocCacheTests
         }
         Assert.Single((await directory.SearchAsync("cached", null, "docs/a.md", 3, TimeSpan.FromSeconds(10))).Hits);
         var recovered = DocumentUsage(restarted, "repo", "docs/a.md");
-        Assert.Equal((1L, 1L, 0L), (UsageCount(recovered, "Searches"), UsageCount(recovered, "MatchedSections"), UsageCount(recovered, "SectionReads")));
+        Assert.Equal((1L, 1L, failMigration ? 1L : 0L), (UsageCount(recovered, "Searches"), UsageCount(recovered, "MatchedSections"), UsageCount(recovered, "SectionReads")));
         Assert.True(recovered.GetProperty("TrackingSince").GetDateTimeOffset() >= restartedAt);
     }
 
@@ -704,18 +743,20 @@ public sealed class DocCacheTests
     public async Task A_search_past_its_timeout_returns_the_hits_so_far_as_partial()
     {
         using var git = GitRepositories.Create(new() { ["docs/fast.md"] = "# Refunds\n\nFast refunds.\n", ["docs/slow.md"] = "# Refunds\n\nSlow refunds.\n" });
-        var watcher = new WatchingGit { SlowPath = "docs/slow.md", ShowDelay = TimeSpan.FromSeconds(20) };
+        var watcher = new WatchingGit { SlowPath = "docs/slow.md" };
         await using var host = DocHost(git, watcher);
         using var client = host.AuthorizedClient();
         await SyncAsync(host);
-        host.Services.GetRequiredService<DocCacheTool>().SearchTimeout = TimeSpan.FromSeconds(1);
+        // slow.md's read waits until released, far past the search timeout; fast.md's real git show has a generous one.
+        watcher.HoldSlow();
+        host.Services.GetRequiredService<DocCacheTool>().SearchTimeout = TimeSpan.FromSeconds(5);
         var timer = Stopwatch.StartNew();
         var reply = Data(await Tool(client, "doc_search", new { repositoryId = "repo", query = "refunds" }));
-        Assert.True(timer.Elapsed < TimeSpan.FromSeconds(10));
+        Assert.True(timer.Elapsed < TimeSpan.FromSeconds(20));
         Assert.True(reply.GetProperty("partial").GetBoolean());
         Assert.Equal(1, reply.GetProperty("notSearched").GetInt32());
         Assert.Equal("docs/fast.md", Assert.Single(reply.GetProperty("hits").EnumerateArray()).GetProperty("path").GetString());
-        watcher.ShowDelay = TimeSpan.Zero;
+        watcher.ReleaseSlow();
     }
 
     [Fact]
@@ -1547,7 +1588,8 @@ public sealed class DocCacheTests
 
     // ---- Helpers ----
 
-    private static RelayHostFixture DocHost(GitRepositories git, GitCli? cli = null, Dictionary<string, string?>? settings = null, string? databasePath = null)
+    /// <param name="usageWrites">How often a directory writes its counted usage; the hub's default when null.</param>
+    private static RelayHostFixture DocHost(GitRepositories git, GitCli? cli = null, Dictionary<string, string?>? settings = null, string? databasePath = null, TimeSpan? usageWrites = null)
     {
         var all = new Dictionary<string, string?>
         {
@@ -1557,7 +1599,22 @@ public sealed class DocCacheTests
             ["Relay:DocCache:Repositories:0:Id"] = "repo", ["Relay:DocCache:Repositories:0:ClonePath"] = git.Clone
         };
         foreach (var (key, value) in settings ?? []) all[key] = value;
-        return new RelayHostFixture(databasePath, settings: all, configureServices: cli is null ? null : services => { services.RemoveAll<GitCli>(); services.AddSingleton(cli); });
+        return new RelayHostFixture(databasePath, settings: all, configureServices: services =>
+        {
+            if (cli is not null) { services.RemoveAll<GitCli>(); services.AddSingleton(cli); }
+            if (usageWrites is { } interval) services.AddSingleton(new DocUsageOptions { WriteInterval = interval });
+        });
+    }
+
+    /// <summary>A document's usage counter as storage holds it now, not as the directory shows it.</summary>
+    private static async Task<long> PersistedUsageAsync(RelayHostFixture host, string path, string counter)
+    {
+        using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={host.DatabasePath}");
+        await connection.OpenAsync();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT json_extract(CAST(payload AS TEXT), $path) FROM grain_state WHERE state_name = 'docs' AND grain_key = 'repo';";
+        command.Parameters.AddWithValue("$path", $"$.Usage.\"{path}\".{counter}");
+        return await command.ExecuteScalarAsync() is long value ? value : 0;
     }
 
     private static Task<DocSyncOutcome> SyncAsync(RelayHostFixture host)
@@ -1647,6 +1704,11 @@ public sealed class DocCacheTests
         public void HoldFetch() => hold = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public void ReleaseFetch() => hold?.TrySetResult();
 
+        private TaskCompletionSource? slowHold;
+        /// <summary>Holds every read of <see cref="SlowPath"/> until <see cref="ReleaseSlow"/>, so a search's timeout passes however slow the machine is.</summary>
+        public void HoldSlow() => slowHold = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public void ReleaseSlow() => slowHold?.TrySetResult();
+
         public override async Task<GitResult> RunAsync(string directory, IReadOnlyList<string> arguments, int maxOutputBytes, IReadOnlyDictionary<string, string>? environment, CancellationToken cancellationToken)
         {
             Interlocked.Increment(ref Commands);
@@ -1668,6 +1730,7 @@ public sealed class DocCacheTests
                 try
                 {
                     if (ShowDelay > TimeSpan.Zero && (SlowPath is null || arguments[^1].EndsWith(":" + SlowPath, StringComparison.Ordinal))) await Task.Delay(ShowDelay, cancellationToken);
+                    if (slowHold is { } slow && SlowPath is not null && arguments[^1].EndsWith(":" + SlowPath, StringComparison.Ordinal)) await slow.Task.WaitAsync(cancellationToken);
                     return await base.RunAsync(directory, arguments, maxOutputBytes, environment, cancellationToken);
                 }
                 finally { Interlocked.Decrement(ref shows); }

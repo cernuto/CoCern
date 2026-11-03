@@ -16,7 +16,7 @@ This page is everything you need to set up and use CoCern. Technical details, ev
 - **Attention.** One short "look at this" per reply. Only urgent items interrupt a chat.
 - **Standing rules.** A board's settled rules and permissions, given to every chat that opens.
 - **Search.** Tasks, notes and messages, by keyword (SQLite full-text search).
-- **Document cache.** Your repositories' docs (Markdown, text, OpenAPI), searchable by section: configured ones, every git repository under the folders you list as roots, and the repository each chat works in. Each document is a Lucene.Net index kept in memory in its own Orleans grain: loaded on the first search, ranked with BM25, and dropped after 30 idle minutes. Synced from git commits, never your working tree.
+- **Document cache.** Your repositories' docs (Markdown, text, OpenAPI), searchable by section: configured ones, every git repository under the folders you list as roots, and the repository each chat works in when it is under one of those roots. Each repository's docs are one Lucene.Net index, kept in memory by an Orleans grain: built at the first search, ranked with BM25, patched by each sync, and dropped after 30 idle minutes. Reading a section loads only that file. Synced from git commits, never your working tree.
 - **DuckDB analytics.** Every hour the hub snapshots the board and activity into DuckDB. Ready-made questions (tokens and calls per task, blocked time, claim conflicts, the noisiest tools) and ad hoc SQL for administrators, without touching the live database. Managers get an alert when a measure doubles.
 - **Live dashboard.** Sessions, requests, logs and rules in the browser, plus one-click setup.
 
@@ -59,7 +59,7 @@ On the dashboard's **Connect** page, one button adds CoCern to each of these on 
 | Claude desktop app | Shown only when it is installed. |
 | Codex | The Codex CLI, IDE extension and app. Codex is ChatGPT's coding agent. |
 
-Restart the app afterwards. Each settings file is backed up first, and an app that already has CoCern is left alone. The page works only in a browser on the hub's PC.
+Restart the app afterwards. Each settings file is backed up first. An app that already has CoCern keeps its entry, unless that entry points at this hub's old address or certificate: then **Connect** updates it. The page works only in a browser on the hub's PC.
 
 The ChatGPT chat app can't use a hub on your PC: it can only reach CoCern at a public HTTPS address, which is not set up.
 
@@ -72,8 +72,10 @@ Chats on other PCs can join the same hub and message chats here. On the hub's PC
 1. Copy the one command it shows.
 2. On the other PC, open PowerShell and paste it.
 
-Nothing is copied by hand and no .NET install is needed there: the command downloads CoCern from this hub over HTTPS with the hub's certificate pinned, joins, adds CoCern to Claude Code (through `claude mcp add` when Claude Code's command line is installed, else its settings file, with a restart hint if Claude Code is running) and Codex, and starts it with Windows. Claude Code no longer needs to be closed. The PC shows up on the dashboard under Machines.
+Nothing is copied by hand: the command downloads CoCern from this hub over HTTPS with the hub's certificate pinned, joins, adds CoCern to Claude Code (through `claude mcp add` when Claude Code's command line is installed, else its settings file, with a restart hint if Claude Code is running) and Codex, and starts it with Windows. Claude Code no longer needs to be closed. The PC shows up on the dashboard under Machines. If the download or unpacking fails, it stops before changing anything.
 
+- **No .NET needed there** when this hub serves the self-contained adapter from `./scripts/Build-CoCern.ps1 -Publish`. A hub started from Visual Studio without it serves its own build, which needs the .NET 10 runtime on the other PC; the section says so.
+- **Updating a joined PC:** paste the same command again. If the hub has a newer adapter while CoCern is running there, it says what to close first and changes nothing; then paste it again.
 - **Turn it on first.** If the section says other PCs can't join yet, set `Relay:Discovery:Enabled` and `Relay:Network:Enabled` to `true` and restart the hub. The Visual Studio launch profile already does.
 - **The other PC can't reach the hub?** Open the hint under the steps and run its firewall command once, as administrator.
 - **Keep the command private.** It holds the hub's join code. Anyone with it can join a PC and message your chats.
@@ -83,7 +85,7 @@ Nothing is copied by hand and no .NET install is needed there: the command downl
 
 Agents find CoCern's tools on their own. A typical chat:
 
-1. `session_open` once, to join the hub, and keep its handle for the whole chat. Retry an uncertain open with the same `requestId` and arguments: it returns the same session, not a second one. A managing chat passes `role: "manager"`.
+1. `session_open` once, to join the hub, and keep its handle for the whole chat. Retry an uncertain open with the same `requestId` and arguments: it returns the same session, not a second one (in Codex, only until the app restarts CoCern; then reuse the handle you kept). A managing chat passes `role: "manager"`.
 2. `task_get` to read the board, then `task_claim` a task.
 3. Do the work with the chat's own tools.
 4. `task_update` with what happened. Add `includeNextWork: true` to be offered the next task.
@@ -93,35 +95,37 @@ Claims are advisory: they keep cooperating agents apart, but can't stop anyone. 
 
 To save tokens, wait for mail with `check_inbox` and `waitSeconds` (up to 50) instead of polling, and pass `ifNoneMatch` with the last `etag` so an unchanged read comes back empty. More in the [Reference](docs/reference.md#calls).
 
-**Administrators** (the token the hub makes for you is one) can also set the board's standing rules, add "when this happens, do that" orders, run analytics and pause work. See the [Reference](docs/reference.md#tools).
+**Administrators** can also set the board's standing rules, add "when this happens, do that" orders, run analytics and pause work. The token the hub makes for you is an administrator token, but a chat lists these tools only when its `cocern` entry also sets `COCERN_ROLE=admin`, which Connect doesn't add. See the [Reference](docs/reference.md#tools).
 
 ## Wake-ups
 
 A chat can be woken when something needs it.
 
-- **Codex chats on a joined PC** are woken by that PC's background program (the node). Nothing to do. Codex chats on the hub's own PC are not woken.
-- **Claude chats** wake themselves. Run this in the chat as a background command:
+- **Codex chats on a joined PC** are woken by that PC's background program (the node). Nothing to do.
+- **Claude chats on a joined PC** wake themselves. Run this in the chat as a background command:
 
   ```powershell
-  dotnet <adapter folder>\CoCern.Adapter.dll --await-inbox --chat <this chat's session ID> --timeout-minutes 120
+  & "$env:LOCALAPPDATA\CoCern\adapter\CoCern.Adapter.exe" --await-inbox --chat <this chat's session ID> --timeout-minutes 120
   ```
 
-  The session ID is the chat's `CLAUDE_CODE_SESSION_ID`. Start it again after handling the inbox.
+  That is the folder the pasted command installs; from a build with .NET installed, `dotnet <folder>\CoCern.Adapter.dll` works the same. The session ID is the chat's `CLAUDE_CODE_SESSION_ID`. Start it again after handling the inbox.
+- **Chats on the hub's own PC** aren't woken: it has no node, so the waiter exits with code 1 there. They see mail at their next call, or sooner while they wait with `check_inbox` and `waitSeconds`.
 
 Only urgent items (a task blocked, failed or interrupted) wake a chat at once. Everything else, messages included, waits for the chat's next reply or for 10 minutes.
 
 ## The dashboard
 
-Open it with the sign-in link the hub prints. The link works once, only on the hub's PC, for 24 hours, and each use prints the next one. You can also paste the token from `data/local-client-token`. A sign-in lasts 8 hours in that browser session, or 30 days with **Remember this browser** (`Relay:Dashboard:SessionHours` and `RememberDays`).
+Open it with the sign-in link the hub prints. The link works once, only on the hub's PC, for 24 hours, and each use prints the next one. You can also paste the token from `data/local-client-token`. A sign-in lasts 8 hours in that browser session, or 7 days with **Remember this browser** (`Relay:Dashboard:SessionHours` and `RememberDays`).
 
 | Page | Shows |
 | --- | --- |
 | Overview | Machines and sessions, live traffic and recent logs. |
-| Sessions | Each session in detail, and **Close idle sessions** to clear out finished chats (idle sessions also close on their own after a day). |
+| Sessions | Each session in detail, and **Close idle sessions** to clear out finished chats (idle sessions also close on their own after a day, unless they have unread messages). |
+| Analytics | Ten reports for one repository from the hourly snapshot, this period against the one before (1–14 days). |
 | Database | Table sizes. |
 | Logs | Recent hub events. |
 | Standing | Each board's rules, grants and orders, and token use. |
-| Documents | Docs loaded for search. |
+| Documents | Each repository's documents, with their search and read counts. |
 | Connect | Add CoCern to apps here and on other PCs. |
 
 It never opens sessions or reads anyone's messages.
@@ -136,18 +140,18 @@ Everything works out of the box. Settings go in `appsettings.json`, environment 
 | `Relay:Network:Enabled` | off | Serves the hub to other PCs over HTTPS (port 5273). |
 | `Relay:Attention:Enabled` | on | Off: no attention offers, and every message wakes its chat. |
 | `Relay:Board:ArchiveAfterDays` | 30 | Days before a finished task leaves the board. |
-| `Relay:DocCache:Repositories:N:…` | none (the start script adds this checkout) | Repositories whose docs are searchable. |
+| `Relay:DocCache:Repositories:N:…` | none (the start script and the Visual Studio profile add this checkout; the profile also makes the folder holding it a root) | Repositories whose docs are searchable. |
 | `Relay:Analytics:Enabled` | on | Hourly analytics snapshots. Works out of the box on Windows x64. |
 
 Every setting: [Reference](docs/reference.md#settings).
 
 ## Good to know
 
-- **Keep the hub and its adapters on the same version.** Update both together.
+- **Keep the hub and its adapters on the same version.** Update both together: on a joined PC, paste its Add another PC command again.
 - **Don't rebuild a folder a hub or chat is running from.** Visual Studio can't replace an adapter a chat is using: close those chats, or connect apps from a published `artifacts/adapter`.
 - **One hub per database.** Don't put `data/` on a shared drive.
-- **Apps connected with an earlier version** use plain HTTP. To switch one to the safer pinned connection, remove its `cocern` entry and click **Connect** again.
-- **The token is an administrator token.** Every chat that uses it can use administrator tools. For worker-only chats, see the [Reference](docs/reference.md#clients-and-tokens).
+- **Apps connected with an earlier version** may use plain HTTP, or a certificate the hub no longer has. Click **Connect** again: it switches them to the pinned connection.
+- **The token is an administrator token.** Any program holding it can call administrator tools, even where a chat doesn't list them. For worker-only chats, see the [Reference](docs/reference.md#clients-and-tokens).
 
 ## Development
 
@@ -156,9 +160,9 @@ dotnet build CoCern.slnx -c Release
 dotnet test CoCern.slnx -c Release
 ```
 
-For an end-to-end check, `python scripts/Smoke-CoCern.py` starts a throwaway hub from the build and runs 88 happy- and sad-path checks: sign-in, tasks, claims, actions, messages, notes, search, standing rules, orders, attention, pausing, doc search, the adapter, the dashboard, Connect, a real node joining over HTTPS, races, malformed input, a hub killed mid-flight, and a restart. Before any settings writes, it verifies that the adapter reads the exact temporary profile and application-data paths; an older adapter that ignores these paths stops the run. It uses its own temporary folders and ports, and its exit code is the number of failed checks.
+For an end-to-end check, `python scripts/Smoke-CoCern.py` starts a throwaway hub from the build and runs 94 happy- and sad-path checks: sign-in, tasks, claims, actions, messages, notes, search, standing rules, orders, attention, pausing, closing sessions, doc search and re-sync, analytics, the adapter, the dashboard, Connect, the adapter download, a real node joining over HTTPS, races, malformed input, a hub killed mid-flight, and a restart. Before any settings writes, it verifies that the adapter reads the exact temporary profile and application-data paths; an older adapter that ignores these paths stops the run. It uses its own temporary folders and ports, and its exit code is the number of failed checks.
 
-On Windows the tests run offline. Elsewhere, 10 setup tests fail because they need Windows, and the analytics tests download DuckDB's `sqlite` extension once (or set `COCERN_DUCKDB_EXTENSIONS` to a folder that has it).
+On Windows the tests run offline. Elsewhere, 12 setup tests fail because they need Windows, and the analytics tests download DuckDB's `sqlite` extension once (or set `COCERN_DUCKDB_EXTENSIONS` to a folder that has it).
 
 | Folder | What's in it |
 | --- | --- |

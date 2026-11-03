@@ -26,7 +26,7 @@ public sealed class DashboardAuthenticationTests
 
     [Theory]
     [InlineData(false, null, null, 8)]
-    [InlineData(true, null, null, 720)]
+    [InlineData(true, null, null, 168)]
     [InlineData(false, "2", "14", 2)]
     [InlineData(true, "2", "14", 336)]
     public async Task Login_issues_the_selected_absolute_lifetime_and_only_remembered_cookies_persist(bool remember, string? sessionHours, string? rememberDays, int expectedHours)
@@ -40,6 +40,7 @@ public sealed class DashboardAuthenticationTests
         Assert.Contains("httponly", cookie, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("samesite=strict", cookie, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("secure", cookie, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("path=/dashboard;", cookie + ";", StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain(RelayHostFixture.Token, cookie);
         var options = host.Services.GetRequiredService<IOptionsMonitor<CookieAuthenticationOptions>>().Get(DashboardSecurity.Scheme);
         var ticket = Assert.IsType<AuthenticationTicket>(options.TicketDataFormat.Unprotect(cookie.Split(';')[0].Split('=', 2)[1]));
@@ -60,6 +61,28 @@ public sealed class DashboardAuthenticationTests
     }
 
     [Fact]
+    public async Task Over_plain_loopback_http_the_cookie_is_scoped_to_the_dashboard_and_not_marked_secure()
+    {
+        await using var host = OperatorHost(remoteAddress: System.Net.IPAddress.Loopback);
+        var client = host.CreateClient(new WebApplicationFactoryClientOptions { BaseAddress = new Uri("http://127.0.0.1"), AllowAutoRedirect = false });
+        client.DefaultRequestHeaders.Add("Origin", "http://127.0.0.1");
+        var response = await client.PostAsJsonAsync("/dashboard/api/login", new { token = RelayHostFixture.Token, rememberBrowser = true });
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var attributes = Assert.Single(response.Headers.GetValues("Set-Cookie")).Split(';', StringSplitOptions.TrimEntries).Skip(1).ToArray();
+        // Every route that needs the cookie (sign-in, sign-out, the API and the hub stream) is under /dashboard, so no other path receives it.
+        Assert.Contains("path=/dashboard", attributes, StringComparer.OrdinalIgnoreCase);
+        Assert.Contains("httponly", attributes, StringComparer.OrdinalIgnoreCase);
+        Assert.Contains("samesite=strict", attributes, StringComparer.OrdinalIgnoreCase);
+        Assert.DoesNotContain("secure", attributes, StringComparer.OrdinalIgnoreCase);
+        // Remembered for the default 7 days, not longer.
+        var expires = DateTimeOffset.Parse(Assert.Single(attributes, attribute => attribute.StartsWith("expires=", StringComparison.OrdinalIgnoreCase))["expires=".Length..], System.Globalization.CultureInfo.InvariantCulture);
+        Assert.InRange(expires - DateTimeOffset.UtcNow, TimeSpan.FromDays(7) - TimeSpan.FromMinutes(5), TimeSpan.FromDays(7) + TimeSpan.FromMinutes(1));
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/dashboard/api/auth")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await client.PostAsJsonAsync("/dashboard/api/logout", new { })).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/dashboard/api/auth")).StatusCode);
+    }
+
+    [Fact]
     public async Task Login_without_remember_choice_keeps_a_browser_session_cookie()
     {
         await using var host = OperatorHost();
@@ -72,7 +95,7 @@ public sealed class DashboardAuthenticationTests
     [Fact]
     public async Task Sign_in_options_show_the_configured_durations_before_authentication_without_caching()
     {
-        await using var host = OperatorHost("12", "45");
+        await using var host = OperatorHost("12", "20");
         using var client = BrowserClient(host);
         var response = await client.GetAsync("/dashboard/api/login-options");
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
@@ -80,7 +103,7 @@ public sealed class DashboardAuthenticationTests
         Assert.Equal("application/json", response.Content.Headers.ContentType?.MediaType);
         var json = await response.Content.ReadFromJsonAsync<JsonElement>();
         Assert.Equal(12, json.GetProperty("sessionHours").GetInt32());
-        Assert.Equal(45, json.GetProperty("rememberDays").GetInt32());
+        Assert.Equal(20, json.GetProperty("rememberDays").GetInt32());
         Assert.DoesNotContain(RelayHostFixture.Token, await response.Content.ReadAsStringAsync());
         Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/dashboard/api/snapshot")).StatusCode);
     }
@@ -90,7 +113,7 @@ public sealed class DashboardAuthenticationTests
     [InlineData("SessionHours", "169")]
     [InlineData("SessionHours", "bad")]
     [InlineData("RememberDays", "0")]
-    [InlineData("RememberDays", "91")]
+    [InlineData("RememberDays", "31")]
     public async Task Invalid_authentication_durations_fail_clearly(string key, string value)
     {
         await using var host = OperatorHost(key == "SessionHours" ? value : null, key == "RememberDays" ? value : null);
@@ -116,7 +139,7 @@ public sealed class DashboardAuthenticationTests
         Assert.False(response.Headers.Contains("Set-Cookie"));
     }
 
-    private static RelayHostFixture OperatorHost(string? sessionHours = null, string? rememberDays = null)
+    private static RelayHostFixture OperatorHost(string? sessionHours = null, string? rememberDays = null, System.Net.IPAddress? remoteAddress = null)
     {
         var settings = new Dictionary<string, string?>
         {
@@ -125,7 +148,7 @@ public sealed class DashboardAuthenticationTests
         };
         if (sessionHours is not null) settings["Relay:Dashboard:SessionHours"] = sessionHours;
         if (rememberDays is not null) settings["Relay:Dashboard:RememberDays"] = rememberDays;
-        return new RelayHostFixture(settings: settings);
+        return new RelayHostFixture(settings: settings, remoteAddress: remoteAddress);
     }
 
     private static HttpClient BrowserClient(RelayHostFixture host)

@@ -34,8 +34,14 @@ public static class CoordinationStateMachine
         {
             // Every non-control aggregate belongs to the first repository that touched it.
             if (Text(state, "repositoryId") is { Length: > 0 } existing && existing != repository)
-                // A message for a session in another repository can never be delivered; dropping it keeps the sender's outbox moving.
-                return operation == Operations.Deliver ? Ok(new { delivered = false, repositoryDenied = true }) : Error(RepositoryDenied);
+                // A message for a session in another repository can never be delivered, and a task cannot wait on such a session; dropping
+                // either keeps the sender's outbox moving.
+                return operation switch
+                {
+                    Operations.Deliver => Ok(new { delivered = false, repositoryDenied = true }),
+                    Operations.SessionTargetWatch => Ok(new { watching = false, repositoryDenied = true }),
+                    _ => Error(RepositoryDenied)
+                };
             state["repositoryId"] = repository;
         }
 
