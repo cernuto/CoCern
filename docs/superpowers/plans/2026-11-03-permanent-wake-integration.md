@@ -51,11 +51,15 @@
 
 - [x] Wire runtime creation/observation/disposal and install the owned Claude handler from development and local-connect setup too.
 - [x] Independently review changes, diagnostics and focused regressions; fix new failures before deployment.
-- [ ] Publish immutable adapter binaries and replace only the identified temporary CoCern Stop hook, preserving the existing sessions and other hooks.
-- [ ] Verify native wake after ended turns in both directions, exact replies across PCs, duplicate suppression, an FYI quiet window with a positive control, and scoped document reads.
-- [ ] Include Paul's authorized telephone-game variations as transport accuracy/timing checks, separately from idle-wake proof.
-- [ ] Commit and publish completed changes under Paul's standing commit/merge/push instruction, leaving source clean and recording any provider limits truthfully.
+- [x] Publish immutable adapter binaries and replace only the identified temporary CoCern Stop hook, preserving the existing sessions and other hooks.
+- [x] Verify native wake after ended turns in both directions, exact replies across PCs, duplicate suppression, an FYI quiet window with a positive control, and scoped document reads.
+- [x] Include Paul's authorized telephone-game variations as transport accuracy/timing checks, separately from idle-wake proof.
+- [x] Commit and publish completed changes under Paul's standing commit/merge/push instruction, leaving source clean and recording any provider limits truthfully.
 
 ## Verification before deployment
 
 The isolated permanent-wake candidate passed 215/215 focused tests, including actual conditional ChatCalls restoration, concurrent native ownership, hook replacement, node behavior and runtime cleanup. The known unrelated Windows Git PATH baseline test was excluded explicitly. Both MCP targets were verified; independent final review found no remaining blockers. Test result: artifacts/permanent-wake-isolated/results/permanent-wake-isolated.trx.
+
+## Live verification
+
+All planned live checks passed using the installed product integration, including an already-idle root Codex wake in about 7.6 seconds, Claude wake in about 1.7 seconds, a roughly 149-second FYI quiet window, cross-PC document reads and all three telephone variations. See docs/audits/2026-11-03-permanent-wake-tests.md for timestamps, correlation evidence and operating limits.
