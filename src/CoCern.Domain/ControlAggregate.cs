@@ -138,7 +138,8 @@ internal static class ControlAggregate
     /// </summary>
     private static RelayReply SweepSessions(AggregateContext context)
     {
-        var hours = Number(context.Args, "idleHours");
+        if (!SessionSweep.Decode(context.Args).TryGet(out var sweep, out var malformed)) return Malformed(malformed);
+        var hours = sweep.IdleHours;
         if (hours <= 0) return Error(InvalidArguments, new { field = "idleHours" });
         var cutoff = IdleCutoff(context.Now, TimeSpan.FromHours(hours));
         var result = CloseSessions(context, ObjectAt(context.State, "sessions"), (_, session) => session is null || LastSeen(session) <= cutoff, RelayLimits.MaxSessionsClosedPerCall, idle: true);
@@ -430,8 +431,9 @@ internal static class ControlAggregate
     /// <summary>The given session IDs that the caller's principal opened in this repository. Read-only; tokens and other principals are never returned.</summary>
     private static RelayReply OwnedSessions(AggregateContext context)
     {
+        if (!SessionOwnersQuery.Decode(context.Args).TryGet(out var query, out var malformed)) return Malformed(malformed);
         var sessions = ObjectAt(context.State, "sessions");
-        var owned = Strings(context.Args["sessionIds"]).Distinct(StringComparer.Ordinal)
+        var owned = query.SessionIds.Distinct(StringComparer.Ordinal)
             .Where(id => sessions[id] is JsonObject session && Text(session, "principalId") == context.Caller.PrincipalId && Text(session, "repositoryId") == context.Repository).ToArray();
         return Ok(new { owned });
     }
@@ -439,30 +441,39 @@ internal static class ControlAggregate
     /// <summary>The given session IDs still open in this repository, whoever opened them. Read-only; nothing else about them is returned.</summary>
     private static RelayReply OpenSessions(AggregateContext context)
     {
+        if (!SessionsOpenQuery.Decode(context.Args).TryGet(out var query, out var malformed)) return Malformed(malformed);
         var sessions = ObjectAt(context.State, "sessions");
-        var open = Strings(context.Args["sessionIds"]).Distinct(StringComparer.Ordinal)
+        var open = query.SessionIds.Distinct(StringComparer.Ordinal)
             .Where(id => sessions[id] is JsonObject session && Text(session, "repositoryId") == context.Repository).ToArray();
         return Ok(new { open });
     }
 
     /// <summary>Maps a resource ID or a machine-scoped alias to its canonical registered resource.</summary>
-    private static RelayReply ResolveResource(AggregateContext context) =>
-        Find(context, Required(context.Args, "resourceId")) is { } resolved ? Ok(resolved) : Error(ResourceUnknown);
+    private static RelayReply ResolveResource(AggregateContext context)
+    {
+        if (!ResourceResolve.Decode(context.Args).TryGet(out var resolve, out var malformed)) return Malformed(malformed);
+        return Find(context, resolve.MachineId, ResourceName(resolve.ResourceId)) is { } resolved ? Ok(resolved) : Error(ResourceUnknown);
+    }
+
+    /// <summary>A resource name a client gave: nonempty and within the identifier bound, or the call fails as invalid arguments.</summary>
+    private static string ResourceName(string name) =>
+        name is { Length: > 0 and <= RelayLimits.MaxIdentifierLength } ? name : throw new ArgumentException("resourceId is required and at most 256 characters.");
 
     /// <summary>Read-only: the canonical ID of each named resource this repository registered, in one call. Unknown names are left out.</summary>
     private static RelayReply ResolveAll(AggregateContext context)
     {
+        if (!ResourceResolveAll.Decode(context.Args).TryGet(out var resolve, out var malformed)) return Malformed(malformed);
         var resolved = new JsonObject();
-        foreach (var id in Strings(context.Args["resourceIds"]).Distinct(StringComparer.Ordinal).Take(RelayLimits.MaxOfferResourceLookups))
-            if (Find(context, id) is { } resource) resolved[id] = Text(resource, "resourceId");
+        foreach (var id in resolve.ResourceIds.Distinct(StringComparer.Ordinal).Take(RelayLimits.MaxOfferResourceLookups))
+            if (Find(context, resolve.MachineId, id) is { } resource) resolved[id] = Text(resource, "resourceId");
         return Ok(new { resolved });
     }
 
-    private static JsonObject? Find(AggregateContext context, string id)
+    private static JsonObject? Find(AggregateContext context, string machineId, string id)
     {
         var resources = ObjectAt(context.State, "resources");
         var resolved = resources[id] as JsonObject;
-        if (resolved is null && ObjectAt(context.State, "aliases")[AliasKey(Text(context.Args, "machineId"), id)] is JsonValue alias) resolved = resources[alias.GetValue<string>()] as JsonObject;
+        if (resolved is null && ObjectAt(context.State, "aliases")[AliasKey(machineId, id)] is JsonValue alias) resolved = resources[alias.GetValue<string>()] as JsonObject;
         return resolved is null || Text(resolved, "repositoryId") != context.Repository ? null : resolved;
     }
 

@@ -82,6 +82,7 @@ internal static class LockAggregate
     /// <summary>Due work: raises <c>claim_expiring</c> to the holder when the lease nears its end with an action in flight.</summary>
     private static RelayReply LeaseCheck(AggregateContext context)
     {
+        if (!LockLeaseCheck.Decode(context.Args).TryGet(out _, out var malformed)) return Malformed(malformed);
         AttentionSources.OnLeaseCheck(context, context.Key);
         return Ok(new { checkedLease = true });
     }
@@ -89,13 +90,14 @@ internal static class LockAggregate
     /// <summary>Read-only: whether <see cref="Acquire"/> would refuse this session now. It changes nothing and acquires nothing.</summary>
     private static RelayReply ClaimState(AggregateContext context)
     {
+        if (!ClaimStateQuery.Decode(context.Args).TryGet(out var query, out var malformed)) return Malformed(malformed);
         var state = context.State;
         var holder = Text(state, "holder");
         var blockers = (state["blockers"] as JsonObject)?.Count ?? 0;
         var live = Date(state, "leaseUntil") > context.Now;
-        var owned = holder == context.SessionId && live;
+        var owned = holder == query.SessionId && live;
         // An action already in flight on this lock blocks a new one, even this session's own: its block would be refused after the new action was recorded.
-        var busy = holder.Length > 0 && holder != context.SessionId && (live || blockers > 0) || blockers > 0;
+        var busy = holder.Length > 0 && holder != query.SessionId && (live || blockers > 0) || blockers > 0;
         // held: this session's grant is live and free, which action_begin needs for each resource its packet declares.
         return Ok(new { busy, held = owned && blockers == 0 });
     }

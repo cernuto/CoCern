@@ -117,7 +117,7 @@ internal sealed class AggregateHub
     }
 
     public RelayReply Sweep(int idleHours, DateTimeOffset now) =>
-        Apply(AggregateKinds.Control, AggregateKinds.ControlKey, Operations.SweepSessions, new() { ["repositoryId"] = "*", ["idleHours"] = idleHours }, Sweeper, now);
+        Apply(SessionSweep.TargetKind, AggregateKinds.ControlKey, SessionSweep.Operation, new SessionSweep(idleHours).ToJson(), Sweeper, now);
 
     /// <summary>
     /// Delivers one effect (queued, a direct call, or a second copy) to its target with the caller it carries, and removes it from wherever

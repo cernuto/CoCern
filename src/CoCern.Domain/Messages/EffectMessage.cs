@@ -168,6 +168,15 @@ internal sealed class MessageReader(JsonObject payload, string prefix = "", List
         return readers;
     }
 
+    /// <summary>A required array of strings, each empty or not; any other element makes the whole field invalid.</summary>
+    public IReadOnlyList<string> Strings(string name)
+    {
+        if (payload[name] is JsonArray items && items.All(item => item is JsonValue value && value.TryGetValue<string>(out _)))
+            return items.Select(item => item!.GetValue<string>()).ToArray();
+        Problem(name);
+        return [];
+    }
+
     /// <summary>Whether the payload has <paramref name="name"/> at all, null or not.</summary>
     public bool Has(string name) => payload.ContainsKey(name);
 
