@@ -20,6 +20,7 @@ public partial class Dashboard : IAsyncDisposable
     private string View => Navigation.ToBaseRelativePath(Navigation.Uri).Split('?', '#')[0].Trim('/').ToLowerInvariant() switch
     {
         "sessions" => "sessions",
+        "analytics" => "analytics",
         "sql" => "sql",
         "logs" => "logs",
         "standing" => "standing",
@@ -27,9 +28,10 @@ public partial class Dashboard : IAsyncDisposable
         "connect" => "connect",
         _ => "overview"
     };
-    private string PageTitle => View switch { "sessions" => "Sessions", "sql" => "Database", "logs" => "Logs", "standing" => "Standing", "documents" => "Documents", "connect" => "Connect", _ => "Overview" };
+    private string PageTitle => View switch { "sessions" => "Sessions", "analytics" => "Analytics", "sql" => "Database", "logs" => "Logs", "standing" => "Standing", "documents" => "Documents", "connect" => "Connect", _ => "Overview" };
     private string? PageDescription => View switch
     {
+        "analytics" => "Task efficiency, coordination and outcomes from the hourly analytics snapshot.",
         "standing" => "Instructions, access grants and pending proposals for each board.",
         "documents" => "Indexed files and document activity for each repository.",
         "connect" => "Add CoCern to Claude and Codex, here and on your other PCs.",

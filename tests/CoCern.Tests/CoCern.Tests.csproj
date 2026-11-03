@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup><IsTestProject>true</IsTestProject><IsPackable>false</IsPackable></PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../src/CoCern.Dashboard/Services/AnalyticsPresentation.cs" Link="Dashboard/AnalyticsPresentation.cs" Condition="Exists('../../src/CoCern.Dashboard/Services/AnalyticsPresentation.cs')" />
     <ProjectReference Include="../../src/CoCern.Core/CoCern.Core.csproj" />
     <ProjectReference Include="../../src/CoCern.Storage/CoCern.Storage.csproj" />
     <ProjectReference Include="../../src/CoCern.Host/CoCern.Host.csproj" />

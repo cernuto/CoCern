@@ -74,13 +74,13 @@ public sealed partial class SqliteStore
         {
             // `|| ''` keeps the inner document a JSON string, as the hub stores it, rather than an embedded object.
             Run($"""
+                DROP TABLE IF EXISTS search_index;
+                DROP TABLE IF EXISTS search_docs;
                 DELETE FROM due_work WHERE state_name NOT IN {SnapshotStates};
                 DELETE FROM grain_state WHERE state_name NOT IN {SnapshotStates};
                 UPDATE grain_state
                 SET payload = json_set(payload, '$.Value.Json', json_remove(json_extract(payload, '$.Value.Json'), '$.requests', '$.requestTombstones', '$.sessionToken') || '')
                 WHERE payload IS NOT NULL AND json_valid(payload) AND json_valid(json_extract(payload, '$.Value.Json'));
-                DROP TABLE IF EXISTS search_index;
-                DROP TABLE IF EXISTS search_docs;
                 DELETE FROM hub_metadata;
                 """, transaction);
             transaction.Commit();

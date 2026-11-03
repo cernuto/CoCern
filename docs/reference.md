@@ -266,12 +266,12 @@ Each named query compares the last `days` days (`cur`, 1 to 14, default 7) with 
 | `calls_per_task` | Average tool calls per task. |
 | `messages_per_task` | Average task messages per task. |
 | `context_by_role` | Average reply bytes per session, by role. |
-| `blocked_time` | Hours tasks stayed blocked. |
+| `blocked_time` | Average hours of ended blocked spells, and the count of open spells. |
 | `claim_conflicts_by_resource` | Refused claims, by resource. |
 | `noisiest_tools` | Reply bytes, by tool. |
 | `manager_assignment_latency` | Minutes from `ready` to first claim. |
 | `quality_guardrails` | Closures, reopened tasks, and failed, abandoned and retried actions. |
-| `attention_outcomes_by_kind` | Attention answers, by kind. |
+| `attention_outcomes_by_kind` | Attention offer events (shown, accepted, later and dismissed), by kind. |
 
 Ad hoc SQL: `"name": "sql", "sql": "SELECT ..."` runs one `SELECT` over the views `tasks`, `tool_calls`, `context_by_role`, `messages`, `action_reports`, `claim_conflicts`, `attention_outcomes`, `budget_events`, `board_doc`, `task_doc`, `archived_tasks` and `activity`. Every ad hoc query is logged. Errors: `AdministratorRequired`, `AnalyticsUnavailable`, `AnalyticsRefused` (ad hoc SQL off, or not one `SELECT`), `AnalyticsTimeout`, `AnalyticsFailed`, `PayloadTooLarge` (over 8 KB).
 
@@ -445,6 +445,18 @@ $t = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBy
 Then give those chats `COCERN_TOKEN_FILE=data/worker-token`, or run `--connect --token-file data/worker-token`. Keep the file private.
 
 **OAuth (optional).** For remote clients with their own identity provider: `Relay:OAuth:Authority` (HTTPS issuer), `Relay:OAuth:Audience`, `Relay:OAuth:RequiredScopes:N` (default `relay`), `Relay:OAuth:Resource` (the public HTTPS `/mcp` address; publishes `/.well-known/oauth-protected-resource/mcp`) and `Relay:OAuth:Principals:N` (`Subject`, `PrincipalId`, `IsAdministrator`, `Repositories`). The hub doesn't issue tokens. This is how the ChatGPT chat app would connect; it has not been tested.
+
+## Dashboard
+
+The dashboard provides Overview, Sessions, Analytics, Database, Logs, Standing, Documents and Connect. Existing dashboard viewer access is required for both the page and its read-only data endpoints.
+
+### Analytics page
+
+Open **Analytics** to compare one repository over 1–14 days with the preceding equal period. Both periods end relative to the displayed hourly snapshot time, not the current hub connection time. The repository selector uses repository IDs known to the dashboard and defaults conservatively when none are present. Changing either selector fetches one combined report; an older response cannot overwrite the latest selection.
+
+The ten public named reports cover average tokens, calls and messages per task; average reply bytes per session by role; noisiest tools by reply bytes; claim conflicts by resource; quality guardrail events; attention offer events (shown, accepted, later and dismissed) by kind and outcome; average ready-to-first-claim latency in minutes (an assignment proxy); and average hours of ended blocked spells, with open blocked spells counted separately. Charts include numeric equivalents, units and sample counts. Attention event denominators are per kind and are not summed across outcome categories.
+
+`GET /dashboard/api/analytics?repositoryId=cocern&days=7` returns the fixed reports under the existing dashboard viewer policy. It accepts no SQL and preserves the existing analytics row and payload limits. Missing snapshots, unavailable analytics, per-report failures and truncated results are shown explicitly. Unknown values display as **Not measured**; measured zeros remain **0**. Earliest recorded activity, when known, can identify short history but does not prove continuous tracking. Unknown history and incomplete comparison periods are labeled; no sample data is substituted.
 
 ## Addresses
 

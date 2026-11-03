@@ -1,5 +1,6 @@
 @page "/"
 @page "/sessions"
+@page "/analytics"
 @page "/sql"
 @page "/logs"
 @page "/standing"
@@ -24,6 +25,7 @@ else
             <nav class="main-nav" aria-label="Dashboard">
                 <NavLink href="" Match="NavLinkMatch.All"><Icon Name="overview" />Overview</NavLink>
                 <NavLink href="sessions"><Icon Name="sessions" />Sessions</NavLink>
+                <NavLink href="analytics"><svg class="icon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M4 20V10M12 20V4M20 20v-7" /></svg>Analytics</NavLink>
                 <NavLink href="sql"><Icon Name="database" />Database</NavLink>
                 <NavLink href="logs"><Icon Name="logs" />Logs</NavLink>
                 <NavLink href="standing"><Icon Name="standing" />Standing</NavLink>
@@ -38,8 +40,8 @@ else
         <main id="main" class="dashboard-main">
             <div class="page-heading">
                 <div><h1>@PageTitle</h1>@if (PageDescription is { } description) { <p>@description</p> }</div>
-                <div class="page-tools">
-                    <div class="connection-status"><span class="connection-chip @(IsLive ? "live" : "waiting")" role="status"><span class="status-dot"></span>@ConnectionLabel</span><span title="@DashboardFormat.Timestamp(Connection.Snapshot?.ObservedAt)">Updated @DashboardFormat.Ago(Connection.Snapshot?.ObservedAt, _now).ToLowerInvariant()</span></div>
+                <div class="page-tools @(View == "analytics" ? "analytics-page-tools" : null)">
+                    <div class="connection-status"><span class="connection-chip @(IsLive ? "live" : "waiting")" role="status"><span class="status-dot"></span>@(View == "analytics" ? $"Hub connection: {ConnectionLabel}" : ConnectionLabel)</span><span title="@DashboardFormat.Timestamp(Connection.Snapshot?.ObservedAt)">@(View == "analytics" ? "Hub updated" : "Updated") @DashboardFormat.Ago(Connection.Snapshot?.ObservedAt, _now).ToLowerInvariant()</span></div>
                     <details class="observation-warnings">
                         <summary>Notices <span class="notice-count" aria-live="polite">@(Connection.Snapshot?.Warnings.Length ?? 0)</span></summary>
                         <div class="observation-warnings-panel" role="region" aria-label="Dashboard notices" tabindex="0">
@@ -74,6 +76,9 @@ else
                 }
                 @switch (View)
                 {
+                    case "analytics":
+                        <AnalyticsView Snapshot="@snapshot" />
+                        break;
                     case "connect":
                         <ConnectView />
                         <AddPcView />

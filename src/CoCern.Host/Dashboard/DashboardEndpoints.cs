@@ -30,6 +30,10 @@ public static class DashboardEndpoints
         services.AddSingleton<DashboardCollector>();
         services.AddHostedService(provider => provider.GetRequiredService<DashboardCollector>());
         services.AddSingleton<DashboardConnections>();
+        services.AddSingleton(provider => new DashboardAnalytics(
+            provider.GetService<IAnalyticsTool>() ?? (provider.GetService<IAnalyticsQueries>() is { } queries
+                ? new AnalyticsTool(queries, allowAdHocSql: false)
+                : AnalyticsTool.Off), provider));
         services.AddRateLimiter(options => options.AddPolicy(LoginPolicy, context =>
             RateLimitPartition.GetFixedWindowLimiter(DiscoveryEndpoints.Address(context), _ => new FixedWindowRateLimiterOptions
             {
@@ -91,6 +95,7 @@ public static class DashboardEndpoints
             return DashboardConnect.ClientIds.Contains(client) ? Results.Ok(await connect.ConnectAsync(client, context.RequestAborted)) : Results.NotFound();
         }).RequireAuthorization(DashboardSecurity.Policy);
         api.MapGet("/snapshot", (DashboardCollector collector) => Results.Ok(collector.Current)).RequireAuthorization(DashboardSecurity.Policy);
+        api.MapGet("/analytics", (HttpContext context, DashboardAnalytics analytics) => analytics.GetAsync(context)).RequireAuthorization(DashboardSecurity.Policy);
         // The Sessions page's "Close idle sessions": the cookie alone would let another site's form post this, so it also needs this origin.
         api.MapPost("/sessions/close", CloseSessionsAsync).RequireAuthorization(DashboardSecurity.Policy);
         app.MapHub<DashboardHub>("/dashboard/hub", options =>

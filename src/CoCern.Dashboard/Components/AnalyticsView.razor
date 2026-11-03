@@ -1,0 +1,132 @@
+@using System.Net.Http.Json
+@implements IDisposable
+@inject HttpClient Http
+
+<section class="analytics-view" aria-labelledby="analytics-heading" aria-busy="@_loading">
+    <div class="analytics-toolbar">
+        <div><h2 id="analytics-heading">Hourly snapshot</h2><p>Compare the selected period with the preceding equal period.</p></div>
+        <div class="analytics-filters">
+            <label for="analytics-repository">Repository<select id="analytics-repository" value="@_repository" @onchange="RepositoryChangedAsync">@foreach (var repository in Repositories) { <option value="@repository">@repository</option> }</select></label>
+            <label for="analytics-days">Period<select id="analytics-days" value="@_days" @onchange="DaysChangedAsync">@for (var days = 1; days <= 14; days++) { <option value="@days">@days @(days == 1 ? "day" : "days")</option> }</select></label>
+            <button type="button" class="analytics-refresh" @onclick="LoadAsync" disabled="@_loading" title="Read the latest available hourly snapshot">Refresh analytics</button>
+        </div>
+    </div>
+    @if (_loading)
+    {
+        <p class="analytics-state surface" role="status">Loading hourly analytics for @_repository…</p>
+    }
+    else if (_error is { } error)
+    {
+        <p class="analytics-state surface" role="alert">@error Choose Refresh analytics to try again.</p>
+    }
+    else if (_analytics is not { Status: "ready", SnapshotAt: not null } data)
+    {
+        <div class="analytics-state surface" role="status"><h3>@StateTitle</h3><p>@(_analytics?.Message ?? "No analytics snapshot is available. Try again after the next hourly snapshot.")</p></div>
+    }
+    else
+    {
+        <div class="analytics-snapshot-strip">
+            <div><span>Snapshot captured</span><strong>@Stamp(data.SnapshotAt.Value)</strong><small>Hourly data; refresh loads the latest available snapshot.</small></div>
+            <div><span><i class="analytics-swatch analytics-current" aria-hidden="true"></i>Current @_days-day period</span><strong>@Period(data.SnapshotAt.Value.AddDays(-_days), data.SnapshotAt.Value)</strong><span><i class="analytics-swatch analytics-previous" aria-hidden="true"></i>Previous @_days-day period</span><strong>@Period(data.SnapshotAt.Value.AddDays(-2 * _days), data.SnapshotAt.Value.AddDays(-_days))</strong></div>
+        </div>
+        <p class="analytics-history" role="status">@HistoryMessage(data)</p>
+        @if (AdditionalMessage(data) is { Length: > 0 } message) { <p class="warning-note" role="status">@message</p> }
+        <p class="analytics-key">Paired bars use teal for current and gold for previous; stacked bars use the labeled category colors. Not measured means unknown; 0 is a measured zero. Sample counts appear with each report.</p>
+        <div class="analytics-grid">
+            <AnalyticsChart Query="@Query("tokens_per_task")" Title="Tokens per task" Description="Average reported tokens for each task." Unit="tokens/task" SampleUnit="tasks" />
+            <AnalyticsChart Query="@Query("calls_per_task")" Title="Tool calls per task" Description="Average tool calls for each task." Unit="calls/task" SampleUnit="tasks" />
+            <AnalyticsChart Query="@Query("messages_per_task")" Title="Messages per task" Description="Average task messages for each task." Unit="messages/task" SampleUnit="tasks" />
+            <AnalyticsChart Query="@Query("context_by_role")" Title="Reply bytes by role" Description="Average reply bytes per session, grouped by role." Unit="bytes/session" SampleUnit="sessions" />
+            <AnalyticsChart Query="@Query("noisiest_tools")" Title="Noisiest tools" Description="Reply bytes by tool. Counts show the calls behind each value." Unit="bytes" SampleUnit="calls" Mode="horizontal" />
+            <AnalyticsChart Query="@Query("claim_conflicts_by_resource")" Title="Claim conflicts" Description="Refused claims, grouped by resource." Unit="conflicts" SampleUnit="samples" Mode="horizontal" />
+            <AnalyticsChart Query="@Query("quality_guardrails")" Title="Quality guardrails" Description="Closures, reopened tasks, and failed, abandoned or retried actions. Stacked categories are separate event counts." Unit="events" Mode="stacked" />
+            <AnalyticsChart Query="@Query("attention_outcomes_by_kind")" Title="Attention offer outcomes" Description="Shown, accepted, later and dismissed offer events, grouped by kind. Each kind's event denominator is shown once." Unit="events" SampleUnit="events" Mode="stacked" GroupByKind />
+            <AnalyticsChart Query="@Query("manager_assignment_latency")" Title="Assignment latency" Description="Average minutes from ready to first claim; a proxy for assignment latency." Unit="minutes" Mode="numeric" />
+            <AnalyticsChart Query="@Query("blocked_time")" Title="Blocked time" Description="Average hours of ended blocked spells, with open blocked-spell counts shown separately." Unit="hours/spell" Mode="numeric" />
+        </div>
+    }
+</section>
+
+@code {
+    [Parameter] public DashboardSnapshot Snapshot { get; set; } = new();
+    private DashboardAnalyticsSnapshot? _analytics;
+    private string _repository = "";
+    private int _days = 7;
+    private bool _loading;
+    private bool _disposed;
+    private string? _error;
+    private int _request;
+    private CancellationTokenSource? _pending;
+    private IEnumerable<string> Repositories => Snapshot.Sessions.Select(session => session.RepositoryId)
+        .Concat(Snapshot.DocCache.Grains.Select(grain => grain.Repository)).Append(_repository)
+        .Where(repository => !string.IsNullOrWhiteSpace(repository)).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal);
+    private string StateTitle => _analytics?.Status switch
+    {
+        "no-snapshot" => "Waiting for the first snapshot",
+        "unavailable" => "Analytics unavailable",
+        "too-large" => "Analytics result exceeds the limit",
+        "error" => "Analytics could not be loaded",
+        _ => "Snapshot unavailable"
+    };
+    protected override async Task OnInitializedAsync()
+    {
+        _repository = Repositories.Contains("cocern", StringComparer.Ordinal) ? "cocern" : Repositories.FirstOrDefault() ?? "cocern";
+        await LoadAsync();
+    }
+    private async Task RepositoryChangedAsync(ChangeEventArgs args)
+    {
+        if (args.Value is not string value || value == _repository || string.IsNullOrWhiteSpace(value)) return;
+        _repository = value;
+        await LoadAsync();
+    }
+    private async Task DaysChangedAsync(ChangeEventArgs args)
+    {
+        if (!int.TryParse(args.Value?.ToString(), out var days) || days is < 1 or > 14 || days == _days) return;
+        _days = days;
+        await LoadAsync();
+    }
+    private async Task LoadAsync()
+    {
+        _pending?.Cancel();
+        _pending?.Dispose();
+        var pending = _pending = new CancellationTokenSource();
+        var request = ++_request;
+        _loading = true;
+        _error = null;
+        _analytics = null;
+        try
+        {
+            var data = await Http.GetFromJsonAsync<DashboardAnalyticsSnapshot>($"api/analytics?repositoryId={Uri.EscapeDataString(_repository)}&days={_days}", pending.Token);
+            if (!_disposed && request == _request)
+            {
+                if (data is null || data.RepositoryId != _repository || data.Days != _days)
+                    _error = "The analytics response did not match the selected repository and period.";
+                else _analytics = data;
+            }
+        }
+        catch (OperationCanceledException) when (pending.IsCancellationRequested) { }
+        catch (Exception exception) when (exception is HttpRequestException or System.Text.Json.JsonException or OperationCanceledException)
+        {
+            if (!_disposed && request == _request) _error = "The analytics snapshot could not be loaded. Check the hub connection.";
+        }
+        finally { if (!_disposed && request == _request) _loading = false; }
+    }
+    private DashboardAnalyticsQuery? Query(string name) => _analytics?.Queries.FirstOrDefault(query => query.Name == name);
+    private static string Stamp(DateTimeOffset value) => value.ToUniversalTime().ToString("yyyy-MM-dd HH:mm 'UTC'", CultureInfo.InvariantCulture);
+    private static string Period(DateTimeOffset from, DateTimeOffset until) => $"{Stamp(from)} to {Stamp(until)}";
+    private string HistoryMessage(DashboardAnalyticsSnapshot data)
+    {
+        if (data.AvailableFrom is not { } from) return "History coverage is unknown. Missing samples do not establish that a period had no activity.";
+        var prefix = data.SnapshotAt is { } at && from > at.AddDays(-2 * _days) ? "Short history: " : "";
+        return $"{prefix}earliest recorded activity is {Stamp(from)}. This does not establish uninterrupted tracking; earlier periods may be incomplete.";
+    }
+    private static string? AdditionalMessage(DashboardAnalyticsSnapshot data) => data.Message?
+        .Replace("History coverage is unknown; the selected periods may be incomplete.", "", StringComparison.Ordinal).Trim();
+    public void Dispose()
+    {
+        _disposed = true;
+        ++_request;
+        _pending?.Cancel();
+        _pending?.Dispose();
+    }
+}
