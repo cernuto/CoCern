@@ -8,6 +8,7 @@ using Orleans;
 using Orleans.Runtime;
 using CoCern.Contracts;
 using CoCern.Domain;
+using CoCern.Domain.Messages;
 using static CoCern.Domain.JsonFields;
 
 namespace CoCern.Core;
@@ -190,10 +191,10 @@ public sealed class MachineDirectory(IGrainFactory grains, TimeProvider? clock =
         foreach (var group in items.GroupBy(item => Field(item, "repositoryId") ?? "", StringComparer.Ordinal).Where(group => group.Key.Length > 0))
         {
             ct.ThrowIfCancellationRequested();
-            var ids = group.Select(item => Field(item, "relaySessionId")).OfType<string>().Distinct(StringComparer.Ordinal).Select(id => (JsonNode)JsonValue.Create(id)!).ToArray();
-            var args = new JsonObject { ["repositoryId"] = group.Key, ["sessionIds"] = new JsonArray(ids) };
+            var ids = group.Select(item => Field(item, "relaySessionId")).OfType<string>().Distinct(StringComparer.Ordinal).ToArray();
+            var query = new SessionsOpenQuery(group.Key, ids);
             RelayReply found;
-            try { found = await grains.GetGrain<IControlGrain>(AggregateKinds.ControlKey).ExecuteAsync(new RelayCaller(Internal.PrincipalId, false, [group.Key], true), Operations.SessionsOpen, args.ToJsonString()); }
+            try { found = await grains.GetGrain<IControlGrain>(AggregateKinds.ControlKey).ExecuteAsync(new RelayCaller(Internal.PrincipalId, false, [group.Key], true), SessionsOpenQuery.Operation, query.ToJson().ToJsonString()); }
             catch (Exception exception) when (exception is not OperationCanceledException) { return reply; }
             if (!found.Ok) return reply;
             foreach (var id in JsonNode.Parse(found.DataJson)?["open"] as JsonArray ?? []) if (id is JsonValue value && value.TryGetValue<string>(out var text)) open.Add((group.Key, text));
@@ -207,10 +208,10 @@ public sealed class MachineDirectory(IGrainFactory grains, TimeProvider? clock =
     public async Task<IReadOnlySet<string>?> OwnedSessionsAsync(MachineIdentity machine, string repository, IReadOnlyCollection<string> sessionIds, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        var args = new JsonObject { ["repositoryId"] = repository, ["sessionIds"] = new JsonArray(sessionIds.Select(x => (JsonNode)JsonValue.Create(x)!).ToArray()) };
+        var query = new SessionOwnersQuery(repository, sessionIds.ToArray());
         RelayReply reply;
         // A grain fault means "cannot be read now", like a not-Ok reply, so the caller answers 503 rather than 500.
-        try { reply = await grains.GetGrain<IControlGrain>(AggregateKinds.ControlKey).ExecuteAsync(new RelayCaller(machine.PrincipalId, false, [repository], true), Operations.SessionOwners, args.ToJsonString()); }
+        try { reply = await grains.GetGrain<IControlGrain>(AggregateKinds.ControlKey).ExecuteAsync(new RelayCaller(machine.PrincipalId, false, [repository], true), SessionOwnersQuery.Operation, query.ToJson().ToJsonString()); }
         catch (Exception exception) when (exception is not OperationCanceledException) { return null; }
         return reply.Ok ? (JsonNode.Parse(reply.DataJson)?["owned"] as JsonArray ?? []).Select(x => x?.GetValue<string>()).OfType<string>().ToHashSet(StringComparer.Ordinal) : null;
     }

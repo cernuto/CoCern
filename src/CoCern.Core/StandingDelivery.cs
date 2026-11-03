@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Text.Json.Nodes;
 using CoCern.Contracts;
 using CoCern.Domain;
+using CoCern.Domain.Messages;
 using static CoCern.Domain.JsonFields;
 using static CoCern.Domain.Replies;
 
@@ -72,11 +73,8 @@ internal sealed class StandingDelivery(Aggregates aggregates)
         return false;
     }
 
-    private Task<RelayReply> MarkStandingSeenAsync(RelayCaller caller, JsonObject args, long revision) => aggregates.Session(caller, Operations.StandingSeen, new JsonObject
-    {
-        ["repositoryId"] = Text(args, "repositoryId"), ["sessionId"] = Text(args, "sessionId"), ["sessionToken"] = Text(args, "sessionToken"),
-        ["boardId"] = Text(args, "boardId", "default"), ["standingRevision"] = revision
-    });
+    private Task<RelayReply> MarkStandingSeenAsync(RelayCaller caller, JsonObject args, long revision) => aggregates.Session(caller, StandingSeen.Operation,
+        new StandingSeen(Text(args, "repositoryId"), Text(args, "sessionId"), Text(args, "sessionToken"), Text(args, "boardId", "default"), revision).ToJson());
 
     /// <summary>The board's delivered standing, read at most once per <see cref="RelayLimits.StandingCacheSeconds"/>; a write through this hub clears it at once.</summary>
     private async Task<JsonObject?> ReadAsync(RelayCaller caller, JsonObject args)
@@ -84,7 +82,7 @@ internal sealed class StandingDelivery(Aggregates aggregates)
         var key = Aggregates.BoardKey(args);
         var now = Environment.TickCount64;
         if (cache.TryGetValue(key, out var cached) && cached.Json is not null && now - cached.At < RelayLimits.StandingCacheSeconds * 1000L) return JsonNode.Parse(cached.Json)!.AsObject();
-        var read = await aggregates.Board(caller, Operations.Standing, new JsonObject { ["repositoryId"] = Text(args, "repositoryId"), ["boardId"] = Text(args, "boardId", "default") });
+        var read = await aggregates.Board(caller, StandingRead.Operation, new StandingRead(Text(args, "repositoryId"), Text(args, "boardId", "default")).ToJson());
         if (!read.Ok) return null;
         CacheStanding(key, now, read.Version, read.DataJson);
         return Aggregates.Parse(read);

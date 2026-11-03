@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using CoCern.Contracts;
 using CoCern.Domain;
+using CoCern.Domain.Messages;
 using static CoCern.Contracts.RelayErrorCodes;
 using static CoCern.Domain.JsonFields;
 using static CoCern.Domain.Replies;
@@ -201,16 +202,15 @@ internal sealed class ReplyAddOns(Aggregates aggregates, ClaimComposer claims, S
             // A model-visible inbox page shows its messages, so their info items are not offered. They close after compaction, from
             // the page as sent, so a message cut from the page keeps its item.
             var onPage = tool == RelayTools.CheckInbox && data["items"] is JsonArray page
-                ? new JsonArray(page.OfType<JsonObject>().Select(message => Text(message, "messageId")).Where(id => id.Length > 0).Select(id => (JsonNode)id).ToArray()) : null;
+                ? page.OfType<JsonObject>().Select(message => Text(message, "messageId")).Where(id => id.Length > 0).ToArray() : null;
             data["attention"] = new string('x', RelayLimits.MaxAttentionOfferBytes);
             if (!FitsWire(Ok(data, long.MaxValue))) return committed;
-            var request = new JsonObject
+            var request = new AttentionOffer(Text(args, "repositoryId"), Text(args, "sessionId"), Text(args, "sessionToken"))
             {
-                ["repositoryId"] = Text(args, "repositoryId"), ["sessionId"] = Text(args, "sessionId"), ["sessionToken"] = Text(args, "sessionToken"),
-                ["focusTaskId"] = Text(args, "taskId"), ["focusBoardId"] = Text(args, "boardId", "default"), ["snoozeBoundaries"] = attention.SnoozeBoundaries
+                FocusTaskId = Text(args, "taskId"), FocusBoardId = Text(args, "boardId", "default"), SnoozeBoundaries = attention.SnoozeBoundaries,
+                PageMessageIds = onPage is { Length: > 0 } ? onPage : null
             };
-            if (onPage is { Count: > 0 }) request["pageMessageIds"] = onPage;
-            var offer = await aggregates.Session(caller, Operations.AttentionOffer, request);
+            var offer = await aggregates.Session(caller, AttentionOffer.Operation, request.ToJson());
             if (!offer.Ok || Parse(offer)["attention"] is not JsonObject item) return committed;
             data["attention"] = item.DeepClone();
             telemetry?.RecordOutcome(args, Text(item, "k"), "shown", Text(item, "id"));
@@ -227,11 +227,9 @@ internal sealed class ReplyAddOns(Aggregates aggregates, ClaimComposer claims, S
             var ids = seenIds.ToList();
             if (pageSeen && Parse(read)["items"] is JsonArray page) ids.AddRange(page.OfType<JsonObject>().Select(message => Text(message, "messageId")).Where(id => id.Length > 0));
             if (ids.Count == 0) return;
-            await aggregates.Session(caller, Operations.AttentionSeen, new JsonObject
-            {
-                ["repositoryId"] = Text(args, "repositoryId"), ["sessionId"] = Text(args, "sessionId"), ["sessionToken"] = Text(args, "sessionToken"),
-                ["messageIds"] = new JsonArray(ids.Distinct(StringComparer.Ordinal).Take(RelayLimits.MaxAcknowledgedMessages + RelayLimits.MaxPageSize).Select(id => (JsonNode)id).ToArray())
-            });
+            var seen = new AttentionSeen(Text(args, "repositoryId"), Text(args, "sessionId"), Text(args, "sessionToken"),
+                ids.Distinct(StringComparer.Ordinal).Take(RelayLimits.MaxAcknowledgedMessages + RelayLimits.MaxPageSize).ToArray());
+            await aggregates.Session(caller, AttentionSeen.Operation, seen.ToJson());
         }
         catch (Exception) { /* The read stands either way. */ }
     }
@@ -245,11 +243,11 @@ internal sealed class ReplyAddOns(Aggregates aggregates, ClaimComposer claims, S
         try
         {
             if (Parse(reply)["nextWork"]?["offer"] is not JsonObject offer || Text(offer, "taskId") is not { Length: > 0 } taskId) return;
-            await aggregates.Session(caller, Operations.AttentionRaise, new JsonObject
+            var priority = offer["workflow"] is JsonObject workflow && workflow["priority"] is JsonValue ? AttentionWeights.PriorityLevel(Number(workflow, "priority")) : null;
+            await Suggest(caller, args, new AttentionContent
             {
-                ["repositoryId"] = Text(args, "repositoryId"), ["sessionId"] = Text(args, "sessionId"), ["kind"] = AttentionKinds.NextWork, ["taskId"] = taskId,
-                ["boardId"] = Text(args, "boardId", "default"), ["priority"] = offer["workflow"]?["priority"]?.DeepClone(), ["note"] = "offered as your next work; claim it with task_claim",
-                ["revision"] = Math.Max(1, Number(offer, "snapshotRevision")), ["expiryDays"] = RelayLimits.OfferedWorkExpiryDays
+                Kind = AttentionKinds.NextWork, TaskId = taskId, BoardId = Text(args, "boardId", "default"), Priority = priority, Note = "offered as your next work; claim it with task_claim",
+                Revision = Math.Max(1, Number(offer, "snapshotRevision")), ExpiryDays = RelayLimits.OfferedWorkExpiryDays
             });
         }
         catch (Exception) { /* The offer in the reply stands either way. */ }
@@ -262,11 +260,8 @@ internal sealed class ReplyAddOns(Aggregates aggregates, ClaimComposer claims, S
         {
             var claim = Parse(claimed);
             if (claim["newlyAcquired"]?.GetValue<bool>() != true) return;
-            await aggregates.Session(caller, Operations.AttentionClose, new JsonObject
-            {
-                ["repositoryId"] = Text(args, "repositoryId"), ["sessionId"] = Text(args, "sessionId"), ["taskId"] = Text(args, "taskId"), ["boardId"] = Text(args, "boardId", "default"),
-                ["kinds"] = new JsonArray(AttentionKinds.NextWork), ["revision"] = Number(claim, "changeRevision")
-            });
+            var close = new AttentionClaimed(Text(args, "repositoryId"), Text(args, "sessionId"), Text(args, "boardId", "default"), Text(args, "taskId"), Number(claim, "changeRevision"));
+            await aggregates.Session(caller, AttentionClaimed.Operation, close.ToJson());
         }
         catch (Exception) { /* The claim stands either way. */ }
     }
@@ -298,11 +293,10 @@ internal sealed class ReplyAddOns(Aggregates aggregates, ClaimComposer claims, S
             {
                 var ids = found.Select(hit => hit.DocId).Distinct(StringComparer.Ordinal).Take(RelayLimits.MaxRelatedWorkHits).ToArray();
                 if (ids.Length == 0) return;
-                await aggregates.Session(caller, Operations.AttentionRaise, new JsonObject
+                await Suggest(caller, args, new AttentionContent
                 {
-                    ["repositoryId"] = Text(args, "repositoryId"), ["sessionId"] = Text(args, "sessionId"), ["kind"] = kind, ["boardId"] = board, ["subject"] = taskId,
-                    ["note"] = (kind == AttentionKinds.DuplicateWarning ? "may duplicate " : "related to ") + taskId,
-                    ["refs"] = new JsonArray(ids.Select(id => (JsonNode)id).ToArray()), ["revision"] = Number(claim, "changeRevision"), ["expiryDays"] = attention.ItemExpiryDays
+                    Kind = kind, BoardId = board, Subject = taskId, Note = (kind == AttentionKinds.DuplicateWarning ? "may duplicate " : "related to ") + taskId,
+                    Refs = ids, Revision = Number(claim, "changeRevision"), ExpiryDays = attention.ItemExpiryDays
                 });
             }
             await Raise(AttentionKinds.DuplicateWarning, hits.Where(hit => hit.Status != "completed"));
@@ -322,15 +316,15 @@ internal sealed class ReplyAddOns(Aggregates aggregates, ClaimComposer claims, S
             else if (Parse(status)["paused"]?.GetValue<bool>() == true) next = Outcome(true, Paused);
             else
             {
-                var read = args.DeepClone().AsObject(); read.Remove("requestId"); read.Remove("busyResources"); read["limit"] = RelayLimits.NextWorkCandidates;
-                var offered = await aggregates.Board(caller, Operations.NextWork, read);
+                var current = args["taskId"] is JsonValue value && value.TryGetValue<string>(out var taskId) ? taskId : null;
+                var read = new NextWorkRead(Text(args, "repositoryId"), Aggregates.BoardIdOf(args), Text(args, "sessionId"), current, Limit: RelayLimits.NextWorkCandidates);
+                var offered = await aggregates.Board(caller, NextWorkRead.Operation, read.ToJson());
                 var offer = offered.Ok ? Parse(offered) : null;
                 var busy = offer?["candidates"] is JsonArray candidates ? await BusyResourcesAsync(caller, args, session, candidates) : [];
                 if (busy.Count > 0)
                 {
                     // Ask again so that, within equal priority, a task whose listed resources are all free is offered first.
-                    read.Remove("limit"); read["busyResources"] = JsonSerializer.SerializeToNode(busy);
-                    offered = await aggregates.Board(caller, Operations.NextWork, read);
+                    offered = await aggregates.Board(caller, NextWorkRead.Operation, (read with { Limit = 0, BusyResources = busy }).ToJson());
                     offer = offered.Ok ? Parse(offered) : null;
                 }
                 offer?.Remove("candidates");
@@ -352,14 +346,15 @@ internal sealed class ReplyAddOns(Aggregates aggregates, ClaimComposer claims, S
         {
             var listed = candidates.SelectMany(candidate => Strings(candidate?["resources"])).Distinct(StringComparer.Ordinal).Take(RelayLimits.MaxOfferResourceLookups).ToArray();
             if (listed.Length == 0) return [];
-            var lookup = new JsonObject { ["repositoryId"] = Text(args, "repositoryId"), ["sessionId"] = Text(args, "sessionId"), ["machineId"] = session is null ? "" : Text(session, "machineId") };
-            var resolve = lookup.DeepClone().AsObject(); resolve["resourceIds"] = JsonSerializer.SerializeToNode(listed);
-            var resolved = await aggregates.Control(caller, Operations.ResolveAll, resolve);
+            var repository = Text(args, "repositoryId");
+            var resolve = new ResourceResolveAll(repository, listed, session is null ? "" : Text(session, "machineId"));
+            var resolved = await aggregates.Request(AggregateKinds.ControlKey, caller, resolve);
             if (!resolved.Ok || Parse(resolved)["resolved"] is not JsonObject canonical) return [];
+            var lookup = new ClaimStateQuery(repository, Text(args, "sessionId"));
             async Task<bool> IsBusy(string resource)
             {
                 if (canonical[resource] is not JsonValue id) return false;
-                var claim = await aggregates.Call(AggregateKinds.Lock, id.GetValue<string>(), caller, Operations.ClaimState, lookup);
+                var claim = await aggregates.Request(id.GetValue<string>(), caller, lookup);
                 return claim.Ok && Parse(claim)["busy"]?.GetValue<bool>() == true;
             }
             var busy = await Task.WhenAll(listed.Select(IsBusy));
@@ -367,6 +362,10 @@ internal sealed class ReplyAddOns(Aggregates aggregates, ClaimComposer claims, S
         }
         catch (Exception) { return []; }
     }
+
+    /// <summary>Raises the hub's own <paramref name="item"/> at the caller's session (<see cref="AttentionSuggestion"/>).</summary>
+    private Task<RelayReply> Suggest(RelayCaller caller, JsonObject args, AttentionContent item) =>
+        aggregates.Session(caller, AttentionSuggestion.Operation, new AttentionSuggestion(Text(args, "repositoryId"), Text(args, "sessionId"), item).ToJson());
 
     private static JsonObject Parse(RelayReply reply) => Aggregates.Parse(reply);
     private static JsonNode Outcome(bool ok, string code) => JsonSerializer.SerializeToNode(new { ok, code })!;

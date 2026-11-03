@@ -55,7 +55,7 @@ internal sealed class SessionTools(Aggregates aggregates, StandingDelivery stand
     private void StartAnomalyMonitor(RelayCaller caller, string repository)
     {
         if (anomaly is not { Enabled: true } || !attention.Enabled) return;
-        Advisory.Run(() => aggregates.Call(AggregateKinds.Anomaly, repository, caller, Operations.AnomalyStart, new() { ["repositoryId"] = repository })); // else the next manager starts it
+        Advisory.Run(() => aggregates.Call(AnomalyStart.TargetKind, repository, caller, AnomalyStart.Operation, new AnomalyStart(repository).ToJson())); // else the next manager starts it
     }
 
     /// <summary>

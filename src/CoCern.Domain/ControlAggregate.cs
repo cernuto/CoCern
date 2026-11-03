@@ -3,13 +3,17 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using CoCern.Contracts;
 using CoCern.Domain.Messages;
+using CoCern.Domain.State;
 using static CoCern.Contracts.RelayErrorCodes;
 using static CoCern.Domain.JsonFields;
 using static CoCern.Domain.Replies;
 
 namespace CoCern.Domain;
 
-/// <summary>The hub singleton: session directory, worker presence, registered resources and their aliases, pause and cancellation requests.</summary>
+/// <summary>
+/// The hub singleton: session directory, worker presence, registered resources and their aliases, pause and cancellation requests. Its
+/// handlers read and write the document through <see cref="ControlState"/>.
+/// </summary>
 internal static class ControlAggregate
 {
     private const int MaxMachineSummaries = 50;
@@ -43,14 +47,14 @@ internal static class ControlAggregate
     {
         var args = context.Args;
         Required(args, "requestId");
-        var sessions = ObjectAt(context.State, "sessions");
-        if (sessions.Count >= RelayLimits.MaxRecords) DropStaleSessions(context, sessions);
+        var state = new ControlState(context.State);
+        if (state.SessionCount >= RelayLimits.MaxRecords) DropStaleSessions(context, state);
         // Every session was seen within StaleSessionHours, or still answers for an unresolved action: refused for now. The first clears as
         // sessions go stale; the second only once those actions are reported or recovered, since expiring their sessions would strand them.
-        if (sessions.Count >= RelayLimits.MaxRecords)
+        if (state.SessionCount >= RelayLimits.MaxRecords)
         {
             var cutoff = IdleCutoff(context.Now, TimeSpan.FromHours(RelayLimits.StaleSessionHours));
-            var held = sessions.Count(entry => entry.Value is JsonObject record && OwnsWork(record, context.Now) && LastSeen(record) <= cutoff);
+            var held = state.Entries().Count(entry => entry.Entry is { } record && record.OwnsWork(context.Now) && record.LastSeen <= cutoff);
             return Error(CapacityExceeded, new
             {
                 staleAfterHours = RelayLimits.StaleSessionHours, heldByUnresolvedActions = held,
@@ -61,7 +65,7 @@ internal static class ControlAggregate
         var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
         // The role given at session_open routes manager-bound attention items; it grants nothing.
         var record = SessionRecord.Opened(id, token, context.Caller.PrincipalId, context.Repository, args).WithInitialFreshness(context.Now);
-        sessions[id] = record.ToJson();
+        state.Enter(record);
         context.Send(id, new SessionOpen(record));
         return Ok(new { sessionId = id, sessionToken = token, bindingVersion = 0, binding = args["binding"] });
     }
@@ -73,10 +77,10 @@ internal static class ControlAggregate
     /// to report it). Each dropped session is sent <see cref="Operations.SessionExpire"/>, under its own repository, so its chat gets a
     /// clean <c>SessionUnknown</c> and opens again. This is the directory's capacity valve, so unread mail does not keep a session here.
     /// </summary>
-    private static void DropStaleSessions(AggregateContext context, JsonObject sessions)
+    private static void DropStaleSessions(AggregateContext context, ControlState state)
     {
         var cutoff = IdleCutoff(context.Now, TimeSpan.FromHours(RelayLimits.StaleSessionHours));
-        CloseSessions(context, sessions, (_, session) => session is null || LastSeen(session) <= cutoff, sessions.Count - RelayLimits.RetainedEntriesAfterPrune, idle: false);
+        CloseSessions(context, state, (_, session) => session is null || session.LastSeen <= cutoff, state.SessionCount - RelayLimits.RetainedEntriesAfterPrune, idle: false);
     }
 
     /// <summary>
@@ -103,23 +107,23 @@ internal static class ControlAggregate
     /// </list>
     /// Each closed session leaves the directory and is sent <see cref="Operations.SessionExpire"/>, under its own repository, so its chat
     /// gets a clean <c>SessionUnknown</c> and opens again. One that refuses sends <see cref="Operations.SessionRestore"/> and comes back.
-    /// Each close is fenced (see <see cref="Fence"/>), so only the session's answer to this close can bring it back.
+    /// Each close is fenced (see <see cref="ControlState.Fence"/>), so only the session's answer to this close can bring it back.
     /// </summary>
-    private static Closing CloseSessions(AggregateContext context, JsonObject sessions, Func<string, JsonObject?, bool> matches, int limit, bool idle, bool force = false)
+    private static Closing CloseSessions(AggregateContext context, ControlState state, Func<string, DirectoryEntry?, bool> matches, int limit, bool idle, bool force = false)
     {
         var now = context.Now;
-        var matched = sessions.Select(entry => (entry.Key, Session: entry.Value as JsonObject)).Where(entry => matches(entry.Key, entry.Session))
-            .Select(entry => (entry.Key, entry.Session, Seen: entry.Session is { } record ? LastSeen(record) : DateTimeOffset.MinValue,
-                Owns: entry.Session is { } owner && OwnsWork(owner, now), Hold: entry.Session is { } holder ? MailHold(holder, now) : Hold.None)).ToList();
+        var matched = state.Entries().Where(entry => matches(entry.Id, entry.Entry))
+            .Select(entry => (Key: entry.Id, Session: entry.Entry, Seen: entry.Entry?.LastSeen ?? DateTimeOffset.MinValue,
+                Owns: entry.Entry is { } owner && owner.OwnsWork(now), Hold: entry.Entry is { } holder ? MailHold(holder, now) : Hold.None)).ToList();
         var closable = matched.Where(entry => force || !entry.Owns && !(idle && entry.Hold == Hold.Holding))
             // A forced close takes sessions without mail waiting first.
             .OrderBy(entry => entry.Hold == Hold.Holding).ThenBy(entry => entry.Seen).ThenBy(entry => entry.Key, StringComparer.Ordinal).ToList();
         var closing = closable.Take(Math.Max(0, limit)).ToList();
         foreach (var (id, session, seen, _, hold) in closing)
         {
-            sessions.Remove(id);
-            var repository = session is null ? "" : Text(session, "repositoryId");
-            var expire = new SessionExpire(repository, id, Fence(context.State, id),
+            state.Leave(id);
+            var repository = session?.RepositoryId ?? "";
+            var expire = new SessionExpire(repository, id, state.Fence(id),
                 // What the directory had heard when it decided; a session that has reported activity since was working, and refuses.
                 SeenAt: !force && seen > DateTimeOffset.MinValue ? seen : null,
                 // A session whose hold lapsed already had its grace, so this idle close takes it as it is.
@@ -138,10 +142,11 @@ internal static class ControlAggregate
     /// </summary>
     private static RelayReply SweepSessions(AggregateContext context)
     {
-        var hours = Number(context.Args, "idleHours");
+        if (!SessionSweep.Decode(context.Args).TryGet(out var sweep, out var malformed)) return Malformed(malformed);
+        var hours = sweep.IdleHours;
         if (hours <= 0) return Error(InvalidArguments, new { field = "idleHours" });
         var cutoff = IdleCutoff(context.Now, TimeSpan.FromHours(hours));
-        var result = CloseSessions(context, ObjectAt(context.State, "sessions"), (_, session) => session is null || LastSeen(session) <= cutoff, RelayLimits.MaxSessionsClosedPerCall, idle: true);
+        var result = CloseSessions(context, new ControlState(context.State), (_, session) => session is null || session.LastSeen <= cutoff, RelayLimits.MaxSessionsClosedPerCall, idle: true);
         return Ok(new { closed = result.Closed.Count, kept = result.Kept, held = result.Held, more = result.More });
     }
 
@@ -191,17 +196,14 @@ internal static class ControlAggregate
         var cutoff = minutes is { } span ? IdleCutoff(context.Now, TimeSpan.FromMinutes(span))
             : labelOnly ? IdleCutoff(context.Now, TimeSpan.FromMinutes(RelayLimits.LabelCloseActiveMinutes)) : DateTimeOffset.MaxValue;
         var own = context.SessionId;
-        var sessions = ObjectAt(context.State, "sessions");
-        bool Matches(string id, JsonObject? session) => session is not null && id != own && Text(session, "repositoryId") == context.Repository
-            && (target is null || id == target) && (prefix is null || Text(session, "label").StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
-        var active = labelOnly ? sessions.Count(entry => Matches(entry.Key, entry.Value as JsonObject) && LastSeen((JsonObject)entry.Value!) > cutoff) : 0;
-        var result = CloseSessions(context, sessions, (id, session) => Matches(id, session) && LastSeen(session!) <= cutoff, RelayLimits.MaxSessionsClosedPerCall,
+        var state = new ControlState(context.State);
+        bool Matches(string id, DirectoryEntry? session) => session is not null && id != own && session.RepositoryId == context.Repository
+            && (target is null || id == target) && (prefix is null || session.Label.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
+        var active = labelOnly ? state.Entries().Count(entry => Matches(entry.Id, entry.Entry) && entry.Entry!.LastSeen > cutoff) : 0;
+        var result = CloseSessions(context, state, (id, session) => Matches(id, session) && session!.LastSeen <= cutoff, RelayLimits.MaxSessionsClosedPerCall,
             idle: minutes is not null, force: force);
         return Ok(new { closed = result.Closed.Count, kept = result.Kept, held = result.Held, active, more = result.More, ids = result.Closed.Take(RelayLimits.MaxClosedSessionIds).ToArray() });
     }
-
-    /// <summary>When the session refused an idle close because it had unread mail; see <see cref="MailHold"/>.</summary>
-    private const string MailHeldKey = "mailHeldAt";
 
     private enum Hold { None, Holding, Lapsed }
 
@@ -211,9 +213,9 @@ internal static class ControlAggregate
     /// lasts while the session is not seen again, for <see cref="RelayLimits.SessionMailHoldDays"/>; after that it has lapsed and the next
     /// idle close takes the session as it is. Once the session is seen again the hold no longer applies: its next idle close asks again.
     /// </summary>
-    private static Hold MailHold(JsonObject record, DateTimeOffset now)
+    private static Hold MailHold(DirectoryEntry record, DateTimeOffset now)
     {
-        if (OptionalDate(record, MailHeldKey) is not { } held || LastSeen(record) > held) return Hold.None;
+        if (record.MailHeldAt is not { } held || record.LastSeen > held) return Hold.None;
         return held > now.AddDays(-RelayLimits.SessionMailHoldDays) ? Hold.Holding : Hold.Lapsed;
     }
 
@@ -228,68 +230,33 @@ internal static class ControlAggregate
     {
         if (!SessionRestore.Decode(context.Args).TryGet(out var restore, out var malformed)) return Malformed(malformed);
         var id = restore.SessionId;
-        var sessions = ObjectAt(context.State, "sessions");
+        var state = new ControlState(context.State);
+        var record = state.Entry(id);
         // Only the answer to this directory's latest close of the session counts, once: a delayed or duplicated restore from an earlier
         // close would otherwise bring back a session that has since closed (a forced close, or a later one it accepted).
-        if (!Fenced(context.State, id, restore.CloseSeq)) return Ok(new { restored = false });
-        if (sessions[id] is not JsonObject record) sessions[id] = record = (restore.Record with { SessionId = id, RepositoryId = context.Repository }).ToJson();
-        else if (Text(record, "repositoryId") != context.Repository) return Ok(new { restored = false });
+        if (!state.Fenced(id, restore.CloseSeq)) return Ok(new { restored = false });
+        if (record is null) record = state.Enter(restore.Record with { SessionId = id, RepositoryId = context.Repository });
+        else if (record.RepositoryId != context.Repository) return Ok(new { restored = false });
         // A redelivered restore never undoes a newer report that the work ended.
-        if (restore.Owns && restore.Seq >= Number(record, WorkSeqKey))
+        if (restore.Owns && restore.Seq >= record.WorkSeq)
         {
-            record[OwnsWorkKey] = context.Now.ToUnixTimeSeconds();
-            record[WorkSeqKey] = restore.Seq;
+            record.OwnsWorkAt = context.Now.ToUnixTimeSeconds();
+            record.WorkSeq = restore.Seq;
         }
-        if (restore.Mail) record[MailHeldKey] = context.Now.ToString("O");
-        Unfence(context.State, id);
+        if (restore.Mail) record.MailHeldAt = context.Now;
+        state.Unfence(id);
         return Ok(new { restored = true });
-    }
-
-    private const string ClosingKey = "closing";
-    private const string CloseSeqKey = "closeSeq";
-
-    /// <summary>
-    /// Fences one close of <paramref name="id"/>: returns its new <c>closeSeq</c>, which the session's one answer carries back, a restore
-    /// (<see cref="RestoreSession"/>) or an acknowledgement (<see cref="SettleClose"/>). Either settles the fence. A fence lives only while
-    /// its close is in flight, so the directory keeps none for sessions long closed; past <see cref="RelayLimits.MaxRecords"/> in flight the
-    /// oldest is dropped, and its late answer is then ignored.
-    /// </summary>
-    private static long Fence(JsonObject state, string id)
-    {
-        var seq = Number(state, CloseSeqKey) + 1;
-        state[CloseSeqKey] = seq;
-        var closing = ObjectAt(state, ClosingKey);
-        closing.Remove(id);
-        closing[id] = seq;
-        while (closing.Count > RelayLimits.MaxRecords) closing.Remove(closing.First().Key);
-        return seq;
-    }
-
-    /// <summary>Whether <paramref name="closeSeq"/> answers the close of <paramref name="id"/> still in flight.</summary>
-    private static bool Fenced(JsonObject state, string id, long closeSeq) =>
-        state[ClosingKey] is JsonObject closing && closing[id] is JsonValue fence && fence.TryGetValue<long>(out var seq) && closeSeq == seq;
-
-    private static void Unfence(JsonObject state, string id)
-    {
-        if (state[ClosingKey] is not JsonObject closing) return;
-        closing.Remove(id);
-        if (closing.Count == 0) state.Remove(ClosingKey);
     }
 
     /// <summary><see cref="Operations.SessionExpired"/>: a session closed as this directory asked, so that close is settled. Any other copy is ignored.</summary>
     private static RelayReply SettleClose(AggregateContext context)
     {
         if (!SessionExpired.Decode(context.Args).TryGet(out var expired, out var malformed)) return Malformed(malformed);
-        if (!Fenced(context.State, expired.SessionId, expired.CloseSeq)) return Ok(new { settled = false });
-        Unfence(context.State, expired.SessionId);
+        var state = new ControlState(context.State);
+        if (!state.Fenced(expired.SessionId, expired.CloseSeq)) return Ok(new { settled = false });
+        state.Unfence(expired.SessionId);
         return Ok(new { settled = true });
     }
-
-    private const string OwnsWorkKey = "ownsWork";
-    private const string WorkSeqKey = "ownsWorkSeq";
-
-    /// <summary>Whether the session answers for an unresolved action: it reported so within <see cref="RelayLimits.SessionWorkRetentionDays"/>.</summary>
-    private static bool OwnsWork(JsonObject session, DateTimeOffset now) => WorkLedger.Seconds(session[OwnsWorkKey]) > WorkLedger.Cutoff(now);
 
     /// <summary>
     /// <see cref="Operations.SessionOwns"/>: a session's report that it now answers for unresolved work, or no longer does, sent only when
@@ -300,16 +267,12 @@ internal static class ControlAggregate
     private static RelayReply TrackOwnership(AggregateContext context)
     {
         if (!SessionOwnership.Decode(context.Args).TryGet(out var report, out var malformed)) return Malformed(malformed);
-        if (ObjectAt(context.State, "sessions")[report.SessionId] is not JsonObject session || Text(session, "repositoryId") != context.Repository) return Ok(new { tracked = false });
-        if (report.Seq <= Number(session, WorkSeqKey)) return Ok(new { tracked = false });
-        session[WorkSeqKey] = report.Seq;
-        if (report.Owns) session[OwnsWorkKey] = WorkLedger.ReportedAt(report.At, context.Now);
-        else session.Remove(OwnsWorkKey);
+        if (new ControlState(context.State).Entry(report.SessionId) is not { } session || session.RepositoryId != context.Repository) return Ok(new { tracked = false });
+        if (report.Seq <= session.WorkSeq) return Ok(new { tracked = false });
+        session.WorkSeq = report.Seq;
+        session.OwnsWorkAt = report.Owns ? WorkLedger.ReportedAt(report.At, context.Now) : null;
         return Ok(new { tracked = true });
     }
-
-    private static DateTimeOffset LastSeen(JsonObject session) =>
-        new[] { Date(session, "freshUntil"), Date(session, "activeAt"), Date(session, "observedAt") }.Max();
 
     /// <summary>
     /// <see cref="Operations.Register"/>: a session's presence after <c>session_bind</c>. Registrations can arrive reordered (a retried
@@ -319,14 +282,11 @@ internal static class ControlAggregate
     private static RelayReply RegisterSession(AggregateContext context)
     {
         if (!SessionRegistration.Decode(context.Args).TryGet(out var registration, out var malformed)) return Malformed(malformed);
-        if (ObjectAt(context.State, "sessions")[registration.SessionId] is not JsonObject session) return Ok(new { registered = false });
-        if (Text(session, "repositoryId") != context.Repository) return Error(SessionDenied);
+        if (new ControlState(context.State).Entry(registration.SessionId) is not { } session) return Ok(new { registered = false });
+        if (session.RepositoryId != context.Repository) return Error(SessionDenied);
         var presence = registration.Presence;
-        var stale = presence.BindingVersion < Number(session, "bindingVersion");
-        var reported = new JsonObject();
-        (stale ? new SessionPresence { ObservedAt = presence.ObservedAt, FreshUntil = presence.FreshUntil } : presence).WriteTo(reported);
-        foreach (var (property, value) in reported)
-            if (property is not ("observedAt" or "freshUntil") || Date(reported, property) > Date(session, property)) session[property] = value?.DeepClone();
+        var stale = presence.BindingVersion < session.BindingVersion;
+        session.Register(stale ? new SessionPresence { ObservedAt = presence.ObservedAt, FreshUntil = presence.FreshUntil } : presence);
         return Ok(new { registered = !stale });
     }
 
@@ -338,24 +298,19 @@ internal static class ControlAggregate
     private static RelayReply RecordActivity(AggregateContext context)
     {
         if (!SessionActivity.Decode(context.Args).TryGet(out var activity, out var malformed)) return Malformed(malformed);
-        if (ObjectAt(context.State, "sessions")[activity.SessionId] is not JsonObject session) return Ok(new { recorded = false });
-        if (Text(session, "repositoryId") != context.Repository) return Error(SessionDenied);
-        if (activity.ActiveAt <= Date(session, "activeAt")) return Ok(new { recorded = false });
-        session["activeAt"] = activity.ActiveAt.ToString("O");
+        if (new ControlState(context.State).Entry(activity.SessionId) is not { } session) return Ok(new { recorded = false });
+        if (session.RepositoryId != context.Repository) return Error(SessionDenied);
+        if (activity.ActiveAt <= session.ActiveAt) return Ok(new { recorded = false });
+        session.ActiveAt = activity.ActiveAt;
         return Ok(new { recorded = true });
     }
 
     /// <summary>Reported presence only. A record from another hub incarnation or past its freshness is shown as stale.</summary>
     private static RelayReply ListWorkers(AggregateContext context)
     {
-        var workers = ObjectAt(context.State, "sessions").Select(x => x.Value!.AsObject()).Where(x => Text(x, "repositoryId") == context.Repository).Select(x =>
-        {
-            var copy = x.DeepClone().AsObject(); copy.Remove(ReadModels.SessionTokenKey); copy.Remove("principalId"); copy.Remove(OwnsWorkKey); copy.Remove(WorkSeqKey); copy.Remove(MailHeldKey);
-            var stale = Date(copy, "freshUntil") <= context.Now || Text(copy, "hubIncarnation") != Text(context.Args, "hubIncarnation");
-            copy["stale"] = stale; copy.Remove("hubIncarnation");
-            if (stale) copy["availability"] = "unknown";
-            return (JsonNode)copy;
-        }).ToArray();
+        var hubIncarnation = Text(context.Args, "hubIncarnation");
+        var workers = new ControlState(context.State).Entries().Select(entry => entry.Entry).OfType<DirectoryEntry>()
+            .Where(entry => entry.RepositoryId == context.Repository).Select(entry => (JsonNode)entry.Worker(context.Now, hubIncarnation)).ToArray();
         var data = JsonNode.Parse(Page(workers, context.Args).DataJson)!.AsObject();
         var machines = workers.GroupBy(x => Text(x.AsObject(), "machineId")).Where(x => x.Key.Length > 0).Select(group => new
         {
@@ -390,12 +345,12 @@ internal static class ControlAggregate
     private static RelayReply Status(AggregateContext context)
     {
         var sessionId = context.SessionId;
-        var cancellations = ObjectAt(context.State, "cancellations");
+        var state = new ControlState(context.State);
         return Ok(new
         {
-            paused = Flag(context.State, "paused"),
-            cancellations = cancellations.Count,
-            requests = sessionId.Length > 0 ? cancellations.Where(x => x.Key.StartsWith(sessionId + ":", StringComparison.Ordinal)).Take(RelayLimits.MaxPageSize).Select(x => new { target = x.Key, request = x.Value }).ToArray() : []
+            paused = state.Paused,
+            cancellations = state.CancellationCount,
+            requests = sessionId.Length > 0 ? state.CancellationsOf(sessionId).Take(RelayLimits.MaxPageSize).Select(x => new { target = x.Target, request = x.Request }).ToArray() : []
         });
     }
 
@@ -406,21 +361,18 @@ internal static class ControlAggregate
     /// </summary>
     private static RelayReply RouteAttention(AggregateContext context)
     {
-        var args = context.Args;
-        var operation = Text(args, "operation");
-        if (operation is not (Operations.AttentionRaise or Operations.AttentionClose) || args["item"] is not JsonObject item) return Error(InvalidArguments, new { field = "item" });
-        var role = Required(args, "role");
-        var except = Text(args, "exceptSessionId");
+        if (!AttentionRoute.Decode(context.Args).TryGet(out var route, out var malformed)) return Malformed(malformed);
+        var role = route.Role;
         // A raise goes to recently active managers only; a close reaches every manager, or an idle one would keep a stale item until it expires.
-        var closing = operation == Operations.AttentionClose;
+        var closing = route.Close is not null;
         var targets = ObjectAt(context.State, "sessions").Select(x => x.Value).OfType<JsonObject>()
-            .Where(session => Text(session, "repositoryId") == context.Repository && string.Equals(Text(session, "role"), role, StringComparison.OrdinalIgnoreCase) && Text(session, "sessionId") != except
+            .Where(session => Text(session, "repositoryId") == context.Repository && string.Equals(Text(session, "role"), role, StringComparison.OrdinalIgnoreCase) && Text(session, "sessionId") != route.ExceptSessionId
                 && (closing || Max(Date(session, "freshUntil"), Date(session, "activeAt")) > context.Now.AddHours(-RelayLimits.MaxAttentionRouteIdleHours)))
             .OrderByDescending(session => Date(session, "observedAt")).Take(closing ? RelayLimits.MaxRecords : RelayLimits.MaxAttentionRouteTargets).Select(session => Text(session, "sessionId")).ToArray();
         foreach (var target in targets)
         {
-            var copy = item.DeepClone().AsObject(); copy["repositoryId"] = context.Repository;
-            context.Emit(AggregateKinds.Session, target, operation, copy);
+            if (route.Raise is { } raise) context.Send(target, raise with { RepositoryId = context.Repository });
+            else context.Send(target, route.Close! with { RepositoryId = context.Repository });
         }
         return Ok(new { routed = targets.Length });
     }
@@ -430,40 +382,43 @@ internal static class ControlAggregate
     /// <summary>The given session IDs that the caller's principal opened in this repository. Read-only; tokens and other principals are never returned.</summary>
     private static RelayReply OwnedSessions(AggregateContext context)
     {
-        var sessions = ObjectAt(context.State, "sessions");
-        var owned = Strings(context.Args["sessionIds"]).Distinct(StringComparer.Ordinal)
-            .Where(id => sessions[id] is JsonObject session && Text(session, "principalId") == context.Caller.PrincipalId && Text(session, "repositoryId") == context.Repository).ToArray();
+        if (!SessionOwnersQuery.Decode(context.Args).TryGet(out var query, out var malformed)) return Malformed(malformed);
+        var state = new ControlState(context.State);
+        var owned = query.SessionIds.Distinct(StringComparer.Ordinal)
+            .Where(id => state.Entry(id) is { } session && session.PrincipalId == context.Caller.PrincipalId && session.RepositoryId == context.Repository).ToArray();
         return Ok(new { owned });
     }
 
     /// <summary>The given session IDs still open in this repository, whoever opened them. Read-only; nothing else about them is returned.</summary>
     private static RelayReply OpenSessions(AggregateContext context)
     {
-        var sessions = ObjectAt(context.State, "sessions");
-        var open = Strings(context.Args["sessionIds"]).Distinct(StringComparer.Ordinal)
-            .Where(id => sessions[id] is JsonObject session && Text(session, "repositoryId") == context.Repository).ToArray();
+        if (!SessionsOpenQuery.Decode(context.Args).TryGet(out var query, out var malformed)) return Malformed(malformed);
+        var state = new ControlState(context.State);
+        var open = query.SessionIds.Distinct(StringComparer.Ordinal).Where(id => state.Entry(id) is { } session && session.RepositoryId == context.Repository).ToArray();
         return Ok(new { open });
     }
 
     /// <summary>Maps a resource ID or a machine-scoped alias to its canonical registered resource.</summary>
-    private static RelayReply ResolveResource(AggregateContext context) =>
-        Find(context, Required(context.Args, "resourceId")) is { } resolved ? Ok(resolved) : Error(ResourceUnknown);
+    private static RelayReply ResolveResource(AggregateContext context)
+    {
+        if (!ResourceResolve.Decode(context.Args).TryGet(out var resolve, out var malformed)) return Malformed(malformed);
+        var name = ResourceName(resolve.ResourceId);
+        return new ControlState(context.State).Resources.Find(context.Repository, resolve.MachineId, name) is { } resolved ? Ok(resolved.ToReply()) : Error(ResourceUnknown);
+    }
+
+    /// <summary>A resource name a client gave: nonempty and within the identifier bound, or the call fails as invalid arguments.</summary>
+    private static string ResourceName(string name) =>
+        name is { Length: > 0 and <= RelayLimits.MaxIdentifierLength } ? name : throw new ArgumentException("resourceId is required and at most 256 characters.");
 
     /// <summary>Read-only: the canonical ID of each named resource this repository registered, in one call. Unknown names are left out.</summary>
     private static RelayReply ResolveAll(AggregateContext context)
     {
+        if (!ResourceResolveAll.Decode(context.Args).TryGet(out var resolve, out var malformed)) return Malformed(malformed);
+        var registry = new ControlState(context.State).Resources;
         var resolved = new JsonObject();
-        foreach (var id in Strings(context.Args["resourceIds"]).Distinct(StringComparer.Ordinal).Take(RelayLimits.MaxOfferResourceLookups))
-            if (Find(context, id) is { } resource) resolved[id] = Text(resource, "resourceId");
+        foreach (var id in resolve.ResourceIds.Distinct(StringComparer.Ordinal).Take(RelayLimits.MaxOfferResourceLookups))
+            if (registry.Find(context.Repository, resolve.MachineId, id) is { } resource) resolved[id] = resource.ResourceId;
         return Ok(new { resolved });
-    }
-
-    private static JsonObject? Find(AggregateContext context, string id)
-    {
-        var resources = ObjectAt(context.State, "resources");
-        var resolved = resources[id] as JsonObject;
-        if (resolved is null && ObjectAt(context.State, "aliases")[AliasKey(Text(context.Args, "machineId"), id)] is JsonValue alias) resolved = resources[alias.GetValue<string>()] as JsonObject;
-        return resolved is null || Text(resolved, "repositoryId") != context.Repository ? null : resolved;
     }
 
     private static RelayReply Control(AggregateContext context)
@@ -472,36 +427,31 @@ internal static class ControlAggregate
         var command = Required(context.Args, "command");
         if (command == "register_resource") return RegisterResource(context);
         if (command == "close_sessions") return CloseSessionsByFilter(context);
-        var state = context.State;
-        if (command is "pause" or "stop") state["paused"] = true;
-        else if (command == "resume") state["paused"] = false;
+        var state = new ControlState(context.State);
+        if (command is "pause" or "stop") state.Paused = true;
+        else if (command == "resume") state.Paused = false;
         else if (command != "cancel") return Error(UnknownCommand);
         var cancellation = command is "stop" or "cancel";
-        if (cancellation)
-            ObjectAt(state, "cancellations")[context.SessionId + ":" + Text(context.Args, "actionId")] = JsonSerializer.SerializeToNode(new { requestedBy = context.Caller.PrincipalId, at = context.Now, status = "requested_unknown" });
-        return Ok(new { paused = Flag(state, "paused"), cancellationRequested = cancellation });
+        if (cancellation) state.RequestCancellation(context.SessionId, Text(context.Args, "actionId"), context.Caller.PrincipalId, context.Now);
+        return Ok(new { paused = state.Paused, cancellationRequested = cancellation });
     }
 
     private static RelayReply RegisterResource(AggregateContext context)
     {
         var id = Required(context.Args, "resourceId");
         var machine = Required(context.Args, "machineId");
-        var resources = ObjectAt(context.State, "resources");
-        var aliases = ObjectAt(context.State, "aliases");
+        var registry = new ControlState(context.State).Resources;
         var names = Strings(context.Args["aliases"]).Append(id).ToArray();
         var canonical = id;
         foreach (var name in names)
-            if (aliases[AliasKey(machine, name)] is JsonValue prior) canonical = prior.GetValue<string>();
-        if (resources[canonical] is JsonObject existing && Text(existing, "repositoryId") != context.Repository) return Error(RepositoryDenied);
+            if (registry.Alias(machine, name) is { } prior) canonical = prior;
+        if (registry.Resource(canonical) is { } existing && existing.RepositoryId != context.Repository) return Error(RepositoryDenied);
         foreach (var name in names)
         {
-            var aliasKey = AliasKey(machine, name);
-            if (aliases[aliasKey] is JsonValue other && other.GetValue<string>() != canonical) return Error(AliasConflict);
-            aliases[aliasKey] = canonical;
+            if (registry.Alias(machine, name) is { } other && other != canonical) return Error(AliasConflict);
+            registry.SetAlias(machine, name, canonical);
         }
-        resources[canonical] = new JsonObject { ["resourceId"] = canonical, ["repositoryId"] = context.Repository, ["machineId"] = machine, ["aliases"] = JsonSerializer.SerializeToNode(names) };
+        registry.Register(canonical, context.Repository, machine, names);
         return Ok(new { resourceId = canonical });
     }
-
-    private static string AliasKey(string machine, string name) => machine.ToUpperInvariant() + ":" + name.ToUpperInvariant();
 }

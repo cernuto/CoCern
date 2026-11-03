@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using CoCern.Contracts;
 using CoCern.Domain;
+using CoCern.Domain.Messages;
 using static CoCern.Contracts.RelayErrorCodes;
 using static CoCern.Domain.JsonFields;
 using static CoCern.Domain.Replies;
@@ -69,7 +70,7 @@ internal sealed class CallGuard(Aggregates aggregates, string incarnation)
     public Task<RelayReply> VerifySessionAsync(RelayCaller caller, JsonObject args) =>
         Text(args, "sessionId").Length == 0 || Text(args, "sessionToken").Length == 0
             ? Task.FromResult(Error(SessionDenied))
-            : aggregates.Session(caller, Operations.Verify, args);
+            : aggregates.Session(caller, SessionVerify.Operation, new SessionVerify(Text(args, "repositoryId"), Text(args, "sessionId"), Text(args, "sessionToken"), Text(args, "hubIncarnation")).ToJson());
 
     private async Task<RelayReply?> PausedAsync(RelayCaller caller, JsonObject args)
     {

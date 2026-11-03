@@ -1,6 +1,7 @@
 using System.Text.Json.Nodes;
 using CoCern.Contracts;
 using CoCern.Domain;
+using CoCern.Domain.Messages;
 using static CoCern.Contracts.RelayErrorCodes;
 using static CoCern.Domain.JsonFields;
 using static CoCern.Domain.Replies;
@@ -49,7 +50,7 @@ internal sealed class StatusTools(Aggregates aggregates, StandingDelivery standi
             args["defaultExpiryDays"] = orders.DefaultExpiryDays;
             if (args["trigger"] is JsonObject trigger && Text(trigger, "on") == OrderTriggers.ClaimReleased && Text(trigger, "resourceId") is { Length: > 0 } resource)
             {
-                var resolved = await aggregates.Resolve(caller, new JsonObject { ["repositoryId"] = Text(args, "repositoryId") }, resource);
+                var resolved = await aggregates.Resolve(caller, Text(args, "repositoryId"), "", resource);
                 if (!resolved.Ok) return resolved;
                 trigger["resourceId"] = Text(Aggregates.Parse(resolved), "resourceId");
             }
@@ -63,7 +64,7 @@ internal sealed class StatusTools(Aggregates aggregates, StandingDelivery standi
         if (!status.Ok || orders is not { Enabled: true }) return status;
         try
         {
-            var read = await aggregates.Board(caller, Operations.Orders, new JsonObject { ["repositoryId"] = Text(args, "repositoryId"), ["boardId"] = Text(args, "boardId", "default") });
+            var read = await aggregates.Board(caller, OrdersRead.Operation, new OrdersRead(Text(args, "repositoryId"), Text(args, "boardId", "default")).ToJson());
             if (!read.Ok || Aggregates.Parse(read)["orders"] is not JsonArray { Count: > 0 } list) return status;
             var data = Aggregates.Parse(status); data["orders"] = list.DeepClone(); data["ordersRevision"] = Aggregates.Parse(read)["revision"]?.DeepClone();
             return FitsWire(Ok(data, status.Version)) ? Ok(data, status.Version) : status;

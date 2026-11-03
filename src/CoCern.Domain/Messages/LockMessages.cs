@@ -57,3 +57,42 @@ public sealed record ActionUnblock(string RepositoryId, string ActionId, string 
         return read.Result(new ActionUnblock(read.Text("repositoryId"), read.Text("actionId"), read.Text("actionKey"), read.Text("sessionId"), read.OptionalFlag("administrativeAcceptance")));
     }
 }
+
+/// <summary>
+/// <see cref="Operations.ClaimState"/>: whether <c>claim_acquire</c> would refuse <see cref="SessionId"/> on this lock now (<c>busy</c>),
+/// and whether the session holds a live grant with no action in flight (<c>held</c>), which <c>action_begin</c> needs for each resource its
+/// packet declares. Read-only: it acquires nothing. The hub asks it for each declared resource of a new action, and for each resource a
+/// next-work offer's candidates list.
+/// </summary>
+public sealed record ClaimStateQuery(string RepositoryId, string SessionId) : IInternalRequest<ClaimStateQuery>
+{
+    public static string Operation => Operations.ClaimState;
+    public static string TargetKind => AggregateKinds.Lock;
+
+    public JsonObject ToJson() => new() { ["repositoryId"] = RepositoryId, ["sessionId"] = SessionId };
+
+    public static Decoding<ClaimStateQuery> Decode(JsonObject payload)
+    {
+        var read = new MessageReader(payload);
+        return read.Result(new ClaimStateQuery(read.Text("repositoryId"), read.Text("sessionId")));
+    }
+}
+
+/// <summary>
+/// <see cref="Operations.LeaseCheck"/>: the lock's own due check of its lease, which its grain runs shortly before the lease ends and again
+/// when it ends while the holder has an action in flight: the holder gets a <c>claim_expiring</c> item, then an <c>interrupted</c> one.
+/// The grain sends it under the lock's own repository.
+/// </summary>
+public sealed record LockLeaseCheck(string RepositoryId) : IInternalRequest<LockLeaseCheck>
+{
+    public static string Operation => Operations.LeaseCheck;
+    public static string TargetKind => AggregateKinds.Lock;
+
+    public JsonObject ToJson() => new() { ["repositoryId"] = RepositoryId };
+
+    public static Decoding<LockLeaseCheck> Decode(JsonObject payload)
+    {
+        var read = new MessageReader(payload);
+        return read.Result(new LockLeaseCheck(read.Text("repositoryId")));
+    }
+}

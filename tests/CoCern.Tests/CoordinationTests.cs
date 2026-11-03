@@ -890,7 +890,7 @@ public sealed class CoordinationTests
         var control = new StateEnvelope<CoordinationDocument> { Value = new() { Json = new JsonObject { ["sessions"] = sessions }.ToJsonString() } };
         for (var hour = 0; hour <= 30; hour++)
         {
-            Assert.True(Call(session, "session", "__verify", new() { ["sessionToken"] = "secret" }, seconds: hour * 3600).Ok);
+            Assert.True(Call(session, "session", "__verify", new() { ["sessionId"] = "busy", ["sessionToken"] = "secret" }, seconds: hour * 3600).Ok);
             foreach (var effect in session.Effects.Where(effect => effect.Operation == Operations.SessionActive))
                 Assert.True(Call(control, "control", effect.Operation, JsonNode.Parse(effect.PayloadJson)!.AsObject(), seconds: hour * 3600).Ok);
             session.Effects.Clear();
@@ -1221,7 +1221,7 @@ public sealed class CoordinationTests
         Assert.Equal(Now.AddDays(7).ToString("O"), AttentionItems(session)[kept]!["expiresAt"]!.GetValue<string>());
         var day = (int)TimeSpan.FromDays(1).TotalSeconds;
         Assert.Equal(RelayErrorCodes.NotFound, Call(session, "session", "attention_respond", new() { ["sessionToken"] = "secret", ["itemId"] = id, ["action"] = "accept", ["requestId"] = "r" }, seconds: day).Code);
-        var offer = Data(Call(session, "session", "__attention_offer", new() { ["sessionToken"] = "secret" }, seconds: day));
+        var offer = Data(Call(session, "session", "__attention_offer", new() { ["sessionId"] = "s1", ["sessionToken"] = "secret" }, seconds: day));
         Assert.Equal(kept, offer["attention"]!["id"]!.GetValue<string>());
         Assert.False(AttentionItems(session).ContainsKey(id));
         // A refresh extends the safety net; an expired item cannot be picked even before anything removes it.
@@ -1693,7 +1693,7 @@ public sealed class CoordinationTests
         release["run"] = 10;
         Assert.False(Data(Lock("__order_release", release.DeepClone().AsObject()))["released"]!.GetValue<bool>());
         // A late failure report for an order run that is not the latest is logged but not counted.
-        Assert.False(Data(OrderCall(board, "board", "__order_failed", new() { ["orderId"] = "o-1", ["run"] = 1, ["reason"] = "late" }))["counted"]!.GetValue<bool>());
+        Assert.False(Data(OrderCall(board, "board", "__order_failed", new OrderFailed("repo", AggregateKinds.DefaultBoard, "o-1", 1, "late").ToJson()))["counted"]!.GetValue<bool>());
 
         // An expired order never runs.
         Assert.True(OrderCall(board, "board", "task_update", new() { ["taskId"] = "u", ["requestId"] = "u", ["expectedVersion"] = 0, ["workflow"] = DependentWorkflow("ready") }).Ok);

@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 using CoCern.Contracts;
+using CoCern.Domain.State;
 using static CoCern.Contracts.RelayErrorCodes;
 using static CoCern.Domain.JsonFields;
 using static CoCern.Domain.Replies;
@@ -29,7 +30,7 @@ public static class DiscoveryLimits
 
 /// <summary>
 /// The machine-scoped discovery aggregate: enrolled machines, their hashed credentials, the chats each announced and a deny list.
-/// It decides identity and wiring only. State is <c>{ machines: { id: {...} }, denied: { id: true }, expired: { id: seconds } }</c>; the envelope changes only when a mutation succeeds.
+/// It decides identity and wiring only. Its document is <see cref="DiscoveryState"/>; the envelope changes only when a mutation succeeds.
 /// </summary>
 public static class DiscoveryStateMachine
 {
@@ -37,7 +38,8 @@ public static class DiscoveryStateMachine
     {
         if (ByteSize(args) > RelayLimits.MaxPayloadBytes) return Error(PayloadTooLarge);
         if (!caller.IsInternal) return Error(InternalOnly);
-        var state = JsonNode.Parse(envelope.Value.Json)!.AsObject();
+        var json = JsonNode.Parse(envelope.Value.Json)!.AsObject();
+        var state = new DiscoveryState(json);
         RelayReply result;
         try
         {
@@ -56,55 +58,52 @@ public static class DiscoveryStateMachine
         catch (FormatException) { return Error(InvalidArguments); }
         if (!result.Ok) return result;
         if (!FitsWire(result, RelayLimits.AggregateReplyBytes)) return Error(PayloadTooLarge);
-        if (operation is DiscoveryOperations.Enroll or DiscoveryOperations.Announce or DiscoveryOperations.Revoke) envelope.Value = new() { Json = state.ToJsonString() };
+        if (operation is DiscoveryOperations.Enroll or DiscoveryOperations.Announce or DiscoveryOperations.Revoke) envelope.Value = new() { Json = json.ToJsonString() };
         return result;
     }
 
     private static string PrincipalOf(string machineId) => "machine:" + machineId;
 
-    private static RelayReply Enroll(JsonObject state, JsonObject args, DateTimeOffset now)
+    private static RelayReply Enroll(DiscoveryState state, JsonObject args, DateTimeOffset now)
     {
         var id = Required(args, "machineId");
         var name = Required(args, "machineName");
         var hash = Required(args, "credentialHash");
-        if (ObjectAt(state, "denied").ContainsKey(id)) return Error(MachineRevoked);
+        if (state.IsDenied(id)) return Error(MachineRevoked);
         // A machine's ID is its principal, which owns actions and sessions; reissuing it would hand those to whoever enrolled next.
-        if (ObjectAt(state, "expired").ContainsKey(id)) return Error(MachineExpired);
-        var machines = ObjectAt(state, "machines");
-        if (machines[id] is JsonObject existing)
+        if (state.IsExpired(id)) return Error(MachineExpired);
+        if (state.Machine(id) is { } existing)
         {
-            if (!SecretEquals(Text(existing, "credentialHash"), hash)) return Error(AliasConflict);
-            existing["machineName"] = name;
+            if (!SecretEquals(existing.CredentialHash, hash)) return Error(AliasConflict);
+            existing.Name = name;
         }
         else
         {
-            if (machines.Count >= DiscoveryLimits.MaxMachines && !RemoveExpired(state, machines, now)) return Error(CapacityExceeded);
-            machines[id] = new JsonObject { ["machineName"] = name, ["credentialHash"] = hash, ["enrolledAt"] = now.ToString("O"), ["lastSeen"] = null, ["clients"] = new JsonArray(), ["chats"] = new JsonArray() };
+            if (state.MachineCount >= DiscoveryLimits.MaxMachines && !RemoveExpired(state, now)) return Error(CapacityExceeded);
+            state.Enroll(id, name, hash, now);
         }
         return Ok(new { machineId = id, principalId = PrincipalOf(id) });
     }
 
     /// <summary>Frees one slot by removing the machine unseen longest, if unseen past the expiry, so strangers cannot hold the table forever.</summary>
-    private static bool RemoveExpired(JsonObject state, JsonObject machines, DateTimeOffset now)
+    private static bool RemoveExpired(DiscoveryState state, DateTimeOffset now)
     {
         var cutoff = now - TimeSpan.FromDays(RelayLimits.MachineExpiryDays);
         // A machine that never announced counts from its enrollment; one from before enrolledAt existed counts as oldest.
-        var oldest = machines.Select(x => (x.Key, Seen: Date(x.Value!.AsObject(), "lastSeen") is var seen && seen != DateTimeOffset.MinValue ? seen : Date(x.Value!.AsObject(), "enrolledAt")))
+        var oldest = state.EnrolledMachines().Select(x => (Key: x.Id, Seen: x.Machine.LastContact))
             .Where(x => x.Seen < cutoff).OrderBy(x => x.Seen).ThenBy(x => x.Key, StringComparer.Ordinal).FirstOrDefault();
         if (oldest.Key is null) return false;
-        machines.Remove(oldest.Key);
-        var expired = ObjectAt(state, "expired");
-        if (expired.Count >= DiscoveryLimits.MaxExpiredIds)
-            expired.Remove(expired.OrderBy(x => Number(expired, x.Key)).ThenBy(x => x.Key, StringComparer.Ordinal).First().Key);
-        expired[oldest.Key] = now.ToUnixTimeSeconds();
+        state.RemoveMachine(oldest.Key);
+        if (state.ExpiredCount >= DiscoveryLimits.MaxExpiredIds && state.OldestExpired() is { } forgotten) state.ForgetExpired(forgotten);
+        state.Expire(oldest.Key, now);
         return true;
     }
 
-    private static RelayReply Validate(JsonObject state, JsonObject args)
+    private static RelayReply Validate(DiscoveryState state, JsonObject args)
     {
         var hash = Required(args, "credentialHash");
-        var found = ObjectAt(state, "machines").FirstOrDefault(x => x.Value is JsonObject machine && SecretEquals(Text(machine, "credentialHash"), hash));
-        return found.Key is null ? Error(NotFound) : Ok(new { machineId = found.Key, principalId = PrincipalOf(found.Key) });
+        var found = state.EnrolledMachines().FirstOrDefault(x => SecretEquals(x.Machine.CredentialHash, hash));
+        return found.Id is null ? Error(NotFound) : Ok(new { machineId = found.Id, principalId = PrincipalOf(found.Id) });
     }
 
     /// <summary>The provider a node announces for a session it has not mapped to a chat.</summary>
@@ -114,48 +113,43 @@ public static class DiscoveryStateMachine
     private static DateTimeOffset OpenedAt(JsonObject chat) =>
         chat["openedAt"] is JsonValue value && value.TryGetValue<string>(out var text) && DateTimeOffset.TryParse(text, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var at) ? at : DateTimeOffset.MinValue;
 
-    private static RelayReply Announce(JsonObject state, JsonObject args, DateTimeOffset now)
+    private static RelayReply Announce(DiscoveryState state, JsonObject args, DateTimeOffset now)
     {
         var id = Required(args, "machineId");
         var name = Required(args, "machineName");
         var clients = StringList(args["clients"]).Select(x => x.Length is > 0 and <= RelayLimits.MaxIdentifierLength ? x : throw new ArgumentException("clients entries must be 1 to 256 characters.")).ToArray();
         var source = args["chats"] is null ? new JsonArray() : args["chats"] as JsonArray ?? throw new ArgumentException("chats must be an array.");
         if (source.Count > DiscoveryLimits.MaxChatsPerMachine) return Error(CapacityExceeded);
-        var parsed = new List<(JsonObject Chat, DateTimeOffset OpenedAt, int Order)>();
+        var parsed = new List<(AnnouncedChat Chat, DateTimeOffset OpenedAt, int Order)>();
         foreach (var node in source)
         {
             var chat = node as JsonObject ?? throw new ArgumentException("chats entries must be objects.");
-            parsed.Add((new JsonObject
-            {
-                ["provider"] = Required(chat, "provider"), ["threadId"] = Required(chat, "threadId"), ["relaySessionId"] = Required(chat, "relaySessionId"),
-                ["repositoryId"] = Required(chat, "repositoryId"), ["label"] = Required(chat, "label"), ["wakeable"] = Flag(chat, "wakeable"), ["waiterRunning"] = Flag(chat, "waiterRunning")
-            }, OpenedAt(chat), parsed.Count));
+            parsed.Add((AnnouncedChat.From(Required(chat, "provider"), Required(chat, "threadId"), Required(chat, "relaySessionId"), Required(chat, "repositoryId"), Required(chat, "label"),
+                Flag(chat, "wakeable"), Flag(chat, "waiterRunning")), OpenedAt(chat), parsed.Count));
         }
         // One provider thread maps to one current relay session: keep only the newest chat per (provider, thread), so a stale node cannot announce a superseded route.
         // Newest is the latest openedAt; without one, the earlier entry wins (the node lists newest first). Unmapped chats share a placeholder thread and are never collapsed.
-        var chats = new JsonArray(parsed.GroupBy(x => Text(x.Chat, "provider") == UnmappedProvider ? "unmapped:" + x.Order : Text(x.Chat, "provider").ToLowerInvariant() + "/" + Text(x.Chat, "threadId").ToLowerInvariant())
-            .Select(group => group.OrderByDescending(x => x.OpenedAt).ThenBy(x => x.Order).First()).OrderBy(x => x.Order).Select(x => (JsonNode)x.Chat).ToArray());
-        if (ObjectAt(state, "machines")[id] is not JsonObject machine) return Error(NotFound);
-        machine["machineName"] = name; machine["lastSeen"] = now.ToString("O");
-        machine["clients"] = new JsonArray(clients.Select(x => (JsonNode)JsonValue.Create(x)!).ToArray()); machine["chats"] = chats;
-        var routes = chats.Select(x => x!.AsObject()).Where(x => Flag(x, "wakeable")).Select(x => new { provider = Text(x, "provider"), threadId = Text(x, "threadId"), relaySessionId = Text(x, "relaySessionId"), repositoryId = Text(x, "repositoryId") }).ToArray();
+        var chats = parsed.GroupBy(x => x.Chat.Provider == UnmappedProvider ? "unmapped:" + x.Order : x.Chat.Provider.ToLowerInvariant() + "/" + x.Chat.ThreadId.ToLowerInvariant())
+            .Select(group => group.OrderByDescending(x => x.OpenedAt).ThenBy(x => x.Order).First()).OrderBy(x => x.Order).Select(x => x.Chat).ToArray();
+        if (state.Machine(id) is not { } machine) return Error(NotFound);
+        machine.Announced(name, now, clients, chats);
+        var routes = chats.Where(x => x.Wakeable).Select(x => new { provider = x.Provider, threadId = x.ThreadId, relaySessionId = x.RelaySessionId, repositoryId = x.RepositoryId }).ToArray();
         return Ok(new { routes });
     }
 
     /// <summary>The announced chats in the given repositories. Thread IDs, hashes and credentials never leave the aggregate.</summary>
-    private static RelayReply Directory(JsonObject state, JsonObject args, DateTimeOffset now)
+    private static RelayReply Directory(DiscoveryState state, JsonObject args, DateTimeOffset now)
     {
         var repositories = StringList(args["repositories"]).ToHashSet(StringComparer.Ordinal);
         var items = new List<object>();
-        foreach (var (_, node) in ObjectAt(state, "machines"))
+        foreach (var (_, machine) in state.EnrolledMachines())
         {
-            var machine = node!.AsObject();
-            var lastSeen = OptionalDate(machine, "lastSeen");
-            foreach (var chat in ArrayAt(machine, "chats").Select(x => x!.AsObject()).Where(x => repositories.Contains(Text(x, "repositoryId"))))
+            var lastSeen = machine.LastSeen;
+            foreach (var chat in machine.Chats.Where(x => repositories.Contains(x.RepositoryId)))
             {
-                var provider = Text(chat, "provider");
-                var reachable = ReadModels.IsReachable(provider, Flag(chat, "wakeable"), Flag(chat, "waiterRunning"), lastSeen, now);
-                items.Add(new { label = Text(chat, "label"), provider, machineName = Text(machine, "machineName"), relaySessionId = Text(chat, "relaySessionId"), repositoryId = Text(chat, "repositoryId"), reachable });
+                var provider = chat.Provider;
+                var reachable = ReadModels.IsReachable(provider, chat.Wakeable, chat.WaiterRunning, lastSeen, now);
+                items.Add(new { label = chat.Label, provider, machineName = machine.Name, relaySessionId = chat.RelaySessionId, repositoryId = chat.RepositoryId, reachable });
             }
         }
         if (Fits(items, items.Count)) return Ok(new { items, truncated = false });
@@ -175,16 +169,14 @@ public static class DiscoveryStateMachine
         _ => throw new ArgumentException("Expected an array of strings.")
     };
 
-    private static RelayReply Revoke(JsonObject state, RelayCaller caller, JsonObject args)
+    private static RelayReply Revoke(DiscoveryState state, RelayCaller caller, JsonObject args)
     {
         if (!caller.IsAdministrator) return Error(AdministratorRequired);
         var id = Required(args, "machineId");
-        var machines = ObjectAt(state, "machines");
-        var denied = ObjectAt(state, "denied");
-        if (!machines.ContainsKey(id) && !denied.ContainsKey(id)) return Error(NotFound);
-        if (!denied.ContainsKey(id) && denied.Count >= RelayLimits.MaxRecords) return Error(CapacityExceeded);
-        machines.Remove(id);
-        denied[id] = true;
+        if (!state.HasMachine(id) && !state.IsDenied(id)) return Error(NotFound);
+        if (!state.IsDenied(id) && state.DeniedCount >= RelayLimits.MaxRecords) return Error(CapacityExceeded);
+        state.RemoveMachine(id);
+        state.Deny(id);
         return Ok(new { revoked = true });
     }
 }

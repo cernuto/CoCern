@@ -1,5 +1,7 @@
 using System.Text.Json.Nodes;
 using CoCern.Contracts;
+using CoCern.Domain.Messages;
+using CoCern.Domain.State;
 using static CoCern.Domain.JsonFields;
 
 namespace CoCern.Domain;
@@ -15,15 +17,8 @@ namespace CoCern.Domain;
 /// </summary>
 internal static class TaskArchiving
 {
-    public const string ArchivedKey = "archivedTasks";
-    public const string FloorKey = "archiveFloor";
     private const int CloseBatch = 64;
     private const int MaxClosedSessions = 64;
-
-    public static bool IsArchived(JsonObject board, string taskId) => board[ArchivedKey] is JsonObject archived && archived.ContainsKey(taskId);
-
-    /// <summary>Whether a task ID on the board that owns <paramref name="tasks"/> is a remembered archived one.</summary>
-    public static bool IsArchivedOnBoardOf(JsonObject tasks, string taskId) => tasks.Parent is JsonObject board && IsArchived(board, taskId);
 
     /// <summary>The board revision a remembered archived ID left at; 0 for one the hub resolved from the archive (never a delta removal).</summary>
     public static long Revision(JsonNode? stub) =>
@@ -32,16 +27,16 @@ internal static class TaskArchiving
     private static DateTimeOffset ArchivedAt(JsonNode? stub) =>
         stub is JsonArray { Count: > 1 } pair && pair[1] is JsonValue value && value.TryGetValue<long>(out var seconds) ? DateTimeOffset.FromUnixTimeSeconds(seconds) : DateTimeOffset.MinValue;
 
+    /// <summary>A remembered archived ID's stub: the board revision it left at, and when, in Unix seconds.</summary>
     private static JsonArray Stub(long revision, DateTimeOffset at) => new(revision, at.ToUnixTimeSeconds());
 
     /// <summary>When the task completed: its <c>completedAt</c>, else its last update (boards from before archiving), else the earliest time.</summary>
-    public static DateTimeOffset CompletedAt(JsonObject task) =>
-        Date(task, "completedAt") is var completed && completed > DateTimeOffset.MinValue ? completed : Date(task, "updatedAt");
+    public static DateTimeOffset CompletedAt(BoardTask task) => task.CompletedAt is var completed && completed > DateTimeOffset.MinValue ? completed : task.UpdatedAt;
 
-    public static bool IsFinished(JsonObject task) => task["workflow"] is JsonObject workflow && Text(workflow, "state") == "completed";
+    public static bool IsFinished(BoardTask task) => task.Workflow is { } workflow && workflow.State == "completed";
 
-    public static bool Archivable(JsonObject task, DateTimeOffset now) =>
-        IsFinished(task) && !TaskActions.HasUnresolved(task) && (Text(task, "owner").Length == 0 || Date(task, "leaseUntil") <= now);
+    public static bool Archivable(BoardTask task, DateTimeOffset now) =>
+        IsFinished(task) && !TaskActions.HasUnresolved(task) && (task.Owner.Length == 0 || task.LeaseUntil <= now);
 
     /// <summary>
     /// On a board write with at least <see cref="RelayLimits.ArchiveHighWater"/> tasks: archives tasks finished longer than the setting,
@@ -51,13 +46,14 @@ internal static class TaskArchiving
     /// </summary>
     public static void Run(AggregateContext context, bool sweep)
     {
-        var state = context.State;
-        var tasks = ObjectAt(state, "tasks");
+        var board = new BoardState(context.State);
+        var tasks = board.TaskMap;
         var full = tasks.Count >= RelayLimits.ArchiveHighWater;
         if (!sweep && !full) return;
         var except = Text(context.Args, "taskId");
-        var candidates = tasks.Where(entry => entry.Key != except && entry.Value is JsonObject task && Archivable(task, context.Now))
-            .Select(entry => (Id: entry.Key, Task: entry.Value!.AsObject(), Completed: CompletedAt(entry.Value!.AsObject())))
+        var candidates = tasks.Where(entry => entry.Key != except && entry.Value is JsonObject task && Archivable(new BoardTask(task), context.Now))
+            .Select(entry => (Id: entry.Key, Task: new BoardTask(entry.Value!.AsObject())))
+            .Select(entry => (entry.Id, entry.Task, Completed: CompletedAt(entry.Task)))
             .OrderBy(entry => entry.Completed).ThenBy(entry => entry.Id, StringComparer.Ordinal).ToList();
         var chosen = context.ArchiveAfterDays > 0 ? candidates.Where(entry => entry.Completed <= context.Now.AddDays(-context.ArchiveAfterDays)).ToList() : [];
         if (full)
@@ -70,42 +66,41 @@ internal static class TaskArchiving
         if (chosen.Count > 0)
         {
             // One board revision for the whole batch: a delta reader past it sees each archived task as a removal.
-            var revision = Number(state, "taskRevision") + 1;
-            state["taskRevision"] = revision;
-            var archived = ObjectAt(state, ArchivedKey);
-            var repository = Text(state, "repositoryId");
+            var revision = board.TaskRevision + 1;
+            board.TaskRevision = revision;
+            var archived = board.ArchivedTasks;
+            var repository = board.RepositoryId;
             foreach (var (id, task, completed) in chosen)
             {
-                tasks.Remove(id);
-                task["archivedAt"] = context.Now.ToString("O");
+                board.RemoveTask(id);
+                task.ArchivedAt = context.Now;
                 archived[id] = Stub(revision, context.Now);
-                context.Archived.Add(new(repository, id, completed, context.Now, task.ToJsonString()));
+                context.Archived.Add(new(repository, id, completed, context.Now, task.Json.ToJsonString()));
             }
             CloseAttention(context, chosen.Select(entry => entry.Task).ToList(), revision);
         }
-        if (sweep || chosen.Count > 0) Forget(state, context.Now);
+        if (sweep || chosen.Count > 0) Forget(board, context.Now);
     }
 
     /// <summary>
     /// Closes every open attention item of the archived tasks, with the archive revision, at the managers and at each task's owner and
     /// target session: review_ready, failed, next_work and the rest. Batched, so a large archive run adds only a few outbox effects.
     /// </summary>
-    private static void CloseAttention(AggregateContext context, List<JsonObject> archived, long revision)
+    private static void CloseAttention(AggregateContext context, List<BoardTask> archived, long revision)
     {
-        JsonObject Close(IEnumerable<string> ids) => new() { ["taskIds"] = new JsonArray(ids.Select(id => (JsonNode)id).ToArray()), ["revision"] = revision };
-        var ids = archived.Select(task => Text(task, "taskId")).ToList();
-        foreach (var batch in ids.Chunk(CloseBatch)) AttentionSources.ToManagers(context, Operations.AttentionClose, Close(batch));
+        AttentionSelection Close(IEnumerable<string> ids) => new() { TaskIds = ids.ToArray(), Revision = revision };
+        var ids = archived.Select(task => task.TaskId).ToList();
+        foreach (var batch in ids.Chunk(CloseBatch)) AttentionSources.ToManagers(context, Close(batch));
         var bySession = archived
-            .SelectMany(task => new[] { Text(task, "owner"), task["workflow"] is JsonObject workflow ? Text(workflow, "targetSessionId") : "" }.Where(session => session.Length > 0).Distinct(StringComparer.Ordinal).Select(session => (Session: session, Id: Text(task, "taskId"))))
+            .SelectMany(task => new[] { task.Owner, task.Workflow?.TargetSessionId ?? "" }.Where(session => session.Length > 0).Distinct(StringComparer.Ordinal).Select(session => (Session: session, Id: task.TaskId)))
             .GroupBy(entry => entry.Session, StringComparer.Ordinal).Take(MaxClosedSessions);
         foreach (var group in bySession)
-            foreach (var batch in group.Select(entry => entry.Id).Chunk(CloseBatch)) AttentionSources.Emit(context, group.Key, Operations.AttentionClose, Close(batch));
+            foreach (var batch in group.Select(entry => entry.Id).Chunk(CloseBatch)) AttentionSources.Emit(context, group.Key, Close(batch));
     }
 
     /// <summary>The IDs live tasks' <c>dependsOn</c> name: archived ones among them are always remembered.</summary>
-    private static HashSet<string> Referenced(JsonObject state) =>
-        (state["tasks"] as JsonObject ?? new JsonObject()).Select(entry => entry.Value).OfType<JsonObject>()
-            .SelectMany(task => task["workflow"] is JsonObject workflow ? TaskWorkflow.Dependencies(workflow) : []).ToHashSet(StringComparer.Ordinal);
+    private static HashSet<string> Referenced(BoardState board) =>
+        board.Tasks.SelectMany(task => task.Workflow?.DependsOn ?? []).ToHashSet(StringComparer.Ordinal);
 
     /// <summary>
     /// Bounds what deltas can report: of the IDs with a removal revision, those older than <see cref="RelayLimits.ArchivedIdDays"/>, then
@@ -113,10 +108,10 @@ internal static class TaskArchiving
     /// among them. One a live task depends on stays remembered with revision 0 (counted as completed, never a removal); the rest are
     /// dropped, as are revision-0 IDs no live task depends on any more. So removals never exceed <see cref="RelayLimits.MaxArchivedIds"/>.
     /// </summary>
-    private static void Forget(JsonObject state, DateTimeOffset now)
+    private static void Forget(BoardState board, DateTimeOffset now)
     {
-        if (state[ArchivedKey] is not JsonObject archived || archived.Count == 0) return;
-        var referenced = Referenced(state);
+        if (board.ArchivedTasksIfAny is not { Count: > 0 } archived) return;
+        var referenced = Referenced(board);
         var cutoff = now.AddDays(-RelayLimits.ArchivedIdDays);
         var entries = archived.Select(entry => (entry.Key, Revision: Revision(entry.Value), At: ArchivedAt(entry.Value))).ToList();
         var withRemoval = entries.Where(entry => entry.Revision > 0).ToList();
@@ -132,18 +127,17 @@ internal static class TaskArchiving
             .Select(entry => (entry.Key, Value: (JsonNode)(leaving.Contains(entry.Key) ? Stub(0, entry.At) : archived[entry.Key]!.DeepClone()))).ToList();
         archived.Clear();
         foreach (var (key, value) in remaining) archived[key] = value;
-        if (leave.Count > 0) state[FloorKey] = Math.Max(Number(state, FloorKey), leave.Max(entry => entry.Revision));
+        if (leave.Count > 0) board.ArchiveFloor = Math.Max(board.ArchiveFloor, leave.Max(entry => entry.Revision));
     }
 
     /// <summary>
     /// Remembers archived IDs the hub found in the archive table for a workflow's <c>dependsOn</c> (revision 0, so no delta lists them),
     /// so the dependency counts as completed here and stays remembered while a live task names it.
     /// </summary>
-    public static void Remember(JsonObject state, IEnumerable<string> archivedIds, DateTimeOffset now)
+    public static void Remember(BoardState board, IEnumerable<string> archivedIds, DateTimeOffset now)
     {
-        var tasks = state["tasks"] as JsonObject;
         foreach (var id in archivedIds)
-            if (tasks?[id] is not JsonObject && !IsArchived(state, id)) ObjectAt(state, ArchivedKey)[id] = Stub(0, now);
+            if (board.Task(id) is null && !board.IsArchived(id)) board.ArchivedTasks[id] = Stub(0, now);
     }
 
     /// <summary>
@@ -153,20 +147,21 @@ internal static class TaskArchiving
     /// </summary>
     public static DateTimeOffset? NextSweep(JsonObject state, int archiveAfterDays)
     {
+        var board = new BoardState(state);
         DateTimeOffset? next = null;
         void Consider(DateTimeOffset due) { if (next is null || due < next) next = due; }
-        if (archiveAfterDays > 0 && state["tasks"] is JsonObject tasks)
-            foreach (var entry in tasks)
+        if (archiveAfterDays > 0)
+            foreach (var task in board.Tasks)
             {
-                if (entry.Value is not JsonObject task || !IsFinished(task) || TaskActions.HasUnresolved(task)) continue;
+                if (!IsFinished(task) || TaskActions.HasUnresolved(task)) continue;
                 var due = CompletedAt(task).AddDays(archiveAfterDays);
-                if (Text(task, "owner").Length > 0 && Date(task, "leaseUntil") > due) due = Date(task, "leaseUntil");
+                if (task.Owner.Length > 0 && task.LeaseUntil > due) due = task.LeaseUntil;
                 Consider(due);
             }
-        if (state[ArchivedKey] is JsonObject { Count: > 0 } archived)
+        if (board.ArchivedTasksIfAny is { Count: > 0 } archived)
         {
             // An ID with a removal revision leaves delta memory after ArchivedIdDays; a revision-0 one goes once nothing depends on it.
-            var referenced = Referenced(state);
+            var referenced = Referenced(board);
             foreach (var entry in archived)
                 if (Revision(entry.Value) > 0) Consider(ArchivedAt(entry.Value).AddDays(RelayLimits.ArchivedIdDays));
                 else if (!referenced.Contains(entry.Key)) Consider(ArchivedAt(entry.Value));

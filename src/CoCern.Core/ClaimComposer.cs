@@ -24,12 +24,8 @@ internal sealed class ClaimComposer(Aggregates aggregates)
     }
 
     /// <summary>Resolves a resource name (or alias) by the session's machine, as every claim path must, so one name never means two locks.</summary>
-    public Task<RelayReply> ResolveForSession(RelayCaller caller, JsonObject args, JsonObject? session, string resource)
-    {
-        var lookup = args.DeepClone().AsObject();
-        lookup["machineId"] = SessionMachine(args, session);
-        return aggregates.Resolve(caller, lookup, resource);
-    }
+    public Task<RelayReply> ResolveForSession(RelayCaller caller, JsonObject args, JsonObject? session, string resource) =>
+        aggregates.Resolve(caller, Text(args, "repositoryId"), SessionMachine(args, session), resource);
 
     /// <summary>
     /// Claims the task, then each canonical resource in a stable order. If any resource is busy, the grants this
@@ -40,10 +36,9 @@ internal sealed class ClaimComposer(Aggregates aggregates)
         // Fields only the hub sets; a client's own values are dropped.
         var canonical = new SortedSet<string>(StringComparer.Ordinal);
         // The claim's own names resolve by the same machine as the declared ones: the verified session's, else the one the call gives.
-        var lookup = args.DeepClone().AsObject(); lookup["machineId"] = SessionMachine(args, session);
         foreach (var resource in Strings(args["resourceIds"]))
         {
-            var resolved = await aggregates.Resolve(caller, lookup, resource);
+            var resolved = await ResolveForSession(caller, args, session, resource);
             if (!resolved.Ok) return resolved;
             canonical.Add(Text(Aggregates.Parse(resolved), "resourceId"));
         }
@@ -149,8 +144,8 @@ internal sealed class ClaimComposer(Aggregates aggregates)
         var claimed = Aggregates.Parse(task);
         if (claimed["newlyAcquired"]?.GetValue<bool>() == true)
         {
-            var release = args.DeepClone().AsObject(); release["claimGeneration"] = claimed["claimGeneration"]?.DeepClone(); release["claimRequestId"] = Text(args, "requestId"); release.Remove("requestId");
-            await Attempt(() => aggregates.Board(caller, Operations.TaskUnclaim, release));
+            var unclaim = new TaskUnclaim(Text(args, "repositoryId"), Aggregates.BoardIdOf(args), Text(args, "taskId"), Text(args, "sessionId"), Number(claimed, "claimGeneration"), Text(args, "requestId"));
+            await Attempt(() => aggregates.Board(caller, TaskUnclaim.Operation, unclaim.ToJson()));
         }
     }
 
@@ -173,10 +168,10 @@ internal sealed class ClaimComposer(Aggregates aggregates)
                 return Error(Unavailable, new { replayAllowed = false });
             {
                 beginArgs["declaredResources"] = declared;
-                var lookup = new JsonObject { ["repositoryId"] = Text(args, "repositoryId"), ["sessionId"] = Text(args, "sessionId") };
+                var lookup = new ClaimStateQuery(Text(args, "repositoryId"), Text(args, "sessionId"));
                 foreach (var resource in declared.Select(entry => entry.Value is JsonValue value && value.TryGetValue<string>(out var id) ? id : "").Where(id => id.Length > 0).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal))
                 {
-                    var state = await aggregates.Call(AggregateKinds.Lock, resource, caller, Operations.ClaimState, lookup);
+                    var state = await aggregates.Request(resource, caller, lookup);
                     if (!state.Ok) return state;
                     if (Aggregates.Parse(state)["held"]?.GetValue<bool>() == true) continue;
                     beginArgs[Operations.LockRefusalField] = new JsonObject { ["code"] = Aggregates.Parse(state)["busy"]?.GetValue<bool>() == true ? Busy : ClaimRequired, ["resourceId"] = resource };
@@ -222,11 +217,7 @@ internal sealed class ClaimComposer(Aggregates aggregates)
     {
         var names = listed.Where(name => name.Length > 0).Distinct(StringComparer.Ordinal).ToArray();
         if (names.Length == 0) return null;
-        var resolved = await aggregates.Control(caller, Operations.ResolveAll, new JsonObject
-        {
-            ["repositoryId"] = Text(args, "repositoryId"), ["machineId"] = SessionMachine(args, session),
-            ["resourceIds"] = JsonSerializer.SerializeToNode(names)
-        });
+        var resolved = await aggregates.Request(AggregateKinds.ControlKey, caller, new ResourceResolveAll(Text(args, "repositoryId"), names, SessionMachine(args, session)));
         // Without the lookup the board checks each declared name as listed, which only refuses more.
         if (!resolved.Ok) return null;
         var map = Aggregates.Parse(resolved)["resolved"] as JsonObject;

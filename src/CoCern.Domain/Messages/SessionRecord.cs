@@ -10,6 +10,15 @@ namespace CoCern.Domain.Messages;
 /// </summary>
 public sealed record SessionPresence
 {
+    public const string HubIncarnationKey = "hubIncarnation";
+    public const string MachineIdKey = "machineId";
+    public const string LabelKey = "label";
+    public const string BindingKey = "binding";
+    public const string BindingVersionKey = "bindingVersion";
+    public const string ObservedAtKey = "observedAt";
+    public const string FreshUntilKey = "freshUntil";
+    public const string AvailabilityKey = "availability";
+
     public string? HubIncarnation { get; init; }
     public string? MachineId { get; init; }
     public string? Label { get; init; }
@@ -25,22 +34,22 @@ public sealed record SessionPresence
     /// <summary>Writes each field this presence has into <paramref name="target"/>.</summary>
     internal void WriteTo(JsonObject target)
     {
-        if (HubIncarnation is not null) target["hubIncarnation"] = HubIncarnation;
-        if (MachineId is not null) target["machineId"] = MachineId;
-        if (Label is not null) target["label"] = Label;
-        if (Binding is not null) target["binding"] = Binding.DeepClone();
-        if (BindingVersion is { } version) target["bindingVersion"] = version;
-        if (ObservedAt is { } observed) target["observedAt"] = observed.ToString("O");
-        if (FreshUntil is { } fresh) target["freshUntil"] = fresh.ToString("O");
-        if (Availability is not null) target["availability"] = Availability;
+        if (HubIncarnation is not null) target[HubIncarnationKey] = HubIncarnation;
+        if (MachineId is not null) target[MachineIdKey] = MachineId;
+        if (Label is not null) target[LabelKey] = Label;
+        if (Binding is not null) target[BindingKey] = Binding.DeepClone();
+        if (BindingVersion is { } version) target[BindingVersionKey] = version;
+        if (ObservedAt is { } observed) target[ObservedAtKey] = observed.ToString("O");
+        if (FreshUntil is { } fresh) target[FreshUntilKey] = fresh.ToString("O");
+        if (Availability is not null) target[AvailabilityKey] = Availability;
     }
 
     /// <summary>Reads the presence fields <paramref name="read"/>'s object has, noting any of the wrong type.</summary>
     internal static SessionPresence Read(MessageReader read) => new()
     {
-        HubIncarnation = read.OptionalText("hubIncarnation"), MachineId = read.OptionalText("machineId"), Label = read.OptionalText("label"), Binding = read.Node("binding"),
-        BindingVersion = read.OptionalNumber("bindingVersion", minimum: 0), ObservedAt = read.OptionalDate("observedAt"), FreshUntil = read.OptionalDate("freshUntil"),
-        Availability = read.OptionalText("availability")
+        HubIncarnation = read.OptionalText(HubIncarnationKey), MachineId = read.OptionalText(MachineIdKey), Label = read.OptionalText(LabelKey), Binding = read.Node(BindingKey),
+        BindingVersion = read.OptionalNumber(BindingVersionKey, minimum: 0), ObservedAt = read.OptionalDate(ObservedAtKey), FreshUntil = read.OptionalDate(FreshUntilKey),
+        Availability = read.OptionalText(AvailabilityKey)
     };
 }
 
@@ -52,6 +61,13 @@ public sealed record SessionPresence
 /// </summary>
 public sealed record SessionRecord
 {
+    public const string SessionIdKey = "sessionId";
+    public const string PrincipalIdKey = "principalId";
+    public const string RepositoryIdKey = "repositoryId";
+    public const string SessionTokenKey = ReadModels.SessionTokenKey;
+    public const string RoleKey = "role";
+    public const string ActiveAtKey = "activeAt";
+
     public required string SessionId { get; init; }
     public required string PrincipalId { get; init; }
     public required string RepositoryId { get; init; }
@@ -93,10 +109,10 @@ public sealed record SessionRecord
 
     public JsonObject ToJson()
     {
-        var json = new JsonObject { ["sessionId"] = SessionId, ["principalId"] = PrincipalId, ["repositoryId"] = RepositoryId, [ReadModels.SessionTokenKey] = SessionToken };
-        if (Role is not null) json["role"] = Role;
+        var json = new JsonObject { [SessionIdKey] = SessionId, [PrincipalIdKey] = PrincipalId, [RepositoryIdKey] = RepositoryId, [SessionTokenKey] = SessionToken };
+        if (Role is not null) json[RoleKey] = Role;
         Presence.WriteTo(json);
-        if (ActiveAt is { } active) json["activeAt"] = active.ToString("O");
+        if (ActiveAt is { } active) json[ActiveAtKey] = active.ToString("O");
         return json;
     }
 
@@ -110,7 +126,7 @@ public sealed record SessionRecord
 
     internal static SessionRecord Read(MessageReader read) => new()
     {
-        SessionId = read.Text("sessionId"), PrincipalId = read.Text("principalId"), RepositoryId = read.Text("repositoryId"), SessionToken = read.Text(ReadModels.SessionTokenKey),
-        Role = read.OptionalText("role"), Presence = SessionPresence.Read(read), ActiveAt = read.OptionalDate("activeAt")
+        SessionId = read.Text(SessionIdKey), PrincipalId = read.Text(PrincipalIdKey), RepositoryId = read.Text(RepositoryIdKey), SessionToken = read.Text(SessionTokenKey),
+        Role = read.OptionalText(RoleKey), Presence = SessionPresence.Read(read), ActiveAt = read.OptionalDate(ActiveAtKey)
     };
 }

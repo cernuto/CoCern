@@ -14,7 +14,14 @@ public enum DeliveryClass
     Retry,
 
     /// <summary>A report its sender sends again whole and its target orders by a stamp: a refused one is dropped and counted, and a later one replaces it.</summary>
-    DropAndCount
+    DropAndCount,
+
+    /// <summary>
+    /// Advice (an attention item, a standing order's step) its target may refuse for good: a refusal would repeat on every retry, so it is
+    /// dropped. Nothing is lost that the sender relies on; an attention item a standing order raised and its session refused counts as a
+    /// failed run of that order.
+    /// </summary>
+    Advisory
 }
 
 /// <summary>
@@ -139,6 +146,49 @@ internal sealed class MessageReader(JsonObject payload, string prefix = "", List
         Problem(name);
         return null;
     }
+
+    /// <summary>A required number, integer or not.</summary>
+    public double Real(string name)
+    {
+        if (payload[name] is JsonValue value && value.GetValueKind() == JsonValueKind.Number && value.TryGetValue<double>(out var number) && double.IsFinite(number)) return number;
+        Problem(name);
+        return 0;
+    }
+
+    /// <summary>A required array of objects, each read with its own reader (its problems named under <paramref name="name"/>).</summary>
+    public IReadOnlyList<MessageReader> Objects(string name)
+    {
+        if (payload[name] is not JsonArray items) { Problem(name); return []; }
+        var readers = new List<MessageReader>();
+        foreach (var item in items)
+        {
+            if (item is JsonObject nested) readers.Add(new(nested, prefix + name + ".", problems));
+            else Problem(name);
+        }
+        return readers;
+    }
+
+    /// <summary>A required array of strings.</summary>
+    public IReadOnlyList<string> Strings(string name)
+    {
+        if (payload[name] is null) Problem(name);
+        return OptionalStrings(name) ?? [];
+    }
+
+    /// <summary>An array of strings, or null when absent.</summary>
+    public IReadOnlyList<string>? OptionalStrings(string name)
+    {
+        if (payload[name] is null) return null;
+        var texts = new List<string>();
+        if (payload[name] is JsonArray items)
+            foreach (var item in items)
+                if (item is JsonValue value && value.TryGetValue<string>(out var text)) texts.Add(text);
+        if (payload[name] is not JsonArray array || texts.Count != array.Count) { Problem(name); return []; }
+        return texts;
+    }
+
+    /// <summary>Whether the payload has <paramref name="name"/> at all, null or not.</summary>
+    public bool Has(string name) => payload.ContainsKey(name);
 
     /// <summary>Any JSON value, copied, or null when absent.</summary>
     public JsonNode? Node(string name) => payload[name]?.DeepClone();

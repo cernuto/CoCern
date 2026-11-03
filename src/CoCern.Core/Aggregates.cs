@@ -2,6 +2,7 @@ using System.Text.Json.Nodes;
 using Orleans;
 using CoCern.Contracts;
 using CoCern.Domain;
+using CoCern.Domain.Messages;
 using static CoCern.Contracts.RelayErrorCodes;
 using static CoCern.Domain.JsonFields;
 using static CoCern.Domain.Replies;
@@ -26,12 +27,13 @@ internal sealed class Aggregates(IGrainFactory grains, ITaskArchive? archive)
         return json is null ? reply : ArchivedTasks.Read(args, json);
     }
 
-    /// <summary>The canonical ID of a resource name (or alias, by the args' <c>machineId</c>).</summary>
-    public Task<RelayReply> Resolve(RelayCaller caller, JsonObject args, string resource)
-    {
-        var resolve = args.DeepClone().AsObject(); resolve["resourceId"] = resource; resolve.Remove("requestId");
-        return Control(caller, Operations.Resolve, resolve);
-    }
+    /// <summary>The registered resource a name (or an alias on <paramref name="machineId"/>, empty for none) stands for in the repository.</summary>
+    public Task<RelayReply> Resolve(RelayCaller caller, string repositoryId, string machineId, string resource) =>
+        Request(AggregateKinds.ControlKey, caller, new ResourceResolve(repositoryId, resource, machineId));
+
+    /// <summary>Makes a typed direct request of the aggregate <paramref name="key"/> of its kind.</summary>
+    public Task<RelayReply> Request<T>(string key, RelayCaller caller, T request) where T : class, IInternalRequest<T> =>
+        Call(T.TargetKind, key, caller, T.Operation, request.ToJson());
 
     public Task<RelayReply> Control(RelayCaller caller, string operation, JsonObject args) => Call(AggregateKinds.Control, AggregateKinds.ControlKey, caller, operation, args);
     public Task<RelayReply> Session(RelayCaller caller, string operation, JsonObject args) => Call(AggregateKinds.Session, Text(args, "sessionId"), caller, operation, args);
@@ -74,5 +76,11 @@ internal sealed class Aggregates(IGrainFactory grains, ITaskArchive? archive)
     public Task<RelayReply> Call(string kind, string key, RelayCaller caller, string operation, JsonObject args) => CoordinationGrain.Aggregate(grains, kind, key).ExecuteAsync(caller, operation, args.ToJsonString());
 
     public static string BoardKey(JsonObject args) => CallTelemetry.BoardKey(args);
+
+    /// <summary>
+    /// The board a call named, for a direct board request (<see cref="Domain.Messages.TaskUnclaim"/> and the like): its <c>boardId</c> as
+    /// given, or null when it named none, which a request reads as the default board. The request then reaches the board the call did.
+    /// </summary>
+    public static string? BoardIdOf(JsonObject args) => args["boardId"] is JsonValue value && value.TryGetValue<string>(out var board) ? board : null;
     public static JsonObject Parse(RelayReply reply) => JsonNode.Parse(reply.DataJson)!.AsObject();
 }
