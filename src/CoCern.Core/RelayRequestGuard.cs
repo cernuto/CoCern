@@ -40,7 +40,7 @@ internal static class RelayRequestGuard
         foreach (var numeric in IntegerFields) if (args.ContainsKey(numeric) && args[numeric] is null) args.Remove(numeric);
         if (NotWholeNumber(args) is { } numberField) return Replies.Error(InvalidArguments, new { field = numberField });
         if (tool.Name == RelayTools.ContextPut && args["content"] is null) return Replies.Error(InvalidArguments, new { field = "content" });
-        foreach (var flag in new[] { "includeNextWork", "attention", "attentionDetail", "seen" })
+        foreach (var flag in new[] { "includeNextWork", "attention", "attentionDetail", "seen", "headersOnly" })
             if (args.ContainsKey(flag) && (args[flag] is not JsonValue value || !value.TryGetValue<bool>(out _))) return Replies.Error(InvalidArguments, new { field = flag });
         if (!caller.MayAccess(Text(args, "repositoryId"))) return Replies.Error(RepositoryDenied);
         if (tool.IsMutation && Text(args, "requestId").Length == 0) return Replies.Error(RequestIdRequired);
@@ -53,6 +53,8 @@ internal static class RelayRequestGuard
         if (tool.Name is RelayTools.DocSearch or RelayTools.DocSection or RelayTools.DocSync && DocProblem(tool.Name, args) is { } docField) return Replies.Error(InvalidArguments, new { field = docField });
         if (args.ContainsKey("seenMessageIds") && (args["seenMessageIds"] is not JsonArray seen || seen.Count > RelayLimits.MaxAcknowledgedMessages
             || seen.Any(id => id is not JsonValue value || !value.TryGetValue<string>(out var text) || text.Length is 0 or > RelayLimits.MaxIdentifierLength))) return Replies.Error(InvalidArguments, new { field = "seenMessageIds" });
+        if (args["knownInboxEtag"] is { } inboxEtag && (inboxEtag is not JsonValue etagValue || !etagValue.TryGetValue<string>(out var etagText) || etagText.Length is 0 or > RelayLimits.MaxKnownEtagLength || etagText.Any(char.IsControl)))
+            return Replies.Error(InvalidArguments, new { field = "knownInboxEtag" });
         if (Count(args, "resourceIds") > RelayLimits.MaxClaimResources || Count(args, "messageIds") > RelayLimits.MaxAcknowledgedMessages || Count(args, "ackMessageIds") > RelayLimits.MaxAcknowledgedMessages) return Replies.Error(PayloadTooLarge);
         return null;
     }
@@ -93,7 +95,9 @@ internal static class RelayRequestGuard
     /// </summary>
     private static string? AnalyticsProblem(JsonObject args)
     {
-        if (args["name"] is not JsonValue name || !name.TryGetValue<string>(out var text) || text != AnalyticsQueryNames.AdHocSql && !AnalyticsQueryNames.All.Contains(text)) return "name";
+        if (args["name"] is not JsonValue name || !name.TryGetValue<string>(out var text)) return "name";
+        if (text == "batch") return AnalyticsBatch.Problem(args);
+        if (text != AnalyticsQueryNames.AdHocSql && !AnalyticsQueryNames.All.Contains(text)) return "name";
         var adHoc = text == AnalyticsQueryNames.AdHocSql;
         if (adHoc != args.ContainsKey("sql")) return "sql";
         if (adHoc && (args["sql"] is not JsonValue sql || !sql.TryGetValue<string>(out var statement) || string.IsNullOrWhiteSpace(statement) || statement.Length > RelayLimits.MaxAnalyticsSqlLength)) return "sql";
@@ -131,9 +135,10 @@ internal static class RelayRequestGuard
 /// The adapter's call controls: fields that steer how a call is composed or recorded and never reach an aggregate. <see cref="Take"/>
 /// reads and removes them (after <see cref="RelayRequestGuard.Validate"/> has checked their shapes).
 /// </summary>
-internal sealed record CallControls(bool OfferWanted, bool StatusDetail, bool PageSeen, string[] SeenIds, string? KnownEtag, JsonObject? Usage, bool ModelVisible, bool? BackgroundCall)
+internal sealed record CallControls(bool OfferWanted, bool StatusDetail, bool PageSeen, string[] SeenIds, string? KnownEtag, JsonObject? Usage, bool ModelVisible, bool? BackgroundCall,
+    bool HeadersOnly = false, string? KnownInboxEtag = null)
 {
-    private static readonly string[] Fields = ["usage", "attention", "attentionDetail", "attentionStatus", "maxHoldMinutes", "seen", "seenMessageIds", "knownEtag", "backgroundCall"];
+    private static readonly string[] Fields = ["usage", "attention", "attentionDetail", "attentionStatus", "maxHoldMinutes", "seen", "seenMessageIds", "knownEtag", "backgroundCall", "headersOnly", "knownInboxEtag"];
 
     public static CallControls Take(JsonObject args)
     {
@@ -150,7 +155,11 @@ internal sealed record CallControls(bool OfferWanted, bool StatusDetail, bool Pa
             Usage: args["usage"] as JsonObject,
             ModelVisible: offerWanted && !args.ContainsKey("waitSeconds"),
             // This untrusted report affects telemetry only. Unmarked older adapters and malformed reports remain unknown.
-            BackgroundCall: args["backgroundCall"] is JsonValue origin && origin.TryGetValue<bool>(out var background) ? background : null);
+            BackgroundCall: args["backgroundCall"] is JsonValue origin && origin.TryGetValue<bool>(out var background) ? background : null,
+            // A background check_inbox reader that needs only which messages wait (the wake watcher) asks for their headers, and for an
+            // unchanged answer when the inbox is the one it last read.
+            HeadersOnly: args["headersOnly"] is JsonValue headers && headers.GetValue<bool>(),
+            KnownInboxEtag: JsonFields.Text(args, "knownInboxEtag") is { Length: > 0 } inboxEtag ? inboxEtag : null);
         foreach (var field in Fields) args.Remove(field);
         return controls;
     }

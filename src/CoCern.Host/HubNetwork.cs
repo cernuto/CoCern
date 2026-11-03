@@ -159,8 +159,8 @@ internal static class HubNetwork
     /// <c>hub-certificate.pfx</c> beside the database, with <c>local-hub.json</c>. The content root depends on how the hub starts (Visual
     /// Studio uses <c>src/CoCern.Host</c>, <c>dotnet CoCern.Host.dll</c> the current folder) while the database does not, so every way of
     /// starting one hub finds the one certificate whose fingerprint other PCs and this PC's apps pinned. A certificate made before at the
-    /// content root's <c>data</c> folder, with none beside the database yet, is moved there, so its fingerprint survives; when the move
-    /// fails, it is used where it is.
+    /// content root's <c>data</c> folder, with none beside the database yet, is copied there, so its fingerprint survives. The source is
+    /// retained because another hub may still use it; when the copy fails, it is used where it is.
     /// </summary>
     internal static string CertificatePath(IConfiguration configuration, IHostEnvironment environment, ILogger? logger = null)
     {
@@ -172,10 +172,9 @@ internal static class HubNetwork
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            // Written afresh rather than moved, so the copy is private to this user however the old file's permissions were inherited.
+            // Write a private copy however the source's permissions were inherited; another hub may still use the source.
             HubCertificate.WritePrivately(path, File.ReadAllBytes(earlier));
-            File.Delete(earlier);
-            logger?.LogInformation("Moved the hub certificate from {From} to {To}, beside the database; its fingerprint is unchanged.", earlier, path);
+            logger?.LogInformation("Copied the hub certificate from {From} to {To}, beside the database, retaining the source; its fingerprint is unchanged.", earlier, path);
             return path;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
@@ -183,10 +182,10 @@ internal static class HubNetwork
             // A copy that did land is the same certificate; otherwise the old file still serves, so the fingerprint stays the same either way.
             if (File.Exists(path))
             {
-                logger?.LogWarning("Copied the hub certificate from {From} to {To}, beside the database, but could not remove the old copy; delete it. {Reason}", earlier, path, exception.Message);
+                logger?.LogWarning("The hub certificate copy from {From} to {To}, beside the database, exists despite a copy error; retaining the source. {Reason}", earlier, path, exception.Message);
                 return path;
             }
-            logger?.LogWarning("Could not move the hub certificate from {From} to {To}; using it where it is. {Reason}", earlier, path, exception.Message);
+            logger?.LogWarning("Could not copy the hub certificate from {From} to {To}; using it where it is. {Reason}", earlier, path, exception.Message);
             return earlier;
         }
     }

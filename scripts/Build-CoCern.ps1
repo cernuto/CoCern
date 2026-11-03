@@ -10,7 +10,7 @@ try {
     # the build output (checksums checked), so on Windows neither the build nor the tests download anything. Elsewhere the tests use
     # COCERN_DUCKDB_EXTENSIONS, or download it once into a temp cache. See docs/reference.md#analytics.
     # Tests produce their own binaries and verify behavior before packaging.
-    & dotnet test tests/CoCern.Tests/CoCern.Tests.csproj --no-restore --nologo
+    & dotnet test CoCern.slnx --no-restore --nologo
     if ($LASTEXITCODE -ne 0) { throw 'Tests failed.' }
     if ($Publish) {
         # The hub runs on Windows x64: publishing for that runtime ships only its DuckDB library (about 35 MB, not every platform's).

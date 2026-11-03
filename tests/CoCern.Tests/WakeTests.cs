@@ -2,6 +2,7 @@ using System.Net;
 using System.Text;
 using System.Text.Json;
 using CoCern.Adapter;
+using CoCern.Contracts;
 using Xunit;
 
 namespace CoCern.Tests;
@@ -30,7 +31,8 @@ public sealed class WakeTests
         using var fixture = new Fixture();
         Assert.Equal("empty", await fixture.Reconcile());
         Assert.Empty(fixture.Dispatcher.Prompts);
-        Assert.Equal(3, fixture.CallBodies.Count);
+        // One status read and one inbox read: with nothing that may wake, the controls are not read a second time.
+        Assert.Equal(2, fixture.CallBodies.Count);
         Assert.All(fixture.CallBodies, body => { using var json = JsonDocument.Parse(body); Assert.True(json.RootElement.GetProperty("backgroundCall").GetBoolean()); });
     }
 
@@ -419,7 +421,12 @@ public sealed class WakeTests
             _client = new(new Handler(this));
             _forwarder = new(_client, new AdapterOptions(Configuration.RelayUrl, "client-secret"));
         }
-        public Task<string> Reconcile(CancellationToken cancellationToken = default) => new WakeReconciler(Configuration, State, _forwarder, Dispatcher, Clock).ReconcileAsync(Route, new("session", "session-secret"), cancellationToken);
+        /// <summary>What the watcher keeps between passes; every reconcile here shares it, as the watcher's loop does.</summary>
+        public readonly InboxCoverage Coverage = new();
+        /// <summary>The inbox etag the fake hub gives header reads: it changes with the messages and their wake flags.</summary>
+        public string Etag => RelayEtag.Of(string.Join(",", Messages.Select(id => id + (Quiet.Contains(id) ? ":quiet" : ""))));
+        public Task<string> Reconcile(CancellationToken cancellationToken = default) => new WakeReconciler(Configuration, State, _forwarder, Dispatcher, Clock, Coverage).ReconcileAsync(Route, new("session", "session-secret"), cancellationToken);
+        public int StatusReads => CallBodies.Count(body => !InboxBodies.Contains(body));
         public void Restart() { State.Dispose(); State = new(Configuration.StatePath, Strict); }
 
         /// <summary>Writes the token and session files a real enrollment has, and releases the state lock so a waiter can own it.</summary>
@@ -456,8 +463,12 @@ public sealed class WakeTests
                 var items = fixture.Messages.Skip(cursor).Take(fixture.PageSize).Select(id => new { messageId = id, repositoryId = "repo", text = "UNTRUSTED MESSAGE BODY", wake = fixture.Quiet.Contains(id) ? false : (bool?)null }).ToArray();
                 var more = cursor + items.Length < fixture.Messages.Length;
                 if (request.RequestUri!.AbsolutePath.EndsWith("check_inbox")) fixture.Cursors.Add(cursor);
+                var headersOnly = args.RootElement.TryGetProperty("headersOnly", out var headers) && headers.GetBoolean();
+                var known = args.RootElement.TryGetProperty("knownInboxEtag", out var knownEtag) ? knownEtag.GetString() : null;
                 var data = request.RequestUri.AbsolutePath.EndsWith("get_status")
                     ? fixture.Status == "missing-pause" ? "{\"sessionId\":\"session\",\"control\":{}}" : JsonSerializer.Serialize(new { sessionId = fixture.Status == "wrong-session" ? "other" : "session", control = new { paused = fixture.Status == "paused", requests = fixture.Status.EndsWith("cancelled") ? new object[] { new { target = fixture.Status == "other-cancelled" ? "other:" : "session:", request = new { status = "requested_unknown" } } } : [] } })
+                    : headersOnly && known == fixture.Etag ? JsonSerializer.Serialize(new { unchanged = true, etag = fixture.Etag, total = fixture.Messages.Length })
+                    : headersOnly ? JsonSerializer.Serialize(new { items = items.Select(item => new { item.messageId, item.repositoryId, item.wake }), nextCursor = more ? (int?)(cursor + items.Length) : null, truncated = more, total = fixture.Messages.Length, etag = fixture.Etag })
                     : JsonSerializer.Serialize(new { items, nextCursor = more ? (int?)(cursor + items.Length) : null, truncated = more, total = fixture.Messages.Length });
                 // The hub gives its attention block only to a reader that asks for the detail.
                 if (request.RequestUri.AbsolutePath.EndsWith("get_status") && fixture.Attention is { } attention && args.RootElement.TryGetProperty("attentionDetail", out var detail) && detail.GetBoolean())
@@ -531,9 +542,52 @@ public sealed class WakeTests
         // After the chat's next boundary a new idle period may wake it once more.
         fixture.Attention = "{\"actionable\":3,\"wake\":\"hold:638000000000000001\"}";
         Assert.Equal("queued", await fixture.Reconcile());
-        // Every inbox read the watcher makes opts out of attention offers.
-        Assert.All(fixture.InboxBodies, body => Assert.Contains("\"attention\":false", body));
+        // With attention on, only the hub's wake candidate can wake the chat, so the watcher never pages the inbox at all.
+        Assert.Empty(fixture.InboxBodies);
+    }
+
+    [Fact]
+    public async Task With_attention_on_a_pass_is_one_status_read_however_many_messages_wait()
+    {
+        using var fixture = new Fixture();
+        fixture.Attention = "{\"actionable\":150}";
+        fixture.Messages = Enumerable.Range(1, 150).Select(n => $"m{n}").ToArray();
+        Assert.Equal("empty", await fixture.Reconcile());
+        Assert.Empty(fixture.InboxBodies);
+        Assert.Equal(1, fixture.StatusReads);
+    }
+
+    [Fact]
+    public async Task With_attention_off_inbox_reads_are_headers_only_and_a_pass_with_nothing_to_wake_skips_the_second_status_read()
+    {
+        using var fixture = new Fixture();
+        fixture.Messages = ["quiet-1", "quiet-2"];
+        fixture.Quiet.UnionWith(fixture.Messages);
+        Assert.Equal("empty", await fixture.Reconcile());
         Assert.NotEmpty(fixture.InboxBodies);
+        Assert.All(fixture.InboxBodies, body => { Assert.Contains("\"headersOnly\":true", body); Assert.Contains("\"attention\":false", body); });
+        Assert.Equal(1, fixture.StatusReads);
+        Assert.Empty(fixture.Dispatcher.Prompts);
+    }
+
+    [Fact]
+    public async Task With_attention_off_an_unchanged_inbox_costs_one_tiny_read_and_still_wakes_for_a_new_message()
+    {
+        using var fixture = new Fixture();
+        fixture.PageSize = 2;
+        fixture.Messages = ["m1", "m2", "m3"];
+        Assert.Equal("queued", await fixture.Reconcile());
+        Assert.Equal([0, 2], fixture.Cursors);
+        fixture.Clock.Now += TimeSpan.FromSeconds(11);
+        // Unchanged: the first page's etag answers alone, no page is read and nothing wakes again.
+        Assert.Equal("empty", await fixture.Reconcile());
+        Assert.Equal([0, 2, 0], fixture.Cursors);
+        Assert.Contains($"\"knownInboxEtag\":\"{fixture.Etag}\"", fixture.InboxBodies[^1]);
+        // A new message changes the etag: the inbox is read again and the new message wakes the chat.
+        fixture.Messages = ["m1", "m2", "m3", "m4"];
+        fixture.Clock.Now += TimeSpan.FromSeconds(11);
+        Assert.Equal("queued", await fixture.Reconcile());
+        Assert.Equal(2, fixture.Dispatcher.Prompts.Count);
     }
 
     [Fact]

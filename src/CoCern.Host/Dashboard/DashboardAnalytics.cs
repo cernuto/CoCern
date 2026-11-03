@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Security.Claims;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -103,6 +104,19 @@ public sealed class DashboardAnalytics(IAnalyticsTool tool, IServiceProvider ser
             if (JsonSerializer.SerializeToUtf8Bytes(snapshot, JsonOptions).Length > RelayLimits.MaxAnalyticsReplyBytes)
                 return State("too-large", "The combined analytics result exceeds the reply limit. Choose a shorter period.");
         }
+        if (source is not null)
+        {
+            try
+            {
+                // The repository is a SQL string value, never an identifier. This fixed internal
+                // read exposes only coverage, under the dashboard's existing viewer authorization.
+                var value = repository.Replace("'", "''", StringComparison.Ordinal);
+                var coverage = await source.RunSqlAsync($"SELECT history_incomplete FROM workflow_history_coverage WHERE repository_id = '{value}'", cancellation);
+                if (coverage.Rows.Any(row => row.Count > 0 && row[0] is true))
+                    snapshot.Message = "Workflow history is incomplete: retained activity cannot establish every blocked or ready transition. Durations exclude unknown starts. " + UnknownHistory;
+            }
+            catch (AnalyticsException) { /* An older snapshot may not carry coverage metadata. */ }
+        }
         if (source is not null && (source.SnapshotAt != sourceAt || source.SnapshotPath != sourcePath))
             return State("error", "The hourly snapshot changed during this request. Refresh to compare one snapshot.");
         if (reports.All(x => x.Error is not null))
@@ -112,6 +126,16 @@ public sealed class DashboardAnalytics(IAnalyticsTool tool, IServiceProvider ser
         }
         if (JsonSerializer.SerializeToUtf8Bytes(snapshot, JsonOptions).Length > RelayLimits.MaxAnalyticsReplyBytes)
             return State("too-large", "The combined analytics result exceeds the reply limit. Choose a shorter period.");
+        // A conditional dashboard refresh saves transferring and reprocessing an unchanged report.
+        // Bind the tag to the entire response, including repository, period and snapshot identity.
+        if (snapshot.Status == "ready" && reports.All(report => report.Error is null))
+        {
+            var tag = "\"" + Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(snapshot, JsonOptions))).ToLowerInvariant() + "\"";
+            context.Response.Headers.ETag = tag;
+            context.Response.Headers.CacheControl = "private, no-cache";
+            if (context.Request.Headers.IfNoneMatch.Any(value => value?.Split(',').Any(candidate => candidate.Trim() == tag) == true))
+                return Results.StatusCode(StatusCodes.Status304NotModified);
+        }
         return Results.Ok(snapshot);
 
         IResult State(string status, string message) => Results.Ok(new DashboardAnalyticsSnapshot

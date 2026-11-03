@@ -11,5 +11,6 @@
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/CoCern.Tests/CoCern.Tests.csproj" />
+    <Project Path="tests/CoCern.StandingIdentity.Tests/CoCern.StandingIdentity.Tests.csproj" />
   </Folder>
 </Solution>

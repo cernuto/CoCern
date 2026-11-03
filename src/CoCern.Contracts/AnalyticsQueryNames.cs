@@ -4,6 +4,8 @@ namespace CoCern.Contracts;
 public static class AnalyticsQueryNames
 {
     public const string TokensPerTask = "tokens_per_task";
+    public const string RelayTokens = "relay_tokens";
+    public const string UsageCoverage = "usage_coverage";
     public const string CallsPerTask = "calls_per_task";
     public const string MessagesPerTask = "messages_per_task";
     public const string ContextByRole = "context_by_role";
@@ -26,7 +28,7 @@ public static class AnalyticsQueryNames
     public static readonly IReadOnlyList<string> All =
     [
         TokensPerTask, CallsPerTask, MessagesPerTask, ContextByRole, BlockedTime, ClaimConflictsByResource, NoisiestTools,
-        ManagerAssignmentLatency, QualityGuardrails, AttentionOutcomesByKind
+        ManagerAssignmentLatency, QualityGuardrails, AttentionOutcomesByKind, RelayTokens, UsageCoverage
     ];
 
     /// <summary>The alert queries. The anomaly monitor runs them; <c>analytics_query</c> does not list them.</summary>

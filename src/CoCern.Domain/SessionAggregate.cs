@@ -44,7 +44,7 @@ internal static class SessionAggregate
             Operations.Verify => Verify(context, state),
             RelayTools.GetStatus => Describe(context, state, Text(context.Args, "hubIncarnation"), verified: false),
             RelayTools.SessionBind => Bind(context, state),
-            RelayTools.CheckInbox => Page(state.Inbox.Stored, context.Args),
+            RelayTools.CheckInbox => ReadInbox(state, context.Args),
             RelayTools.Ack => Acknowledge(context, state),
             RelayTools.SendMessage => SendDirect(context),
             Operations.StandingSeen => MarkStandingSeen(context, state),
@@ -382,6 +382,25 @@ internal static class SessionAggregate
     /// Acknowledgment is explicit: a later duplicate delivery of an acknowledged message is ignored. The acknowledged set keeps each ID for
     /// the retry window (<see cref="RelayLimits.RequestReplayRetentionHours"/>), and a full set drops its oldest, so acknowledging never stops working.
     /// </summary>
+    /// <summary>The fields a header read keeps: enough to know which messages wait and whether each may wake the chat, never their text.</summary>
+    private static readonly string[] HeaderFields = ["messageId", "repositoryId", "wake", "senderSessionId", "sentAt", "taskId", "replyTo", "kind"];
+
+    /// <summary>
+    /// A page of the inbox. A header read (<c>headersOnly</c>, a background reader's control) pages the messages without their text and adds
+    /// an <c>etag</c> over the whole inbox's IDs and wake flags; when <c>knownInboxEtag</c> matches it, the reply is that etag and the total alone.
+    /// </summary>
+    private static RelayReply ReadInbox(SessionState state, JsonObject args)
+    {
+        if (args["headersOnly"] is not JsonValue headersOnly || !headersOnly.GetValue<bool>()) return Page(state.Inbox.Stored, args);
+        var headers = state.Inbox.Stored.Select(message => (JsonNode)new JsonObject(HeaderFields
+            .Where(field => message[field] is not null).Select(field => KeyValuePair.Create(field, (JsonNode?)message[field]!.DeepClone())))).ToArray();
+        var etag = RelayEtag.Of(string.Join('\n', headers.Select(header => $"{Text(header.AsObject(), "messageId")}:{(header["wake"] is JsonValue wake && wake.TryGetValue<bool>(out var flag) && !flag ? "quiet" : "")}")));
+        if (Text(args, "knownInboxEtag") == etag) return Ok(new { unchanged = true, etag, total = headers.Length });
+        var page = JsonNode.Parse(Page(headers, args).DataJson)!.AsObject();
+        page["etag"] = etag;
+        return Ok(page);
+    }
+
     private static RelayReply Acknowledge(AggregateContext context, SessionState state)
     {
         var ids = context.Args["messageIds"] as JsonArray ?? new JsonArray(Text(context.Args, "messageId"));

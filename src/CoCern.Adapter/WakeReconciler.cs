@@ -11,7 +11,20 @@ public interface IWakeDispatcher
     /// </summary>
     bool IsBusy(string threadId) => false;
 }
-public sealed class WakeReconciler(WakeConfiguration configuration, WakeState state, RelayForwarder forwarder, IWakeDispatcher dispatcher, TimeProvider? clock = null)
+/// <summary>
+/// What a watcher keeps between reconcile passes: each route's last inbox etag and the message IDs and wake flags it covered, so a pass
+/// over an inbox that has not changed reads one tiny reply instead of every page again.
+/// </summary>
+public sealed class InboxCoverage
+{
+    private readonly Dictionary<string, (string Etag, IReadOnlyList<(string Id, bool Quiet)> Messages)> _known = new(StringComparer.Ordinal);
+
+    internal (string Etag, IReadOnlyList<(string Id, bool Quiet)> Messages)? Known(string route) { lock (_known) return _known.TryGetValue(route, out var known) ? known : null; }
+
+    internal void Remember(string route, string etag, IReadOnlyList<(string Id, bool Quiet)> messages) { lock (_known) _known[route] = (etag, messages); }
+}
+
+public sealed class WakeReconciler(WakeConfiguration configuration, WakeState state, RelayForwarder forwarder, IWakeDispatcher dispatcher, TimeProvider? clock = null, InboxCoverage? coverage = null)
 {
     public async Task<string> ReconcileAsync(WakeRoute route, WakeSession session, CancellationToken cancellationToken = default)
     {
@@ -28,40 +41,20 @@ public sealed class WakeReconciler(WakeConfiguration configuration, WakeState st
         try
         {
             if (!await Permitted(readAttention: true)) return "control-blocked";
-            var ids = new HashSet<string>(StringComparer.Ordinal);
-            // Messages sent with wake=false count for coverage but never cause a wake; they are read with the next one.
             var wakeable = new HashSet<string>(StringComparer.Ordinal);
-            var cursor = 0;
-            int? total = null;
-            var covered = false;
-            for (var page = 0; page < 20; page++)
+            // With attention on, only the hub's wake candidate wakes the chat, so the inbox is not read at all: paging every message's
+            // text on each pass, only to find none of them may wake, was nearly all of this watcher's traffic under load.
+            if (!urgentOnly)
             {
-                var reply = await forwarder.ForwardAsync("check_inbox", RelayForwarder.WithOrigin(Arguments(cursor), background: true), cancellationToken);
-                if (!reply.Ok || reply.Data is not { ValueKind: JsonValueKind.Object } data) return "inbox-unavailable";
-                if (!data.TryGetProperty("items", out var items) || items.ValueKind != JsonValueKind.Array || items.GetArrayLength() > 50 ||
-                    !data.TryGetProperty("total", out var count) || !count.TryGetInt32(out var countValue) || countValue < 0 ||
-                    total.HasValue && total != countValue || !data.TryGetProperty("nextCursor", out var next) ||
-                    !data.TryGetProperty("truncated", out var truncated) || truncated.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) return "invalid-inbox";
-                total = countValue;
-                foreach (var item in items.EnumerateArray())
-                {
-                    if (item.ValueKind != JsonValueKind.Object || !item.TryGetProperty("messageId", out var id) || id.ValueKind != JsonValueKind.String ||
-                        id.GetString() is not { Length: > 0 and <= 256 } messageId || !ids.Add(messageId) ||
-                        !item.TryGetProperty("repositoryId", out var repo) || repo.GetString() != route.RepositoryId) return "invalid-inbox";
-                    if (!urgentOnly && (!item.TryGetProperty("wake", out var wake) || wake.ValueKind != JsonValueKind.False)) wakeable.Add(messageId);
-                }
-                if (next.ValueKind == JsonValueKind.Null)
-                {
-                    if (truncated.GetBoolean() || ids.Count != total) return "invalid-inbox";
-                    covered = true;
-                    break;
-                }
-                if (!truncated.GetBoolean() || !next.TryGetInt32(out var offset) || offset != cursor + items.GetArrayLength() || offset <= cursor) return "invalid-inbox";
-                cursor = offset;
+                var (problem, messages) = await ReadInboxAsync();
+                if (problem is not null) return problem;
+                // Messages sent with wake=false count for coverage but never cause a wake; they are read with the next one.
+                foreach (var (id, quiet) in messages) if (!quiet) wakeable.Add(id);
             }
-            if (!covered) return "coverage-limit";
             // An attention wake is deduplicated like a message: each item ID wakes the route at most once.
             if (attentionWake is not null) wakeable.Add(AttentionWakePrefix + attentionWake);
+            // Nothing may wake the chat, so there is nothing to reserve and no reason to read the hub's controls a second time.
+            if (wakeable.Count == 0) return "empty";
             if (File.Exists(configuration.StopFile)) return "stopped";
             if (!await Permitted()) return "control-blocked";
             cancellationToken.ThrowIfCancellationRequested();
@@ -83,6 +76,56 @@ public sealed class WakeReconciler(WakeConfiguration configuration, WakeState st
 
         // This read is the watcher's, never the model's, so it must not take an attention offer.
         JsonElement Arguments(int? cursor = null) => JsonSerializer.SerializeToElement(new { repositoryId = route.RepositoryId, boardId = route.BoardId, sessionId = session.SessionId, sessionToken = session.SessionToken, cursor = cursor ?? 0, limit = 50, attention = false });
+
+        // The watcher needs only which messages wait and their wake flags: it reads headers, and asks the first page to answer "unchanged"
+        // when the inbox is the one it covered last time.
+        JsonElement InboxArguments(int cursor, string? knownEtag)
+        {
+            var arguments = System.Text.Json.Nodes.JsonNode.Parse(Arguments(cursor).GetRawText())!.AsObject();
+            arguments["headersOnly"] = true;
+            if (knownEtag is not null) arguments["knownInboxEtag"] = knownEtag;
+            return JsonSerializer.SerializeToElement(arguments);
+        }
+
+        // Every message ID and whether it is quiet (wake=false), or why the inbox could not be covered.
+        async Task<(string? Problem, IReadOnlyList<(string Id, bool Quiet)> Messages)> ReadInboxAsync()
+        {
+            var known = coverage?.Known(key);
+            var ids = new HashSet<string>(StringComparer.Ordinal);
+            var messages = new List<(string Id, bool Quiet)>();
+            string? etag = null;
+            var cursor = 0;
+            int? total = null;
+            for (var page = 0; page < 20; page++)
+            {
+                var reply = await forwarder.ForwardAsync("check_inbox", RelayForwarder.WithOrigin(InboxArguments(cursor, page == 0 ? known?.Etag : null), background: true), cancellationToken);
+                if (!reply.Ok || reply.Data is not { ValueKind: JsonValueKind.Object } data) return ("inbox-unavailable", []);
+                if (page == 0 && known is { } remembered && data.TryGetProperty("unchanged", out var unchanged) && unchanged.ValueKind == JsonValueKind.True &&
+                    data.TryGetProperty("etag", out var same) && same.ValueKind == JsonValueKind.String && same.GetString() == remembered.Etag) return (null, remembered.Messages);
+                if (!data.TryGetProperty("items", out var items) || items.ValueKind != JsonValueKind.Array || items.GetArrayLength() > 50 ||
+                    !data.TryGetProperty("total", out var count) || !count.TryGetInt32(out var countValue) || countValue < 0 ||
+                    total.HasValue && total != countValue || !data.TryGetProperty("nextCursor", out var next) ||
+                    !data.TryGetProperty("truncated", out var truncated) || truncated.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) return ("invalid-inbox", []);
+                total = countValue;
+                if (page == 0 && data.TryGetProperty("etag", out var tag) && tag.ValueKind == JsonValueKind.String) etag = tag.GetString();
+                foreach (var item in items.EnumerateArray())
+                {
+                    if (item.ValueKind != JsonValueKind.Object || !item.TryGetProperty("messageId", out var id) || id.ValueKind != JsonValueKind.String ||
+                        id.GetString() is not { Length: > 0 and <= 256 } messageId || !ids.Add(messageId) ||
+                        !item.TryGetProperty("repositoryId", out var repo) || repo.GetString() != route.RepositoryId) return ("invalid-inbox", []);
+                    messages.Add((messageId, item.TryGetProperty("wake", out var wake) && wake.ValueKind == JsonValueKind.False));
+                }
+                if (next.ValueKind == JsonValueKind.Null)
+                {
+                    if (truncated.GetBoolean() || ids.Count != total) return ("invalid-inbox", []);
+                    if (etag is not null) coverage?.Remember(key, etag, messages);
+                    return (null, messages);
+                }
+                if (!truncated.GetBoolean() || !next.TryGetInt32(out var offset) || offset != cursor + items.GetArrayLength() || offset <= cursor) return ("invalid-inbox", []);
+                cursor = offset;
+            }
+            return ("coverage-limit", []);
+        }
         async Task<bool> Permitted(bool readAttention = false)
         {
             var arguments = readAttention ? JsonSerializer.SerializeToElement(new { repositoryId = route.RepositoryId, boardId = route.BoardId, sessionId = session.SessionId, sessionToken = session.SessionToken, attentionDetail = true }) : Arguments();

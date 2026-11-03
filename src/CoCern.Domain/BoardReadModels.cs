@@ -38,6 +38,13 @@ public static class BoardReadModels
 
     private static DashboardStanding ProjectStanding(string key, string json)
     {
+        // Split the encoded key before decoding: a slash inside either ID is data, not a separator.
+        var address = key.Split('/');
+        var repositoryId = address.Length == 2 ? Uri.UnescapeDataString(address[0]) : "";
+        var boardId = address.Length == 2 ? Uri.UnescapeDataString(address[1]) : "";
+        if (!ManagementId(repositoryId) || !ManagementId(boardId)
+            || AggregateKinds.BoardKey(repositoryId, boardId) != key)
+            (repositoryId, boardId) = ("", "");
         using var document = JsonDocument.Parse(json, Options);
         var standing = document.RootElement;
         var lines = Values(Property(standing, StandingState.LinesKey)).Select(line => new DashboardStandingLine
@@ -77,11 +84,15 @@ public static class BoardReadModels
             : [];
         return new()
         {
+            RepositoryId = repositoryId, BoardId = boardId,
             Board = DashboardText.Safe(Uri.UnescapeDataString(key)), Revision = Long(Property(standing, StandingState.RevisionKey)),
             RequireResources = Property(Property(standing, StandingState.SettingsKey), StandingSettings.RequireResourcesKey).ValueKind == JsonValueKind.True,
             Lines = lines, Grants = grants, Proposals = proposals, History = history
         };
     }
+
+    private static bool ManagementId(string id) => !string.IsNullOrWhiteSpace(id)
+        && id.Length <= RelayLimits.MaxIdentifierLength && !id.Any(char.IsControl);
 
     /// <summary>A board's orders (trigger, actions, approval, expiry, runs, failures) and its order log, newest first.</summary>
     private static DashboardOrder[] ProjectOrders(string json, out DashboardOrderLogEntry[] log)

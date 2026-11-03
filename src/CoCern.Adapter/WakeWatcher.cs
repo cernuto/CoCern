@@ -30,8 +30,33 @@ public sealed class WakeNudge
     public void Pulse() => Changes.Writer.TryWrite(true);
 }
 
+/// <summary>
+/// Waits after a hint until hints stop for a quiet gap, or until a cap since the wait began, then drops the hints that came meanwhile. A
+/// burst of messages then costs one reconcile pass instead of one per message, and a steady stream still gets a pass at least every cap.
+/// </summary>
+internal static class HintCoalescer
+{
+    public static async Task WaitAsync(ChannelReader<bool> hints, TimeSpan quiet, TimeSpan limit, CancellationToken cancellationToken)
+    {
+        var started = System.Diagnostics.Stopwatch.StartNew();
+        while (limit - started.Elapsed is var left && left > TimeSpan.Zero)
+        {
+            using var gap = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            gap.CancelAfter(left < quiet ? left : quiet);
+            try { await hints.ReadAsync(gap.Token); }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { break; }
+        }
+        while (hints.TryRead(out _)) { }
+    }
+}
+
 public static class WakeWatcher
 {
+    /// <summary>How long hints must stop before a pass runs: a lone message is read about this soon after it arrives.</summary>
+    internal static readonly TimeSpan HintQuiet = TimeSpan.FromMilliseconds(500);
+    /// <summary>The longest a stream of hints can hold a pass back.</summary>
+    internal static readonly TimeSpan HintCoalesceLimit = TimeSpan.FromSeconds(3);
+
     /// <summary>Watches every enrolled route until stopped, queueing one fixed inbox-check prompt per new message batch into its Codex chat.</summary>
     public static Task RunAsync(WakeConfiguration config, CancellationToken cancellationToken) =>
         RunAsync(config, new CodexWakeDispatcher(config.CodexPath, new CodexActivity(CodexActivity.DefaultSessionsRoot), queue: new CodexQueue(CodexQueue.DefaultHome)), exitWhenQueued: false, timeout: null, cancellationToken);
@@ -72,6 +97,7 @@ public static class WakeWatcher
         if (timeout is { } limit) lifetime.CancelAfter(limit);
         var stopMonitor = MonitorStop();
         var lastStatus = new Dictionary<string, string>();
+        var coverage = new InboxCoverage();
         try
         {
             while (!lifetime.IsCancellationRequested && !File.Exists(runtime.StopFile))
@@ -88,7 +114,7 @@ public static class WakeWatcher
                 for (var i = 0; i < current.Length && !File.Exists(runtime.StopFile); i++)
                 {
                     var target = current[i];
-                    var status = await new WakeReconciler(settings, state, forwarder, target.Dispatcher, clock).ReconcileAsync(target.Route, target.Session, lifetime.Token);
+                    var status = await new WakeReconciler(settings, state, forwarder, target.Dispatcher, clock, coverage).ReconcileAsync(target.Route, target.Session, lifetime.Token);
                     var routeKey = WakeState.Key(target.Route.ThreadId);
                     if (!lastStatus.TryGetValue(routeKey, out var previous) || previous != status || status == "queued")
                         Console.Error.WriteLine($"CoCern wake route {i + 1}: {status}.");
@@ -114,8 +140,7 @@ public static class WakeWatcher
                 try
                 {
                     await changed.Reader.ReadAsync(wait.Token);
-                    await Task.Delay(TimeSpan.FromSeconds(1), lifetime.Token);
-                    while (changed.Reader.TryRead(out _)) { }
+                    await HintCoalescer.WaitAsync(changed.Reader, HintQuiet, HintCoalesceLimit, lifetime.Token);
                 }
                 catch (OperationCanceledException) when (!lifetime.IsCancellationRequested) { }
             }

@@ -171,7 +171,7 @@ public sealed class HubNetworkTests : IDisposable
     }
 
     [Fact]
-    public void A_certificate_made_at_the_content_root_moves_beside_the_database_and_keeps_its_fingerprint()
+    public void A_certificate_made_at_the_content_root_is_copied_beside_the_database_and_keeps_its_fingerprint()
     {
         var content = Path.Combine(root, "src", "CoCern.Host");
         var earlier = Path.Combine(content, "data", HubNetwork.CertificateFile);
@@ -180,9 +180,9 @@ public sealed class HubNetworkTests : IDisposable
 
         var path = HubNetwork.CertificatePath(Settings("../../data/relay.db"), new HubEnvironment(content));
         Assert.Equal(Path.Combine(root, "data", HubNetwork.CertificateFile), path);
-        Assert.False(File.Exists(earlier));
-        using var moved = HubCertificate.LoadOrCreate(path, "ignored-because-reused");
-        Assert.Equal(fingerprint, CertificateFingerprint.Of(moved));
+        Assert.True(File.Exists(earlier));
+        using var copied = HubCertificate.LoadOrCreate(path, "ignored-because-reused");
+        Assert.Equal(fingerprint, CertificateFingerprint.Of(copied));
         if (!OperatingSystem.IsWindows()) Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(path));
         Assert.Equal([path], Directory.GetFiles(Path.GetDirectoryName(path)!));
         // Started the other way, from the repository with the same database, the hub finds the same certificate.
@@ -226,6 +226,50 @@ public sealed class HubNetworkTests : IDisposable
         using var loopback = new HttpClient();
         Assert.Equal(HttpStatusCode.OK, (await loopback.GetAsync($"http://127.0.0.1:{httpPort}/health")).StatusCode);
         Assert.False(File.Exists(CertificatePath));
+    }
+
+    [Fact]
+    public async Task A_second_hub_with_a_custom_database_retains_the_original_certificate_across_stops_and_restarts()
+    {
+        var originalPath = Path.Combine(root, "data", HubNetwork.CertificateFile);
+        byte[] originalBytes;
+        string fingerprint;
+        using (var original = HubCertificate.LoadOrCreate(originalPath, "main-hub"))
+        {
+            fingerprint = CertificateFingerprint.Of(original);
+            originalBytes = File.ReadAllBytes(originalPath);
+            // StartAsync uses a custom database beside the content root, separate from the main hub's data folder.
+            for (var start = 0; start < 2; start++)
+            {
+                await using var app = await StartAsync(FreePort(), FreePort(), enabled: false, configureCertificate: false);
+                var destination = Path.Combine(root, HubNetwork.CertificateFile);
+                Assert.True(File.Exists(originalPath));
+                Assert.Equal(originalBytes, File.ReadAllBytes(originalPath));
+                using var copied = HubCertificate.LoadOrCreate(destination, "ignored-because-reused");
+                Assert.Equal(fingerprint, CertificateFingerprint.Of(copied));
+                Assert.True(copied.HasPrivateKey);
+                using var local = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(root, LocalHubRecord.FileName)));
+                Assert.Equal(fingerprint, local.RootElement.GetProperty("fingerprint").GetString());
+                if (OperatingSystem.IsWindows())
+                {
+                    var security = new FileInfo(destination).GetAccessControl();
+                    Assert.True(security.AreAccessRulesProtected);
+                    var rule = Assert.Single(security.GetAccessRules(true, true, typeof(SecurityIdentifier)).Cast<FileSystemAccessRule>());
+                    Assert.Equal(WindowsIdentity.GetCurrent().User!, rule.IdentityReference);
+                    Assert.Equal(AccessControlType.Allow, rule.AccessControlType);
+                    Assert.Equal(FileSystemRights.FullControl, rule.FileSystemRights);
+                    Assert.False(rule.IsInherited);
+                }
+                else Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(destination));
+                await app.StopAsync();
+            }
+        }
+        var mainPath = HubNetwork.CertificatePath(Settings(null), new HubEnvironment(root));
+        Assert.Equal(originalPath, mainPath);
+        using var restartedMain = HubCertificate.LoadOrCreate(mainPath, "main-hub");
+        Assert.Equal(fingerprint, CertificateFingerprint.Of(restartedMain));
+        Assert.True(restartedMain.HasPrivateKey);
+        Assert.Equal(originalBytes, File.ReadAllBytes(mainPath));
     }
 
     private async Task<WebApplication> StartAsync(int httpPort, int httpsPort, bool enabled, int? localPort = null, Action<HttpsConnectionAdapterOptions>? configureHttps = null, bool configureCertificate = true)

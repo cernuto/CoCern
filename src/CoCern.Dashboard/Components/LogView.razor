@@ -2,23 +2,31 @@
     <div class="section-heading"><div><h2 id="logs-heading">@(Compact ? "Recent log" : "Log")</h2></div>
         @if (!Compact)
         {
-            <label class="log-filter"><span class="visually-hidden">Level</span><select @bind="_level"><option value="">All levels</option><option>Error</option><option>Warning</option><option>Information</option><option>Debug</option></select></label>
+            <div class="analytics-filters">
+                <label style="min-width:0">Search logs<input type="search" style="min-width:0;width:100%;max-width:100%" @bind="_search" @bind:event="oninput" placeholder="Tool, repository, session or message" /></label>
+                <label class="log-filter">Level<select @bind="_level"><option value="">All levels</option><option value="problems">Warning and above</option><option>Error</option><option>Critical</option><option>Fatal</option><option>Warning</option><option>Information</option><option>Debug</option><option>Verbose</option><option>Trace</option></select></label>
+                <label><input type="checkbox" @bind="_hideRoutine" /> Hide routine successful HTTP completions</label>
+            </div>
         }
     </div>
     <ol class="log-entries @(Compact ? "compact-logs" : "")">
         @foreach (var entry in VisibleEntries)
         {
-            <li class="log-entry" @key="entry.Sequence"><time title="@DashboardFormat.Timestamp(entry.Timestamp)">@entry.Timestamp.ToLocalTime().ToString("HH:mm:ss")</time><span class="log-level @LevelClass(entry.Level)">@entry.Level</span><div><p>@entry.Message</p><small>@entry.Category</small></div></li>
+            <li class="log-entry" @key="entry.Sequence"><time title="@DashboardFormat.Timestamp(entry.Timestamp)">@entry.Timestamp.ToLocalTime().ToString("HH:mm:ss")</time><span class="log-level @LevelClass(entry.Level)">@entry.Level</span><div><p>@entry.Message</p><small>@entry.Category @if (entry.SessionId is { Length: > 0 } session) { <span> · Session @session</span> }</small></div></li>
         }
     </ol>
-    @if (!VisibleEntries.Any()) { <p class="empty-copy">No recent events@(string.IsNullOrEmpty(_level) ? "" : " at this level").</p> }
-    @if (!Compact) { <p class="table-footnote">Recent events only, in your local time.</p> }
+    @if (!VisibleEntries.Any()) { <p class="empty-copy" role="status">@(Entries.Length == 0 ? "No recent events were returned." : Compact ? "No recent events after hiding routine successful HTTP completions." : "No events match the current filters. Clear search, choose All levels or include routine HTTP completions.")</p> }
+    @if (Compact) { <p class="table-footnote">Routine successful HTTP completions hidden. <a href="logs">Search and filter all recent logs</a></p> }
+    @if (!Compact) { <p class="table-footnote" role="status">Showing @VisibleEntries.Count() of @MatchingEntries.Count() matching events (@Entries.Length returned), newest first, up to 200. Recent events only, in your local time. Search checks category, message and session ID; tool/repository names are searchable only when present in that text. Generic HTTP events have no tool or repository correlation.</p> }
 </section>
 
 @code {
     [Parameter] public DashboardLogEntry[] Entries { get; set; } = [];
     [Parameter] public bool Compact { get; set; }
     private string _level = "";
-    private IEnumerable<DashboardLogEntry> VisibleEntries => Entries.Where(entry => string.IsNullOrEmpty(_level) || entry.Level.Equals(_level, StringComparison.OrdinalIgnoreCase)).OrderByDescending(entry => entry.Sequence).Take(Compact ? 4 : 200);
+    private string _search = "";
+    private bool _hideRoutine = true;
+    private IEnumerable<DashboardLogEntry> MatchingEntries => Entries.Where(entry => DashboardUsefulness.MatchesLog(entry.Level, entry.Category, entry.Message, entry.SessionId, _level, _search, _hideRoutine));
+    private IEnumerable<DashboardLogEntry> VisibleEntries => MatchingEntries.OrderByDescending(entry => entry.Sequence).Take(Compact ? 4 : 200);
     private static string LevelClass(string level) => level.ToLowerInvariant() switch { "critical" or "error" => "error", "warning" => "warning", _ => "information" };
 }

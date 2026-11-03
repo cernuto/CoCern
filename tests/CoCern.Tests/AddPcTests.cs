@@ -317,6 +317,9 @@ public sealed class AddPcTests : IDisposable
             "preference kept: $($ErrorActionPreference -eq $preference)"
             """);
         var start = new ProcessStartInfo(shell) { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true };
+        // Let each shell discover its own modules. A test host launched by PowerShell 7 can
+        // otherwise make Windows PowerShell load incompatible versions of its built-in modules.
+        start.Environment.Remove("PSModulePath");
         foreach (var argument in new[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script, "-CommandFile", commandFile, "-Local", local, "-Temp", temp, "-SetupFile", setupFile, "-Fail", fail })
             start.ArgumentList.Add(argument);
         using var process = Process.Start(start)!;

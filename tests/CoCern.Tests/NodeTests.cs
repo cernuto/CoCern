@@ -1311,7 +1311,33 @@ public sealed class NodeTests : IDisposable
         if (!response.IsSuccessStatusCode) return [];
         var body = await response.Content.ReadFromJsonAsync<JsonElement>();
         using var data = JsonDocument.Parse(body.GetProperty("dataJson").GetString()!);
-        return data.RootElement.GetProperty("items").EnumerateArray().Select(x => x.GetProperty("machineName").GetString()!).ToArray();
+        return DirectoryMachineNames(data.RootElement);
+    }
+
+    private static string[] DirectoryMachineNames(JsonElement directory) => directory.GetProperty("items").EnumerateArray()
+        .Where(x => x.TryGetProperty("machineName", out var name) && name.ValueKind == JsonValueKind.String)
+        .Select(x => x.GetProperty("machineName").GetString()!).ToArray();
+
+    [Fact]
+    public void Directory_names_wait_for_announcement_among_registered_rows()
+    {
+        using var registered = JsonDocument.Parse("""
+            {"items":[
+                {"repositoryId":"repo","relaySessionId":"registered","label":"Node PC","reachable":false},
+                {"repositoryId":"repo","relaySessionId":"pending","label":"Node PC","machineId":"node","reachable":false}
+            ]}
+            """);
+        Assert.Empty(DirectoryMachineNames(registered.RootElement));
+
+        using var mixed = JsonDocument.Parse("""
+            {"items":[
+                {"repositoryId":"repo","relaySessionId":"registered","label":"Node PC","reachable":false},
+                {"repositoryId":"repo","relaySessionId":"other","machineName":"Other PC","reachable":true},
+                {"repositoryId":"repo","relaySessionId":"announced","machineId":"node","machineName":"Node PC","reachable":true},
+                {"repositoryId":"repo","relaySessionId":"pending","label":"Node PC","machineId":"pending-node","reachable":false}
+            ]}
+            """);
+        Assert.Equal(["Other PC", "Node PC"], DirectoryMachineNames(mixed.RootElement));
     }
 
     private static void AssertPrivate(string path)

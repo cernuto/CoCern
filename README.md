@@ -14,10 +14,10 @@ This page is everything you need to set up and use CoCern. Technical details, ev
 - **Messages between chats.** On this PC or another one. A chat can be woken when something needs it.
 - **Next-work offers.** When a chat finishes a task, the hub offers it the next ready one.
 - **Attention.** One short "look at this" per reply. Only urgent items interrupt a chat.
-- **Standing rules.** A board's settled rules and permissions, given to every chat that opens.
+- **Standing rules.** A board's approved instructions and active grants, delivered at session open and again only when the revision changes. Pending proposals deliver nothing; approve or dismiss them on the dashboard.
 - **Search.** Tasks, notes and messages, by keyword (SQLite full-text search).
 - **Document cache.** Your repositories' docs (Markdown, text, OpenAPI), searchable by section: configured ones, every git repository under the folders you list as roots, and the repository each chat works in when it is under one of those roots. Each repository's docs are one Lucene.Net index, kept in memory by an Orleans grain: built at the first search, ranked with BM25, patched by each sync, and dropped after 30 idle minutes. Reading a section loads only that file. Synced from git commits, never your working tree.
-- **DuckDB analytics.** Every hour the hub snapshots the board and activity into DuckDB. Ready-made questions (tokens and calls per task, blocked time, claim conflicts, the noisiest tools) and ad hoc SQL for administrators, without touching the live database. Noisiest tools separates reported model-facing calls from background readers; older unmarked calls stay unknown. Managers get an alert when a measure doubles.
+- **DuckDB analytics.** Every hour the hub snapshots the board and activity into DuckDB. Ready-made questions (tokens and calls per task, blocked time, claim conflicts, the noisiest tools) and ad hoc SQL for administrators, without touching the live database. Twelve public reports include measured MCP request/reply token estimates (not model billing) and reported usage coverage. Noisiest tools separates reported model-facing calls from background readers; older unmarked calls stay unknown. Managers get an alert when a measure doubles.
 - **Live dashboard.** Sessions, requests, logs and rules in the browser, plus one-click setup.
 
 ## Faster, with fewer tokens
@@ -95,7 +95,7 @@ Claims are advisory: they keep cooperating agents apart, but can't stop anyone. 
 
 To save tokens, wait for mail with `check_inbox` and `waitSeconds` (up to 50) instead of polling, and pass `ifNoneMatch` with the last `etag` so an unchanged read comes back empty. More in the [Reference](docs/reference.md#calls).
 
-**Administrators** can also set the board's standing rules, add "when this happens, do that" orders, run analytics and pause work. Chats get these tools when **Administrator tools** is ticked on the Connect page as you connect their app; it is off by default, so leave it off unless you trust every chat in that app. See the [Reference](docs/reference.md#tools).
+**Administrators** can also set the board's standing rules, add "when this happens, do that" orders, run analytics and pause work. Chats get these tools when **Administrator tools** is ticked on the Connect page as you connect their app; it is off by default, so leave it off unless you trust every chat in that app. For worker tools plus analytics without administrator mutation tools, set `COCERN_PROFILE=diagnostics`; analytics still requires an administrator credential role. Default and `chat` profiles are unchanged. See the [Reference](docs/reference.md#tools).
 
 ## Wake-ups
 
@@ -121,14 +121,16 @@ Open it with the sign-in link the hub prints. The link works once, only on the h
 | --- | --- |
 | Overview | Machines and sessions, live traffic and recent logs. |
 | Sessions | Each session in detail. **Close idle sessions** clears out finished chats (idle sessions also close on their own after a day, unless they have unread messages; closing by label skips chats working right now), and **Close session** closes one, optionally forcing it past unresolved actions. |
-| Analytics | Ten reports for one repository from the hourly snapshot, this period against the one before (1–14 days). |
+| Analytics | Twelve reports for one repository from the hourly snapshot, this period against the one before (1–14 days), with Top 10 / Show all and an origin filter. |
 | Database | Table sizes. |
-| Logs | Recent hub events. |
-| Standing | Each board's rules, grants and orders, and token use. |
+| Logs | Recent hub events, with level and text search filters and a filter for successful routine HTTP requests. |
+| Standing | Each board's instructions, grants, proposals and orders, token use, and Approve / Dismiss / Remove controls for the exact board. |
 | Documents | Each repository's documents, with their search and read counts. |
 | Connect | Add CoCern to apps here and on other PCs. |
 
-It never opens sessions or reads anyone's messages.
+It never opens sessions or reads anyone's messages. Standing proposals never expire from age or session closure; dismiss obsolete proposals manually. Without approved instructions or active grants, nothing is delivered to chats. Expired grants remain visible but inactive, and a grant's scoped authority never overrides client permissions.
+
+Analytics uses a cached hourly snapshot, not realtime data; its timestamp records snapshot completion. Conditional HTTP reads reuse cached data only for the exact repository and day selection. Retained workflow history can be incomplete, and unknown durations are excluded rather than treated as zero. See the [analytics reference](docs/reference.md#analytics) for batch reads and usage coverage.
 
 ## Settings
 

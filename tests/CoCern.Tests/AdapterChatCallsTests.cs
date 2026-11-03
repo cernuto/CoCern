@@ -159,8 +159,9 @@ public sealed class AdapterChatCallsTests : IDisposable
     [Fact]
     public void Git_is_found_only_in_absolute_path_folders()
     {
-        var a = Path.Combine(root, "a");
-        var b = Path.Combine(root, "b");
+        // A synthetic UNC root is fully qualified on both platforms, without a drive colon in the Unix PATH.
+        var a = Path.Combine("//server/share", "a");
+        var b = Path.Combine("//server/share", "b");
         var programs = new HashSet<string>(StringComparer.Ordinal) { Path.Combine(b, "git"), Path.Combine("repo", "git"), Path.Combine(".", "git") };
         var path = string.Join(':', ".", "", "repo", a, b);
         Assert.Equal(Path.Combine(b, "git"), ExecutableSearch.Find("git", path, null, windows: false, programs.Contains));

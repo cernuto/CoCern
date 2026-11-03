@@ -28,7 +28,7 @@ internal static class ToolSchemas
             RelayTools.StandingPut => ["lines", "grants", "remove", "approve", "settings"],
             RelayTools.Search => ["kinds"],
             RelayTools.AttentionRespond => ["until"],
-            RelayTools.AnalyticsQuery => ["params", "sql"],
+            RelayTools.AnalyticsQuery => ["params", "sql", "reports", "ifNoneMatch", "includeDetails"],
             RelayTools.OrderPut => ["expiresAt", "expectedRevision"],
             RelayTools.DocSearch => ["spec", "path"],
             RelayTools.DocSync => ["branch"],
@@ -73,9 +73,12 @@ internal static class ToolSchemas
         if (tool.Name == RelayTools.AnalyticsQuery)
         {
             properties.Remove("requestId"); properties.Remove("sessionId"); properties.Remove("sessionToken");
-            properties["name"] = new { type = "string", @enum = AnalyticsQueryNames.All.Append(AnalyticsQueryNames.AdHocSql).ToArray() };
+            properties["name"] = new { type = "string", @enum = AnalyticsQueryNames.All.Append(AnalyticsQueryNames.AdHocSql).Append("batch").ToArray() };
             properties["params"] = new { type = "object", description = "Optional {days}." };
             properties["sql"] = new { type = "string", description = "SELECT, with name sql." };
+            properties["reports"] = new { type = "array", items = new { type = "string" }, description = "Batch names; default first row." };
+            properties["ifNoneMatch"] = new { type = "string", description = "Prior batch etag." };
+            properties["includeDetails"] = new { type = "boolean", description = "All batch rows." };
         }
         // Orders are advertised by shape with the trigger and action names; InputSchema gives the limits. The administrator token is the
         // authority, so the forwarding copy leaves out the session handle.
@@ -211,7 +214,10 @@ internal static class ToolSchemas
                 properties["action"] = new { type = "string", @enum = AttentionActions.All, description = "later hides the item for a few replies, or until a time; accept and dismiss close it." };
                 properties["until"] = new { type = "string", format = "date-time", description = "Optional future time when a later item returns." }; break;
             case RelayTools.AnalyticsQuery:
-                properties["name"] = new { type = "string", @enum = AnalyticsQueryNames.All.Append(AnalyticsQueryNames.AdHocSql).ToArray(), description = "A named query, or sql to run the sql field." };
+                properties["reports"] = new { type = "array", minItems = 1, maxItems = AnalyticsQueryNames.All.Count, uniqueItems = true, items = new { type = "string", @enum = AnalyticsQueryNames.All.ToArray() }, description = "Required with name batch; public reports only." };
+                properties["ifNoneMatch"] = new { type = "string", minLength = 1, maxLength = 128, description = "Batch etag from the previous identical selection." };
+                properties["includeDetails"] = new { type = "boolean", description = "Batch: include all bounded rows instead of the first row summary." };
+                properties["name"] = new { type = "string", @enum = AnalyticsQueryNames.All.Append(AnalyticsQueryNames.AdHocSql).Append("batch").ToArray(), description = "A public query, batch with reports, or sql with the sql field." };
                 properties["params"] = new { type = "object", properties = new { days = new { type = "integer", minimum = 1, maximum = RelayLimits.MaxAnalyticsPeriodDays, description = $"Days per compared period; default {RelayLimits.DefaultAnalyticsPeriodDays}." } }, additionalProperties = false, description = "Named query parameters." };
                 properties["sql"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxAnalyticsSqlLength, description = "One SELECT over the analytics views; only with name sql, and only when the hub allows ad hoc SQL." }; break;
             case RelayTools.OrderPut:

@@ -98,6 +98,9 @@ public sealed record DashboardTokens
 
 public sealed record DashboardStanding
 {
+    /// <summary>Exact mutation identity, independent of the sanitized Board display label. Empty for an invalid grain key.</summary>
+    public string RepositoryId { get; init; } = "";
+    public string BoardId { get; init; } = "";
     public string Board { get; init; } = "";
     public long Revision { get; init; }
     public bool RequireResources { get; init; }

@@ -12,6 +12,8 @@ namespace CoCern.Analytics;
 public static class NamedQueries
 {
     public const string TokensPerTask = AnalyticsQueryNames.TokensPerTask;
+    public const string RelayTokens = AnalyticsQueryNames.RelayTokens;
+    public const string UsageCoverage = AnalyticsQueryNames.UsageCoverage;
     public const string CallsPerTask = AnalyticsQueryNames.CallsPerTask;
     public const string MessagesPerTask = AnalyticsQueryNames.MessagesPerTask;
     public const string ContextByRole = AnalyticsQueryNames.ContextByRole;
@@ -26,6 +28,28 @@ public static class NamedQueries
     public static readonly IReadOnlyList<string> Columns = ["key", "cur", "prev", "cur_n", "prev_n"];
 
     private const string Window = "repository_id = $repository AND at_ticks >= $prev AND at_ticks < $now";
+
+    // Canonical successful identity/time across all retained raw history, BEFORE either comparison boundary. An original call
+    // without usage still fixes the report time of its retry. Missing request IDs are separate from literal numeric IDs.
+    private const string UsageReports = """
+        canonical_reports AS (
+            SELECT board_id, task_id, min(at_ticks) AS at_ticks,
+                   max(coalesce(input_tokens, 0) + coalesce(output_tokens, 0))
+                       FILTER (WHERE input_tokens IS NOT NULL OR output_tokens IS NOT NULL) AS tokens
+            FROM tool_calls
+            WHERE repository_id = $repository AND at_ticks < $now AND ok AND task_id IS NOT NULL
+            GROUP BY board_id, task_id, session_id, tool, request_id IS NULL, coalesce(request_id, CAST(id AS VARCHAR))),
+        reports AS (
+            SELECT *, at_ticks >= $from AS in_cur FROM canonical_reports WHERE at_ticks >= $prev AND tokens IS NOT NULL)
+        """;
+
+    private const string HistoryCoverage = """
+        coverage AS (
+            SELECT coalesce(bool_or(history_incomplete), false) AS incomplete,
+                   coalesce(bool_or(has_current_board), false) AS has_current_board,
+                   coalesce(max(current_blocked_tasks), 0) AS current_blocked_tasks
+            FROM workflow_history_coverage WHERE repository_id = $repository)
+        """;
 
     /// <summary>One summary row named 'all': the average of <c>v</c> per period over <c>source(in_cur, v)</c>.</summary>
     private static string Average(string source) => $"""
@@ -45,15 +69,33 @@ public static class NamedQueries
 
     private static readonly FrozenDictionary<string, string> Queries = new Dictionary<string, string>
     {
-        // Reported tokens per task with any report. An exact retry (same session, tool and requestId) counts once.
+        // Self-reported model usage, distinct from relay tokens; deduplication is bounded by retained raw history.
         [TokensPerTask] = $"""
-            WITH reports AS (
-                SELECT min(at_ticks) >= $from AS in_cur, board_id, task_id, max(coalesce(input_tokens, 0) + coalesce(output_tokens, 0)) AS tokens
-                FROM tool_calls
-                WHERE {Window} AND ok AND task_id IS NOT NULL AND (input_tokens IS NOT NULL OR output_tokens IS NOT NULL)
-                GROUP BY board_id, task_id, session_id, tool, coalesce(request_id, CAST(id AS VARCHAR))),
+            WITH {UsageReports},
             per_task AS (SELECT in_cur, sum(tokens) AS v FROM reports GROUP BY in_cur, board_id, task_id)
             {Average("per_task")}
+            """,
+        // Actual relay traffic includes retries and failures. A total requires BOTH hub token estimates; partial/unknown calls
+        // contribute neither totals nor samples. Raw retention only; daily byte totals cannot recover token measurements.
+        [RelayTokens] = $"""
+            SELECT CASE WHEN background_call THEN 'background' WHEN NOT background_call THEN 'model-facing' ELSE 'unknown' END AS key,
+                   (sum(relay_tokens) FILTER (WHERE at_ticks >= $from))::BIGINT AS cur, (sum(relay_tokens) FILTER (WHERE at_ticks < $from))::BIGINT AS prev,
+                   count(*) FILTER (WHERE at_ticks >= $from) AS cur_n, count(*) FILTER (WHERE at_ticks < $from) AS prev_n
+            FROM tool_calls WHERE {Window} AND request_tokens IS NOT NULL AND reply_tokens IS NOT NULL
+            GROUP BY background_call ORDER BY coalesce(cur, 0) DESC, key
+            """,
+        // Percent of tasks touched by any call that have successful reported model usage in that period. Samples are the
+        // eligible touched tasks, not token counts; reported zero is measured and an empty denominator stays unknown.
+        [UsageCoverage] = $"""
+            WITH {UsageReports},
+            touched AS (SELECT DISTINCT at_ticks >= $from AS in_cur, board_id, task_id FROM tool_calls WHERE {Window} AND task_id IS NOT NULL),
+            reported AS (SELECT DISTINCT in_cur, board_id, task_id FROM reports),
+            measured AS (SELECT t.in_cur, r.task_id IS NOT NULL AS has_usage FROM touched t LEFT JOIN reported r USING (in_cur, board_id, task_id))
+            SELECT 'all' AS key,
+                   100.0 * count(*) FILTER (WHERE in_cur AND has_usage) / nullif(count(*) FILTER (WHERE in_cur), 0) AS cur,
+                   100.0 * count(*) FILTER (WHERE NOT in_cur AND has_usage) / nullif(count(*) FILTER (WHERE NOT in_cur), 0) AS prev,
+                   count(*) FILTER (WHERE in_cur) AS cur_n, count(*) FILTER (WHERE NOT in_cur) AS prev_n
+            FROM measured
             """,
         // Tool calls naming a task, per task touched.
         [CallsPerTask] = $"""
@@ -83,21 +125,24 @@ public static class NamedQueries
             FROM per_session GROUP BY role ORDER BY coalesce(cur, 0) DESC, key
             """,
         // 'all': hours a task stayed blocked, for spells that ended in the period; spells still open are left out.
-        // 'open': blocked spells still open at the end of each period ($now and $from).
+        // 'open': current snapshot board count when available, otherwise retained-history count only when complete. Previous
+        // count is unknown after history loss. workflow_history_coverage exposes why durations/counts may be incomplete.
         [BlockedTime] = $"""
-            WITH {WorkflowStates},
+            WITH {WorkflowStates}, {HistoryCoverage},
             changes AS (
-                SELECT workflow_state, at_ticks, lead(at_ticks) OVER (PARTITION BY board_id, task_id ORDER BY at_ticks, id) AS ended
+                SELECT workflow_state, before, at_ticks, lead(at_ticks) OVER (PARTITION BY board_id, task_id ORDER BY at_ticks, id) AS ended
                 FROM states WHERE before IS DISTINCT FROM workflow_state),
             spells AS (
                 SELECT ended >= $from AS in_cur, (ended - at_ticks) / 36000000000.0 AS v FROM changes
-                WHERE workflow_state = 'blocked' AND ended >= $prev),
-            blocked AS (SELECT at_ticks, ended FROM changes WHERE workflow_state = 'blocked')
+                WHERE workflow_state = 'blocked' AND ended >= $prev AND (before IS NOT NULL OR NOT (SELECT incomplete FROM coverage))),
+            blocked AS (SELECT at_ticks, ended FROM changes WHERE workflow_state = 'blocked'),
+            open_counts AS (
+                SELECT CASE WHEN has_current_board THEN current_blocked_tasks WHEN NOT incomplete THEN (SELECT count(*) FROM blocked WHERE ended IS NULL) END AS cur,
+                       CASE WHEN NOT incomplete THEN (SELECT count(*) FROM blocked WHERE at_ticks < $from AND (ended IS NULL OR ended >= $from)) END AS prev
+                FROM coverage)
             {Average("spells")}
             UNION ALL
-            SELECT 'open', count(*) FILTER (WHERE ended IS NULL), count(*) FILTER (WHERE at_ticks < $from AND (ended IS NULL OR ended >= $from)),
-                   count(*) FILTER (WHERE ended IS NULL), count(*) FILTER (WHERE at_ticks < $from AND (ended IS NULL OR ended >= $from))
-            FROM blocked
+            SELECT 'open', cur, prev, coalesce(cur, 0), coalesce(prev, 0) FROM open_counts
             """,
         // Refused claims per resource (see the claim_conflicts view).
         [ClaimConflictsByResource] = $"""
@@ -115,18 +160,20 @@ public static class NamedQueries
         // Minutes from a task's workflow becoming ready to its first claim, for claims in the period: a proxy for how long ready work
         // waits for an owner, since the hub records no assignment.
         [ManagerAssignmentLatency] = $"""
-            WITH events AS (
-                SELECT board_id, task_id, id, at_ticks, CASE WHEN tool = 'task_claim' THEN 'claim' ELSE workflow_state END AS ev
+            WITH {HistoryCoverage}, events AS (
+                SELECT board_id, task_id, id, at_ticks, workflow_state, CASE WHEN tool = 'task_claim' THEN 'claim' ELSE workflow_state END AS ev
                 FROM tool_calls
                 WHERE repository_id = $repository AND ok AND task_id IS NOT NULL AND at_ticks < $now
                   AND (tool = 'task_claim' OR (tool = 'task_update' AND workflow_state IS NOT NULL))),
-            ordered AS (SELECT *, lag(ev) OVER (PARTITION BY board_id, task_id ORDER BY at_ticks, id) AS before FROM events),
+            ordered AS (SELECT *, lag(ev) OVER w AS before, lag(workflow_state IGNORE NULLS) OVER w AS before_state
+                FROM events WINDOW w AS (PARTITION BY board_id, task_id ORDER BY at_ticks, id)),
             changes AS (
-                SELECT ev, at_ticks, lead(ev) OVER w AS next_ev, lead(at_ticks) OVER w AS next_at
+                SELECT ev, at_ticks, before_state, lead(ev) OVER w AS next_ev, lead(at_ticks) OVER w AS next_at
                 FROM ordered WHERE before IS DISTINCT FROM ev WINDOW w AS (PARTITION BY board_id, task_id ORDER BY at_ticks, id)),
             waits AS (
                 SELECT next_at >= $from AS in_cur, (next_at - at_ticks) / 600000000.0 AS v FROM changes
-                WHERE ev = 'ready' AND next_ev = 'claim' AND next_at >= $prev)
+                WHERE ev = 'ready' AND next_ev = 'claim' AND next_at >= $prev
+                    AND (before_state IS NOT NULL OR NOT (SELECT incomplete FROM coverage)))
             {Average("waits")}
             """,
         // Counts: closures, reopened tasks (completed, then ready or blocked again), failed actions and actions a recovery abandoned

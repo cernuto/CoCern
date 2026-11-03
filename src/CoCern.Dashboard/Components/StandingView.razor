@@ -1,12 +1,18 @@
+@inject HttpClient StandingHttp
+
 <section class="surface sql-view standing-view" aria-labelledby="standing-heading">
     <h2 id="standing-heading" class="visually-hidden">Standing by board</h2>
-    @if (Boards.Length == 0) { <p class="standing-empty">No board has standing yet.</p> }
+    <p class="standing-section-copy">Pending proposals remain inactive until approved or dismissed; age and session closure do not clear them. Approved rules are delivered when a chat opens and when their revision changes. Instructions stay until removed. Expired grants no longer authorize work and can be removed explicitly.</p>
+    @if (!string.IsNullOrEmpty(DecisionMessage)) { <p role="status">@DecisionMessage</p> }
+    @if (UnconfirmedDecision is not null) { <button type="button" disabled="@DecisionBusy" @onclick="RetryStandingAsync">Retry decision</button> }
+    @if (Boards.Length == 0) { <p class="standing-empty">No board has Standing yet. Proposals will appear here for review; nothing is approved automatically.</p> }
     @foreach (var board in Boards)
     {
-        <article class="standing-board" @key="board.Board" aria-label="@($"Board {board.Board}")">
+        <article class="standing-board" @key="ManagementKey(board)" aria-label="@($"Board {board.Board}")">
             <header class="standing-board-heading">
                 <h3>@board.Board</h3>
                 <p>Approved instructions and access grants for this board.</p>
+                @if (!CanManage(board)) { <p>Standing management is unavailable: this board has no valid exact repository and board identity.</p> }
             </header>
 
             <section class="standing-pending" aria-label="Awaiting approval">
@@ -26,6 +32,8 @@
                                 <p class="standing-proposal-text">@proposal.Summary</p>
                                 <div class="standing-meta"><span>Proposed by @proposal.ProposedBy</span><time title="@DashboardFormat.Timestamp(proposal.ProposedAt)">@DashboardFormat.Ago(proposal.ProposedAt, Now)</time></div>
                                 <p class="standing-id">Proposal ID: @proposal.Id</p>
+                                <button type="button" disabled='@Unavailable(board, proposal.Id, "proposal")' @onclick='() => DecideStandingAsync(board, proposal.Id, "approve", "proposal")'>Approve</button>
+                                <button type="button" disabled='@Unavailable(board, proposal.Id, "proposal")' @onclick='() => DecideStandingAsync(board, proposal.Id, "remove", "proposal")'>Dismiss</button>
                             </li>
                         }
                     </ul>
@@ -37,7 +45,7 @@
                     <div class="standing-section-heading"><h4>Active instructions</h4><span class="standing-count">@board.Lines.Length</span></div>
                     @if (board.Lines.Length == 0)
                     {
-                        <p class="standing-empty">No instructions have been approved.</p>
+                        <p class="standing-empty">No active instructions.</p>
                     }
                     else
                     {
@@ -48,6 +56,7 @@
                                     <p class="standing-record-text">@line.Text</p>
                                     <div class="standing-meta"><span>Written by @line.Author</span><span title="@DashboardFormat.Timestamp(line.ApprovedAt)">Approved by @line.ApprovedBy, @DashboardFormat.Ago(line.ApprovedAt, Now)</span></div>
                                     <p class="standing-id">Instruction ID: @line.Id</p>
+                                    <button type="button" disabled='@Unavailable(board, line.Id, "line")' @onclick='() => DecideStandingAsync(board, line.Id, "remove", "line")'>Remove</button>
                                 </li>
                             }
                         </ul>
@@ -57,7 +66,7 @@
                     <div class="standing-section-heading"><h4>Access grants</h4><span class="standing-count">@board.Grants.Length</span></div>
                     @if (board.Grants.Length == 0)
                     {
-                        <p class="standing-empty">No access grants have been approved.</p>
+                        <p class="standing-empty">No access grants.</p>
                     }
                     else
                     {
@@ -70,9 +79,12 @@
                                         <div><dt>Targets</dt><dd>@string.Join(", ", grant.Targets)</dd></div>
                                         <div><dt>Expires</dt><dd>@(grant.ExpiresAt <= Now ? "Expired" : DashboardFormat.Timestamp(grant.ExpiresAt))</dd></div>
                                         <div><dt>Granted by</dt><dd>@grant.Grantor</dd></div>
+                                        <div><dt>Age</dt><dd title="@DashboardFormat.Timestamp(grant.GrantedAt)">@DashboardFormat.Ago(grant.GrantedAt, Now)</dd></div>
                                         @if (!string.IsNullOrEmpty(grant.ProposedBy)) { <div><dt>Proposed by</dt><dd>@grant.ProposedBy</dd></div> }
                                     </dl>
                                     <p class="standing-id">Grant ID: @grant.Id</p>
+                                    @if (grant.ExpiresAt <= Now) { <p>Expired — no longer authorizes work. Kept for review until removed.</p> }
+                                    <button type="button" disabled='@Unavailable(board, grant.Id, "grant")' @onclick='() => DecideStandingAsync(board, grant.Id, "remove", "grant")'>Remove</button>
                                 </li>
                             }
                         </ul>
@@ -164,6 +176,57 @@
     [Parameter] public bool Truncated { get; set; }
     [Parameter] public DashboardTokens Tokens { get; set; } = new();
     [Parameter] public DateTimeOffset Now { get; set; }
+
+    private bool DecisionBusy;
+    private string? DecisionMessage;
+    private DashboardStandingDecision? UnconfirmedDecision;
+    private string DecisionKind = "";
+    private readonly HashSet<(string RepositoryId, string BoardId, long Revision, string Id, string Kind)> Decided = new();
+
+    // Display labels are lossy. Never use them as a mutation address or decision key.
+    private static bool ManagementId(string? id) => !string.IsNullOrWhiteSpace(id)
+        && id.Length <= CoCern.Contracts.RelayLimits.MaxIdentifierLength && !id.Any(char.IsControl);
+    private static bool CanManage(DashboardStanding board) => ManagementId(board.RepositoryId) && ManagementId(board.BoardId);
+    private static object ManagementKey(DashboardStanding board) => CanManage(board) ? (board.RepositoryId, board.BoardId) : (object)board;
+    private bool Unavailable(DashboardStanding board, string id, string kind) => DecisionBusy || UnconfirmedDecision is not null || !CanManage(board) || Decided.Contains((board.RepositoryId, board.BoardId, board.Revision, id, kind));
+
+    private async Task DecideStandingAsync(DashboardStanding board, string id, string action, string kind)
+    {
+        if (Unavailable(board, id, kind)) return;
+        DecisionKind = kind;
+        UnconfirmedDecision = new DashboardStandingDecision
+        {
+            RepositoryId = board.RepositoryId, BoardId = board.BoardId, Id = id, Action = action,
+            ExpectedRevision = board.Revision, RequestId = "dashboard-standing-" + Guid.NewGuid().ToString("N")
+        };
+        await RetryStandingAsync();
+    }
+
+    private async Task RetryStandingAsync()
+    {
+        if (DecisionBusy || UnconfirmedDecision is not { } decision) return;
+        DecisionBusy = true;
+        DecisionMessage = "Saving Standing decision…";
+        try
+        {
+            var result = await StandingManagementClient.DecideAsync(StandingHttp, decision);
+            UnconfirmedDecision = null;
+            if (result.Ok)
+            {
+                Decided.Add((decision.RepositoryId, decision.BoardId, decision.ExpectedRevision!.Value, decision.Id, DecisionKind));
+                DecisionMessage = "Decision saved. Waiting for the dashboard snapshot to refresh.";
+            }
+            else
+            {
+                DecisionMessage = $"Decision refused: {result.Code}. Review the latest Standing before trying again.";
+            }
+        }
+        catch (Exception error) when (error is HttpRequestException or System.Text.Json.JsonException or TaskCanceledException)
+        {
+            DecisionMessage = "The decision result could not be confirmed. Retry to check the same request safely.";
+        }
+        finally { DecisionBusy = false; }
+    }
 
     private static string Estimated(int? tokens) => tokens is { } count ? $"≈{count:N0} tokens" : "—";
 }

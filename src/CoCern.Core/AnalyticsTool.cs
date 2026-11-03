@@ -27,6 +27,9 @@ public sealed class AnalyticsTool(IAnalyticsQueries queries, bool allowAdHocSql,
 
     public async Task<RelayReply> RunAsync(RelayCaller caller, JsonObject args, CancellationToken cancellationToken)
     {
+        if (Text(args, "name") == "batch") return await AnalyticsBatch.RunAsync(queries, args, cancellationToken);
+        if (args.ContainsKey("reports") || args.ContainsKey("includeDetails") || args.ContainsKey("ifNoneMatch"))
+            return Error(InvalidArguments, new { field = "name", message = "Report selection and conditional reads require name batch." });
         var name = Text(args, "name");
         AnalyticsResult result;
         try

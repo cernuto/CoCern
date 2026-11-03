@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk.Razor">
+  <PropertyGroup>
+    <IsTestProject>true</IsTestProject>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>CoCern.Dashboard</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <ProjectReference Include="../../src/CoCern.Domain/CoCern.Domain.csproj" />
+    <RazorComponent Include="../../src/CoCern.Dashboard/Components/StandingView.razor" Link="Components/StandingView.razor" />
+    <RazorComponent Include="../../src/CoCern.Dashboard/_Imports.razor" Link="_Imports.razor" />
+    <Compile Include="../../src/CoCern.Dashboard/Services/StandingManagementClient.cs" Link="Services/StandingManagementClient.cs" />
+    <Compile Include="../../src/CoCern.Dashboard/Services/DashboardFormat.cs" Link="Services/DashboardFormat.cs" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio"><PrivateAssets>all</PrivateAssets></PackageReference>
+  </ItemGroup>
+</Project>

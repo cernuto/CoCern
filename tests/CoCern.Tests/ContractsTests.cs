@@ -113,11 +113,11 @@ public sealed class ContractsTests
         var strict = RelayToolCatalog.InputSchema(analytics);
         Assert.Equal(new[] { "repositoryId", "name" }, strict.GetProperty("required").EnumerateArray().Select(x => x.GetString()));
         var properties = strict.GetProperty("properties");
-        Assert.Equal(AnalyticsQueryNames.All.Append(AnalyticsQueryNames.AdHocSql), properties.GetProperty("name").GetProperty("enum").EnumerateArray().Select(x => x.GetString()!));
+        Assert.Equal(AnalyticsQueryNames.All.Append(AnalyticsQueryNames.AdHocSql).Append("batch"), properties.GetProperty("name").GetProperty("enum").EnumerateArray().Select(x => x.GetString()!));
         Assert.Equal(CoCern.Analytics.NamedQueries.Names, AnalyticsQueryNames.All);
         Assert.Equal(RelayLimits.MaxAnalyticsPeriodDays, properties.GetProperty("params").GetProperty("properties").GetProperty("days").GetProperty("maximum").GetInt32());
         Assert.Equal(RelayLimits.MaxAnalyticsSqlLength, properties.GetProperty("sql").GetProperty("maxLength").GetInt32());
-        Assert.Equal(new[] { "name", "params", "repositoryId", "sql" }, RelayToolCatalog.ForwardingSchema(analytics).GetProperty("properties").EnumerateObject().Select(x => x.Name).Order());
+        Assert.Equal(new[] { "ifNoneMatch", "includeDetails", "name", "params", "reports", "repositoryId", "sql" }, RelayToolCatalog.ForwardingSchema(analytics).GetProperty("properties").EnumerateObject().Select(x => x.Name).Order());
         foreach (var code in new[] { RelayErrorCodes.AnalyticsUnavailable, RelayErrorCodes.AnalyticsRefused, RelayErrorCodes.AnalyticsTimeout, RelayErrorCodes.AnalyticsFailed })
             Assert.Equal(RelayErrorKind.Invalid, RelayErrorCodes.Classify(code));
     }

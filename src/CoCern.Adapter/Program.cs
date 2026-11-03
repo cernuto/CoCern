@@ -142,7 +142,7 @@ try
     builder.Services.AddMcpServer(server =>
     {
         server.ServerInstructions = AdapterInstructions.Server;
-    }).WithStdioServerTransport().WithTools(CoordinationTools.Create(forwarder, options.Admin, hints, SessionHandoff.For(options), options.ChatOnly, options.ExportedChat, localWake: localWake));
+    }).WithStdioServerTransport().WithTools(CoordinationTools.Create(forwarder, options.Admin, hints, SessionHandoff.For(options), options.ChatOnly, options.ExportedChat, localWake: localWake, diagnostics: options.Diagnostics));
     using var host = builder.Build();
     _ = localWake?.RunAsync(host.Services.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping);
     await host.RunAsync();

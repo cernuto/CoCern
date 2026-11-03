@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using CoCern.Contracts;
 using CoCern.Domain;
 using static CoCern.Contracts.RelayErrorCodes;
@@ -29,7 +30,8 @@ internal sealed class ToolRouter(Aggregates aggregates, ClaimComposer claims, Se
             RelayTools.ControlRequest when Text(args, "command") == "revoke_machine" => messages.RevokeMachineAsync(caller, args),
             RelayTools.Search => searches.SearchAsync(args, cancellationToken),
             RelayTools.AnalyticsQuery => searches.AnalyticsAsync(caller, args, cancellationToken),
-            RelayTools.SessionBind or RelayTools.CheckInbox or RelayTools.Ack => aggregates.Session(caller, tool, args),
+            RelayTools.CheckInbox => aggregates.Session(caller, tool, InboxArguments(args, call.Controls)),
+            RelayTools.SessionBind or RelayTools.Ack => aggregates.Session(caller, tool, args),
             RelayTools.AttentionRespond => messages.RespondToAttentionAsync(caller, args),
             RelayTools.OrderPut or RelayTools.OrderRemove => status.OrderAsync(caller, tool, args),
             RelayTools.DocSearch => docs.SearchAsync(args),
@@ -40,5 +42,15 @@ internal sealed class ToolRouter(Aggregates aggregates, ClaimComposer claims, Se
             RelayTools.TaskGet => aggregates.ReadTaskAsync(caller, args, cancellationToken),
             _ => aggregates.Board(caller, tool, args)
         };
+    }
+
+    /// <summary>The header-read controls, which the guard took from the call, given back to the session's inbox read as plain arguments.</summary>
+    private static JsonObject InboxArguments(JsonObject args, CallControls controls)
+    {
+        if (!controls.HeadersOnly) return args;
+        var read = (JsonObject)args.DeepClone();
+        read["headersOnly"] = true;
+        if (controls.KnownInboxEtag is { } known) read["knownInboxEtag"] = known;
+        return read;
     }
 }

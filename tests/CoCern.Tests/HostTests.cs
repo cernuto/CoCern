@@ -575,9 +575,10 @@ public class HostTests
     }
 
     [Fact]
-    public async Task Enabled_ad_hoc_sql_stays_read_only_with_the_timeout_row_cap_and_reply_limit()
+    public async Task Enabled_ad_hoc_sql_stays_read_only_with_the_row_cap_and_reply_limit()
     {
-        await using var host = await AnalyticsHost(enabled: true, adHoc: true, timeout: "00:00:01");
+        // Leave time for payload checks even when other test hosts contend for the CPU.
+        await using var host = await AnalyticsHost(enabled: true, adHoc: true, timeout: "00:00:10");
         using var admin = AnalyticsAdmin(host);
         object Sql(string sql) => new { repositoryId = "repo", name = "sql", sql };
 
@@ -600,12 +601,22 @@ public class HostTests
         var fileRead = await Analytics(admin, Sql($"SELECT * FROM read_text('{host.DatabasePath}')"));
         Assert.Equal((HttpStatusCode.BadRequest, "AnalyticsFailed"), (fileRead.Status, fileRead.Code));
         Assert.Contains("disabled", fileRead.Data.GetProperty("message").GetString());
-        Assert.Equal((HttpStatusCode.BadRequest, "AnalyticsTimeout"), await AnalyticsStatus(admin, Sql("SELECT count(*) FROM range(1000000000000) t(a) WHERE a % 7 = 3")));
-
         var large = await Analytics(admin, Sql("SELECT repeat('x', 1000) AS filler FROM range(20)"));
         Assert.Equal((HttpStatusCode.RequestEntityTooLarge, "PayloadTooLarge"), (large.Status, large.Code));
         Assert.Contains("narrower", large.Data.GetProperty("message").GetString());
-        // The interrupted and refused queries left the snapshot usable.
+        // The refused and oversized queries left the snapshot usable.
+        Assert.Equal((HttpStatusCode.OK, "Ok"), await AnalyticsStatus(admin, Sql("SELECT count(*) FROM tool_calls")));
+    }
+
+    [Fact]
+    public async Task Enabled_ad_hoc_sql_timeout_leaves_the_snapshot_usable()
+    {
+        await using var host = await AnalyticsHost(enabled: true, adHoc: true, timeout: "00:00:01");
+        using var admin = AnalyticsAdmin(host);
+        object Sql(string sql) => new { repositoryId = "repo", name = "sql", sql };
+
+        Assert.Equal((HttpStatusCode.BadRequest, "AnalyticsTimeout"), await AnalyticsStatus(admin, Sql("SELECT count(*) FROM range(1000000000000) t(a) WHERE a % 7 = 3")));
+        // Interrupting the expensive query leaves the same snapshot usable.
         Assert.Equal((HttpStatusCode.OK, "Ok"), await AnalyticsStatus(admin, Sql("SELECT count(*) FROM tool_calls")));
     }
 

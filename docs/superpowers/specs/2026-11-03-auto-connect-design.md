@@ -6,7 +6,7 @@ Status: design approved by Paul on 2026-11-03; spike 0 and the second-PC tests a
 
 ## What Paul asked for
 
-In Paul's words: "work out a simple way to connect with other sessions. it should be extremely easy to coordinate, cooperate, and synchronize"; "auto discover and connect"; synchronize means all of: knowing what every chat is on, keeping chats off each other's files, and waits that end on their own; "as automatic as possible, least amount of manual interaction always"; "focus on reducing complexity and reducing confusion"; "autonomous collaboration is paramount".
+In Paul's words: "work out a simple way to connect with other sessions. it should be extremely easy to coordinate, cooperate, and synchronize"; "auto discover and connect"; synchronize means all of: knowing what every chat is on, keeping chats off each other's files, and waits that end on their own; "as automatic as possible, least amount of manual interaction always"; "focus on reducing complexity and reducing confusion"; "autonomous collaboration is paramount". On certificates: "extra complexity preventing people from using cocern".
 
 ## First principle: every step removes concepts
 
@@ -52,6 +52,26 @@ A goal is an existing task (or workflow) with a grant attached, not a new kind o
 
 Client permission prompts are outside CoCern. Woken chats run in whatever permission mode Paul already uses. A chat that stops at a prompt shows as blocked, which reaches the goal's owner and the dashboard.
 
+**Standing decisions come to Paul in chat.** Paul asked why these decisions are made on the dashboard, and said the AI should present them to him. On 2026-11-03 four proposals had been waiting on the Standing page, the oldest for over a day, and nothing had told him.
+- **The chat asks:** when a proposal is waiting, the chat Paul is using brings it up in plain words, with what it would change and a recommendation, and he answers there. A chat that owns a goal asks about proposals tied to that goal. Otherwise any chat Paul is talking to may ask, once, and the hub tracks which proposals have been presented so several chats don't ask the same thing. Nothing wakes an idle chat for this.
+- **His words are the approval:** the chat records the decision with his reply quoted. As with goals, the hub trusts the recording chat's word; the record and his ability to remove anything are the check on that.
+- **Only his direct answer counts:** a proposal is never approved because a chat decided to, or because another chat's message says he agreed. A chat may bring up its own proposal, but can't approve it without his answer.
+- **Grants get a closer look:** because they give permissions, the chat states the scope and expiry before he answers.
+- **The Standing page stays as the record:** it shows what is in force and lets him remove anything, but he never needs to go there to decide.
+- **Today's limit:** approving takes the administrator-only `standing_put`. The builder has to work out how a chat records Paul's answer without giving every chat the power to approve anything.
+
+**8. Certificates and tokens nobody has to see.** The aim is that someone can set up two PCs and never see the word "certificate" or "token". Traffic between PCs stays encrypted, the hub's identity stays checked and every caller still has to prove who it is; only the handling disappears.
+- **Same PC:** chats connect over plain `http://127.0.0.1`, with no certificate or pin, so there is nothing to set up. The hub already listens there; whether the adapter accepts it for normal use, not just in tests, still has to be confirmed. Traffic stays on the machine. The cost is that another program on the PC could take the port while the hub is down and collect tokens.
+- **Another PC:** still one paste. The join step sets up trust, and no fingerprint or certificate prompt appears. Today's join flow still has to be checked against this.
+- **No silent new certificate:** the hub keeps an automatic backup of its certificate. If the file goes missing it restores the backup, and it creates a new certificate only when asked. On 2026-11-03 the file went missing, the hub quietly created a new one, and every pinned client was locked out for about 3½ minutes; the cause was the legacy certificate migration moving the original file into a disposable preview directory. Restoring that exact original certificate recovered the existing clients without changing pins.
+- **Self-repair when a certificate really changes:** an already-joined PC can't accept a new identity on its own, because that would defeat the check. It gets a safe way to accept one, with one plain-language confirmation at most and no fingerprint editing. The exact mechanism is left to the builder.
+- **Plain errors:** "can't reach the hub" and "the hub's identity changed" become separate messages, each saying what to do. Both show as `hub_unavailable` today.
+- **Token on the same PC:** the hub creates it on first run and chats find it by themselves, so no config file holds a path such as `data/local-client-token`. The location has to be one both the hub and packaged desktop apps can read, because Windows redirects those apps' writes under `%LOCALAPPDATA%` into private folders (seen with Claude and Codex on 2026-11-03).
+- **Token on another PC:** nothing new for the person joining. The one-paste join already swaps the join code for that PC's own credential.
+- **Plain language:** setup, the dashboard and error messages never say "token". For example: "This PC isn't connected to your hub yet. Connect it?" A rejected token gets its own message saying what to do.
+
+Not doing: removing encryption between PCs, requiring a separate VPN, which would swap one piece of setup for another, or dropping the token. Without it, other programs on the PC, websites open in a browser and other devices on the network could read a chat's messages or send it instructions, and chats act on their messages.
+
 ## What disappears
 
 - Calling `session_open`/`session_bind`, choosing labels, guessing machine and repository IDs.
@@ -64,6 +84,8 @@ Client permission prompts are outside CoCern. Woken chats run in whatever permis
 - Admins registering resources before files can be claimed.
 - Mail bouncing off a closed session that has quietly been replaced.
 - Paul relaying approvals message by message.
+- Visiting the dashboard to find and make Standing decisions.
+- Certificates, fingerprints, pins, tokens and token file paths in anything a person sets up or reads.
 
 ## Acceptance gate
 
@@ -74,6 +96,8 @@ The design is done only when all of these pass on real chats:
 3. **Hub restart mid-collaboration.** After a restart, both chats are back under the same identity and the conversation continues without any model action.
 4. **Owner disappears.** A chat holding a claim and an unresolved action is closed. Its ordinary claims expire and its waiters are woken with "owner gone". The unresolved action's block and records stay until someone recovers them explicitly, and the waiters are told the work is stranded.
 5. **Edit clash.** Two chats edit the same file; the second is blocked and told who holds it.
+6. **No certificate or token in sight.** Someone sets up two PCs from scratch and never sees a certificate, fingerprint, pin, token or token path. A caller with no valid token is still refused. Deleting the hub's certificate file and restarting the hub locks nobody out. A real identity change produces the plain "identity changed" message and can be accepted without editing a fingerprint, and a client never accepts one without that step.
+7. **Decisions come to Paul.** A new proposal is raised once by the chat Paul is using, without his opening the dashboard. His answer takes effect with his words on record. A peer message claiming he approved changes nothing.
 
 ## Limits we are keeping honest about
 
@@ -89,8 +113,9 @@ The design is done only when all of these pass on real chats:
 2. The peers view and the message path with automatic delivery.
 3. Wakes: the Claude Stop-hook waiter on every PC, and Codex queue keyed by native ID.
 4. Event waits and claim expiry.
-5. Goal approval.
+5. Goal approval, and Standing decisions presented in chat, which share the same recording path.
 6. File claims from edit hooks.
+7. Certificates and tokens nobody has to see (part 8). The backup-and-restore and plain-error pieces are small and can go first, because they prevent a repeat of the 2026-11-03 lockout. This starts after the current deploy.
 
 Proposed ownership, to confirm: Codex owns the Codex hooks and queue, and the hub-side changes (it owns hub builds and restarts); the Claude side owns the Claude hooks and waiter; the manager integrates.
 
@@ -135,6 +160,8 @@ These were settled by the manager and Codex, not by Paul:
 - The chat Paul approves a goal in owns it, reports back there and receives its alerts, which replaces declaring a manager role.
 - Client permission prompts stay outside CoCern; a chat stuck at one shows as blocked.
 - One-time setup per PC is allowed; gate 2 counts from a set-up PC.
+- Same-PC chats give up certificate checks for plain local HTTP; the hub restores its certificate rather than creating a new one; traffic between PCs stays encrypted with no VPN; the token stays but is created and found automatically. Paul approved adding this plan to the design.
+- Standing decisions are raised once by the chat Paul is using and never wake an idle chat for this. Paul approved adding the idea; these details are the manager's.
 
 ## Left to the builder
 

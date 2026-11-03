@@ -1,5 +1,13 @@
 <section class="surface analytics-chart" aria-labelledby="@_headingId">
-    <header><h3 id="@_headingId">@Title</h3><p>@Description</p></header>
+    <header><h3 id="@_headingId">@ReportTitle</h3><p>@ReportDescription</p></header>
+    @if (NoisyTools && Query is { Error: null })
+    {
+        <div class="analytics-filters">
+            <label>Origin<select @bind="_origin"><option value="all">All origins</option><option value="model">Model-facing</option><option value="background">Background</option><option value="unknown">Unknown</option></select></label>
+            <button type="button" class="analytics-refresh" @onclick="() => _showAll = !_showAll" aria-pressed="@_showAll">@(_showAll ? "Show top 10" : "Show all")</button>
+        </div>
+        <p class="table-footnote" role="status">Showing @DisplayRows.Length of @FilteredRows.Length matching tool/origin rows (@Query.Rows.Length returned). Ranked by current reply bytes. Totals across matching returned rows: @AnalyticsPresentation.Number(FilteredRows.Sum(row => row.Current ?? 0), "bytes") / @FilteredRows.Sum(row => row.CurrentCount) calls current; @AnalyticsPresentation.Number(FilteredRows.Sum(row => row.Previous ?? 0), "bytes") / @FilteredRows.Sum(row => row.PreviousCount) calls previous. These are returned-sample totals, not complete traffic coverage or model token use.</p>
+    }
     @if (Query is null)
     {
         <p class="analytics-empty">This report was not returned. Try refreshing analytics.</p>
@@ -11,6 +19,10 @@
     else if (Query.Rows.Length == 0)
     {
         <p class="analytics-empty">No recorded samples for these periods.</p>
+    }
+    else if (NoisyTools && FilteredRows.Length == 0)
+    {
+        <p class="analytics-empty">No returned samples match this origin. Choose All origins to see other rows.</p>
     }
     else if (Mode == "stacked")
     {
@@ -49,8 +61,8 @@
                 {
                     <div class="analytics-readout">
                         <span><i class="@($"analytics-swatch analytics-category-{category++ % 6}")" aria-hidden="true"></i>@(GroupByKind ? Outcome(row.Key) : row.Key)</span>
-                        <span>@AnalyticsPresentation.Number(row.Current, Unit)@if (!GroupByKind) { <small>@row.CurrentCount @SampleUnit</small> }</span>
-                        <span>@AnalyticsPresentation.Number(row.Previous, Unit)@if (!GroupByKind) { <small>@row.PreviousCount @SampleUnit</small> }</span>
+                        <span>@AnalyticsPresentation.Number(row.Current, ReportUnit)@if (!GroupByKind) { <small>@row.CurrentCount @SampleUnit</small> }</span>
+                        <span>@AnalyticsPresentation.Number(row.Previous, ReportUnit)@if (!GroupByKind) { <small>@row.PreviousCount @SampleUnit</small> }</span>
                     </div>
                 }
             </div>
@@ -59,9 +71,9 @@
     else
     {
         <div class="analytics-readout-heading"><span>@(Mode == "horizontal" ? "Category" : "Measure")</span><span>Current</span><span>Previous</span></div>
-        @foreach (var row in Query.Rows)
+        @foreach (var row in DisplayRows)
         {
-            var unit = row.Key == "open" && Mode == "numeric" ? "open spells" : Unit;
+            var unit = row.Key == "open" && Mode == "numeric" ? "open spells" : ReportUnit;
             <div class="analytics-comparison-row">
                 <div class="analytics-readout">
                     <span>@Label(row.Key)</span>
@@ -72,8 +84,8 @@
                 {
                     <div class="analytics-labeled-bars">
                         <div class="analytics-bar-labels"><span>Current</span><span>Previous</span></div>
-                        <svg class="analytics-pair" viewBox="0 0 100 19" preserveAspectRatio="none" role="img" aria-label="@AnalyticsPresentation.ComparisonLabel(Label(row.Key), row.Current, row.Previous, row.CurrentCount, row.PreviousCount, Unit)" focusable="false">
-                            <title>@AnalyticsPresentation.ComparisonLabel(Label(row.Key), row.Current, row.Previous, row.CurrentCount, row.PreviousCount, Unit)</title>
+                        <svg class="analytics-pair" viewBox="0 0 100 19" preserveAspectRatio="none" role="img" aria-label="@AnalyticsPresentation.ComparisonLabel(Label(row.Key), row.Current, row.Previous, row.CurrentCount, row.PreviousCount, ReportUnit)" focusable="false">
+                            <title>@AnalyticsPresentation.ComparisonLabel(Label(row.Key), row.Current, row.Previous, row.CurrentCount, row.PreviousCount, ReportUnit)</title>
                             <rect width="100" height="7" y="1" class="analytics-track" />
                             <rect width="100" height="7" y="11" class="analytics-track" />
                             <rect width="@AnalyticsPresentation.Width(row.Current, Maximum)" height="7" y="1" class="analytics-current" />
@@ -95,8 +107,17 @@
     [Parameter] public string SampleUnit { get; set; } = "samples";
     [Parameter] public string Mode { get; set; } = "paired";
     [Parameter] public bool GroupByKind { get; set; }
+    private CoCern.Contracts.AnalyticsReportDefinition? Report => CoCern.Contracts.AnalyticsReportCatalog.All.FirstOrDefault(report => report.Name == Query?.Name);
+    private string ReportTitle => Report?.Title ?? Title;
+    private string ReportDescription => Report?.Description ?? Description;
+    private string ReportUnit => Report?.Unit ?? Unit;
+    private bool NoisyTools => Query?.Name == "noisiest_tools";
+    private string _origin = "all";
+    private bool _showAll;
+    private DashboardAnalyticsRow[] FilteredRows => NoisyTools ? DashboardUsefulness.RankTools(Query?.Rows ?? [], row => row.Key, row => row.Current, _origin) : Query?.Rows ?? [];
+    private DashboardAnalyticsRow[] DisplayRows => NoisyTools && !_showAll ? FilteredRows.Take(10).ToArray() : FilteredRows;
     private readonly string _headingId = "analytics-" + Guid.NewGuid().ToString("N");
-    private double Maximum => Query?.Rows.SelectMany(row => new[] { Positive(row.Current), Positive(row.Previous) }).DefaultIfEmpty(0).Max() ?? 0;
+    private double Maximum => DisplayRows.SelectMany(row => new[] { Positive(row.Current), Positive(row.Previous) }).DefaultIfEmpty(0).Max();
     private IEnumerable<IGrouping<string, DashboardAnalyticsRow>> Groups => (Query?.Rows ?? []).GroupBy(row => GroupByKind ? Kind(row.Key) : Title);
     private static double Positive(double? value) => value is { } number && double.IsFinite(number) && number > 0 ? number : 0;
     private static string Svg(double value) => value.ToString("0.###", CultureInfo.InvariantCulture);
@@ -104,5 +125,5 @@
     private static string Outcome(string key) => key.LastIndexOf(':') is var index && index >= 0 ? key[(index + 1)..] : key;
     private string Label(string key) => key switch { _ when Query?.Name == "context_by_role" && string.IsNullOrWhiteSpace(key) => "Role not reported", "open" => "Open blocked spells", "ended" => "Ended blocked spells", "all" when Query?.Name == "blocked_time" => "Ended blocked spells", "all" => "All tasks", _ => key };
     private string RowSampleUnit(string key) => Query?.Name == "blocked_time" ? key == "open" ? "open spells" : "ended spells" : SampleUnit;
-    private string StackLabel(string label, DashboardAnalyticsRow[] rows) => $"{Title}: {label}. Top row current, bottom row previous. " + string.Join(" ", rows.Select(row => AnalyticsPresentation.ComparisonLabel(row.Key, row.Current, row.Previous, row.CurrentCount, row.PreviousCount, Unit)));
+    private string StackLabel(string label, DashboardAnalyticsRow[] rows) => $"{Title}: {label}. Top row current, bottom row previous. " + string.Join(" ", rows.Select(row => AnalyticsPresentation.ComparisonLabel(row.Key, row.Current, row.Previous, row.CurrentCount, row.PreviousCount, ReportUnit)));
 }

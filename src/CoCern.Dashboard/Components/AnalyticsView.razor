@@ -27,13 +27,15 @@
     else
     {
         <div class="analytics-snapshot-strip">
-            <div><span>Snapshot captured</span><strong>@Stamp(data.SnapshotAt.Value)</strong><small>Hourly data; refresh loads the latest available snapshot.</small></div>
+            <div><span>Snapshot captured</span><strong>@Stamp(data.SnapshotAt.Value)</strong><small>@DashboardUsefulness.SnapshotAge(data.SnapshotAt.Value, DateTimeOffset.UtcNow) Hourly data; refresh loads the latest available snapshot.</small></div>
             <div><span><i class="analytics-swatch analytics-current" aria-hidden="true"></i>Current @_days-day period</span><strong>@Period(data.SnapshotAt.Value.AddDays(-_days), data.SnapshotAt.Value)</strong><span><i class="analytics-swatch analytics-previous" aria-hidden="true"></i>Previous @_days-day period</span><strong>@Period(data.SnapshotAt.Value.AddDays(-2 * _days), data.SnapshotAt.Value.AddDays(-_days))</strong></div>
         </div>
         <p class="analytics-history" role="status">@HistoryMessage(data)</p>
         @if (AdditionalMessage(data) is { Length: > 0 } message) { <p class="warning-note" role="status">@message</p> }
         <p class="analytics-key">Paired bars use teal for current and gold for previous; stacked bars use the labeled category colors. Not measured means unknown; 0 is a measured zero. Sample counts appear with each report.</p>
         <div class="analytics-grid">
+            <AnalyticsChart Query="@Query("relay_tokens")" Title="Relay tokens" Description="Measured request and reply relay tokens by reported origin; these are not total model context or billing." Unit="tokens" SampleUnit="calls" Mode="horizontal" />
+            <AnalyticsChart Query="@Query("usage_coverage")" Title="Reported model usage coverage" Description="Percent of touched tasks with reported model usage." Unit="%" SampleUnit="touched tasks" />
             <AnalyticsChart Query="@Query(AnalyticsQueryNames.TokensPerTask)" Title="Tokens per task" Description="Average reported tokens for each task." Unit="tokens/task" SampleUnit="tasks" />
             <AnalyticsChart Query="@Query(AnalyticsQueryNames.CallsPerTask)" Title="Tool calls per task" Description="Average tool calls for each task." Unit="calls/task" SampleUnit="tasks" />
             <AnalyticsChart Query="@Query(AnalyticsQueryNames.MessagesPerTask)" Title="Messages per task" Description="Average task messages for each task." Unit="messages/task" SampleUnit="tasks" />
@@ -51,6 +53,8 @@
 @code {
     [Parameter] public DashboardSnapshot Snapshot { get; set; } = new();
     private DashboardAnalyticsSnapshot? _analytics;
+    private DashboardAnalyticsSnapshot? _cachedAnalytics;
+    private System.Net.Http.Headers.EntityTagHeaderValue? _cachedEtag;
     private string _repository = "";
     private int _days = 7;
     private bool _loading;
@@ -91,18 +95,46 @@
         _pending?.Cancel();
         _pending?.Dispose();
         var pending = _pending = new CancellationTokenSource();
+        var cancellationToken = pending.Token;
         var request = ++_request;
+        var repository = _repository;
+        var days = _days;
+        if (_cachedAnalytics?.RepositoryId != repository || _cachedAnalytics?.Days != days)
+        {
+            _cachedAnalytics = null;
+            _cachedEtag = null;
+        }
+        var cached = _cachedAnalytics;
+        var etag = _cachedEtag;
         _loading = true;
         _error = null;
         _analytics = null;
         try
         {
-            var data = await Http.GetFromJsonAsync<DashboardAnalyticsSnapshot>($"api/analytics?repositoryId={Uri.EscapeDataString(_repository)}&days={_days}", pending.Token);
+            using var message = new HttpRequestMessage(HttpMethod.Get, $"api/analytics?repositoryId={Uri.EscapeDataString(repository)}&days={days}");
+            if (cached is not null && etag is not null) message.Headers.IfNoneMatch.Add(etag);
+            using var response = await Http.SendAsync(message, cancellationToken);
+            if (_disposed || request != _request) return;
+            if (response.StatusCode == System.Net.HttpStatusCode.NotModified)
+            {
+                if (cached is not null && etag is not null) _analytics = cached;
+                else _error = "The server returned an unchanged response without a matching cached snapshot.";
+                return;
+            }
+            response.EnsureSuccessStatusCode();
+            var data = await response.Content.ReadFromJsonAsync<DashboardAnalyticsSnapshot>(cancellationToken);
             if (!_disposed && request == _request)
             {
-                if (data is null || data.RepositoryId != _repository || data.Days != _days)
+                if (data is null || data.RepositoryId != repository || data.Days != days)
                     _error = "The analytics response did not match the selected repository and period.";
-                else _analytics = data;
+                else
+                {
+                    _analytics = data;
+                    var cacheable = data.Status == "ready" && data.SnapshotAt is not null
+                        && data.Queries.All(query => string.IsNullOrWhiteSpace(query.Error)) && response.Headers.ETag is not null;
+                    _cachedAnalytics = cacheable ? data : null;
+                    _cachedEtag = cacheable ? response.Headers.ETag : null;
+                }
             }
         }
         catch (OperationCanceledException) when (pending.IsCancellationRequested) { }

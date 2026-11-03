@@ -59,7 +59,10 @@ internal sealed class AnalyticsSnapshotService(SqliteStore store, AnalyticsSetti
         try
         {
             await store.CreateAnalyticsSnapshotAsync(path, cancellationToken);
-            await analytics.SwitchSnapshotAsync(path, takenAt, cancellationToken);
+            // Capture completion is the report cutoff: activity flushed before the copy must not be
+            // excluded merely because it arrived after the filename's start time. This describes
+            // the completed snapshot, not the freshness of the live database after it was copied.
+            await analytics.SwitchSnapshotAsync(path, DateTimeOffset.UtcNow, cancellationToken);
             return path;
         }
         catch (Exception exception)

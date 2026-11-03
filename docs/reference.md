@@ -160,7 +160,7 @@ Direct messages from another session wake a chat at once unless sent with `wake:
 
 ## Standing
 
-A board's settled rules (lines) and permissions (grants). Chats get them at `session_open`, and again only when they change. Administrators write them:
+A board's approved instructions (lines) and active permissions (grants). Approved content is delivered at `session_open`, then on later replies only when the standing revision changes. Pending proposals are not instructions or authority; without approved instructions or active grants, nothing is delivered. Administrators write them:
 
 ```json
 { "repositoryId": "cocern", "requestId": "r-1", "expectedRevision": 0,
@@ -169,7 +169,9 @@ A board's settled rules (lines) and permissions (grants). Chats get them at `ses
   "settings": { "requireResources": true } }
 ```
 
-- Anyone can `standing_propose` a line or grant; an administrator approves it with `standing_put` and `approve`.
+- Anyone can `standing_propose` a line or grant; an administrator approves it with `standing_put` and `approve`. Proposals never autoexpire because of age or the proposing session closing; dismiss obsolete proposals manually.
+- The dashboard offers **Approve**, **Dismiss** and **Remove** against the exact repository and board, using revision checks and existing standing operations. Approval activates eligible content; dismissal discards a pending proposal, and removal deletes the selected standing item. Nothing is autoapproved.
+- Expired grants remain visible but inactive. Grant authority requires a matching `authorityRef` and valid scope and expiry; it never overrides client permissions.
 - Read it all with `task_get`, no `taskId`, `section: "standing"`.
 - What chats receive is held to 12 KB; a larger `standing_put` gets `PayloadTooLarge` and changes nothing.
 
@@ -235,7 +237,7 @@ Every tool call goes to the `activity_log` table: time, session, role, tool, res
 
 ### Tokens
 
-The hub counts the tokens of every request and reply with the o200k tokenizer, into `activity_log` (`request_tokens`, `reply_tokens`). They match Codex exactly; for Claude they are estimates. Administrators see each role's tool-definition tokens in `get_status` (`toolTokens`) and on the dashboard's Standing page.
+The hub estimates MCP request and reply tokens with the o200k tokenizer, into `activity_log` (`request_tokens`, `reply_tokens`). These measure relay traffic, not model billing, total model context or proof that a model consumed a reply. Reports separate model-facing, background and unknown origins. Administrators see each role's tool-definition tokens in `get_status` (`toolTokens`) and on the dashboard's Standing page.
 
 Every reply is held to its tool's token budget, set at what the 32 KB byte limit allows (about 10,923 tokens), so in practice only a reply that would be cut anyway is compacted. Doc tools have their own 2,000-token budget. Compaction goes in steps: drop optional detail (`detailFetchRequired`), then shorten paged lists (`truncated`, `more`, `nextCursor`), then cut long text to its first line. A compacted reply says `compacted: true` and `compactStep`. IDs, versions, codes, grants and errors are never removed.
 
@@ -273,11 +275,19 @@ DuckDB needs its `sqlite` extension. The Windows x64 build is bundled in `extens
 { "repositoryId": "cocern", "name": "tokens_per_task", "params": { "days": 7 } }
 ```
 
-Each named query compares the last `days` days (`cur`, 1 to 14, default 7) with the days before (`prev`); `cur_n` and `prev_n` count the rows behind each.
+The twelve public named reports compare the last `days` days (`cur`, 1 to 14, default 7) with the days before (`prev`); `cur_n` and `prev_n` count the rows behind each. Periods use the completed snapshot, not realtime hub activity. Retained workflow history may be incomplete; reports surface that limitation and exclude unknown durations from duration averages.
+
+Use `name: "batch"` with a `reports` array of public report names and common `params` to select several reports from one snapshot. By default each report returns its first summary row with counts and `more`; `includeDetails: true` returns full rows within the row and payload bounds. A strong `etag` supports `ifNoneMatch` for the exact selection, including repository, reports and parameters; do not reuse it for another selection. Partial errors are explicit and produce no ETag.
+
+```json
+{ "repositoryId": "cocern", "name": "batch", "reports": ["relay_tokens", "usage_coverage"], "params": { "days": 7 }, "includeDetails": true }
+```
 
 | Name | Measures |
 | --- | --- |
 | `tokens_per_task` | Average reported tokens per task. |
+| `relay_tokens` | Measured MCP request/reply token estimates, separated into model-facing, background and unknown origins; not model billing. |
+| `usage_coverage` | Successful canonical usage reports among touched tasks; coverage of reported usage, not an estimate of missing model usage. |
 | `calls_per_task` | Average tool calls per task. |
 | `messages_per_task` | Average task messages per task. |
 | `context_by_role` | Average reply bytes per session, by role. |
@@ -400,7 +410,7 @@ All on by default except the two for other PCs.
 | `Relay:Local:HttpsPort` | 5272 | HTTPS for chats on this PC, loopback only, with the hub certificate. Connect points apps here and pins the certificate, so a program that takes the port while the hub is down never gets their token. Its address and fingerprint are written to `local-hub.json` beside the database. `0` turns it off. |
 | `Relay:Network:Enabled` | `false` | Also serve HTTPS on every network interface. |
 | `Relay:Network:HttpsPort` | 5273 | The HTTPS port. |
-| `Relay:Network:CertificatePath` | beside the database | Self-signed certificate, made on first start. Keep it: PCs and Connect's app entries pin its fingerprint. A set path is relative to the content root. |
+| `Relay:Network:CertificatePath` | beside the database | Self-signed certificate, made on first start. Keep it: PCs and Connect's app entries pin its fingerprint. A set path is relative to the content root. For a disposable second hub, set an explicit private path as well as separate database and listener ports, so the preview has a separate identity instead of adopting the main hub's legacy certificate. Migration retains the original certificate. |
 
 ### Documents
 
@@ -434,7 +444,7 @@ Connect sets `COCERN_TOKEN_FILE`, `COCERN_URL` and `COCERN_FINGERPRINT`, and `CO
 | `COCERN_URL` | `http://127.0.0.1:5271` | Hub address. Plain HTTP works only on loopback. |
 | `COCERN_TOKEN_FILE` | | File holding the client token. Wins over `COCERN_TOKEN`. |
 | `COCERN_TOKEN` | | The token itself. |
-| `COCERN_PROFILE` | | `chat`: only `session_open`, `send_message`, `check_inbox`, `ack` and `chat_directory`. |
+| `COCERN_PROFILE` | | `chat`: only `session_open`, `send_message`, `check_inbox`, `ack` and `chat_directory`. `diagnostics`: worker tools plus analytics, requiring an administrator credential role for analytics and exposing no administrator mutations. Default and `chat` behavior are unchanged. |
 | `COCERN_ROLE` | | `admin` also lists administrator tools, for a chat whose token is an administrator's (Connect's is). The hub still checks the token. |
 | `COCERN_SIGNALR` | `false` | `true` prints a hint on standard error when the inbox changes. |
 | `COCERN_FINGERPRINT` | | The hub certificate's SHA-256 fingerprint, for an `https://` `COCERN_URL`: only that certificate is accepted. Connect sets it. |
@@ -469,15 +479,21 @@ Then give those chats `COCERN_TOKEN_FILE=data/worker-token`, or run `--connect -
 
 The dashboard provides Overview, Sessions, Analytics, Database, Logs, Standing, Documents and Connect. Existing dashboard viewer access is required for both the page and its read-only data endpoints.
 
+### Standing and logs
+
+**Standing** distinguishes approved instructions and active grants from pending proposals and retained expired grants. Use **Approve**, **Dismiss** or **Remove** for the exact board shown; dashboard writes use the existing authorization and revision checks. Dismiss obsolete proposals manually, since age and session closure do not expire them.
+
+**Logs** supports level and text search filters and filtering successful routine HTTP requests to focus on relevant events.
+
 ### Analytics page
 
-Open **Analytics** to compare one repository over 1–14 days with the preceding equal period. Both periods end relative to the displayed hourly snapshot time, not the current hub connection time. The repository selector uses repository IDs known to the dashboard and defaults conservatively when none are present. Changing either selector fetches one combined report; an older response cannot overwrite the latest selection.
+Open **Analytics** to compare one repository over 1–14 days with the preceding equal period. Both periods end relative to the displayed hourly snapshot completion timestamp, not realtime activity or the current hub connection time. The repository selector uses repository IDs known to the dashboard and defaults conservatively when none are present. Changing either selector fetches one combined report; an older response cannot overwrite the latest selection.
 
-The ten public named reports cover average tokens, calls and messages per task; average reply bytes per session by role; noisiest tools by reply bytes; claim conflicts by resource; quality guardrail events; attention offer events (shown, accepted, later and dismissed) by kind and outcome; average ready-to-first-claim latency in minutes (an assignment proxy); and average hours of ended blocked spells, with open blocked spells counted separately. Charts include numeric equivalents, units and sample counts. Attention event denominators are per kind and are not summed across outcome categories.
+The twelve public named reports include relay request/reply token estimates and successful canonical usage-report coverage among touched tasks, alongside reports covering average tokens, calls and messages per task; average reply bytes per session by role; noisiest tools by reply bytes; claim conflicts by resource; quality guardrail events; attention offer events (shown, accepted, later and dismissed) by kind and outcome; average ready-to-first-claim latency in minutes (an assignment proxy); and average hours of ended blocked spells, with open blocked spells counted separately. The shared `AnalyticsReportCatalog` supplies report titles and units. Charts include numeric equivalents, units and sample counts; **Top 10** / **Show all** and the origin filter make noisy-tool rows easier to inspect. Attention event denominators are per kind and are not summed across outcome categories.
 
 Noisiest tools groups each tool by its reported adapter path: model-facing, background or unknown. Current adapters mark ordinary MCP calls separately from internal inbox, watcher and hook reads; an explicit `attention: false` alone does not make a model-facing call background. Older adapters and unmarked raw callers remain unknown. Origin is telemetry, not proof that a model ran or consumed a reply. Counts and bytes survive raw-log retention through daily totals, whose boundary days have day precision rather than exact rolling timestamps.
 
-`GET /dashboard/api/analytics?repositoryId=cocern&days=7` returns the fixed reports under the existing dashboard viewer policy. It accepts no SQL and preserves the existing analytics row and payload limits. Missing snapshots, unavailable analytics, per-report failures and truncated results are shown explicitly. Unknown values display as **Not measured**; measured zeros remain **0**. History coverage always shows as unknown, because the hub doesn't record when tracking began, so a short history and incomplete comparison periods are labeled as possible; no sample data is substituted.
+`GET /dashboard/api/analytics?repositoryId=cocern&days=7` returns the fixed reports under the existing dashboard viewer policy. It accepts no SQL and preserves the existing analytics row and payload limits. HTTP ETag / `If-None-Match` reads can return `304 Not Modified` only for the exact repository and days cache selection; partial report errors carry no ETag. Missing snapshots, unavailable analytics, per-report failures and truncated results are shown explicitly. Unknown values display as **Not measured**; measured zeros remain **0**. Retained workflow history may be incomplete, and reports surface missing history rather than reconstructing it. Unknown durations are excluded from averages. Usage coverage measures successful canonical usage reports among touched tasks; it does not establish complete workflow history or model billing. No sample data is substituted.
 
 ## Addresses
 
