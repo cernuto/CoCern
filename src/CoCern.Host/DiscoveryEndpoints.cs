@@ -259,7 +259,7 @@ internal static partial class DiscoveryEndpoints
         if (hints.Changed(machine.MachineId, routes))
         {
             // A lost hint costs one announce interval, never correctness, so a delivery failure does not fail the announcement.
-            try { await hub.Clients.Group(CoordinationHub.MachineGroup(machine.MachineId)).SendAsync("discovery.changed", new { }, context.RequestAborted); }
+            try { await hub.Clients.Group(CoordinationHub.MachineGroup(machine.MachineId)).SendAsync(HubEvents.DiscoveryChanged, new { }, context.RequestAborted); }
             catch (Exception exception) when (exception is not OperationCanceledException) { }
         }
         if (refused.Count == 0) return Results.Content(reply.DataJson, "application/json");

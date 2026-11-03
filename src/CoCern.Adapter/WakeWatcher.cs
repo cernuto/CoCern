@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Threading.Channels;
 using Microsoft.AspNetCore.SignalR.Client;
+using CoCern.Contracts;
 
 namespace CoCern.Adapter;
 
@@ -161,7 +162,7 @@ public static class WakeWatcher
         {
             var watch = new Watch(RelayHubConnection.Create(options, hubHandler), target);
             var sessionId = target.Session.SessionId;
-            watch.Connection.On<JsonElement>(RelayHubConnection.ChangedEvent, hint =>
+            watch.Connection.On<JsonElement>(HubEvents.CoordinationChanged, hint =>
             {
                 if (hint.ValueKind == JsonValueKind.Object && hint.TryGetProperty("sessionId", out var session) && session.ValueKind == JsonValueKind.String && session.GetString() == sessionId)
                     changed.Writer.TryWrite(true);

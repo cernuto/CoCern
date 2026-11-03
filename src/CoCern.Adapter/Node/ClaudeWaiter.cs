@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using CoCern.Contracts;
 
 namespace CoCern.Adapter.Node;
 
@@ -121,7 +122,7 @@ public static class ClaudeWaiter
         var folder = Path.GetFullPath(nodeFolder);
         if (!ChatLocators.IsUuid(claudeSessionId)) throw new AdapterConfigurationException(ChatUsage);
         var threadId = Normalize(claudeSessionId);
-        var enrollment = NodeState.ReadEnrollment(folder) ?? throw new AdapterConfigurationException($"This PC's node in '{folder}' is not enrolled with a hub yet. Start it once with --node --hub https://<hub-address>:5273/.");
+        var enrollment = NodeState.ReadEnrollment(folder) ?? throw new AdapterConfigurationException($"This PC's node in '{folder}' is not enrolled with a hub yet. Start it once with --node --hub https://<hub-address>:{HubAddresses.NetworkHttpsPort}/.");
         var handle = FindHandle(folder, threadId) ?? throw new AdapterConfigurationException($"No relay session on this PC belongs to Claude chat {threadId}. Call session_open from that chat first, with CoCern running on the node's credentials.");
         var options = new AdapterOptions(enrollment.Hub.AbsoluteUri, enrollment.Credential, signalR: true) { PinnedFingerprint = enrollment.Fingerprint };
         var statePath = Path.Combine(folder, WaitersFolder, threadId + ".db");
@@ -176,7 +177,7 @@ public static class ClaudeWaiter
     private static string Normalize(string uuid) => Guid.ParseExact(uuid, "D").ToString("D");
 
     private static bool IsClaude(ChatLocation? location, string claudeSessionId) =>
-        location is { Provider: "claude" } && string.Equals(location.ThreadId, claudeSessionId, StringComparison.OrdinalIgnoreCase);
+        location is { Provider: ChatProviders.Claude } && string.Equals(location.ThreadId, claudeSessionId, StringComparison.OrdinalIgnoreCase);
 
     private static bool IsAlive(string path)
     {

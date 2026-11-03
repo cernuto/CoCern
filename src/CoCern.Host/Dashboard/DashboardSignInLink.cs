@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
+using CoCern.Contracts;
 
 namespace CoCern.Host.Dashboard;
 
@@ -36,7 +37,7 @@ public sealed class DashboardSignInLink(ILogger<DashboardSignInLink> log)
     {
         var code = new string(RandomNumberGenerator.GetItems<char>(Alphabet, 24));
         lock (gate) { digest = Digest(code); expires = now + Lifetime; }
-        var link = (baseUrl ?? "http://127.0.0.1:5271/dashboard/") + "#link=" + code;
+        var link = (baseUrl ?? HubAddresses.LocalUrl + "/dashboard/") + "#link=" + code;
         log.LogWarning("Dashboard sign-in link (works once, from this PC, for 24 hours): {SignInLink}", link);
         return link;
     }

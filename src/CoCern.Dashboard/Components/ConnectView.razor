@@ -4,9 +4,9 @@
 @if (Compact)
 {
     @* On the overview: a single prompt while an app on this PC can still get CoCern. *@
-    if (_status?.Clients.Any(client => client.State == "available") == true)
+    if (_status?.Clients.Any(client => client.State == ConnectStates.Available) == true)
     {
-        <a class="surface connect-prompt" href="connect"><Icon Name="plug" Size="20" /><span><strong>Add CoCern to your apps</strong><small>@string.Join(", ", _status.Clients.Where(client => client.State == "available").Select(client => client.Name)) on this PC, in one click.</small></span><span aria-hidden="true">→</span></a>
+        <a class="surface connect-prompt" href="connect"><Icon Name="plug" Size="20" /><span><strong>Add CoCern to your apps</strong><small>@string.Join(", ", _status.Clients.Where(client => client.State == ConnectStates.Available).Select(client => client.Name)) on this PC, in one click.</small></span><span aria-hidden="true">→</span></a>
     }
 }
 else
@@ -33,13 +33,13 @@ else
                     <li class="connect-item" @key="client.Id">
                         <span class="provider-token" aria-hidden="true">@client.Name[..1]</span>
                         <div><strong>@client.Name</strong><small>@Describe(client)</small></div>
-                        @if (client.State is "connected" or "added")
+                        @if (client.State is ConnectStates.Connected or ConnectStates.Added)
                         {
-                            <span class="tag good">@(client.State == "added" ? "Connected · restart it" : client.Admin == true ? "Connected · admin tools" : "Connected")</span>
+                            <span class="tag good">@(client.State == ConnectStates.Added ? "Connected · restart it" : client.Admin == true ? "Connected · admin tools" : "Connected")</span>
                         }
                         else
                         {
-                            <button type="button" class="connect-button" disabled="@(_busy is not null)" @onclick="() => ConnectAsync(client.Id)">@(_busy == client.Id ? "Connecting…" : client.State == "error" ? "Try again" : "Connect")</button>
+                            <button type="button" class="connect-button" disabled="@(_busy is not null)" @onclick="() => ConnectAsync(client.Id)">@(_busy == client.Id ? "Connecting…" : client.State == ConnectStates.Error ? "Try again" : "Connect")</button>
                         }
                     </li>
                 }
@@ -97,8 +97,8 @@ else
 
     private static string Describe(DashboardConnectClient client) => client.State switch
     {
-        "error" => client.Detail ?? "Its settings could not be changed.",
-        "available" when client.Detail is { } detail => detail,
-        _ => client.Id switch { "claude-code" => "The Claude Code CLI and its IDE extensions.", "claude-desktop" => "Claude for desktop.", "codex" => "Codex CLI, IDE extension and app.", _ => "" }
+        ConnectStates.Error => client.Detail ?? "Its settings could not be changed.",
+        ConnectStates.Available when client.Detail is { } detail => detail,
+        _ => client.Id switch { ConnectClients.ClaudeCode => "The Claude Code CLI and its IDE extensions.", ConnectClients.ClaudeDesktop => "Claude for desktop.", ConnectClients.Codex => "Codex CLI, IDE extension and app.", _ => "" }
     };
 }

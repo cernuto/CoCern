@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using CoCern.Adapter.Node;
+using CoCern.Contracts;
 
 namespace CoCern.Adapter.Setup;
 
@@ -31,8 +32,8 @@ internal sealed record SetupOptions(Uri Hub, bool SkipClientConfig, string? Data
                 case "--join-code" when joinCode is null && i + 1 < args.Count && !string.IsNullOrWhiteSpace(args[i + 1]): joinCode = args[++i].Trim(); break;
                 case "--fingerprint" when fingerprint is null && i + 1 < args.Count:
                     // Accepts the hub's logged form and the colon-separated form certificate viewers show.
-                    fingerprint = args[++i].Replace(":", "").Trim().ToUpperInvariant();
-                    if (!PinnedCertificate.IsFingerprint(fingerprint)) throw new AdapterConfigurationException("--fingerprint must be the hub certificate's SHA-256 fingerprint: 64 hexadecimal characters, as the hub logs it.");
+                    fingerprint = CertificateFingerprint.Normalize(args[++i])!;
+                    if (!CertificateFingerprint.IsValid(fingerprint)) throw new AdapterConfigurationException("--fingerprint must be the hub certificate's SHA-256 fingerprint: 64 hexadecimal characters, as the hub logs it.");
                     break;
                 default: throw new AdapterConfigurationException(Usage);
             }

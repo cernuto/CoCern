@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using CoCern.Contracts;
 
 namespace CoCern.Adapter.Node;
 
@@ -233,7 +234,7 @@ public abstract class TranscriptLocator(int maxLineBytes, Func<string, Stream>? 
 /// </summary>
 public sealed class CodexChatLocator(string root, int maxLineBytes = ChatLocators.DefaultMaxLineBytes, Func<string, Stream>? open = null) : TranscriptLocator(maxLineBytes, open)
 {
-    public override string Provider => "codex";
+    public override string Provider => ChatProviders.Codex;
 
     protected override IEnumerable<Transcript> Transcripts() =>
         Describe(ChatLocators.Files(root, "rollout-*.jsonl", SearchOption.AllDirectories), stem => stem.Length >= 36 && ChatLocators.IsUuid(stem[^36..]) ? stem[^36..] : null);
@@ -260,7 +261,7 @@ public sealed class CodexChatLocator(string root, int maxLineBytes = ChatLocator
 /// </summary>
 public sealed class ClaudeChatLocator(string root, int maxLineBytes = ChatLocators.DefaultMaxLineBytes, Func<string, Stream>? open = null) : TranscriptLocator(maxLineBytes, open)
 {
-    public override string Provider => "claude";
+    public override string Provider => ChatProviders.Claude;
 
     protected override IEnumerable<Transcript> Transcripts()
     {
@@ -343,9 +344,9 @@ internal sealed class NodeChats(string nodeFolder, IReadOnlyList<IChatLocator> l
         var codex = codexFound?.Invoke() ?? true;
         return Fit(new JsonArray(Current(handles).Select(handle => (JsonNode)new JsonObject
         {
-            ["provider"] = handle.Chat?.Provider ?? "unknown", ["threadId"] = handle.Chat?.ThreadId ?? "unmapped", ["relaySessionId"] = handle.SessionId,
-            ["repositoryId"] = handle.RepositoryId, ["label"] = handle.Label, ["wakeable"] = handle.Chat is { } chat && (chat.Provider != "codex" || codex),
-            ["waiterRunning"] = handle.Chat is { Provider: "claude" } claude && waiters.Contains(claude.ThreadId), ["openedAt"] = handle.OpenedAt.ToString("O")
+            ["provider"] = handle.Chat?.Provider ?? ChatProviders.Unknown, ["threadId"] = handle.Chat?.ThreadId ?? "unmapped", ["relaySessionId"] = handle.SessionId,
+            ["repositoryId"] = handle.RepositoryId, ["label"] = handle.Label, ["wakeable"] = handle.Chat is { } chat && (chat.Provider != ChatProviders.Codex || codex),
+            ["waiterRunning"] = handle.Chat is { Provider: ChatProviders.Claude } claude && waiters.Contains(claude.ThreadId), ["openedAt"] = handle.OpenedAt.ToString("O")
         }).ToArray()));
     }
 

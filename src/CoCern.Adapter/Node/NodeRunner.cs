@@ -119,7 +119,7 @@ public sealed class NodeRunner : IAsyncDisposable
 
     /// <summary>The installed coding clients, found by their usual folders in the user profile.</summary>
     internal static string[] DetectClients(string profile) =>
-        new[] { ("codex", ".codex"), ("claude", ".claude") }.Where(x => Directory.Exists(Path.Combine(profile, x.Item2))).Select(x => x.Item1).ToArray();
+        new[] { (ChatProviders.Codex, ".codex"), (ChatProviders.Claude, ".claude") }.Where(x => Directory.Exists(Path.Combine(profile, x.Item2))).Select(x => x.Item1).ToArray();
 
     internal static TimeSpan NextRetry(TimeSpan current, TimeSpan max) => current * 2 > max ? max : current * 2;
 
@@ -138,7 +138,7 @@ public sealed class NodeRunner : IAsyncDisposable
                 throw new AdapterConfigurationException($"'{state.Folder}' holds no pinned certificate for the hub at {stored}, and the node will not trust a new one silently. Delete the folder to enroll again.");
             return stored;
         }
-        if (typed is null) return stored ?? throw new AdapterConfigurationException("This PC has no hub yet. Run the node once with --node --hub https://<hub-address>:5273/.");
+        if (typed is null) return stored ?? throw new AdapterConfigurationException($"This PC has no hub yet. Run the node once with --node --hub https://<hub-address>:{HubAddresses.NetworkHttpsPort}/.");
         // Before enrollment a typed address replaces the stored one, and a different hub is pinned afresh.
         if (stored is null || !SameOrigin(stored, typed)) state.SetHub(typed.AbsoluteUri, null);
         return typed;
@@ -214,7 +214,7 @@ public sealed class NodeRunner : IAsyncDisposable
         {
             // Trust on first use unless the operator gave the fingerprint, recorded before anything secret is sent.
             var presented = await _transport.ProbeFingerprint(_hub, ct);
-            if (!PinnedCertificate.IsFingerprint(presented)) return Next.Retry;
+            if (!CertificateFingerprint.IsValid(presented)) return Next.Retry;
             if (!ExpectedMatches(presented)) return Unexpected(presented);
             _state.SetFingerprint(presented);
             _error.WriteLine($"CoCern node pinned the certificate of the hub at {_hub}: {_state.Fingerprint}.");
@@ -279,7 +279,7 @@ public sealed class NodeRunner : IAsyncDisposable
                 // No credential was ever saved for this ID (an earlier enrollment's reply was lost), so it cannot be recovered: continue under a new ID.
                 _state.RenewMachineId();
                 return Next.Retry;
-            case HttpStatusCode.Forbidden when code == "MachineRevoked":
+            case HttpStatusCode.Forbidden when code == RelayErrorCodes.MachineRevoked:
                 return Stop($"The hub at {_hub} has revoked this PC (machine {machineId}). The node stopped; ask the hub administrator.");
             case HttpStatusCode.Forbidden when code == RelayErrorCodes.JoinCodeRequired:
                 return Stop($"The hub at {_hub} needs its join code to enroll this PC{((_transport.JoinCode ?? _state.ReadJoinCode()) is null ? "" : ", and the one this PC has is wrong")}. The node stopped. Run setup again with --join-code <code> (it is in the join-code file next to the hub's database).");
@@ -360,9 +360,9 @@ public sealed class NodeRunner : IAsyncDisposable
         var targets = new List<WakeTarget>();
         foreach (var route in routes)
         {
-            if (route.Provider != "codex" || !ChatLocators.IsUuid(route.ThreadId) || !NodeState.IsFileId(route.RelaySessionId)) continue;
+            if (route.Provider != ChatProviders.Codex || !ChatLocators.IsUuid(route.ThreadId) || !NodeState.IsFileId(route.RelaySessionId)) continue;
             var path = NodeState.SessionHandlePath(nodeFolder, route.RelaySessionId);
-            if (NodeState.ReadSessionHandle(path) is not { Chat: { Provider: "codex" } chat } handle || !string.Equals(chat.ThreadId, route.ThreadId, StringComparison.OrdinalIgnoreCase) ||
+            if (NodeState.ReadSessionHandle(path) is not { Chat: { Provider: ChatProviders.Codex } chat } handle || !string.Equals(chat.ThreadId, route.ThreadId, StringComparison.OrdinalIgnoreCase) ||
                 handle.RepositoryId != route.RepositoryId) continue;
             targets.Add(new(new WakeRoute(handle.RepositoryId, "default", path, chat.ThreadId, machineName), new WakeSession(handle.SessionId, handle.SessionToken), dispatcher(codex)));
         }
@@ -540,7 +540,7 @@ public sealed class NodeRunner : IAsyncDisposable
         HubConnection connection;
         try { connection = RelayHubConnection.Create(new AdapterOptions(_hub.AbsoluteUri, credential, signalR: true) { PinnedFingerprint = Https ? _state.Fingerprint : null }, _transport.HubHandler); }
         catch (Exception) { return; /* Hints are optional. */ }
-        connection.On<JsonElement>(RelayHubConnection.DiscoveryChangedEvent, _ => { _transport.Trace?.Invoke("hint"); Refresh(); });
+        connection.On<JsonElement>(HubEvents.DiscoveryChanged, _ => { _transport.Trace?.Invoke("hint"); Refresh(); });
         connection.Reconnected += async _ =>
         {
             try

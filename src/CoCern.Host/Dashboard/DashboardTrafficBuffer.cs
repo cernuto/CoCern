@@ -16,7 +16,7 @@ public sealed class DashboardTrafficBuffer
 
     public void Request(string name, string? sessionId, string correlationId) => Add(new() { Kind = "request", Name = name, SessionId = SafeSessionId(sessionId), CorrelationId = correlationId });
     public void Response(string name, string? sessionId, string correlationId, string code, double duration) => Add(new() { Kind = "response", Name = name, SessionId = SafeSessionId(sessionId), CorrelationId = correlationId, Code = SafeCode(code), DurationMilliseconds = Math.Max(0, duration) });
-    public void Push(string sessionId) => Add(new() { Kind = "push", Name = "coordination.changed", SessionId = SafeSessionId(sessionId) });
+    public void Push(string sessionId) => Add(new() { Kind = "push", Name = HubEvents.CoordinationChanged, SessionId = SafeSessionId(sessionId) });
 
     private void Add(DashboardTrafficEvent value)
     {

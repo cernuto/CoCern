@@ -1,3 +1,4 @@
+@using CoCern.Contracts
 @using System.Net
 @using System.Net.Http.Json
 @inject HttpClient Http
@@ -162,10 +163,10 @@
 
     private static string Refused(HttpStatusCode status, DashboardCloseSessionsResult? result) => (status, result?.Code, result?.Field) switch
     {
-        (_, "InvalidArguments", "labelPrefix") => "Enter the start of a label to match.",
-        (_, "InvalidArguments", "idleMinutes") => "Choose an idle time of at least an hour.",
-        (_, "InvalidArguments", "repositoryId") => "Choose a repository.",
-        (_, "AdministratorRequired", _) => "Only an administrator can close sessions.",
+        (_, RelayErrorCodes.InvalidArguments, "labelPrefix") => "Enter the start of a label to match.",
+        (_, RelayErrorCodes.InvalidArguments, "idleMinutes") => "Choose an idle time of at least an hour.",
+        (_, RelayErrorCodes.InvalidArguments, "repositoryId") => "Choose a repository.",
+        (_, RelayErrorCodes.AdministratorRequired, _) => "Only an administrator can close sessions.",
         (HttpStatusCode.Unauthorized, _, _) => "Your sign-in has ended. Reload the page and sign in again.",
         (HttpStatusCode.Forbidden, null, _) => "This page could not confirm it is the hub's own dashboard. Reload it and try again.",
         (_, { } code, _) => $"The hub did not close any sessions ({code}).",

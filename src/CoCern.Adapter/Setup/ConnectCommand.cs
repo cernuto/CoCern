@@ -1,3 +1,6 @@
+using CoCern.Contracts;
+using CoCern.Contracts.Dashboard;
+
 namespace CoCern.Adapter.Setup;
 
 /// <summary>
@@ -15,14 +18,6 @@ internal static class ConnectCommand
     /// <summary>The variable that makes a chat's adapter list the administrator tools as well (see <see cref="AdapterOptions"/>).</summary>
     private const string RoleVariable = "COCERN_ROLE";
 
-    /// <summary>
-    /// One app CoCern can be added to. <c>connected</c>: it has a CoCern entry; <c>available</c>: it can get one; <c>added</c>: this run added it;
-    /// <c>outdated</c>: its entry is this hub's but names an old address or certificate, or other tools than <c>--role</c> asks for (<c>--check</c>);
-    /// <c>updated</c>: this run updated that entry; <c>error</c>: see the detail. <see cref="Admin"/> says whether its entry gives chats the
-    /// administrator tools, once there is an entry; null when there is none or it could not be read.
-    /// </summary>
-    internal sealed record ClientState(string Id, string Name, string State, string? Detail = null, bool? Admin = null);
-
     /// <summary>The variables a Connect entry carries; an entry with none of them is a joined PC's node entry, which is never this hub's to change.</summary>
     private static readonly string[] HubVariables = ["COCERN_TOKEN_FILE", "COCERN_TOKEN", "COCERN_URL", "COCERN_FINGERPRINT"];
 
@@ -36,13 +31,13 @@ internal static class ConnectCommand
             switch (args[i])
             {
                 case "--token-file" when tokenFile is null && i + 1 < args.Count: tokenFile = args[++i]; break;
-                case "--only" when only is null && i + 1 < args.Count && args[i + 1] is "claude-code" or "claude-desktop" or "codex": only = args[++i]; break;
+                case "--only" when only is null && i + 1 < args.Count && ConnectClients.All.Contains(args[i + 1]): only = args[++i]; break;
                 case "--check" when !check: check = true; break;
                 case "--role" when admin is null && i + 1 < args.Count && args[i + 1] is "admin" or "worker": admin = args[++i] == "admin"; break;
                 case "--json" when !json: json = true; break;
                 case "--fingerprint" when fingerprint is null && i + 1 < args.Count:
-                    fingerprint = args[++i].Replace(":", "").Trim().ToUpperInvariant();
-                    if (!Node.PinnedCertificate.IsFingerprint(fingerprint)) throw new AdapterConfigurationException("--fingerprint must be the hub certificate's SHA-256 fingerprint: 64 hexadecimal characters.");
+                    fingerprint = CertificateFingerprint.Normalize(args[++i])!;
+                    if (!CertificateFingerprint.IsValid(fingerprint)) throw new AdapterConfigurationException("--fingerprint must be the hub certificate's SHA-256 fingerprint: 64 hexadecimal characters.");
                     break;
                 case "--hub" when hub is null && i + 1 < args.Count:
                     if (!AdapterOptions.TryParseOrigin(args[++i], out var origin)) throw new AdapterConfigurationException("--hub must be a root https:// address, or http:// to this PC's loopback.");
@@ -79,35 +74,39 @@ internal static class ConnectCommand
 
         var clients = new List<(string Id, string Name, Func<ClientPlan> Plan)>
         {
-            ("claude-code", "Claude Code", () => ClientSettings.PlanClaudeCode(Path.Combine(profile, ".claude.json"), dotnetPath, adapterDll, environment, RefreshFor("claude-code"))),
-            ("codex", "Codex", () => ClientSettings.PlanCodex(Path.Combine(profile, ".codex", "config.toml"), dotnetPath, adapterDll, environment, RefreshFor("codex")))
+            (ConnectClients.ClaudeCode, "Claude Code", () => ClientSettings.PlanClaudeCode(Path.Combine(profile, ".claude.json"), dotnetPath, adapterDll, environment, RefreshFor(ConnectClients.ClaudeCode))),
+            (ConnectClients.Codex, "Codex", () => ClientSettings.PlanCodex(Path.Combine(profile, ".codex", "config.toml"), dotnetPath, adapterDll, environment, RefreshFor(ConnectClients.Codex)))
         };
         // The desktop app is offered only where it is installed; its config file may not exist yet.
         if (appData is not null && Directory.Exists(Path.Combine(appData, "Claude")))
-            clients.Insert(1, ("claude-desktop", "Claude desktop app", () => ClientSettings.PlanClaudeDesktop(Path.Combine(appData, "Claude", "claude_desktop_config.json"), dotnetPath, adapterDll, environment, RefreshFor("claude-desktop"))));
-        var results = new List<ClientState>();
+            clients.Insert(1, (ConnectClients.ClaudeDesktop, "Claude desktop app", () => ClientSettings.PlanClaudeDesktop(Path.Combine(appData, "Claude", "claude_desktop_config.json"), dotnetPath, adapterDll, environment, RefreshFor(ConnectClients.ClaudeDesktop))));
+        var results = new List<DashboardConnectClient>();
         var code = 0;
         foreach (var client in clients.Where(client => only is null || client.Id == only))
         {
             try
             {
                 var plan = client.Plan();
-                var state = plan.IsUnchanged ? "connected" : plan.Refreshes ? check ? "outdated" : "updated" : check ? "available" : "added";
-                if (state is "added" or "updated") plan.Apply(clock ?? TimeProvider.System);
+                var state = plan.IsUnchanged ? ConnectStates.Connected : plan.Refreshes ? check ? ConnectStates.Outdated : ConnectStates.Updated : check ? ConnectStates.Available : ConnectStates.Added;
+                if (state is ConnectStates.Added or ConnectStates.Updated) plan.Apply(clock ?? TimeProvider.System);
                 var entry = seen.TryGetValue(client.Id, out var found) ? found : ((bool Admin, IReadOnlyDictionary<string, string?>? Changes)?)null;
                 var changes = plan.Refreshes ? entry?.Changes : null;
                 bool? gives = state switch
                 {
-                    "added" => admin == true,
-                    "updated" when changes?.TryGetValue(RoleVariable, out var role) == true => role is not null,
-                    "available" => null,
+                    ConnectStates.Added => admin == true,
+                    ConnectStates.Updated when changes?.TryGetValue(RoleVariable, out var role) == true => role is not null,
+                    ConnectStates.Available => null,
                     _ => entry?.Admin
                 };
-                results.Add(new(client.Id, client.Name, state, changes is null ? null : Detail(check, changes), gives));
+                results.Add(new() { Id = client.Id, Name = client.Name, State = state, Detail = changes is null ? null : Detail(check, changes), Admin = gives });
             }
             catch (Exception exception) when (exception is ClientSettingsException or IOException or UnauthorizedAccessException)
             {
-                results.Add(new(client.Id, client.Name, "error", exception is ClientSettingsException ? exception.Message.Replace(" Fix or move the file, or use --skip-client-config.", " Fix or move the file, then try again.") : "Its settings file could not be written."));
+                results.Add(new()
+                {
+                    Id = client.Id, Name = client.Name, State = ConnectStates.Error,
+                    Detail = exception is ClientSettingsException ? exception.Message.Replace(" Fix or move the file, or use --skip-client-config.", " Fix or move the file, then try again.") : "Its settings file could not be written."
+                });
                 code = SetupCommand.MalformedClientFileExitCode;
             }
         }
@@ -115,8 +114,8 @@ internal static class ConnectCommand
         else
         {
             foreach (var result in results)
-                (result.State == "error" ? error : output).WriteLine($"{result.Name}: {result.State switch { "connected" => "already connected", "available" => "not connected yet", "added" => "connected", "outdated" => "needs an update. " + result.Detail, "updated" => "updated (backup kept next to its settings file). " + result.Detail, _ => result.Detail }}{(result.Admin == true && result.State is "connected" or "added" ? ", with administrator tools" : "")}");
-            if (!check && results.Any(result => result.State is "added" or "updated")) output.WriteLine("Restart your chats (or the app) to load CoCern.");
+                (result.State == ConnectStates.Error ? error : output).WriteLine($"{result.Name}: {result.State switch { ConnectStates.Connected => "already connected", ConnectStates.Available => "not connected yet", ConnectStates.Added => "connected", ConnectStates.Outdated => "needs an update. " + result.Detail, ConnectStates.Updated => "updated (backup kept next to its settings file). " + result.Detail, _ => result.Detail }}{(result.Admin == true && result.State is ConnectStates.Connected or ConnectStates.Added ? ", with administrator tools" : "")}");
+            if (!check && results.Any(result => result.State is ConnectStates.Added or ConnectStates.Updated)) output.WriteLine("Restart your chats (or the app) to load CoCern.");
         }
         return code;
     }
@@ -155,8 +154,8 @@ internal static class ConnectCommand
     internal static IReadOnlyDictionary<string, string?>? Refresh(IReadOnlyDictionary<string, string> variables, string tokenFile, string? hub, string? fingerprint, string? localUrl, bool? admin = null)
     {
         if (!HubVariables.Any(variables.ContainsKey)) return null;
-        var url = variables.GetValueOrDefault("COCERN_URL")?.Trim() is { Length: > 0 } given ? given : AdapterOptions.DefaultUrl;
-        var pinned = variables.GetValueOrDefault("COCERN_FINGERPRINT")?.Replace(":", "").Trim().ToUpperInvariant() is { Length: > 0 } pin ? pin : null;
+        var url = variables.GetValueOrDefault("COCERN_URL")?.Trim() is { Length: > 0 } given ? given : HubAddresses.LocalUrl;
+        var pinned = CertificateFingerprint.Normalize(variables.GetValueOrDefault("COCERN_FINGERPRINT")) is { Length: > 0 } pin ? pin : null;
         var ours = variables.GetValueOrDefault("COCERN_TOKEN_FILE")?.Trim() is { Length: > 0 } file
             ? InFolder(file, Path.GetDirectoryName(Path.GetFullPath(tokenFile))!)
             : AdapterOptions.TryParseOrigin(url, out var origin) && (origin.Scheme == Uri.UriSchemeHttp && origin.IsLoopback || hub is not null && SameOrigin(origin, hub) || localUrl is not null && SameOrigin(origin, localUrl))
@@ -187,18 +186,10 @@ internal static class ConnectCommand
     }
 
     /// <summary>The hub's loopback HTTPS address and certificate fingerprint from its <c>local-hub.json</c>, or null when it has none (an older hub).</summary>
-    internal static (string Url, string Fingerprint)? LocalHub(string folder)
-    {
-        try
-        {
-            using var document = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(folder, "local-hub.json")));
-            var url = document.RootElement.GetProperty("url").GetString();
-            var fingerprint = document.RootElement.GetProperty("fingerprint").GetString()?.ToUpperInvariant();
-            return url is not null && AdapterOptions.TryParseOrigin(url, out var origin) && origin.Scheme == Uri.UriSchemeHttps && fingerprint is not null && Node.PinnedCertificate.IsFingerprint(fingerprint)
-                ? (origin.ToString(), fingerprint) : null;
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Text.Json.JsonException or KeyNotFoundException or InvalidOperationException) { return null; }
-    }
+    internal static (string Url, string Fingerprint)? LocalHub(string folder) =>
+        LocalHubRecord.Read(folder) is { } record && AdapterOptions.TryParseOrigin(record.Url, out var origin) && origin.Scheme == Uri.UriSchemeHttps
+            && CertificateFingerprint.Normalize(record.Fingerprint) is { } fingerprint && CertificateFingerprint.IsValid(fingerprint)
+            ? (origin.ToString(), fingerprint) : null;
 
     /// <summary>The hub's default token file, in the first folder at or above the adapter's that has one.</summary>
     internal static string? FindTokenFile(string start)

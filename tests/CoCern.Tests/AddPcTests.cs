@@ -1,3 +1,4 @@
+using CoCern.Contracts;
 using System.Diagnostics;
 using System.IO.Compression;
 using System.Net;
@@ -136,7 +137,7 @@ public sealed class AddPcTests : IDisposable
         var context = new AssemblyLoadContext("add-pc-pin", isCollectible: true);
         try
         {
-            foreach (var (fingerprint, protocols) in new[] { (HubCertificate.Fingerprint(hub), SecurityProtocolType.Tls13), (HubCertificate.Fingerprint(hub).ToLowerInvariant(), SecurityProtocolType.SystemDefault) })
+            foreach (var (fingerprint, protocols) in new[] { (CertificateFingerprint.Of(hub), SecurityProtocolType.Tls13), (CertificateFingerprint.Of(hub).ToLowerInvariant(), SecurityProtocolType.SystemDefault) })
             {
                 var command = DashboardAddPc.Command("https://hub:5273/", JoinCode, fingerprint);
                 var installed = Regex.Match(command, @"\[CoCernDownloadPin\]::Install\('([^']*)'\)").Groups[1].Value;
@@ -208,7 +209,7 @@ public sealed class AddPcTests : IDisposable
         var served = first;
         await using var server = await HttpsServer(certificate, () => served);
         var url = $"https://127.0.0.1:{server.Port}/";
-        var fingerprint = HubCertificate.Fingerprint(certificate);
+        var fingerprint = CertificateFingerprint.Of(certificate);
         foreach (var shell in shells)
         {
             var run = Path.Combine(root, Path.GetFileNameWithoutExtension(shell));
@@ -233,7 +234,7 @@ public sealed class AddPcTests : IDisposable
             }
 
             // A hub presenting another certificate: the download fails and nothing is unpacked or run.
-            Assert.Contains("failed:", Paste(HubCertificate.Fingerprint(stranger)));
+            Assert.Contains("failed:", Paste(CertificateFingerprint.Of(stranger)));
             Assert.False(Directory.Exists(installed));
             Assert.False(File.Exists(setupFile));
 
