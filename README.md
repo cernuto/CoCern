@@ -72,8 +72,10 @@ Chats on other PCs can join the same hub and message chats here. On the hub's PC
 1. Copy the one command it shows.
 2. On the other PC, open PowerShell and paste it.
 
-Nothing is copied by hand and no .NET install is needed there: the command downloads CoCern from this hub over HTTPS with the hub's certificate pinned, joins, adds CoCern to Claude Code (through `claude mcp add` when Claude Code's command line is installed, else its settings file, with a restart hint if Claude Code is running) and Codex, and starts it with Windows. Claude Code no longer needs to be closed. The PC shows up on the dashboard under Machines.
+Nothing is copied by hand: the command downloads CoCern from this hub over HTTPS with the hub's certificate pinned, joins, adds CoCern to Claude Code (through `claude mcp add` when Claude Code's command line is installed, else its settings file, with a restart hint if Claude Code is running) and Codex, and starts it with Windows. Claude Code no longer needs to be closed. The PC shows up on the dashboard under Machines. If the download or unpacking fails, it stops before changing anything.
 
+- **No .NET needed there** when this hub serves the self-contained adapter from `./scripts/Build-CoCern.ps1 -Publish`. A hub started from Visual Studio without it serves its own build, which needs the .NET 10 runtime on the other PC; the section says so.
+- **Updating a joined PC:** paste the same command again. If the hub has a newer adapter while CoCern is running there, it says what to close first and changes nothing; then paste it again.
 - **Turn it on first.** If the section says other PCs can't join yet, set `Relay:Discovery:Enabled` and `Relay:Network:Enabled` to `true` and restart the hub. The Visual Studio launch profile already does.
 - **The other PC can't reach the hub?** Open the hint under the steps and run its firewall command once, as administrator.
 - **Keep the command private.** It holds the hub's join code. Anyone with it can join a PC and message your chats.
@@ -113,7 +115,7 @@ Only urgent items (a task blocked, failed or interrupted) wake a chat at once. E
 
 ## The dashboard
 
-Open it with the sign-in link the hub prints. The link works once, only on the hub's PC, for 24 hours, and each use prints the next one. You can also paste the token from `data/local-client-token`. A sign-in lasts 8 hours in that browser session, or 30 days with **Remember this browser** (`Relay:Dashboard:SessionHours` and `RememberDays`).
+Open it with the sign-in link the hub prints. The link works once, only on the hub's PC, for 24 hours, and each use prints the next one. You can also paste the token from `data/local-client-token`. A sign-in lasts 8 hours in that browser session, or 7 days with **Remember this browser** (`Relay:Dashboard:SessionHours` and `RememberDays`).
 
 | Page | Shows |
 | --- | --- |
@@ -145,7 +147,7 @@ Every setting: [Reference](docs/reference.md#settings).
 
 ## Good to know
 
-- **Keep the hub and its adapters on the same version.** Update both together.
+- **Keep the hub and its adapters on the same version.** Update both together: on a joined PC, paste its Add another PC command again.
 - **Don't rebuild a folder a hub or chat is running from.** Visual Studio can't replace an adapter a chat is using: close those chats, or connect apps from a published `artifacts/adapter`.
 - **One hub per database.** Don't put `data/` on a shared drive.
 - **Apps connected with an earlier version** use plain HTTP. To switch one to the safer pinned connection, remove its `cocern` entry and click **Connect** again.

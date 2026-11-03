@@ -281,7 +281,7 @@ Each joined PC runs a small background program, the **node**. It joins the hub o
 
 ### Setup by hand
 
-The dashboard's **Add another PC** shows one PowerShell command to paste on the other PC. It downloads the published adapter from this hub (`GET /join/adapter.zip`, over HTTPS with the hub's certificate pinned) into `%LOCALAPPDATA%\CoCern\adapter` and runs setup from there; the folder is self-contained, so the other PC needs no .NET install, and nothing is copied by hand. The command holds the join code, so keep it private. By hand instead, from any copy of `artifacts/adapter` on the other PC:
+The dashboard's **Add another PC** shows one PowerShell command to paste on the other PC (Windows PowerShell 5.1 or PowerShell 7). It downloads the adapter from this hub (`GET /join/adapter.zip`, over HTTPS with the hub's certificate pinned for that download only) and runs setup from `%LOCALAPPDATA%\CoCern\adapter`. Any failure stops it before anything is unpacked or run, and it leaves the window's settings as they were. The zip is unpacked into a fresh folder: a folder holding the same files is left alone, any other is swapped whole (never unpacked over), and when a running node or chat holds the old folder nothing changes and it says to close those chats and stop the node (`Stop-Process -Name CoCern.Adapter`) first. Pasting it again is how a joined PC updates; files added to the folder by hand are not kept. The other PC needs no .NET when the hub serves a self-contained adapter (`artifacts/adapter` from `Build-CoCern.ps1 -Publish`, preferred when present); otherwise it needs the .NET 10 runtime, and the page warns. The command holds the join code, so keep it private. By hand instead, from any copy of `artifacts/adapter` on the other PC:
 
 ```powershell
 .\CoCern.Adapter.exe --setup --hub https://<hub-pc>:5273/ --join-code <code> --fingerprint <fingerprint>
@@ -342,8 +342,8 @@ Set them in `appsettings.json`, as environment variables (`Relay__Clients__0__To
 | `Relay:Dashboard:ViewerPrincipalIds:N` | | Administrator principals that may open the dashboard. The start script and Visual Studio profile set theirs. |
 | `Relay:Dashboard:OpenOnStart` | `false` | Open the dashboard in the default browser when the hub starts, already signed in with that start's one-time link. The Visual Studio launch profile turns it on. |
 | `Relay:Dashboard:SessionHours` | 8 | Hours a dashboard sign-in lasts in that browser session (1 to 168). The deadline is fixed at sign-in; use doesn't extend it. |
-| `Relay:Dashboard:RememberDays` | 30 | Days a sign-in lasts, across browser restarts, when "Remember this browser" is ticked (1 to 90, and at least `SessionHours`). |
-| `Relay:Connect:AdapterPath` | found | The adapter the Connect page uses. Default: `artifacts/adapter`, else the build output. |
+| `Relay:Dashboard:RememberDays` | 7 | Days a sign-in lasts, across browser restarts, when "Remember this browser" is ticked (1 to 30, and at least `SessionHours`). |
+| `Relay:Connect:AdapterPath` | found | The adapter the Connect page uses, and the folder `/join/adapter.zip` serves. Default: `artifacts/adapter`, else the build output, looked for only inside this checkout or beside a published hub. Other PCs get a self-contained `artifacts/adapter` whenever there is one. |
 
 ### Features
 
@@ -381,7 +381,7 @@ All on by default except the two for other PCs.
 | `Relay:Local:HttpsPort` | 5272 | HTTPS for chats on this PC, loopback only, with the hub certificate. Connect points apps here and pins the certificate, so a program that takes the port while the hub is down never gets their token. Its address and fingerprint are written to `local-hub.json` beside the database. `0` turns it off. |
 | `Relay:Network:Enabled` | `false` | Also serve HTTPS on every network interface. |
 | `Relay:Network:HttpsPort` | 5273 | The HTTPS port. |
-| `Relay:Network:CertificatePath` | `data/hub-certificate.pfx` | Self-signed certificate, made on first start. Keep it: PCs pin its fingerprint. |
+| `Relay:Network:CertificatePath` | beside the database | Self-signed certificate, made on first start. Keep it: PCs and Connect's app entries pin its fingerprint. A set path is relative to the content root. |
 
 ### Documents
 
@@ -404,7 +404,7 @@ All on by default except the two for other PCs.
 
 Changing a repository's settings makes its next sync re-read everything.
 
-**Found repositories.** With `Roots` set, every sync also looks for git repositories under them (a folder holding `.git`, never inside another repository) and indexes each one's current branch under its folder name in lower case, without fetching. A session's workspace is learned too: the adapter sends its git top-level folder with `session_open`, and when that folder is a repository inside a root the hub indexes it at once, under the session's repository if that has no documents yet, otherwise under its folder name. Roots are the only folders the hub reads this way; a configured repository's ID always wins, at most 64 are added, and access still follows each client's repositories.
+**Found repositories.** With `Roots` set, every sync also looks for git repositories under them (a folder holding `.git`, never inside another repository) and indexes each one's current branch under its folder name in lower case, without fetching. A session's workspace is learned too: the adapter sends its git top-level folder with `session_open`, and when that folder is a repository inside a root the hub indexes it at once: a folder already indexed keeps its ID; otherwise it goes under the session's repository if no repository has that ID yet, else under its folder name if that is free. Roots are the only folders the hub reads this way; a configured repository's ID always wins, at most 64 are added, and access still follows each client's repositories (an administrator client, such as the generated token, may read every one).
 
 ### Adapter
 
@@ -506,9 +506,9 @@ Dependencies point inward; Domain knows nothing about Orleans or storage.
 | Place | What |
 | --- | --- |
 | `data/relay.db` | One SQLite file (WAL): grain state, due work, search index, activity. Only the hub opens it. |
-| `analytics/`, `join-code` | Beside the database: DuckDB snapshots, and the join code (owner-only). |
+| `analytics/`, `join-code`, `adapter-zip/` | Beside the database: DuckDB snapshots, the join code (owner-only), and the zip `/join/adapter.zip` serves (owner-only, rebuilt when the adapter changes). |
 | `data/local-client-token` | The administrator token, where the start script and Visual Studio profile put it. Owner-only. |
-| `data/hub-certificate.pfx` | The HTTPS certificate, under the hub's content root (the folder it runs from). |
+| `data/hub-certificate.pfx` | The HTTPS certificate, beside the database. One an earlier version made under the content root (`src/CoCern.Host/data` from Visual Studio) is moved here, keeping its fingerprint. |
 | `%LOCALAPPDATA%\CoCern\node` | On each joined PC: the node's credential, pinned fingerprint, join code, session handles and wake state. |
 
 **Rules to keep.** Claims are advisory. Every fixed limit lives in `RelayLimits`. Keep tool descriptions and schemas short: they are sent on every model turn, and a test caps their size.
