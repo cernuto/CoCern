@@ -26,7 +26,7 @@ public sealed class DashboardSessionCleanupTests
     private static readonly RelayCaller Admin = new("test-user", true, ["repo"]);
 
     [Fact]
-    public async Task A_signed_in_viewer_closes_the_matching_sessions_and_gets_the_counts()
+    public async Task A_signed_in_viewer_gets_the_counts_and_a_label_close_keeps_chats_working_right_now()
     {
         await using var host = ViewerHost();
         var smoke = await OpenAsync(host, "Smoke test 1");
@@ -44,13 +44,14 @@ public sealed class DashboardSessionCleanupTests
         }
         Assert.Equal(3, (await LiveAsync(host)).Length);
 
+        // Both smoke chats were opened a moment ago, so a close by label keeps them as working right now.
         using var response = await browser.PostAsync(Route, Json(new { repositoryId = "repo", labelPrefix = "smoke" }));
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var result = (await response.Content.ReadFromJsonAsync<DashboardCloseSessionsResult>())!;
-        Assert.Equal((2, 0), (result.Closed, result.Kept));
+        Assert.Equal((0, 0, 2), (result.Closed, result.Kept, result.Active));
         Assert.Null(result.Code);
-        Assert.Equal(new[] { smoke.Id, smoke2.Id }.Order(StringComparer.Ordinal), result.Ids.Order(StringComparer.Ordinal));
-        Assert.Equal([work.Id], await LiveAsync(host));
+        Assert.Empty(result.Ids);
+        Assert.Equal(new[] { smoke.Id, smoke2.Id, work.Id }.Order(StringComparer.Ordinal), (await LiveAsync(host)).Order(StringComparer.Ordinal));
     }
 
     [Fact]
@@ -164,7 +165,7 @@ public sealed class DashboardSessionCleanupTests
         var smoke = await OpenAsync(host, "Smoke test");
         var work = await OpenAsync(host, "Real work");
         using var browser = await SignedInAsync(host);
-        using var response = await browser.PostAsync(Route, Json(new { repositoryId = "repo", labelPrefix = "smoke", sessionId = work.Id, sessionToken = work.Token }));
+        using var response = await browser.PostAsync(Route, Json(new { repositoryId = "repo", targetSessionId = smoke.Id, sessionId = smoke.Id, sessionToken = smoke.Token }));
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var text = await response.Content.ReadAsStringAsync();
         Assert.DoesNotContain(smoke.Token, text);
@@ -172,9 +173,9 @@ public sealed class DashboardSessionCleanupTests
         Assert.DoesNotContain(RelayHostFixture.Token, text);
         Assert.DoesNotContain("token", text, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("label", text, StringComparison.OrdinalIgnoreCase);
-        Assert.Equal(["closed", "code", "field", "held", "ids", "kept", "more"], JsonNode.Parse(text)!.AsObject().Select(property => property.Key).Order(StringComparer.Ordinal));
+        Assert.Equal(["active", "closed", "code", "field", "held", "ids", "kept", "more"], JsonNode.Parse(text)!.AsObject().Select(property => property.Key).Order(StringComparer.Ordinal));
         Assert.Equal([smoke.Id], JsonNode.Parse(text)!["ids"]!.AsArray().Select(id => id!.GetValue<string>()));
-        // A session named in the body is not the viewer's own: the dashboard forwards only the repository and the filter.
+        // A session named in the body is not the viewer's own (the dashboard forwards only the repository, the filters and the target), so the target closes.
         Assert.Equal([work.Id], await LiveAsync(host));
     }
 

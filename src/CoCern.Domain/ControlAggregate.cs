@@ -120,12 +120,14 @@ internal static class ControlAggregate
             // A forced close takes sessions without mail waiting first.
             .OrderBy(entry => entry.Hold == Hold.Holding).ThenBy(entry => entry.Seen).ThenBy(entry => entry.Key, StringComparer.Ordinal).ToList();
         var closing = closable.Take(Math.Max(0, limit)).ToList();
-        foreach (var (id, session, _, _, hold) in closing)
+        foreach (var (id, session, seen, _, hold) in closing)
         {
             sessions.Remove(id);
             var repository = session is null ? "" : Text(session, "repositoryId");
             var expire = new JsonObject { ["repositoryId"] = repository, ["sessionId"] = id, ["closeSeq"] = Fence(context.State, id) };
             if (force) { expire["force"] = true; expire["requestedBy"] = context.Caller.PrincipalId; }
+            // What the directory had heard when it decided; a session that has reported activity since was working, and refuses.
+            else if (seen > DateTimeOffset.MinValue) expire["seenAt"] = seen.ToString("O");
             // A session whose hold lapsed already had its grace, so this idle close takes it as it is.
             if (idle && hold == Hold.None) expire["idle"] = true;
             // Its own caller: the session belongs to its repository, which the caller that closed it may not reach (or may reach them all).
@@ -189,11 +191,19 @@ internal static class ControlAggregate
             prefix = parsed;
         }
         if (minutes is null && prefix is null && target is null) return Error(InvalidArguments, new { field = "idleMinutes", hint = "give targetSessionId, idleMinutes, labelPrefix or both bulk filters" });
-        var cutoff = minutes is { } span ? IdleCutoff(context.Now, TimeSpan.FromMinutes(span)) : DateTimeOffset.MaxValue;
+        // A close by label alone skips chats working right now (a call within LabelCloseActiveMinutes), counted as active; an idle filter or
+        // one exact target says how quiet a session must be.
+        var labelOnly = minutes is null && target is null;
+        var cutoff = minutes is { } span ? IdleCutoff(context.Now, TimeSpan.FromMinutes(span))
+            : labelOnly ? IdleCutoff(context.Now, TimeSpan.FromMinutes(RelayLimits.LabelCloseActiveMinutes)) : DateTimeOffset.MaxValue;
         var own = context.SessionId;
-        var result = CloseSessions(context, ObjectAt(context.State, "sessions"), (id, session) => session is not null && id != own && Text(session, "repositoryId") == context.Repository
-            && (target is null || id == target) && LastSeen(session) <= cutoff && (prefix is null || Text(session, "label").StartsWith(prefix, StringComparison.OrdinalIgnoreCase)), RelayLimits.MaxSessionsClosedPerCall, idle: minutes is not null, force: force);
-        return Ok(new { closed = result.Closed.Count, kept = result.Kept, held = result.Held, more = result.More, ids = result.Closed.Take(RelayLimits.MaxClosedSessionIds).ToArray() });
+        var sessions = ObjectAt(context.State, "sessions");
+        bool Matches(string id, JsonObject? session) => session is not null && id != own && Text(session, "repositoryId") == context.Repository
+            && (target is null || id == target) && (prefix is null || Text(session, "label").StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
+        var active = labelOnly ? sessions.Count(entry => Matches(entry.Key, entry.Value as JsonObject) && LastSeen((JsonObject)entry.Value!) > cutoff) : 0;
+        var result = CloseSessions(context, sessions, (id, session) => Matches(id, session) && LastSeen(session!) <= cutoff, RelayLimits.MaxSessionsClosedPerCall,
+            idle: minutes is not null, force: force);
+        return Ok(new { closed = result.Closed.Count, kept = result.Kept, held = result.Held, active, more = result.More, ids = result.Closed.Take(RelayLimits.MaxClosedSessionIds).ToArray() });
     }
 
     /// <summary>When the session refused an idle close because it had unread mail; see <see cref="MailHold"/>.</summary>

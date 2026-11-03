@@ -120,7 +120,7 @@ Open it with the sign-in link the hub prints. The link works once, only on the h
 | Page | Shows |
 | --- | --- |
 | Overview | Machines and sessions, live traffic and recent logs. |
-| Sessions | Each session in detail. **Close idle sessions** clears out finished chats (idle sessions also close on their own after a day, unless they have unread messages), and **Close session** closes one, optionally forcing it past unresolved actions. |
+| Sessions | Each session in detail. **Close idle sessions** clears out finished chats (idle sessions also close on their own after a day, unless they have unread messages; closing by label skips chats working right now), and **Close session** closes one, optionally forcing it past unresolved actions. |
 | Analytics | Ten reports for one repository from the hourly snapshot, this period against the one before (1–14 days). |
 | Database | Table sizes. |
 | Logs | Recent hub events. |

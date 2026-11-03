@@ -138,7 +138,7 @@ public sealed class SessionLifecycleTests
     }
 
     [Fact]
-    public void A_label_close_takes_a_session_with_mail_and_later_messages_to_it_come_back_to_their_sender()
+    public void A_close_that_is_not_idle_takes_a_session_with_mail_and_later_messages_to_it_come_back_to_their_sender()
     {
         var hub = new Hub();
         var worker = hub.Open("smoke worker", T0);
@@ -147,7 +147,7 @@ public sealed class SessionLifecycleTests
         hub.DeliverAll(T0);
         hub.Send(sender, worker.Id, "first", T0.AddMinutes(1));
         hub.DeliverAll(T0.AddMinutes(1));
-        Assert.Equal(1, Data(hub.Close(new() { ["labelPrefix"] = "smoke" }, T0.AddMinutes(2)))["closed"]!.GetValue<int>());
+        Assert.Equal(1, Data(hub.Close(new() { ["targetSessionId"] = worker.Id }, T0.AddMinutes(2)))["closed"]!.GetValue<int>());
         hub.DeliverAll(T0.AddMinutes(2));
         Assert.Equal(RelayErrorCodes.SessionUnknown, hub.Verify(worker, T0.AddMinutes(3)).Code);
 
@@ -195,7 +195,7 @@ public sealed class SessionLifecycleTests
         Assert.Equal(Operations.SessionWork, report.Operation);
         hub.Of(AggregateKinds.Session, worker.Id).Effects.Clear();
 
-        Assert.Equal(1, Data(hub.Close(new() { ["labelPrefix"] = "smoke" }, T0.AddMinutes(2)))["closed"]!.GetValue<int>());
+        Assert.Equal(1, Data(hub.Close(new() { ["targetSessionId"] = worker.Id }, T0.AddMinutes(2)))["closed"]!.GetValue<int>());
         Assert.False(hub.Directory().ContainsKey(worker.Id));
         var refused = Data(hub.Deliver(Assert.Single(hub.Of(AggregateKinds.Control, AggregateKinds.ControlKey).Effects), T0.AddMinutes(2)));
         Assert.Equal("work", refused["keptFor"]!.GetValue<string>());
@@ -205,7 +205,7 @@ public sealed class SessionLifecycleTests
 
         Assert.True(hub.Directory().ContainsKey(worker.Id));
         Assert.True(hub.Verify(worker, T0.AddMinutes(3)).Ok);
-        var again = Data(hub.Close(new() { ["labelPrefix"] = "smoke" }, T0.AddMinutes(4)));
+        var again = Data(hub.Close(new() { ["targetSessionId"] = worker.Id }, T0.AddMinutes(4)));
         Assert.Equal((0, 1), (again["closed"]!.GetValue<int>(), again["kept"]!.GetValue<int>()));
         // The restored record lists as before, without the directory's internal fields.
         var listed = Assert.Single(Data(hub.Apply(AggregateKinds.Control, AggregateKinds.ControlKey, RelayTools.WorkerList, new() { ["hubIncarnation"] = "hub-1" }, Alice, T0.AddMinutes(4)))["items"]!.AsArray())!;
@@ -262,7 +262,7 @@ public sealed class SessionLifecycleTests
         }, BoardCaller, T0).Ok);
         // The directory has not yet heard the work report, so a normal close is refused by the session.
         hub.Of(AggregateKinds.Session, target.Id).Effects.Clear();
-        Assert.True(hub.Close(new() { ["labelPrefix"] = "target" }, T0.AddMinutes(1)).Ok);
+        Assert.True(hub.Close(new() { ["targetSessionId"] = target.Id }, T0.AddMinutes(1)).Ok);
         var expiry = Assert.Single(hub.Of(AggregateKinds.Control, AggregateKinds.ControlKey).Effects);
         Assert.True(hub.Deliver(expiry, T0.AddMinutes(1)).Ok);
         var restore = Assert.Single(hub.Of(AggregateKinds.Session, target.Id).Effects, effect => effect.Operation == Operations.SessionRestore);
@@ -330,8 +330,8 @@ public sealed class SessionLifecycleTests
         var worker = hub.Open("smoke worker", T0);
         hub.Verify(worker, T0); hub.DeliverAll(T0);
         SeedBoard(hub, worker.Id);
-        // The close by label lands before the board's report of the action it just began.
-        Assert.Equal(1, Data(hub.Close(new() { ["labelPrefix"] = "smoke" }, T0.AddMinutes(1)))["closed"]!.GetValue<int>());
+        // The close lands before the board's report of the action the session just began.
+        Assert.Equal(1, Data(hub.Close(new() { ["targetSessionId"] = worker.Id }, T0.AddMinutes(1)))["closed"]!.GetValue<int>());
         hub.DeliverAll(T0.AddMinutes(1));
         Assert.Equal(RelayErrorCodes.SessionUnknown, hub.Verify(worker, T0.AddMinutes(1)).Code);
 
@@ -353,7 +353,7 @@ public sealed class SessionLifecycleTests
         // The session begins work the directory has not heard of, so the first close is refused and the session restores itself.
         Assert.True(ReportWork(hub, worker, true, T0.AddMinutes(1)).Ok);
         hub.Of(AggregateKinds.Session, worker.Id).Effects.Clear();
-        Assert.True(hub.Close(new() { ["labelPrefix"] = "smoke" }, T0.AddMinutes(2)).Ok);
+        Assert.True(hub.Close(new() { ["targetSessionId"] = worker.Id }, T0.AddMinutes(2)).Ok);
         Assert.True(hub.Deliver(Assert.Single(hub.Of(AggregateKinds.Control, AggregateKinds.ControlKey).Effects), T0.AddMinutes(2)).Ok);
         var restore = Assert.Single(hub.Of(AggregateKinds.Session, worker.Id).Effects, effect => effect.Operation == Operations.SessionRestore);
         Assert.True(Data(hub.Deliver(restore, T0.AddMinutes(2)))["restored"]!.GetValue<bool>());
@@ -362,13 +362,53 @@ public sealed class SessionLifecycleTests
         // The work ends and a second close is accepted.
         Assert.True(ReportWork(hub, worker, false, T0.AddMinutes(3)).Ok);
         hub.DeliverAll(T0.AddMinutes(3));
-        Assert.Equal(1, Data(hub.Close(new() { ["labelPrefix"] = "smoke" }, T0.AddMinutes(4)))["closed"]!.GetValue<int>());
+        Assert.Equal(1, Data(hub.Close(new() { ["targetSessionId"] = worker.Id }, T0.AddMinutes(4)))["closed"]!.GetValue<int>());
         hub.DeliverAll(T0.AddMinutes(4));
 
         // A copy of the first restore, delivered late (its outbox removal failed after the directory committed), is ignored.
         Assert.False(Data(hub.Deliver(restore, T0.AddMinutes(5)))["restored"]!.GetValue<bool>());
         Assert.False(hub.Directory().ContainsKey(worker.Id));
         Assert.Equal(RelayErrorCodes.SessionUnknown, hub.Verify(worker, T0.AddMinutes(5)).Code);
+        Assert.Null(hub.State(AggregateKinds.Control, AggregateKinds.ControlKey)["closing"]);
+    }
+
+    [Fact]
+    public void A_close_by_label_skips_a_chat_working_right_now_and_takes_it_once_it_is_quiet()
+    {
+        var hub = new Hub();
+        var worker = hub.Open("smoke worker", T0);
+        hub.Verify(worker, T0); hub.DeliverAll(T0);
+
+        // A call a few minutes ago: the close by label keeps it, counted as active, and the chat carries on.
+        var skipped = Data(hub.Close(new() { ["labelPrefix"] = "smoke" }, T0.AddMinutes(5)));
+        Assert.Equal((0, 0, 1), (skipped["closed"]!.GetValue<int>(), skipped["kept"]!.GetValue<int>(), skipped["active"]!.GetValue<int>()));
+        Assert.Empty(hub.Of(AggregateKinds.Control, AggregateKinds.ControlKey).Effects);
+        Assert.True(hub.Verify(worker, T0.AddMinutes(6)).Ok);
+
+        // Quiet for longer than the window (plus the hour activity may take to reach the directory), it is closed like any other.
+        var closed = Data(hub.Close(new() { ["labelPrefix"] = "smoke" }, T0.AddHours(2)));
+        Assert.Equal((1, 0), (closed["closed"]!.GetValue<int>(), closed["active"]!.GetValue<int>()));
+        hub.DeliverAll(T0.AddHours(2));
+        Assert.Equal(RelayErrorCodes.SessionUnknown, hub.Verify(worker, T0.AddHours(2)).Code);
+    }
+
+    [Fact]
+    public void A_session_whose_new_activity_has_not_reached_the_directory_refuses_the_close_and_comes_back()
+    {
+        var hub = new Hub();
+        var worker = hub.Open("worker", T0);
+        hub.Verify(worker, T0); hub.DeliverAll(T0);
+        // After hours of quiet the chat calls again; its activity report is still on its way when an idle close decides from older news.
+        Assert.True(hub.Verify(worker, T0.AddHours(5)).Ok);
+        var report = Assert.Single(hub.Of(AggregateKinds.Session, worker.Id).Effects);
+        Assert.Equal(Operations.Register, report.Operation);
+        Assert.Equal(1, Data(hub.Close(new() { ["idleMinutes"] = 60 }, T0.AddHours(5)))["closed"]!.GetValue<int>());
+
+        var refused = Data(hub.Deliver(Assert.Single(hub.Of(AggregateKinds.Control, AggregateKinds.ControlKey).Effects), T0.AddHours(5)));
+        Assert.Equal("active", refused["keptFor"]!.GetValue<string>());
+        hub.DeliverAll(T0.AddHours(5));
+        Assert.True(hub.Directory().ContainsKey(worker.Id));
+        Assert.True(hub.Verify(worker, T0.AddHours(5).AddMinutes(1)).Ok);
         Assert.Null(hub.State(AggregateKinds.Control, AggregateKinds.ControlKey)["closing"]);
     }
 
@@ -416,10 +456,10 @@ public sealed class SessionLifecycleTests
         hub.DeliverAll(T0);
         Assert.Equal(RelayErrorCodes.WorkflowNotReady, hub.Board(RelayTools.TaskClaim, new() { ["taskId"] = "t", ["expectedVersion"] = 1, ["sessionId"] = "other" }, T0).Code);
 
-        // The target is closed by label; its expiry reaches the board, which drops the target.
+        // The target is closed; its expiry reaches the board, which drops the target.
         Assert.True(hub.Session(target, RelayTools.SessionBind, new() { ["expectedVersion"] = 0, ["label"] = "smoke target" }, T0).Ok);
         hub.DeliverAll(T0);
-        hub.Close(new() { ["labelPrefix"] = "smoke" }, T0.AddMinutes(1));
+        hub.Close(new() { ["targetSessionId"] = target.Id }, T0.AddMinutes(1));
         hub.DeliverAll(T0.AddMinutes(1));
         var task = hub.State(AggregateKinds.Board, BoardKey)["tasks"]!["t"]!.AsObject();
         Assert.Null(task["workflow"]!["targetSessionId"]);

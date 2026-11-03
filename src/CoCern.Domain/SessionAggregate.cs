@@ -121,7 +121,10 @@ internal static class SessionAggregate
         var force = Flag(context.Args, "force");
         var owns = state[WorkKey] is JsonObject ledger && WorkLedger.Owns(ledger, context.Now);
         var mail = IsTrue(context.Args, "idle") && state["inbox"] is JsonObject { Count: > 0 };
-        if (!force && (owns || mail)) return KeepOpen(context, owns, mail);
+        // The directory decided from what it had heard (seenAt). Activity this session has reported since, still on its way there, means it
+        // was working when it was closed, so it refuses as it does for unresolved work.
+        var working = Date(context.Args, "seenAt") is var seen && seen > DateTimeOffset.MinValue && Date(state, "activeReportedAt") > seen;
+        if (!force && (owns || mail || working)) return KeepOpen(context, owns, mail);
         if (force) state["forceClosedBy"] = Text(context.Args, "requestedBy");
         // Each board waiting on it hears once: those whose tasks target it, and, when it still answers for work (a forced close), those
         // holding that work, which then make it recoverable at once instead of after its claim's lease.
@@ -190,7 +193,7 @@ internal static class SessionAggregate
         if (mail) restore["mail"] = true;
         if (context.Args["closeSeq"] is not null) restore["closeSeq"] = Number(context.Args, "closeSeq");
         context.Emit(AggregateKinds.Control, AggregateKinds.ControlKey, Operations.SessionRestore, restore);
-        return Ok(new { expired = false, keptFor = owns ? "work" : "mail" });
+        return Ok(new { expired = false, keptFor = owns ? "work" : mail ? "mail" : "active" });
     }
 
     private const string TargetBoardsKey = "targetBoards";

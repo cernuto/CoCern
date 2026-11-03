@@ -361,6 +361,8 @@ public sealed record DashboardCloseSessionsResult
     public int Closed { get; init; }
     public int Kept { get; init; }
     public int Held { get; init; }
+    /// <summary>Sessions a close by label alone kept because their chats are working right now.</summary>
+    public int Active { get; init; }
     public bool More { get; init; }
     public string[] Ids { get; init; } = [];
     public string? Code { get; init; }
