@@ -77,6 +77,44 @@ internal static class ClientSettings
 
     public static ClientChange RegisterClaudeCode(string claudeJsonPath, string dotnetPath, string adapterDll, TimeProvider? clock = null) => PlanClaudeCode(claudeJsonPath, dotnetPath, adapterDll).Apply(clock ?? TimeProvider.System);
 
+    internal static ClientPlan PlanDevelopmentCodex(string path, string dotnetPath, string launcherDll, string deploymentRoot, string tokenFile, bool replaceLauncher = false)
+    {
+        var original = ReadAll(path) ?? throw Malformed(path, "no existing CoCern connection was found");
+        string text;
+        try { text = Strict.GetString(original, Bom(original), original.Length - Bom(original)); }
+        catch (DecoderFallbackException) { throw Malformed(path, "it is not valid UTF-8"); }
+        var reader = new TomlReader(text);
+        if (!reader.HasCoCern()) throw Malformed(path, "no existing CoCern connection was found");
+        IReadOnlyDictionary<string, string>? variables = null;
+        RefreshCodex(text, current => { variables = current; return null; });
+        if (variables is null || !variables.TryGetValue("COCERN_TOKEN_FILE", out var configuredToken) || !Path.IsPathFullyQualified(configuredToken)
+            || !string.Equals(Path.GetFullPath(configuredToken), Path.GetFullPath(tokenFile), OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+            throw Malformed(path, "its CoCern entry is not tied to this hub's token file");
+        string[] entry = [Table, Name];
+        var command = reader.Assignments.Where(x => x.Table.SequenceEqual(entry) && x.Key.SequenceEqual(new[] { "command" })).ToArray();
+        var arguments = reader.Assignments.Where(x => x.Table.SequenceEqual(entry) && x.Key.SequenceEqual(new[] { "args" })).ToArray();
+        if (command.Length != 1 || arguments.Length != 1 || TomlInline.String(text, command[0].ValueStart, command[0].ValueEnd) is null)
+            throw Malformed(path, "its CoCern launch entry is not a supported command and args table");
+        // Our canonical launcher entry is stable: updating current.json is enough to restart its backend, without rewriting config each build.
+        var rawArguments = text[arguments[0].ValueStart..arguments[0].ValueEnd];
+        var suffix = $", '--dev-launch', {TomlString(deploymentRoot)}]";
+        if (!replaceLauncher && rawArguments.StartsWith('[') && rawArguments.EndsWith(suffix, StringComparison.Ordinal)
+            && TomlInline.String(rawArguments, 1, rawArguments.Length - suffix.Length) is { } existingLauncher
+            && File.Exists(existingLauncher) && Path.GetFileName(existingLauncher) == "CoCern.Adapter.dll"
+            && Path.GetDirectoryName(existingLauncher) is { } versionFolder && Path.GetFileName(versionFolder) is { Length: 64 } version
+            && version.All(char.IsAsciiHexDigit)
+            && string.Equals(Path.GetFullPath(existingLauncher), Development.AdapterDeployment.AdapterPath(deploymentRoot, new(version, "")), OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+            return ClientPlan.Unchanged(path);
+        var edits = new[]
+        {
+            (Line: command[0], Text: TomlString(dotnetPath)),
+            (Line: arguments[0], Text: $"[{TomlString(launcherDll)}, '--dev-launch', {TomlString(deploymentRoot)}]")
+        };
+        var result = text;
+        foreach (var edit in edits.OrderByDescending(x => x.Line.ValueStart)) result = result[..edit.Line.ValueStart] + edit.Text + result[edit.Line.ValueEnd..];
+        return result == text ? ClientPlan.Unchanged(path) : ClientPlan.Write(path, [.. original.AsSpan(0, Bom(original)), .. Encoding.UTF8.GetBytes(result)], existed: true, refreshes: true);
+    }
+
     /// <param name="environment">Variables for the adapter, such as <c>COCERN_TOKEN_FILE</c> on the hub's own PC; none for an enrolled node.</param>
     /// <param name="refresh">How to change the variables of a <c>cocern</c> entry the file already has; without one, such an entry is left as it is.</param>
     public static ClientPlan PlanCodex(string path, string dotnetPath, string adapterDll, IReadOnlyDictionary<string, string>? environment = null, EntryRefresh? refresh = null)

@@ -136,7 +136,7 @@ internal sealed class DashboardConnect(IConfiguration configuration, IHostEnviro
         return url is null || url == "http://127.0.0.1:5271/" ? [] : ["--hub", url];
     }
 
-    private static string DotnetHost()
+    internal static string DotnetHost()
     {
         if (Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") is { Length: > 0 } host && File.Exists(host)) return host;
         if (Environment.ProcessPath is { } process && Path.GetFileNameWithoutExtension(process).Equals("dotnet", StringComparison.OrdinalIgnoreCase)) return process;
