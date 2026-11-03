@@ -8,7 +8,9 @@ the exit code is the number of failed checks (0 = all passed).
 """
 import concurrent.futures
 import hashlib
+import http.client
 import http.cookiejar
+import io
 import json
 import os
 from pathlib import Path
@@ -25,6 +27,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 REPO = "smoke"
@@ -286,6 +289,10 @@ def run_checks(hub, checks):
         _, opened = ok("session_open", {"requestId": rid()}, token)
         return {"sessionId": opened["sessionId"], "sessionToken": opened["sessionToken"]}
 
+    def analytics_unavailable_here():
+        """Only a hub that logged it has no usable DuckDB sqlite extension may answer analytics as unavailable."""
+        return "Analytics is unavailable:" in hub.log()
+
     # ---- Startup -------------------------------------------------------------------------------------------------
     print("Startup")
 
@@ -457,6 +464,26 @@ def run_checks(hub, checks):
         expect(status == 200 and "host" in data and "sessions" in data, f"HTTP {status}")
     checks.run("happy", "the dashboard snapshot is served to a signed-in viewer", snapshot)
 
+    def dashboard_analytics():
+        # The first snapshot is taken as the hub starts; give it a moment rather than accepting "no snapshot yet".
+        deadline = time.monotonic() + 30
+        while True:
+            status, data = request(f"{hub.origin}/dashboard/api/analytics?repositoryId={REPO}&days=7", opener=browser)
+            expect(status == 200 and isinstance(data, dict), f"HTTP {status} {data}")
+            if data.get("status") != "no-snapshot" or time.monotonic() > deadline:
+                break
+            time.sleep(0.5)
+        if analytics_unavailable_here():
+            expect(data.get("status") == "unavailable", f"status {data.get('status')}: {data.get('message')}")
+            return
+        queries = data.get("queries") or []
+        expect(data.get("status") == "ready" and data.get("snapshotAt") and queries, f"status {data.get('status')}: {data.get('message')}")
+        expect(all(query.get("error") is None and isinstance(query.get("rows"), list) for query in queries),
+               f"reports failed: {[query.get('name') for query in queries if query.get('error')]}")
+    checks.run("happy", "the dashboard's analytics page answers for one repository", dashboard_analytics)
+    checks.run("sad", "the analytics page refuses a period over 14 days",
+               lambda: expect(request(f"{hub.origin}/dashboard/api/analytics?repositoryId={REPO}&days=15", opener=browser)[0] == 400, "not 400"))
+
     def connect_page():
         expect(hub.connect_isolated, "Connect settings writes require a successful isolation preflight")
         status, data = request(hub.origin + "/dashboard/api/connect", opener=browser)
@@ -547,6 +574,27 @@ def run_checks(hub, checks):
         command = data["addresses"][0]["command"]
         expect(f"--join-code {state['join_code']}" in command and f"--fingerprint {state['fingerprint']}" in command and f":{hub.https_port}/" in command, command)
     checks.run("happy", "Add another PC fills in the join code, fingerprint and port", add_pc_filled_in)
+
+    def adapter_zip():
+        context = ssl.create_default_context()
+        context.check_hostname, context.verify_mode = False, ssl.CERT_NONE
+        connection = http.client.HTTPSConnection("127.0.0.1", hub.https_port, context=context, timeout=120)
+        try:
+            connection.connect()
+            # Pinned like the pasted command: only the certificate whose SHA-256 is the fingerprint may serve the download.
+            presented = hashlib.sha256(connection.sock.getpeercert(binary_form=True)).hexdigest().upper()
+            expect(presented == state["fingerprint"], "the HTTPS listener presented another certificate")
+            connection.request("GET", "/join/adapter.zip")  # no token: the zip carries no secret
+            response = connection.getresponse()
+            body = response.read()
+            expect(response.status == 200 and response.getheader("Content-Type") == "application/zip", f"HTTP {response.status}")
+        finally:
+            connection.close()
+        with zipfile.ZipFile(io.BytesIO(body)) as archive:
+            names = archive.namelist()
+        expect("CoCern.Adapter.dll" in names, f"the zip holds {names[:5]}")
+        expect(not any(name.startswith("/") or ".." in name.split("/") or "\\" in name for name in names), "the zip holds an unsafe path")
+    checks.run("happy", "the pasted command's download: the adapter zip over pinned HTTPS, no token", adapter_zip)
 
     def add_pc_only_here():
         status, data = request(hub.origin + "/dashboard/api/add-pc")
@@ -688,6 +736,33 @@ def run_checks(hub, checks):
         ok("task_claim", {**state["a"], "requestId": rid(), "taskId": "paused", "expectedVersion": 1})
     checks.run("sad", "while paused, claims are refused; after resume they work", pause)
 
+    # ---- Closing sessions ----------------------------------------------------------------------------------------
+    print("Closing sessions")
+
+    def close_by_label():
+        prefix = "smoke-close-" + uuid.uuid4().hex[:8]
+        _, opened = ok("session_open", {"requestId": rid(), "label": prefix + "-chat"}, hub.worker_token)
+        doomed = {"sessionId": opened["sessionId"], "sessionToken": opened["sessionToken"]}
+        # The label reaches the hub's session directory a moment after the open.
+        deadline, closed = time.monotonic() + 10, 0
+        while not closed and time.monotonic() < deadline:
+            _, reply = ok("control_request", {"requestId": rid(), "sessionId": state["a"]["sessionId"], "command": "close_sessions", "labelPrefix": prefix})
+            closed = reply.get("closed", 0)
+            time.sleep(0 if closed else 0.2)
+        expect(closed == 1, f"closed {closed}")
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            _, answer = tool("check_inbox", doomed, hub.worker_token)
+            if isinstance(answer, dict) and answer.get("code") == "SessionUnknown":
+                expect(json.loads(answer.get("dataJson") or "{}").get("expired") is True, f"reply {answer}")
+                ok("check_inbox", state["a"])  # the caller's own session is untouched
+                return
+            time.sleep(0.2)
+        raise AssertionError("the closed session still answers")
+    checks.run("happy", "close_sessions by label prefix closes that chat, which then gets SessionUnknown expired", close_by_label)
+    checks.run("sad", "close_sessions with idleMinutes under the minimum is refused",
+               lambda: refused("control_request", {"requestId": rid(), "command": "close_sessions", "idleMinutes": 5}, "InvalidArguments", 400))
+
     # ---- Doc search ----------------------------------------------------------------------------------------------
     print("Doc search")
 
@@ -702,6 +777,30 @@ def run_checks(hub, checks):
         _, section = ok("doc_section", {"path": hits[0]["path"], "anchor": hits[0]["anchor"]}, hub.worker_token)
         expect("five business days" in json.dumps(section), "section text missing")
     checks.run("happy", "sync a git repo's docs, search them, read a section", doc_search)
+
+    def doc_resync():
+        guide = hub.docs / "docs" / "guide.md"
+        guide.write_text(guide.read_text().replace("Refunds take five business days.", "Returns are credited within a week."))
+        git = ["git", "-C", str(hub.docs), "-c", "user.name=smoke", "-c", "user.email=smoke@example.invalid"]
+        for command in (["add", "."], ["commit", "-q", "-m", "reword refunds"]):
+            subprocess.run(git + command, check=True, capture_output=True)
+        # A sync runs at most once per 30 seconds, and the first check just ran one.
+        deadline = time.monotonic() + 45
+        while True:
+            status, reply = tool("doc_sync", {"requestId": rid()})
+            if not (isinstance(reply, dict) and reply.get("code") == "RateLimited") or time.monotonic() > deadline:
+                break
+            time.sleep(json.loads(reply.get("dataJson") or "{}").get("retryAfterSeconds", 5) + 0.5)
+        expect(status == 200 and reply.get("ok"), f"doc_sync: HTTP {status} {reply}")
+        # The repository's one shared index is patched by the sync: the new words are found and the old ones are gone.
+        deadline, hits, stale = time.monotonic() + 30, [], True
+        while (not hits or stale) and time.monotonic() < deadline:
+            hits = ok("doc_search", {"query": "credited"}, hub.worker_token)[1].get("hits", [])
+            stale = bool(ok("doc_search", {"query": "business"}, hub.worker_token)[1].get("hits", []))
+            time.sleep(0 if hits and not stale else 0.5)
+        expect(hits and hits[0]["path"] == "docs/guide.md", f"hits {hits}")
+        expect(not stale, "the old text is still found after the sync")
+    checks.run("happy", "a new commit's docs replace the old ones in search after a sync", doc_resync)
     checks.run("sad", "a worker can't force a doc sync", lambda: refused("doc_sync", {"requestId": rid()}, "AdministratorRequired", 403, hub.worker_token))
     checks.run("sad", "reading a section that doesn't exist is 404",
                lambda: refused("doc_section", {"path": "docs/guide.md", "anchor": "nope"}, "NotFound", 404, hub.worker_token))
@@ -836,29 +935,50 @@ def run_checks(hub, checks):
     print("Analytics")
 
     def analytics():
-        status, reply = tool("analytics_query", {"name": "tokens_per_task"})
-        code = reply.get("code") if isinstance(reply, dict) else None
-        expect((status == 200 and reply.get("ok")) or code == "AnalyticsUnavailable", f"HTTP {status} {code}")
-    checks.run("happy", "analytics answers (or AnalyticsUnavailable before its first snapshot / without the extension)", analytics)
+        # The hub just restarted; its first snapshot is taken as it starts, so wait for it rather than accepting "not loaded yet".
+        deadline = time.monotonic() + 30
+        while True:
+            status, reply = tool("analytics_query", {"name": "tokens_per_task"})
+            code = reply.get("code") if isinstance(reply, dict) else None
+            if code != "AnalyticsUnavailable" or analytics_unavailable_here() or time.monotonic() > deadline:
+                break
+            time.sleep(0.5)
+        if analytics_unavailable_here():
+            expect(code == "AnalyticsUnavailable", f"HTTP {status} {code}")
+            return
+        expect(status == 200 and reply.get("ok"), f"HTTP {status} {code}; snapshot failures: {re.findall(r'Analytics snapshot failed.*', hub.log())[-1:]}")
+        data = json.loads(reply["dataJson"])
+        expect(isinstance(data.get("rows"), list) and isinstance(data.get("cols"), list) and data.get("at"), f"reply {str(data)[:200]}")
+    checks.run("happy", "analytics answers from a snapshot (AnalyticsUnavailable only when the hub has no DuckDB extension)", analytics)
     checks.run("sad", "a worker can't run analytics", lambda: refused("analytics_query", {"name": "tokens_per_task"}, "AdministratorRequired", 403, hub.worker_token))
 
 
+class RpcReader:
+    """Owns one child's stdout for its whole life, so replies can be awaited one after another."""
+
+    def __init__(self, process):
+        self.lines = queue.Queue()
+        threading.Thread(target=lambda: [self.lines.put(line) for line in process.stdout] + [self.lines.put(None)], daemon=True).start()
+
+    def reply(self, request_id, timeout=60):
+        """A matching reply with a wall-clock bound, even when the child never writes a line."""
+        deadline = time.monotonic() + timeout
+        while (remaining := deadline - time.monotonic()) > 0:
+            try:
+                line = self.lines.get(timeout=remaining)
+            except queue.Empty:
+                return None
+            if line is None:
+                return None
+            reply = json.loads(line)
+            if reply.get("id") == request_id:
+                return reply
+        return None
+
+
 def read_rpc_reply(process, request_id, timeout=60):
-    """Read a matching reply with a wall-clock bound, even when the child never writes a line."""
-    lines = queue.Queue()
-    threading.Thread(target=lambda: [lines.put(line) for line in process.stdout] + [lines.put(None)], daemon=True).start()
-    deadline = time.monotonic() + timeout
-    while (remaining := deadline - time.monotonic()) > 0:
-        try:
-            line = lines.get(timeout=remaining)
-        except queue.Empty:
-            return None
-        if line is None:
-            return None
-        reply = json.loads(line)
-        if reply.get("id") == request_id:
-            return reply
-    return None
+    """Read one matching reply; the reader then owns the child's stdout."""
+    return RpcReader(process).reply(request_id, timeout)
 
 
 def adapter_urgent_attention_wait(hub, adapter_path=None):
@@ -902,16 +1022,19 @@ def adapter_urgent_attention_wait(hub, adapter_path=None):
                                stderr=subprocess.DEVNULL, text=True, encoding="utf-8")
     wait_seconds = 5
     try:
-        messages = [
-            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "cocern-smoke", "version": "1.0"}}},
-            {"jsonrpc": "2.0", "method": "notifications/initialized"},
-            {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "check_inbox", "arguments": {"repositoryId": REPO, **manager, "waitSeconds": wait_seconds}}}]
-        started = time.monotonic()
-        for message in messages:
-            adapter.stdin.write(json.dumps(message) + "\n")
+        def send(*messages):
+            for message in messages:
+                adapter.stdin.write(json.dumps(message) + "\n")
             adapter.stdin.flush()
-        # Read once: the helper's reader thread owns stdout for this adapter's entire lifetime.
-        reply = read_rpc_reply(adapter, 2, timeout=wait_seconds + 10)
+
+        reader = RpcReader(adapter)
+        send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "cocern-smoke", "version": "1.0"}}})
+        # Time the wait from a started adapter, so its cold start never counts against the early return.
+        expect(reader.reply(1) is not None, "the adapter did not answer initialize")
+        started = time.monotonic()
+        send({"jsonrpc": "2.0", "method": "notifications/initialized"},
+             {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "check_inbox", "arguments": {"repositoryId": REPO, **manager, "waitSeconds": wait_seconds}}})
+        reply = reader.reply(2, timeout=wait_seconds + 10)
         elapsed = time.monotonic() - started
         expect(reply is not None and "error" not in reply, "the waiting adapter did not return an MCP tool result")
         result = reply.get("result", {})
