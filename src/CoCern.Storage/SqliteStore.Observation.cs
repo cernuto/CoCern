@@ -1,6 +1,4 @@
 using System.Diagnostics;
-using System.Globalization;
-using System.Text;
 using System.Text.Json;
 using CoCern.Contracts.Dashboard;
 using CoCern.Core;
@@ -330,17 +328,7 @@ public sealed partial class SqliteStore : IRelayObservationSource
     private static string Text(JsonElement value, string name) { var item = Property(value, name); return item.ValueKind == JsonValueKind.String ? Safe(item.GetString()!) : ""; }
     private static bool Flag(JsonElement value, string name) => Property(value, name).ValueKind == JsonValueKind.True;
     private static DateTimeOffset? Date(JsonElement value, string name) { var item = Property(value, name); return item.ValueKind == JsonValueKind.String && item.TryGetDateTimeOffset(out var date) ? date : null; }
-    private static string Safe(string value)
-    {
-        var result = new StringBuilder(Math.Min(value.Length, 256));
-        foreach (var rune in value.EnumerateRunes())
-        {
-            if (Rune.IsControl(rune) || Rune.GetUnicodeCategory(rune) == UnicodeCategory.Format) continue;
-            if (result.Length + rune.Utf16SequenceLength > 256) break;
-            result.Append(rune.ToString());
-        }
-        return result.ToString();
-    }
+    private static string Safe(string value) => DashboardText.Safe(value);
 }
 
 
