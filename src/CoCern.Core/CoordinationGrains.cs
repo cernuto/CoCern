@@ -30,9 +30,6 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
     protected abstract string Kind { get; }
     private bool uncertainCommit;
 
-    /// <summary>The malformed effects this activation has logged, so each is logged once though a state transfer is retried every few seconds.</summary>
-    private readonly HashSet<string> malformedLogged = new(StringComparer.Ordinal);
-
     /// <summary>The time operations and due work are judged by. The anomaly monitor reads it from its options, so tests can move it.</summary>
     protected virtual DateTimeOffset Now => DateTimeOffset.UtcNow;
 
@@ -123,7 +120,11 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
                 }, now, ordersEnabled: true);
             if (failure == EffectDelivery.Failure.Retry)
             {
-                candidate.Effects[candidate.Effects.FindIndex(x => x.Id == effect.Id)] = effect with { DueAt = DateTimeOffset.UtcNow.Add(RedeliveryDelay) };
+                // A malformed one is marked reported in the same commit, so it is logged and counted once however often it is retried.
+                candidate.Effects[candidate.Effects.FindIndex(x => x.Id == effect.Id)] = effect with
+                {
+                    DueAt = DateTimeOffset.UtcNow.Add(RedeliveryDelay), MalformedReported = effect.MalformedReported || result.Code == RelayErrorCodes.MalformedEffect
+                };
                 if (!await CommitAsync(candidate)) return Replies.Error(RelayErrorCodes.StorageFailure);
                 return Replies.Error(RelayErrorCodes.DeliveryPending, new { effectId = effect.Id, reason = result.Code });
             }
@@ -167,12 +168,12 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
     /// <summary>
     /// A malformed effect is logged once per effect at Error level (<see cref="EffectDelivery.LogMalformed"/>). One that is retried is also
     /// counted once here, as a dropped one is counted when it leaves the outbox, so the count of malformed effects reads zero only when none
-    /// was sent.
+    /// was sent. The effect keeps that it was reported (<see cref="DurableEffect.MalformedReported"/>), so a reloaded grain does not report it
+    /// again; only a retry whose commit failed can report it twice.
     /// </summary>
     private void ReportMalformed(DurableEffect effect, JsonObject payload, RelayReply result, EffectDelivery.Failure failure)
     {
-        if (malformedLogged.Count >= RelayLimits.MaxRecords) malformedLogged.Clear();
-        if (!malformedLogged.Add(effect.Id)) return;
+        if (effect.MalformedReported) return;
         if (services.GetService<ILoggerFactory>()?.CreateLogger<CoordinationGrain>() is { } logger)
             EffectDelivery.LogMalformed(logger, Kind, this.GetPrimaryKeyString(), effect, result, failure);
         if (failure == EffectDelivery.Failure.Retry) RecordRefused(effect, payload, result);

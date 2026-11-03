@@ -173,7 +173,7 @@ public sealed class EffectMessageTests
     /// </summary>
     private static readonly string[] Untyped =
     [
-        Operations.Verify, Operations.Deliver, Operations.Resolve, Operations.ResolveAll, Operations.Block, Operations.Unblock, Operations.Dispatch,
+        Operations.Verify, Operations.Deliver, Operations.Resolve, Operations.ResolveAll, Operations.Dispatch,
         Operations.TaskUnclaim, Operations.NextWork, Operations.ClaimState, Operations.Standing, Operations.StandingSeen, Operations.StandingProposeHub,
         Operations.SessionTargetWatch, Operations.SweepSessions, Operations.TaskArchive, Operations.SessionOwners, Operations.SessionsOpen,
         Operations.AttentionRaise, Operations.AttentionClose, Operations.AttentionOffer, Operations.AttentionSeen, Operations.AttentionRoute,
@@ -182,7 +182,44 @@ public sealed class EffectMessageTests
     ];
 
     /// <summary>The number of untyped internal operations. It may only go down.</summary>
-    private const int PinnedUntyped = 31;
+    private const int PinnedUntyped = 29;
+
+    [Fact]
+    public void Lock_messages_read_back_name_their_missing_fields_and_the_lock_answers_a_malformed_one()
+    {
+        var block = new ActionBlock("repo", "deploy", "repo/default/T-1/deploy/1", "s1");
+        Assert.Equal(block, RoundTrip(block));
+        Assert.Equal(new ActionUnblock("repo", "deploy", block.ActionKey, "s1", AdministrativeAcceptance: true), RoundTrip(new ActionUnblock("repo", "deploy", block.ActionKey, "s1", AdministrativeAcceptance: true)));
+        Assert.False(new ActionUnblock("repo", "deploy", block.ActionKey, "s1").ToJson().ContainsKey("administrativeAcceptance"));
+        Assert.Equal(["actionKey"], Malformed<ActionBlock>(Without(block.ToJson(), "actionKey")));
+        Assert.Equal(["sessionId"], Malformed<ActionUnblock>(Without(new ActionUnblock("repo", "deploy", block.ActionKey, "s1").ToJson(), "sessionId")));
+
+        // A block that names only its action (the lock once fell back to the action's ID) is malformed, not a different lock entry.
+        var lockState = new StateEnvelope<CoordinationDocument>();
+        Assert.True(CoordinationStateMachine.Apply(lockState, "lock", "printer", Hub, RelayTools.ClaimAcquire, new() { ["repositoryId"] = "repo", ["sessionId"] = "s1", ["requestId"] = "c" }, Now).Ok);
+        var refused = CoordinationStateMachine.Apply(lockState, "lock", "printer", Hub, Operations.Block, Without(block.ToJson(), "actionKey"), Now);
+        Assert.Equal(RelayErrorCodes.MalformedEffect, refused.Code);
+        Assert.True(CoordinationStateMachine.Apply(lockState, "lock", "printer", Hub, Operations.Block, block.ToJson(), Now).Ok);
+        Assert.Equal([block.ActionKey], JsonNode.Parse(lockState.Value.Json)!["blockers"]!.AsObject().Select(entry => entry.Key));
+    }
+
+    [Fact]
+    public void A_session_closed_before_it_opened_tells_a_board_whose_task_targets_it()
+    {
+        var session = new StateEnvelope<CoordinationDocument>();
+        var directory = new RelayCaller("relay-directory", false, ["repo"], true);
+        Assert.True(CoordinationStateMachine.Apply(session, "session", "s1", directory, Operations.SessionExpire, new SessionExpire("repo", "s1", 1).ToJson(), Now).Ok);
+        var watch = CoordinationStateMachine.Apply(session, "session", "s1", Hub, Operations.SessionTargetWatch, new() { ["repositoryId"] = "repo", ["boardKey"] = "repo/ops", ["boardId"] = "ops" }, Now);
+        Assert.True(JsonNode.Parse(watch.DataJson)!["closed"]!.GetValue<bool>());
+        var told = Assert.Single(session.Effects, effect => effect.Operation == SessionClosed.Operation);
+        Assert.Equal(("repo/ops", new SessionClosed("repo", "ops", "s1")), (told.TargetKey, RoundTrip(SessionClosed.Decode(JsonNode.Parse(told.PayloadJson)!.AsObject()).Message!)));
+
+        // A session never opened or closed here is still left alone.
+        var unknown = new StateEnvelope<CoordinationDocument>();
+        var ignored = CoordinationStateMachine.Apply(unknown, "session", "s2", Hub, Operations.SessionTargetWatch, new() { ["repositoryId"] = "repo", ["boardKey"] = "repo/ops", ["boardId"] = "ops" }, Now);
+        Assert.False(JsonNode.Parse(ignored.DataJson)!["watching"]!.GetValue<bool>());
+        Assert.Empty(unknown.Effects);
+    }
 
     [Fact]
     public void Every_internal_operation_has_a_typed_message_or_is_on_an_untyped_list_that_only_shrinks()

@@ -52,8 +52,8 @@ public sealed class CoordinationTests
     {
         var state = new StateEnvelope<CoordinationDocument>();
         Assert.True(Call(state, "lock", "claim_acquire", new() { ["sessionId"] = "s1", ["requestId"] = "c", ["leaseSeconds"] = 1 }).Ok);
-        Assert.True(Call(state, "lock", "__block", new() { ["actionId"] = "a", ["sessionId"] = "s1" }).Ok);
-        Assert.Equal("Busy", Call(state, "lock", "__block", new() { ["actionId"] = "other", ["sessionId"] = "s1" }).Code);
+        Assert.True(Call(state, "lock", "__block", new() { ["actionId"] = "a", ["actionKey"] = "a/1", ["sessionId"] = "s1" }).Ok);
+        Assert.Equal("Busy", Call(state, "lock", "__block", new() { ["actionId"] = "other", ["actionKey"] = "other/1", ["sessionId"] = "s1" }).Code);
         Assert.Equal("Busy", Call(state, "lock", "claim_acquire", new() { ["sessionId"] = "s2", ["requestId"] = "later" }, seconds: 100).Code);
         var board = new StateEnvelope<CoordinationDocument>();
         Assert.True(Call(board, "board", "task_update", new() { ["taskId"] = "t", ["requestId"] = "t", ["expectedVersion"] = 0 }).Ok);
@@ -1671,13 +1671,13 @@ public sealed class CoordinationTests
         Assert.True(Lock("claim_acquire", new() { ["sessionId"] = "holder", ["requestId"] = "hold", ["taskId"] = "t", ["taskClaimGeneration"] = 1 }).Ok);
         NewEffects(printer, ref lockSeen);
         var release = new JsonObject { ["boardKey"] = "repo/default", ["boardId"] = "default", ["holderSessionId"] = "holder", ["claimFor"] = "default/t#1", ["orderId"] = "o-9", ["run"] = 7 };
-        Assert.True(Lock("__block", new() { ["actionId"] = "print", ["sessionId"] = "holder" }).Ok);
+        Assert.True(Lock("__block", new() { ["actionId"] = "print", ["actionKey"] = "print/1", ["sessionId"] = "holder" }).Ok);
         Assert.True(Data(Lock("__order_release", release.DeepClone().AsObject()))["failed"]!.GetValue<bool>());
         var back = Assert.Single(NewEffects(printer, ref lockSeen));
         Assert.Equal(("repo/default", "__order_failed", "o-9", 7L), (back.Target, back.Operation, back.Item["orderId"]!.GetValue<string>(), back.Item["run"]!.GetValue<long>()));
         Assert.True(Data(Lock("__order_release", release.DeepClone().AsObject()))["repeated"]!.GetValue<bool>());
         Assert.Empty(NewEffects(printer, ref lockSeen));
-        Assert.True(Lock("__unblock", new() { ["actionId"] = "print", ["sessionId"] = "holder" }).Ok);
+        Assert.True(Lock("__unblock", new() { ["actionId"] = "print", ["actionKey"] = "print/1", ["sessionId"] = "holder" }).Ok);
         // Complete, then claim again: the holder took the same resource for its next task (same lock generation) before the order's
         // release arrived. The late release leaves the new claim alone.
         Assert.True(Lock("claim_acquire", new() { ["sessionId"] = "holder", ["requestId"] = "hold-next", ["taskId"] = "t2", ["taskClaimGeneration"] = 1 }).Ok);

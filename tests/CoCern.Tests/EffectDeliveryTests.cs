@@ -36,6 +36,10 @@ public sealed class EffectDeliveryTests
     [InlineData(Operations.SessionOwns, RelayErrorCodes.MalformedEffect, "DropAndCount")]
     [InlineData(Operations.SessionActive, RelayErrorCodes.SessionDenied, "DropAndCount")]
     [InlineData(Operations.SessionActive, RelayErrorCodes.StorageFailure, "Retry")]
+    [InlineData(Operations.Block, RelayErrorCodes.Busy, "Drop")]
+    [InlineData(Operations.Block, RelayErrorCodes.ClaimRequired, "Drop")]
+    [InlineData(Operations.Block, RelayErrorCodes.MalformedEffect, "Retry")]
+    [InlineData(Operations.Unblock, RelayErrorCodes.ActionDenied, "Retry")]
     [InlineData(Operations.AttentionRaise, RelayErrorCodes.SessionUnknown, "Drop")]
     [InlineData(Operations.Deliver, RelayErrorCodes.InvalidArguments, "Retry")]
     public void A_typed_message_is_retried_or_dropped_by_its_delivery_class(string operation, string code, string expected)
@@ -111,6 +115,10 @@ public sealed class EffectDeliveryTests
             await storage.WriteStateAsync("board", GrainId.Create("cocern.board", "repo/seeded"), new GrainState<StateEnvelope<CoordinationDocument>>(board));
             var grain = factory.GetGrain<ITaskBoardGrain>("repo/seeded");
             Assert.Equal(RelayErrorCodes.DeliveryPending, (await grain.ExecuteAsync(dispatcher, Operations.Dispatch, "{}")).Code);
+            // The board keeps that it reported the effect, so a reloaded grain does not log or count it again.
+            var stored = new GrainState<StateEnvelope<CoordinationDocument>>();
+            await storage.ReadStateAsync("board", GrainId.Create("cocern.board", "repo/seeded"), stored);
+            Assert.True(Assert.Single(stored.State!.Effects).MalformedReported);
             await Task.Delay(TimeSpan.FromSeconds(5.5));
             Assert.Equal(RelayErrorCodes.DeliveryPending, (await grain.ExecuteAsync(dispatcher, Operations.Dispatch, "{}")).Code);
             Assert.Equal(2, logs.Lines.Count);

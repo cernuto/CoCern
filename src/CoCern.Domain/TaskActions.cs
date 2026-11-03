@@ -172,10 +172,7 @@ internal static class TaskActions
         if (previousAttempt is not null && Text(previousAttempt, "status") is "failed" or Abandoned)
             AttentionSources.OnTaskUpdate(context, task, task["workflow"] as JsonObject, [], [], [], [id]);
         foreach (var resource in Strings(action["resourceIds"]))
-            context.Emit(AggregateKinds.Lock, resource, Operations.Block, new JsonObject
-            {
-                ["repositoryId"] = context.Repository, ["actionId"] = id, ["actionKey"] = CoordinationStateMachine.ActionKey(args, id, Number(action, "attempt")), ["sessionId"] = session
-            });
+            context.Send(resource, new ActionBlock(context.Repository, id, CoordinationStateMachine.ActionKey(args, id, Number(action, "attempt")), session));
         Track(context, session, id, Number(action, "attempt"), open: true);
         return Ok(new { action, replayAllowed = true, existing = false }, version);
     }
@@ -293,11 +290,7 @@ internal static class TaskActions
         var administrativeAcceptance = caller.IsAdministrator && (adminAcceptance || recovery || recoverer);
         if (!unresolved)
             foreach (var resource in Strings(action["resourceIds"]))
-                context.Emit(AggregateKinds.Lock, resource, Operations.Unblock, new JsonObject
-                {
-                    ["repositoryId"] = context.Repository, ["actionId"] = id, ["actionKey"] = actionKey,
-                    ["sessionId"] = Text(action, "sessionId"), ["administrativeAcceptance"] = administrativeAcceptance
-                });
+                context.Send(resource, new ActionUnblock(context.Repository, id, actionKey, Text(action, "sessionId"), administrativeAcceptance));
         return null;
     }
 

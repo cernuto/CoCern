@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using CoCern.Contracts;
 using CoCern.Domain;
+using CoCern.Domain.Messages;
 using static CoCern.Contracts.RelayErrorCodes;
 using static CoCern.Domain.JsonFields;
 using static CoCern.Domain.Replies;
@@ -191,18 +192,19 @@ internal sealed class ClaimComposer(Aggregates aggregates)
         // the board would stall both until the call timeout. Blocking is idempotent, so the board's own queued blocks are harmless.
         var actionKey = CoordinationStateMachine.ActionKey(args, actionId, attempt);
         var resources = Strings(Aggregates.Parse(result)["action"]!["resourceIds"]).ToArray();
-        JsonObject LockArgs() => new() { ["repositoryId"] = Text(args, "repositoryId"), ["actionId"] = actionId, ["actionKey"] = actionKey, ["sessionId"] = Text(args, "sessionId") };
+        // The same messages the board queues (ActionBlock, ActionUnblock), sent directly.
+        var (repository, sessionId) = (Text(args, "repositoryId"), Text(args, "sessionId"));
         foreach (var resource in resources)
         {
             RelayReply block;
             // A block call that throws may still have blocked the lock: it is lifted below with the others.
-            try { block = await aggregates.Call(AggregateKinds.Lock, resource, caller, Operations.Block, LockArgs()); }
+            try { block = await aggregates.Call(ActionBlock.TargetKind, resource, caller, ActionBlock.Operation, new ActionBlock(repository, actionId, actionKey, sessionId).ToJson()); }
             catch (Exception exception) when (exception is not OperationCanceledException) { block = Error(Unavailable); }
             if (block.Ok) continue;
             // The action is recorded but never ran. Each lock remembers it as resolved, which lifts the blocks this call placed and turns the
             // board's own queued blocks into no-ops, so no lock stays blocked by it. The action stays open until reported (canceled).
             foreach (var placed in resources)
-                try { await aggregates.Call(AggregateKinds.Lock, placed, caller, Operations.Unblock, LockArgs()); }
+                try { await aggregates.Call(ActionUnblock.TargetKind, placed, caller, ActionUnblock.Operation, new ActionUnblock(repository, actionId, actionKey, sessionId).ToJson()); }
                 catch (Exception exception) when (exception is not OperationCanceledException) { }
             return Error(ActionPending, new { actionId, replayAllowed = false, reason = block.Code, resourceId = resource, next = "report this action with outcome canceled, then retry" });
         }
