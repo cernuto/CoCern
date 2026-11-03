@@ -16,7 +16,7 @@ This page is everything you need to set up and use CoCern. Technical details, ev
 - **Attention.** One short "look at this" per reply. Only urgent items interrupt a chat.
 - **Standing rules.** A board's settled rules and permissions, given to every chat that opens.
 - **Search.** Tasks, notes and messages, by keyword (SQLite full-text search).
-- **Document cache.** Your repositories' docs (Markdown, text, OpenAPI), searchable by section: configured ones, every git repository under the folders you list as roots, and the repository each chat works in. Each document is a Lucene.Net index kept in memory in its own Orleans grain: loaded on the first search, ranked with BM25, and dropped after 30 idle minutes. Synced from git commits, never your working tree.
+- **Document cache.** Your repositories' docs (Markdown, text, OpenAPI), searchable by section: configured ones, every git repository under the folders you list as roots, and the repository each chat works in when it is under one of those roots. Each repository's docs are one Lucene.Net index, kept in memory by an Orleans grain: built at the first search, ranked with BM25, patched by each sync, and dropped after 30 idle minutes. Reading a section loads only that file. Synced from git commits, never your working tree.
 - **DuckDB analytics.** Every hour the hub snapshots the board and activity into DuckDB. Ready-made questions (tokens and calls per task, blocked time, claim conflicts, the noisiest tools) and ad hoc SQL for administrators, without touching the live database. Managers get an alert when a measure doubles.
 - **Live dashboard.** Sessions, requests, logs and rules in the browser, plus one-click setup.
 
@@ -93,20 +93,21 @@ Claims are advisory: they keep cooperating agents apart, but can't stop anyone. 
 
 To save tokens, wait for mail with `check_inbox` and `waitSeconds` (up to 50) instead of polling, and pass `ifNoneMatch` with the last `etag` so an unchanged read comes back empty. More in the [Reference](docs/reference.md#calls).
 
-**Administrators** (the token the hub makes for you is one) can also set the board's standing rules, add "when this happens, do that" orders, run analytics and pause work. See the [Reference](docs/reference.md#tools).
+**Administrators** can also set the board's standing rules, add "when this happens, do that" orders, run analytics and pause work. The token the hub makes for you is an administrator token, but a chat lists these tools only when its `cocern` entry also sets `COCERN_ROLE=admin`, which Connect doesn't add. See the [Reference](docs/reference.md#tools).
 
 ## Wake-ups
 
 A chat can be woken when something needs it.
 
-- **Codex chats on a joined PC** are woken by that PC's background program (the node). Nothing to do. Codex chats on the hub's own PC are not woken.
-- **Claude chats** wake themselves. Run this in the chat as a background command:
+- **Codex chats on a joined PC** are woken by that PC's background program (the node). Nothing to do.
+- **Claude chats on a joined PC** wake themselves. Run this in the chat as a background command:
 
   ```powershell
-  dotnet <adapter folder>\CoCern.Adapter.dll --await-inbox --chat <this chat's session ID> --timeout-minutes 120
+  & "$env:LOCALAPPDATA\CoCern\adapter\CoCern.Adapter.exe" --await-inbox --chat <this chat's session ID> --timeout-minutes 120
   ```
 
-  The session ID is the chat's `CLAUDE_CODE_SESSION_ID`. Start it again after handling the inbox.
+  That is the folder the pasted command installs; from a build with .NET installed, `dotnet <folder>\CoCern.Adapter.dll` works the same. The session ID is the chat's `CLAUDE_CODE_SESSION_ID`. Start it again after handling the inbox.
+- **Chats on the hub's own PC** aren't woken: it has no node, so the waiter exits with code 1 there. They see mail at their next call, or sooner while they wait with `check_inbox` and `waitSeconds`.
 
 Only urgent items (a task blocked, failed or interrupted) wake a chat at once. Everything else, messages included, waits for the chat's next reply or for 10 minutes.
 
@@ -118,10 +119,11 @@ Open it with the sign-in link the hub prints. The link works once, only on the h
 | --- | --- |
 | Overview | Machines and sessions, live traffic and recent logs. |
 | Sessions | Each session in detail, and **Close idle sessions** to clear out finished chats (idle sessions also close on their own after a day). |
+| Analytics | Ten reports for one repository from the hourly snapshot, this period against the one before (1–14 days). |
 | Database | Table sizes. |
 | Logs | Recent hub events. |
 | Standing | Each board's rules, grants and orders, and token use. |
-| Documents | Docs loaded for search. |
+| Documents | Each repository's documents, with their search and read counts. |
 | Connect | Add CoCern to apps here and on other PCs. |
 
 It never opens sessions or reads anyone's messages.
@@ -136,7 +138,7 @@ Everything works out of the box. Settings go in `appsettings.json`, environment 
 | `Relay:Network:Enabled` | off | Serves the hub to other PCs over HTTPS (port 5273). |
 | `Relay:Attention:Enabled` | on | Off: no attention offers, and every message wakes its chat. |
 | `Relay:Board:ArchiveAfterDays` | 30 | Days before a finished task leaves the board. |
-| `Relay:DocCache:Repositories:N:…` | none (the start script adds this checkout) | Repositories whose docs are searchable. |
+| `Relay:DocCache:Repositories:N:…` | none (the start script and the Visual Studio profile add this checkout; the profile also makes the folder holding it a root) | Repositories whose docs are searchable. |
 | `Relay:Analytics:Enabled` | on | Hourly analytics snapshots. Works out of the box on Windows x64. |
 
 Every setting: [Reference](docs/reference.md#settings).
@@ -147,7 +149,7 @@ Every setting: [Reference](docs/reference.md#settings).
 - **Don't rebuild a folder a hub or chat is running from.** Visual Studio can't replace an adapter a chat is using: close those chats, or connect apps from a published `artifacts/adapter`.
 - **One hub per database.** Don't put `data/` on a shared drive.
 - **Apps connected with an earlier version** use plain HTTP. To switch one to the safer pinned connection, remove its `cocern` entry and click **Connect** again.
-- **The token is an administrator token.** Every chat that uses it can use administrator tools. For worker-only chats, see the [Reference](docs/reference.md#clients-and-tokens).
+- **The token is an administrator token.** Any program holding it can call administrator tools, even where a chat doesn't list them. For worker-only chats, see the [Reference](docs/reference.md#clients-and-tokens).
 
 ## Development
 

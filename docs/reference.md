@@ -180,7 +180,7 @@ A board's settled rules (lines) and permissions (grants). Chats get them at `ses
 
 ## Documents
 
-`doc_search` searches a repository's committed docs by section instead of reading whole files. Nothing is searchable until a repository is configured; the start script adds the checkout it runs from as `cocern` (`-NoDocs` skips this).
+`doc_search` searches a repository's committed docs by section instead of reading whole files. Nothing is searchable until a repository is configured; the start script adds the checkout it runs from as `cocern` (`-NoDocs` skips this). The Visual Studio profile adds it too, and makes the folder holding the checkout a root, so the repositories beside it are found as well.
 
 | File | Split into |
 | --- | --- |
@@ -305,7 +305,7 @@ New-NetFirewallRule -DisplayName "CoCern hub (HTTPS 5273)" -Direction Inbound -A
 
 **Codex chats** are woken by the node with `codex queue`: never mid-turn, at most one waiting wake per chat, at most one every 3 seconds and 20 per 10 minutes. If a wake's outcome is unknown (the dispatch failed or was cut off), that chat isn't woken again for 10 minutes, and that wake's messages are never sent twice. Codex gives the adapter no chat ID, so the node finds each chat from its transcript.
 
-**Claude chats** wake themselves with `--await-inbox --chat <CLAUDE_CODE_SESSION_ID>` (see the README). The chat must have called `session_open` on this PC first. Exit codes: 0 mail arrived, 1 no session for that chat, 2 timed out, 3 stopped. `--print-inbox` also prints the messages; `--ack <id,id>` acknowledges them, then waits again. The chat shows as reachable only while it runs.
+**Claude chats** on a joined PC wake themselves with `--await-inbox --chat <CLAUDE_CODE_SESSION_ID>` (see the README). The chat must have called `session_open` on this PC first, through the node's credentials; the waiter needs the node, so on the hub's own PC it exits 1. Exit codes: 0 mail arrived, 1 no session for that chat, 2 timed out, 3 stopped. `--print-inbox` also prints the messages; `--ack <id,id>` acknowledges them, then waits again. The chat shows as reachable only while it runs.
 
 `--wake <config>` and `--await-inbox <config>` also take a hand-written config; see `scripts/Start-CoCernWake.ps1`. Watch each chat with only one of them. For an `https://` `relayUrl`, give the hub certificate's SHA-256 `fingerprint` in the config (it wins over `COCERN_FINGERPRINT`); only that certificate is accepted.
 
@@ -408,7 +408,7 @@ Changing a repository's settings makes its next sync re-read everything.
 
 ### Adapter
 
-The Connect page sets these. By hand, run `dotnet <path>/CoCern.Adapter.dll` as an MCP server with:
+Connect sets `COCERN_TOKEN_FILE`, `COCERN_URL` and `COCERN_FINGERPRINT`; add the others to an app's `cocern` entry by hand. By hand, run `dotnet <path>/CoCern.Adapter.dll` as an MCP server with:
 
 | Variable | Default | What it does |
 | --- | --- | --- |
@@ -416,7 +416,7 @@ The Connect page sets these. By hand, run `dotnet <path>/CoCern.Adapter.dll` as 
 | `COCERN_TOKEN_FILE` | | File holding the client token. Wins over `COCERN_TOKEN`. |
 | `COCERN_TOKEN` | | The token itself. |
 | `COCERN_PROFILE` | | `chat`: only `session_open`, `send_message`, `check_inbox`, `ack` and `chat_directory`. |
-| `COCERN_ROLE` | | `admin` also lists administrator tools. The hub still checks the token. |
+| `COCERN_ROLE` | | `admin` also lists administrator tools, for a chat whose token is an administrator's (Connect's is). The hub still checks the token. |
 | `COCERN_SIGNALR` | `false` | `true` prints a hint on standard error when the inbox changes. |
 | `COCERN_FINGERPRINT` | | The hub certificate's SHA-256 fingerprint, for an `https://` `COCERN_URL`: only that certificate is accepted. Connect sets it. |
 
@@ -432,9 +432,9 @@ With none of the first three set, the adapter uses this PC's node.
 | `Relay:Clients:N:TokenFile` | Read the token from this file instead. A missing file is created at startup with a new token, owner-only. |
 | `Relay:Clients:N:PrincipalId` | Who the client is. |
 | `Relay:Clients:N:IsAdministrator` | Allows administrator tools (default `false`). |
-| `Relay:Clients:N:Repositories:M` | Repositories it may use. |
+| `Relay:Clients:N:Repositories:M` | Repositories it may use. An administrator may use every repository. |
 
-The hub refuses to start with no clients and no OAuth issuer. The start script and the Visual Studio profile configure one administrator client with `data/local-client-token`; the start script's `-RepositoryId` sets its repository (default `cocern`).
+The hub refuses to start with no clients and no OAuth issuer. The start script and the Visual Studio profile configure one administrator client with `data/local-client-token`; the start script's `-RepositoryId` (default `cocern`) names this checkout's repository, for the client and the doc cache.
 
 **A worker-only token.** In the PowerShell window you start the hub from, before starting it:
 
@@ -456,7 +456,7 @@ Open **Analytics** to compare one repository over 1–14 days with the preceding
 
 The ten public named reports cover average tokens, calls and messages per task; average reply bytes per session by role; noisiest tools by reply bytes; claim conflicts by resource; quality guardrail events; attention offer events (shown, accepted, later and dismissed) by kind and outcome; average ready-to-first-claim latency in minutes (an assignment proxy); and average hours of ended blocked spells, with open blocked spells counted separately. Charts include numeric equivalents, units and sample counts. Attention event denominators are per kind and are not summed across outcome categories.
 
-`GET /dashboard/api/analytics?repositoryId=cocern&days=7` returns the fixed reports under the existing dashboard viewer policy. It accepts no SQL and preserves the existing analytics row and payload limits. Missing snapshots, unavailable analytics, per-report failures and truncated results are shown explicitly. Unknown values display as **Not measured**; measured zeros remain **0**. Earliest recorded activity, when known, can identify short history but does not prove continuous tracking. Unknown history and incomplete comparison periods are labeled; no sample data is substituted.
+`GET /dashboard/api/analytics?repositoryId=cocern&days=7` returns the fixed reports under the existing dashboard viewer policy. It accepts no SQL and preserves the existing analytics row and payload limits. Missing snapshots, unavailable analytics, per-report failures and truncated results are shown explicitly. Unknown values display as **Not measured**; measured zeros remain **0**. History coverage always shows as unknown, because the hub doesn't record when tracking began, so a short history and incomplete comparison periods are labeled as possible; no sample data is substituted.
 
 ## Addresses
 
@@ -466,6 +466,7 @@ The ten public named reports cover average tokens, calls and messages per task; 
 | `/api/tools`, `/api/tools/{tool}` | List tools, call a tool. Needs a token. |
 | `/hubs/coordination` | SignalR inbox hints. Needs a token. |
 | `/api/discovery/enroll`, `/api/discovery/announce` | Joining PCs (with discovery on). |
+| `/join/adapter.zip` | The adapter folder that Add another PC's command downloads. No token (it holds no secret); HTTPS, or this PC only; with discovery on. |
 | `/dashboard/` | The dashboard. |
 | `/scalar`, `/openapi/v1.json` | API reference. This PC only. |
 | `/health` | Health check. |
