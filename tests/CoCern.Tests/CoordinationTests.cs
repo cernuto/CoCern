@@ -4,6 +4,7 @@ using System.Reflection;
 using Orleans;
 using CoCern.Core;
 using CoCern.Domain;
+using CoCern.Domain.Messages;
 using CoCern.Contracts;
 using Xunit;
 
@@ -1744,10 +1745,8 @@ public sealed class CoordinationTests
         Assert.Single(hub.Queued, effect => effect.Operation == Operations.SessionWork && effect.TargetKind == AggregateKinds.Session && effect.TargetKey == session);
 
     /// <summary>A board's report to the session <paramref name="session"/> that it starts or stops answering for action <paramref name="action"/>.</summary>
-    private static JsonObject ActionWork(string session, string action, bool open, DateTimeOffset at) => new()
-    {
-        ["sessionId"] = session, ["actionKey"] = "repo/default/t/" + action + "/1", ["open"] = open, ["at"] = at.ToString("O")
-    };
+    private static JsonObject ActionWork(string session, string action, bool open, DateTimeOffset at) =>
+        new ActionWorkReport("repo", session, AggregateKinds.DefaultBoard, "t", action, 1, open, at).ToJson();
 
     [Fact]
     public void A_full_directory_never_expires_a_session_that_owns_an_unresolved_action()
@@ -1810,7 +1809,7 @@ public sealed class CoordinationTests
         var held = new JsonObject();
         for (var i = 0; i < RelayLimits.MaxRecords; i++)
         {
-            var heldRecord = StaleRecord("h-" + i, Now.AddDays(-3)); heldRecord["openActions"] = new JsonObject { ["k" + i] = Now.ToUnixTimeSeconds() };
+            var heldRecord = StaleRecord("h-" + i, Now.AddDays(-3)); heldRecord["ownsWork"] = Now.ToUnixTimeSeconds();
             held["h-" + i] = heldRecord;
         }
         var full = new StateEnvelope<CoordinationDocument> { Value = new() { Json = new JsonObject { ["sessions"] = held }.ToJsonString() } };

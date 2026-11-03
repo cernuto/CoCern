@@ -236,10 +236,16 @@ public static class Operations
     /// </summary>
     public const string SessionClosed = "__session_closed";
     /// <summary>
-    /// A board tells a session it starts answering for an unresolved action (<c>open: true</c>: it began or recovered it) or stops; the
-    /// session tells the control directory (<c>owns</c>) when it starts or stops owning any. The directory never expires such a session.
+    /// A board tells a session it starts answering for an unresolved action (<c>open: true</c>: it began or recovered it) or stops
+    /// (<see cref="Messages.ActionWorkReport"/>); the session then tells the control directory when it starts or stops owning any
+    /// (<see cref="SessionOwns"/>).
     /// </summary>
     public const string SessionWork = "__session_work";
+    /// <summary>
+    /// A session tells the control directory it now answers for unresolved work, or no longer does (<see cref="Messages.SessionOwnership"/>).
+    /// The directory never expires such a session.
+    /// </summary>
+    public const string SessionOwns = "__session_owns";
     /// <summary>
     /// The hub's periodic sweep, sent to the control directory: closes sessions in every repository not seen for <c>idleHours</c>, as the
     /// full-directory cleanup does (each is sent <see cref="SessionExpire"/>); one that answers for an unresolved action is kept, and so is

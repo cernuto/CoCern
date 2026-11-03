@@ -171,10 +171,11 @@ internal sealed class AggregateHub
     /// <summary>
     /// Fails the test unless the target took the effect as its outbox would leave it: accepted, or refused where the outbox drops the
     /// refusal (an attention item, or a lock the board's own copy of a block finds busy or unclaimed). Any other refusal would be retried
-    /// forever.
+    /// forever. A malformed message fails whatever its delivery class: its emitter is wrong, and in production it would only be logged.
     /// </summary>
     public static void Accept(DurableEffect effect, RelayReply reply)
     {
+        Assert.False(reply.Code == RelayErrorCodes.MalformedEffect, effect.Operation + " to " + effect.TargetKey + " is malformed: " + reply.DataJson);
         var dropped = Operations.IsAttention(effect.Operation) || effect.Operation == Operations.Block && reply.Code is RelayErrorCodes.Busy or RelayErrorCodes.ClaimRequired;
         Assert.True(reply.Ok || dropped, effect.Operation + " to " + effect.TargetKey + " was refused: " + reply.Code + " " + reply.DataJson);
     }

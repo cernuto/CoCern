@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using CoCern.Contracts;
+using CoCern.Domain.Messages;
 using static CoCern.Contracts.RelayErrorCodes;
 using static CoCern.Domain.JsonFields;
 using static CoCern.Domain.Replies;
@@ -21,7 +22,7 @@ internal static class ControlAggregate
         {
             RelayTools.SessionOpen => OpenSession(context),
             Operations.Register => RegisterSession(context),
-            Operations.SessionWork => TrackWork(context),
+            Operations.SessionOwns => TrackOwnership(context),
             Operations.SweepSessions => SweepSessions(context),
             Operations.SessionRestore => RestoreSession(context),
             Operations.SessionExpired => SettleClose(context),
@@ -253,7 +254,7 @@ internal static class ControlAggregate
         // A redelivered restore never undoes a newer report that the work ended.
         if (IsTrue(args, "owns") && Number(args, "seq") >= Number(record, WorkSeqKey))
         {
-            record[OwnsWorkKey] = context.Now.ToUnixTimeSeconds(); record.Remove(ClearedWorkKey);
+            record[OwnsWorkKey] = context.Now.ToUnixTimeSeconds();
             record[WorkSeqKey] = Number(args, "seq");
         }
         if (IsTrue(args, "mail")) record[MailHeldKey] = context.Now.ToString("O");
@@ -302,43 +303,25 @@ internal static class ControlAggregate
     }
 
     private const string OwnsWorkKey = "ownsWork";
-    private const string ClearedWorkKey = "ownsWorkCleared";
     private const string WorkSeqKey = "ownsWorkSeq";
 
-    /// <summary>
-    /// Whether the session answers for an unresolved action: its session reported so within <see cref="RelayLimits.SessionWorkRetentionDays"/>,
-    /// or (before sessions reported for themselves) a board's per-action report still counts.
-    /// </summary>
-    private static bool OwnsWork(JsonObject session, DateTimeOffset now) =>
-        WorkLedger.Seconds(session[OwnsWorkKey]) > WorkLedger.Cutoff(now) || WorkLedger.Owns(session, now);
+    /// <summary>Whether the session answers for an unresolved action: it reported so within <see cref="RelayLimits.SessionWorkRetentionDays"/>.</summary>
+    private static bool OwnsWork(JsonObject session, DateTimeOffset now) => WorkLedger.Seconds(session[OwnsWorkKey]) > WorkLedger.Cutoff(now);
 
     /// <summary>
-    /// <see cref="Operations.SessionWork"/>: a session's report that it now answers for unresolved work (<c>owns</c>), or no longer does,
-    /// sent only when that changes and as a daily refresh, so each action no longer writes this directory. A report older than the last
-    /// change is ignored, so reordered reports never flip it back. A board's older per-action report (<c>actionKey</c>) still applies to the
-    /// ledger it kept here. A session missing from the directory, or in another repository, is ignored: a refusal would be retried forever.
+    /// <see cref="Operations.SessionOwns"/>: a session's report that it now answers for unresolved work, or no longer does, sent only when
+    /// that changes and as a daily refresh, so each action does not write this directory. A report numbered no later than the last one
+    /// applied (<c>seq</c>) is stale and ignored, so reordered or repeated reports never flip it back. A session missing from the
+    /// directory, or in another repository, is ignored.
     /// </summary>
-    private static RelayReply TrackWork(AggregateContext context)
+    private static RelayReply TrackOwnership(AggregateContext context)
     {
-        var id = Required(context.Args, "sessionId");
-        if (ObjectAt(context.State, "sessions")[id] is not JsonObject session || Text(session, "repositoryId") != context.Repository) return Ok(new { tracked = false });
-        var at = WorkLedger.ReportedAt(context.Args, context.Now);
-        if (!context.Args.ContainsKey("owns"))
-        {
-            var tracked = WorkLedger.Apply(session, Required(context.Args, "actionKey"), Flag(context.Args, "open"), at, context.Now);
-            return Ok(new { tracked, openActions = WorkLedger.OpenCount(session), overflow = WorkLedger.Overflowing(session) });
-        }
-        // The session numbers its reports, so a reordered one is told apart even within one second; a report from before that falls back to its time.
-        if (Number(context.Args, "seq") is var seq and > 0)
-        {
-            if (seq <= Number(session, WorkSeqKey)) return Ok(new { tracked = false });
-            session[WorkSeqKey] = seq;
-        }
-        else if (at <= Math.Max(WorkLedger.Seconds(session[OwnsWorkKey]), WorkLedger.Seconds(session[ClearedWorkKey]))) return Ok(new { tracked = false });
-        if (Flag(context.Args, "owns")) session[OwnsWorkKey] = at;
-        else { session.Remove(OwnsWorkKey); session[ClearedWorkKey] = at; }
-        // The session now speaks for all its work, so the per-action ledger older boards kept here is superseded.
-        foreach (var field in WorkLedger.Fields) session.Remove(field);
+        if (!SessionOwnership.Decode(context.Args).TryGet(out var report, out var malformed)) return Malformed(malformed);
+        if (ObjectAt(context.State, "sessions")[report.SessionId] is not JsonObject session || Text(session, "repositoryId") != context.Repository) return Ok(new { tracked = false });
+        if (report.Seq <= Number(session, WorkSeqKey)) return Ok(new { tracked = false });
+        session[WorkSeqKey] = report.Seq;
+        if (report.Owns) session[OwnsWorkKey] = WorkLedger.ReportedAt(report.At, context.Now);
+        else session.Remove(OwnsWorkKey);
         return Ok(new { tracked = true });
     }
 
@@ -373,7 +356,7 @@ internal static class ControlAggregate
     {
         var workers = ObjectAt(context.State, "sessions").Select(x => x.Value!.AsObject()).Where(x => Text(x, "repositoryId") == context.Repository).Select(x =>
         {
-            var copy = x.DeepClone().AsObject(); copy.Remove("sessionToken"); copy.Remove("principalId"); foreach (var field in WorkLedger.Fields) copy.Remove(field); copy.Remove(OwnsWorkKey); copy.Remove(ClearedWorkKey); copy.Remove(WorkSeqKey); copy.Remove(MailHeldKey);
+            var copy = x.DeepClone().AsObject(); copy.Remove("sessionToken"); copy.Remove("principalId"); copy.Remove(OwnsWorkKey); copy.Remove(WorkSeqKey); copy.Remove(MailHeldKey);
             var stale = Date(copy, "freshUntil") <= context.Now || Text(copy, "hubIncarnation") != Text(context.Args, "hubIncarnation");
             copy["stale"] = stale; copy.Remove("hubIncarnation");
             if (stale) copy["availability"] = "unknown";

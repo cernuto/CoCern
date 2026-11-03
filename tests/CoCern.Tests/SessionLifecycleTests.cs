@@ -10,6 +10,7 @@ using Orleans.Hosting;
 using CoCern.Contracts;
 using CoCern.Core;
 using CoCern.Domain;
+using CoCern.Domain.Messages;
 using Xunit;
 
 namespace CoCern.Tests;
@@ -185,11 +186,8 @@ public sealed class SessionLifecycleTests
         hub.DeliverAll(T0);
         // A board records the session's new action and tells the session, which tells the directory; that last report is still queued
         // when an administrator closes the session by label.
-        Assert.True(hub.Apply(AggregateKinds.Session, worker.Id, Operations.SessionWork, new()
-        {
-            ["sessionId"] = worker.Id, ["actionKey"] = "repo/default/t/a/1", ["open"] = true, ["at"] = T0.AddMinutes(1).ToString("O")
-        }, BoardCaller, T0.AddMinutes(1)).Ok);
-        var report = Assert.Single(hub.Discard(Operations.SessionWork));
+        Assert.True(hub.Apply(AggregateKinds.Session, worker.Id, Operations.SessionWork, Work(worker.Id, true, T0.AddMinutes(1)), BoardCaller, T0.AddMinutes(1)).Ok);
+        var report = Assert.Single(hub.Discard(Operations.SessionOwns));
         Assert.Equal(AggregateKinds.Control, report.TargetKind);
 
         Assert.Equal(1, Data(hub.Close(new() { ["targetSessionId"] = worker.Id }, T0.AddMinutes(2)))["closed"]!.GetValue<int>());
@@ -220,10 +218,7 @@ public sealed class SessionLifecycleTests
         hub.Verify(target, T0); hub.Verify(peer, T0);
         hub.DeliverAll(T0);
         Assert.True(hub.Send(peer, target.Id, "unread", T0).Ok);
-        Assert.True(hub.Apply(AggregateKinds.Session, target.Id, Operations.SessionWork, new()
-        {
-            ["sessionId"] = target.Id, ["actionKey"] = "repo/default/t/a/1", ["open"] = true, ["at"] = T0.ToString("O")
-        }, BoardCaller, T0).Ok);
+        Assert.True(hub.Apply(AggregateKinds.Session, target.Id, Operations.SessionWork, Work(target.Id, true, T0), BoardCaller, T0).Ok);
         hub.DeliverAll(T0);
 
         var kept = hub.Close(new() { ["targetSessionId"] = target.Id }, T0.AddMinutes(1));
@@ -239,10 +234,7 @@ public sealed class SessionLifecycleTests
         Assert.True(hub.Verify(peer, T0.AddMinutes(3)).Ok);
         Assert.Null(hub.State(AggregateKinds.Session, target.Id)["inbox"]);
         // A late work report cannot revive the closed session.
-        Assert.True(hub.Apply(AggregateKinds.Session, target.Id, Operations.SessionWork, new()
-        {
-            ["sessionId"] = target.Id, ["actionKey"] = "repo/default/t/a/1", ["open"] = true, ["at"] = T0.AddMinutes(4).ToString("O")
-        }, BoardCaller, T0.AddMinutes(4)).Ok);
+        Assert.True(hub.Apply(AggregateKinds.Session, target.Id, Operations.SessionWork, Work(target.Id, true, T0.AddMinutes(4)), BoardCaller, T0.AddMinutes(4)).Ok);
         hub.DeliverAll(T0.AddMinutes(4));
         Assert.False(hub.Directory().ContainsKey(target.Id));
     }
@@ -253,12 +245,9 @@ public sealed class SessionLifecycleTests
         var hub = new AggregateHub();
         var target = hub.Open("target", T0);
         hub.Verify(target, T0); hub.DeliverAll(T0);
-        Assert.True(hub.Apply(AggregateKinds.Session, target.Id, Operations.SessionWork, new()
-        {
-            ["sessionId"] = target.Id, ["actionKey"] = "repo/default/t/a/1", ["open"] = true, ["at"] = T0.ToString("O")
-        }, BoardCaller, T0).Ok);
+        Assert.True(hub.Apply(AggregateKinds.Session, target.Id, Operations.SessionWork, Work(target.Id, true, T0), BoardCaller, T0).Ok);
         // The directory has not yet heard the work report, so a normal close is refused by the session.
-        Assert.Single(hub.Discard(Operations.SessionWork));
+        Assert.Single(hub.Discard(Operations.SessionOwns));
         Assert.True(hub.Close(new() { ["targetSessionId"] = target.Id }, T0.AddMinutes(1)).Ok);
         var expiry = Assert.Single(hub.Of(AggregateKinds.Control, AggregateKinds.ControlKey).Effects);
         Assert.True(hub.Deliver(expiry, T0.AddMinutes(1)).Ok);
@@ -293,10 +282,10 @@ public sealed class SessionLifecycleTests
     private static JsonObject BoardTask(AggregateHub hub) => hub.State(AggregateKinds.Board, BoardKey)["tasks"]!["t"]!.AsObject();
 
     private static RelayReply ReportWork(AggregateHub hub, Chat chat, bool open, DateTimeOffset at) =>
-        hub.Apply(AggregateKinds.Session, chat.Id, Operations.SessionWork, new()
-        {
-            ["sessionId"] = chat.Id, ["actionKey"] = "repo/default/t/a/1", ["open"] = open, ["at"] = at.ToString("O")
-        }, BoardCaller, at);
+        hub.Apply(AggregateKinds.Session, chat.Id, Operations.SessionWork, Work(chat.Id, open, at), BoardCaller, at);
+
+    /// <summary>The board's report that <paramref name="session"/> starts or stops answering for attempt 1 of action a on task t.</summary>
+    private static JsonObject Work(string session, bool open, DateTimeOffset at) => new ActionWorkReport("repo", session, "default", "t", "a", 1, open, at).ToJson();
 
     [Fact]
     public void A_forced_close_tells_the_board_which_makes_the_sessions_actions_recoverable_at_once()
@@ -412,7 +401,7 @@ public sealed class SessionLifecycleTests
         hub.Verify(worker, T0); hub.DeliverAll(T0);
         // The session begins work the directory has not heard of, so the first close is refused and the session restores itself.
         Assert.True(ReportWork(hub, worker, true, T0.AddMinutes(1)).Ok);
-        Assert.Single(hub.Discard(Operations.SessionWork));
+        Assert.Single(hub.Discard(Operations.SessionOwns));
         Assert.True(hub.Close(new() { ["targetSessionId"] = worker.Id }, T0.AddMinutes(2)).Ok);
         Assert.True(hub.Deliver(Assert.Single(hub.Of(AggregateKinds.Control, AggregateKinds.ControlKey).Effects), T0.AddMinutes(2)).Ok);
         var restore = Assert.Single(hub.Of(AggregateKinds.Session, worker.Id).Effects, effect => effect.Operation == Operations.SessionRestore);

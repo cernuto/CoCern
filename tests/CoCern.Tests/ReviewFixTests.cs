@@ -3,6 +3,7 @@ using System.Text.Json.Nodes;
 using CoCern.Contracts;
 using CoCern.Core;
 using CoCern.Domain;
+using CoCern.Domain.Messages;
 using static CoCern.Domain.JsonFields;
 using Xunit;
 
@@ -153,7 +154,7 @@ public sealed class ReviewFixTests
     {
         var session = new StateEnvelope<CoordinationDocument>();
         Assert.True(Apply(session, "session", Operations.Open, new() { ["principalId"] = "alice", ["sessionToken"] = "secret", ["sessionId"] = "a" }).Ok);
-        JsonObject Work(bool open, int seconds) => new() { ["sessionId"] = "a", ["actionKey"] = "k", ["open"] = open, ["at"] = Now.AddSeconds(seconds).ToString("O") };
+        JsonObject Work(bool open, int seconds) => new ActionWorkReport("repo", "a", "default", "t", "k", 1, open, Now.AddSeconds(seconds)).ToJson();
         foreach (var (open, at) in new[] { (true, 0), (false, 30), (false, 10) }) Assert.True(Apply(session, "session", Operations.SessionWork, Work(open, at)).Ok);
         // An open reported at 20 predates the close at 30, so it stays closed.
         Assert.False(JsonNode.Parse(Apply(session, "session", Operations.SessionWork, Work(true, 20)).DataJson)!["tracked"]!.GetValue<bool>());
@@ -167,8 +168,8 @@ public sealed class ReviewFixTests
         int Reports(string key, bool open)
         {
             session.Effects.Clear();
-            Assert.True(Apply(session, "session", Operations.SessionWork, new() { ["sessionId"] = "s1", ["actionKey"] = key, ["open"] = open }).Ok);
-            return session.Effects.Count(effect => effect.Operation == Operations.SessionWork && effect.TargetKind == AggregateKinds.Control);
+            Assert.True(Apply(session, "session", Operations.SessionWork, new ActionWorkReport("repo", "s1", "default", "t", key, 1, open, Now).ToJson()).Ok);
+            return session.Effects.Count(effect => effect.Operation == Operations.SessionOwns && effect.TargetKind == AggregateKinds.Control);
         }
         Assert.Equal(1, Reports("a", true));   // now owns work
         Assert.Equal(0, Reports("b", true));   // still owns
@@ -183,10 +184,11 @@ public sealed class ReviewFixTests
         {
             Value = new() { Json = new JsonObject { ["sessions"] = new JsonObject { ["a"] = new JsonObject { ["sessionId"] = "a", ["principalId"] = "alice", ["repositoryId"] = "repo", ["observedAt"] = Now.ToString("O") } } }.ToJsonString() }
         };
-        bool Report(bool owns, int seconds) => JsonNode.Parse(Apply(control, "control", Operations.SessionWork, new() { ["sessionId"] = "a", ["owns"] = owns, ["at"] = Now.AddSeconds(-100 + seconds).ToString("O") }).DataJson)!["tracked"]!.GetValue<bool>();
-        Assert.True(Report(true, 10));
-        Assert.True(Report(false, 30));
-        Assert.False(Report(true, 20));  // older than the clear
+        bool Report(bool owns, long seq) => JsonNode.Parse(Apply(control, "control", Operations.SessionOwns, new SessionOwnership("repo", "a", owns, Now, seq).ToJson()).DataJson)!["tracked"]!.GetValue<bool>();
+        Assert.True(Report(true, 1));
+        Assert.True(Report(false, 3));
+        Assert.False(Report(true, 2));  // sent before the clear
+        Assert.False(Report(false, 3)); // a repeated copy
         Assert.Null(State(control)["sessions"]!["a"]!["ownsWork"]);
     }
 

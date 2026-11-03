@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json.Nodes;
 using CoCern.Contracts;
+using CoCern.Domain.Messages;
 using static CoCern.Contracts.RelayErrorCodes;
 using static CoCern.Domain.JsonFields;
 using static CoCern.Domain.Replies;
@@ -26,7 +27,10 @@ internal static class SessionAggregate
         // Boards report through their outboxes, without the session secret; an unknown session ignores them, and an expired one tells the
         // board of new work it can no longer answer for.
         if (context.Operation == Operations.SessionWork)
-            return !context.State.ContainsKey("principalId") ? Ok(new { tracked = false }) : expired ? LateWork(context) : TrackWork(context);
+        {
+            if (!ActionWorkReport.Decode(context.Args).TryGet(out var report, out var malformed)) return Malformed(malformed);
+            return !context.State.ContainsKey("principalId") ? Ok(new { tracked = false }) : expired ? LateWork(context, report) : TrackWork(context, report);
+        }
         if (expired && context.Operation is Operations.AttentionRaise or Operations.AttentionClose) return Error(SessionUnknown, new { expired = true });
         // Attention items arrive through other aggregates' outboxes, which carry no session secret, just like deliveries.
         if (context.Operation == Operations.AttentionRaise) return SessionAttention.Raise(context);
@@ -80,16 +84,16 @@ internal static class SessionAggregate
 
     /// <summary>
     /// A board's report that this session now answers for an unresolved action, or no longer does (see <see cref="WorkLedger"/>). The hub's
-    /// directory hears only when that changes, and once a day while it lasts, so a full directory never expires a session that owns work.
+    /// directory hears only when that changes, and once a day while it lasts (<see cref="SessionOwnership"/>), so a full directory never
+    /// expires a session that owns work.
     /// </summary>
-    private static RelayReply TrackWork(AggregateContext context)
+    private static RelayReply TrackWork(AggregateContext context, ActionWorkReport report)
     {
-        var (state, args, now) = (context.State, context.Args, context.Now);
+        var (state, now) = (context.State, context.Now);
         var ledger = ObjectAt(state, WorkKey);
-        var actionKey = Required(args, "actionKey");
-        var tracked = WorkLedger.Apply(ledger, actionKey, Flag(args, "open"), WorkLedger.ReportedAt(args, now), now);
+        var tracked = WorkLedger.Apply(ledger, report.ActionKey, report.Open, WorkLedger.ReportedAt(report.At, now), now);
         var owns = WorkLedger.Owns(ledger, now);
-        if (tracked && Flag(args, "open")) RememberWorkBoard(context, actionKey);
+        if (tracked && report.Open) RememberWorkBoard(context, report.BoardId);
         if (ledger.Count == 0) state.Remove(WorkKey);
         var reported = state[WorkReportedKey] as JsonObject;
         var (wasOwning, reportedAt) = reported is null ? (false, DateTimeOffset.MinValue) : (Flag(reported, "owns"), Date(reported, "at"));
@@ -98,10 +102,7 @@ internal static class SessionAggregate
             // The sequence orders reports that share a second, which board times alone cannot.
             var seq = (reported is null ? 0 : Number(reported, "seq")) + 1;
             state[WorkReportedKey] = new JsonObject { ["owns"] = owns, ["at"] = now.ToString("O"), ["seq"] = seq };
-            context.Emit(AggregateKinds.Control, AggregateKinds.ControlKey, Operations.SessionWork, new JsonObject
-            {
-                ["repositoryId"] = context.Repository, ["sessionId"] = Text(state, "sessionId"), ["owns"] = owns, ["at"] = now.ToString("O"), ["seq"] = seq
-            });
+            context.Send(AggregateKinds.ControlKey, new SessionOwnership(context.Repository, Text(state, "sessionId"), owns, now, seq));
         }
         return Ok(new { tracked, owns });
     }
@@ -155,20 +156,18 @@ internal static class SessionAggregate
     /// report of an action just begun). The session can no longer answer for it, so it tells that board, which makes the action
     /// recoverable at once (<see cref="Operations.SessionClosed"/>). A report that work ended needs nothing.
     /// </summary>
-    private static RelayReply LateWork(AggregateContext context)
+    private static RelayReply LateWork(AggregateContext context, ActionWorkReport report)
     {
-        if (!Flag(context.Args, "open") || Text(context.Args, "actionKey") is not { Length: > 0 } actionKey) return Ok(new { tracked = false });
-        var boardId = CoordinationStateMachine.ParseActionKey(actionKey).BoardId;
-        TellBoard(context, AggregateKinds.BoardKey(context.Repository, boardId), boardId);
+        if (!report.Open) return Ok(new { tracked = false });
+        TellBoard(context, AggregateKinds.BoardKey(context.Repository, report.BoardId), report.BoardId);
         return Ok(new { tracked = false, toldBoard = true });
     }
 
     private const string WorkBoardsKey = "workBoards";
 
     /// <summary>Remembers the board holding an action this session answers for, so a forced close can tell it; the oldest of <see cref="RelayLimits.MaxSessionTargetBoards"/> is forgotten first.</summary>
-    private static void RememberWorkBoard(AggregateContext context, string actionKey)
+    private static void RememberWorkBoard(AggregateContext context, string boardId)
     {
-        var boardId = CoordinationStateMachine.ParseActionKey(actionKey).BoardId;
         var boards = ObjectAt(context.State, WorkBoardsKey);
         var key = AggregateKinds.BoardKey(context.Repository, boardId);
         boards.Remove(key);

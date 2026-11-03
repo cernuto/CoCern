@@ -5,7 +5,7 @@ using static CoCern.Domain.JsonFields;
 namespace CoCern.Domain;
 
 /// <summary>
-/// The unresolved actions one session answers for, kept from boards' <see cref="Operations.SessionWork"/> reports. Each action is a short
+/// The unresolved actions one session answers for, kept from boards' <see cref="Messages.ActionWorkReport"/>s. Each action is a short
 /// hash of its key with the board time of its last report, at most <see cref="RelayLimits.MaxSessionOpenActions"/>. Reports can arrive
 /// reordered (effects are retried one by one), so:
 /// <list type="bullet">
@@ -21,16 +21,12 @@ internal static class WorkLedger
     private const string ClosedKey = "closedActions";
     private const string OverflowKey = "openActionsOverflow";
 
-    /// <summary>The fields a ledger keeps in its record, so readers can leave them out.</summary>
-    public static readonly string[] Fields = [OpenKey, ClosedKey, OverflowKey];
-
     public static long Cutoff(DateTimeOffset now) => now.AddDays(-RelayLimits.SessionWorkRetentionDays).ToUnixTimeSeconds();
 
     public static long Seconds(JsonNode? value) => value is JsonValue number && number.TryGetValue<long>(out var seconds) ? seconds : long.MinValue;
 
-    /// <summary>The report's board time, never later than now.</summary>
-    public static long ReportedAt(JsonObject args, DateTimeOffset now) =>
-        Date(args, "at") is var reported && reported > DateTimeOffset.MinValue ? Math.Min(reported.ToUnixTimeSeconds(), now.ToUnixTimeSeconds()) : now.ToUnixTimeSeconds();
+    /// <summary>A report's time in seconds, never later than now: a sender's clock ahead of this aggregate's cannot date a report into the future.</summary>
+    public static long ReportedAt(DateTimeOffset reported, DateTimeOffset now) => Math.Min(reported.ToUnixTimeSeconds(), now.ToUnixTimeSeconds());
 
     /// <summary>Whether the record answers for an action reported (or overflowed) within the retention window.</summary>
     public static bool Owns(JsonObject record, DateTimeOffset now)
@@ -38,9 +34,6 @@ internal static class WorkLedger
         var cutoff = Cutoff(now);
         return record[OpenKey] is JsonObject open && open.Any(entry => Seconds(entry.Value) > cutoff) || Seconds(record[OverflowKey]) > cutoff;
     }
-
-    public static int OpenCount(JsonObject record) => (record[OpenKey] as JsonObject)?.Count ?? 0;
-    public static bool Overflowing(JsonObject record) => record.ContainsKey(OverflowKey);
 
     /// <summary>Applies one open or close report; returns whether it changed what the record answers for.</summary>
     public static bool Apply(JsonObject record, string actionKey, bool opening, long at, DateTimeOffset now)
