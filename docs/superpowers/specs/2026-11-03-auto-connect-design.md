@@ -95,7 +95,17 @@ Not doing: removing encryption between PCs, requiring a separate VPN, which woul
 - **When something is missing:** the reply says what's missing and how to get it, such as "Analytics is off for this chat. Ask Paul to allow it?"
 - **While working:** analytics feed back in; if a chat's reads are large, the hub suggests a cheaper one, as its tips already do.
 - **Settings move to the hub, per session:** `COCERN_ROLE` and `COCERN_PROFILE` are read when the app starts, so changing one means a restart. On the hub, a chat can gain a tool without restarting, and those switches go away. A client may keep the tool list it loaded when it connected, as the launcher hot-swap result below shows, so the builder has to confirm how a new tool reaches a running chat.
-- **The one choice left is the role, and it can be automatic:** the chat Paul is talking to is the manager, and the chats it hands work to are workers. This replaces the setup choice in part 9. How it works when Paul talks to several chats at once is left to the builder.
+- **The one choice left is the role:** one chat is the manager (part 11) and the chats it hands work to are workers. This replaces the setup choice in part 9.
+
+**11. One CoCern Manager.** Paul proposed a chat named CoCern Manager with all tools, able to administer every session, so that CoCern is fully managed by the AI and the dashboard is mainly for viewing. Paul talks to one manager, it runs everything, and the dashboard is where he looks.
+- **The name doesn't grant the power:** chat labels are plain text any chat can set. Paul makes a chat the manager by saying so in that chat, or setup makes the first chat the manager. The hub records it, and "CoCern Manager" is just the label that follows.
+- **One manager at a time:** handing over is explicit, so two chats never both think they're in charge.
+- **Recovery:** if the manager is closed or stuck, Paul names a new one in any chat or from the dashboard.
+- **Other chats:** Paul can still talk to any chat, but that doesn't make it the manager. It does its work and passes admin requests to the manager or asks him.
+- **What it can do:** see every chat, assign and reassign work, and close stuck or duplicate sessions; run setup, add PCs, connect apps, push updates and diagnose problems; read analytics and tune how chats work; bring Paul decisions and apply his answers.
+- **What it can't do:** see other chats' private tokens or sign in as them; approve rules or grant permissions without Paul's words on record; push to main or do anything destructive without his yes, unless a goal he approved covers it.
+- **The dashboard:** viewing, plus the controls needed when the AI can't help: sign-in, a pause or stop for all chats, removing a rule or grant, and naming a new manager. Mainly view-only, not only view, because a bad or broken manager must never leave Paul with no way in.
+- **The honest risk:** a compromised manager could do a lot of damage inside CoCern, such as closing sessions or sending bad instructions. Every manager action is logged where Paul can see it, and its messages are marked as coming from the manager. A worker treats a manager's message as a request, not as Paul's authority, unless it falls inside a goal he approved.
 
 ## What disappears
 
@@ -126,6 +136,7 @@ The design is done only when all of these pass on real chats:
 7. **Decisions come to Paul.** A new proposal is raised once by the chat Paul is using, without his opening the dashboard. His answer takes effect with his words on record. A peer message claiming he approved changes nothing.
 8. **Manager without the dashboard.** A manager chat approves or dismisses a proposal on Paul's answer, closes sessions, reads analytics, produces the add-a-PC command and diagnoses a hub problem, all by tools. Sign-in and removal on the dashboard still work. A new build reaches a joined PC's node with no action on that PC.
 9. **No feature switches.** A new chat works with nobody choosing a profile or role. A worker that needs something it lacks is told what's missing and how to get it. A chat can't gain a power-giving tool without Paul's yes on record.
+10. **One manager.** Renaming a chat "CoCern Manager" grants nothing. Paul names a manager and it can administer every session by tools, with each action logged. Exactly one chat is manager at a time. With the manager gone, Paul names a new one and can still pause or stop everything from the dashboard. The manager can't read another chat's token.
 
 ## Limits we are keeping honest about
 
@@ -146,6 +157,7 @@ The design is done only when all of these pass on real chats:
 7. Certificates and tokens nobody has to see (part 8). The backup-and-restore and plain-error pieces are small and can go first, because they prevent a repeat of the 2026-11-03 lockout. This starts after the current deploy.
 8. A manager chat does the admin work (part 9). Admin tools by setup choice, `hub_diagnose` and the repeat-wake fix are the small pieces and can go first; node self-update is the largest.
 9. Features choose themselves (part 10). The "what's missing and how to get it" replies are small and can go first; moving settings to the hub per session is the larger piece, and it would replace the part 9 setup choice, so sequence the two together.
+10. One CoCern Manager (part 11). The recorded manager role, the action log and the dashboard's pause, stop and name-a-manager controls come before the manager gets full powers, so the safeguards exist first.
 
 Proposed ownership, to confirm: Codex owns the Codex hooks and queue, and the hub-side changes (it owns hub builds and restarts); the Claude side owns the Claude hooks and waiter; the manager integrates.
 
@@ -193,7 +205,8 @@ These were settled by the manager and Codex, not by Paul:
 - Same-PC chats give up certificate checks for plain local HTTP; the hub restores its certificate rather than creating a new one; traffic between PCs stays encrypted with no VPN; the token stays but is created and found automatically. Paul approved adding this plan to the design.
 - Standing decisions are raised once by the chat Paul is using and never wake an idle chat for this. Paul approved adding the idea; these details are the manager's.
 - The manager's tool names, its safeguards and accepting the self-approval risk for a single-person setup. Paul approved adding this plan to the design; the details are the manager's.
-- The four feature categories, the rule that power needs Paul's yes, and making the chat he talks to the manager. Paul approved adding this; the details are the manager's.
+- The four feature categories, the rule that power needs Paul's yes, and making the chat he talks to the manager (superseded by part 11). Paul approved adding this; the details are the manager's.
+- The manager role is granted by Paul rather than by the chat's name, one manager at a time, the list of what it can't do, and the dashboard controls that stay. The one-manager idea is Paul's and he approved adding this; these details are the manager's.
 
 ## Left to the builder
 

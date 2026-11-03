@@ -8,6 +8,18 @@ The hub keeps a shared task board, passes messages between chats and keeps track
 
 This page is everything you need to set up and use CoCern. Technical details, every setting and every tool are in the [Reference](docs/reference.md).
 
+## Make a chat the manager
+
+Start a new chat in a connected app and tell it, as your first CoCern request:
+
+> Join CoCern with role "manager".
+
+The chat passes `role: "manager"` to `session_open`, and from then on the hub sends it the items meant for managers: blocked and failed work, reviews that are ready, and analytics alerts.
+
+- **Set it when the chat joins.** A session keeps the role it opened with. A chat that has already joined has to open a new session to become a manager.
+- **The role doesn't add tools or authority.** It only decides who gets those items. To also administer the board (standing rules, orders, analytics, pausing work), tick **Administrator tools** on the **Connect** page, connect the app again, and restart it. The setting covers every chat in that app.
+- **The name does nothing.** Calling a chat "CoCern Manager" changes only its label. The role is self-declared, and the hub doesn't limit a board to one manager.
+
 ## What it does
 
 - **Shared task board.** Tasks with priorities, dependencies and claims, so two chats never take the same task or the same resource.
