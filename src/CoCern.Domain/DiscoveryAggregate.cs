@@ -150,13 +150,12 @@ public static class DiscoveryStateMachine
         foreach (var (_, node) in ObjectAt(state, "machines"))
         {
             var machine = node!.AsObject();
-            var lastSeen = Date(machine, "lastSeen");
-            var live = lastSeen != DateTimeOffset.MinValue && now - lastSeen <= DiscoveryLimits.LivenessTimeout;
+            var lastSeen = OptionalDate(machine, "lastSeen");
             foreach (var chat in ArrayAt(machine, "chats").Select(x => x!.AsObject()).Where(x => repositories.Contains(Text(x, "repositoryId"))))
             {
                 var provider = Text(chat, "provider");
-                var ready = provider.ToLowerInvariant() switch { ChatProviders.Codex => Flag(chat, "wakeable"), ChatProviders.Claude => Flag(chat, "waiterRunning"), _ => false };
-                items.Add(new { label = Text(chat, "label"), provider, machineName = Text(machine, "machineName"), relaySessionId = Text(chat, "relaySessionId"), repositoryId = Text(chat, "repositoryId"), reachable = live && ready });
+                var reachable = ReadModels.IsReachable(provider, Flag(chat, "wakeable"), Flag(chat, "waiterRunning"), lastSeen, now);
+                items.Add(new { label = Text(chat, "label"), provider, machineName = Text(machine, "machineName"), relaySessionId = Text(chat, "relaySessionId"), repositoryId = Text(chat, "repositoryId"), reachable });
             }
         }
         if (Fits(items, items.Count)) return Ok(new { items, truncated = false });

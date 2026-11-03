@@ -276,10 +276,9 @@ public sealed partial class SqliteStore : IRelayObservationSource
             var id = Safe(property.Name);
             var name = Text(machine, "machineName");
             var lastSeen = Date(machine, "lastSeen");
-            var live = lastSeen is { } seen && seen <= now && now - seen <= DiscoveryLimits.LivenessTimeout;
             var announced = Property(machine, "chats");
             var count = announced.ValueKind == JsonValueKind.Array ? announced.GetArrayLength() : 0;
-            machines.Add(new() { MachineId = id, Name = name, LastSeenAt = lastSeen, Reachable = live, SessionCount = count });
+            machines.Add(new() { MachineId = id, Name = name, LastSeenAt = lastSeen, Reachable = ReadModels.IsLive(lastSeen, now), SessionCount = count });
             if (announced.ValueKind != JsonValueKind.Array) continue;
             foreach (var chat in announced.EnumerateArray().Take(64))
             {
@@ -289,7 +288,7 @@ public sealed partial class SqliteStore : IRelayObservationSource
                 {
                     SessionId = Safe(grainKey), RepositoryId = Text(chat, "repositoryId"), Label = Text(chat, "label"), Provider = provider,
                     MachineId = id, MachineName = name, IsMapped = provider.Length > 0 && !provider.Equals(ChatProviders.Unknown, StringComparison.OrdinalIgnoreCase),
-                    Reachable = live && (provider.Equals(ChatProviders.Codex, StringComparison.OrdinalIgnoreCase) ? Flag(chat, "wakeable") : provider.Equals(ChatProviders.Claude, StringComparison.OrdinalIgnoreCase) && Flag(chat, "waiterRunning")),
+                    Reachable = ReadModels.IsReachable(provider, Flag(chat, "wakeable"), Flag(chat, "waiterRunning"), lastSeen, now),
                     ReportedAt = lastSeen, FreshUntil = lastSeen?.Add(DiscoveryLimits.LivenessTimeout)
                 };
                 if (string.IsNullOrEmpty(session.SessionId)) continue;
