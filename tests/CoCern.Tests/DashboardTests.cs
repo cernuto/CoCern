@@ -217,7 +217,7 @@ public sealed class DashboardTests
             await writer.WriteStateAsync("session", GrainId.Create("cocern.session", "repo/" + i), state);
         }
         var source = Assert.IsAssignableFrom<IRelayObservationSource>(store);
-        var observation = Assert.IsType<RelayObservation>(await source.ReadObservationAsync(DateTimeOffset.UtcNow, "test-incarnation"));
+        var observation = await source.ObserveAsync(DateTimeOffset.UtcNow, "test-incarnation", complete: false);
         Assert.InRange(observation.Sessions.Length, 1, 200);
         Assert.Equal(205, observation.SessionCount);
         Assert.True(observation.SessionsTruncated);
@@ -251,15 +251,7 @@ public sealed class DashboardTests
         });
         await writer.WriteStateAsync("discovery", GrainId.Create("cocern.discovery", "machines"), discovery);
         var source = Assert.IsAssignableFrom<IRelayObservationSource>(store);
-        RelayObservation? observation = null;
-        for (var attempt = 0; attempt < 20; attempt++)
-        {
-            observation = await source.ReadObservationAsync(now, "test-incarnation");
-            if (observation is { SessionsTruncated: false }) break;
-            if (attempt < 19) await Task.Delay(50);
-        }
-        Assert.True(observation is not null, "The metadata fixture did not produce an available observation after 20 samples.");
-        observation = Assert.IsType<RelayObservation>(observation);
+        var observation = await source.ObserveAsync(now, "test-incarnation");
         Assert.False(observation.SessionsTruncated, JsonSerializer.Serialize(observation));
         var session = Assert.Single(observation.Sessions);
         Assert.Equal("session-a", session.SessionId);

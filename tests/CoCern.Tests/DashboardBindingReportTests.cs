@@ -25,7 +25,7 @@ public sealed class DashboardBindingReportTests
         if (binding is not null) document["binding"] = JsonNode.Parse(binding);
         var state = new GrainState<StateEnvelope<CoordinationDocument>>(new() { Value = new() { Json = document.ToJsonString() } });
         await new SqliteGrainStorage(store).WriteStateAsync("session", GrainId.Create("cocern.session", "session"), state);
-        var observation = Assert.IsType<RelayObservation>(await store.ReadObservationAsync(DateTimeOffset.UtcNow, "current"));
+        var observation = await store.ObserveAsync(DateTimeOffset.UtcNow, "current");
         var json = JsonSerializer.SerializeToElement(Assert.Single(observation.Sessions));
         Assert.True(json.TryGetProperty("HasBindingReport", out var report), "Binding presence must be independent of the metadata version.");
         if (expected is null) Assert.Equal(JsonValueKind.Null, report.ValueKind);

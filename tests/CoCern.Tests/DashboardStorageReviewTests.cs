@@ -121,7 +121,7 @@ public sealed class DashboardStorageReviewTests
         Assert.True(bound.Ok, bound.Code);
 
         var now = DateTimeOffset.UtcNow;
-        var session = Assert.Single(Assert.IsType<RelayObservation>(await store.ReadObservationAsync(now, application.IncarnationId)).Sessions);
+        var session = Assert.Single((await store.ObserveAsync(now, application.IncarnationId)).Sessions);
         Assert.True(session.FreshUntil > now);
         Assert.False(session.IncarnationMismatch);
         Assert.NotNull(session.ReportedAt);
@@ -129,7 +129,7 @@ public sealed class DashboardStorageReviewTests
 
         var restartedApplication = new RelayApplication(host.Services.GetRequiredService<IGrainFactory>());
         Assert.NotEqual(application.IncarnationId, restartedApplication.IncarnationId);
-        var restartedSession = Assert.Single(Assert.IsType<RelayObservation>(await store.ReadObservationAsync(now, restartedApplication.IncarnationId)).Sessions);
+        var restartedSession = Assert.Single((await store.ObserveAsync(now, restartedApplication.IncarnationId)).Sessions);
         Assert.Equal(session.SessionId, restartedSession.SessionId);
         Assert.True(restartedSession.IncarnationMismatch);
         Assert.True(restartedSession.FreshUntil > now);
@@ -208,17 +208,8 @@ public sealed class DashboardStorageReviewTests
             await new SqliteGrainStorage(Store).WriteStateAsync(name, GrainId.Create(type, key), state);
         }
 
-        public async Task<RelayObservation> Observe()
-        {
-            // A busy or expired sample is explicitly unavailable; retry that result, not a failed content assertion.
-            for (var attempt = 0; attempt < 20; attempt++)
-            {
-                if (await Store.ReadObservationAsync(Now, "observing-application") is { } observation) return observation;
-                if (attempt < 19) await Task.Delay(50);
-            }
-            Assert.Fail("The fixture did not produce an available observation after 20 samples.");
-            return null!;
-        }
+        // A busy or expired sample is explicitly unavailable; retry that result, not a failed content assertion.
+        public Task<RelayObservation> Observe() => Store.ObserveAsync(Now, "observing-application", complete: false);
         public void Dispose() => Store.Dispose();
     }
 }

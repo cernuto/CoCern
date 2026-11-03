@@ -88,7 +88,7 @@ public sealed class ReadModelsTests
 
         using var store = new SqliteStore(Path.Combine(Path.GetTempPath(), "cocern-read-models-" + Guid.NewGuid().ToString("N"), "relay.db"));
         await new SqliteGrainStorage(store).WriteStateAsync("discovery", GrainId.Create("cocern.discovery", "machines"), new GrainState<StateEnvelope<CoordinationDocument>>(discovery));
-        var observation = Assert.IsType<RelayObservation>(await store.ReadObservationAsync(at, "incarnation"));
+        var observation = await store.ObserveAsync(at, "incarnation");
         var shown = observation.Sessions.ToDictionary(session => session.SessionId, session => session.Reachable);
 
         Assert.Equal(listed.OrderBy(x => x.Key), shown.OrderBy(x => x.Key));
