@@ -72,6 +72,15 @@ Client permission prompts are outside CoCern. Woken chats run in whatever permis
 
 Not doing: removing encryption between PCs, requiring a separate VPN, which would swap one piece of setup for another, or dropping the token. Without it, other programs on the PC, websites open in a browser and other devices on the network could read a chat's messages or send it instructions, and chats act on their messages.
 
+**9. A manager chat does the admin work.** Paul said a manager session should perform most administrative tasks with tools and minimize interactions with the dashboard. The dashboard becomes somewhere to look (what happened, what is in force, a way to undo things) and the fallback when the hub or a chat is broken, not somewhere he has to go.
+- **Admin tools for managers:** declaring `role: "manager"` today only routes alerts, and the admin tools appear only with `COCERN_ROLE=admin` in the app's settings. Setup offers this as one choice. It costs about 600 tokens of tool definitions per chat (4,659 against 4,061).
+- **Missing tools:** `add_pc` returns the command to paste on the new PC, `connect_app` connects an app to the hub, and `hub_diagnose` reports hub health, certificate mismatches and each PC's adapter version. Today these exist only on the dashboard, or not at all.
+- **Nodes update themselves:** a node fetches the new build from its hub and restarts between wakes, instead of a side-by-side install, a settings change and a sign-out on each PC. The mechanism is left to the builder; a new build must be verified before it runs, and a failed update must leave the old node working.
+- **Alert backlog:** a manager can clear several attention items in one call, and alerts about sessions that have closed stop lingering.
+- **No repeat wakes:** a wake fires only for mail the chat hasn't already been given.
+- **Safeguards:** an approval made with admin tools must include Paul's quoted reply, and the dashboard shows it. Messages from other chats never count as approval. Every grant has a scope and an expiry. Pushing to main and destructive actions stay with Paul.
+- **The honest limit:** these limit the damage and make it visible, but the hub can't prove Paul was the one who said yes, so a chat could approve its own proposal or be talked into it by a bad message. The risk isn't entirely new, because the token on the hub's PC is already an administrator token and hiding the tools is a soft barrier. For a single-person setup this is an acceptable trade; a shared hub would need more.
+
 ## What disappears
 
 - Calling `session_open`/`session_bind`, choosing labels, guessing machine and repository IDs.
@@ -98,6 +107,7 @@ The design is done only when all of these pass on real chats:
 5. **Edit clash.** Two chats edit the same file; the second is blocked and told who holds it.
 6. **No certificate or token in sight.** Someone sets up two PCs from scratch and never sees a certificate, fingerprint, pin, token or token path. A caller with no valid token is still refused. Deleting the hub's certificate file and restarting the hub locks nobody out. A real identity change produces the plain "identity changed" message and can be accepted without editing a fingerprint, and a client never accepts one without that step.
 7. **Decisions come to Paul.** A new proposal is raised once by the chat Paul is using, without his opening the dashboard. His answer takes effect with his words on record. A peer message claiming he approved changes nothing.
+8. **Manager without the dashboard.** A manager chat approves or dismisses a proposal on Paul's answer, closes sessions, reads analytics, produces the add-a-PC command and diagnoses a hub problem, all by tools. Sign-in and removal on the dashboard still work. A new build reaches a joined PC's node with no action on that PC.
 
 ## Limits we are keeping honest about
 
@@ -116,6 +126,7 @@ The design is done only when all of these pass on real chats:
 5. Goal approval, and Standing decisions presented in chat, which share the same recording path.
 6. File claims from edit hooks.
 7. Certificates and tokens nobody has to see (part 8). The backup-and-restore and plain-error pieces are small and can go first, because they prevent a repeat of the 2026-11-03 lockout. This starts after the current deploy.
+8. A manager chat does the admin work (part 9). Admin tools by setup choice, `hub_diagnose` and the repeat-wake fix are the small pieces and can go first; node self-update is the largest.
 
 Proposed ownership, to confirm: Codex owns the Codex hooks and queue, and the hub-side changes (it owns hub builds and restarts); the Claude side owns the Claude hooks and waiter; the manager integrates.
 
@@ -162,6 +173,7 @@ These were settled by the manager and Codex, not by Paul:
 - One-time setup per PC is allowed; gate 2 counts from a set-up PC.
 - Same-PC chats give up certificate checks for plain local HTTP; the hub restores its certificate rather than creating a new one; traffic between PCs stays encrypted with no VPN; the token stays but is created and found automatically. Paul approved adding this plan to the design.
 - Standing decisions are raised once by the chat Paul is using and never wake an idle chat for this. Paul approved adding the idea; these details are the manager's.
+- The manager's tool names, its safeguards and accepting the self-approval risk for a single-person setup. Paul approved adding this plan to the design; the details are the manager's.
 
 ## Left to the builder
 
