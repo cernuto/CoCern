@@ -41,6 +41,32 @@ public static class ReadModels
     }
 
     /// <summary>
+    /// The top-level key under which every aggregate keeps the stored replies to its recent requests, so that a retry is answered, not
+    /// run again (<see cref="CoordinationStateMachine.Apply"/>). A stored reply holds whatever that reply returned.
+    /// </summary>
+    public const string RequestsKey = "requests";
+
+    /// <summary>The top-level key for the requests whose stored replies were evicted before their window ended (see <see cref="Retention"/>).</summary>
+    public const string RequestTombstonesKey = "requestTombstones";
+
+    /// <summary>The top-level key for a session's secret.</summary>
+    public const string SessionTokenKey = "sessionToken";
+
+    /// <summary>
+    /// The aggregate kinds whose state may leave the live database in an analytics snapshot: boards and locks. Session state (private
+    /// inboxes, attention notes, bindings), the control directory and discovery (machine credentials) never do; analytics reads sessions
+    /// only through the activity log.
+    /// </summary>
+    public static readonly IReadOnlyList<string> SnapshotKinds = [AggregateKinds.Board, AggregateKinds.Lock];
+
+    /// <summary>
+    /// The top-level state keys an analytics snapshot removes even from <see cref="SnapshotKinds"/>: the idempotency caches
+    /// (<see cref="RequestsKey"/>, whose stored replies can hold anything an earlier reply returned, and <see cref="RequestTombstonesKey"/>)
+    /// and any session secret (<see cref="SessionTokenKey"/>).
+    /// </summary>
+    public static readonly IReadOnlyList<string> PrivateStateKeys = [RequestsKey, RequestTombstonesKey, SessionTokenKey];
+
+    /// <summary>
     /// Whether a machine announced recently enough to count as live: its <c>lastSeen</c> lies within
     /// <see cref="DiscoveryLimits.LivenessTimeout"/> of <paramref name="now"/>, on either side. A stamp a little ahead is normal: the dashboard
     /// takes its time before it reads, and an announcement that lands in between is stamped later, which must not show a live machine as

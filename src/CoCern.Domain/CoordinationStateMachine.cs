@@ -46,7 +46,7 @@ public static class CoordinationStateMachine
         }
 
         var requestId = Text(arguments, "requestId");
-        var requests = ObjectAt(state, "requests");
+        var requests = ObjectAt(state, ReadModels.RequestsKey);
         var requestKey = RequestKey(caller.PrincipalId, Text(arguments, "sessionId"), operation, requestId);
         var fingerprint = Fingerprint(operation, arguments);
         if (requestId.Length > 0 && requests[requestKey] is JsonObject prior) return Replay(kind, state, operation, arguments, prior, fingerprint, now);
@@ -159,7 +159,7 @@ public static class CoordinationStateMachine
     /// </summary>
     public static void ForgetRequest(JsonObject state, string principalId, string sessionId, string operation, string requestId)
     {
-        if (requestId.Length > 0 && state["requests"] is JsonObject requests) requests.Remove(RequestKey(principalId, sessionId, operation, requestId));
+        if (requestId.Length > 0 && state[ReadModels.RequestsKey] is JsonObject requests) requests.Remove(RequestKey(principalId, sessionId, operation, requestId));
     }
 
     /// <summary>Mutations are deduplicated by requestId and committed; reads never are.</summary>
