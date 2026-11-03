@@ -53,7 +53,7 @@ public sealed class DashboardSessionActivityTests
         var now = DateTimeOffset.UtcNow;
         var opened = known ? now.AddHours(-1) : (DateTimeOffset?)null;
         await WriteSession(store, now, openedAt: opened);
-        var observation = Assert.IsType<RelayObservation>(await store.ReadObservationAsync(now, "current-incarnation"));
+        var observation = await store.ObserveAsync(now, "current-incarnation");
         var session = JsonSerializer.SerializeToElement(Assert.Single(observation.Sessions));
         Assert.True(session.TryGetProperty("OpenedAt", out var stamp));
         if (opened is { } expected) Assert.Equal(expected, stamp.GetDateTimeOffset());
@@ -69,7 +69,7 @@ public sealed class DashboardSessionActivityTests
         using var store = new SqliteStore(DatabasePath());
         var now = DateTimeOffset.UtcNow;
         await WriteSession(store, now, bindingVersion);
-        var observation = Assert.IsType<RelayObservation>(await store.ReadObservationAsync(now, "current-incarnation"));
+        var observation = await store.ObserveAsync(now, "current-incarnation");
         var session = JsonSerializer.SerializeToElement(Assert.Single(observation.Sessions));
         Assert.True(session.TryGetProperty("BindingVersion", out var version));
         if (bindingVersion is { } expected) Assert.Equal(expected, version.GetInt64());
@@ -102,7 +102,7 @@ public sealed class DashboardSessionActivityTests
 
         async Task AssertActivity(SqliteStore store)
         {
-            var observation = Assert.IsType<RelayObservation>(await store.ReadObservationAsync(now, "current-incarnation"));
+            var observation = await store.ObserveAsync(now, "current-incarnation");
             var session = Assert.Single(observation.Sessions);
             Assert.Equal(active, session.LastActivityAt);
             Assert.Equal(reported, session.ReportedAt);
@@ -121,7 +121,7 @@ public sealed class DashboardSessionActivityTests
         store.Record(Call(now.AddSeconds(-1)) with { Kind = ActivityEvent.Wake });
         await store.FlushActivityAsync();
 
-        var observation = Assert.IsType<RelayObservation>(await store.ReadObservationAsync(now, "previous-incarnation"));
+        var observation = await store.ObserveAsync(now, "previous-incarnation");
         Assert.Null(Assert.Single(observation.Sessions).LastActivityAt);
     }
 
@@ -135,7 +135,7 @@ public sealed class DashboardSessionActivityTests
         var opened = await application.ExecuteAsync(caller, "session_open", JsonSerializer.SerializeToElement(new { repositoryId = "repo", requestId = "activity-open" }));
         Assert.True(opened.Ok, opened.Code);
         using var document = JsonDocument.Parse(opened.DataJson);
-        var initial = Assert.Single(Assert.IsType<RelayObservation>(await store.ReadObservationAsync(DateTimeOffset.UtcNow, application.IncarnationId)).Sessions);
+        var initial = Assert.Single((await store.ObserveAsync(DateTimeOffset.UtcNow, application.IncarnationId)).Sessions);
         var beforeRead = DateTimeOffset.UtcNow;
         var status = await application.ExecuteAsync(caller, "check_inbox", JsonSerializer.SerializeToElement(new
         {
@@ -147,7 +147,7 @@ public sealed class DashboardSessionActivityTests
         Assert.True(status.Ok, status.Code);
         await store.FlushActivityAsync();
         var now = DateTimeOffset.UtcNow;
-        var observation = Assert.IsType<RelayObservation>(await store.ReadObservationAsync(now, application.IncarnationId));
+        var observation = await store.ObserveAsync(now, application.IncarnationId);
         var session = Assert.Single(observation.Sessions);
         Assert.NotNull(session.LastActivityAt);
         Assert.InRange(session.LastActivityAt.Value, beforeRead, now);

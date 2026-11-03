@@ -20,7 +20,7 @@ public sealed class DashboardExpiredSessionTests
         var now = DateTimeOffset.UtcNow;
         await WriteSession(store, "live", now, expiredAt: null);
         await WriteSession(store, "closed", now.AddHours(-30), expiredAt: now);
-        var observation = Assert.IsType<RelayObservation>(await store.ReadObservationAsync(now, "current-incarnation"));
+        var observation = await store.ObserveAsync(now, "current-incarnation");
         Assert.Equal("live", Assert.Single(observation.Sessions).SessionId);
         Assert.Equal(1, observation.SessionCount);
         // A closed session is not a sign that the observation was cut short.
@@ -40,7 +40,7 @@ public sealed class DashboardExpiredSessionTests
         await WriteSession(store, "closed", now.AddHours(-30), expiredAt: now);
         await WriteDiscovery(store, now, Chat("live", "Live chat"), Chat("closed", "Closed chat"), Chat("unstored", "Announced only"));
 
-        var observation = Assert.IsType<RelayObservation>(await store.ReadObservationAsync(now, "current-incarnation"));
+        var observation = await store.ObserveAsync(now, "current-incarnation");
 
         Assert.Equal(["live", "unstored"], observation.Sessions.Select(session => session.SessionId).Order(StringComparer.Ordinal));
         Assert.False(observation.SessionsTruncated);
@@ -56,7 +56,7 @@ public sealed class DashboardExpiredSessionTests
         for (var index = 0; index < 205; index++) await WriteSession(store, "a-closed-" + index.ToString("D3"), now.AddHours(-30), expiredAt: now);
         await WriteSession(store, "z-open", now, expiredAt: null);
 
-        var observation = Assert.IsType<RelayObservation>(await store.ReadObservationAsync(now, "current-incarnation"));
+        var observation = await store.ObserveAsync(now, "current-incarnation");
 
         Assert.Equal("z-open", Assert.Single(observation.Sessions).SessionId);
         Assert.Equal(1, observation.SessionCount);
@@ -80,7 +80,7 @@ public sealed class DashboardExpiredSessionTests
         await WriteSession(store, "closed-announced", now.AddHours(-30), expiredAt: now);
         await WriteDiscovery(store, now, Chat("bound-announced", "Announced chat"), Chat("closed-announced", "Closed chat"));
 
-        var observation = Assert.IsType<RelayObservation>(await store.ReadObservationAsync(now, "current-incarnation"));
+        var observation = await store.ObserveAsync(now, "current-incarnation");
 
         Assert.Equal(["bound-announced", "bound-stored"], observation.Sessions.Select(session => session.SessionId).Order(StringComparer.Ordinal));
         Assert.Equal(observation.Sessions.Length, observation.SessionCount);
@@ -96,7 +96,7 @@ public sealed class DashboardExpiredSessionTests
         await WriteSession(store, "renamed", now, expiredAt: null);
         await WriteDiscovery(store, now, Chat("renamed", "Old name"));
 
-        var session = Assert.Single(Assert.IsType<RelayObservation>(await store.ReadObservationAsync(now, "current-incarnation")).Sessions);
+        var session = Assert.Single((await store.ObserveAsync(now, "current-incarnation")).Sessions);
 
         Assert.Equal("chat renamed", session.Label);
         Assert.Equal("PC A", session.MachineName);

@@ -29,7 +29,7 @@ Every call an agent makes re-reads its whole chat, so the cheapest call is one i
 | Agents wait for mail (`waitSeconds`, up to 50 s) instead of polling, and a joined PC wakes its Codex chats when mail arrives. | Idle polling turns. |
 | An unchanged read comes back as one line (`ifNoneMatch`), and board reads can be deltas (`sinceRevision`). | Re-reading a task or the board. |
 | Finishing a task returns the next one to do; acknowledgments and claim renewals ride along on other calls. | Round trips. |
-| Attention hands each reply one short item, and only urgent ones (blocked, failed, interrupted) wake a chat. | Needless wake-ups. |
+| Attention hands each reply one short item, and only urgent ones (blocked, failed, interrupted, stranded) wake a chat. | Needless wake-ups. |
 | Standing rules are sent when a chat opens, then again only when they change. | Repeating the same rules. |
 | Doc search returns the matching sections, under 2,000 tokens, not whole files. | Reading files to find one paragraph. |
 | Every reply has a token budget; an oversized one is compacted, with a cursor for the rest. | Surprise huge replies. |
@@ -111,7 +111,7 @@ A chat can be woken when something needs it.
   That is the folder the pasted command installs; from a build with .NET installed, `dotnet <folder>\CoCern.Adapter.dll` works the same. The session ID is the chat's `CLAUDE_CODE_SESSION_ID`. Start it again after handling the inbox.
 - **Chats on the hub's own PC** aren't woken: it has no node, so the waiter exits with code 1 there. They see mail at their next call, or sooner while they wait with `check_inbox` and `waitSeconds`.
 
-Only urgent items (a task blocked, failed or interrupted) wake a chat at once. Everything else, messages included, waits for the chat's next reply or for 10 minutes.
+Only urgent items (a task blocked, failed or interrupted, or an action stranded by a closed session) wake a chat at once. Everything else, messages included, waits for the chat's next reply or for 10 minutes.
 
 ## The dashboard
 

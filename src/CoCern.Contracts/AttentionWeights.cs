@@ -8,6 +8,8 @@ public static class AttentionKinds
     public const string Blocked = "blocked";
     public const string Failed = "failed";
     public const string Interrupted = "interrupted";
+    /// <summary>An unresolved action whose session closed: it keeps its resource blocks until another session recovers or reports it.</summary>
+    public const string Stranded = "stranded";
     public const string ClaimExpiring = "claim_expiring";
     public const string Anomaly = "anomaly";
     public const string OrderFailed = "order_failed";
@@ -21,7 +23,7 @@ public static class AttentionKinds
     public const string Tip = "tip";
 
     public static readonly IReadOnlyList<string> All =
-        [Blocked, Failed, Interrupted, ClaimExpiring, Anomaly, OrderFailed, ReviewReady, DuplicateWarning, StandingProposal, RelatedWork, NextWork, Info, Tip];
+        [Blocked, Failed, Interrupted, Stranded, ClaimExpiring, Anomaly, OrderFailed, ReviewReady, DuplicateWarning, StandingProposal, RelatedWork, NextWork, Info, Tip];
 }
 
 /// <summary>The answers to an attention offer. <see cref="Later"/> snoozes the item; the other two close it.</summary>
@@ -60,7 +62,7 @@ public static class AttentionWeights
 
     private static readonly FrozenDictionary<string, int> Tiers = new Dictionary<string, int>
     {
-        [AttentionKinds.Blocked] = 1, [AttentionKinds.Failed] = 1, [AttentionKinds.Interrupted] = 1,
+        [AttentionKinds.Blocked] = 1, [AttentionKinds.Failed] = 1, [AttentionKinds.Interrupted] = 1, [AttentionKinds.Stranded] = 1,
         [AttentionKinds.ClaimExpiring] = 2, [AttentionKinds.Anomaly] = 2, [AttentionKinds.OrderFailed] = 2,
         [AttentionKinds.ReviewReady] = 3, [AttentionKinds.DuplicateWarning] = 3, [AttentionKinds.StandingProposal] = 3,
         [AttentionKinds.RelatedWork] = 4, [AttentionKinds.NextWork] = 4, [AttentionKinds.Info] = 4, [AttentionKinds.Tip] = 4

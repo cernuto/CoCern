@@ -388,6 +388,9 @@ public sealed class TaskAction(JsonObject json)
     /// <summary>Whether the session that answered for the action was seen to close while it was unresolved.</summary>
     public bool OwnerClosed => json[OwnerClosedKey] is not null;
 
+    /// <summary>The session seen to close while it answered for the action; none unless <see cref="OwnerClosed"/>.</summary>
+    public string? OwnerClosedSessionId => json[OwnerClosedKey] is JsonObject closed ? Text(closed, ActionOwnerClosed.SessionIdKey) : null;
+
     public void MarkOwnerClosed(string sessionId, DateTimeOffset at) =>
         json[OwnerClosedKey] = new JsonObject { [ActionOwnerClosed.SessionIdKey] = sessionId, [ActionOwnerClosed.AtKey] = at.ToString("O") };
 

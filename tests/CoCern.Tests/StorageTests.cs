@@ -520,7 +520,7 @@ public sealed class StorageTests : IDisposable
             ("session", GrainId.Create("cocern.session", "closed"), Session("closed", "expiredAt", Now.ToString("O"))));
         using (var store = new SqliteStore(Database))
         {
-            var observation = Assert.IsType<RelayObservation>(await store.ReadObservationAsync(Now, "incarnation"));
+            var observation = await store.ObserveAsync(Now, "incarnation");
             Assert.Equal("open", Assert.Single(observation.Sessions).SessionId);
             Assert.Equal(1, observation.SessionCount);
         }

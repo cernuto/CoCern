@@ -271,10 +271,13 @@ internal static class TaskBoardAggregate
                 workflow.ClearTarget();
                 changed = true; cleared++;
             }
-            if (TaskActions.Strand(task, session, context.Now)) { changed = true; stranded++; }
+            var (actionsChanged, newlyStranded) = TaskActions.Strand(task, session, context.Now);
+            if (actionsChanged) { changed = true; stranded++; }
             if (!changed) continue;
             task.Version += 1;
             board.MarkChanged(task);
+            // Each action newly stranded is raised to the managers once, at the revision of this change.
+            foreach (var action in newlyStranded) AttentionSources.OnStranded(context, task, action, session, board.TaskRevision);
         }
         return Ok(new { cleared, stranded });
     }
@@ -341,6 +344,7 @@ internal static class TaskBoardAggregate
             if (TaskActions.HasUnresolved(task)) return Error(UnresolvedAction);
         }
         var priorStatus = task.Actions.ToDictionary(x => x.Key, x => x.Value is JsonObject action ? new TaskAction(action).Status : "", StringComparer.Ordinal);
+        var priorStranded = task.ActionRecords.Where(TaskActions.IsStranded).Select(action => action.ActionId).ToList();
         foreach (var report in reports)
             if (TaskActions.ApplyReport(context, task, report as JsonObject ?? throw new ArgumentException("Each action report must be an object.")) is { } failure) return failure;
         if (args["patch"] is JsonObject patch)
@@ -385,6 +389,9 @@ internal static class TaskBoardAggregate
         var replaced = task.Actions.Where(x => x.Value is JsonObject action && priorStatus.GetValueOrDefault(x.Key) == TaskActions.Abandoned && new TaskAction(action).Status is not (TaskActions.Abandoned or "failed"))
             .Select(x => x.Key).Order(StringComparer.Ordinal).ToArray();
         AttentionSources.OnTaskUpdate(context, task.Json, priorWorkflow, unblocked, NewlyIn("failed"), NewlyIn(TaskActions.Abandoned), replaced);
+        // A stranded action this change reported or recovered no longer needs the managers.
+        var settledStranded = priorStranded.Where(id => task.Action(id) is not { } action || !TaskActions.IsStranded(action)).ToList();
+        if (settledStranded.Count > 0) AttentionSources.OnStrandedSettled(context, task.TaskId, settledStranded, board.TaskRevision + 1);
         StandingOrders.Detect(context, task, priorWorkflow is null ? null : new WorkflowRecord(priorWorkflow));
         task.UpdatedAt = context.Now; task.UpdatedBy = context.Caller.PrincipalId; task.Version = ++version;
         // An acknowledgment, not the task: echoing the whole task (up to its 256-message conversation) put it into the updater's context again

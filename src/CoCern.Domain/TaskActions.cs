@@ -44,23 +44,26 @@ internal static class TaskActions
     /// The owner, the action records and their resource blocks stay, and nothing about the outcome is assumed. Returns whether anything
     /// changed, so a repeated notice changes nothing.
     /// </summary>
-    internal static bool Strand(BoardTask task, string session, DateTimeOffset now)
+    internal static (bool Changed, IReadOnlyList<TaskAction> Stranded) Strand(BoardTask task, string session, DateTimeOffset now)
     {
         var answered = task.ActionRecords.Where(action => IsUnresolved(action) && OwnerSession(action) == session).ToList();
-        if (answered.Count == 0) return false;
-        var changed = false;
-        foreach (var action in answered.Where(action => !action.OwnerClosed))
-        {
-            action.MarkOwnerClosed(session, now);
-            changed = true;
-        }
+        if (answered.Count == 0) return (false, []);
+        var stranded = answered.Where(action => !action.OwnerClosed).ToList();
+        foreach (var action in stranded) action.MarkOwnerClosed(session, now);
+        var changed = stranded.Count > 0;
         if (task.Owner == session && task.LeaseUntil > now)
         {
             task.LeaseUntil = now;
             changed = true;
         }
-        return changed;
+        return (changed, stranded);
     }
+
+    /// <summary>
+    /// Whether <paramref name="action"/> is stranded now: unresolved, and still answered for by the session seen to close. A report that
+    /// settles it, or a recovery by another session, ends that.
+    /// </summary>
+    internal static bool IsStranded(TaskAction action) => IsUnresolved(action) && action.OwnerClosedSessionId is { Length: > 0 } closed && OwnerSession(action) == closed;
 
     /// <summary>
     /// The bulky parts of a report or an action record: its report text and its tool binding. Dropping one keeps the record itself. A

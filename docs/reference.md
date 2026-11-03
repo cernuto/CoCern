@@ -67,6 +67,7 @@ Every call takes `repositoryId`. Session calls also take `sessionId` and `sessio
 - A closed session's calls get `SessionUnknown` with `expired: true`: call `session_open` again. Its unread direct messages (up to 64) go back to their senders as `delivery.failed` with `reason: "unread"`.
 - If a board's report of a just-begun action reaches the session after it closed (a close can land first), the session tells that board, which marks the action `ownerClosed` and lapses its claim, as for a forced close.
 - Each close counts only the session's answer to that close, once: a delayed or repeated restore from an earlier close never brings back a session that has since closed.
+- A session missing from the list but still open (its close's answer was lost) is repaired when it next reports activity, a bind or its work, once that close has gone unanswered for 30 minutes: the hub closes it again, and it either comes back to the list (it still has an action open) or closes, and its chat opens a new session.
 - A message to a closed or unknown session, or to a full inbox, comes back to the sender as an inbox message with `kind: "delivery.failed"`, `reason` (`closed`, `unknown`, `full`, or `unread` for one discarded when its session closed), `recipientSessionId`, `undeliveredMessageId` and the `text`.
 - A task whose `targetSessionId` names a session that closed loses the target, so anyone may claim it.
 
@@ -122,7 +123,7 @@ A resource is something only one chat may use at a time, such as a test rig. Cla
 
 ### Stranded actions
 
-An action whose session closed before it reported is stranded. Recover it with `action_report` and `recover: true`:
+An action whose session closed before it reported is stranded. The board marks it `ownerClosed`, ends the task's claim, and raises a `stranded` item to the repository's managers, one per action, which closes once the action is reported or recovered. Recover it with `action_report` and `recover: true`:
 
 - An administrator can recover any action, from its own session, without an `outcome`.
 - The action's own principal can recover it from a new session once the claim of the session answering for it has ended. It may give a final `outcome` (`completed`, `failed` or `canceled`; anything else gets `InvalidOutcome`).
@@ -150,7 +151,7 @@ A `check_inbox`, `task_update`, `action_report` or `task_claim` reply can carry 
 
 Answer with `attention_respond`: `accept` or `dismiss` closes it; `later` hides it for 3 replies (or until `until`). Ignoring it counts as `later`. Pass `"attention": false` on a call to skip offers.
 
-Only `blocked` (except by a `coordinator_hold`), `failed` and `interrupted` wake a chat at once. Everything else, messages included, waits for the next reply. A chat with no reply for 10 minutes gets one wake.
+Only `blocked` (except by a `coordinator_hold`), `failed`, `interrupted` and `stranded` wake a chat at once. Everything else, messages included, waits for the next reply. A chat with no reply for 10 minutes gets one wake.
 
 **Manager items.** `role: "manager"` on `session_open` routes manager items (blocked, failed, review ready, anomalies) to that session. The role is self-declared.
 

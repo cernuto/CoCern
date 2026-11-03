@@ -115,6 +115,27 @@ internal static class AttentionSources
         ToManagers(context, new AttentionSelection { Subject = proposalId, Kinds = [AttentionKinds.StandingProposal], Revision = 2 });
 
     /// <summary>
+    /// A <c>stranded</c> item to the managers for <paramref name="action"/>, which <paramref name="session"/> left unresolved when it closed.
+    /// The action keeps its records and resource blocks, and the task's claim has lapsed, so the principal's other session (or an
+    /// administrator) can recover it now. The item is about the action (its subject), so each stranded action has its own; it closes when
+    /// the action is reported or recovered (<see cref="OnStrandedSettled"/>).
+    /// </summary>
+    public static void OnStranded(AggregateContext context, BoardTask task, TaskAction action, string session, long revision) =>
+        ToManagers(context, new AttentionContent
+        {
+            Kind = AttentionKinds.Stranded, TaskId = task.TaskId, Subject = action.ActionId, Priority = AttentionWeights.PriorityLevel(task.Workflow?.Priority ?? 0),
+            Note = "action " + action.ActionId + " (attempt " + action.Attempt + ") was left unresolved when session " + session + " closed; recover it with action_report and recover: true",
+            Revision = revision
+        });
+
+    /// <summary>Closes the <c>stranded</c> items of the actions a report or recovery settled.</summary>
+    public static void OnStrandedSettled(AggregateContext context, string taskId, IEnumerable<string> actionIds, long revision)
+    {
+        foreach (var actionId in actionIds)
+            ToManagers(context, new AttentionSelection { TaskId = taskId, Subject = actionId, Kinds = [AttentionKinds.Stranded], Revision = revision });
+    }
+
+    /// <summary>
     /// A lock's due check, run twice per lease while its holder has an action in flight. Shortly before the lease ends the holder gets one
     /// <c>claim_expiring</c> item. When the lease has ended with the action still unresolved, that item closes and an <c>interrupted</c>
     /// item goes to the holder and to the managers. <paramref name="resourceId"/> is the lock's key.
