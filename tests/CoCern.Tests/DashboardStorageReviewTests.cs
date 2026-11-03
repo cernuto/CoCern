@@ -216,7 +216,7 @@ public sealed class DashboardStorageReviewTests
                 if (await Store.ReadObservationAsync(Now, "observing-application") is { } observation) return observation;
                 if (attempt < 19) await Task.Delay(50);
             }
-            Assert.True(false, "The fixture did not produce an available observation after 20 samples.");
+            Assert.Fail("The fixture did not produce an available observation after 20 samples.");
             return null!;
         }
         public void Dispose() => Store.Dispose();

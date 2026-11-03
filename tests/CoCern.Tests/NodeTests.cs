@@ -61,7 +61,7 @@ public sealed class NodeTests : IDisposable
         Assert.True(timeout.IsCancellationRequested);
         Assert.Equal(before, File.ReadAllBytes(NodeJson));
         Assert.Contains(HubCertificate.Fingerprint(presented), error.ToString());
-        Assert.Equal(1, System.Text.RegularExpressions.Regex.Matches(error.ToString(), "presented a certificate").Count);
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(error.ToString(), "presented a certificate"));
         Assert.Equal(0, requests);
         Assert.Equal(enrolled ? new string('c', 64) : null, state.ReadCredential());
     }

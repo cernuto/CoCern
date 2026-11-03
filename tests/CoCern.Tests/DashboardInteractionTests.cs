@@ -134,7 +134,7 @@ public sealed class DashboardInteractionTests
             if (observation is { SessionsTruncated: false, Interactions.Truncated: false }) return observation;
             if (attempt < 19) await Task.Delay(50);
         }
-        Assert.True(false, "The small metadata fixture did not produce a complete observation after 20 samples. Last result: " + JsonSerializer.Serialize(observation));
+        Assert.Fail("The small metadata fixture did not produce a complete observation after 20 samples. Last result: " + JsonSerializer.Serialize(observation));
         return observation!;
     }
 

@@ -27,7 +27,7 @@ public sealed class DashboardLoggingTests
         var previousSequence = logs.Snapshot().LastOrDefault()?.Sequence ?? 0;
 
         (await client.GetAsync("/health?token=PRIVATE-TOKEN")).EnsureSuccessStatusCode();
-        var entry = Assert.Single(logs.Snapshot().Where(entry => entry.Sequence > previousSequence));
+        var entry = Assert.Single(logs.Snapshot(), entry => entry.Sequence > previousSequence);
         Assert.Equal("HTTP", entry.Category);
         Assert.Equal("Relay request completed (HTTP 200).", entry.Message);
         Assert.DoesNotContain("PRIVATE-", JsonSerializer.Serialize(entry));

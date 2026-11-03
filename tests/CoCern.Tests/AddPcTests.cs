@@ -192,15 +192,15 @@ public sealed class AddPcTests : IDisposable
 
     /// <summary>
     /// The command run for real, by Windows PowerShell 5.1 on Windows and by PowerShell 7 wherever <c>pwsh</c> is on the PATH, against an HTTPS server with
-    /// a hub certificate. Off Windows its backslashes become slashes, because .NET there reads a backslash as part of a file name. Nothing is checked
-    /// where neither shell is present.
+    /// a hub certificate. Off Windows its backslashes become slashes, because .NET there reads a backslash as part of a file name. Where neither shell
+    /// is present it is reported as skipped, never as passed.
     /// </summary>
-    [Fact]
+    [SkippableFact]
     public async Task Pasting_the_command_installs_keeps_or_swaps_the_adapter_and_leaves_the_window_as_it_was()
     {
         var shells = new[] { OperatingSystem.IsWindows() ? Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe") : null, OnPath("pwsh") }
             .OfType<string>().Where(File.Exists).Distinct().ToArray();
-        if (shells.Length == 0) return;
+        Skip.If(shells.Length == 0, "Neither Windows PowerShell nor pwsh is installed here, so the pasted command can't be run.");
         using var certificate = HubCertificate.LoadOrCreate(Path.Combine(root, "hub-certificate.pfx"), "localhost");
         using var stranger = HubCertificate.LoadOrCreate(Path.Combine(root, "other-certificate.pfx"), "localhost");
         byte[] first = Zip(("CoCern.Adapter.dll", "first"), ("CoCern.Adapter.runtimeconfig.json", "{}"), ("old-only.txt", "gone after the swap"));
