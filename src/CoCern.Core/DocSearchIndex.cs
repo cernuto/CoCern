@@ -23,8 +23,9 @@ public sealed record DocIndexResult(DocHit[] Hits, IReadOnlyDictionary<string, i
 /// <summary>
 /// One repository's in-memory Lucene index: every section chunk of every file, one Lucene document each, with its path, anchor and part,
 /// heading and body indexed as a document grain indexes them (the same fields, analyzer, BM25 and heading boost). Spec, commit, content hash
-/// and the sections themselves sit in a side map, so the text is held once. Upserts replace one path's chunks and run one at a time;
-/// searches run side by side and each sees one whole version of the index and its side map.
+/// and the sections themselves sit in a side map, so the text is held once. Writes (<see cref="Apply"/>) run one at a time and each merges
+/// away deleted chunks and refreshes the searchers once, so a caller with many changed files passes them in one call; searches run side
+/// by side and each sees one whole version of the index and its side map.
 /// </summary>
 public sealed class DocSearchIndex : IDisposable
 {
@@ -71,8 +72,9 @@ public sealed class DocSearchIndex : IDisposable
     public void Remove(string path) => Apply([], [path]);
 
     /// <summary>
-    /// Removes, then upserts, in one refresh, and returns how many files it re-indexed. Each changed path's chunks are deleted by its path
-    /// term and its sections added again; a file its splitter refuses indexes as empty, as a document grain does.
+    /// Removes, then upserts, as one batch, and returns how many files it re-indexed. Each changed path's chunks are deleted by its path
+    /// term and its sections added again; a file its splitter refuses indexes as empty, as a document grain does. Deleted chunks are merged
+    /// away and the searchers refreshed once for the whole batch, both costing about as much for one file as for many.
     /// </summary>
     public int Apply(IEnumerable<DocSearchDocument> upserts, IEnumerable<string> removed)
     {
@@ -147,6 +149,10 @@ public sealed class DocSearchIndex : IDisposable
             var highlighter = new Highlighter(new SimpleHTMLFormatter("[", "]"), new QueryScorer(parsed, DocQuery.Body)) { TextFragmenter = new SimpleFragmenter(RelayLimits.MaxDocSnippetChars / 2) };
             var weights = content.ToDictionary(term => term, term => Idf(searcher.IndexReader, term), StringComparer.Ordinal);
             var total = weights.Values.Sum();
+            // Which chunks hold each query term, read once per query from the index instead of analyzing every candidate chunk's text again.
+            // The analyzer only splits and rewrites single words, so a chunk's indexed heading and body terms are exactly the terms of its text.
+            var inHeading = queryTerms.ToDictionary(term => term, term => Holders(searcher.IndexReader, DocQuery.Heading, term), StringComparer.Ordinal);
+            var inBody = content.ToDictionary(term => term, term => Holders(searcher.IndexReader, DocQuery.Body, term), StringComparer.Ordinal);
             // A document grain took its own top 4 × limit chunks; so does each file here.
             var collector = new PerPathCollector(Math.Max(limit, 1) * 4, matches.ContainsKey);
             searcher.Search(parsed, collector);
@@ -160,12 +166,10 @@ public sealed class DocSearchIndex : IDisposable
                     var stored = searcher.Doc(doc);
                     var section = indexed.Sections[indexed.ByAnchor[stored.Get(AnchorField)]];
                     var body = BodyOf(section, stored.GetField(PartField).GetInt32Value() ?? 0);
-                    var headingTerms = DocQuery.Terms(analyzer, section.HeadingPath);
-                    var chunkTerms = DocQuery.Terms(analyzer, section.HeadingPath + "\n" + body);
-                    var coverage = total <= 0 ? 1f : (float)(weights.Where(weight => chunkTerms.Contains(weight.Key)).Sum(weight => weight.Value) / total);
+                    var coverage = total <= 0 ? 1f : (float)(weights.Where(weight => inHeading[weight.Key].Get(doc) || inBody[weight.Key].Get(doc)).Sum(weight => weight.Value) / total);
                     // The body rides in Snippet until the hits are chosen, so only returned hits are highlighted.
                     candidates.Add(new(file, section.Anchor, section.HeadingPath, body, score * (CoverageFloor + (1 - CoverageFloor) * coverage * coverage),
-                        section.Tokens, indexed.Commit, headingTerms.Overlaps(queryTerms), coverage));
+                        section.Tokens, indexed.Commit, queryTerms.Any(term => inHeading[term].Get(doc)), coverage));
                 }
                 // One hit per section: its best chunk.
                 var own = DocHit.Ranked(candidates).DistinctBy(hit => hit.Anchor).Take(limit).ToArray();
@@ -182,6 +186,18 @@ public sealed class DocSearchIndex : IDisposable
     {
         var frequency = Math.Max(reader.DocFreq(new Term(DocQuery.Body, term)), reader.DocFreq(new Term(DocQuery.Heading, term)));
         return Math.Log(1 + (reader.NumDocs - frequency + 0.5) / (frequency + 0.5));
+    }
+
+    /// <summary>The chunks (by index-wide document number) whose <paramref name="field"/> holds <paramref name="term"/>.</summary>
+    private static FixedBitSet Holders(IndexReader reader, string field, string term)
+    {
+        var holders = new FixedBitSet(reader.MaxDoc);
+        foreach (var leaf in reader.Leaves)
+        {
+            if (leaf.AtomicReader.GetTermDocsEnum(new Term(field, term)) is not { } docs) continue;
+            for (var doc = docs.NextDoc(); doc != DocIdSetIterator.NO_MORE_DOCS; doc = docs.NextDoc()) holders.Set(leaf.DocBase + doc);
+        }
+        return holders;
     }
 
     /// <summary>A chunk's indexed body: the first chunk without its heading line, which is indexed as the heading.</summary>

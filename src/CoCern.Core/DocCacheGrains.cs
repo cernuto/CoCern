@@ -86,6 +86,16 @@ public sealed record DocUsage(
     [property: Id(0)] long Searches, [property: Id(1)] long MatchedSections, [property: Id(2)] long SectionReads,
     [property: Id(3)] DateTimeOffset? LastUsedAt, [property: Id(4)] DateTimeOffset TrackingSince);
 
+/// <summary>
+/// How often a repository's directory writes the document usage it counted since its last write (<see cref="DocDirectoryGrain"/>). The hub
+/// keeps the default; tests pass a shorter one.
+/// </summary>
+public sealed record DocUsageOptions
+{
+    public static readonly TimeSpan DefaultWriteInterval = TimeSpan.FromSeconds(30);
+    public TimeSpan WriteInterval { get; init; } = DefaultWriteInterval;
+}
+
 /// <summary>The directory's persisted state: the branch and commit it follows, and each document's entry.</summary>
 [GenerateSerializer]
 public sealed class DocDirectoryState
@@ -270,31 +280,66 @@ public sealed class DocumentGrain(IDocSource source, ITokenCounter tokens, DocCa
 /// repository's one <see cref="DocSearchGrain"/> and sections to the one document grain asked for; both are counted as each document's
 /// usage here. Reads are <see cref="ReadOnlyAttribute"/>, so searches run side by side; a sync's update waits for them.
 /// </summary>
+/// <remarks>
+/// Usage is counted in memory and written with the next sync, every <see cref="DocUsageOptions.WriteInterval"/>, and on deactivation (idle
+/// collection and a normal shutdown), so a search or a section read never waits for a storage write. The dashboard sees the counts at once;
+/// only a crash loses the uses since the last write.
+/// </remarks>
 [GrainType("cocern.docdir")]
-public sealed class DocDirectoryGrain([PersistentState("docs", "relay")] IPersistentState<DocDirectoryState> state, DocCacheActivity? activity = null) : Grain, IDocDirectoryGrain
+public sealed class DocDirectoryGrain([PersistentState("docs", "relay")] IPersistentState<DocDirectoryState> state, DocCacheActivity? activity = null, DocUsageOptions? usageOptions = null)
+    : Grain, IDocDirectoryGrain
 {
+    /// <summary>Uses of one document since the last usage write.</summary>
+    private sealed class UnsavedUsage(DateTimeOffset firstUsedAt)
+    {
+        public long Searches, MatchedSections, SectionReads;
+        public DateTimeOffset FirstUsedAt { get; } = firstUsedAt;
+        public DateTimeOffset LastUsedAt { get; set; } = firstUsedAt;
+    }
+
     private readonly Guid observationId = Guid.NewGuid();
-    // ReadOnly requests may overlap; serialize their metadata writes and copy state only once this is held.
-    private readonly SemaphoreSlim usageWrites = new(1);
+    /// <summary>Uses not yet written, by path. Only exclusive turns (the timer, a sync, deactivation) write them, so no lock is needed.</summary>
+    private readonly Dictionary<string, UnsavedUsage> unsaved = new(StringComparer.Ordinal);
     private DateTimeOffset activatedAt;
+    // The shown paths change only with the state, which every write replaces whole, so a counted use reuses them.
+    private DocDirectoryState? pathsFor;
+    private string[] paths = [];
+
     private void Observe()
     {
         if (activity is null) return;
         var current = state.State;
-        var paths = current.Docs.Keys.Where(path => path.Length <= DocCacheActivity.MaxDocumentPathLength)
-            .Order(StringComparer.Ordinal).Take(DocCacheActivity.MaxDocumentPaths).ToArray();
+        if (!ReferenceEquals(pathsFor, current))
+        {
+            paths = current.Docs.Keys.Where(path => path.Length <= DocCacheActivity.MaxDocumentPathLength)
+                .Order(StringComparer.Ordinal).Take(DocCacheActivity.MaxDocumentPaths).ToArray();
+            pathsFor = current;
+        }
         var usage = current.Usage ?? [];
+        var shown = new Dictionary<string, DashboardDocUsage>(StringComparer.Ordinal);
+        foreach (var path in paths)
+            if (Shown(usage.GetValueOrDefault(path), unsaved.GetValueOrDefault(path)) is { } counted)
+                shown[path] = new DashboardDocUsage
+                {
+                    Searches = counted.Searches, MatchedSections = counted.MatchedSections, SectionReads = counted.SectionReads,
+                    LastUsedAt = counted.LastUsedAt, TrackingSince = counted.TrackingSince
+                };
         activity.Update(observationId, new DashboardDocGrain
         {
             Kind = "Directory", Repository = Repository, ActivatedAt = activatedAt,
-            Loaded = true, Commit = current.Commit, Documents = current.Docs.Count, DocumentPaths = paths,
-            DocumentUsage = paths.Where(path => usage.GetValueOrDefault(path) is not null).ToDictionary(path => path, path => new DashboardDocUsage
-            {
-                Searches = usage[path].Searches, MatchedSections = usage[path].MatchedSections, SectionReads = usage[path].SectionReads,
-                LastUsedAt = usage[path].LastUsedAt, TrackingSince = usage[path].TrackingSince
-            }, StringComparer.Ordinal)
+            Loaded = true, Commit = current.Commit, Documents = current.Docs.Count, DocumentPaths = paths, DocumentUsage = shown
         });
     }
+
+    /// <summary>The written record plus the uses since; a document with no record yet starts its tracking period at its first unsaved use.</summary>
+    private static DocUsage? Shown(DocUsage? written, UnsavedUsage? since) =>
+        since is null ? written : Added(written ?? new DocUsage(0, 0, 0, null, since.FirstUsedAt), since);
+
+    private static DocUsage Added(DocUsage usage, UnsavedUsage since) => usage with
+    {
+        Searches = usage.Searches + since.Searches, MatchedSections = usage.MatchedSections + since.MatchedSections, SectionReads = usage.SectionReads + since.SectionReads,
+        LastUsedAt = usage.LastUsedAt is { } last && last > since.LastUsedAt ? last : since.LastUsedAt
+    };
 
     public override async Task OnActivateAsync(CancellationToken cancellationToken)
     {
@@ -308,12 +353,16 @@ public sealed class DocDirectoryGrain([PersistentState("docs", "relay")] IPersis
             catch (Exception) { /* Tracking is best effort: inventory and document access remain available. */ }
         }
         Observe();
+        // Not interleaving, so a write never overlaps a search counting a use; not keeping the directory alive, so idle collection still runs.
+        var interval = usageOptions?.WriteInterval is { } configured && configured > TimeSpan.Zero ? configured : DocUsageOptions.DefaultWriteInterval;
+        this.RegisterGrainTimer(_ => WriteUsageAsync(), interval, interval);
     }
 
-    public override Task OnDeactivateAsync(DeactivationReason reason, CancellationToken cancellationToken)
+    /// <summary>Writes the uses counted since the last write first, so idle collection and a normal shutdown lose none.</summary>
+    public override async Task OnDeactivateAsync(DeactivationReason reason, CancellationToken cancellationToken)
     {
+        await WriteUsageAsync();
         activity?.Remove(observationId);
-        return Task.CompletedTask;
     }
 
     private string Repository => this.GetPrimaryKeyString();
@@ -335,6 +384,8 @@ public sealed class DocDirectoryGrain([PersistentState("docs", "relay")] IPersis
         candidate.SyncedAt = DateTimeOffset.UtcNow;
         foreach (var path in update.Removed) candidate.Docs.Remove(path);
         foreach (var entry in update.Upserts) candidate.Docs[entry.Path] = entry;
+        // The sync's write carries the uses counted since the last write too; a removed document's are dropped with its record.
+        AddUnsaved(candidate);
         ReconcileUsage(candidate, candidate.SyncedAt.Value);
         if (update.Full) { candidate.NeedsResync = false; candidate.Skipped.Clear(); candidate.CapacitySkipped.Clear(); }
         foreach (var path in update.Unskipped) { candidate.Skipped.Remove(path); candidate.CapacitySkipped.Remove(path); }
@@ -347,7 +398,7 @@ public sealed class DocDirectoryGrain([PersistentState("docs", "relay")] IPersis
             // A file waiting for room that the full list cannot hold would be lost for good: a full resync lists every file again.
             if (forRoom.ContainsKey(path) && !candidate.Skipped.Contains(path)) candidate.NeedsResync = true;
         }
-        return CommitAsync(candidate);
+        return CommitAsync(candidate, unsaved.Clear);
     }
 
     /// <summary>Marks a full resync as needed. Like <see cref="ApplyAsync"/>, the mark counts only once stored, so a failed write is retried by the next mark.</summary>
@@ -360,14 +411,14 @@ public sealed class DocDirectoryGrain([PersistentState("docs", "relay")] IPersis
     }
 
     /// <summary>
-    /// Writes <paramref name="candidate"/> as the state. On failure it reloads what storage holds (a write that did land, or the previous
-    /// state, which also refreshes the ETag), keeps the previous state if even that fails, and rethrows.
+    /// Writes <paramref name="candidate"/> as the state, then runs <paramref name="written"/>. On failure it reloads what storage holds (a
+    /// write that did land, or the previous state, which also refreshes the ETag), keeps the previous state if even that fails, and rethrows.
     /// </summary>
-    private async Task CommitAsync(DocDirectoryState candidate)
+    private async Task CommitAsync(DocDirectoryState candidate, Action? written = null)
     {
         var previous = state.State;
         state.State = candidate;
-        try { await state.WriteStateAsync(); }
+        try { await state.WriteStateAsync(); written?.Invoke(); }
         catch (Exception)
         {
             state.State = previous;
@@ -393,28 +444,50 @@ public sealed class DocDirectoryGrain([PersistentState("docs", "relay")] IPersis
             if (candidate.Usage.GetValueOrDefault(path) is null) candidate.Usage[path] = new DocUsage(0, 0, 0, null, now);
     }
 
-    /// <summary>
-    /// One write for an operation's answered documents. A storage failure can lose utilization increments, but cannot turn a successful
-    /// document response into a failure. CommitAsync restores persisted state and its ETag before the next operation tries again.
-    /// </summary>
-    private async Task RecordUsageAsync(IReadOnlyList<(string Path, int Matches)> searches, string? sectionPath = null)
+    /// <summary>Adds the uses counted since the last write to the documents <paramref name="candidate"/> still lists.</summary>
+    private void AddUnsaved(DocDirectoryState candidate)
     {
-        if (searches.Count == 0 && sectionPath is null) return;
-        await usageWrites.WaitAsync();
-        try
+        foreach (var (path, since) in unsaved)
+            if (candidate.Docs.ContainsKey(path)) candidate.Usage[path] = Shown(candidate.Usage.GetValueOrDefault(path), since)!;
+    }
+
+    /// <summary>
+    /// Counts an operation's answered documents in memory, for the next write; the dashboard sees them at once. A document the directory
+    /// no longer lists counts nothing.
+    /// </summary>
+    private void RecordUsage(IEnumerable<(string Path, int Matches)> searches, string? sectionPath = null)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var counted = false;
+        UnsavedUsage Since(string path) => unsaved.TryGetValue(path, out var since) ? since : unsaved[path] = new UnsavedUsage(now);
+        foreach (var (path, matches) in searches)
         {
-            var candidate = Copy(state.State);
-            var now = DateTimeOffset.UtcNow;
-            ReconcileUsage(candidate, now);
-            foreach (var (path, matches) in searches)
-                if (candidate.Usage.TryGetValue(path, out var usage))
-                    candidate.Usage[path] = usage with { Searches = usage.Searches + 1, MatchedSections = usage.MatchedSections + matches, LastUsedAt = now };
-            if (sectionPath is not null && candidate.Usage.TryGetValue(sectionPath, out var sectionUsage))
-                candidate.Usage[sectionPath] = sectionUsage with { SectionReads = sectionUsage.SectionReads + 1, LastUsedAt = now };
-            await CommitAsync(candidate);
+            if (!state.State.Docs.ContainsKey(path)) continue;
+            var since = Since(path);
+            since.Searches++; since.MatchedSections += matches; since.LastUsedAt = now;
+            counted = true;
         }
-        catch (Exception) { /* Usage is best effort; never replace a successful document answer with a statistics failure. */ }
-        finally { usageWrites.Release(); }
+        if (sectionPath is not null && state.State.Docs.ContainsKey(sectionPath))
+        {
+            var since = Since(sectionPath);
+            since.SectionReads++; since.LastUsedAt = now;
+            counted = true;
+        }
+        if (counted) Observe();
+    }
+
+    /// <summary>
+    /// Writes the uses counted since the last write, if any. A failed write keeps them for the next one: usage is best effort and never
+    /// fails a document answer. CommitAsync restores persisted state and its ETag before the next write tries again.
+    /// </summary>
+    private async Task WriteUsageAsync()
+    {
+        if (unsaved.Count == 0) return;
+        var candidate = Copy(state.State);
+        AddUnsaved(candidate);
+        ReconcileUsage(candidate, DateTimeOffset.UtcNow);
+        try { await CommitAsync(candidate, unsaved.Clear); }
+        catch (Exception) { /* Kept in memory for the next write. */ }
     }
 
     public async Task<DocSearchOutcome> SearchAsync(string query, string? spec, string? path, int limit, TimeSpan timeout)
@@ -431,7 +504,7 @@ public sealed class DocDirectoryGrain([PersistentState("docs", "relay")] IPersis
         }
         if (result.FellBack) this.AsReference<IDocDirectoryGrain>().MarkResyncAsync().Ignore();
         // Each document that answered counts one search and its matched sections; one not loaded in time counts nothing.
-        await RecordUsageAsync(result.Searched.Select(item => (item.Path, item.Matches)).ToArray());
+        RecordUsage(result.Searched.Select(item => (item.Path, item.Matches)));
         return result.Outcome;
     }
 
@@ -439,7 +512,7 @@ public sealed class DocDirectoryGrain([PersistentState("docs", "relay")] IPersis
     {
         if (!state.State.Docs.TryGetValue(path, out var entry)) return null;
         var section = await GrainFactory.GetGrain<IDocumentGrain>(DocKeys.Document(Repository, path)).SectionAsync(Ref(entry), anchor);
-        if (section is not null) await RecordUsageAsync([], path);
+        if (section is not null) RecordUsage([], path);
         return section;
     }
 
