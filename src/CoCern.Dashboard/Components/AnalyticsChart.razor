@@ -23,23 +23,26 @@
             var maximum = Math.Max(currentTotal, previousTotal);
             <div class="analytics-stack-group">
                 @if (GroupByKind) { <h4>@group.Key</h4> }
-                <svg class="analytics-stack" viewBox="0 0 100 19" preserveAspectRatio="none" role="img" aria-label="@StackLabel(group.Key, rows)" focusable="false">
-                    <title>@StackLabel(group.Key, rows)</title>
-                    <rect width="100" height="7" y="1" class="analytics-track" />
-                    <rect width="100" height="7" y="11" class="analytics-track" />
-                    @{ double currentX = 0; double previousX = 0; var color = 0; }
-                    @foreach (var row in rows)
-                    {
-                        var currentWidth = AnalyticsPresentation.Width(scale > 0 ? Positive(row.Current) / scale : 0, maximum);
-                        var previousWidth = AnalyticsPresentation.Width(scale > 0 ? Positive(row.Previous) / scale : 0, maximum);
-                        <rect x="@Svg(currentX)" y="1" width="@currentWidth" height="7" class="@($"analytics-category-{color % 6}")" />
-                        <rect x="@Svg(previousX)" y="11" width="@previousWidth" height="7" class="@($"analytics-category-{color % 6}")" />
-                        currentX += double.Parse(currentWidth, CultureInfo.InvariantCulture);
-                        previousX += double.Parse(previousWidth, CultureInfo.InvariantCulture);
-                        color++;
-                    }
-                </svg>
-                <p class="analytics-stack-caption">Top: current · Bottom: previous@if (GroupByKind) { <span> · @rows.Max(row => row.CurrentCount) current @SampleUnit, @rows.Max(row => row.PreviousCount) previous @SampleUnit</span> }</p>
+                <div class="analytics-labeled-bars">
+                    <div class="analytics-bar-labels"><span>Current</span><span>Previous</span></div>
+                    <svg class="analytics-stack" viewBox="0 0 100 19" preserveAspectRatio="none" role="img" aria-label="@StackLabel(group.Key, rows)" focusable="false">
+                        <title>@StackLabel(group.Key, rows)</title>
+                        <rect width="100" height="7" y="1" class="analytics-track" />
+                        <rect width="100" height="7" y="11" class="analytics-track" />
+                        @{ double currentX = 0; double previousX = 0; var color = 0; }
+                        @foreach (var row in rows)
+                        {
+                            var currentWidth = AnalyticsPresentation.Width(scale > 0 ? Positive(row.Current) / scale : 0, maximum);
+                            var previousWidth = AnalyticsPresentation.Width(scale > 0 ? Positive(row.Previous) / scale : 0, maximum);
+                            <rect x="@Svg(currentX)" y="1" width="@currentWidth" height="7" class="@($"analytics-category-{color % 6}")" />
+                            <rect x="@Svg(previousX)" y="11" width="@previousWidth" height="7" class="@($"analytics-category-{color % 6}")" />
+                            currentX += double.Parse(currentWidth, CultureInfo.InvariantCulture);
+                            previousX += double.Parse(previousWidth, CultureInfo.InvariantCulture);
+                            color++;
+                        }
+                    </svg>
+                </div>
+                @if (GroupByKind) { <p class="analytics-stack-caption">@rows.Max(row => row.CurrentCount) current @SampleUnit, @rows.Max(row => row.PreviousCount) previous @SampleUnit</p> }
                 <div class="analytics-readout-heading"><span>Outcome</span><span>Current</span><span>Previous</span></div>
                 @{ var category = 0; }
                 @foreach (var row in rows)
@@ -67,13 +70,16 @@
                 </div>
                 @if (Mode != "numeric")
                 {
-                    <svg class="analytics-pair" viewBox="0 0 100 19" preserveAspectRatio="none" role="img" aria-label="@AnalyticsPresentation.ComparisonLabel(Label(row.Key), row.Current, row.Previous, row.CurrentCount, row.PreviousCount, Unit)" focusable="false">
-                        <title>@AnalyticsPresentation.ComparisonLabel(Label(row.Key), row.Current, row.Previous, row.CurrentCount, row.PreviousCount, Unit)</title>
-                        <rect width="100" height="7" y="1" class="analytics-track" />
-                        <rect width="100" height="7" y="11" class="analytics-track" />
-                        <rect width="@AnalyticsPresentation.Width(row.Current, Maximum)" height="7" y="1" class="analytics-current" />
-                        <rect width="@AnalyticsPresentation.Width(row.Previous, Maximum)" height="7" y="11" class="analytics-previous" />
-                    </svg>
+                    <div class="analytics-labeled-bars">
+                        <div class="analytics-bar-labels"><span>Current</span><span>Previous</span></div>
+                        <svg class="analytics-pair" viewBox="0 0 100 19" preserveAspectRatio="none" role="img" aria-label="@AnalyticsPresentation.ComparisonLabel(Label(row.Key), row.Current, row.Previous, row.CurrentCount, row.PreviousCount, Unit)" focusable="false">
+                            <title>@AnalyticsPresentation.ComparisonLabel(Label(row.Key), row.Current, row.Previous, row.CurrentCount, row.PreviousCount, Unit)</title>
+                            <rect width="100" height="7" y="1" class="analytics-track" />
+                            <rect width="100" height="7" y="11" class="analytics-track" />
+                            <rect width="@AnalyticsPresentation.Width(row.Current, Maximum)" height="7" y="1" class="analytics-current" />
+                            <rect width="@AnalyticsPresentation.Width(row.Previous, Maximum)" height="7" y="11" class="analytics-previous" />
+                        </svg>
+                    </div>
                 }
             </div>
         }
