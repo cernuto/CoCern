@@ -194,11 +194,14 @@ public static class RelayHostBuilderExtensions
             ? new DocCacheTool(provider.GetRequiredService<Orleans.IGrainFactory>(), provider.GetRequiredService<ITokenCounter>(), provider.GetRequiredService<IDocSync>(), provider.GetRequiredService<DocRepositoryRegistry>().Ids)
             : null!);
         services.AddHostedService<SpecSyncService>();
-        // Idle deactivation is the cache's eviction: an unused document grain drops its index after Relay:DocCache:IdleMinutes.
+        // Idle deactivation is the cache's eviction: an unused document grain drops its sections, and an unused search index its index,
+        // after Relay:DocCache:IdleMinutes.
         services.AddOptions<GrainCollectionOptions>().Configure<IConfiguration>((options, configuration) =>
         {
-            if (configuration.GetValue("Relay:DocCache:Enabled", true))
-                options.ClassSpecificCollectionAge[typeof(DocumentGrain).FullName!] = TimeSpan.FromMinutes(configuration.GetValue("Relay:DocCache:IdleMinutes", RelayLimits.DefaultDocIdleMinutes));
+            if (!configuration.GetValue("Relay:DocCache:Enabled", true)) return;
+            var idle = TimeSpan.FromMinutes(configuration.GetValue("Relay:DocCache:IdleMinutes", RelayLimits.DefaultDocIdleMinutes));
+            options.ClassSpecificCollectionAge[typeof(DocumentGrain).FullName!] = idle;
+            options.ClassSpecificCollectionAge[typeof(DocSearchGrain).FullName!] = idle;
         });
     }
 

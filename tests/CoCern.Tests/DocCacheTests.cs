@@ -121,7 +121,10 @@ public sealed class DocCacheTests
         await Task.Delay(TimeSpan.FromSeconds(2.5));
         Assert.Equal(0, UsageCount(DocumentUsage(host, "repo", "docs/slow.md"), "Searches"));
         watcher.ShowDelay = TimeSpan.Zero;
-        await host.Services.GetRequiredService<IGrainFactory>().GetGrain<IDocumentGrain>(DocKeys.Document("repo", "docs/slow.md")).DropAsync();
+        // The late read did land in the search index: deactivate it, so the next search reads slow.md again, and that read fails.
+        var management = host.Services.GetRequiredService<IGrainFactory>().GetGrain<IManagementGrain>(0);
+        await management.ForceActivationCollection(TimeSpan.Zero);
+        await WaitUntilAsync(async () => !(await management.GetActiveGrains(DocKeys.SearchType)).Any(id => id.Key.ToString() == "repo"));
         watcher.FailPath = "docs/slow.md";
         Assert.Equal(1, (await directory.SearchAsync("cached", null, "docs/slow.md", 3, TimeSpan.FromSeconds(10))).NotSearched);
         Assert.Equal(0, UsageCount(DocumentUsage(host, "repo", "docs/slow.md"), "Searches"));
@@ -267,7 +270,10 @@ public sealed class DocCacheTests
         var directory = Assert.Single(first.Grains, row => row.Kind == "Directory");
         Assert.Equal(1, directory.Documents);
         Assert.Equal(0, first.ActiveDocuments);
-        await grains.GetGrain<IDocDirectoryGrain>("repo").SearchAsync("cached", null, null, 3, TimeSpan.FromSeconds(10));
+        // A search answers from the repository's shared index and loads no document; reading a section loads that one.
+        Assert.Single((await grains.GetGrain<IDocDirectoryGrain>("repo").SearchAsync("cached", null, null, 3, TimeSpan.FromSeconds(10))).Hits);
+        Assert.Equal(0, activity.Snapshot(DateTimeOffset.UtcNow).ActiveDocuments);
+        Assert.NotNull(await grains.GetGrain<IDocDirectoryGrain>("repo").SectionAsync("docs/a.md", "alpha"));
         first = activity.Snapshot(DateTimeOffset.UtcNow);
         var document = Assert.Single(first.Grains, row => row.Kind == "Document");
         Assert.Equal(("repo", "docs/a.md", true, 1), (document.Repository, document.Path, document.Loaded, document.IndexRuns));
@@ -280,11 +286,13 @@ public sealed class DocCacheTests
         for (var i = 0; i < 5; i++) Assert.Equal(0, activity.Snapshot(DateTimeOffset.UtcNow).ActiveDocuments);
         Assert.Equal(commands, watcher.Commands);
 
-        // An explicit call activates a new empty cache; a search then loads it once.
+        // An explicit call activates a new empty cache; a search leaves it empty, and a section read then loads it once.
         var doc = grains.GetGrain<IDocumentGrain>(DocKeys.Document("repo", "docs/a.md"));
         await doc.StatsAsync();
         Assert.False(Assert.Single(activity.Snapshot(DateTimeOffset.UtcNow).Grains, row => row.Kind == "Document").Loaded);
         await grains.GetGrain<IDocDirectoryGrain>("repo").SearchAsync("cached", null, null, 3, TimeSpan.FromSeconds(10));
+        Assert.False(Assert.Single(activity.Snapshot(DateTimeOffset.UtcNow).Grains, row => row.Kind == "Document").Loaded);
+        await grains.GetGrain<IDocDirectoryGrain>("repo").SectionAsync("docs/a.md", "alpha");
         document = Assert.Single(activity.Snapshot(DateTimeOffset.UtcNow).Grains, row => row.Kind == "Document");
         Assert.True(document.Loaded);
         Assert.Equal(1, document.Reads);
@@ -762,7 +770,7 @@ public sealed class DocCacheTests
     }
 
     [Fact]
-    public async Task After_idle_deactivation_the_next_search_reloads_the_file_at_the_recorded_commit()
+    public async Task After_idle_deactivation_the_next_search_and_section_reload_the_file_at_the_recorded_commit()
     {
         using var git = GitRepositories.Create(new() { ["docs/a.md"] = "# Refunds\n\nRefunds take five days.\n" });
         var watcher = new WatchingGit();
@@ -771,17 +779,23 @@ public sealed class DocCacheTests
         await SyncAsync(host);
         var recorded = git.Head();
         Assert.Single(Hits(await Tool(client, "doc_search", new { repositoryId = "repo", query = "refunds" })));
+        Assert.Contains("five days", Data(await Tool(client, "doc_section", new { repositoryId = "repo", path = "docs/a.md", anchor = "refunds" })).GetProperty("text").GetString());
         var grains = host.Services.GetRequiredService<IGrainFactory>();
+        var management = grains.GetGrain<IManagementGrain>(0);
         var document = grains.GetGrain<IDocumentGrain>(DocKeys.Document("repo", "docs/a.md"));
         Assert.Equal(1, (await document.StatsAsync()).IndexRuns);
-        // A newer commit in the clone's working tree and branch must not leak into the reload: it reads the recorded commit.
+        // A newer commit in the clone's working tree and branch must not leak into the reload: both read the recorded commit.
         git.WriteInClone("docs/a.md", "# Refunds\n\nUncommitted refunds text.\n");
-        await grains.GetGrain<IManagementGrain>(0).ForceActivationCollection(TimeSpan.Zero);
-        await WaitUntilAsync(async () => !(await grains.GetGrain<IManagementGrain>(0).GetActiveGrains(DocKeys.DocumentType)).Any(id => id.Key.ToString() == DocKeys.Document("repo", "docs/a.md")));
+        await management.ForceActivationCollection(TimeSpan.Zero);
+        await WaitUntilAsync(async () => !(await management.GetActiveGrains(DocKeys.DocumentType)).Any(id => id.Key.ToString() == DocKeys.Document("repo", "docs/a.md"))
+            && !(await management.GetActiveGrains(DocKeys.SearchType)).Any(id => id.Key.ToString() == "repo"));
         var shows = watcher.Shows.Count;
         var hits = Hits(await Tool(client, "doc_search", new { repositoryId = "repo", query = "refunds" }));
         Assert.Contains("five days", Assert.Single(hits).GetProperty("snippet").GetString());
         Assert.Contains(watcher.Shows.Skip(shows), argument => argument == recorded + ":docs/a.md");
+        // The search reloaded the shared index only; the section read reloads the document.
+        Assert.DoesNotContain(await management.GetActiveGrains(DocKeys.DocumentType), id => id.Key.ToString() == DocKeys.Document("repo", "docs/a.md"));
+        Assert.Contains("five days", Data(await Tool(client, "doc_section", new { repositoryId = "repo", path = "docs/a.md", anchor = "refunds" })).GetProperty("text").GetString());
         var stats = await document.StatsAsync();
         Assert.Equal((true, recorded, 1, 1), (stats.Loaded, stats.Commit, stats.IndexRuns, stats.Reads));
     }
@@ -804,22 +818,25 @@ public sealed class DocCacheTests
         await service.RunOnceAsync(CancellationToken.None);
         var grains = host.Services.GetRequiredService<IGrainFactory>();
         Assert.Equal(4, Hits(await Tool(client, "doc_search", new { repositoryId = "repo", query = "refunds", limit = 10 })).Count(hit => hit.GetProperty("anchor").GetString() != "gone-soon"));
+        // The shared search index read each file once; a section read loads its one document.
+        async Task<int> Reads() => (await grains.GetGrain<IDocSearchGrain>("repo").StatsAsync()).Reads;
         async Task<int> Runs(string path) => (await grains.GetGrain<IDocumentGrain>(DocKeys.Document("repo", path)).StatsAsync()).IndexRuns;
-        var runs = new[] { await Runs("docs/a.md"), await Runs("docs/b.md"), await Runs("docs/c.md"), await Runs("docs/old.md") };
-        Assert.Equal(new[] { 1, 1, 1, 1 }, runs);
+        Assert.Equal(4, await Reads());
+        Assert.Contains("Alpha refunds", Data(await Tool(client, "doc_section", new { repositoryId = "repo", path = "docs/a.md", anchor = "alpha" })).GetProperty("text").GetString());
+        Assert.Equal(1, await Runs("docs/a.md"));
 
-        // A timer run with no new commits indexes nothing.
+        // A timer run with no new commits reads and indexes nothing.
         var runner = host.Services.GetRequiredService<DocSyncRunner>();
         Assert.Equal(0, (await runner.SyncAsync("repo", null, CancellationToken.None)).Changed);
         await service.RunOnceAsync(CancellationToken.None);
-        Assert.Equal(1, await Runs("docs/a.md"));
+        Assert.Equal((4, 1), (await Reads(), await Runs("docs/a.md")));
 
-        // One changed file is re-indexed alone, and loses the section it no longer has; an unchanged rewrite is not re-indexed.
+        // One changed file is re-read alone (and the loaded document re-indexed from the sync's content), and loses the section it no
+        // longer has; an unchanged rewrite is not re-read.
         git.Commit(new() { ["docs/a.md"] = "# Alpha\n\nAlpha refunds, revised.\n", ["docs/b.md"] = "# Beta\n\nBeta refunds.\n" });
         var changed = await runner.SyncAsync("repo", null, CancellationToken.None);
         Assert.Equal((git.Head(), 1), (changed.Commit, changed.Changed));
-        runs = [await Runs("docs/a.md"), await Runs("docs/b.md"), await Runs("docs/c.md")];
-        Assert.Equal(new[] { 2, 1, 1 }, runs);
+        Assert.Equal((5, 2), (await Reads(), await Runs("docs/a.md")));
         var alpha = Hits(await Tool(client, "doc_search", new { repositoryId = "repo", query = "refunds", path = "docs/a.md" }));
         Assert.Equal(new[] { "alpha" }, alpha.Select(hit => hit.GetProperty("anchor").GetString()));
         Assert.Equal(git.Head()[..12], alpha[0].GetProperty("commit").GetString());
