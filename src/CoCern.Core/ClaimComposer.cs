@@ -74,6 +74,8 @@ internal sealed class ClaimComposer(Aggregates aggregates)
             try { claim = await aggregates.Call(AggregateKinds.Lock, resource, caller, RelayTools.ClaimAcquire, resourceArgs); }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
+                // The lock may have granted before its reply was lost; that grant is undone with the rest.
+                if (await GrantAfterLostReplyAsync(caller, resource, resourceArgs) is { } granted) Record(resource, Aggregates.Parse(granted), acquired, held);
                 await RollBackClaimAsync(caller, args, acquired, held, task);
                 return Error(Unavailable, new { resourceId = resource, rollback = "new_grants_released" });
             }
@@ -84,13 +86,30 @@ internal sealed class ClaimComposer(Aggregates aggregates)
                 return Error(claim.Code, new { resourceId = resource, detail = JsonNode.Parse(claim.DataJson), rollback = "new_grants_released" });
             }
             var grant = Aggregates.Parse(claim);
-            if (grant["newlyAcquired"]?.GetValue<bool>() == true) acquired.Add((resource, Number(grant, "generation")));
-            else held.Add((resource, Text(grant, "previousClaimFor")));
+            Record(resource, grant, acquired, held);
             grant.Remove("previousClaimFor");
             grant["resourceId"] = resource; grants.Add(grant);
         }
         var data = Aggregates.Parse(task); data["grants"] = grants; data["complete"] = true;
         return Ok(data, task.Version);
+    }
+
+    /// <summary>A grant this claim took (released on rollback) or one the session already held (given back to the claim it served).</summary>
+    private static void Record(string resource, JsonObject grant, List<(string Resource, long Generation)> acquired, List<(string Resource, string ClaimFor)> held)
+    {
+        if (grant["newlyAcquired"]?.GetValue<bool>() == true) acquired.Add((resource, Number(grant, "generation")));
+        else held.Add((resource, Text(grant, "previousClaimFor")));
+    }
+
+    /// <summary>
+    /// After a lock call threw, the grant it may have made: the same request again replays the stored grant when the first one did land
+    /// (a timeout after the lock's write), or takes it now, so either way the rollback knows its generation and undoes it. Null when the
+    /// lock refuses or throws again; a grant it made then lapses with its lease.
+    /// </summary>
+    private async Task<RelayReply?> GrantAfterLostReplyAsync(RelayCaller caller, string resource, JsonObject resourceArgs)
+    {
+        try { return await aggregates.Call(AggregateKinds.Lock, resource, caller, RelayTools.ClaimAcquire, resourceArgs) is { Ok: true } replayed ? replayed : null; }
+        catch (Exception exception) when (exception is not OperationCanceledException) { return null; }
     }
 
     /// <summary>
@@ -175,7 +194,10 @@ internal sealed class ClaimComposer(Aggregates aggregates)
         JsonObject LockArgs() => new() { ["repositoryId"] = Text(args, "repositoryId"), ["actionId"] = actionId, ["actionKey"] = actionKey, ["sessionId"] = Text(args, "sessionId") };
         foreach (var resource in resources)
         {
-            var block = await aggregates.Call(AggregateKinds.Lock, resource, caller, Operations.Block, LockArgs());
+            RelayReply block;
+            // A block call that throws may still have blocked the lock: it is lifted below with the others.
+            try { block = await aggregates.Call(AggregateKinds.Lock, resource, caller, Operations.Block, LockArgs()); }
+            catch (Exception exception) when (exception is not OperationCanceledException) { block = Error(Unavailable); }
             if (block.Ok) continue;
             // The action is recorded but never ran. Each lock remembers it as resolved, which lifts the blocks this call placed and turns the
             // board's own queued blocks into no-ops, so no lock stays blocked by it. The action stays open until reported (canceled).
