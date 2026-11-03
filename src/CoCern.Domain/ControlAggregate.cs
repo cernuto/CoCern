@@ -29,6 +29,7 @@ internal static class ControlAggregate
             Operations.Resolve => ResolveResource(context),
             Operations.ResolveAll => ResolveAll(context),
             Operations.SessionOwners => OwnedSessions(context),
+            Operations.SessionsOpen => OpenSessions(context),
             Operations.AttentionRoute => RouteAttention(context),
             RelayTools.ControlRequest => Control(context),
             _ => Error(UnknownTool)
@@ -386,6 +387,15 @@ internal static class ControlAggregate
         var owned = Strings(context.Args["sessionIds"]).Distinct(StringComparer.Ordinal)
             .Where(id => sessions[id] is JsonObject session && Text(session, "principalId") == context.Caller.PrincipalId && Text(session, "repositoryId") == context.Repository).ToArray();
         return Ok(new { owned });
+    }
+
+    /// <summary>The given session IDs still open in this repository, whoever opened them. Read-only; nothing else about them is returned.</summary>
+    private static RelayReply OpenSessions(AggregateContext context)
+    {
+        var sessions = ObjectAt(context.State, "sessions");
+        var open = Strings(context.Args["sessionIds"]).Distinct(StringComparer.Ordinal)
+            .Where(id => sessions[id] is JsonObject session && Text(session, "repositoryId") == context.Repository).ToArray();
+        return Ok(new { open });
     }
 
     /// <summary>Maps a resource ID or a machine-scoped alias to its canonical registered resource.</summary>

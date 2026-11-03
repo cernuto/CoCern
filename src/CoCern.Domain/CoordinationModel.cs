@@ -253,6 +253,8 @@ public static class Operations
     public const string TaskArchive = "__task_archive";
     /// <summary>Read-only: which of the given sessions in the repository the caller's principal opened.</summary>
     public const string SessionOwners = "__session_owners";
+    /// <summary>Read-only, sent to the control directory: which of the given session IDs are open in this repository, whoever opened them.</summary>
+    public const string SessionsOpen = "__sessions_open";
     /// <summary>
     /// Adds an attention item to a session, or refreshes the open one with the same kind, task and subject. Sent through the outbox.
     /// Sources should always send <c>revision</c>; without one, only an identical copy within a few minutes of a close is ignored.
@@ -294,7 +296,7 @@ public static class Operations
     public static bool IsInternal(string operation) => operation.StartsWith("__", StringComparison.Ordinal);
 
     /// <summary>Internal operations that only read: never deduplicated by requestId, never committed for themselves.</summary>
-    public static bool IsRead(string operation) => operation is Verify or Resolve or ResolveAll or NextWork or ClaimState or SessionOwners or Standing or Orders;
+    public static bool IsRead(string operation) => operation is Verify or Resolve or ResolveAll or NextWork or ClaimState or SessionOwners or SessionsOpen or Standing or Orders;
 
     /// <summary>Order effects run only while standing orders are on; a target that refuses one is not asked again.</summary>
     public static bool IsOrder(string operation) => operation is OrderFire or OrderWatch or OrderRelease or OrderFailed;

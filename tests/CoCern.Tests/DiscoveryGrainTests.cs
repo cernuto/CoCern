@@ -82,12 +82,15 @@ public sealed class DiscoveryGrainTests
         try
         {
             var directory = host.Services.GetRequiredService<IMachineDirectory>();
+            var application = host.Services.GetRequiredService<RelayApplication>();
             var a = (await directory.EnrollAsync("pc-a", "PC A", "secret-a", CancellationToken.None))!;
+            var machine = new RelayCaller(a.PrincipalId, false, ["cocern", "secret-repo"]);
             var announcement = Announcement("pc-a", "PC A", "chat-open"); var secret = Announcement("pc-a", "PC A", "chat-secret");
+            announcement["chats"]![0]!["relaySessionId"] = await OpenAsync(application, machine, "cocern", "chat-open");
             secret["chats"]![0]!["repositoryId"] = "secret-repo";
+            secret["chats"]![0]!["relaySessionId"] = await OpenAsync(application, machine, "secret-repo", "chat-secret");
             var chats = announcement["chats"]!.AsArray(); chats.Add(secret["chats"]![0]!.DeepClone());
             Assert.True((await directory.AnnounceAsync(a, announcement, CancellationToken.None)).Ok);
-            var application = host.Services.GetRequiredService<RelayApplication>();
             // A caller who may use both repositories still sees only the one it asked for.
             var both = new RelayCaller("alice", false, ["cocern", "secret-repo"]);
             var listed = await application.ExecuteAsync(both, RelayTools.ChatDirectory, JsonSerializer.SerializeToElement(new { repositoryId = "cocern" }));
@@ -98,6 +101,37 @@ public sealed class DiscoveryGrainTests
             var denied = await application.ExecuteAsync(limited, RelayTools.ChatDirectory, JsonSerializer.SerializeToElement(new { repositoryId = "secret-repo" }));
             Assert.Equal(RelayErrorCodes.RepositoryDenied, denied.Code);
             Assert.Equal(["chat-open"], Items(await application.ExecuteAsync(limited, RelayTools.ChatDirectory, JsonSerializer.SerializeToElement(new { repositoryId = "cocern" }))).Select(x => x["label"]!.GetValue<string>()));
+        }
+        finally { await host.StopAsync(); }
+    }
+
+    [Fact]
+    public async Task Chat_directory_leaves_out_an_announced_chat_whose_session_closed()
+    {
+        using var host = await StartAsync();
+        try
+        {
+            var directory = host.Services.GetRequiredService<IMachineDirectory>();
+            var application = host.Services.GetRequiredService<RelayApplication>();
+            var a = (await directory.EnrollAsync("pc-a", "PC A", "secret-a", CancellationToken.None))!;
+            var machine = new RelayCaller(a.PrincipalId, false, ["cocern"]);
+            var announcement = Announcement("pc-a", "PC A", "kept-chat");
+            announcement["chats"]![0]!["relaySessionId"] = await OpenAsync(application, machine, "cocern", "kept-chat");
+            var closing = Announcement("pc-a", "PC A", "closing-chat")["chats"]![0]!.DeepClone();
+            closing["relaySessionId"] = await OpenAsync(application, machine, "cocern", "closing-chat");
+            announcement["chats"]!.AsArray().Add(closing);
+            Assert.True((await directory.AnnounceAsync(a, announcement, CancellationToken.None)).Ok);
+            var reader = new RelayCaller("alice", false, ["cocern"]);
+            async Task<string[]> Labels() => Items(await application.ExecuteAsync(reader, RelayTools.ChatDirectory, JsonSerializer.SerializeToElement(new { repositoryId = "cocern" })))
+                .Select(x => x["label"]!.GetValue<string>()).ToArray();
+            Assert.Equal(["kept-chat", "closing-chat"], await Labels());
+
+            var closed = await application.ExecuteAsync(Administrator, RelayTools.ControlRequest,
+                JsonSerializer.SerializeToElement(new { repositoryId = "cocern", requestId = "close-closing", command = "close_sessions", labelPrefix = "closing" }));
+            Assert.True(closed.Ok, closed.Code);
+            Assert.Equal(1, JsonNode.Parse(closed.DataJson)!["closed"]!.GetValue<int>());
+            // The PC is off and never announces again, so only the session directory can tell that this chat is gone.
+            Assert.Equal(["kept-chat"], await Labels());
         }
         finally { await host.StopAsync(); }
     }
@@ -205,11 +239,20 @@ public sealed class DiscoveryGrainTests
         try
         {
             var directory = host.Services.GetRequiredService<IMachineDirectory>();
+            var application = host.Services.GetRequiredService<RelayApplication>();
             var a = (await directory.EnrollAsync("pc-a", "PC A", "secret-a", CancellationToken.None))!;
             var b = (await directory.EnrollAsync("pc-b", "PC B", "secret-b", CancellationToken.None))!;
-            Assert.True((await directory.AnnounceAsync(b, Announcement("pc-b", "PC B", "chat-b"), CancellationToken.None)).Ok);
+            // Real open sessions, so the directory (which leaves out closed ones) lists every announced chat.
+            Task<string> Open(MachineIdentity machine, string label) => OpenAsync(application, new RelayCaller(machine.PrincipalId, false, ["cocern"]), "cocern", label);
+            JsonObject Announced(MachineIdentity machine, string machineId, string machineName, string label, string sessionId)
+            {
+                var announcement = Announcement(machineId, machineName, label);
+                announcement["chats"]![0]!["relaySessionId"] = sessionId;
+                return announcement;
+            }
+            Assert.True((await directory.AnnounceAsync(b, Announced(b, "pc-b", "PC B", "chat-b", await Open(b, "chat-b")), CancellationToken.None)).Ok);
             // Machine A claims to be machine B: the hub must apply it to A and leave B untouched.
-            var hijack = Announcement("pc-b", "PC B hijacked", "chat-a");
+            var hijack = Announced(a, "pc-b", "PC B hijacked", "chat-a", await Open(a, "chat-a"));
             Assert.True((await directory.AnnounceAsync(a, hijack, CancellationToken.None)).Ok);
             Assert.Equal("pc-b", hijack["machineId"]!.GetValue<string>());
             var items = Items(await directory.DirectoryAsync(["cocern"], CancellationToken.None));
@@ -217,7 +260,7 @@ public sealed class DiscoveryGrainTests
             Assert.Contains(items, x => x["label"]!.GetValue<string>() == "chat-a" && x["machineName"]!.GetValue<string>() == "PC B hijacked");
             Assert.Equal(2, items.Count);
             // Announcing under a machine ID that is not enrolled cannot create or touch anything either.
-            var ghost = Announcement("ghost", "Ghost", "chat-g");
+            var ghost = Announced(a, "ghost", "Ghost", "chat-g", await Open(a, "chat-g"));
             Assert.True((await directory.AnnounceAsync(a, ghost, CancellationToken.None)).Ok);
             items = Items(await directory.DirectoryAsync(["cocern"], CancellationToken.None));
             Assert.Equal(2, items.Count);
@@ -286,6 +329,14 @@ public sealed class DiscoveryGrainTests
             ["provider"] = "codex", ["threadId"] = "thread-" + label, ["relaySessionId"] = "session-" + label, ["repositoryId"] = "cocern", ["label"] = label, ["wakeable"] = true, ["waiterRunning"] = false
         })
     };
+
+    /// <summary>Opens a real session, labelled <paramref name="label"/>, and returns its ID: the directory lists only announced chats whose session is open.</summary>
+    private static async Task<string> OpenAsync(RelayApplication application, RelayCaller caller, string repository, string label)
+    {
+        var reply = await application.ExecuteAsync(caller, RelayTools.SessionOpen, JsonSerializer.SerializeToElement(new { repositoryId = repository, requestId = "open-" + label, label }));
+        Assert.True(reply.Ok, reply.Code);
+        return JsonNode.Parse(reply.DataJson)!["sessionId"]!.GetValue<string>();
+    }
 
     private static List<JsonObject> Items(RelayReply reply)
     {

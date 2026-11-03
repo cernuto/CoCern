@@ -176,8 +176,33 @@ public sealed class MachineDirectory(IGrainFactory grains, TimeProvider? clock =
         return CallAsync(Internal, DiscoveryOperations.Announce, args, ct);
     }
 
-    public Task<RelayReply> DirectoryAsync(IReadOnlyList<string> repositories, CancellationToken ct) =>
-        CallAsync(Internal, DiscoveryOperations.Directory, new() { ["repositories"] = new JsonArray(repositories.Select(x => (JsonNode)JsonValue.Create(x)!).ToArray()) }, ct);
+    /// <summary>
+    /// The announced chats in <paramref name="repositories"/>, less those whose session has closed. A node's last announcement can name a session
+    /// closed since: a running node drops it at its next announce, but a PC that is off would keep listing it until it comes back. The list is
+    /// informational, so when the session directory can't be read now the announcements are shown as they are.
+    /// </summary>
+    public async Task<RelayReply> DirectoryAsync(IReadOnlyList<string> repositories, CancellationToken ct)
+    {
+        var reply = await CallAsync(Internal, DiscoveryOperations.Directory, new() { ["repositories"] = new JsonArray(repositories.Select(x => (JsonNode)JsonValue.Create(x)!).ToArray()) }, ct);
+        if (!reply.Ok || JsonNode.Parse(reply.DataJson) is not JsonObject data || data["items"] is not JsonArray items || items.Count == 0) return reply;
+        static string? Field(JsonNode? item, string name) => item?[name] is JsonValue value && value.TryGetValue<string>(out var text) ? text : null;
+        var open = new HashSet<(string, string)>();
+        foreach (var group in items.GroupBy(item => Field(item, "repositoryId") ?? "", StringComparer.Ordinal).Where(group => group.Key.Length > 0))
+        {
+            ct.ThrowIfCancellationRequested();
+            var ids = group.Select(item => Field(item, "relaySessionId")).OfType<string>().Distinct(StringComparer.Ordinal).Select(id => (JsonNode)JsonValue.Create(id)!).ToArray();
+            var args = new JsonObject { ["repositoryId"] = group.Key, ["sessionIds"] = new JsonArray(ids) };
+            RelayReply found;
+            try { found = await grains.GetGrain<IControlGrain>(AggregateKinds.ControlKey).ExecuteAsync(new RelayCaller(Internal.PrincipalId, false, [group.Key], true), Operations.SessionsOpen, args.ToJsonString()); }
+            catch (Exception exception) when (exception is not OperationCanceledException) { return reply; }
+            if (!found.Ok) return reply;
+            foreach (var id in JsonNode.Parse(found.DataJson)?["open"] as JsonArray ?? []) if (id is JsonValue value && value.TryGetValue<string>(out var text)) open.Add((group.Key, text));
+        }
+        var kept = items.Where(item => Field(item, "relaySessionId") is { } id && open.Contains((Field(item, "repositoryId") ?? "", id))).Select(item => item!.DeepClone()).ToArray();
+        if (kept.Length == items.Count) return reply;
+        data["items"] = new JsonArray(kept);
+        return reply with { DataJson = data.ToJsonString() };
+    }
 
     public async Task<IReadOnlySet<string>?> OwnedSessionsAsync(MachineIdentity machine, string repository, IReadOnlyCollection<string> sessionIds, CancellationToken ct)
     {
