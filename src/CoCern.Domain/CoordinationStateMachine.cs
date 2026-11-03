@@ -170,7 +170,7 @@ public static class CoordinationStateMachine
     public static bool RequiresCommit(string kind, string operation, string? priorTaskRevision, StateEnvelope<CoordinationDocument> envelope) =>
         IsMutation(operation) || kind == AggregateKinds.Board && priorTaskRevision != TaskRevision(envelope);
 
-    public static string? TaskRevision(StateEnvelope<CoordinationDocument> envelope) => JsonNode.Parse(envelope.Value.Json)?["taskRevision"]?.ToJsonString();
+    public static string? TaskRevision(StateEnvelope<CoordinationDocument> envelope) => JsonNode.Parse(envelope.Value.Json)?[State.BoardState.TaskRevisionKey]?.ToJsonString();
 
     /// <summary>The board, task and action an <see cref="ActionKey"/> names; an older key without them reads as the default board.</summary>
     public static (string BoardId, string TaskId, string ActionId) ParseActionKey(string actionKey)
@@ -210,9 +210,9 @@ public static class CoordinationStateMachine
         if (DateTimeOffset.TryParse(Text(state, State.LockState.LeaseUntilKey), out var lease) && lease > now) envelope.DueWork.Add(new(DueWorkKinds.Lease, DueWorkKinds.Lease, lease));
         // A lock whose holder has an action in flight checks its lease shortly before it ends (claim_expiring).
         if (AttentionSources.LeaseWarningAt(state) is { } warning) envelope.DueWork.Add(new(DueWorkKinds.LeaseWarning, DueWorkKinds.LeaseWarning, warning));
-        if (state["tasks"] is JsonObject tasks)
+        if (state[State.BoardState.TasksKey] is JsonObject tasks)
             foreach (var entry in tasks)
-                if (entry.Value is JsonObject task && DateTimeOffset.TryParse(Text(task, "leaseUntil"), out var taskLease) && taskLease > now) envelope.DueWork.Add(new(DueWorkKinds.Lease + ":" + entry.Key, DueWorkKinds.Lease, taskLease));
+                if (entry.Value is JsonObject task && DateTimeOffset.TryParse(Text(task, State.BoardTask.LeaseUntilKey), out var taskLease) && taskLease > now) envelope.DueWork.Add(new(DueWorkKinds.Lease + ":" + entry.Key, DueWorkKinds.Lease, taskLease));
     }
 
     /// <summary>Records who caused new outbox effects so delivery runs with the originating caller's authority.</summary>

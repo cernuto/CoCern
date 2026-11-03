@@ -5,6 +5,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Orleans;
 using CoCern.Contracts;
 using CoCern.Domain;
+using CoCern.Domain.Messages;
 using static CoCern.Contracts.RelayErrorCodes;
 using static CoCern.Domain.JsonFields;
 using static CoCern.Domain.Replies;
@@ -132,11 +133,8 @@ public sealed class RelayApplication : IRelayApplication
                 ["priority"] = AttentionWeights.Low, ["note"] = tip.Text, ["revision"] = tip.Revision, ["expiryDays"] = RelayLimits.TipExpiryDays
             });
         if (actions.Proposal is { } proposal)
-            await aggregates.Call(AggregateKinds.Board, AggregateKinds.BoardKey(proposal.RepositoryId, AggregateKinds.DefaultBoard), HubProposer(proposal.RepositoryId), Operations.StandingProposeHub, new JsonObject
-            {
-                ["repositoryId"] = proposal.RepositoryId, ["boardId"] = "default", ["rule"] = proposal.Rule,
-                ["line"] = new JsonObject { ["id"] = proposal.LineId, ["text"] = proposal.Text }
-            });
+            await aggregates.Call(HubStandingProposal.TargetKind, AggregateKinds.BoardKey(proposal.RepositoryId, AggregateKinds.DefaultBoard), HubProposer(proposal.RepositoryId), HubStandingProposal.Operation,
+                new HubStandingProposal(proposal.RepositoryId, AggregateKinds.DefaultBoard, proposal.Rule, proposal.LineId, proposal.Text).ToJson());
     }
 
     /// <summary>The hub's own identity for proposals: internal, so only this hub can use it, and scoped to the one repository.</summary>

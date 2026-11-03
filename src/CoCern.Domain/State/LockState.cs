@@ -28,20 +28,14 @@ public sealed class LockState(JsonObject json)
     public const string WarnedTaskIdKey = "taskId";
     public const string AttentionRevisionKey = "attentionRevision";
 
-    // Standing orders: StandingOrders writes these on the lock, the boards watching for its release and the order runs it applied. The
-    // board's own state class for them names the same keys.
-    public const string OrderBoardsKey = "orderBoards";
-    public const string OrderBoardIdKey = "boardId";
-    public const string OrderReleasesKey = "orderReleases";
-
     /// <summary>Every key a lock stores, by whichever part of the Domain writes it.</summary>
     public static StateShape Shape { get; } = CommonState.Shape.With(
         (HolderKey, null), (GenerationKey, null), (LeaseUntilKey, null), (ClaimForKey, null),
         (BlockersKey, StateShape.Map(Blocker.Shape)), (ResolvedActionsKey, StateShape.Map(null)),
         // Lease warnings (AttentionSources).
-        (WarnedLeaseKey, null), (InterruptedLeaseKey, null), (WarnedTaskKey, StateShape.Object((WarnedBoardIdKey, null), (WarnedTaskIdKey, null))), (AttentionRevisionKey, null),
-        // Standing orders (StandingOrders): watching boards by board key, and the runs applied, a list of marks.
-        (OrderBoardsKey, StateShape.Map(StateShape.Object((OrderBoardIdKey, null)))), (OrderReleasesKey, null));
+        (WarnedLeaseKey, null), (InterruptedLeaseKey, null), (WarnedTaskKey, StateShape.Object((WarnedBoardIdKey, null), (WarnedTaskIdKey, null))), (AttentionRevisionKey, null))
+        // Standing orders (StandingOrders): the boards watching for the lock's release, and the order runs it applied.
+        .With(LockOrderState.Fields);
 
     /// <summary>The session that holds the claim; empty when the lock is free.</summary>
     public string Holder

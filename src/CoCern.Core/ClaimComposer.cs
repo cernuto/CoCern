@@ -144,8 +144,8 @@ internal sealed class ClaimComposer(Aggregates aggregates)
         var claimed = Aggregates.Parse(task);
         if (claimed["newlyAcquired"]?.GetValue<bool>() == true)
         {
-            var release = args.DeepClone().AsObject(); release["claimGeneration"] = claimed["claimGeneration"]?.DeepClone(); release["claimRequestId"] = Text(args, "requestId"); release.Remove("requestId");
-            await Attempt(() => aggregates.Board(caller, Operations.TaskUnclaim, release));
+            var unclaim = new TaskUnclaim(Text(args, "repositoryId"), Aggregates.BoardIdOf(args), Text(args, "taskId"), Text(args, "sessionId"), Number(claimed, "claimGeneration"), Text(args, "requestId"));
+            await Attempt(() => aggregates.Board(caller, TaskUnclaim.Operation, unclaim.ToJson()));
         }
     }
 

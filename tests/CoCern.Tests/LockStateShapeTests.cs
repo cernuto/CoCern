@@ -62,7 +62,7 @@ public sealed class LockStateShapeTests
         Assert.Equal(1, state.BlockerCount);
         Assert.True(state.IsResolved(print));
         Assert.Equal("T-1", json[LockState.WarnedTaskKey]![LockState.WarnedTaskIdKey]!.GetValue<string>());
-        Assert.Equal("ops", json[LockState.OrderBoardsKey]!["repo/ops"]![LockState.OrderBoardIdKey]!.GetValue<string>());
+        Assert.Equal("ops", json[LockOrderState.OrderBoardsKey]!["repo/ops"]![LockOrderState.BoardIdKey]!.GetValue<string>());
     }
 
     [Fact]
