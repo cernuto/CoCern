@@ -498,7 +498,7 @@ CoCern stores coordination only: tasks, claims, messages, notes and reported out
 | --- | --- |
 | `CoCern.Contracts` | The tool catalog and schemas, error codes and limits (`RelayLimits`). Shared by hub and adapter. |
 | `CoCern.Domain` | The rules, as pure code. `CoordinationStateMachine.Apply` checks every call and hands it to one aggregate: control, session, task board or lock. Discovery and the anomaly monitor have their own. |
-| `CoCern.Core` | `RelayApplication`: validates, authenticates the session, routes each tool, and composes calls that span aggregates. Also the Orleans grains. |
+| `CoCern.Core` | `RelayApplication` runs each call through `CallGuard` (validation, then the session check and pause gate), `ToolRouter` (one aggregate call, or a flow that spans aggregates: `ClaimComposer`, `SessionTools`, `StatusTools`, `MessageTools`, `SearchTools`) and `ReplyAddOns`. Also the Orleans grains. |
 | `CoCern.Storage` | SQLite: grain state, due work, search index and activity log. |
 | `CoCern.Analytics` | DuckDB snapshots and named queries. |
 | `CoCern.Host` | ASP.NET Core: REST, MCP, SignalR, auth, the due-work pump and the dashboard. |
@@ -516,7 +516,7 @@ Dependencies point inward; Domain knows nothing about Orleans or storage.
 | `DiscoveryGrain` | `hub` | Joined PCs and their chats. |
 | `AnomalyMonitorGrain` | repository | The next anomaly check. |
 
-**A call.** The client calls `POST /api/tools/{tool}` or `/mcp` (the stdio adapter forwards to REST). The host authenticates the token; identity never comes from the JSON. `RelayApplication` validates the call and the session handle, then calls the grain, which runs `CoordinationStateMachine.Apply` on a copy of its state. On success, one SQLite transaction saves the state, its outbox of effects for other grains, its due work and its search rows. `DueWorkDispatcher` delivers the effects; receivers ignore ones they already applied, and may get them late, reordered or twice. A message sends a SignalR hint; the inbox stays the source of truth. The activity log is written in the background.
+**A call.** The client calls `POST /api/tools/{tool}` or `/mcp` (the stdio adapter forwards to REST). The host authenticates the token; identity never comes from the JSON. `RelayApplication` validates the call and the session handle, then calls the grain, which runs `CoordinationStateMachine.Apply` on a copy of its state. The reply then picks up its add-ons in one fixed, named order (`ReplyAddOns.Steps`, pinned by a test): piggybacked renewals and acknowledgments, the next-work offer, standing, the attention offer, offered and claimed work, related work, compaction to the token budget, and last, marking a page seen from the reply as sent, so a message cut from the page stays unseen. On success, one SQLite transaction saves the state, its outbox of effects for other grains, its due work and its search rows. `DueWorkDispatcher` delivers the effects; receivers ignore ones they already applied, and may get them late, reordered or twice. A message sends a SignalR hint; the inbox stays the source of truth. The activity log is written in the background.
 
 | Place | What |
 | --- | --- |
@@ -530,7 +530,7 @@ Dependencies point inward; Domain knows nothing about Orleans or storage.
 
 **Reading stored state.** Code outside the Domain asks `ReadModels` instead of reading aggregate JSON itself: whether a session is closed (stored as `grain_state.closed` on each commit) and whether a chat is reachable. A test checks every JSON path in `Views.sql` and the standing query against a board the Domain built.
 
-**Rules to keep.** Claims are advisory. Every fixed limit lives in `RelayLimits`. Keep tool descriptions and schemas short: they are sent on every model turn, and a test caps their size.
+**Rules to keep.** Claims are advisory. A new reply add-on goes into `ReplyAddOns.Steps` at an explicit position, never through dependency injection. Every fixed limit lives in `RelayLimits`. Keep tool descriptions and schemas short: they are sent on every model turn, and a test caps their size.
 
 ## Verification
 
