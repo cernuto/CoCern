@@ -67,7 +67,7 @@ internal static class SessionAggregate
         if (ReadModels.IsClosed(state)) return Ok(new { initialized = false, expired = true });
         var record = open.Record;
         if (state.ContainsKey("principalId"))
-            return Text(state, "principalId") == record.PrincipalId && Text(state, "sessionToken") == record.SessionToken ? Ok(new { initialized = true }) : Error(SessionDenied);
+            return Text(state, "principalId") == record.PrincipalId && Text(state, ReadModels.SessionTokenKey) == record.SessionToken ? Ok(new { initialized = true }) : Error(SessionDenied);
         foreach (var (field, value) in (record with { ActiveAt = null }).ToJson()) state[field] = value?.DeepClone();
         state["openedAt"] = context.Now.ToString("O");
         if (Text(state, "role").Length > RelayLimits.MaxActivityRoleLength) state.Remove("role");
@@ -80,7 +80,7 @@ internal static class SessionAggregate
     }
 
     /// <summary>What an expired session forgets: its secret, its mail and attention, its tool binding, and the boards waiting on it (told as it closes).</summary>
-    private static readonly string[] ExpiredState = ["sessionToken", "inbox", "acked", "attention", "attentionClosed", "attentionArchived", "attentionRecent", "standingSeen", "binding", TargetBoardsKey, WorkBoardsKey];
+    private static readonly string[] ExpiredState = [ReadModels.SessionTokenKey, "inbox", "acked", "attention", "attentionClosed", "attentionArchived", "attentionRecent", "standingSeen", "binding", TargetBoardsKey, WorkBoardsKey];
 
     private const string WorkKey = "work";
     private const string WorkReportedKey = "workReported";
@@ -319,7 +319,7 @@ internal static class SessionAggregate
     }
 
     private static bool Authenticates(AggregateContext context) =>
-        Text(context.State, "principalId") == context.Caller.PrincipalId && SecretEquals(Text(context.State, "sessionToken"), Text(context.Args, "sessionToken"));
+        Text(context.State, "principalId") == context.Caller.PrincipalId && SecretEquals(Text(context.State, ReadModels.SessionTokenKey), Text(context.Args, "sessionToken"));
 
     private static RelayReply Describe(AggregateContext context)
     {
