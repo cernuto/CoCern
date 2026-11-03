@@ -14,6 +14,7 @@ public partial class Program
         }
         var builder = WebApplication.CreateBuilder(args);
         builder.AddRelayHost();
+        builder.Services.AddHostedService<CoCern.Host.Development.DevelopmentAdapterService>();
         var app = builder.Build();
         app.UseRelayPipeline();
         app.MapRelayEndpoints();

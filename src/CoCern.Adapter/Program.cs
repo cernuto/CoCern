@@ -8,6 +8,18 @@ using CoCern.Contracts;
 
 try
 {
+    if (args is ["--dev-setup", var deploymentRoot, var sourceDirectory, var developmentTokenFile])
+    {
+        deploymentRoot = Path.GetFullPath(deploymentRoot);
+        var manifest = CoCern.Adapter.Development.AdapterDeployment.Publish(sourceDirectory, deploymentRoot);
+        var profile = SetupEnvironment.ConnectFolders().Profile;
+        var changed = CoCern.Adapter.Development.DevelopmentSetup.ConfigureCodex(Path.Combine(profile, ".codex", "config.toml"), SetupEnvironment.Host().Dotnet,
+            CoCern.Adapter.Development.AdapterDeployment.AdapterPath(deploymentRoot, manifest), deploymentRoot, Path.GetFullPath(developmentTokenFile), replaceLauncher: true);
+        Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new { manifest.Version, manifest.Generation, ConfigurationChanged = changed }));
+        return 0;
+    }
+    if (args is ["--dev-launch", var developmentRoot])
+        return await CoCern.Adapter.Development.DevelopmentLauncher.RunAsync(developmentRoot, SetupEnvironment.Host().Dotnet);
     if (args.Length > 0 && args[0] == "--wake")
     {
         if (args.Length != 2) throw new AdapterConfigurationException("Use --wake with one absolute configuration path.");

@@ -6,6 +6,8 @@
       "applicationUrl": "http://127.0.0.1:5271",
       "environmentVariables": {
         "ASPNETCORE_ENVIRONMENT": "Development",
+        "Relay__DevelopmentAdapter__Enabled": "true",
+        "Relay__DevelopmentAdapter__Root": "../../artifacts/development-adapter",
         "Relay__DatabasePath": "../../data/relay.db",
         "Relay__Clients__0__TokenFile": "../../data/local-client-token",
         "Relay__Clients__0__PrincipalId": "PaulC",
