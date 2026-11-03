@@ -15,23 +15,42 @@ namespace CoCern.Domain;
 /// </summary>
 internal static class SessionAttention
 {
-    /// <summary>Adds an item, or refreshes the open one with the same key. An older source revision than one already seen is ignored.</summary>
-    public static RelayReply Raise(AggregateContext context) => Add(context.State, context.Args, context.Now);
+    /// <summary>
+    /// An outbox's raise (<see cref="AttentionRaise"/>): adds an item, or refreshes the open one with the same key. An older source revision
+    /// than one already seen is ignored.
+    /// </summary>
+    public static RelayReply Raise(AggregateContext context) =>
+        AttentionRaise.Decode(context.Args).TryGet(out var raise, out var malformed) ? Raise(context, raise.Item) : Malformed(malformed);
+
+    /// <summary>The hub's own item for this session (<see cref="AttentionSuggestion"/>), applied as a raise.</summary>
+    public static RelayReply Suggest(AggregateContext context) =>
+        AttentionSuggestion.Decode(context.Args).TryGet(out var suggestion, out var malformed) ? Raise(context, suggestion.Item) : Malformed(malformed);
+
+    /// <summary>An outbox's close (<see cref="AttentionClose"/>).</summary>
+    public static RelayReply Close(AggregateContext context) =>
+        AttentionClose.Decode(context.Args).TryGet(out var close, out var malformed) ? Close(context, close.Selection) : Malformed(malformed);
+
+    /// <summary>The hub's close of this session's <c>next_work</c> items for a task it claimed (<see cref="AttentionClaimed"/>).</summary>
+    public static RelayReply Claimed(AggregateContext context) =>
+        AttentionClaimed.Decode(context.Args).TryGet(out var claimed, out var malformed) ? Close(context, claimed.Selection) : Malformed(malformed);
+
+    /// <summary>A closed session refuses attention, and its sources drop it.</summary>
+    private static RelayReply Raise(AggregateContext context, AttentionContent item) =>
+        ReadModels.IsClosed(context.State) ? Error(SessionUnknown, new { expired = true }) : Add(context.State, item, context.Now);
+
+    private static RelayReply Close(AggregateContext context, AttentionSelection selection) =>
+        ReadModels.IsClosed(context.State) ? Error(SessionUnknown, new { expired = true }) : Close(context.State, selection, context.Now);
 
     /// <summary>
     /// A wakeable inbox message is an <c>info</c> item (subject = the message ID), so like any lower-tier item it waits for a boundary
     /// reply or the idle-hold wake. Its text stays in the inbox; the offer only points to it.
     /// </summary>
-    public static void AddMessage(JsonObject state, JsonObject message, int expiryDays, DateTimeOffset now)
+    public static void AddMessage(JsonObject state, InboxMessage message, int expiryDays, DateTimeOffset now) => Add(state, new AttentionContent
     {
-        var item = new JsonObject
-        {
-            ["kind"] = AttentionKinds.Info, ["subject"] = Text(message, "messageId"), ["expiryDays"] = expiryDays,
-            ["note"] = Text(message, "taskId") is { Length: > 0 } task ? "task " + task + " changed; read it with check_inbox" : "unread message; read it with check_inbox"
-        };
-        if (Text(message, "boardId") is { Length: > 0 } board) item["boardId"] = board;
-        Add(state, item, now);
-    }
+        Kind = AttentionKinds.Info, Subject = message.MessageId, ExpiryDays = expiryDays,
+        Note = message.TaskId is { Length: > 0 } task ? "task " + task + " changed; read it with check_inbox" : "unread message; read it with check_inbox",
+        BoardId = message.BoardId is { Length: > 0 } board ? board : null
+    }, now);
 
     /// <summary>Closes the <c>info</c> items of messages that were read or acknowledged.</summary>
     public static void CloseMessages(JsonObject state, IEnumerable<string> messageIds, DateTimeOffset now)
@@ -45,27 +64,27 @@ internal static class SessionAttention
         }
     }
 
-    private static RelayReply Add(JsonObject state, JsonObject args, DateTimeOffset now)
+    private static RelayReply Add(JsonObject state, AttentionContent raised, DateTimeOffset now)
     {
         if (!state.ContainsKey("principalId")) return Error(SessionUnknown);
-        var kind = Text(args, "kind");
+        var kind = raised.Kind;
         if (!AttentionKinds.All.Contains(kind)) return Error(InvalidArguments, new { field = "kind" });
-        var (taskId, boardId, subject) = (Optional(args, "taskId"), Optional(args, "boardId") is { Length: > 0 } board ? board : "default", Optional(args, "subject"));
+        var (taskId, boardId, subject) = (Optional(raised.TaskId, "taskId"), Optional(raised.BoardId, "boardId") is { Length: > 0 } board ? board : "default", Optional(raised.Subject, "subject"));
         var key = AttentionScheduler.Key(kind, boardId, taskId, subject);
         var items = ObjectAt(state, "attention");
         RemoveExpired(items, now);
-        var revision = Math.Max(0, Number(args, "revision"));
+        var revision = Math.Max(0, raised.Revision ?? 0);
         if (revision > 0 && (Number(ObjectAt(state, "attentionClosed"), key) >= revision || taskId.Length > 0 && Number(ObjectAt(state, ArchivedKey), ArchivedTask(boardId, taskId)) >= revision))
             return Ok(new { raised = false, reason = "stale" });
         var existing = Find(items, key);
         if (existing is { } open && revision > 0 && Number(open.Item, "revision") > revision) return Ok(new { raised = false, reason = "stale", itemId = open.Id });
         var content = new JsonObject { ["kind"] = kind };
         Set(content, "taskId", taskId); Set(content, "boardId", boardId == "default" ? "" : boardId); Set(content, "subject", subject);
-        Set(content, "blocker", Text(args, "blocker") is { Length: > 0 and <= RelayLimits.MaxAttentionBlockerLength } blocker ? blocker : "");
-        if (IsTrue(args, "blocking")) content["blocking"] = true;
-        content["priority"] = Priority(args["priority"]);
-        content["refs"] = new JsonArray(Refs(args["refs"]).Select(x => (JsonNode)x).ToArray());
-        content["note"] = Cap(Text(args, "note"));
+        Set(content, "blocker", raised.Blocker is { Length: > 0 and <= RelayLimits.MaxAttentionBlockerLength } blocker ? blocker : "");
+        if (raised.Blocking) content["blocking"] = true;
+        content["priority"] = raised.Priority is { } level && AttentionWeights.Priorities.Contains(level) ? level : AttentionWeights.Normal;
+        content["refs"] = new JsonArray(Refs(raised.Refs).Select(x => (JsonNode)x).ToArray());
+        content["note"] = Cap(raised.Note ?? "");
         // Without a revision, a redelivered copy of a raise for an item just closed is recognized by its content and ignored.
         if (revision == 0 && existing is null && RecentlyClosed(state, key, Fingerprint(content), now)) return Ok(new { raised = false, reason = "recentlyClosed" });
 
@@ -78,7 +97,7 @@ internal static class SessionAttention
             if (content[field] is { } value) item[field] = value.DeepClone(); else item.Remove(field);
         if (revision > 0) item["revision"] = revision;
         item["updatedAt"] = now.ToString("O");
-        item["expiresAt"] = Expiry(args, now).ToString("O");
+        item["expiresAt"] = now.AddDays(Math.Clamp(raised.ExpiryDays ?? RelayLimits.DefaultAttentionExpiryDays, 1, RelayLimits.MaxAttentionExpiryDays)).ToString("O");
         if (existing is not null) return Ok(new { raised = true, itemId = id, refreshed = true });
 
         state["attentionSeq"] = Number(state, "attentionSeq") + 1;
@@ -89,25 +108,22 @@ internal static class SessionAttention
         return dropped == id ? Ok(new { raised = false, reason = "full" }) : Ok(new { raised = true, itemId = id, refreshed = false, dropped });
     }
 
-    /// <summary>Closes the items of one task, or of several (<c>taskIds</c>, as archiving sends; all kinds, or only <c>kinds</c>), of one subject, or one item by ID.</summary>
-    public static RelayReply Close(AggregateContext context)
+    /// <summary>Closes the items of one task, or of several (<c>taskIds</c>, as archiving sends; all kinds, or only <c>kinds</c>), or of one subject.</summary>
+    private static RelayReply Close(JsonObject state, AttentionSelection selection, DateTimeOffset now)
     {
-        var state = context.State;
         if (!state.ContainsKey("principalId")) return Error(SessionUnknown);
-        var args = context.Args;
-        var (taskId, boardId, subject, itemId) = (Optional(args, "taskId"), Optional(args, "boardId") is { Length: > 0 } board ? board : "default", Optional(args, "subject"), Optional(args, "itemId"));
-        var taskIds = args["taskIds"] is JsonArray named ? named.OfType<JsonValue>().Select(x => x.TryGetValue<string>(out var id) ? id : "").Where(id => id.Length > 0).ToHashSet(StringComparer.Ordinal) : null;
-        if (taskId.Length == 0 && taskIds is not { Count: > 0 } && subject.Length == 0 && itemId.Length == 0) return Error(InvalidArguments, new { required = "taskId" });
-        var kinds = args["kinds"] is JsonArray list ? list.OfType<JsonValue>().Select(x => x.TryGetValue<string>(out var kind) ? kind : "").Where(AttentionKinds.All.Contains).ToHashSet(StringComparer.Ordinal) : null;
+        var (taskId, boardId, subject) = (Optional(selection.TaskId, "taskId"), Optional(selection.BoardId, "boardId") is { Length: > 0 } board ? board : "default", Optional(selection.Subject, "subject"));
+        var taskIds = selection.TaskIds?.Where(id => id.Length > 0).ToHashSet(StringComparer.Ordinal);
+        if (taskId.Length == 0 && taskIds is not { Count: > 0 } && subject.Length == 0) return Error(InvalidArguments, new { required = "taskId" });
+        var kinds = selection.Kinds?.Where(AttentionKinds.All.Contains).ToHashSet(StringComparer.Ordinal);
         var items = ObjectAt(state, "attention");
-        RemoveExpired(items, context.Now);
-        var revision = Math.Max(0, Number(args, "revision"));
+        RemoveExpired(items, now);
+        var revision = Math.Max(0, selection.Revision ?? 0);
         var closed = 0;
         foreach (var item in AttentionScheduler.Items(items))
         {
-            var matches = itemId.Length > 0 ? item.Id == itemId
-                : (taskId.Length == 0 || item.TaskId == taskId && item.BoardId == boardId) && (taskIds is null || taskIds.Contains(item.TaskId) && item.BoardId == boardId)
-                  && (subject.Length == 0 || item.Subject == subject) && (kinds is null || kinds.Contains(item.Kind));
+            var matches = (taskId.Length == 0 || item.TaskId == taskId && item.BoardId == boardId) && (taskIds is null || taskIds.Contains(item.TaskId) && item.BoardId == boardId)
+                && (subject.Length == 0 || item.Subject == subject) && (kinds is null || kinds.Contains(item.Kind));
             if (!matches) continue;
             var itemRevision = Number(items[item.Id]!.AsObject(), "revision");
             // An item with its own subject (an order's offer) counts revisions apart from a close that names no subject.
@@ -115,11 +131,11 @@ internal static class SessionAttention
             // A reordered close older than the item leaves it open.
             if (sameCounter && itemRevision > revision) continue;
             RememberClosed(state, item.Key, sameCounter ? revision : itemRevision);
-            Tombstone(state, item.Key, items[item.Id]!.AsObject(), context.Now);
+            Tombstone(state, item.Key, items[item.Id]!.AsObject(), now);
             items.Remove(item.Id); closed++;
         }
         // A close with a revision and named kinds also guards keys with no open item, so an older raise arriving later stays closed.
-        if (revision > 0 && kinds is not null && itemId.Length == 0)
+        if (revision > 0 && kinds is not null)
             foreach (var kind in kinds) RememberClosed(state, AttentionScheduler.Key(kind, boardId, taskId, subject), revision);
         // Archiving names tasks, not kinds: each is guarded as a whole, apart from the per-key guards it would otherwise flush.
         if (revision > 0 && kinds is null && taskIds is not null)
@@ -149,17 +165,15 @@ internal static class SessionAttention
     /// </summary>
     public static RelayReply Offer(AggregateContext context)
     {
+        if (!AttentionOffer.Decode(context.Args).TryGet(out var offer, out var malformed)) return Malformed(malformed);
         var state = context.State;
-        var args = context.Args;
         var now = context.Now;
         var items = ObjectAt(state, "attention");
         RemoveExpired(items, now);
         // An idle chat is one with no boundary for a while; see Status.
         state["attentionBoundaryAt"] = now.ToString("O");
         ReportActive(context);
-        // Messages a model-visible check_inbox reply lists were seen, so their info items close before anything is picked.
-        if (args["seenMessageIds"] is JsonArray seen) CloseMessages(state, Strings(seen), now);
-        var boundaries = SnoozeBoundaries(args);
+        var boundaries = SnoozeBoundaries(offer.SnoozeBoundaries ?? RelayLimits.DefaultAttentionSnoozeBoundaries);
         foreach (var item in items.Select(x => x.Value).OfType<JsonObject>())
             if (item["shownAt"] is JsonValue)
             {
@@ -179,15 +193,15 @@ internal static class SessionAttention
             sittingOut.Add(entry.Key);
         }
         // Messages on the page this offer rides are not offered again; the hub closes them once it knows which ones the reply kept.
-        if (args["pageMessageIds"] is JsonArray page)
+        if (offer.PageMessageIds is { } page)
         {
-            var onPage = Strings(page).ToHashSet(StringComparer.Ordinal);
+            var onPage = page.ToHashSet(StringComparer.Ordinal);
             foreach (var item in AttentionScheduler.Items(items).Where(item => item.Kind == AttentionKinds.Info && onPage.Contains(item.Subject))) sittingOut.Add(item.Id);
         }
         var candidates = AttentionScheduler.Items(items).Where(item => !sittingOut.Contains(item.Id)).ToArray();
         var actionable = AttentionScheduler.Eligible(candidates, now).Count();
         // "more" counts from the set Pick chooses from, so it never includes items for the focused task that cannot be offered now.
-        var offerable = AttentionScheduler.Eligible(candidates, now, Optional(args, "focusTaskId"), Optional(args, "focusBoardId") is { Length: > 0 } board ? board : "default").ToArray();
+        var offerable = AttentionScheduler.Eligible(candidates, now, Optional(offer.FocusTaskId, "focusTaskId"), Optional(offer.FocusBoardId, "focusBoardId") is { Length: > 0 } board ? board : "default").ToArray();
         var picked = AttentionScheduler.Pick(offerable, now);
         if (picked is null) return Ok(new JsonObject { ["actionable"] = actionable });
         items[picked.Id]!["shownAt"] = now.ToString("O");
@@ -254,7 +268,7 @@ internal static class SessionAttention
                     until = time;
                 }
                 item["shownAt"] = null;
-                if (!Snooze(item, now, SnoozeBoundaries(args), until))
+                if (!Snooze(item, now, SnoozeBoundaries(Number(args, "snoozeBoundaries", RelayLimits.DefaultAttentionSnoozeBoundaries)), until))
                     return Error(SnoozeLimit, new { itemId = id, maxSnoozes = RelayLimits.MaxBlockingSnoozes, maxMinutes = RelayLimits.MaxBlockingSnoozeMinutes });
                 var snoozed = AttentionItem.From(id, item);
                 var reply = new JsonObject { ["itemId"] = id, ["outcome"] = "later", ["kind"] = Text(item, "kind") };
@@ -382,31 +396,14 @@ internal static class SessionAttention
         return recent;
     }
 
-    private static DateTimeOffset Expiry(JsonObject args, DateTimeOffset now)
-    {
-        var latest = now.AddDays(RelayLimits.MaxAttentionExpiryDays);
-        if (DateTimeOffset.TryParse(Text(args, "expiresAt"), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var at) && at > now) return at < latest ? at : latest;
-        return now.AddDays(Math.Clamp(Number(args, "expiryDays", RelayLimits.DefaultAttentionExpiryDays), 1, RelayLimits.MaxAttentionExpiryDays));
-    }
+    private static int SnoozeBoundaries(long boundaries) => (int)Math.Clamp(boundaries, 1, RelayLimits.MaxAttentionSnoozeBoundaries);
 
-    private static int SnoozeBoundaries(JsonObject args) =>
-        (int)Math.Clamp(Number(args, "snoozeBoundaries", RelayLimits.DefaultAttentionSnoozeBoundaries), 1, RelayLimits.MaxAttentionSnoozeBoundaries);
-
-    /// <summary>A level from <see cref="AttentionWeights.Priorities"/>, or a task's numeric priority mapped to one; anything else is normal.</summary>
-    private static string Priority(JsonNode? node)
-    {
-        if (node is not JsonValue value) return AttentionWeights.Normal;
-        if (value.TryGetValue<string>(out var level)) return AttentionWeights.Priorities.Contains(level) ? level : AttentionWeights.Normal;
-        return long.TryParse(value.ToJsonString(), out var number) ? AttentionWeights.PriorityLevel(number) : AttentionWeights.Normal;
-    }
-
-    private static IEnumerable<string> Refs(JsonNode? node) => (node as JsonArray ?? [])
-        .OfType<JsonValue>().Select(x => x.TryGetValue<string>(out var id) ? id : "")
+    private static IEnumerable<string> Refs(IReadOnlyList<string>? refs) => (refs ?? [])
         .Where(id => id.Length is > 0 and <= RelayLimits.MaxIdentifierLength).Distinct(StringComparer.Ordinal).Take(RelayLimits.MaxAttentionRefs);
 
     /// <summary>An optional identifier: empty when absent, refused when longer than the shared bound.</summary>
-    private static string Optional(JsonObject args, string key) =>
-        Text(args, key) is { Length: <= RelayLimits.MaxIdentifierLength } value ? value : throw new ArgumentException(key + " is at most 256 characters.");
+    private static string Optional(string? value, string key) =>
+        (value ?? "") is { Length: <= RelayLimits.MaxIdentifierLength } text ? text : throw new ArgumentException(key + " is at most 256 characters.");
 
     private static void Set(JsonObject item, string key, string value) { if (value.Length > 0) item[key] = value; else item.Remove(key); }
 

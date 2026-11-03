@@ -368,10 +368,7 @@ internal static class TaskBoardAggregate
             task["workflow"] = workflow.DeepClone();
             // A newly named target is asked to tell this board when it closes, so the task never waits on a session that is gone.
             if (Text(workflow, "targetSessionId") is { Length: > 0 } target && (priorWorkflow is null || Text(priorWorkflow, "targetSessionId") != target) && context.Key.Length > 0)
-                context.Emit(AggregateKinds.Session, target, Operations.SessionTargetWatch, new JsonObject
-                {
-                    ["repositoryId"] = context.Repository, ["sessionId"] = target, ["boardKey"] = context.Key, ["boardId"] = Text(args, "boardId", "default")
-                });
+                context.Send(target, new SessionTargetWatch(context.Repository, target, context.Key, Text(args, "boardId", "default")));
             // Archiving counts from completion; reopening clears it.
             if (completing) task["completedAt"] = context.Now.ToString("O");
             else if (Text(workflow, "state") != "completed") task.Remove("completedAt");
@@ -426,11 +423,7 @@ internal static class TaskBoardAggregate
         messages.Add(entry);
         var recipient = Text(message, "recipientSessionId", Text(task, "owner"));
         if (recipient.Length > 0)
-            context.Emit(AggregateKinds.Session, recipient, Operations.Deliver, new JsonObject
-            {
-                ["repositoryId"] = context.Repository, ["messageId"] = Text(entry, "messageId"), ["taskId"] = Text(task, "taskId"), ["boardId"] = Text(context.Args, "boardId", "default"),
-                ["kind"] = "task.changed", ["taskVersion"] = nextVersion
-            });
+            context.Send(recipient, new MessageDelivery(InboxMessage.TaskChanged(context.Repository, Text(entry, "messageId"), Text(context.Args, "boardId", "default"), Text(task, "taskId"), nextVersion)));
         return null;
     }
 

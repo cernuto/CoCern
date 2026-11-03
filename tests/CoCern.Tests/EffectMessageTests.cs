@@ -166,6 +166,110 @@ public sealed class EffectMessageTests
         }
     }
 
+    [Fact]
+    public void Inbox_messages_read_back_and_a_direct_message_always_says_what_it_replies_to()
+    {
+        var direct = new InboxMessage { MessageId = "m1", RepositoryId = "repo", Text = "hi", Author = "alice", SenderSessionId = "s1", SentAt = Now, Supersede = true, Wake = false };
+        var delivery = new MessageDelivery(direct, AttentionExpiryDays: 7);
+        Assert.Equal(Json(delivery), Json(RoundTrip(delivery)));
+        // The keys send_message always stored, in its order, with the reply link even when the message answers none.
+        Assert.Equal(["messageId", "repositoryId", "text", "author", "senderSessionId", "sentAt", "replyTo", "supersede", "wake"], direct.ToJson().Select(entry => entry.Key));
+        var changed = new MessageDelivery(InboxMessage.TaskChanged("repo", "n1", "ops", "T-1", 3));
+        Assert.Equal(Json(changed), Json(RoundTrip(changed)));
+        Assert.DoesNotContain("replyTo", Json(changed));
+        Assert.Equal(["messageId"], Malformed<MessageDelivery>(Without(delivery.ToJson(), "messageId")));
+        var mistyped = delivery.ToJson(); mistyped["wake"] = "no"; mistyped["taskVersion"] = "3";
+        Assert.Equal(["taskVersion", "wake"], Malformed<MessageDelivery>(mistyped));
+        Assert.Equal((Operations.Deliver, AggregateKinds.Session, DeliveryClass.Retry), (MessageDelivery.Operation, MessageDelivery.TargetKind, MessageDelivery.Delivery));
+        Assert.Equal((Operations.SessionTargetWatch, DeliveryClass.Retry), (SessionTargetWatch.Operation, SessionTargetWatch.Delivery));
+        Assert.Equal(new SessionTargetWatch("repo", "s1", "repo/ops", "ops"), RoundTrip(new SessionTargetWatch("repo", "s1", "repo/ops", "ops")));
+    }
+
+    [Fact]
+    public void Attention_raises_closes_and_routes_read_back_and_name_their_missing_fields()
+    {
+        var item = new AttentionContent
+        {
+            Kind = AttentionKinds.Blocked, TaskId = "T-1", BoardId = "ops", Blocker = "provider_rejection", Blocking = true, Priority = AttentionWeights.High, Refs = ["T-2"],
+            Note = "waiting", Revision = 4, ExpiryDays = 2
+        };
+        var raise = new AttentionRaise("repo", item, OrderId: "o-1", OrderRun: 3);
+        Assert.Equal(Json(raise), Json(RoundTrip(raise)));
+        var close = new AttentionClose("repo", new AttentionSelection { TaskIds = ["T-1", "T-2"], BoardId = "ops", Kinds = [AttentionKinds.Blocked], Revision = 5 });
+        Assert.Equal(Json(close), Json(RoundTrip(close)));
+        foreach (var routed in new[] { AttentionRoute.Raising("manager", raise, "s1"), AttentionRoute.Closing("manager", close) })
+            Assert.Equal(Json(routed), Json(RoundTrip(routed)));
+        Assert.All(new[] { AttentionRaise.Delivery, AttentionClose.Delivery, AttentionRoute.Delivery }, delivery => Assert.Equal(DeliveryClass.Advisory, delivery));
+
+        Assert.Equal(["kind"], Malformed<AttentionRaise>(Without(raise.ToJson(), "kind")));
+        // An order's raise names its run, which a refusal counts as failed.
+        Assert.Equal(["orderRun"], Malformed<AttentionRaise>(Without(raise.ToJson(), "orderRun")));
+        var mistyped = raise.ToJson(); mistyped["refs"] = new JsonArray("T-2", 7); mistyped["priority"] = true;
+        Assert.Equal(["priority", "refs"], Malformed<AttentionRaise>(mistyped));
+        // A task's numeric priority, as sources sent it before they gave its level, reads as that level.
+        var numeric = raise.ToJson(); numeric["priority"] = 3;
+        Assert.Equal(AttentionWeights.High, RoundTrip(AttentionRaise.Decode(numeric).Message!).Item.Priority);
+        // A route names its item's fields under item, and carries only a raise or a close.
+        var route = AttentionRoute.Raising("manager", raise, "").ToJson(); route["item"]!.AsObject().Remove("kind");
+        Assert.Equal(["item.kind"], Malformed<AttentionRoute>(route));
+        var unknown = AttentionRoute.Closing("manager", close).ToJson(); unknown["operation"] = Operations.Deliver;
+        Assert.Equal(["operation"], Malformed<AttentionRoute>(unknown));
+    }
+
+    [Fact]
+    public void The_hubs_direct_session_requests_read_back_and_name_their_missing_fields()
+    {
+        static T Back<T>(T request) where T : class, IInternalRequest<T>
+        {
+            Assert.True(T.Decode(request.ToJson()).TryGet(out var decoded, out var fields), string.Join(", ", fields));
+            Assert.Equal(request.ToJson().ToJsonString(), decoded.ToJson().ToJsonString());
+            return decoded;
+        }
+        static IReadOnlyList<string> Missing<T>(JsonObject payload) where T : class, IInternalRequest<T>
+        {
+            Assert.False(T.Decode(payload).TryGet(out _, out var fields));
+            return fields;
+        }
+        var verify = Back(new SessionVerify("repo", "s1", "T0KEN", "hub-1"));
+        var standing = Back(new StandingSeen("repo", "s1", "T0KEN", "ops", 4));
+        var offer = Back(new AttentionOffer("repo", "s1", "T0KEN") { FocusTaskId = "T-1", FocusBoardId = "ops", SnoozeBoundaries = 2, PageMessageIds = ["m1"] });
+        var seen = Back(new AttentionSeen("repo", "s1", "T0KEN", ["m1", "m2"]));
+        Back(new AttentionSuggestion("repo", "s1", new AttentionContent { Kind = AttentionKinds.Tip, Subject = "rule", Priority = AttentionWeights.Low, Note = "n", Revision = 1, ExpiryDays = 1 }));
+        var claimed = Back(new AttentionClaimed("repo", "s1", "ops", "T-1", 9));
+        Assert.Equal(["sessionToken"], Missing<SessionVerify>(Without(verify.ToJson(), "sessionToken")));
+        Assert.Equal(["standingRevision"], Missing<StandingSeen>(Without(standing.ToJson(), "standingRevision")));
+        Assert.Equal(["sessionId"], Missing<AttentionOffer>(Without(offer.ToJson(), "sessionId")));
+        Assert.Equal(["messageIds"], Missing<AttentionSeen>(Without(seen.ToJson(), "messageIds")));
+        Assert.Equal(["revision"], Missing<AttentionClaimed>(Without(claimed.ToJson(), "revision")));
+        Assert.Equal(["kind"], Missing<AttentionSuggestion>(new JsonObject { ["repositoryId"] = "repo", ["sessionId"] = "s1" }));
+    }
+
+    [Fact]
+    public void The_session_answers_a_malformed_delivery_attention_item_or_request_with_its_field_names()
+    {
+        var session = new StateEnvelope<CoordinationDocument>();
+        RelayReply Apply(string operation, JsonObject args) => CoordinationStateMachine.Apply(session, AggregateKinds.Session, "s1", Hub, operation, args, Now);
+        static IEnumerable<string> Fields(RelayReply reply)
+        {
+            Assert.Equal(RelayErrorCodes.MalformedEffect, reply.Code);
+            return JsonNode.Parse(reply.DataJson)!["fields"]!.AsArray().Select(field => field!.GetValue<string>());
+        }
+        Assert.True(Apply(Operations.Open, new SessionOpen(Opened).ToJson()).Ok);
+        Assert.Equal(["messageId"], Fields(Apply(Operations.Deliver, new JsonObject { ["repositoryId"] = "repo", ["text"] = "hi" })));
+        Assert.Equal(["kind"], Fields(Apply(Operations.AttentionRaise, new JsonObject { ["repositoryId"] = "repo", ["taskId"] = "T-1" })));
+        Assert.Equal(["kinds"], Fields(Apply(Operations.AttentionClose, new JsonObject { ["repositoryId"] = "repo", ["taskId"] = "T-1", ["kinds"] = "blocked" })));
+        Assert.Equal(["boardKey"], Fields(Apply(Operations.SessionTargetWatch, Without(new SessionTargetWatch("repo", "s1", "repo/ops", "ops").ToJson(), "boardKey"))));
+        // A request that presents the session's handle is authenticated first, then read.
+        Assert.Equal(["standingRevision"], Fields(Apply(Operations.StandingSeen, Without(new StandingSeen("repo", "s1", "T0KEN", "ops", 1).ToJson(), "standingRevision"))));
+        Assert.Equal(RelayErrorCodes.SessionDenied, Apply(Operations.StandingSeen, new StandingSeen("repo", "s1", "wrong", "ops", 1).ToJson()).Code);
+        Assert.Empty(session.Effects);
+
+        // The hub's own raise is applied as a raise, and its close for a claimed task closes the claimer's next_work item for it.
+        Assert.True(Apply(Operations.AttentionSuggest, new AttentionSuggestion("repo", "s1", new AttentionContent { Kind = AttentionKinds.NextWork, TaskId = "T-1", Revision = 2 }).ToJson()).Ok);
+        var closed = Apply(Operations.AttentionClaimed, new AttentionClaimed("repo", "s1", AggregateKinds.DefaultBoard, "T-1", 3).ToJson());
+        Assert.Equal(1, JsonNode.Parse(closed.DataJson)!["closed"]!.GetValue<int>());
+    }
+
     /// <summary>
     /// Internal operations without a typed message yet. Typing one means taking it off this list (the test fails while a typed operation
     /// is still listed) and lowering <see cref="PinnedUntyped"/>; a new internal operation must be typed, since listing it here would
@@ -173,16 +277,15 @@ public sealed class EffectMessageTests
     /// </summary>
     private static readonly string[] Untyped =
     [
-        Operations.Verify, Operations.Deliver, Operations.Resolve, Operations.ResolveAll, Operations.Dispatch,
-        Operations.TaskUnclaim, Operations.NextWork, Operations.ClaimState, Operations.Standing, Operations.StandingSeen, Operations.StandingProposeHub,
-        Operations.SessionTargetWatch, Operations.SweepSessions, Operations.TaskArchive, Operations.SessionOwners, Operations.SessionsOpen,
-        Operations.AttentionRaise, Operations.AttentionClose, Operations.AttentionOffer, Operations.AttentionSeen, Operations.AttentionRoute,
+        Operations.Resolve, Operations.ResolveAll, Operations.Dispatch,
+        Operations.TaskUnclaim, Operations.NextWork, Operations.ClaimState, Operations.Standing, Operations.StandingProposeHub,
+        Operations.SweepSessions, Operations.TaskArchive, Operations.SessionOwners, Operations.SessionsOpen,
         Operations.LeaseCheck, Operations.Orders, Operations.OrderFire, Operations.OrderWatch,
         Operations.OrderRelease, Operations.OrderFailed
     ];
 
     /// <summary>The number of untyped internal operations. It may only go down.</summary>
-    private const int PinnedUntyped = 27;
+    private const int PinnedUntyped = 18;
 
     [Fact]
     public void Lock_messages_read_back_name_their_missing_fields_and_the_lock_answers_a_malformed_one()
@@ -209,14 +312,14 @@ public sealed class EffectMessageTests
         var session = new StateEnvelope<CoordinationDocument>();
         var directory = new RelayCaller("relay-directory", false, ["repo"], true);
         Assert.True(CoordinationStateMachine.Apply(session, "session", "s1", directory, Operations.SessionExpire, new SessionExpire("repo", "s1", 1).ToJson(), Now).Ok);
-        var watch = CoordinationStateMachine.Apply(session, "session", "s1", Hub, Operations.SessionTargetWatch, new() { ["repositoryId"] = "repo", ["boardKey"] = "repo/ops", ["boardId"] = "ops" }, Now);
+        var watch = CoordinationStateMachine.Apply(session, "session", "s1", Hub, Operations.SessionTargetWatch, new SessionTargetWatch("repo", "s1", "repo/ops", "ops").ToJson(), Now);
         Assert.True(JsonNode.Parse(watch.DataJson)!["closed"]!.GetValue<bool>());
         var told = Assert.Single(session.Effects, effect => effect.Operation == SessionClosed.Operation);
         Assert.Equal(("repo/ops", new SessionClosed("repo", "ops", "s1")), (told.TargetKey, RoundTrip(SessionClosed.Decode(JsonNode.Parse(told.PayloadJson)!.AsObject()).Message!)));
 
         // A session never opened or closed here is still left alone.
         var unknown = new StateEnvelope<CoordinationDocument>();
-        var ignored = CoordinationStateMachine.Apply(unknown, "session", "s2", Hub, Operations.SessionTargetWatch, new() { ["repositoryId"] = "repo", ["boardKey"] = "repo/ops", ["boardId"] = "ops" }, Now);
+        var ignored = CoordinationStateMachine.Apply(unknown, "session", "s2", Hub, Operations.SessionTargetWatch, new SessionTargetWatch("repo", "s2", "repo/ops", "ops").ToJson(), Now);
         Assert.False(JsonNode.Parse(ignored.DataJson)!["watching"]!.GetValue<bool>());
         Assert.Empty(unknown.Effects);
     }

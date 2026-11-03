@@ -5,6 +5,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Orleans;
 using CoCern.Contracts;
 using CoCern.Domain;
+using CoCern.Domain.Messages;
 using static CoCern.Contracts.RelayErrorCodes;
 using static CoCern.Domain.JsonFields;
 using static CoCern.Domain.Replies;
@@ -126,11 +127,10 @@ public sealed class RelayApplication : IRelayApplication
     private async Task Deliver(RelayCaller trusted, FeedbackActions actions)
     {
         if (actions.Tip is { } tip && attentionOptions.Enabled)
-            await aggregates.Session(trusted, Operations.AttentionRaise, new JsonObject
+            await aggregates.Session(trusted, AttentionSuggestion.Operation, new AttentionSuggestion(tip.RepositoryId, tip.SessionId, new AttentionContent
             {
-                ["repositoryId"] = tip.RepositoryId, ["sessionId"] = tip.SessionId, ["kind"] = AttentionKinds.Tip, ["subject"] = tip.Rule,
-                ["priority"] = AttentionWeights.Low, ["note"] = tip.Text, ["revision"] = tip.Revision, ["expiryDays"] = RelayLimits.TipExpiryDays
-            });
+                Kind = AttentionKinds.Tip, Subject = tip.Rule, Priority = AttentionWeights.Low, Note = tip.Text, Revision = tip.Revision, ExpiryDays = RelayLimits.TipExpiryDays
+            }).ToJson());
         if (actions.Proposal is { } proposal)
             await aggregates.Call(AggregateKinds.Board, AggregateKinds.BoardKey(proposal.RepositoryId, AggregateKinds.DefaultBoard), HubProposer(proposal.RepositoryId), Operations.StandingProposeHub, new JsonObject
             {

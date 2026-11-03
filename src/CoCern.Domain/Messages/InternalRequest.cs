@@ -35,6 +35,7 @@ public static class InternalRequests
 
     public static IReadOnlyDictionary<string, Kind> ByOperation { get; } = new[]
     {
-        Of<AnomalyStart>(), Of<AnomalySchedule>(), Of<AnomalyCheck>()
+        Of<AnomalyStart>(), Of<AnomalySchedule>(), Of<AnomalyCheck>(), Of<SessionVerify>(), Of<StandingSeen>(), Of<AttentionOffer>(), Of<AttentionSeen>(),
+        Of<AttentionSuggestion>(), Of<AttentionClaimed>()
     }.ToFrozenDictionary(kind => kind.Operation, StringComparer.Ordinal);
 }

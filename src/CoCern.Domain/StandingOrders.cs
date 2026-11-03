@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json.Nodes;
 using CoCern.Contracts;
+using CoCern.Domain.Messages;
 using static CoCern.Contracts.RelayErrorCodes;
 using static CoCern.Domain.JsonFields;
 using static CoCern.Domain.Replies;
@@ -262,39 +263,28 @@ internal static class StandingOrders
                 // offers only work the session could claim now.
                 if (TaskWorkflow.OfferProblem(context.State, tasks, task, Text(action, "sessionId"), context.Now) is { } problem) return "task " + taskId + " " + problem;
                 var workflow = task["workflow"]!.AsObject();
-                var item = new JsonObject
+                var item = new AttentionContent
                 {
-                    ["kind"] = AttentionKinds.NextWork, ["taskId"] = taskId, ["subject"] = id, ["priority"] = Number(workflow, "priority"),
-                    ["note"] = "order " + id + ": " + on + " " + target + "; claim it with task_claim", ["revision"] = revision
+                    Kind = AttentionKinds.NextWork, TaskId = taskId, Subject = id, Priority = AttentionWeights.PriorityLevel(Number(workflow, "priority")),
+                    Note = "order " + id + ": " + on + " " + target + "; claim it with task_claim", Revision = revision, Refs = triggerTask.Length > 0 ? [triggerTask] : null
                 };
-                if (triggerTask.Length > 0) item["refs"] = new JsonArray(triggerTask);
-                AttentionSources.Emit(context, Text(action, "sessionId"), Operations.AttentionRaise, Mark(item, id, revision));
+                AttentionSources.Emit(context, Text(action, "sessionId"), item, id, revision);
                 return null;
             }
             case OrderActions.Notify:
             {
-                var item = new JsonObject
+                var item = new AttentionContent
                 {
-                    ["kind"] = AttentionKinds.Info, ["subject"] = id, ["note"] = Text(action, "note", "order " + id + ": " + on + " " + target), ["revision"] = revision
+                    Kind = AttentionKinds.Info, Subject = id, Note = Text(action, "note", "order " + id + ": " + on + " " + target), Revision = revision,
+                    TaskId = triggerTask.Length > 0 ? triggerTask : null
                 };
-                if (triggerTask.Length > 0) item["taskId"] = triggerTask;
-                AttentionSources.Emit(context, Text(action, "sessionId"), Operations.AttentionRaise, Mark(item, id, revision));
+                // The raise names its order and run; if the session refuses it, the dispatcher reports a failed run.
+                AttentionSources.Emit(context, Text(action, "sessionId"), item, id, revision);
                 return null;
             }
             default: return "unknown action";
         }
     }
-
-    /// <summary>Names the order and run an order's raise belongs to; if the session refuses it, the dispatcher reports a failed run.</summary>
-    private static JsonObject Mark(JsonObject item, string orderId, long run)
-    {
-        item[OrderIdField] = orderId;
-        item[OrderRunField] = run;
-        return item;
-    }
-
-    private const string OrderIdField = Operations.OrderIdField;
-    private const string OrderRunField = Operations.OrderRunField;
 
     /// <summary>Counts one failed run, logs it, raises <c>order_failed</c> to the managers, and disables the order at the failure limit.</summary>
     private static void Fail(AggregateContext context, JsonObject orders, JsonObject order, string reason)
@@ -308,17 +298,17 @@ internal static class StandingOrders
         var disabled = failures >= RelayLimits.MaxOrderFailures;
         if (disabled) order["disabled"] = true;
         Log(orders, context, id, (disabled ? "failed and disabled: " : "failed: ") + reason);
-        var item = new JsonObject
+        var item = new AttentionContent
         {
-            ["kind"] = AttentionKinds.OrderFailed, ["subject"] = id,
-            ["note"] = "order " + id + (disabled ? " disabled after " + failures + " failures: " : " failed: ") + reason, ["revision"] = NextRevision(orders)
+            Kind = AttentionKinds.OrderFailed, Subject = id,
+            Note = "order " + id + (disabled ? " disabled after " + failures + " failures: " : " failed: ") + reason, Revision = NextRevision(orders)
         };
-        if (order["trigger"] is JsonObject trigger && Text(trigger, "taskId") is { Length: > 0 } taskId) item["taskId"] = taskId;
-        AttentionSources.ToManagers(context, Operations.AttentionRaise, item);
+        if (order["trigger"] is JsonObject trigger && Text(trigger, "taskId") is { Length: > 0 } taskId) item = item with { TaskId = taskId };
+        AttentionSources.ToManagers(context, item);
     }
 
     private static void CloseFailure(AggregateContext context, string id, long revision) =>
-        AttentionSources.ToManagers(context, Operations.AttentionClose, new JsonObject { ["subject"] = id, ["kinds"] = new JsonArray(AttentionKinds.OrderFailed), ["revision"] = revision });
+        AttentionSources.ToManagers(context, new AttentionSelection { Subject = id, Kinds = [AttentionKinds.OrderFailed], Revision = revision });
 
     /// <summary>Asks each lock a <c>claim_released</c> order newly names (or the written order names) to tell this board, and the ones no order names any more to stop.</summary>
     private static void UpdateWatches(AggregateContext context, HashSet<string> before, HashSet<string> after, string? written, string orderId)

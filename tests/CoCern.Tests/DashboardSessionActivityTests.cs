@@ -31,7 +31,7 @@ public sealed class DashboardSessionActivityTests
         }, opened.AddHours(1)).Ok);
         Assert.True(CoordinationStateMachine.Apply(state, AggregateKinds.Session, "session", caller, Operations.Verify, new JsonObject
         {
-            ["repositoryId"] = "repo", ["sessionToken"] = "secret"
+            ["repositoryId"] = "repo", ["sessionId"] = "session", ["sessionToken"] = "secret"
         }, opened.AddHours(2)).Ok);
         Assert.True(CoordinationStateMachine.Apply(state, AggregateKinds.Session, "session", caller, Operations.Open, initialize, opened.AddHours(3)).Ok);
         AssertOpened();

@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Text.Json.Nodes;
 using CoCern.Contracts;
 using CoCern.Domain;
+using CoCern.Domain.Messages;
 using static CoCern.Domain.JsonFields;
 using static CoCern.Domain.Replies;
 
@@ -72,11 +73,8 @@ internal sealed class StandingDelivery(Aggregates aggregates)
         return false;
     }
 
-    private Task<RelayReply> MarkStandingSeenAsync(RelayCaller caller, JsonObject args, long revision) => aggregates.Session(caller, Operations.StandingSeen, new JsonObject
-    {
-        ["repositoryId"] = Text(args, "repositoryId"), ["sessionId"] = Text(args, "sessionId"), ["sessionToken"] = Text(args, "sessionToken"),
-        ["boardId"] = Text(args, "boardId", "default"), ["standingRevision"] = revision
-    });
+    private Task<RelayReply> MarkStandingSeenAsync(RelayCaller caller, JsonObject args, long revision) => aggregates.Session(caller, StandingSeen.Operation,
+        new StandingSeen(Text(args, "repositoryId"), Text(args, "sessionId"), Text(args, "sessionToken"), Text(args, "boardId", "default"), revision).ToJson());
 
     /// <summary>The board's delivered standing, read at most once per <see cref="RelayLimits.StandingCacheSeconds"/>; a write through this hub clears it at once.</summary>
     private async Task<JsonObject?> ReadAsync(RelayCaller caller, JsonObject args)

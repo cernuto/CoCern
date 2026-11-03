@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 using CoCern.Contracts;
+using CoCern.Domain.Messages;
 using static CoCern.Domain.JsonFields;
 
 namespace CoCern.Domain;
@@ -92,14 +93,14 @@ internal static class TaskArchiving
     /// </summary>
     private static void CloseAttention(AggregateContext context, List<JsonObject> archived, long revision)
     {
-        JsonObject Close(IEnumerable<string> ids) => new() { ["taskIds"] = new JsonArray(ids.Select(id => (JsonNode)id).ToArray()), ["revision"] = revision };
+        AttentionSelection Close(IEnumerable<string> ids) => new() { TaskIds = ids.ToArray(), Revision = revision };
         var ids = archived.Select(task => Text(task, "taskId")).ToList();
-        foreach (var batch in ids.Chunk(CloseBatch)) AttentionSources.ToManagers(context, Operations.AttentionClose, Close(batch));
+        foreach (var batch in ids.Chunk(CloseBatch)) AttentionSources.ToManagers(context, Close(batch));
         var bySession = archived
             .SelectMany(task => new[] { Text(task, "owner"), task["workflow"] is JsonObject workflow ? Text(workflow, "targetSessionId") : "" }.Where(session => session.Length > 0).Distinct(StringComparer.Ordinal).Select(session => (Session: session, Id: Text(task, "taskId"))))
             .GroupBy(entry => entry.Session, StringComparer.Ordinal).Take(MaxClosedSessions);
         foreach (var group in bySession)
-            foreach (var batch in group.Select(entry => entry.Id).Chunk(CloseBatch)) AttentionSources.Emit(context, group.Key, Operations.AttentionClose, Close(batch));
+            foreach (var batch in group.Select(entry => entry.Id).Chunk(CloseBatch)) AttentionSources.Emit(context, group.Key, Close(batch));
     }
 
     /// <summary>The IDs live tasks' <c>dependsOn</c> name: archived ones among them are always remembered.</summary>

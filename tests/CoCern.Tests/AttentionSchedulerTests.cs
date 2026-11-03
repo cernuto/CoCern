@@ -21,7 +21,7 @@ public sealed class AttentionSchedulerTests
     private static RelayReply Call(StateEnvelope<CoordinationDocument> session, string operation, JsonObject args, DateTimeOffset? at = null)
     {
         args["repositoryId"] = "repo";
-        if (operation is not ("__open" or "__attention_raise" or "__attention_close")) args["sessionToken"] = "secret";
+        if (operation is not ("__open" or "__attention_raise" or "__attention_close")) { args["sessionId"] ??= "s1"; args["sessionToken"] = "secret"; }
         return CoordinationStateMachine.Apply(session, "session", "s1", Hub, operation, args, at ?? Now);
     }
 

@@ -406,21 +406,18 @@ internal static class ControlAggregate
     /// </summary>
     private static RelayReply RouteAttention(AggregateContext context)
     {
-        var args = context.Args;
-        var operation = Text(args, "operation");
-        if (operation is not (Operations.AttentionRaise or Operations.AttentionClose) || args["item"] is not JsonObject item) return Error(InvalidArguments, new { field = "item" });
-        var role = Required(args, "role");
-        var except = Text(args, "exceptSessionId");
+        if (!AttentionRoute.Decode(context.Args).TryGet(out var route, out var malformed)) return Malformed(malformed);
+        var role = route.Role;
         // A raise goes to recently active managers only; a close reaches every manager, or an idle one would keep a stale item until it expires.
-        var closing = operation == Operations.AttentionClose;
+        var closing = route.Close is not null;
         var targets = ObjectAt(context.State, "sessions").Select(x => x.Value).OfType<JsonObject>()
-            .Where(session => Text(session, "repositoryId") == context.Repository && string.Equals(Text(session, "role"), role, StringComparison.OrdinalIgnoreCase) && Text(session, "sessionId") != except
+            .Where(session => Text(session, "repositoryId") == context.Repository && string.Equals(Text(session, "role"), role, StringComparison.OrdinalIgnoreCase) && Text(session, "sessionId") != route.ExceptSessionId
                 && (closing || Max(Date(session, "freshUntil"), Date(session, "activeAt")) > context.Now.AddHours(-RelayLimits.MaxAttentionRouteIdleHours)))
             .OrderByDescending(session => Date(session, "observedAt")).Take(closing ? RelayLimits.MaxRecords : RelayLimits.MaxAttentionRouteTargets).Select(session => Text(session, "sessionId")).ToArray();
         foreach (var target in targets)
         {
-            var copy = item.DeepClone().AsObject(); copy["repositoryId"] = context.Repository;
-            context.Emit(AggregateKinds.Session, target, operation, copy);
+            if (route.Raise is { } raise) context.Send(target, raise with { RepositoryId = context.Repository });
+            else context.Send(target, route.Close! with { RepositoryId = context.Repository });
         }
         return Ok(new { routed = targets.Length });
     }
