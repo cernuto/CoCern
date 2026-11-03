@@ -78,7 +78,7 @@ Every call takes `repositoryId`. Session calls also take `sessionId` and `sessio
 - Wait with `check_inbox` and `waitSeconds` (up to 50) instead of polling. Mail, urgent attention, or an eligible idle reminder ends the wait; the returning attention read offers one item. Internal polls consume no offers, and `attention: false` opts out of attention wakes.
 - Pass the `etag` from `task_get`, `get_status`, `worker_list`, `context_get` or `chat_directory` back as `ifNoneMatch`. An unchanged read returns only `{"unchanged":true,"etag":...}`.
 - Acknowledge in your reply: `send_message` with `ackMessageIds`.
-- `supersede: true` replaces your previous status message; `wake: false` sends a note nobody must act on now.
+- `supersede: true` replaces your previous status message; `wake: false` sends a note nobody must act on now and never causes a wake, even after the idle hold.
 - Renew claims rarely: `claim_renew` takes `leaseSeconds` up to 1800.
 - Send your session handle on `task_get` too, so [tips](#feedback) can point out rereads.
 
@@ -151,7 +151,7 @@ A `check_inbox`, `task_update`, `action_report` or `task_claim` reply can carry 
 
 Answer with `attention_respond`: `accept` or `dismiss` closes it; `later` hides it for 3 replies (or until `until`). Ignoring it counts as `later`. Pass `"attention": false` on a call to skip offers.
 
-Only `blocked` (except by a `coordinator_hold`), `failed`, `interrupted` and `stranded` wake a chat at once. Everything else, messages included, waits for the next reply. A chat with no reply for 10 minutes gets one wake.
+Direct messages from another session wake a chat at once unless sent with `wake: false`. The message's existing attention item ID makes repeated watcher reads one wake; the adapter's busy-chat checks and rate limits still apply. Urgent attention (`blocked`, except by a `coordinator_hold`, `failed`, `interrupted` and `stranded`) also wakes at once. Task-change notices and other nonurgent items wait for the next reply or for an idle hold of 10 minutes. Tips never cause a wake.
 
 **Manager items.** `role: "manager"` on `session_open` routes manager items (blocked, failed, review ready, anomalies) to that session. The role is self-declared.
 
@@ -223,7 +223,7 @@ Every tool call goes to the `activity_log` table: time, session, role, tool, res
 | Counter | Definition |
 | --- | --- |
 | Tokens | Reported `inputTokens` plus `outputTokens` on successful calls; a retry counts once. |
-| Wakes | With attention on: new urgent items and idle wakes. Off: new messages without `wake: false`. |
+| Wakes | Recorded urgent-item and idle-hold signals with attention on; new messages without `wake: false` with it off. Immediate direct-message candidates are not yet counted. These hub signals do not prove native chat dispatch. |
 | Inbox reads | Bursts of first-page `check_inbox` calls by one session (60 seconds apart end a burst). |
 | Offers made | `task_update` replies with `includeNextWork` that offered a task. |
 | Offers that ended blocked | Offers whose next `task_claim` failed, or whose task became `blocked` first. |
@@ -381,7 +381,7 @@ All on by default except the two for other PCs.
 | `Relay:Orders:DefaultExpiryDays` | 7 | Order lifetime without `expiresAt`. |
 | `Relay:Attention:Enabled` | `true` | `false`: no offers, and every message wakes its chat. |
 | `Relay:Attention:SnoozeBoundaries` | 3 | Replies a `later` item stays hidden (1 to 50). |
-| `Relay:Attention:MaxHoldMinutes` | 10 | Minutes before an idle chat gets one wake (1 to 1440). |
+| `Relay:Attention:MaxHoldMinutes` | 10 | Minutes before other nonurgent items wake an idle chat once (1 to 1440). Direct messages bypass the hold; tips and `wake: false` messages never cause a wake. |
 | `Relay:Attention:ItemExpiryDays` | 7 | Days before an unclosed item goes away (1 to 90). |
 | `Relay:Attention:AnomalyInterval` | `01:00:00` | Time between anomaly checks. `0`: off. |
 | `Relay:Analytics:Enabled` | `true` | Snapshots and queries. |

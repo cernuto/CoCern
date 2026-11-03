@@ -50,8 +50,8 @@ internal static class SessionAttention
     }
 
     /// <summary>
-    /// A wakeable inbox message is an <c>info</c> item (subject = the message ID), so like any lower-tier item it waits for a boundary
-    /// reply or the idle-hold wake. Its text stays in the inbox; the offer only points to it.
+    /// A wakeable inbox message is an <c>info</c> item (subject = the message ID). Direct messages from another session may wake it at
+    /// once; other notices wait for a boundary reply or the idle hold. Its text stays in the inbox; the offer only points to it.
     /// </summary>
     public static void AddMessage(SessionState state, InboxMessage message, int expiryDays, DateTimeOffset now) => Add(state, new AttentionContent
     {
@@ -219,7 +219,8 @@ internal static class SessionAttention
     /// <summary>
     /// Read-only, for <c>get_status</c>: the count of actionable items (never snoozed or expired ones). With <paramref name="detail"/>
     /// it also gives the top item (ID, kind, task), the count of top-tier items, and <c>wake</c>: the item that may wake the chat now.
-    /// That is the newest top-tier item's ID, or else, when an item has waited <c>maxHoldMinutes</c> since the chat's last boundary,
+    /// That is the newest top-tier item's ID, an unread direct message's item ID, or else, when a non-tip item has waited
+    /// <c>maxHoldMinutes</c> since the chat's last boundary,
     /// <c>hold:&lt;ticks of that boundary&gt;</c>: one ID per idle period, so however many items wait, an idle chat gets one wake until
     /// its next boundary. The adapter wakes at most once per ID.
     /// </summary>
@@ -242,8 +243,16 @@ internal static class SessionAttention
         var hold = TimeSpan.FromMinutes(Math.Clamp(Number(args, "maxHoldMinutes", RelayLimits.DefaultAttentionMaxHoldMinutes), 1, RelayLimits.MaxAttentionMaxHoldMinutes));
         var boundary = queue.BoundaryAt;
         DateTimeOffset Waiting(AttentionItem item) => boundary is { } at && at > item.CreatedAt ? at : item.CreatedAt;
+        // Keep the existing info-item identity for deduplication, and match the inbox's structured sender/kind rather than its text.
+        // Seen or acknowledged messages have no eligible info item, and wake:false deliveries never create one.
+        var directMessages = state.Unread.Where(stored => InboxMessage.Decode(stored).TryGet(out var message, out _)
+                && message.Wake && message.Kind is null && string.IsNullOrEmpty(message.TaskId) && !string.IsNullOrWhiteSpace(message.SenderSessionId))
+            .Select(stored => Text(stored, InboxMessage.MessageIdKey)).ToHashSet(StringComparer.Ordinal);
+        var direct = eligible.Where(item => item.Kind == AttentionKinds.Info && directMessages.Contains(item.Subject))
+            .OrderBy(item => item.CreatedAt).ThenBy(item => item.Id, StringComparer.Ordinal).FirstOrDefault()?.Id;
         var wake = urgent.OrderByDescending(item => item.CreatedAt).ThenByDescending(item => item.Id, StringComparer.Ordinal).FirstOrDefault()?.Id
-            ?? (eligible.Any(item => now - Waiting(item) >= hold) ? AttentionWeights.HoldWakePrefix + (boundary?.UtcTicks ?? 0).ToString(CultureInfo.InvariantCulture) : null);
+            ?? direct
+            ?? (eligible.Any(item => item.Kind != AttentionKinds.Tip && now - Waiting(item) >= hold) ? AttentionWeights.HoldWakePrefix + (boundary?.UtcTicks ?? 0).ToString(CultureInfo.InvariantCulture) : null);
         if (wake is not null) status["wake"] = wake;
         return status;
     }

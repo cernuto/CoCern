@@ -49,6 +49,82 @@ public sealed class AttentionSchedulerTests
         return Call(session, "attention_respond", args, at);
     }
 
+    private static string? StatusWake(StateEnvelope<CoordinationDocument> session, DateTimeOffset? at = null) =>
+        Data(Call(session, "get_status", new() { ["attentionStatus"] = "detail", ["maxHoldMinutes"] = 10 }, at))["attention"]?["wake"]?.GetValue<string>();
+
+    [Fact]
+    public void A_direct_sender_message_wakes_immediately_with_a_stable_item_id()
+    {
+        var session = OpenSession();
+        Data(Call(session, "__deliver", new() { ["messageId"] = "m-direct", ["senderSessionId"] = "s2", ["text"] = "please review", ["attentionExpiryDays"] = 7 }));
+
+        Assert.Equal("a-1", StatusWake(session));
+        Assert.Equal("a-1", StatusWake(session, Now.AddMinutes(5)));
+        Data(Call(session, "ack", new() { ["requestId"] = "ack-direct", ["messageId"] = "m-direct" }));
+        Assert.Null(StatusWake(session, Now.AddMinutes(11)));
+    }
+
+    [Fact]
+    public void A_seen_direct_message_stops_waking_without_acknowledging_it()
+    {
+        var session = OpenSession();
+        Data(Call(session, "__deliver", new() { ["messageId"] = "m-seen", ["senderSessionId"] = "s2", ["text"] = "please review", ["attentionExpiryDays"] = 7 }));
+        Assert.Equal("a-1", StatusWake(session));
+
+        var seen = new CoCern.Domain.Messages.AttentionSeen("repo", "s1", "secret", ["m-seen"]);
+        Data(Call(session, CoCern.Domain.Messages.AttentionSeen.Operation, seen.ToJson()));
+        Assert.Null(StatusWake(session, Now.AddMinutes(11)));
+        Assert.Single(Data(Call(session, "check_inbox", new()))["items"]!.AsArray());
+    }
+
+    [Fact]
+    public void A_wake_false_message_never_wakes_even_after_the_hold()
+    {
+        var session = OpenSession();
+        Data(Call(session, "__deliver", new() { ["messageId"] = "m-fyi", ["senderSessionId"] = "s2", ["text"] = "for later", ["wake"] = false, ["attentionExpiryDays"] = 7 }));
+
+        Assert.Null(StatusWake(session));
+        Assert.Null(StatusWake(session, Now.AddHours(1)));
+        Assert.Single(Data(Call(session, "check_inbox", new()))["items"]!.AsArray());
+    }
+
+    [Fact]
+    public void A_tip_never_wakes_even_after_the_hold()
+    {
+        var session = OpenSession();
+        Raise(session, AttentionKinds.Tip, "", extra: new() { ["subject"] = "long_messages" });
+
+        Assert.Null(StatusWake(session));
+        Assert.Null(StatusWake(session, Now.AddHours(1)));
+    }
+
+    [Theory]
+    [InlineData("task.changed", "T-1", "s2")]
+    [InlineData(null, "T-1", "s2")]
+    [InlineData("delivery.failed", null, "s2")]
+    [InlineData(null, null, null)]
+    public void Task_notices_failure_notices_and_anonymous_messages_keep_the_hold(string? kind, string? taskId, string? sender)
+    {
+        var session = OpenSession();
+        Data(Call(session, "__deliver", new() { ["messageId"] = "m-notice", ["kind"] = kind, ["taskId"] = taskId, ["senderSessionId"] = sender, ["text"] = "notice", ["attentionExpiryDays"] = 7 }));
+
+        Assert.Null(StatusWake(session, Now.AddMinutes(9)));
+        Assert.Equal("hold:0", StatusWake(session, Now.AddMinutes(10)));
+    }
+
+    [Fact]
+    public void General_info_keeps_the_hold_and_urgent_items_still_take_precedence()
+    {
+        var session = OpenSession();
+        Raise(session, AttentionKinds.Info, "T-1");
+        Assert.Null(StatusWake(session, Now.AddMinutes(9)));
+        Assert.Equal("hold:0", StatusWake(session, Now.AddMinutes(10)));
+
+        Data(Call(session, "__deliver", new() { ["messageId"] = "m-direct", ["senderSessionId"] = "s2", ["text"] = "please review", ["attentionExpiryDays"] = 7 }));
+        var urgent = Raise(session, AttentionKinds.Failed, "T-2");
+        Assert.Equal(urgent, StatusWake(session));
+    }
+
     private static JsonObject Items(StateEnvelope<CoordinationDocument> session) => JsonNode.Parse(session.Value.Json)!["attention"]?.AsObject() ?? new();
 
     private static AttentionItem Item(string id, string kind, DateTimeOffset createdAt, string priority = "normal", string taskId = "T", string? blocker = null, bool blocking = false,

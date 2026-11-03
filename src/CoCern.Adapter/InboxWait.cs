@@ -13,7 +13,7 @@ public static class InboxWait
 {
     /// <summary>Kept under Codex's default 60-second MCP tool timeout, so a full wait never turns into a failed call.</summary>
     public const int MaxSeconds = 50;
-    public static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(2);
+    public static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(4);
     private static readonly TimeSpan MinimumDelay = TimeSpan.FromMilliseconds(20);
     /// <summary>How far past the wait one poll may run: <see cref="MaxSeconds"/> plus this stays under Codex's 60 seconds.</summary>
     internal static readonly TimeSpan PollMargin = TimeSpan.FromSeconds(5);
