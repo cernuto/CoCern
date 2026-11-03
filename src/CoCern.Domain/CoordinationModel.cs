@@ -204,17 +204,19 @@ public static class Operations
     public const string Block = "__block";
     public const string Unblock = "__unblock";
     public const string Dispatch = "__dispatch";
+    /// <summary>The hub rolls back a task claim whose resources could not all be acquired (<see cref="Messages.TaskUnclaim"/>).</summary>
     public const string TaskUnclaim = "__task_unclaim";
+    /// <summary>Read-only: the next task a session could claim, as a next-work offer (<see cref="Messages.NextWorkRead"/>).</summary>
     public const string NextWork = "__next_work";
     /// <summary>Read-only: whether another session holds a resource now, so a next-work offer can prefer tasks whose resources are free.</summary>
     public const string ClaimState = "__claim_state";
-    /// <summary>Read-only: a board's standing lines, active grants and settings in the compact form sent to chats.</summary>
+    /// <summary>Read-only: a board's standing lines, active grants and settings in the compact form sent to chats (<see cref="Messages.StandingRead"/>).</summary>
     public const string Standing = "__standing";
     /// <summary>Records the standing revision a session received for a board, so later replies carry standing only when it changed.</summary>
     public const string StandingSeen = "__standing_seen";
     /// <summary>
     /// The hub's own standing proposal for a feedback rule that fires across many sessions. Internal only, so no client can propose as the
-    /// hub; it is outside the per-session proposal cap.
+    /// hub; it is outside the per-session proposal cap (<see cref="Messages.HubStandingProposal"/>).
     /// </summary>
     public const string StandingProposeHub = "__standing_propose_hub";
     /// <summary>
@@ -270,7 +272,7 @@ public static class Operations
 
     /// <summary>Server-set on a rolled-back claim's re-acquire of a grant it already held: the claim that grant served before.</summary>
     public const string RestoreClaimForField = "restoreClaimFor";
-    /// <summary>A board's due sweep: moves tasks finished longer than <c>Relay:Board:ArchiveAfterDays</c> to the archive.</summary>
+    /// <summary>A board's due sweep: moves tasks finished longer than <c>Relay:Board:ArchiveAfterDays</c> to the archive (<see cref="Messages.TaskArchiveSweep"/>).</summary>
     public const string TaskArchive = "__task_archive";
     /// <summary>Read-only: which of the given sessions in the repository the caller's principal opened.</summary>
     public const string SessionOwners = "__session_owners";
@@ -301,16 +303,21 @@ public static class Operations
     /// <summary>The findings the hub read from the analytics snapshot for one check (<see cref="Messages.AnomalyCheck"/>).</summary>
     public const string AnomalyCheck = "__anomaly_check";
 
-    /// <summary>Read-only: a board's standing orders in the compact form <c>get_status</c> lists.</summary>
+    /// <summary>Read-only: a board's standing orders in the compact form <c>get_status</c> lists (<see cref="Messages.OrdersRead"/>).</summary>
     public const string Orders = "__orders";
-    /// <summary>Sent by a lock to each board watching it when its claim is released: runs the board's <c>claim_released</c> order.</summary>
+    /// <summary>Sent by a lock to each board watching it when its claim is released: runs the board's <c>claim_released</c> order (<see cref="Messages.OrderFire"/>).</summary>
     public const string OrderFire = "__order_fire";
-    /// <summary>Sent by a board to a lock: starts or stops telling that board when the lock's claim is released.</summary>
+    /// <summary>Sent by a board to a lock: starts or stops telling that board when the lock's claim is released (<see cref="Messages.OrderWatch"/>).</summary>
     public const string OrderWatch = "__order_watch";
-    /// <summary>Sent by a board to a lock: an order releases the claim its task's owner holds, once per order run.</summary>
+    /// <summary>Sent by a board to a lock: an order releases the claim its task's owner holds, once per order run (<see cref="Messages.OrderRelease"/>).</summary>
     public const string OrderRelease = "__order_release";
-    /// <summary>Sent by a lock back to the board: an order's release could not run (an action is still unresolved).</summary>
+    /// <summary>
+    /// An order's run failed: sent by a lock back to the board when the order's release meets an unresolved action, and applied by the hub
+    /// when a session refused an item the order raised (<see cref="Messages.OrderFailed"/>).
+    /// </summary>
     public const string OrderFailed = "__order_failed";
+    /// <summary>Sent by a lock back to the board: it refused to watch for an order, being watched by too many boards (<see cref="Messages.OrderWatchFailed"/>).</summary>
+    public const string OrderWatchFailed = "__order_watch_failed";
 
     /// <summary>Fields of a standing order's attention raise naming its order and run; the session ignores them.</summary>
     public const string OrderIdField = "orderId";
@@ -322,7 +329,7 @@ public static class Operations
     public static bool IsRead(string operation) => operation is Verify or Resolve or ResolveAll or NextWork or ClaimState or SessionOwners or SessionsOpen or Standing or Orders;
 
     /// <summary>Order effects run only while standing orders are on; a target that refuses one is not asked again.</summary>
-    public static bool IsOrder(string operation) => operation is OrderFire or OrderWatch or OrderRelease or OrderFailed;
+    public static bool IsOrder(string operation) => operation is OrderFire or OrderWatch or OrderRelease or OrderFailed or OrderWatchFailed;
 
     /// <summary>Attention effects are advisory: a target that refuses one is not asked again.</summary>
     public static bool IsAttention(string operation) => operation is AttentionRaise or AttentionClose or AttentionRoute;

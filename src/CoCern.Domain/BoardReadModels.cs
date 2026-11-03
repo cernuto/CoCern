@@ -1,21 +1,23 @@
 using System.Text.Json;
 using CoCern.Contracts;
 using CoCern.Contracts.Dashboard;
+using CoCern.Domain.State;
 
 namespace CoCern.Domain;
 
 /// <summary>
 /// The dashboard's standing panel for a stored board: its standing preferences (<see cref="StandingPreferences"/>) and its standing
-/// orders (<see cref="StandingOrders"/>). It reads the keys those write, so storage extracts only the two sub-documents the board keeps
-/// them in and asks here, instead of knowing their layout. Every text it returns is <see cref="DashboardText.Safe"/>.
+/// orders (<see cref="StandingOrders"/>). It reads the keys those write, as the board's state declares them (<see cref="StandingState"/>,
+/// <see cref="OrdersState"/>), so storage extracts only the two sub-documents the board keeps them in and asks here, instead of knowing
+/// their layout. Every text it returns is <see cref="DashboardText.Safe"/>.
 /// </summary>
 public static class BoardReadModels
 {
     /// <summary>The board's top-level key for its standing preferences: lines, grants, settings, proposals and history.</summary>
-    public const string StandingKey = "standing";
+    public const string StandingKey = BoardState.StandingKey;
 
     /// <summary>The board's top-level key for its standing orders (<c>items</c>) and their <c>log</c>.</summary>
-    public const string OrdersKey = "orders";
+    public const string OrdersKey = BoardState.OrdersKey;
 
     private static readonly JsonDocumentOptions Options = new() { MaxDepth = 64 };
 
@@ -38,40 +40,45 @@ public static class BoardReadModels
     {
         using var document = JsonDocument.Parse(json, Options);
         var standing = document.RootElement;
-        var lines = Values(Property(standing, "lines")).Select(line => new DashboardStandingLine
+        var lines = Values(Property(standing, StandingState.LinesKey)).Select(line => new DashboardStandingLine
         {
-            Id = Text(line, "id"), Text = Text(line, "text"), Author = Text(line, "author"), ApprovedBy = Text(line, "approvedBy"), ApprovedAt = Date(line, "approvedAt")
+            Id = Text(line, StandingLine.IdKey), Text = Text(line, StandingLine.TextKey), Author = Text(line, StandingLine.AuthorKey), ApprovedBy = Text(line, StandingLine.ApprovedByKey),
+            ApprovedAt = Date(line, StandingLine.ApprovedAtKey)
         }).ToArray();
-        var grants = Values(Property(standing, "grants")).Select(grant => new DashboardStandingGrant
+        var grants = Values(Property(standing, StandingState.GrantsKey)).Select(grant => new DashboardStandingGrant
         {
-            Id = Text(grant, "id"), Scope = Text(grant, "scope"), Targets = Strings(Property(grant, "targets")), ExpiresAt = Date(grant, "expiresAt"),
-            Grantor = Text(grant, "grantor"), ProposedBy = Text(grant, "proposedBy"), GrantedAt = Date(grant, "grantedAt")
+            Id = Text(grant, StandingGrant.IdKey), Scope = Text(grant, StandingGrant.ScopeKey), Targets = Strings(Property(grant, StandingGrant.TargetsKey)),
+            ExpiresAt = Date(grant, StandingGrant.ExpiresAtKey), Grantor = Text(grant, StandingGrant.GrantorKey), ProposedBy = Text(grant, StandingGrant.ProposedByKey),
+            GrantedAt = Date(grant, StandingGrant.GrantedAtKey)
         }).ToArray();
-        var proposals = Values(Property(standing, "proposals")).Select(proposal =>
+        var proposals = Values(Property(standing, StandingState.ProposalsKey)).Select(proposal =>
         {
-            var line = Property(proposal, "line");
-            var grant = Property(proposal, "grant");
+            var line = Property(proposal, StandingProposal.LineKey);
+            var grant = Property(proposal, StandingProposal.GrantKey);
             var item = line.ValueKind == JsonValueKind.Object ? line : grant;
             // Approving a proposal writes the line or grant under its own ID, or under the proposal's when it names none.
-            var id = Text(item, "id") is { Length: > 0 } named ? named : Text(proposal, "id");
+            var id = Text(item, StandingLine.IdKey) is { Length: > 0 } named ? named : Text(proposal, StandingProposal.IdKey);
             return new DashboardStandingProposal
             {
-                Id = Text(proposal, "id"), Kind = line.ValueKind == JsonValueKind.Object ? "line" : "grant",
-                Summary = line.ValueKind == JsonValueKind.Object ? Text(line, "text") : $"{Text(grant, "scope")}: {string.Join(", ", Strings(Property(grant, "targets")))} until {Text(grant, "expiresAt")}",
-                ProposedBy = Text(proposal, "proposedBy"), ProposedAt = Date(proposal, "proposedAt"),
+                Id = Text(proposal, StandingProposal.IdKey), Kind = line.ValueKind == JsonValueKind.Object ? "line" : "grant",
+                Summary = line.ValueKind == JsonValueKind.Object
+                    ? Text(line, StandingLine.TextKey)
+                    : $"{Text(grant, StandingGrant.ScopeKey)}: {string.Join(", ", Strings(Property(grant, StandingGrant.TargetsKey)))} until {Text(grant, StandingGrant.ExpiresAtKey)}",
+                ProposedBy = Text(proposal, StandingProposal.ProposedByKey), ProposedAt = Date(proposal, StandingProposal.ProposedAtKey),
                 Replaces = line.ValueKind == JsonValueKind.Object ? lines.Any(x => x.Id == id) : grants.Any(x => x.Id == id)
             };
         }).ToArray();
-        var history = Property(standing, "history") is { ValueKind: JsonValueKind.Array } changes
+        var history = Property(standing, StandingState.HistoryKey) is { ValueKind: JsonValueKind.Array } changes
             ? changes.EnumerateArray().Reverse().Take(RelayLimits.StandingHistoryEntries).Select(change => new DashboardStandingChange
             {
-                Revision = Long(Property(change, "revision")), By = Text(change, "by"), At = Date(change, "at"), Changes = Strings(Property(change, "changes"))
+                Revision = Long(Property(change, StandingChange.RevisionKey)), By = Text(change, StandingChange.ByKey), At = Date(change, StandingChange.AtKey),
+                Changes = Strings(Property(change, StandingChange.ChangesKey))
             }).ToArray()
             : [];
         return new()
         {
-            Board = DashboardText.Safe(Uri.UnescapeDataString(key)), Revision = Long(Property(standing, "revision")),
-            RequireResources = Property(Property(standing, "settings"), "requireResources").ValueKind == JsonValueKind.True,
+            Board = DashboardText.Safe(Uri.UnescapeDataString(key)), Revision = Long(Property(standing, StandingState.RevisionKey)),
+            RequireResources = Property(Property(standing, StandingState.SettingsKey), StandingSettings.RequireResourcesKey).ValueKind == JsonValueKind.True,
             Lines = lines, Grants = grants, Proposals = proposals, History = history
         };
     }
@@ -81,21 +88,24 @@ public static class BoardReadModels
     {
         using var document = JsonDocument.Parse(json, Options);
         var orders = document.RootElement;
-        log = Property(orders, "log") is { ValueKind: JsonValueKind.Array } entries
-            ? entries.EnumerateArray().Reverse().Take(RelayLimits.OrderLogEntries).Select(entry => new DashboardOrderLogEntry { At = Date(entry, "at"), OrderId = Text(entry, "orderId"), What = Text(entry, "what") }).ToArray()
+        log = Property(orders, OrdersState.LogKey) is { ValueKind: JsonValueKind.Array } entries
+            ? entries.EnumerateArray().Reverse().Take(RelayLimits.OrderLogEntries)
+                .Select(entry => new DashboardOrderLogEntry { At = Date(entry, OrderLogEntry.AtKey), OrderId = Text(entry, OrderLogEntry.OrderIdKey), What = Text(entry, OrderLogEntry.WhatKey) }).ToArray()
             : [];
-        return Values(Property(orders, "items")).Select(order =>
+        return Values(Property(orders, OrdersState.ItemsKey)).Select(order =>
         {
-            var trigger = Property(order, "trigger");
-            var on = Text(trigger, "on");
-            var actions = Property(order, "actions") is { ValueKind: JsonValueKind.Array } list
-                ? list.EnumerateArray().Where(action => action.ValueKind == JsonValueKind.Object).Select(action => string.Join(" ", new[] { Text(action, "do"), Text(action, "taskId"), Text(action, "sessionId") is { Length: > 0 } session ? "to " + session : "" }.Where(part => part.Length > 0))).ToArray()
+            var trigger = Property(order, OrderRecord.TriggerKey);
+            var on = Text(trigger, OrderTrigger.OnKey);
+            var actions = Property(order, OrderRecord.ActionsKey) is { ValueKind: JsonValueKind.Array } list
+                ? list.EnumerateArray().Where(action => action.ValueKind == JsonValueKind.Object)
+                    .Select(action => string.Join(" ", new[] { Text(action, OrderStep.DoKey), Text(action, OrderStep.TaskIdKey), Text(action, OrderStep.SessionIdKey) is { Length: > 0 } session ? "to " + session : "" }.Where(part => part.Length > 0))).ToArray()
                 : [];
             return new DashboardOrder
             {
-                Id = Text(order, "id"), Trigger = on, Target = Text(trigger, on == OrderTriggers.ClaimReleased ? "resourceId" : "taskId"), Actions = actions,
-                ApprovedBy = Text(order, "approvedBy"), ExpiresAt = Date(order, "expiresAt"), Runs = Long(Property(order, "runs")), Failures = Long(Property(order, "failures")),
-                Disabled = Property(order, "disabled").ValueKind == JsonValueKind.True, LastError = Text(order, "lastError")
+                Id = Text(order, OrderRecord.IdKey), Trigger = on, Target = Text(trigger, OrderTrigger.TargetKey(on)), Actions = actions,
+                ApprovedBy = Text(order, OrderRecord.ApprovedByKey), ExpiresAt = Date(order, OrderRecord.ExpiresAtKey), Runs = Long(Property(order, OrderRecord.RunsKey)),
+                Failures = Long(Property(order, OrderRecord.FailuresKey)), Disabled = Property(order, OrderRecord.DisabledKey).ValueKind == JsonValueKind.True,
+                LastError = Text(order, OrderRecord.LastErrorKey)
             };
         }).ToArray();
     }

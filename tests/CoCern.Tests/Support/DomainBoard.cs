@@ -1,6 +1,7 @@
 using System.Text.Json.Nodes;
 using CoCern.Contracts;
 using CoCern.Domain;
+using CoCern.Domain.Messages;
 using Xunit;
 
 namespace CoCern.Tests;
@@ -90,9 +91,9 @@ internal static class DomainBoard
             ["actions"] = new JsonArray(new JsonObject { ["do"] = OrderActions.Offer, ["taskId"] = "plan", ["sessionId"] = "b" }, new JsonObject { ["do"] = OrderActions.Notify, ["sessionId"] = "c" })
         }, 131);
         // The lock tells the board its claim was released, and the order runs; then the lock reports, three times, that it cannot watch.
-        Assert.True(Apply(Writer, Operations.OrderFire, new() { ["resourceId"] = "rig-1", ["generation"] = 1 }, 140)["ran"]!.GetValue<bool>());
+        Assert.True(Apply(Writer, OrderFire.Operation, new OrderFire("repo", AggregateKinds.DefaultBoard, "rig-1", 1).ToJson(), 140)["ran"]!.GetValue<bool>());
         for (var attempt = 1; attempt <= RelayLimits.MaxOrderFailures; attempt++)
-            Assert.True(Apply(Writer, Operations.OrderFailed, new() { ["orderId"] = "o-2", ["watch"] = true, ["reason"] = "watch refused " + attempt }, 140 + attempt)["counted"]!.GetValue<bool>());
+            Assert.True(Apply(Writer, OrderWatchFailed.Operation, new OrderWatchFailed("repo", AggregateKinds.DefaultBoard, "o-2", "watch refused " + attempt).ToJson(), 140 + attempt)["counted"]!.GetValue<bool>());
         return (board, new(newLine, replacingLine, replacingGrant, approvedGrant));
     }
 }

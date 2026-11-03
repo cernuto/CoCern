@@ -1693,7 +1693,7 @@ public sealed class CoordinationTests
         release["run"] = 10;
         Assert.False(Data(Lock("__order_release", release.DeepClone().AsObject()))["released"]!.GetValue<bool>());
         // A late failure report for an order run that is not the latest is logged but not counted.
-        Assert.False(Data(OrderCall(board, "board", "__order_failed", new() { ["orderId"] = "o-1", ["run"] = 1, ["reason"] = "late" }))["counted"]!.GetValue<bool>());
+        Assert.False(Data(OrderCall(board, "board", "__order_failed", new OrderFailed("repo", AggregateKinds.DefaultBoard, "o-1", 1, "late").ToJson()))["counted"]!.GetValue<bool>());
 
         // An expired order never runs.
         Assert.True(OrderCall(board, "board", "task_update", new() { ["taskId"] = "u", ["requestId"] = "u", ["expectedVersion"] = 0, ["workflow"] = DependentWorkflow("ready") }).Ok);

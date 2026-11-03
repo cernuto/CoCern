@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using CoCern.Contracts;
 using CoCern.Domain;
+using CoCern.Domain.Messages;
 using static CoCern.Contracts.RelayErrorCodes;
 using static CoCern.Domain.JsonFields;
 using static CoCern.Domain.Replies;
@@ -322,15 +323,15 @@ internal sealed class ReplyAddOns(Aggregates aggregates, ClaimComposer claims, S
             else if (Parse(status)["paused"]?.GetValue<bool>() == true) next = Outcome(true, Paused);
             else
             {
-                var read = args.DeepClone().AsObject(); read.Remove("requestId"); read.Remove("busyResources"); read["limit"] = RelayLimits.NextWorkCandidates;
-                var offered = await aggregates.Board(caller, Operations.NextWork, read);
+                var current = args["taskId"] is JsonValue value && value.TryGetValue<string>(out var taskId) ? taskId : null;
+                var read = new NextWorkRead(Text(args, "repositoryId"), Aggregates.BoardIdOf(args), Text(args, "sessionId"), current, Limit: RelayLimits.NextWorkCandidates);
+                var offered = await aggregates.Board(caller, NextWorkRead.Operation, read.ToJson());
                 var offer = offered.Ok ? Parse(offered) : null;
                 var busy = offer?["candidates"] is JsonArray candidates ? await BusyResourcesAsync(caller, args, session, candidates) : [];
                 if (busy.Count > 0)
                 {
                     // Ask again so that, within equal priority, a task whose listed resources are all free is offered first.
-                    read.Remove("limit"); read["busyResources"] = JsonSerializer.SerializeToNode(busy);
-                    offered = await aggregates.Board(caller, Operations.NextWork, read);
+                    offered = await aggregates.Board(caller, NextWorkRead.Operation, (read with { Limit = 0, BusyResources = busy }).ToJson());
                     offer = offered.Ok ? Parse(offered) : null;
                 }
                 offer?.Remove("candidates");

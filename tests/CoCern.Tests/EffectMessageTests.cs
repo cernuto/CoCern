@@ -174,15 +174,14 @@ public sealed class EffectMessageTests
     private static readonly string[] Untyped =
     [
         Operations.Verify, Operations.Deliver, Operations.Resolve, Operations.ResolveAll, Operations.Dispatch,
-        Operations.TaskUnclaim, Operations.NextWork, Operations.ClaimState, Operations.Standing, Operations.StandingSeen, Operations.StandingProposeHub,
-        Operations.SessionTargetWatch, Operations.SweepSessions, Operations.TaskArchive, Operations.SessionOwners, Operations.SessionsOpen,
+        Operations.ClaimState, Operations.StandingSeen,
+        Operations.SessionTargetWatch, Operations.SweepSessions, Operations.SessionOwners, Operations.SessionsOpen,
         Operations.AttentionRaise, Operations.AttentionClose, Operations.AttentionOffer, Operations.AttentionSeen, Operations.AttentionRoute,
-        Operations.LeaseCheck, Operations.Orders, Operations.OrderFire, Operations.OrderWatch,
-        Operations.OrderRelease, Operations.OrderFailed
+        Operations.LeaseCheck
     ];
 
     /// <summary>The number of untyped internal operations. It may only go down.</summary>
-    private const int PinnedUntyped = 27;
+    private const int PinnedUntyped = 17;
 
     [Fact]
     public void Lock_messages_read_back_name_their_missing_fields_and_the_lock_answers_a_malformed_one()

@@ -74,5 +74,11 @@ internal sealed class Aggregates(IGrainFactory grains, ITaskArchive? archive)
     public Task<RelayReply> Call(string kind, string key, RelayCaller caller, string operation, JsonObject args) => CoordinationGrain.Aggregate(grains, kind, key).ExecuteAsync(caller, operation, args.ToJsonString());
 
     public static string BoardKey(JsonObject args) => CallTelemetry.BoardKey(args);
+
+    /// <summary>
+    /// The board a call named, for a direct board request (<see cref="Domain.Messages.TaskUnclaim"/> and the like): its <c>boardId</c> as
+    /// given, or null when it named none, which a request reads as the default board. The request then reaches the board the call did.
+    /// </summary>
+    public static string? BoardIdOf(JsonObject args) => args["boardId"] is JsonValue value && value.TryGetValue<string>(out var board) ? board : null;
     public static JsonObject Parse(RelayReply reply) => JsonNode.Parse(reply.DataJson)!.AsObject();
 }

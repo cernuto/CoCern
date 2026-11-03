@@ -6,6 +6,7 @@ using Orleans;
 using Orleans.Runtime;
 using CoCern.Contracts;
 using CoCern.Domain;
+using CoCern.Domain.Messages;
 
 namespace CoCern.Core;
 
@@ -113,11 +114,9 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
             if (result.Code == RelayErrorCodes.MalformedEffect) ReportMalformed(effect, payload, result, failure!.Value);
             // The failed order run is applied on this board's own state, so it is logged, raised to the managers and counted.
             if (failure == EffectDelivery.Failure.DropAsFailedOrderRun)
-                ApplyInternal(candidate, effectCaller, Operations.OrderFailed, new JsonObject
-                {
-                    ["repositoryId"] = JsonFields.Text(payload, "repositoryId"), ["boardId"] = JsonFields.Text(payload, "boardId", "default"), ["orderId"] = JsonFields.Text(payload, Operations.OrderIdField),
-                    ["run"] = JsonFields.Number(payload, Operations.OrderRunField), ["reason"] = "session " + effect.TargetKey + " refused the " + JsonFields.Text(payload, "kind") + " item (" + result.Code + ")"
-                }, now, ordersEnabled: true);
+                ApplyInternal(candidate, effectCaller, OrderFailed.Operation, new OrderFailed(JsonFields.Text(payload, "repositoryId"), JsonFields.Text(payload, "boardId", "default"),
+                    JsonFields.Text(payload, Operations.OrderIdField), JsonFields.Number(payload, Operations.OrderRunField),
+                    "session " + effect.TargetKey + " refused the " + JsonFields.Text(payload, "kind") + " item (" + result.Code + ")").ToJson(), now, ordersEnabled: true);
             if (failure == EffectDelivery.Failure.Retry)
             {
                 // A malformed one is marked reported in the same commit, so it is logged and counted once however often it is retried.
@@ -278,8 +277,8 @@ public sealed class TaskBoardGrain([PersistentState("board", "relay")] IPersiste
         if (repository.Length == 0) return true;
         var sweeper = new RelayCaller("relay-archive", false, [repository], true);
         // The board's own ID, so the attention closes it emits name this board and not the default one.
-        var sweep = new JsonObject { ["repositoryId"] = repository, ["boardId"] = BoardId(this.GetPrimaryKeyString()) };
-        if (!ApplyInternal(candidate, sweeper, Operations.TaskArchive, sweep, now).Ok)
+        var sweep = new TaskArchiveSweep(repository, BoardId(this.GetPrimaryKeyString()));
+        if (!ApplyInternal(candidate, sweeper, TaskArchiveSweep.Operation, sweep.ToJson(), now).Ok)
         {
             // A sweep the board refuses would otherwise stay due and run on every pump: try again after a backoff.
             candidate.DueWork.RemoveAll(x => x.Kind == DueWorkKinds.TaskArchive);

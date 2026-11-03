@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using CoCern.Contracts;
+using CoCern.Domain.State;
 using static CoCern.Domain.JsonFields;
 
 namespace CoCern.Domain;
@@ -36,12 +37,13 @@ public static class SearchExtraction
 
     /// <summary>An archived task's document, from the JSON the archive kept, with status <c>archived</c>; null when it cannot be read.</summary>
     public static SearchDocument? ArchivedTaskDocument(string repositoryId, string taskId, string json) =>
-        Guarded(() => Parse(json) is { } task && repositoryId.Length > 0 ? TaskDocument(taskId, task, repositoryId) with { Status = "archived" } : null, () => null);
+        Guarded(() => Parse(json) is { } task && repositoryId.Length > 0 ? TaskDocument(taskId, new BoardTask(task), repositoryId) with { Status = "archived" } : null, () => null);
 
     /// <summary>The documents of only the named tasks on a board. Unknown IDs are ignored.</summary>
     public static IReadOnlyList<SearchDocument> ExtractTasks(JsonObject board, IEnumerable<string> taskIds) =>
-        Guarded(() => Repository(board) is { } repository && board["tasks"] is JsonObject tasks
-            ? taskIds.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).Where(id => tasks[id] is JsonObject).Select(id => TaskDocument(id, tasks[id]!.AsObject(), repository)).ToArray()
+        Guarded(() => Repository(board) is { } repository
+            ? taskIds.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).Select(id => (Id: id, Task: new BoardState(board).Task(id))).Where(entry => entry.Task is not null)
+                .Select(entry => TaskDocument(entry.Id, entry.Task!, repository)).ToArray()
             : [], () => []);
 
     /// <summary>
@@ -90,7 +92,7 @@ public static class SearchExtraction
     }
 
     /// <summary>A document without a repository could never pass the repository filter, so it is not indexed at all.</summary>
-    private static string? Repository(JsonObject state) => Text(state, "repositoryId") is { Length: > 0 } repository ? repository : null;
+    private static string? Repository(JsonObject state) => Text(state, CommonState.RepositoryIdKey) is { Length: > 0 } repository ? repository : null;
 
     // The hub writes these documents itself, so this is only a guard: a document it cannot read gives what it can,
     // and never fails the commit that calls this.
@@ -109,10 +111,10 @@ public static class SearchExtraction
         if (Repository(state) is not { } repository) yield break;
         if (stateName == AggregateKinds.Board)
         {
-            foreach (var (id, task) in Items(state, "tasks"))
-                yield return new(new(SearchKinds.Task, id), Marker(task, "changeRevision"), () => TaskDocument(id, task, repository));
-            foreach (var (id, note) in Items(state, "context"))
-                yield return new(new(SearchKinds.Context, id), Marker(note, "version"), () => ContextDocument(id, note, repository));
+            foreach (var (id, task) in Items(state, BoardState.TasksKey))
+                yield return new(new(SearchKinds.Task, id), Marker(task, BoardTask.ChangeRevisionKey), () => TaskDocument(id, new BoardTask(task), repository));
+            foreach (var (id, note) in Items(state, BoardState.ContextKey))
+                yield return new(new(SearchKinds.Context, id), Marker(note, ContextNote.VersionKey), () => ContextDocument(id, new ContextNote(note), repository));
         }
         else if (stateName == AggregateKinds.Session && Text(state, "sessionId") is { Length: > 0 } owner)
         {
@@ -149,42 +151,43 @@ public static class SearchExtraction
     /// latest <see cref="RelayLimits.RecentTaskEntries"/> reports and messages (what <c>task_get</c> returns). Reports and messages
     /// share the rest of the body, newest first across both, so the cap drops the oldest of either.
     /// </summary>
-    private static SearchDocument TaskDocument(string id, JsonObject task, string repository)
+    private static SearchDocument TaskDocument(string id, BoardTask task, string repository)
     {
-        var workflow = task["workflow"] as JsonObject;
-        var packet = workflow?["packet"] as JsonObject;
-        var facts = task["facts"] as JsonObject;
-        var goal = packet is null ? "" : Text(packet, "goal");
-        var title = Text(facts ?? new JsonObject(), "title") is { Length: > 0 } named ? named : goal.Length > 0 ? goal : id;
+        var workflow = task.Workflow;
+        var packet = workflow?.Packet;
+        var facts = task.FactsIfAny;
+        var goal = packet?.Goal ?? "";
+        var title = Text(facts ?? new JsonObject(), BoardTask.TitleFact) is { Length: > 0 } named ? named : goal.Length > 0 ? goal : id;
         var body = new Body();
         if (goal != title) body.Add(goal);
-        if (packet is not null) body.Add(Text(packet, "target"));
-        if (workflow?["blockers"] is JsonArray blockers)
-            foreach (var blocker in blockers.OfType<JsonObject>())
-                body.Add(Join(" ", "blocked", Text(blocker, "kind"), Text(blocker, "summary"), Text(blocker, "recheckCondition")));
+        if (packet is not null) body.Add(packet.Target);
+        if (workflow is not null)
+            foreach (var blocker in workflow.Blockers)
+                body.Add(Join(" ", "blocked", blocker.Kind, blocker.Summary, blocker.RecheckCondition));
         if (workflow is not null)
         {
-            var dependencies = TaskWorkflow.Dependencies(workflow).ToArray();
+            var dependencies = workflow.DependsOn.ToArray();
             if (dependencies.Length > 0) body.Add("depends on " + string.Join(' ', dependencies));
-            var resources = TaskWorkflow.Resources(workflow).ToArray();
+            var resources = workflow.Resources.ToArray();
             if (resources.Length > 0) body.Add("resources " + string.Join(' ', resources));
         }
-        if (facts?["notes"] is { } notes) body.Add(Flatten(notes));
-        var reports = Recent(task["reports"]).Select(report => (At: Date(report, "at"), Text: Join(" ", Text(report, "actionId"), Text(report, "outcome"), report["report"] is { } detail ? Flatten(detail) : "")));
-        var messages = Recent(task["messages"]).Select(message => (At: Date(message, "at"), Text: Text(message, "text")));
+        if (facts?[BoardTask.NotesFact] is { } notes) body.Add(Flatten(notes));
+        var reports = Recent(task.ReportsIfAny).Select(entry => new TaskReport(entry))
+            .Select(report => (report.At, Text: Join(" ", report.ActionId, report.Outcome, report.Body is { } detail ? Flatten(detail) : "")));
+        var messages = Recent(task.MessagesIfAny).Select(entry => new TaskMessage(entry)).Select(message => (message.At, message.Text));
         // A stable sort keeps each list's own newest-first order on equal times; a message comes before a report at the same time.
         var entries = messages.Concat(reports).OrderByDescending(entry => entry.At).ToArray();
         foreach (var entry in entries) body.Add(entry.Text);
-        var updated = entries.Select(entry => entry.At).Append(Date(task, "updatedAt")).Max();
-        var status = workflow is not null && Text(workflow, "state") is { Length: > 0 } state ? state : "open";
+        var updated = entries.Select(entry => entry.At).Append(task.UpdatedAt).Max();
+        var status = workflow is not null && workflow.State is { Length: > 0 } state ? state : "open";
         return new(id, SearchKinds.Task, repository, null, Title(title), body.ToString(), status, updated);
     }
 
-    private static SearchDocument ContextDocument(string id, JsonObject note, string repository)
+    private static SearchDocument ContextDocument(string id, ContextNote note, string repository)
     {
         var body = new Body();
-        if (note["content"] is { } content) body.Add(Flatten(content));
-        return new(id, SearchKinds.Context, repository, null, Title(id), body.ToString(), "note", Date(note, "updatedAt"));
+        if (note.Content is { } content) body.Add(Flatten(content));
+        return new(id, SearchKinds.Context, repository, null, Title(id), body.ToString(), "note", note.UpdatedAt);
     }
 
     /// <summary>
