@@ -1,4 +1,5 @@
 """Check runner safety boundaries without launching a hub or reading real state."""
+import base64
 import hashlib
 import importlib.util
 import io
@@ -16,6 +17,25 @@ spec.loader.exec_module(runner)
 
 
 class SafetyBoundaryTests(unittest.TestCase):
+    # Hand-checked .NET GUID byte order; the cookie and XML identify this key.
+    cookie_key = "35918bc9-196d-40ea-9779-889d79b753f0"
+    cookie_frame = bytes.fromhex("09f0c9f0c98b91356d19ea409779889d79b753f0") + b"inert-protected-payload"
+
+    def key_evidence(self, hub, key_id=None):
+        hub.key_dir.mkdir(parents=True, exist_ok=True)
+        key_id = key_id or self.cookie_key
+        path = hub.key_dir / f"key-{self.cookie_key}.xml"
+        path.write_text(f'<key id="{key_id}" version="1"><descriptor deserializerType="inert"><descriptor /></descriptor></key>', encoding="utf-8")
+        return path
+
+    def login_response(self, connection, cookie_frame=None, status=200):
+        response = connection.return_value.getresponse.return_value
+        response.status = status
+        response.read.return_value = b"{}"
+        encoded = base64.urlsafe_b64encode(cookie_frame or self.cookie_frame).decode().rstrip("=")
+        response.getheaders.return_value = [("Set-Cookie", f"CoCern.Dashboard={encoded}; path=/dashboard; httponly; samesite=strict")]
+        return response
+
     def make_hub(self, root):
         return runner.Hub(root / "fixture", root / "host.dll", root / "adapter.dll", 1)
 
@@ -236,29 +256,66 @@ class SafetyBoundaryTests(unittest.TestCase):
                 connection.return_value.close.assert_called_once()
 
     def test_cookie_preflight_rejects_effective_repository_outside_fixture(self):
-        with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder)
-            hub = runner.Hub(root / "fixture", root / "host.dll", root / "adapter.dll", 1)
-            hub.key_dir.mkdir(parents=True)
-            (hub.key_dir / "key-decoy.xml").write_text("inert", encoding="utf-8")
-            hub.lines.append(f"Using '{root / 'unrelated-keys'}' as key repository")
-            with mock.patch.object(hub, "request", return_value=(200, {})):
-                with self.assertRaises(runner.ProbeFailure):
-                    hub.verify_key_isolation()
+        for outside in (True, False):
+            with self.subTest(outside=outside), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                hub = self.make_hub(root)
+                self.key_evidence(hub)
+                unexpected = (root if outside else hub.root) / "unrelated-keys"
+                hub.lines.append(f"Using '{unexpected}' as key repository")
+                with mock.patch.object(runner.http.client, "HTTPConnection") as connection:
+                    self.login_response(connection)
+                    with self.assertRaises(runner.ProbeFailure):
+                        hub.verify_key_isolation()
 
     def test_cookie_preflight_requires_login_and_actual_expected_repository(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             hub = runner.Hub(root / "fixture", root / "host.dll", root / "adapter.dll", 1)
-            hub.key_dir.mkdir(parents=True)
-            (hub.key_dir / "key-inert.xml").write_text("inert", encoding="utf-8")
+            self.key_evidence(hub)
             hub.lines.append(f"Using '{hub.key_dir}' as key repository")
-            with mock.patch.object(hub, "request", return_value=(200, {})) as request:
+            with mock.patch.object(runner.http.client, "HTTPConnection") as connection:
+                response = self.login_response(connection)
                 hub.verify_key_isolation()
-                self.assertEqual(request.call_args.args[:2], ("POST", "/dashboard/api/login"))
-            with mock.patch.object(hub, "request", return_value=(401, {})):
+                self.assertEqual(connection.return_value.request.call_args.args[:2], ("POST", "/dashboard/api/login"))
+                response.status = 401
                 with self.assertRaises(runner.ProbeFailure):
                     hub.verify_key_isolation()
+
+    def test_cookie_preflight_accepts_private_cookie_key_without_information_logs(self):
+        with tempfile.TemporaryDirectory() as folder:
+            hub = self.make_hub(Path(folder))
+            self.key_evidence(hub)
+            with mock.patch.object(runner.http.client, "HTTPConnection") as connection:
+                self.login_response(connection)
+                hub.verify_key_isolation()
+
+    def test_cookie_preflight_rejects_missing_wrong_and_decoy_key_evidence(self):
+        for defect in ("missing-cookie", "wrong-cookie-key", "wrong-magic", "truncated-cookie", "wrong-xml-id", "decoy-xml", "missing-key", "outside-key"):
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                hub = self.make_hub(root)
+                key = self.key_evidence(hub)
+                hub.lines.append(f"Using '{hub.key_dir}' as key repository")
+                if defect == "wrong-xml-id":
+                    self.key_evidence(hub, "aaaaaaaa-0b0b-1c1c-2d2d-333333333333")
+                elif defect == "decoy-xml":
+                    key.write_text("inert-decoy", encoding="utf-8")
+                elif defect in ("missing-key", "outside-key"):
+                    key.rename(root / key.name)
+                with mock.patch.object(runner.http.client, "HTTPConnection") as connection:
+                    frame = self.cookie_frame
+                    if defect == "wrong-cookie-key":
+                        frame = frame[:4] + bytes.fromhex("aaaaaaaa0b0b1c1c2d2d333333333333") + frame[20:]
+                    elif defect == "wrong-magic":
+                        frame = b"bad!" + frame[4:]
+                    elif defect == "truncated-cookie":
+                        frame = frame[:20]
+                    response = self.login_response(connection, frame)
+                    if defect == "missing-cookie":
+                        response.getheaders.return_value = []
+                    with self.assertRaises(runner.ProbeFailure):
+                        hub.verify_key_isolation()
 
     def test_deletion_cannot_escape_fixture_root(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -4,9 +4,12 @@ Requires explicit, hash-verified candidate DLLs. Creates disposable state only.
 No builds, Connect/setup, installed-node changes, live hub calls, or raw logs.
 """
 import argparse
+import base64
+import binascii
 from collections import deque
 import hashlib
 import http.client
+from http.cookies import CookieError, SimpleCookie
 import json
 import os
 from pathlib import Path
@@ -21,6 +24,7 @@ import tempfile
 import threading
 import time
 import uuid
+import xml.etree.ElementTree as ET
 from urllib.parse import urlsplit
 
 
@@ -214,7 +218,7 @@ class Hub:
         require(path in (self.certificate, self.backup), "Unexpected deletion target")
         path.unlink()
 
-    def request(self, method, path, body=None, token=None):
+    def request(self, method, path, body=None, token=None, response_headers=None):
         target = urlsplit(path)
         require(path.startswith("/") and not path.startswith("//")
                 and not target.scheme and not target.netloc
@@ -229,6 +233,8 @@ class Hub:
         try:
             connection.request(method, path, json.dumps(body) if body is not None else None, headers)
             response = connection.getresponse()
+            if response_headers is not None:
+                response_headers.extend(response.getheaders())
             raw = response.read(200_001)
             require(len(raw) <= 200_000, "Unexpected oversized fixture response")
             try:
@@ -248,8 +254,29 @@ class Hub:
         require(self.key_dir.resolve().is_relative_to(self.root), "Cookie key path escapes fixture")
         # Force cookie protection using only this disposable hub's synthetic
         # viewer credential. Never publish the request, response cookies or keys.
-        status, _ = self.request("POST", "/dashboard/api/login", {"token": self.admin})
+        headers = []
+        status, _ = self.request("POST", "/dashboard/api/login", {"token": self.admin},
+                                 response_headers=headers)
         require(status == 200, "Synthetic dashboard login preflight failed")
+        cookies = []
+        try:
+            for name, value in headers:
+                if name.lower() == "set-cookie":
+                    parsed = SimpleCookie()
+                    parsed.load(value)
+                    if "CoCern.Dashboard" in parsed:
+                        cookies.append(parsed["CoCern.Dashboard"].value)
+            require(len(cookies) == 1 and re.fullmatch(r"[A-Za-z0-9_-]+", cookies[0]) is not None,
+                    "Synthetic dashboard cookie evidence missing or malformed")
+            payload = base64.b64decode(cookies[0] + "=" * (-len(cookies[0]) % 4),
+                                       altchars=b"-_", validate=True)
+            # ASP.NET's documented protected frame is magic + .NET GUID + ciphertext.
+            # https://learn.microsoft.com/aspnet/core/security/data-protection/implementation/authenticated-encryption-details
+            require(len(payload) > 20 and payload[:4] == b"\x09\xf0\xc9\xf0",
+                    "Synthetic dashboard cookie protection frame was not verified")
+            key_id = uuid.UUID(bytes_le=payload[4:20])
+        except (CookieError, binascii.Error, ValueError):
+            raise ProbeFailure("Synthetic dashboard cookie evidence missing or malformed") from None
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
             repositories = []
@@ -259,8 +286,21 @@ class Hub:
                     repositories.append(Path(match.group(1)).resolve())
             require(all(path.is_relative_to(self.root) for path in repositories),
                     "ASP.NET reported a key repository outside disposable state")
-            if self.key_dir.is_dir() and any(self.key_dir.glob("key-*.xml")) \
-                    and self.key_dir.resolve() in repositories:
+            require(all(path == self.key_dir.resolve() for path in repositories),
+                    "ASP.NET reported an unexpected disposable key repository")
+            key_file = self.key_dir / f"key-{key_id}.xml"
+            require(key_file.resolve().is_relative_to(self.root), "Cookie key file escapes fixture")
+            if key_file.is_file():
+                try:
+                    key = ET.parse(key_file).getroot()
+                    # XML ID is authoritative; a filename or unrelated decoy is no proof.
+                    # https://learn.microsoft.com/aspnet/core/security/data-protection/implementation/key-storage-format
+                    require(key.tag == "key" and key.get("version") == "1"
+                            and uuid.UUID(key.get("id", "")) == key_id
+                            and key.find("descriptor") is not None,
+                            "Synthetic dashboard cookie does not match private key evidence")
+                except (ET.ParseError, ValueError):
+                    raise ProbeFailure("Synthetic dashboard private key evidence malformed") from None
                 return
             time.sleep(0.05)
         raise ProbeFailure("ASP.NET key directory was not verified; refusing further probes")
