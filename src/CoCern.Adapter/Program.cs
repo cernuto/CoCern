@@ -122,6 +122,8 @@ try
         Console.CancelKeyPress += (_, cancel) => { cancel.Cancel = true; stopping.Cancel(); };
         // Messages carry any text; the console's code page would turn non-ASCII into '?' before the chat reads it.
         using var error = new StreamWriter(Console.OpenStandardError(), new System.Text.UTF8Encoding(false)) { AutoFlush = true };
+        // Everything on standard error enters the chat, so the watcher's status lines must not; the delivered text goes through its own writer above.
+        Console.SetError(TextWriter.Null);
         return await StopHook.RunAsync(Console.In, error, folder, stopping.Token);
     }
     if (args.Length > 0 && args[0] == "--connect")
