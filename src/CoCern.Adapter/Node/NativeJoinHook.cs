@@ -34,7 +34,8 @@ internal static class NativeJoinHook
     }
 
     // The setup-owned launcher identity stays stable while its helper follows the current deployment.
-    internal static async Task<int> RunDevelopmentAsync(string root, string dotnet, string provider, string folder, TextReader input, TextWriter output, TextWriter error, CancellationToken ct, string? profile = null)
+    internal static async Task<int> RunDevelopmentAsync(string root, string dotnet, string provider, string folder, TextReader input, TextWriter output, TextWriter error, CancellationToken ct, string? profile = null,
+        Action<ProcessStartInfo>? configureProcess = null)
     {
         var text = await ReadInputAsync(input, ct);
         if (text is null) return 0;
@@ -42,6 +43,7 @@ internal static class NativeJoinHook
         var start = new ProcessStartInfo(dotnet) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
         foreach (var argument in new[] { adapter, "--native-hook", provider, "--connection", folder }) start.ArgumentList.Add(argument);
         if (profile is not null) { start.ArgumentList.Add("--profile"); start.ArgumentList.Add(profile); }
+        configureProcess?.Invoke(start);
         NativeRegistration.RestrictPrivateEnvironment(start);
         using var process = Process.Start(start) ?? throw new IOException("The current native helper could not start.");
         using var copying = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -216,31 +218,33 @@ internal static class NativeJoinHook
     }
 
     internal static async Task<JsonElement> StampAsync(NativeJoin join, NativeHookContext capture, string tool, string invocation, JsonElement input, CancellationToken ct,
-        TimeProvider? clock = null)
+        TimeProvider? clock = null, Func<string, CancellationToken, Task<string>>? resolveCheckout = null)
     {
         if (!ValidInvocation(tool, invocation) || capture.Provider is not ("claude" or "codex")) throw new ArgumentException("Invalid native invocation.");
         var business = CloneArguments(input);
         // Validate all canonical scalars before networking or recording a pending intent.
         _ = Canonical(business);
-        await using var binding = await NativeJoinBinding.AcquireEstablishedAsync(join.PrivateFolder, capture.Provider, capture.NativeId,
-            Environment.MachineName, capture.Cwd, ct);
-        if (binding.CurrentHandle is null) throw new IOException("An established native binding is required before signing.");
-        var expires = (clock ?? TimeProvider.System).GetUtcNow().AddMinutes(2).ToUnixTimeSeconds();
-        var unsigned = JsonSerializer.SerializeToElement(new
+        return await join.WithEstablishedSigningBindingAsync(capture, binding =>
         {
-            version = 1, provider = binding.Provider, nativeId = binding.NativeId, cwd = binding.Workspace,
-            repositoryId = binding.RepositoryId, invocation, expires, generation = binding.Generation
-        });
-        var stamp = JsonNode.Parse(unsigned.GetRawText())!.AsObject();
-        stamp["mac"] = Mac(binding, tool, business, unsigned);
-        var result = JsonNode.Parse(business.GetRawText())!.AsObject();
-        result["_cocernNative"] = stamp;
-        return JsonSerializer.SerializeToElement(result);
+            if (binding.CurrentHandle is null) throw new IOException("An established native binding is required before signing.");
+            var expires = (clock ?? TimeProvider.System).GetUtcNow().AddMinutes(2).ToUnixTimeSeconds();
+            var unsigned = JsonSerializer.SerializeToElement(new
+            {
+                version = 1, provider = binding.Provider, nativeId = binding.NativeId, cwd = binding.Workspace,
+                repositoryId = binding.RepositoryId, invocation, expires, generation = binding.Generation
+            });
+            var stamp = JsonNode.Parse(unsigned.GetRawText())!.AsObject();
+            stamp["mac"] = Mac(binding, tool, business, unsigned);
+            var result = JsonNode.Parse(business.GetRawText())!.AsObject();
+            result["_cocernNative"] = stamp;
+            return JsonSerializer.SerializeToElement(result);
+        }, ct, resolveCheckout);
     }
 
     internal static async Task<AdapterReply> InvokeAsync(NativeJoin join, string provider, string tool, JsonElement input, CancellationToken ct, TimeProvider? clock = null,
         Func<string, CancellationToken, Task<string>>? resolveCheckout = null,
-        Func<string, byte[], CancellationToken, Task>? writeReadCache = null, Func<TimeSpan, CancellationToken, Task>? retryDelay = null)
+        Func<string, byte[], CancellationToken, Task>? writeReadCache = null, Func<TimeSpan, CancellationToken, Task>? retryDelay = null,
+        Func<string, string>? normalizeWorkspace = null)
     {
         if (input.ValueKind != JsonValueKind.Object || !input.TryGetProperty("_cocernNative", out var stamp)) return new(false, "native_stamp_required");
         string? authenticationFailure = null;
@@ -270,7 +274,7 @@ internal static class NativeJoinHook
                     return candidate.Generation == generation && candidate.CurrentHandle is not null && candidate.Provider == provider && candidate.NativeId == native &&
                         candidate.Workspace == cwd && candidate.RepositoryId == repository &&
                         CryptographicOperations.FixedTimeEquals(Convert.FromHexString(mac), Convert.FromHexString(Mac(candidate, tool, business, JsonSerializer.SerializeToElement(unsigned))));
-                }))
+                }, normalizeWorkspace: normalizeWorkspace))
             {
                 now = (clock ?? TimeProvider.System).GetUtcNow().ToUnixTimeSeconds();
                 if (expires <= now || expires > now + 120) return new(false, "native_stamp_expired");
@@ -301,8 +305,13 @@ internal static class NativeJoinHook
         var path = Path.ChangeExtension(binding.StatePath, ".reads");
         ReadAdmission[] prior = [];
         byte[]? priorBytes = null;
-        if (File.Exists(path))
+        FileAttributes? attributes = null;
+        try { attributes = File.GetAttributes(path); }
+        catch (FileNotFoundException) { } // Only a genuinely absent optional cache is empty history.
+        if (attributes is { } present)
         {
+            if ((present & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
+                throw new IOException("The native read history is not a regular private file.");
             if (!NodeState.IsPrivateFile(path) || new FileInfo(path).Length > MaximumInputBytes) throw new IOException("The native read cache is not private or bounded.");
             priorBytes = File.ReadAllBytes(path);
             using var document = JsonDocument.Parse(priorBytes, new JsonDocumentOptions { MaxDepth = 4 });
@@ -445,6 +454,19 @@ internal sealed class NativeRegistration
     internal const string ProtocolMetadata = "CoCern.NativeClientProtocol";
     internal const string ProtocolVersion = "1";
     internal const string PrivateServerName = "CoCern native private v1";
+    internal static bool HasPrivateOptionName(string argument)
+    {
+        var name = argument.AsSpan();
+        if (name.IsEmpty) return false;
+        var prefixed = name[0] is '-' or '/';
+        while (!name.IsEmpty && (name[0] is '-' or '/')) name = name[1..];
+        var separator = name.IndexOfAny('=', ':');
+        if (!prefixed && separator < 0) return false;
+        if (separator >= 0) name = name[..separator];
+        return name.Equals("native-client", StringComparison.OrdinalIgnoreCase) || name.Equals("native-hook", StringComparison.OrdinalIgnoreCase) ||
+            name.Equals("connection", StringComparison.OrdinalIgnoreCase) || name.Equals("profile", StringComparison.OrdinalIgnoreCase) ||
+            name.Equals("development-root", StringComparison.OrdinalIgnoreCase);
+    }
     internal static void RestrictPrivateEnvironment(ProcessStartInfo start)
     {
         foreach (var name in start.Environment.Keys.Where(name => name.StartsWith("COCERN_", StringComparison.OrdinalIgnoreCase)).ToArray())

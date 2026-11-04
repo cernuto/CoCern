@@ -167,7 +167,7 @@ try
         return await NodeRunner.RunAsync(state, hub, new NodeTransport { JoinCode = joinCode }, Console.Error, shutdown.Token);
     }
     NativeRegistration? registration = null;
-    if (args.Any(argument => argument is "--native-client" or "--native-hook" or "--connection" or "--profile" or "--development-root"))
+    if (args.Any(NativeRegistration.HasPrivateOptionName))
     {
         registration = NativeRegistration.FromClientArguments(args) ?? throw new AdapterConfigurationException(NativeRegistration.Refusal);
         if (await registration.AcceptAsync(CancellationToken.None) is null) throw new AdapterConfigurationException(NativeRegistration.Refusal);

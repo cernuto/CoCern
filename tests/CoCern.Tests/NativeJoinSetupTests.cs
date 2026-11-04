@@ -6,6 +6,8 @@ using System.IO.Pipes;
 using System.Buffers.Binary;
 using System.Net;
 using System.Net.Sockets;
+using System.IO.Compression;
+using System.Security.Cryptography;
 using CoCern.Adapter;
 using CoCern.Adapter.Development;
 using CoCern.Adapter.Node;
@@ -605,24 +607,15 @@ public sealed class NativeJoinSetupTests : IDisposable
     [Fact]
     public async Task FixRound1_cancelled_development_hook_preserves_independent_sentinel_descendant()
     {
-        const string python = "C:/Python314/python.exe";
-        Assert.True(File.Exists(python));
-        var source = Directory.CreateDirectory(Path.Combine(root, "synthetic-helper")).FullName;
-        File.WriteAllText(Path.Combine(source, "CoCern.Adapter.deps.json"), "{}");
-        File.WriteAllText(Path.Combine(source, "CoCern.Adapter.runtimeconfig.json"), "{}");
-        File.WriteAllText(Path.Combine(source, "CoCern.Adapter.dll"), """
-            import json, pathlib, subprocess, sys, time
-            folder = pathlib.Path(sys.argv[sys.argv.index('--connection') + 1])
-            sentinel = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=0x08000000)
-            (folder / 'owned-pids.json').write_text(json.dumps({'helper': __import__('os').getpid(), 'sentinel': sentinel.pid}))
-            sys.stdin.read()
-            time.sleep(60)
-            """);
+        var source = FixturePackage("CoCern.NativeProcessFixture");
+        var (environment, _) = WiringStartInfo([]);
+        environment.Environment["DOTNET_HOST_PATH"] = environment.FileName;
         var deployment = Path.Combine(root, "synthetic-helper-deployment");
         AdapterDeployment.Publish(source, deployment);
         using var cancel = new CancellationTokenSource();
         using var output = new StringWriter(); using var error = new StringWriter();
-        var run = NativeJoinHook.RunDevelopmentAsync(deployment, python, "claude", root, new StringReader("{}"), output, error, cancel.Token);
+        var run = NativeJoinHook.RunDevelopmentAsync(deployment, environment.FileName, "claude", root, new StringReader("{}"), output, error, cancel.Token,
+            configureProcess: start => { start.Environment.Clear(); foreach (var pair in environment.Environment) start.Environment[pair.Key] = pair.Value; });
         Process? sentinel = null; Process? helper = null;
         try
         {
@@ -651,14 +644,109 @@ public sealed class NativeJoinSetupTests : IDisposable
         }
     }
 
-    private static string FixRound1OldOutput()
+    [Fact]
+    public async Task FixRound2_packaged_actual_legacy_adapter_ignores_private_arguments_and_serves_raw_catalog()
     {
-        var output = Path.Combine(Workspace(), "artifacts", "n4cover", "bin", "CoCern.Adapter", "debug");
-        Assert.True(File.Exists(Path.Combine(output, "CoCern.Adapter.dll")), "The preserved own pre-wiring package is required; never substitute primary outputs.");
-        return output;
+        await using var relay = new WiringRelayCounter();
+        var (_, args) = WiringCandidate(relay.Origin);
+        var package = FixRound1OldOutput();
+        await using var child = WiringStart(args, relay.Origin, Path.Combine(package, "CoCern.Adapter.dll"));
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var initialized = await WiringRpc(child, 1, "initialize", new { protocolVersion = "2025-06-18", capabilities = new { }, clientInfo = new { name = "owned-actual-legacy-precondition", version = "1" } }, timeout.Token);
+        Assert.Contains("Keep one session per chat", initialized.GetProperty("result").GetProperty("instructions").GetString());
+        await child.Process.StandardInput.WriteLineAsync("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}");
+        var listed = await WiringRpc(child, 2, "tools/list", new { }, timeout.Token);
+        Assert.Contains(listed.GetProperty("result").GetProperty("tools").EnumerateArray(), tool => tool.GetProperty("name").GetString() == "session_open");
+        Assert.Equal(0, relay.Count); Assert.Equal(0, relay.BusinessRequests); Assert.Equal(0, relay.HintAttempts);
+        Assert.Equal("unchanged", File.ReadAllText(child.Sentinel));
     }
 
-    private static string WiringOutput() => Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "CoCern.Adapter", "debug"));
+    [Theory]
+    [InlineData("joined")]
+    [InlineData("orphaned-joined")]
+    [InlineData("mixed")]
+    [InlineData("joined-hook")]
+    [InlineData("joined-development-root")]
+    [InlineData("upper-joined")]
+    [InlineData("upper-pairs")]
+    [InlineData("bare-joined")]
+    public async Task FixRound2_private_option_names_refuse_all_unsupported_forms_before_raw_configuration(string form)
+    {
+        await using var relay = new WiringRelayCounter();
+        var (_, valid) = WiringCandidate(relay.Origin);
+        var folder = valid[3];
+        var args = form switch
+        {
+            "joined" => new[] { "--native-client=codex", "--connection=" + folder, "--profile=" + Profile },
+            "orphaned-joined" => ["--connection=" + folder, "--profile=" + Profile],
+            "mixed" => ["--native-client=codex", "--connection", folder, "--profile=" + Profile],
+            "joined-hook" => ["--native-hook=claude", "--connection=" + folder, "--profile=" + Profile],
+            "joined-development-root" => ["--development-root=" + root, "--connection=" + folder, "--profile=" + Profile],
+            "upper-joined" => ["--NATIVE-CLIENT=codex", "--CONNECTION=" + folder, "--PROFILE=" + Profile],
+            "bare-joined" => ["native-client=codex", "connection=" + folder, "profile=" + Profile],
+            _ => ["--NATIVE-CLIENT", "codex", "--CONNECTION", folder, "--PROFILE", Profile]
+        };
+        await using var child = WiringStart(args, relay.Origin);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await child.Process.StandardInput.WriteLineAsync("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"owned-private-name-refusal\",\"version\":\"1\"}}}");
+        var response = await child.Process.StandardOutput.ReadLineAsync(timeout.Token);
+        child.Process.StandardInput.Close(); await child.Process.WaitForExitAsync(timeout.Token);
+        Assert.Equal(0, relay.Count); Assert.Equal(0, relay.BusinessRequests); Assert.Equal(0, relay.HintAttempts);
+        Assert.Equal("unchanged", File.ReadAllText(child.Sentinel));
+        Assert.Null(response); Assert.Equal(1, child.Process.ExitCode);
+        Assert.Equal("Native client registration could not be verified.", (await child.Error).Trim());
+    }
+
+    private string FixRound1OldOutput() => FixturePackage("CoCern.NativeLegacyFixture");
+
+    private string FixturePackage(string assembly)
+    {
+        var source = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", assembly, new DirectoryInfo(AppContext.BaseDirectory).Name));
+        Assert.True(File.Exists(Path.Combine(source, assembly + ".dll")), "Build the test fixture dependency in this invocation's isolated outputs.");
+        if (assembly == "CoCern.NativeLegacyFixture") VerifyLegacySource(source);
+        var package = Path.Combine(root, "fixture-packages", assembly);
+        Assert.False(Directory.Exists(package));
+        Directory.CreateDirectory(package);
+        foreach (var file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
+        {
+            var relative = Path.GetRelativePath(source, file);
+            var destination = Path.Combine(package, relative);
+            Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+            File.Copy(file, destination);
+        }
+        foreach (var suffix in new[] { ".dll", ".deps.json", ".runtimeconfig.json" })
+        {
+            var original = Path.Combine(source, assembly + suffix);
+            var copied = Path.Combine(package, "CoCern.Adapter" + suffix);
+            File.Copy(original, copied);
+            Assert.True(SHA256.HashData(File.ReadAllBytes(original)).AsSpan().SequenceEqual(SHA256.HashData(File.ReadAllBytes(copied))));
+        }
+        return package;
+    }
+
+    private static void VerifyLegacySource(string source)
+    {
+        var archivePath = Path.Combine(source, "legacy-adapter-source.zip");
+        var manifestPath = Path.Combine(source, "source-manifest.json");
+        Assert.Equal("9AA0030EFF65B527F20D8AD2296ABB6D0F1432751E360047875944BB3F4978ED", Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(archivePath))));
+        Assert.Equal("28B267DDF8AD3C7C8C7FBAF03CD936D30DB02F7FA5DC00411D9F3A85318EE857", Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(manifestPath))));
+        using var manifest = JsonDocument.Parse(File.ReadAllBytes(manifestPath));
+        Assert.Equal("349db7e0948954a53596f73a7d8e7326df7de6bb", manifest.RootElement.GetProperty("Commit").GetString());
+        Assert.Equal("ae8d82e1a960f9dfead83330863bf948e6698107", manifest.RootElement.GetProperty("AdapterTree").GetString());
+        var expected = manifest.RootElement.GetProperty("Files").EnumerateArray().ToDictionary(row => row.GetProperty("Path").GetString()!, row => row.Clone());
+        using var archive = ZipFile.OpenRead(archivePath);
+        var files = archive.Entries.Where(entry => !entry.FullName.EndsWith('/')).ToArray();
+        Assert.Equal(expected.Count, files.Length);
+        foreach (var entry in files)
+        {
+            Assert.StartsWith("src/CoCern.Adapter/", entry.FullName); Assert.DoesNotContain("..", entry.FullName);
+            var row = expected[entry.FullName]; Assert.Equal(row.GetProperty("Length").GetInt64(), entry.Length);
+            using var stream = entry.Open();
+            Assert.Equal(row.GetProperty("SHA256").GetString(), Convert.ToHexString(SHA256.HashData(stream)));
+        }
+    }
+
+    private static string WiringOutput() => Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "CoCern.Adapter", new DirectoryInfo(AppContext.BaseDirectory).Name));
     private string WiringDeployment()
     {
         var deployment = Path.Combine(root, "deployment with spaces");
@@ -674,15 +762,15 @@ public sealed class NativeJoinSetupTests : IDisposable
         return (NativeRegistration.Read(candidate, "codex", connection.Folder, Profile)!, ["--native-client", "codex", "--connection", connection.Folder, "--profile", Profile]);
     }
 
-    private WiringChild WiringStart(string[] args, string? rawOrigin = null)
+    private WiringChild WiringStart(string[] args, string? rawOrigin = null, string? adapter = null)
     {
-        var (start, sentinel) = WiringStartInfo(args, rawOrigin);
+        var (start, sentinel) = WiringStartInfo(args, rawOrigin, adapter);
         return new(Process.Start(start)!, sentinel);
     }
 
-    private (ProcessStartInfo Start, string Sentinel) WiringStartInfo(string[] args, string? rawOrigin = null)
+    private (ProcessStartInfo Start, string Sentinel) WiringStartInfo(string[] args, string? rawOrigin = null, string? adapter = null)
     {
-        var adapter = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "CoCern.Adapter", "debug", "CoCern.Adapter.dll"));
+        adapter ??= Path.Combine(WiringOutput(), "CoCern.Adapter.dll");
         Assert.True(File.Exists(adapter));
         var dotnet = Environment.GetEnvironmentVariable("DOTNET_HOST_PATH");
         if (dotnet is null || !Path.IsPathFullyQualified(dotnet) || !File.Exists(dotnet))

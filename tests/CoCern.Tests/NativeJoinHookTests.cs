@@ -701,7 +701,7 @@ public sealed class NativeJoinHookTests(ITestOutputHelper output)
                 throw NativeReadError(scenario == "other-error" ? 112 : 32);
             }, retryDelay: (_, _) => { waits++; return Task.CompletedTask; });
         Assert.False(result.Ok); Assert.Equal("native_stamp_invalid", result.Code);
-        Assert.Equal(1, attempts); Assert.Equal(0, waits); Assert.Equal(0, fixture.Requests); Assert.Empty(fixture.Business);
+        Assert.Equal(scenario == "directory" ? 0 : 1, attempts); Assert.Equal(0, waits); Assert.Equal(0, fixture.Requests); Assert.Empty(fixture.Business);
         if (scenario == "directory") Assert.True(Directory.Exists(cache));
         if (scenario == "missing") Assert.False(File.Exists(cache));
         if (scenario is "changed" or "corrupt") Assert.Equal(scenario == "changed" ? "[]\n" : "[broken", File.ReadAllText(cache));
@@ -716,6 +716,89 @@ public sealed class NativeJoinHookTests(ITestOutputHelper output)
         var cache = Path.ChangeExtension(binding.StatePath, ".reads");
         if (create) NodeState.WritePrivately(cache, Encoding.UTF8.GetBytes("[]"));
         return cache;
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task FixRound2_unauthenticated_short_name_spelling_never_normalizes_or_resolves_checkout(bool unc)
+    {
+        await using var fixture = new HookFixture();
+        await fixture.Join.EnsureAsync(fixture.Capture, default);
+        var signed = await NativeJoinHook.StampAsync(fixture.Join, fixture.Capture, RelayTools.ChatDirectory, "short-name-forgery", JsonSerializer.SerializeToElement(new { }), default);
+        var forged = JsonNode.Parse(signed.GetRawText())!.AsObject();
+        forged["_cocernNative"]!["cwd"] = unc ? @"\\untrusted.invalid\share\PROJEC~1" : @"C:\untrusted-fixture\PROJEC~1";
+        forged["_cocernNative"]!["mac"] = new string('0', 64);
+        var normalizations = 0; var resolutions = 0; fixture.Requests = 0;
+        var result = await NativeJoinHook.InvokeAsync(fixture.Join, "claude", RelayTools.ChatDirectory, JsonSerializer.SerializeToElement(forged), default,
+            normalizeWorkspace: _ => { normalizations++; throw new IOException("Instrumented normalization refused."); },
+            resolveCheckout: (_, _) => { resolutions++; throw new IOException("Instrumented checkout resolution refused."); });
+        Assert.False(result.Ok); Assert.Equal("native_stamp_invalid", result.Code);
+        Assert.Equal(0, normalizations); Assert.Equal(0, resolutions); Assert.Equal(0, fixture.Requests); Assert.Empty(fixture.Business);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task FixRound2_signing_waits_for_complete_candidate_set_and_refuses_ambiguity(bool ambiguous)
+    {
+        await using var fixture = new HookFixture();
+        await fixture.Join.EnsureAsync(fixture.Capture, default);
+        var repository = ambiguous ? "other-repo" : "repo";
+        var held = await NativeJoinBinding.AcquireAsync(fixture.Folder, "claude", Parent, Environment.MachineName, repository, fixture.Capture.Cwd, default);
+        if (ambiguous)
+        {
+            var handle = new SessionHandle("s-other-owned", "synthetic-other-token", repository, "fixture", DateTimeOffset.UtcNow,
+                new("claude", Parent), new("claude", Parent)) { NativeBindingKey = held.OwnershipKey };
+            NodeState.WriteSessionHandle(fixture.Folder, handle); Assert.True(held.Complete(handle));
+        }
+        fixture.Requests = 0;
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var stamping = NativeJoinHook.StampAsync(fixture.Join, fixture.Capture, RelayTools.ChatDirectory, "busy-candidate", JsonSerializer.SerializeToElement(new { }), timeout.Token,
+            resolveCheckout: (_, _) => Task.FromResult(fixture.Capture.Cwd));
+        var completedWhileBusy = stamping.IsCompleted;
+        await held.DisposeAsync();
+        JsonElement result = default;
+        var failure = await Record.ExceptionAsync(async () => { result = await stamping.WaitAsync(timeout.Token); });
+        Assert.Equal(0, fixture.Requests); Assert.Empty(fixture.Business);
+        Assert.False(completedWhileBusy, "A busy candidate must not disappear from the lookup.");
+        if (ambiguous) Assert.IsAssignableFrom<IOException>(failure);
+        else { Assert.Null(failure); Assert.True(result.TryGetProperty("_cocernNative", out _)); }
+    }
+
+    [Fact]
+    public async Task FixRound2_signing_wait_on_established_lease_is_cancellable_without_relay()
+    {
+        await using var fixture = new HookFixture();
+        await fixture.Join.EnsureAsync(fixture.Capture, default);
+        await using var held = await NativeJoinBinding.AcquireAsync(fixture.Folder, "claude", Parent, Environment.MachineName, "repo", fixture.Capture.Cwd, default, existingOnly: true);
+        fixture.Requests = 0;
+        using var cancel = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var stamping = NativeJoinHook.StampAsync(fixture.Join, fixture.Capture, RelayTools.ChatDirectory, "cancelled-lookup", JsonSerializer.SerializeToElement(new { }), cancel.Token,
+            resolveCheckout: (_, _) => Task.FromResult(fixture.Capture.Cwd));
+        cancel.Cancel();
+        var cancelled = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => stamping);
+        Assert.Equal(cancel.Token, cancelled.CancellationToken);
+        Assert.Equal(0, fixture.Requests); Assert.Empty(fixture.Business);
+    }
+
+    [Fact]
+    public async Task FixRound2_nonregular_read_history_refuses_signed_mutation_before_any_relay_or_permanent_fence()
+    {
+        await using var fixture = new HookFixture();
+        await fixture.Join.EnsureAsync(fixture.Capture, default);
+        var signed = await NativeJoinHook.StampAsync(fixture.Join, fixture.Capture, RelayTools.SendMessage, "directory-mutation", JsonSerializer.SerializeToElement(new { recipientSessionId = "peer", text = "never dispatch" }), default);
+        string cache; string mutations;
+        await using (var binding = await NativeJoinBinding.AcquireAsync(fixture.Folder, "claude", Parent, Environment.MachineName, "repo", fixture.Capture.Cwd, default, existingOnly: true))
+        {
+            cache = Path.ChangeExtension(binding.StatePath, ".reads"); mutations = Path.Combine(Path.GetDirectoryName(binding.StatePath)!, "calls-" + binding.BindingKey);
+            Directory.CreateDirectory(cache); File.WriteAllText(Path.Combine(cache, "sentinel"), "unchanged");
+        }
+        fixture.Requests = 0;
+        var result = await NativeJoinHook.InvokeAsync(fixture.Join, "claude", RelayTools.SendMessage, signed, default);
+        Assert.False(result.Ok); Assert.Equal("native_stamp_invalid", result.Code);
+        Assert.Equal(0, fixture.Requests); Assert.Empty(fixture.Business); Assert.False(Directory.Exists(mutations));
+        Assert.True(Directory.Exists(cache)); Assert.Equal("unchanged", File.ReadAllText(Path.Combine(cache, "sentinel")));
     }
 
     private sealed class AdvancingClock(DateTimeOffset now) : TimeProvider

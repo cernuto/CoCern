@@ -52,6 +52,39 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
     internal async Task<SessionHandle> EnsureAsync(NativeHookContext context, CancellationToken ct) =>
         (await EnsureBoundAsync(context, null, ct)).Handle;
 
+    internal async Task<JsonElement> WithEstablishedSigningBindingAsync(NativeHookContext context, Func<NativeJoinBinding, JsonElement> sign,
+        CancellationToken ct, Func<string, CancellationToken, Task<string>>? resolveCheckout = null)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct, stopping.Token);
+        timeout.CancelAfter(TimeSpan.FromSeconds(15));
+        var cancel = timeout.Token;
+        try
+        {
+            cancel.ThrowIfCancellationRequested();
+            if (context.Provider is not ("claude" or "codex") || context.NativeId is not { Length: 32 or 36 } ||
+                !Guid.TryParseExact(context.NativeId, context.NativeId.Length == 32 ? "N" : "D", out var id)) throw new Refused("native_capture_required");
+            var workspace = resolveCheckout is null
+                ? await Task.Run(() => NativeCheckout.Inspect(context.Cwd).Root, cancel).WaitAsync(cancel)
+                : await resolveCheckout(context.Cwd, cancel);
+            var scope = CredentialScope();
+            var directory = IntentDir(scope);
+            SafeDirectory(directory, false);
+            var intent = new Intent(context.Provider, id.ToString("D"), workspace);
+            var name = NativeCheckout.Hash(JsonSerializer.Serialize(intent));
+            // The same fence excludes SessionStart/open and repository remapping for this capture.
+            // Retain it through the complete candidate lookup AND MAC issuance, without relay work.
+            await using var membership = await NativeJoinBinding.LockAsync(Path.Combine(directory, name[..2] + ".lock"), cancel, existingOnly: true);
+            if (CredentialScope() != scope) throw new Refused("native_private_connection_required");
+            Func<string, CancellationToken, Task<string>>? knownCheckout = resolveCheckout is null ? null : (_, _) => Task.FromResult(workspace);
+            await using var binding = await NativeJoinBinding.AcquireEstablishedAsync(folder, context.Provider, id.ToString("D"),
+                Environment.MachineName, workspace, cancel, resolveCheckout: knownCheckout);
+            cancel.ThrowIfCancellationRequested();
+            return sign(binding);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw new OperationCanceledException(ct); }
+        catch (OperationCanceledException) when (!stopping.IsCancellationRequested) { throw new Refused("native_binding_busy"); }
+    }
+
     private async Task<(SessionHandle Handle,string? Request)> EnsureBoundAsync(NativeHookContext context, Invocation? invocation, CancellationToken ct, bool retry = true, string? expectedGeneration = null)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct, stopping.Token);
