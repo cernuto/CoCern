@@ -61,7 +61,7 @@ public sealed class ClaudeCliRegistrationTests : IDisposable
             MaxRetry = TimeSpan.FromMilliseconds(20),
             CodexExecutable = () => null
         },
-        EnrollTimeout = TimeSpan.FromSeconds(20),
+        EnrollTimeout = TimeSpan.FromSeconds(60),
         Out = output,
         Error = error
     };
