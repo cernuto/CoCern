@@ -18,6 +18,17 @@ public static class CoordinationTools
     public static bool IsAllowed(string name, bool admin, bool chatOnly = false, bool diagnostics = false) =>
         RelayToolCatalog.TryGet(name, out var tool) && (admin || !tool.AdministratorOnly) && (!chatOnly || ChatTools.Contains(tool.Name)) && (!diagnostics || !tool.AdministratorOnly || tool.Name == RelayTools.AnalyticsQuery);
 
+    // Private integration seam. Only a future verified provider surface can supply this callback;
+    // the raw registration never inspects arguments for a native ID or stamp.
+    internal sealed record VerifiedInvocation(NativeHookContext Context, string ToolUseId, JsonElement Arguments);
+    internal static IEnumerable<McpServerTool> CreateVerified(NativeJoin join, bool admin, bool chatOnly, bool diagnostics,
+        Func<string, JsonElement, CancellationToken, Task<VerifiedInvocation?>> verify)
+    {
+        return Surface(admin, chatOnly, diagnostics).Where(tool => tool.Name is not (RelayTools.SessionOpen or RelayTools.SessionBind)).Select(tool =>
+            new ForwardedTool(tool, async (args, ct) => await verify(tool.Name, args, ct) is { } call
+                ? await join.CallAsync(call.Context, call.ToolUseId, tool.Name, call.Arguments, ct) : new(false, "native_capture_required")));
+    }
+
     /// <param name="chat">The chat ID the client exported to this process (<see cref="AdapterOptions.ExportedChat"/>), if any; it keeps the chat's request IDs its own across adapter restarts.</param>
     public static IEnumerable<McpServerTool> Create(RelayForwarder forwarder, bool admin, SessionHints? hints = null, SessionHandoff? handoff = null, bool chatOnly = false, ChatLocation? chat = null, LocalChatWake? localWake = null, bool diagnostics = false)
     {
@@ -81,6 +92,18 @@ public static class CoordinationTools
 
     private static string? GitTopLevel(string directory, string? git, bool nativeEvent)
     {
+        try
+        {
+            var path = GitRead(directory, git, nativeEvent, ["rev-parse", "--show-toplevel"]);
+            return path is null ? null : Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+        }
+        catch (Exception error) when (error is ArgumentException or IOException or UnauthorizedAccessException) { return null; }
+    }
+
+    internal static string? NativeGitRead(string directory, params string[] arguments) => GitRead(directory, Git.Value, true, arguments);
+
+    private static string? GitRead(string directory, string? git, bool nativeEvent, string[] arguments)
+    {
         if (git is null) return null;
         try
         {
@@ -90,21 +113,28 @@ public static class CoordinationTools
             if (nativeEvent)
                 foreach (var name in start.Environment.Keys.Where(name => name.StartsWith("GIT_", StringComparison.OrdinalIgnoreCase)).ToArray())
                     start.Environment.Remove(name);
-            foreach (var argument in new[] { "rev-parse", "--show-toplevel" }) start.ArgumentList.Add(argument);
+            foreach (var argument in arguments) start.ArgumentList.Add(argument);
             start.Environment["GIT_TERMINAL_PROMPT"] = "0";
             start.Environment["GIT_OPTIONAL_LOCKS"] = "0";
             using var process = System.Diagnostics.Process.Start(start);
             if (process is null) return null;
             process.StandardInput.Close();
-            var output = process.StandardOutput.ReadToEndAsync();
-            _ = process.StandardError.ReadToEndAsync();
+            var output = nativeEvent ? ReadBounded(process.StandardOutput) : process.StandardOutput.ReadToEndAsync();
+            _ = process.StandardError.BaseStream.CopyToAsync(Stream.Null);
             if (!process.WaitForExit(GitTimeout) || !output.Wait(GitTimeout))
             {
                 try { process.Kill(entireProcessTree: true); } catch (InvalidOperationException) { } catch (System.ComponentModel.Win32Exception) { }
                 return null;
             }
-            var path = output.Result.Trim();
-            return process.ExitCode == 0 && path.Length > 0 ? Path.TrimEndingDirectorySeparator(Path.GetFullPath(path)) : null;
+            var value = nativeEvent ? output.Result.TrimEnd('\r', '\n') : output.Result.Trim();
+            return process.ExitCode == 0 && value.Length > 0 && (!nativeEvent || !value.Any(char.IsControl)) ? value : null;
+
+            static async Task<string> ReadBounded(StreamReader reader)
+            {
+                var buffer = new char[32769];
+                var count = await reader.ReadBlockAsync(buffer);
+                return count == buffer.Length ? "" : new string(buffer, 0, count);
+            }
         }
         catch (Exception exception) when (exception is System.ComponentModel.Win32Exception or InvalidOperationException or IOException or ArgumentException or UnauthorizedAccessException) { return null; }
     }
@@ -125,10 +155,12 @@ public static class CoordinationTools
 
     private sealed class ForwardedTool : McpServerTool
     {
-        private readonly ChatCalls _calls;
-        public ForwardedTool(RelayTool tool, ChatCalls calls)
+        private readonly Func<JsonElement, CancellationToken, Task<AdapterReply>> call;
+        public ForwardedTool(RelayTool tool, ChatCalls calls) : this(tool, (args, ct) => calls.CallAsync(tool.Name, args, ct)) { }
+
+        public ForwardedTool(RelayTool tool, Func<JsonElement, CancellationToken, Task<AdapterReply>> call)
         {
-            _calls = calls;
+            this.call = call;
             ProtocolTool = new Tool
             {
                 Name = tool.Name,
@@ -155,7 +187,7 @@ public static class CoordinationTools
         public override async ValueTask<CallToolResult> InvokeAsync(RequestContext<CallToolRequestParams> request, CancellationToken cancellationToken = default)
         {
             var arguments = JsonSerializer.SerializeToElement(request.Params.Arguments ?? new Dictionary<string, JsonElement>());
-            var reply = await _calls.CallAsync(ProtocolTool.Name, arguments, cancellationToken);
+            var reply = await call(arguments, cancellationToken);
             var json = JsonSerializer.Serialize(reply, AdapterReply.JsonOptions);
             return new CallToolResult { IsError = !reply.Ok, Content = [new TextContentBlock { Text = json }] };
         }

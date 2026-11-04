@@ -342,7 +342,12 @@ internal sealed class NodeChats(string nodeFolder, IReadOnlyList<IChatLocator> l
             }
         }
         var codex = codexFound?.Invoke() ?? true;
-        return Fit(new JsonArray(Current(handles).Select(handle => (JsonNode)new JsonObject
+        // Never prune, scan, or choose between private generations using legacy timestamps.
+        var native = NativeJoinBinding.DispatchSnapshot(nodeFolder).Where(h => allowed(h.RepositoryId)).ToArray();
+        var routable = native.Concat(Current(handles).Where(h => h.Chat is null || !native.Any(n => n.Chat == h.Chat)))
+            .GroupBy(h => h.Chat is null ? h.SessionId : h.Chat.Provider + ":" + h.Chat.ThreadId)
+            .Where(group => group.Count() == 1).Select(group => group.Single()).Take(MaxChats);
+        return Fit(new JsonArray(routable.Select(handle => (JsonNode)new JsonObject
         {
             ["provider"] = handle.Chat?.Provider ?? ChatProviders.Unknown, ["threadId"] = handle.Chat?.ThreadId ?? "unmapped", ["relaySessionId"] = handle.SessionId,
             ["repositoryId"] = handle.RepositoryId, ["label"] = handle.Label, ["wakeable"] = handle.Chat is { } chat && (chat.Provider != ChatProviders.Codex || codex),

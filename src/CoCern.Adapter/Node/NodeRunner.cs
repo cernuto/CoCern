@@ -358,13 +358,20 @@ public sealed class NodeRunner : IAsyncDisposable
     {
         if (codex is null) return [];
         var targets = new List<WakeTarget>();
+        IReadOnlyList<SessionHandle>? native = null;
         foreach (var route in routes)
         {
             if (route.Provider != ChatProviders.Codex || !ChatLocators.IsUuid(route.ThreadId) || !NodeState.IsFileId(route.RelaySessionId)) continue;
             var path = NodeState.SessionHandlePath(nodeFolder, route.RelaySessionId);
             if (NodeState.ReadSessionHandle(path) is not { Chat: { Provider: ChatProviders.Codex } chat } handle || !string.Equals(chat.ThreadId, route.ThreadId, StringComparison.OrdinalIgnoreCase) ||
                 handle.RepositoryId != route.RepositoryId) continue;
-            targets.Add(new(new WakeRoute(handle.RepositoryId, "default", path, chat.ThreadId, machineName), new WakeSession(handle.SessionId, handle.SessionToken), dispatcher(codex)));
+            if (handle.NativeBindingKey is not null)
+            {
+                native ??= NativeJoinBinding.DispatchSnapshot(nodeFolder);
+                if (!native.Contains(handle) || native.Count(other => other.Chat == handle.Chat) != 1) continue;
+            }
+            targets.Add(new(new WakeRoute(handle.RepositoryId, "default", path, chat.ThreadId, machineName), new WakeSession(handle.SessionId, handle.SessionToken),
+                NativeJoinBinding.ForDispatch(nodeFolder, handle, dispatcher(codex))));
         }
         return targets;
     }

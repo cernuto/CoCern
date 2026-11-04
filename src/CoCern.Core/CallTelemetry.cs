@@ -49,7 +49,8 @@ internal sealed class CallTelemetry(IActivitySink activity, ITokenCounter? count
             var role = Bounded(trace.Role?.ToLowerInvariant(), RelayLimits.MaxActivityRoleLength);
             // The texts wait in the queue until the writer counts them. Past the hub's cap the event goes without them: token counts are
             // dropped before any activity row is.
-            var privatePayload = arguments.ValueKind == JsonValueKind.Object ? arguments.TryGetProperty("nativeJoin", out _) : tool == RelayTools.SessionOpen;
+            var privatePayload = arguments.ValueKind == JsonValueKind.Object ?
+                arguments.TryGetProperty("nativeJoin", out _) || arguments.TryGetProperty("nativePreflight", out _) : tool == RelayTools.SessionOpen;
             var (requestText, replyText) = counter is null || privatePayload ? (null, null) : (raw, reply is null || trace.ReplyTokens is not null ? null : reply.DataJson);
             if (!TokenTextBudget.Shared.TryHold(requestText, replyText)) (requestText, replyText) = (null, null);
             activity.Record(new ActivityEvent
