@@ -136,17 +136,27 @@ public sealed class DashboardHostReviewTests
                 ["Relay:Clients:0:IsAdministrator"] = "true",
                 ["Relay:Dashboard:ViewerPrincipalIds:0"] = "viewer"
             }).Build();
-            var security = new DashboardSecurity(configuration, new TestEnvironment(directory));
-            var principal = Assert.IsType<System.Security.Claims.ClaimsPrincipal>(security.Exchange("first-test-token", DateTimeOffset.UtcNow));
+            long ticks = 10_000;
+            var now = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+            var security = new DashboardSecurity(configuration, new TestEnvironment(directory), () => ticks);
+            var principal = Assert.IsType<System.Security.Claims.ClaimsPrincipal>(security.Exchange("first-test-token", now));
             await File.WriteAllTextAsync(path, "second-test-token");
-            Assert.True(security.IsValid(principal, DateTimeOffset.UtcNow));
-            await Task.Delay(1100);
-            Assert.False(security.IsValid(principal, DateTimeOffset.UtcNow));
-            principal = Assert.IsType<System.Security.Claims.ClaimsPrincipal>(security.Exchange("second-test-token", DateTimeOffset.UtcNow));
+            ticks = 10_999;
+            Assert.True(security.IsValid(principal, now));
+            Assert.Null(security.Exchange("second-test-token", now));
+            ticks = 11_000;
+            Assert.False(security.IsValid(principal, now));
+            Assert.Null(security.Exchange("first-test-token", now));
+            principal = Assert.IsType<System.Security.Claims.ClaimsPrincipal>(security.Exchange("second-test-token", now));
+            var expiring = Assert.IsType<System.Security.Claims.ClaimsPrincipal>(security.Exchange("second-test-token", now, now.AddSeconds(1)));
+            Assert.True(security.IsValid(expiring, now.AddMilliseconds(999)));
+            Assert.False(security.IsValid(expiring, now.AddSeconds(1)));
             File.Delete(path);
-            await Task.Delay(1100);
-            Assert.False(security.IsValid(principal, DateTimeOffset.UtcNow));
-            Assert.Null(security.Exchange("second-test-token", DateTimeOffset.UtcNow));
+            ticks = 11_999;
+            Assert.True(security.IsValid(principal, now));
+            ticks = 12_000;
+            Assert.False(security.IsValid(principal, now));
+            Assert.Null(security.Exchange("second-test-token", now));
         }
         finally { Directory.Delete(directory, recursive: true); }
     }
