@@ -20,6 +20,7 @@ internal static class ConnectCommand
 
     /// <summary>The variables a Connect entry carries; an entry with none of them is a joined PC's node entry, which is never this hub's to change.</summary>
     private static readonly string[] HubVariables = ["COCERN_TOKEN_FILE", "COCERN_TOKEN", "COCERN_URL", "COCERN_FINGERPRINT"];
+    private static readonly string[] ManagedVariables = [.. HubVariables, RoleVariable];
 
     public static int Run(IReadOnlyList<string> args, string profile, string? appData, string dotnetPath, string adapterDll, TextWriter output, TextWriter error, TimeProvider? clock = null)
     {
@@ -68,7 +69,7 @@ internal static class ConnectCommand
         var owned = new HashSet<string>(StringComparer.Ordinal);
         EntryRefresh RefreshFor(string id) => variables =>
         {
-            if (BelongsToHub(variables, tokenFile, hub, fingerprint, localHub?.Url)) owned.Add(id);
+            if (BelongsToHub(variables, tokenFile, hub, localHub?.Url)) owned.Add(id);
             var changes = Refresh(variables, tokenFile, hub, fingerprint, localHub?.Url, admin);
             seen[id] = (IsAdmin(variables), changes);
             return changes;
@@ -156,13 +157,12 @@ internal static class ConnectCommand
     /// known; and, when <paramref name="admin"/> is given, <c>COCERN_ROLE</c> set to <c>admin</c> or removed to match. Null when nothing differs
     /// or the entry is not this hub's. The hub's certificate can change (a new one, or a new place for it), and an entry still pinning the old one
     /// stops connecting. A local refresh never claims a supplied non-loopback or invalid origin. An eligible entry counts as this hub's when its token file is in this hub's data folder (beside <paramref name="tokenFile"/>);
-    /// without a token file, when its address is this hub's (<paramref name="hub"/>, or the hub's own record <paramref name="localUrl"/>), any
-    /// plain-HTTP address on this PC (as before the hub had loopback HTTPS), or it pins this hub's current certificate. A token file anywhere else
+    /// without a token file, when its address matches the requested destination, the recorded TLS origin, or the legacy default HTTP origin. A token file anywhere else
     /// is another hub's, and an entry with none of the CoCern variables is a node's; both are left alone, as is everything else in the entry.
     /// </summary>
     internal static IReadOnlyDictionary<string, string?>? Refresh(IReadOnlyDictionary<string, string> variables, string tokenFile, string? hub, string? fingerprint, string? localUrl, bool? admin = null)
     {
-        if (!BelongsToHub(variables, tokenFile, hub, fingerprint, localUrl)) return null;
+        if (!BelongsToHub(variables, tokenFile, hub, localUrl)) return null;
         var url = variables.GetValueOrDefault("COCERN_URL")?.Trim() is { Length: > 0 } given ? given : HubAddresses.LocalUrl;
         var pinned = CertificateFingerprint.Normalize(variables.GetValueOrDefault("COCERN_FINGERPRINT")) is { Length: > 0 } pin ? pin : null;
         var changes = new Dictionary<string, string?>(StringComparer.Ordinal);
@@ -175,18 +175,20 @@ internal static class ConnectCommand
         return changes.Count == 0 ? null : changes;
     }
 
-    private static bool BelongsToHub(IReadOnlyDictionary<string, string> variables, string tokenFile, string? hub, string? fingerprint, string? localUrl)
+    private static bool BelongsToHub(IReadOnlyDictionary<string, string> variables, string tokenFile, string? hub, string? localUrl)
     {
+        // Windows will treat alternate spellings as the same variable when the client launches the adapter.
+        if (OperatingSystem.IsWindows() && variables.Keys.Any(key => ManagedVariables.Contains(key, StringComparer.OrdinalIgnoreCase) && !ManagedVariables.Contains(key, StringComparer.Ordinal))) return false;
         if (!HubVariables.Any(variables.ContainsKey)) return false;
         if ((hub is null || HubAddresses.TryParseLoopbackOrigin(hub, out _)) &&
             variables.TryGetValue("COCERN_URL", out var supplied) && !HubAddresses.TryParseLoopbackOrigin(supplied, out _))
-            return false; // A shared credential path or pin cannot turn a remote or malformed entry into a local one.
+            return false; // A shared credential path cannot turn a remote or malformed entry into a local one.
+        if (variables.GetValueOrDefault("COCERN_TOKEN_FILE")?.Trim() is { Length: > 0 } file)
+            return InFolder(file, Path.GetDirectoryName(Path.GetFullPath(tokenFile))!);
+
         var url = variables.GetValueOrDefault("COCERN_URL")?.Trim() is { Length: > 0 } given ? given : HubAddresses.LocalUrl;
-        var pinned = CertificateFingerprint.Normalize(variables.GetValueOrDefault("COCERN_FINGERPRINT"));
-        return variables.GetValueOrDefault("COCERN_TOKEN_FILE")?.Trim() is { Length: > 0 } file
-            ? InFolder(file, Path.GetDirectoryName(Path.GetFullPath(tokenFile))!)
-            : AdapterOptions.TryParseOrigin(url, out var origin) && (origin.Scheme == Uri.UriSchemeHttp && origin.IsLoopback || hub is not null && SameOrigin(origin, hub) || localUrl is not null && SameOrigin(origin, localUrl))
-              || fingerprint is not null && pinned == fingerprint;
+        return AdapterOptions.TryParseOrigin(url, out var origin) && (SameOrigin(origin, HubAddresses.LocalUrl)
+            || hub is not null && SameOrigin(origin, hub) || localUrl is not null && SameOrigin(origin, localUrl));
     }
 
     private static bool SameOrigin(Uri origin, string other) => AdapterOptions.TryParseOrigin(other, out var parsed) && Uri.Compare(origin, parsed, UriComponents.AbsoluteUri, UriFormat.SafeUnescaped, StringComparison.OrdinalIgnoreCase) == 0;

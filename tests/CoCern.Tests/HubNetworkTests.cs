@@ -1,4 +1,7 @@
+using CoCern.Adapter;
 using CoCern.Contracts;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.Versioning;
@@ -412,6 +415,33 @@ public sealed class HubNetworkTests : IDisposable
             Assert.False(rule.IsInherited);
         }
         else Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(path));
+    }
+
+    [Fact]
+    public async Task Non_string_optional_http_metadata_allows_the_established_hub_to_restart_and_open_a_pinned_session()
+    {
+        var localPort = FreePort();
+        await using (var first = await StartAsync(FreePort(), FreePort(), enabled: false, localPort))
+            await first.StopAsync();
+        var identity = LocalHubRecord.Read(root)!;
+        var original = File.ReadAllBytes(CertificatePath);
+        var path = Path.Combine(root, LocalHubRecord.FileName);
+        var record = JsonNode.Parse(File.ReadAllText(path))!;
+        record["httpUrl"] = new JsonObject();
+        File.WriteAllText(path, record.ToJsonString());
+
+        await using var restarted = await StartAsync(FreePort(), FreePort(), enabled: false, localPort);
+        Assert.Equal(original, File.ReadAllBytes(CertificatePath));
+        using var certificate = X509CertificateLoader.LoadPkcs12FromFile(CertificatePath, null, X509KeyStorageFlags.EphemeralKeySet);
+        Assert.True(certificate.HasPrivateKey);
+        Assert.Equal(identity.Fingerprint, CertificateFingerprint.Of(certificate));
+        Assert.Equal(identity.Fingerprint, LocalHubRecord.Read(root)!.Fingerprint);
+        var options = new AdapterOptions(identity.Url, "network-test-secret-not-a-production-token") { PinnedFingerprint = identity.Fingerprint };
+        using var client = new HttpClient(RelayForwarder.CreateHandler(options));
+        var session = await new RelayForwarder(client, options).ForwardAsync("session_open", JsonSerializer.SerializeToElement(new { repositoryId = "repo", requestId = "restart" }));
+        Assert.True(session.Ok, session.Code);
+        Assert.False(string.IsNullOrWhiteSpace(session.Data!.Value.GetProperty("sessionId").GetString()));
+        await restarted.StopAsync();
     }
 
     [Fact]

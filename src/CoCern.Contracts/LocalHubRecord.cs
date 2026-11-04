@@ -11,7 +11,20 @@ public sealed record LocalHubRecord(string Url, string Fingerprint)
 {
     /// <summary>Optional configured loopback HTTP origin for same-PC chats.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    [JsonConverter(typeof(OptionalHttpUrlConverter))]
     public string? HttpUrl { get; init; }
+
+    private sealed class OptionalHttpUrlConverter : JsonConverter<string>
+    {
+        public override string? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+        {
+            if (reader.TokenType == JsonTokenType.String) return reader.GetString();
+            reader.Skip();
+            return null;
+        }
+
+        public override void Write(Utf8JsonWriter writer, string value, JsonSerializerOptions options) => writer.WriteStringValue(value);
+    }
 
     public const string FileName = "local-hub.json";
 

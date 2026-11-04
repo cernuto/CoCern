@@ -443,7 +443,7 @@ Changing a repository's settings makes its next sync re-read everything.
 
 ### Adapter
 
-Connect sets `COCERN_TOKEN_FILE`, `COCERN_URL` and `COCERN_FINGERPRINT`, and `COCERN_ROLE=admin` when the page's **Administrator tools** box is ticked; add the others to an app's `cocern` entry by hand. By hand, run `dotnet <path>/CoCern.Adapter.dll` as an MCP server with:
+Connect sets `COCERN_TOKEN_FILE` and the known `COCERN_URL`. It sets `COCERN_FINGERPRINT` for pinned HTTPS and `COCERN_ROLE=admin` when the page's **Administrator tools** box is ticked. For manual setup, run `dotnet <path>/CoCern.Adapter.dll` as an MCP server and set the variables you need in the app's `cocern` entry.
 
 | Variable | Default | What it does |
 | --- | --- | --- |
@@ -453,7 +453,7 @@ Connect sets `COCERN_TOKEN_FILE`, `COCERN_URL` and `COCERN_FINGERPRINT`, and `CO
 | `COCERN_PROFILE` | | `chat`: only `session_open`, `send_message`, `check_inbox`, `ack` and `chat_directory`. `diagnostics`: worker tools plus analytics, requiring an administrator credential role for analytics and exposing no administrator mutations. Default and `chat` behavior are unchanged. |
 | `COCERN_ROLE` | | `admin` also lists administrator tools, for a chat whose token is an administrator's (Connect's is). The hub still checks the token. |
 | `COCERN_SIGNALR` | `false` | `true` prints a hint on standard error when the inbox changes. |
-| `COCERN_FINGERPRINT` | | The hub certificate's SHA-256 fingerprint, for an `https://` `COCERN_URL`: only that certificate is accepted. Connect sets it. |
+| `COCERN_FINGERPRINT` | | The hub certificate's SHA-256 fingerprint, for an `https://` `COCERN_URL`: only that certificate is accepted. Connect sets it for pinned HTTPS, omits it for local HTTP and removes the old pin when moving an owned entry to HTTP. |
 
 With none of the first three set, the adapter uses this PC's node.
 

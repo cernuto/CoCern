@@ -14,6 +14,22 @@ public sealed class SharedNamesTests : IDisposable
 
     public void Dispose() { try { Directory.Delete(folder, true); } catch (IOException) { } }
 
+    [Theory]
+    [InlineData("{\"nested\":[1,2]}")]
+    [InlineData("6123")]
+    [InlineData("true")]
+    [InlineData("[\"http://localhost:6123/\"]")]
+    [InlineData("null")]
+    public void Non_string_optional_http_metadata_preserves_the_pinned_fallback(string optional)
+    {
+        const string url = "https://127.0.0.1:5443/";
+        var pin = new string('A', 64);
+        File.WriteAllText(Path.Combine(folder, LocalHubRecord.FileName), $$"""{"HTTPURL":{{optional}},"url":"{{url}}","fingerprint":"{{pin}}"}""");
+        var record = LocalHubRecord.Read(folder);
+        Assert.Equal(new LocalHubRecord(url, pin), record);
+        Assert.Equal((url, pin), ConnectCommand.PreferredLocalHub(record));
+    }
+
     [Fact]
     public void Recorded_http_origin_is_preferred_and_the_legacy_tls_identity_remains_readable()
     {
