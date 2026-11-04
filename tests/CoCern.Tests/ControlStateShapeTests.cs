@@ -53,8 +53,23 @@ public sealed class ControlStateShapeTests
         foreach (var expire in inFlight.Where(effect => effect.TargetKey != pending.Id)) Accept(expire, hub.Deliver(expire, later));
         hub.DeliverAll(later);
 
+        // Exercise native directory storage through the same admitted open and durable initialization.
+        var native = new JsonObject
+        {
+            ["repositoryId"] = Repository, ["machineId"] = "pc-native", ["requestId"] = Guid.NewGuid().ToString("N"),
+            ["nativeJoin"] = new JsonObject
+            {
+                ["provider"] = "codex", ["nativeId"] = Guid.NewGuid().ToString("D"), ["workspace"] = "/fixture/native-state-shape",
+                ["bindingSecret"] = Convert.ToBase64String(new byte[32]), ["generation"] = Guid.NewGuid().ToString("N")
+            }
+        };
+        Assert.True(NativeParticipant.Admit(Alice, native));
+        Assert.True(hub.Apply(AggregateKinds.Control, AggregateKinds.ControlKey, RelayTools.SessionOpen, native, SessionCaller, later).Ok);
+        hub.DeliverAll(later);
+
         var json = hub.State(AggregateKinds.Control, AggregateKinds.ControlKey);
         Assert.Empty(ControlState.Shape.Undeclared(json));
+        Assert.NotEmpty(json["nativeJoins"]!.AsObject());
 
         // The shape is not vacuous: the document holds every key it declares, but the ones only another aggregate or a full replay cache writes.
         Assert.Empty(ControlState.Shape.Fields.Keys.Except([CommonState.RepositoryIdKey, ReadModels.RequestTombstonesKey]).Except(json.Select(entry => entry.Key)));
