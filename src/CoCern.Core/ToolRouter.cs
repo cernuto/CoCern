@@ -12,7 +12,7 @@ namespace CoCern.Core;
 /// composes them (<see cref="ClaimComposer"/>, <see cref="SessionTools"/>, <see cref="StatusTools"/>, <see cref="MessageTools"/>,
 /// <see cref="SearchTools"/>). A turned-off feature answers for itself, so no route checks for one.
 /// </summary>
-internal sealed class ToolRouter(Aggregates aggregates, ClaimComposer claims, SessionTools sessions, StatusTools status, MessageTools messages, SearchTools searches, IDocCacheTools docs)
+internal sealed class ToolRouter(Aggregates aggregates, ClaimComposer claims, SessionTools sessions, StatusTools status, MessageTools messages, SearchTools searches, IDocCacheTools docs, IAdminTools admin)
 {
     public Task<RelayReply> RouteAsync(RelayCall call, CallTrace? trace, CancellationToken cancellationToken)
     {
@@ -38,6 +38,8 @@ internal sealed class ToolRouter(Aggregates aggregates, ClaimComposer claims, Se
             RelayTools.DocSection => docs.SectionAsync(args),
             // Administrator only, checked first, so a worker learns nothing about the hub's doc cache settings.
             RelayTools.DocSync => !caller.IsAdministrator ? Task.FromResult(Error(AdministratorRequired)) : docs.SyncAsync(args, cancellationToken),
+            // The same, and only the caller's token decides: a session's role or being the recorded manager grants nothing here.
+            RelayTools.HubDiagnose or RelayTools.AddPc or RelayTools.ConnectApp => !caller.IsAdministrator ? Task.FromResult(Error(AdministratorRequired)) : admin.RunAsync(caller, tool, args, cancellationToken),
             RelayTools.WorkerList or RelayTools.ControlRequest => aggregates.Control(caller, tool, args),
             RelayTools.TaskGet => aggregates.ReadTaskAsync(caller, args, cancellationToken),
             _ => aggregates.Board(caller, tool, args)

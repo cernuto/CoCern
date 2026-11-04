@@ -255,7 +255,7 @@ internal static class ControlAggregate
             prefix = parsed;
         }
         if (minutes is null && prefix is null && target is null) return Error(InvalidArguments, new { field = "idleMinutes", hint = "give targetSessionId, idleMinutes, labelPrefix or both bulk filters" });
-        // A close by label alone skips chats working right now (a call within LabelCloseActiveMinutes), counted as active; an idle filter or
+        // A close by label alone skips chats active in about the last 70 minutes (LabelCloseActiveMinutes plus the report interval IdleCutoff adds), counted as active; an idle filter or
         // one exact target says how quiet a session must be.
         var labelOnly = minutes is null && target is null;
         var cutoff = minutes is { } span ? IdleCutoff(context.Now, TimeSpan.FromMinutes(span))

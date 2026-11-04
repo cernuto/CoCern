@@ -309,6 +309,101 @@ public sealed class WakeTests
     }
 
     [Fact]
+    public async Task A_delivered_wake_candidate_costs_one_status_read_and_a_new_one_still_gets_both()
+    {
+        using var fixture = new Fixture();
+        fixture.Attention = "{\"actionable\":1,\"top\":{\"id\":\"a-1\",\"k\":\"blocked\"},\"wake\":\"a-1\"}";
+        Assert.Equal("queued", await fixture.Reconcile());
+        var before = fixture.StatusReads;
+        Assert.Equal("empty", await fixture.Reconcile());
+        Assert.Equal(before + 1, fixture.StatusReads);
+        // Anything that would dispatch still pays for the hub's controls a second time.
+        fixture.Clock.Now += TimeSpan.FromSeconds(11);
+        fixture.Attention = "{\"actionable\":1,\"top\":{\"id\":\"a-2\",\"k\":\"blocked\"},\"wake\":\"a-2\"}";
+        before = fixture.StatusReads;
+        Assert.Equal("queued", await fixture.Reconcile());
+        Assert.Equal(before + 2, fixture.StatusReads);
+        Assert.Equal(2, fixture.Dispatcher.Prompts.Count);
+    }
+
+    [Fact]
+    public async Task A_delivered_message_costs_one_status_read_with_attention_off()
+    {
+        using var fixture = new Fixture();
+        fixture.Messages = ["m1"];
+        Assert.Equal("queued", await fixture.Reconcile());
+        var before = fixture.StatusReads;
+        Assert.Equal("empty", await fixture.Reconcile());
+        Assert.Equal(before + 1, fixture.StatusReads);
+    }
+
+    [Fact]
+    public async Task A_new_candidate_is_held_by_a_pause_only_the_second_status_read_sees()
+    {
+        using var fixture = new Fixture();
+        fixture.Attention = "{\"actionable\":1,\"top\":{\"id\":\"a-1\",\"k\":\"blocked\"},\"wake\":\"a-1\"}";
+        fixture.PauseSecondRead = true;
+        Assert.Equal("control-blocked", await fixture.Reconcile());
+        Assert.Empty(fixture.Dispatcher.Prompts);
+        // Nothing was reserved, so it wakes the chat once the pause lifts.
+        fixture.PauseSecondRead = false;
+        Assert.Equal("queued", await fixture.Reconcile());
+    }
+
+    [Fact]
+    public void Checking_for_unseen_messages_reserves_nothing()
+    {
+        using var directory = new TempDirectory();
+        using var state = new WakeState(Path.Combine(directory.Path, "state.db"));
+        var start = new DateTimeOffset(2026, 10, 29, 0, 0, 0, TimeSpan.Zero);
+        Assert.True(state.HasUnseen("route", ["a"]));
+        // The check left no trace: the message still reserves.
+        Assert.Equal("reserved", Wake(state, "a", start));
+        Assert.False(state.HasUnseen("route", ["a"]));
+        Assert.True(state.HasUnseen("route", ["a", "b"]));
+        Assert.True(state.HasUnseen("other", ["a"]));
+    }
+
+    [Fact]
+    public void Printed_messages_are_remembered_per_route_across_a_restart()
+    {
+        using var directory = new TempDirectory();
+        var path = Path.Combine(directory.Path, "state.db");
+        using (var state = new WakeState(path))
+        {
+            Assert.Empty(state.Printed("route", ["m1", "m2"]));
+            state.MarkPrinted("route", ["m1"]);
+            state.MarkPrinted("route", ["m1"]);
+            Assert.Equal(["m1"], state.Printed("route", ["m1", "m2"]));
+            Assert.Empty(state.Printed("other", ["m1"]));
+        }
+        using var reopened = new WakeState(path);
+        Assert.Equal(["m1"], reopened.Printed("route", ["m1", "m2"]));
+    }
+
+    [Fact]
+    public void A_database_from_before_printed_messages_upgrades_in_place_and_keeps_its_wakes()
+    {
+        using var directory = new TempDirectory();
+        var path = Path.Combine(directory.Path, "state.db");
+        var start = new DateTimeOffset(2026, 10, 29, 0, 0, 0, TimeSpan.Zero);
+        var seen = WakeState.Key("m1");
+        using (var old = new Microsoft.Data.Sqlite.SqliteConnection(new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder { DataSource = path, Pooling = false }.ToString()))
+        {
+            old.Open();
+            using var command = old.CreateCommand();
+            command.CommandText = $"CREATE TABLE batches (route TEXT NOT NULL, batch TEXT PRIMARY KEY, status TEXT NOT NULL, at INTEGER NOT NULL); CREATE TABLE messages (route TEXT NOT NULL, message TEXT NOT NULL, batch TEXT NOT NULL, PRIMARY KEY(route,message)); INSERT INTO batches VALUES('route','b1','queued',{start.ToUnixTimeMilliseconds()}); INSERT INTO messages VALUES('route','{seen}','b1');";
+            command.ExecuteNonQuery();
+        }
+        using var state = new WakeState(path);
+        // A message that woke the route before the upgrade still does not wake it again, and has not counted as printed.
+        Assert.Equal("empty", state.Reserve("route", ["m1"], start + TimeSpan.FromMinutes(1)).Status);
+        Assert.Empty(state.Printed("route", ["m1"]));
+        state.MarkPrinted("route", ["m1"]);
+        Assert.Equal(["m1"], state.Printed("route", ["m1"]));
+    }
+
+    [Fact]
     public void Default_limits_allow_a_wake_three_seconds_after_the_previous_one_and_refuse_two()
     {
         using var directory = new TempDirectory();
@@ -407,6 +502,8 @@ public sealed class WakeTests
         public string Status = "ok";
         /// <summary>The hub's attention block on get_status, as JSON, or null for a hub with nothing waiting.</summary>
         public string? Attention;
+        /// <summary>Pauses the session on the status read that asks for no attention detail, the one just before a reservation.</summary>
+        public bool PauseSecondRead;
         public int PageSize = 50;
         public readonly List<int> Cursors = [];
         /// <summary>The body of every check_inbox request.</summary>
@@ -470,7 +567,7 @@ public sealed class WakeTests
                 var headersOnly = args.RootElement.TryGetProperty("headersOnly", out var headers) && headers.GetBoolean();
                 var known = args.RootElement.TryGetProperty("knownInboxEtag", out var knownEtag) ? knownEtag.GetString() : null;
                 var data = request.RequestUri.AbsolutePath.EndsWith("get_status")
-                    ? fixture.Status == "missing-pause" ? "{\"sessionId\":\"session\",\"control\":{}}" : JsonSerializer.Serialize(new { sessionId = fixture.Status == "wrong-session" ? "other" : "session", control = new { paused = fixture.Status == "paused", requests = fixture.Status.EndsWith("cancelled") ? new object[] { new { target = fixture.Status == "other-cancelled" ? "other:" : "session:", request = new { status = "requested_unknown" } } } : [] } })
+                    ? fixture.Status == "missing-pause" ? "{\"sessionId\":\"session\",\"control\":{}}" : JsonSerializer.Serialize(new { sessionId = fixture.Status == "wrong-session" ? "other" : "session", control = new { paused = fixture.Status == "paused" || (fixture.PauseSecondRead && !args.RootElement.TryGetProperty("attentionDetail", out _)), requests = fixture.Status.EndsWith("cancelled") ? new object[] { new { target = fixture.Status == "other-cancelled" ? "other:" : "session:", request = new { status = "requested_unknown" } } } : [] } })
                     : headersOnly && known == fixture.Etag ? JsonSerializer.Serialize(new { unchanged = true, etag = fixture.Etag, total = fixture.Messages.Length })
                     : headersOnly ? JsonSerializer.Serialize(new { items = items.Select(item => new { item.messageId, item.repositoryId, item.wake }), nextCursor = more ? (int?)(cursor + items.Length) : null, truncated = more, total = fixture.Messages.Length, etag = fixture.Etag })
                     : JsonSerializer.Serialize(new { items, nextCursor = more ? (int?)(cursor + items.Length) : null, truncated = more, total = fixture.Messages.Length });

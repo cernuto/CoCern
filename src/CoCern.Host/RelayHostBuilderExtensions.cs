@@ -93,13 +93,15 @@ public static class RelayHostBuilderExtensions
                 tokenOptions: services.GetRequiredService<TokenOptions>(),
                 feedback: services.GetRequiredService<FeedbackOptions>() is { Enabled: true } feedback ? new FeedbackRules(feedback, counter, services.GetService<IFeedbackRuleStore>()) : null,
                 archive: services.GetService<ITaskArchive>(),
-                observations: services.GetService<IRelayObservationSource>()));
+                observations: services.GetService<IRelayObservationSource>(),
+                admin: services.GetRequiredService<IAdminTools>()));
         }));
         // One shared tokenizer for every token count; it loads its vocabulary on first use.
         builder.Services.AddSingleton<ITokenCounter, O200kTokenCounter>();
         builder.Services.AddDocCache();
         builder.AddRelayOrleans();
         builder.Services.AddRelayDashboard();
+        builder.Services.AddSingleton<IAdminTools, AdminToolsService>();
         builder.Services.AddHostedService<DueWorkDispatcher>();
         // Sessions idle longer than Relay:Sessions:IdleHours (default 24, 2 to 720) are closed every ten minutes, in every repository.
         builder.Services.AddSingleton(services => new SessionCleanupOptions

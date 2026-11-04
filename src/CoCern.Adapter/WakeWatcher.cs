@@ -16,8 +16,16 @@ public sealed record WakeRuntime(AdapterOptions Options, string StatePath, strin
     public WakeNudge? Nudge { get; init; }
     /// <summary>Replaces the hint channel's handler (tests); null keeps SignalR's own, pinned when <see cref="AdapterOptions.PinnedFingerprint"/> is set.</summary>
     public Func<HttpMessageHandler>? HubHandler { get; init; }
-    /// <summary>The fallback pass interval when no hint arrives.</summary>
-    public TimeSpan Interval { get; init; } = TimeSpan.FromSeconds(15);
+    internal static readonly TimeSpan DefaultInterval = TimeSpan.FromSeconds(15);
+    internal static readonly TimeSpan DefaultHintedInterval = TimeSpan.FromSeconds(60);
+    /// <summary>
+    /// The fallback pass when no hint arrives. Unset, it is <see cref="DefaultInterval"/>, lengthened to <see cref="DefaultHintedInterval"/> while
+    /// hints are working; a value set here is used as it is, so a caller that chose a pace keeps it.
+    /// </summary>
+    public TimeSpan? Interval { get; init; }
+    /// <summary>The fallback pass while hints are working, for a caller that wants both set (tests); unset follows <see cref="Interval"/>.</summary>
+    public TimeSpan? HintedInterval { get; init; }
+    internal TimeSpan FallbackWait(bool hinted) => hinted ? HintedInterval ?? Interval ?? DefaultHintedInterval : Interval ?? DefaultInterval;
     /// <summary>How often a route may be woken.</summary>
     public WakeLimits Limits { get; init; } = WakeLimits.Default;
     /// <summary>A state the caller already owns (and disposes); null opens <see cref="StatePath"/> for the run.</summary>
@@ -112,6 +120,7 @@ public static class WakeWatcher
                     lastStatus.Remove(WakeState.Key(watch.Target.Route.ThreadId));
                     await watch.Connection.DisposeAsync();
                 }
+                var settled = current.Length > 0;
                 for (var i = 0; i < current.Length && !File.Exists(runtime.StopFile); i++)
                 {
                     var target = current[i];
@@ -125,6 +134,7 @@ public static class WakeWatcher
                     if (!lastStatus.TryGetValue(routeKey, out var previous) || previous != status || status == "queued")
                         Console.Error.WriteLine($"CoCern wake route {i + 1}: {status}.");
                     lastStatus[routeKey] = status;
+                    settled &= status is "empty" or "queued";
                     if (exitWhenQueued && status == "queued") return status;
                     if (!watches.TryGetValue(target.Session.SessionId, out var watch)) watches[target.Session.SessionId] = watch = Watch.Create(options, runtime.HubHandler, target, changed, lifetime.Token);
                     watch.Target = target;
@@ -142,7 +152,9 @@ public static class WakeWatcher
                     }
                 }
                 using var wait = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
-                wait.CancelAfter(runtime.Interval);
+                // The longer wait only while a hint is sure to bring the next wake: every target's channel joined, and none waiting out a retry no hint
+                // will announce (a rate limit, a busy chat, a hub error).
+                wait.CancelAfter(runtime.FallbackWait(settled && current.All(target => watches.TryGetValue(target.Session.SessionId, out var known) && known.Listening)));
                 try
                 {
                     await changed.Reader.ReadAsync(wait.Token);
@@ -180,6 +192,7 @@ public static class WakeWatcher
         // Bumped on every reconnect or close; the group was joined only while _joined equals it.
         private int _generation, _joined = -1;
         public bool Subscribed => Volatile.Read(ref _joined) == Volatile.Read(ref _generation);
+        public bool Listening => Connection.State == HubConnectionState.Connected && Subscribed;
 
         public async Task SubscribeAsync(CancellationToken cancellationToken)
         {
@@ -198,8 +211,9 @@ public static class WakeWatcher
                 if (hint.ValueKind == JsonValueKind.Object && hint.TryGetProperty("sessionId", out var session) && session.ValueKind == JsonValueKind.String && session.GetString() == sessionId)
                     changed.Writer.TryWrite(true);
             });
-            watch.Connection.Reconnecting += _ => { Interlocked.Increment(ref watch._generation); return Task.CompletedTask; };
-            watch.Connection.Closed += _ => { Interlocked.Increment(ref watch._generation); return Task.CompletedTask; };
+            // A lost channel also ends a long wait, so the short fallback takes over at once rather than after it.
+            watch.Connection.Reconnecting += _ => { Interlocked.Increment(ref watch._generation); changed.Writer.TryWrite(true); return Task.CompletedTask; };
+            watch.Connection.Closed += _ => { Interlocked.Increment(ref watch._generation); changed.Writer.TryWrite(true); return Task.CompletedTask; };
             watch.Connection.Reconnected += async _ =>
             {
                 Interlocked.Increment(ref watch._generation);

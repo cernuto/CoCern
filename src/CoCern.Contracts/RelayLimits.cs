@@ -319,6 +319,10 @@ public static class RelayLimits
     /// longer; Close session closes one of those on purpose.
     /// </summary>
     public const int LabelCloseActiveMinutes = 10;
+    /// <summary><c>connect_app</c> requests this hub remembers, so a retry gets the first reply and does not run setup again.</summary>
+    public const int RememberedConnectRequests = 64;
+    /// <summary>Room an administrator tool's reply leaves under <see cref="MaxPayloadBytes"/> when it trims itself to fit, for what the hub adds on the way out.</summary>
+    public const int AdminReplyRoomBytes = 1_024;
     /// <summary>Unread messages a closing session returns to their senders as <c>delivery.failed</c>; the rest are dropped with it.</summary>
     public const int MaxMessagesReturnedOnClose = 64;
     /// <summary>Closed session IDs a <c>close_sessions</c> reply lists; <c>closed</c> still counts them all.</summary>

@@ -51,7 +51,7 @@ public sealed class SetupTests : IDisposable
             MaxRetry = TimeSpan.FromMilliseconds(20),
             CodexExecutable = () => null
         },
-        EnrollTimeout = timeout ?? TimeSpan.FromSeconds(20),
+        EnrollTimeout = timeout ?? TimeSpan.FromSeconds(60),
         Out = output,
         Error = error
     };

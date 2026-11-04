@@ -59,7 +59,7 @@ public sealed class NodeTests : IDisposable
             CreateUpdater = _ => new UpdateFunctionalCoordinator((release, _) =>
             {
                 if (Interlocked.Increment(ref attempts) == 3) { earlyA = release!.ReleaseId == a.ReleaseId && clock.GetUtcNow() - began < TimeSpan.FromMinutes(15); stop.Cancel(); }
-                return Task.FromResult<StagedNode?>(null);
+                return Task.FromException<StagedNode?>(new IOException("fixture stage failure"));
             }, (_, _) => throw new InvalidOperationException()),
             Trace = value =>
             {
@@ -319,7 +319,9 @@ public sealed class NodeTests : IDisposable
                 return new UpdateFunctionalCoordinator((offered, _) =>
                 {
                     Assert.Equal(release.ReleaseId, offered!.ReleaseId);
-                    if (Interlocked.Increment(ref calls) == 1) return Task.FromResult<StagedNode?>(prepareFailure ? stagedImage : null);
+                    if (Interlocked.Increment(ref calls) == 1) return prepareFailure
+                        ? Task.FromResult<StagedNode?>(stagedImage)
+                        : Task.FromException<StagedNode?>(new IOException("fixture stage failure"));
                     early = clock.GetUtcNow() - began < TimeSpan.FromMinutes(15);
                     stop.Cancel();
                     return Task.FromResult<StagedNode?>(null);
@@ -1447,6 +1449,272 @@ public sealed class NodeTests : IDisposable
         Assert.DoesNotContain("synthetic-token", output);
     }
 
+    private int _wakeMinutes;
+
+    /// <summary>A chat with a session handle on this PC, and a stub inbox for that session.</summary>
+    private (string ChatId, InboxStub Inbox) PrintingChat(string repository = "repo")
+    {
+        var chatId = Guid.NewGuid().ToString();
+        EnrollOnLoopback();
+        NodeState.WriteSessionHandle(DataDir, new SessionHandle("s-claude", "synthetic-token-claude", repository, "Claude chat", DateTimeOffset.UtcNow.AddMinutes(-1), new ChatLocation("claude", chatId), new ChatLocation("claude", chatId)));
+        return (chatId, new InboxStub(new string('c', 64), "s-claude", "synthetic-token-claude"));
+    }
+
+    /// <summary>One printed wake, each a minute later than the last so the rate limit never holds it back; every run opens the state database afresh, as a restarted hook does.</summary>
+    private async Task<string> PrintedWake(string chatId, InboxStub inbox)
+    {
+        var printed = new List<string>();
+        Assert.Equal("queued", await ClaudeWaiter.RunAsync(DataDir, chatId, printed.Add, TimeSpan.FromSeconds(30), CancellationToken.None, inbox, () => new NoHub(), new ManualClock(DateTimeOffset.UtcNow.AddMinutes(++_wakeMinutes)), printInbox: true));
+        return Assert.Single(printed);
+    }
+
+    private static string[] MessageLines(string output) => output.Split('\n').Where(line => line.StartsWith("- ", StringComparison.Ordinal)).ToArray();
+
+    [Fact]
+    public async Task A_second_wake_prints_only_new_messages_and_says_how_many_it_held_back()
+    {
+        var (chatId, inbox) = PrintingChat();
+        inbox.Messages = ["m1", "m2"];
+        Assert.Equal(2, MessageLines(await PrintedWake(chatId, inbox)).Length);
+        inbox.Messages = ["m1", "m2", "m3"];
+        var second = await PrintedWake(chatId, inbox);
+        Assert.StartsWith("- m3:", Assert.Single(MessageLines(second)));
+        Assert.Contains("2 earlier unacknowledged messages are not repeated", second);
+        Assert.Contains("check_inbox", second);
+        // The hub still hears about everything that reached the chat, so a report that failed once is made again.
+        Assert.Contains(inbox.InboxReads, read => read.Contains("\"seenMessageIds\":[\"m3\",\"m1\",\"m2\"]"));
+        // Acknowledged messages leave the count.
+        inbox.Messages = ["m3", "m4"];
+        var third = await PrintedWake(chatId, inbox);
+        Assert.StartsWith("- m4:", Assert.Single(MessageLines(third)));
+        Assert.Contains("1 earlier unacknowledged message is not repeated", third);
+    }
+
+    [Fact]
+    public async Task A_new_message_behind_a_full_page_of_earlier_ones_is_still_printed()
+    {
+        var (chatId, inbox) = PrintingChat();
+        inbox.PageSize = 2;
+        inbox.Messages = ["m1", "m2", "m3", "m4"];
+        Assert.Equal(4, MessageLines(await PrintedWake(chatId, inbox)).Length);
+        inbox.Messages = ["m1", "m2", "m3", "m4", "m5"];
+        var second = await PrintedWake(chatId, inbox);
+        Assert.StartsWith("- m5:", Assert.Single(MessageLines(second)));
+        Assert.Contains("4 earlier unacknowledged messages", second);
+    }
+
+    [Fact]
+    public async Task A_chat_that_moves_during_a_read_keeps_one_session_for_that_wake_and_prints_the_new_inbox_whole_on_the_next()
+    {
+        var (chatId, inbox) = PrintingChat();
+        inbox.PageSize = 2;
+        inbox.Messages = ["a1", "a2", "a3"];
+        inbox.Moved = ("s-new", "synthetic-token-new", ["b1", "b2", "b3"]);
+        // Written as the first page is answered, so the second page and the seen report are the calls that could stray to the new session.
+        inbox.OnFullRead = () => NodeState.WriteSessionHandle(DataDir, new SessionHandle("s-new", "synthetic-token-new", "repo", "New", DateTimeOffset.UtcNow, new ChatLocation("claude", chatId), new ChatLocation("claude", chatId)));
+        var first = await PrintedWake(chatId, inbox);
+        Assert.Equal(["a1", "a2", "a3"], MessageLines(first).Select(line => line[2..line.IndexOf(':')]));
+        Assert.All(inbox.InboxReads, read => Assert.Contains("\"sessionId\":\"s-claude\"", read));
+        Assert.Contains(inbox.InboxReads, read => read.Contains("seenMessageIds"));
+        inbox.OnFullRead = null;
+        // None of the new session's messages were recorded under the old one, so all of them print once, with none counted as earlier.
+        var second = await PrintedWake(chatId, inbox);
+        Assert.Equal(["b1", "b2", "b3"], MessageLines(second).Select(line => line[2..line.IndexOf(':')]));
+        Assert.DoesNotContain("earlier", second);
+    }
+
+    [Fact]
+    public async Task A_message_past_the_print_limit_is_not_marked_and_prints_on_a_later_wake()
+    {
+        var (chatId, inbox) = PrintingChat();
+        inbox.Text = _ => new string('x', ClaudeWaiter.MaxPrintedInbox * 2 / 3);
+        inbox.Messages = ["m1", "m2"];
+        var first = await PrintedWake(chatId, inbox);
+        Assert.StartsWith("- m1:", Assert.Single(MessageLines(first)));
+        Assert.EndsWith("1 more not shown; check_inbox reads it.", first);
+        // Nothing new arrived, so something else has to wake the chat.
+        inbox.Attention = "{\"actionable\":1,\"top\":{\"id\":\"a-1\",\"k\":\"info\"},\"wake\":\"a-1\"}";
+        var second = await PrintedWake(chatId, inbox);
+        Assert.StartsWith("- m2:", Assert.Single(MessageLines(second)));
+        Assert.Contains("1 earlier unacknowledged message is not repeated", second);
+    }
+
+    [Fact]
+    public async Task A_long_inbox_stays_under_the_hook_limit_ends_with_the_count_and_the_rest_arrives_on_later_wakes()
+    {
+        var (chatId, inbox) = PrintingChat();
+        var ids = Enumerable.Range(0, 30).Select(i => $"m{i:00}").ToArray();
+        inbox.Text = _ => new string('x', 600);
+        inbox.Messages = ids;
+        var delivered = new List<string>();
+        for (var wake = 1; delivered.Count < ids.Length; wake++)
+        {
+            Assert.True(wake <= 5, $"{delivered.Count} delivered after {wake - 1} wakes");
+            // After the first, every wake also carries the longest attention line and an earlier count, which share the limit with the messages.
+            if (wake > 1) inbox.Attention = $"{{\"actionable\":1,\"top\":{{\"id\":\"a-{wake}\",\"k\":\"blocked\",\"t\":\"{new string('t', 256)}\"}},\"wake\":\"a-{wake}\"}}";
+            var output = await PrintedWake(chatId, inbox);
+            Assert.True(output.Length <= ClaudeWaiter.MaxPrintedInbox && output.Length < 10_000, output.Length.ToString());
+            delivered.AddRange(MessageLines(output).Select(line => line[2..line.IndexOf(':')]));
+            if (delivered.Count < ids.Length) Assert.Matches($@"\n{ids.Length - delivered.Count} more not shown; check_inbox reads (them|it)\.$", output);
+            else Assert.DoesNotContain("more not shown", output);
+        }
+        // Every message once, in order: none lost past the limit and none repeated.
+        Assert.Equal(ids, delivered);
+    }
+
+    [Fact]
+    public async Task A_message_over_the_limit_prints_as_a_pointer_and_the_ones_behind_it_still_print()
+    {
+        var (chatId, inbox) = PrintingChat();
+        inbox.Text = id => id == "big" ? new string('x', ClaudeWaiter.MaxPrintedInbox * 2) : "UNTRUSTED";
+        inbox.Messages = ["before", "big", "after"];
+        var first = await PrintedWake(chatId, inbox);
+        Assert.Equal(new[] { "- before: UNTRUSTED", "- big: (too long to print; call check_inbox to read it)", "- after: UNTRUSTED" }, MessageLines(first));
+        Assert.DoesNotContain("more not shown", first);
+        // It never reached the chat in full, so the hub is not told it was seen and it is not marked.
+        Assert.DoesNotContain(inbox.InboxReads, read => read.Contains("seenMessageIds") && read.Contains("\"big\""));
+        inbox.Attention = "{\"actionable\":1,\"top\":{\"id\":\"a-1\",\"k\":\"info\"},\"wake\":\"a-1\"}";
+        var second = await PrintedWake(chatId, inbox);
+        Assert.StartsWith("- big: (too long", Assert.Single(MessageLines(second)));
+        Assert.Contains("2 earlier unacknowledged messages are not repeated", second);
+    }
+
+    [Fact]
+    public async Task A_message_over_the_limit_does_not_end_the_reading_of_the_pages_behind_it()
+    {
+        var (chatId, inbox) = PrintingChat();
+        inbox.PageSize = 1;
+        inbox.Text = id => id == "big" ? new string('x', ClaudeWaiter.MaxPrintedInbox * 2) : "UNTRUSTED";
+        inbox.Messages = ["big", "after"];
+        Assert.Equal(new[] { "- big: (too long to print; call check_inbox to read it)", "- after: UNTRUSTED" }, MessageLines(await PrintedWake(chatId, inbox)));
+    }
+
+    [Fact]
+    public void A_message_that_cannot_follow_an_unmarked_line_becomes_a_pointer_rather_than_waiting_for_ever()
+    {
+        // An oversized piece prints again on every wake, so a message waiting for a wake with room after it would never get one.
+        // Fits a wake on its own, by a few dozen characters; the pointer line ahead of it takes those.
+        var text = new string('x', ClaudeWaiter.MaxPrintedInbox - 300);
+        var page = JsonDocument.Parse($$"""{"items":[{"messageId":"big","truncated":true,"part":"{","partOffset":0},{"messageId":"long","text":"{{text}}"},{"messageId":"after","text":"hello"}],"total":3}""").RootElement;
+        var shown = new List<string>();
+        var printed = ClaudeWaiter.FormatInbox(page, "repo", shown)!;
+        Assert.Equal(new[] { "- big: (oversized; call check_inbox with partOffset to read it)", "- long: (too long to print; call check_inbox to read it)", "- after: hello" }, MessageLines(printed));
+        Assert.Equal(["after"], shown);
+    }
+
+    [Fact]
+    public async Task An_oversized_message_is_not_marked_so_its_pointer_prints_again()
+    {
+        var (chatId, inbox) = PrintingChat();
+        inbox.Oversized = ["big"];
+        inbox.Messages = ["small", "big"];
+        var first = await PrintedWake(chatId, inbox);
+        Assert.Contains("big: (oversized; call check_inbox with partOffset to read it)", first);
+        inbox.Attention = "{\"actionable\":1,\"top\":{\"id\":\"a-1\",\"k\":\"info\"},\"wake\":\"a-1\"}";
+        var second = await PrintedWake(chatId, inbox);
+        Assert.StartsWith("- big: (oversized", Assert.Single(MessageLines(second)));
+        Assert.Contains("1 earlier unacknowledged message is not repeated", second);
+    }
+
+    [Fact]
+    public async Task A_wake_whose_text_never_reached_the_chat_marks_nothing()
+    {
+        var (chatId, inbox) = PrintingChat();
+        inbox.Messages = ["m1"];
+        await Assert.ThrowsAsync<IOException>(() => ClaudeWaiter.RunAsync(DataDir, chatId, _ => throw new IOException("lost"), TimeSpan.FromSeconds(30), CancellationToken.None, inbox, () => new NoHub(), new ManualClock(DateTimeOffset.UtcNow.AddMinutes(++_wakeMinutes)), printInbox: true));
+        inbox.Messages = ["m1", "m2"];
+        Assert.Equal(2, MessageLines(await PrintedWake(chatId, inbox)).Length);
+    }
+
+    [Fact]
+    public async Task A_failed_inbox_read_falls_back_to_the_fixed_prompt_and_marks_nothing()
+    {
+        var (chatId, inbox) = PrintingChat();
+        inbox.Messages = ["m1"];
+        inbox.RefuseFullReads = true;
+        Assert.StartsWith("CoCern inbox wake", await PrintedWake(chatId, inbox));
+        inbox.RefuseFullReads = false;
+        inbox.Messages = ["m1", "m2"];
+        Assert.Equal(2, MessageLines(await PrintedWake(chatId, inbox)).Length);
+    }
+
+    [Fact]
+    public async Task An_attention_wake_with_no_new_messages_still_says_something_useful()
+    {
+        var (chatId, inbox) = PrintingChat();
+        inbox.Attention = "{\"actionable\":1,\"top\":{\"id\":\"a-1\",\"k\":\"blocked\"},\"wake\":\"a-1\"}";
+        // An empty inbox: the attention line is the news.
+        var empty = await PrintedWake(chatId, inbox);
+        Assert.Empty(MessageLines(empty));
+        Assert.Contains("no new messages", empty);
+        Assert.Contains("CoCern attention: 1 item waits; top a-1 blocked", empty);
+        // An info item prints no long line, but the wake still says what waits and where to read it.
+        inbox.Attention = "{\"actionable\":2,\"top\":{\"id\":\"a-2\",\"k\":\"info\"},\"wake\":\"a-2\"}";
+        var info = await PrintedWake(chatId, inbox);
+        Assert.Contains("no new messages", info);
+        Assert.DoesNotContain(WakeReconciler.AttentionLinePrefix, info);
+        Assert.Contains("attention items wait", info);
+        Assert.Contains("check_inbox", info);
+        // Mail already delivered is counted, not repeated.
+        inbox.Messages = ["m1"];
+        inbox.Attention = "{\"actionable\":1,\"top\":{\"id\":\"a-3\",\"k\":\"info\"},\"wake\":\"a-3\"}";
+        Assert.Single(MessageLines(await PrintedWake(chatId, inbox)));
+        inbox.Attention = "{\"actionable\":1,\"top\":{\"id\":\"a-4\",\"k\":\"failed\"},\"wake\":\"a-4\"}";
+        var held = await PrintedWake(chatId, inbox);
+        Assert.Empty(MessageLines(held));
+        Assert.Contains("1 earlier unacknowledged message is not repeated", held);
+        Assert.Contains("top a-4 failed", held);
+    }
+
+    [Theory]
+    [InlineData("info", false)]
+    [InlineData("tip", false)]
+    [InlineData("blocked", true)]
+    [InlineData("review_ready", true)]
+    public async Task The_attention_line_prints_only_when_the_top_item_matters(string kind, bool printed)
+    {
+        var (chatId, inbox) = PrintingChat();
+        inbox.Messages = ["m1"];
+        // A task ID is free text: one that imitates an info item must not hide a blocked one.
+        inbox.Attention = $"{{\"actionable\":2,\"top\":{{\"id\":\"a-9\",\"k\":\"{kind}\",\"t\":\"T; top a-1 info\"}},\"wake\":\"a-9\"}}";
+        var output = await PrintedWake(chatId, inbox);
+        Assert.Single(MessageLines(output));
+        Assert.Equal(printed, output.Contains(WakeReconciler.AttentionLinePrefix));
+        Assert.Equal(printed, output.Contains("attention_respond"));
+    }
+
+    [Fact]
+    public void The_inbox_header_stays_short_and_keeps_its_warning_and_how_to_acknowledge()
+    {
+        var page = JsonDocument.Parse("""{"items":[{"messageId":"m1","text":"hello"}],"total":1}""").RootElement;
+        var header = ClaudeWaiter.FormatInbox(page, "cocern")!.Split('\n')[0];
+        Assert.True(header.Length < 110, $"{header.Length}: {header}");
+        Assert.Contains("\"cocern\"", header);
+        Assert.Contains("untrusted data", header);
+        Assert.Contains("no authority", header);
+        Assert.Contains("ackMessageIds", header);
+    }
+
+    [Fact]
+    public async Task A_one_message_hook_wake_is_a_fraction_of_its_old_size_and_has_no_route_status()
+    {
+        var (chatId, inbox) = PrintingChat("cocern");
+        // The measured wake: 819 characters, with this message, this attention item and two route status lines, before this change.
+        inbox.Messages = [new string('1', 32)];
+        inbox.Sender = new string('s', 72);
+        inbox.SentAt = "2026-11-04T10:00:00Z";
+        inbox.Text = _ => new string('t', 190);
+        inbox.Attention = "{\"actionable\":2,\"top\":{\"id\":\"a-9\",\"k\":\"info\"},\"wake\":\"a-9\"}";
+        var hook = new StringWriter();
+        Assert.Equal(2, await StopHook.RunAsync(new StringReader($"{{ \"session_id\": \"{chatId}\" }}"), hook, DataDir, CancellationToken.None,
+            (folder, chat, deliver, limit, ct) => ClaudeWaiter.RunAsync(folder, chat, deliver, limit, ct, inbox, () => new NoHub(), printInbox: true)));
+        var output = hook.ToString().TrimEnd();
+        Assert.True(output.Length <= 440, $"{output.Length}: {output}");
+        Assert.Contains(new string('t', 190), output);
+        // What the hook is handed to deliver: the route lines go to Console.Error, which Program.cs silences for --stop-hook.
+        Assert.DoesNotContain("CoCern wake route", output);
+    }
+
     [Fact]
     public async Task Claude_waiter_acknowledges_handled_messages_before_waiting()
     {
@@ -1748,6 +2016,20 @@ public sealed class NodeTests : IDisposable
         public readonly System.Collections.Concurrent.ConcurrentQueue<string> Acks = new();
         /// <summary>The body of every inbox read the stub received.</summary>
         public readonly System.Collections.Concurrent.ConcurrentQueue<string> InboxReads = new();
+        /// <summary>The get_status attention block, as JSON; null is a hub with attention off.</summary>
+        public string? Attention;
+        /// <summary>The most items one inbox page holds.</summary>
+        public int PageSize = int.MaxValue;
+        /// <summary>A message's text; "UNTRUSTED" for any message it leaves out.</summary>
+        public Func<string, string>? Text;
+        /// <summary>Messages too large for a page, which come back as a piece.</summary>
+        public string[] Oversized = [];
+        public string? Sender;
+        public string? SentAt;
+        /// <summary>Refuses the waiter's full inbox reads while headers-only reads still work.</summary>
+        public volatile bool RefuseFullReads;
+        /// <summary>Runs as the stub answers each of the waiter's full inbox reads.</summary>
+        public volatile Action? OnFullRead;
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             if (request.Headers.Authorization?.Parameter != credential) return new(HttpStatusCode.Unauthorized);
@@ -1760,10 +2042,36 @@ public sealed class NodeTests : IDisposable
             var moved = Moved is { } other && asked == other.SessionId && token == other.SessionToken;
             if (!moved && (asked != sessionId || token != sessionToken)) return new(HttpStatusCode.Forbidden);
             var messages = moved ? Moved!.Value.Messages : Messages;
-            var data = request.RequestUri!.AbsolutePath.EndsWith("get_status")
-                ? JsonSerializer.Serialize(new { sessionId = asked, control = new { paused = false, requests = Array.Empty<object>() } })
-                : JsonSerializer.Serialize(new { items = messages.Select(id => new { messageId = id, repositoryId = "repo", text = "UNTRUSTED" }), nextCursor = (int?)null, truncated = false, total = messages.Length });
+            var fullRead = request.RequestUri!.AbsolutePath.EndsWith("/check_inbox") && !args.RootElement.TryGetProperty("headersOnly", out _);
+            if (fullRead && RefuseFullReads) return new(HttpStatusCode.ServiceUnavailable);
+            if (fullRead) OnFullRead?.Invoke();
+            var data = request.RequestUri!.AbsolutePath.EndsWith("get_status") ? StatusReply(asked!) : InboxReply(messages, args.RootElement);
             return new(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new { ok = true, code = "ok", dataJson = data, version = 0 }), System.Text.Encoding.UTF8, "application/json") };
+        }
+
+        private string StatusReply(string asked)
+        {
+            var status = new JsonObject { ["sessionId"] = asked, ["control"] = new JsonObject { ["paused"] = false, ["requests"] = new JsonArray() } };
+            if (Attention is { } attention) status["attention"] = JsonNode.Parse(attention);
+            return status.ToJsonString();
+        }
+
+        private string InboxReply(string[] messages, JsonElement args)
+        {
+            var cursor = args.TryGetProperty("cursor", out var from) ? from.GetInt32() : 0;
+            var limit = Math.Min(PageSize, args.TryGetProperty("limit", out var asked) ? asked.GetInt32() : int.MaxValue);
+            var page = messages.Skip(cursor).Take(limit).ToArray();
+            var items = new JsonArray(page.Select(id =>
+            {
+                var item = new JsonObject { ["messageId"] = id, ["repositoryId"] = "repo" };
+                if (Sender is not null) item["senderSessionId"] = Sender;
+                if (SentAt is not null) item["sentAt"] = SentAt;
+                if (Oversized.Contains(id)) { item["truncated"] = true; item["part"] = "{\"text\":\"aaaa"; item["partOffset"] = 0; }
+                else item["text"] = Text?.Invoke(id) ?? "UNTRUSTED";
+                return (JsonNode)item;
+            }).ToArray());
+            var next = cursor + page.Length;
+            return new JsonObject { ["items"] = items, ["nextCursor"] = next < messages.Length ? next : null, ["truncated"] = next < messages.Length, ["total"] = messages.Length }.ToJsonString();
         }
     }
 

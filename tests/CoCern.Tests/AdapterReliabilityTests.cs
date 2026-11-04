@@ -68,6 +68,173 @@ public sealed class AdapterReliabilityTests : IDisposable
         Assert.Equal(1, hub.Negotiations);
     }
 
+    /// <summary>One target watched over the fake hub. By default the hinted wait is far too long to end during a test, so any pass that follows is a hint's or a retry's.</summary>
+    private Task<string> Watching(FakeHub hub, CountingInbox inbox, WakeLimits? limits = null, bool longHintedWait = true)
+    {
+        var sessionFile = Path.Combine(root, "session.json");
+        File.WriteAllText(sessionFile, "{\"sessionId\":\"session\",\"sessionToken\":\"session-secret\"}");
+        var runtime = new WakeRuntime(new AdapterOptions(Relay, "client-secret", signalR: true), Path.Combine(root, "state.db"), Path.Combine(root, "stop"), Relay)
+        { HubHandler = hub.Handler, Interval = TimeSpan.FromMilliseconds(100), HintedInterval = longHintedWait ? TimeSpan.FromMinutes(10) : null, Limits = limits ?? WakeLimits.Default };
+        WakeTarget[] targets = [new(new WakeRoute("repo", "board", sessionFile, "00000000-0000-0000-0000-000000000001", Environment.MachineName), new WakeSession("session", "session-secret"), new InboxWaitDispatcher(_ => { }))];
+        return WakeWatcher.RunAsync(runtime, _ => Task.FromResult<IReadOnlyList<WakeTarget>>(targets), exitWhenQueued: false, TimeSpan.FromSeconds(60), CancellationToken.None, inbox);
+    }
+
+    private async Task StopWatching(Task<string> run)
+    {
+        File.WriteAllText(Path.Combine(root, "stop"), "");
+        Assert.Equal("stopped", await run);
+    }
+
+    /// <summary>Many short intervals pass without a status read.</summary>
+    private static async Task AssertNoPass(CountingInbox inbox)
+    {
+        var before = inbox.StatusReads;
+        await Task.Delay(800);
+        Assert.Equal(before, inbox.StatusReads);
+    }
+
+    /// <summary>Status reads stop within the deadline and stay stopped for many short intervals, however late the last expected pass lands.</summary>
+    private static async Task AssertSettles(CountingInbox inbox)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(20);
+        var seen = inbox.StatusReads;
+        var quietSince = DateTime.UtcNow;
+        while (DateTime.UtcNow - quietSince < TimeSpan.FromSeconds(1.5))
+        {
+            Assert.True(DateTime.UtcNow < deadline, $"Status reads were still arriving after 20 s; {inbox.StatusReads} so far.");
+            await Task.Delay(50);
+            if (inbox.StatusReads != seen) { seen = inbox.StatusReads; quietSince = DateTime.UtcNow; }
+        }
+    }
+
+    private static async Task AssertPassesKeepComing(CountingInbox inbox)
+    {
+        var before = inbox.StatusReads;
+        await WaitFor(() => inbox.StatusReads >= before + 4);
+    }
+
+    [Fact]
+    public async Task A_subscribed_watcher_waits_the_longer_interval()
+    {
+        var hub = new FakeHub();
+        var inbox = new CountingInbox();
+        var run = Watching(hub, inbox);
+        await WaitFor(() => hub.Watches >= 1 || run.IsCompleted);
+        await AssertNoPass(inbox);
+        await StopWatching(run);
+    }
+
+    [Fact]
+    public async Task A_watcher_with_no_hint_channel_keeps_the_short_interval()
+    {
+        var hub = new FakeHub { Available = false };
+        var inbox = new CountingInbox();
+        var run = Watching(hub, inbox);
+        await AssertPassesKeepComing(inbox);
+        await StopWatching(run);
+    }
+
+    [Fact]
+    public async Task A_refused_watch_keeps_the_short_interval_on_a_connection_that_is_up()
+    {
+        var hub = new FakeHub { FailWatches = int.MaxValue };
+        var inbox = new CountingInbox();
+        var run = Watching(hub, inbox);
+        await WaitFor(() => hub.Watches >= 1 || run.IsCompleted);
+        await AssertPassesKeepComing(inbox);
+        await StopWatching(run);
+    }
+
+    [Fact]
+    public async Task Losing_the_hint_channel_ends_a_long_wait_and_reconnecting_moves_back_to_it()
+    {
+        var hub = new FakeHub();
+        var inbox = new CountingInbox();
+        var run = Watching(hub, inbox);
+        await WaitFor(() => hub.Watches >= 1 || run.IsCompleted);
+        await AssertNoPass(inbox);
+        hub.Available = false;
+        hub.DropAll();
+        await AssertPassesKeepComing(inbox);
+        hub.Available = true;
+        await WaitFor(() => hub.Watches >= 2);
+        // The reconnect's own pass comes after the hint quiet gap, later on a busy machine; passes that keep coming never settle.
+        await AssertSettles(inbox);
+        await StopWatching(run);
+    }
+
+    [Fact]
+    public async Task A_closed_hint_channel_is_reopened_without_waiting_out_the_long_interval()
+    {
+        var hub = new FakeHub();
+        var inbox = new CountingInbox();
+        var run = Watching(hub, inbox);
+        await WaitFor(() => hub.Watches >= 1 || run.IsCompleted);
+        await AssertNoPass(inbox);
+        hub.CloseAll();
+        await WaitFor(() => hub.Watches >= 2);
+        await AssertSettles(inbox);
+        await StopWatching(run);
+    }
+
+    [Fact]
+    public async Task A_hint_during_a_long_wait_runs_a_pass_promptly()
+    {
+        var hub = new FakeHub();
+        var inbox = new CountingInbox();
+        var run = Watching(hub, inbox);
+        await WaitFor(() => hub.Watches >= 1 || run.IsCompleted);
+        await AssertNoPass(inbox);
+        var before = inbox.StatusReads;
+        var hinted = Stopwatch.StartNew();
+        hub.Push("session");
+        await WaitFor(() => inbox.StatusReads > before);
+        Assert.True(hinted.Elapsed < TimeSpan.FromSeconds(10), hinted.Elapsed.ToString());
+        // That pass found nothing, so the long wait resumes.
+        await Task.Delay(TimeSpan.FromMilliseconds(200));
+        await AssertNoPass(inbox);
+        await StopWatching(run);
+    }
+
+    [Fact]
+    public async Task A_pass_that_must_retry_keeps_the_short_interval_while_subscribed()
+    {
+        var hub = new FakeHub();
+        var inbox = new CountingInbox { Attention = "{\"actionable\":1,\"wake\":\"a-1\"}" };
+        var run = Watching(hub, inbox, limits: new WakeLimits(TimeSpan.FromHours(1), 20, TimeSpan.FromHours(2)));
+        await WaitFor(() => hub.Watches >= 1 || run.IsCompleted);
+        await AssertNoPass(inbox);
+        // The rate limit holds this one back, and no hint will say when it lifts.
+        inbox.Attention = "{\"actionable\":1,\"wake\":\"a-2\"}";
+        hub.Push("session");
+        await AssertPassesKeepComing(inbox);
+        await StopWatching(run);
+    }
+
+    [Fact]
+    public async Task A_configured_interval_is_not_slowed_when_subscribed()
+    {
+        var hub = new FakeHub();
+        var inbox = new CountingInbox();
+        var run = Watching(hub, inbox, longHintedWait: false);
+        await WaitFor(() => hub.Watches >= 1 || run.IsCompleted);
+        await AssertPassesKeepComing(inbox);
+        await StopWatching(run);
+    }
+
+    [Fact]
+    public void Only_an_unset_interval_lengthens_under_hints()
+    {
+        var runtime = new WakeRuntime(new AdapterOptions(Relay, "client-secret", signalR: true), "state.db", "stop", Relay);
+        Assert.Equal(TimeSpan.FromSeconds(15), runtime.FallbackWait(hinted: false));
+        Assert.Equal(TimeSpan.FromSeconds(60), runtime.FallbackWait(hinted: true));
+        var configured = runtime with { Interval = TimeSpan.FromSeconds(5) };
+        Assert.Equal(TimeSpan.FromSeconds(5), configured.FallbackWait(hinted: false));
+        Assert.Equal(TimeSpan.FromSeconds(5), configured.FallbackWait(hinted: true));
+        // A node leaves it unset unless a caller chose a pace.
+        Assert.Null(new NodeTransport().WakeInterval);
+    }
+
     [Fact]
     public async Task Forwarder_bounds_a_body_that_stalls_after_the_headers()
     {
@@ -260,6 +427,22 @@ public sealed class AdapterReliabilityTests : IDisposable
     }
 
     /// <summary>A relay with an empty inbox and nothing paused.</summary>
+    /// <summary>An empty inbox that counts status reads, one or two per reconcile pass, and answers with the attention block it is given.</summary>
+    private sealed class CountingInbox : HttpMessageHandler
+    {
+        private int _statusReads;
+        public int StatusReads => Volatile.Read(ref _statusReads);
+        public volatile string? Attention;
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            if (!request.RequestUri!.AbsolutePath.EndsWith("get_status")) return Task.FromResult(Envelope("{\"items\":[],\"nextCursor\":null,\"truncated\":false,\"total\":0}"));
+            Interlocked.Increment(ref _statusReads);
+            var attention = Attention is { } block ? ",\"attention\":" + block : "";
+            return Task.FromResult(Envelope("{\"sessionId\":\"session\",\"control\":{\"paused\":false,\"requests\":[]}" + attention + "}"));
+        }
+    }
+
     private sealed class EmptyInbox : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) => Task.FromResult(Envelope(request.RequestUri!.AbsolutePath.EndsWith("get_status")
@@ -302,6 +485,12 @@ public sealed class AdapterReliabilityTests : IDisposable
 
         /// <summary>Ends every connection with a close message that does not allow reconnecting.</summary>
         public void CloseAll() { foreach (var connection in _connections.Values) connection.Outgoing.Writer.TryWrite("{\"type\":7}" + Separator); }
+
+        /// <summary>Ends every connection with a close message that allows reconnecting.</summary>
+        public void DropAll() { foreach (var connection in _connections.Values) connection.Outgoing.Writer.TryWrite("{\"type\":7,\"allowReconnect\":true}" + Separator); }
+
+        /// <summary>Sends every connection the hint a session's new mail brings.</summary>
+        public void Push(string sessionId) { foreach (var connection in _connections.Values) connection.Outgoing.Writer.TryWrite(JsonSerializer.Serialize(new { type = 1, target = "coordination.changed", arguments = new object[] { new { sessionId, eventId = "e" } } }) + Separator); }
 
         private sealed class Connection
         {

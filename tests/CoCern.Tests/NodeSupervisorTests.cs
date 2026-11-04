@@ -915,10 +915,12 @@ public sealed class NodeSupervisorTests(ITestOutputHelper output) : IDisposable
             receiver = await Open("gap-receiver");
             var announceEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var authenticate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var announced = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var transport = new NodeTransport
             {
                 Clients = () => [], Locators = [], Chats = _ => Task.FromResult(new System.Text.Json.Nodes.JsonArray()), CodexExecutable = () => null,
-                CreateHandler = (_, _) => new UpdateAnnounceBarrier(hub.Server.CreateHandler(), announceEntered, authenticate), HubHandler = () => hub.Server.CreateHandler()
+                CreateHandler = (_, _) => new UpdateAnnounceBarrier(hub.Server.CreateHandler(), announceEntered, authenticate), HubHandler = () => hub.Server.CreateHandler(),
+                Trace = value => { if (value == "announced") announced.TrySetResult(); }
             };
             var host = new NodeHostCapabilities(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "dotnet", "dotnet.exe"), [new("Microsoft.NETCore.App", "10.0.14")], "win-x64");
             using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(20));
@@ -940,6 +942,9 @@ public sealed class NodeSupervisorTests(ITestOutputHelper output) : IDisposable
                 await GapInboxCount(hub, machine, receiver, 1);
                 Assert.Null(NodeUpdateState.ReadReady(Updates));
                 authenticate.TrySetResult();
+                // Releasing the request is not authenticated readiness. Keep its processing inside
+                // the existing outer guard, then measure the supervisor's commit from actual readiness.
+                await announced.Task.WaitAsync(stop.Token);
                 var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(5);
                 while (ReadPrimaryPhase(Updates) != NodeUpdatePhase.Committed && DateTimeOffset.UtcNow < deadline) await Task.Delay(10);
                 var committed = NodeUpdateState.Read(Updates).Record!;
@@ -989,6 +994,143 @@ public sealed class NodeSupervisorTests(ITestOutputHelper output) : IDisposable
         public int ProcessId => Environment.ProcessId;
         public Task<int> WaitForExitAsync(CancellationToken cancellationToken) => ended ??= run(stopping.Token);
         public async ValueTask DisposeAsync() { stopping.Cancel(); if (ended is not null) { try { await ended; } catch (OperationCanceledException) { } } stopping.Dispose(); }
+    }
+
+    [Theory]
+    [InlineData(true, 5, false)]
+    [InlineData(false, 15, false)]
+    [InlineData(true, 5, true)]
+    [InlineData(false, 15, true)]
+    public async Task Current_release_rechecks_keep_normal_cadence_while_rejected_packages_back_off(bool alreadyCurrent, int retryMinutes, bool resetForCredentialRefusal)
+    {
+        PrepareRoot();
+        var current = Image("same-release-scheduler") with { ReleaseId = new string('A', 64) };
+        NodeUpdateState.Write(Updates, Committed(current));
+        using var state = NodeState.Open(NodeFolder);
+        state.SetHub("http://localhost/", null);
+        state.SaveCredential(new string('a', 64));
+        var clock = new NodeTests.UpdateClock();
+        var releaseId = new string(alreadyCurrent ? 'A' : 'B', 64);
+        var release = new NodeRelease(1, releaseId, current.Package, 1, releaseId, current.AdapterDllSha256);
+        var dotnet = Path.Combine(fixture, "dotnet.exe");
+        File.WriteAllText(dotnet, "Inert host inventory fixture; never executed.");
+        var attempts = new System.Collections.Concurrent.ConcurrentQueue<DateTimeOffset>();
+        using var failure = new UpdateFailureObserver();
+        var downloads = 0;
+        var phase = 0;
+        var refused = 0;
+        var reenrolled = 0;
+        var stagingFinished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var transport = new NodeTransport
+        {
+            Clock = clock, Clients = () => [], Locators = [], Chats = _ => Task.FromResult(new System.Text.Json.Nodes.JsonArray()), CodexExecutable = () => null,
+            AnnounceInterval = TimeSpan.FromMilliseconds(10), UpdateHost = new(dotnet, [new("Microsoft.NETCore.App", "10.0.0")], "win-x64"),
+            CreateHandler = (_, _) => new UpdateWorkerHandler(request =>
+            {
+                if (request.RequestUri!.AbsolutePath.EndsWith("/enroll", StringComparison.Ordinal))
+                {
+                    Interlocked.Increment(ref reenrolled);
+                    return new(System.Net.HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new { machineId = state.MachineId, credential = new string('b', 64) })) };
+                }
+                if (request.Method == HttpMethod.Get)
+                {
+                    Interlocked.Increment(ref downloads);
+                    return new(System.Net.HttpStatusCode.ServiceUnavailable);
+                }
+                if (resetForCredentialRefusal && stagingFinished.Task.IsCompleted && Interlocked.CompareExchange(ref refused, 1, 0) == 0)
+                    return new(System.Net.HttpStatusCode.Unauthorized);
+                return new(System.Net.HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new { routes = Array.Empty<object>(), nodeRelease = release }, new JsonSerializerOptions(JsonSerializerDefaults.Web))) };
+            }),
+            HubHandler = () => new UpdateWorkerHandler(_ => new(System.Net.HttpStatusCode.ServiceUnavailable)),
+            CreateUpdater = context => new ObservedUpdateCoordinator(resetForCredentialRefusal && Volatile.Read(ref reenrolled) == 0
+                ? new FinishStagingDuringReset(new NodeUpdateCoordinator(context), stagingFinished)
+                : new NodeUpdateCoordinator(context), () => attempts.Enqueue(clock.GetUtcNow()), () =>
+            {
+                if (attempts.Count == 2) stop.Cancel();
+            }),
+            Trace = value =>
+            {
+                if (value != "announced" || attempts.IsEmpty) return;
+                if (resetForCredentialRefusal ? Volatile.Read(ref reenrolled) == 0 : !alreadyCurrent && !failure.Recorded.Task.IsCompleted) return;
+                if (phase == 0)
+                {
+                    clock.Advance(TimeSpan.FromMinutes(4) + TimeSpan.FromSeconds(59));
+                    phase = 1;
+                }
+                else if (phase == 1)
+                {
+                    Assert.Single(attempts);
+                    clock.Advance(TimeSpan.FromSeconds(1));
+                    phase = 2;
+                }
+                else if (phase == 2 && !alreadyCurrent)
+                {
+                    Assert.Single(attempts);
+                    clock.Advance(TimeSpan.FromMinutes(9) + TimeSpan.FromSeconds(59));
+                    phase = 3;
+                }
+                else if (phase == 3)
+                {
+                    Assert.Single(attempts);
+                    clock.Advance(TimeSpan.FromSeconds(1));
+                    phase = 4;
+                }
+            }
+        };
+
+        Assert.Equal(0, await NodeRunner.RunAsync(state, null, transport, failure, stop.Token));
+        var observed = attempts.ToArray();
+        Assert.Equal(2, observed.Length);
+        Assert.Equal(TimeSpan.FromMinutes(retryMinutes), observed[1] - observed[0]);
+        Assert.Equal(alreadyCurrent ? 0 : 2, downloads);
+        Assert.Equal(resetForCredentialRefusal ? 1 : 0, reenrolled);
+        var unchanged = NodeUpdateState.Read(Updates).Record!;
+        Assert.Equal(current.ContentId, unchanged.Current.ContentId);
+        Assert.Equal(current.ReleaseId, unchanged.Current.ReleaseId);
+        Assert.Equal(NodeUpdatePhase.Committed, unchanged.Phase);
+        Assert.Null(unchanged.Pending);
+    }
+
+    // Preserve the real staging result, but let the credential reset consume it before the normal loop can.
+    private sealed class FinishStagingDuringReset(INodeUpdateCoordinator inner, TaskCompletionSource finished) : INodeUpdateCoordinator
+    {
+        public async Task<StagedNode?> TryStageAsync(NodeRelease? offered, CancellationToken ct)
+        {
+            try { return await inner.TryStageAsync(offered, ct); }
+            finally
+            {
+                finished.TrySetResult();
+                try { await Task.Delay(Timeout.InfiniteTimeSpan, ct); }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+            }
+        }
+
+        public Task PrepareAsync(StagedNode staged, CancellationToken ct) => inner.PrepareAsync(staged, ct);
+    }
+
+    private sealed class UpdateFailureObserver : StringWriter
+    {
+        public TaskCompletionSource Recorded { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public override void WriteLine(string? value)
+        {
+            base.WriteLine(value);
+            // This existing diagnostic is emitted only after the scheduler records the staging exception.
+            if (value == "node-update:deferred") Recorded.TrySetResult();
+        }
+    }
+
+    private sealed class ObservedUpdateCoordinator(INodeUpdateCoordinator inner, Action started, Action completed) : INodeUpdateCoordinator
+    {
+        public async Task<StagedNode?> TryStageAsync(NodeRelease? offered, CancellationToken ct)
+        {
+            started();
+            try { return await inner.TryStageAsync(offered, ct); }
+            finally { completed(); }
+        }
+
+        public Task PrepareAsync(StagedNode staged, CancellationToken ct) => inner.PrepareAsync(staged, ct);
     }
 
     [Fact]

@@ -42,8 +42,8 @@ internal sealed class NodeTransport
     public Func<string?> CodexExecutable { get; init; } = CodexLocator.Find;
     /// <summary>How a wake reaches a Codex chat, given the executable; tests replace it so no real <c>codex.exe</c> ever runs.</summary>
     public Func<string, IWakeDispatcher> CodexDispatcher { get; init; } = executable => new CodexWakeDispatcher(executable, new CodexActivity(CodexActivity.DefaultSessionsRoot), queue: new CodexQueue(CodexQueue.DefaultHome));
-    /// <summary>The wake watcher's fallback pass when no hint arrives.</summary>
-    public TimeSpan WakeInterval { get; init; } = TimeSpan.FromSeconds(15);
+    /// <summary>The wake watcher's fallback pass when no hint arrives; unset leaves <see cref="WakeRuntime.Interval"/>'s default, which lengthens while hints work.</summary>
+    public TimeSpan? WakeInterval { get; init; }
     /// <summary>Fixed event names for tests (enrolled, announced, watching, hint, unauthorized, waking, wake-target); never carries data.</summary>
     public Action<string>? Trace { get; init; }
     /// <summary>The hub's join code, sent only when enrolling; enrolled PCs never need it again.</summary>
@@ -473,7 +473,6 @@ public sealed class NodeRunner : IAsyncDisposable
                 StagedNode? staged;
                 try { staged = await completed; }
                 catch { RecordUpdateFailure(_stagingRelease); throw; }
-                if (staged is null) RecordUpdateFailure(_stagingRelease);
                 if (staged is not null)
                 {
                     if (!await _dispatchGate.TryDrainAsync(TimeSpan.FromSeconds(30), ct)) return false;
@@ -506,7 +505,7 @@ public sealed class NodeRunner : IAsyncDisposable
         if (_updateStop is { } stopping) await stopping.CancelAsync();
         if (_updateTask is { } pending)
         {
-            try { if (await pending is null) RecordUpdateFailure(_stagingRelease); }
+            try { await pending; }
             catch (OperationCanceledException) { }
             catch (Exception) { RecordUpdateFailure(_stagingRelease); }
         }

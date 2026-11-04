@@ -60,6 +60,9 @@ public sealed class WakeReconciler(WakeConfiguration configuration, WakeState st
             if (attentionWake is not null) wakeable.Add(AttentionWakePrefix + attentionWake);
             // Nothing may wake the chat, so there is nothing to reserve and no reason to read the hub's controls a second time.
             if (wakeable.Count == 0) return "empty";
+            // All of it already woke the chat, so nothing would dispatch and the hub's controls need no second read. A chat holding one delivered
+            // candidate would otherwise pay it on every pass until its next boundary.
+            if (!state.HasUnseen(key, wakeable)) return "empty";
             if (File.Exists(configuration.StopFile)) return "stopped";
             if (!await Permitted()) return "control-blocked";
             cancellationToken.ThrowIfCancellationRequested();
@@ -177,8 +180,21 @@ public sealed class WakeReconciler(WakeConfiguration configuration, WakeState st
             line.Append("; top ").Append(topId.GetString()).Append(' ').Append(kind.GetString());
             if (top.TryGetProperty("t", out var task) && task.ValueKind == JsonValueKind.String && task.GetString() is { Length: > 0 and <= 256 } taskId) line.Append(" on task ").Append(JsonSerializer.Serialize(taskId));
         }
-        line.Append(". Your next check_inbox, task_update, action_report or task_claim reply offers it; answer with attention_respond.");
+        line.Append(". Your next check_inbox offers it; answer with attention_respond.");
         return (true, wake, line.ToString());
+    }
+
+    /// <summary>
+    /// Whether an attention line is worth its characters in a printed wake: not when its top item is only info or a tip. The kind follows the
+    /// first "; top a-N ", which a quoted task ID can only come after; a line that names no top item is kept.
+    /// </summary>
+    internal static bool AttentionMatters(string line)
+    {
+        const string top = "; top ";
+        var at = line.IndexOf(top, StringComparison.Ordinal);
+        if (at < 0) return true;
+        var parts = line[(at + top.Length)..].Split([' ', '.'], 3);
+        return parts.Length < 2 || parts[1] is not (CoCern.Contracts.AttentionKinds.Info or CoCern.Contracts.AttentionKinds.Tip);
     }
 
     private static string Prompt(WakeRoute route, string batch) =>
