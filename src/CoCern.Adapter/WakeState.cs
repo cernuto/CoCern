@@ -35,7 +35,7 @@ public sealed class WakeState : IDisposable
         try
         {
             _connection.Open();
-            Execute("PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS batches (route TEXT NOT NULL, batch TEXT PRIMARY KEY, status TEXT NOT NULL, at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS messages (route TEXT NOT NULL, message TEXT NOT NULL, batch TEXT NOT NULL, PRIMARY KEY(route,message)); UPDATE batches SET status='uncertain' WHERE status='reserved';");
+            Execute("PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS batches (route TEXT NOT NULL, batch TEXT PRIMARY KEY, status TEXT NOT NULL, at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS messages (route TEXT NOT NULL, message TEXT NOT NULL, batch TEXT NOT NULL, PRIMARY KEY(route,message)); CREATE TABLE IF NOT EXISTS printed (route TEXT NOT NULL, message TEXT NOT NULL, PRIMARY KEY(route,message)); UPDATE batches SET status='uncertain' WHERE status='reserved';");
         }
         catch { _connection.Dispose(); _ownership.Dispose(); throw; }
     }
@@ -52,7 +52,7 @@ public sealed class WakeState : IDisposable
         {
             using var transaction = _connection.BeginTransaction();
             if (IsUncertain(route, now)) return ("uncertain", null);
-            var unseen = ids.Select(id => Key(id)).Distinct().Where(id => Scalar("SELECT COUNT(*) FROM messages WHERE route=$route AND message=$value", route, id) == 0).ToArray();
+            var unseen = Unseen(route, ids);
             if (unseen.Length == 0) return ("empty", null);
             if (busy?.Invoke() == true) return ("busy", null);
             var time = now.ToUnixTimeMilliseconds();
@@ -65,6 +65,12 @@ public sealed class WakeState : IDisposable
             return ("reserved", batch);
         }
     }
+    /// <summary>Whether <see cref="Reserve"/> would find anything new in <paramref name="ids"/>; reserves nothing.</summary>
+    public bool HasUnseen(string route, IEnumerable<string> ids)
+    {
+        lock (_gate) return Unseen(route, ids).Length > 0;
+    }
+    private string[] Unseen(string route, IEnumerable<string> ids) => ids.Select(id => Key(id)).Distinct().Where(id => Scalar("SELECT COUNT(*) FROM messages WHERE route=$route AND message=$value", route, id) == 0).ToArray();
     /// <summary>Forgets a reserved batch that was never sent (stopped or canceled first), so its route and messages can wake again.</summary>
     public void Release(string batch)
     {
@@ -79,6 +85,20 @@ public sealed class WakeState : IDisposable
     public void Complete(string batch, bool queued)
     {
         lock (_gate) Execute("UPDATE batches SET status=$route WHERE batch=$value", queued ? "queued" : "uncertain", batch);
+    }
+    /// <summary>Those of <paramref name="ids"/> whose text has already been handed to this route's chat.</summary>
+    public IReadOnlySet<string> Printed(string route, IEnumerable<string> ids)
+    {
+        lock (_gate) return ids.Where(id => Scalar("SELECT COUNT(*) FROM printed WHERE route=$route AND message=$value", route, Key(id)) > 0).ToHashSet(StringComparer.Ordinal);
+    }
+    public void MarkPrinted(string route, IEnumerable<string> ids)
+    {
+        lock (_gate)
+        {
+            using var transaction = _connection.BeginTransaction();
+            foreach (var id in ids) Execute("INSERT OR IGNORE INTO printed(route,message) VALUES($route,$value)", route, Key(id));
+            transaction.Commit();
+        }
     }
     private long Scalar(string sql, string route, object? value = null)
     {

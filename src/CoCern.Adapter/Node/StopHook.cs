@@ -3,7 +3,7 @@ namespace CoCern.Adapter.Node;
 /// <summary>
 /// <c>--stop-hook</c>: the Claude Code Stop hook that keeps an idle chat reachable. Installed with <c>asyncRewake</c>, it runs in the
 /// background when a turn ends, reads the hook's JSON for the chat's <c>session_id</c> and waits with <see cref="ClaudeWaiter"/> on this
-/// PC's node credentials and the chat's session handle. When the hub queues a wake it prints the waiting messages to standard error and
+/// PC's node credentials and the chat's session handle. When the hub queues a wake it prints the messages not printed before to standard error and
 /// exits 2, which wakes the chat with them; the hub queues none for <c>wake: false</c> messages, so those wait for the chat's next turn.
 /// Anything else (no chat ID, no node or handle, this client's waiter already running, a timeout, an error) ends quietly with 0.
 /// </summary>
