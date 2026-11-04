@@ -265,13 +265,57 @@ public class DashboardManagerManagementTests
         Assert.Equal(new[] { RelayTools.ControlRequest, RelayTools.GetStatus }, app.Tools);
     }
 
-    private sealed class ConflictRefreshApplication : IRelayApplication
+    [Theory]
+    [InlineData("timeout")]
+    [InlineData("silo")]
+    [InlineData("gateway")]
+    [InlineData("connection")]
+    public async Task Known_host_conflict_survives_recoverable_grain_refresh_failures(string failure)
+    {
+        var app = new ConflictRefreshApplication(GrainFailure(failure));
+        var result = await DashboardManagerManagement.DecideAsync(Context("""{"repositoryId":"repo","requestId":"stale-grain","command":"clear_manager","expectedManagerGeneration":0,"humanWords":"Clear."}"""), app);
+        Assert.Equal(409, Status(result));
+        var data = Assert.IsType<DashboardManagerResult>(((IValueHttpResult)result).Value);
+        Assert.False(data.Ok); Assert.Equal(RelayErrorCodes.VersionConflict, data.Code); Assert.Null(data.Manager); Assert.Null(data.Paused);
+        Assert.Equal(new[] { RelayTools.ControlRequest, RelayTools.GetStatus }, app.Tools);
+    }
+
+    [Theory]
+    [InlineData("timeout")]
+    [InlineData("silo")]
+    public async Task Initial_decision_execution_failures_are_not_misrepresented_as_definitive_conflicts(string failure)
+    {
+        var error = GrainFailure(failure); var app = new ConflictRefreshApplication(error, failInitial: true);
+        var thrown = await Assert.ThrowsAnyAsync<Exception>(() => DashboardManagerManagement.DecideAsync(Context("""{"repositoryId":"repo","requestId":"initial-failure","command":"clear_manager","expectedManagerGeneration":0,"humanWords":"Clear."}"""), app));
+        Assert.Same(error, thrown);
+        Assert.Equal(new[] { RelayTools.ControlRequest }, app.Tools);
+    }
+
+    [Fact]
+    public async Task Fatal_refresh_failure_is_not_swallowed()
+    {
+        var error = new OutOfMemoryException("fixture fatal failure"); var app = new ConflictRefreshApplication(error);
+        var thrown = await Assert.ThrowsAsync<OutOfMemoryException>(() => DashboardManagerManagement.DecideAsync(Context("""{"repositoryId":"repo","requestId":"fatal-read","command":"clear_manager","expectedManagerGeneration":0,"humanWords":"Clear."}"""), app));
+        Assert.Same(error, thrown);
+        Assert.Equal(new[] { RelayTools.ControlRequest, RelayTools.GetStatus }, app.Tools);
+    }
+
+    private static Exception GrainFailure(string failure) => failure switch
+    {
+        "timeout" => new TimeoutException("fixture grain read timeout"),
+        "silo" => new Orleans.Runtime.SiloUnavailableException("fixture silo unavailable"),
+        "gateway" => new Orleans.Runtime.GatewayTooBusyException("fixture gateway busy"),
+        "connection" => new Orleans.Runtime.Messaging.ConnectionFailedException("fixture connection unavailable"),
+        _ => throw new ArgumentException("Unknown fixture failure", nameof(failure))
+    };
+
+    private sealed class ConflictRefreshApplication(Exception? failure = null, bool failInitial = false) : IRelayApplication
     {
         public List<string> Tools { get; } = [];
         public Task<RelayReply> ExecuteAsync(RelayCaller caller, string tool, JsonElement arguments, CancellationToken cancellationToken = default)
         {
             Tools.Add(tool);
-            if (tool == RelayTools.GetStatus) throw new HttpRequestException("status unavailable");
+            if (failInitial || tool == RelayTools.GetStatus) throw failure ?? new HttpRequestException("status unavailable");
             return Task.FromResult(new RelayReply(false, RelayErrorCodes.VersionConflict, "{}", 0));
         }
     }

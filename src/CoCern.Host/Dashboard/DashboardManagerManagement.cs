@@ -55,7 +55,9 @@ public static class DashboardManagerManagement
                 var refreshed = await ReadStatusAsync(context, application, principal, body.RepositoryId);
                 if (refreshed.Ok) result = result with { Manager = refreshed.Manager, Paused = refreshed.Paused };
             }
-            catch (Exception error) when (error is HttpRequestException or OperationCanceledException or JsonException) { }
+            catch (Exception error) when (error is HttpRequestException or OperationCanceledException or JsonException or TimeoutException
+                or Orleans.Runtime.OrleansMessageRejectionException or Orleans.Runtime.GatewayTooBusyException
+                or Orleans.Runtime.ClientNotAvailableException or Orleans.Runtime.Messaging.ConnectionFailedException) { }
             return Results.Json(result, statusCode: ToolResults.Status(reply));
         }
         return Project(reply);
