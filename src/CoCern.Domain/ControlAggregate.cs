@@ -460,6 +460,21 @@ internal static class ControlAggregate
     {
         if (!context.Caller.IsAdministrator) return Error(AdministratorRequired);
         var command = Required(context.Args, "command");
+        var allSessions = false;
+        if (context.Args.ContainsKey("allSessions"))
+        {
+            if (context.Args["allSessions"] is not JsonValue flag || !flag.TryGetValue(out allSessions) || command != "stop"
+                || context.Args.ContainsKey("sessionId") || context.Args.ContainsKey("actionId") || context.Args.ContainsKey("targetSessionId"))
+                return Error(InvalidArguments);
+        }
+        if (allSessions)
+        {
+            var global = new ControlState(context.State);
+            global.Paused = true;
+            var sessions = global.Entries().Where(entry => entry.Entry is not null).Select(entry => entry.Id).ToArray();
+            foreach (var id in sessions) global.RequestCancellation(id, "", context.Caller.PrincipalId, context.Now);
+            return Ok(new { paused = true, cancellationRequested = true, cancellationSessions = sessions.Length });
+        }
         if (command is "appoint_manager" or "clear_manager") return ManagerSelection.Apply(context);
         if (command == "register_resource") return RegisterResource(context);
         if (command == "close_sessions") return CloseSessionsByFilter(context);

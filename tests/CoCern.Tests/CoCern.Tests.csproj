@@ -1,6 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup><IsTestProject>true</IsTestProject><IsPackable>false</IsPackable></PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../src/CoCern.Dashboard/Services/ManagerManagementClient.cs" Link="Dashboard/ManagerManagementClient.cs" />
+    <Compile Include="../../src/CoCern.Dashboard/Components/ManagerControl.razor.cs" Link="Dashboard/ManagerControl.razor.cs" />
     <Compile Include="../../src/CoCern.Dashboard/Services/DashboardUsefulness.cs" Link="Dashboard/DashboardUsefulness.cs" />
     <Compile Include="../../src/CoCern.Dashboard/Services/AnalyticsPresentation.cs" Link="Dashboard/AnalyticsPresentation.cs" Condition="Exists('../../src/CoCern.Dashboard/Services/AnalyticsPresentation.cs')" />
     <!-- The Documents view's redraw key, with the formatting it reads times through. -->

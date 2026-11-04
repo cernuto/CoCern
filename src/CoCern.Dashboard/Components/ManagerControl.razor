@@ -1,0 +1,86 @@
+<section class="surface sql-view standing-view" aria-labelledby="manager-heading">
+    <h2 id="manager-heading">@RecoveryPanelKind</h2>
+    <p>Pause prevents new claims and actions. Stop also asks known chats to cancel. Running tools and wake delivery are not interrupted.</p>
+    <div class="standing-section">
+        <label for="manager-repository">Repository</label>
+        <input id="manager-repository" @bind="RepositoryId" maxlength="256" disabled="@(DecisionBusy || UnconfirmedDecision is not null)" />
+        <button type="button" @onclick="RefreshAsync" disabled="@ReadBusy">Refresh selection</button>
+        <p>Dispatch: @(Paused is true ? "Paused" : Paused is false ? "Running" : "Not yet read")</p>
+        <button type="button" @onclick='() => DispatchAsync("pause")' disabled="@DispatchBusy">Pause dispatch</button>
+        <button type="button" @onclick='() => DispatchAsync("stop")' disabled="@DispatchBusy">Request stop for all chats</button>
+        <button type="button" @onclick='() => DispatchAsync("resume")' disabled="@DispatchBusy">Resume dispatch</button>
+        @if (DispatchMessage is not null) { <p role="status">@DispatchMessage</p> }
+        @if (UnconfirmedDispatch is not null)
+        {
+            <p>Unconfirmed dispatch: @UnconfirmedDispatch.Command, request @UnconfirmedDispatch.RequestId.</p>
+            <button type="button" @onclick="RetryDispatchAsync" disabled="@DispatchBusy">Retry dispatch</button>
+        }
+    </div>
+    <details class="standing-section">
+        <summary>Manager selection</summary>
+        @if (Selection is null)
+        {
+            <p>Enter a repository and refresh selection.</p>
+        }
+        else
+        {
+            @if (Selection.Current is not { } current)
+            {
+                <p>No manager selected</p>
+            }
+            else
+            {
+                <p><strong>@(current.Available ? "Current manager" : "Manager unavailable")</strong></p>
+                <p>@(Sessions.FirstOrDefault(session => session.SessionId == current.SessionId && session.RepositoryId == current.RepositoryId)?.Label ?? "Session label unavailable")</p>
+                <p>Session @current.SessionId · Repository @current.RepositoryId</p>
+            }
+            <p>Generation @Selection.Generation</p>
+        }
+        <label for="manager-target">Exact session</label>
+        <select id="manager-target" value="@TargetSessionId" @onchange="SelectTarget" disabled="@(DecisionBusy || UnconfirmedDecision is not null)">
+            <option value="">Choose a session</option>
+            @foreach (var session in Sessions)
+            {
+                <option value="@session.SessionId">@session.Label · @session.SessionId · @session.RepositoryId</option>
+            }
+        </select>
+        @if (Sessions.FirstOrDefault(session => session.SessionId == TargetSessionId) is { } target)
+        {
+            <p>Target: @target.Label · Session @target.SessionId · Repository @target.RepositoryId</p>
+        }
+        <p>Enter the direct human answer authorizing this exact selection or clearing it. Selection records a choice; it grants no new powers.</p>
+        @if (HumanWords.Length > 200) { <p id="manager-words-error" role="alert">The human answer exceeds 200 characters. Shorten it explicitly; the text has been kept in full.</p> }
+        <label for="manager-human-words">Exact human answer (up to 200 characters)</label>
+        <input aria-invalid="@(HumanWords.Length > 200)" aria-describedby="manager-words-error" id="manager-human-words" value="@HumanWords" @oninput='change => HumanWords = change.Value?.ToString() ?? ""' disabled="@(DecisionBusy || UnconfirmedDecision is not null)" />
+        <button type="button" @onclick='() => DecideAsync("appoint_manager")' disabled="@(DecisionBusy || UnconfirmedDecision is not null)">Appoint or replace manager</button>
+        <button type="button" @onclick='() => DecideAsync("clear_manager")' disabled="@(DecisionBusy || UnconfirmedDecision is not null)">Clear selection</button>
+        @if (Message is not null) { <p role="status">@Message</p> }
+        @if (UnconfirmedDecision is not null)
+        {
+            <p>Unconfirmed request @UnconfirmedDecision.RequestId · Generation @UnconfirmedDecision.ExpectedManagerGeneration</p>
+            <blockquote>@UnconfirmedDecision.HumanWords</blockquote>
+            <button type="button" @onclick="RetryDecisionAsync" disabled="@DecisionBusy">Retry decision</button>
+            <button type="button" @onclick="NewDecision" disabled="@DecisionBusy">Start a new decision</button>
+        }
+        <h3>Recent manager selections</h3>
+        <p>This bounded list records recent selections.</p>
+        @if (RecentSelections.Length == 0) { <p>No selection history loaded.</p> }
+        <ul class="standing-records">
+            @foreach (var decision in RecentSelections)
+            {
+                <li @key="decision.Generation">
+                    <p>Generation @decision.Generation · @decision.Command · @decision.RepositoryId · Session @(decision.SessionId ?? "None")</p>
+                    <blockquote>@decision.HumanWords</blockquote>
+                    <p>By @decision.ActorPrincipalId at @decision.At.ToString("O") · Request @decision.RequestId</p>
+                </li>
+            }
+        </ul>
+        @if (nextHistoryBefore is not null)
+        {
+            <button type="button" @onclick="LoadEarlierAsync" disabled="@ReadBusy">Load earlier decisions</button>
+        }
+    </details>
+</section>
+@code {
+    private string RecoveryPanelKind => "Manager and dispatch";
+}

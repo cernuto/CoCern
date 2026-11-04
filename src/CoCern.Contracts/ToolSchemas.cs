@@ -286,6 +286,7 @@ internal static class ToolSchemas
                 properties["branch"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxDocBranchLength, description = "Branch to follow from now on; default the configured one." }; break;
             case RelayTools.ControlRequest:
                 properties["command"] = new { type = "string", @enum = new[] { "pause", "resume", "stop", "cancel", "register_resource", "revoke_machine", "close_sessions", "appoint_manager", "clear_manager" } };
+                properties["allSessions"] = new { type = "boolean", description = "stop only: pause globally and request cancellation from every known session across repositories. Cannot accompany sessionId, actionId or targetSessionId. Running tools and wake delivery are not interrupted." };
                 properties["idleMinutes"] = new { type = "integer", minimum = RelayLimits.MinCloseSessionsIdleMinutes, description = "close_sessions: sessions not seen for at least this many minutes." };
                 properties["labelPrefix"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxIdentifierLength, description = "close_sessions: sessions whose label starts with this, ignoring case; with idleMinutes both must match; alone, chats active in the last 10 minutes are skipped." };
                 properties["targetSessionId"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxIdentifierLength, description = "appoint_manager: exact target session; close_sessions: only this session, instead of the filters." };

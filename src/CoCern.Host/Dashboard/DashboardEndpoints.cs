@@ -104,6 +104,9 @@ public static class DashboardEndpoints
         // The Sessions page's "Close idle sessions": the cookie alone would let another site's form post this, so it also needs this origin.
         api.MapPost("/sessions/close", CloseSessionsAsync).RequireAuthorization(DashboardSecurity.Policy);
         api.MapPost("/standing/decide", DashboardStandingManagement.DecideAsync).RequireAuthorization(DashboardSecurity.Policy);
+        api.MapGet("/manager", DashboardManagerManagement.ReadAsync).RequireAuthorization(DashboardSecurity.Policy);
+        api.MapPost("/manager/decide", DashboardManagerManagement.DecideAsync).RequireAuthorization(DashboardSecurity.Policy);
+        api.MapPost("/dispatch", DashboardManagerManagement.DispatchAsync).RequireAuthorization(DashboardSecurity.Policy);
         app.MapHub<DashboardHub>("/dashboard/hub", options =>
         {
             options.ApplicationMaxBufferSize = 256 * 1024;
