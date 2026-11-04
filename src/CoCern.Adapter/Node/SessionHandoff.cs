@@ -9,6 +9,8 @@ namespace CoCern.Adapter.Node;
 /// </summary>
 public sealed record SessionHandle(string SessionId, string SessionToken, string RepositoryId, string Label, DateTimeOffset OpenedAt, ChatLocation? Client = null, ChatLocation? Chat = null, bool Unmapped = false)
 {
+    // Private cache ownership only; never populated from ordinary open/bind arguments or serialized in public metadata.
+    internal string? NativeBindingKey { get; init; }
     public override string ToString() => $"SessionHandle {{ SessionId = {SessionId}, RepositoryId = {RepositoryId}, Client = {Client}, Chat = {Chat}, Unmapped = {Unmapped} }}";
 }
 
@@ -30,6 +32,35 @@ public sealed class SessionHandoff
 
     /// <summary>A hand-off writing into <paramref name="folder"/> directly (tests).</summary>
     internal static SessionHandoff ForFolder(string folder, ChatLocation? client = null) => new(folder, client, TextWriter.Null);
+
+    /// <summary>Complete only the exact authenticated native opening attempt, under both private ownership locks.</summary>
+    internal bool CompleteNativeJoin(NativeJoinBinding binding, AdapterOptions authenticatedOptions, JsonElement arguments, AdapterReply reply)
+    {
+        try
+        {
+            if (!reply.Ok || reply.Code != "Ok" || reply.Version is null || reply.Data is not { ValueKind: JsonValueKind.Object } data ||
+                !binding.MatchesFolder(_folder) || !binding.MatchesClient(_client) || !binding.MatchesConnection(authenticatedOptions) ||
+                arguments.ValueKind != JsonValueKind.Object || arguments.GetRawText() != binding.FrozenOpenArguments.GetRawText() ||
+                ChatLocators.Text(data, "sessionId") is not { } id || !NodeState.IsFileId(id) ||
+                ChatLocators.Text(data, "sessionToken") is not { Length: > 0 and <= 8192 } token || token.Any(char.IsControl)) return false;
+            using var owner = Acquire(id);
+            if (owner is null) return false;
+            var path = NodeState.SessionHandlePath(_folder, id);
+            if (File.Exists(path))
+            {
+                var previous = binding.OwnedHandle(id);
+                if (previous is null || previous.SessionToken != token) return false;
+                return binding.Complete(previous);
+            }
+            if (binding.CurrentHandleReference is not null && binding.CurrentHandleReference != id) return false;
+            var client = new ChatLocation(binding.Provider, binding.NativeId);
+            var handle = new SessionHandle(id, token, binding.RepositoryId, Label(arguments) ?? DefaultLabel,
+                DateTimeOffset.UtcNow, client, client) { NativeBindingKey = binding.OwnershipKey };
+            NodeState.WriteSessionHandle(_folder, handle);
+            return binding.Complete(handle);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or JsonException) { return false; }
+    }
 
     /// <summary>Restores an established handle only after its authenticated tool call succeeded; never opens a replacement session.</summary>
     internal void Restore(string tool, JsonElement arguments, AdapterReply reply)
@@ -63,7 +94,8 @@ public sealed class SessionHandoff
         if (_client is null) return null;
         try
         {
-            return NodeState.ReadSessionHandles(_folder).Where(handle => handle.RepositoryId == repository && (handle.Client is not null || handle.Chat is not null) && OwnsNative(handle))
+            // Native handles require their full credential/checkout lease, not this legacy chat-ID-only lookup.
+            return NodeState.ReadSessionHandles(_folder).Where(handle => handle.NativeBindingKey is null && handle.RepositoryId == repository && (handle.Client is not null || handle.Chat is not null) && OwnsNative(handle))
                 .OrderByDescending(handle => handle.OpenedAt).FirstOrDefault();
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { return null; }
