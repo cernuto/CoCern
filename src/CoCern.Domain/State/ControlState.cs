@@ -24,12 +24,16 @@ public sealed class ControlState(JsonObject json)
     public const string AliasesKey = "aliases";
     public const string PausedKey = "paused";
     public const string CancellationsKey = "cancellations";
+    public const string ManagerGenerationKey = "managerGeneration";
+    public const string ManagerKey = "manager";
+    public const string ManagerHistoryKey = "managerHistory";
 
     /// <summary>Every key the directory stores: its entries by session ID, close fences by session ID, resources by ID, aliases by machine and name, and cancellations by session and action.</summary>
     public static StateShape Shape { get; } = CommonState.Shape.With(
         (SessionsKey, StateShape.Map(DirectoryEntry.Shape)), (ClosingKey, StateShape.Map(StateShape.Object((FenceSeqKey, null), (FenceAtKey, null)))), (CloseSeqKey, null),
         (ResourcesKey, StateShape.Map(RegisteredResource.Shape)), (AliasesKey, StateShape.Map(null)),
-        (PausedKey, null), (CancellationsKey, StateShape.Map(Cancellation.Shape)));
+        (PausedKey, null), (CancellationsKey, StateShape.Map(Cancellation.Shape)),
+        (ManagerGenerationKey, null), (ManagerKey, ManagerAssignment.Shape), (ManagerHistoryKey, ManagerSelectionHistoryState.Shape));
 
     private JsonObject Sessions => ObjectAt(json, SessionsKey);
 
@@ -99,6 +103,22 @@ public sealed class ControlState(JsonObject json)
         get => Flag(json, PausedKey);
         set => json[PausedKey] = value;
     }
+
+    /// <summary>The hub-wide selection generation; old documents start at zero.</summary>
+    public long ManagerGeneration
+    {
+        get => Number(json, ManagerGenerationKey);
+        set => json[ManagerGenerationKey] = value;
+    }
+
+    /// <summary>Private selection provenance. Clearing preserves the generation and history.</summary>
+    public ManagerAssignment? Manager
+    {
+        get => json[ManagerKey] is JsonObject assignment ? new(assignment) : null;
+        set => json[ManagerKey] = value?.ToJson();
+    }
+
+    public JsonArray ManagerHistory => ArrayAt(json, ManagerHistoryKey);
 
     private JsonObject Cancellations => ObjectAt(json, CancellationsKey);
 
