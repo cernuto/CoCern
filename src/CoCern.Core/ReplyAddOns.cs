@@ -73,9 +73,13 @@ internal sealed class ReplyAddOns(Aggregates aggregates, ClaimComposer claims, S
     {
         if (!reply.Reply.Ok) return;
         var (caller, args, committed) = (reply.Call.Caller, reply.Call.Args, reply.Reply);
-        if (args["renewClaims"] is not JsonArray && args["ackMessageIds"] is not JsonArray) return;
+        // Only a send answers a message. replyTo is validated as an ID on every call and means nothing on any other tool.
+        var answers = reply.Call.Tool == RelayTools.SendMessage ? Text(args, "replyTo") : "";
+        if (args["renewClaims"] is not JsonArray && args["ackMessageIds"] is not JsonArray && answers.Length == 0) return;
         var conveniences = new JsonObject();
-        var authorization = await guard.VerifySessionAsync(caller, args);
+        RelayReply authorization;
+        try { authorization = await guard.VerifySessionAsync(caller, args); }
+        catch (Exception) { authorization = Error(Unavailable); }
         if (args["renewClaims"] is JsonArray renewals)
         {
             var outcomes = new JsonArray();
@@ -90,14 +94,40 @@ internal sealed class ReplyAddOns(Aggregates aggregates, ClaimComposer claims, S
             }
             conveniences["renewals"] = outcomes;
         }
-        if (args["ackMessageIds"] is JsonArray ids)
+        if (args["ackMessageIds"] is JsonArray || answers.Length > 0)
         {
-            var ack = args.DeepClone().AsObject(); ack.Remove("requestId"); ack["messageIds"] = ids.DeepClone();
-            var result = authorization.Ok ? await aggregates.Session(caller, RelayTools.Ack, ack) : authorization;
-            conveniences["ack"] = Outcome(result.Ok, result.Code);
+            // The write has committed: a failed acknowledgment gets its own outcome, never an error for the whole call.
+            try
+            {
+                var result = authorization.Ok ? await AcknowledgeAsync(caller, args, answers) : authorization;
+                conveniences["ack"] = Outcome(result.Ok, result.Code);
+            }
+            catch (Exception) { conveniences["ack"] = Outcome(false, Unavailable); }
         }
         var data = Parse(committed); data["conveniences"] = conveniences;
         reply.Reply = Ok(data, committed.Version);
+    }
+
+    /// <summary>
+    /// Acknowledges a call's <c>ackMessageIds</c> as the <c>ack</c> tool would, then, on a send, the message it answers. The answered message is
+    /// <c>heldOnly</c>, so an ID the sender's inbox does not hold changes nothing and the outcome cannot tell whose it is or whether it exists. It
+    /// carries its own request ID, so a retry replays this answer rather than acting on an inbox that has changed since. It stays out when
+    /// already listed, and when the list is at the ID limit.
+    /// </summary>
+    private async Task<RelayReply> AcknowledgeAsync(RelayCaller caller, JsonObject args, string answers)
+    {
+        if (args["ackMessageIds"] is JsonArray ids)
+        {
+            var ack = args.DeepClone().AsObject(); ack.Remove("requestId"); ack.Remove("heldOnly"); ack["messageIds"] = ids.DeepClone();
+            var result = await aggregates.Session(caller, RelayTools.Ack, ack);
+            if (!result.Ok || answers.Length == 0 || ids.Count >= RelayLimits.MaxAcknowledgedMessages || ids.Any(id => id is JsonValue value && value.TryGetValue<string>(out var listed) && listed == answers)) return result;
+        }
+        var held = new JsonObject
+        {
+            ["repositoryId"] = Text(args, "repositoryId"), ["sessionId"] = Text(args, "sessionId"), ["sessionToken"] = Text(args, "sessionToken"),
+            ["requestId"] = Text(args, "requestId") + "/reply-ack", ["messageIds"] = new JsonArray(answers), ["heldOnly"] = true
+        };
+        return await aggregates.Session(caller, RelayTools.Ack, held);
     }
 
     /// <summary>A <c>task_update</c> with <c>includeNextWork</c> carries an advisory next-work offer (<see cref="WithNextWorkAsync"/>).</summary>

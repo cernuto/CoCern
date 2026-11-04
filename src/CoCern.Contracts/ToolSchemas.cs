@@ -211,7 +211,7 @@ internal static class ToolSchemas
                 properties["usage"] = UsageSchema(); properties["attention"] = AttentionOptOut(); break;
             case RelayTools.SendMessage:
                 Text("text", "Message text, at most 8 KiB. Supply taskId for shared conversation, otherwise recipientSessionId for private delivery.");
-                Text("replyTo", "Optional ID of the message this replies to.");
+                Text("replyTo", "Optional ID of the message this replies to; acknowledged if in your inbox.");
                 properties["ackMessageIds"] = new { type = "array", items = new { type = "string" }, maxItems = RelayLimits.MaxAcknowledgedMessages, description = "Inbox message IDs this reply handles; acknowledged in the same call." };
                 properties["supersede"] = new { type = "boolean", description = "For repeated status or heartbeats: replaces your earlier unread superseding message to this recipient." };
                 properties["wake"] = new { type = "boolean", description = "false for status/FYI needing no action now: stored and read at the next wake, never wakes the recipient." }; break;

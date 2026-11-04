@@ -89,7 +89,7 @@ Within 24 hours, a retry in the original scope returns the first reply without r
 - Wait with `check_inbox` and `waitSeconds` (up to 50) instead of polling. Mail, urgent attention, or an eligible idle reminder ends the wait; the returning attention read offers one item. Internal polls consume no offers, and `attention: false` opts out of attention wakes.
 - Pass the `etag` from `task_get`, `get_status`, `worker_list`, `context_get` or `chat_directory` back as `ifNoneMatch`. An unchanged read returns only `{"unchanged":true,"etag":...}`.
 - Find task IDs with `search`, then read the needed `task_get` section. For a synchronized board, use `sinceRevision` and finish every page before saving its checkpoint. Reuse shared notes and cached documentation when the context will be needed again.
-- Acknowledge in your reply: `send_message` with `ackMessageIds`.
+- Acknowledge in your reply: `send_message` with `replyTo` also acknowledges that message if it is in your own inbox, and does nothing otherwise; list any others in `ackMessageIds`.
 - `supersede: true` replaces your previous status message; `wake: false` sends a note nobody must act on now and never causes a wake, even after the idle hold.
 - Renew claims rarely: `claim_renew` takes `leaseSeconds` up to 1800.
 - Send your session handle on `task_get` too, so [tips](#feedback) can point out rereads.
