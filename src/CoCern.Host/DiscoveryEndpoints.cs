@@ -9,6 +9,7 @@ using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.AspNetCore.SignalR;
 using CoCern.Contracts;
 using CoCern.Core;
+using CoCern.Host.Dashboard;
 
 namespace CoCern.Host;
 
@@ -219,7 +220,7 @@ internal static partial class DiscoveryEndpoints
     /// <summary>The enroll rules for a display name: 1 to 128 characters, not blank, no control characters. Announce applies the same rules.</summary>
     private static bool ValidMachineName([System.Diagnostics.CodeAnalysis.NotNullWhen(true)] string? name) => name is { Length: > 0 and <= MaxNameLength } && !name.Any(char.IsControl) && !string.IsNullOrWhiteSpace(name);
 
-    private static async Task<IResult> AnnounceAsync(HttpContext context, IMachineDirectory machines, IHubContext<CoordinationHub> hub, MachineRouteHints hints)
+    private static async Task<IResult> AnnounceAsync(HttpContext context, IMachineDirectory machines, IHubContext<CoordinationHub> hub, MachineRouteHints hints, DashboardConnect connect, AdapterZipCache cache)
     {
         if (RelayAuthentication.Machine(context.User) is not { } machine) return Failure(StatusCodes.Status403Forbidden, RelayErrorCodes.MachineRequired);
         var allowed = context.User.FindAll("relay_repository").Select(x => x.Value).ToHashSet(StringComparer.Ordinal);
@@ -262,9 +263,18 @@ internal static partial class DiscoveryEndpoints
             try { await hub.Clients.Group(CoordinationHub.MachineGroup(machine.MachineId)).SendAsync(HubEvents.DiscoveryChanged, new { }, context.RequestAborted); }
             catch (Exception exception) when (exception is not OperationCanceledException) { }
         }
-        if (refused.Count == 0) return Results.Content(reply.DataJson, "application/json");
         var data = JsonNode.Parse(reply.DataJson)!.AsObject();
-        data["refused"] = refused;
+        if (refused.Count != 0) data["refused"] = refused;
+        // A package problem never fails an authorized announcement; cancellation remains the caller's cancellation.
+        try
+        {
+            if (connect.ServedAdapter() is { } adapter)
+            {
+                await using var lease = await cache.ReleaseAsync(adapter.Folder, context.RequestAborted);
+                if (lease is not null) data["nodeRelease"] = JsonSerializer.SerializeToNode(lease.Release, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException) { }
         return Results.Content(data.ToJsonString(), "application/json");
     }
 
