@@ -179,10 +179,10 @@ try
                 default: throw new AdapterConfigurationException(usage);
             }
         }
-        using var state = NodeState.Open(dataDir);
         using var shutdown = new CancellationTokenSource();
         Console.CancelKeyPress += (_, cancel) => { cancel.Cancel = true; shutdown.Cancel(); };
-        return await NodeRunner.RunAsync(state, hub, new NodeTransport { JoinCode = joinCode }, Console.Error, shutdown.Token);
+        var (knownDotnet, knownDll) = SetupEnvironment.Host();
+        return await SetupEnvironment.RunNodeAsync(dataDir, hub, new NodeTransport { JoinCode = joinCode }, knownDll, knownDotnet, Console.Error, shutdown.Token);
     }
     NativeRegistration? registration = null;
     if (args.Any(NativeRegistration.HasPrivateOptionName))

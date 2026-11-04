@@ -118,6 +118,7 @@ public static class DiscoveryStateMachine
         var id = Required(args, "machineId");
         var name = Required(args, "machineName");
         var clients = StringList(args["clients"]).Select(x => x.Length is > 0 and <= RelayLimits.MaxIdentifierLength ? x : throw new ArgumentException("clients entries must be 1 to 256 characters.")).ToArray();
+        var nodeBuild = ReadNodeBuild(args["nodeBuild"]);
         var source = args["chats"] is null ? new JsonArray() : args["chats"] as JsonArray ?? throw new ArgumentException("chats must be an array.");
         if (source.Count > DiscoveryLimits.MaxChatsPerMachine) return Error(CapacityExceeded);
         var parsed = new List<(AnnouncedChat Chat, DateTimeOffset OpenedAt, int Order)>();
@@ -132,12 +133,26 @@ public static class DiscoveryStateMachine
         var chats = parsed.GroupBy(x => x.Chat.Provider == UnmappedProvider ? "unmapped:" + x.Order : x.Chat.Provider.ToLowerInvariant() + "/" + x.Chat.ThreadId.ToLowerInvariant())
             .Select(group => group.OrderByDescending(x => x.OpenedAt).ThenBy(x => x.Order).First()).OrderBy(x => x.Order).Select(x => x.Chat).ToArray();
         if (state.Machine(id) is not { } machine) return Error(NotFound);
-        machine.Announced(name, now, clients, chats);
+        machine.Announced(name, now, clients, chats, nodeBuild);
         var routes = chats.Where(x => x.Wakeable).Select(x => new { provider = x.Provider, threadId = x.ThreadId, relaySessionId = x.RelaySessionId, repositoryId = x.RepositoryId }).ToArray();
         return Ok(new { routes });
     }
 
-    /// <summary>The announced chats in the given repositories. Thread IDs, hashes and credentials never leave the aggregate.</summary>
+    private static NodeBuildObservation? ReadNodeBuild(JsonNode? value)
+    {
+        if (value is null) return null;
+        if (value is not JsonObject build) throw new ArgumentException("nodeBuild must be an object.");
+        var version = Required(build, "productVersion");
+        var content = Required(build, "contentId");
+        var dll = Required(build, "adapterDllSha256");
+        if (version.Any(char.IsControl) || content.Length != 64 || content.Any(c => !char.IsAsciiHexDigit(c)) ||
+            dll.Length != 64 || dll.Any(c => !char.IsAsciiHexDigit(c)) ||
+            build["processId"] is not JsonValue pid || !pid.TryGetValue<int>(out var processId) || processId <= 0)
+            throw new ArgumentException("nodeBuild contains invalid build observations.");
+        return new(version, content, dll, processId);
+    }
+
+    /// <summary>The announced chats in the given repositories. Private thread IDs, credential hashes and credentials never leave the aggregate.</summary>
     private static RelayReply Directory(DiscoveryState state, JsonObject args, DateTimeOffset now)
     {
         var repositories = StringList(args["repositories"]).ToHashSet(StringComparer.Ordinal);
@@ -149,7 +164,8 @@ public static class DiscoveryStateMachine
             {
                 var provider = chat.Provider;
                 var reachable = ReadModels.IsReachable(provider, chat.Wakeable, chat.WaiterRunning, lastSeen, now);
-                items.Add(new { label = chat.Label, provider, machineName = machine.Name, relaySessionId = chat.RelaySessionId, repositoryId = chat.RepositoryId, reachable });
+                var nodeBuild = machine.NodeBuild is { } build ? new { productVersion = build.ProductVersion, contentId = build.ContentId, adapterDllSha256 = build.AdapterDllSha256, processId = build.ProcessId } : null;
+                items.Add(new { label = chat.Label, provider, machineName = machine.Name, relaySessionId = chat.RelaySessionId, repositoryId = chat.RepositoryId, reachable, nodeBuild });
             }
         }
         if (Fits(items, items.Count)) return Ok(new { items, truncated = false });

@@ -13,9 +13,16 @@ public static class NodeSupervisor
     internal static Task<int> RunAsync(string nodeFolder, string bootstrapAdapterDll, NodeHostCapabilities host, Func<NodeLaunchSpec, INodeChild?> start, TimeProvider clock, CancellationToken ct) =>
         RunCoreAsync(nodeFolder, bootstrapAdapterDll, () => host, start, clock, ct);
 
+    // Only the explicit normal startup entry may offer first-launch credential recovery.
+    internal static Task<int> RunOrdinaryAsync(string nodeFolder, string bootstrapAdapterDll, string? dotnetPath, CancellationToken ct) =>
+        RunCoreAsync(nodeFolder, bootstrapAdapterDll, () => NodePackage.ReadHostCapabilities(dotnetPath), StartOwnedChild, TimeProvider.System, ct, ordinaryStartup: true);
+
+    internal static Task<int> RunOrdinaryAsync(string nodeFolder, string bootstrapAdapterDll, NodeHostCapabilities host, Func<NodeLaunchSpec, INodeChild?> start, TimeProvider clock, CancellationToken ct) =>
+        RunCoreAsync(nodeFolder, bootstrapAdapterDll, () => host, start, clock, ct, ordinaryStartup: true);
+
     internal static INodeChild? StartOwnedChild(NodeLaunchSpec launch) => WindowsNodeChild.Start(launch);
 
-    private static async Task<int> RunCoreAsync(string nodeFolder, string bootstrapAdapterDll, Func<NodeHostCapabilities> readHost, Func<NodeLaunchSpec, INodeChild?> start, TimeProvider clock, CancellationToken ct)
+    private static async Task<int> RunCoreAsync(string nodeFolder, string bootstrapAdapterDll, Func<NodeHostCapabilities> readHost, Func<NodeLaunchSpec, INodeChild?> start, TimeProvider clock, CancellationToken ct, bool ordinaryStartup = false)
     {
         try
         {
@@ -34,6 +41,9 @@ public static class NodeSupervisor
                 NodeUpdateState.Write(root, record);
             }
             else record = read.Record!;
+            var primary = ordinaryStartup ? NodeUpdateState.ReadPrimary(root) : null;
+            var firstOrdinaryLaunch = ordinaryStartup && record is { Phase: NodeUpdatePhase.Committed, Pending: null, ActivationNonce: null } &&
+                primary is { Phase: NodeUpdatePhase.Committed, Pending: null, ActivationNonce: null } && primary.Current.ContentId == record.Current.ContentId;
             if (record.Phase == NodeUpdatePhase.Starting)
             {
                 record = Rollback(root, record, clock);
@@ -52,13 +62,15 @@ public static class NodeSupervisor
                 var launch = NodePackage.Launch(image, originalFolder, record.ActivationNonce, readHost());
                 if (launch is not null)
                 {
-                    var startup = new NodeWorkerStartupContext(record.ActivationNonce, Guid.NewGuid(), refusedRelease, refusedAt);
+                    var ordinary = firstOrdinaryLaunch && NodePackage.SupportsOrdinaryStartup(root, image);
+                    var startup = new NodeWorkerStartupContext(record.ActivationNonce, Guid.NewGuid(), refusedRelease, refusedAt, ordinary);
                     var arguments = launch.Arguments.ToList();
                     var contextIndex = arguments.IndexOf("--activation-nonce");
                     if (contextIndex >= 0) arguments[contextIndex + 1] = startup.ToArgument();
                     else arguments.AddRange(["--activation-nonce", startup.ToArgument()]);
                     launch = launch with { Arguments = arguments.ToArray(), StartupContext = startup };
                 }
+                firstOrdinaryLaunch = false; // Never retry this intent for handoffs, rollback or a later attempt.
                 var child = launch is null ? null : start(launch);
                 if (child is null)
                 {

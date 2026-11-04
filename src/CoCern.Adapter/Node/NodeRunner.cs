@@ -92,12 +92,21 @@ public sealed class NodeRunner : IAsyncDisposable
             catch (AdapterConfigurationException exception) { error.WriteLine(exception.Message); return 1; }
             var image = NodeUpdateState.ValidateWorkerStartup(nodeFolder, activationNonce, executingFolder);
             if (image is null || !state.Enrolled || state.TryReadCredential(out _) != CredentialRead.Present) { error.WriteLine("node-update:startup-invalid"); return 1; }
+            if (startupContext?.OrdinaryStartup == true)
+            {
+                var root = Path.Combine(nodeFolder, "updates");
+                var primary = NodeUpdateState.ReadPrimary(root);
+                if (activationNonce is not null || primary is not { Phase: NodeUpdatePhase.Committed, Pending: null, ActivationNonce: null } ||
+                    primary.Current.ContentId != image.ContentId || !NodePackage.SupportsOrdinaryStartup(root, image))
+                { error.WriteLine("node-update:startup-invalid"); return 1; }
+            }
             NodeReady? readiness = null;
             if (activationNonce is { } nonce)
             {
                 readiness = new(nonce, image.ContentId, Environment.ProcessId, startupContext?.LaunchId is { } launch && launch != Guid.Empty ? launch : null);
             }
-            return await RunAsync(state, null, transport, error, ct, readiness, workerStartup: true, workerImage: image.ContentId, startupContext: startupContext);
+            var observation = new NodeBuildObservation(image.Package.ProductVersion, image.ContentId, image.AdapterDllSha256, Environment.ProcessId);
+            return await RunAsync(state, null, transport, error, ct, readiness, workerStartup: true, workerImage: image.ContentId, startupContext: startupContext, nodeBuild: observation);
         }
     }
 
@@ -155,17 +164,21 @@ public sealed class NodeRunner : IAsyncDisposable
     private NodeReady? _pendingReady;
     private readonly NodeReady? _activationReady;
     private readonly string? _workerImage;
+    private readonly NodeBuildObservation? _nodeBuild;
     private readonly bool _pendingCandidate;
     private int _activationGateHeld;
     private bool _workerStartup;
+    private readonly bool _ordinaryStartup;
 
-    private NodeRunner(NodeState state, Uri hub, NodeTransport transport, TextWriter error, NodeReady? readiness = null, bool workerStartup = false, string? workerImage = null, NodeWorkerStartupContext? startupContext = null)
+    private NodeRunner(NodeState state, Uri hub, NodeTransport transport, TextWriter error, NodeReady? readiness = null, bool workerStartup = false, string? workerImage = null, NodeWorkerStartupContext? startupContext = null, NodeBuildObservation? nodeBuild = null)
     {
         (_state, _hub, _transport, _error) = (state, hub, transport, error);
         _pendingReady = readiness;
         _activationReady = readiness;
         _workerImage = workerImage;
+        _nodeBuild = nodeBuild;
         _workerStartup = workerStartup;
+        _ordinaryStartup = startupContext?.OrdinaryStartup == true;
         var journal = (workerImage is not null || transport.CreateUpdater is not null && transport.UpdateHost is not null) ? NodeUpdateState.Read(Path.Combine(state.Folder, "updates")).Record : null;
         _pendingCandidate = readiness is not null && journal?.Current.ContentId != workerImage;
         _activationGateHeld = _pendingCandidate ? 1 : 0;
@@ -182,12 +195,12 @@ public sealed class NodeRunner : IAsyncDisposable
     /// <summary>Runs until cancelled (exit 0). Exit 1 for configuration problems or a revoked PC, 4 when the hub presents a certificate other than the pinned one.</summary>
     public static Task<int> RunAsync(NodeState state, Uri? hub, CancellationToken ct) => RunAsync(state, hub, new NodeTransport(), Console.Error, ct);
 
-    internal static async Task<int> RunAsync(NodeState state, Uri? hub, NodeTransport transport, TextWriter error, CancellationToken ct, NodeReady? readiness = null, bool workerStartup = false, string? workerImage = null, NodeWorkerStartupContext? startupContext = null)
+    internal static async Task<int> RunAsync(NodeState state, Uri? hub, NodeTransport transport, TextWriter error, CancellationToken ct, NodeReady? readiness = null, bool workerStartup = false, string? workerImage = null, NodeWorkerStartupContext? startupContext = null, NodeBuildObservation? nodeBuild = null)
     {
         Uri target;
         try { target = ResolveHub(state, hub); }
         catch (AdapterConfigurationException exception) { error.WriteLine(exception.Message); return 1; }
-        await using var runner = new NodeRunner(state, target, transport, error, readiness, workerStartup, workerImage, startupContext);
+        await using var runner = new NodeRunner(state, target, transport, error, readiness, workerStartup, workerImage, startupContext, nodeBuild);
         if (runner._pendingCandidate) await runner._dispatchGate.TryDrainAsync(TimeSpan.Zero, ct);
         try { return await runner.LoopAsync(ct); }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { return transport.SingleCycle ? 1 : 0; }
@@ -200,7 +213,7 @@ public sealed class NodeRunner : IAsyncDisposable
     internal static TimeSpan NextRetry(TimeSpan current, TimeSpan max) => current * 2 > max ? max : current * 2;
 
     /// <summary>A typed address counts only until the PC has enrolled; afterwards a different one is refused, so a typo cannot move the PC to another hub.</summary>
-    private static Uri ResolveHub(NodeState state, Uri? typed)
+    internal static Uri ResolveHub(NodeState state, Uri? typed)
     {
         if (typed is not null && !AdapterOptions.TryParseOrigin(typed.OriginalString, out typed))
             throw new AdapterConfigurationException("--hub must be a root https:// address, or http:// to this PC's loopback, without credentials, query, or fragment.");
@@ -388,7 +401,10 @@ public sealed class NodeRunner : IAsyncDisposable
             }
             if (response.StatusCode == HttpStatusCode.Unauthorized)
             {
-                if (_workerStartup) return Stop("node-update:authentication-refused");
+                // Ordinary recovery may send the stored join code, so require pinned TLS for this
+                // worker's entire lifetime, including after its first accepted announcement.
+                if ((_ordinaryStartup && (!Https || _state.Fingerprint is null)) || (_workerStartup && !_ordinaryStartup))
+                    return Stop("node-update:authentication-refused");
                 await ResetUpdaterAsync();
                 // Only the hub refusing the credential leads to enrolling again; network errors never do. The credential is kept aside in case the hub turns out to still hold this ID.
                 (_rejected, _credential) = (_credential, null);
@@ -629,6 +645,7 @@ public sealed class NodeRunner : IAsyncDisposable
     private Task<HttpResponseMessage> PostAnnounceAsync(JsonArray chats, CancellationToken ct) => PostAsync("api/discovery/announce", new JsonObject
     {
         ["machineName"] = _transport.MachineName,
+        ["nodeBuild"] = JsonSerializer.SerializeToNode(_nodeBuild, new JsonSerializerOptions(JsonSerializerDefaults.Web)),
         ["clients"] = new JsonArray(_transport.Clients().Select(x => (JsonNode)JsonValue.Create(x)!).ToArray()),
         ["chats"] = chats.DeepClone()
     }, _credential, ct);
