@@ -961,6 +961,114 @@ public sealed class NodeTests : IDisposable
     }
 
     [Fact]
+    public async Task Claude_waiter_follows_its_chat_to_a_newer_session()
+    {
+        var chatId = Guid.NewGuid().ToString();
+        var now = DateTimeOffset.UtcNow;
+        EnrollOnLoopback();
+        NodeState.WriteSessionHandle(DataDir, new SessionHandle("s-old", "synthetic-token-old", "repo", "Old", now.AddHours(-1), new ChatLocation("claude", chatId), new ChatLocation("claude", chatId)));
+        var inbox = new InboxStub(new string('c', 64), "s-old", "synthetic-token-old") { Moved = ("s-new", "synthetic-token-new", ["m-new"]) };
+        var prompts = new List<string>();
+        var waiting = ClaudeWaiter.RunAsync(DataDir, chatId, prompts.Add, TimeSpan.FromSeconds(20), CancellationToken.None, inbox, () => new NoHub(), interval: TimeSpan.FromMilliseconds(50));
+        await WaitForAsync(() => File.Exists(Path.Combine(DataDir, "waiters", chatId + ".pid")), waiting);
+        // A later Stop hook finds this waiter alive and leaves it running, so only the waiter itself can notice the chat moved.
+        NodeState.WriteSessionHandle(DataDir, new SessionHandle("s-new", "synthetic-token-new", "repo", "New", now, new ChatLocation("claude", chatId), new ChatLocation("claude", chatId)));
+        Assert.Equal("queued", await waiting);
+        Assert.Single(prompts);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_hook_from_a_new_client_arms_once_a_waiter_left_by_another_client_ends(bool oldClientStillListed)
+    {
+        var chatId = Guid.NewGuid().ToString();
+        using var oldWaiter = StartStandIn();
+        try
+        {
+            SeedWaiter(chatId, oldWaiter);
+            var inbox = new InboxStub(new string('c', 64), "s-claude", "synthetic-token-claude") { Messages = ["m1"] };
+            var error = new StringWriter();
+            var hook = RunHook(chatId, inbox, error, Clients(oldWaiter.Id, oldClientStillListed ? 9002 : null), TimeSpan.FromSeconds(30));
+            await Task.Delay(300);
+            Assert.False(hook.IsCompleted);
+            oldWaiter.Kill(entireProcessTree: true);
+            await oldWaiter.WaitForExitAsync();
+            Assert.Equal(2, await hook.WaitAsync(TimeSpan.FromSeconds(20)));
+            Assert.Contains("m1", error.ToString());
+        }
+        finally { if (!oldWaiter.HasExited) oldWaiter.Kill(entireProcessTree: true); }
+    }
+
+    [Fact]
+    public async Task A_hook_leaves_a_live_waiter_of_its_own_client_alone_and_ends_at_once()
+    {
+        var chatId = Guid.NewGuid().ToString();
+        using var ownWaiter = StartStandIn();
+        try
+        {
+            SeedWaiter(chatId, ownWaiter);
+            var inbox = new InboxStub(new string('c', 64), "s-claude", "synthetic-token-claude") { Messages = ["m1"] };
+            var error = new StringWriter();
+            Assert.Equal(0, await RunHook(chatId, inbox, error, Clients(ownWaiter.Id, 9001), TimeSpan.FromSeconds(30)).WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.Equal("", error.ToString());
+            Assert.True(File.Exists(Path.Combine(DataDir, "waiters", chatId + ".pid")));
+        }
+        finally { if (!ownWaiter.HasExited) ownWaiter.Kill(entireProcessTree: true); }
+    }
+
+    [Fact]
+    public async Task A_hook_stops_waiting_for_another_clients_waiter_after_the_grace_and_leaves_it_running()
+    {
+        var chatId = Guid.NewGuid().ToString();
+        using var oldWaiter = StartStandIn();
+        try
+        {
+            SeedWaiter(chatId, oldWaiter);
+            var inbox = new InboxStub(new string('c', 64), "s-claude", "synthetic-token-claude") { Messages = ["m1"] };
+            var error = new StringWriter();
+            var grace = System.Diagnostics.Stopwatch.StartNew();
+            Assert.Equal(0, await RunHook(chatId, inbox, error, Clients(oldWaiter.Id, 9002), TimeSpan.FromMilliseconds(300)).WaitAsync(TimeSpan.FromSeconds(10)));
+            Assert.True(grace.Elapsed >= TimeSpan.FromMilliseconds(250));
+            Assert.Equal("", error.ToString());
+            Assert.False(oldWaiter.HasExited);
+            Assert.True(File.Exists(Path.Combine(DataDir, "waiters", chatId + ".pid")));
+        }
+        finally { if (!oldWaiter.HasExited) oldWaiter.Kill(entireProcessTree: true); }
+    }
+
+    /// <summary>A real process that stands in for a running waiter: pid files are checked against the live process table.</summary>
+    private static System.Diagnostics.Process StartStandIn() =>
+        System.Diagnostics.Process.Start(OperatingSystem.IsWindows()
+            ? new System.Diagnostics.ProcessStartInfo("cmd.exe", "/c ping -n 120 127.0.0.1") { RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true }
+            : new System.Diagnostics.ProcessStartInfo("sleep", "120") { UseShellExecute = false })!;
+
+    private void SeedWaiter(string chatId, System.Diagnostics.Process waiter)
+    {
+        EnrollOnLoopback();
+        NodeState.WriteSessionHandle(DataDir, new SessionHandle("s-claude", "synthetic-token-claude", "repo", "Claude chat", DateTimeOffset.UtcNow.AddMinutes(-1), new ChatLocation("claude", chatId), new ChatLocation("claude", chatId)));
+        ClaudeWaiter.WritePid(DataDir, chatId, waiter.Id, waiter.StartTime.ToUniversalTime());
+    }
+
+    /// <summary>This process runs under client 9001; the waiter runs under <paramref name="waiterClient"/>, or under a client that is gone when null.</summary>
+    private static Func<int, ProcessFacts?> Clients(int waiterId, int? waiterClient)
+    {
+        var t0 = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        return id => id switch
+        {
+            9001 or 9002 => new ProcessFacts(id, 1, "claude", t0),
+            _ when id == Environment.ProcessId => new ProcessFacts(id, 9001, "dotnet", t0.AddHours(1)),
+            _ when id == waiterId => new ProcessFacts(id, waiterClient ?? 9999, "CoCern.Adapter", t0.AddHours(1)),
+            _ => null
+        };
+    }
+
+    private Task<int> RunHook(string chatId, HttpMessageHandler inbox, TextWriter error, Func<int, ProcessFacts?> read, TimeSpan grace) =>
+        StopHook.RunAsync(new StringReader($"{{ \"session_id\": \"{chatId}\" }}"), error, DataDir, CancellationToken.None,
+            (folder, chat, deliver, limit, ct) => ClaudeWaiter.RunAsync(folder, chat, deliver, limit, ct, inbox, () => new NoHub(), printInbox: true), null, null,
+            (folder, chat, ct) => ClaudeWaiter.AwaitOtherClientsWaiterAsync(folder, chat, read, grace, TimeSpan.FromMilliseconds(20), ct));
+
+    [Fact]
     public void Claude_waiter_with_several_handles_uses_the_newest()
     {
         var chatId = Guid.NewGuid().ToString();
@@ -1132,6 +1240,8 @@ public sealed class NodeTests : IDisposable
     private sealed class InboxStub(string credential, string sessionId, string sessionToken) : HttpMessageHandler
     {
         public volatile string[] Messages = [];
+        /// <summary>A second session this stub answers for, with its own inbox.</summary>
+        public (string SessionId, string SessionToken, string[] Messages)? Moved;
         /// <summary>The tool and body of every acknowledgment the stub received.</summary>
         public readonly System.Collections.Concurrent.ConcurrentQueue<string> Acks = new();
         /// <summary>The body of every inbox read the stub received.</summary>
@@ -1143,10 +1253,13 @@ public sealed class NodeTests : IDisposable
             using var args = JsonDocument.Parse(body);
             if (request.RequestUri!.AbsolutePath.EndsWith("/ack")) Acks.Enqueue(body);
             if (request.RequestUri!.AbsolutePath.EndsWith("/check_inbox")) InboxReads.Enqueue(body);
-            if (args.RootElement.GetProperty("sessionId").GetString() != sessionId || args.RootElement.GetProperty("sessionToken").GetString() != sessionToken) return new(HttpStatusCode.Forbidden);
-            var messages = Messages;
+            var asked = args.RootElement.GetProperty("sessionId").GetString();
+            var token = args.RootElement.GetProperty("sessionToken").GetString();
+            var moved = Moved is { } other && asked == other.SessionId && token == other.SessionToken;
+            if (!moved && (asked != sessionId || token != sessionToken)) return new(HttpStatusCode.Forbidden);
+            var messages = moved ? Moved!.Value.Messages : Messages;
             var data = request.RequestUri!.AbsolutePath.EndsWith("get_status")
-                ? JsonSerializer.Serialize(new { sessionId, control = new { paused = false, requests = Array.Empty<object>() } })
+                ? JsonSerializer.Serialize(new { sessionId = asked, control = new { paused = false, requests = Array.Empty<object>() } })
                 : JsonSerializer.Serialize(new { items = messages.Select(id => new { messageId = id, repositoryId = "repo", text = "UNTRUSTED" }), nextCursor = (int?)null, truncated = false, total = messages.Length });
             return new(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new { ok = true, code = "ok", dataJson = data, version = 0 }), System.Text.Encoding.UTF8, "application/json") };
         }
