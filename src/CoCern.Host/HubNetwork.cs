@@ -220,8 +220,7 @@ internal static class HubNetwork
     /// <summary>
     /// The HTTPS listeners, both with the hub certificate (see <see cref="CertificatePath"/>):
     /// <list type="bullet">
-    /// <item>Loopback HTTPS (<c>Relay:Local:HttpsPort</c>, default 5272; 0 turns it off): local chats connect here and pin the certificate,
-    /// so a process that takes the port while the hub is down never receives their token. Its address and fingerprint go to
+    /// <item>Loopback HTTPS (<c>Relay:Local:HttpsPort</c>, default 5272; 0 turns it off): retained for pinned connections. Its address and fingerprint, plus an available same-PC HTTP origin, go to
     /// <c>local-hub.json</c> beside the database, where Connect finds them.</item>
     /// <item>Network HTTPS on every interface, only with <c>Relay:Network:Enabled</c>.</item>
     /// </list>
@@ -234,7 +233,8 @@ internal static class HubNetwork
         if (!network && localPort == 0) return;
         var port = configuration.GetValue("Relay:Network:HttpsPort", HubAddresses.NetworkHttpsPort);
         var logger = options.ApplicationServices.GetService<ILoggerFactory>()?.CreateLogger("CoCern.Host.HubNetwork");
-        foreach (var url in (configuration["urls"] ?? HubAddresses.LocalUrl).Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)) ListenHttp(options, url);
+        var addresses = (configuration["urls"] ?? HubAddresses.LocalUrl).Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        foreach (var url in addresses) ListenHttp(options, url);
         var localRecord = Path.Combine(Path.GetDirectoryName(RelayHostBuilderExtensions.DatabasePath(configuration, environment))!, LocalHubRecord.FileName);
         var hasLocalRecord = HubCertificate.EvidenceExists(localRecord);
         var expectedFingerprint = hasLocalRecord ? CertificateFingerprint.Normalize(LocalHubRecord.Read(Path.GetDirectoryName(localRecord)!)?.Fingerprint) : null;
@@ -249,7 +249,7 @@ internal static class HubNetwork
         {
             options.Listen(IPAddress.Loopback, localPort, listen => listen.UseHttps(certificate));
             listener.Local = (localPort, fingerprint);
-            WriteLocalHub(configuration, environment, localPort, fingerprint, logger);
+            WriteLocalHub(configuration, environment, localPort, fingerprint, HubAddresses.SelectLoopbackHttp(addresses), logger);
         }
         if (network)
         {
@@ -299,8 +299,8 @@ internal static class HubNetwork
         }
     }
 
-    /// <summary>Records where local chats reach the hub over pinned HTTPS. Not a secret; rewritten each start. Best effort.</summary>
-    private static void WriteLocalHub(IConfiguration configuration, IHostEnvironment environment, int port, string fingerprint, ILogger? logger)
+    /// <summary>Records the pinned HTTPS identity and optional HTTP origin for local chats. Not a secret. Best effort.</summary>
+    private static void WriteLocalHub(IConfiguration configuration, IHostEnvironment environment, int port, string fingerprint, string? httpUrl, ILogger? logger)
     {
         try
         {
@@ -308,10 +308,10 @@ internal static class HubNetwork
             Directory.CreateDirectory(folder);
             var target = Path.Combine(folder, LocalHubRecord.FileName);
             var temporary = target + "." + Guid.NewGuid().ToString("N") + ".tmp";
-            File.WriteAllText(temporary, new LocalHubRecord($"https://127.0.0.1:{port}/", fingerprint).ToJson());
+            File.WriteAllText(temporary, new LocalHubRecord($"https://127.0.0.1:{port}/", fingerprint) { HttpUrl = httpUrl }.ToJson());
             File.Move(temporary, target, overwrite: true);
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { logger?.LogWarning("Could not write {File}; Connect will use plain HTTP on this PC.", LocalHubRecord.FileName); }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { logger?.LogWarning("Could not update {File}; the local connection record is not current.", LocalHubRecord.FileName); }
     }
 
     private static void ListenHttp(KestrelServerOptions options, string url)

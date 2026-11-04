@@ -36,9 +36,11 @@ internal sealed class DashboardConnect(IConfiguration configuration, IHostEnviro
     private async Task<DashboardConnectStatus> RunAsync(string[] arguments, CancellationToken cancellationToken)
     {
         if (AdapterDll() is not { } adapter) return new() { Unavailable = "The CoCern adapter was not found. Build the solution (or run Build-CoCern.ps1 -Publish), then reload." };
-        if (TokenFile() is not { } tokenFile) return new() { Unavailable = "No administrator client reads its token from a file (Relay:Clients:N:TokenFile), so there is no token to give the apps." };
+        if (TokenFile() is not { } tokenFile) return new() { Unavailable = "CoCern isn't ready on this PC. Start the hub, then try Connect again." };
+        var hubArguments = HubArguments(server.Features.Get<IServerAddressesFeature>()?.Addresses ?? [], listener?.Local);
+        if (hubArguments is null) return new() { Unavailable = "This hub has no connection available on this PC." };
         var start = new ProcessStartInfo(DotnetHost()) { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true };
-        foreach (var argument in new[] { adapter, "--connect", "--json", "--token-file", tokenFile }.Concat(HubArguments()).Concat(arguments)) start.ArgumentList.Add(argument);
+        foreach (var argument in new[] { adapter, "--connect", "--json", "--token-file", tokenFile }.Concat(hubArguments).Concat(arguments)) start.ArgumentList.Add(argument);
         using var process = Process.Start(start) ?? throw new InvalidOperationException("The adapter could not start.");
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(Timeout);
@@ -125,15 +127,11 @@ internal sealed class DashboardConnect(IConfiguration configuration, IHostEnviro
         .Where(client => client.IsAdministrator && string.IsNullOrWhiteSpace(client.Token) && !string.IsNullOrWhiteSpace(client.TokenFile))
         .Select(client => Path.GetFullPath(Path.Combine(environment.ContentRootPath, client.TokenFile!))).FirstOrDefault(File.Exists);
 
-    /// <summary>
-    /// Where the apps reach the hub: its loopback HTTPS with the certificate pinned, so their token never goes to another process on that
-    /// port; else (that listener off) its loopback HTTP address when it is not the adapter's default.
-    /// </summary>
-    private IEnumerable<string> HubArguments()
+    /// <summary>Use the running server's loopback HTTP address, then its known local HTTPS identity.</summary>
+    internal static string[]? HubArguments(IEnumerable<string> addresses, (int Port, string Fingerprint)? localHttps)
     {
-        if (listener?.Local is { } local) return ["--hub", $"https://127.0.0.1:{local.Port}/", "--fingerprint", local.Fingerprint];
-        var url = DashboardSignInLink.LoopbackUrl(server.Features.Get<IServerAddressesFeature>()?.Addresses ?? [])?.Replace("/dashboard/", "/");
-        return url is null || url == HubAddresses.LocalUrl + "/" ? [] : ["--hub", url];
+        if (HubAddresses.SelectLoopbackHttp(addresses) is { } http) return ["--hub", http];
+        return localHttps is { } local ? ["--hub", $"https://127.0.0.1:{local.Port}/", "--fingerprint", local.Fingerprint] : null;
     }
 
     internal static string DotnetHost()

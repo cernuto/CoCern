@@ -409,7 +409,7 @@ All on by default except the two for other PCs.
 | `Relay:Discovery:Enabled` | `false` | Lets PCs join and announce chats. |
 | `Relay:Discovery:Repositories` | `["cocern"]` | Repositories joined PCs may use. |
 | `Relay:Discovery:JoinCode` | generated | The join code. Unset: made on first start, kept owner-only in `join-code` next to the database. At least 8 characters. |
-| `Relay:Local:HttpsPort` | 5272 | HTTPS for chats on this PC, loopback only, with the hub certificate. Connect points apps here and pins the certificate, so a program that takes the port while the hub is down never gets their token. Its address and fingerprint are written to `local-hub.json` beside the database. `0` turns it off. |
+| `Relay:Local:HttpsPort` | 5272 | Loopback HTTPS with the hub certificate, for pinned connections. When enabled, the hub writes its HTTPS address and fingerprint to `local-hub.json` beside the database, along with the first configured loopback HTTP origin if there is one. `0` turns this listener off. |
 | `Relay:Network:Enabled` | `false` | Also serve HTTPS on every network interface. |
 | `Relay:Network:HttpsPort` | 5273 | The HTTPS port. |
 | `Relay:Network:CertificatePath` | beside the database | Self-signed certificate, made on first start. Keep it: PCs and Connect's app entries pin its fingerprint. A set path is relative to the content root. For a disposable second hub, set an explicit private path as well as separate database and listener ports, so the preview has a separate identity instead of adopting the main hub's legacy certificate. Migration retains the original certificate. |
@@ -453,7 +453,11 @@ Connect sets `COCERN_TOKEN_FILE`, `COCERN_URL` and `COCERN_FINGERPRINT`, and `CO
 
 With none of the first three set, the adapter uses this PC's node.
 
-`--connect` options: `--token-file <path>` (default: `data/local-client-token` above the adapter folder), `--hub <url>` and `--fingerprint <sha256>` (default: the pinned loopback HTTPS from `local-hub.json` beside the token file), `--only claude-code|claude-desktop|codex`, `--role admin|worker` (add or remove `COCERN_ROLE=admin`; left out, entries keep theirs), `--check` (report only) and `--json`. Each app in the JSON reply has `admin`: whether its entry gives the administrator tools. An app that already has a `cocern` entry keeps it, unless the entry is this hub's (its token file is in the hub's data folder, or, with no token file, it points at a loopback address of this PC or pins the current certificate) and its `COCERN_URL` or `COCERN_FINGERPRINT` differs from the current ones, or its `COCERN_ROLE` from what `--role` asks for: `--check` reports that as `outdated`, and connecting rewrites just those values (state `updated`; restart the app). Entries for other hubs, and node entries, are never changed.
+On the hub PC, dashboard Connect uses the first HTTP listener bound to a loopback address, including a custom port or IPv6 loopback. If none is available, it uses the hub's known local HTTPS listener and pins its certificate. Wildcard and network listeners are never chosen for a local connection.
+
+Command-line Connect reads `local-hub.json` beside the token file. It prefers the recorded loopback HTTP address; older records with just the local HTTPS address and fingerprint still use pinned HTTPS. An HTTP-only hub does not create or refresh this identity record. For an HTTP-only hub on a custom port, use dashboard Connect or supply its exact loopback address with `--hub`. Without a record or override the adapter retains its old default of `http://127.0.0.1:5271`.
+
+Advanced overrides: `--token-file <path>` (default: `data/local-client-token` above the adapter folder), `--hub <url>` and `--fingerprint <sha256>` (for an explicit HTTPS connection). Other options: `--only claude-code|claude-desktop|codex`, `--role admin|worker`, `--check` (report only) and `--json`. Each app's JSON result reports whether it has administrator tools. Connect can update an owned local entry from pinned HTTPS to the current HTTP address and remove its old pin; it preserves the role unless requested and leaves other settings alone. Check reports such entries as `outdated`; connecting reports `updated` (restart the app). A local update leaves entries for other credential folders, remote or invalid addresses, and joined nodes alone, even if a remote entry shares this hub's credential path or certificate fingerprint.
 
 ## Clients and tokens
 
@@ -512,7 +516,7 @@ Noisiest tools groups each tool by its reported adapter path: model-facing, back
 
 REST replies are `{ "ok": true, "code": "...", "dataJson": "{...}", "version": 1 }`; `dataJson` is a JSON string, so parse it again. Errors: 400 invalid or refused (bad arguments, or a refusal such as `ResourceUnknown` or `ClaimRequired`), 401 no valid token, 403 denied, 404 unknown tool or `NotFound`, 409 a conflict to resolve by reading again (such as `VersionConflict` or `Busy`), 413 too large. The `code` says exactly which. The stdio adapter returns the parsed `data` instead.
 
-Tokens work only over HTTPS or real loopback, and the hub ignores forwarded headers. Plain HTTP on loopback can't prove it's the hub, so local apps use the pinned loopback HTTPS (`Relay:Local:HttpsPort`) instead. Behind a local reverse proxy every caller looks local, so don't put one in front of the hub.
+Tokens work only over HTTPS or real loopback, and the hub ignores forwarded headers. Plain HTTP on loopback keeps traffic on this PC but cannot prove the listener is the hub. If another local process takes its port while the hub is down, that process could receive a local app's token. To avoid that tradeoff, explicitly configure local HTTPS (`Relay:Local:HttpsPort`) with the hub's fingerprint. Connections between PCs still use HTTPS and never fall back to plain HTTP after a failure. Behind a local reverse proxy every caller looks local, so don't put one in front of the hub.
 
 ## Architecture
 

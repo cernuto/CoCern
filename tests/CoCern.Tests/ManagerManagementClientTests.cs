@@ -313,6 +313,47 @@ public class ManagerManagementClientTests
     }
 
     [Fact]
+    public async Task Dispatch_readback_superseded_by_refresh_requires_fresh_words_for_the_successor()
+    {
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var decisions = new List<DashboardManagerDecision>();
+        int reads = 0, generation = 1;
+        using var http = new HttpClient(new Handler(async request =>
+        {
+            if (request.RequestUri!.AbsolutePath.EndsWith("/dispatch"))
+                return Reply(new(true, "Ok", null, true));
+            if (request.Method == HttpMethod.Post)
+                decisions.Add((await request.Content!.ReadFromJsonAsync<DashboardManagerDecision>())!);
+            var snapshot = generation;
+            if (request.Method == HttpMethod.Get && ++reads == 2)
+            {
+                entered.SetResult();
+                await release.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            }
+            return Reply(new(true, "Ok", new(snapshot, new(snapshot == 1 ? "A" : "B", "repo", snapshot, true), [], null, false), true));
+        })) { BaseAddress = new("https://localhost/dashboard/") };
+        var form = new CoCern.Dashboard.Components.ManagerControl { ManagerHttp = http, RepositoryId = "repo" };
+        await form.RefreshAsync();
+        Assert.Equal("A", form.Selection!.Current!.SessionId);
+        form.HumanWords = "Remove A.";
+        var stop = form.DispatchAsync("stop");
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        generation = 2; // Another viewer appointed B while the first readback was in flight.
+        await form.RefreshAsync();
+        release.SetResult();
+        await stop;
+        Assert.Equal("B", form.Selection!.Current!.SessionId);
+        await form.DecideAsync("clear_manager");
+        Assert.Empty(decisions);
+        form.HumanWords = "Remove B.";
+        await form.DecideAsync("clear_manager");
+        var clear = Assert.Single(decisions);
+        Assert.Equal(2, clear.ExpectedManagerGeneration);
+        Assert.Equal("Remove B.", clear.HumanWords);
+    }
+
+    [Fact]
     public async Task Newer_manual_refresh_supersedes_a_delayed_post_receipt_read()
     {
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);

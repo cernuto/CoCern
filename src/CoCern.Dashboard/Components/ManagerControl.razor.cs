@@ -241,8 +241,8 @@ public partial class ManagerControl : ComponentBase
     private async Task<bool> ReadAfterWriteAsync(string repository)
     {
         if (RepositoryId != repository) return false;
-        var previousGeneration = Selection?.Generation;
         InvalidateSelection();
+        HumanWords = "";
         Paused = null;
         var selectionAtStart = selectionRevision;
         var dispatchAtStart = ++dispatchRevision;
@@ -251,18 +251,11 @@ public partial class ManagerControl : ComponentBase
             var current = await ManagerManagementClient.ReadAsync(ManagerHttp, repository, null);
             if (!current.Ok || current.Manager is null || current.Paused is null || RepositoryId != repository) return false;
             if (selectionRevision == selectionAtStart)
-            {
-                if (previousGeneration != current.Manager.Generation && UnconfirmedDecision is null) HumanWords = "";
                 ApplySelection(current.Manager, repository);
-            }
             if (dispatchRevision == dispatchAtStart) Paused = current.Paused;
             return true;
         }
         catch (Exception error) when (Uncertain(error)) { return false; }
-        finally
-        {
-            if (selectionRevision == selectionAtStart && Selection is null && UnconfirmedDecision is null) HumanWords = "";
-        }
     }
 
     private void ApplySelection(ManagerSelectionStatus manager, string repository)

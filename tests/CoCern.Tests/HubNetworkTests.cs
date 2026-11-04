@@ -598,6 +598,8 @@ public sealed class HubNetworkTests : IDisposable
         using var stored = HubCertificate.LoadOrCreate(path, "ignored-because-reused");
         using var local = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(root, LocalHubRecord.FileName)));
         Assert.Equal(CertificateFingerprint.Of(stored), local.RootElement.GetProperty("fingerprint").GetString());
+        Assert.Equal($"https://127.0.0.1:{localPort}/", local.RootElement.GetProperty("url").GetString());
+        Assert.Equal($"http://127.0.0.1:{httpPort}/", local.RootElement.GetProperty("httpUrl").GetString());
         Assert.False(File.Exists(CertificatePath));
     }
 
@@ -605,10 +607,24 @@ public sealed class HubNetworkTests : IDisposable
     public async Task With_both_https_listeners_off_no_certificate_is_made()
     {
         var (httpPort, httpsPort) = (FreePort(), FreePort());
-        await using var app = await StartAsync(httpPort, httpsPort, enabled: false, localPort: 0);
-        using var loopback = new HttpClient();
-        Assert.Equal(HttpStatusCode.OK, (await loopback.GetAsync($"http://127.0.0.1:{httpPort}/health")).StatusCode);
-        Assert.False(File.Exists(CertificatePath));
+        var record = Path.Combine(root, LocalHubRecord.FileName);
+        await using (var app = await StartAsync(httpPort, httpsPort, enabled: false, localPort: 0))
+        {
+            using var loopback = new HttpClient();
+            Assert.Equal(HttpStatusCode.OK, (await loopback.GetAsync($"http://127.0.0.1:{httpPort}/health")).StatusCode);
+            Assert.False(File.Exists(CertificatePath));
+            Assert.False(File.Exists(record));
+            await app.StopAsync();
+        }
+
+        byte[] established;
+        await using (var tls = await StartAsync(httpPort, httpsPort, enabled: false, localPort: FreePort()))
+        {
+            established = await File.ReadAllBytesAsync(record);
+            await tls.StopAsync();
+        }
+        await using var httpOnly = await StartAsync(httpPort, httpsPort, enabled: false, localPort: 0);
+        Assert.Equal(established, await File.ReadAllBytesAsync(record));
     }
 
     [Fact]
