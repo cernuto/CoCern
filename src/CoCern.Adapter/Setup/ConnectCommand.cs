@@ -108,7 +108,8 @@ internal static class ConnectCommand
                 if (!check) hook?.Apply(clock ?? TimeProvider.System);
                 if (!check && client.Id != ConnectClients.ClaudeDesktop && (!plan.IsUnchanged || owned.Contains(client.Id)))
                     ClientSettings.StageLocalNativeCandidate(client.Id == ConnectClients.Codex ? "codex" : "claude", dotnetPath, adapterDll,
-                        nativeEnvironments.GetValueOrDefault(client.Id) ?? environment, nativeCacheRoot);
+                        nativeEnvironments.GetValueOrDefault(client.Id) ?? environment, nativeCacheRoot,
+                        clientProfile: Path.Combine(profile, client.Id == ConnectClients.Codex ? ".codex" : ".claude"));
                 var entry = seen.TryGetValue(client.Id, out var found) ? found : ((bool Admin, IReadOnlyDictionary<string, string?>? Changes)?)null;
                 var changes = plan.Refreshes ? entry?.Changes : null;
                 bool? gives = state switch

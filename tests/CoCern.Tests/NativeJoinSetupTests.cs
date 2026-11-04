@@ -2,6 +2,8 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Diagnostics;
+using System.IO.Pipes;
+using System.Buffers.Binary;
 using CoCern.Adapter;
 using CoCern.Adapter.Development;
 using CoCern.Adapter.Node;
@@ -177,6 +179,171 @@ public sealed class NativeJoinSetupTests : IDisposable
         Assert.Empty(await output);
         Assert.Equal("unchanged", File.ReadAllText(sentinel));
         Assert.False(Directory.Exists(Path.Combine(local, "CoCern", "local-wake")));
+    }
+
+    [Fact]
+    public async Task Registration_pair_authenticates_only_configured_scope_and_persists_no_receipt()
+    {
+        var (registration, candidate) = Registration();
+        var original = File.ReadAllBytes(candidate);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var accepting = registration.AcceptAsync(timeout.Token, TimeSpan.FromSeconds(2));
+        Assert.True(await registration.AnswerAsync(timeout.Token, TimeSpan.FromSeconds(2)));
+        var verified = await accepting;
+        Assert.NotNull(verified);
+        Assert.Equal("codex", verified.Provider);
+        Assert.Equal(Connection().Folder, verified.Folder);
+        Assert.Equal(Profile, verified.Profile);
+        Assert.DoesNotContain("synthetic-setup-secret", verified.ToString());
+        Assert.Equal(original, File.ReadAllBytes(candidate));
+        Assert.Empty(Directory.EnumerateFiles(verified.Folder, "*.receipt*"));
+        Assert.Null(await registration.AcceptAsync(timeout.Token, TimeSpan.FromMilliseconds(100)));
+        Assert.False(await registration.AnswerAsync(timeout.Token, TimeSpan.FromMilliseconds(100)));
+    }
+
+    [Fact]
+    public void Registration_candidate_binds_exact_profile_provider_connection_and_definition()
+    {
+        var (registration, candidate) = Registration();
+        Assert.Equal("codex", registration.Provider);
+        Assert.Equal(Profile, registration.Profile);
+        Assert.Equal(64, registration.Definition.Length);
+        Assert.Null(NativeRegistration.Read(candidate, "claude", Connection().Folder, Profile));
+        var otherProfile = Directory.CreateDirectory(Path.Combine(root, "different-profile")).FullName;
+        Assert.Null(NativeRegistration.Read(candidate, "codex", Connection().Folder, otherProfile));
+        Assert.Null(NativeRegistration.Read(candidate, "codex", root, Profile));
+    }
+
+    [Theory]
+    [InlineData("provider")]
+    [InlineData("credentialScope")]
+    [InlineData("command")]
+    public void Registration_rejects_a_modified_owned_candidate_without_adopting_it(string field)
+    {
+        var (_, candidate) = Registration();
+        var data = JsonNode.Parse(File.ReadAllBytes(candidate))!.AsObject();
+        if (field == "command") data["hooks"]!["SessionStart"]![0]!["hooks"]![0]!["command"] = "unrelated command";
+        else data[field] = field == "provider" ? "claude" : new string('0', 64);
+        NodeState.WritePrivately(candidate, JsonSerializer.SerializeToUtf8Bytes(data));
+        Assert.Null(NativeRegistration.Read(candidate, "codex", Connection().Folder, Profile));
+    }
+
+    [Fact]
+    public async Task Registration_without_a_trusted_helper_is_bounded_and_cannot_select_a_native_context()
+    {
+        var (registration, _) = Registration();
+        var elapsed = Stopwatch.StartNew();
+        Assert.Null(await registration.AcceptAsync(default, TimeSpan.FromMilliseconds(150)));
+        Assert.InRange(elapsed.Elapsed, TimeSpan.Zero, TimeSpan.FromSeconds(2));
+    }
+
+    [Theory]
+    [InlineData("oversize")]
+    [InlineData("wrong-provider")]
+    [InlineData("wrong-mac")]
+    [InlineData("stale-nonce")]
+    [InlineData("expired")]
+    [InlineData("unknown-field")]
+    public async Task Registration_refuses_invalid_bounded_wire_before_a_native_context_exists(string form)
+    {
+        var (registration, _) = Registration();
+        Assert.NotEmpty(registration.PipeName);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var accepting = registration.AcceptAsync(timeout.Token, TimeSpan.FromSeconds(2));
+        await using var client = new NamedPipeClientStream(".", registration.PipeName, PipeDirection.InOut, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+        await client.ConnectAsync(timeout.Token);
+        var challenge = await ReadFrame(client, timeout.Token);
+        Assert.Equal(new[] { "deadline", "definition", "mac", "nonce", "profile", "provider", "scope", "version" }.Order(), challenge.EnumerateObject().Select(item => item.Name).Order());
+        Assert.DoesNotContain("synthetic-setup-secret", challenge.GetRawText());
+        Assert.DoesNotContain("session", challenge.GetRawText(), StringComparison.OrdinalIgnoreCase);
+        if (form == "oversize")
+        {
+            var prefix = new byte[4]; BinaryPrimitives.WriteInt32BigEndian(prefix, NativeRegistration.MaximumFrameBytes + 1);
+            await client.WriteAsync(prefix, timeout.Token); await client.FlushAsync(timeout.Token);
+        }
+        else
+        {
+            var response = JsonNode.Parse(challenge.GetRawText())!.AsObject();
+            if (form == "wrong-provider") response["provider"] = "claude";
+            if (form == "wrong-mac") response["mac"] = new string('0', 64);
+            if (form == "stale-nonce") response["nonce"] = new string('0', 64);
+            if (form == "expired") response["deadline"] = DateTimeOffset.UtcNow.AddMinutes(-1).ToUnixTimeMilliseconds();
+            if (form == "unknown-field") response["tool_input"] = new JsonObject { ["untrusted"] = true };
+            await WriteFrame(client, JsonSerializer.SerializeToElement(response), timeout.Token);
+        }
+        Assert.Null(await accepting);
+    }
+
+    [Fact]
+    public async Task Registration_cancellation_keeps_the_original_token_and_no_listener()
+    {
+        var (registration, _) = Registration();
+        using var canceled = new CancellationTokenSource(); canceled.Cancel();
+        var serverError = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => registration.AcceptAsync(canceled.Token));
+        var clientError = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => registration.AnswerAsync(canceled.Token));
+        Assert.Equal(canceled.Token, serverError.CancellationToken); Assert.Equal(canceled.Token, clientError.CancellationToken);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var accepting = registration.AcceptAsync(timeout.Token, TimeSpan.FromSeconds(2));
+        Assert.True(await registration.AnswerAsync(timeout.Token, TimeSpan.FromSeconds(2)));
+        Assert.NotNull(await accepting);
+    }
+
+    [Fact]
+    public async Task Registration_instances_use_fresh_nonces_and_refuse_cross_instance_replay()
+    {
+        var (registration, _) = Registration();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var first = registration.AcceptAsync(timeout.Token, TimeSpan.FromSeconds(2));
+        var second = registration.AcceptAsync(timeout.Token, TimeSpan.FromSeconds(2));
+        await using var one = new NamedPipeClientStream(".", registration.PipeName, PipeDirection.InOut, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+        await using var two = new NamedPipeClientStream(".", registration.PipeName, PipeDirection.InOut, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+        await one.ConnectAsync(timeout.Token); await two.ConnectAsync(timeout.Token);
+        var challengeOne = await ReadFrame(one, timeout.Token); var challengeTwo = await ReadFrame(two, timeout.Token);
+        Assert.NotEqual(challengeOne.GetProperty("nonce").GetString(), challengeTwo.GetProperty("nonce").GetString());
+        await WriteFrame(one, challengeTwo, timeout.Token); await WriteFrame(two, challengeOne, timeout.Token);
+        Assert.Null(await first); Assert.Null(await second);
+    }
+
+    [Fact]
+    public async Task Registration_concurrent_instances_are_bounded_and_capacity_is_released()
+    {
+        var (registration, _) = Registration();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var waiting = Enumerable.Range(0, NativeRegistration.MaximumInstances).Select(_ => registration.AcceptAsync(timeout.Token, TimeSpan.FromMilliseconds(300))).ToArray();
+        var refused = registration.AcceptAsync(timeout.Token, TimeSpan.FromMilliseconds(150));
+        Assert.True(refused.IsCompleted);
+        Assert.Null(await refused);
+        Assert.All(await Task.WhenAll(waiting), value => Assert.Null(value));
+        var fresh = registration.AcceptAsync(timeout.Token, TimeSpan.FromSeconds(2));
+        Assert.True(await registration.AnswerAsync(timeout.Token, TimeSpan.FromSeconds(2)));
+        Assert.NotNull(await fresh);
+    }
+
+    private (NativeRegistration Registration, string Candidate) Registration()
+    {
+        Directory.CreateDirectory(Profile);
+        var connection = Connection();
+        var candidate = ClientSettings.StageNativeCandidate(connection.Folder, "codex", "\"fixture launcher.exe\"", clientProfile: Profile);
+        Assert.NotNull(candidate);
+        var registration = NativeRegistration.Read(candidate, "codex", connection.Folder, Profile);
+        Assert.NotNull(registration);
+        return (registration, candidate);
+    }
+
+    private static async Task<JsonElement> ReadFrame(Stream stream, CancellationToken ct)
+    {
+        var prefix = new byte[4]; await stream.ReadExactlyAsync(prefix, ct);
+        var count = BinaryPrimitives.ReadInt32BigEndian(prefix);
+        Assert.InRange(count, 1, NativeRegistration.MaximumFrameBytes);
+        var bytes = new byte[count]; await stream.ReadExactlyAsync(bytes, ct);
+        using var json = JsonDocument.Parse(bytes); return json.RootElement.Clone();
+    }
+
+    private static async Task WriteFrame(Stream stream, JsonElement value, CancellationToken ct)
+    {
+        var bytes = Encoding.UTF8.GetBytes(value.GetRawText());
+        var prefix = new byte[4]; BinaryPrimitives.WriteInt32BigEndian(prefix, bytes.Length);
+        await stream.WriteAsync(prefix, ct); await stream.WriteAsync(bytes, ct); await stream.FlushAsync(ct);
     }
 
     private LocalWakeConnection Connection() => LocalWakeConnection.Create(new AdapterOptions(Hub, "synthetic-setup-secret"), Token, Cache)!;

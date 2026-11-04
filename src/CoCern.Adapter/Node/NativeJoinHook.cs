@@ -5,6 +5,8 @@ using System.Text;
 using System.Globalization;
 using System.Diagnostics;
 using CoCern.Adapter.Development;
+using System.IO.Pipes;
+using System.Buffers.Binary;
 using CoCern.Contracts;
 
 namespace CoCern.Adapter.Node;
@@ -342,4 +344,146 @@ internal static class NativeJoinHook
             return sign + trimmed + (exponent == 0 ? "" : "e" + exponent.ToString(CultureInfo.InvariantCulture));
         }
     }
+}
+
+// Inactive registration prototype. Its only authority is a setup-owned private candidate and
+// connection, never an answering chat identity. Normal setup does not launch this endpoint.
+internal sealed class NativeRegistration
+{
+    internal const int MaximumFrameBytes = 2048;
+    internal const int MaximumInstances = 4;
+    internal static TimeSpan MaximumWait => TimeSpan.FromSeconds(15);
+    internal string Provider { get; }
+    internal string Folder { get; }
+    internal string Profile { get; }
+    internal string Definition { get; }
+    internal string PipeName { get; }
+    private readonly string path, scope, profileKey;
+    private readonly AdapterOptions options;
+
+    private NativeRegistration(string path, string provider, string folder, string profile, string scope, string definition, AdapterOptions options)
+    {
+        (this.path, Provider, Folder, Profile, this.scope, Definition, this.options) = (path, provider, folder, profile, scope, definition, options);
+        profileKey = NativeCheckout.Hash("cocern-native-profile-v1:" + profile);
+        PipeName = "cocern-native-" + NativeCheckout.Hash(JsonSerializer.Serialize(new[] { provider, scope, profileKey, definition }));
+    }
+
+    internal static NativeRegistration? Read(string path, string provider, string folder, string profile)
+    {
+        try
+        {
+            if (provider is not ("codex" or "claude") || !Path.IsPathFullyQualified(path) || !Path.IsPathFullyQualified(folder) ||
+                profile is not { Length: > 0 and <= 32768 } || !Path.IsPathFullyQualified(profile) || profile.Any(char.IsControl) || !Directory.Exists(profile)) return null;
+            path = Path.GetFullPath(path); folder = Path.GetFullPath(folder); profile = Path.TrimEndingDirectorySeparator(Path.GetFullPath(profile));
+            var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+            if (!string.Equals(path, Path.Combine(folder, "native-client-" + provider + ".candidate.json"), comparison) ||
+                !NodeState.IsPrivateFile(path) || new FileInfo(path).Length > 65536 || NativeJoinHook.ReadConnection(folder) is not { } connection) return null;
+            using var document = JsonDocument.Parse(File.ReadAllBytes(path), new JsonDocumentOptions { MaxDepth = 12 });
+            var data = document.RootElement;
+            if (data.ValueKind != JsonValueKind.Object || !NativeJoinHook.Unique(data) || ChatLocators.Text(data, "kind") != "cocern-native-candidate-v1" ||
+                ChatLocators.Text(data, "state") != "inactive" || ChatLocators.Text(data, "provider") != provider ||
+                ChatLocators.Text(data, "connection") is not { } capturedFolder || !string.Equals(capturedFolder, folder, comparison) ||
+                ChatLocators.Text(data, "profile") is not { } capturedProfile || !string.Equals(capturedProfile, profile, comparison) ||
+                ChatLocators.Text(data, "helperVersion") != typeof(NativeRegistration).Assembly.ManifestModule.ModuleVersionId.ToString("D") ||
+                ChatLocators.Text(data, "credentialScope") is not { Length: 64 } capturedScope ||
+                ChatLocators.Text(data, "definition") is not { Length: 64 } definition) return null;
+            var currentScope = NodeState.HasIdentityFiles(folder) ? NodeState.NativeCredentialIdentity(folder) : LocalWakeConnection.NativeCredentialIdentity(folder);
+            var unsigned = JsonNode.Parse(data.GetRawText())!.AsObject(); unsigned.Remove("definition");
+            if (currentScope != capturedScope || NativeCheckout.Hash(NativeJoinHook.Canonical(JsonSerializer.SerializeToElement(unsigned))) != definition) return null;
+            return new(path, provider, folder, capturedProfile, capturedScope, definition, connection);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException or InvalidOperationException) { return null; }
+    }
+
+    private bool StillCurrent() => Read(path, Provider, Folder, Profile) is { } current && current.Definition == Definition && current.scope == scope;
+
+    internal async Task<NativeRegistration?> AcceptAsync(CancellationToken ct, TimeSpan? budget = null)
+    {
+        ct.ThrowIfCancellationRequested();
+        var limit = budget ?? MaximumWait;
+        if (limit <= TimeSpan.Zero || limit > MaximumWait || !StillCurrent()) return null;
+        using var waiting = CancellationTokenSource.CreateLinkedTokenSource(ct); waiting.CancelAfter(limit);
+        try
+        {
+            await using var pipe = new NamedPipeServerStream(PipeName, PipeDirection.InOut, MaximumInstances, PipeTransmissionMode.Byte,
+                PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly, MaximumFrameBytes, MaximumFrameBytes);
+            await pipe.WaitForConnectionAsync(waiting.Token);
+            var nonce = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32));
+            var deadline = DateTimeOffset.UtcNow.Add(limit).ToUnixTimeMilliseconds();
+            await WriteFrameAsync(pipe, Frame(nonce, deadline, "challenge"), waiting.Token);
+            var response = await ReadFrameAsync(pipe, waiting.Token);
+            if (!Valid(response, "response", nonce, deadline) || !StillCurrent()) return null;
+            await WriteFrameAsync(pipe, Frame(nonce, deadline, "ack"), waiting.Token);
+            return this; // Registration context only: no native/session ID is captured or retained.
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested) { return null; }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException or InvalidOperationException or FormatException) { return null; }
+    }
+
+    internal async Task<bool> AnswerAsync(CancellationToken ct, TimeSpan? budget = null)
+    {
+        ct.ThrowIfCancellationRequested();
+        var limit = budget ?? MaximumWait;
+        if (limit <= TimeSpan.Zero || limit > MaximumWait || !StillCurrent()) return false;
+        using var waiting = CancellationTokenSource.CreateLinkedTokenSource(ct); waiting.CancelAfter(limit);
+        try
+        {
+            await using var pipe = new NamedPipeClientStream(".", PipeName, PipeDirection.InOut, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+            await pipe.ConnectAsync(waiting.Token);
+            var challenge = await ReadFrameAsync(pipe, waiting.Token);
+            if (!Valid(challenge, "challenge") || !StillCurrent()) return false;
+            var nonce = challenge.GetProperty("nonce").GetString()!; var deadline = challenge.GetProperty("deadline").GetInt64();
+            await WriteFrameAsync(pipe, Frame(nonce, deadline, "response"), waiting.Token);
+            return Valid(await ReadFrameAsync(pipe, waiting.Token), "ack", nonce, deadline) && StillCurrent();
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested) { return false; }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException or InvalidOperationException or FormatException) { return false; }
+    }
+
+    private JsonElement Frame(string nonce, long deadline, string purpose)
+    {
+        var data = JsonSerializer.SerializeToElement(new { version = 1, nonce, deadline, provider = Provider, scope, profile = profileKey, definition = Definition });
+        var frame = JsonNode.Parse(data.GetRawText())!.AsObject(); frame["mac"] = Mac(purpose, data);
+        return JsonSerializer.SerializeToElement(frame);
+    }
+
+    private bool Valid(JsonElement frame, string purpose, string? nonce = null, long? deadline = null)
+    {
+        if (frame.ValueKind != JsonValueKind.Object || !NativeJoinHook.Unique(frame) || frame.EnumerateObject().Count() != 8 ||
+            !frame.TryGetProperty("version", out var version) || !version.TryGetInt32(out var parsedVersion) || parsedVersion != 1 ||
+            ChatLocators.Text(frame, "provider") != Provider || ChatLocators.Text(frame, "scope") != scope || ChatLocators.Text(frame, "profile") != profileKey ||
+            ChatLocators.Text(frame, "definition") != Definition || ChatLocators.Text(frame, "nonce") is not { Length: 64 } capturedNonce ||
+            !capturedNonce.All(char.IsAsciiHexDigit) || ChatLocators.Text(frame, "mac") is not { Length: 64 } mac ||
+            !frame.TryGetProperty("deadline", out var expiry) || !expiry.TryGetInt64(out var capturedDeadline)) return false;
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        if (capturedDeadline <= now || capturedDeadline > now + (long)MaximumWait.TotalMilliseconds ||
+            nonce is not null && nonce != capturedNonce || deadline is not null && deadline != capturedDeadline) return false;
+        var unsigned = JsonNode.Parse(frame.GetRawText())!.AsObject(); unsigned.Remove("mac");
+        return CryptographicOperations.FixedTimeEquals(Convert.FromHexString(mac), Convert.FromHexString(Mac(purpose, JsonSerializer.SerializeToElement(unsigned))));
+    }
+
+    private string Mac(string purpose, JsonElement data)
+    {
+        var key = HMACSHA256.HashData(Encoding.UTF8.GetBytes(options.Token), Encoding.UTF8.GetBytes("cocern-native-registration-key-v1"));
+        return Convert.ToHexStringLower(HMACSHA256.HashData(key, Encoding.UTF8.GetBytes("cocern-native-registration-" + purpose + "-v1\n" + NativeJoinHook.Canonical(data))));
+    }
+
+    private static async Task<JsonElement> ReadFrameAsync(Stream stream, CancellationToken ct)
+    {
+        var prefix = new byte[4]; await stream.ReadExactlyAsync(prefix, ct);
+        var count = BinaryPrimitives.ReadInt32BigEndian(prefix);
+        if (count is <= 0 or > MaximumFrameBytes) throw new IOException("Invalid native registration frame bound.");
+        var bytes = new byte[count]; await stream.ReadExactlyAsync(bytes, ct);
+        using var document = JsonDocument.Parse(bytes, new JsonDocumentOptions { MaxDepth = 3 });
+        return document.RootElement.Clone();
+    }
+
+    private static async Task WriteFrameAsync(Stream stream, JsonElement frame, CancellationToken ct)
+    {
+        var bytes = Encoding.UTF8.GetBytes(frame.GetRawText());
+        if (bytes.Length is <= 0 or > MaximumFrameBytes) throw new IOException("Invalid native registration frame bound.");
+        var prefix = new byte[4]; BinaryPrimitives.WriteInt32BigEndian(prefix, bytes.Length);
+        await stream.WriteAsync(prefix, ct); await stream.WriteAsync(bytes, ct); await stream.FlushAsync(ct);
+    }
+    public override string ToString() => "Native registration (private)";
 }

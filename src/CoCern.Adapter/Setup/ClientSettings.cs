@@ -69,16 +69,21 @@ internal sealed class ClientPlan
 /// </summary>
 internal static class ClientSettings
 {
-    internal static string? StageNativeCandidate(string folder, string provider, string command, string? developmentRoot = null)
+    internal static string? StageNativeCandidate(string folder, string provider, string command, string? developmentRoot = null, string? clientProfile = null)
     {
-        try { return StageNativeCandidateCore(folder, provider, command, developmentRoot); }
+        try { return StageNativeCandidateCore(folder, provider, command, developmentRoot, clientProfile); }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException or InvalidOperationException)
         { return null; }
     }
 
-    private static string? StageNativeCandidateCore(string folder, string provider, string command, string? developmentRoot)
+    private static string? StageNativeCandidateCore(string folder, string provider, string command, string? developmentRoot, string? clientProfile)
     {
         if (provider is not ("claude" or "codex") || NativeJoinHook.ReadConnection(folder) is null) return null;
+        if (clientProfile is not null)
+        {
+            if (!Path.IsPathFullyQualified(clientProfile) || clientProfile.Length > 32768 || clientProfile.Any(char.IsControl) || !Directory.Exists(clientProfile)) return null;
+            clientProfile = Path.TrimEndingDirectorySeparator(Path.GetFullPath(clientProfile));
+        }
         folder = Path.GetFullPath(folder);
         var scope = NodeState.HasIdentityFiles(folder) ? NodeState.NativeCredentialIdentity(folder) : LocalWakeConnection.NativeCredentialIdentity(folder);
         if (scope is null) return null;
@@ -89,6 +94,7 @@ internal static class ClientSettings
             using var previous = JsonDocument.Parse(File.ReadAllBytes(path));
             if (ChatLocators.Text(previous.RootElement, "kind") != "cocern-native-candidate-v1" || ChatLocators.Text(previous.RootElement, "provider") != provider ||
                 ChatLocators.Text(previous.RootElement, "state") != "inactive") return null;
+            if (ChatLocators.Text(previous.RootElement, "profile") is { } previousProfile && previousProfile != clientProfile) return null;
         }
         var invocation = command + " --native-hook " + provider + " --connection " + LogonStart.Quote(folder) +
             (developmentRoot is null ? "" : " --development-root " + LogonStart.Quote(Path.GetFullPath(developmentRoot)));
@@ -101,11 +107,14 @@ internal static class ClientSettings
             ["PreToolUse"] = new JsonArray(new JsonObject { ["matcher"] = "^mcp__cocern__.*$", ["hooks"] = new JsonArray(Handler()) })
         };
         if (provider == "claude") hooks["Stop"] = new JsonArray(new JsonObject { ["hooks"] = new JsonArray(Handler(stop: true)) });
-        var bytes = JsonSerializer.SerializeToUtf8Bytes(new JsonObject
+        var candidate = new JsonObject
         {
             ["kind"] = "cocern-native-candidate-v1", ["state"] = "inactive", ["provider"] = provider,
-            ["connection"] = folder, ["credentialScope"] = scope, ["hooks"] = hooks
-        });
+            ["connection"] = folder, ["credentialScope"] = scope, ["profile"] = clientProfile,
+            ["helperVersion"] = typeof(NativeRegistration).Assembly.ManifestModule.ModuleVersionId.ToString("D"), ["hooks"] = hooks
+        };
+        candidate["definition"] = NativeCheckout.Hash(NativeJoinHook.Canonical(JsonSerializer.SerializeToElement(candidate)));
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(candidate);
         if (!File.Exists(path) || !File.ReadAllBytes(path).AsSpan().SequenceEqual(bytes)) NodeState.WritePrivately(path, bytes);
         return path;
     }
@@ -114,13 +123,13 @@ internal static class ClientSettings
     internal static ClientPlan PlanNativePromotion(string path, string folder, string provider) => ClientPlan.Unchanged(path);
 
     internal static void StageLocalNativeCandidate(string provider, string dotnet, string adapter, IReadOnlyDictionary<string, string> environment, string? cacheRoot = null,
-        string? developmentRoot = null)
+        string? developmentRoot = null, string? clientProfile = null)
     {
         try
         {
             var options = AdapterOptions.FromEnvironment(key => environment.GetValueOrDefault(key));
             if (LocalWakeConnection.Create(options, environment.GetValueOrDefault("COCERN_TOKEN_FILE"), cacheRoot) is { } connection)
-                StageNativeCandidate(connection.Folder, provider, SetupEnvironment.AdapterCommandLine(dotnet, adapter), developmentRoot);
+                StageNativeCandidate(connection.Folder, provider, SetupEnvironment.AdapterCommandLine(dotnet, adapter), developmentRoot, clientProfile);
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException or AdapterConfigurationException)
         { /* Raw setup remains usable when the optional private candidate cannot be staged. */ }
@@ -133,7 +142,9 @@ internal static class ClientSettings
         if (bytes is null) return;
         if (provider == "codex") RefreshCodex(Strict.GetString(bytes, Bom(bytes), bytes.Length - Bom(bytes)), variables => { environment = variables; return null; });
         else if (ParseClaudeJson(configurationPath, bytes)["mcpServers"]?[Name] is JsonObject entry) environment = Variables(entry);
-        if (environment is not null) StageLocalNativeCandidate(provider, dotnet, launcher, environment, cacheRoot, developmentRoot);
+        var configurationFolder = Path.GetDirectoryName(Path.GetFullPath(configurationPath))!;
+        var profile = provider == "codex" ? configurationFolder : Path.Combine(configurationFolder, ".claude");
+        if (environment is not null) StageLocalNativeCandidate(provider, dotnet, launcher, environment, cacheRoot, developmentRoot, profile);
     }
 
     private const string Table = "mcp_servers";

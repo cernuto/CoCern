@@ -220,8 +220,8 @@ internal static class SetupCommand
             if (!options.SkipClientConfig)
             {
                 var command = SetupEnvironment.AdapterCommandLine(env.DotnetPath, env.AdapterDll);
-                ClientSettings.StageNativeCandidate(folder, "codex", command);
-                ClientSettings.StageNativeCandidate(folder, "claude", command);
+                ClientSettings.StageNativeCandidate(folder, "codex", command, clientProfile: Path.Combine(env.Profile, ".codex"));
+                ClientSettings.StageNativeCandidate(folder, "claude", command, clientProfile: Path.Combine(env.Profile, ".claude"));
             }
             LogonStart.Register(env.DotnetPath, env.AdapterDll, options.DataDir is null ? null : folder, env.RunKey);
             env.StartNode(env.DotnetPath, env.AdapterDll, options.DataDir is null ? null : folder);
