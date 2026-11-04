@@ -113,7 +113,12 @@ public static class NodeSupervisor
                 var request = NodeUpdateState.ReadRequest(root);
                 if (request is null || request.Candidate.ContentId == record.Current.ContentId ||
                     request.Candidate.ReleaseId == record.LastFailedReleaseId && clock.GetUtcNow() - record.LastFailedAtUtc < TimeSpan.FromMinutes(15)) continue;
-                var starting = record with { Phase = NodeUpdatePhase.Starting, Pending = request.Candidate, ActivationNonce = Guid.NewGuid(), LastFailedReleaseId = refusedRelease ?? record.LastFailedReleaseId, LastFailedAtUtc = refusedAt ?? record.LastFailedAtUtc };
+                // An unexpired journal failure remains durable; a separate refused release
+                // already travels in the private launch context and cannot replace that history.
+                var preserveFailure = record.LastFailedAtUtc is { } failedAt && clock.GetUtcNow() - failedAt < TimeSpan.FromMinutes(15);
+                var starting = record with { Phase = NodeUpdatePhase.Starting, Pending = request.Candidate, ActivationNonce = Guid.NewGuid(),
+                    LastFailedReleaseId = preserveFailure ? record.LastFailedReleaseId : refusedRelease ?? record.LastFailedReleaseId,
+                    LastFailedAtUtc = preserveFailure ? record.LastFailedAtUtc : refusedAt ?? record.LastFailedAtUtc };
                 try { NodeUpdateState.Write(root, starting); record = starting; }
                 catch (Exception exception) when (JournalFailure(exception))
                 {

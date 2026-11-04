@@ -20,6 +20,89 @@ public sealed class NodeSupervisorTests(ITestOutputHelper output) : IDisposable
     private static NodeHostCapabilities FixHost => new(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "dotnet", "dotnet.exe"), [new("Microsoft.NETCore.App", "10.0.14")], "win-x64");
 
     [Fact]
+    public async Task Fix3_old_starting_refusal_preserves_newer_failure_through_C_commit_and_original_expiry()
+    {
+        PrepareRoot();
+        var current = Image("fix3-current");
+        var a = Image("fix3-A") with { ReleaseId = new string('A', 64) };
+        var b = Image("fix3-B") with { ReleaseId = new string('B', 64) };
+        var c = Image("fix3-C") with { ReleaseId = new string('C', 64) };
+        NodeUpdateState.Write(Updates, Committed(current));
+        using (var state = NodeState.Open(NodeFolder)) { state.SetHub("http://localhost/", null); state.SaveCredential(new string('a', 64)); }
+        var clock = new NodeTests.UpdateClock(); var origin = clock.GetUtcNow(); var bFailedAt = origin.AddMinutes(5);
+        FileStream? blocked = new(Path.Combine(Updates, "state.json"), FileMode.Open, FileAccess.Read, FileShare.Read);
+        var stages = 0; var announces = 0; var launches = 0;
+        var staged = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new NodeRelease(1, b.ReleaseId!, b.Package, 1, new string('D', 64), b.AdapterDllSha256);
+        var transport = new NodeTransport
+        {
+            Clients = () => [], Locators = [], Chats = _ => Task.FromResult(new System.Text.Json.Nodes.JsonArray()), CodexExecutable = () => null,
+            Clock = clock, AnnounceInterval = TimeSpan.FromMilliseconds(20), UpdateHost = FixHost,
+            CreateUpdater = _ => new UpdateScheduleCoordinator(() => { Interlocked.Increment(ref stages); staged.TrySetResult(); }),
+            Trace = value => { if (value == "announced") Interlocked.Increment(ref announces); },
+            HubHandler = () => new UpdateWorkerHandler(_ => new(System.Net.HttpStatusCode.ServiceUnavailable)),
+            CreateHandler = (_, _) => new UpdateWorkerHandler(_ => new(System.Net.HttpStatusCode.OK)
+            { Content = new StringContent(JsonSerializer.Serialize(new { routes = Array.Empty<object>(), nodeRelease = release })) })
+        };
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        async Task CommittedImage(string id, CancellationToken ct)
+        {
+            while (NodeUpdateState.ReadPrimary(Updates) is not { Phase: NodeUpdatePhase.Committed } journal || journal.Current.ContentId != id)
+                await Task.Delay(10, ct);
+        }
+        async Task Announced(int target)
+        {
+            while (Volatile.Read(ref announces) < target) await Task.Delay(10, stop.Token);
+        }
+        var supervisor = NodeSupervisor.RunAsync(NodeFolder, "C:/unused/CoCern.Adapter.dll", FixHost, launch =>
+        {
+            switch (++launches)
+            {
+                case 1:
+                    NodeUpdateState.WriteRequest(Updates, new(a)); return new UpdateExitedChild(75);
+                case 2:
+                    Assert.Equal(a.ReleaseId, launch.StartupContext!.FailedReleaseId);
+                    blocked.Dispose(); blocked = null; clock.Advance(TimeSpan.FromMinutes(5));
+                    NodeUpdateState.WriteRequest(Updates, new(b)); return new UpdateExitedChild(75);
+                case 3:
+                    NodeUpdateState.WriteReady(Updates, new(Guid.NewGuid(), b.ContentId, 5678, launch.StartupContext!.LaunchId));
+                    return new UpdateReadyChild(Updates);
+                case 4:
+                    var rollback = NodeUpdateState.ReadPrimary(Updates)!;
+                    Assert.Equal(b.ReleaseId, rollback.LastFailedReleaseId); Assert.Equal(bFailedAt, rollback.LastFailedAtUtc);
+                    NodeUpdateState.WriteReady(Updates, new(rollback.ActivationNonce!.Value, current.ContentId, Environment.ProcessId, launch.StartupContext!.LaunchId));
+                    return new UpdateWorkerChild(async ct =>
+                    {
+                        await CommittedImage(current.ContentId, ct); clock.Advance(TimeSpan.FromMinutes(5));
+                        NodeUpdateState.WriteRequest(Updates, new(c)); return 75;
+                    }, stop.Token);
+                case 5:
+                    Assert.Equal(a.ReleaseId, launch.StartupContext!.FailedReleaseId);
+                    var starting = NodeUpdateState.ReadPrimary(Updates)!;
+                    return new UpdateWorkerChild(ct => NodeRunner.RunWorkerAsync(NodeFolder, starting.ActivationNonce,
+                        Path.Combine(Updates, "versions", c.ContentId), transport, new StringWriter(), ct, launch.StartupContext), stop.Token);
+                default: throw new InvalidOperationException("An unexpired failed handoff must not churn the serving worker.");
+            }
+        }, clock, stop.Token);
+        try
+        {
+            await CommittedImage(c.ContentId, stop.Token).WaitAsync(TimeSpan.FromSeconds(5));
+            await Announced(4).WaitAsync(TimeSpan.FromSeconds(5));
+            var committed = NodeUpdateState.ReadPrimary(Updates)!;
+            Assert.Equal(b.ReleaseId, committed.LastFailedReleaseId); Assert.Equal(bFailedAt, committed.LastFailedAtUtc);
+            Assert.Equal(0, Volatile.Read(ref stages)); Assert.False(supervisor.IsCompleted);
+            clock.Advance(TimeSpan.FromMinutes(10) - TimeSpan.FromSeconds(1));
+            await Announced(Volatile.Read(ref announces) + 3).WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(0, Volatile.Read(ref stages)); Assert.False(supervisor.IsCompleted);
+            clock.Advance(TimeSpan.FromSeconds(1));
+            await staged.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            Assert.Equal(1, Volatile.Read(ref stages)); Assert.Equal(5, launches);
+            Assert.Equal(bFailedAt, NodeUpdateState.ReadPrimary(Updates)!.LastFailedAtUtc);
+        }
+        finally { stop.Cancel(); blocked?.Dispose(); Assert.Equal(0, await supervisor); }
+    }
+
+    [Fact]
     public async Task Fix2_serving_retained_worker_defers_transient_primary_read_loss()
     {
         var candidateStartup = false; var checkDispatchFirst = false;
