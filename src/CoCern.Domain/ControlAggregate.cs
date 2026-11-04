@@ -376,10 +376,17 @@ internal static class ControlAggregate
             if (!ManagerSelection.WholeNumber(context.Args["managerHistoryBefore"], out var parsed)) return Error(InvalidArguments);
             before = parsed;
         }
-        var requests = sessionId.Length > 0 ? state.CancellationsOf(sessionId).Take(RelayLimits.MaxPageSize).Select(x => new { target = x.Target, request = x.Request }).ToArray() : [];
-        RelayReply Reply(CoCern.Contracts.ManagerSelectionStatus manager) => Ok(new { paused = state.Paused, cancellations = state.CancellationCount, requests, manager });
+        var historyOnly = false;
+        if (context.Args.ContainsKey("managerHistoryOnly"))
+        {
+            if (!context.Caller.IsAdministrator) return Error(AdministratorRequired);
+            if (context.Args["managerHistoryOnly"] is not JsonValue mode || !mode.TryGetValue(out historyOnly)) return Error(InvalidArguments);
+        }
+        var requests = !historyOnly && sessionId.Length > 0 ? state.CancellationsOf(sessionId).Take(RelayLimits.MaxPageSize).Select(x => new { target = x.Target, request = x.Request }).ToArray() : [];
+        RelayReply Reply(CoCern.Contracts.ManagerSelectionStatus manager) => Ok(new { paused = state.Paused, cancellations = state.CancellationCount, requests, requestsOmitted = historyOnly, manager });
         var selection = ManagerSelection.Status(state, context.Caller, context.Now, before);
-        return Reply(ManagerSelection.Fit(selection, candidate => FitsWire(Reply(candidate), RelayLimits.AggregateReplyBytes)));
+        var fitted = ManagerSelection.Fit(selection, candidate => FitsWire(Reply(candidate), RelayLimits.AggregateReplyBytes), before);
+        return historyOnly && fitted.HistoryReadRequired ? Error(PayloadTooLarge) : Reply(fitted);
     }
 
     /// <summary>

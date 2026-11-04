@@ -20,7 +20,7 @@ internal static class ManagerSelection
         if (!Identity(context.Repository) || !Identity(context.Caller.PrincipalId) || !Identity(Text(args, "requestId")) ||
             !WholeNumber(args["expectedManagerGeneration"], out var expected) || expected == long.MaxValue ||
             args["humanWords"] is not JsonValue wordsValue || !wordsValue.TryGetValue<string>(out var words) ||
-            string.IsNullOrWhiteSpace(words) || words.Length > RelayLimits.MaxManagerHumanWordsLength || words.Any(char.IsControl)) return Error("InvalidArguments");
+            string.IsNullOrWhiteSpace(words) || words.Length > RelayLimits.MaxManagerHumanWordsLength || words.Any(ch => char.IsControl(ch) || ch is '\u2028' or '\u2029')) return Error("InvalidArguments");
         string? targetId = null;
         if (command == "clear_manager")
         {
@@ -67,16 +67,22 @@ internal static class ManagerSelection
         var page = candidates.Take(RelayLimits.ManagerSelectionHistoryPageEntries).ToArray();
         var more = candidates.Length > page.Length;
         var status = new ManagerSelectionStatus(state.ManagerGeneration, current, page, more ? page[^1].Generation : null, more);
-        return Fit(status, candidate => FitsWire(Ok(new { manager = candidate }), RelayLimits.AggregateReplyBytes));
+        return Fit(status, candidate => FitsWire(Ok(new { manager = candidate }), RelayLimits.AggregateReplyBytes), historyBefore);
     }
 
     // Fit the complete serialized RelayReply, including its escaped DataJson and any enclosing control fields.
-    internal static ManagerSelectionStatus Fit(ManagerSelectionStatus status, Func<ManagerSelectionStatus, bool> fits)
+    internal static ManagerSelectionStatus Fit(ManagerSelectionStatus status, Func<ManagerSelectionStatus, bool> fits, long? historyBefore)
     {
         while (status.History.Length > 0 && !fits(status))
         {
             var page = status.History[..^1];
-            status = status with { History = page, NextHistoryBefore = page.Length > 0 ? page[^1].Generation : status.History[0].Generation + 1, HistoryTruncated = true };
+            status = status with
+            {
+                History = page,
+                NextHistoryBefore = page.Length > 0 ? page[^1].Generation : historyBefore,
+                HistoryTruncated = true,
+                HistoryReadRequired = page.Length == 0
+            };
         }
         return status;
     }

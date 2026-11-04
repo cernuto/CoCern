@@ -44,6 +44,9 @@ public sealed class ManagerSelectionHostTests
         using var denied = await worker.PostAsJsonAsync("/api/tools/control_request", new { repositoryId = "repo", requestId = "self-select", command = "appoint_manager", targetSessionId = session.GetProperty("sessionId").GetString(), expectedManagerGeneration = 2, humanWords = "select myself", role = "manager", isAdministrator = true });
         Assert.Equal(HttpStatusCode.Forbidden, denied.StatusCode);
         Assert.Equal("AdministratorRequired", (await denied.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("code").GetString());
+        var composedHistory = Data(await host.Call(admin, RelayTools.GetStatus, new { repositoryId = "repo", sessionId = session.GetProperty("sessionId").GetString(), sessionToken = session.GetProperty("sessionToken").GetString(), managerHistoryOnly = true })).GetProperty("control");
+        Assert.True(composedHistory.GetProperty("requestsOmitted").GetBoolean()); Assert.Empty(composedHistory.GetProperty("requests").EnumerateArray());
+        Assert.False(composedHistory.GetProperty("manager").GetProperty("historyReadRequired").GetBoolean()); Assert.NotEmpty(composedHistory.GetProperty("manager").GetProperty("history").EnumerateArray());
         var visible = Data(await host.Call(admin, RelayTools.GetStatus, new { repositoryId = "repo" })).GetProperty("manager");
         Assert.Equal(session.GetProperty("sessionId").GetString(), visible.GetProperty("current").GetProperty("sessionId").GetString());
         Assert.DoesNotContain("sessionToken", visible.GetRawText()); Assert.DoesNotContain(target.GetProperty("sessionToken").GetString()!, visible.GetRawText());

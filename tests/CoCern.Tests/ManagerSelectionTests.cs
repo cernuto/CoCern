@@ -91,6 +91,33 @@ public sealed class ManagerSelectionTests
         Assert.Equal(exact, accepted.State(AggregateKinds.Control, AggregateKinds.ControlKey)["manager"]!["humanWords"]!.GetValue<string>());
     }
 
+    [Theory]
+    [InlineData("\u2028")]
+    [InlineData("\u2029")]
+    public void Unicode_line_and_paragraph_separators_are_rejected_without_mutation(string separator)
+    {
+        AssertRejectedWithoutMutation(Seed(), Decision("appoint_manager", "a", 0, "first" + separator + "second"), "InvalidArguments");
+    }
+
+    [Theory]
+    [InlineData("principalId")]
+    [InlineData("repositoryId")]
+    [InlineData("sessionId")]
+    [InlineData("staleCutoff")]
+    public void Selected_identity_changes_and_stale_cutoff_equality_make_assignment_unavailable(string change)
+    {
+        var hub = Seed(); Assert.True(Apply(hub, Decision("appoint_manager", "a", 0)).Ok);
+        Mutate(hub, json =>
+        {
+            var entry = json["sessions"]!["a"]!;
+            if (change == "staleCutoff")
+                foreach (var key in new[] { "freshUntil", "activeAt", "observedAt" }) entry[key] = Now.AddHours(-RelayLimits.StaleSessionHours).ToString("O");
+            else entry[change] = "different-identity";
+        });
+        var current = Manager(hub)["current"]!;
+        Assert.Equal("a", current["sessionId"]!.GetValue<string>()); Assert.Equal("repo", current["repositoryId"]!.GetValue<string>());
+        Assert.Equal(1, current["generation"]!.GetValue<long>()); Assert.False(current["available"]!.GetValue<bool>());
+    }
     [Fact]
     public void Generation_is_a_required_nonnegative_whole_number()
     {
@@ -229,6 +256,69 @@ public sealed class ManagerSelectionTests
         Assert.True(reduced); Assert.Equal(Enumerable.Range(1, 20).Reverse().Select(x => (long)x), seen);
     }
 
+    [Theory]
+    [InlineData(0L)]
+    [InlineData(long.MaxValue - 2)]
+    public void Mixed_cancellations_and_history_continue_with_same_session_without_skips_or_overflow(long initialGeneration)
+    {
+        var hub = new AggregateHub(); var identity = new string('"', 256); const string requester = "load-session";
+        Add(hub, identity, identity, principal: identity); Add(hub, requester, identity);
+        Mutate(hub, json => json["managerGeneration"] = initialGeneration);
+        var actor = new RelayCaller(identity, true, [identity]);
+        for (var i = 0; i < 2; i++)
+        {
+            var decision = Decision("appoint_manager", identity, initialGeneration + i, new string('"', 200), new string('"', 255) + i);
+            decision["repositoryId"] = identity; Assert.True(Apply(hub, decision, actor).Ok);
+        }
+        for (var i = 0; i < 40; i++)
+            Assert.True(Apply(hub, new() { ["repositoryId"] = identity, ["sessionId"] = requester, ["requestId"] = "cancel-" + i, ["command"] = "cancel", ["actionId"] = new string('a', 200) + i }).Ok);
+        JsonObject Read(JsonObject args)
+        {
+            var reply = hub.Apply(AggregateKinds.Control, AggregateKinds.ControlKey, RelayTools.GetStatus, args, Admin, Now);
+            Assert.True(reply.Ok); Assert.True(Replies.FitsWire(reply, 24576)); return AggregateHub.Data(reply);
+        }
+        var ordinary = new JsonObject { ["repositoryId"] = identity, ["sessionId"] = requester };
+        var first = Read(ordinary); Assert.Equal(40, first["requests"]!.AsArray().Count); Assert.Equal(40, first["cancellations"]!.GetValue<int>());
+        var firstHistory = first["manager"]!; Assert.Empty(firstHistory["history"]!.AsArray());
+        Assert.True(firstHistory["historyReadRequired"]?.GetValue<bool>() ?? false); Assert.Null(firstHistory["nextHistoryBefore"]);
+        var continuation = ordinary.DeepClone().AsObject(); continuation["managerHistoryOnly"] = true;
+        var seen = new List<long>(); var pages = 0;
+        while (true)
+        {
+            Assert.True(++pages <= 3, "History continuation must terminate without returning an empty advancing page.");
+            var page = Read(continuation); Assert.True(page["requestsOmitted"]!.GetValue<bool>()); Assert.Empty(page["requests"]!.AsArray()); Assert.Equal(40, page["cancellations"]!.GetValue<int>());
+            var manager = page["manager"]!; Assert.False(manager["historyReadRequired"]!.GetValue<bool>());
+            var entries = manager["history"]!.AsArray(); Assert.NotEmpty(entries); seen.AddRange(entries.Select(x => x!["generation"]!.GetValue<long>()));
+            if (manager["nextHistoryBefore"] is not { } cursor) break;
+            Assert.Equal(seen[^1], cursor.GetValue<long>()); continuation["managerHistoryBefore"] = cursor.GetValue<long>();
+        }
+        Assert.Equal(new[] { initialGeneration + 2, initialGeneration + 1 }, seen);
+        var boundedOrdinary = ordinary.DeepClone().AsObject(); boundedOrdinary["managerHistoryBefore"] = initialGeneration + 2;
+        var blocked = Read(boundedOrdinary)["manager"]!; Assert.True(blocked["historyReadRequired"]!.GetValue<bool>());
+        Assert.Empty(blocked["history"]!.AsArray()); Assert.Equal(initialGeneration + 2, blocked["nextHistoryBefore"]!.GetValue<long>());
+        boundedOrdinary["managerHistoryOnly"] = true;
+        var remaining = Read(boundedOrdinary)["manager"]!["history"]!.AsArray(); Assert.Equal(initialGeneration + 1, Assert.Single(remaining)!["generation"]!.GetValue<long>());
+        var after = Read(ordinary); Assert.Equal(first["requests"]!.ToJsonString(), after["requests"]!.ToJsonString());
+        Assert.All(after["requests"]!.AsArray(), request => Assert.Equal("requested_unknown", request!["request"]!["status"]!.GetValue<string>()));
+    }
+
+    [Fact]
+    public void History_only_mode_requires_an_administrator_and_an_actual_boolean()
+    {
+        foreach (var invalid in new JsonNode?[] { null, JsonValue.Create("true"), JsonValue.Create(1), new JsonObject() })
+        {
+            var hub = Seed(); var before = Snapshot(hub);
+            var args = new JsonObject { ["repositoryId"] = "repo", ["managerHistoryOnly"] = invalid };
+            Assert.Equal("InvalidArguments", hub.Apply(AggregateKinds.Control, AggregateKinds.ControlKey, RelayTools.GetStatus, args, Admin, Now).Code);
+            Assert.Equal(before, Snapshot(hub));
+        }
+        foreach (var mode in new[] { false, true })
+        {
+            var hub = Seed(); var before = Snapshot(hub);
+            Assert.Equal("AdministratorRequired", hub.Apply(AggregateKinds.Control, AggregateKinds.ControlKey, RelayTools.GetStatus, new() { ["repositoryId"] = "repo", ["managerHistoryOnly"] = mode }, Worker, Now).Code);
+            Assert.Equal(before, Snapshot(hub));
+        }
+    }
     [Fact]
     public void Clear_of_empty_assignment_is_an_explicit_recorded_decision_and_old_state_defaults_are_safe()
     {

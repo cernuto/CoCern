@@ -31,5 +31,6 @@ public sealed class ManagerSelectionContractTests
         var tool = RelayToolCatalog.All.Single(x => x.Name == RelayTools.GetStatus);
         var properties = (forwarding ? RelayToolCatalog.ForwardingSchema(tool) : RelayToolCatalog.InputSchema(tool)).GetProperty("properties");
         Assert.Equal("integer", properties.GetProperty("managerHistoryBefore").GetProperty("type").GetString());
+        Assert.Equal("boolean", properties.GetProperty("managerHistoryOnly").GetProperty("type").GetString());
     }
 }

@@ -26,4 +26,5 @@ public sealed record ManagerSelectionStatus(
     [property: JsonPropertyName("current")] ManagerSelectionSummary? Current,
     [property: JsonPropertyName("history")] ManagerSelectionHistory[] History,
     [property: JsonPropertyName("nextHistoryBefore")] long? NextHistoryBefore,
-    [property: JsonPropertyName("historyTruncated")] bool HistoryTruncated);
+    [property: JsonPropertyName("historyTruncated")] bool HistoryTruncated,
+    [property: JsonPropertyName("historyReadRequired")] bool HistoryReadRequired = false);

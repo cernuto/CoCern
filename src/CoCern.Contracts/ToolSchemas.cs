@@ -21,7 +21,7 @@ internal static class ToolSchemas
             RelayTools.TaskClaim or RelayTools.ActionReport => ["attention"],
             RelayTools.SendMessage => ["text", "recipientSessionId", "taskId", "replyTo", "ackMessageIds", "supersede", "wake"],
             RelayTools.CheckInbox => ["cursor", "limit"],
-            RelayTools.GetStatus => ["managerHistoryBefore"],
+            RelayTools.GetStatus => ["managerHistoryBefore", "managerHistoryOnly"],
             RelayTools.ControlRequest => ["targetSessionId", "expectedManagerGeneration", "humanWords"],
             RelayTools.Ack => ["messageId", "messageIds"],
             RelayTools.ClaimRenew => ["resourceId", "generation", "taskId", "claimGeneration", "leaseSeconds"],
@@ -122,7 +122,10 @@ internal static class ToolSchemas
         if (tool.Name == RelayTools.GetStatus)
         {
             foreach (var field in ForwardingFields) properties[field] = new { type = "string" };
+            // Status reads are not deduplicated; as with the other compact reads, omit the unused request ID.
+            properties.Remove("requestId");
             properties["managerHistoryBefore"] = new { type = "integer" };
+            properties["managerHistoryOnly"] = new { type = "boolean" };
         }
         // Each boundary tool advertises the attention opt-out with a short description; InputSchema gives the full one.
         if (properties.ContainsKey("attention")) properties["attention"] = new { type = "boolean", description = "false: no attention offer." };
@@ -158,7 +161,8 @@ internal static class ToolSchemas
         switch (tool)
         {
             case RelayTools.GetStatus:
-                properties["managerHistoryBefore"] = new { type = "integer", minimum = 0, description = "Administrator-only: read manager selections older than this generation." }; break;
+                properties["managerHistoryBefore"] = new { type = "integer", minimum = 0, description = "Administrator-only: read manager selections older than this generation." };
+                properties["managerHistoryOnly"] = new { type = "boolean", description = "Administrator-only: reserve this read for manager history, omitting cancellation requests. Use when manager.historyReadRequired is true; retain the incoming cursor (or omit it for the first page). Ordinary status retains cancellation requests." }; break;
             case RelayTools.SessionOpen:
                 Text("label", "Display label for this chat's session."); properties["requestId"] = new { type = "string", maxLength = RelayLimits.MaxIdentifierLength, description = SessionOpenRequestId }; Object("binding", "Reported configured Roslyn/Visual Studio binding and source identity."); break;
             case RelayTools.SessionBind:
