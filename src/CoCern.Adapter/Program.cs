@@ -103,6 +103,18 @@ try
         Console.CancelKeyPress += (_, cancel) => { cancel.Cancel = true; shutdown.Cancel(); };
         return await SetupCommand.RunAsync(setup, SetupEnvironment.Create(), shutdown.Token);
     }
+    if (args.Length > 0 && args[0] == "--node-worker")
+    {
+        const string usage = "Use --node-worker --data-dir <absolute-path> [--activation-nonce <guid>].";
+        if (args.Length is not (3 or 5) || args[1] != "--data-dir" || string.IsNullOrWhiteSpace(args[2]) || !Path.IsPathFullyQualified(args[2]))
+            throw new AdapterConfigurationException(usage);
+        if (args.Length == 5 && (args[3] != "--activation-nonce" || !Guid.TryParseExact(args[4], "D", out var nonce) || nonce == Guid.Empty))
+            throw new AdapterConfigurationException(usage);
+        using var state = NodeState.Open(args[2]);
+        using var shutdown = new CancellationTokenSource();
+        Console.CancelKeyPress += (_, cancel) => { cancel.Cancel = true; shutdown.Cancel(); };
+        return await NodeRunner.RunAsync(state, null, new NodeTransport(), Console.Error, shutdown.Token);
+    }
     if (args.Length > 0 && args[0] == "--node")
     {
         // Exit codes: 0 stopped, 1 configuration problem or revoked PC, 4 the hub presented a certificate other than the pinned one.

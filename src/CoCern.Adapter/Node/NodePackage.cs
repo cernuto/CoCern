@@ -21,6 +21,116 @@ public sealed record NodeLaunchSpec(string FileName, string[] Arguments);
 
 public static class NodePackage
 {
+    /// <summary>Imports only the explicitly supplied installed package; it neither selects nor executes an adapter.</summary>
+    public static async Task<NodeImage> ImportBootstrapAsync(string bootstrapAdapterDll, string updateRoot, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        string? root = null;
+        string? scratch = null;
+        try
+        {
+            var dll = Canonical(bootstrapAdapterDll);
+            if (!Path.GetFileName(dll).Equals("CoCern.Adapter.dll", StringComparison.OrdinalIgnoreCase) || !File.Exists(dll)) throw new InvalidDataException();
+            var source = Path.GetDirectoryName(dll)!;
+            root = UpdateRoot(updateRoot);
+            if (root.StartsWith(source + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException();
+            var files = BootstrapFiles(source, ct);
+            var metadata = NodePackageMetadataReader.Read(source);
+            if (metadata is null || !ValidMetadata(metadata)) throw new InvalidDataException();
+            var image = new NodeImage(AdapterDeployment.ContentHash(source), metadata, DllHash(source), null);
+            PrivateDirectory(root);
+            scratch = Path.Combine(root, ".staging-" + Guid.NewGuid().ToString("N"));
+            PrivateDirectory(scratch, requireNew: true);
+            var content = Path.Combine(scratch, "content");
+            PrivateDirectory(content, requireNew: true);
+            foreach (var file in files)
+            {
+                ct.ThrowIfCancellationRequested();
+                RejectLinks(file);
+                RejectHardLink(file);
+                var target = Contained(content, Path.GetRelativePath(source, file));
+                PrivateParents(content, Path.GetDirectoryName(target)!);
+                await using var input = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, FileOptions.Asynchronous);
+                await using var output = PrivateFile(target);
+                var length = input.Length;
+                if (length > FileLimit || await CopyBoundedAsync(input, output, length, null, ct) != length) throw new InvalidDataException();
+                output.Flush(flushToDisk: true);
+            }
+            _ = BootstrapFiles(source, ct);
+            if (AdapterDeployment.ContentHash(source) != image.ContentId || !ValidateImage(content, image, ct)) throw new InvalidDataException();
+            var versions = Path.Combine(root, "versions");
+            PrivateDirectory(versions);
+            var final = Contained(versions, image.ContentId);
+            if (!Directory.Exists(final))
+            {
+                ct.ThrowIfCancellationRequested();
+                try { Directory.Move(content, final); }
+                catch (IOException) when (Directory.Exists(final)) { }
+            }
+            if (!ValidateImage(final, image, ct)) throw new InvalidDataException();
+            ct.ThrowIfCancellationRequested();
+            return image;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception exception) when (Unavailable(exception)) { ct.ThrowIfCancellationRequested(); throw new InvalidDataException("node-bootstrap-invalid"); }
+        finally { if (root is not null && scratch is not null) RemoveScratch(root, scratch); }
+    }
+
+    private static string[] BootstrapFiles(string source, CancellationToken ct)
+    {
+        var files = new List<string>();
+        var count = 0;
+        long total = 0;
+        void Visit(string directory)
+        {
+            ct.ThrowIfCancellationRequested();
+            RejectLinks(directory);
+            foreach (var entry in new DirectoryInfo(directory).EnumerateFileSystemInfos())
+            {
+                if (++count > EntryLimit) throw new InvalidDataException();
+                SafeName(Path.GetRelativePath(source, entry.FullName).Replace('\\', '/'));
+                RejectLinks(entry.FullName);
+                if (entry is DirectoryInfo child) Visit(child.FullName);
+                else
+                {
+                    RejectHardLink(entry.FullName);
+                    var length = ((FileInfo)entry).Length;
+                    total = checked(total + length);
+                    if (length > FileLimit || total > InflatedLimit) throw new InvalidDataException();
+                    files.Add(entry.FullName);
+                }
+            }
+        }
+        Visit(source);
+        return files.Order(StringComparer.Ordinal).ToArray();
+    }
+
+    internal static string ValidatedUpdateRoot(string updateRoot, bool create)
+    {
+        var root = UpdateRoot(updateRoot);
+        if (File.Exists(root)) throw new InvalidDataException();
+        if (create) PrivateDirectory(root);
+        else if (Directory.Exists(root)) ValidatePrivacy(new DirectoryInfo(root));
+        return root;
+    }
+
+    internal static bool ValidateStoredImage(string updateRoot, NodeImage? image)
+    {
+        if (image is null || !LowerHash(image.ContentId) || !UpperHash(image.AdapterDllSha256) || image.ReleaseId is not null && !UpperHash(image.ReleaseId) || !ValidMetadata(image.Package)) return false;
+        var versions = Path.Combine(updateRoot, "versions");
+        ValidatePrivacy(new DirectoryInfo(versions));
+        return ValidateImage(Contained(versions, image.ContentId), image, default);
+    }
+
+    internal static void ValidatePrivateFile(string path)
+    {
+        RejectLinks(path);
+        RejectHardLink(path);
+        ValidatePrivacy(new FileInfo(path));
+    }
+
+    internal static FileStream CreatePrivateFile(string path) => PrivateFile(path);
+
     private const long ZipLimit = 256L * 1024 * 1024;
     private const long FileLimit = 128L * 1024 * 1024;
     private const long InflatedLimit = 768L * 1024 * 1024;
