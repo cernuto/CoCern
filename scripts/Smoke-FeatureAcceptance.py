@@ -470,16 +470,21 @@ class Hub:
         return {"revision": snapshot["revision"], "traffic": snapshot["traffic"]}
 
     def fresh_traffic(self):
-        # Fence AFTER the adapter returns: a revision sampled during its call
-        # cannot prove absence. Require a later completed server collection.
+        # The sequential collector can have captured traffic before this call
+        # but publish afterward. Two completed revisions past the post-call
+        # fence guarantee the second capture follows the call.
         fence = self.traffic_snapshot()
+        previous = fence
         deadline = time.monotonic() + self.timeout
         while time.monotonic() < deadline:
             current = self.traffic_snapshot()
-            require(current["revision"] >= fence["revision"], "Dashboard collection revision rolled back")
-            if current["revision"] > fence["revision"]:
-                protected_request_count(fence, current)  # Also fail on lost retention.
-                return current
+            require(current["revision"] >= previous["revision"], "Dashboard collection revision rolled back")
+            if current["revision"] > previous["revision"]:
+                protected_request_count(previous, current)
+                protected_request_count(fence, current)  # Retain the original boundary too.
+                previous = current
+                if current["revision"] >= fence["revision"] + 2:
+                    return current
             time.sleep(0.05)
         raise ProbeFailure("Fresh dashboard collection unavailable")
 

@@ -241,11 +241,62 @@ class SafetyBoundaryTests(unittest.TestCase):
                 runner.pin_refusal(hub)
             hub.stop_observation.assert_called_once()
 
-    def test_freshness_requires_revision_newer_than_postcall_fence(self):
+    def test_inflight_first_advance_cannot_hide_request_in_second_advance(self):
         with tempfile.TemporaryDirectory() as folder:
             hub = self.make_hub(Path(folder))
-            with mock.patch.object(hub, "traffic_snapshot", side_effect=[self.traffic(4), self.traffic(4), self.traffic(5)]):
-                self.assertEqual(hub.fresh_traffic()["revision"], 5)
+            fence, stale = self.traffic(4), self.traffic(5)
+            fresh = self.traffic(6, (1, "request", "task_get"), (2, "response", "task_get"))
+            with mock.patch.object(hub, "traffic_snapshot", side_effect=[fence, stale, fresh]) as read, \
+                    mock.patch.object(runner.time, "monotonic", return_value=0), \
+                    mock.patch.object(runner.time, "sleep"):
+                observed = hub.fresh_traffic()
+            self.assertEqual(observed["revision"], 6)
+            self.assertEqual(read.call_count, 3)
+            self.assertEqual(runner.protected_request_count(fence, observed), 1)
+
+    def test_zero_requires_second_completed_advance_not_repeated_first_revision(self):
+        with tempfile.TemporaryDirectory() as folder:
+            hub = self.make_hub(Path(folder))
+            fence = self.traffic(4)
+            snapshots = [fence, self.traffic(4), self.traffic(5), self.traffic(5), self.traffic(6)]
+            with mock.patch.object(hub, "traffic_snapshot", side_effect=snapshots) as read, \
+                    mock.patch.object(runner.time, "monotonic", return_value=0), \
+                    mock.patch.object(runner.time, "sleep"):
+                observed = hub.fresh_traffic()
+            self.assertEqual(observed["revision"], 6)
+            self.assertEqual(read.call_count, 5)
+            self.assertEqual(runner.protected_request_count(fence, observed), 0)
+
+    def test_only_one_advance_before_deadline_cannot_prove_zero(self):
+        with tempfile.TemporaryDirectory() as folder:
+            hub = self.make_hub(Path(folder))
+            with mock.patch.object(hub, "traffic_snapshot", side_effect=[self.traffic(4), self.traffic(5)]), \
+                    mock.patch.object(runner.time, "monotonic", side_effect=[0, 0, 2]), \
+                    mock.patch.object(runner.time, "sleep"):
+                with self.assertRaises(runner.ProbeFailure):
+                    hub.fresh_traffic()
+
+    def test_continuity_and_retention_are_checked_between_both_advances(self):
+        for second in (self.traffic(6), self.traffic(6, (1, "request", "get_status")),
+                       self.traffic(6, (4, "response", "get_status")),
+                       self.traffic(6, (2, "response", "get_status"), (4, "push", "coordination.changed"))):
+            with self.subTest(second=second), tempfile.TemporaryDirectory() as folder:
+                hub = self.make_hub(Path(folder))
+                first = self.traffic(5, (1, "request", "get_status"), (2, "response", "get_status"))
+                with mock.patch.object(hub, "traffic_snapshot", side_effect=[self.traffic(4), first, second]), \
+                        mock.patch.object(runner.time, "monotonic", return_value=0), \
+                        mock.patch.object(runner.time, "sleep"):
+                    with self.assertRaises(runner.ProbeFailure):
+                        hub.fresh_traffic()
+
+    def test_revision_cannot_roll_back_between_advances(self):
+        with tempfile.TemporaryDirectory() as folder:
+            hub = self.make_hub(Path(folder))
+            with mock.patch.object(hub, "traffic_snapshot", side_effect=[self.traffic(4), self.traffic(5), self.traffic(4)]), \
+                    mock.patch.object(runner.time, "monotonic", return_value=0), \
+                    mock.patch.object(runner.time, "sleep"):
+                with self.assertRaises(runner.ProbeFailure):
+                    hub.fresh_traffic()
 
     def test_stale_or_rollback_collection_cannot_prove_zero_requests(self):
         for revisions in ([4, 4, 4], [4, 3]):
