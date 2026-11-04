@@ -45,6 +45,12 @@ Use a separate row/receipt for each actual Codex/Claude client surface required 
 | 9.3 unpack rejection | `<pending>` | `<pending>` | NOT RUN | `<pending>` |
 | 9.3 successor exit / rollback | `<pending>` | `<pending>` | NOT RUN | `<pending>` |
 | 9.3 readiness timeout / rollback, if required | `<pending>` | `<pending>` | NOT RUN | `<pending>` |
+| T6-race: B offer / C publication / exact-B-or-unavailable | `<pending>` | `<pending>` | NOT RUN | `<pending>` |
+| T6-runtime: incompatible RID | `<pending>` | `<pending>` | NOT RUN | `<pending>` |
+| T6-runtime: unavailable required runtime | `<pending>` | `<pending>` | NOT RUN | `<pending>` |
+| T6-crash: copy row per frozen crash boundary | `<pending>` | `<pending>` | NOT RUN | `<pending>` |
+| T6-offline: before download | `<pending>` | `<pending>` | NOT RUN | `<pending>` |
+| T6-offline: after old exit / before authenticated readiness | `<pending>` | `<pending>` | NOT RUN | `<pending>` |
 
 ## Case receipt — copy per attempt
 
@@ -69,6 +75,8 @@ Use a separate row/receipt for each actual Codex/Claude client surface required 
 | Failed candidate execution | `<not launched before verification; expected verified startup failure distinguished>` |
 | Enrolled identity / credential / pin / binding | `<private before-after comparisons reported as preservation booleans; no secret values/digests>` |
 | Work / pending mail / cache / reservations | `<message IDs and legitimate changes; reserved/queued/uncertain state preserved; no manual repair>` |
+| Pending-message boundary history | `<store UTC, pre-transition reservation, observed phase/worker, post-transition state, eventual turn/reply/ack; no inferred gap>` |
+| Race / runtime / crash / outage control | `<exact frozen phase, approved fixture-only control, ordered receipts, deadlines and recovery; not applicable only with reason>` |
 | Hub correlation | `<exact fixture machine ID + LastSeen + observation UTC, or unconfirmed>` |
 | Same-release no-op | `<observation window, stable PID before separate restart, no extra activation/wake/ack>` |
 | Stop condition or blocker | `<none only if observed; otherwise precise condition>` |
