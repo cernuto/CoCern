@@ -41,20 +41,30 @@ public static class ClaudeWaiter
         }
         if (!printInbox) return await WaitAsync(nodeFolder, claudeSessionId, deliver, timeout, cancellationToken, handler, hubHandler, clock, interval);
         string? prompt = null;
-        // Still holding the state and pid file, so a hook that starts now can neither print these messages too nor keep this one from recording them.
-        return await WaitAsync(nodeFolder, claudeSessionId, text => prompt = text, timeout, cancellationToken, handler, hubHandler, clock, interval, async state =>
+        var folder = Path.GetFullPath(nodeFolder);
+        return await WaitAsync(nodeFolder, claudeSessionId, text => prompt = text, timeout, cancellationToken, handler, hubHandler, clock, interval,
+            state => DeliverPrintedAsync(prompt!, state, FindHandle(folder, Normalize(claudeSessionId)), ConnectionOptions(folder), handler, deliver, cancellationToken));
+    }
+
+    /// <summary>
+    /// A queued wake's text: the messages <paramref name="handle"/>'s session has not printed before, or <paramref name="prompt"/> if they cannot be read. It runs
+    /// still holding the state and pid file, so a hook that starts now can neither print these messages too nor keep this one from recording them.
+    /// </summary>
+    private static async Task DeliverPrintedAsync(string prompt, WakeState state, SessionHandle? handle, AdapterOptions? options, HttpMessageHandler? handler, Action<string> deliver, CancellationToken cancellationToken)
+    {
+        // An attention line in the prompt names the waiting item; it is kept when the inbox replaces the prompt.
+        var attention = prompt.Split('\n').FirstOrDefault(line => line.StartsWith(WakeReconciler.AttentionLinePrefix, StringComparison.Ordinal));
+        PrintedInbox? printed = null;
+        if (handle is not null && options is not null)
         {
-            // An attention line in the prompt names the waiting item; it is kept when the inbox replaces the prompt.
-            var attention = prompt!.Split('\n').FirstOrDefault(line => line.StartsWith(WakeReconciler.AttentionLinePrefix, StringComparison.Ordinal));
-            PrintedInbox? printed;
-            try { printed = await ReadInboxAsync(nodeFolder, claudeSessionId, state, handler, attention, cancellationToken); }
+            try { printed = await ReadInboxAsync(handle, options, state, handler, attention, cancellationToken); }
             catch (Microsoft.Data.Sqlite.SqliteException) { printed = null; }
-            deliver(printed?.Text ?? prompt);
-            if (printed is null) return;
-            // Only now the text is on its way: a record that fails costs one repeat, while one made too early would lose the message from later wakes.
-            try { state.MarkPrinted(printed.Route, printed.Shown); }
-            catch (Microsoft.Data.Sqlite.SqliteException) { }
-        });
+        }
+        deliver(printed?.Text ?? prompt);
+        if (printed is null) return;
+        // Only now the text is on its way: a record that fails costs one repeat, while one made too early would lose the message from later wakes.
+        try { state.MarkPrinted(printed.Route, printed.Shown); }
+        catch (Microsoft.Data.Sqlite.SqliteException) { }
     }
 
     /// <summary>
@@ -84,11 +94,9 @@ public static class ClaudeWaiter
     private sealed record PrintedInbox(string Text, string Route, IReadOnlyList<string> Shown);
 
     /// <summary>The chat's messages not printed by an earlier wake as one compact block, or null when the inbox cannot be read.</summary>
-    private static async Task<PrintedInbox?> ReadInboxAsync(string nodeFolder, string claudeSessionId, WakeState state, HttpMessageHandler? handler, string? attention, CancellationToken cancellationToken)
+    /// <param name="handle">The one session for the whole read and its report: a chat that moves meanwhile must not mix two inboxes' pages, or record one's messages under the other.</param>
+    private static async Task<PrintedInbox?> ReadInboxAsync(SessionHandle handle, AdapterOptions options, WakeState state, HttpMessageHandler? handler, string? attention, CancellationToken cancellationToken)
     {
-        // One session for the whole read and its report: a chat that moves meanwhile must not mix two inboxes' pages, or record one's messages under the other.
-        var folder = Path.GetFullPath(nodeFolder);
-        if (FindHandle(folder, Normalize(claudeSessionId)) is not { } handle) return null;
         var route = WakeState.Key(handle.RepositoryId, handle.SessionId);
         var fresh = new List<JsonElement>();
         var earlier = new List<string>();
@@ -97,7 +105,7 @@ public static class ClaudeWaiter
         for (var page = 0; page < MaxInboxPages && size <= MaxPrintedInbox; page++)
         {
             // The printed inbox shows messages only, so this read takes no attention offer; the attention line names the waiting item instead.
-            var reply = await CallAsHandleAsync(folder, handle, handler, CoCern.Contracts.RelayTools.CheckInbox, new() { ["attention"] = false, ["limit"] = CoCern.Contracts.RelayLimits.MaxPageSize, ["cursor"] = cursor }, cancellationToken);
+            var reply = await CallAsHandleAsync(options, handle, handler, CoCern.Contracts.RelayTools.CheckInbox, new() { ["attention"] = false, ["limit"] = CoCern.Contracts.RelayLimits.MaxPageSize, ["cursor"] = cursor }, cancellationToken);
             if (reply is not { Ok: true, Data: { ValueKind: JsonValueKind.Object } data } || !data.TryGetProperty("items", out var items) || items.ValueKind != JsonValueKind.Array)
             {
                 if (page == 0) return null;
@@ -124,7 +132,7 @@ public static class ClaudeWaiter
         {
             try
             {
-                await CallAsHandleAsync(folder, handle, handler, CoCern.Contracts.RelayTools.CheckInbox,
+                await CallAsHandleAsync(options, handle, handler, CoCern.Contracts.RelayTools.CheckInbox,
                     new() { ["attention"] = false, ["limit"] = 1, ["seenMessageIds"] = new JsonArray(shown.Concat(earlier).Take(CoCern.Contracts.RelayLimits.MaxAcknowledgedMessages).Select(id => (JsonNode)id).ToArray()) }, cancellationToken);
             }
             catch (Exception exception) when (exception is not OperationCanceledException) { /* The inbox is still printed. */ }
@@ -136,12 +144,11 @@ public static class ClaudeWaiter
     private static async Task<AdapterReply?> CallAsSessionAsync(string nodeFolder, string claudeSessionId, HttpMessageHandler? handler, string tool, JsonObject arguments, CancellationToken cancellationToken)
     {
         var folder = Path.GetFullPath(nodeFolder);
-        return FindHandle(folder, Normalize(claudeSessionId)) is { } handle ? await CallAsHandleAsync(folder, handle, handler, tool, arguments, cancellationToken) : null;
+        return ConnectionOptions(folder) is { } options && FindHandle(folder, Normalize(claudeSessionId)) is { } handle ? await CallAsHandleAsync(options, handle, handler, tool, arguments, cancellationToken) : null;
     }
 
-    private static async Task<AdapterReply?> CallAsHandleAsync(string folder, SessionHandle handle, HttpMessageHandler? handler, string tool, JsonObject arguments, CancellationToken cancellationToken)
+    private static async Task<AdapterReply?> CallAsHandleAsync(AdapterOptions options, SessionHandle handle, HttpMessageHandler? handler, string tool, JsonObject arguments, CancellationToken cancellationToken)
     {
-        if (ConnectionOptions(folder) is not { } options) return null;
         using var http = new HttpClient(handler ?? RelayForwarder.CreateHandler(options), disposeHandler: handler is null) { Timeout = TimeSpan.FromSeconds(15) };
         arguments["repositoryId"] = handle.RepositoryId; arguments["sessionId"] = handle.SessionId; arguments["sessionToken"] = handle.SessionToken;
         return await new RelayForwarder(http, options).ForwardAsync(tool, RelayForwarder.WithOrigin(JsonSerializer.SerializeToElement(arguments), background: true), cancellationToken);
@@ -207,17 +214,27 @@ public static class ClaudeWaiter
     }
 
     // Task 4's verified Claude hook supplies the root/parent and checkout. This path never asks the ID-only legacy finder.
-    internal static async Task<string> RunNativeAsync(NativeJoin join, NativeHookContext capture, Action<string> deliver, TimeSpan? timeout, CancellationToken ct, HttpMessageHandler? handler = null)
+    internal static async Task<string> RunNativeAsync(NativeJoin join, NativeHookContext capture, Action<string> deliver, TimeSpan? timeout, CancellationToken ct, HttpMessageHandler? handler = null,
+        bool printInbox = false, TimeProvider? clock = null, Func<HttpMessageHandler>? hubHandler = null, TimeSpan? interval = null)
     {
         if (capture.Provider != ChatProviders.Claude) throw new AdapterConfigurationException(ChatUsage);
         var handle = await join.EnsureAsync(capture, ct);
         var chat = new ChatLocation(ChatProviders.Claude, Guid.Parse(capture.NativeId).ToString("D"));
         if (handle.NativeBindingKey is null || handle.Client != chat || handle.Chat != chat || handle.Unmapped)
             throw new AdapterConfigurationException("The native Claude waiter needs its current private chat binding.");
-        Task<IReadOnlyList<WakeTarget>> Targets(CancellationToken _) => Task.FromResult<IReadOnlyList<WakeTarget>>([
-            new(new WakeRoute(handle.RepositoryId, "default", NodeState.SessionHandlePath(join.PrivateFolder, handle.SessionId), chat.ThreadId, Environment.MachineName),
-                new WakeSession(handle.SessionId, handle.SessionToken), NativeJoinBinding.ForDispatch(join.PrivateFolder, handle, new InboxWaitDispatcher(deliver)))]);
-        return await WaitForHandleAsync(join.PrivateFolder, chat.ThreadId, join.WakeOptions, Targets, timeout, ct, handler, null, null, null);
+        string? prompt = null;
+        Action<string> queued = printInbox ? text => prompt = text : deliver;
+        // Read again on every pass: a later hook of this client finds this waiter alive and leaves it running, and the dispatch fence refuses a replaced handle, so only
+        // the waiter itself can move on. Only a validated binding counts, chosen as the fence chooses; a busy or ambiguous one keeps the handle until the next pass.
+        Task<IReadOnlyList<WakeTarget>> Targets(CancellationToken _)
+        {
+            if (NativeJoinBinding.DispatchSnapshot(join.PrivateFolder).Where(row => row.Chat == chat).Take(2).ToArray() is [var current]) handle = current;
+            return Task.FromResult<IReadOnlyList<WakeTarget>>([
+                new(new WakeRoute(handle.RepositoryId, "default", NodeState.SessionHandlePath(join.PrivateFolder, handle.SessionId), chat.ThreadId, Environment.MachineName),
+                    new WakeSession(handle.SessionId, handle.SessionToken), NativeJoinBinding.ForDispatch(join.PrivateFolder, handle, new InboxWaitDispatcher(queued)))]);
+        }
+        Func<WakeState, Task>? onQueued = printInbox ? state => DeliverPrintedAsync(prompt!, state, handle, join.WakeOptions, handler, deliver, ct) : null;
+        return await WaitForHandleAsync(join.PrivateFolder, chat.ThreadId, join.WakeOptions, Targets, timeout, ct, handler, hubHandler, clock, interval, onQueued);
     }
 
     private static async Task<string> WaitAsync(string nodeFolder, string claudeSessionId, Action<string> deliver, TimeSpan? timeout, CancellationToken cancellationToken, HttpMessageHandler? handler, Func<HttpMessageHandler>? hubHandler, TimeProvider? clock, TimeSpan? interval, Func<WakeState, Task>? onQueued = null)
