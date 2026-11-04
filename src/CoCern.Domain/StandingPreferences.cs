@@ -38,12 +38,14 @@ internal static class StandingPreferences
     public static RelayReply Present(AggregateContext context)
     {
         if (!context.Caller.IsInternal) return Error(InternalOnly);
+        if (!StandingPresentationRequest.Decode(context.Args).TryGet(out var presentation, out var malformed)) return Malformed(malformed);
         var board = new BoardState(context.State);
         var standing = board.Standing;
-        var id = Text(context.Args, "proposalId");
-        var request = Text(context.Args, "presentationRequest");
-        if (standing is null || context.Args["expectedEffect"] is not JsonObject expected) return Ok(new { presented = false });
-        var effect = PendingPresentation(standing.Json, Text(context.Args, "boardId", "default"), id, context.Caller.PrincipalId, context.SessionId, request);
+        var id = presentation.ProposalId;
+        var request = presentation.PresentationRequest;
+        if (standing is null) return Ok(new { presented = false });
+        var expected = JsonNode.Parse(presentation.ExpectedEffectJson)!.AsObject();
+        var effect = PendingPresentation(standing.Json, presentation.BoardId ?? "default", id, context.Caller.PrincipalId, presentation.SessionId, request);
         if (effect is null || !JsonNode.DeepEquals(effect, expected) || ByteSize(effect) > RelayLimits.MaxAttentionOfferBytes) return Ok(new { presented = false }, standing.Revision);
         var proposal = standing.Proposal(id)!;
         if (!JsonNode.DeepEquals(proposal.PresentedEffect, effect))
