@@ -94,6 +94,117 @@ public sealed class TrafficOriginTests
         Assert.Equal(210L, (await analytics.RunSqlAsync("SELECT sum(request_bytes) FROM tool_traffic WHERE repository_id = 'repo'")).Rows[0][0]);
     }
 
+    [Theory]
+    [InlineData("mcp")]
+    [InlineData("claude-stop")]
+    [InlineData("claude-waiter")]
+    [InlineData("wake-watcher")]
+    [InlineData("node")]
+    [InlineData("dashboard")]
+    public async Task Explicit_call_origin_is_recorded_without_affecting_classification_or_entering_grain_state(string origin)
+    {
+        await using var host = new RelayHostFixture();
+        using var client = host.AuthorizedClient();
+        var reply = await host.Call(client, "task_get", new { repositoryId = "repo", backgroundCall = true, callOrigin = origin });
+        Assert.True(reply.GetProperty("ok").GetBoolean());
+        var store = host.Services.GetRequiredService<SqliteStore>();
+        await store.FlushActivityAsync();
+        using var db = Open(store.DatabasePath);
+        Assert.Equal(origin, Scalar(db, "SELECT call_origin FROM activity_log WHERE kind = 'call' AND tool = 'task_get'"));
+        Assert.Equal(1L, Scalar(db, "SELECT background_call FROM activity_log WHERE kind = 'call' AND tool = 'task_get'"));
+        Assert.Equal(0L, Scalar(db, "SELECT count(*) FROM grain_state WHERE payload LIKE '%callOrigin%'"));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("future-provider")]
+    [InlineData("MCP")]
+    [InlineData(42)]
+    public async Task Missing_or_unrecognized_origin_stays_unknown_without_rejecting_the_call(object? origin)
+    {
+        await using var host = new RelayHostFixture();
+        using var client = host.AuthorizedClient();
+        var reply = await host.Call(client, "task_get", new { repositoryId = "repo", callOrigin = origin });
+        Assert.True(reply.GetProperty("ok").GetBoolean());
+        var store = host.Services.GetRequiredService<SqliteStore>();
+        await store.FlushActivityAsync();
+        using var db = Open(store.DatabasePath);
+        Assert.Equal("unknown", Scalar(db, "SELECT coalesce(call_origin, 'unknown') FROM activity_log WHERE kind = 'call' AND tool = 'task_get'"));
+        Assert.Equal(1L, Scalar(db, "SELECT count(*) FROM activity_log WHERE kind = 'call' AND background_call IS NULL"));
+        Assert.Equal(0L, Scalar(db, "SELECT count(*) FROM grain_state WHERE payload LIKE '%callOrigin%'"));
+    }
+
+    [Fact]
+    public async Task Explicit_origin_counts_survive_repeated_rollups_without_changing_existing_traffic_totals()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "cocern-call-origin-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        using var store = new SqliteStore(Path.Combine(root, "relay.db"), new ActivityOptions { RetentionDays = 1 });
+        var now = DateTimeOffset.UtcNow;
+        ActivityEvent Report(string? origin, DateTimeOffset at, int bytes)
+        {
+            var json = JsonSerializer.SerializeToNode(Event(null, at, bytes))!.AsObject();
+            json["CallOrigin"] = origin;
+            return json.Deserialize<ActivityEvent>()!;
+        }
+        store.Record(Report("claude-stop", now.AddDays(-2), 10));
+        store.Record(Report("mcp", now.AddDays(-2), 20));
+        store.Record(Report(null, now.AddDays(-2), 30));
+        await store.FlushActivityAsync();
+        Assert.Equal(3, await store.RollUpActivityAsync(now));
+        store.Record(Report("claude-stop", now.AddDays(-2), 5));
+        store.Record(Report("node", now.AddMinutes(-1), 40));
+        await store.FlushActivityAsync();
+        Assert.Equal(1, await store.RollUpActivityAsync(now));
+        using (var db = Open(store.DatabasePath))
+        {
+            Assert.Equal(4L, Scalar(db, "SELECT sum(calls) FROM activity_daily"));
+            Assert.Equal(65L, Scalar(db, "SELECT sum(reply_bytes) FROM activity_daily"));
+            Assert.Equal(130L, Scalar(db, "SELECT sum(request_bytes) FROM activity_daily"));
+            Assert.Equal(4L, Scalar(db, "SELECT sum(calls) FROM activity_origin_daily"));
+            Assert.Equal(65L, Scalar(db, "SELECT sum(reply_bytes) FROM activity_origin_daily"));
+            Assert.Equal(0L, Scalar(db, "SELECT sum(model_calls + background_calls) FROM activity_daily"));
+        }
+        var snapshot = Path.Combine(root, "snapshot.db");
+        await store.CreateAnalyticsSnapshotAsync(snapshot);
+        using var analytics = new AnalyticsService(new AnalyticsOptions { ExtensionDirectory = await AnalyticsTestExtension.DirectoryAsync() });
+        await analytics.SwitchSnapshotAsync(snapshot, now);
+        var byOrigin = (await analytics.RunSqlAsync("SELECT call_origin, sum(calls), sum(request_bytes), sum(reply_bytes) FROM tool_origin_traffic WHERE repository_id = 'repo' GROUP BY call_origin ORDER BY call_origin")).Rows;
+        Assert.Equal(4, byOrigin.Count);
+        Assert.Equal(new object?[] { "claude-stop", 2L, 30L, 15L }, byOrigin[0]);
+        Assert.Equal(new object?[] { "mcp", 1L, 40L, 20L }, byOrigin[1]);
+        Assert.Equal(new object?[] { "node", 1L, 80L, 40L }, byOrigin[2]);
+        Assert.Equal(new object?[] { "unknown", 1L, 60L, 30L }, byOrigin[3]);
+        Assert.Equal(105L, (await analytics.RunSqlAsync("SELECT sum(reply_bytes) FROM tool_traffic WHERE repository_id = 'repo'")).Rows[0][0]);
+        Assert.Equal(5L, (await analytics.RunSqlAsync("SELECT sum(calls) FROM tool_traffic WHERE repository_id = 'repo'")).Rows[0][0]);
+    }
+
+    [Fact]
+    public async Task Historical_snapshots_without_origin_column_or_companion_keep_all_unattributed_totals()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "cocern-legacy-call-origin-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var path = Path.Combine(root, "relay.db");
+        using (var store = new SqliteStore(path))
+        {
+            store.Record(Event(null, DateTimeOffset.UtcNow, 7));
+            await store.FlushActivityAsync();
+            using (var db = Open(path))
+                Scalar(db, "INSERT INTO activity_daily(day, repository_id, kind, role, tool, calls, errors, request_bytes, reply_bytes, duration_ms, input_tokens, output_tokens) VALUES (date('now', '-2 day'), 'repo', 'call', '', 'task_get', 4, 0, 26, 13, 0, 0, 0)");
+            await store.CreateAnalyticsSnapshotAsync(Path.Combine(root, "old.db"));
+        }
+        using (var db = Open(Path.Combine(root, "old.db")))
+        {
+            if (Convert.ToInt64(Scalar(db, "SELECT count(*) FROM pragma_table_info('activity_log') WHERE name = 'call_origin'")) != 0)
+                Scalar(db, "ALTER TABLE activity_log DROP COLUMN call_origin");
+            Scalar(db, "DROP TABLE IF EXISTS activity_origin_daily");
+        }
+        using var analytics = new AnalyticsService(new AnalyticsOptions { ExtensionDirectory = await AnalyticsTestExtension.DirectoryAsync() });
+        await analytics.SwitchSnapshotAsync(Path.Combine(root, "old.db"));
+        var rows = (await analytics.RunSqlAsync("SELECT call_origin, sum(calls), sum(request_bytes), sum(reply_bytes) FROM tool_origin_traffic WHERE repository_id = 'repo' GROUP BY call_origin")).Rows;
+        Assert.Equal(new object?[] { "unknown", 5L, 40L, 20L }, Assert.Single(rows));
+    }
+
     private static ActivityEvent Event(bool? background, DateTimeOffset at, int bytes) => JsonSerializer.Deserialize<ActivityEvent>(JsonSerializer.Serialize(new
     {
         Timestamp = at, Kind = "call", RepositoryId = "repo", Tool = "task_get", Ok = true, Code = "Ok", BackgroundCall = background, RequestBytes = bytes * 2, ReplyBytes = bytes
