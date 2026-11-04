@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Text.Json;
 using CoCern.Contracts;
 using CoCern.Contracts.Dashboard;
 
@@ -41,11 +42,32 @@ public static class ManagerManagementClient
     private static async Task<DashboardManagerResult> ResultAsync(HttpResponseMessage response, CancellationToken cancellationToken)
     {
         if (response.StatusCode == HttpStatusCode.Unauthorized
-            || response.StatusCode == HttpStatusCode.Forbidden && response.Content.Headers.ContentType?.MediaType != "application/json")
+            || response.StatusCode == HttpStatusCode.Forbidden && response.Content.Headers.ContentType?.MediaType is null or "text/html")
             return new(false, "Sign in again to manage this hub.", null, null);
-        if (response.StatusCode == HttpStatusCode.RequestEntityTooLarge)
+        if (response.StatusCode == HttpStatusCode.RequestEntityTooLarge && response.Content.Headers.ContentLength == 0)
             return new(false, RelayErrorCodes.PayloadTooLarge, null, null);
-        return await response.Content.ReadFromJsonAsync<DashboardManagerResult>(cancellationToken)
-            ?? throw new HttpRequestException("No manager result was received.");
+        if ((int)response.StatusCode >= 500 || (int)response.StatusCode < 200 || (int)response.StatusCode is >= 300 and < 400)
+            throw new HttpRequestException("No definitive manager response was received.");
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>(cancellationToken);
+        if (body.ValueKind != JsonValueKind.Object || !body.TryGetProperty("ok", out var ok)
+            || ok.ValueKind is not (JsonValueKind.True or JsonValueKind.False)
+            || !body.TryGetProperty("code", out var code) || code.ValueKind != JsonValueKind.String
+            || string.IsNullOrWhiteSpace(code.GetString()) || ok.GetBoolean() != response.IsSuccessStatusCode
+            || ok.GetBoolean() != (code.GetString() == "Ok")
+            || body.EnumerateObject().Select(field => field.Name).Distinct(StringComparer.OrdinalIgnoreCase).Count() != body.EnumerateObject().Count())
+            throw new HttpRequestException("No definitive manager response was received.");
+        var result = body.Deserialize<DashboardManagerResult>(JsonSerializerOptions.Web)!;
+        var expected = result.Ok ? HttpStatusCode.OK : RelayErrorCodes.Classify(result.Code) switch
+        {
+            RelayErrorKind.Denied => HttpStatusCode.Forbidden,
+            RelayErrorKind.Missing => HttpStatusCode.NotFound,
+            RelayErrorKind.TooLarge => HttpStatusCode.RequestEntityTooLarge,
+            RelayErrorKind.Conflict => HttpStatusCode.Conflict,
+            _ => HttpStatusCode.BadRequest
+        };
+        if (response.StatusCode != expected || result.Ok && result.Manager is null && result.Paused is null
+            || result.Manager is { History: null })
+            throw new HttpRequestException("No definitive manager response was received.");
+        return result;
     }
 }

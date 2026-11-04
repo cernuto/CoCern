@@ -25,7 +25,7 @@ Admin tools need a token with `IsAdministrator`. A session's `role` grants nothi
 | `session_open` | worker | Open a session for this chat; returns its private handle and the board's standing. |
 | `session_bind` | worker | Record this session's IDE tool bindings. Optional `label` renames the session (to match its chat's title) and `machineId` reports its PC, once (a later one is ignored); a bind that leaves out `binding` or `availability`, or sends `null`, keeps the current one. |
 | `worker_list` | worker | List reported worker state and freshness; use `chat_directory` to find a chat to message. |
-| `get_status` | worker | Repository and session status, including blockers and uncertain actions. |
+| `get_status` | worker | Repository and session status, including blockers and uncertain actions. A session-wide stop is included on the bounded cancellation page whenever present. |
 | `task_get` | worker | One task, or the board. |
 | `task_update` | worker | Create or update a task under `expectedVersion`. |
 | `task_claim` | worker | Claim a task and its resources together. |
@@ -46,6 +46,8 @@ Admin tools need a token with `IsAdministrator`. A session's `role` grants nothi
 | `control_request` | admin | Pause or resume dispatch, request cancellation, register a [resource](#resources), close [sessions](#calls) in bulk, or revoke a PC. It never stops work already running. |
 | `analytics_query` | admin | Run a named analytics query, or ad hoc SQL. |
 | `doc_sync` | admin | Sync a repository's docs now. |
+
+When cancellation details fill the ordinary status reply, the hub may omit the optional `manager` property. A missing property means the selection has not been read. Repeat the read with `managerHistoryOnly: true` to obtain the same repository-visible manager summary without cancellation details. Workers receive an empty history. Administrators can also read history and page with `managerHistoryBefore`.
 
 ## Calls
 

@@ -303,7 +303,44 @@ public sealed class ManagerSelectionTests
     }
 
     [Fact]
-    public void History_only_mode_requires_an_administrator_and_an_actual_boolean()
+    public void Optional_manager_summary_yields_to_a_previously_fitting_worker_status()
+    {
+        var hub = new AggregateHub();
+        var repo = new string('"', 256);
+        Add(hub, "manager", repo); Add(hub, "reader", repo);
+        var admin = new RelayCaller("admin", true, [repo]);
+        var worker = new RelayCaller("reader", false, [repo]);
+        var decision = Decision("appoint_manager", "manager", 0); decision["repositoryId"] = repo;
+        Assert.True(Apply(hub, decision, admin).Ok);
+        var state = hub.State(AggregateKinds.Control, AggregateKinds.ControlKey);
+        var control = new ControlState(state);
+        var summary = AggregateHub.Data(Status(hub, worker, repo))["manager"];
+        for (var i = 0; i < 50; i++)
+        {
+            control.RequestCancellation("reader", new string('a', 230) + i, new string('b', 175), Now);
+            var requests = control.CancellationsOf("reader").Select(x => new { target = x.Target, request = x.Request }).ToArray();
+            var legacy = Replies.Ok(new { paused = false, cancellations = requests.Length, requests });
+            var augmented = Replies.Ok(new { paused = false, cancellations = requests.Length, requests, requestsOmitted = false, manager = summary });
+            if (!Replies.FitsWire(legacy, 24576) || Replies.FitsWire(augmented, 24576)) continue;
+            hub.Of(AggregateKinds.Control, AggregateKinds.ControlKey).Value = new() { Json = state.ToJsonString() };
+            var args = new JsonObject { ["sessionId"] = "reader", ["repositoryId"] = repo };
+            var ordinary = hub.Apply(AggregateKinds.Control, AggregateKinds.ControlKey, RelayTools.GetStatus, args, worker, Now);
+            Assert.True(ordinary.Ok, ordinary.Code);
+            Assert.False(AggregateHub.Data(ordinary).ContainsKey("manager"));
+            Assert.Equal(requests.Length, AggregateHub.Data(ordinary)["requests"]!.AsArray().Count);
+            Assert.False(AggregateHub.Data(ordinary)["paused"]!.GetValue<bool>());
+            args["managerHistoryOnly"] = true;
+            var dedicated = hub.Apply(AggregateKinds.Control, AggregateKinds.ControlKey, RelayTools.GetStatus, args, worker, Now);
+            Assert.True(dedicated.Ok, dedicated.Code);
+            var view = AggregateHub.Data(dedicated)["manager"]!;
+            Assert.Equal("manager", (string?)view["current"]!["sessionId"]); Assert.Empty(view["history"]!.AsArray());
+            return;
+        }
+        Assert.Fail("Fixture must cross the manager augmentation boundary while the legacy status fits.");
+    }
+
+    [Fact]
+    public void Dedicated_manager_read_preserves_visibility_and_requires_an_actual_boolean()
     {
         foreach (var invalid in new JsonNode?[] { null, JsonValue.Create("true"), JsonValue.Create(1), new JsonObject() })
         {
@@ -314,9 +351,19 @@ public sealed class ManagerSelectionTests
         }
         foreach (var mode in new[] { false, true })
         {
-            var hub = Seed(); var before = Snapshot(hub);
-            Assert.Equal("AdministratorRequired", hub.Apply(AggregateKinds.Control, AggregateKinds.ControlKey, RelayTools.GetStatus, new() { ["repositoryId"] = "repo", ["managerHistoryOnly"] = mode }, Worker, Now).Code);
-            Assert.Equal(before, Snapshot(hub));
+            var hub = Seed();
+            Assert.True(Apply(hub, Decision("appoint_manager", "a", 0)).Ok);
+            foreach (var caller in new[] { Worker, new RelayCaller("outsider", false, ["other"]) })
+            {
+                var reply = hub.Apply(AggregateKinds.Control, AggregateKinds.ControlKey, RelayTools.GetStatus, new() { ["repositoryId"] = caller == Worker ? "repo" : "other", ["managerHistoryOnly"] = mode }, caller, Now);
+                Assert.True(reply.Ok, reply.Code);
+                var manager = AggregateHub.Data(reply)["manager"]!;
+                var ordinary = Status(hub, caller, caller == Worker ? "repo" : "other");
+                Assert.True(JsonNode.DeepEquals(AggregateHub.Data(ordinary)["manager"], manager));
+                Assert.Empty(manager["history"]!.AsArray());
+                Assert.Equal(caller == Worker ? 1L : 0L, (long?)manager["generation"]);
+                Assert.Equal(caller == Worker, manager["current"] is not null);
+            }
         }
     }
     [Fact]

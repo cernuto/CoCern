@@ -50,7 +50,8 @@ internal static class ManagerSelection
         return Ok(new { manager = Status(state, context.Caller, context.Now, null) });
     }
 
-    public static ManagerSelectionStatus Status(ControlState state, RelayCaller caller, DateTimeOffset now, long? historyBefore)
+    // This projection reads only the assignment and its directory entry. It never opens the history collection.
+    internal static ManagerSelectionStatus VisibleSummary(ControlState state, RelayCaller caller, DateTimeOffset now)
     {
         var assignment = state.Manager;
         var visible = assignment is null || caller.MayAccess(assignment.RepositoryId);
@@ -62,11 +63,17 @@ internal static class ManagerSelection
                 !state.AwaitingAnswer(assignment.SessionId, now) && entry.LastSeen > now.AddHours(-RelayLimits.StaleSessionHours);
             current = new(assignment.SessionId, assignment.RepositoryId, assignment.Generation, available);
         }
-        if (!caller.IsAdministrator) return new(visible ? state.ManagerGeneration : 0, current, [], null, false);
+        return new(visible || caller.IsAdministrator ? state.ManagerGeneration : 0, current, [], null, false);
+    }
+
+    public static ManagerSelectionStatus Status(ControlState state, RelayCaller caller, DateTimeOffset now, long? historyBefore)
+    {
+        var summary = VisibleSummary(state, caller, now);
+        if (!caller.IsAdministrator) return summary;
         var candidates = state.ManagerHistory.Select(x => x!.Deserialize<ManagerSelectionHistory>()!).Where(x => historyBefore is null || x.Generation < historyBefore).OrderByDescending(x => x.Generation).ToArray();
         var page = candidates.Take(RelayLimits.ManagerSelectionHistoryPageEntries).ToArray();
         var more = candidates.Length > page.Length;
-        var status = new ManagerSelectionStatus(state.ManagerGeneration, current, page, more ? page[^1].Generation : null, more);
+        var status = new ManagerSelectionStatus(state.ManagerGeneration, summary.Current, page, more ? page[^1].Generation : null, more);
         return Fit(status, candidate => FitsWire(Ok(new { manager = candidate }), RelayLimits.AggregateReplyBytes), historyBefore);
     }
 

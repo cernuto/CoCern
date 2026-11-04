@@ -32,10 +32,15 @@ public sealed class DashboardTests
         var recovery = page.IndexOf("<ManagerControl", StringComparison.Ordinal);
         var authenticated = page.IndexOf("<main id=\"main\"", StringComparison.Ordinal);
         var snapshot = page.IndexOf("@if (Connection.Snapshot is { } snapshot)", StringComparison.Ordinal);
+        Assert.True(authenticated >= 0, "Authenticated main marker is missing.");
+        Assert.True(recovery >= 0, "Manager recovery marker is missing.");
+        Assert.True(snapshot >= 0, "Snapshot branch marker is missing.");
         Assert.True(recovery > authenticated && recovery < snapshot, "Recovery must remain available without a snapshot.");
         var component = File.ReadAllText(Path.Combine(root.FullName, "src/CoCern.Dashboard/Components/ManagerControl.razor"));
         Assert.Contains("Pause prevents new claims and actions. Stop also asks known chats to cancel. Running tools and wake delivery are not interrupted.", component);
         Assert.Contains("Recent manager selections", component);
+        Assert.Contains("<textarea", component);
+        Assert.Contains("standing-record-text", component);
         Assert.DoesNotContain("MarkupString", component);
         Assert.DoesNotContain("maxlength=\"200\"", component);
         Assert.Contains("the text has been kept in full", component);

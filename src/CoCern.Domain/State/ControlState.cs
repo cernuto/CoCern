@@ -126,8 +126,16 @@ public sealed class ControlState(JsonObject json)
     public int CancellationCount => Cancellations.Count;
 
     /// <summary>The cancellation requests for <paramref name="sessionId"/>'s actions, each by its target (session and action) and as stored.</summary>
-    public IEnumerable<(string Target, JsonNode? Request)> CancellationsOf(string sessionId) =>
-        Cancellations.Where(entry => entry.Key.StartsWith(sessionId + ":", StringComparison.Ordinal)).Select(entry => (entry.Key, entry.Value));
+    public IEnumerable<(string Target, JsonNode? Request)> CancellationsOf(string sessionId)
+    {
+        var prefix = sessionId + ":";
+        var cancellations = Cancellations;
+        // A bounded page must deliver the session-wide request even after many individual actions.
+        if (cancellations.TryGetPropertyValue(prefix, out var global)) yield return (prefix, global);
+        foreach (var entry in cancellations)
+            if (entry.Key.Length > prefix.Length && entry.Key.StartsWith(prefix, StringComparison.Ordinal))
+                yield return (entry.Key, entry.Value);
+    }
 
     /// <summary>Records that <paramref name="requestedBy"/> asked, at <paramref name="at"/>, to cancel action <paramref name="actionId"/> of <paramref name="sessionId"/>.</summary>
     public void RequestCancellation(string sessionId, string actionId, string requestedBy, DateTimeOffset at) =>

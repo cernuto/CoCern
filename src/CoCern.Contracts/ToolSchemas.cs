@@ -162,7 +162,7 @@ internal static class ToolSchemas
         {
             case RelayTools.GetStatus:
                 properties["managerHistoryBefore"] = new { type = "integer", minimum = 0, description = "Administrator-only: read manager selections older than this generation." };
-                properties["managerHistoryOnly"] = new { type = "boolean", description = "Administrator-only: reserve this read for manager history, omitting cancellation requests. Use when manager.historyReadRequired is true; retain the incoming cursor (or omit it for the first page). Ordinary status retains cancellation requests." }; break;
+                properties["managerHistoryOnly"] = new { type = "boolean", description = "Reserve this read for the visible manager summary and administrator history, omitting cancellation requests. Use when ordinary status omits manager or manager.historyReadRequired is true. Retain the incoming cursor for history continuation." }; break;
             case RelayTools.SessionOpen:
                 Text("label", "Display label for this chat's session."); properties["requestId"] = new { type = "string", maxLength = RelayLimits.MaxIdentifierLength, description = SessionOpenRequestId }; Object("binding", "Reported configured Roslyn/Visual Studio binding and source identity."); break;
             case RelayTools.SessionBind:

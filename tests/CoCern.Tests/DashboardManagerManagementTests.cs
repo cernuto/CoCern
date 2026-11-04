@@ -320,6 +320,30 @@ public class DashboardManagerManagementTests
         }
     }
 
+    [Fact]
+    public async Task Form_appoints_an_exact_unobserved_target_and_directory_rejects_unknown_target()
+    {
+        await using var host = Host();
+        var target = await Open(host, "repo");
+        using var browser = Browser(host);
+        browser.BaseAddress = new Uri("https://localhost/dashboard/");
+        await Login(browser);
+        var form = new CoCern.Dashboard.Components.ManagerControl { ManagerHttp = browser, RepositoryId = "repo" };
+        await form.RefreshAsync();
+        Assert.Empty(form.Sessions);
+        form.TargetSessionId = target.Id; form.HumanWords = "Two  spaces.";
+        await form.DecideAsync("appoint_manager");
+        Assert.Equal(target.Id, form.Selection!.Current!.SessionId);
+        Assert.Equal("Two  spaces.", Assert.Single(form.RecentSelections).HumanWords);
+        form.HumanWords = "Unused words."; form.TargetSessionId = "unknown";
+        Assert.Empty(form.HumanWords);
+        form.HumanWords = "Choose this exact ID."; await form.DecideAsync("appoint_manager");
+        Assert.Equal("SessionUnknown", form.Message);
+        await form.RefreshAsync();
+        Assert.Equal(target.Id, form.Selection!.Current!.SessionId);
+        Assert.Equal(1, form.Selection.Generation);
+    }
+
     internal static RelayHostFixture Host() => new(settings: new Dictionary<string, string?> { ["Relay:Clients:0:IsAdministrator"] = "true", ["Relay:Clients:0:Repositories:1"] = "other", ["Relay:Dashboard:ViewerPrincipalIds:0"] = "test-user" });
     internal static HttpClient Browser(RelayHostFixture host)
     {

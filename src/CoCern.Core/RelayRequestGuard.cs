@@ -42,6 +42,9 @@ internal static class RelayRequestGuard
         if (tool.Name == RelayTools.ContextPut && args["content"] is null) return Replies.Error(InvalidArguments, new { field = "content" });
         foreach (var flag in new[] { "includeNextWork", "attention", "attentionDetail", "seen", "headersOnly" })
             if (args.ContainsKey(flag) && (args[flag] is not JsonValue value || !value.TryGetValue<bool>(out _))) return Replies.Error(InvalidArguments, new { field = flag });
+        // Machine revocation dispatches directly to discovery, outside the control aggregate's argument fence.
+        if (tool.Name == RelayTools.ControlRequest && Text(args, "command") == "revoke_machine" && args.ContainsKey("allSessions"))
+            return Replies.Error(InvalidArguments, new { field = "allSessions" });
         if (!caller.MayAccess(Text(args, "repositoryId"))) return Replies.Error(RepositoryDenied);
         if (tool.IsMutation && Text(args, "requestId").Length == 0) return Replies.Error(RequestIdRequired);
         if (!IdentifiersFit(args)) return Replies.Error(InvalidArguments);

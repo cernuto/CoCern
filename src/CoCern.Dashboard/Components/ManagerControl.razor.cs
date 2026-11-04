@@ -17,11 +17,14 @@ public partial class ManagerControl : ComponentBase
         get => repositoryId;
         set
         {
+            repositoryTouched = true;
             if (repositoryId == value) return;
             repositoryId = value;
             HumanWords = "";
             InvalidateSelection();
             dispatchRevision++;
+            Paused = null;
+            DispatchMessage = null;
             SetMessage(null);
         }
     }
@@ -47,7 +50,8 @@ public partial class ManagerControl : ComponentBase
     public bool? Paused { get; private set; }
     public ManagerSelectionHistory[] RecentSelections { get; private set; } = [];
     private string? loadedRepository;
-    private bool initialized;
+    private bool repositoryTouched;
+    private const string RepositoryRequired = "Enter a repository to refresh selection or control dispatch.";
     private long? nextHistoryBefore;
     // Reads update each field only while no newer operation has superseded that field.
     private long selectionRevision;
@@ -56,19 +60,22 @@ public partial class ManagerControl : ComponentBase
 
     protected override async Task OnParametersSetAsync()
     {
-        if (initialized) return;
-        RepositoryId = DefaultRepositoryId ?? Sessions.FirstOrDefault()?.RepositoryId ?? "";
-        initialized = true;
-        if (!string.IsNullOrWhiteSpace(RepositoryId)) await RefreshAsync();
+        if (repositoryTouched || !string.IsNullOrWhiteSpace(RepositoryId)) return;
+        var candidate = !string.IsNullOrWhiteSpace(DefaultRepositoryId) ? DefaultRepositoryId
+            : Sessions.FirstOrDefault(session => !string.IsNullOrWhiteSpace(session.RepositoryId))?.RepositoryId;
+        if (string.IsNullOrWhiteSpace(candidate)) return;
+        RepositoryId = candidate;
+        await RefreshAsync();
     }
 
     public async Task RefreshAsync()
     {
-        if (ReadBusy || string.IsNullOrWhiteSpace(RepositoryId)) return;
+        if (string.IsNullOrWhiteSpace(RepositoryId)) { SetMessage(RepositoryRequired); return; }
+        if (ReadBusy) return;
         ReadBusy = true;
         var repository = RepositoryId;
-        var selectionAtStart = selectionRevision;
-        var dispatchAtStart = dispatchRevision;
+        var selectionAtStart = ++selectionRevision;
+        var dispatchAtStart = ++dispatchRevision;
         var messageAtStart = messageRevision;
         try
         {
@@ -132,11 +139,11 @@ public partial class ManagerControl : ComponentBase
             SetMessage("Refresh selection for this repository before deciding."); return;
         }
         if (command is not ("appoint_manager" or "clear_manager")) return;
-        if (string.IsNullOrWhiteSpace(HumanWords) || HumanWords.Length > 200 || HumanWords.Any(ch => char.IsControl(ch) || ch is '\u2028' or '\u2029'))
+        if (string.IsNullOrWhiteSpace(HumanWords) || HumanWords.Length > 200 || HumanWords.Any(UnsafeCharacter))
         {
             SetMessage("Enter a fresh exact direct human answer, on one line, up to 200 characters. It has not been shortened."); return;
         }
-        if (command == "appoint_manager" && !Sessions.Any(session => session.SessionId == TargetSessionId && session.RepositoryId == RepositoryId))
+        if (command == "appoint_manager" && (string.IsNullOrWhiteSpace(TargetSessionId) || TargetSessionId.Length > RelayLimits.MaxIdentifierLength || TargetSessionId.Any(UnsafeCharacter)))
         {
             SetMessage("Choose an exact session and its repository."); return;
         }
@@ -157,6 +164,14 @@ public partial class ManagerControl : ComponentBase
             UnconfirmedDecision = null;
             HumanWords = "";
             selectionRevision++;
+            if (result.Ok)
+            {
+                var receipt = $"Manager selection recorded for request {decision.RequestId}.";
+                SetMessage(receipt);
+                if (!await ReadAfterWriteAsync(decision.RepositoryId))
+                    SetMessage(receipt + " Current state is unknown. Use Refresh selection.");
+                return;
+            }
             if (result.Manager is { } manager) ApplySelection(manager, decision.RepositoryId);
             else if (result.Code == RelayErrorCodes.VersionConflict) InvalidateSelection();
             if (dispatchRevision == dispatchAtStart && result.Paused is { } paused) { Paused = paused; dispatchRevision++; }
@@ -164,7 +179,7 @@ public partial class ManagerControl : ComponentBase
                 ? result.Manager is null
                     ? "Selection changed. The current selection could not be read. Use Refresh selection before making a new decision."
                     : "Selection changed. The current selection is shown; review it before making a new decision."
-                : result.Ok ? "Manager selection recorded." : result.Code);
+                : result.Code);
         }
         catch (Exception error) when (Uncertain(error))
         {
@@ -185,7 +200,8 @@ public partial class ManagerControl : ComponentBase
 
     public async Task DispatchAsync(string command)
     {
-        if (DispatchBusy || string.IsNullOrWhiteSpace(RepositoryId) || command is not ("pause" or "stop" or "resume")) return;
+        if (string.IsNullOrWhiteSpace(RepositoryId)) { DispatchMessage = RepositoryRequired; return; }
+        if (DispatchBusy || command is not ("pause" or "stop" or "resume")) return;
         // Choosing a different command is an explicit new intent; retrying this command reuses its request.
         if (UnconfirmedDispatch is null || UnconfirmedDispatch.Command != command || UnconfirmedDispatch.RepositoryId != RepositoryId)
             UnconfirmedDispatch = new(RepositoryId, Guid.NewGuid().ToString("N"), command);
@@ -202,13 +218,16 @@ public partial class ManagerControl : ComponentBase
             var result = await ManagerManagementClient.DispatchAsync(ManagerHttp, decision);
             UnconfirmedDispatch = null;
             dispatchRevision++;
-            if (result.Paused is { } paused) Paused = paused;
-            DispatchMessage = result.Ok ? decision.Command switch
+            if (!result.Ok) { DispatchMessage = result.Code; return; }
+            DispatchMessage = decision.Command switch
             {
-                "stop" => "Dispatch paused. Cancellation requested from known chats; running tool outcomes remain unknown.",
-                "pause" => "Dispatch paused.",
-                _ => "Dispatch resumed."
-            } : result.Code;
+                "stop" => "Stop recorded. Cancellation requested from known chats. Running tool outcomes remain unknown.",
+                "pause" => "Pause recorded.",
+                _ => "Resume recorded."
+            };
+            DispatchMessage += $" Request {decision.RequestId}.";
+            if (!await ReadAfterWriteAsync(RepositoryId))
+                DispatchMessage += " Current state is unknown. Use Refresh selection.";
         }
         catch (Exception error) when (Uncertain(error))
         {
@@ -218,9 +237,37 @@ public partial class ManagerControl : ComponentBase
         finally { DispatchBusy = false; }
     }
 
+    // An idempotent receipt can describe an older generation or an already-reversed pause.
+    private async Task<bool> ReadAfterWriteAsync(string repository)
+    {
+        if (RepositoryId != repository) return false;
+        var previousGeneration = Selection?.Generation;
+        InvalidateSelection();
+        Paused = null;
+        var selectionAtStart = selectionRevision;
+        var dispatchAtStart = ++dispatchRevision;
+        try
+        {
+            var current = await ManagerManagementClient.ReadAsync(ManagerHttp, repository, null);
+            if (!current.Ok || current.Manager is null || current.Paused is null || RepositoryId != repository) return false;
+            if (selectionRevision == selectionAtStart)
+            {
+                if (previousGeneration != current.Manager.Generation && UnconfirmedDecision is null) HumanWords = "";
+                ApplySelection(current.Manager, repository);
+            }
+            if (dispatchRevision == dispatchAtStart) Paused = current.Paused;
+            return true;
+        }
+        catch (Exception error) when (Uncertain(error)) { return false; }
+        finally
+        {
+            if (selectionRevision == selectionAtStart && Selection is null && UnconfirmedDecision is null) HumanWords = "";
+        }
+    }
+
     private void ApplySelection(ManagerSelectionStatus manager, string repository)
     {
-        if (Selection is { } previous && previous.Generation != manager.Generation) HumanWords = "";
+        if (UnconfirmedDecision is null && Selection is { } previous && previous.Generation != manager.Generation) HumanWords = "";
         Selection = manager; loadedRepository = repository;
         RecentSelections = manager.History;
         nextHistoryBefore = manager.NextHistoryBefore;
@@ -232,6 +279,8 @@ public partial class ManagerControl : ComponentBase
         Selection = null; loadedRepository = null;
         RecentSelections = []; nextHistoryBefore = null;
     }
+
+    private static bool UnsafeCharacter(char ch) => char.IsControl(ch) || ch is '\u2028' or '\u2029';
 
     private void SetMessage(string? message) { messageRevision++; Message = message; }
     private static bool Uncertain(Exception error) => error is HttpRequestException or OperationCanceledException or System.Text.Json.JsonException;

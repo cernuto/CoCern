@@ -328,6 +328,30 @@ public sealed class HubNetworkTests : IDisposable
         foreach (var (path, bytes) in before) Assert.Equal(bytes, File.ReadAllBytes(path));
     }
 
+    [Theory]
+    [InlineData(".identity", false)]
+    [InlineData(".identity", true)]
+    [InlineData(".backup", false)]
+    [InlineData(".backup", true)]
+    [InlineData("record", false)]
+    [InlineData("record", true)]
+    public async Task Directory_at_evidence_path_prevents_any_identity_writes(string evidence, bool legacy)
+    {
+        var folder = Path.Combine(root, "separate");
+        var path = evidence == "record" ? Path.Combine(folder, LocalHubRecord.FileName) : Path.Combine(folder, HubNetwork.CertificateFile) + evidence;
+        Directory.CreateDirectory(path);
+        if (legacy)
+        {
+            using var candidate = HubCertificate.LoadOrCreate(Path.Combine(root, "data", HubNetwork.CertificateFile), "legacy");
+        }
+        var before = Directory.GetFiles(root, "*", SearchOption.AllDirectories).ToDictionary(file => file, File.ReadAllBytes);
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => ConfigureNetworkAsync(Path.Combine(folder, "relay.db")));
+        Assert.Contains("restore", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.True(Directory.Exists(path));
+        Assert.Equal(before.Keys.Order(), Directory.GetFiles(root, "*", SearchOption.AllDirectories).Order());
+        foreach (var (file, bytes) in before) Assert.Equal(bytes, File.ReadAllBytes(file));
+    }
+
     private async Task ConfigureNetworkAsync(string database)
     {
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions { ContentRootPath = root });

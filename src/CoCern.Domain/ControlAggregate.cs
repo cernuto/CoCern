@@ -379,14 +379,21 @@ internal static class ControlAggregate
         var historyOnly = false;
         if (context.Args.ContainsKey("managerHistoryOnly"))
         {
-            if (!context.Caller.IsAdministrator) return Error(AdministratorRequired);
             if (context.Args["managerHistoryOnly"] is not JsonValue mode || !mode.TryGetValue(out historyOnly)) return Error(InvalidArguments);
+            if (historyOnly && !context.Caller.IsAdministrator)
+            {
+                var summary = ManagerSelection.VisibleSummary(state, context.Caller, context.Now);
+                return Ok(new { paused = state.Paused, cancellations = state.CancellationCount, requests = Array.Empty<object>(), requestsOmitted = true, manager = summary });
+            }
         }
         var requests = !historyOnly && sessionId.Length > 0 ? state.CancellationsOf(sessionId).Take(RelayLimits.MaxPageSize).Select(x => new { target = x.Target, request = x.Request }).ToArray() : [];
         RelayReply Reply(CoCern.Contracts.ManagerSelectionStatus manager) => Ok(new { paused = state.Paused, cancellations = state.CancellationCount, requests, requestsOmitted = historyOnly, manager });
         var selection = ManagerSelection.Status(state, context.Caller, context.Now, before);
         var fitted = ManagerSelection.Fit(selection, candidate => FitsWire(Reply(candidate), RelayLimits.AggregateReplyBytes), before);
-        return historyOnly && fitted.HistoryReadRequired ? Error(PayloadTooLarge) : Reply(fitted);
+        var augmented = Reply(fitted);
+        if (historyOnly) return fitted.HistoryReadRequired ? Error(PayloadTooLarge) : augmented;
+        return FitsWire(augmented, RelayLimits.AggregateReplyBytes) ? augmented
+            : Ok(new { paused = state.Paused, cancellations = state.CancellationCount, requests });
     }
 
     /// <summary>
