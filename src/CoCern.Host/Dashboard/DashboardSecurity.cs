@@ -16,6 +16,10 @@ public sealed class DashboardSecurity(IConfiguration configuration, IHostEnviron
     private Enrollment[] enrollments = [];
     private KeyValuePair<string, string?>[] enrollmentConfiguration = [];
     private long refreshEnrollmentAt;
+    private readonly Func<long> monotonicMilliseconds = static () => Environment.TickCount64;
+
+    internal DashboardSecurity(IConfiguration configuration, IHostEnvironment environment, Func<long> monotonicMilliseconds)
+        : this(configuration, environment) => this.monotonicMilliseconds = monotonicMilliseconds;
 
     public bool Enabled => configuration.GetSection("Relay:Dashboard:ViewerPrincipalIds").Get<string[]>() is { } ids
         && ids.Any(id => !string.IsNullOrWhiteSpace(id));
@@ -60,7 +64,7 @@ public sealed class DashboardSecurity(IConfiguration configuration, IHostEnviron
             .OrderBy(entry => entry.Key, StringComparer.Ordinal).ToArray();
         lock (enrollmentGate)
         {
-            var now = Environment.TickCount64;
+            var now = monotonicMilliseconds();
             if (now < refreshEnrollmentAt && configured.SequenceEqual(enrollmentConfiguration)) return enrollments;
             try
             {

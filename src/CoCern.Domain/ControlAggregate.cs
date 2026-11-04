@@ -369,12 +369,31 @@ internal static class ControlAggregate
     {
         var sessionId = context.SessionId;
         var state = new ControlState(context.State);
-        return Ok(new
+        long? before = null;
+        if (context.Args.ContainsKey("managerHistoryBefore"))
         {
-            paused = state.Paused,
-            cancellations = state.CancellationCount,
-            requests = sessionId.Length > 0 ? state.CancellationsOf(sessionId).Take(RelayLimits.MaxPageSize).Select(x => new { target = x.Target, request = x.Request }).ToArray() : []
-        });
+            if (!context.Caller.IsAdministrator) return Error(AdministratorRequired);
+            if (!ManagerSelection.WholeNumber(context.Args["managerHistoryBefore"], out var parsed)) return Error(InvalidArguments);
+            before = parsed;
+        }
+        var historyOnly = false;
+        if (context.Args.ContainsKey("managerHistoryOnly"))
+        {
+            if (context.Args["managerHistoryOnly"] is not JsonValue mode || !mode.TryGetValue(out historyOnly)) return Error(InvalidArguments);
+            if (historyOnly && !context.Caller.IsAdministrator)
+            {
+                var summary = ManagerSelection.VisibleSummary(state, context.Caller, context.Now);
+                return Ok(new { paused = state.Paused, cancellations = state.CancellationCount, requests = Array.Empty<object>(), requestsOmitted = true, manager = summary });
+            }
+        }
+        var requests = !historyOnly && sessionId.Length > 0 ? state.CancellationsOf(sessionId).Take(RelayLimits.MaxPageSize).Select(x => new { target = x.Target, request = x.Request }).ToArray() : [];
+        RelayReply Reply(CoCern.Contracts.ManagerSelectionStatus manager) => Ok(new { paused = state.Paused, cancellations = state.CancellationCount, requests, requestsOmitted = historyOnly, manager });
+        var selection = ManagerSelection.Status(state, context.Caller, context.Now, before);
+        var fitted = ManagerSelection.Fit(selection, candidate => FitsWire(Reply(candidate), RelayLimits.AggregateReplyBytes), before);
+        var augmented = Reply(fitted);
+        if (historyOnly) return fitted.HistoryReadRequired ? Error(PayloadTooLarge) : augmented;
+        return FitsWire(augmented, RelayLimits.AggregateReplyBytes) ? augmented
+            : Ok(new { paused = state.Paused, cancellations = state.CancellationCount, requests });
     }
 
     /// <summary>
@@ -448,6 +467,22 @@ internal static class ControlAggregate
     {
         if (!context.Caller.IsAdministrator) return Error(AdministratorRequired);
         var command = Required(context.Args, "command");
+        var allSessions = false;
+        if (context.Args.ContainsKey("allSessions"))
+        {
+            if (context.Args["allSessions"] is not JsonValue flag || !flag.TryGetValue(out allSessions) || command != "stop"
+                || context.Args.ContainsKey("sessionId") || context.Args.ContainsKey("actionId") || context.Args.ContainsKey("targetSessionId"))
+                return Error(InvalidArguments);
+        }
+        if (allSessions)
+        {
+            var global = new ControlState(context.State);
+            global.Paused = true;
+            var sessions = global.Entries().Where(entry => entry.Entry is not null).Select(entry => entry.Id).ToArray();
+            foreach (var id in sessions) global.RequestCancellation(id, "", context.Caller.PrincipalId, context.Now);
+            return Ok(new { paused = true, cancellationRequested = true, cancellationSessions = sessions.Length });
+        }
+        if (command is "appoint_manager" or "clear_manager") return ManagerSelection.Apply(context);
         if (command == "register_resource") return RegisterResource(context);
         if (command == "close_sessions") return CloseSessionsByFilter(context);
         var state = new ControlState(context.State);

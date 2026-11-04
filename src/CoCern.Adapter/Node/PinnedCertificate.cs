@@ -7,6 +7,8 @@ namespace CoCern.Adapter.Node;
 /// <summary>Trust in the hub's self-signed certificate by its SHA-256 fingerprint (uppercase hex of the raw certificate, compared case-insensitively). The exact pin replaces chain and name checks.</summary>
 public static class PinnedCertificate
 {
+    internal static readonly HttpRequestOptionsKey<bool> IdentityMismatch = new("CoCern.IdentityMismatch");
+
     /// <summary>Accepts the server certificate only when its fingerprint matches; no redirects, no cookies (as <see cref="RelayForwarder.CreateHandler()"/>).</summary>
     public static HttpClientHandler CreateHandler(string fingerprint) => CreateHandler(fingerprint, null);
 
@@ -15,9 +17,10 @@ public static class PinnedCertificate
     {
         if (!CertificateFingerprint.IsValid(fingerprint)) throw new AdapterConfigurationException("A pinned certificate fingerprint must be 64 hexadecimal characters.");
         var handler = RelayForwarder.CreateHandler();
-        handler.ServerCertificateCustomValidationCallback = (_, certificate, _, _) =>
+        handler.ServerCertificateCustomValidationCallback = (request, certificate, _, _) =>
         {
             if (CertificateFingerprint.Matches(certificate, fingerprint)) return true;
+            if (certificate is not null) request.Options.Set(IdentityMismatch, true);
             mismatch?.Invoke(certificate is null ? "none" : CertificateFingerprint.Of(certificate));
             return false;
         };

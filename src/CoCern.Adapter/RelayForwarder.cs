@@ -43,7 +43,8 @@ public sealed class RelayForwarder(HttpClient client, AdapterOptions options)
             using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, bounded.Token);
             if ((int)response.StatusCode is >= 300 and < 400) return new(false, "redirect_rejected");
             var failureKind = DomainFailureKind(response.StatusCode);
-            if (!response.IsSuccessStatusCode && failureKind is null) return new(false, TransportCode(response.StatusCode));
+            if (!response.IsSuccessStatusCode && failureKind is null)
+                return response.StatusCode == HttpStatusCode.Unauthorized ? ConnectionFailure("unauthorized") : new(false, TransportCode(response.StatusCode));
             if (failureKind is { } kind)
             {
                 // A domain failure keeps its code, data and version only when the body is the hub's own envelope for
@@ -62,10 +63,21 @@ public sealed class RelayForwarder(HttpClient client, AdapterOptions options)
             return await ReadEnvelopeAsync(response, bounded.Token);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return new(false, "hub_timeout"); }
-        catch (HttpRequestException) { return new(false, "hub_unavailable"); }
-        catch (IOException) { return new(false, "hub_unavailable"); }
+        catch (HttpRequestException) { return ConnectionFailure(request.Options.TryGetValue(PinnedCertificate.IdentityMismatch, out var mismatch) && mismatch ? "hub_identity_changed" : "hub_unavailable"); }
+        catch (IOException) { return ConnectionFailure(request.Options.TryGetValue(PinnedCertificate.IdentityMismatch, out var mismatch) && mismatch ? "hub_identity_changed" : "hub_unavailable"); }
         catch (JsonException) { return new(false, "invalid_hub_reply"); }
         catch (InvalidOperationException) { return new(false, "invalid_hub_reply"); }
+    }
+
+    private static AdapterReply ConnectionFailure(string code)
+    {
+        var message = code switch
+        {
+            "hub_identity_changed" => "The hub's identity changed. Check with the person who runs the hub before reconnecting this PC.",
+            "unauthorized" => "The hub didn't accept this PC's sign-in. Reconnect this PC to the hub and try again.",
+            _ => "Can't reach the hub. Check that it is running and try again."
+        };
+        return new(false, code, JsonSerializer.SerializeToElement(new { message }));
     }
 
     /// <summary>Stamps reported origin at the adapter boundary; this field grants no permission and changes no call behavior.</summary>

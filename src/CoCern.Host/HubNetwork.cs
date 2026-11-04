@@ -15,25 +15,126 @@ public static class HubCertificate
 {
     private static readonly TimeSpan Validity = TimeSpan.FromDays(730);
 
-    /// <summary>Loads the certificate at <paramref name="path"/>, or creates and saves a self-signed ECDSA P-256 one for <paramref name="hostName"/> and every non-loopback IPv4 address. A file that exists but cannot be loaded fails with a clear message and is left untouched.</summary>
-    public static X509Certificate2 LoadOrCreate(string path, string hostName)
+    /// <summary>Loads the hub's existing identity, restoring its private backup if needed. Only a new hub with no identity evidence may create one.</summary>
+    public static X509Certificate2 LoadOrCreate(string path, string hostName, bool allowCreate = true) =>
+        LoadOrCreate(path, hostName, allowCreate, expectedFingerprint: null);
+
+    internal static X509Certificate2 LoadOrCreate(string path, string hostName, bool allowCreate, string? expectedFingerprint)
     {
-        if (!File.Exists(path)) Create(path, hostName);
-        return Load(path);
+        var backupPath = path + ".backup";
+        var markerPath = path + ".identity";
+        var hasBackup = EvidenceExists(backupPath);
+        var hasMarker = EvidenceExists(markerPath);
+        if (!EvidenceExists(path))
+        {
+            if (hasBackup)
+            {
+                using var backup = Load(backupPath, out var backupBytes);
+                var fingerprint = CertificateFingerprint.Of(backup);
+                ValidateFingerprint(backupPath, fingerprint, expectedFingerprint);
+                if (EvidenceExists(markerPath)) ValidateMarker(markerPath, fingerprint);
+                WritePrivately(path, backupBytes);
+                // A concurrent start may have won the primary write. Never derive artifacts from the losing candidate.
+                ValidateCertificate(path, fingerprint);
+            }
+            else
+            {
+                if (hasMarker || !allowCreate || expectedFingerprint is not null)
+                    throw RecoveryError(path, "The established hub identity is missing, and no automatic backup is available.");
+                Create(path, hostName);
+            }
+        }
+
+        var certificate = Load(path, out var primaryBytes);
+        try
+        {
+            var fingerprint = CertificateFingerprint.Of(certificate);
+            ValidateFingerprint(path, fingerprint, expectedFingerprint);
+            // Validate all existing evidence before creating anything missing. Conflicting files must remain untouched.
+            if (EvidenceExists(backupPath)) ValidateCertificate(backupPath, fingerprint);
+            if (EvidenceExists(markerPath)) ValidateMarker(markerPath, fingerprint);
+            if (!EvidenceExists(backupPath)) WritePrivately(backupPath, primaryBytes);
+            ValidateCertificate(backupPath, fingerprint);
+            if (!EvidenceExists(markerPath)) WritePrivately(markerPath, System.Text.Encoding.UTF8.GetBytes(fingerprint));
+            ValidateMarker(markerPath, fingerprint);
+            return certificate;
+        }
+        catch
+        {
+            certificate.Dispose();
+            throw;
+        }
     }
 
-    private static X509Certificate2 Load(string path)
+    internal static bool EvidenceExists(string path)
     {
         try
         {
-            var certificate = X509CertificateLoader.LoadPkcs12FromFile(path, null);
+            if ((File.GetAttributes(path) & FileAttributes.Directory) != 0)
+                throw RecoveryError(path, "An identity file path is occupied by a directory.");
+            return true;
+        }
+        catch (FileNotFoundException) { return false; }
+        catch (DirectoryNotFoundException) { return false; }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            throw RecoveryError(path, "The identity file could not be inspected.", error);
+        }
+    }
+
+    private static byte[] ReadValidatedCertificate(string path, string? expected, out string fingerprint)
+    {
+        using var certificate = Load(path, out var bytes);
+        fingerprint = CertificateFingerprint.Of(certificate);
+        ValidateFingerprint(path, fingerprint, expected);
+        return bytes;
+    }
+
+    internal static void ValidateCertificate(string path, string fingerprint) =>
+        ReadValidatedCertificate(path, fingerprint, out _);
+
+    internal static void CopyLegacyCertificate(string source, string destination, string? expected)
+    {
+        var bytes = ReadValidatedCertificate(source, expected, out var fingerprint);
+        WritePrivately(destination, bytes);
+        ValidateCertificate(destination, fingerprint);
+    }
+
+    private static void ValidateFingerprint(string path, string actual, string? expected)
+    {
+        if (expected is not null && !string.Equals(actual, expected, StringComparison.Ordinal))
+            throw RecoveryError(path, "The certificate does not match the hub's established identity.");
+    }
+
+    private static void ValidateMarker(string path, string fingerprint)
+    {
+        try
+        {
+            if (!string.Equals(File.ReadAllText(path), fingerprint, StringComparison.Ordinal))
+                throw RecoveryError(path, "The identity marker does not match the hub certificate.");
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            throw RecoveryError(path, "The identity marker could not be read.", error);
+        }
+    }
+
+    internal static InvalidOperationException RecoveryError(string path, string reason, Exception? error = null) =>
+        new($"{reason} Identity file: '{path}'. Restore the original hub certificate and its matching backup and identity marker from a trusted backup, then restart the hub. Existing identity files were not replaced.", error);
+
+    private static X509Certificate2 Load(string path, out byte[] bytes)
+    {
+        try
+        {
+            bytes = File.ReadAllBytes(path);
+            var certificate = X509CertificateLoader.LoadPkcs12(bytes, null);
             if (certificate.HasPrivateKey) return certificate;
             certificate.Dispose();
             throw new CryptographicException("The file holds no private key.");
         }
-        catch (Exception error) when (error is CryptographicException or IOException)
+        catch (Exception error) when (error is CryptographicException or IOException or UnauthorizedAccessException)
         {
-            throw new InvalidOperationException($"The hub certificate file '{path}' exists but could not be loaded. It was left unchanged. Restore it from a backup, or delete it to create a new certificate (every PC that pinned the old fingerprint must then re-pin the new one).", error);
+            throw RecoveryError(path, "The hub certificate file exists but could not be loaded. It was left unchanged.", error);
         }
     }
 
@@ -119,8 +220,7 @@ internal static class HubNetwork
     /// <summary>
     /// The HTTPS listeners, both with the hub certificate (see <see cref="CertificatePath"/>):
     /// <list type="bullet">
-    /// <item>Loopback HTTPS (<c>Relay:Local:HttpsPort</c>, default 5272; 0 turns it off): local chats connect here and pin the certificate,
-    /// so a process that takes the port while the hub is down never receives their token. Its address and fingerprint go to
+    /// <item>Loopback HTTPS (<c>Relay:Local:HttpsPort</c>, default 5272; 0 turns it off): retained for pinned connections. Its address and fingerprint, plus an available same-PC HTTP origin, go to
     /// <c>local-hub.json</c> beside the database, where Connect finds them.</item>
     /// <item>Network HTTPS on every interface, only with <c>Relay:Network:Enabled</c>.</item>
     /// </list>
@@ -133,8 +233,14 @@ internal static class HubNetwork
         if (!network && localPort == 0) return;
         var port = configuration.GetValue("Relay:Network:HttpsPort", HubAddresses.NetworkHttpsPort);
         var logger = options.ApplicationServices.GetService<ILoggerFactory>()?.CreateLogger("CoCern.Host.HubNetwork");
-        foreach (var url in (configuration["urls"] ?? HubAddresses.LocalUrl).Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)) ListenHttp(options, url);
-        var certificate = HubCertificate.LoadOrCreate(CertificatePath(configuration, environment, logger), Environment.MachineName);
+        var addresses = (configuration["urls"] ?? HubAddresses.LocalUrl).Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        foreach (var url in addresses) ListenHttp(options, url);
+        var localRecord = Path.Combine(Path.GetDirectoryName(RelayHostBuilderExtensions.DatabasePath(configuration, environment))!, LocalHubRecord.FileName);
+        var hasLocalRecord = HubCertificate.EvidenceExists(localRecord);
+        var expectedFingerprint = hasLocalRecord ? CertificateFingerprint.Normalize(LocalHubRecord.Read(Path.GetDirectoryName(localRecord)!)?.Fingerprint) : null;
+        if (hasLocalRecord && (expectedFingerprint is null || !CertificateFingerprint.IsValid(expectedFingerprint)))
+            throw HubCertificate.RecoveryError(localRecord, "The recorded hub identity could not be read or is invalid.");
+        var certificate = HubCertificate.LoadOrCreate(CertificatePath(configuration, environment, logger, expectedFingerprint), Environment.MachineName, allowCreate: !hasLocalRecord, expectedFingerprint);
         // The certificate's private key is a persisted Windows key container that only Dispose removes, so release it when the host stops.
         options.ApplicationServices.GetRequiredService<IHostApplicationLifetime>().ApplicationStopped.Register(certificate.Dispose);
         var fingerprint = CertificateFingerprint.Of(certificate);
@@ -143,7 +249,7 @@ internal static class HubNetwork
         {
             options.Listen(IPAddress.Loopback, localPort, listen => listen.UseHttps(certificate));
             listener.Local = (localPort, fingerprint);
-            WriteLocalHub(configuration, environment, localPort, fingerprint, logger);
+            WriteLocalHub(configuration, environment, localPort, fingerprint, HubAddresses.SelectLoopbackHttp(addresses), logger);
         }
         if (network)
         {
@@ -162,18 +268,21 @@ internal static class HubNetwork
     /// content root's <c>data</c> folder, with none beside the database yet, is copied there, so its fingerprint survives. The source is
     /// retained because another hub may still use it; when the copy fails, it is used where it is.
     /// </summary>
-    internal static string CertificatePath(IConfiguration configuration, IHostEnvironment environment, ILogger? logger = null)
+    internal static string CertificatePath(IConfiguration configuration, IHostEnvironment environment, ILogger? logger = null, string? expectedFingerprint = null)
     {
         var configured = configuration["Relay:Network:CertificatePath"];
         if (!string.IsNullOrWhiteSpace(configured)) return Path.Combine(environment.ContentRootPath, configured);
         var path = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(RelayHostBuilderExtensions.DatabasePath(configuration, environment))!, CertificateFile));
+        // This hub's recovery evidence takes precedence over importing a possibly different legacy identity.
+        if (HubCertificate.EvidenceExists(path + ".backup") || HubCertificate.EvidenceExists(path + ".identity")) return path;
         var earlier = Path.GetFullPath(Path.Combine(environment.ContentRootPath, ContentRootCertificatePath));
-        if (File.Exists(path) || !File.Exists(earlier) || string.Equals(path, earlier, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal)) return path;
+        if (HubCertificate.EvidenceExists(path) || !HubCertificate.EvidenceExists(earlier) || string.Equals(path, earlier, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal)) return path;
+        // A startup record belongs to this database, so verify a legacy candidate before importing any bytes.
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             // Write a private copy however the source's permissions were inherited; another hub may still use the source.
-            HubCertificate.WritePrivately(path, File.ReadAllBytes(earlier));
+            HubCertificate.CopyLegacyCertificate(earlier, path, expectedFingerprint);
             logger?.LogInformation("Copied the hub certificate from {From} to {To}, beside the database, retaining the source; its fingerprint is unchanged.", earlier, path);
             return path;
         }
@@ -190,8 +299,8 @@ internal static class HubNetwork
         }
     }
 
-    /// <summary>Records where local chats reach the hub over pinned HTTPS. Not a secret; rewritten each start. Best effort.</summary>
-    private static void WriteLocalHub(IConfiguration configuration, IHostEnvironment environment, int port, string fingerprint, ILogger? logger)
+    /// <summary>Records the pinned HTTPS identity and optional HTTP origin for local chats. Not a secret. Best effort.</summary>
+    private static void WriteLocalHub(IConfiguration configuration, IHostEnvironment environment, int port, string fingerprint, string? httpUrl, ILogger? logger)
     {
         try
         {
@@ -199,10 +308,10 @@ internal static class HubNetwork
             Directory.CreateDirectory(folder);
             var target = Path.Combine(folder, LocalHubRecord.FileName);
             var temporary = target + "." + Guid.NewGuid().ToString("N") + ".tmp";
-            File.WriteAllText(temporary, new LocalHubRecord($"https://127.0.0.1:{port}/", fingerprint).ToJson());
+            File.WriteAllText(temporary, new LocalHubRecord($"https://127.0.0.1:{port}/", fingerprint) { HttpUrl = httpUrl }.ToJson());
             File.Move(temporary, target, overwrite: true);
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { logger?.LogWarning("Could not write {File}; Connect will use plain HTTP on this PC.", LocalHubRecord.FileName); }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { logger?.LogWarning("Could not update {File}; the local connection record is not current.", LocalHubRecord.FileName); }
     }
 
     private static void ListenHttp(KestrelServerOptions options, string url)

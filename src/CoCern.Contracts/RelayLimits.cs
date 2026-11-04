@@ -84,6 +84,9 @@ public static class RelayLimits
     public const int SessionOutlierAlertSamples = 10;
 
     public const int MaxIdentifierLength = 256;
+    public const int MaxManagerHumanWordsLength = 200;
+    public const int ManagerSelectionHistoryEntries = 20;
+    public const int ManagerSelectionHistoryPageEntries = 2;
     public const int MaxPageSize = 50;
     public const int DefaultPageSize = 20;
     /// <summary>A whole-task read carries only this many of the latest messages, reports and attempts; older ones stay in the paged sections.</summary>

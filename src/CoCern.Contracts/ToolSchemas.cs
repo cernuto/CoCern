@@ -21,6 +21,8 @@ internal static class ToolSchemas
             RelayTools.TaskClaim or RelayTools.ActionReport => ["attention"],
             RelayTools.SendMessage => ["text", "recipientSessionId", "taskId", "replyTo", "ackMessageIds", "supersede", "wake"],
             RelayTools.CheckInbox => ["cursor", "limit"],
+            RelayTools.GetStatus => ["managerHistoryBefore", "managerHistoryOnly"],
+            RelayTools.ControlRequest => ["targetSessionId", "expectedManagerGeneration", "humanWords"],
             RelayTools.Ack => ["messageId", "messageIds"],
             RelayTools.ClaimRenew => ["resourceId", "generation", "taskId", "claimGeneration", "leaseSeconds"],
             RelayTools.ClaimRelease => ["resourceId", "generation", "taskId", "claimGeneration", "expectedVersion"],
@@ -110,6 +112,21 @@ internal static class ToolSchemas
             foreach (var field in ForwardingFields.Where(properties.ContainsKey)) properties[field] = new { type = "string" };
             if (!tool.RequiresSession) { properties.Remove("sessionToken"); if (tool.Name != RelayTools.ControlRequest) properties.Remove("sessionId"); }
         }
+        if (tool.Name == RelayTools.ControlRequest)
+        {
+            properties["targetSessionId"] = new { type = "string" };
+            properties["expectedManagerGeneration"] = new { type = "integer" };
+            properties["humanWords"] = new { type = "string" };
+        }
+        // Keep the added status cursor within the forwarding catalog budget; the full schema retains envelope descriptions.
+        if (tool.Name == RelayTools.GetStatus)
+        {
+            foreach (var field in ForwardingFields) properties[field] = new { type = "string" };
+            // Status reads are not deduplicated; as with the other compact reads, omit the unused request ID.
+            properties.Remove("requestId");
+            properties["managerHistoryBefore"] = new { type = "integer" };
+            properties["managerHistoryOnly"] = new { type = "boolean" };
+        }
         // Each boundary tool advertises the attention opt-out with a short description; InputSchema gives the full one.
         if (properties.ContainsKey("attention")) properties["attention"] = new { type = "boolean", description = "false: no attention offer." };
         // The same budget leaves room only for typed names of workflow dependsOn and packet.resources; InputSchema describes them in full.
@@ -143,6 +160,9 @@ internal static class ToolSchemas
         Text("machineId", "Reported machine or registered tool-host identity; not a permission grant.");
         switch (tool)
         {
+            case RelayTools.GetStatus:
+                properties["managerHistoryBefore"] = new { type = "integer", minimum = 0, description = "Administrator-only: read manager selections older than this generation." };
+                properties["managerHistoryOnly"] = new { type = "boolean", description = "Reserve this read for the visible manager summary and administrator history, omitting cancellation requests. Use when ordinary status omits manager or manager.historyReadRequired is true. Retain the incoming cursor for history continuation." }; break;
             case RelayTools.SessionOpen:
                 Text("label", "Display label for this chat's session."); properties["requestId"] = new { type = "string", maxLength = RelayLimits.MaxIdentifierLength, description = SessionOpenRequestId }; Object("binding", "Reported configured Roslyn/Visual Studio binding and source identity."); break;
             case RelayTools.SessionBind:
@@ -265,10 +285,13 @@ internal static class ToolSchemas
             case RelayTools.DocSync:
                 properties["branch"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxDocBranchLength, description = "Branch to follow from now on; default the configured one." }; break;
             case RelayTools.ControlRequest:
-                properties["command"] = new { type = "string", @enum = new[] { "pause", "resume", "stop", "cancel", "register_resource", "revoke_machine", "close_sessions" } };
+                properties["command"] = new { type = "string", @enum = new[] { "pause", "resume", "stop", "cancel", "register_resource", "revoke_machine", "close_sessions", "appoint_manager", "clear_manager" } };
+                properties["allSessions"] = new { type = "boolean", description = "stop only: pause globally and request cancellation from every known session across repositories. Cannot accompany sessionId, actionId or targetSessionId. Running tools and wake delivery are not interrupted." };
                 properties["idleMinutes"] = new { type = "integer", minimum = RelayLimits.MinCloseSessionsIdleMinutes, description = "close_sessions: sessions not seen for at least this many minutes." };
                 properties["labelPrefix"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxIdentifierLength, description = "close_sessions: sessions whose label starts with this, ignoring case; with idleMinutes both must match; alone, chats active in the last 10 minutes are skipped." };
-                properties["targetSessionId"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxIdentifierLength, description = "close_sessions: only this session, instead of the filters." };
+                properties["targetSessionId"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxIdentifierLength, description = "appoint_manager: exact target session; close_sessions: only this session, instead of the filters." };
+                properties["expectedManagerGeneration"] = new { type = "integer", minimum = 0, description = "appoint_manager or clear_manager: required current singleton generation." };
+                properties["humanWords"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxManagerHumanWordsLength, description = "Exact single-line human selection attestation; required for appoint_manager or clear_manager. Never truncated." };
                 properties["force"] = new { type = "boolean", description = "close_sessions with targetSessionId: close it despite unresolved actions." };
                 properties["aliases"] = new { type = "array", items = new { type = "string" } }; Text("reason", "Coordination control explanation."); Text("machineId", "Machine to revoke; required by revoke_machine."); break;
         }

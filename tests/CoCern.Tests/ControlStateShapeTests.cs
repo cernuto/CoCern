@@ -40,6 +40,8 @@ public sealed class ControlStateShapeTests
         Assert.True(Admin(hub, new() { ["command"] = "register_resource", ["resourceId"] = "printer", ["machineId"] = "pc-1", ["aliases"] = new JsonArray("lp"), ["requestId"] = "register" }, T0.AddMinutes(5)).Ok);
         Assert.True(Admin(hub, new() { ["command"] = "stop", ["sessionId"] = manager.Id, ["actionId"] = "deploy", ["requestId"] = "stop" }, T0.AddMinutes(6)).Ok);
 
+        Assert.True(Admin(hub, new() { ["command"] = "appoint_manager", ["targetSessionId"] = manager.Id, ["expectedManagerGeneration"] = 0, ["humanWords"] = "Paul selected this manager", ["requestId"] = "select-manager" }, T0.AddMinutes(7)).Ok);
+
         // A day later the manager is still working; an idle close takes the worker, which refuses for its unread mail and comes back
         // held, and the pending session, whose answer has not arrived. The owner is kept for its work.
         var later = T0.AddDays(1);

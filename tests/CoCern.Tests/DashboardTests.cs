@@ -23,6 +23,29 @@ namespace CoCern.Tests;
 public sealed class DashboardTests
 {
     [Fact]
+    public void Manager_recovery_is_in_authenticated_main_before_the_snapshot_branch_with_honest_stop_copy()
+    {
+        var root = new DirectoryInfo(AppContext.BaseDirectory);
+        while (root is not null && !File.Exists(Path.Combine(root.FullName, "CoCern.slnx"))) root = root.Parent;
+        Assert.NotNull(root);
+        var page = File.ReadAllText(Path.Combine(root.FullName, "src/CoCern.Dashboard/Pages/Dashboard.razor"));
+        var recovery = page.IndexOf("<ManagerControl", StringComparison.Ordinal);
+        var authenticated = page.IndexOf("<main id=\"main\"", StringComparison.Ordinal);
+        var snapshot = page.IndexOf("@if (Connection.Snapshot is { } snapshot)", StringComparison.Ordinal);
+        Assert.True(authenticated >= 0, "Authenticated main marker is missing.");
+        Assert.True(recovery >= 0, "Manager recovery marker is missing.");
+        Assert.True(snapshot >= 0, "Snapshot branch marker is missing.");
+        Assert.True(recovery > authenticated && recovery < snapshot, "Recovery must remain available without a snapshot.");
+        var component = File.ReadAllText(Path.Combine(root.FullName, "src/CoCern.Dashboard/Components/ManagerControl.razor"));
+        Assert.Contains("Pause prevents new claims and actions. Stop also asks known chats to cancel. Running tools and wake delivery are not interrupted.", component);
+        Assert.Contains("Recent manager selections", component);
+        Assert.Contains("<textarea", component);
+        Assert.Contains("standing-record-text", component);
+        Assert.DoesNotContain("MarkupString", component);
+        Assert.DoesNotContain("maxlength=\"200\"", component);
+        Assert.Contains("the text has been kept in full", component);
+    }
+    [Fact]
     public void Cache_inventory_bounds_rows_without_losing_totals_and_removes_only_the_given_activation()
     {
         var activity = new DocCacheActivity();

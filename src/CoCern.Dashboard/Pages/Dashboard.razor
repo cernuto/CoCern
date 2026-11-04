@@ -62,6 +62,7 @@ else
             {
                 <p class="connection-notice" role="status">@Connection.Notice</p>
             }
+            <ManagerControl Sessions="@(Connection.Snapshot?.Sessions ?? [])" DefaultRepositoryId="@(Connection.Snapshot?.Sessions.FirstOrDefault()?.RepositoryId)" />
             @if (Connection.Snapshot is { } snapshot)
             {
                 <section class="relay-summary" aria-label="Relay summary">

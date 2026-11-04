@@ -4,6 +4,9 @@ using System.Text.Json.Nodes;
 using CoCern.Adapter.Setup;
 using CoCern.Contracts.Dashboard;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Xunit;
 
 namespace CoCern.Tests;
@@ -32,6 +35,145 @@ public sealed class ConnectTests : IDisposable
         using var error = new StringWriter();
         var code = ConnectCommand.Run(args, Profile, AppData, "dotnet", Adapter, output, error);
         return (code, output.ToString(), error.ToString());
+    }
+
+    private const string CustomHttp = "http://127.0.0.1:6123/";
+
+    [Theory]
+    [InlineData("http://127.0.0.1:7123/", true)]
+    [InlineData("https://127.0.0.1:7123/", false)]
+    public void Foreign_custom_loopback_origin_cannot_claim_an_inline_credential(string otherHub, bool preferHttp)
+    {
+        LocalHubRecord(httpUrl: preferHttp ? CustomHttp : null);
+        var variables = new Dictionary<string, string> { ["COCERN_URL"] = otherHub, ["COCERN_TOKEN"] = "other-hub-test-token" };
+        if (!preferHttp) variables["COCERN_FINGERPRINT"] = NewPin;
+        AssertEntryLeftAlone(variables);
+    }
+
+    [Theory]
+    [InlineData("cocern_url")]
+    [InlineData("CoCern_Token_File")]
+    [InlineData("cocern_fingerprint")]
+    [InlineData("Cocern_Role")]
+    [InlineData("cocern_token")]
+    public void Windows_managed_names_with_noncanonical_case_leave_existing_entries_alone(string key)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        LocalHubRecord(httpUrl: CustomHttp);
+        var variables = new Dictionary<string, string> { ["COCERN_URL"] = NewUrl, ["COCERN_TOKEN_FILE"] = Token, ["COCERN_FINGERPRINT"] = NewPin };
+        if (key == "cocern_url") variables.Remove("COCERN_URL");
+        if (key == "CoCern_Token_File") variables.Remove("COCERN_TOKEN_FILE");
+        variables[key] = key switch
+        {
+            "cocern_url" => "https://other.example/",
+            "CoCern_Token_File" => Path.Combine(root, "other", "token"),
+            "cocern_fingerprint" => OldPin,
+            "Cocern_Role" => "worker",
+            _ => "other-hub-test-token"
+        };
+        AssertEntryLeftAlone(variables);
+    }
+
+    private void AssertEntryLeftAlone(Dictionary<string, string> variables)
+    {
+        WriteFile(ClaudeJson, JsonSerializer.Serialize(new { mcpServers = new { cocern = new { command = "dotnet", env = variables } } }));
+        var inline = string.Join(", ", variables.Select(pair => $"{pair.Key} = '{pair.Value}'"));
+        WriteFile(Toml, $"# keep\n[mcp_servers.cocern]\ncommand = 'dotnet'\nenv = {{ {inline} }}\n");
+        var json = File.ReadAllBytes(ClaudeJson);
+        var toml = File.ReadAllBytes(Toml);
+        foreach (var args in new[] { new[] { "--check", "--json", "--role", "admin" }, new[] { "--json", "--role", "admin" } })
+        {
+            var result = Connect(args);
+            Assert.Equal(0, result.Code);
+            Assert.All(States(result.Output).Values, state => Assert.Equal("connected", state));
+            Assert.Equal(json, File.ReadAllBytes(ClaudeJson));
+            Assert.Equal(toml, File.ReadAllBytes(Toml));
+            Assert.Empty(Backups(ClaudeJson));
+            Assert.Empty(Backups(Toml));
+            Assert.False(File.Exists(Path.Combine(Profile, ".claude", "settings.json")));
+        }
+    }
+
+    [Fact]
+    public void An_inline_entry_on_the_recorded_tls_origin_can_still_migrate_to_http()
+    {
+        LocalHubRecord(httpUrl: CustomHttp);
+        WriteFile(ClaudeJson, JsonSerializer.Serialize(new { mcpServers = new { cocern = new { command = "dotnet", env = new { COCERN_URL = NewUrl, COCERN_TOKEN = "own-test-token", COCERN_FINGERPRINT = OldPin } } } }));
+        Assert.Equal("updated", States(Connect("--json", "--only", "claude-code").Output)["claude-code"]);
+        var env = JsonNode.Parse(File.ReadAllText(ClaudeJson))!["mcpServers"]!["cocern"]!["env"]!;
+        Assert.Equal(CustomHttp, env["COCERN_URL"]!.GetValue<string>());
+        Assert.Equal("own-test-token", env["COCERN_TOKEN"]!.GetValue<string>());
+        Assert.Null(env["COCERN_FINGERPRINT"]);
+    }
+
+    [Fact]
+    public void Fresh_configs_use_recorded_http_but_explicit_remote_https_and_pin_are_preserved()
+    {
+        LocalHubRecord(httpUrl: CustomHttp);
+        Assert.Equal(0, Connect("--only", "claude-code").Code);
+        Assert.Equal(0, Connect("--only", "codex").Code);
+        var env = JsonNode.Parse(File.ReadAllText(ClaudeJson))!["mcpServers"]!["cocern"]!["env"]!;
+        Assert.Equal(CustomHttp, env["COCERN_URL"]!.GetValue<string>());
+        Assert.Null(env["COCERN_FINGERPRINT"]);
+        var toml = File.ReadAllText(Toml);
+        Assert.Contains(CustomHttp, toml);
+        Assert.DoesNotContain("COCERN_FINGERPRINT", toml);
+
+        Directory.CreateDirectory(Path.Combine(AppData, "Claude"));
+        Assert.Equal(0, Connect("--only", "claude-desktop", "--hub", "https://hub.example:7443/", "--fingerprint", OldPin).Code);
+        var explicitEnv = JsonNode.Parse(File.ReadAllText(Desktop))!["mcpServers"]!["cocern"]!["env"]!;
+        Assert.Equal("https://hub.example:7443/", explicitEnv["COCERN_URL"]!.GetValue<string>());
+        Assert.Equal(OldPin, explicitEnv["COCERN_FINGERPRINT"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void Owned_legacy_tls_entries_migrate_to_http_without_changing_role_or_other_settings()
+    {
+        LocalHubRecord();
+        Assert.Equal(0, Connect("--role", "admin").Code);
+        var oldJson = File.ReadAllText(ClaudeJson);
+        var oldToml = "# my settings\n" + File.ReadAllText(Toml);
+        WriteFile(Toml, oldToml);
+        LocalHubRecord(httpUrl: CustomHttp);
+        var check = Connect("--check", "--json");
+        Assert.All(States(check.Output).Values, state => Assert.Equal("outdated", state));
+        Assert.Equal(oldJson, File.ReadAllText(ClaudeJson));
+        Assert.Equal(oldToml, File.ReadAllText(Toml));
+        var update = Connect("--json");
+        Assert.All(States(update.Output).Values, state => Assert.Equal("updated", state));
+        Assert.DoesNotContain("certificate", update.Output, StringComparison.OrdinalIgnoreCase);
+        var json = File.ReadAllText(ClaudeJson);
+        var toml = File.ReadAllText(Toml);
+        foreach (var config in new[] { json, toml })
+        {
+            Assert.Contains(CustomHttp, config);
+            Assert.DoesNotContain("COCERN_FINGERPRINT", config);
+            Assert.Contains("COCERN_ROLE", config);
+            Assert.Contains("admin", config);
+        }
+        Assert.StartsWith("# my settings\n", toml);
+        Assert.All(States(Connect("--json").Output).Values, state => Assert.Equal("connected", state));
+        Assert.Equal(json, File.ReadAllText(ClaudeJson));
+        Assert.Equal(toml, File.ReadAllText(Toml));
+    }
+
+    [Theory]
+    [InlineData("https://hub.example:7443/")]
+    [InlineData("not-an-origin")]
+    [InlineData("http://127.0.0.1:0/")]
+    [InlineData("http://localhost/private/../")]
+    [InlineData("")]
+    public void Local_refresh_never_claims_an_entry_with_an_unsafe_supplied_origin(string url)
+    {
+        LocalHubRecord(httpUrl: CustomHttp);
+        // Same token file in JSON; matching certificate without any token-file path in TOML.
+        var json = JsonSerializer.Serialize(new { mcpServers = new { cocern = new { command = "dotnet", env = new { COCERN_URL = url, COCERN_TOKEN_FILE = Token } } } });
+        var toml = $"[mcp_servers.cocern]\ncommand = 'dotnet'\nenv = {{ COCERN_URL = '{url}', COCERN_FINGERPRINT = '{NewPin}' }}\n";
+        WriteFile(ClaudeJson, json);
+        WriteFile(Toml, toml);
+        Assert.Equal(0, Connect("--role", "admin").Code);
+        Assert.Equal(json, File.ReadAllText(ClaudeJson));
+        Assert.Equal(toml, File.ReadAllText(Toml));
     }
 
     [Fact]
@@ -85,7 +227,25 @@ public sealed class ConnectTests : IDisposable
         File.Delete(Token);
         var (code, _, error) = Connect();
         Assert.Equal(1, code);
-        Assert.Contains("Start the hub once", error);
+        Assert.Equal("CoCern isn't ready on this PC. Start the hub, then try Connect again.", error.Trim());
+        Assert.DoesNotContain(Token, Connect("--json").Output);
+    }
+
+    [Theory]
+    [InlineData(false, "CoCern isn't ready on this PC. Start the hub, then try Connect again.")]
+    [InlineData(true, "This hub has no connection available on this PC.")]
+    public async Task Dashboard_reports_unavailable_local_setup_without_running_connect(bool hasClientFile, string expected)
+    {
+        File.WriteAllText(Adapter, "disposable placeholder");
+        var builder = Microsoft.Extensions.Hosting.Host.CreateEmptyApplicationBuilder(new() { ContentRootPath = root });
+        var configuration = builder.Configuration;
+        configuration["Relay:Connect:AdapterPath"] = Adapter;
+        configuration["Relay:Clients:0:IsAdministrator"] = "true";
+        if (hasClientFile) configuration["Relay:Clients:0:TokenFile"] = Token;
+        using var host = builder.Build();
+        using var server = new TestServer(host.Services);
+        var dashboard = new CoCern.Host.Dashboard.DashboardConnect(configuration, host.Services.GetRequiredService<IHostEnvironment>(), server);
+        Assert.Equal(expected, (await dashboard.StatusAsync(null, default)).Unavailable);
     }
 
     [Fact]
@@ -117,8 +277,8 @@ public sealed class ConnectTests : IDisposable
     private string[] Backups(string path) => Directory.GetFiles(Path.GetDirectoryName(path)!, Path.GetFileName(path) + ".cocern-backup-*");
 
     /// <summary>The hub's own record beside its token: where its loopback HTTPS is now and which certificate it presents.</summary>
-    private void LocalHubRecord(string url = NewUrl, string fingerprint = NewPin) =>
-        File.WriteAllText(Path.Combine(Path.GetDirectoryName(Token)!, "local-hub.json"), JsonSerializer.Serialize(new { url, fingerprint }));
+    private void LocalHubRecord(string url = NewUrl, string fingerprint = NewPin, string? httpUrl = null) =>
+        File.WriteAllText(Path.Combine(Path.GetDirectoryName(Token)!, "local-hub.json"), httpUrl is null ? JsonSerializer.Serialize(new { url, fingerprint }) : JsonSerializer.Serialize(new { url, fingerprint, httpUrl }));
 
     private static void WriteFile(string path, string text) { Directory.CreateDirectory(Path.GetDirectoryName(path)!); File.WriteAllText(path, text); }
 
