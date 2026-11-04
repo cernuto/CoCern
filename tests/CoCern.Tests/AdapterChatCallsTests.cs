@@ -205,6 +205,20 @@ public sealed class AdapterChatCallsTests : IDisposable
         // A token the caller gave stands, even blank.
         Assert.Equal((null, ""), await Check(new { repositoryId = "repo", sessionToken = "" }));
         Assert.Equal(("s-mine", "t-mine"), await Check(new { repositoryId = "repo", sessionId = "s-mine", sessionToken = "t-mine" }));
+        // An explicitly present credential is never corrected, even when unusable or missing its other half.
+        foreach (var fragment in new[] { """{"sessionId":null}""", """{"sessionId":7}""", """{"sessionId":""}""", """{"sessionToken":null}""", """{"sessionToken":7}""", """{"sessionToken":"partial"}""" })
+        {
+            var input = JsonNode.Parse(fragment)!.AsObject();
+            input["repositoryId"] = "repo";
+            input["requestId"] = "same-request";
+            await calls.CallAsync(RelayTools.Ack, JsonSerializer.SerializeToElement(input), CancellationToken.None);
+            var sent = hub.Sent(RelayTools.Ack);
+            foreach (var field in new[] { "sessionId", "sessionToken" })
+            {
+                Assert.Equal(input.ContainsKey(field), sent.ContainsKey(field));
+                Assert.True(JsonNode.DeepEquals(input[field], sent[field]));
+            }
+        }
         // A session belongs to its repository.
         Assert.Equal((null, null), await Check(new { repositoryId = "other-repo" }));
 
@@ -238,7 +252,98 @@ public sealed class AdapterChatCallsTests : IDisposable
     }
 
     [Fact]
-    public async Task On_a_real_hub_a_chat_that_lost_its_handle_still_reads_and_acknowledges_but_a_stranger_is_denied()
+    public async Task An_implicit_send_with_a_lost_reply_retries_in_its_original_session_after_the_default_changes()
+    {
+        await using var host = Hub();
+        var loss = new LoseFirstSendReply(host.Server.CreateHandler());
+        using var client = new HttpClient(loss);
+        var calls = new ChatCalls(new RelayForwarder(client, new AdapterOptions("http://127.0.0.1:5271", RelayHostFixture.Token, false)), null, null, "scope", () => null);
+        var other = new ChatCalls(Forwarder(host), null, null, "other", () => null);
+        async Task<AdapterReply> Call(string tool, object args) => await calls.CallAsync(tool, JsonSerializer.SerializeToElement(args), CancellationToken.None);
+        var a = await Call(RelayTools.SessionOpen, new { repositoryId = "repo", requestId = "open-a", label = "A" });
+        var b = await other.CallAsync(RelayTools.SessionOpen, JsonSerializer.SerializeToElement(new { repositoryId = "repo", requestId = "open-b", label = "B" }), CancellationToken.None);
+        Assert.True(a.Ok && b.Ok, a.Code + " " + b.Code);
+        var (idB, tokenB) = (b.Data!.Value.GetProperty("sessionId").GetString(), b.Data.Value.GetProperty("sessionToken").GetString());
+        var send = new { repositoryId = "repo", requestId = "one-send", recipientSessionId = idB, text = "original" };
+
+        var lost = await Call(RelayTools.SendMessage, send);
+        Assert.Equal("hub_unavailable", lost.Code);
+        Assert.NotNull(loss.CommittedMessageId);
+        var learned = await Call(RelayTools.CheckInbox, new { repositoryId = "repo", sessionId = idB, sessionToken = tokenB });
+        Assert.True(learned.Ok, learned.Code);
+        Assert.Equal(idB, calls.CurrentSession);
+
+        var retries = await Task.WhenAll(Call(RelayTools.SendMessage, send), Call(RelayTools.SendMessage, send));
+        foreach (var retry in retries)
+        {
+            Assert.True(retry.Ok, retry.Code);
+            Assert.Equal(loss.CommittedMessageId, retry.Data!.Value.GetProperty("messageId").GetString());
+        }
+        Assert.Equal(idB, calls.CurrentSession);
+        var changed = await Call(RelayTools.SendMessage, send with { text = "changed" });
+        Assert.Equal(RelayErrorCodes.RequestConflict, changed.Code);
+
+        // An old binding cannot supply credentials for a different explicitly named session.
+        var partial = await Call(RelayTools.SendMessage, new { send.repositoryId, send.requestId, send.recipientSessionId, send.text, sessionId = idB });
+        Assert.False(partial.Ok);
+        var invalid = await Call(RelayTools.CheckInbox, new { repositoryId = "repo", sessionId = "stranger", sessionToken = "invalid" });
+        Assert.False(invalid.Ok);
+        Assert.Equal(idB, calls.CurrentSession);
+        foreach (var ordinary in new[] { lost, retries[0], changed, partial, invalid })
+        {
+            var json = JsonSerializer.Serialize(ordinary);
+            Assert.DoesNotContain(a.Data!.Value.GetProperty("sessionToken").GetString()!, json);
+            Assert.DoesNotContain(tokenB!, json);
+        }
+
+        // Fully explicit calls still use the hub's per-session replay scope.
+        var explicitB = await Call(RelayTools.SendMessage, new { send.repositoryId, send.requestId, send.recipientSessionId, send.text, sessionId = idB, sessionToken = tokenB });
+        Assert.True(explicitB.Ok, explicitB.Code);
+        Assert.NotEqual(loss.CommittedMessageId, explicitB.Data!.Value.GetProperty("messageId").GetString());
+    }
+
+    [Fact]
+    public async Task A_full_implicit_request_table_keeps_early_retries_and_leaves_explicit_writes_available()
+    {
+        using var hub = new FakeHub();
+        var calls = new ChatCalls(hub.Forwarder(), null, null, "scope", () => null);
+        Task<AdapterReply> Call(string tool, object args) => calls.CallAsync(tool, JsonSerializer.SerializeToElement(args), CancellationToken.None);
+        Task<AdapterReply> Ack(int i) => Call(RelayTools.Ack, new { repositoryId = "repo", requestId = i.ToString(), messageIds = new[] { "m" } });
+        Assert.True((await Call(RelayTools.SessionOpen, new { repositoryId = "repo", requestId = "open" })).Ok);
+        for (var i = 0; i < 4096; i++) Assert.True((await Ack(i)).Ok);
+        Assert.True((await Call(RelayTools.CheckInbox, new { repositoryId = "repo", sessionId = "s-b", sessionToken = "t-b" })).Ok);
+
+        var refused = await Ack(4096);
+        Assert.False(refused.Ok);
+        Assert.Equal("implicit_request_capacity", refused.Code);
+        Assert.Equal("4095", hub.Sent(RelayTools.Ack)["requestId"]!.GetValue<string>());
+        Assert.True((await Ack(0)).Ok);
+        Assert.Equal(("s-1", "t-1"), Handle(hub.Sent(RelayTools.Ack)));
+        Assert.True((await Call(RelayTools.Ack, new { repositoryId = "repo", requestId = "4096", sessionId = "s-b", sessionToken = "t-b", messageIds = new[] { "m" } })).Ok);
+        Assert.Equal(("s-b", "t-b"), Handle(hub.Sent(RelayTools.Ack)));
+    }
+
+    private sealed class LoseFirstSendReply(HttpMessageHandler hub) : DelegatingHandler(hub)
+    {
+        public string? CommittedMessageId { get; private set; }
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            var response = await base.SendAsync(request, ct);
+            if (request.RequestUri!.Segments[^1] == RelayTools.SendMessage && CommittedMessageId is null && response.IsSuccessStatusCode)
+            {
+                using (response)
+                using (var envelope = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct)))
+                using (var data = JsonDocument.Parse(envelope.RootElement.GetProperty("dataJson").GetString()!))
+                    CommittedMessageId = data.RootElement.GetProperty("messageId").GetString();
+                throw new HttpRequestException("Reply lost after commit");
+            }
+            return response;
+        }
+    }
+
+    [Fact]
+    public async Task On_a_real_hub_a_chat_that_lost_its_handle_still_reads_its_inbox_but_a_stranger_is_denied()
     {
         await using var host = Hub();
         var folder = Path.Combine(root, "node");
