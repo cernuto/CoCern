@@ -21,8 +21,13 @@ public static class ManagerManagementClient
         var result = await ResultAsync(response, cancellationToken);
         if (result.Code == RelayErrorCodes.VersionConflict && result.Manager is null)
         {
-            var current = await ReadAsync(http, decision.RepositoryId, null, cancellationToken);
-            result = result with { Manager = current.Manager, Paused = current.Paused };
+            // The POST was definitively rejected. An unavailable read must never turn it into an uncertain write.
+            try
+            {
+                var current = await ReadAsync(http, decision.RepositoryId, null, cancellationToken);
+                if (current.Ok) result = result with { Manager = current.Manager, Paused = current.Paused };
+            }
+            catch (Exception error) when (error is HttpRequestException or OperationCanceledException or System.Text.Json.JsonException) { }
         }
         return result;
     }

@@ -49,8 +49,14 @@ public static class DashboardManagerManagement
         // A stale write is never resubmitted. Return a fresh redacted view with the original domain code.
         if (reply.Code == RelayErrorCodes.VersionConflict)
         {
-            var refreshed = await ReadStatusAsync(context, application, principal, body.RepositoryId);
-            return Results.Json(refreshed with { Ok = false, Code = reply.Code }, statusCode: ToolResults.Status(reply));
+            var result = new DashboardManagerResult(false, reply.Code, null, null);
+            try
+            {
+                var refreshed = await ReadStatusAsync(context, application, principal, body.RepositoryId);
+                if (refreshed.Ok) result = result with { Manager = refreshed.Manager, Paused = refreshed.Paused };
+            }
+            catch (Exception error) when (error is HttpRequestException or OperationCanceledException or JsonException) { }
+            return Results.Json(result, statusCode: ToolResults.Status(reply));
         }
         return Project(reply);
     }
@@ -91,7 +97,7 @@ public static class DashboardManagerManagement
             if (document.RootElement.ValueKind != JsonValueKind.Object || DuplicateProperties(document.RootElement)) return (default, Invalid());
             return (document.RootElement.Deserialize<T>(Json), null);
         }
-        catch (JsonException) { return (default, Invalid()); }
+        catch (Exception error) when (error is JsonException or InvalidOperationException) { return (default, Invalid()); }
     }
 
     private static bool DuplicateProperties(JsonElement value)

@@ -234,6 +234,48 @@ public class DashboardManagerManagementTests
         }
     }
 
+    [Theory]
+    [InlineData(false, false, 0xD800)]
+    [InlineData(false, true, 0xD800)]
+    [InlineData(true, false, 0xD800)]
+    [InlineData(true, true, 0xD800)]
+    [InlineData(false, false, 0xDC00)]
+    [InlineData(true, true, 0xDC00)]
+    public async Task Invalid_surrogate_property_names_are_bad_requests_without_application_calls(bool dispatch, bool nested, int keyCode)
+    {
+        var key = @"\u" + keyCode.ToString("X4");
+        var property = "\"" + key + "\":true";
+        if (nested) property = "\"ignored\":{" + property + "}";
+        var json = "{\"repositoryId\":\"repo\",\"requestId\":\"invalid-key\",\"command\":\"" + (dispatch ? "pause" : "clear_manager") + "\",\"expectedManagerGeneration\":0,\"humanWords\":\"Clear.\"," + property + "}";
+        var app = new RecordingApplication();
+        var result = await (dispatch ? DashboardManagerManagement.DispatchAsync(Context(json), app) : DashboardManagerManagement.DecideAsync(Context(json), app));
+        Assert.Equal(400, Status(result));
+        Assert.Equal(RelayErrorCodes.InvalidArguments, Assert.IsType<DashboardManagerResult>(((IValueHttpResult)result).Value).Code);
+        Assert.Empty(app.Calls);
+    }
+
+    [Fact]
+    public async Task Known_host_conflict_stays_definitive_when_its_status_read_transport_fails()
+    {
+        var app = new ConflictRefreshApplication();
+        var result = await DashboardManagerManagement.DecideAsync(Context("""{"repositoryId":"repo","requestId":"stale","command":"clear_manager","expectedManagerGeneration":0,"humanWords":"Clear."}"""), app);
+        Assert.Equal(409, Status(result));
+        var data = Assert.IsType<DashboardManagerResult>(((IValueHttpResult)result).Value);
+        Assert.Equal(RelayErrorCodes.VersionConflict, data.Code); Assert.Null(data.Manager);
+        Assert.Equal(new[] { RelayTools.ControlRequest, RelayTools.GetStatus }, app.Tools);
+    }
+
+    private sealed class ConflictRefreshApplication : IRelayApplication
+    {
+        public List<string> Tools { get; } = [];
+        public Task<RelayReply> ExecuteAsync(RelayCaller caller, string tool, JsonElement arguments, CancellationToken cancellationToken = default)
+        {
+            Tools.Add(tool);
+            if (tool == RelayTools.GetStatus) throw new HttpRequestException("status unavailable");
+            return Task.FromResult(new RelayReply(false, RelayErrorCodes.VersionConflict, "{}", 0));
+        }
+    }
+
     internal static RelayHostFixture Host() => new(settings: new Dictionary<string, string?> { ["Relay:Clients:0:IsAdministrator"] = "true", ["Relay:Clients:0:Repositories:1"] = "other", ["Relay:Dashboard:ViewerPrincipalIds:0"] = "test-user" });
     internal static HttpClient Browser(RelayHostFixture host)
     {

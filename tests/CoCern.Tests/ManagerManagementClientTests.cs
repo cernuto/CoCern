@@ -159,6 +159,155 @@ public class ManagerManagementClientTests
         Assert.Contains("Sign in", (await ManagerManagementClient.ReadAsync(http, "repo", null)).Code);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Delayed_refresh_does_not_replace_a_confirmed_stop_or_selection(bool selection)
+    {
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var reads = 0;
+        using var http = new HttpClient(new Handler(async request =>
+        {
+            if (request.Method == HttpMethod.Get)
+            {
+                if (++reads == 2) { entered.SetResult(); await release.Task; }
+                return Reply(new(true, "Ok", new(1, null, [], null, false), false));
+            }
+            return Reply(new(true, "Ok", selection ? new(2, null, [], null, false) : null, true));
+        })) { BaseAddress = new("https://localhost/dashboard/") };
+        var form = new CoCern.Dashboard.Components.ManagerControl { ManagerHttp = http, RepositoryId = "repo" };
+        await form.RefreshAsync();
+        var delayed = form.RefreshAsync(); await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        if (selection) { form.HumanWords = "Clear."; await form.DecideAsync("clear_manager"); }
+        else await form.DispatchAsync("stop");
+        Assert.True(form.ReadBusy); // Independent write controls remain usable.
+        var feedback = form.Message; var dispatchFeedback = form.DispatchMessage;
+        release.SetResult(); await delayed;
+        Assert.True(form.Paused);
+        if (selection) { Assert.Equal(2, form.Selection!.Generation); Assert.Equal(feedback, form.Message); }
+        Assert.Equal(dispatchFeedback, form.DispatchMessage);
+    }
+
+    [Fact]
+    public async Task Delayed_history_cannot_append_to_a_new_selection_or_replace_feedback()
+    {
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        CoCern.Contracts.ManagerSelectionHistory History(long generation) => new(generation, "clear_manager", null, null, "repo", "viewer", "r-" + generation, DateTimeOffset.UnixEpoch, "Clear " + generation);
+        using var http = new HttpClient(new Handler(async request =>
+        {
+            if (request.Method == HttpMethod.Post) return Reply(new(true, "Ok", new(3, null, [History(3)], null, false), false));
+            if (request.RequestUri!.Query.Contains("managerHistoryBefore"))
+            {
+                entered.SetResult(); await release.Task;
+                return Reply(new(true, "Ok", new(2, null, [History(1)], 1, true), false));
+            }
+            return Reply(new(true, "Ok", new(2, null, [History(2)], 2, true), false));
+        })) { BaseAddress = new("https://localhost/dashboard/") };
+        var form = new CoCern.Dashboard.Components.ManagerControl { ManagerHttp = http, RepositoryId = "repo" };
+        await form.RefreshAsync();
+        var delayed = form.LoadEarlierAsync(); await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        form.HumanWords = "Clear."; await form.DecideAsync("clear_manager");
+        var feedback = form.Message;
+        release.SetResult(); await delayed;
+        Assert.Equal(3, form.Selection!.Generation);
+        Assert.Equal(3, Assert.Single(form.RecentSelections).Generation);
+        Assert.Equal(feedback, form.Message);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Definitive_conflict_with_failed_refresh_requires_only_read_recovery(bool transportFailure)
+    {
+        var writes = 0; var reads = 0;
+        using var http = new HttpClient(new Handler(request =>
+        {
+            if (request.Method == HttpMethod.Post)
+            {
+                writes++;
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Conflict) { Content = JsonContent.Create(new DashboardManagerResult(false, "VersionConflict", null, null)) });
+            }
+            reads++;
+            if (reads == 2)
+            {
+                if (transportFailure) throw new HttpRequestException("refresh unavailable");
+                return Task.FromResult(Reply(new(false, "Unavailable", null, null)));
+            }
+            return Task.FromResult(Reply(new(true, "Ok", new(reads == 1 ? 1 : 2, null, [], null, false), false)));
+        })) { BaseAddress = new("https://localhost/dashboard/") };
+        var form = new CoCern.Dashboard.Components.ManagerControl { ManagerHttp = http, RepositoryId = "repo" };
+        await form.RefreshAsync(); form.HumanWords = "Clear."; await form.DecideAsync("clear_manager");
+        Assert.Null(form.UnconfirmedDecision);
+        Assert.Null(form.Selection); Assert.Empty(form.RecentSelections);
+        Assert.Contains("Selection changed", form.Message);
+        Assert.Contains("Refresh selection", form.Message);
+        await form.RetryDecisionAsync(); await form.DecideAsync("clear_manager");
+        Assert.Equal(1, writes);
+        await form.RefreshAsync();
+        Assert.Equal(2, form.Selection!.Generation);
+        Assert.Equal(1, writes);
+    }
+
+    [Theory]
+    [InlineData("clear_manager", false)]
+    [InlineData("appoint_manager", true)]
+    public async Task A_completed_appointment_requires_fresh_words_for_clear_or_another_target(string nextCommand, bool changeTarget)
+    {
+        var writes = new List<DashboardManagerDecision>();
+        using var http = new HttpClient(new Handler(async request =>
+        {
+            if (request.Method == HttpMethod.Post) writes.Add((await request.Content!.ReadFromJsonAsync<DashboardManagerDecision>())!);
+            return Reply(new(true, "Ok", new(writes.Count, null, [], null, false), false));
+        })) { BaseAddress = new("https://localhost/dashboard/") };
+        var form = new CoCern.Dashboard.Components.ManagerControl { ManagerHttp = http, RepositoryId = "repo", TargetSessionId = "A" };
+        Microsoft.AspNetCore.Components.ParameterView.FromDictionary(new Dictionary<string, object?> { ["Sessions"] = new DashboardSession[] { new() { SessionId = "A", RepositoryId = "repo" }, new() { SessionId = "B", RepositoryId = "repo" } } }).SetParameterProperties(form);
+        await form.RefreshAsync(); form.HumanWords = "Choose A."; await form.DecideAsync("appoint_manager");
+        Assert.Single(writes);
+        if (changeTarget) form.TargetSessionId = "B";
+        await form.DecideAsync(nextCommand);
+        Assert.Single(writes); Assert.Empty(form.HumanWords);
+        form.HumanWords = changeTarget ? "Choose B." : "Clear.";
+        await form.DecideAsync(nextCommand);
+        Assert.Equal(2, writes.Count);
+        Assert.Equal(changeTarget ? "Choose B." : "Clear.", writes[1].HumanWords); Assert.Empty(form.HumanWords);
+    }
+
+    [Fact]
+    public async Task Changing_context_or_abandoning_uncertainty_requires_fresh_words_but_retry_keeps_original()
+    {
+        var writes = new List<DashboardManagerDecision>(); var lose = true;
+        using var http = new HttpClient(new Handler(async request =>
+        {
+            if (request.Method == HttpMethod.Post)
+            {
+                writes.Add((await request.Content!.ReadFromJsonAsync<DashboardManagerDecision>())!);
+                if (lose) throw new HttpRequestException("lost response");
+            }
+            return Reply(new(true, "Ok", new(0, null, [], null, false), false));
+        })) { BaseAddress = new("https://localhost/dashboard/") };
+        var form = new CoCern.Dashboard.Components.ManagerControl { ManagerHttp = http, RepositoryId = "repo", TargetSessionId = "A" };
+        await form.RefreshAsync();
+        form.HumanWords = "Choose A."; form.TargetSessionId = "B";
+        Assert.Empty(form.HumanWords);
+        form.HumanWords = "Clear here."; form.RepositoryId = "other";
+        Assert.Empty(form.HumanWords);
+        form.RepositoryId = "repo"; await form.RefreshAsync();
+        form.HumanWords = "  Clear this exact selection.  "; await form.DecideAsync("clear_manager");
+        var saved = form.UnconfirmedDecision;
+        Assert.NotNull(saved); lose = false; await form.RetryDecisionAsync();
+        Assert.Equal(saved, writes[1]);
+        form.HumanWords = "Another clear."; lose = true; await form.DecideAsync("clear_manager");
+        Assert.NotNull(form.UnconfirmedDecision);
+        form.NewDecision();
+        Assert.Empty(form.HumanWords); Assert.Null(form.UnconfirmedDecision);
+        await form.DecideAsync("clear_manager");
+        Assert.Equal(3, writes.Count);
+    }
+
+    private static HttpResponseMessage Reply(DashboardManagerResult result) => new(HttpStatusCode.OK) { Content = JsonContent.Create(result) };
+
     private sealed class Handler(Func<HttpRequestMessage, Task<HttpResponseMessage>> handle) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) => handle(request);

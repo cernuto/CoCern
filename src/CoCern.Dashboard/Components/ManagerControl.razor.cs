@@ -10,8 +10,31 @@ public partial class ManagerControl : ComponentBase
     [Parameter] public DashboardSession[] Sessions { get; set; } = [];
     [Parameter] public string? DefaultRepositoryId { get; set; }
     [Inject] public HttpClient ManagerHttp { get; set; } = default!;
-    public string RepositoryId { get; set; } = "";
-    public string TargetSessionId { get; set; } = "";
+    private string repositoryId = "";
+    private string targetSessionId = "";
+    public string RepositoryId
+    {
+        get => repositoryId;
+        set
+        {
+            if (repositoryId == value) return;
+            repositoryId = value;
+            HumanWords = "";
+            InvalidateSelection();
+            dispatchRevision++;
+            SetMessage(null);
+        }
+    }
+    public string TargetSessionId
+    {
+        get => targetSessionId;
+        set
+        {
+            if (targetSessionId == value) return;
+            targetSessionId = value;
+            HumanWords = "";
+        }
+    }
     public string HumanWords { get; set; } = "";
     public ManagerSelectionStatus? Selection { get; private set; }
     public DashboardManagerDecision? UnconfirmedDecision { get; private set; }
@@ -26,6 +49,10 @@ public partial class ManagerControl : ComponentBase
     private string? loadedRepository;
     private bool initialized;
     private long? nextHistoryBefore;
+    // Reads update each field only while no newer operation has superseded that field.
+    private long selectionRevision;
+    private long dispatchRevision;
+    private long messageRevision;
 
     protected override async Task OnParametersSetAsync()
     {
@@ -40,17 +67,26 @@ public partial class ManagerControl : ComponentBase
         if (ReadBusy || string.IsNullOrWhiteSpace(RepositoryId)) return;
         ReadBusy = true;
         var repository = RepositoryId;
+        var selectionAtStart = selectionRevision;
+        var dispatchAtStart = dispatchRevision;
+        var messageAtStart = messageRevision;
         try
         {
             var result = await ManagerManagementClient.ReadAsync(ManagerHttp, repository, null);
-            if (result.Ok && RepositoryId == repository)
+            if (RepositoryId != repository) return;
+            if (result.Ok)
             {
-                Apply(result, repository);
-                Message = null;
+                if (selectionRevision == selectionAtStart && result.Manager is { } manager) ApplySelection(manager, repository);
+                if (dispatchRevision == dispatchAtStart && result.Paused is { } paused) Paused = paused;
+                if (messageRevision == messageAtStart) SetMessage(null);
             }
-            else if (!result.Ok) Message = result.Code;
+            else if (messageRevision == messageAtStart) SetMessage(result.Code);
         }
-        catch (Exception error) when (Uncertain(error)) { Message = "Could not read the current selection. Try Refresh selection."; }
+        catch (Exception error) when (Uncertain(error))
+        {
+            if (RepositoryId == repository && messageRevision == messageAtStart)
+                SetMessage("Could not read the current selection. Try Refresh selection.");
+        }
         finally { ReadBusy = false; }
     }
 
@@ -59,17 +95,24 @@ public partial class ManagerControl : ComponentBase
         if (ReadBusy || nextHistoryBefore is null || loadedRepository != RepositoryId) return;
         ReadBusy = true;
         var repository = loadedRepository;
+        var selectionAtStart = selectionRevision;
+        var messageAtStart = messageRevision;
         try
         {
             var result = await ManagerManagementClient.ReadAsync(ManagerHttp, repository, nextHistoryBefore);
-            if (result.Ok && RepositoryId == repository && result.Manager is { } page)
+            if (RepositoryId != repository || selectionRevision != selectionAtStart) return;
+            if (result.Ok && result.Manager is { } page)
             {
                 RecentSelections = RecentSelections.Concat(page.History).DistinctBy(item => item.Generation).OrderByDescending(item => item.Generation).ToArray();
                 nextHistoryBefore = page.NextHistoryBefore;
             }
-            else if (!result.Ok) Message = result.Code;
+            else if (!result.Ok && messageRevision == messageAtStart) SetMessage(result.Code);
         }
-        catch (Exception error) when (Uncertain(error)) { Message = "Could not load earlier selections. Try again."; }
+        catch (Exception error) when (Uncertain(error))
+        {
+            if (RepositoryId == repository && selectionRevision == selectionAtStart && messageRevision == messageAtStart)
+                SetMessage("Could not load earlier selections. Try again.");
+        }
         finally { ReadBusy = false; }
     }
 
@@ -86,16 +129,16 @@ public partial class ManagerControl : ComponentBase
         if (DecisionBusy || UnconfirmedDecision is not null) return;
         if (Selection is null || loadedRepository != RepositoryId)
         {
-            Message = "Refresh selection for this repository before deciding."; return;
+            SetMessage("Refresh selection for this repository before deciding."); return;
         }
         if (command is not ("appoint_manager" or "clear_manager")) return;
         if (string.IsNullOrWhiteSpace(HumanWords) || HumanWords.Length > 200 || HumanWords.Any(ch => char.IsControl(ch) || ch is '\u2028' or '\u2029'))
         {
-            Message = "Enter the exact direct human answer, on one line, up to 200 characters. It has not been shortened."; return;
+            SetMessage("Enter a fresh exact direct human answer, on one line, up to 200 characters. It has not been shortened."); return;
         }
         if (command == "appoint_manager" && !Sessions.Any(session => session.SessionId == TargetSessionId && session.RepositoryId == RepositoryId))
         {
-            Message = "Choose an exact session and its repository."; return;
+            SetMessage("Choose an exact session and its repository."); return;
         }
         UnconfirmedDecision = new(RepositoryId, Guid.NewGuid().ToString("N"), command, command == "appoint_manager" ? TargetSessionId : null, Selection.Generation, HumanWords);
         await RetryDecisionAsync();
@@ -105,18 +148,28 @@ public partial class ManagerControl : ComponentBase
     {
         if (DecisionBusy || UnconfirmedDecision is not { } decision) return;
         DecisionBusy = true;
+        selectionRevision++;
+        var dispatchAtStart = dispatchRevision;
+        SetMessage(null);
         try
         {
             var result = await ManagerManagementClient.DecideAsync(ManagerHttp, decision);
             UnconfirmedDecision = null;
-            Apply(result, decision.RepositoryId);
-            Message = result.Code == RelayErrorCodes.VersionConflict
-                ? "Selection changed. The current selection is shown; review it before making a new decision."
-                : result.Ok ? "Manager selection recorded." : result.Code;
+            HumanWords = "";
+            selectionRevision++;
+            if (result.Manager is { } manager) ApplySelection(manager, decision.RepositoryId);
+            else if (result.Code == RelayErrorCodes.VersionConflict) InvalidateSelection();
+            if (dispatchRevision == dispatchAtStart && result.Paused is { } paused) { Paused = paused; dispatchRevision++; }
+            SetMessage(result.Code == RelayErrorCodes.VersionConflict
+                ? result.Manager is null
+                    ? "Selection changed. The current selection could not be read. Use Refresh selection before making a new decision."
+                    : "Selection changed. The current selection is shown; review it before making a new decision."
+                : result.Ok ? "Manager selection recorded." : result.Code);
         }
         catch (Exception error) when (Uncertain(error))
         {
-            Message = "The result is unconfirmed. Retry decision keeps the same request, generation and exact human words.";
+            selectionRevision++;
+            SetMessage("The result is unconfirmed. Retry decision keeps the same request, generation and exact human words.");
         }
         finally { DecisionBusy = false; }
     }
@@ -124,8 +177,10 @@ public partial class ManagerControl : ComponentBase
     public void NewDecision()
     {
         if (DecisionBusy) return;
+        if (UnconfirmedDecision is not null) InvalidateSelection();
         UnconfirmedDecision = null;
-        Message = "Review the current selection and human answer before making a new decision.";
+        HumanWords = "";
+        SetMessage("Review the current selection and enter a fresh human answer before making a new decision.");
     }
 
     public async Task DispatchAsync(string command)
@@ -141,10 +196,12 @@ public partial class ManagerControl : ComponentBase
     {
         if (DispatchBusy || UnconfirmedDispatch is not { } decision) return;
         DispatchBusy = true;
+        dispatchRevision++;
         try
         {
             var result = await ManagerManagementClient.DispatchAsync(ManagerHttp, decision);
             UnconfirmedDispatch = null;
+            dispatchRevision++;
             if (result.Paused is { } paused) Paused = paused;
             DispatchMessage = result.Ok ? decision.Command switch
             {
@@ -153,20 +210,29 @@ public partial class ManagerControl : ComponentBase
                 _ => "Dispatch resumed."
             } : result.Code;
         }
-        catch (Exception error) when (Uncertain(error)) { DispatchMessage = "The dispatch result is unconfirmed. Retry dispatch reuses the same request."; }
+        catch (Exception error) when (Uncertain(error))
+        {
+            dispatchRevision++;
+            DispatchMessage = "The dispatch result is unconfirmed. Retry dispatch reuses the same request.";
+        }
         finally { DispatchBusy = false; }
     }
 
-    private void Apply(DashboardManagerResult result, string repository)
+    private void ApplySelection(ManagerSelectionStatus manager, string repository)
     {
-        if (result.Manager is { } manager)
-        {
-            Selection = manager; loadedRepository = repository;
-            RecentSelections = manager.History;
-            nextHistoryBefore = manager.NextHistoryBefore;
-        }
-        if (result.Paused is { } paused) Paused = paused;
+        if (Selection is { } previous && previous.Generation != manager.Generation) HumanWords = "";
+        Selection = manager; loadedRepository = repository;
+        RecentSelections = manager.History;
+        nextHistoryBefore = manager.NextHistoryBefore;
     }
 
+    private void InvalidateSelection()
+    {
+        selectionRevision++;
+        Selection = null; loadedRepository = null;
+        RecentSelections = []; nextHistoryBefore = null;
+    }
+
+    private void SetMessage(string? message) { messageRevision++; Message = message; }
     private static bool Uncertain(Exception error) => error is HttpRequestException or OperationCanceledException or System.Text.Json.JsonException;
 }
