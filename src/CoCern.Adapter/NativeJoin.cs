@@ -13,6 +13,11 @@ internal sealed record NativeHookContext(string Provider, string NativeId, strin
 internal sealed class NativeJoin(string folder, AdapterOptions options, RelayForwarder forwarder) : IAsyncDisposable
 {
     private readonly CancellationTokenSource stopping = new();
+    internal string PrivateFolder => folder;
+    internal AdapterOptions WakeOptions => BackgroundOptions(options);
+    // The private waiter/watcher has a fixed inbox/status protocol and uses the same pin and credential.
+    internal static AdapterOptions BackgroundOptions(AdapterOptions connection) => new(connection.BaseUri.AbsoluteUri, connection.Token, signalR: connection.SignalR)
+        { PinnedFingerprint = connection.PinnedFingerprint };
     private readonly ConcurrentDictionary<string, (string Session, SessionHints Keeper)> hints = new();
     private Task? runtime;
     internal TimeSpan Budget { get; init; } = TimeSpan.FromSeconds(15);
@@ -100,8 +105,7 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
                 if (handle is not null)
                 {
                     // Verify the exact durable handle, never resume a nearby session by chat name or repo.
-                    var probe = await forwarder.ForwardAsync(RelayTools.GetStatus, JsonSerializer.SerializeToElement(new
-                    { repositoryId = repo, sessionId = handle.SessionId, sessionToken = handle.SessionToken, backgroundCall = true }), cancel);
+                    var probe = await forwarder.ProbeNativeAsync(binding, cancel);
                     if (!probe.Ok && probe.Version is not null && probe.Code == RelayErrorCodes.SessionUnknown) handle = null;
                     else if (!probe.Ok) throw new Refused(probe.Code);
                     else if (probe.Version is null || !SessionHandoff.IsSessionReply(RelayTools.GetStatus, JsonSerializer.SerializeToElement(new { sessionId = handle.SessionId }), probe))
@@ -110,7 +114,7 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
                 if (handle is null)
                 {
                     var handoff = SessionHandoff.ForFolder(folder, client);
-                    var opened = await handoff.OpenNativeJoinAsync(binding, forwarder, cancel, context.DisplayTitle);
+                    var opened = await handoff.OpenNativeJoinAsync(binding, forwarder, cancel, context.DisplayTitle, evidence.GetProperty("nativePreflight"));
                     if (!opened.Completed) throw new Refused(opened.Code);
                     handle = binding.CurrentHandle ?? throw new Refused("native_handle_unverified");
                 }

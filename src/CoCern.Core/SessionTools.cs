@@ -18,12 +18,17 @@ internal sealed class SessionTools(Aggregates aggregates, StandingDelivery stand
 {
     public async Task<RelayReply> OpenAsync(RelayCaller caller, JsonObject args, CallTrace? trace)
     {
+        Task<string?> Resolve(JsonObject evidence) => docs.ResolveNativeAsync(caller, (string?)evidence["checkout"], (string?)evidence["common"], (string?)evidence["origin"]);
         if (args["nativePreflight"] is JsonObject evidence)
         {
-            var repo = await docs.ResolveNativeAsync(caller, (string?)evidence["checkout"], (string?)evidence["common"], (string?)evidence["origin"]);
+            var repo = await Resolve(evidence);
             return repo is not null && caller.MayAccess(repo) ? Ok(new { repositoryId = repo }) :
                 Error(RepositoryDenied, new { guidance = "Configure one accessible repository matching this checkout or its Git origin." });
         }
+        // Fresh authorization and mapping on this allocating request, after the caller obtained the exclusive lease.
+        if (args.Remove(RelayRequestGuard.CheckedNativeResolution, out var checkedEvidence) &&
+            (checkedEvidence is not JsonObject mapping || await Resolve(mapping) != Text(args, "repositoryId")))
+            return Error(RepositoryDenied);
         var opened = BoundWire(await OpenSessionAsync(caller, args));
         if (trace is not null && opened.Ok) { trace.SessionId = Text(Aggregates.Parse(opened), "sessionId"); trace.Role = Text(args, "role"); }
         if (opened.Ok && string.Equals(Text(args, "role"), SessionRoles.Manager, StringComparison.OrdinalIgnoreCase)) StartAnomalyMonitor(caller, Text(args, "repositoryId"));

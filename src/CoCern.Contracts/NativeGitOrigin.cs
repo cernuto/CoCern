@@ -5,6 +5,21 @@ namespace CoCern.Contracts;
 /// <summary>Credential-free identity for a conservative subset of network Git origins. No DNS, filesystem or network access.</summary>
 public static class NativeGitOrigin
 {
+    /// <summary>Only bounded credential-free origin identity and local path digests may cross the private resolution boundary.</summary>
+    public static bool ValidCheckoutEvidence(System.Text.Json.JsonElement value)
+    {
+        if (value.ValueKind != System.Text.Json.JsonValueKind.Object) return false;
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var field in value.EnumerateObject())
+        {
+            if (!seen.Add(field.Name) || field.Value.ValueKind != System.Text.Json.JsonValueKind.String) return false;
+            var text = field.Value.GetString()!;
+            if (field.Name == "origin") { if (Canonical(text) != text) return false; }
+            else if (field.Name is not ("checkout" or "common") || text.Length != 64 || !text.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f')) return false;
+        }
+        return seen.Count > 0;
+    }
+
     public static string? Canonical(string? value)
     {
         if (string.IsNullOrWhiteSpace(value) || value.Length > 2048 || value.Any(char.IsControl) || value.Contains('\\')) return null;

@@ -7,6 +7,7 @@ using CoCern.Domain;
 using CoCern.Host;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 
 namespace CoCern.Tests;
@@ -156,6 +157,143 @@ public sealed class NativeJoinCallsTests
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) => send(request, ct);
     }
 
+    private static (string Folder, AdapterOptions Options) ReviewConnection(NativeScope scope, bool enrolled)
+    {
+        if (!enrolled) return (scope.Folder, scope.Options);
+        using var node = NodeState.Open(Path.Combine(scope.Root, "review-node"));
+        node.SetHub(scope.Options.BaseUri.AbsoluteUri, null);
+        node.SaveCredential(new string('c', 64));
+        return (node.Folder, AdapterOptions.FromEnvironment(key => key == "COCERN_NODE_DIR" ? node.Folder : null));
+    }
+
+    private static HttpResponseMessage ReviewReply(JsonElement args) =>
+        args.TryGetProperty("nativePreflight", out _) ? Wire(new { repositoryId = "repo" }) :
+        args.TryGetProperty("nativeJoin", out _) ? Wire(new { sessionId = "s-native", sessionToken = "own-token" }) :
+        args.TryGetProperty("headersOnly", out _) ? Wire(new { items = new[] { new { messageId = "m1", repositoryId = "repo" } }, total = 1, nextCursor = (int?)null, truncated = false }) :
+        Wire(new { sessionId = "s-native", control = new { paused = false, requests = Array.Empty<object>() } });
+
+    [Fact]
+    public async Task Round1_compact_chat_private_probe_supports_startup_and_subsequent_calls()
+    {
+        using var scope = new NativeScope();
+        var options = new AdapterOptions(scope.Options.BaseUri.AbsoluteUri, scope.Options.Token) { ChatOnly = true };
+        var sends = 0;
+        using var http = new HttpClient(new Handler(async (r, ct) =>
+        {
+            using var doc = JsonDocument.Parse(await r.Content!.ReadAsStringAsync(ct));
+            if (r.RequestUri!.Segments[^1] == RelayTools.Ack) { Assert.Equal("own-token", ChatLocators.Text(doc.RootElement, "sessionToken")); sends++; }
+            return ReviewReply(doc.RootElement);
+        }));
+        var capture = new NativeHookContext("codex", Guid.NewGuid().ToString("D"), scope.Checkout);
+        var forwarder = new RelayForwarder(http, options);
+        await using var join = new NativeJoin(scope.Folder, options, forwarder);
+        var own = await join.EnsureAsync(capture, default);
+        Assert.Equal("s-native", own.SessionId);
+        var args = JsonSerializer.SerializeToElement(new { messageIds = new[] { "m1" } });
+        foreach (var id in new[] { "first", "later" })
+        {
+            var reply = await join.CallAsync(capture, id, RelayTools.Ack, args, default);
+            Assert.True(reply.Ok, reply.Code);
+        }
+        Assert.Equal(2, sends);
+        Assert.Equal("unknown_tool", (await forwarder.ForwardAsync(RelayTools.GetStatus, args)).Code);
+    }
+
+    [Fact]
+    public async Task Round1_already_canceled_public_forward_returns_canceled_task_without_http()
+    {
+        var sends = 0;
+        using var http = new HttpClient(new Handler((_, _) => { sends++; return Task.FromResult(Wire(new { })); }));
+        var forwarder = new RelayForwarder(http, new AdapterOptions("http://127.0.0.1:4321", "fixture"));
+        using var canceled = new CancellationTokenSource();
+        canceled.Cancel();
+        var returned = forwarder.ForwardAsync(RelayTools.GetStatus, JsonSerializer.SerializeToElement(new { }), canceled.Token);
+        Assert.True(returned.IsCanceled);
+        var error = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => returned);
+        Assert.Equal(canceled.Token, error.CancellationToken);
+        Assert.Equal(0, sends);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Round1_scoped_Claude_waiter_delivers_from_own_session_when_legacy_neighbor_exists(bool enrolled)
+    {
+        using var scope = new NativeScope();
+        var (folder, options) = ReviewConnection(scope, enrolled);
+        var capture = new NativeHookContext("claude", Guid.NewGuid().ToString("D"), scope.Checkout);
+        var keys = new List<string>();
+        using var handler = new Handler(async (r, ct) =>
+        {
+            Assert.Equal(options.Token, r.Headers.Authorization?.Parameter);
+            using var doc = JsonDocument.Parse(await r.Content!.ReadAsStringAsync(ct));
+            if (ChatLocators.Text(doc.RootElement, "sessionId") is { } id)
+            { keys.Add(id); Assert.Equal("own-token", ChatLocators.Text(doc.RootElement, "sessionToken")); }
+            return ReviewReply(doc.RootElement);
+        });
+        using var http = new HttpClient(handler, false);
+        await using var join = new NativeJoin(folder, options, new RelayForwarder(http, options));
+        await join.EnsureAsync(capture, default);
+        var location = new ChatLocation("claude", capture.NativeId);
+        NodeState.WriteSessionHandle(folder, new("s-neighbor", "neighbor", "repo", "Same", DateTimeOffset.UtcNow, location, location));
+        Assert.Equal("s-neighbor", ClaudeWaiter.FindHandle(folder, capture.NativeId)!.SessionId);
+        var deliveries = new List<string>();
+        Assert.Equal("queued", await ClaudeWaiter.RunNativeAsync(join, capture, deliveries.Add, TimeSpan.FromSeconds(4), default, handler));
+        Assert.Single(deliveries); Assert.NotEmpty(keys); Assert.All(keys, id => Assert.Equal("s-native", id));
+    }
+
+    [Theory]
+    [InlineData("changed")]
+    [InlineData("removed")]
+    [InlineData("ambiguous")]
+    public async Task Round1_actual_allocating_open_refuses_mapping_drift_while_waiting_on_binding(string drift)
+    {
+        using var scope = new NativeScope(RelayHostFixture.Token);
+        var configured = Directory.CreateDirectory(Path.Combine(scope.Root, "configured")).FullName;
+        var other = Directory.CreateDirectory(Path.Combine(scope.Root, "other")).FullName;
+        NativeScope.Git(other, "init", "-q");
+        foreach (var checkout in new[] { scope.Checkout, configured })
+        {
+            if (checkout == configured) NativeScope.Git(checkout, "init", "-q");
+            NativeScope.Git(checkout, "remote", "add", "origin", "https://git.example/team/a.git");
+        }
+        await using var host = new RelayHostFixture(remoteAddress: System.Net.IPAddress.Loopback, settings: new Dictionary<string,string?>
+        {
+            ["Relay:DocCache:Enabled"] = "true", ["Relay:DocCache:SyncMinutes"] = "0", ["Relay:DocCache:Repositories:0:Id"] = "repo",
+            ["Relay:DocCache:Repositories:0:ClonePath"] = configured, ["Relay:DocCache:Repositories:0:Fetch"] = "false",
+            ["Relay:DocCache:Repositories:1:Id"] = "alternative", ["Relay:DocCache:Repositories:1:ClonePath"] = other,
+            ["Relay:DocCache:Repositories:1:Fetch"] = "false", ["Relay:Clients:0:Repositories:1"] = "alternative"
+        });
+        var preflight = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var fixture = host.CreateClient();
+        using var http = new HttpClient(new Handler(async (request, ct) =>
+        {
+            var body = await request.Content!.ReadAsStringAsync(ct);
+            using var clone = new HttpRequestMessage(request.Method, request.RequestUri) { Content = new StringContent(body, System.Text.Encoding.UTF8, "application/json") };
+            clone.Headers.Authorization = request.Headers.Authorization;
+            var response = await fixture.SendAsync(clone, ct);
+            if (body.Contains("nativePreflight", StringComparison.Ordinal) && response.IsSuccessStatusCode) preflight.TrySetResult();
+            return response;
+        }));
+        var capture = new NativeHookContext("codex", Guid.NewGuid().ToString("D"), scope.Checkout);
+        await using var join = new NativeJoin(scope.Folder, scope.Options, new RelayForwarder(http, scope.Options));
+        Task<AdapterReply> call;
+        await using (var owner = await NativeJoinBinding.AcquireAsync(scope.Folder, "codex", capture.NativeId, Environment.MachineName, "repo", scope.Checkout, default))
+        {
+            call = join.CallAsync(capture, "after-lock", RelayTools.GetStatus, JsonSerializer.SerializeToElement(new { }), default);
+            await preflight.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            if (drift == "removed") Directory.Move(configured, configured + "-removed");
+            else if (drift == "ambiguous") NativeScope.Git(other, "remote", "add", "origin", "https://git.example/team/a.git");
+            else NativeScope.Git(configured, "remote", "set-url", "origin", "https://git.example/team/different.git");
+        }
+        Assert.Equal(RelayErrorCodes.RepositoryDenied, (await call).Code);
+        Assert.Empty(NativeJoinBinding.DispatchSnapshot(scope.Folder));
+        using var authorized = host.AuthorizedClient();
+        var directory = await host.Call(authorized, RelayTools.WorkerList, new { repositoryId = "repo" });
+        using var rows = JsonDocument.Parse(directory.GetProperty("dataJson").GetString()!);
+        Assert.Empty(rows.RootElement.GetProperty("items").EnumerateArray());
+    }
+
     [Fact]
     public async Task Enrolled_node_delayed_acquisition_announces_only_verified_generation_and_rejects_foreign_records()
     {
@@ -213,6 +351,177 @@ public sealed class NativeJoinCallsTests
         Assert.Empty(NativeJoinBinding.DispatchSnapshot(node.Folder));
         Assert.False((await join.CallAsync(context, "foreign", RelayTools.GetStatus, JsonSerializer.SerializeToElement(new { }), default)).Ok);
         Assert.Equal(1, opens);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Round1_route_invalidated_during_final_status_cannot_reserve_or_queue(bool enrolled)
+    {
+        using var scope = new NativeScope();
+        var (folder, options) = ReviewConnection(scope, enrolled);
+        if (!enrolled) options = new AdapterOptions(options.BaseUri.AbsoluteUri, options.Token) { ChatOnly = true };
+        var capture = new NativeHookContext("codex", Guid.NewGuid().ToString("D"), scope.Checkout);
+        var finalStatus = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var http = new HttpClient(new Handler(async (r, ct) =>
+        {
+            using var doc = JsonDocument.Parse(await r.Content!.ReadAsStringAsync(ct));
+            if (r.RequestUri!.Segments[^1] == RelayTools.GetStatus && !doc.RootElement.TryGetProperty("attentionDetail", out _))
+            { finalStatus.TrySetResult(); await release.Task.WaitAsync(ct); }
+            return ReviewReply(doc.RootElement);
+        }));
+        var forward = new RelayForwarder(http, options);
+        await using var join = new NativeJoin(folder, options, forward);
+        var handle = await join.EnsureAsync(capture, default);
+        var calls = 0;
+        var insideQueue = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var finishQueue = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var dispatcher = new HoldingDispatcher(async ct => { calls++; insideQueue.TrySetResult(); await finishQueue.Task.WaitAsync(ct); });
+        var watcherForwarder = forward;
+        WakeTarget target;
+        if (enrolled)
+        {
+            target = Assert.Single(NodeRunner.WakeTargets(folder, [new NodeRoute("codex", capture.NativeId, handle.SessionId, "repo")], "fixture", _ => dispatcher, "node"));
+        }
+        else
+        {
+            var ready = new TaskCompletionSource<(WakeTarget Target, AdapterOptions Options)>(TaskCreationOptions.RunContinuationsAsynchronously);
+            await using var wake = new LocalChatWake(new LocalWakeConnection { Folder = folder, Options = options }, new NodeTransport
+            { CodexExecutable = () => "fixture", CodexDispatcher = _ => dispatcher, Locators = [] },
+                (runtime, t, _) => { ready.TrySetResult((t, runtime.Options)); return Task.CompletedTask; });
+            using var stop = new CancellationTokenSource();
+            var running = wake.RunAsync(stop.Token);
+            var result = await ready.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            target = result.Target;
+            Assert.Equal(options.BaseUri, result.Options.BaseUri);
+            Assert.Equal(options.PinnedFingerprint, result.Options.PinnedFingerprint);
+            Assert.True(options.Token == result.Options.Token);
+            watcherForwarder = new RelayForwarder(http, result.Options);
+            Assert.Equal("unknown_tool", (await forward.ForwardAsync(RelayTools.GetStatus, JsonSerializer.SerializeToElement(new { }))).Code);
+            stop.Cancel(); await running;
+        }
+        var db = Path.Combine(scope.Root, "review.db");
+        using var state = new WakeState(db);
+        var wakeup = new WakeReconciler(new(options.BaseUri.AbsoluteUri, "", "", db, Path.Combine(scope.Root, "stop"), []), state, watcherForwarder, target.Dispatcher);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var pending = wakeup.ReconcileAsync(target.Route, target.Session, timeout.Token);
+        await finalStatus.Task.WaitAsync(timeout.Token);
+        NodeState.WriteSessionHandle(folder, handle with { Chat = new("codex", Guid.NewGuid().ToString("D")) });
+        release.TrySetResult();
+        Assert.NotEqual("queued", await pending);
+        Assert.Equal(0, calls);
+        NodeState.WriteSessionHandle(folder, handle);
+        var valid = wakeup.ReconcileAsync(target.Route, target.Session, timeout.Token);
+        await insideQueue.Task.WaitAsync(timeout.Token);
+        try
+        {
+            using var competing = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+            {
+                await using var lease = await NativeJoinBinding.AcquireAsync(folder, "codex", capture.NativeId, Environment.MachineName, "repo", scope.Checkout, competing.Token);
+            });
+        }
+        finally { finishQueue.TrySetResult(); }
+        Assert.Equal("queued", await valid);
+        Assert.Equal(1, calls);
+    }
+
+    private sealed class HoldingDispatcher(Func<CancellationToken, Task> queue) : IWakeDispatcher
+    {
+        public async Task<bool> QueueAsync(string threadId, string prompt, CancellationToken ct) { await queue(ct); return true; }
+    }
+
+    [Fact]
+    public async Task Round1_lost_reply_freezes_checked_evidence_and_cannot_change_retry_wire()
+    {
+        using var scope = new NativeScope();
+        const string original = "https://git.example/team/original.git";
+        NativeScope.Git(scope.Checkout, "remote", "add", "origin", original);
+        var context = new NativeHookContext("codex", Guid.NewGuid().ToString("D"), scope.Checkout);
+        var sent = new List<string>();
+        var arrived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var http = new HttpClient(new Handler(async (r, ct) =>
+        {
+            var wire = await r.Content!.ReadAsStringAsync(ct);
+            using var doc = JsonDocument.Parse(wire);
+            if (doc.RootElement.TryGetProperty("nativeJoin", out var proof))
+            {
+                var evidence = proof.GetProperty("resolution");
+                Assert.True(NativeGitOrigin.ValidCheckoutEvidence(evidence));
+                sent.Add(wire);
+                if (sent.Count == 1) { arrived.TrySetResult(); await Task.Delay(Timeout.Infinite, ct); }
+            }
+            return ReviewReply(doc.RootElement);
+        }));
+        using var sender = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var forward = new RelayForwarder(http, scope.Options);
+        await using (var first = new NativeJoin(scope.Folder, scope.Options, forward))
+        {
+            var opening = first.EnsureAsync(context, sender.Token);
+            await arrived.Task.WaitAsync(sender.Token);
+            sender.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => opening);
+        }
+        NativeScope.Git(scope.Checkout, "remote", "set-url", "origin", "https://git.example/team/changed.git");
+        await using var restarted = new NativeJoin(scope.Folder, scope.Options, forward);
+        var changed = await restarted.CallAsync(context, "changed", RelayTools.Ack, JsonSerializer.SerializeToElement(new { }), default);
+        Assert.False(changed.Ok); Assert.Single(sent);
+        NativeScope.Git(scope.Checkout, "remote", "set-url", "origin", original);
+        Assert.Equal("s-native", (await restarted.EnsureAsync(context, default)).SessionId);
+        Assert.Equal(2, sent.Count);
+        Assert.True(sent[0] == sent[1], "The frozen checked open changed across process restart.");
+    }
+
+    [Theory]
+    [InlineData("credential")]
+    [InlineData("duplicate")]
+    [InlineData("mixed")]
+    [InlineData("forged")]
+    public async Task Round1_checked_proof_refuses_malformed_or_mixed_evidence(string form)
+    {
+        using var scope = new NativeScope();
+        await using var binding = await NativeJoinBinding.AcquireAsync(scope.Folder, "claude", Guid.NewGuid().ToString("D"), Environment.MachineName, "repo", scope.Checkout, default);
+        var evidence = JsonSerializer.SerializeToElement(new { origin = "https://git.example/team/project" });
+        var wire = binding.OpenWireArguments(evidence);
+        var guard = new CallGuard(null!, "hub"); var caller = new RelayCaller("worker", false, ["repo"]);
+        Assert.True(guard.TryAdmit(caller, RelayTools.SessionOpen, wire, null, out _, out _));
+        var mutated = System.Text.Json.Nodes.JsonNode.Parse(wire.GetRawText())!.AsObject();
+        if (form == "credential") mutated["nativeJoin"]!["resolution"]!["origin"] = "https://private@host.example/team/project";
+        if (form == "forged") mutated[RelayRequestGuard.CheckedNativeResolution] = JsonSerializer.SerializeToNode(evidence);
+        if (form == "mixed") mutated["expectedVersion"] = null;
+        var raw = mutated.ToJsonString();
+        if (form == "duplicate") raw = raw.Replace("\"resolution\":{", "\"resolution\":{\"origin\":null,", StringComparison.Ordinal);
+        using var submitted = JsonDocument.Parse(raw);
+        Assert.False(guard.TryAdmit(caller, RelayTools.SessionOpen, submitted.RootElement, null, out _, out var refusal));
+        Assert.Equal(RelayErrorCodes.InvalidArguments, refusal!.Code);
+    }
+
+    private sealed class Meter : ITokenCounter
+    {
+        public string Encoding => "fixture";
+        public int Count(string text) => text.Length;
+        public int PrefixLength(string text, int maxTokens) => Math.Min(text.Length, maxTokens);
+    }
+
+    [Fact]
+    public async Task Round1_preflight_meter_omits_raw_text_for_valid_malformed_and_wrong_tool_calls()
+    {
+        await using var host = new RelayHostFixture(disableDispatcher: true, configureServices: services => services.AddSingleton<ITokenCounter>(new Meter()));
+        var app = host.Services.GetRequiredService<RelayApplication>();
+        var caller = new RelayCaller("worker", false, ["repo"]);
+        var safe = JsonSerializer.SerializeToElement(new { nativePreflight = new { origin = "https://git.example/team/project" } });
+        var unsafeEvidence = JsonSerializer.SerializeToElement(new { nativePreflight = new { origin = "https://user:synthetic-secret@git.example/team/project" } });
+        Assert.Equal(RelayErrorCodes.RepositoryDenied, (await app.ExecuteAsync(caller, RelayTools.SessionOpen, safe)).Code);
+        Assert.Equal(RelayErrorCodes.InvalidArguments, (await app.ExecuteAsync(caller, RelayTools.SessionOpen, unsafeEvidence)).Code);
+        Assert.Equal(RelayErrorCodes.InvalidArguments, (await app.ExecuteAsync(caller, RelayTools.WorkerList, unsafeEvidence)).Code);
+        await host.Services.GetRequiredService<CoCern.Storage.SqliteStore>().FlushActivityAsync();
+        using var connection = new Microsoft.Data.Sqlite.SqliteConnection(new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
+        { DataSource = host.DatabasePath, Mode = Microsoft.Data.Sqlite.SqliteOpenMode.ReadOnly }.ToString());
+        connection.Open();
+        using var sql = connection.CreateCommand();
+        sql.CommandText = "SELECT count(*) FROM activity_log WHERE tool IN ('session_open', 'worker_list') AND request_bytes>0 AND request_tokens IS NULL AND code IN ('InvalidArguments','RepositoryDenied')";
+        Assert.Equal(3L, (long)sql.ExecuteScalar()!);
     }
 
     private sealed class NativeScope : IDisposable

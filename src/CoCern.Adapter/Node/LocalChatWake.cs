@@ -113,9 +113,10 @@ public sealed class LocalChatWake : IAsyncDisposable
         {
             var path = Path.Combine(Connection.Folder, "wake-" + thread + ".db");
             using var state = new WakeState(path); // Exclusive per-native-chat state also prevents duplicate MCP processes from dispatching twice.
-            var runtime = new WakeRuntime(Connection.Options, path, Path.Combine(Connection.Folder, "stop"), Connection.Options.BaseUri.AbsoluteUri) { State = state, HubHandler = transport.HubHandler, Interval = transport.WakeInterval };
+            var options = handle.NativeBindingKey is null ? Connection.Options : NativeJoin.BackgroundOptions(Connection.Options);
+            var runtime = new WakeRuntime(options, path, Path.Combine(Connection.Folder, "stop"), Connection.Options.BaseUri.AbsoluteUri) { State = state, HubHandler = transport.HubHandler, Interval = transport.WakeInterval };
             var route = new WakeRoute(handle.RepositoryId, "default", NodeState.SessionHandlePath(Connection.Folder, handle.SessionId), thread, Environment.MachineName);
-            await watch(runtime, new(route, new(handle.SessionId, handle.SessionToken), transport.CodexDispatcher(codex)), ct);
+            await watch(runtime, new(route, new(handle.SessionId, handle.SessionToken), NativeJoinBinding.ForDispatch(Connection.Folder, handle, transport.CodexDispatcher(codex))), ct);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
         catch (IOException) { /* Another live adapter owns the native chat; retry after it releases the state. */ }

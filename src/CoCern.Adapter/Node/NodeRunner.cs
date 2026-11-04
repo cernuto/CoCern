@@ -370,7 +370,8 @@ public sealed class NodeRunner : IAsyncDisposable
                 native ??= NativeJoinBinding.DispatchSnapshot(nodeFolder);
                 if (!native.Contains(handle) || native.Count(other => other.Chat == handle.Chat) != 1) continue;
             }
-            targets.Add(new(new WakeRoute(handle.RepositoryId, "default", path, chat.ThreadId, machineName), new WakeSession(handle.SessionId, handle.SessionToken), dispatcher(codex)));
+            targets.Add(new(new WakeRoute(handle.RepositoryId, "default", path, chat.ThreadId, machineName), new WakeSession(handle.SessionId, handle.SessionToken),
+                NativeJoinBinding.ForDispatch(nodeFolder, handle, dispatcher(codex))));
         }
         return targets;
     }
