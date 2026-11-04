@@ -81,6 +81,9 @@ public static class CoordinationTools
         {
             if (!Directory.Exists(directory)) return null;
             var start = new System.Diagnostics.ProcessStartInfo(git) { WorkingDirectory = directory, RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = true, UseShellExecute = false };
+            // A native event's cwd selects its checkout. Inherited repository/config selectors must not repoint it.
+            foreach (var name in start.Environment.Keys.Where(name => name.StartsWith("GIT_", StringComparison.OrdinalIgnoreCase)).ToArray())
+                start.Environment.Remove(name);
             foreach (var argument in new[] { "rev-parse", "--show-toplevel" }) start.ArgumentList.Add(argument);
             start.Environment["GIT_TERMINAL_PROMPT"] = "0";
             start.Environment["GIT_OPTIONAL_LOCKS"] = "0";

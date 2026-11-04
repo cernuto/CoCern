@@ -314,9 +314,10 @@ public sealed class NodeState : IDisposable
     /// <summary>The handle file for a relay session; the ID must be one that can name a file.</summary>
     internal static string SessionHandlePath(string nodeFolder, string sessionId) => IsFileId(sessionId) ? Path.Combine(nodeFolder, SessionsFolder, sessionId + ".json") : throw new ArgumentException("Not a session ID that can name a file.", nameof(sessionId));
 
-    /// <summary>Every readable handle in the node folder.</summary>
+    /// <summary>Readable legacy handles. Native handles require their fully scoped private binding reference.</summary>
     public static IReadOnlyList<SessionHandle> ReadSessionHandles(string nodeFolder) =>
-        ChatLocators.Files(Path.Combine(nodeFolder, SessionsFolder), "*.json", SearchOption.TopDirectoryOnly).Select(ReadSessionHandle).OfType<SessionHandle>().ToArray();
+        ChatLocators.Files(Path.Combine(nodeFolder, SessionsFolder), "*.json", SearchOption.TopDirectoryOnly).Select(ReadSessionHandle).OfType<SessionHandle>()
+            .Where(handle => handle.NativeBindingKey is null).ToArray();
 
     /// <summary>A relay session ID that is safe as a file name: ASCII letters, digits, '.', '_' or '-', starting with a letter or digit.</summary>
     internal static bool IsFileId(string id) => id.Length is > 0 and <= 128 && char.IsAsciiLetterOrDigit(id[0]) && id.All(c => char.IsAsciiLetterOrDigit(c) || c is '.' or '_' or '-');

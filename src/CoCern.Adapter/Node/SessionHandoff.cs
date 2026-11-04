@@ -33,13 +33,31 @@ public sealed class SessionHandoff
     /// <summary>A hand-off writing into <paramref name="folder"/> directly (tests).</summary>
     internal static SessionHandoff ForFolder(string folder, ChatLocation? client = null) => new(folder, client, TextWriter.Null);
 
-    /// <summary>Complete only the exact authenticated native opening attempt, under both private ownership locks.</summary>
-    internal bool CompleteNativeJoin(NativeJoinBinding binding, AdapterOptions authenticatedOptions, JsonElement arguments, AdapterReply reply)
+    /// <summary>Perform one exact scoped open. No independently supplied reply can become a private native handle.</summary>
+    internal async Task<(bool Completed, string Code)> OpenNativeJoinAsync(NativeJoinBinding binding, RelayForwarder forwarder, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        try
+        {
+            if (!binding.MatchesFolder(_folder) || !binding.MatchesClient(_client) || !forwarder.MatchesNativeBinding(binding))
+                return (false, "native_join_scope_mismatch");
+            var arguments = binding.FrozenOpenArguments;
+            var reply = await forwarder.ForwardAsync(CoCern.Contracts.RelayTools.SessionOpen, arguments, ct);
+            if (!reply.Ok) return (false, reply.Code);
+            if (!forwarder.MatchesNativeBinding(binding)) return (false, "native_join_scope_mismatch");
+            return CompleteNativeJoin(binding, arguments, reply) ? (true, reply.Code) : (false, "native_join_handle_conflict");
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or JsonException)
+        { return (false, "native_join_scope_mismatch"); }
+    }
+
+    /// <summary>Only the immediately preceding transport call can reach this completion boundary.</summary>
+    private bool CompleteNativeJoin(NativeJoinBinding binding, JsonElement arguments, AdapterReply reply)
     {
         try
         {
             if (!reply.Ok || reply.Code != "Ok" || reply.Version is null || reply.Data is not { ValueKind: JsonValueKind.Object } data ||
-                !binding.MatchesFolder(_folder) || !binding.MatchesClient(_client) || !binding.MatchesConnection(authenticatedOptions) ||
+                !binding.MatchesFolder(_folder) || !binding.MatchesClient(_client) ||
                 arguments.ValueKind != JsonValueKind.Object || arguments.GetRawText() != binding.FrozenOpenArguments.GetRawText() ||
                 ChatLocators.Text(data, "sessionId") is not { } id || !NodeState.IsFileId(id) ||
                 ChatLocators.Text(data, "sessionToken") is not { Length: > 0 and <= 8192 } token || token.Any(char.IsControl)) return false;

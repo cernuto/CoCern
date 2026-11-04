@@ -47,21 +47,27 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
         (credentialIdentity, BindingKey, arguments, currentSessionId, owner) = (identity, key, frozen.Clone(), sessionId, lease);
     }
 
+    /// <summary>Provider names are at most 16 characters; native IDs accept only UUID N (32) or D (36) forms.</summary>
     internal static async Task<NativeJoinBinding> AcquireAsync(string folder, string provider, string nativeId,
         string machineId, string repositoryId, string workspace, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        folder = CanonicalDirectory(folder);
-        if (string.IsNullOrWhiteSpace(provider)) throw new ArgumentException("A native provider is required.");
+        if (provider is not { Length: > 0 and <= 16 } || nativeId is not { Length: 32 or 36 })
+            throw new ArgumentException("A bounded provider and N/D native UUID are required.");
         provider = provider.ToLowerInvariant();
-        if (provider is not ("codex" or "claude") || !Guid.TryParse(nativeId, out var id))
+        if (provider is not ("codex" or "claude") || !TryNativeId(nativeId, out var id))
             throw new ArgumentException("A supported provider and native chat UUID are required.");
         nativeId = id.ToString("D");
+        folder = CanonicalDirectory(folder);
         ValidateIdentifier(machineId); ValidateIdentifier(repositoryId);
         workspace = CanonicalDirectory(workspace); // Never use the adapter's cwd or accept a relative native event path.
         var checkout = await Task.Run(() => CoordinationTools.GitTopLevel(workspace), ct).WaitAsync(ct);
         if (checkout is null) throw Failure("The native event checkout could not be verified with Git.");
-        workspace = CanonicalDirectory(checkout);
+        checkout = CanonicalDirectory(checkout);
+        var prefix = Path.EndsInDirectorySeparator(checkout) ? checkout : checkout + Path.DirectorySeparatorChar;
+        if (!string.Equals(workspace, checkout, StringComparison.Ordinal) && !workspace.StartsWith(prefix, StringComparison.Ordinal))
+            throw Failure("Git returned a checkout outside the native event directory.");
+        workspace = checkout;
         var identity = ConnectionIdentity(folder);
         var key = Digest("cocern-native-binding-v1", folder, identity, provider, nativeId, machineId, repositoryId, workspace);
         var sessions = Path.Combine(folder, NodeState.SessionsFolder);
@@ -116,7 +122,7 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
 
     internal bool MatchesFolder(string folder) => CanonicalDirectory(folder) == Folder;
     internal bool MatchesClient(ChatLocation? client) => client is not null && client.Provider == Provider &&
-        Guid.TryParse(client.ThreadId, out var id) && id.ToString("D") == NativeId;
+        TryNativeId(client.ThreadId, out var id) && id.ToString("D") == NativeId;
     internal bool MatchesConnection(AdapterOptions authenticatedOptions)
     {
         CheckLease();
@@ -209,7 +215,12 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
     private static string Text(JsonElement value) => value.ValueKind == JsonValueKind.String ? value.GetString()! : throw Failure("The private native binding is invalid.");
     private static void ValidateIdentifier(string value)
     {
-        if (string.IsNullOrWhiteSpace(value) || value.Length > NodeState.MaxIdentifierLength || value.Any(char.IsControl)) throw new ArgumentException("A bounded native scope identifier is required.");
+        if (value is not { Length: > 0 and <= NodeState.MaxIdentifierLength } || string.IsNullOrWhiteSpace(value) || value.Any(char.IsControl)) throw new ArgumentException("A bounded native scope identifier is required.");
+    }
+    private static bool TryNativeId(string value, out Guid id)
+    {
+        id = default;
+        return value is { Length: 32 or 36 } && Guid.TryParseExact(value, value.Length == 32 ? "N" : "D", out id);
     }
     private static string CanonicalDirectory(string path)
     {
@@ -229,6 +240,12 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
             if (path.StartsWith(@"\\?\UNC\", StringComparison.Ordinal)) path = @"\\" + path[8..];
             else if (path.StartsWith(@"\\?\", StringComparison.Ordinal)) path = path[4..];
             path = Path.TrimEndingDirectorySeparator(path);
+        }
+        else
+        {
+            // A lexical Unix path does not identify its physical directory when any ancestor is a symlink.
+            // Refuse such paths rather than opening a second lock namespace through an alias.
+            for (DirectoryInfo? ancestor = new(path); ancestor is not null; ancestor = ancestor.Parent) RejectLink(ancestor.FullName);
         }
         return path;
     }

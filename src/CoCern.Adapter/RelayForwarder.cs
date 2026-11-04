@@ -24,6 +24,9 @@ public sealed class RelayForwarder(HttpClient client, AdapterOptions options)
     /// <summary>The pinned handler when the options carry a certificate fingerprint, otherwise the plain one.</summary>
     public static HttpClientHandler CreateHandler(AdapterOptions options) => options.PinnedFingerprint is { } fingerprint ? PinnedCertificate.CreateHandler(fingerprint) : CreateHandler();
 
+    // Uses this transport's closed connection options; callers cannot substitute an unrelated authentication claim.
+    internal bool MatchesNativeBinding(NativeJoinBinding binding) => binding.MatchesConnection(options);
+
     public async Task<AdapterReply> ForwardAsync(string tool, JsonElement arguments, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
