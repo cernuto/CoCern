@@ -44,12 +44,64 @@ public static class NodeSupervisor
                 };
                 NodeUpdateState.Write(root, record);
             }
-            var launch = NodePackage.Launch(record.Current, originalFolder, record.ActivationNonce, readHost());
-            if (launch is null) { Console.Error.WriteLine("node-update:current-unavailable"); return 1; }
-            await using var child = start(launch);
-            if (child is null) { Console.Error.WriteLine("node-update:child-unavailable"); return 1; }
-            // Process creation/exit is not authenticated readiness. Rollback evidence remains until Task 4 confirms it.
-            return await child.WaitForExitAsync(ct);
+            while (true)
+            {
+                ct.ThrowIfCancellationRequested();
+                var candidate = record.Phase == NodeUpdatePhase.Starting;
+                var image = candidate ? record.Pending! : record.Current;
+                ClearHandoff(root, "ready.json");
+                ClearHandoff(root, "request.json");
+                // Launch rehashes the immutable stored image on every attempt.
+                var launch = NodePackage.Launch(image, originalFolder, record.ActivationNonce, readHost());
+                var child = launch is null ? null : start(launch);
+                if (child is null)
+                {
+                    if (candidate) { record = Rollback(root, record, clock); continue; }
+                    Console.Error.WriteLine("node-update:current-unavailable"); return 1;
+                }
+                int exit;
+                var startupFailed = false;
+                await using (child)
+                {
+                    var ended = child.WaitForExitAsync(ct);
+                    if (record.ActivationNonce is { } nonce)
+                    {
+                        if (!await ReadyAsync(root, child, ended, nonce, image.ContentId, clock, ct)) startupFailed = true;
+                        else
+                        {
+                            var committed = record with
+                            {
+                                Current = image,
+                                Previous = candidate ? record.Current : record.Previous,
+                                Pending = null,
+                                ActivationNonce = null,
+                                Phase = NodeUpdatePhase.Committed
+                            };
+                            try { NodeUpdateState.Write(root, committed); record = committed; }
+                            catch (Exception exception) when (JournalFailure(exception))
+                            {
+                                // The primary may already be committed even when refreshing its backup failed.
+                                var authoritative = NodeUpdateState.Read(root);
+                                if (authoritative.Record is { Phase: NodeUpdatePhase.Committed } durable && durable.Current.ContentId == image.ContentId) record = durable;
+                                else startupFailed = true;
+                            }
+                        }
+                    }
+                    if (!startupFailed) exit = await ended;
+                    else exit = 1;
+                } // Only this owned child is stopped/waited before retained startup.
+                if (startupFailed)
+                {
+                    if (candidate) { record = Rollback(root, record, clock); continue; }
+                    return 1; // Retain Rollback evidence until an authenticated retained startup succeeds.
+                }
+                if (exit != 75) return exit;
+                var request = NodeUpdateState.ReadRequest(root);
+                if (request is null || request.Candidate.ContentId == record.Current.ContentId ||
+                    request.Candidate.ReleaseId == record.LastFailedReleaseId && clock.GetUtcNow() - record.LastFailedAtUtc < TimeSpan.FromMinutes(15)) continue;
+                record = record with { Phase = NodeUpdatePhase.Starting, Pending = request.Candidate, ActivationNonce = Guid.NewGuid() };
+                NodeUpdateState.Write(root, record);
+            }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { return 0; }
         catch (Exception exception) when (exception is IOException or InvalidDataException or UnauthorizedAccessException or ArgumentException or NotSupportedException or System.ComponentModel.Win32Exception or System.Security.SecurityException)
@@ -57,6 +109,38 @@ public static class NodeSupervisor
             Console.Error.WriteLine("node-update:supervisor-unavailable");
             return 1;
         }
+    }
+
+    private static bool JournalFailure(Exception exception) => exception is IOException or InvalidDataException or UnauthorizedAccessException or ArgumentException or NotSupportedException or System.Security.SecurityException;
+
+    private static NodeUpdateRecord Rollback(string root, NodeUpdateRecord record, TimeProvider clock)
+    {
+        var rollback = record with { Phase = NodeUpdatePhase.Rollback, LastFailedReleaseId = record.Pending!.ReleaseId, LastFailedAtUtc = record.Pending.ReleaseId is null ? null : clock.GetUtcNow() };
+        NodeUpdateState.Write(root, rollback);
+        return rollback;
+    }
+
+    private static async Task<bool> ReadyAsync(string root, INodeChild child, Task<int> ended, Guid nonce, string contentId, TimeProvider clock, CancellationToken ct)
+    {
+        var started = clock.GetTimestamp();
+        while (clock.GetElapsedTime(started) < TimeSpan.FromSeconds(30))
+        {
+            ct.ThrowIfCancellationRequested();
+            if (ended.IsCompleted) return false;
+            var ready = NodeUpdateState.ReadReady(root);
+            if (ready is not null) return !ended.IsCompleted && ready.ActivationNonce == nonce && ready.ContentId == contentId && ready.ProcessId == child.ProcessId;
+            if (ended.IsCompleted) return false;
+            await Task.WhenAny(ended, Task.Delay(TimeSpan.FromMilliseconds(100), clock, ct));
+        }
+        return false;
+    }
+
+    private static void ClearHandoff(string root, string name)
+    {
+        var path = Path.Combine(root, name);
+        if (!File.Exists(path)) return;
+        NodePackage.ValidatePrivateFile(path);
+        File.Delete(path);
     }
 
     private static FileStream OpenOwner(string path)

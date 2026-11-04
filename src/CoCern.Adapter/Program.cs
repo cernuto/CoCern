@@ -110,10 +110,15 @@ try
             throw new AdapterConfigurationException(usage);
         if (args.Length == 5 && (args[3] != "--activation-nonce" || !Guid.TryParseExact(args[4], "D", out var nonce) || nonce == Guid.Empty))
             throw new AdapterConfigurationException(usage);
-        using var state = NodeState.Open(args[2]);
         using var shutdown = new CancellationTokenSource();
         Console.CancelKeyPress += (_, cancel) => { cancel.Cancel = true; shutdown.Cancel(); };
-        return await NodeRunner.RunAsync(state, null, new NodeTransport(), Console.Error, shutdown.Token);
+        var knownHost = SetupEnvironment.Host().Dotnet;
+        var transport = new NodeTransport
+        {
+            UpdateHost = NodePackage.ReadHostCapabilities(Path.IsPathFullyQualified(knownHost) ? knownHost : null),
+            CreateUpdater = context => new NodeUpdateCoordinator(context)
+        };
+        return await NodeRunner.RunWorkerAsync(args[2], args.Length == 5 ? Guid.ParseExact(args[4], "D") : null, AppContext.BaseDirectory, transport, Console.Error, shutdown.Token);
     }
     if (args.Length > 0 && args[0] == "--node")
     {

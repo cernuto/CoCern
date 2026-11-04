@@ -4,6 +4,9 @@ using System.Text.Json.Serialization;
 
 namespace CoCern.Adapter.Node;
 
+internal sealed record NodeUpdateRequest(NodeImage Candidate);
+internal sealed record NodeReady(Guid ActivationNonce, string ContentId, int ProcessId);
+
 public enum NodeUpdatePhase { Committed, Starting, Rollback }
 
 public sealed record NodeUpdateRecord(int Schema, NodeImage Current, NodeImage? Previous, NodeImage? Pending, Guid? ActivationNonce, NodeUpdatePhase Phase, string? LastFailedReleaseId, DateTimeOffset? LastFailedAtUtc);
@@ -14,6 +17,61 @@ public sealed record NodeUpdateReadResult(NodeUpdateReadStatus Status, NodeUpdat
 
 public static class NodeUpdateState
 {
+    internal static NodeImage? ValidateWorkerStartup(string nodeFolder, Guid? nonce, string executingFolder)
+    {
+        try
+        {
+            if (nonce == Guid.Empty || !Path.IsPathFullyQualified(nodeFolder) || !Path.IsPathFullyQualified(executingFolder)) return null;
+            var root = NodePackage.ValidatedUpdateRoot(Path.Combine(nodeFolder, "updates"), create: false);
+            var record = Read(root).Record;
+            if (record is null || (nonce is not null ? record.ActivationNonce != nonce || record.Phase == NodeUpdatePhase.Committed : record.Phase != NodeUpdatePhase.Committed)) return null;
+            var image = record.Phase == NodeUpdatePhase.Starting ? record.Pending! : record.Current;
+            var expected = Path.Combine(root, "versions", image.ContentId);
+            if (!string.Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(executingFolder)), expected, StringComparison.OrdinalIgnoreCase) || !NodePackage.ValidateStoredImage(root, image)) return null;
+            return image;
+        }
+        catch (Exception exception) when (InvalidJournal(exception)) { return null; }
+    }
+    internal static void WriteRequest(string updateRoot, NodeUpdateRequest request)
+    {
+        var root = NodePackage.ValidatedUpdateRoot(updateRoot, create: false);
+        if (request.Candidate.ReleaseId is null || !NodePackage.ValidateStoredImage(root, request.Candidate)) throw new InvalidDataException("node-request-invalid");
+        AtomicWrite(root, "request.json", request);
+    }
+    internal static NodeUpdateRequest? ReadRequest(string updateRoot)
+    {
+        var request = ReadHandoff<NodeUpdateRequest>(updateRoot, "request.json");
+        try { return request is { Candidate.ReleaseId: not null } && NodePackage.ValidateStoredImage(updateRoot, request.Candidate) ? request : null; }
+        catch (Exception exception) when (InvalidJournal(exception)) { return null; }
+    }
+    internal static void WriteReady(string updateRoot, NodeReady ready)
+    {
+        var root = NodePackage.ValidatedUpdateRoot(updateRoot, create: false);
+        if (!ValidReady(ready)) throw new InvalidDataException("node-ready-invalid");
+        AtomicWrite(root, "ready.json", ready);
+    }
+    internal static NodeReady? ReadReady(string updateRoot)
+    {
+        var ready = ReadHandoff<NodeReady>(updateRoot, "ready.json");
+        return ready is not null && ValidReady(ready) ? ready : null;
+    }
+    private static bool ValidReady(NodeReady ready) => ready.ActivationNonce != Guid.Empty && ready.ProcessId > 0 && ready.ContentId is { Length: 64 } id && id.All(c => char.IsAsciiDigit(c) || c is >= 'a' and <= 'f');
+    private static T? ReadHandoff<T>(string updateRoot, string name) where T : class
+    {
+        try
+        {
+            var root = NodePackage.ValidatedUpdateRoot(updateRoot, create: false);
+            var path = Path.Combine(root, name);
+            NodePackage.ValidatePrivateFile(path);
+            using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            if (file.Length is <= 0 or > JournalLimit) return null;
+            var bytes = new byte[checked((int)file.Length)];
+            file.ReadExactly(bytes);
+            if (file.ReadByte() != -1) return null;
+            return JsonSerializer.Deserialize<T>(bytes, Json);
+        }
+        catch (Exception exception) when (InvalidJournal(exception)) { return null; }
+    }
     private const int JournalLimit = 65536;
     private static readonly JsonSerializerOptions Json = new()
     {
@@ -45,6 +103,8 @@ public static class NodeUpdateState
             if (!Valid(root, record)) throw new InvalidDataException();
             var existing = Read(root);
             if (existing.Status == NodeUpdateReadStatus.Corrupt) throw new InvalidDataException();
+            // Pending is bounded recovery evidence on read; a new activation still needs all candidate bytes.
+            if (record.Phase == NodeUpdatePhase.Starting && !NodePackage.ValidateStoredImage(root, record.Pending)) throw new InvalidDataException();
             if (record.Phase != NodeUpdatePhase.Committed)
             {
                 // A validated primary also retains the last committed Current/Previous during Starting/Rollback.
@@ -90,12 +150,12 @@ public static class NodeUpdateState
         {
             if (record.Pending is not null || record.ActivationNonce is not null) return false;
         }
-        else if (record.Pending is null || record.ActivationNonce is not { } nonce || nonce == Guid.Empty || !NodePackage.ValidateStoredImage(root, record.Pending)) return false;
+        else if (record.Pending is null || record.ActivationNonce is not { } nonce || nonce == Guid.Empty || !NodePackage.ValidImageDescriptor(record.Pending)) return false;
         if ((record.LastFailedReleaseId is null) != (record.LastFailedAtUtc is null)) return false;
         return record.LastFailedReleaseId is null || record.LastFailedReleaseId is { Length: 64 } hash && hash.All(c => char.IsAsciiDigit(c) || c is >= 'A' and <= 'F');
     }
 
-    private static void AtomicWrite(string root, string name, NodeUpdateRecord record)
+    private static void AtomicWrite<T>(string root, string name, T record)
     {
         var bytes = JsonSerializer.SerializeToUtf8Bytes(record, Json);
         if (bytes.Length > JournalLimit) throw new InvalidDataException();

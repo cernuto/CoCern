@@ -116,11 +116,13 @@ public static class NodePackage
 
     internal static bool ValidateStoredImage(string updateRoot, NodeImage? image)
     {
-        if (image is null || !LowerHash(image.ContentId) || !UpperHash(image.AdapterDllSha256) || image.ReleaseId is not null && !UpperHash(image.ReleaseId) || !ValidMetadata(image.Package)) return false;
+        if (!ValidImageDescriptor(image)) return false;
         var versions = Path.Combine(updateRoot, "versions");
         ValidatePrivacy(new DirectoryInfo(versions));
-        return ValidateImage(Contained(versions, image.ContentId), image, default);
+        return ValidateImage(Contained(versions, image!.ContentId), image, default);
     }
+
+    internal static bool ValidImageDescriptor(NodeImage? image) => image is not null && LowerHash(image.ContentId) && UpperHash(image.AdapterDllSha256) && (image.ReleaseId is null || UpperHash(image.ReleaseId)) && ValidMetadata(image.Package);
 
     internal static void ValidatePrivateFile(string path)
     {
@@ -291,7 +293,7 @@ public static class NodePackage
         return result.ToString();
     }
 
-    private static bool ValidRelease(NodeRelease release) => release is not null && release.Schema == 1 && UpperHash(release.ReleaseId) && release.ReleaseId == release.ZipSha256 && UpperHash(release.AdapterDllSha256) && release.ZipBytes is > 0 and <= ZipLimit && ValidMetadata(release.Package) && JsonSerializer.SerializeToUtf8Bytes(release).Length <= 65536;
+    internal static bool ValidRelease(NodeRelease release) => release is not null && release.Schema == 1 && UpperHash(release.ReleaseId) && release.ReleaseId == release.ZipSha256 && UpperHash(release.AdapterDllSha256) && release.ZipBytes is > 0 and <= ZipLimit && ValidMetadata(release.Package) && JsonSerializer.SerializeToUtf8Bytes(release).Length <= 65536;
 
     private static bool ValidMetadata(NodePackageMetadata package)
     {
@@ -316,7 +318,7 @@ public static class NodePackage
     private static bool UpperHash(string? value) => value is { Length: 64 } && value.All(c => char.IsAsciiDigit(c) || c is >= 'A' and <= 'F');
     private static bool LowerHash(string? value) => value is { Length: 64 } && value.All(c => char.IsAsciiDigit(c) || c is >= 'a' and <= 'f');
     private static bool ValidHub(Uri hub) => hub is { IsAbsoluteUri: true } && hub.UserInfo.Length == 0 && hub.Query.Length == 0 && hub.Fragment.Length == 0 && (hub.Scheme == Uri.UriSchemeHttps || hub.Scheme == Uri.UriSchemeHttp && hub.IsLoopback);
-    private static bool SameMetadata(NodePackageMetadata? left, NodePackageMetadata right) => left is not null && ValidMetadata(right) && left.Schema == right.Schema && left.ProductVersion == right.ProductVersion && left.TargetFramework == right.TargetFramework && left.Rid == right.Rid && left.SelfContained == right.SelfContained && left.SupervisorProtocol == right.SupervisorProtocol && left.Frameworks.OrderBy(f => f.Name, StringComparer.Ordinal).ThenBy(f => f.Version, StringComparer.Ordinal).Select(f => (f.Name, f.Version)).SequenceEqual(right.Frameworks.OrderBy(f => f.Name, StringComparer.Ordinal).ThenBy(f => f.Version, StringComparer.Ordinal).Select(f => (f.Name, f.Version)));
+    internal static bool SameMetadata(NodePackageMetadata? left, NodePackageMetadata right) => left is not null && ValidMetadata(right) && left.Schema == right.Schema && left.ProductVersion == right.ProductVersion && left.TargetFramework == right.TargetFramework && left.Rid == right.Rid && left.SelfContained == right.SelfContained && left.SupervisorProtocol == right.SupervisorProtocol && left.Frameworks.OrderBy(f => f.Name, StringComparer.Ordinal).ThenBy(f => f.Version, StringComparer.Ordinal).Select(f => (f.Name, f.Version)).SequenceEqual(right.Frameworks.OrderBy(f => f.Name, StringComparer.Ordinal).ThenBy(f => f.Version, StringComparer.Ordinal).Select(f => (f.Name, f.Version)));
     private static string DllHash(string folder) { using var stream = File.OpenRead(Path.Combine(folder, "CoCern.Adapter.dll")); return Convert.ToHexString(SHA256.HashData(stream)); }
     private static StagedNode? Rejected() { Console.Error.WriteLine("node-update:package-unavailable"); return null; }
     private static bool Unavailable(Exception exception) => exception is IOException or InvalidDataException or UnauthorizedAccessException or ArgumentException or NotSupportedException or InvalidOperationException or OverflowException or HttpRequestException or OperationCanceledException or JsonException or System.Security.SecurityException;

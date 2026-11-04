@@ -11,6 +11,7 @@ public sealed record WakeTarget(WakeRoute Route, WakeSession Session, IWakeDispa
 /// <summary>Where a watcher runs: the hub and the credential it calls with, its exclusive state database and its stop file.</summary>
 public sealed record WakeRuntime(AdapterOptions Options, string StatePath, string StopFile, string RelayUrl)
 {
+    public Func<IDisposable?>? TryEnterDispatch { get; init; }
     /// <summary>Pulsed when the targets may have changed, so the watcher re-reads them now rather than at its next fallback pass.</summary>
     public WakeNudge? Nudge { get; init; }
     /// <summary>Replaces the hint channel's handler (tests); null keeps SignalR's own, pinned when <see cref="AdapterOptions.PinnedFingerprint"/> is set.</summary>
@@ -114,7 +115,12 @@ public static class WakeWatcher
                 for (var i = 0; i < current.Length && !File.Exists(runtime.StopFile); i++)
                 {
                     var target = current[i];
-                    var status = await new WakeReconciler(settings, state, forwarder, target.Dispatcher, clock, coverage).ReconcileAsync(target.Route, target.Session, lifetime.Token);
+                    string status;
+                    using (var dispatch = runtime.TryEnterDispatch?.Invoke())
+                    {
+                        if (runtime.TryEnterDispatch is not null && dispatch is null) continue;
+                        status = await new WakeReconciler(settings, state, forwarder, target.Dispatcher, clock, coverage).ReconcileAsync(target.Route, target.Session, lifetime.Token);
+                    }
                     var routeKey = WakeState.Key(target.Route.ThreadId);
                     if (!lastStatus.TryGetValue(routeKey, out var previous) || previous != status || status == "queued")
                         Console.Error.WriteLine($"CoCern wake route {i + 1}: {status}.");

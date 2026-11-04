@@ -23,6 +23,456 @@ namespace CoCern.Tests;
 
 public sealed class NodeTests : IDisposable
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Update_preserves_paused_or_pending_control_and_its_unread_mail(bool paused)
+    {
+        var database = Path.Combine(root, "control-update-hub.db");
+        var download = new TaskCompletionSource<StagedNode?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var prepared = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var dispatcher = new RecordingDispatcher();
+        (string SessionId, string Token) receiver = default;
+        string credential;
+        string controlBefore;
+        using var state = NodeState.Open(DataDir);
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        await using (var host = Hub(databasePath: database))
+        {
+            var traffic = new HubTraffic();
+            var basis = InMemory(host, traffic, TimeSpan.FromMilliseconds(20));
+            var transport = new NodeTransport
+            {
+                JoinCode = basis.JoinCode, ProbeFingerprint = basis.ProbeFingerprint, CreateHandler = basis.CreateHandler, HubHandler = basis.HubHandler,
+                Clients = () => [], Locators = [], AnnounceInterval = basis.AnnounceInterval, MachineName = "Node PC",
+                CodexExecutable = () => Path.Combine(root, "never-start-codex.exe"), CodexDispatcher = _ => dispatcher, WakeInterval = TimeSpan.FromMilliseconds(20),
+                UpdateHost = new(null, [], "win-x64"), Trace = events.Enqueue,
+                CreateUpdater = _ => new UpdateFunctionalCoordinator((_, ct) => download.Task.WaitAsync(ct), (_, _) => { prepared.TrySetResult(); throw new IOException("fixture prepare refusal"); })
+            };
+            var run = NodeRunner.RunAsync(state, InMemoryHub, transport, error, stop.Token);
+            try
+            {
+                await WaitForAsync(() => Count("announced") > 0, run);
+                credential = state.ReadCredential()!;
+                var sender = await OpenSessionWithTokenAsync(() => host.CreateClient(new() { BaseAddress = InMemoryHub }), credential);
+                receiver = await OpenSessionWithTokenAsync(() => host.CreateClient(new() { BaseAddress = InMemoryHub }), credential);
+                using var machine = host.CreateClient(new() { BaseAddress = InMemoryHub });
+                machine.DefaultRequestHeaders.Authorization = new("Bearer", credential);
+                await host.Call(machine, "send_message", new { repositoryId = "repo", sessionId = sender.SessionId, sessionToken = sender.Token, recipientSessionId = receiver.SessionId, requestId = "blocked-mail", text = "mail held by existing control" });
+                using var admin = AdminClient(host);
+                var controlReply = await host.Call(admin, "control_request", new { repositoryId = "repo", sessionId = receiver.SessionId, requestId = Guid.NewGuid().ToString("N"), command = paused ? "pause" : "cancel", actionId = "native-action" });
+                Assert.True(controlReply.GetProperty("ok").GetBoolean());
+                var status = await UpdateStatusAsync(host, machine, receiver);
+                controlBefore = status.GetProperty("control").GetRawText();
+                if (paused) Assert.True(status.GetProperty("control").GetProperty("paused").GetBoolean());
+                else Assert.NotEmpty(status.GetProperty("control").GetProperty("requests").EnumerateArray());
+                NodeState.WriteSessionHandle(DataDir, new(receiver.SessionId, receiver.Token, "repo", "blocked update", DateTimeOffset.UtcNow, Chat: new("codex", Guid.NewGuid().ToString())));
+                await WaitForAsync(() => Count("wake-target") > 0, run);
+                var package = new NodePackageMetadata(1, "1.0.0", "net10.0", "win-x64", true, [], 1);
+                var release = new NodeRelease(1, new string('B', 64), package, 1, new string('B', 64), new string('C', 64));
+                download.TrySetResult(new(release, new(new string('b', 64), package, release.AdapterDllSha256, release.ReleaseId), Path.Combine(root, "unused-staged")));
+                await prepared.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                var announced = Count("announced");
+                await WaitForAsync(() => Count("announced") >= announced + 2, run);
+                Assert.Empty(dispatcher.Threads);
+                Assert.Equal(controlBefore, (await UpdateStatusAsync(host, machine, receiver)).GetProperty("control").GetRawText());
+                Assert.Equal(1, (await UpdateInboxAsync(host, machine, receiver)).GetProperty("items").GetArrayLength());
+            }
+            finally { stop.Cancel(); Assert.Equal(0, await run); }
+        }
+        credential = state.ReadCredential()!;
+        await using var restarted = Hub(databasePath: database);
+        using var reader = restarted.CreateClient(new() { BaseAddress = InMemoryHub });
+        reader.DefaultRequestHeaders.Authorization = new("Bearer", credential);
+        Assert.Equal(controlBefore, (await UpdateStatusAsync(restarted, reader, receiver)).GetProperty("control").GetRawText());
+        Assert.Equal(1, (await UpdateInboxAsync(restarted, reader, receiver)).GetProperty("items").GetArrayLength());
+        using var wake = new WakeState(Path.Combine(DataDir, "wake.db"));
+        Assert.False(wake.IsUncertain(WakeState.Key(InMemoryHub.AbsoluteUri, "repo", receiver.SessionId)));
+    }
+
+    private static async Task<JsonElement> UpdateStatusAsync(RelayHostFixture host, HttpClient client, (string SessionId, string Token) session)
+    {
+        var envelope = await host.Call(client, "get_status", new { repositoryId = "repo", sessionId = session.SessionId, sessionToken = session.Token });
+        using var data = JsonDocument.Parse(envelope.GetProperty("dataJson").GetString()!);
+        return data.RootElement.Clone();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Update_prepare_failure_or_drain_deferral_preserves_live_loops_and_durable_mail(bool deferDrain)
+    {
+        var database = Path.Combine(root, "update-hub.db");
+        var firstThread = Guid.NewGuid().ToString();
+        var freshThread = Guid.NewGuid().ToString();
+        var download = new TaskCompletionSource<StagedNode?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var prepared = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var resumed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var dispatcher = new UpdateMailboxDispatcher(firstThread);
+        var startedDrain = new Stopwatch();
+        string credential;
+        (string SessionId, string Token) receiver = default, fresh = default;
+        using var state = NodeState.Open(DataDir);
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(70));
+        await using (var host = Hub(databasePath: database))
+        {
+            var traffic = new HubTraffic();
+            var basis = InMemory(host, traffic, TimeSpan.FromMilliseconds(20));
+            var factories = 0;
+            NodeUpdateContext? context = null;
+            var transport = new NodeTransport
+            {
+                JoinCode = basis.JoinCode, ProbeFingerprint = basis.ProbeFingerprint, CreateHandler = basis.CreateHandler, HubHandler = basis.HubHandler,
+                Clients = () => [], Locators = [], MachineName = "Node PC", AnnounceInterval = basis.AnnounceInterval,
+                CodexExecutable = () => Path.Combine(root, "never-start-codex.exe"), CodexDispatcher = _ => dispatcher, WakeInterval = TimeSpan.FromMilliseconds(20),
+                UpdateHost = new(null, [], "win-x64"),
+                CreateUpdater = value =>
+                {
+                    factories++; context = value;
+                    return new UpdateFunctionalCoordinator((_, ct) => download.Task.WaitAsync(ct), (_, _) => { prepared.TrySetResult(); throw new IOException("fixture prepare refusal"); });
+                },
+                Trace = value => { events.Enqueue(value); if (value == "announced" && startedDrain.IsRunning && startedDrain.Elapsed >= TimeSpan.FromSeconds(30)) resumed.TrySetResult(); }
+            };
+            var run = NodeRunner.RunAsync(state, InMemoryHub, transport, error, stop.Token);
+            try
+            {
+                await WaitForAsync(() => Count("announced") > 0, run);
+                credential = state.ReadCredential()!;
+                var sender = await OpenSessionWithTokenAsync(() => host.CreateClient(new() { BaseAddress = InMemoryHub }), credential);
+                receiver = await OpenSessionWithTokenAsync(() => host.CreateClient(new() { BaseAddress = InMemoryHub }), credential);
+                fresh = await OpenSessionWithTokenAsync(() => host.CreateClient(new() { BaseAddress = InMemoryHub }), credential);
+                NodeState.WriteSessionHandle(DataDir, new(receiver.SessionId, receiver.Token, "repo", "update first", DateTimeOffset.UtcNow, Chat: new("codex", firstThread)));
+                NodeState.WriteSessionHandle(DataDir, new(fresh.SessionId, fresh.Token, "repo", "update fresh", DateTimeOffset.UtcNow, Chat: new("codex", freshThread)));
+                using var machine = host.CreateClient(new() { BaseAddress = InMemoryHub });
+                machine.DefaultRequestHeaders.Authorization = new("Bearer", credential);
+                async Task Send((string SessionId, string Token) to, string text) => await host.Call(machine, "send_message", new { repositoryId = "repo", sessionId = sender.SessionId, sessionToken = sender.Token, recipientSessionId = to.SessionId, requestId = Guid.NewGuid().ToString("N"), text });
+                await WaitForAsync(() => Count("wake-target") > 0, run);
+                await Send(receiver, "mail while download is pending");
+                await dispatcher.FirstEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+                await Send(receiver, "second mail during download");
+                var identity = File.ReadAllBytes(NodeJson);
+                var package = new NodePackageMetadata(1, "1.0.0", "net10.0", "win-x64", true, [], 1);
+                var release = new NodeRelease(1, new string('B', 64), package, 1, new string('B', 64), new string('C', 64));
+                var before = Count("announced");
+                startedDrain.Start();
+                download.TrySetResult(new(release, new(new string('b', 64), package, release.AdapterDllSha256, release.ReleaseId), Path.Combine(root, "unused-staged")));
+                await WaitForAsync(() => Count("announced") > before, run);
+                Assert.False(prepared.Task.IsCompleted); // The reserved dispatcher still owns its full reconcile lease.
+                await Send(receiver, "mail during drain");
+                if (deferDrain)
+                {
+                    await resumed.Task.WaitAsync(TimeSpan.FromSeconds(40));
+                    Assert.False(prepared.Task.IsCompleted);
+                    dispatcher.FirstResult.TrySetResult(false);
+                }
+                else
+                {
+                    dispatcher.FirstResult.TrySetResult(false);
+                    await prepared.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                    var preparing = Count("announced");
+                    await WaitForAsync(() => Count("announced") > preparing, run);
+                }
+                await Send(fresh, "fresh mail after deferral");
+                await dispatcher.FreshQueued.Task.WaitAsync(TimeSpan.FromSeconds(10));
+                Assert.Equal(1, factories);
+                Assert.Equal(1, Count("waking"));
+                Assert.Equal(1, dispatcher.FirstCalls);
+                Assert.Equal(1, dispatcher.FreshCalls);
+                Assert.Equal(identity, File.ReadAllBytes(NodeJson));
+                Assert.Throws<AdapterConfigurationException>(() => NodeState.Open(DataDir));
+                Assert.NotNull(context);
+                using var stillLive = await context!.PinnedHttp.GetAsync(new Uri(InMemoryHub, "api/fixture-client-alive"));
+                Assert.Null(context.PinnedHttp.DefaultRequestHeaders.Authorization);
+                Assert.Equal(3, (await UpdateInboxAsync(host, machine, receiver)).GetProperty("items").GetArrayLength());
+                Assert.Equal(1, (await UpdateInboxAsync(host, machine, fresh)).GetProperty("items").GetArrayLength());
+            }
+            finally
+            {
+                dispatcher.FirstResult.TrySetResult(false);
+                stop.Cancel();
+                Assert.Equal(0, await run);
+            }
+        }
+        credential = state.ReadCredential()!;
+        using (var wake = new WakeState(Path.Combine(DataDir, "wake.db"))) Assert.True(wake.IsUncertain(WakeState.Key(InMemoryHub.AbsoluteUri, "repo", receiver.SessionId)));
+        await using var restarted = Hub(databasePath: database);
+        using var reader = restarted.CreateClient(new() { BaseAddress = InMemoryHub });
+        reader.DefaultRequestHeaders.Authorization = new("Bearer", credential);
+        Assert.Equal(3, (await UpdateInboxAsync(restarted, reader, receiver)).GetProperty("items").GetArrayLength());
+        Assert.Equal(1, (await UpdateInboxAsync(restarted, reader, fresh)).GetProperty("items").GetArrayLength());
+    }
+
+    private static async Task<JsonElement> UpdateInboxAsync(RelayHostFixture host, HttpClient client, (string SessionId, string Token) session)
+    {
+        var envelope = await host.Call(client, "check_inbox", new { repositoryId = "repo", sessionId = session.SessionId, sessionToken = session.Token, attention = false, headersOnly = true, limit = 50 });
+        using var data = JsonDocument.Parse(envelope.GetProperty("dataJson").GetString()!);
+        return data.RootElement.Clone();
+    }
+
+    private sealed class UpdateMailboxDispatcher(string firstThread) : IWakeDispatcher
+    {
+        public TaskCompletionSource FirstEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> FirstResult { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource FreshQueued { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public int FirstCalls, FreshCalls;
+        public Task<bool> QueueAsync(string threadId, string prompt, CancellationToken cancellationToken)
+        {
+            if (threadId == firstThread) { Interlocked.Increment(ref FirstCalls); FirstEntered.TrySetResult(); return FirstResult.Task; }
+            Interlocked.Increment(ref FreshCalls); FreshQueued.TrySetResult(); return Task.FromResult(true);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Update_stage_or_prepare_failure_backoff_survives_authenticated_client_replacement(bool prepareFailure)
+    {
+        using var state = NodeState.Open(DataDir);
+        state.SetHub(InMemoryHub.AbsoluteUri, ProbedFingerprint);
+        state.SaveCredential(new string('a', 64));
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var clock = new UpdateClock();
+        var began = clock.GetUtcNow();
+        var package = new NodePackageMetadata(1, "1.0.0", "net10.0", "win-x64", true, [], 1);
+        var release = new NodeRelease(1, new string('B', 64), package, 1, new string('B', 64), new string('C', 64));
+        var stagedImage = new StagedNode(release, new(new string('b', 64), package, release.AdapterDllSha256, release.ReleaseId), Path.Combine(root, "unused-staged"));
+        var calls = 0;
+        var prepares = 0;
+        var handlers = 0;
+        var announces = 0;
+        var replacementAnnounces = 0;
+        var early = false;
+        var contexts = new List<NodeUpdateContext>();
+        var transport = new NodeTransport
+        {
+            Clock = clock, Clients = () => [], Locators = [], Chats = _ => Task.FromResult(new JsonArray()), CodexExecutable = () => null,
+            AnnounceInterval = TimeSpan.FromMilliseconds(10), FirstRetry = TimeSpan.FromMilliseconds(1), MaxRetry = TimeSpan.FromMilliseconds(1), UpdateHost = new(null, [], "win-x64"),
+            CreateHandler = (_, mismatch) =>
+            {
+                var generation = 0;
+                return new UpdateTestHandler(_ =>
+                {
+                    if (generation == 0)
+                    {
+                        generation = ++handlers;
+                        if (generation == 2) clock.Advance(TimeSpan.FromMinutes(5));
+                    }
+                    if (generation == 1 && ++announces == 4) { mismatch(OtherFingerprint); throw new HttpRequestException("fixture replacement"); }
+                    return new(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new { routes = Array.Empty<object>(), nodeRelease = release }, new JsonSerializerOptions(JsonSerializerDefaults.Web))) };
+                });
+            },
+            HubHandler = () => new UpdateTestHandler(_ => new(HttpStatusCode.ServiceUnavailable)),
+            CreateUpdater = context =>
+            {
+                contexts.Add(context);
+                return new UpdateFunctionalCoordinator((offered, _) =>
+                {
+                    Assert.Equal(release.ReleaseId, offered!.ReleaseId);
+                    if (Interlocked.Increment(ref calls) == 1) return Task.FromResult<StagedNode?>(prepareFailure ? stagedImage : null);
+                    early = clock.GetUtcNow() - began < TimeSpan.FromMinutes(15);
+                    stop.Cancel();
+                    return Task.FromResult<StagedNode?>(null);
+                }, (_, _) => { Interlocked.Increment(ref prepares); throw new IOException("fixture prepare failure"); });
+            },
+            Trace = value => { if (value == "announced" && handlers == 2 && ++replacementAnnounces == 3) clock.Advance(TimeSpan.FromMinutes(11)); }
+        };
+        Assert.Equal(0, await NodeRunner.RunAsync(state, null, transport, error, stop.Token));
+        Assert.False(early);
+        Assert.Equal(2, calls);
+        Assert.Equal(prepareFailure ? 1 : 0, prepares);
+        Assert.Equal(2, contexts.Count);
+        Assert.NotSame(contexts[0].PinnedHttp, contexts[1].PinnedHttp);
+        Assert.Equal(contexts[0].MachineCredential, contexts[1].MachineCredential);
+        Assert.Equal(ProbedFingerprint, state.Fingerprint);
+    }
+
+    internal sealed class UpdateClock : TimeProvider
+    {
+        private long ticks;
+        private readonly DateTimeOffset start = DateTimeOffset.UtcNow;
+        public override DateTimeOffset GetUtcNow() => start + TimeSpan.FromTicks(Interlocked.Read(ref ticks));
+        public void Advance(TimeSpan elapsed) => Interlocked.Add(ref ticks, elapsed.Ticks);
+    }
+
+    private sealed class UpdateFunctionalCoordinator(Func<NodeRelease?, CancellationToken, Task<StagedNode?>> stage, Func<StagedNode, CancellationToken, Task> prepare) : INodeUpdateCoordinator
+    {
+        public Task<StagedNode?> TryStageAsync(NodeRelease? offered, CancellationToken ct) => stage(offered, ct);
+        public Task PrepareAsync(StagedNode staged, CancellationToken ct) => prepare(staged, ct);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Update_reconcile_lease_holds_through_reserved_dispatch_and_durable_result(bool queued)
+    {
+        Directory.CreateDirectory(root);
+        var path = Path.Combine(root, "dispatch-result.db");
+        var key = WakeState.Key(InMemoryHub.AbsoluteUri, "repo", "session");
+        var gate = new NodeDispatchGate();
+        var dispatcher = new UpdateBlockingDispatcher();
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        using (var state = new WakeState(path))
+        {
+            using var handler = new UpdateTestHandler(request =>
+            {
+                object data = request.RequestUri!.AbsolutePath.EndsWith("get_status", StringComparison.Ordinal)
+                    ? new { sessionId = "session", control = new { paused = false, requests = Array.Empty<object>() } }
+                    : new { items = new[] { new { messageId = "mail-during-download", repositoryId = "repo" } }, total = 1, nextCursor = (int?)null, truncated = false };
+                Assert.True(request.RequestUri.AbsolutePath.EndsWith("get_status", StringComparison.Ordinal) || request.RequestUri.AbsolutePath.EndsWith("check_inbox", StringComparison.Ordinal));
+                return new(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new { ok = true, code = "ok", dataJson = JsonSerializer.Serialize(data), version = 1 })) };
+            });
+            var runtime = new WakeRuntime(new AdapterOptions(InMemoryHub.AbsoluteUri, "fixture"), path, Path.Combine(root, "stop"), InMemoryHub.AbsoluteUri)
+            {
+                State = state, TryEnterDispatch = gate.TryEnter, Interval = TimeSpan.FromMilliseconds(10),
+                HubHandler = () => new UpdateTestHandler(_ => new(HttpStatusCode.ServiceUnavailable))
+            };
+            var target = new WakeTarget(new("repo", "board", "unused", "thread", "machine"), new("session", "token"), dispatcher);
+            var watcher = WakeWatcher.RunAsync(runtime, _ => Task.FromResult<IReadOnlyList<WakeTarget>>([target]), false, null, stop.Token, handler);
+            try
+            {
+                await dispatcher.Entered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                Assert.True(state.IsUncertain(key)); // The batch is already reserved.
+                Assert.False(await gate.TryDrainAsync(TimeSpan.Zero, default));
+                using (var afterDeferral = gate.TryEnter()) Assert.NotNull(afterDeferral);
+                var drain = gate.TryDrainAsync(TimeSpan.FromSeconds(3), default);
+                Assert.False(drain.IsCompleted);
+                dispatcher.Result.TrySetResult(queued);
+                Assert.True(await drain);
+                Assert.Equal(!queued, state.IsUncertain(key)); // Complete persisted before the lease left.
+                Assert.Equal(1, dispatcher.Calls);
+            }
+            finally
+            {
+                dispatcher.Result.TrySetResult(queued);
+                stop.Cancel();
+                try { await watcher; } catch (OperationCanceledException) { }
+            }
+        }
+        using var reopened = new WakeState(path);
+        Assert.Equal(!queued, reopened.IsUncertain(key));
+    }
+
+    private sealed class UpdateBlockingDispatcher : IWakeDispatcher
+    {
+        public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> Result { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public int Calls;
+        public Task<bool> QueueAsync(string threadId, string prompt, CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref Calls);
+            Entered.TrySetResult();
+            return Result.Task;
+        }
+    }
+
+    [Fact]
+    public void Update_context_never_formats_or_serializes_the_machine_credential()
+    {
+        using var http = new HttpClient();
+        var secret = new string('a', 64);
+        var context = new NodeUpdateContext("C:/isolated-node", InMemoryHub, http, secret, new(null, [], "win-x64"));
+        Assert.DoesNotContain(secret, context.ToString());
+        Assert.DoesNotContain(secret, JsonSerializer.Serialize(context));
+    }
+
+    [Fact]
+    public async Task Update_closed_gate_skips_reconciliation_before_any_reservation_or_request()
+    {
+        Directory.CreateDirectory(root);
+        var requests = 0;
+        var entries = 0;
+        using var handler = new UpdateTestHandler(_ => { Interlocked.Increment(ref requests); return new(HttpStatusCode.OK) { Content = new StringContent("{}") }; });
+        var runtime = new WakeRuntime(new AdapterOptions(InMemoryHub.AbsoluteUri, "test"), Path.Combine(root, "gate.db"), Path.Combine(root, "stop"), InMemoryHub.AbsoluteUri)
+        {
+            TryEnterDispatch = () => { Interlocked.Increment(ref entries); return null; },
+            Interval = TimeSpan.FromMilliseconds(10), HubHandler = () => new UpdateTestHandler(_ => new(HttpStatusCode.ServiceUnavailable))
+        };
+        var target = new WakeTarget(new("repo", "board", "unused", "thread", "machine"), new("session", "session-token"), new RecordingDispatcher());
+        await WakeWatcher.RunAsync(runtime, _ => Task.FromResult<IReadOnlyList<WakeTarget>>([target]), false, TimeSpan.FromMilliseconds(100), default, handler);
+        Assert.True(entries > 0);
+        Assert.Equal(0, requests);
+        using var state = new WakeState(runtime.StatePath);
+        Assert.False(state.IsUncertain(WakeState.Key(InMemoryHub.AbsoluteUri, "repo", "session")));
+    }
+
+    [Fact]
+    public async Task Update_factory_uses_authenticated_pinned_client_once_across_normal_cycles()
+    {
+        using var state = NodeState.Open(DataDir);
+        state.SetHub(InMemoryHub.AbsoluteUri, ProbedFingerprint);
+        state.SaveCredential(new string('a', 64));
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var factories = 0;
+        var staged = 0;
+        var announced = 0;
+        NodeUpdateContext? captured = null;
+        var transport = new NodeTransport
+        {
+            CreateHandler = (_, _) => new UpdateTestHandler(request =>
+            {
+                Assert.Equal("Bearer", request.Headers.Authorization?.Scheme);
+                return new(HttpStatusCode.OK) { Content = new StringContent("{\"routes\":[]}") };
+            }),
+            HubHandler = () => new UpdateTestHandler(_ => new(HttpStatusCode.ServiceUnavailable)),
+            Chats = _ => Task.FromResult(new JsonArray()), Locators = [], CodexExecutable = () => null, Clients = () => [],
+            AnnounceInterval = TimeSpan.FromMilliseconds(10),
+            UpdateHost = new(null, [], "win-x64"),
+            CreateUpdater = context => { factories++; captured = context; return new UpdateTestCoordinator(() => staged++); },
+            Trace = value => { if (value == "announced" && ++announced == 3) stop.Cancel(); }
+        };
+        Assert.Equal(0, await NodeRunner.RunAsync(state, null, transport, error, stop.Token));
+        Assert.Equal(1, factories);
+        Assert.Equal(1, staged);
+        Assert.NotNull(captured);
+        Assert.Equal(state.ReadCredential(), captured!.MachineCredential);
+        Assert.Null(captured.PinnedHttp.DefaultRequestHeaders.Authorization);
+        Assert.Equal(DataDir, captured.NodeFolder);
+    }
+
+    private sealed class UpdateTestHandler(Func<HttpRequestMessage, HttpResponseMessage> respond) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) => Task.FromResult(respond(request));
+    }
+
+    private sealed class UpdateTestCoordinator(Action stage) : INodeUpdateCoordinator
+    {
+        public Task<StagedNode?> TryStageAsync(NodeRelease? offered, CancellationToken ct) { stage(); return Task.FromResult<StagedNode?>(null); }
+        public Task PrepareAsync(StagedNode staged, CancellationToken ct) => throw new InvalidOperationException("No image was staged.");
+    }
+
+    [Fact]
+    public async Task Update_drain_waits_for_the_entire_dispatch_and_reopens_after_deferral()
+    {
+        var gate = new NodeDispatchGate();
+        var dispatch = gate.TryEnter();
+        Assert.NotNull(dispatch);
+        Assert.False(await gate.TryDrainAsync(TimeSpan.Zero, default));
+        using (var freshMessage = gate.TryEnter()) Assert.NotNull(freshMessage);
+        var drain = gate.TryDrainAsync(TimeSpan.FromSeconds(5), default);
+        Assert.Null(gate.TryEnter());
+        Assert.False(drain.IsCompleted);
+        dispatch!.Dispose();
+        Assert.True(await drain);
+        Assert.Null(gate.TryEnter());
+        gate.Resume();
+        using var resumed = gate.TryEnter();
+        Assert.NotNull(resumed);
+    }
+
+    [Fact]
+    public async Task Update_cancelled_drain_resumes_without_disposing_the_active_dispatch()
+    {
+        var gate = new NodeDispatchGate();
+        using var dispatch = gate.TryEnter();
+        Assert.NotNull(dispatch);
+        using var cancellation = new CancellationTokenSource();
+        var drain = gate.TryDrainAsync(TimeSpan.FromSeconds(30), cancellation.Token);
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => drain);
+        using var next = gate.TryEnter();
+        Assert.NotNull(next);
+    }
+
     private const string AdminToken = "node-admin-test-secret-not-production";
     private const string ProbedFingerprint = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF";
     private const string OtherFingerprint = "FEDCBA9876543210FEDCBA9876543210FEDCBA9876543210FEDCBA9876543210";
@@ -391,6 +841,7 @@ public sealed class NodeTests : IDisposable
         var transport = new NodeTransport
         {
             JoinCode = RelayHostFixture.JoinCode,
+            Clients = () => [], Locators = [],
             ProbeFingerprint = (_, _) => throw new InvalidOperationException("A loopback HTTP hub must not be probed."),
             CreateHandler = (fingerprint, _) => { pins.Enqueue(fingerprint); return traffic.Wrap(host.Server.CreateHandler()); },
             HubHandler = () => host.Server.CreateHandler(),
@@ -504,7 +955,7 @@ public sealed class NodeTests : IDisposable
         var run = NodeRunner.RunAsync(state, InMemoryHub, new NodeTransport
         {
             JoinCode = transport.JoinCode, ProbeFingerprint = transport.ProbeFingerprint, CreateHandler = transport.CreateHandler, HubHandler = transport.HubHandler, MachineName = "Node PC",
-            Locators = [locator, new ClaudeChatLocator(claude)], AnnounceInterval = transport.AnnounceInterval, FirstRetry = transport.FirstRetry, MaxRetry = transport.MaxRetry, Trace = events.Enqueue,
+            Clients = () => [], Locators = [locator, new ClaudeChatLocator(claude)], AnnounceInterval = transport.AnnounceInterval, FirstRetry = transport.FirstRetry, MaxRetry = transport.MaxRetry, Trace = events.Enqueue,
             CodexExecutable = () => Path.Combine(root, "codex.exe"), CodexDispatcher = _ => new RecordingDispatcher()
         }, error, stop.Token);
         await WaitForAsync(() => traffic.Accepted is not null && Count("announced") >= 2, run);
@@ -544,7 +995,7 @@ public sealed class NodeTests : IDisposable
         var run = NodeRunner.RunAsync(state, InMemoryHub, new NodeTransport
         {
             JoinCode = transport.JoinCode, ProbeFingerprint = transport.ProbeFingerprint, CreateHandler = transport.CreateHandler, HubHandler = transport.HubHandler, MachineName = "Node PC",
-            Locators = [], AnnounceInterval = transport.AnnounceInterval, FirstRetry = transport.FirstRetry, MaxRetry = transport.MaxRetry, Trace = events.Enqueue, CodexExecutable = () => null
+            Clients = () => [], Locators = [], AnnounceInterval = transport.AnnounceInterval, FirstRetry = transport.FirstRetry, MaxRetry = transport.MaxRetry, Trace = events.Enqueue, CodexExecutable = () => null
         }, error, stop.Token);
         await WaitForAsync(() => Count("announced") >= 4, run);
         stop.Cancel();
@@ -779,7 +1230,7 @@ public sealed class NodeTests : IDisposable
         var run = NodeRunner.RunAsync(state, InMemoryHub, new NodeTransport
         {
             JoinCode = transport.JoinCode, ProbeFingerprint = transport.ProbeFingerprint, CreateHandler = transport.CreateHandler, HubHandler = transport.HubHandler, MachineName = "Node PC",
-            Locators = [new CodexChatLocator(codex, open: Counting(opens))], LocateBudget = TimeSpan.Zero,
+            Clients = () => [], Locators = [new CodexChatLocator(codex, open: Counting(opens))], LocateBudget = TimeSpan.Zero,
             AnnounceInterval = transport.AnnounceInterval, FirstRetry = transport.FirstRetry, MaxRetry = transport.MaxRetry, Trace = events.Enqueue, CodexExecutable = () => null
         }, error, stop.Token);
         await WaitForAsync(() => Count("announced") >= 2, run);
@@ -849,7 +1300,7 @@ public sealed class NodeTests : IDisposable
             var transport = InMemory(host, traffic, TimeSpan.FromMilliseconds(50));
             return new NodeTransport
             {
-                JoinCode = transport.JoinCode, ProbeFingerprint = transport.ProbeFingerprint, CreateHandler = transport.CreateHandler, HubHandler = transport.HubHandler, MachineName = "Node PC", Locators = [],
+                JoinCode = transport.JoinCode, ProbeFingerprint = transport.ProbeFingerprint, CreateHandler = transport.CreateHandler, HubHandler = transport.HubHandler, MachineName = "Node PC", Clients = () => [], Locators = [],
                 AnnounceInterval = transport.AnnounceInterval, FirstRetry = transport.FirstRetry, MaxRetry = transport.MaxRetry, Trace = events.Enqueue,
                 CodexExecutable = () => Path.Combine(root, "codex.exe"), CodexDispatcher = _ => dispatcher, WakeInterval = TimeSpan.FromMilliseconds(100)
             };
@@ -1224,6 +1675,7 @@ public sealed class NodeTests : IDisposable
 
     private NodeTransport Transport(Func<HttpClient>? hub = null) => new()
     {
+        Clients = () => [], Locators = [],
         JoinCode = RelayHostFixture.JoinCode,
         MachineName = "Node PC",
         Chats = hub is null ? _ => Task.FromResult(new JsonArray(Chat())) : OwnedChats(hub),
@@ -1234,6 +1686,7 @@ public sealed class NodeTests : IDisposable
 
     private NodeTransport InMemory(RelayHostFixture host, HubTraffic traffic, TimeSpan? interval = null, int credentialAttempts = 5) => new()
     {
+        Clients = () => [], Locators = [],
         JoinCode = RelayHostFixture.JoinCode,
         CredentialAttempts = credentialAttempts,
         CredentialRetryDelay = TimeSpan.FromMilliseconds(25),
@@ -1287,7 +1740,7 @@ public sealed class NodeTests : IDisposable
 
     private static JsonObject Chat() => new() { ["provider"] = "codex", ["threadId"] = "t1", ["relaySessionId"] = "s-t1", ["repositoryId"] = "repo", ["label"] = "Node chat", ["wakeable"] = true, ["waiterRunning"] = false };
 
-    private static RelayHostFixture Hub(IPAddress? remote = null) => new(remoteAddress: remote, settings: new Dictionary<string, string?>
+    private static RelayHostFixture Hub(IPAddress? remote = null, string? databasePath = null) => new(databasePath: databasePath, remoteAddress: remote, settings: new Dictionary<string, string?>
     {
         ["Relay:Discovery:Enabled"] = "true",
         ["Relay:Discovery:Repositories:0"] = "repo",
