@@ -59,7 +59,7 @@ public sealed class NodeTests : IDisposable
             CreateUpdater = _ => new UpdateFunctionalCoordinator((release, _) =>
             {
                 if (Interlocked.Increment(ref attempts) == 3) { earlyA = release!.ReleaseId == a.ReleaseId && clock.GetUtcNow() - began < TimeSpan.FromMinutes(15); stop.Cancel(); }
-                return Task.FromResult<StagedNode?>(null);
+                return Task.FromException<StagedNode?>(new IOException("fixture stage failure"));
             }, (_, _) => throw new InvalidOperationException()),
             Trace = value =>
             {
@@ -319,7 +319,9 @@ public sealed class NodeTests : IDisposable
                 return new UpdateFunctionalCoordinator((offered, _) =>
                 {
                     Assert.Equal(release.ReleaseId, offered!.ReleaseId);
-                    if (Interlocked.Increment(ref calls) == 1) return Task.FromResult<StagedNode?>(prepareFailure ? stagedImage : null);
+                    if (Interlocked.Increment(ref calls) == 1) return prepareFailure
+                        ? Task.FromResult<StagedNode?>(stagedImage)
+                        : Task.FromException<StagedNode?>(new IOException("fixture stage failure"));
                     early = clock.GetUtcNow() - began < TimeSpan.FromMinutes(15);
                     stop.Cancel();
                     return Task.FromResult<StagedNode?>(null);

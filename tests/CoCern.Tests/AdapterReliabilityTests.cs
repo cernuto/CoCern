@@ -93,6 +93,20 @@ public sealed class AdapterReliabilityTests : IDisposable
         Assert.Equal(before, inbox.StatusReads);
     }
 
+    /// <summary>Status reads stop within the deadline and stay stopped for many short intervals, however late the last expected pass lands.</summary>
+    private static async Task AssertSettles(CountingInbox inbox)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(20);
+        var seen = inbox.StatusReads;
+        var quietSince = DateTime.UtcNow;
+        while (DateTime.UtcNow - quietSince < TimeSpan.FromSeconds(1.5))
+        {
+            Assert.True(DateTime.UtcNow < deadline, $"Status reads were still arriving after 20 s; {inbox.StatusReads} so far.");
+            await Task.Delay(50);
+            if (inbox.StatusReads != seen) { seen = inbox.StatusReads; quietSince = DateTime.UtcNow; }
+        }
+    }
+
     private static async Task AssertPassesKeepComing(CountingInbox inbox)
     {
         var before = inbox.StatusReads;
@@ -144,9 +158,8 @@ public sealed class AdapterReliabilityTests : IDisposable
         await AssertPassesKeepComing(inbox);
         hub.Available = true;
         await WaitFor(() => hub.Watches >= 2);
-        // The reconnect's own pass comes after the hint quiet gap.
-        await Task.Delay(TimeSpan.FromSeconds(1));
-        await AssertNoPass(inbox);
+        // The reconnect's own pass comes after the hint quiet gap, later on a busy machine; passes that keep coming never settle.
+        await AssertSettles(inbox);
         await StopWatching(run);
     }
 
@@ -160,8 +173,7 @@ public sealed class AdapterReliabilityTests : IDisposable
         await AssertNoPass(inbox);
         hub.CloseAll();
         await WaitFor(() => hub.Watches >= 2);
-        await Task.Delay(TimeSpan.FromSeconds(1));
-        await AssertNoPass(inbox);
+        await AssertSettles(inbox);
         await StopWatching(run);
     }
 

@@ -10,6 +10,7 @@ internal sealed record NodeUpdateContext(string NodeFolder, Uri EnrolledHub, Htt
 
 internal interface INodeUpdateCoordinator
 {
+    // Null means no change; rejected staging throws so the scheduler can apply failure backoff.
     Task<StagedNode?> TryStageAsync(NodeRelease? offered, CancellationToken ct);
     Task PrepareAsync(StagedNode staged, CancellationToken ct);
 }
@@ -25,8 +26,9 @@ internal sealed class NodeUpdateCoordinator(NodeUpdateContext context) : INodeUp
             var root = Path.Combine(context.NodeFolder, "updates");
             var journal = NodeUpdateState.Read(root).Record;
             if (journal?.Current.ReleaseId == offered.ReleaseId) return null;
-            var staged = await NodePackage.StageAsync(offered, context.EnrolledHub, context.PinnedHttp, context.MachineCredential, root, context.Host, ct);
-            return staged?.Image.ContentId == journal?.Current.ContentId ? null : staged;
+            var staged = await NodePackage.StageAsync(offered, context.EnrolledHub, context.PinnedHttp, context.MachineCredential, root, context.Host, ct)
+                ?? throw new InvalidDataException("node-update:stage-rejected");
+            return staged.Image.ContentId == journal?.Current.ContentId ? null : staged;
         }
         finally { owner.Release(); }
     }

@@ -516,26 +516,28 @@ public sealed class NativeJoinSetupTests : IDisposable
 
 
 
-    [Fact]
-    public async Task FixRound1_missing_private_selector_refuses_valid_raw_settings_before_startup()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task FixRound1_missing_private_selector_refuses_valid_raw_settings_before_startup(bool exitBeforeInitialize)
     {
         await using var relay = new WiringRelayCounter();
         var (_, args) = WiringCandidate(relay.Origin);
         await using var child = WiringStart(args[2..], relay.Origin);
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-        await child.Process.StandardInput.WriteLineAsync("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"owned-incomplete-private\",\"version\":\"1\"}}}");
-        var response = await child.Process.StandardOutput.ReadLineAsync(timeout.Token);
-        child.Process.StandardInput.Close();
-        await child.Process.WaitForExitAsync(timeout.Token);
+        if (exitBeforeInitialize) await child.Process.WaitForExitAsync(timeout.Token);
+        var response = await WiringReadRefusalAsync(child, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"owned-incomplete-private\",\"version\":\"1\"}}}", timeout.Token);
         Assert.Equal(0, relay.Count); Assert.Equal(0, relay.BusinessRequests); Assert.Equal(0, relay.HintAttempts);
         Assert.Equal("unchanged", File.ReadAllText(child.Sentinel));
-        Assert.Null(response);
+        Assert.Empty(response);
         Assert.Equal(1, child.Process.ExitCode);
         Assert.Equal("Native client registration could not be verified.", (await child.Error).Trim());
     }
 
-    [Fact]
-    public async Task FixRound1_private_launcher_refuses_initial_actual_flag_ignoring_backend_before_raw_startup()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task FixRound1_private_launcher_refuses_initial_actual_flag_ignoring_backend_before_raw_startup(bool exitBeforeInitialize)
     {
         await using var relay = new WiringRelayCounter();
         var (_, args) = WiringCandidate(relay.Origin);
@@ -543,13 +545,11 @@ public sealed class NativeJoinSetupTests : IDisposable
         AdapterDeployment.Publish(FixRound1OldOutput(), deployment);
         await using var child = WiringStart(["--dev-launch", deployment, .. args], relay.Origin);
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-        await child.Process.StandardInput.WriteLineAsync("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"owned-old-private\",\"version\":\"1\"}}}");
-        var response = await child.Process.StandardOutput.ReadLineAsync(timeout.Token);
-        child.Process.StandardInput.Close();
-        await child.Process.WaitForExitAsync(timeout.Token);
+        if (exitBeforeInitialize) await child.Process.WaitForExitAsync(timeout.Token);
+        var response = await WiringReadRefusalAsync(child, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"owned-old-private\",\"version\":\"1\"}}}", timeout.Token);
         Assert.Equal(0, relay.Count); Assert.Equal(0, relay.BusinessRequests); Assert.Equal(0, relay.HintAttempts);
         Assert.Equal("unchanged", File.ReadAllText(child.Sentinel));
-        Assert.Null(response);
+        Assert.Empty(response);
         Assert.Equal(1, child.Process.ExitCode);
         Assert.Contains("Native client registration could not be verified.", await child.Error);
     }
@@ -662,16 +662,25 @@ public sealed class NativeJoinSetupTests : IDisposable
     }
 
     [Theory]
-    [InlineData("joined")]
-    [InlineData("orphaned-joined")]
-    [InlineData("mixed")]
-    [InlineData("joined-hook")]
-    [InlineData("joined-development-root")]
-    [InlineData("upper-joined")]
-    [InlineData("upper-pairs")]
-    [InlineData("bare-joined")]
-    [InlineData("bare-pairs")]
-    public async Task FixRound2_private_option_names_refuse_all_unsupported_forms_before_raw_configuration(string form)
+    [InlineData("joined", false)]
+    [InlineData("joined", true)]
+    [InlineData("orphaned-joined", false)]
+    [InlineData("orphaned-joined", true)]
+    [InlineData("mixed", false)]
+    [InlineData("mixed", true)]
+    [InlineData("joined-hook", false)]
+    [InlineData("joined-hook", true)]
+    [InlineData("joined-development-root", false)]
+    [InlineData("joined-development-root", true)]
+    [InlineData("upper-joined", false)]
+    [InlineData("upper-joined", true)]
+    [InlineData("upper-pairs", false)]
+    [InlineData("upper-pairs", true)]
+    [InlineData("bare-joined", false)]
+    [InlineData("bare-joined", true)]
+    [InlineData("bare-pairs", false)]
+    [InlineData("bare-pairs", true)]
+    public async Task FixRound2_private_option_names_refuse_all_unsupported_forms_before_raw_configuration(string form, bool exitBeforeInitialize)
     {
         await using var relay = new WiringRelayCounter();
         var (_, valid) = WiringCandidate(relay.Origin);
@@ -690,12 +699,11 @@ public sealed class NativeJoinSetupTests : IDisposable
         };
         await using var child = WiringStart(args, relay.Origin);
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-        await child.Process.StandardInput.WriteLineAsync("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"owned-private-name-refusal\",\"version\":\"1\"}}}");
-        var response = await child.Process.StandardOutput.ReadLineAsync(timeout.Token);
-        child.Process.StandardInput.Close(); await child.Process.WaitForExitAsync(timeout.Token);
+        if (exitBeforeInitialize) await child.Process.WaitForExitAsync(timeout.Token);
+        var response = await WiringReadRefusalAsync(child, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"owned-private-name-refusal\",\"version\":\"1\"}}}", timeout.Token);
         Assert.Equal(0, relay.Count); Assert.Equal(0, relay.BusinessRequests); Assert.Equal(0, relay.HintAttempts);
         Assert.Equal("unchanged", File.ReadAllText(child.Sentinel));
-        Assert.Null(response); Assert.Equal(1, child.Process.ExitCode);
+        Assert.Empty(response); Assert.Equal(1, child.Process.ExitCode);
         Assert.Equal("Native client registration could not be verified.", (await child.Error).Trim());
     }
 
@@ -745,6 +753,24 @@ public sealed class NativeJoinSetupTests : IDisposable
             var row = expected[entry.FullName]; Assert.Equal(row.GetProperty("Length").GetInt64(), entry.Length);
             using var stream = entry.Open();
             Assert.Equal(row.GetProperty("SHA256").GetString(), Convert.ToHexString(SHA256.HashData(stream)));
+        }
+    }
+
+    private static async Task<string> WiringReadRefusalAsync(WiringChild child, string initialize, CancellationToken ct)
+    {
+        var output = child.Process.StandardOutput.ReadToEndAsync(ct);
+        try { await child.Process.StandardInput.WriteLineAsync(initialize.AsMemory(), ct); }
+        catch (IOException) { await ConfirmRefusalAsync(); }
+        await child.Process.WaitForExitAsync(ct);
+        try { child.Process.StandardInput.Close(); }
+        catch (IOException) { await ConfirmRefusalAsync(); }
+        return await output;
+
+        async Task ConfirmRefusalAsync()
+        {
+            await child.Process.WaitForExitAsync(ct);
+            Assert.Equal(1, child.Process.ExitCode);
+            Assert.Contains("Native client registration could not be verified.", await child.Error);
         }
     }
 

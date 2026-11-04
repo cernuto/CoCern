@@ -98,7 +98,7 @@ public sealed class AdminToolsTests : IDisposable
         Assert.True(counter.Count(data.ToJsonString()) <= tool.TokenBudget);
         var kept = data["status"]!["addresses"]!.AsArray();
         Assert.InRange(kept.Count, 1, 19);
-        Assert.Equal(true, data["truncated"]!.GetValue<bool>());
+        Assert.True(data["truncated"]!.GetValue<bool>());
         Assert.Equal(20 - kept.Count, data["moreAddresses"]!.GetValue<int>());
         Assert.All(kept, (address, index) => Assert.Equal(addresses[index].Command, address!["command"]!.GetValue<string>()));
     }

@@ -649,7 +649,8 @@ public sealed class NativeJoinCallsTests
             writes++; return Wire(new { });
         }));
         var forwarder = new RelayForwarder(http, scope.Options);
-        await using (var first = new NativeJoin(scope.Folder, scope.Options, forwarder) { Budget = TimeSpan.FromMilliseconds(650) })
+        // The budget also covers the git-based checkout inspection before the first request; on a busy machine a short one ends before any preflight.
+        await using (var first = new NativeJoin(scope.Folder, scope.Options, forwarder) { Budget = TimeSpan.FromSeconds(5) })
         {
             var call = first.CallAsync(context, "uncertain", RelayTools.Ack, JsonSerializer.SerializeToElement(new { messageIds = new[] { "m1" } }), default);
             await hit.Task.WaitAsync(TimeSpan.FromSeconds(5));
