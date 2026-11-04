@@ -42,6 +42,7 @@ Task 1 owns domain selection, the wire contract and status tests:
 - Create src/CoCern.Domain/State/ManagerSelectionState.cs: typed assignment/history wrappers and redacted projection methods.
 - Create src/CoCern.Domain/ManagerSelection.cs: command validation and mutation, kept out of the large ControlAggregate implementation.
 - Modify src/CoCern.Domain/ControlAggregate.cs: delegate two selection commands and include selection status.
+- Modify src/CoCern.Domain/CoordinationStateMachine.cs: enforce current ControlRequest administrator authority before cached request replay; this narrow gate prevents downgraded callers from receiving prior privileged replies.
 - Create src/CoCern.Contracts/ManagerSelectionContracts.cs: shared redacted status records.
 - Modify src/CoCern.Contracts/RelayLimits.cs and ToolSchemas.cs: exact limits and additive command/status fields; retain the existing RelayTools.ControlRequest catalog entry and authorization flags.
 - Modify tests/CoCern.Tests/ControlStateShapeTests.cs and create tests/CoCern.Tests/ManagerSelectionTests.cs, ManagerSelectionHostTests.cs, ManagerSelectionContractTests.cs.
@@ -105,3 +106,6 @@ Separate subsequent plans own direct-human Standing/goal recording and proposal 
 ## Plan Self-Review
 
 Checked against spec parts 9–11: singleton selection, explicit handoff/recovery, recorded words, no label authority, redacted reads and dashboard emergency control are covered by the two tasks. Full powers, every-action audit, role/profile removal, Standing decisions and updater work are deliberately separate subsequent deliverables, with assignment inert until their safeguards are implemented. Contract names match producer/consumer blocks; all five review-focus conditions have named assertions. No implementation, build, test run, live operation or Git mutation is performed by authoring this plan.
+## Task 1 authorization replay correction
+
+The current state machine replays cached writes before ControlAggregate.Control checks administrator authority. Task 1 additionally owns CoordinationStateMachine.cs for a narrow pre-replay ControlRequest administrator gate. Add a behavioral regression for a request accepted as administrator then retried by the same principal/request with IsAdministrator=false: AdministratorRequired, no manager history/provenance and unchanged state/effects. Retain successful same-authority replay and request-conflict semantics. This is not a general authorization refactor or an expansion to unrelated tools.
