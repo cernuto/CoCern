@@ -319,6 +319,15 @@ public sealed class NodeState : IDisposable
         ChatLocators.Files(Path.Combine(nodeFolder, SessionsFolder), "*.json", SearchOption.TopDirectoryOnly).Select(ReadSessionHandle).OfType<SessionHandle>()
             .Where(handle => handle.NativeBindingKey is null).ToArray();
 
+    /// <summary>
+    /// Which of one chat's handles is its session. Carrying the chat's ID proves little: anything the chat starts inherits it, as a test script's
+    /// sessions did. So a session found in the chat's own transcript comes first, then one still being looked for, then one the search gave up on,
+    /// and the newest within each. A session the chat really moved to is found there too, seconds after it opens, and takes over then.
+    /// </summary>
+    internal static SessionHandle? ChooseForChat(IEnumerable<SessionHandle> handles, string threadId) =>
+        handles.OrderBy(handle => handle.Chat is { } chat ? string.Equals(chat.ThreadId, threadId, StringComparison.OrdinalIgnoreCase) ? 0 : 3 : handle.Unmapped ? 2 : 1)
+            .ThenByDescending(handle => handle.OpenedAt).FirstOrDefault();
+
     /// <summary>A relay session ID that is safe as a file name: ASCII letters, digits, '.', '_' or '-', starting with a letter or digit.</summary>
     internal static bool IsFileId(string id) => id.Length is > 0 and <= 128 && char.IsAsciiLetterOrDigit(id[0]) && id.All(c => char.IsAsciiLetterOrDigit(c) || c is '.' or '_' or '-');
 
