@@ -23,6 +23,23 @@ try
     }
     if (args is ["--dev-launch", var developmentRoot])
         return await CoCern.Adapter.Development.DevelopmentLauncher.RunAsync(developmentRoot, SetupEnvironment.Host().Dotnet);
+    if (args.Length > 0 && args[0] == "--native-hook")
+    {
+        const string usage = "Use --native-hook <codex|claude> --connection <absolute-private-folder> with an optional --development-root <absolute-folder>.";
+        if (args.Length is not (4 or 6) || args[1] is not ("codex" or "claude") || args[2] != "--connection" ||
+            !Path.IsPathFullyQualified(args[3]) || args.Length == 6 && (args[4] != "--development-root" || !Path.IsPathFullyQualified(args[5])))
+            throw new AdapterConfigurationException(usage);
+        var connection = NativeJoinHook.ReadConnection(args[3]) ?? throw new AdapterConfigurationException("Native hooks need their configured private connection.");
+        using var stopping = new CancellationTokenSource();
+        Console.CancelKeyPress += (_, cancel) => { cancel.Cancel = true; stopping.Cancel(); };
+        if (args.Length == 6)
+            return await NativeJoinHook.RunDevelopmentAsync(args[5], SetupEnvironment.Host().Dotnet, args[1], args[3], Console.In, Console.Out, Console.Error, stopping.Token);
+        using var nativeHttp = new HttpClient(RelayForwarder.CreateHandler(connection)) { Timeout = TimeSpan.FromSeconds(15) };
+        await using var join = new NativeJoin(args[3], connection, new RelayForwarder(nativeHttp, connection));
+        using var output = new StreamWriter(Console.OpenStandardOutput(), new System.Text.UTF8Encoding(false)) { AutoFlush = true };
+        using var error = new StreamWriter(Console.OpenStandardError(), new System.Text.UTF8Encoding(false)) { AutoFlush = true };
+        return await NativeJoinHook.RunAsync(args[1], Console.In, output, error, join, stopping.Token);
+    }
     if (args.Length > 0 && args[0] == "--wake")
     {
         if (args.Length != 2) throw new AdapterConfigurationException("Use --wake with one absolute configuration path.");

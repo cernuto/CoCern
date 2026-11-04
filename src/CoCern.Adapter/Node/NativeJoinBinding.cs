@@ -135,7 +135,7 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
 
     /// <summary>Provider names are at most 16 characters; native IDs accept only UUID N (32) or D (36) forms.</summary>
     internal static async Task<NativeJoinBinding> AcquireAsync(string folder, string provider, string nativeId,
-        string machineId, string repositoryId, string workspace, CancellationToken ct)
+        string machineId, string repositoryId, string workspace, CancellationToken ct, bool existingOnly = false)
     {
         ct.ThrowIfCancellationRequested();
         if (provider is not { Length: > 0 and <= 16 } || nativeId is not { Length: 32 or 36 })
@@ -157,11 +157,14 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
         var identity = ConnectionIdentity(folder);
         var key = Digest("cocern-native-binding-v1", folder, identity, provider, nativeId, machineId, repositoryId, workspace);
         var sessions = Path.Combine(folder, NodeState.SessionsFolder);
-        Directory.CreateDirectory(sessions); RejectLink(sessions);
+        if (!existingOnly) Directory.CreateDirectory(sessions);
+        RejectLink(sessions);
         var directory = Path.Combine(sessions, "native");
-        Directory.CreateDirectory(directory); RejectLink(directory);
+        if (!existingOnly) Directory.CreateDirectory(directory);
+        RejectLink(directory);
         var statePath = Path.Combine(directory, key + ".json");
-        var lease = await LockAsync(Path.ChangeExtension(statePath, ".lock"), ct);
+        if (existingOnly) RequirePrivate(statePath, MaxStateBytes);
+        var lease = await LockAsync(Path.ChangeExtension(statePath, ".lock"), ct, existingOnly);
         try
         {
             ct.ThrowIfCancellationRequested();
@@ -197,6 +200,7 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
             }
             else
             {
+                if (existingOnly) throw Failure("The private native binding does not exist.");
                 var secret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
                 var generation = Guid.NewGuid().ToString("N");
                 var requestId = Guid.NewGuid().ToString("N");
@@ -268,7 +272,7 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
         if (ConnectionIdentity(Folder) != credentialIdentity) throw Failure("The private connection changed while joining.");
     }
 
-    internal static async Task<FileStream> LockAsync(string path, CancellationToken ct)
+    internal static async Task<FileStream> LockAsync(string path, CancellationToken ct, bool existingOnly = false)
     {
         var elapsed = Stopwatch.StartNew();
         while (true)
@@ -278,6 +282,7 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
             try
             {
                 if (File.Exists(path)) { RejectLink(path); lease = new(path, FileMode.Open, FileAccess.Write, FileShare.None); }
+                else if (existingOnly) throw Failure("The private native lease does not exist.");
                 else lease = NodeState.CreatePrivateFile(path);
             }
             catch (IOException error) when ((error.HResult & 0xffff) is 11 or 32 or 33 or 80 or 183)

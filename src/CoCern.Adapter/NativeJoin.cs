@@ -49,7 +49,7 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
     internal async Task<SessionHandle> EnsureAsync(NativeHookContext context, CancellationToken ct) =>
         (await EnsureBoundAsync(context, null, ct)).Handle;
 
-    private async Task<(SessionHandle Handle,string? Request)> EnsureBoundAsync(NativeHookContext context, Invocation? invocation, CancellationToken ct, bool retry = true)
+    private async Task<(SessionHandle Handle,string? Request)> EnsureBoundAsync(NativeHookContext context, Invocation? invocation, CancellationToken ct, bool retry = true, string? expectedGeneration = null)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct, stopping.Token);
         timeout.CancelAfter(Budget);
@@ -100,6 +100,7 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
                 }
                 await using var binding = await NativeJoinBinding.AcquireAsync(folder, intent.Provider, intent.NativeId, Environment.MachineName, repo, checkout.Root, cancel);
                 if (!forwarder.MatchesNativeBinding(binding)) throw new Refused("native_private_connection_required");
+                if (expectedGeneration is not null && binding.Generation != expectedGeneration) throw new Refused("native_stamp_invalid");
                 var handle = binding.CurrentHandle;
                 var client = new ChatLocation(intent.Provider, intent.NativeId);
                 if (handle is not null)
@@ -149,7 +150,7 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
         SafeDirectory(directory, true);
         var request = NativeCheckout.Hash(binding.BindingKey + ":" + invocation.Id);
         var path = Path.Combine(directory, request + ".json");
-        var fence = NativeCheckout.Hash(JsonSerializer.Serialize(new[] { binding.Generation, handle.SessionId, invocation.Tool, invocation.Args.GetRawText() }));
+        var fence = NativeCheckout.Hash(JsonSerializer.Serialize(new[] { binding.Generation, handle.SessionId, invocation.Tool, NativeJoinHook.Canonical(invocation.Args) }));
         if (File.Exists(path))
         {
             if (!NodeState.IsPrivateFile(path) || new FileInfo(path).Length != 64 || File.ReadAllText(path) != fence) throw new Refused("native_invocation_conflict");
@@ -162,7 +163,7 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
         return request;
     }
 
-    internal async Task<AdapterReply> CallAsync(NativeHookContext context, string invocation, string tool, JsonElement args, CancellationToken ct)
+    internal async Task<AdapterReply> CallAsync(NativeHookContext context, string invocation, string tool, JsonElement args, CancellationToken ct, string? expectedGeneration = null)
     {
         if (invocation is not { Length: > 0 and <= 256 } || invocation.Any(char.IsControl) || args.ValueKind != JsonValueKind.Object ||
             !RelayToolCatalog.TryGet(tool, out var definition) || tool is RelayTools.SessionOpen or RelayTools.SessionBind) return new(false, "native_invocation_invalid");
@@ -170,13 +171,13 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
             return new(false, "native_invocation_conflict");
         try
         {
-            var (handle, request) = await EnsureBoundAsync(context, definition.IsMutation ? new(invocation, tool, args) : null, ct);
+            var (handle, request) = await EnsureBoundAsync(context, definition.IsMutation ? new(invocation, tool, args) : null, ct, expectedGeneration: expectedGeneration);
             var payload = JsonNode.Parse(args.GetRawText())!.AsObject();
             if (payload.ContainsKey("repositoryId") && (string?)payload["repositoryId"] != handle.RepositoryId) return new(false, "native_repository_conflict");
             payload["repositoryId"] = handle.RepositoryId;
             if (definition.RequiresSession || tool == RelayTools.GetStatus)
             { payload["sessionId"] = handle.SessionId; payload["sessionToken"] = handle.SessionToken; }
-            if (request is not null) payload["requestId"] = request;
+            if (definition.IsMutation && request is not null) payload["requestId"] = request;
             var arguments = RelayForwarder.WithOrigin(JsonSerializer.SerializeToElement(payload), background: false);
             if (tool == RelayTools.ControlRequest) arguments = CoordinationTools.WithOwnSession(arguments, handle.SessionId);
             var reply = tool == RelayTools.CheckInbox ? await InboxWait.CheckAsync(forwarder, arguments, InboxWait.PollInterval, ct) :

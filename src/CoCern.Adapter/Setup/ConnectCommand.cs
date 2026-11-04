@@ -22,7 +22,7 @@ internal static class ConnectCommand
     private static readonly string[] HubVariables = ["COCERN_TOKEN_FILE", "COCERN_TOKEN", "COCERN_URL", "COCERN_FINGERPRINT"];
     private static readonly string[] ManagedVariables = [.. HubVariables, RoleVariable];
 
-    public static int Run(IReadOnlyList<string> args, string profile, string? appData, string dotnetPath, string adapterDll, TextWriter output, TextWriter error, TimeProvider? clock = null)
+    public static int Run(IReadOnlyList<string> args, string profile, string? appData, string dotnetPath, string adapterDll, TextWriter output, TextWriter error, TimeProvider? clock = null, string? nativeCacheRoot = null)
     {
         string? tokenFile = null, hub = null, only = null, fingerprint = null;
         bool check = false, json = false;
@@ -67,10 +67,17 @@ internal static class ConnectCommand
         // Without a current address (an older hub, no --hub) the address and certificate are left as they are; without --role, the tools.
         var seen = new Dictionary<string, (bool Admin, IReadOnlyDictionary<string, string?>? Changes)>(StringComparer.Ordinal);
         var owned = new HashSet<string>(StringComparer.Ordinal);
+        var nativeEnvironments = new Dictionary<string, IReadOnlyDictionary<string, string>>(StringComparer.Ordinal);
         EntryRefresh RefreshFor(string id) => variables =>
         {
             if (BelongsToHub(variables, tokenFile, hub, localHub?.Url)) owned.Add(id);
             var changes = Refresh(variables, tokenFile, hub, fingerprint, localHub?.Url, admin);
+            if (owned.Contains(id))
+            {
+                var effective = variables.ToDictionary(item => item.Key, item => item.Value, StringComparer.Ordinal);
+                if (changes is not null) foreach (var (key, value) in changes) { if (value is null) effective.Remove(key); else effective[key] = value; }
+                nativeEnvironments[id] = effective;
+            }
             seen[id] = (IsAdmin(variables), changes);
             return changes;
         };
@@ -99,6 +106,9 @@ internal static class ConnectCommand
                     plan.Apply(clock ?? TimeProvider.System);
                 }
                 if (!check) hook?.Apply(clock ?? TimeProvider.System);
+                if (!check && client.Id != ConnectClients.ClaudeDesktop && (!plan.IsUnchanged || owned.Contains(client.Id)))
+                    ClientSettings.StageLocalNativeCandidate(client.Id == ConnectClients.Codex ? "codex" : "claude", dotnetPath, adapterDll,
+                        nativeEnvironments.GetValueOrDefault(client.Id) ?? environment, nativeCacheRoot);
                 var entry = seen.TryGetValue(client.Id, out var found) ? found : ((bool Admin, IReadOnlyDictionary<string, string?>? Changes)?)null;
                 var changes = plan.Refreshes ? entry?.Changes : null;
                 bool? gives = state switch
