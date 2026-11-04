@@ -1,3 +1,5 @@
+using CoCern.Contracts.Dashboard;
+
 namespace CoCern.Contracts;
 
 /// <summary>Argument property schemas per tool. Serialized as JSON Schema by <see cref="RelayToolCatalog.InputSchema"/>.</summary>
@@ -34,6 +36,7 @@ internal static class ToolSchemas
             RelayTools.OrderPut => ["expiresAt", "expectedRevision"],
             RelayTools.DocSearch => ["spec", "path"],
             RelayTools.DocSync => ["branch"],
+            RelayTools.ConnectApp => ["admin"],
             _ => []
         };
         var properties = ForwardingFields.Concat(tool.RequiredFields).Concat(extra).Distinct(StringComparer.Ordinal).ToDictionary(field => field, field => all[field]);
@@ -112,6 +115,8 @@ internal static class ToolSchemas
             foreach (var field in ForwardingFields.Where(properties.ContainsKey)) properties[field] = new { type = "string" };
             if (!tool.RequiresSession) { properties.Remove("sessionToken"); if (tool.Name != RelayTools.ControlRequest) properties.Remove("sessionId"); }
         }
+        // Reads, so nothing in them is kept for replay.
+        if (tool.Name is RelayTools.HubDiagnose or RelayTools.AddPc) properties.Remove("requestId");
         if (tool.Name == RelayTools.ControlRequest)
         {
             properties["targetSessionId"] = new { type = "string" };
@@ -285,11 +290,13 @@ internal static class ToolSchemas
                 properties["anchor"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxDocAnchorLength, description = "Section anchor from a hit, or the next anchor of a long section." }; break;
             case RelayTools.DocSync:
                 properties["branch"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxDocBranchLength, description = "Branch to follow from now on; default the configured one." }; break;
+            case RelayTools.ConnectApp:
+                properties["client"] = new { type = "string", @enum = ConnectClients.All }; properties["admin"] = new { type = "boolean" }; break;
             case RelayTools.ControlRequest:
                 properties["command"] = new { type = "string", @enum = new[] { "pause", "resume", "stop", "cancel", "register_resource", "revoke_machine", "close_sessions", "appoint_manager", "clear_manager" } };
                 properties["allSessions"] = new { type = "boolean", description = "stop only: pause globally and request cancellation from every known session across repositories. Cannot accompany sessionId, actionId or targetSessionId. Running tools and wake delivery are not interrupted." };
                 properties["idleMinutes"] = new { type = "integer", minimum = RelayLimits.MinCloseSessionsIdleMinutes, description = "close_sessions: sessions not seen for at least this many minutes." };
-                properties["labelPrefix"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxIdentifierLength, description = "close_sessions: sessions whose label starts with this, ignoring case; with idleMinutes both must match; alone, chats active in the last 10 minutes are skipped." };
+                properties["labelPrefix"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxIdentifierLength, description = "close_sessions: sessions whose label starts with this, ignoring case; with idleMinutes both must match; alone, chats active in about the last 70 minutes are skipped." };
                 properties["targetSessionId"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxIdentifierLength, description = "appoint_manager: exact target session; close_sessions: only this session, instead of the filters." };
                 properties["expectedManagerGeneration"] = new { type = "integer", minimum = 0, description = "appoint_manager or clear_manager: required current singleton generation." };
                 properties["humanWords"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxManagerHumanWordsLength, description = "Exact single-line human selection attestation; required for appoint_manager or clear_manager. Never truncated." };
