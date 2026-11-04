@@ -49,7 +49,11 @@ public sealed class NodeState : IDisposable
         environment("COCERN_NODE_DIR") is { } configured && !string.IsNullOrWhiteSpace(configured) ? configured : DefaultFolder;
 
     /// <summary>Takes the folder's lock and loads its state, creating a machine ID the first time. A second node on the same folder fails at once.</summary>
-    public static NodeState Open(string? dataDir)
+    public static NodeState Open(string? dataDir) => OpenCore(dataDir, createIdentity: true);
+
+    internal static NodeState OpenExisting(string dataDir) => OpenCore(dataDir, createIdentity: false);
+
+    private static NodeState OpenCore(string? dataDir, bool createIdentity)
     {
         var folder = Path.GetFullPath(string.IsNullOrWhiteSpace(dataDir) ? DefaultFolder : dataDir);
         FileStream @lock;
@@ -61,7 +65,7 @@ public sealed class NodeState : IDisposable
         catch (IOException) when (File.Exists(Path.Combine(folder, LockFile))) { throw new AdapterConfigurationException($"Another CoCern node is already running with the data folder '{folder}'."); }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { throw new AdapterConfigurationException($"Unable to use the node data folder '{folder}'."); }
         var state = new NodeState(folder, @lock);
-        try { state.Load(); }
+        try { state.Load(createIdentity); }
         catch { @lock.Dispose(); throw; }
         return state;
     }
@@ -136,9 +140,20 @@ public sealed class NodeState : IDisposable
 
     private static string NewMachineId() => Guid.NewGuid().ToString("N");
 
-    private void Load()
+    private void Load(bool createIdentity)
     {
         var path = Path.Combine(Folder, StateFile);
+        if (!createIdentity)
+        {
+            try
+            {
+                (MachineId, HubUrl, Fingerprint, Enrolled) = Parse(File.ReadAllText(path));
+                if (File.Exists(Path.Combine(Folder, CredentialFile))) NodePackage.ValidatePrivateFile(Path.Combine(Folder, CredentialFile));
+                return; // An existing-only worker never creates or repairs identity/enrollment.
+            }
+            catch (Exception exception) when (exception is JsonException or IOException or InvalidDataException or UnauthorizedAccessException or InvalidOperationException or FormatException)
+            { throw new AdapterConfigurationException("The existing node identity is missing, unreadable, or not private."); }
+        }
         if (File.Exists(path))
         {
             try { (MachineId, HubUrl, Fingerprint, Enrolled) = Parse(File.ReadAllText(path)); }

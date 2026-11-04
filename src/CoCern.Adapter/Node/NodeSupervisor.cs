@@ -36,21 +36,16 @@ public static class NodeSupervisor
             else record = read.Record!;
             if (record.Phase == NodeUpdatePhase.Starting)
             {
-                record = record with
-                {
-                    Phase = NodeUpdatePhase.Rollback,
-                    LastFailedReleaseId = record.Pending!.ReleaseId,
-                    LastFailedAtUtc = record.Pending.ReleaseId is null ? null : clock.GetUtcNow()
-                };
-                NodeUpdateState.Write(root, record);
+                record = Rollback(root, record, clock);
             }
             while (true)
             {
                 ct.ThrowIfCancellationRequested();
                 var candidate = record.Phase == NodeUpdatePhase.Starting;
                 var image = candidate ? record.Pending! : record.Current;
-                ClearHandoff(root, "ready.json");
-                ClearHandoff(root, "request.json");
+                var readyClean = ClearHandoff(root, "ready.json");
+                var requestClean = ClearHandoff(root, "request.json");
+                if (candidate && (!readyClean || !requestClean)) { record = Rollback(root, record, clock); continue; }
                 // Launch rehashes the immutable stored image on every attempt.
                 var launch = NodePackage.Launch(image, originalFolder, record.ActivationNonce, readHost());
                 var child = launch is null ? null : start(launch);
@@ -66,25 +61,32 @@ public static class NodeSupervisor
                     var ended = child.WaitForExitAsync(ct);
                     if (record.ActivationNonce is { } nonce)
                     {
-                        if (!await ReadyAsync(root, child, ended, nonce, image.ContentId, clock, ct)) startupFailed = true;
-                        else
+                        while (!startupFailed && record.Phase != NodeUpdatePhase.Committed)
                         {
-                            var committed = record with
+                            if (!await ReadyAsync(root, child, ended, nonce, image.ContentId, candidate, clock, ct)) { startupFailed = true; break; }
+                            else
                             {
-                                Current = image,
-                                Previous = candidate ? record.Current : record.Previous,
-                                Pending = null,
-                                ActivationNonce = null,
-                                Phase = NodeUpdatePhase.Committed
-                            };
-                            try { NodeUpdateState.Write(root, committed); record = committed; }
-                            catch (Exception exception) when (JournalFailure(exception))
-                            {
-                                // The primary may already be committed even when refreshing its backup failed.
-                                var authoritative = NodeUpdateState.Read(root);
-                                if (authoritative.Record is { Phase: NodeUpdatePhase.Committed } durable && durable.Current.ContentId == image.ContentId) record = durable;
-                                else startupFailed = true;
+                                var committed = record with
+                                {
+                                    Current = image,
+                                    Previous = candidate ? record.Current : record.Previous,
+                                    Pending = null,
+                                    ActivationNonce = null,
+                                    Phase = NodeUpdatePhase.Committed
+                                };
+                                try { NodeUpdateState.Write(root, committed); record = committed; }
+                                catch (Exception exception) when (JournalFailure(exception))
+                                {
+                                    // The primary may already be committed even when refreshing its backup failed.
+                                    var authoritative = NodeUpdateState.ReadPrimary(root);
+                                    if (authoritative is { Phase: NodeUpdatePhase.Committed } durable && durable.Current.ContentId == image.ContentId) record = durable;
+                                    else if (candidate) startupFailed = true;
+                                    // A fully verified historical Current remains available even when
+                                    // its authenticated recovery cannot yet clear durable evidence.
+                                }
                             }
+                            if (!candidate && record.Phase != NodeUpdatePhase.Committed)
+                                await Task.WhenAny(ended, Task.Delay(TimeSpan.FromMilliseconds(100), clock, ct));
                         }
                     }
                     if (!startupFailed) exit = await ended;
@@ -96,11 +98,17 @@ public static class NodeSupervisor
                     return 1; // Retain Rollback evidence until an authenticated retained startup succeeds.
                 }
                 if (exit != 75) return exit;
+                if (record.Phase != NodeUpdatePhase.Committed || !requestClean || !readyClean) continue;
                 var request = NodeUpdateState.ReadRequest(root);
                 if (request is null || request.Candidate.ContentId == record.Current.ContentId ||
                     request.Candidate.ReleaseId == record.LastFailedReleaseId && clock.GetUtcNow() - record.LastFailedAtUtc < TimeSpan.FromMinutes(15)) continue;
-                record = record with { Phase = NodeUpdatePhase.Starting, Pending = request.Candidate, ActivationNonce = Guid.NewGuid() };
-                NodeUpdateState.Write(root, record);
+                var starting = record with { Phase = NodeUpdatePhase.Starting, Pending = request.Candidate, ActivationNonce = Guid.NewGuid() };
+                try { NodeUpdateState.Write(root, starting); record = starting; }
+                catch (Exception exception) when (JournalFailure(exception))
+                {
+                    var authoritative = NodeUpdateState.Read(root).Record ?? throw new InvalidDataException("node-journal-invalid");
+                    record = authoritative.Phase == NodeUpdatePhase.Starting ? Rollback(root, authoritative, clock) : authoritative;
+                }
             }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { return 0; }
@@ -116,31 +124,51 @@ public static class NodeSupervisor
     private static NodeUpdateRecord Rollback(string root, NodeUpdateRecord record, TimeProvider clock)
     {
         var rollback = record with { Phase = NodeUpdatePhase.Rollback, LastFailedReleaseId = record.Pending!.ReleaseId, LastFailedAtUtc = record.Pending.ReleaseId is null ? null : clock.GetUtcNow() };
-        NodeUpdateState.Write(root, rollback);
-        return rollback;
+        try { NodeUpdateState.Write(root, rollback); return rollback; }
+        catch (Exception exception) when (JournalFailure(exception))
+        {
+            var authoritative = NodeUpdateState.Read(root).Record ?? throw new InvalidDataException("node-journal-invalid");
+            if (authoritative.Phase == NodeUpdatePhase.Committed) return authoritative;
+            if (authoritative.Current.ContentId != record.Current.ContentId) throw new InvalidDataException("node-journal-invalid");
+            // Only the launch decision is Rollback in memory. The durable Pending/nonce
+            // remain untouched until authenticated retained recovery can commit.
+            return authoritative with { Phase = NodeUpdatePhase.Rollback, LastFailedReleaseId = rollback.LastFailedReleaseId, LastFailedAtUtc = rollback.LastFailedAtUtc };
+        }
     }
 
-    private static async Task<bool> ReadyAsync(string root, INodeChild child, Task<int> ended, Guid nonce, string contentId, TimeProvider clock, CancellationToken ct)
+    private static async Task<bool> ReadyAsync(string root, INodeChild child, Task<int> ended, Guid nonce, string contentId, bool candidate, TimeProvider clock, CancellationToken ct)
     {
         var started = clock.GetTimestamp();
-        while (clock.GetElapsedTime(started) < TimeSpan.FromSeconds(30))
+        while (!candidate || clock.GetElapsedTime(started) < TimeSpan.FromSeconds(30))
         {
             ct.ThrowIfCancellationRequested();
-            if (ended.IsCompleted) return false;
+            if (child.HasExited || ended.IsCompleted) return false;
             var ready = NodeUpdateState.ReadReady(root);
-            if (ready is not null) return !ended.IsCompleted && ready.ActivationNonce == nonce && ready.ContentId == contentId && ready.ProcessId == child.ProcessId;
+            if (ready is not null)
+            {
+                if (ready.ActivationNonce == nonce && ready.ContentId == contentId && ready.ProcessId == child.ProcessId)
+                    return !child.HasExited && !ended.IsCompleted;
+                if (candidate) return false;
+            }
             if (ended.IsCompleted) return false;
             await Task.WhenAny(ended, Task.Delay(TimeSpan.FromMilliseconds(100), clock, ct));
         }
         return false;
     }
 
-    private static void ClearHandoff(string root, string name)
+    private static bool ClearHandoff(string root, string name)
     {
         var path = Path.Combine(root, name);
-        if (!File.Exists(path)) return;
-        NodePackage.ValidatePrivateFile(path);
-        File.Delete(path);
+        try
+        {
+            _ = File.GetAttributes(path);
+            NodePackage.ValidatePrivateFile(path);
+            File.Delete(path);
+            return true;
+        }
+        catch (FileNotFoundException) { return true; }
+        catch (DirectoryNotFoundException) { return true; }
+        catch (Exception exception) when (JournalFailure(exception)) { return false; }
     }
 
     private static FileStream OpenOwner(string path)
@@ -153,6 +181,7 @@ public static class NodeSupervisor
 
 internal interface INodeChild : IAsyncDisposable
 {
+    bool HasExited { get; }
     int ProcessId { get; }
     Task<int> WaitForExitAsync(CancellationToken ct);
 }
@@ -165,6 +194,12 @@ internal sealed class WindowsNodeChild : INodeChild
     private readonly object disposalGate = new();
     private Task? disposal;
     public int ProcessId { get; }
+    public bool HasExited => WaitForSingleObject(process, 0) switch
+    {
+        0 => true,
+        258 => false,
+        _ => throw new Win32Exception()
+    };
 
     private WindowsNodeChild(SafeFileHandle job, SafeProcessHandle process, int processId)
     {

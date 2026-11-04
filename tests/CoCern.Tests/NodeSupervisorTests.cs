@@ -17,6 +17,220 @@ namespace CoCern.Tests;
 
 public sealed class NodeSupervisorTests(ITestOutputHelper output) : IDisposable
 {
+    private static NodeHostCapabilities FixHost => new(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "dotnet", "dotnet.exe"), [new("Microsoft.NETCore.App", "10.0.14")], "win-x64");
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Fix1_retained_current_survives_late_ready_io_or_stale_evidence_then_commits(bool locked)
+    {
+        PrepareRoot(); var current = Image("fix-late-A"); var candidate = Image("fix-late-B") with { ReleaseId = new string('B', 64) }; var nonce = Guid.NewGuid();
+        NodeUpdateState.Write(Updates, Committed(current)); NodeUpdateState.Write(Updates, new(1, current, null, candidate, nonce, NodeUpdatePhase.Rollback, candidate.ReleaseId, DateTimeOffset.UtcNow));
+        var launched = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); FileStream? held = null;
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var supervisor = NodeSupervisor.RunAsync(NodeFolder, "C:/unused/CoCern.Adapter.dll", FixHost, _ =>
+        {
+            NodeUpdateState.WriteReady(Updates, new(Guid.NewGuid(), current.ContentId, 999));
+            if (locked) held = new(Path.Combine(Updates, "ready.json"), FileMode.Open, FileAccess.Read, FileShare.Read);
+            launched.TrySetResult(); return new WaitingChild();
+        }, new FixExpiredClock(), stop.Token);
+        try
+        {
+            await launched.Task; Assert.False(supervisor.IsCompleted);
+            var pending = NodeUpdateState.Read(Updates).Record!; Assert.Equal(candidate.ContentId, pending.Pending!.ContentId); Assert.Equal(nonce, pending.ActivationNonce);
+            held?.Dispose(); held = null;
+            NodeUpdateState.WriteReady(Updates, new(nonce, current.ContentId, 12345));
+            var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(3);
+            while (ReadPrimaryPhase(Updates) != NodeUpdatePhase.Committed && DateTimeOffset.UtcNow < deadline) await Task.Delay(10);
+            var committed = NodeUpdateState.Read(Updates).Record!;
+            Assert.Equal(NodeUpdatePhase.Committed, committed.Phase); Assert.Null(committed.Pending); Assert.Null(committed.ActivationNonce); Assert.Equal(current.ContentId, committed.Current.ContentId);
+            Assert.False(supervisor.IsCompleted);
+        }
+        finally { held?.Dispose(); stop.Cancel(); await supervisor; }
+    }
+
+    private sealed class FixExpiredClock : TimeProvider
+    {
+        private long timestamp;
+        public override long TimestampFrequency => 1;
+        public override long GetTimestamp() => Interlocked.Add(ref timestamp, 31);
+    }
+
+    [SkippableFact]
+    public async Task Fix1_nonprivate_request_is_not_consumed_or_deleted_and_current_remains_available()
+    {
+        if (!OperatingSystem.IsWindows()) throw new Xunit.SkipException("This refusal fixture requires Windows file ACLs.");
+        PrepareRoot(); var current = Image("fix-untrusted-request"); NodeUpdateState.Write(Updates, Committed(current));
+        var path = Path.Combine(Updates, "request.json"); NodeUpdateState.WriteRequest(Updates, new(current with { ReleaseId = new string('B', 64) }));
+        var bytes = File.ReadAllBytes(path); var file = new FileInfo(path); var acl = FileSystemAclExtensions.GetAccessControl(file);
+        acl.AddAccessRule(new(new SecurityIdentifier(WellKnownSidType.WorldSid, null), FileSystemRights.ReadData, AccessControlType.Allow)); FileSystemAclExtensions.SetAccessControl(file, acl);
+        var launches = 0;
+        Assert.Equal(0, await NodeSupervisor.RunAsync(NodeFolder, "C:/unused/CoCern.Adapter.dll", FixHost, _ => { launches++; return new UpdateExitedChild(0); }, TimeProvider.System, default));
+        Assert.Equal(1, launches); Assert.Equal(bytes, File.ReadAllBytes(path)); Assert.Equal(current.ContentId, NodeUpdateState.Read(Updates).Record!.Current.ContentId);
+    }
+
+    [Fact]
+    public async Task Fix1_rollback_write_refusal_keeps_retained_current_available_and_pending_evidence()
+    {
+        PrepareRoot(); var current = Image("fix-rollback-A"); var candidate = Image("fix-rollback-B") with { ReleaseId = new string('B', 64) };
+        NodeUpdateState.Write(Updates, Committed(current)); FileStream? blocked = null; var launches = 0; var retained = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var supervisor = NodeSupervisor.RunAsync(NodeFolder, "C:/unused/CoCern.Adapter.dll", FixHost, launch =>
+        {
+            if (++launches == 1) { NodeUpdateState.WriteRequest(Updates, new(candidate)); return new UpdateExitedChild(75); }
+            var journal = NodeUpdateState.Read(Updates).Record!;
+            if (launches == 2)
+            {
+                blocked = new FileStream(Path.Combine(Updates, "state.json"), FileMode.Open, FileAccess.Read, FileShare.Read);
+                NodeUpdateState.WriteReady(Updates, new(Guid.NewGuid(), candidate.ContentId, 5678));
+                return new UpdateReadyChild(Updates);
+            }
+            Assert.Equal(Path.Combine(Updates, "versions", current.ContentId, "CoCern.Adapter.dll"), launch.Arguments[0]);
+            NodeUpdateState.WriteReady(Updates, new(journal.ActivationNonce!.Value, current.ContentId, 12345)); retained.TrySetResult(); return new WaitingChild();
+        }, TimeProvider.System, stop.Token);
+        try
+        {
+            await Task.WhenAny(retained.Task, supervisor).WaitAsync(TimeSpan.FromSeconds(3));
+            Assert.True(retained.Task.IsCompleted);
+            var journal = NodeUpdateState.Read(Updates).Record!;
+            Assert.NotNull(journal.Pending); Assert.NotNull(journal.ActivationNonce); Assert.Equal(current.ContentId, journal.Current.ContentId);
+            Assert.False(supervisor.IsCompleted);
+        }
+        finally { stop.Cancel(); blocked?.Dispose(); await supervisor; }
+    }
+
+    [Fact]
+    public async Task Fix1_journal_observers_do_not_deny_atomic_replacement_during_image_validation()
+    {
+        PrepareRoot(); var current = Image(new string('x', 2 * 1024 * 1024)); NodeUpdateState.Write(Updates, Committed(current));
+        using var stop = new CancellationTokenSource();
+        var readers = Enumerable.Range(0, 3).Select(_ => Task.Run(async () => { while (!stop.IsCancellationRequested) { NodeUpdateState.Read(Updates); await Task.Yield(); } })).ToArray();
+        try { for (var i = 0; i < 8; i++) await Task.Run(() => NodeUpdateState.Write(Updates, Committed(current))); }
+        finally { stop.Cancel(); await Task.WhenAll(readers); }
+        Assert.Equal(current.ContentId, NodeUpdateState.Read(Updates).Record!.Current.ContentId);
+    }
+
+    [Fact]
+    public async Task Fix1_starting_replace_refusal_restarts_authoritative_committed_current()
+    {
+        PrepareRoot();
+        var current = Image("fix-start-A"); var candidate = Image("fix-start-B") with { ReleaseId = new string('B', 64) };
+        NodeUpdateState.Write(Updates, Committed(current));
+        var before = File.ReadAllBytes(Path.Combine(Updates, "state.json"));
+        using var blocked = new FileStream(Path.Combine(Updates, "state.json"), FileMode.Open, FileAccess.Read, FileShare.Read);
+        var launches = 0;
+        var exit = await NodeSupervisor.RunAsync(NodeFolder, "C:/unused/CoCern.Adapter.dll", FixHost, launch =>
+        {
+            Assert.Equal(Path.Combine(Updates, "versions", current.ContentId, "CoCern.Adapter.dll"), launch.Arguments[0]);
+            if (++launches == 1) { NodeUpdateState.WriteRequest(Updates, new(candidate)); return new UpdateExitedChild(75); }
+            return new UpdateExitedChild(0);
+        }, TimeProvider.System, default);
+        Assert.Equal(0, exit); Assert.Equal(2, launches);
+        Assert.Equal(before, File.ReadAllBytes(Path.Combine(Updates, "state.json")));
+    }
+
+    [Theory]
+    [InlineData("request.json")]
+    [InlineData("ready.json")]
+    public async Task Fix1_locked_handoff_debris_does_not_prevent_verified_current(string name)
+    {
+        PrepareRoot(); var current = Image("fix-debris-A");
+        NodeUpdateState.Write(Updates, Committed(current));
+        if (name == "request.json") NodeUpdateState.WriteRequest(Updates, new(current with { ReleaseId = new string('B', 64) }));
+        else NodeUpdateState.WriteReady(Updates, new(Guid.NewGuid(), current.ContentId, 999));
+        var bytes = File.ReadAllBytes(Path.Combine(Updates, name));
+        using var held = new FileStream(Path.Combine(Updates, name), FileMode.Open, FileAccess.Read, FileShare.Read);
+        var launches = 0;
+        Assert.Equal(0, await NodeSupervisor.RunAsync(NodeFolder, "C:/unused/CoCern.Adapter.dll", FixHost, _ => { launches++; return new UpdateExitedChild(0); }, TimeProvider.System, default));
+        Assert.Equal(1, launches); Assert.Equal(bytes, File.ReadAllBytes(Path.Combine(Updates, name)));
+        Assert.Equal(NodeUpdatePhase.Committed, NodeUpdateState.Read(Updates).Record!.Phase);
+    }
+
+    [Fact]
+    public async Task Fix1_signaled_owned_child_is_rejected_before_delayed_wait_task_completes()
+    {
+        PrepareRoot(); var current = Image("fix-signaled-A"); var candidate = Image("fix-signaled-B") with { ReleaseId = new string('B', 64) };
+        NodeUpdateState.Write(Updates, Committed(current)); var launches = 0;
+        Assert.Equal(0, await NodeSupervisor.RunAsync(NodeFolder, "C:/unused/CoCern.Adapter.dll", FixHost, _ =>
+        {
+            if (++launches == 1) { NodeUpdateState.WriteRequest(Updates, new(candidate)); return new UpdateExitedChild(75); }
+            var journal = NodeUpdateState.Read(Updates).Record!;
+            NodeUpdateState.WriteReady(Updates, new(journal.ActivationNonce!.Value, launches == 2 ? candidate.ContentId : current.ContentId, 5678));
+            return new UpdateReadyChild(Updates, signaled: launches == 2);
+        }, TimeProvider.System, default));
+        Assert.Equal(3, launches); Assert.Equal(current.ContentId, NodeUpdateState.Read(Updates).Record!.Current.ContentId);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Fix1_private_worker_refusal_never_creates_or_adopts_identity(bool missing)
+    {
+        PrepareRoot(); var current = Image("fix-identity"); NodeUpdateState.Write(Updates, Committed(current));
+        using (var state = NodeState.Open(NodeFolder)) { state.SetHub("http://localhost/", null); state.SaveCredential(new string('a', 64)); }
+        var path = Path.Combine(NodeFolder, "node.json");
+        if (missing) File.Delete(path);
+        else { var json = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path))!; json["enrolled"] = false; File.WriteAllText(path, json.ToJsonString()); }
+        var before = missing ? null : File.ReadAllBytes(path); var requests = 0;
+        var transport = new NodeTransport { Clients = () => [], Locators = [], Chats = _ => Task.FromResult(new System.Text.Json.Nodes.JsonArray()), CodexExecutable = () => null,
+            CreateHandler = (_, _) => new UpdateWorkerHandler(_ => { requests++; return new(System.Net.HttpStatusCode.Unauthorized) { Content = new StringContent("{}") }; }) };
+        try { Assert.Equal(1, await NodeRunner.RunWorkerAsync(NodeFolder, null, Path.Combine(Updates, "versions", current.ContentId), transport, new StringWriter(), default)); }
+        catch (CoCern.Adapter.AdapterConfigurationException) { }
+        Assert.Equal(0, requests);
+        if (missing) Assert.False(File.Exists(path)); else Assert.Equal(before, File.ReadAllBytes(path));
+        using var released = new FileStream(Path.Combine(NodeFolder, "node.lock"), FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+    }
+
+    [Theory]
+    [InlineData(true, true)]
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    public async Task Fix1_nonce_worker_admission_preserves_candidate_commit_fence_and_retained_availability(bool candidateStartup, bool checkDispatchFirst)
+    {
+        PrepareRoot(); var current = Image("fix-admission-A"); var candidate = Image("fix-admission-B") with { ReleaseId = new string('B', 64) }; var nonce = Guid.NewGuid();
+        NodeUpdateState.Write(Updates, Committed(current)); NodeUpdateState.Write(Updates, new(1, current, null, candidate, nonce, NodeUpdatePhase.Starting, null, null));
+        var thread = Guid.NewGuid().ToString();
+        using (var state = NodeState.Open(NodeFolder)) { state.SetHub("http://localhost/", null); state.SaveCredential(new string('a', 64)); }
+        NodeState.WriteSessionHandle(NodeFolder, new("session", "session-token", "repo", "candidate", DateTimeOffset.UtcNow, Chat: new("codex", thread)));
+        var dispatcher = new FixDispatcher(); var stages = 0; var announces = 0; var cycled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var transport = new NodeTransport
+        {
+            Clients = () => [], Locators = [], Chats = _ => Task.FromResult(new System.Text.Json.Nodes.JsonArray()), CodexExecutable = () => "inert-never-run", CodexDispatcher = _ => dispatcher,
+            AnnounceInterval = TimeSpan.FromMilliseconds(20), WakeInterval = TimeSpan.FromMilliseconds(20), UpdateHost = FixHost,
+            CreateUpdater = _ => new UpdateScheduleCoordinator(() => Interlocked.Increment(ref stages)), HubHandler = () => new UpdateWorkerHandler(_ => new(System.Net.HttpStatusCode.ServiceUnavailable)),
+            Trace = value => { if (value == "announced" && ++announces == 4) cycled.TrySetResult(); },
+            CreateHandler = (_, _) => new UpdateWorkerHandler(request =>
+            {
+                if (request.RequestUri!.AbsolutePath.EndsWith("announce")) return new(System.Net.HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new { routes = new[] { new { provider = "codex", threadId = thread, relaySessionId = "session", repositoryId = "repo" } } })) };
+                object data = request.RequestUri.AbsolutePath.EndsWith("get_status") ? new { sessionId = "session", control = new { paused = false, requests = Array.Empty<object>() } } : new { items = new[] { new { messageId = "candidate-mail", repositoryId = "repo" } }, total = 1, nextCursor = (int?)null, truncated = false };
+                return new(System.Net.HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new { ok = true, code = "ok", dataJson = JsonSerializer.Serialize(data), version = 1 })) };
+            })
+        };
+        FileStream? readyLock = null;
+        if (!candidateStartup) { NodeUpdateState.WriteReady(Updates, new(Guid.NewGuid(), current.ContentId, 999)); readyLock = new(Path.Combine(Updates, "ready.json"), FileMode.Open, FileAccess.Read, FileShare.Read); }
+        var worker = NodeRunner.RunWorkerAsync(NodeFolder, nonce, Path.Combine(Updates, "versions", candidateStartup ? candidate.ContentId : current.ContentId), transport, new StringWriter(), stop.Token);
+        try
+        {
+            await Task.WhenAny(cycled.Task, worker).WaitAsync(TimeSpan.FromSeconds(5)); Assert.True(cycled.Task.IsCompleted);
+            if (candidateStartup)
+            {
+                if (checkDispatchFirst) { Assert.Equal(0, dispatcher.Calls); Assert.Equal(0, stages); }
+                else { Assert.Equal(0, stages); Assert.Equal(0, dispatcher.Calls); }
+                Assert.NotNull(NodeUpdateState.ReadReady(Updates));
+                NodeUpdateState.Write(Updates, Committed(candidate) with { Previous = current });
+                await dispatcher.Entered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            }
+            else { Assert.Equal(1, dispatcher.Calls); Assert.Equal(0, stages); Assert.Equal(candidate.ContentId, NodeUpdateState.Read(Updates).Record!.Pending!.ContentId); }
+        }
+        finally { stop.Cancel(); readyLock?.Dispose(); var exit = await worker; if (cycled.Task.IsCompleted) Assert.Equal(0, exit); }
+    }
+
+    private sealed class FixDispatcher : CoCern.Adapter.IWakeDispatcher
+    {
+        public int Calls; public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public Task<bool> QueueAsync(string threadId, string prompt, CancellationToken ct) { Interlocked.Increment(ref Calls); Entered.TrySetResult(); return Task.FromResult(false); }
+    }
     [Theory]
     [InlineData("valid")]
     [InlineData("metadata")]
@@ -231,6 +445,7 @@ public sealed class NodeSupervisorTests(ITestOutputHelper output) : IDisposable
 
     private sealed class UpdateWorkerChild(Func<CancellationToken, Task<int>> run, CancellationToken ct) : INodeChild
     {
+        public bool HasExited => ended?.IsCompleted == true;
         private readonly CancellationTokenSource stopping = CancellationTokenSource.CreateLinkedTokenSource(ct);
         private Task<int>? ended;
         public int ProcessId => Environment.ProcessId;
@@ -550,16 +765,18 @@ public sealed class NodeSupervisorTests(ITestOutputHelper output) : IDisposable
 
     private sealed class UpdateExitedChild(int code) : INodeChild
     {
+        public bool HasExited => true;
         public int ProcessId => 5678;
         public Task<int> WaitForExitAsync(CancellationToken ct) => Task.FromResult(code);
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
-    private sealed class UpdateReadyChild(string updates, IDisposable? blockedReplace = null) : INodeChild
+    private sealed class UpdateReadyChild(string updates, IDisposable? blockedReplace = null, bool signaled = false) : INodeChild
     {
         private readonly CancellationTokenSource stopped = new();
         private Task<int>? ended;
         public int ProcessId => 5678;
+        public bool HasExited => signaled || ended?.IsCompleted == true;
         public Task<int> WaitForExitAsync(CancellationToken ct) => ended ??= WaitAsync(ct);
         private async Task<int> WaitAsync(CancellationToken ct)
         {
@@ -871,6 +1088,7 @@ public sealed class NodeSupervisorTests(ITestOutputHelper output) : IDisposable
 
     private sealed class WaitingChild : INodeChild
     {
+        public bool HasExited => false;
         public int ProcessId => 12345;
         public async Task<int> WaitForExitAsync(CancellationToken ct) { await Task.Delay(Timeout.InfiniteTimeSpan, ct); return 0; }
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
@@ -923,6 +1141,7 @@ public sealed class NodeSupervisorTests(ITestOutputHelper output) : IDisposable
 
     private sealed class ExitedChild : INodeChild
     {
+        public bool HasExited => true;
         public int ProcessId => 12346;
         public Task<int> WaitForExitAsync(CancellationToken ct) => Task.FromResult(0);
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
@@ -935,6 +1154,8 @@ public sealed class NodeSupervisorTests(ITestOutputHelper output) : IDisposable
         Directory.CreateDirectory(fixture);
         var target = Path.Combine(fixture, "worker target");
         var sentinel = Path.Combine(fixture, "must-not-open-default");
+        using (NodeState.Open(target)) { }
+        var identityBefore = File.ReadAllBytes(Path.Combine(target, "node.json"));
         using var process = IsolatedAdapterProcess(sentinel, ["--node-worker", "--data-dir", target]);
         Assert.True(process.Start());
         var stdout = ReadBounded(process.StandardOutput);
@@ -950,6 +1171,7 @@ public sealed class NodeSupervisorTests(ITestOutputHelper output) : IDisposable
             Assert.True(File.Exists(Path.Combine(target, "node.lock")), "The private worker entry must acquire its explicit isolated singleton before refusing a missing hub.");
             Assert.Empty(await stdout);
             Assert.Contains("no hub yet", await error, StringComparison.Ordinal);
+            Assert.Equal(identityBefore, File.ReadAllBytes(Path.Combine(target, "node.json")));
             using var released = new FileStream(Path.Combine(target, "node.lock"), FileMode.Open, FileAccess.ReadWrite, FileShare.None);
         }
         finally { if (!process.HasExited) { process.Kill(entireProcessTree: false); await process.WaitForExitAsync(); } }

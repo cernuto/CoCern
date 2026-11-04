@@ -25,10 +25,13 @@ public static class NodeUpdateState
             var root = NodePackage.ValidatedUpdateRoot(Path.Combine(nodeFolder, "updates"), create: false);
             var record = Read(root).Record;
             if (record is null || (nonce is not null ? record.ActivationNonce != nonce || record.Phase == NodeUpdatePhase.Committed : record.Phase != NodeUpdatePhase.Committed)) return null;
-            var image = record.Phase == NodeUpdatePhase.Starting ? record.Pending! : record.Current;
-            var expected = Path.Combine(root, "versions", image.ContentId);
-            if (!string.Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(executingFolder)), expected, StringComparison.OrdinalIgnoreCase) || !NodePackage.ValidateStoredImage(root, image)) return null;
-            return image;
+            var actual = Path.TrimEndingDirectorySeparator(Path.GetFullPath(executingFolder));
+            // Starting may retain Current while rollback persistence is unavailable. Both identities
+            // require the recorded nonce, their exact canonical folder, and a fresh full rehash.
+            var images = record.Phase == NodeUpdatePhase.Starting ? new[] { record.Pending!, record.Current } : new[] { record.Current };
+            foreach (var image in images)
+                if (string.Equals(actual, Path.Combine(root, "versions", image.ContentId), StringComparison.OrdinalIgnoreCase) && NodePackage.ValidateStoredImage(root, image)) return image;
+            return null;
         }
         catch (Exception exception) when (InvalidJournal(exception)) { return null; }
     }
@@ -63,11 +66,14 @@ public static class NodeUpdateState
             var root = NodePackage.ValidatedUpdateRoot(updateRoot, create: false);
             var path = Path.Combine(root, name);
             NodePackage.ValidatePrivateFile(path);
-            using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-            if (file.Length is <= 0 or > JournalLimit) return null;
-            var bytes = new byte[checked((int)file.Length)];
-            file.ReadExactly(bytes);
-            if (file.ReadByte() != -1) return null;
+            byte[] bytes;
+            using (var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            {
+                if (file.Length is <= 0 or > JournalLimit) return null;
+                bytes = new byte[checked((int)file.Length)];
+                file.ReadExactly(bytes);
+                if (file.ReadByte() != -1) return null;
+            }
             return JsonSerializer.Deserialize<T>(bytes, Json);
         }
         catch (Exception exception) when (InvalidJournal(exception)) { return null; }
@@ -80,6 +86,12 @@ public static class NodeUpdateState
         AllowDuplicateProperties = false,
         MaxDepth = 16
     };
+
+    internal static NodeUpdateRecord? ReadPrimary(string updateRoot)
+    {
+        try { return ReadRecord(NodePackage.ValidatedUpdateRoot(updateRoot, create: false), "state.json", out _); }
+        catch (Exception exception) when (InvalidJournal(exception)) { return null; }
+    }
 
     public static NodeUpdateReadResult Read(string updateRoot)
     {
@@ -131,11 +143,14 @@ public static class NodeUpdateState
         try
         {
             NodePackage.ValidatePrivateFile(path);
-            using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-            if (file.Length is <= 0 or > JournalLimit) return null;
-            var bytes = new byte[checked((int)file.Length)];
-            file.ReadExactly(bytes);
-            if (file.ReadByte() != -1) return null;
+            byte[] bytes;
+            using (var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            {
+                if (file.Length is <= 0 or > JournalLimit) return null;
+                bytes = new byte[checked((int)file.Length)];
+                file.ReadExactly(bytes);
+                if (file.ReadByte() != -1) return null;
+            }
             var record = JsonSerializer.Deserialize<NodeUpdateRecord>(bytes, Json);
             return record is not null && Valid(root, record) ? record : null;
         }

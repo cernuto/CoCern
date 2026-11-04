@@ -23,6 +23,36 @@ namespace CoCern.Tests;
 
 public sealed class NodeTests : IDisposable
 {
+    [Fact]
+    public async Task Fix1_release_A_B_A_keeps_each_unexpired_failure_until_fifteen_minutes()
+    {
+        using var state = NodeState.Open(DataDir); state.SetHub("http://localhost/", null); state.SaveCredential(new string('a', 64));
+        var clock = new UpdateClock(); var began = clock.GetUtcNow(); var package = new NodePackageMetadata(1, "1.0.0", "net10.0", "win-x64", true, [], 1);
+        var a = new NodeRelease(1, new string('A', 64), package, 1, new string('A', 64), new string('C', 64)); var b = a with { ReleaseId = new string('B', 64), ZipSha256 = new string('B', 64) };
+        var offered = a; var phase = 0; var phaseCycles = 0; var attempts = 0; var earlyA = false;
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var transport = new NodeTransport
+        {
+            Clock = clock, Clients = () => [], Locators = [], Chats = _ => Task.FromResult(new JsonArray()), CodexExecutable = () => null, UpdateHost = new(null, [], "win-x64"), AnnounceInterval = TimeSpan.FromMilliseconds(10),
+            HubHandler = () => new UpdateTestHandler(_ => new(HttpStatusCode.ServiceUnavailable)),
+            CreateHandler = (_, _) => new UpdateTestHandler(_ => new(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new { routes = Array.Empty<object>(), nodeRelease = offered }, new JsonSerializerOptions(JsonSerializerDefaults.Web))) }),
+            CreateUpdater = _ => new UpdateFunctionalCoordinator((release, _) =>
+            {
+                if (Interlocked.Increment(ref attempts) == 3) { earlyA = release!.ReleaseId == a.ReleaseId && clock.GetUtcNow() - began < TimeSpan.FromMinutes(15); stop.Cancel(); }
+                return Task.FromResult<StagedNode?>(null);
+            }, (_, _) => throw new InvalidOperationException()),
+            Trace = value =>
+            {
+                if (value != "announced" || ++phaseCycles < 4) return;
+                if (phase == 0 && attempts == 1) { offered = b; clock.Advance(TimeSpan.FromMinutes(5)); phase++; phaseCycles = 0; }
+                else if (phase == 1 && attempts == 2) { offered = a; clock.Advance(TimeSpan.FromMinutes(5)); phase++; phaseCycles = 0; }
+                else if (phase == 2) { clock.Advance(TimeSpan.FromMinutes(6)); phase++; }
+            }
+        };
+        Assert.Equal(0, await NodeRunner.RunAsync(state, null, transport, error, stop.Token));
+        Assert.False(earlyA); Assert.Equal(3, attempts);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -59,6 +89,7 @@ public sealed class NodeTests : IDisposable
                 using var machine = host.CreateClient(new() { BaseAddress = InMemoryHub });
                 machine.DefaultRequestHeaders.Authorization = new("Bearer", credential);
                 await host.Call(machine, "send_message", new { repositoryId = "repo", sessionId = sender.SessionId, sessionToken = sender.Token, recipientSessionId = receiver.SessionId, requestId = "blocked-mail", text = "mail held by existing control" });
+                await WaitForAsync(async () => (await UpdateInboxAsync(host, machine, receiver)).GetProperty("items").GetArrayLength() == 1, run);
                 using var admin = AdminClient(host);
                 var controlReply = await host.Call(admin, "control_request", new { repositoryId = "repo", sessionId = receiver.SessionId, requestId = Guid.NewGuid().ToString("N"), command = paused ? "pause" : "cancel", actionId = "native-action" });
                 Assert.True(controlReply.GetProperty("ok").GetBoolean());
