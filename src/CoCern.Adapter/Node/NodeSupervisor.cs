@@ -38,6 +38,8 @@ public static class NodeSupervisor
             {
                 record = Rollback(root, record, clock);
             }
+            string? refusedRelease = null;
+            DateTimeOffset? refusedAt = null;
             while (true)
             {
                 ct.ThrowIfCancellationRequested();
@@ -48,6 +50,15 @@ public static class NodeSupervisor
                 if (candidate && (!readyClean || !requestClean)) { record = Rollback(root, record, clock); continue; }
                 // Launch rehashes the immutable stored image on every attempt.
                 var launch = NodePackage.Launch(image, originalFolder, record.ActivationNonce, readHost());
+                if (launch is not null)
+                {
+                    var startup = new NodeWorkerStartupContext(record.ActivationNonce, Guid.NewGuid(), refusedRelease, refusedAt);
+                    var arguments = launch.Arguments.ToList();
+                    var contextIndex = arguments.IndexOf("--activation-nonce");
+                    if (contextIndex >= 0) arguments[contextIndex + 1] = startup.ToArgument();
+                    else arguments.AddRange(["--activation-nonce", startup.ToArgument()]);
+                    launch = launch with { Arguments = arguments.ToArray(), StartupContext = startup };
+                }
                 var child = launch is null ? null : start(launch);
                 if (child is null)
                 {
@@ -63,7 +74,7 @@ public static class NodeSupervisor
                     {
                         while (!startupFailed && record.Phase != NodeUpdatePhase.Committed)
                         {
-                            if (!await ReadyAsync(root, child, ended, nonce, image.ContentId, candidate, clock, ct)) { startupFailed = true; break; }
+                            if (!await ReadyAsync(root, child, ended, nonce, image.ContentId, launch!.StartupContext!.LaunchId, candidate, clock, ct)) { startupFailed = true; break; }
                             else
                             {
                                 var committed = record with
@@ -102,11 +113,13 @@ public static class NodeSupervisor
                 var request = NodeUpdateState.ReadRequest(root);
                 if (request is null || request.Candidate.ContentId == record.Current.ContentId ||
                     request.Candidate.ReleaseId == record.LastFailedReleaseId && clock.GetUtcNow() - record.LastFailedAtUtc < TimeSpan.FromMinutes(15)) continue;
-                var starting = record with { Phase = NodeUpdatePhase.Starting, Pending = request.Candidate, ActivationNonce = Guid.NewGuid() };
+                var starting = record with { Phase = NodeUpdatePhase.Starting, Pending = request.Candidate, ActivationNonce = Guid.NewGuid(), LastFailedReleaseId = refusedRelease ?? record.LastFailedReleaseId, LastFailedAtUtc = refusedAt ?? record.LastFailedAtUtc };
                 try { NodeUpdateState.Write(root, starting); record = starting; }
                 catch (Exception exception) when (JournalFailure(exception))
                 {
                     var authoritative = NodeUpdateState.Read(root).Record ?? throw new InvalidDataException("node-journal-invalid");
+                    refusedRelease = request.Candidate.ReleaseId;
+                    refusedAt = clock.GetUtcNow();
                     record = authoritative.Phase == NodeUpdatePhase.Starting ? Rollback(root, authoritative, clock) : authoritative;
                 }
             }
@@ -136,7 +149,7 @@ public static class NodeSupervisor
         }
     }
 
-    private static async Task<bool> ReadyAsync(string root, INodeChild child, Task<int> ended, Guid nonce, string contentId, bool candidate, TimeProvider clock, CancellationToken ct)
+    private static async Task<bool> ReadyAsync(string root, INodeChild child, Task<int> ended, Guid nonce, string contentId, Guid launchId, bool candidate, TimeProvider clock, CancellationToken ct)
     {
         var started = clock.GetTimestamp();
         while (!candidate || clock.GetElapsedTime(started) < TimeSpan.FromSeconds(30))
@@ -146,7 +159,7 @@ public static class NodeSupervisor
             var ready = NodeUpdateState.ReadReady(root);
             if (ready is not null)
             {
-                if (ready.ActivationNonce == nonce && ready.ContentId == contentId && ready.ProcessId == child.ProcessId)
+                if (ready.ActivationNonce == nonce && ready.ContentId == contentId && ready.ProcessId == child.ProcessId && ready.LaunchId == launchId)
                     return !child.HasExited && !ended.IsCompleted;
                 if (candidate) return false;
             }

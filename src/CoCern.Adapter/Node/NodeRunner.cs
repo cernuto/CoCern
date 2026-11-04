@@ -64,9 +64,15 @@ public sealed record NodeRoute(string Provider, string ThreadId, string RelaySes
 /// </summary>
 public sealed class NodeRunner : IAsyncDisposable
 {
-    internal static async Task<int> RunWorkerAsync(string nodeFolder, Guid? activationNonce, string executingFolder, NodeTransport transport, TextWriter error, CancellationToken ct)
+    internal static async Task<int> RunWorkerAsync(string nodeFolder, Guid? activationNonce, string executingFolder, NodeTransport transport, TextWriter error, CancellationToken ct, NodeWorkerStartupContext? startupContext = null)
     {
         if (!Path.IsPathFullyQualified(nodeFolder) || !Path.IsPathFullyQualified(executingFolder) || activationNonce == Guid.Empty) return 1;
+        if (startupContext is not null)
+        {
+            if (startupContext.ActivationNonce != activationNonce || startupContext.LaunchId == Guid.Empty && (startupContext.FailedReleaseId is not null || startupContext.FailedAtUtc is not null)) return 1;
+            var argument = startupContext.LaunchId == Guid.Empty ? startupContext.ActivationNonce?.ToString("D") ?? "" : startupContext.ToArgument();
+            if (!NodeWorkerStartupContext.TryParse(argument, out startupContext)) return 1;
+        }
         NodeState state;
         var started = TimeProvider.System.GetTimestamp();
         var reported = false;
@@ -89,9 +95,9 @@ public sealed class NodeRunner : IAsyncDisposable
             NodeReady? readiness = null;
             if (activationNonce is { } nonce)
             {
-                readiness = new(nonce, image.ContentId, Environment.ProcessId);
+                readiness = new(nonce, image.ContentId, Environment.ProcessId, startupContext?.LaunchId is { } launch && launch != Guid.Empty ? launch : null);
             }
-            return await RunAsync(state, null, transport, error, ct, readiness, workerStartup: true, workerImage: image.ContentId);
+            return await RunAsync(state, null, transport, error, ct, readiness, workerStartup: true, workerImage: image.ContentId, startupContext: startupContext);
         }
     }
 
@@ -153,7 +159,7 @@ public sealed class NodeRunner : IAsyncDisposable
     private int _activationGateHeld;
     private bool _workerStartup;
 
-    private NodeRunner(NodeState state, Uri hub, NodeTransport transport, TextWriter error, NodeReady? readiness = null, bool workerStartup = false, string? workerImage = null)
+    private NodeRunner(NodeState state, Uri hub, NodeTransport transport, TextWriter error, NodeReady? readiness = null, bool workerStartup = false, string? workerImage = null, NodeWorkerStartupContext? startupContext = null)
     {
         (_state, _hub, _transport, _error) = (state, hub, transport, error);
         _pendingReady = readiness;
@@ -164,18 +170,24 @@ public sealed class NodeRunner : IAsyncDisposable
         _pendingCandidate = readiness is not null && journal?.Current.ContentId != workerImage;
         _activationGateHeld = _pendingCandidate ? 1 : 0;
         if (journal?.LastFailedReleaseId is { } failed && journal.LastFailedAtUtc is { } at) _failedReleases[failed] = at;
+        if (startupContext?.FailedReleaseId is { } refused && startupContext.FailedAtUtc is { } failedAt)
+        {
+            var now = transport.Clock.GetUtcNow();
+            var bounded = failedAt > now ? now : failedAt;
+            if (now - bounded < TimeSpan.FromMinutes(15) && (!_failedReleases.TryGetValue(refused, out var existing) || existing < bounded)) _failedReleases[refused] = bounded;
+        }
         _chats = new NodeChats(state.Folder, transport.Locators, transport.Clock, transport.LocateWindow, transport.LocateBudget, () => transport.CodexExecutable() is not null);
     }
 
     /// <summary>Runs until cancelled (exit 0). Exit 1 for configuration problems or a revoked PC, 4 when the hub presents a certificate other than the pinned one.</summary>
     public static Task<int> RunAsync(NodeState state, Uri? hub, CancellationToken ct) => RunAsync(state, hub, new NodeTransport(), Console.Error, ct);
 
-    internal static async Task<int> RunAsync(NodeState state, Uri? hub, NodeTransport transport, TextWriter error, CancellationToken ct, NodeReady? readiness = null, bool workerStartup = false, string? workerImage = null)
+    internal static async Task<int> RunAsync(NodeState state, Uri? hub, NodeTransport transport, TextWriter error, CancellationToken ct, NodeReady? readiness = null, bool workerStartup = false, string? workerImage = null, NodeWorkerStartupContext? startupContext = null)
     {
         Uri target;
         try { target = ResolveHub(state, hub); }
         catch (AdapterConfigurationException exception) { error.WriteLine(exception.Message); return 1; }
-        await using var runner = new NodeRunner(state, target, transport, error, readiness, workerStartup, workerImage);
+        await using var runner = new NodeRunner(state, target, transport, error, readiness, workerStartup, workerImage, startupContext);
         if (runner._pendingCandidate) await runner._dispatchGate.TryDrainAsync(TimeSpan.Zero, ct);
         try { return await runner.LoopAsync(ct); }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { return transport.SingleCycle ? 1 : 0; }
@@ -391,19 +403,23 @@ public sealed class NodeRunner : IAsyncDisposable
             if (_pendingReady is { } ready)
             {
                 var root = Path.Combine(_state.Folder, "updates");
-                var record = NodeUpdateState.Read(root).Record;
+                var record = NodeUpdateState.ReadPrimary(root);
                 var expected = record?.Phase == NodeUpdatePhase.Starting ? record.Pending : null;
-                if (record is { Phase: NodeUpdatePhase.Committed } && NodeUpdateState.ReadPrimary(root) is { Phase: NodeUpdatePhase.Committed } committed && committed.Current.ContentId == ready.ContentId)
+                if (record is { Phase: NodeUpdatePhase.Committed } && record.Current.ContentId == ready.ContentId)
                     _pendingReady = null;
+                else if (accepted is null || record?.ActivationNonce != ready.ActivationNonce || (expected?.ContentId != ready.ContentId && record?.Current.ContentId != ready.ContentId))
+                {
+                    // A verified historical Current that already authenticated may have an admitted
+                    // reconcile. Lost recovery observation defers readiness/updates, never that work.
+                    if (_pendingCandidate || _workerStartup) return Stop("node-update:startup-invalid");
+                }
                 else
                 {
-                    if (accepted is null || record?.ActivationNonce != ready.ActivationNonce || (expected?.ContentId != ready.ContentId && record?.Current.ContentId != ready.ContentId)) return Stop("node-update:startup-invalid");
                     try { NodeUpdateState.WriteReady(root, ready); _pendingReady = null; }
                     catch (Exception exception) when (exception is IOException or InvalidDataException or UnauthorizedAccessException)
                     {
                         if (_pendingCandidate) return Stop("node-update:ready-unavailable");
-                        // Historical Current may keep serving after authentication while recovery
-                        // evidence/debris remains untouched; updates stay fenced by the journal.
+                        // Retry retained readiness through this same accepted announce cycle.
                     }
                 }
             }

@@ -108,7 +108,8 @@ try
         const string usage = "Use --node-worker --data-dir <absolute-path> [--activation-nonce <guid>].";
         if (args.Length is not (3 or 5) || args[1] != "--data-dir" || string.IsNullOrWhiteSpace(args[2]) || !Path.IsPathFullyQualified(args[2]))
             throw new AdapterConfigurationException(usage);
-        if (args.Length == 5 && (args[3] != "--activation-nonce" || !Guid.TryParseExact(args[4], "D", out var nonce) || nonce == Guid.Empty))
+        NodeWorkerStartupContext? startupContext = null;
+        if (args.Length == 5 && (args[3] != "--activation-nonce" || !NodeWorkerStartupContext.TryParse(args[4], out startupContext)))
             throw new AdapterConfigurationException(usage);
         using var shutdown = new CancellationTokenSource();
         Console.CancelKeyPress += (_, cancel) => { cancel.Cancel = true; shutdown.Cancel(); };
@@ -118,7 +119,7 @@ try
             UpdateHost = NodePackage.ReadHostCapabilities(Path.IsPathFullyQualified(knownHost) ? knownHost : null),
             CreateUpdater = context => new NodeUpdateCoordinator(context)
         };
-        return await NodeRunner.RunWorkerAsync(args[2], args.Length == 5 ? Guid.ParseExact(args[4], "D") : null, AppContext.BaseDirectory, transport, Console.Error, shutdown.Token);
+        return await NodeRunner.RunWorkerAsync(args[2], startupContext?.ActivationNonce, AppContext.BaseDirectory, transport, Console.Error, shutdown.Token, startupContext);
     }
     if (args.Length > 0 && args[0] == "--node")
     {

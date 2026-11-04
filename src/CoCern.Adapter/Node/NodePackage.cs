@@ -17,7 +17,10 @@ namespace CoCern.Adapter.Node;
 
 public sealed record StagedNode(NodeRelease Release, NodeImage Image, string Directory);
 public sealed record NodeHostCapabilities(string? DotnetPath, NodeFramework[] InstalledFrameworks, string WindowsRid);
-public sealed record NodeLaunchSpec(string FileName, string[] Arguments);
+public sealed record NodeLaunchSpec(string FileName, string[] Arguments)
+{
+    internal NodeWorkerStartupContext? StartupContext { get; init; }
+}
 
 public static class NodePackage
 {
@@ -124,10 +127,10 @@ public static class NodePackage
 
     internal static bool ValidImageDescriptor(NodeImage? image) => image is not null && LowerHash(image.ContentId) && UpperHash(image.AdapterDllSha256) && (image.ReleaseId is null || UpperHash(image.ReleaseId)) && ValidMetadata(image.Package);
 
-    internal static void ValidatePrivateFile(string path)
+    internal static void ValidatePrivateFile(string path, bool replaceableRead = false)
     {
         RejectLinks(path);
-        RejectHardLink(path);
+        using var handle = replaceableRead ? OpenPrivateReadHandle(path) : OpenSingleLinkHandle(path, FileShare.Read);
         ValidatePrivacy(new FileInfo(path));
     }
 
@@ -466,8 +469,20 @@ public static class NodePackage
 
     private static void RejectHardLink(string file)
     {
-        using var handle = File.OpenHandle(file, FileMode.Open, FileAccess.Read, FileShare.Read);
-        if (!GetFileInformationByHandle(handle, out var information) || information.NumberOfLinks != 1) throw new InvalidDataException();
+        using var handle = OpenSingleLinkHandle(file, FileShare.Read);
+    }
+
+    internal static Microsoft.Win32.SafeHandles.SafeFileHandle OpenPrivateReadHandle(string file) => OpenSingleLinkHandle(file, FileShare.ReadWrite | FileShare.Delete);
+
+    private static Microsoft.Win32.SafeHandles.SafeFileHandle OpenSingleLinkHandle(string file, FileShare sharing)
+    {
+        var handle = File.OpenHandle(file, FileMode.Open, FileAccess.Read, sharing);
+        try
+        {
+            if (!GetFileInformationByHandle(handle, out var information) || information.NumberOfLinks != 1) throw new InvalidDataException();
+            return handle;
+        }
+        catch { handle.Dispose(); throw; }
     }
 
     [DllImport("kernel32.dll", SetLastError = true)]

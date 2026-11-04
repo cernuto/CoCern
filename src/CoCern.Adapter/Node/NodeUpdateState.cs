@@ -5,7 +5,35 @@ using System.Text.Json.Serialization;
 namespace CoCern.Adapter.Node;
 
 internal sealed record NodeUpdateRequest(NodeImage Candidate);
-internal sealed record NodeReady(Guid ActivationNonce, string ContentId, int ProcessId);
+internal sealed record NodeReady(Guid ActivationNonce, string ContentId, int ProcessId, Guid? LaunchId = null);
+internal sealed record NodeWorkerStartupContext(Guid? ActivationNonce, Guid LaunchId, string? FailedReleaseId = null, DateTimeOffset? FailedAtUtc = null)
+{
+    internal string ToArgument() => $"v1;{(ActivationNonce is { } nonce ? nonce.ToString("D") : "-")};{LaunchId:D};{FailedReleaseId ?? "-"};{(FailedAtUtc is { } failed ? failed.ToUnixTimeSeconds().ToString(System.Globalization.CultureInfo.InvariantCulture) : "-")}";
+
+    internal static bool TryParse(string value, out NodeWorkerStartupContext? context)
+    {
+        context = null;
+        if (value is null || value.Length > 192) return false;
+        if (Guid.TryParseExact(value, "D", out var legacy) && legacy != Guid.Empty) { context = new(legacy, Guid.Empty); return true; }
+        var fields = value.Split(';');
+        if (fields.Length != 5 || fields[0] != "v1" || !Guid.TryParseExact(fields[2], "D", out var launch) || launch == Guid.Empty) return false;
+        Guid? nonce = null;
+        if (fields[1] != "-")
+        {
+            if (!Guid.TryParseExact(fields[1], "D", out var parsed) || parsed == Guid.Empty) return false;
+            nonce = parsed;
+        }
+        if (fields[3] == "-" && fields[4] == "-") { context = new(nonce, launch); return true; }
+        if (fields[3].Length != 64 || !fields[3].All(c => char.IsAsciiDigit(c) || c is >= 'A' and <= 'F') ||
+            !long.TryParse(fields[4], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var seconds)) return false;
+        DateTimeOffset at;
+        try { at = DateTimeOffset.FromUnixTimeSeconds(seconds); }
+        catch (ArgumentOutOfRangeException) { return false; }
+        if (at > DateTimeOffset.UtcNow.AddMinutes(15)) return false;
+        context = new(nonce, launch, fields[3], at);
+        return true;
+    }
+}
 
 public enum NodeUpdatePhase { Committed, Starting, Rollback }
 
@@ -65,7 +93,7 @@ public static class NodeUpdateState
         {
             var root = NodePackage.ValidatedUpdateRoot(updateRoot, create: false);
             var path = Path.Combine(root, name);
-            NodePackage.ValidatePrivateFile(path);
+            NodePackage.ValidatePrivateFile(path, replaceableRead: true);
             byte[] bytes;
             using (var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
             {
@@ -142,7 +170,7 @@ public static class NodeUpdateState
         catch (Exception exception) when (InvalidJournal(exception)) { return null; }
         try
         {
-            NodePackage.ValidatePrivateFile(path);
+            NodePackage.ValidatePrivateFile(path, replaceableRead: true);
             byte[] bytes;
             using (var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
             {

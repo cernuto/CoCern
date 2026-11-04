@@ -19,6 +19,176 @@ public sealed class NodeSupervisorTests(ITestOutputHelper output) : IDisposable
 {
     private static NodeHostCapabilities FixHost => new(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "dotnet", "dotnet.exe"), [new("Microsoft.NETCore.App", "10.0.14")], "win-x64");
 
+    [Fact]
+    public async Task Fix2_serving_retained_worker_defers_transient_primary_read_loss()
+    {
+        var candidateStartup = false; var checkDispatchFirst = false;
+        PrepareRoot(); var current = Image("fix-admission-A"); var candidate = Image("fix-admission-B") with { ReleaseId = new string('B', 64) }; var nonce = Guid.NewGuid();
+        NodeUpdateState.Write(Updates, Committed(current)); NodeUpdateState.Write(Updates, new(1, current, null, candidate, nonce, NodeUpdatePhase.Starting, null, null));
+        var thread = Guid.NewGuid().ToString();
+        using (var state = NodeState.Open(NodeFolder)) { state.SetHub("http://localhost/", null); state.SaveCredential(new string('a', 64)); }
+        NodeState.WriteSessionHandle(NodeFolder, new("session", "session-token", "repo", "candidate", DateTimeOffset.UtcNow, Chat: new("codex", thread)));
+        var dispatcher = new FixServingDispatcher(); var stages = 0; var announces = 0; var cycled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var transport = new NodeTransport
+        {
+            Clients = () => [], Locators = [], Chats = _ => Task.FromResult(new System.Text.Json.Nodes.JsonArray()), CodexExecutable = () => "inert-never-run", CodexDispatcher = _ => dispatcher,
+            AnnounceInterval = TimeSpan.FromMilliseconds(20), WakeInterval = TimeSpan.FromMilliseconds(20), UpdateHost = FixHost,
+            CreateUpdater = _ => new UpdateScheduleCoordinator(() => Interlocked.Increment(ref stages)), HubHandler = () => new UpdateWorkerHandler(_ => new(System.Net.HttpStatusCode.ServiceUnavailable)),
+            Trace = value => { if (value == "announced" && ++announces == 4) cycled.TrySetResult(); },
+            CreateHandler = (_, _) => new UpdateWorkerHandler(request =>
+            {
+                if (request.RequestUri!.AbsolutePath.EndsWith("announce")) return new(System.Net.HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new { routes = new[] { new { provider = "codex", threadId = thread, relaySessionId = "session", repositoryId = "repo" } } })) };
+                object data = request.RequestUri.AbsolutePath.EndsWith("get_status") ? new { sessionId = "session", control = new { paused = false, requests = Array.Empty<object>() } } : new { items = new[] { new { messageId = "candidate-mail", repositoryId = "repo" } }, total = 1, nextCursor = (int?)null, truncated = false };
+                return new(System.Net.HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new { ok = true, code = "ok", dataJson = JsonSerializer.Serialize(data), version = 1 })) };
+            })
+        };
+        FileStream? readyLock = null;
+        if (!candidateStartup) { NodeUpdateState.WriteReady(Updates, new(Guid.NewGuid(), current.ContentId, 999)); readyLock = new(Path.Combine(Updates, "ready.json"), FileMode.Open, FileAccess.Read, FileShare.Read); }
+        var worker = NodeRunner.RunWorkerAsync(NodeFolder, nonce, Path.Combine(Updates, "versions", candidateStartup ? candidate.ContentId : current.ContentId), transport, new StringWriter(), stop.Token);
+        try
+        {
+            await Task.WhenAny(cycled.Task, worker).WaitAsync(TimeSpan.FromSeconds(5)); Assert.True(cycled.Task.IsCompleted);
+            if (candidateStartup)
+            {
+                if (checkDispatchFirst) { Assert.Equal(0, dispatcher.Calls); Assert.Equal(0, stages); }
+                else { Assert.Equal(0, stages); Assert.Equal(0, dispatcher.Calls); }
+                Assert.NotNull(NodeUpdateState.ReadReady(Updates));
+                NodeUpdateState.Write(Updates, Committed(candidate) with { Previous = current });
+                await dispatcher.Entered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            }
+            else
+            {
+                Assert.Equal(1, dispatcher.Calls); Assert.Equal(0, stages);
+                Assert.False(dispatcher.Completed.Task.IsCompleted);
+                using (var denied = new FileStream(Path.Combine(Updates, "state.json"), FileMode.Open, FileAccess.Read, FileShare.None))
+                {
+                    await Task.Delay(150);
+                    Assert.False(worker.IsCompleted);
+                    Assert.Equal(0, stages);
+                }
+                readyLock!.Dispose(); readyLock = null;
+                var deadline = DateTimeOffset.UtcNow.AddSeconds(3);
+                while (NodeUpdateState.ReadReady(Updates)?.ActivationNonce != nonce && DateTimeOffset.UtcNow < deadline) await Task.Delay(10);
+                Assert.Equal(nonce, NodeUpdateState.ReadReady(Updates)!.ActivationNonce);
+                NodeUpdateState.Write(Updates, Committed(current));
+                await Task.Delay(100);
+                Assert.False(worker.IsCompleted);
+            }
+        }
+        finally { stop.Cancel(); readyLock?.Dispose(); await worker; }
+    }
+
+    [Fact]
+    public async Task Fix2_retained_startup_failure_seed_prevents_same_release_churn()
+    {
+        var candidateStartup = false; var checkDispatchFirst = false;
+        PrepareRoot(); var current = Image("fix-admission-A"); var candidate = Image("fix-admission-B") with { ReleaseId = new string('B', 64) }; var nonce = Guid.NewGuid();
+        NodeUpdateState.Write(Updates, Committed(current));
+        var release = new NodeRelease(1, candidate.ReleaseId!, candidate.Package, 1, new string('C', 64), candidate.AdapterDllSha256);
+        var thread = Guid.NewGuid().ToString();
+        using (var state = NodeState.Open(NodeFolder)) { state.SetHub("http://localhost/", null); state.SaveCredential(new string('a', 64)); }
+        NodeState.WriteSessionHandle(NodeFolder, new("session", "session-token", "repo", "candidate", DateTimeOffset.UtcNow, Chat: new("codex", thread)));
+        var dispatcher = new FixDispatcher(); var stages = 0; var announces = 0; var cycled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var transport = new NodeTransport
+        {
+            Clients = () => [], Locators = [], Chats = _ => Task.FromResult(new System.Text.Json.Nodes.JsonArray()), CodexExecutable = () => "inert-never-run", CodexDispatcher = _ => dispatcher,
+            AnnounceInterval = TimeSpan.FromMilliseconds(20), WakeInterval = TimeSpan.FromMilliseconds(20), UpdateHost = FixHost,
+            CreateUpdater = _ => new UpdateScheduleCoordinator(() => Interlocked.Increment(ref stages)), HubHandler = () => new UpdateWorkerHandler(_ => new(System.Net.HttpStatusCode.ServiceUnavailable)),
+            Trace = value => { if (value == "announced" && ++announces == 4) cycled.TrySetResult(); },
+            CreateHandler = (_, _) => new UpdateWorkerHandler(request =>
+            {
+                if (request.RequestUri!.AbsolutePath.EndsWith("announce")) return new(System.Net.HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new { nodeRelease = release, routes = new[] { new { provider = "codex", threadId = thread, relaySessionId = "session", repositoryId = "repo" } } })) };
+                object data = request.RequestUri.AbsolutePath.EndsWith("get_status") ? new { sessionId = "session", control = new { paused = false, requests = Array.Empty<object>() } } : new { items = new[] { new { messageId = "candidate-mail", repositoryId = "repo" } }, total = 1, nextCursor = (int?)null, truncated = false };
+                return new(System.Net.HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new { ok = true, code = "ok", dataJson = JsonSerializer.Serialize(data), version = 1 })) };
+            })
+        };
+        FileStream? readyLock = null;
+
+        var worker = NodeRunner.RunWorkerAsync(NodeFolder, null, Path.Combine(Updates, "versions", candidateStartup ? candidate.ContentId : current.ContentId), transport, new StringWriter(), stop.Token, new(null, Guid.NewGuid(), candidate.ReleaseId, DateTimeOffset.UtcNow));
+        try
+        {
+            await Task.WhenAny(cycled.Task, worker).WaitAsync(TimeSpan.FromSeconds(5)); Assert.True(cycled.Task.IsCompleted);
+            if (candidateStartup)
+            {
+                if (checkDispatchFirst) { Assert.Equal(0, dispatcher.Calls); Assert.Equal(0, stages); }
+                else { Assert.Equal(0, stages); Assert.Equal(0, dispatcher.Calls); }
+                Assert.NotNull(NodeUpdateState.ReadReady(Updates));
+                NodeUpdateState.Write(Updates, Committed(candidate) with { Previous = current });
+                await dispatcher.Entered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            }
+            else { Assert.Equal(0, stages); Assert.False(worker.IsCompleted); }
+        }
+        finally { stop.Cancel(); readyLock?.Dispose(); var exit = await worker; if (cycled.Task.IsCompleted) Assert.Equal(0, exit); }
+    }
+
+    [Fact]
+    public void Fix2_private_startup_context_is_bounded_and_preserves_legacy_nonce()
+    {
+        var nonce = Guid.NewGuid(); var launch = Guid.NewGuid(); var release = new string('B', 64); var failed = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        Assert.True(NodeWorkerStartupContext.TryParse($"v1;{nonce:D};{launch:D};{release};{failed}", out var context));
+        Assert.Equal(nonce, context!.ActivationNonce); Assert.Equal(launch, context.LaunchId); Assert.Equal(release, context.FailedReleaseId);
+        Assert.Equal(failed, context.FailedAtUtc!.Value.ToUnixTimeSeconds());
+        Assert.True(NodeWorkerStartupContext.TryParse($"v1;-;{launch:D};-;-", out var retained)); Assert.Null(retained!.ActivationNonce);
+        Assert.True(NodeWorkerStartupContext.TryParse(nonce.ToString("D"), out var legacy)); Assert.Equal(nonce, legacy!.ActivationNonce);
+        foreach (var invalid in new[] { new string('x', 193), $"v2;-;{launch:D};-;-", $"v1;-;{Guid.Empty:D};-;-", $"v1;-;{launch:D};{release};-", $"v1;-;{launch:D};-;-;extra", $"v1;-;{launch:D};{release};9223372036854775807" })
+            Assert.False(NodeWorkerStartupContext.TryParse(invalid, out _));
+    }
+
+    [Fact]
+    public void Fix2_actual_link_validation_handle_allows_atomic_journal_replacement()
+    {
+        PrepareRoot(); var current = Image("fix2-sharing"); var record = Committed(current);
+        NodeUpdateState.Write(Updates, record);
+        using var validation = NodePackage.OpenPrivateReadHandle(Path.Combine(Updates, "state.json"));
+        NodeUpdateState.Write(Updates, record with { LastFailedReleaseId = new string('B', 64), LastFailedAtUtc = DateTimeOffset.UtcNow });
+        Assert.Equal(new string('B', 64), NodeUpdateState.ReadPrimary(Updates)!.LastFailedReleaseId);
+    }
+
+    [Fact]
+    public async Task Fix2_recycled_retained_pid_requires_fresh_launch_publication()
+    {
+        PrepareRoot(); var current = Image("fix2-fresh-A"); var candidate = Image("fix2-fresh-B") with { ReleaseId = new string('B', 64) }; var nonce = Guid.NewGuid();
+        NodeUpdateState.Write(Updates, Committed(current));
+        NodeUpdateState.Write(Updates, new(1, current, null, candidate, nonce, NodeUpdatePhase.Rollback, candidate.ReleaseId, DateTimeOffset.UtcNow));
+        NodeUpdateState.WriteReady(Updates, new(nonce, current.ContentId, 12345, Guid.NewGuid()));
+        FileStream? held = new(Path.Combine(Updates, "ready.json"), FileMode.Open, FileAccess.Read, FileShare.Read);
+        NodeLaunchSpec? launched = null;
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var run = NodeSupervisor.RunAsync(NodeFolder, "C:/unused/CoCern.Adapter.dll", FixHost, launch => { launched = launch; return new WaitingChild(); }, TimeProvider.System, stop.Token);
+        try
+        {
+            await Task.Delay(150);
+            Assert.Equal(NodeUpdatePhase.Rollback, NodeUpdateState.ReadPrimary(Updates)!.Phase);
+            Assert.False(run.IsCompleted);
+            Assert.NotNull(launched!.StartupContext); Assert.NotEqual(Guid.Empty, launched.StartupContext.LaunchId);
+            held.Dispose(); held = null;
+            NodeUpdateState.WriteReady(Updates, new(nonce, current.ContentId, 12345, launched.StartupContext.LaunchId));
+            var deadline = DateTimeOffset.UtcNow.AddSeconds(3);
+            while (ReadPrimaryPhase(Updates) != NodeUpdatePhase.Committed && DateTimeOffset.UtcNow < deadline) await Task.Delay(10);
+            Assert.Equal(NodeUpdatePhase.Committed, NodeUpdateState.ReadPrimary(Updates)!.Phase);
+        }
+        finally { held?.Dispose(); stop.Cancel(); await run; }
+    }
+
+    [Fact]
+    public async Task Fix2_starting_refusal_carries_bounded_failure_into_retained_launch()
+    {
+        PrepareRoot(); var current = Image("fix2-refusal-A"); var candidate = Image("fix2-refusal-B") with { ReleaseId = new string('B', 64) };
+        NodeUpdateState.Write(Updates, Committed(current));
+        using var held = new FileStream(Path.Combine(Updates, "state.json"), FileMode.Open, FileAccess.Read, FileShare.Read);
+        var launches = 0; NodeWorkerStartupContext? recovery = null;
+        Assert.Equal(0, await NodeSupervisor.RunAsync(NodeFolder, "C:/unused/CoCern.Adapter.dll", FixHost, launch =>
+        {
+            if (++launches == 1) { NodeUpdateState.WriteRequest(Updates, new(candidate)); return new UpdateExitedChild(75); }
+            recovery = launch.StartupContext; return new UpdateExitedChild(0);
+        }, TimeProvider.System, default));
+        Assert.Equal(2, launches); Assert.NotNull(recovery);
+        Assert.Equal(candidate.ReleaseId, recovery.FailedReleaseId); Assert.NotNull(recovery.FailedAtUtc);
+        Assert.InRange(DateTimeOffset.UtcNow - recovery.FailedAtUtc.Value, TimeSpan.Zero, TimeSpan.FromSeconds(5));
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -26,10 +196,11 @@ public sealed class NodeSupervisorTests(ITestOutputHelper output) : IDisposable
     {
         PrepareRoot(); var current = Image("fix-late-A"); var candidate = Image("fix-late-B") with { ReleaseId = new string('B', 64) }; var nonce = Guid.NewGuid();
         NodeUpdateState.Write(Updates, Committed(current)); NodeUpdateState.Write(Updates, new(1, current, null, candidate, nonce, NodeUpdatePhase.Rollback, candidate.ReleaseId, DateTimeOffset.UtcNow));
-        var launched = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); FileStream? held = null;
+        var launched = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); FileStream? held = null; Guid launchId = Guid.Empty;
         using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var supervisor = NodeSupervisor.RunAsync(NodeFolder, "C:/unused/CoCern.Adapter.dll", FixHost, _ =>
+        var supervisor = NodeSupervisor.RunAsync(NodeFolder, "C:/unused/CoCern.Adapter.dll", FixHost, launch =>
         {
+            launchId = launch.StartupContext!.LaunchId;
             NodeUpdateState.WriteReady(Updates, new(Guid.NewGuid(), current.ContentId, 999));
             if (locked) held = new(Path.Combine(Updates, "ready.json"), FileMode.Open, FileAccess.Read, FileShare.Read);
             launched.TrySetResult(); return new WaitingChild();
@@ -39,7 +210,7 @@ public sealed class NodeSupervisorTests(ITestOutputHelper output) : IDisposable
             await launched.Task; Assert.False(supervisor.IsCompleted);
             var pending = NodeUpdateState.Read(Updates).Record!; Assert.Equal(candidate.ContentId, pending.Pending!.ContentId); Assert.Equal(nonce, pending.ActivationNonce);
             held?.Dispose(); held = null;
-            NodeUpdateState.WriteReady(Updates, new(nonce, current.ContentId, 12345));
+            NodeUpdateState.WriteReady(Updates, new(nonce, current.ContentId, 12345, launchId));
             var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(3);
             while (ReadPrimaryPhase(Updates) != NodeUpdatePhase.Committed && DateTimeOffset.UtcNow < deadline) await Task.Delay(10);
             var committed = NodeUpdateState.Read(Updates).Record!;
@@ -86,7 +257,7 @@ public sealed class NodeSupervisorTests(ITestOutputHelper output) : IDisposable
                 return new UpdateReadyChild(Updates);
             }
             Assert.Equal(Path.Combine(Updates, "versions", current.ContentId, "CoCern.Adapter.dll"), launch.Arguments[0]);
-            NodeUpdateState.WriteReady(Updates, new(journal.ActivationNonce!.Value, current.ContentId, 12345)); retained.TrySetResult(); return new WaitingChild();
+            NodeUpdateState.WriteReady(Updates, new(journal.ActivationNonce!.Value, current.ContentId, 12345, launch.StartupContext!.LaunchId)); retained.TrySetResult(); return new WaitingChild();
         }, TimeProvider.System, stop.Token);
         try
         {
@@ -151,11 +322,11 @@ public sealed class NodeSupervisorTests(ITestOutputHelper output) : IDisposable
     {
         PrepareRoot(); var current = Image("fix-signaled-A"); var candidate = Image("fix-signaled-B") with { ReleaseId = new string('B', 64) };
         NodeUpdateState.Write(Updates, Committed(current)); var launches = 0;
-        Assert.Equal(0, await NodeSupervisor.RunAsync(NodeFolder, "C:/unused/CoCern.Adapter.dll", FixHost, _ =>
+        Assert.Equal(0, await NodeSupervisor.RunAsync(NodeFolder, "C:/unused/CoCern.Adapter.dll", FixHost, launch =>
         {
             if (++launches == 1) { NodeUpdateState.WriteRequest(Updates, new(candidate)); return new UpdateExitedChild(75); }
             var journal = NodeUpdateState.Read(Updates).Record!;
-            NodeUpdateState.WriteReady(Updates, new(journal.ActivationNonce!.Value, launches == 2 ? candidate.ContentId : current.ContentId, 5678));
+            NodeUpdateState.WriteReady(Updates, new(journal.ActivationNonce!.Value, launches == 2 ? candidate.ContentId : current.ContentId, 5678, launch.StartupContext!.LaunchId));
             return new UpdateReadyChild(Updates, signaled: launches == 2);
         }, TimeProvider.System, default));
         Assert.Equal(3, launches); Assert.Equal(current.ContentId, NodeUpdateState.Read(Updates).Record!.Current.ContentId);
@@ -224,6 +395,18 @@ public sealed class NodeSupervisorTests(ITestOutputHelper output) : IDisposable
             else { Assert.Equal(1, dispatcher.Calls); Assert.Equal(0, stages); Assert.Equal(candidate.ContentId, NodeUpdateState.Read(Updates).Record!.Pending!.ContentId); }
         }
         finally { stop.Cancel(); readyLock?.Dispose(); var exit = await worker; if (cycled.Task.IsCompleted) Assert.Equal(0, exit); }
+    }
+
+    private sealed class FixServingDispatcher : CoCern.Adapter.IWakeDispatcher
+    {
+        public int Calls;
+        public TaskCompletionSource<bool> Completed { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public Task<bool> QueueAsync(string threadId, string prompt, CancellationToken ct)
+        {
+            Interlocked.Increment(ref Calls); Entered.TrySetResult();
+            return Completed.Task.WaitAsync(ct);
+        }
     }
 
     private sealed class FixDispatcher : CoCern.Adapter.IWakeDispatcher
@@ -386,11 +569,12 @@ public sealed class NodeSupervisorTests(ITestOutputHelper output) : IDisposable
             var host = new NodeHostCapabilities(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "dotnet", "dotnet.exe"), [new("Microsoft.NETCore.App", "10.0.14")], "win-x64");
             using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(20));
             var launches = 0;
-            var supervisor = NodeSupervisor.RunAsync(NodeFolder, "C:/unused/CoCern.Adapter.dll", host, _ =>
+            var supervisor = NodeSupervisor.RunAsync(NodeFolder, "C:/unused/CoCern.Adapter.dll", host, launch =>
             {
                 if (++launches == 1) { NodeUpdateState.WriteRequest(Updates, new(candidate)); return new UpdateExitedChild(75); }
                 var starting = NodeUpdateState.Read(Updates).Record!;
-                return new UpdateWorkerChild(ct => NodeRunner.RunWorkerAsync(NodeFolder, starting.ActivationNonce, Path.Combine(Updates, "versions", candidate.ContentId), transport, new StringWriter(), ct), stop.Token);
+                Assert.NotNull(launch.StartupContext); Assert.NotEqual(Guid.Empty, launch.StartupContext.LaunchId);
+                return new UpdateWorkerChild(ct => NodeRunner.RunWorkerAsync(NodeFolder, starting.ActivationNonce, Path.Combine(Updates, "versions", candidate.ContentId), transport, new StringWriter(), ct, launch.StartupContext), stop.Token);
             }, TimeProvider.System, stop.Token);
             try
             {
@@ -499,11 +683,11 @@ public sealed class NodeSupervisorTests(ITestOutputHelper output) : IDisposable
         NodeUpdateState.Write(Updates, Committed(current));
         var host = new NodeHostCapabilities(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "dotnet", "dotnet.exe"), [new("Microsoft.NETCore.App", "10.0.14")], "win-x64");
         var launches = 0;
-        var exit = await NodeSupervisor.RunAsync(NodeFolder, "C:/unused/CoCern.Adapter.dll", host, _ =>
+        var exit = await NodeSupervisor.RunAsync(NodeFolder, "C:/unused/CoCern.Adapter.dll", host, launch =>
         {
             if (++launches == 1) { NodeUpdateState.WriteRequest(Updates, new(candidate)); return new UpdateExitedChild(75); }
             var journal = NodeUpdateState.Read(Updates).Record!;
-            NodeUpdateState.WriteReady(Updates, new(journal.ActivationNonce!.Value, launches == 2 ? candidate.ContentId : current.ContentId, 5678));
+            NodeUpdateState.WriteReady(Updates, new(journal.ActivationNonce!.Value, launches == 2 ? candidate.ContentId : current.ContentId, 5678, launch.StartupContext!.LaunchId));
             return launches == 2 ? new UpdateExitedChild(0) : new UpdateReadyChild(Updates);
         }, TimeProvider.System, default);
         Assert.Equal(0, exit);
@@ -524,11 +708,11 @@ public sealed class NodeSupervisorTests(ITestOutputHelper output) : IDisposable
         NodeUpdateState.Write(Updates, Committed(current));
         var host = new NodeHostCapabilities(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "dotnet", "dotnet.exe"), [new("Microsoft.NETCore.App", "10.0.14")], "win-x64");
         var launches = 0;
-        var exit = await NodeSupervisor.RunAsync(NodeFolder, "C:/unused/CoCern.Adapter.dll", host, _ =>
+        var exit = await NodeSupervisor.RunAsync(NodeFolder, "C:/unused/CoCern.Adapter.dll", host, launch =>
         {
             if (++launches == 1) { NodeUpdateState.WriteRequest(Updates, new(candidate)); return new UpdateExitedChild(75); }
             var journal = NodeUpdateState.Read(Updates).Record!;
-            NodeUpdateState.WriteReady(Updates, new(journal.ActivationNonce!.Value, launches == 2 ? candidate.ContentId : current.ContentId, 5678));
+            NodeUpdateState.WriteReady(Updates, new(journal.ActivationNonce!.Value, launches == 2 ? candidate.ContentId : current.ContentId, 5678, launch.StartupContext!.LaunchId));
             var blocked = launches == 2 ? new FileStream(Path.Combine(Updates, primaryCommitted ? "committed.json" : "state.json"), FileMode.Open, FileAccess.Read, FileShare.Read) : null;
             return new UpdateReadyChild(Updates, blocked);
         }, TimeProvider.System, default);
@@ -569,7 +753,7 @@ public sealed class NodeSupervisorTests(ITestOutputHelper output) : IDisposable
             Assert.Equal(NodeUpdatePhase.Rollback, journal.Phase);
             Assert.Equal(pending.ContentId, journal.Pending!.ContentId);
             Assert.Equal(nonce, journal.ActivationNonce);
-            NodeUpdateState.WriteReady(Updates, new(nonce, current.ContentId, 5678));
+            NodeUpdateState.WriteReady(Updates, new(nonce, current.ContentId, 5678, launch.StartupContext!.LaunchId));
             return new UpdateReadyChild(Updates);
         }, TimeProvider.System, default);
         Assert.Equal(0, exit);
@@ -741,13 +925,13 @@ public sealed class NodeSupervisorTests(ITestOutputHelper output) : IDisposable
             if (launches == 2)
             {
                 Assert.Equal(NodeUpdatePhase.Starting, journal.Phase);
-                NodeUpdateState.WriteReady(Updates, new(identity == "nonce" ? Guid.NewGuid() : journal.ActivationNonce!.Value, identity == "content" ? current.ContentId : candidate.ContentId, identity == "pid" ? 5679 : 5678));
+                NodeUpdateState.WriteReady(Updates, new(identity == "nonce" ? Guid.NewGuid() : journal.ActivationNonce!.Value, identity == "content" ? current.ContentId : candidate.ContentId, identity == "pid" ? 5679 : 5678, launch.StartupContext!.LaunchId));
             }
             else
             {
                 Assert.Equal(NodeUpdatePhase.Rollback, journal.Phase);
                 AssertImage(candidate, journal.Pending!);
-                NodeUpdateState.WriteReady(Updates, new(journal.ActivationNonce!.Value, current.ContentId, 5678));
+                NodeUpdateState.WriteReady(Updates, new(journal.ActivationNonce!.Value, current.ContentId, 5678, launch.StartupContext!.LaunchId));
             }
             return new UpdateReadyChild(Updates);
         }, TimeProvider.System, default);
@@ -1075,7 +1259,10 @@ public sealed class NodeSupervisorTests(ITestOutputHelper output) : IDisposable
         Assert.NotNull(launched);
         Assert.Equal(1, exit);
         Assert.Equal(Path.Combine(Updates, "versions", current.ContentId, "CoCern.Adapter.dll"), launched.Arguments[0]);
-        Assert.Contains(nonce.ToString("D"), launched.Arguments);
+        Assert.True(NodeWorkerStartupContext.TryParse(launched.Arguments[^1], out var startup));
+        Assert.Equal(nonce, startup!.ActivationNonce);
+        Assert.NotEqual(Guid.Empty, startup.LaunchId);
+        Assert.Equal(launched.StartupContext!.LaunchId, startup.LaunchId);
         var recovered = NodeUpdateState.Read(Updates);
         Assert.Equal(NodeUpdateReadStatus.Valid, recovered.Status);
         Assert.Equal(NodeUpdatePhase.Rollback, recovered.Record!.Phase);
