@@ -106,9 +106,8 @@ internal static class AttentionSources
         });
     }
 
-    /// <summary>A new proposal is raised to the managers; each proposal ID is raised once (revision 1) and closed once (revision 2).</summary>
-    public static void OnProposal(AggregateContext context, string proposalId, string note) =>
-        ToManagers(context, new AttentionContent { Kind = AttentionKinds.StandingProposal, Subject = proposalId, Note = note, Revision = 1 });
+    /// <summary>Proposals wait for an explicitly requested human-active boundary; they never wake manager sessions.</summary>
+    public static void OnProposal(AggregateContext context, string proposalId, string note) { }
 
     /// <summary>An approved or rejected proposal's item is closed at the managers.</summary>
     public static void OnProposalDecided(AggregateContext context, string proposalId) =>

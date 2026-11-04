@@ -98,6 +98,51 @@ public sealed class AttentionSchedulerTests
         Assert.Null(StatusWake(session, Now.AddHours(1)));
     }
 
+    [Fact]
+    public void A_legacy_standing_proposal_is_absent_from_all_counts_top_offers_and_hold_wakes()
+    {
+        var session = OpenSession();
+        var legacy = Raise(session, AttentionKinds.StandingProposal, "", extra: new() { ["subject"] = "old-proposal" });
+        var afterHold = Now.AddHours(1);
+        var compact = Data(Call(session, "get_status", new() { ["attentionStatus"] = "count" }, afterHold))["attention"]!;
+        Assert.Equal(0, (int?)compact["actionable"]);
+        var detail = Data(Call(session, "get_status", new() { ["attentionStatus"] = "detail", ["maxHoldMinutes"] = 10 }, afterHold))["attention"]!;
+        Assert.Equal(0, (int?)detail["actionable"]);
+        Assert.Equal(0, (int?)detail["urgent"]);
+        Assert.Null(detail["top"]);
+        Assert.Null(detail["wake"]);
+        Assert.Null(Offer(session, afterHold));
+        Assert.Null(Items(session)[legacy]?["shownAt"]);
+    }
+
+    [Fact]
+    public void Legacy_proposal_suppression_preserves_direct_mail_and_urgent_wake_precedence()
+    {
+        var session = OpenSession();
+        Raise(session, AttentionKinds.StandingProposal, "", extra: new() { ["subject"] = "old-proposal" });
+        Data(Call(session, "__deliver", new() { ["messageId"] = "new-mail", ["senderSessionId"] = "sender", ["text"] = "actionable nonce", ["attentionExpiryDays"] = 7 }));
+        var direct = StatusWake(session);
+        Assert.NotNull(direct);
+        var urgent = Raise(session, AttentionKinds.Failed, "urgent-task");
+        Assert.Equal(urgent, StatusWake(session));
+        Assert.True(Respond(session, urgent, "dismiss").Ok);
+        Assert.Equal(direct, StatusWake(session));
+        var detail = Data(Call(session, "get_status", new() { ["attentionStatus"] = "detail" }))["attention"]!;
+        Assert.Equal(1, (int?)detail["actionable"]);
+    }
+
+    [Fact]
+    public void An_urgent_only_boundary_preserves_ordinary_items_without_marking_them_shown()
+    {
+        var session = OpenSession();
+        var tip = Raise(session, AttentionKinds.Tip, "", extra: new() { ["subject"] = "ordinary-tip" });
+        var preview = Call(session, "__attention_offer", new() { ["urgentOnly"] = true });
+        Assert.True(preview.Ok, preview.Code);
+        Assert.Null(Data(preview)["attention"]);
+        Assert.Null(Items(session)[tip]?["shownAt"]);
+        Assert.Equal(tip, Offer(session));
+    }
+
     [Theory]
     [InlineData("task.changed", "T-1", "s2")]
     [InlineData(null, "T-1", "s2")]

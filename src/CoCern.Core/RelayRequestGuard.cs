@@ -52,7 +52,7 @@ internal static class RelayRequestGuard
         foreach (var numeric in IntegerFields) if (args.ContainsKey(numeric) && args[numeric] is null) args.Remove(numeric);
         if (NotWholeNumber(args) is { } numberField) return Replies.Error(InvalidArguments, new { field = numberField });
         if (tool.Name == RelayTools.ContextPut && args["content"] is null) return Replies.Error(InvalidArguments, new { field = "content" });
-        foreach (var flag in new[] { "includeNextWork", "attention", "attentionDetail", "seen", "headersOnly" })
+        foreach (var flag in new[] { "includeNextWork", "attention", "attentionDetail", "seen", "headersOnly", "presentStanding" })
             if (args.ContainsKey(flag) && (args[flag] is not JsonValue value || !value.TryGetValue<bool>(out _))) return Replies.Error(InvalidArguments, new { field = flag });
         // Machine revocation dispatches directly to discovery, outside the control aggregate's argument fence.
         if (tool.Name == RelayTools.ControlRequest && Text(args, "command") == "revoke_machine" && args.ContainsKey("allSessions"))
@@ -167,9 +167,9 @@ internal static class RelayRequestGuard
 /// reads and removes them (after <see cref="RelayRequestGuard.Validate"/> has checked their shapes).
 /// </summary>
 internal sealed record CallControls(bool OfferWanted, bool StatusDetail, bool PageSeen, string[] SeenIds, string? KnownEtag, JsonObject? Usage, bool ModelVisible, bool? BackgroundCall,
-    bool HeadersOnly = false, string? KnownInboxEtag = null)
+    bool HeadersOnly = false, string? KnownInboxEtag = null, bool PresentStanding = false)
 {
-    private static readonly string[] Fields = ["usage", "attention", "attentionDetail", "attentionStatus", "maxHoldMinutes", "seen", "seenMessageIds", "knownEtag", "backgroundCall", "headersOnly", "knownInboxEtag"];
+    private static readonly string[] Fields = ["usage", "attention", "attentionDetail", "attentionStatus", "maxHoldMinutes", "seen", "seenMessageIds", "knownEtag", "backgroundCall", "headersOnly", "knownInboxEtag", "presentStanding"];
 
     public static CallControls Take(JsonObject args)
     {
@@ -190,7 +190,8 @@ internal sealed record CallControls(bool OfferWanted, bool StatusDetail, bool Pa
             // A background check_inbox reader that needs only which messages wait (the wake watcher) asks for their headers, and for an
             // unchanged answer when the inbox is the one it last read.
             HeadersOnly: args["headersOnly"] is JsonValue headers && headers.GetValue<bool>(),
-            KnownInboxEtag: JsonFields.Text(args, "knownInboxEtag") is { Length: > 0 } inboxEtag ? inboxEtag : null);
+            KnownInboxEtag: JsonFields.Text(args, "knownInboxEtag") is { Length: > 0 } inboxEtag ? inboxEtag : null,
+            PresentStanding: args["presentStanding"] is JsonValue present && present.GetValue<bool>());
         foreach (var field in Fields) args.Remove(field);
         return controls;
     }

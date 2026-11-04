@@ -17,10 +17,10 @@ internal static class ToolSchemas
             RelayTools.SessionOpen => ["machineId", "label"],
             RelayTools.SessionBind => ["binding", "label", "machineId"],
             RelayTools.TaskGet => ["taskId", "section", "sinceRevision", "snapshotRevision", "cursor", "limit"],
-            RelayTools.TaskUpdate => ["taskId", "expectedVersion", "workflow", "includeNextWork", "usage", "attention"],
-            RelayTools.TaskClaim or RelayTools.ActionReport => ["attention"],
+            RelayTools.TaskUpdate => ["taskId", "expectedVersion", "workflow", "includeNextWork", "usage", "attention", "presentStanding"],
+            RelayTools.TaskClaim or RelayTools.ActionReport => ["attention", "presentStanding"],
             RelayTools.SendMessage => ["text", "recipientSessionId", "taskId", "replyTo", "ackMessageIds", "supersede", "wake"],
-            RelayTools.CheckInbox => ["cursor", "limit"],
+            RelayTools.CheckInbox => ["cursor", "limit", "presentStanding"],
             RelayTools.GetStatus => ["managerHistoryBefore", "managerHistoryOnly"],
             RelayTools.ControlRequest => ["targetSessionId", "expectedManagerGeneration", "humanWords"],
             RelayTools.Ack => ["messageId", "messageIds"],
@@ -131,6 +131,7 @@ internal static class ToolSchemas
         if (properties.ContainsKey("attention")) properties["attention"] = new { type = "boolean", description = "false: no attention offer." };
         // The same budget leaves room only for typed names of workflow dependsOn and packet.resources; InputSchema describes them in full.
         if (properties.ContainsKey("workflow")) properties["workflow"] = WorkflowSchema(compact: true);
+        if (properties.ContainsKey("presentStanding")) properties["presentStanding"] = new { type = "boolean" };
         return properties;
     }
 
@@ -295,6 +296,8 @@ internal static class ToolSchemas
                 properties["force"] = new { type = "boolean", description = "close_sessions with targetSessionId: close it despite unresolved actions." };
                 properties["aliases"] = new { type = "array", items = new { type = "string" } }; Text("reason", "Coordination control explanation."); Text("machineId", "Machine to revoke; required by revoke_machine."); break;
         }
+        if (tool is RelayTools.TaskUpdate or RelayTools.TaskClaim or RelayTools.ActionReport or RelayTools.CheckInbox)
+            properties["presentStanding"] = new { type = "boolean", description = "Optional: offer one Standing question during direct human interaction; confers no authority." };
         return properties;
     }
 
@@ -304,7 +307,7 @@ internal static class ToolSchemas
     {
         "repositoryId" => "Authorized repository ID.",
         "sessionId" => "Your session ID.",
-        "sessionToken" => "Private session secret; never share it.",
+        "sessionToken" => "Secret; never share.",
         _ => "Stable request ID; reuse on retry."
     };
 

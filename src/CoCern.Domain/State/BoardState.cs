@@ -880,9 +880,16 @@ public sealed class StandingProposal(JsonObject json)
     public const string HubKey = "hub";
     public const string LineKey = "line";
     public const string GrantKey = "grant";
+    public const string PresentedByKey = "presentedBy";
+    public const string PresentedPrincipalKey = "presentedPrincipal";
+    public const string PresentedAtKey = "presentedAt";
+    public const string PresentedRequestKey = "presentedRequest";
+    public const string PresentedRevisionKey = "presentedRevision";
+    public const string PresentedEffectKey = "presentedEffect";
 
     public static StateShape Shape { get; } = StateShape.Object(
-        (IdKey, null), (ProposedByKey, null), (SessionIdKey, null), (ProposedAtKey, null), (HubKey, null), (LineKey, StandingLine.ProposedShape), (GrantKey, StandingGrant.ProposedShape));
+        (IdKey, null), (ProposedByKey, null), (SessionIdKey, null), (ProposedAtKey, null), (HubKey, null), (LineKey, StandingLine.ProposedShape), (GrantKey, StandingGrant.ProposedShape),
+        (PresentedByKey, null), (PresentedPrincipalKey, null), (PresentedAtKey, null), (PresentedRequestKey, null), (PresentedRevisionKey, null), (PresentedEffectKey, null));
 
     /// <summary>A session's proposal; its line or grant is added next.</summary>
     public static StandingProposal BySession(string id, string proposedBy, string sessionId, DateTimeOffset proposedAt) =>
@@ -897,6 +904,19 @@ public sealed class StandingProposal(JsonObject json)
     public string Id => Text(json, IdKey);
     public string ProposedBy => Text(json, ProposedByKey);
     public string SessionId => Text(json, SessionIdKey);
+
+    public string PresentedBy => Text(json, PresentedByKey);
+    public string PresentedPrincipal => Text(json, PresentedPrincipalKey);
+    public string PresentedRequest => Text(json, PresentedRequestKey);
+    public long PresentedRevision => Number(json, PresentedRevisionKey);
+    public JsonObject? PresentedEffect => json[PresentedEffectKey] as JsonObject;
+
+    /// <summary>A reservation only; it never changes a line, grant, decision history or Standing revision.</summary>
+    public void MarkPresented(string principal, string session, string request, DateTimeOffset at, long revision, JsonObject effect)
+    {
+        json[PresentedByKey] = session; json[PresentedPrincipalKey] = principal; json[PresentedAtKey] = at.ToString("O");
+        json[PresentedRequestKey] = request; json[PresentedRevisionKey] = revision; json[PresentedEffectKey] = effect.DeepClone();
+    }
 
     /// <summary>The proposed line, or null for a grant.</summary>
     public StandingLine? Line

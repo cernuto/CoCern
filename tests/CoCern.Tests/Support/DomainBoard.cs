@@ -139,7 +139,18 @@ internal static class DomainBoard
             ["expectedRevision"] = 2,
             ["lines"] = new JsonArray(Enumerable.Range(1, RelayLimits.StandingHistoryChanges + 1).Select(n => (JsonNode)new JsonObject { ["id"] = "l-" + n, ["text"] = "Convention " + n + "." }).ToArray())
         }, 200);
-        Apply(HubProposer, HubStandingProposal.Operation, new HubStandingProposal("repo", null, "tip-board-reread", "tip-x", "Read the board as changes since your last revision.").ToJson(), 201);
+        var pending = Apply(HubProposer, HubStandingProposal.Operation, new HubStandingProposal("repo", null, "tip-board-reread", "tip-x", "Read the board as changes since your last revision.").ToJson(), 201);
+        // Exercise the real reservation so strict state-shape coverage includes every presentation marker.
+        const string presentationRequest = "check_inbox:shape-fixture";
+        var presentation = StandingPresentation.ReadPending(JsonNode.Parse(board.Value.Json)!["standing"]!.AsObject(), AggregateKinds.DefaultBoard,
+            pending["proposalId"]!.GetValue<string>(), Writer.PrincipalId, "a", presentationRequest);
+        Assert.NotNull(presentation);
+        var shown = Apply(Writer, Operations.PresentStanding, new()
+        {
+            ["requestId"] = "", ["sessionId"] = "a", ["boardId"] = AggregateKinds.DefaultBoard, ["proposalId"] = presentation.ProposalId,
+            ["presentationRequest"] = presentationRequest, ["expectedEffect"] = JsonNode.Parse(presentation.SummaryJson)
+        }, 201);
+        Assert.Equal(presentation.ProposalId, shown["attention"]?["id"]?.GetValue<string>());
         Apply(Writer, RelayTools.ContextPut, new()
         {
             ["contextId"] = "runbook", ["expectedVersion"] = 0, ["content"] = new JsonObject { ["steps"] = new JsonArray("flash", "verify") }, ["provenance"] = new JsonObject { ["source"] = "wiki" }

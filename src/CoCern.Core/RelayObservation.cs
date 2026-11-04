@@ -1,4 +1,5 @@
 using CoCern.Contracts.Dashboard;
+using CoCern.Domain;
 
 namespace CoCern.Core;
 
@@ -9,6 +10,9 @@ public interface IRelayObservationSource
     Task<DatabaseMetrics?> ReadDatabaseMetricsAsync(int rowCountLimit = 10_000, CancellationToken cancellationToken = default);
     /// <summary>Standing preferences of the boards that have any, bounded. Null means collection was busy; a source without boards has none.</summary>
     Task<DashboardStandingObservation?> ReadStandingAsync(CancellationToken cancellationToken = default) => Task.FromResult<DashboardStandingObservation?>(new());
+    /// <summary>Repository-scoped pending questions, oldest first. Null means busy; reservations are made only by the board.</summary>
+    Task<IReadOnlyList<StandingPresentation>?> ReadPendingStandingAsync(string repositoryId, string principalId, string sessionId, string requestCorrelation, CancellationToken cancellationToken = default) =>
+        Task.FromResult<IReadOnlyList<StandingPresentation>?>(Array.Empty<StandingPresentation>());
 }
 
 public sealed record DashboardStandingObservation

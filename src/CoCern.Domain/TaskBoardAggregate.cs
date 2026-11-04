@@ -49,6 +49,7 @@ internal static class TaskBoardAggregate
         {
             case Operations.NextWork: return TaskWorkflow.NextWork(context);
             case Operations.Standing: return StandingPreferences.Read(context);
+            case Operations.PresentStanding: return StandingPreferences.Present(context);
             case RelayTools.StandingPut: return StandingPreferences.Put(context);
             case RelayTools.StandingPropose: return StandingPreferences.Propose(context);
             case Operations.StandingProposeHub: return StandingPreferences.ProposeFromHub(context);
