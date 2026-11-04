@@ -24,3 +24,18 @@ The run used a fresh isolated checkout and fresh outputs, without building into 
 | Final source, staging and process audit | F8CE74C55D98BCF05F8C44DFC50C783885BE258E398847BD4D3ECBDBA5F56984 |
 
 Raw runtime logs and local manifests remain local. They are not included here because they may contain machine-specific data. A subsequent corrected candidate needs its own frozen head, fresh outputs and full result. Neither these tests nor the source-only merge review establish live deployment, native activation, second-PC journeys or Task 6/provider acceptance.
+
+## Corrected candidate: green full gate
+
+Candidate 66d0f69be08ed598f5144d6b10d35567d938b377, tree 9d7e8a6d50a1069b30e3f449ffb166d7754ad139, passed the fresh combined gate. Build exit 0 with zero warnings or errors. The unfiltered test ran from 20:11:16.5617849Z to 20:20:32.0913926Z on 4 November 2026, exited 0, and did not time out or retry. Actual TRX results are 2,210 total: 2,209 passed, zero failed, and the same existing Unix-only skip. StandingIdentity contributed 22 passes; the main assembly contributed 2,187 passes and one NotExecuted case.
+
+The registry failure is resolved, and all six new typed-presentation required-field and malformed-request cases passed. All three prerequisites and all four earlier checkpoint failure cases also passed. The complete four-file typed correction at af5c158 was independently reviewed with no blocking finding: it registers StandingPresentationRequest, validates required identities and object shape before mutation, retains internal-only access and exact-effect reservation, and preserves the empty untyped list and zero pin.
+
+The fresh isolated checkout matched all 387 canonical source entries before building. At completion, all 436 tracked source hashes and 203 staged output hashes were unchanged, all four binary ProductVersions matched the exact candidate, Git was clean, and no owned runtime remained. The runner was explicitly released after this audit. This is a green combined gate; main merge, deployment, native activation and second-PC/provider acceptance remain separately owned actions.
+
+| Corrected-run evidence | SHA-256 |
+| --- | --- |
+| StandingIdentity TRX | EBC3478041AA18B65A34E35114C16B1125B0F605EEB3EB4E2C7614F7933E5F4D |
+| Main TRX | 887D9ADAAF1ECEC85A27CCF3D237450CC5B6859CD9F47471D0F2BC072EAD22B7 |
+| Parsed TRX summary | CDDE7592AEA82BDE733D7E049BB7477175CA226069C4E117814644669ED13ABB |
+| Final source, staging and process audit | AF3323695446461E1EC94487B9347193F1DCA198F2E2F02220061905361CAAA5 |
