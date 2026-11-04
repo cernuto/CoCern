@@ -411,7 +411,7 @@ public sealed class AdminToolsHostTests : IDisposable
         Assert.Equal("Ok", code);
         Assert.Equal(ConnectStates.Added, data.GetProperty("clients")[0].GetProperty("state").GetString());
         Assert.Equal((ConnectClients.ClaudeCode, (bool?)null), Assert.Single(connect.Runs));
-        Assert.DoesNotContain(logged.Lines, line => line.Contains("connect_app", StringComparison.Ordinal));
+        Assert.DoesNotContain(logged.Lines, line => line.Contains("connect_app by", StringComparison.Ordinal));
     }
 
     [Theory]
@@ -443,7 +443,7 @@ public sealed class AdminToolsHostTests : IDisposable
         Assert.Equal(HttpStatusCode.OK, status);
         Assert.Equal("Ok", code);
         Assert.Equal((ConnectClients.Codex, (bool?)choice), Assert.Single(connect.Runs));
-        var line = Assert.Single(logged.Lines, entry => entry.Contains("connect_app", StringComparison.Ordinal));
+        var line = Assert.Single(logged.Lines, entry => entry.Contains("connect_app by", StringComparison.Ordinal));
         Assert.Contains("test-user", line);
         Assert.Contains(ConnectClients.Codex, line);
         Assert.Contains(choice.ToString(), line, StringComparison.OrdinalIgnoreCase);
@@ -461,7 +461,7 @@ public sealed class AdminToolsHostTests : IDisposable
         Assert.Equal(HttpStatusCode.Forbidden, status);
         Assert.Equal(RelayErrorCodes.HubPcRequired, code);
         Assert.Empty(connect.Runs);
-        Assert.DoesNotContain(logged.Lines, line => line.Contains("connect_app", StringComparison.Ordinal));
+        Assert.DoesNotContain(logged.Lines, line => line.Contains("connect_app by", StringComparison.Ordinal));
     }
 
     private static async Task<(HttpStatusCode Status, JsonElement Reply)> PostRaw(HttpClient client, string body)
