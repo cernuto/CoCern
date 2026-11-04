@@ -102,6 +102,13 @@ public sealed class AdapterTests
         Assert.False(result.Ok);
         Assert.Equal(code, result.Code);
         Assert.DoesNotContain("sensitive", JsonSerializer.Serialize(result));
+        Assert.DoesNotContain("client-secret", JsonSerializer.Serialize(result));
+        if (status == HttpStatusCode.Unauthorized)
+        {
+            Assert.Equal("The hub didn't accept this PC's sign-in. Reconnect this PC to the hub and try again.", result.Data?.GetProperty("message").GetString());
+            Assert.Null(result.Version);
+        }
+        else Assert.Null(result.Data);
     }
 
     [Theory]
@@ -123,12 +130,63 @@ public sealed class AdapterTests
         Assert.Equal("response_too_large", (await new RelayForwarder(client, Options()).ForwardAsync("task_get", Parse("{}"))).Code);
     }
 
-    [Fact]
-    public async Task ShapesTransportFailuresWithoutLeakingException()
+    [Theory]
+    [InlineData("http")]
+    [InlineData("io")]
+    [InlineData("dns")]
+    [InlineData("socket")]
+    [InlineData("tls")]
+    public async Task ShapesTransportFailuresWithoutLeakingException(string failure)
     {
-        using var handler = new StubHandler((_, _) => throw new HttpRequestException("client-secret"));
+        using var handler = new StubHandler((_, _) =>
+        {
+            if (failure == "io") throw new IOException("client-secret");
+            var kind = failure switch
+            {
+                "dns" => HttpRequestError.NameResolutionError,
+                "socket" => HttpRequestError.ConnectionError,
+                "tls" => HttpRequestError.SecureConnectionError,
+                _ => HttpRequestError.Unknown
+            };
+            throw new HttpRequestException(kind, "client-secret");
+        });
         using var client = new HttpClient(handler);
-        Assert.Equal("hub_unavailable", (await new RelayForwarder(client, Options()).ForwardAsync("task_get", Parse("{}"))).Code);
+        var result = await new RelayForwarder(client, Options()).ForwardAsync("task_get", Parse("{}"));
+        Assert.False(result.Ok);
+        Assert.Equal("hub_unavailable", result.Code);
+        Assert.Equal("Can't reach the hub. Check that it is running and try again.", result.Data?.GetProperty("message").GetString());
+        Assert.Null(result.Version);
+        Assert.DoesNotContain("client-secret", JsonSerializer.Serialize(result));
+    }
+
+    [Fact]
+    public async Task PreservesRecognizedHttpDenialDataAndVersion()
+    {
+        using var handler = new StubHandler((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.Forbidden)
+        {
+            Content = new StringContent("{\"ok\":false,\"code\":\"RepositoryDenied\",\"dataJson\":\"{\\\"repositoryId\\\":\\\"fixture\\\"}\",\"version\":9}")
+        }));
+        using var client = new HttpClient(handler);
+        var result = await new RelayForwarder(client, Options()).ForwardAsync("task_get", Parse("{}"));
+        Assert.False(result.Ok);
+        Assert.Equal("RepositoryDenied", result.Code);
+        Assert.Equal(9, result.Version);
+        Assert.Equal("fixture", result.Data?.GetProperty("repositoryId").GetString());
+    }
+
+    [Fact]
+    public async Task KeepsTimeoutDistinctFromConnectionFailures()
+    {
+        using var handler = new StubHandler(async (_, token) =>
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, token);
+            return Json("{}");
+        });
+        using var client = new HttpClient(handler) { Timeout = TimeSpan.FromMilliseconds(100) };
+        var result = await new RelayForwarder(client, Options()).ForwardAsync("task_get", Parse("{}"));
+        Assert.False(result.Ok);
+        Assert.Equal("hub_timeout", result.Code);
+        Assert.Null(result.Data);
     }
 
     [Fact]
