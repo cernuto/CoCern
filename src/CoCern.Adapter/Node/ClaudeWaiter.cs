@@ -146,7 +146,7 @@ public static class ClaudeWaiter
         (NodeState.ReadEnrollment(folder) is { } node ? new AdapterOptions(node.Hub.AbsoluteUri, node.Credential, signalR: true) { PinnedFingerprint = node.Fingerprint } : null);
 
     internal static SessionHandle? FindHandle(string nodeFolder, string claudeSessionId) =>
-        NodeState.ReadSessionHandles(nodeFolder).Where(handle => IsClaude(handle.Client, claudeSessionId) || IsClaude(handle.Chat, claudeSessionId)).OrderByDescending(handle => handle.OpenedAt).FirstOrDefault();
+        NodeState.ChooseForChat(NodeState.ReadSessionHandles(nodeFolder).Where(handle => IsClaude(handle.Client, claudeSessionId) || IsClaude(handle.Chat, claudeSessionId)), claudeSessionId);
 
     /// <summary>The chats whose waiter is alive now. Any pid file naming a process that has exited, or a later process that reused its ID, is removed.</summary>
     internal static HashSet<string> Running(string nodeFolder)
