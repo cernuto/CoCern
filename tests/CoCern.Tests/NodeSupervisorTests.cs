@@ -7,6 +7,7 @@ using System.Text.Json;
 using System.Text;
 using CoCern.Adapter.Development;
 using CoCern.Adapter.Node;
+using CoCern.Adapter.Setup;
 using CoCern.Contracts;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -17,6 +18,242 @@ namespace CoCern.Tests;
 
 public sealed class NodeSupervisorTests(ITestOutputHelper output) : IDisposable
 {
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Task5_fix1_apphost_host_selection_reaches_one_supervised_worker_only_with_a_compatible_runtime(bool compatible)
+    {
+        PrepareRoot();
+        var source = Package("ordinary-fdd-apphost");
+        var dll = Path.Combine(source, "CoCern.Adapter.dll");
+        var exe = Path.Combine(source, "CoCern.Adapter.exe");
+        File.WriteAllText(exe, "inert apphost selection fixture; never executed");
+        using (var state = NodeState.Open(NodeFolder)) { state.SetHub("http://localhost/", null); state.SaveCredential(new string('a', 64)); }
+        var selected = SetupEnvironment.Host(exe, null, source, File.Exists);
+        Assert.Equal("dotnet", selected.Dotnet);
+        var starts = 0;
+        var transport = new NodeTransport
+        {
+            Clients = () => [], Locators = [], Chats = _ => Task.FromResult(new System.Text.Json.Nodes.JsonArray()), CodexExecutable = () => null,
+            CreateHandler = (_, _) => new UpdateWorkerHandler(_ => throw new InvalidOperationException("An enrolled startup must not make a preliminary request.")),
+            HubHandler = () => new UpdateWorkerHandler(_ => new(System.Net.HttpStatusCode.ServiceUnavailable))
+        };
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var exit = await SetupEnvironment.RunNodeAsync(NodeFolder, null, transport, selected.Dll, selected.Dotnet, new StringWriter(), stop.Token,
+            (folder, knownDll, knownHost, ct) => NodeSupervisor.RunOrdinaryAsync(folder, knownDll,
+                new(knownHost, [new("Microsoft.NETCore.App", compatible ? "10.0.14" : "9.0.14")], "win-x64"), launch =>
+                {
+                    starts++;
+                    Assert.True(Path.IsPathFullyQualified(launch.FileName));
+                    Assert.True(File.Exists(launch.FileName));
+                    Assert.Equal("dotnet.exe", Path.GetFileName(launch.FileName), ignoreCase: true);
+                    Assert.Equal(NodeFolder, launch.Arguments[Array.IndexOf(launch.Arguments, "--data-dir") + 1]);
+                    var contextArgument = launch.Arguments[Array.IndexOf(launch.Arguments, "--activation-nonce") + 1];
+                    Assert.StartsWith("v1;", contextArgument);
+                    Assert.True(NodeWorkerStartupContext.TryParse(contextArgument, out _));
+                    using var released = NodeState.OpenExisting(NodeFolder);
+                    return new ExitedChild();
+                }, TimeProvider.System, ct));
+        Assert.Equal(compatible ? 0 : 1, exit);
+        Assert.Equal(compatible ? 1 : 0, starts);
+    }
+
+    [Theory]
+    [InlineData("valid", true, true)]
+    [InlineData("expired", true, true)]
+    [InlineData("conflict", true, true)]
+    [InlineData("expired", false, true)]
+    [InlineData("expired", true, false)]
+    public async Task Task5_fix1_ordinary_start_uses_the_supervised_lifecycle_and_preserves_original_credential_recovery(string scenario, bool marked, bool ordinary)
+    {
+        PrepareRoot();
+        var source = Package("ordinary-credential-" + scenario, ordinaryStartup: marked);
+        var fingerprint = new string('C', 64);
+        var oldCredential = new string('a', 64);
+        var newCredential = new string('b', 64);
+        string originalMachine;
+        using (var state = NodeState.Open(NodeFolder))
+        {
+            state.SetHub("https://localhost/", fingerprint); state.SaveCredential(oldCredential); state.SaveJoinCode("authorized-fixture-code");
+            originalMachine = state.MachineId;
+        }
+        var identityBefore = File.ReadAllBytes(Path.Combine(NodeFolder, "node.json"));
+        var credentialBefore = File.ReadAllBytes(Path.Combine(NodeFolder, "credential"));
+        var requests = new List<string>();
+        var starts = 0;
+        var announces = 0;
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var error = new StringWriter();
+        var transport = new NodeTransport
+        {
+            Clients = () => [], Locators = [], Chats = _ => Task.FromResult(new System.Text.Json.Nodes.JsonArray()), CodexExecutable = () => null,
+            FirstRetry = TimeSpan.FromMilliseconds(10), MaxRetry = TimeSpan.FromMilliseconds(20),
+            ProbeFingerprint = (_, _) => throw new InvalidOperationException("An enrolled pinned hub must not be probed again."),
+            HubHandler = () => new UpdateWorkerHandler(_ => new(System.Net.HttpStatusCode.ServiceUnavailable)),
+            Trace = value => { if (value == "announced") stop.Cancel(); },
+            CreateHandler = (pin, _) => new UpdateWorkerHandler(request =>
+            {
+                Assert.Equal(fingerprint, pin);
+                Assert.Equal("https", request.RequestUri!.Scheme);
+                Assert.Throws<CoCern.Adapter.AdapterConfigurationException>(() => NodeState.Open(NodeFolder));
+                var path = request.RequestUri!.AbsolutePath;
+                requests.Add(path);
+                if (path == "/api/discovery/announce")
+                {
+                    announces++;
+                    var credential = request.Headers.Authorization?.Parameter;
+                    if (scenario == "valid" || scenario == "expired" && credential == newCredential)
+                        return new(System.Net.HttpStatusCode.OK) { Content = new StringContent("{\"routes\":[]}") };
+                    Assert.Equal(oldCredential, credential);
+                    if (scenario == "conflict" && announces == 2) stop.Cancel();
+                    return new(System.Net.HttpStatusCode.Unauthorized) { Content = new StringContent("{}") };
+                }
+                Assert.Equal("/api/discovery/enroll", path);
+                using var body = JsonDocument.Parse(request.Content!.ReadAsStringAsync().GetAwaiter().GetResult());
+                Assert.Equal("authorized-fixture-code", body.RootElement.GetProperty("joinCode").GetString());
+                var machine = body.RootElement.GetProperty("machineId").GetString();
+                if (scenario == "conflict")
+                    return new(System.Net.HttpStatusCode.Conflict) { Content = new StringContent("{\"code\":\"AliasConflict\"}") };
+                if (machine == originalMachine)
+                    return new(System.Net.HttpStatusCode.Conflict) { Content = new StringContent("{\"code\":\"MachineExpired\"}") };
+                return new(System.Net.HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new { machineId = machine, credential = newCredential })) };
+            })
+        };
+        var exit = await SetupEnvironment.RunNodeAsync(NodeFolder, null, transport, Path.Combine(source, "CoCern.Adapter.dll"), FixHost.DotnetPath, error, stop.Token,
+            (folder, dll, _, ct) =>
+            {
+                Assert.Empty(requests);
+                using (var released = NodeState.OpenExisting(folder)) Assert.Equal(originalMachine, released.MachineId);
+                INodeChild? Start(NodeLaunchSpec launch)
+                {
+                    starts++;
+                    Assert.Equal(NodeFolder, launch.Arguments[Array.IndexOf(launch.Arguments, "--data-dir") + 1]);
+                    var executing = Path.GetDirectoryName(launch.Arguments[0])!;
+                    var startup = launch.StartupContext!;
+                    var argument = launch.Arguments[Array.IndexOf(launch.Arguments, "--activation-nonce") + 1];
+                    Assert.StartsWith(marked && ordinary ? "v2;" : "v1;", argument);
+                    return new UpdateWorkerChild(workerCt => NodeRunner.RunWorkerAsync(folder, startup.ActivationNonce, executing, transport, error, workerCt, startup), ct);
+                }
+                return ordinary ? NodeSupervisor.RunOrdinaryAsync(folder, dll, FixHost, Start, TimeProvider.System, ct)
+                    : NodeSupervisor.RunAsync(folder, dll, FixHost, Start, TimeProvider.System, ct);
+            });
+        if (!marked || !ordinary)
+        {
+            Assert.Equal(1, exit);
+            Assert.Equal(1, starts);
+            Assert.Equal(new[] { "/api/discovery/announce" }, requests);
+            Assert.Equal(identityBefore, File.ReadAllBytes(Path.Combine(NodeFolder, "node.json")));
+            Assert.Equal(credentialBefore, File.ReadAllBytes(Path.Combine(NodeFolder, "credential")));
+            return;
+        }
+        Assert.Equal(0, exit);
+        Assert.Equal(1, starts);
+        using var reopened = NodeState.OpenExisting(NodeFolder);
+        Assert.Equal("https://localhost/", reopened.HubUrl);
+        Assert.Equal(fingerprint, reopened.Fingerprint);
+        Assert.Equal("authorized-fixture-code", reopened.ReadJoinCode());
+        if (scenario == "expired")
+        {
+            Assert.Equal(new[] { "/api/discovery/announce", "/api/discovery/enroll", "/api/discovery/enroll", "/api/discovery/announce" }, requests);
+            Assert.NotEqual(originalMachine, reopened.MachineId);
+            Assert.Equal(newCredential, reopened.ReadCredential());
+        }
+        else
+        {
+            Assert.Equal(scenario == "valid" ? new[] { "/api/discovery/announce" } : new[] { "/api/discovery/announce", "/api/discovery/enroll", "/api/discovery/announce" }, requests);
+            Assert.Equal(originalMachine, reopened.MachineId);
+            Assert.Equal(identityBefore, File.ReadAllBytes(Path.Combine(NodeFolder, "node.json")));
+            Assert.Equal(credentialBefore, File.ReadAllBytes(Path.Combine(NodeFolder, "credential")));
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Task5_hardening_ordinary_http_worker_never_sends_stored_join_code_after_credential_refusal(bool acceptedFirst)
+    {
+        PrepareRoot();
+        var source = Package("ordinary-http-refusal", ordinaryStartup: true);
+        var oldCredential = new string('a', 64);
+        string originalMachine;
+        using (var state = NodeState.Open(NodeFolder))
+        {
+            state.SetHub("http://localhost/", null);
+            state.SaveCredential(oldCredential);
+            state.SaveJoinCode("retained-fixture-join-code");
+            originalMachine = state.MachineId;
+        }
+        var retainedFiles = new[] { "node.json", "credential", "join-code" }
+            .ToDictionary(name => name, name => File.ReadAllBytes(Path.Combine(NodeFolder, name)));
+        var requests = new List<string>();
+        var sentJoinCodes = new List<string?>();
+        var starts = 0;
+        var announces = 0;
+        var accepted = 0;
+        var error = new StringWriter();
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var transport = new NodeTransport
+        {
+            Clients = () => [], Locators = [], Chats = _ => Task.FromResult(new System.Text.Json.Nodes.JsonArray()), CodexExecutable = () => null,
+            FirstRetry = TimeSpan.FromMilliseconds(10), MaxRetry = TimeSpan.FromMilliseconds(20), AnnounceInterval = TimeSpan.FromMilliseconds(10),
+            ProbeFingerprint = (_, _) => throw new InvalidOperationException("Loopback HTTP must not probe a certificate."),
+            HubHandler = () => new UpdateWorkerHandler(_ => new(System.Net.HttpStatusCode.ServiceUnavailable)),
+            Trace = value => { if (value == "announced") accepted++; },
+            CreateHandler = (pin, _) => new UpdateWorkerHandler(request =>
+            {
+                Assert.Null(pin);
+                Assert.Equal("http://localhost", request.RequestUri!.GetLeftPart(UriPartial.Authority));
+                Assert.Throws<CoCern.Adapter.AdapterConfigurationException>(() => NodeState.Open(NodeFolder));
+                var path = request.RequestUri.AbsolutePath;
+                requests.Add(path);
+                if (path == "/api/discovery/announce")
+                {
+                    Assert.Equal(oldCredential, request.Headers.Authorization?.Parameter);
+                    announces++;
+                    return acceptedFirst && announces == 1
+                        ? new(System.Net.HttpStatusCode.OK) { Content = new StringContent("{\"routes\":[]}") }
+                        : new(System.Net.HttpStatusCode.Unauthorized) { Content = new StringContent("{}") };
+                }
+                Assert.Equal("/api/discovery/enroll", path);
+                using var body = JsonDocument.Parse(request.Content!.ReadAsStringAsync().GetAwaiter().GetResult());
+                sentJoinCodes.Add(body.RootElement.TryGetProperty("joinCode", out var code) ? code.GetString() : null);
+                // Close the pre-fix recovery attempt without accepting or changing an identity.
+                return new(System.Net.HttpStatusCode.Forbidden) { Content = new StringContent("{\"code\":\"JoinCodeRequired\"}") };
+            })
+        };
+        var exit = await SetupEnvironment.RunNodeAsync(NodeFolder, null, transport, Path.Combine(source, "CoCern.Adapter.dll"), FixHost.DotnetPath, error, stop.Token,
+            (folder, dll, _, ct) =>
+            {
+                Assert.Empty(requests);
+                using (var released = NodeState.OpenExisting(folder)) Assert.Equal(originalMachine, released.MachineId);
+                return NodeSupervisor.RunOrdinaryAsync(folder, dll, FixHost, launch =>
+                {
+                    starts++;
+                    Assert.Equal(NodeFolder, launch.Arguments[Array.IndexOf(launch.Arguments, "--data-dir") + 1]);
+                    var argument = launch.Arguments[Array.IndexOf(launch.Arguments, "--activation-nonce") + 1];
+                    Assert.StartsWith("v2;", argument);
+                    Assert.True(NodeWorkerStartupContext.TryParse(argument, out var startup));
+                    Assert.True(startup!.OrdinaryStartup);
+                    var executing = Path.GetDirectoryName(launch.Arguments[0])!;
+                    return new UpdateWorkerChild(workerCt => NodeRunner.RunWorkerAsync(folder, startup.ActivationNonce, executing, transport, error, workerCt, startup), ct);
+                }, TimeProvider.System, ct);
+            });
+        Assert.Equal(1, exit);
+        Assert.Equal(1, starts);
+        Assert.False(stop.IsCancellationRequested);
+        Assert.Equal(acceptedFirst ? 1 : 0, accepted);
+        Assert.Empty(sentJoinCodes);
+        Assert.Equal(acceptedFirst ? new[] { "/api/discovery/announce", "/api/discovery/announce" } : new[] { "/api/discovery/announce" }, requests);
+        Assert.Contains("node-update:authentication-refused", error.ToString());
+        using var reopened = NodeState.OpenExisting(NodeFolder);
+        Assert.Equal(originalMachine, reopened.MachineId);
+        Assert.Equal(oldCredential, reopened.ReadCredential());
+        Assert.Equal("retained-fixture-join-code", reopened.ReadJoinCode());
+        Assert.Equal("http://localhost/", reopened.HubUrl);
+        Assert.Null(reopened.Fingerprint);
+        foreach (var file in retainedFiles) Assert.Equal(file.Value, File.ReadAllBytes(Path.Combine(NodeFolder, file.Key)));
+    }
+
     [Fact]
     public async Task Worker_announcement_reports_validated_running_image_and_actual_pid_instead_of_served_release()
     {
@@ -246,7 +483,10 @@ public sealed class NodeSupervisorTests(ITestOutputHelper output) : IDisposable
         Assert.Equal(failed, context.FailedAtUtc!.Value.ToUnixTimeSeconds());
         Assert.True(NodeWorkerStartupContext.TryParse($"v1;-;{launch:D};-;-", out var retained)); Assert.Null(retained!.ActivationNonce);
         Assert.True(NodeWorkerStartupContext.TryParse(nonce.ToString("D"), out var legacy)); Assert.Equal(nonce, legacy!.ActivationNonce);
-        foreach (var invalid in new[] { new string('x', 193), $"v2;-;{launch:D};-;-", $"v1;-;{Guid.Empty:D};-;-", $"v1;-;{launch:D};{release};-", $"v1;-;{launch:D};-;-;extra", $"v1;-;{launch:D};{release};9223372036854775807" })
+        Assert.True(NodeWorkerStartupContext.TryParse($"v2;-;{launch:D};-;-", out var ordinary));
+        Assert.True(ordinary!.OrdinaryStartup); Assert.Null(ordinary.ActivationNonce);
+        Assert.False(retained.OrdinaryStartup); Assert.False(legacy.OrdinaryStartup);
+        foreach (var invalid in new[] { new string('x', 193), $"v3;-;{launch:D};-;-", $"v2;{nonce:D};{launch:D};-;-", $"v2;-;{launch:D};{release};{failed}", $"v1;-;{Guid.Empty:D};-;-", $"v1;-;{launch:D};{release};-", $"v1;-;{launch:D};-;-;extra", $"v1;-;{launch:D};{release};9223372036854775807" })
             Assert.False(NodeWorkerStartupContext.TryParse(invalid, out _));
     }
 
@@ -1786,11 +2026,12 @@ public sealed class NodeSupervisorTests(ITestOutputHelper output) : IDisposable
         return new(contentId, metadata, Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(Path.Combine(source, "CoCern.Adapter.dll")))), null);
     }
 
-    private string Package(string payload, int protocol = 1)
+    private string Package(string payload, int protocol = 1, bool ordinaryStartup = false)
     {
         var path = Path.Combine(fixture, "installed-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(path);
-        var code = "using System.Reflection; [assembly: AssemblyInformationalVersion(\"7.8.9+installed\")] [assembly: AssemblyMetadata(\"CoCernNodeSupervisorProtocol\", \"" + protocol + "\")] public static class InertPackage { }";
+        var capability = ordinaryStartup ? "[assembly: AssemblyMetadata(\"CoCernNodeOrdinaryStartupProtocol\", \"2\")] " : "";
+        var code = "using System.Reflection; [assembly: AssemblyInformationalVersion(\"7.8.9+installed\")] [assembly: AssemblyMetadata(\"CoCernNodeSupervisorProtocol\", \"" + protocol + "\")] " + capability + "public static class InertPackage { }";
         var compilation = CSharpCompilation.Create("CoCern.Adapter", [CSharpSyntaxTree.ParseText(code)], [MetadataReference.CreateFromFile(typeof(object).Assembly.Location)], new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
         var result = compilation.Emit(Path.Combine(path, "CoCern.Adapter.dll"));
         Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));

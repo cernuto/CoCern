@@ -92,6 +92,14 @@ public sealed class NodeRunner : IAsyncDisposable
             catch (AdapterConfigurationException exception) { error.WriteLine(exception.Message); return 1; }
             var image = NodeUpdateState.ValidateWorkerStartup(nodeFolder, activationNonce, executingFolder);
             if (image is null || !state.Enrolled || state.TryReadCredential(out _) != CredentialRead.Present) { error.WriteLine("node-update:startup-invalid"); return 1; }
+            if (startupContext?.OrdinaryStartup == true)
+            {
+                var root = Path.Combine(nodeFolder, "updates");
+                var primary = NodeUpdateState.ReadPrimary(root);
+                if (activationNonce is not null || primary is not { Phase: NodeUpdatePhase.Committed, Pending: null, ActivationNonce: null } ||
+                    primary.Current.ContentId != image.ContentId || !NodePackage.SupportsOrdinaryStartup(root, image))
+                { error.WriteLine("node-update:startup-invalid"); return 1; }
+            }
             NodeReady? readiness = null;
             if (activationNonce is { } nonce)
             {
@@ -160,6 +168,7 @@ public sealed class NodeRunner : IAsyncDisposable
     private readonly bool _pendingCandidate;
     private int _activationGateHeld;
     private bool _workerStartup;
+    private readonly bool _ordinaryStartup;
 
     private NodeRunner(NodeState state, Uri hub, NodeTransport transport, TextWriter error, NodeReady? readiness = null, bool workerStartup = false, string? workerImage = null, NodeWorkerStartupContext? startupContext = null, NodeBuildObservation? nodeBuild = null)
     {
@@ -169,6 +178,7 @@ public sealed class NodeRunner : IAsyncDisposable
         _workerImage = workerImage;
         _nodeBuild = nodeBuild;
         _workerStartup = workerStartup;
+        _ordinaryStartup = startupContext?.OrdinaryStartup == true;
         var journal = (workerImage is not null || transport.CreateUpdater is not null && transport.UpdateHost is not null) ? NodeUpdateState.Read(Path.Combine(state.Folder, "updates")).Record : null;
         _pendingCandidate = readiness is not null && journal?.Current.ContentId != workerImage;
         _activationGateHeld = _pendingCandidate ? 1 : 0;
@@ -391,7 +401,10 @@ public sealed class NodeRunner : IAsyncDisposable
             }
             if (response.StatusCode == HttpStatusCode.Unauthorized)
             {
-                if (_workerStartup) return Stop("node-update:authentication-refused");
+                // Ordinary recovery may send the stored join code, so require pinned TLS for this
+                // worker's entire lifetime, including after its first accepted announcement.
+                if ((_ordinaryStartup && (!Https || _state.Fingerprint is null)) || (_workerStartup && !_ordinaryStartup))
+                    return Stop("node-update:authentication-refused");
                 await ResetUpdaterAsync();
                 // Only the hub refusing the credential leads to enrolling again; network errors never do. The credential is kept aside in case the hub turns out to still hold this ID.
                 (_rejected, _credential) = (_credential, null);

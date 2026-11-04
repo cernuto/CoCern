@@ -63,6 +63,18 @@ internal sealed class SetupEnvironment
                 error.WriteLine("node-update:bootstrap-needed");
                 return await NodeRunner.RunAsync(state, hub, transport, error, ct);
             }
+            // A framework-dependent apphost has already selected its CLR installation. Use that
+            // installation's host, never a PATH lookup or execution of an unverified package.
+            if (!bootstrap.SelfContained && !NodePackage.KnownDotnet(dotnetPath))
+            {
+                var runtime = new DirectoryInfo(System.Runtime.InteropServices.RuntimeEnvironment.GetRuntimeDirectory());
+                var framework = runtime.Parent;
+                var shared = framework?.Parent;
+                var installation = string.Equals(framework?.Name, "Microsoft.NETCore.App", StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(shared?.Name, "shared", StringComparison.OrdinalIgnoreCase) ? shared?.Parent : null;
+                var knownHost = installation is null ? null : Path.Combine(installation.FullName, "dotnet.exe");
+                dotnetPath = NodePackage.KnownDotnet(knownHost) ? knownHost : null;
+            }
             try { _ = NodeRunner.ResolveHub(state, hub); }
             catch (AdapterConfigurationException exception) { error.WriteLine(exception.Message); return 1; }
             if (!state.Enrolled || state.TryReadCredential(out _) != CredentialRead.Present)
@@ -77,7 +89,7 @@ internal sealed class SetupEnvironment
             }
         } // Release the original node singleton before its supervised worker opens it.
         if (ct.IsCancellationRequested) return 0;
-        return await (supervise ?? NodeSupervisor.RunAsync)(folder, adapterDll, dotnetPath, ct);
+        return await (supervise ?? NodeSupervisor.RunOrdinaryAsync)(folder, adapterDll, dotnetPath, ct);
     }
 
     public required string Profile { get; init; }

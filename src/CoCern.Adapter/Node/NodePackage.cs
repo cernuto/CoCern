@@ -4,6 +4,8 @@ using System.Diagnostics;
 using System.IO.Compression;
 using System.Net;
 using System.Net.Http.Headers;
+using System.Reflection.Metadata;
+using System.Reflection.PortableExecutable;
 using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Cryptography;
@@ -12,6 +14,8 @@ using System.Text;
 using System.Text.Json;
 using CoCern.Adapter.Development;
 using CoCern.Contracts;
+
+[assembly: System.Reflection.AssemblyMetadata("CoCernNodeOrdinaryStartupProtocol", "2")]
 
 namespace CoCern.Adapter.Node;
 
@@ -24,6 +28,41 @@ public sealed record NodeLaunchSpec(string FileName, string[] Arguments)
 
 public static class NodePackage
 {
+    /// <summary>Reads a bounded capability from an already validated immutable image without loading its code.</summary>
+    internal static bool SupportsOrdinaryStartup(string updateRoot, NodeImage image)
+    {
+        try
+        {
+            var path = Contained(Path.Combine(updateRoot, "versions"), image.ContentId);
+            using var stream = File.OpenRead(Path.Combine(path, "CoCern.Adapter.dll"));
+            if (stream.Length > 64 * 1024 * 1024) return false;
+            using var pe = new PEReader(stream);
+            if (!pe.HasMetadata) return false;
+            var metadata = pe.GetMetadataReader();
+            var attributes = metadata.GetAssemblyDefinition().GetCustomAttributes();
+            if (attributes.Count > 256) return false;
+            var marked = false;
+            foreach (var handle in attributes)
+            {
+                var attribute = metadata.GetCustomAttribute(handle);
+                if (attribute.Constructor.Kind != HandleKind.MemberReference) continue;
+                var constructor = metadata.GetMemberReference((MemberReferenceHandle)attribute.Constructor);
+                if (constructor.Parent.Kind != HandleKind.TypeReference) continue;
+                var type = metadata.GetTypeReference((TypeReferenceHandle)constructor.Parent);
+                if (metadata.GetString(type.Namespace) != "System.Reflection" || metadata.GetString(type.Name) != "AssemblyMetadataAttribute") continue;
+                var blob = metadata.GetBlobReader(attribute.Value);
+                if (blob.Length > 1024 || blob.ReadUInt16() != 1) return false;
+                var key = blob.ReadSerializedString();
+                var value = blob.ReadSerializedString();
+                if (key != "CoCernNodeOrdinaryStartupProtocol") continue;
+                if (marked || value != "2" || blob.ReadUInt16() != 0 || blob.RemainingBytes != 0) return false;
+                marked = true;
+            }
+            return marked;
+        }
+        catch (Exception exception) when (Unavailable(exception) || exception is BadImageFormatException) { return false; }
+    }
+
     /// <summary>Checks only the known installed source; mutable node versions never become the stable bootstrap.</summary>
     internal static NodePackageMetadata? ValidateBootstrapSource(string bootstrapAdapterDll, string updateRoot)
     {
@@ -334,7 +373,7 @@ public static class NodePackage
         return package.Frameworks.All(required => host.InstalledFrameworks.Any(installed => installed is not null && installed.Name == required.Name && Version.TryParse(installed.Version, out var actual) && Version.TryParse(required.Version, out var minimum) && actual.Major == minimum.Major && actual.Minor == minimum.Minor && actual.Build >= minimum.Build && actual.Revision == -1));
     }
 
-    private static bool KnownDotnet(string? path) => path is not null && Path.IsPathFullyQualified(path) && Path.GetFileName(path).Equals("dotnet.exe", StringComparison.OrdinalIgnoreCase) && File.Exists(path);
+    internal static bool KnownDotnet(string? path) => path is not null && Path.IsPathFullyQualified(path) && Path.GetFileName(path).Equals("dotnet.exe", StringComparison.OrdinalIgnoreCase) && File.Exists(path);
     private static bool UpperHash(string? value) => value is { Length: 64 } && value.All(c => char.IsAsciiDigit(c) || c is >= 'A' and <= 'F');
     private static bool LowerHash(string? value) => value is { Length: 64 } && value.All(c => char.IsAsciiDigit(c) || c is >= 'a' and <= 'f');
     private static bool ValidHub(Uri hub) => hub is { IsAbsoluteUri: true } && hub.UserInfo.Length == 0 && hub.Query.Length == 0 && hub.Fragment.Length == 0 && (hub.Scheme == Uri.UriSchemeHttps || hub.Scheme == Uri.UriSchemeHttp && hub.IsLoopback);
