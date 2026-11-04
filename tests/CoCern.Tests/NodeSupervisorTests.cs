@@ -915,10 +915,12 @@ public sealed class NodeSupervisorTests(ITestOutputHelper output) : IDisposable
             receiver = await Open("gap-receiver");
             var announceEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var authenticate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var announced = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var transport = new NodeTransport
             {
                 Clients = () => [], Locators = [], Chats = _ => Task.FromResult(new System.Text.Json.Nodes.JsonArray()), CodexExecutable = () => null,
-                CreateHandler = (_, _) => new UpdateAnnounceBarrier(hub.Server.CreateHandler(), announceEntered, authenticate), HubHandler = () => hub.Server.CreateHandler()
+                CreateHandler = (_, _) => new UpdateAnnounceBarrier(hub.Server.CreateHandler(), announceEntered, authenticate), HubHandler = () => hub.Server.CreateHandler(),
+                Trace = value => { if (value == "announced") announced.TrySetResult(); }
             };
             var host = new NodeHostCapabilities(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "dotnet", "dotnet.exe"), [new("Microsoft.NETCore.App", "10.0.14")], "win-x64");
             using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(20));
@@ -940,6 +942,9 @@ public sealed class NodeSupervisorTests(ITestOutputHelper output) : IDisposable
                 await GapInboxCount(hub, machine, receiver, 1);
                 Assert.Null(NodeUpdateState.ReadReady(Updates));
                 authenticate.TrySetResult();
+                // Releasing the request is not authenticated readiness. Keep its processing inside
+                // the existing outer guard, then measure the supervisor's commit from actual readiness.
+                await announced.Task.WaitAsync(stop.Token);
                 var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(5);
                 while (ReadPrimaryPhase(Updates) != NodeUpdatePhase.Committed && DateTimeOffset.UtcNow < deadline) await Task.Delay(10);
                 var committed = NodeUpdateState.Read(Updates).Record!;
