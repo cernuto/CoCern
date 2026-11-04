@@ -186,6 +186,37 @@ public sealed class AdapterChatCallsTests : IDisposable
         Assert.Equal(("newest", "t-newest"), Handle(hub.Sent(RelayTools.CheckInbox)));
     }
 
+    /// <summary>Every way of finding a chat's session agrees: its waiter, its prompt hook and its adapter's fill-in.</summary>
+    private static void AssertChosen(string folder, ChatLocation chat, string expected)
+    {
+        Assert.Equal(expected, ClaudeWaiter.FindHandle(folder, chat.ThreadId)?.SessionId);
+        Assert.Equal(expected, PromptHook.FindHandle(folder, chat.ThreadId)?.SessionId);
+        Assert.Equal(expected, SessionHandoff.ForFolder(folder, chat).FindOwn("repo")?.SessionId);
+    }
+
+    [Fact]
+    public void A_newer_session_that_only_carries_the_chats_id_never_replaces_the_one_found_in_its_transcript()
+    {
+        var folder = Path.Combine(root, "node");
+        var chat = new ChatLocation(ChatProviders.Claude, Guid.NewGuid().ToString());
+        var now = DateTimeOffset.UtcNow;
+        // Anything started from the chat inherits its ID, as a test script's own sessions did.
+        NodeState.WriteSessionHandle(folder, new SessionHandle("inherited", "t", "repo", "Script", now.AddHours(-1), chat, Unmapped: true));
+        AssertChosen(folder, chat, "inherited");
+        NodeState.WriteSessionHandle(folder, new SessionHandle("pending", "t", "repo", "Just opened", now.AddHours(-2), chat));
+        AssertChosen(folder, chat, "pending");
+        NodeState.WriteSessionHandle(folder, new SessionHandle("real", "t", "repo", "Chat", now.AddHours(-3), chat, chat));
+        AssertChosen(folder, chat, "real");
+        NodeState.WriteSessionHandle(folder, new SessionHandle("still-pending", "t", "repo", "Script", now, chat));
+        AssertChosen(folder, chat, "real");
+        NodeState.WriteSessionHandle(folder, new SessionHandle("gave-up", "t", "repo", "Script", now.AddHours(1), chat, Unmapped: true));
+        AssertChosen(folder, chat, "real");
+
+        // A session the chat really moved to is found in its transcript too, and then the newest of those wins.
+        NodeState.WriteSessionHandle(folder, new SessionHandle("replacement", "t", "repo", "Chat", now.AddMinutes(-1), chat, chat));
+        AssertChosen(folder, chat, "replacement");
+    }
+
     [Fact]
     public async Task Values_the_caller_gave_stand_and_only_calls_that_need_a_session_in_its_repository_are_filled()
     {

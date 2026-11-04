@@ -91,11 +91,10 @@ public static class PromptHook
         return line.Append('.').ToString();
     }
 
-    /// <summary>The newest session handle whose client or located chat is this thread, for any provider.</summary>
+    /// <summary>The session handle chosen (see <see cref="NodeState.ChooseForChat"/>) among those whose client or located chat is this thread, for any provider.</summary>
     internal static SessionHandle? FindHandle(string nodeFolder, string threadId) =>
-        NodeState.ReadSessionHandles(nodeFolder)
-            .Where(handle => string.Equals(handle.Client?.ThreadId, threadId, StringComparison.OrdinalIgnoreCase) || string.Equals(handle.Chat?.ThreadId, threadId, StringComparison.OrdinalIgnoreCase))
-            .OrderByDescending(handle => handle.OpenedAt).FirstOrDefault();
+        NodeState.ChooseForChat(NodeState.ReadSessionHandles(nodeFolder)
+            .Where(handle => string.Equals(handle.Client?.ThreadId, threadId, StringComparison.OrdinalIgnoreCase) || string.Equals(handle.Chat?.ThreadId, threadId, StringComparison.OrdinalIgnoreCase)), threadId);
 
     /// <summary>Reads the hook input to its end (so the client's write never blocks) and returns its top-level <c>session_id</c>, or null.</summary>
     internal static async Task<string?> ReadSessionIdAsync(TextReader input)
