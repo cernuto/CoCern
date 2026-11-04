@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -162,7 +161,11 @@ public static class CoordinationTools
 internal sealed class ChatCalls(RelayForwarder forwarder, SessionHints? hints, SessionHandoff? handoff, string requestScope, Func<string?>? workspace = null, LocalChatWake? localWake = null)
 {
     private readonly Func<string?> _workspace = workspace ?? (() => CoordinationTools.Workspace);
-    private readonly ConcurrentDictionary<string, (string Id, string Token)> _own = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, (string Id, string Token)> _own = new(StringComparer.Ordinal);
+    // Never evict: forgetting a binding could turn a retry into a new write under another session.
+    private const int MaxImplicitRequests = 4096;
+    private readonly Dictionary<(string Repository, string Tool, string RequestId), (string Id, string Token)> _implicitRequests = new();
+    private readonly Lock _handleLock = new();
     private string? _session;
 
     /// <summary>The session this chat last opened, or last used with its token, through this adapter; null until a call succeeds.</summary>
@@ -171,15 +174,17 @@ internal sealed class ChatCalls(RelayForwarder forwarder, SessionHints? hints, S
     public async Task<AdapterReply> CallAsync(string tool, JsonElement arguments, CancellationToken cancellationToken)
     {
         arguments = RelayForwarder.WithOrigin(arguments, background: false);
+        var suppliedToken = arguments.ValueKind == JsonValueKind.Object && arguments.TryGetProperty("sessionToken", out _);
         if (tool == RelayTools.SessionOpen) arguments = CoordinationTools.OwnRequestId(arguments, _workspace(), requestScope);
         else if (tool == RelayTools.ControlRequest) arguments = CoordinationTools.WithOwnSession(arguments, CurrentSession);
-        else arguments = WithOwnHandle(tool, arguments);
+        else if (!TryWithOwnHandle(tool, ref arguments))
+            return new(false, "implicit_request_capacity", JsonSerializer.SerializeToElement(new { guidance = "For a new write, supply your own sessionId and sessionToken. Reconcile an uncertain write in its original session." }));
         AdapterReply? originalReply = null;
         var reply = tool == RelayTools.CheckInbox
             ? await InboxWait.CheckAsync(forwarder, arguments, InboxWait.PollInterval, cancellationToken)
             : await ConditionalRead.ForwardAsync(forwarder, tool, arguments, cancellationToken, value => originalReply = value);
         if (!reply.Ok) return reply;
-        Learn(tool, arguments, reply);
+        Learn(tool, arguments, reply, suppliedToken);
         localWake?.Observe(tool, arguments, originalReply ?? reply);
         if (tool == RelayTools.SessionOpen) handoff?.Record(arguments, reply);
         else
@@ -202,24 +207,40 @@ internal sealed class ChatCalls(RelayForwarder forwarder, SessionHints? hints, S
     /// through this adapter, or, after an adapter restart, the handle on disk with this chat's ID. Anything the caller gave stands (even blank),
     /// and a call naming another session never gains this chat's token. Without either, the call goes on as it was and the hub refuses it.
     /// </summary>
-    private JsonElement WithOwnHandle(string tool, JsonElement arguments)
+    private bool TryWithOwnHandle(string tool, ref JsonElement arguments)
     {
         if (!RelayToolCatalog.TryGet(tool, out var definition) || !definition.RequiresSession || arguments.ValueKind != JsonValueKind.Object || arguments.TryGetProperty("sessionToken", out _) ||
-            ChatLocators.Text(arguments, "repositoryId") is not { Length: > 0 } repository) return arguments;
-        if (!_own.TryGetValue(repository, out var own))
+            ChatLocators.Text(arguments, "repositoryId") is not { Length: > 0 } repository) return true;
+
+        var requestId = definition.IsMutation ? ChatLocators.Text(arguments, "requestId") : null;
+        var bind = requestId is { Length: > 0 and <= RelayLimits.MaxIdentifierLength };
+        var key = (repository, tool, requestId!);
+        (string Id, string Token) own = default;
+        lock (_handleLock)
         {
-            if ((handoff?.FindOwn(repository) ?? localWake?.FindOwn(repository)) is not { } found) return arguments;
-            own = (found.SessionId, found.SessionToken);
+            var bound = bind && _implicitRequests.TryGetValue(key, out own);
+            if (!bound && !_own.TryGetValue(repository, out own))
+            {
+                if ((handoff?.FindOwn(repository) ?? localWake?.FindOwn(repository)) is not { } found) return true;
+                own = (found.SessionId, found.SessionToken);
+            }
+            if (arguments.TryGetProperty("sessionId", out var named) && !(named.ValueKind == JsonValueKind.String && named.GetString() == own.Id)) return true;
+            if (bind && !bound)
+            {
+                if (_implicitRequests.Count >= MaxImplicitRequests) return false;
+                _implicitRequests.Add(key, own);
+            }
         }
-        if (arguments.TryGetProperty("sessionId", out var named) && !(named.ValueKind == JsonValueKind.String && named.GetString() == own.Id)) return arguments;
+
         var node = JsonNode.Parse(arguments.GetRawText())!.AsObject();
         node["sessionId"] = own.Id;
         node["sessionToken"] = own.Token;
-        return JsonSerializer.SerializeToElement(node);
+        arguments = JsonSerializer.SerializeToElement(node);
+        return true;
     }
 
     /// <summary>The session a successful <c>session_open</c> returned, or that a successful call presented with its private token.</summary>
-    private void Learn(string tool, JsonElement arguments, AdapterReply reply)
+    private void Learn(string tool, JsonElement arguments, AdapterReply reply, bool suppliedToken)
     {
         var opened = tool == RelayTools.SessionOpen;
         if (!opened && !(RelayToolCatalog.TryGet(tool, out var definition) && definition.RequiresSession)) return;
@@ -227,7 +248,15 @@ internal sealed class ChatCalls(RelayForwarder forwarder, SessionHints? hints, S
         var token = ChatLocators.Text(source, "sessionToken");
         if (!opened && token is not { Length: > 0 }) return;
         if (ChatLocators.Text(source, "sessionId") is not { Length: > 0 and <= RelayLimits.MaxIdentifierLength } session) return;
-        Volatile.Write(ref _session, session);
-        if (token is { Length: > 0 } && ChatLocators.Text(arguments, "repositoryId") is { Length: > 0 } repository) _own[repository] = (session, token);
+        lock (_handleLock)
+        {
+            if (token is { Length: > 0 } && ChatLocators.Text(arguments, "repositoryId") is { Length: > 0 } repository)
+            {
+                // A late implicit reply from A must not undo a newer authenticated switch to B.
+                if (!opened && !suppliedToken && _own.TryGetValue(repository, out var current) && current != (session, token)) return;
+                _own[repository] = (session, token);
+            }
+            Volatile.Write(ref _session, session);
+        }
     }
 }
