@@ -467,6 +467,30 @@ public sealed class NativeJoinBindingTests(NativeJoinBindingTests.ProbeFixture p
         Assert.Equal(0, process.ExitCode);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Review2_legacy_git_selectors_are_preserved_only_outside_native_discovery(bool ceiling)
+    {
+        using var a = new ScopeFixture();
+        using var b = new ScopeFixture();
+        var nested = Directory.CreateDirectory(Path.Combine(b.Workspace, "nested")).FullName;
+        string key;
+        await using (var expected = await b.Acquire(nested)) key = expected.BindingKey;
+        var overrides = ceiling
+            ? new Dictionary<string, string> { ["GIT_CEILING_DIRECTORIES"] = b.Workspace }
+            : new Dictionary<string, string> { ["GIT_DIR"] = Path.Combine(a.Workspace, ".git"), ["GIT_WORK_TREE"] = a.Workspace };
+        using var process = probe.Start(b, "discovery", overrides, nested);
+        Assert.Equal("attempting", await Line(process));
+        using var output = JsonDocument.Parse((await Line(process))!);
+        var raw = output.RootElement.GetProperty("raw").GetString();
+        Assert.True(ceiling ? raw is null : string.Equals(a.Workspace, raw, StringComparison.OrdinalIgnoreCase),
+            "Legacy discovery did not preserve the isolated child's Git selectors.");
+        Assert.Equal(key, output.RootElement.GetProperty("key").GetString());
+        await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(0, process.ExitCode);
+    }
+
     [SkippableFact]
     public async Task Review1_unix_ancestor_alias_cannot_create_a_second_lease_namespace()
     {
@@ -649,6 +673,7 @@ public sealed class NativeJoinBindingTests(NativeJoinBindingTests.ProbeFixture p
                 using System.Security.Cryptography;
                 using System.Threading;
                 using System.Threading.Tasks;
+                using CoCern.Adapter;
                 using CoCern.Adapter.Node;
                 class BindingProbe {
                     static async Task<int> Main(string[] args) {
@@ -656,8 +681,9 @@ public sealed class NativeJoinBindingTests(NativeJoinBindingTests.ProbeFixture p
                         if(args[2] == "cancel") cancel.CancelAfter(TimeSpan.FromMilliseconds(500));
                         Console.WriteLine("attempting");
                         try {
+                            var raw = args[2] == "discovery" ? CoordinationTools.GitTopLevel(args[1]) : null;
                             await using var lease = await NativeJoinBinding.AcquireAsync(args[0], "codex", "11111111-2222-4333-8444-555555555555", "machine", "repo", args[1], cancel.Token);
-                            Console.WriteLine(JsonSerializer.Serialize(new { key=lease.BindingKey, digest=Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(lease.Secret))), generation=lease.Generation, request=lease.OpenRequestId, arguments=Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(lease.FrozenOpenArguments.GetRawText()))) }));
+                            Console.WriteLine(JsonSerializer.Serialize(new { raw, key=lease.BindingKey, digest=Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(lease.Secret))), generation=lease.Generation, request=lease.OpenRequestId, arguments=Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(lease.FrozenOpenArguments.GetRawText()))) }));
                             if(args[2] == "hold") await Console.In.ReadLineAsync();
                             return 0;
                         } catch(OperationCanceledException) { Console.WriteLine("cancelled"); return 0; }
@@ -673,13 +699,13 @@ public sealed class NativeJoinBindingTests(NativeJoinBindingTests.ProbeFixture p
             var result = compilation.Emit(Path.Combine(folder, "CoCern.Tests.dll"));
             Assert.True(result.Success, string.Join("\n", result.Diagnostics.Where(d => d.Severity == DiagnosticSeverity.Error)));
         }
-        internal Process Start(ScopeFixture fixture, string mode, IReadOnlyDictionary<string, string>? environment = null)
+        internal Process Start(ScopeFixture fixture, string mode, IReadOnlyDictionary<string, string>? environment = null, string? eventDirectory = null)
         {
             var start = new ProcessStartInfo(Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet")
             { WorkingDirectory = folder, UseShellExecute = false, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
             start.ArgumentList.Add(Path.Combine(folder, "CoCern.Tests.dll"));
-            start.ArgumentList.Add(fixture.Folder); start.ArgumentList.Add(fixture.Workspace); start.ArgumentList.Add(mode);
-            foreach (var key in start.Environment.Keys.Where(k => k.StartsWith("COCERN_", StringComparison.OrdinalIgnoreCase) || k.StartsWith("RELAY__", StringComparison.OrdinalIgnoreCase) || k.StartsWith("CODEX_", StringComparison.OrdinalIgnoreCase) || k.StartsWith("CLAUDE_", StringComparison.OrdinalIgnoreCase)).ToArray()) start.Environment.Remove(key);
+            start.ArgumentList.Add(fixture.Folder); start.ArgumentList.Add(eventDirectory ?? fixture.Workspace); start.ArgumentList.Add(mode);
+            foreach (var key in start.Environment.Keys.Where(k => k.StartsWith("GIT_", StringComparison.OrdinalIgnoreCase) || k.StartsWith("COCERN_", StringComparison.OrdinalIgnoreCase) || k.StartsWith("RELAY__", StringComparison.OrdinalIgnoreCase) || k.StartsWith("CODEX_", StringComparison.OrdinalIgnoreCase) || k.StartsWith("CLAUDE_", StringComparison.OrdinalIgnoreCase)).ToArray()) start.Environment.Remove(key);
             if (environment is not null) foreach (var pair in environment) start.Environment[pair.Key] = pair.Value;
             var child = Process.Start(start)!;
             fixture.Children.Add(child);

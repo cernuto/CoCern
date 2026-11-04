@@ -61,7 +61,7 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
         folder = CanonicalDirectory(folder);
         ValidateIdentifier(machineId); ValidateIdentifier(repositoryId);
         workspace = CanonicalDirectory(workspace); // Never use the adapter's cwd or accept a relative native event path.
-        var checkout = await Task.Run(() => CoordinationTools.GitTopLevel(workspace), ct).WaitAsync(ct);
+        var checkout = await Task.Run(() => CoordinationTools.NativeGitTopLevel(workspace), ct).WaitAsync(ct);
         if (checkout is null) throw Failure("The native event checkout could not be verified with Git.");
         checkout = CanonicalDirectory(checkout);
         var prefix = Path.EndsInDirectorySeparator(checkout) ? checkout : checkout + Path.DirectorySeparatorChar;

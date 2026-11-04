@@ -74,7 +74,12 @@ public static class CoordinationTools
     /// Runs <paramref name="git"/> by its full path, found on PATH alone (see <see cref="ExecutableSearch"/>): a bare "git" started in the chat's
     /// workspace would let Windows run a git.exe planted in that repository. Null without one, as when git is not installed.
     /// </summary>
-    internal static string? GitTopLevel(string directory, string? git)
+    internal static string? GitTopLevel(string directory, string? git) => GitTopLevel(directory, git, nativeEvent: false);
+
+    /// <summary>Discover a native event's physical checkout independently of inherited Git selectors.</summary>
+    internal static string? NativeGitTopLevel(string directory) => GitTopLevel(directory, Git.Value, nativeEvent: true);
+
+    private static string? GitTopLevel(string directory, string? git, bool nativeEvent)
     {
         if (git is null) return null;
         try
@@ -82,8 +87,9 @@ public static class CoordinationTools
             if (!Directory.Exists(directory)) return null;
             var start = new System.Diagnostics.ProcessStartInfo(git) { WorkingDirectory = directory, RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = true, UseShellExecute = false };
             // A native event's cwd selects its checkout. Inherited repository/config selectors must not repoint it.
-            foreach (var name in start.Environment.Keys.Where(name => name.StartsWith("GIT_", StringComparison.OrdinalIgnoreCase)).ToArray())
-                start.Environment.Remove(name);
+            if (nativeEvent)
+                foreach (var name in start.Environment.Keys.Where(name => name.StartsWith("GIT_", StringComparison.OrdinalIgnoreCase)).ToArray())
+                    start.Environment.Remove(name);
             foreach (var argument in new[] { "rev-parse", "--show-toplevel" }) start.ArgumentList.Add(argument);
             start.Environment["GIT_TERMINAL_PROMPT"] = "0";
             start.Environment["GIT_OPTIONAL_LOCKS"] = "0";
