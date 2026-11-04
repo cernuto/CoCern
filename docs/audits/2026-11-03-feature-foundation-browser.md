@@ -1,6 +1,6 @@
 # Feature foundation browser verification
 
-Current status: candidate `5549968bd680cf22a677fc1bb4b7a5323f2c3b43` passed all 1,675 solution tests and the integrated-browser checks below. The repository-default and control-styling findings from the earlier run are resolved. Four supporting protocol cases passed; certificate-pin observation remains open. The complete auto-connect design and its installed native-client/two-PC gates remain unfinished.
+Current status: candidate `5549968bd680cf22a677fc1bb4b7a5323f2c3b43` passed all 1,675 solution tests and the integrated-browser checks below. The repository-default and control-styling findings from the earlier run are resolved. All five supporting protocol cases passed together with the corrected observation harness. The complete auto-connect design and its installed native-client/two-PC gates remain unfinished.
 
 ## Current candidate and results
 
@@ -11,7 +11,7 @@ Verified SHA-256 values:
 - Host: `E88DACA6F56AE158F4BCB2F0213FC64C8E976854D02DE46343369CB918279F61`.
 - Adapter: `F9611874B265334569A9D88D15F6C7BB0C090A000511334C465EB2EF9EA8308C`.
 
-Both informational versions identify product commit `5549968`. The later Python-only harness correction is `baf16d9149be208da3d26064f32c2f75d3b711d9`; its independent scoped review approved the two-file change, and its 23 inert tests passed.
+Both informational versions identify product commit `5549968`. Later Python-only harness corrections culminate in `caaa1bbae58f9f7fae50c6ae5bbfe8128182f9ff`; independent scoped review approved the corrections, and all 44 inert runner tests passed. These changes did not rebuild the product binaries.
 
 | Current browser check | Result | Observation |
 | --- | --- | --- |
@@ -30,9 +30,9 @@ The run used Codex's integrated browser and a disposable database, repository, a
 
 Local evidence: [browser results](../../artifacts/feature-final-554/browser-proof.json), [selected manager and wrapped history](../../artifacts/feature-final-554/manager-554-selected.png), [final state](../../artifacts/feature-final-554/manager-554-final.png). Browser transport-fault injection, delayed-response races and catalogs exceeding 200 sessions were not repeated; corresponding automated regressions remain in the suite. The earlier unavailable-manager browser check below was not repeated in this run.
 
-Supporting protocol results: authentication refusal, same-identity backup restoration, missing identity copies and corrupt-backup refusal all passed. The pin case reached a successful relay reply but stopped at its log-based POST observation control; the host suppresses those informational logs, so that case remains open. The corrected cookie guard maps the actual synthetic cookie's key ID to private XML and retains contrary-store rejection; this is provenance evidence, not independent decryption. Original failed reports remain separate. See [current protocol results](../../artifacts/feature-final-554/protocol-proof-baf16d9.json).
+Supporting protocol results: authentication refusal, same-identity backup restoration, missing identity copies, corrupt-backup refusal and certificate-pin refusal all passed in one completed run against the exact binaries above. The pin case uses authenticated structured dashboard traffic, two successful controls and completed snapshot-publication fences to prove the mismatched-pin call produced no protected request. It checks traffic continuity and retention instead of relying on suppressed informational logs. The corrected cookie guard maps the actual synthetic cookie's key ID to private XML and retains contrary-store rejection; this is provenance evidence, not independent decryption. Original failed and superseded reports remain separate. See [current protocol results](../../artifacts/feature-final-554/protocol-proof-caaa1bb-final.json).
 
-The live development adapter remains the separately verified main `9ab8efe` deployment. These checks do not claim feature-host, joined-PC package, native autojoin, manager powers, node-update or idle-wake deployment. The private native-binding task is approved on its separate branch; later tasks and real provider gates remain open.
+The live development adapter remains the separately verified main `9ab8efe` deployment. These checks do not claim feature-host, joined-PC package, native autojoin, manager powers, node-update or idle-wake deployment. The private native-binding and verified-participant tasks are independently approved on their separate branch. Coordinator implementation, later tasks and real provider gates remain open.
 
 The following sections preserve the earlier `2f90d97` verification record.
 
