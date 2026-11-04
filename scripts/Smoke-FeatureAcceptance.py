@@ -28,6 +28,10 @@ class ProbeFailure(Exception):
     pass
 
 
+RECOVERY_SUFFIX = ("Restore the original hub certificate and its matching backup and identity marker "
+                   "from a trusted backup, then restart the hub. Existing identity files were not replaced.")
+
+
 def require(condition, message):
     if not condition:
         raise ProbeFailure(message)
@@ -98,6 +102,7 @@ class Hub:
         self.backup = Path(str(self.certificate) + ".backup")
         self.marker = Path(str(self.certificate) + ".identity")
         self.process = None
+        self.reader = None
         self.lines = deque(maxlen=2000)  # Memory only; never published or persisted.
         profile = self.root / "profile"
         profile.mkdir()
@@ -118,7 +123,7 @@ class Hub:
             "Relay__Dashboard__ViewerPrincipalIds__0": "acceptance-admin",
             "Relay__Discovery__Enabled": "true",
             "Relay__Discovery__Repositories__0": self.repo,
-            "Relay__Network__Enabled": "true",
+            "Relay__Network__Enabled": "false",
             "Relay__Network__HttpsPort": str(self.https),
             "Relay__Local__HttpsPort": str(self.local_https),
             "Relay__Network__CertificatePath": str(self.certificate),
@@ -126,6 +131,7 @@ class Hub:
             "Relay__DocCache__SyncMinutes": "0",
             "Logging__LogLevel__Microsoft.AspNetCore.Hosting.Diagnostics": "Information",
             "Logging__LogLevel__Microsoft.AspNetCore.DataProtection": "Information",
+            "Logging__LogLevel__Microsoft.Hosting.Lifetime": "Information",
         })
 
     def capture(self, stream):
@@ -135,18 +141,33 @@ class Hub:
     def start(self, expect_failure=False):
         require(self.process is None or self.process.poll() is not None,
                 "Refusing to start a second fixture hub")
+        self.lines.clear()
         flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         self.process = subprocess.Popen(
             ["dotnet", str(self.host)], cwd=self.root, env=self.env,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             encoding="utf-8", errors="replace", creationflags=flags)
-        threading.Thread(target=self.capture, args=(self.process.stdout,), daemon=True).start()
+        self.reader = threading.Thread(target=self.capture, args=(self.process.stdout,), daemon=True)
+        self.reader.start()
         if expect_failure:
             try:
                 code = self.process.wait(timeout=self.timeout)
             except subprocess.TimeoutExpired:
                 raise ProbeFailure("Established-identity startup did not refuse within timeout")
             require(code != 0, "Established-identity startup unexpectedly succeeded")
+            self.reader.join(timeout=3)
+            require(not self.reader.is_alive(), "Fixture log reader did not finish after exit")
+            if expect_failure == "missing-identity-copies":
+                path = self.certificate
+                reason = "The established hub identity is missing, and no automatic backup is available."
+            elif expect_failure == "corrupt-backup":
+                path = self.backup
+                reason = "The hub certificate file exists but could not be loaded. It was left unchanged."
+            else:
+                raise ProbeFailure("Unknown expected recovery refusal category")
+            expected = f"{reason} Identity file: '{path}'. {RECOVERY_SUFFIX}"
+            require(any(expected in line for line in self.lines),
+                    "Fixture exited without the intended established-identity recovery refusal; raw logs withheld")
             return
         deadline = time.monotonic() + self.timeout
         while time.monotonic() < deadline:
@@ -155,6 +176,7 @@ class Hub:
             try:
                 status, _ = self.request("GET", "/health")
                 if status == 200:
+                    self.verify_listener_isolation()
                     self.fingerprint()  # HTTPS and the private key must work too.
                     self.verify_key_isolation()
                     return
@@ -164,7 +186,28 @@ class Hub:
         raise ProbeFailure("Fixture readiness timeout; no live endpoint used")
 
     def stop(self):
-        stop_owned(self.process)
+        try:
+            stop_owned(self.process)
+        finally:
+            if self.reader is not None:
+                self.reader.join(timeout=3)
+            if self.process is not None and self.process.stdout is not None:
+                self.process.stdout.close()
+
+    def verify_listener_isolation(self):
+        expected = {self.origin, f"https://127.0.0.1:{self.local_https}"}
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            actual = set()
+            for line in list(self.lines):
+                match = re.search(r"Now listening on:\s*(\S+)", line)
+                if match:
+                    actual.add(match.group(1).rstrip("/"))
+            require(actual.issubset(expected), "Fixture reported a listener outside its owned loopback origins")
+            if actual == expected:
+                return
+            time.sleep(0.05)
+        raise ProbeFailure("Fixture loopback listener isolation was not verified")
 
     def remove_owned(self, path):
         require(path.resolve().is_relative_to(self.root), "Fixture path escapes temporary root")
@@ -230,7 +273,7 @@ class Hub:
 
     def fingerprint(self):
         context = ssl._create_unverified_context()
-        with socket.create_connection(("127.0.0.1", self.https), timeout=3) as raw:
+        with socket.create_connection(("127.0.0.1", self.local_https), timeout=3) as raw:
             with context.wrap_socket(raw, server_hostname="localhost") as stream:
                 return hashlib.sha256(stream.getpeercert(binary_form=True)).hexdigest().upper()
 
@@ -239,7 +282,7 @@ class Hub:
                    for line in list(self.lines))
 
     def adapter_call(self, fingerprint):
-        env = dict(self.env, COCERN_URL=f"https://127.0.0.1:{self.https}/",
+        env = dict(self.env, COCERN_URL=f"https://127.0.0.1:{self.local_https}/",
                    COCERN_TOKEN=self.worker, COCERN_FINGERPRINT=fingerprint)
         flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         process = subprocess.Popen(["dotnet", str(self.adapter)], cwd=self.root, env=env,
@@ -248,12 +291,16 @@ class Hub:
                                    creationflags=flags)
         replies = queue.Queue()
         def read():
-            for line in process.stdout:
-                try:
-                    replies.put(json.loads(line))
-                except ValueError:
-                    continue
-        threading.Thread(target=read, daemon=True).start()
+            try:
+                for line in process.stdout:
+                    try:
+                        replies.put(json.loads(line))
+                    except ValueError:
+                        continue
+            except (OSError, ValueError):
+                pass  # Owned stream closed during cleanup; no raw diagnostics.
+        reader = threading.Thread(target=read, daemon=True)
+        reader.start()
         def rpc(message):
             process.stdin.write(json.dumps(message) + "\n")
             process.stdin.flush()
@@ -277,9 +324,20 @@ class Hub:
                 "name": "task_get", "arguments": {"repositoryId": self.repo,
                 "limit": 1, "attention": False}}})
         finally:
-            if process.stdin:
-                process.stdin.close()
-            stop_owned(process)
+            try:
+                if process.stdin:
+                    try:
+                        process.stdin.close()
+                    except OSError:
+                        pass
+            finally:
+                try:
+                    stop_owned(process)
+                finally:
+                    reader.join(timeout=3)
+                    if process.stdout:
+                        process.stdout.close()
+                    require(not reader.is_alive(), "Adapter fixture reader did not stop")
 
 
 def authentication(hub):
@@ -318,10 +376,11 @@ def missing_copies(hub):
     hub.stop()
     hub.remove_owned(hub.certificate)
     hub.remove_owned(hub.backup)
-    hub.start(expect_failure=True)
+    hub.start(expect_failure="missing-identity-copies")
     require(not hub.certificate.exists() and not hub.backup.exists(), "Missing identity silently regenerated")
     require(hub.marker.read_bytes() == marker, "Established identity evidence changed")
-    return {"startupRefused": True, "noNewIdentity": True, "evidencePreserved": True}
+    return {"startupRefused": True, "refusalCategory": "established_identity_recovery_required",
+            "noNewIdentity": True, "evidencePreserved": True}
 
 
 def corrupt_backup(hub):
@@ -332,19 +391,15 @@ def corrupt_backup(hub):
     hub.remove_owned(hub.certificate)
     corrupt = b"inert-corrupt-fixture-backup"
     hub.backup.write_bytes(corrupt)
-    hub.start(expect_failure=True)
+    hub.start(expect_failure="corrupt-backup")
     require(not hub.certificate.exists(), "Corrupt backup caused identity regeneration")
     require(hub.backup.read_bytes() == corrupt and hub.marker.read_bytes() == marker,
             "Corrupt identity evidence was overwritten")
-    return {"startupRefused": True, "corruptEvidencePreserved": True, "noNewIdentity": True}
+    return {"startupRefused": True, "refusalCategory": "established_identity_recovery_required",
+            "corruptEvidencePreserved": True, "noNewIdentity": True}
 
 
-def pin_refusal(hub):
-    hub.start()
-    before = hub.protected_posts()
-    result = hub.adapter_call(hub.fingerprint())
-    require(not result.get("isError"), "Correctly pinned adapter control failed")
-    relay = None
+def relay_reply(result):
     for item in result.get("content", []):
         if item.get("type") == "text":
             try:
@@ -352,20 +407,37 @@ def pin_refusal(hub):
             except ValueError:
                 continue
             if isinstance(candidate, dict) and "ok" in candidate:
-                relay = candidate
-                break
-    require(relay is not None and relay.get("ok") is True,
-            "Correct-pin control did not return a successful relay reply")
-    deadline = time.monotonic() + 2
-    while hub.protected_posts() <= before and time.monotonic() < deadline:
-        time.sleep(0.05)
-    require(hub.protected_posts() > before, "Request observation control unavailable")
+                return candidate
+    return None
+
+
+def pin_refusal(hub):
+    hub.start()
+    fingerprint = hub.fingerprint()
+
+    def correct_pin_control():
+        before = hub.protected_posts()
+        result = hub.adapter_call(fingerprint)
+        relay = relay_reply(result)
+        require(not result.get("isError") and relay is not None and relay.get("ok") is True,
+                "Correct-pin control did not return a successful relay reply")
+        deadline = time.monotonic() + 2
+        while hub.protected_posts() <= before and time.monotonic() < deadline:
+            time.sleep(0.05)
+        require(hub.protected_posts() > before, "Request observation control unavailable")
+
+    correct_pin_control()
     before = hub.protected_posts()
-    result = hub.adapter_call("0" * 64)
-    require(result.get("isError") is True, "Wrong pin was not refused")
+    wrong_pin = ("B" if fingerprint[0] == "A" else "A") + fingerprint[1:]
+    result = hub.adapter_call(wrong_pin)
+    relay = relay_reply(result)
+    require(result.get("isError") is True and relay is not None and relay.get("ok") is False
+            and relay.get("code") == "hub_identity_changed",
+            "Wrong-pin call did not report a verified hub identity mismatch")
     time.sleep(0.2)
     require(hub.protected_posts() == before, "Protected request reached wrong-identity hub")
-    return {"correctPinWorks": True, "wrongIdentityRefused": True,
+    correct_pin_control()
+    return {"correctPinWorks": True, "freshCorrectPinWorksAfterRefusal": True, "wrongIdentityRefused": True,
             "noProtectedRequestOnMismatch": True, "humanRetrustJourney": "NOT RUN"}
 
 
@@ -421,7 +493,11 @@ def main():
               "verifiedHostSha256": args.host_sha256.upper(),
               "verifiedAdapterSha256": args.adapter_sha256.upper(),
               "nativeReleaseGate": "NOT RUN", "results": records}
-    args.output.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    try:
+        with args.output.open("x", encoding="utf-8") as output:
+            output.write(json.dumps(report, indent=2, ensure_ascii=False) + "\n")
+    except FileExistsError:
+        raise ProbeFailure("Output appeared during execution; refusing overwrite") from None
     return int(any(record["status"] != "PASS" for record in records))
 
 

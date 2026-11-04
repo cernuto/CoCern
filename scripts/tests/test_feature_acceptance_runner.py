@@ -1,6 +1,8 @@
 """Check runner safety boundaries without launching a hub or reading real state."""
 import hashlib
 import importlib.util
+import io
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -14,6 +16,162 @@ spec.loader.exec_module(runner)
 
 
 class SafetyBoundaryTests(unittest.TestCase):
+    def make_hub(self, root):
+        return runner.Hub(root / "fixture", root / "host.dll", root / "adapter.dll", 1)
+
+    def adapter_process(self):
+        process = mock.Mock()
+        process.poll.return_value = None
+        process.wait.return_value = 0
+        process.stdout = io.StringIO(json.dumps({"id": 1, "result": {}}) + "\n" +
+                                       json.dumps({"id": 2, "result": {"isError": False}}) + "\n")
+        return process
+
+    def test_hub_disables_network_listener_without_disabling_discovery(self):
+        with tempfile.TemporaryDirectory() as folder:
+            hub = self.make_hub(Path(folder))
+            self.assertEqual(hub.env["Relay__Network__Enabled"], "false")
+            self.assertEqual(hub.env["Relay__Discovery__Enabled"], "true")
+            with mock.patch.object(runner.socket, "create_connection") as connect, \
+                    mock.patch.object(runner.ssl, "_create_unverified_context") as context:
+                context.return_value.wrap_socket.return_value.__enter__.return_value.getpeercert.return_value = b"inert-certificate"
+                hub.fingerprint()
+                connect.assert_called_once_with(("127.0.0.1", hub.local_https), timeout=3)
+
+    def test_adapter_uses_owned_loopback_tls_port_and_closes_streams(self):
+        with tempfile.TemporaryDirectory() as folder:
+            hub = self.make_hub(Path(folder))
+            process = self.adapter_process()
+            with mock.patch.object(runner.subprocess, "Popen", return_value=process) as launch:
+                hub.adapter_call("A" * 64)
+            self.assertEqual(launch.call_args.kwargs["env"]["COCERN_URL"],
+                             f"https://127.0.0.1:{hub.local_https}/")
+            self.assertTrue(process.stdout.closed)
+
+    def test_effective_listeners_must_be_exact_owned_loopback_origins(self):
+        with tempfile.TemporaryDirectory() as folder:
+            hub = self.make_hub(Path(folder))
+            hub.lines.extend([f"Now listening on: {hub.origin}",
+                              f"Now listening on: https://127.0.0.1:{hub.local_https}"])
+            hub.verify_listener_isolation()
+            hub.lines.append(f"Now listening on: https://[::]:{hub.https}")
+            with self.assertRaises(runner.ProbeFailure):
+                hub.verify_listener_isolation()
+
+    def test_corrupt_backup_refusal_requires_backup_path_and_specific_reason(self):
+        with tempfile.TemporaryDirectory() as folder:
+            hub = self.make_hub(Path(folder))
+            process = mock.Mock()
+            process.wait.return_value = 1
+            reason = "The hub certificate file exists but could not be loaded. It was left unchanged."
+            process.stdout = io.StringIO(f"{reason} Identity file: '{hub.backup}'. {runner.RECOVERY_SUFFIX}\n")
+            with mock.patch.object(runner.subprocess, "Popen", return_value=process):
+                hub.start(expect_failure="corrupt-backup")
+
+    def test_previous_startup_log_cannot_prove_current_refusal(self):
+        with tempfile.TemporaryDirectory() as folder:
+            hub = self.make_hub(Path(folder))
+            reason = "The established hub identity is missing, and no automatic backup is available."
+            hub.lines.append(f"{reason} Identity file: '{hub.certificate}'. {runner.RECOVERY_SUFFIX}")
+            process = mock.Mock()
+            process.wait.return_value = 1
+            process.stdout = io.StringIO("Unrelated configuration crash\n")
+            with mock.patch.object(runner.subprocess, "Popen", return_value=process):
+                with self.assertRaises(runner.ProbeFailure):
+                    hub.start(expect_failure="missing-identity-copies")
+
+    def test_adapter_cleanup_still_stops_child_when_stdin_close_raises(self):
+        with tempfile.TemporaryDirectory() as folder:
+            hub = self.make_hub(Path(folder))
+            process = self.adapter_process()
+            process.stdin.close.side_effect = BrokenPipeError("inert-close-error")
+            with mock.patch.object(runner.subprocess, "Popen", return_value=process):
+                try:
+                    hub.adapter_call("A" * 64)
+                except BrokenPipeError:
+                    pass
+            process.terminate.assert_called_once()
+            process.wait.assert_called_once()
+            self.assertTrue(process.stdout.closed)
+
+    def test_unrelated_nonzero_startup_exit_is_not_recovery_refusal(self):
+        with tempfile.TemporaryDirectory() as folder:
+            hub = self.make_hub(Path(folder))
+            process = mock.Mock()
+            process.wait.return_value = 1
+            process.stdout = io.StringIO("Address already in use; inert-bootstrap-failure\n")
+            with mock.patch.object(runner.subprocess, "Popen", return_value=process):
+                with self.assertRaises(runner.ProbeFailure):
+                    hub.start(expect_failure="missing-identity-copies")
+
+    def test_recovery_refusal_requires_intended_reason_and_owned_identity_path(self):
+        suffix = ("Restore the original hub certificate and its matching backup and identity marker "
+                  "from a trusted backup, then restart the hub. Existing identity files were not replaced.")
+        reason = "The established hub identity is missing, and no automatic backup is available."
+        for wrong_path, wrong_reason in ((False, False), (True, False), (False, True)):
+            with self.subTest(wrong_path=wrong_path, wrong_reason=wrong_reason), tempfile.TemporaryDirectory() as folder:
+                hub = self.make_hub(Path(folder))
+                path = hub.root / "unrelated.pfx" if wrong_path else hub.certificate
+                expected_reason = "Unrelated failure." if wrong_reason else reason
+                process = mock.Mock()
+                process.wait.return_value = 1
+                process.stdout = io.StringIO(f"System.InvalidOperationException: {expected_reason} Identity file: '{path}'. {suffix}\n")
+                with mock.patch.object(runner.subprocess, "Popen", return_value=process):
+                    if wrong_path or wrong_reason:
+                        with self.assertRaises(runner.ProbeFailure):
+                            hub.start(expect_failure="missing-identity-copies")
+                    else:
+                        hub.start(expect_failure="missing-identity-copies")
+
+    def pin_hub(self, failure_code):
+        hub = mock.Mock()
+        hub.fingerprint.return_value = "A" * 64
+        count = [0]
+        hub.protected_posts.side_effect = lambda: count[0]
+        def call(pin):
+            correct = pin == "A" * 64
+            if correct:
+                count[0] += 1
+            return {"isError": not correct, "content": [{"type": "text", "text": json.dumps(
+                {"ok": correct, "code": "Ok" if correct else failure_code})}]}
+        hub.adapter_call.side_effect = call
+        return hub
+
+    def test_generic_mcp_error_cannot_prove_identity_refusal(self):
+        for code in ("hub_unavailable", "invalid_hub_reply", "unauthorized"):
+            with self.subTest(code=code), mock.patch.object(runner.time, "sleep"):
+                with self.assertRaises(runner.ProbeFailure):
+                    runner.pin_refusal(self.pin_hub(code))
+
+    def test_pin_refusal_requires_fresh_correct_pin_control_after_negative(self):
+        hub = self.pin_hub("hub_identity_changed")
+        with mock.patch.object(runner.time, "sleep"):
+            result = runner.pin_refusal(hub)
+        self.assertTrue(result["wrongIdentityRefused"])
+        self.assertEqual(hub.adapter_call.call_count, 3)
+        self.assertEqual(hub.adapter_call.call_args.args, ("A" * 64,))
+
+    def test_evidence_created_during_probe_is_never_overwritten(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            host, adapter, output = root / "host.dll", root / "adapter.dll", root / "report.json"
+            content = b"inert-not-an-assembly"
+            host.write_bytes(content)
+            adapter.write_bytes(content)
+            sha = hashlib.sha256(content).hexdigest()
+            argv = ["runner", "--host", str(host), "--adapter", str(adapter),
+                    "--host-sha256", sha, "--adapter-sha256", sha,
+                    "--declared-commit", "test-only", "--output", str(output)]
+            def concurrent_writer(hub):
+                output.write_bytes(b"concurrent-preserved-evidence")
+                return {"inert": True}
+            with mock.patch("sys.argv", argv), mock.patch.object(runner.shutil, "which", return_value="dotnet"), \
+                    mock.patch.object(runner, "Hub"), mock.patch.object(runner, "PROBES", [("inert", [], concurrent_writer)]), \
+                    mock.patch("builtins.print"):
+                with self.assertRaises(runner.ProbeFailure):
+                    runner.main()
+            self.assertEqual(output.read_bytes(), b"concurrent-preserved-evidence")
+
     def test_environment_filter_is_case_insensitive_and_clears_proxy_paths(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
