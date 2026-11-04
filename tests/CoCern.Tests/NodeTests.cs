@@ -1841,7 +1841,6 @@ public sealed class NodeTests : IDisposable
     {
         Clients = () => [], Locators = [],
         JoinCode = RelayHostFixture.JoinCode,
-        Clients = () => [], Locators = [],
         MachineName = "Node PC",
         Chats = hub is null ? _ => Task.FromResult(new JsonArray(Chat())) : OwnedChats(hub),
         FirstRetry = TimeSpan.FromMilliseconds(20),
@@ -1853,7 +1852,6 @@ public sealed class NodeTests : IDisposable
     {
         Clients = () => [], Locators = [],
         JoinCode = RelayHostFixture.JoinCode,
-        Clients = () => [], Locators = [],
         CredentialAttempts = credentialAttempts,
         CredentialRetryDelay = TimeSpan.FromMilliseconds(25),
         ProbeFingerprint = (_, _) => Task.FromResult(ProbedFingerprint),
