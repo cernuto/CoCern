@@ -129,3 +129,15 @@ Not listed: `failed`, `stranded`, `interrupted`. They remain manager attention.
 - **Coverage:** beyond 200 sessions, 4 MB of rows, or 20 boards the list is incomplete and says so. The tool shares the query but applies its own repository scope.
 - **Decision for Paul:** whether a human blocker should outlive its chat, as proposed, and whether `coordinator_hold` should appear as a separate "maybe" group.
 - **Dependency:** when `record_decision` lands, proposal rows clear with no change here.
+
+## Permission prompts (Paul: in scope)
+
+Paul confirmed that this alert must cover chats stopped at a permission prompt. Read from the Claude Code hooks reference (https://code.claude.com/docs/en/hooks.md) on 2026-11-04; nothing below has been tried on a real client yet.
+
+- **Signal, Claude Code:** the `Notification` hook with matcher `permission_prompt`. Stdin has the common fields plus `message`, optional `title` and `notification_type`. It cannot block or change anything, which suits a report-only mark.
+- **Timing, as documented:** it fires about six seconds after the ask. For sessions whose permission requests go through the SDK `canUseTool` callback, the docs name Claude Desktop and the VS Code extension: it fires since v2.1.233 (this PC runs 2.1.317), typing does not defer it, and it does not fire if the prompt is answered sooner. In terminal sessions it shows only when the user appears away, and each keystroke defers it. `CLAUDE_CODE_DISABLE_PERMISSION_PROMPT_NOTIFY_HOOKS=1` turns it off.
+- **Unconfirmed:** the docs do not mention `--permission-prompt-tool=stdio`, which is what the desktop app launches with, so whether this fires there must be tested on a real desktop chat before it is relied on.
+- **Clearing is the hard part:** the docs list no event for a prompt being answered, and do not say whether a rejected prompt fires anything. Candidates to test: `PostToolUse` and `PostToolUseFailure` for an approved tool, `UserPromptSubmit` and `Stop` for later activity. Until tested, a mark from this source relies on those plus a short bounded expiry, and a rejected prompt may stay listed until the chat's next turn event or the expiry.
+- **Contract:** a fourth row kind, `permission_prompt`, set by that chat's own hook into the existing one-slot self-report path with the hook's fixed text, carrying the tool name only when it is available, and never command contents. No new authority.
+- **Codex:** not established. The note needs Codex's hook documentation or a real client before saying anything; a client with no such signal cannot be detected, and the page must not imply that it was checked.
+- **Not to build yet:** this section is findings and contract only; the real-client test comes first.
