@@ -16,7 +16,10 @@ public static class HubCertificate
     private static readonly TimeSpan Validity = TimeSpan.FromDays(730);
 
     /// <summary>Loads the hub's existing identity, restoring its private backup if needed. Only a new hub with no identity evidence may create one.</summary>
-    public static X509Certificate2 LoadOrCreate(string path, string hostName, bool allowCreate = true)
+    public static X509Certificate2 LoadOrCreate(string path, string hostName, bool allowCreate = true) =>
+        LoadOrCreate(path, hostName, allowCreate, expectedFingerprint: null);
+
+    internal static X509Certificate2 LoadOrCreate(string path, string hostName, bool allowCreate, string? expectedFingerprint)
     {
         var backupPath = path + ".backup";
         var markerPath = path + ".identity";
@@ -26,6 +29,7 @@ public static class HubCertificate
             {
                 using var backup = Load(backupPath);
                 var fingerprint = CertificateFingerprint.Of(backup);
+                ValidateFingerprint(backupPath, fingerprint, expectedFingerprint);
                 if (File.Exists(markerPath)) ValidateMarker(markerPath, fingerprint);
                 WritePrivately(path, File.ReadAllBytes(backupPath));
                 // A concurrent start may have won the primary write. Never derive artifacts from the losing candidate.
@@ -33,7 +37,7 @@ public static class HubCertificate
             }
             else
             {
-                if (File.Exists(markerPath) || !allowCreate)
+                if (File.Exists(markerPath) || !allowCreate || expectedFingerprint is not null)
                     throw RecoveryError(path, "The established hub identity is missing, and no automatic backup is available.");
                 Create(path, hostName);
             }
@@ -43,6 +47,7 @@ public static class HubCertificate
         try
         {
             var fingerprint = CertificateFingerprint.Of(certificate);
+            ValidateFingerprint(path, fingerprint, expectedFingerprint);
             // Validate all existing evidence before creating anything missing. Conflicting files must remain untouched.
             if (File.Exists(backupPath)) ValidateCertificate(backupPath, fingerprint);
             if (File.Exists(markerPath)) ValidateMarker(markerPath, fingerprint);
@@ -59,10 +64,15 @@ public static class HubCertificate
         }
     }
 
-    private static void ValidateCertificate(string path, string fingerprint)
+    internal static void ValidateCertificate(string path, string fingerprint)
     {
         using var certificate = Load(path);
-        if (!string.Equals(CertificateFingerprint.Of(certificate), fingerprint, StringComparison.Ordinal))
+        ValidateFingerprint(path, CertificateFingerprint.Of(certificate), fingerprint);
+    }
+
+    private static void ValidateFingerprint(string path, string actual, string? expected)
+    {
+        if (expected is not null && !string.Equals(actual, expected, StringComparison.Ordinal))
             throw RecoveryError(path, "The certificate does not match the hub's established identity.");
     }
 
@@ -79,7 +89,7 @@ public static class HubCertificate
         }
     }
 
-    private static InvalidOperationException RecoveryError(string path, string reason, Exception? error = null) =>
+    internal static InvalidOperationException RecoveryError(string path, string reason, Exception? error = null) =>
         new($"{reason} Identity file: '{path}'. Restore the original hub certificate and its matching backup and identity marker from a trusted backup, then restart the hub. Existing identity files were not replaced.", error);
 
     private static X509Certificate2 Load(string path)
@@ -195,7 +205,11 @@ internal static class HubNetwork
         var logger = options.ApplicationServices.GetService<ILoggerFactory>()?.CreateLogger("CoCern.Host.HubNetwork");
         foreach (var url in (configuration["urls"] ?? HubAddresses.LocalUrl).Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)) ListenHttp(options, url);
         var localRecord = Path.Combine(Path.GetDirectoryName(RelayHostBuilderExtensions.DatabasePath(configuration, environment))!, LocalHubRecord.FileName);
-        var certificate = HubCertificate.LoadOrCreate(CertificatePath(configuration, environment, logger), Environment.MachineName, allowCreate: !File.Exists(localRecord));
+        var hasLocalRecord = Path.Exists(localRecord);
+        var expectedFingerprint = hasLocalRecord ? CertificateFingerprint.Normalize(LocalHubRecord.Read(Path.GetDirectoryName(localRecord)!)?.Fingerprint) : null;
+        if (hasLocalRecord && (expectedFingerprint is null || !CertificateFingerprint.IsValid(expectedFingerprint)))
+            throw HubCertificate.RecoveryError(localRecord, "The recorded hub identity could not be read or is invalid.");
+        var certificate = HubCertificate.LoadOrCreate(CertificatePath(configuration, environment, logger, expectedFingerprint), Environment.MachineName, allowCreate: !hasLocalRecord, expectedFingerprint);
         // The certificate's private key is a persisted Windows key container that only Dispose removes, so release it when the host stops.
         options.ApplicationServices.GetRequiredService<IHostApplicationLifetime>().ApplicationStopped.Register(certificate.Dispose);
         var fingerprint = CertificateFingerprint.Of(certificate);
@@ -223,7 +237,7 @@ internal static class HubNetwork
     /// content root's <c>data</c> folder, with none beside the database yet, is copied there, so its fingerprint survives. The source is
     /// retained because another hub may still use it; when the copy fails, it is used where it is.
     /// </summary>
-    internal static string CertificatePath(IConfiguration configuration, IHostEnvironment environment, ILogger? logger = null)
+    internal static string CertificatePath(IConfiguration configuration, IHostEnvironment environment, ILogger? logger = null, string? expectedFingerprint = null)
     {
         var configured = configuration["Relay:Network:CertificatePath"];
         if (!string.IsNullOrWhiteSpace(configured)) return Path.Combine(environment.ContentRootPath, configured);
@@ -232,6 +246,8 @@ internal static class HubNetwork
         if (File.Exists(path + ".backup") || File.Exists(path + ".identity")) return path;
         var earlier = Path.GetFullPath(Path.Combine(environment.ContentRootPath, ContentRootCertificatePath));
         if (File.Exists(path) || !File.Exists(earlier) || string.Equals(path, earlier, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal)) return path;
+        // A startup record belongs to this database, so verify a legacy candidate before importing any bytes.
+        if (expectedFingerprint is not null) HubCertificate.ValidateCertificate(earlier, expectedFingerprint);
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);

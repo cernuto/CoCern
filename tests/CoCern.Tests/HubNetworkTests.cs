@@ -249,6 +249,101 @@ public sealed class HubNetworkTests : IDisposable
         finally { await app.StopAsync(); }
     }
 
+    [Theory]
+    [InlineData("legacy")]
+    [InlineData("backup")]
+    [InlineData("primary")]
+    public async Task Recorded_identity_rejects_a_divergent_candidate_before_any_file_changes(string candidate)
+    {
+        var database = Path.Combine(root, "separate", "relay.db");
+        var destination = Path.Combine(root, "separate", HubNetwork.CertificateFile);
+        var source = candidate == "legacy" ? Path.Combine(root, "data", HubNetwork.CertificateFile) : destination;
+        using var different = HubCertificate.LoadOrCreate(source, "different-hub");
+        if (candidate != "legacy")
+        {
+            File.Delete(destination + ".identity");
+            if (candidate == "backup") File.Delete(destination);
+            else File.Delete(destination + ".backup");
+        }
+        Directory.CreateDirectory(Path.GetDirectoryName(database)!);
+        var recordPath = Path.Combine(Path.GetDirectoryName(database)!, LocalHubRecord.FileName);
+        File.WriteAllText(recordPath, new LocalHubRecord("https://127.0.0.1:5272/", new string('A', 64)).ToJson());
+        var before = Directory.GetFiles(root, "*", SearchOption.AllDirectories).ToDictionary(path => path, File.ReadAllBytes);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => ConfigureNetworkAsync(database));
+
+        Assert.Contains("restore", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(before.Keys.Order(), Directory.GetFiles(root, "*", SearchOption.AllDirectories).Order());
+        foreach (var (path, bytes) in before) Assert.Equal(bytes, File.ReadAllBytes(path));
+    }
+
+    [Theory]
+    [InlineData("legacy")]
+    [InlineData("backup")]
+    [InlineData("primary")]
+    public async Task Recorded_identity_allows_a_matching_candidate_and_retains_its_source(string candidate)
+    {
+        var database = Path.Combine(root, "separate", "relay.db");
+        var destination = Path.Combine(root, "separate", HubNetwork.CertificateFile);
+        var source = candidate == "legacy" ? Path.Combine(root, "data", HubNetwork.CertificateFile) : destination;
+        using var original = HubCertificate.LoadOrCreate(source, "established-hub");
+        var originalBytes = File.ReadAllBytes(source);
+        var fingerprint = CertificateFingerprint.Of(original);
+        if (candidate != "legacy")
+        {
+            File.Delete(destination + ".identity");
+            if (candidate == "backup") File.Delete(destination);
+            else File.Delete(destination + ".backup");
+        }
+        Directory.CreateDirectory(Path.GetDirectoryName(database)!);
+        File.WriteAllText(Path.Combine(Path.GetDirectoryName(database)!, LocalHubRecord.FileName), new LocalHubRecord("https://127.0.0.1:5272/", fingerprint).ToJson());
+
+        await ConfigureNetworkAsync(database);
+
+        Assert.Equal(originalBytes, File.ReadAllBytes(source));
+        Assert.Equal(originalBytes, File.ReadAllBytes(destination));
+        Assert.Equal(originalBytes, File.ReadAllBytes(destination + ".backup"));
+        Assert.Equal(fingerprint, File.ReadAllText(destination + ".identity"));
+        Assert.Equal(fingerprint, LocalHubRecord.Read(Path.GetDirectoryName(database)!)!.Fingerprint);
+        foreach (var artifact in IdentityArtifacts(destination)) AssertPrivate(artifact);
+    }
+
+    [Theory]
+    [InlineData("not json")]
+    [InlineData("{\"url\":\"https://127.0.0.1:5272/\",\"fingerprint\":\"unusable\"}")]
+    [InlineData("{\"url\":\"https://127.0.0.1:5272/\"}")]
+    public async Task Unusable_recorded_identity_prevents_legacy_import_and_stays_unchanged(string record)
+    {
+        var legacyPath = Path.Combine(root, "data", HubNetwork.CertificateFile);
+        using var legacy = HubCertificate.LoadOrCreate(legacyPath, "legacy-hub");
+        var database = Path.Combine(root, "separate", "relay.db");
+        Directory.CreateDirectory(Path.GetDirectoryName(database)!);
+        File.WriteAllText(Path.Combine(Path.GetDirectoryName(database)!, LocalHubRecord.FileName), record);
+        var before = Directory.GetFiles(root, "*", SearchOption.AllDirectories).ToDictionary(path => path, File.ReadAllBytes);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => ConfigureNetworkAsync(database));
+
+        Assert.Contains("restore", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(before.Keys.Order(), Directory.GetFiles(root, "*", SearchOption.AllDirectories).Order());
+        foreach (var (path, bytes) in before) Assert.Equal(bytes, File.ReadAllBytes(path));
+    }
+
+    private async Task ConfigureNetworkAsync(string database)
+    {
+        var builder = WebApplication.CreateBuilder(new WebApplicationOptions { ContentRootPath = root });
+        builder.Configuration.AddConfiguration(Settings(database));
+        builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["urls"] = $"http://127.0.0.1:{FreePort()}",
+            ["Relay:Local:HttpsPort"] = FreePort().ToString()
+        });
+        builder.Services.AddSingleton<HubListener>();
+        await using var app = builder.Build();
+        var options = new Microsoft.AspNetCore.Server.Kestrel.Core.KestrelServerOptions { ApplicationServices = app.Services };
+        try { HubNetwork.Configure(builder.Configuration, builder.Environment, options); }
+        finally { await app.StopAsync(); }
+    }
+
     [Fact]
     public async Task Concurrent_and_repeated_starts_share_one_complete_private_identity()
     {
