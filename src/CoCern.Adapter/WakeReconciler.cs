@@ -2,6 +2,11 @@ using System.Text.Json;
 
 namespace CoCern.Adapter;
 
+internal interface IWakeDispatchFence
+{
+    IDisposable? TryAcquire(string threadId);
+}
+
 public interface IWakeDispatcher
 {
     Task<bool> QueueAsync(string threadId, string prompt, CancellationToken cancellationToken);
@@ -58,6 +63,8 @@ public sealed class WakeReconciler(WakeConfiguration configuration, WakeState st
             if (File.Exists(configuration.StopFile)) return "stopped";
             if (!await Permitted()) return "control-blocked";
             cancellationToken.ThrowIfCancellationRequested();
+            using var ownership = (dispatcher as IWakeDispatchFence)?.TryAcquire(route.ThreadId);
+            if (dispatcher is IWakeDispatchFence && ownership is null) return "route-changed";
             var reservation = state.Reserve(key, wakeable, (clock ?? TimeProvider.System).GetUtcNow(), () => dispatcher.IsBusy(route.ThreadId));
             if (reservation.Batch is not { } batch) return reservation.Status;
             if (File.Exists(configuration.StopFile) || cancellationToken.IsCancellationRequested)

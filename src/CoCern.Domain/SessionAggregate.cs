@@ -27,6 +27,11 @@ internal static class SessionAggregate
         switch (context.Operation)
         {
             case Operations.Open: return Initialize(context);
+            case NativeExpiryCheck.Operation:
+                var check = new SessionState(context.State);
+                return context.Caller.IsInternal && check.SessionId == context.Key && check.PrincipalId == context.Caller.PrincipalId
+                    && check.NativeId.Length > 0 && check.NativeId == Text(context.Args, NativeParticipant.Id)
+                    ? Ok(new { expired = check.Closed }) : Error(SessionDenied);
             case Operations.SessionExpire: return Expire(context);
             case Operations.SessionTargetWatch: return WatchTarget(context);
             case Operations.Deliver: return Deliver(context);
@@ -321,6 +326,7 @@ internal static class SessionAggregate
         };
         // The role reported at session_open labels this session's activity; only the hub's internal verification sees it.
         if (verified && state.Role is { Length: > 0 } role) description["role"] = role;
+        if (verified && state.NativeId is { Length: > 0 } participant) description[NativeParticipant.Id] = participant;
         // The machine given at session_open resolves this session's resource aliases (next-work lookups); also internal only.
         if (verified && state.MachineId is { Length: > 0 } machine) description["machineId"] = machine;
         // The standing revision this session last received per board, so replies carry standing only when it changed; internal only.

@@ -6,6 +6,8 @@ using CoCern.Adapter.Node;
 using CoCern.Adapter.Setup;
 using CoCern.Contracts;
 
+[assembly: System.Reflection.AssemblyMetadata(NativeRegistration.ProtocolMetadata, NativeRegistration.ProtocolVersion)]
+
 try
 {
     if (args is ["--dev-setup", var deploymentRoot, var sourceDirectory, var developmentTokenFile])
@@ -23,6 +25,40 @@ try
     }
     if (args is ["--dev-launch", var developmentRoot])
         return await CoCern.Adapter.Development.DevelopmentLauncher.RunAsync(developmentRoot, SetupEnvironment.Host().Dotnet);
+    if (args.Length > 0 && args[0] == "--dev-launch")
+    {
+        if (args.Length != 8 || !Path.IsPathFullyQualified(args[1]) || !NativeRegistration.ValidClientArguments(args[2..]))
+            throw new AdapterConfigurationException(NativeRegistration.Refusal);
+        return await CoCern.Adapter.Development.DevelopmentLauncher.RunNativeAsync(args[1], SetupEnvironment.Host().Dotnet, args[2..]);
+    }
+    if (args.Length > 0 && args[0] == "--native-hook")
+    {
+        const string usage = "Use --native-hook <codex|claude> --connection <absolute-private-folder> with optional --profile <absolute-profile> and --development-root <absolute-folder>.";
+        if (args.Length is not (4 or 6 or 8) || args[1] is not ("codex" or "claude") || args[2] != "--connection" || !Path.IsPathFullyQualified(args[3]))
+            throw new AdapterConfigurationException(usage);
+        string? hookProfile = null; string? hookDevelopmentRoot = null;
+        for (var i = 4; i < args.Length; i += 2)
+        {
+            if (!Path.IsPathFullyQualified(args[i + 1]) || args[i + 1].Length > 32768 || args[i + 1].Any(char.IsControl)) throw new AdapterConfigurationException(usage);
+            if (args[i] == "--profile" && hookProfile is null) hookProfile = args[i + 1];
+            else if (args[i] == "--development-root" && hookDevelopmentRoot is null) hookDevelopmentRoot = args[i + 1];
+            else throw new AdapterConfigurationException(usage);
+        }
+        var connection = NativeJoinHook.ReadConnection(args[3]) ?? throw new AdapterConfigurationException("Native hooks need their configured private connection.");
+        using var stopping = new CancellationTokenSource();
+        Console.CancelKeyPress += (_, cancel) => { cancel.Cancel = true; stopping.Cancel(); };
+        if (hookDevelopmentRoot is not null)
+            return await NativeJoinHook.RunDevelopmentAsync(hookDevelopmentRoot, SetupEnvironment.Host().Dotnet, args[1], args[3], Console.In, Console.Out, Console.Error, stopping.Token, hookProfile);
+        var hookRegistration = hookProfile is null ? null : NativeRegistration.FromClientArguments(["--native-client", args[1], "--connection", args[3], "--profile", hookProfile])
+            ?? throw new AdapterConfigurationException(NativeRegistration.Refusal);
+        using var nativeHttp = new HttpClient(RelayForwarder.CreateHandler(connection)) { Timeout = TimeSpan.FromSeconds(15) };
+        await using var join = new NativeJoin(args[3], connection, new RelayForwarder(nativeHttp, connection));
+        using var output = new StreamWriter(Console.OpenStandardOutput(), new System.Text.UTF8Encoding(false)) { AutoFlush = true };
+        using var error = new StreamWriter(Console.OpenStandardError(), new System.Text.UTF8Encoding(false)) { AutoFlush = true };
+        return hookRegistration is null
+            ? await NativeJoinHook.RunAsync(args[1], Console.In, output, error, join, stopping.Token)
+            : await NativeJoinHook.RunRegisteredAsync(args[1], Console.In, output, error, join, hookRegistration, stopping.Token);
+    }
     if (args.Length > 0 && args[0] == "--wake")
     {
         if (args.Length != 2) throw new AdapterConfigurationException("Use --wake with one absolute configuration path.");
@@ -103,6 +139,24 @@ try
         Console.CancelKeyPress += (_, cancel) => { cancel.Cancel = true; shutdown.Cancel(); };
         return await SetupCommand.RunAsync(setup, SetupEnvironment.Create(), shutdown.Token);
     }
+    if (args.Length > 0 && args[0] == "--node-worker")
+    {
+        const string usage = "Use --node-worker --data-dir <absolute-path> [--activation-nonce <guid>].";
+        if (args.Length is not (3 or 5) || args[1] != "--data-dir" || string.IsNullOrWhiteSpace(args[2]) || !Path.IsPathFullyQualified(args[2]))
+            throw new AdapterConfigurationException(usage);
+        NodeWorkerStartupContext? startupContext = null;
+        if (args.Length == 5 && (args[3] != "--activation-nonce" || !NodeWorkerStartupContext.TryParse(args[4], out startupContext)))
+            throw new AdapterConfigurationException(usage);
+        using var shutdown = new CancellationTokenSource();
+        Console.CancelKeyPress += (_, cancel) => { cancel.Cancel = true; shutdown.Cancel(); };
+        var knownHost = SetupEnvironment.Host().Dotnet;
+        var transport = new NodeTransport
+        {
+            UpdateHost = NodePackage.ReadHostCapabilities(Path.IsPathFullyQualified(knownHost) ? knownHost : null),
+            CreateUpdater = context => new NodeUpdateCoordinator(context)
+        };
+        return await NodeRunner.RunWorkerAsync(args[2], startupContext?.ActivationNonce, AppContext.BaseDirectory, transport, Console.Error, shutdown.Token, startupContext);
+    }
     if (args.Length > 0 && args[0] == "--node")
     {
         // Exit codes: 0 stopped, 1 configuration problem or revoked PC, 4 the hub presented a certificate other than the pinned one.
@@ -125,26 +179,42 @@ try
                 default: throw new AdapterConfigurationException(usage);
             }
         }
-        using var state = NodeState.Open(dataDir);
         using var shutdown = new CancellationTokenSource();
         Console.CancelKeyPress += (_, cancel) => { cancel.Cancel = true; shutdown.Cancel(); };
-        return await NodeRunner.RunAsync(state, hub, new NodeTransport { JoinCode = joinCode }, Console.Error, shutdown.Token);
+        var (knownDotnet, knownDll) = SetupEnvironment.Host();
+        return await SetupEnvironment.RunNodeAsync(dataDir, hub, new NodeTransport { JoinCode = joinCode }, knownDll, knownDotnet, Console.Error, shutdown.Token);
     }
-    var options = AdapterOptions.FromEnvironment();
+    NativeRegistration? registration = null;
+    if (args.Any(NativeRegistration.HasPrivateOptionName))
+    {
+        registration = NativeRegistration.FromClientArguments(args) ?? throw new AdapterConfigurationException(NativeRegistration.Refusal);
+        if (await registration.AcceptAsync(CancellationToken.None) is null) throw new AdapterConfigurationException(NativeRegistration.Refusal);
+    }
+    var options = registration?.Connection ?? AdapterOptions.FromEnvironment();
     // On node credentials the hub certificate is pinned; with explicit settings this is the plain handler, as before.
     using var http = new HttpClient(RelayForwarder.CreateHandler(options)) { Timeout = TimeSpan.FromSeconds(60) };
     await using var hints = new SessionHints(options);
-    await using var localWake = LocalChatWake.TryCreate(options, Environment.GetEnvironmentVariable("COCERN_TOKEN_FILE"));
+    await using var localWake = registration is null ? LocalChatWake.TryCreate(options, Environment.GetEnvironmentVariable("COCERN_TOKEN_FILE")) : null;
     var forwarder = new RelayForwarder(http, options);
-    var builder = Host.CreateApplicationBuilder(args);
+    await using var native = (registration?.Folder ?? options.NodeFolder ?? localWake?.Connection.Folder) is { } privateFolder ? new NativeJoin(privateFolder, options, forwarder) : null;
+    var builder = Host.CreateApplicationBuilder(registration is null ? args : []);
     // Library request/exception logging can contain handles. Emit only our fixed stderr hints.
     builder.Logging.ClearProviders();
     builder.Services.AddMcpServer(server =>
     {
-        server.ServerInstructions = AdapterInstructions.Server;
-    }).WithStdioServerTransport().WithTools(CoordinationTools.Create(forwarder, options.Admin, hints, SessionHandoff.For(options), options.ChatOnly, options.ExportedChat, localWake: localWake, diagnostics: options.Diagnostics));
+        server.ServerInstructions = registration is null ? AdapterInstructions.Server : AdapterInstructions.Native;
+        if (registration is not null) server.ServerInfo = new()
+        {
+            Name = NativeRegistration.PrivateServerName,
+            Version = typeof(NativeRegistration).Assembly.ManifestModule.ModuleVersionId.ToString("D")
+        };
+    }).WithStdioServerTransport().WithTools(registration is null
+        ? CoordinationTools.Create(forwarder, options.Admin, hints, SessionHandoff.For(options), options.ChatOnly, options.ExportedChat, localWake: localWake, diagnostics: options.Diagnostics)
+        : CoordinationTools.CreateNative(forwarder, native!, registration.Provider, options.Admin, options.Diagnostics));
     using var host = builder.Build();
-    _ = localWake?.RunAsync(host.Services.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping);
+    var lifetime = host.Services.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping;
+    _ = localWake?.RunAsync(lifetime);
+    _ = native?.ResumeAsync(lifetime);
     await host.RunAsync();
     return 0;
 }

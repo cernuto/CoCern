@@ -57,6 +57,7 @@ public sealed class BoardMessageTests
         Request(new NextWorkRead("repo", "ops", "s1", "T-1", 5, ["rig-1", "rig-2"]));
         Assert.Equal("""{"repositoryId":"repo","sessionId":"s1"}""", Request(new NextWorkRead("repo", null, "s1")));
         Request(new StandingRead("repo", "default"));
+        Request(new StandingPresentationRequest("repo", "default", "s1", "p1", "task_update:r1", """{"k":"standing_proposal","id":"p1","b":"default","line":{"text":"Confirm first"}}"""));
         Request(new OrdersRead("repo", "default"));
         Request(new TaskArchiveSweep("repo", "ops"));
         Request(new HubStandingProposal("repo", "default", "tip-board-reread", "tip-x", "Read the board as changes."));
@@ -71,6 +72,41 @@ public sealed class BoardMessageTests
         proposal["line"]!.AsObject().Remove("text");
         Assert.Equal(["line.text"], RequestMissing<HubStandingProposal>(proposal));
         Assert.Equal(["repositoryId"], RequestMissing<StandingRead>(new JsonObject { ["boardId"] = "default" }));
+    }
+
+    [Theory]
+    [InlineData("repositoryId")]
+    [InlineData("sessionId")]
+    [InlineData("proposalId")]
+    [InlineData("presentationRequest")]
+    [InlineData("expectedEffect")]
+    public void A_standing_presentation_request_requires_its_identity_correlation_and_exact_effect(string missing)
+    {
+        var request = new StandingPresentationRequest("repo", null, "s1", "p1", "check_inbox:r1", """{"k":"standing_proposal","id":"p1","b":"default","line":{"text":"Confirm first"}}""");
+        Assert.False(request.ToJson().ContainsKey("boardId"));
+        Assert.Equal([missing], RequestMissing<StandingPresentationRequest>(Without(request.ToJson(), missing)));
+        var wrongShape = request.ToJson();
+        wrongShape["expectedEffect"] = new JsonArray("not an effect");
+        Assert.Equal(["expectedEffect"], RequestMissing<StandingPresentationRequest>(wrongShape));
+    }
+
+    [Fact]
+    public void A_malformed_standing_presentation_request_changes_nothing_and_stays_internal()
+    {
+        var board = new StateEnvelope<CoordinationDocument>();
+        var args = new StandingPresentationRequest("repo", null, "s1", "p1", "check_inbox:r1", "{}").ToJson();
+        args.Remove("expectedEffect");
+        var before = board.Value.Json;
+        var refused = CoordinationStateMachine.Apply(board, "board", "key", Hub, Operations.PresentStanding, args, Now);
+        Assert.False(refused.Ok);
+        Assert.Equal(RelayErrorCodes.MalformedEffect, refused.Code);
+        Assert.Contains("expectedEffect", refused.DataJson);
+        Assert.Equal(before, board.Value.Json);
+        Assert.Empty(board.Effects);
+        var external = CoordinationStateMachine.Apply(board, "board", "key", Hub with { IsInternal = false }, Operations.PresentStanding, args, Now);
+        Assert.False(external.Ok);
+        Assert.Equal(RelayErrorCodes.InternalOnly, external.Code);
+        Assert.Equal(before, board.Value.Json);
     }
 
     [Fact]

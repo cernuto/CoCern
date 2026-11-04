@@ -84,6 +84,36 @@ public sealed record StandingRead(string RepositoryId, string? BoardId) : IInter
     }
 }
 
+/// <summary><see cref="Operations.PresentStanding"/> reserves exactly the offer that fit the verified session's reply; it never records a human decision.</summary>
+public sealed record StandingPresentationRequest(string RepositoryId, string? BoardId, string SessionId, string ProposalId, string PresentationRequest, string ExpectedEffectJson) : IInternalRequest<StandingPresentationRequest>
+{
+    public static string Operation => Operations.PresentStanding;
+    public static string TargetKind => AggregateKinds.Board;
+
+    public JsonObject ToJson()
+    {
+        var json = BoardRequest.Json(RepositoryId, BoardId);
+        json["sessionId"] = SessionId;
+        json["proposalId"] = ProposalId;
+        json["presentationRequest"] = PresentationRequest;
+        json["expectedEffect"] = JsonNode.Parse(ExpectedEffectJson)?.AsObject();
+        return json;
+    }
+
+    public static Decoding<StandingPresentationRequest> Decode(JsonObject payload)
+    {
+        var read = new MessageReader(payload);
+        var repository = read.Text("repositoryId");
+        var board = read.OptionalText("boardId");
+        var session = read.Text("sessionId");
+        var proposal = read.Text("proposalId");
+        var request = read.Text("presentationRequest");
+        var expected = read.Node("expectedEffect");
+        read.Check(expected is JsonObject, "expectedEffect");
+        return read.Result(new StandingPresentationRequest(repository, board, session, proposal, request, expected?.ToJsonString() ?? "{}"));
+    }
+}
+
 /// <summary><see cref="Operations.Orders"/>, read-only: a board's standing orders in the compact form <c>get_status</c> lists.</summary>
 public sealed record OrdersRead(string RepositoryId, string? BoardId) : IInternalRequest<OrdersRead>
 {

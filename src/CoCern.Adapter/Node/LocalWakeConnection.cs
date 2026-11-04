@@ -35,12 +35,28 @@ internal sealed class LocalWakeConnection
             if (data.ValueKind != JsonValueKind.Object) return null;
             var hub = ChatLocators.Text(data, "hub");
             var tokenFile = ChatLocators.Text(data, "tokenFile");
-            if (hub is null || tokenFile is null || !Path.IsPathFullyQualified(tokenFile) || Path.GetFileName(Path.TrimEndingDirectorySeparator(folder)) != Key(hub, tokenFile)) return null;
+            if (hub is null || tokenFile is null || !Path.IsPathFullyQualified(tokenFile) ||
+                !string.Equals(Path.GetFileName(Path.TrimEndingDirectorySeparator(folder)), Key(hub, tokenFile), OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal)) return null;
             if (!File.Exists(tokenFile) || new FileInfo(tokenFile).Length > 16384) return null;
             var environment = new Dictionary<string, string?> { ["COCERN_URL"] = hub, ["COCERN_TOKEN_FILE"] = tokenFile, ["COCERN_FINGERPRINT"] = ChatLocators.Text(data, "fingerprint"), ["COCERN_SIGNALR"] = "true" };
             return new() { Folder = folder, Options = AdapterOptions.FromEnvironment(key => environment.GetValueOrDefault(key)) };
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException or AdapterConfigurationException) { return null; }
+    }
+
+    /// <summary>Revalidate this exact token-file-backed connection; never discover a global folder or copy its credential.</summary>
+    internal static string? NativeCredentialIdentity(string folder)
+    {
+        try
+        {
+            var path = Path.Combine(folder, FileName);
+            if (!NodeState.IsPrivateFile(path) || new FileInfo(path).Length > 16384 || Read(folder) is not { } connection) return null;
+            using var document = JsonDocument.Parse(File.ReadAllBytes(path));
+            var tokenFile = ChatLocators.Text(document.RootElement, "tokenFile");
+            if (tokenFile is null || !NodeState.IsPrivateFile(tokenFile)) return null;
+            return NativeJoinBinding.CredentialDigest("local", connection.Options.BaseUri.AbsoluteUri, connection.Options.PinnedFingerprint, connection.Options.Token);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException) { return null; }
     }
 
     /// <summary>A native Stop hook may use one matching local connection; ambiguous hubs are never guessed.</summary>

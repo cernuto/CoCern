@@ -173,6 +173,12 @@ internal static class SessionAttention
     /// </summary>
     public static RelayReply Offer(AggregateContext context)
     {
+        // Preview the same selection/aging rules on a private copy: no shown marker, snooze or boundary can move.
+        if (context.Args["preview"] is JsonValue preview && preview.TryGetValue<bool>(out var previewOnly) && previewOnly)
+        {
+            var args = context.Args.DeepClone().AsObject(); args.Remove("preview");
+            return Offer(new AggregateContext(context.State.DeepClone().AsObject(), context.Caller, context.Operation, args, context.Now));
+        }
         if (!AttentionOffer.Decode(context.Args).TryGet(out var offer, out var malformed)) return Malformed(malformed);
         var queue = new SessionState(context.State).Attention;
         var now = context.Now;
@@ -206,11 +212,13 @@ internal static class SessionAttention
             var onPage = page.ToHashSet(StringComparer.Ordinal);
             foreach (var item in AttentionScheduler.Items(items).Where(item => item.Kind == AttentionKinds.Info && onPage.Contains(item.Subject))) sittingOut.Add(item.Id);
         }
-        var candidates = AttentionScheduler.Items(items).Where(item => !sittingOut.Contains(item.Id)).ToArray();
+        var candidates = AttentionScheduler.Items(items).Where(item => item.Kind != AttentionKinds.StandingProposal && !sittingOut.Contains(item.Id)).ToArray();
         var actionable = AttentionScheduler.Eligible(candidates, now).Count();
         // "more" counts from the set Pick chooses from, so it never includes items for the focused task that cannot be offered now.
         var offerable = AttentionScheduler.Eligible(candidates, now, Optional(offer.FocusTaskId, "focusTaskId"), Optional(offer.FocusBoardId, "focusBoardId") is { Length: > 0 } board ? board : "default").ToArray();
-        var picked = AttentionScheduler.Pick(offerable, now);
+        // A requested Standing question reserves the ordinary slot without marking a tip shown and then replacing it.
+        var urgentOnly = context.Args["urgentOnly"] is JsonValue urgent && urgent.TryGetValue<bool>(out var only) && only;
+        var picked = AttentionScheduler.Pick(urgentOnly ? offerable.Where(item => AttentionWeights.Wakes(item.Tier)) : offerable, now);
         if (picked is null) return Ok(new JsonObject { ["actionable"] = actionable });
         new QueuedItem(items[picked.Id]!.AsObject()).ShownAt = now;
         return Ok(new JsonObject { ["attention"] = OfferJson(picked, offerable.Length - 1), ["actionable"] = actionable });
@@ -227,7 +235,7 @@ internal static class SessionAttention
     public static JsonObject Status(SessionState state, JsonObject args, DateTimeOffset now, bool detail)
     {
         var queue = state.Attention;
-        var eligible = AttentionScheduler.Eligible(AttentionScheduler.Items(queue.StoredItems ?? new JsonObject()), now).ToArray();
+        var eligible = AttentionScheduler.Eligible(AttentionScheduler.Items(queue.StoredItems ?? new JsonObject()).Where(item => item.Kind != AttentionKinds.StandingProposal), now).ToArray();
         var status = new JsonObject { ["actionable"] = eligible.Length };
         if (!detail) return status;
         var urgent = eligible.Where(item => AttentionWeights.Wakes(item.Tier)).ToArray();

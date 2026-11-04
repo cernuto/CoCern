@@ -3,6 +3,8 @@ using System.Text.Json.Nodes;
 using CoCern.Adapter;
 using CoCern.Adapter.Node;
 using CoCern.Adapter.Setup;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
 using Xunit;
 
 namespace CoCern.Tests;
@@ -39,6 +41,7 @@ public sealed class SetupTests : IDisposable
         StartNode = (dotnet, dll, dataDir) => started.Add($"{dotnet}|{dll}|{dataDir}"),
         Transport = new NodeTransport
         {
+            Clients = () => [], Locators = [],
             JoinCode = RelayHostFixture.JoinCode,
             CreateHandler = (_, _) => new HookHandler(host.Server.CreateHandler(), duringEnrollment),
             HubHandler = () => host.Server.CreateHandler(),
@@ -55,6 +58,126 @@ public sealed class SetupTests : IDisposable
 
     private Task<int> Run(RelayHostFixture host, bool skip = false, TimeSpan? timeout = null) =>
         SetupCommand.RunAsync(new SetupOptions(Hub, skip, DataDir), Env(host, timeout), CancellationToken.None);
+
+    [Fact]
+    public async Task Normal_node_start_selects_supervisor_after_enrollment_releases_the_original_singleton()
+    {
+        await using var host = NewHub();
+        var installedDll = BootstrapPackage();
+        var transport = Env(host).Transport;
+        transport.SingleCycle = true; // The pre-updater implementation must return, so RED is an assertion, never an unbounded node loop.
+        var selected = 0;
+        var result = await SetupEnvironment.RunNodeAsync(DataDir, Hub, transport, installedDll, Dotnet, error, CancellationToken.None,
+            (folder, dll, dotnet, _) =>
+            {
+                Assert.Equal(Path.GetFullPath(DataDir), folder);
+                Assert.Equal(installedDll, dll);
+                Assert.Equal(Dotnet, dotnet);
+                using var unlocked = NodeState.OpenExisting(folder);
+                Assert.True(unlocked.Enrolled);
+                Assert.NotNull(unlocked.ReadCredential());
+                selected++;
+                return Task.FromResult(0);
+            });
+        Assert.Equal(0, result);
+        Assert.Equal(1, selected);
+        Assert.Null(transport.CreateUpdater);
+    }
+
+    [Fact]
+    public async Task Valid_incompatible_installed_bootstrap_keeps_direct_node_working_and_reports_bootstrap_needed()
+    {
+        await using var host = NewHub();
+        var dll = BootstrapPackage(protocol: 0);
+        var before = File.ReadAllBytes(dll);
+        var transport = Env(host).Transport;
+        transport.SingleCycle = true;
+        Assert.Equal(0, await SetupEnvironment.RunNodeAsync(DataDir, Hub, transport, dll, Dotnet, error, CancellationToken.None,
+            (_, _, _, _) => throw new InvalidOperationException("An incompatible bootstrap must never start a supervisor.")));
+        Assert.Contains("node-update:bootstrap-needed", error.ToString());
+        Assert.Null(transport.CreateUpdater);
+        Assert.Equal(before, File.ReadAllBytes(dll));
+        Assert.False(File.Exists(Path.Combine(DataDir, "updates", "state.json")));
+    }
+
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("corrupt")]
+    [InlineData("foreign")]
+    [InlineData("inside-updates")]
+    [InlineData("unsupported-corrupt")]
+    public async Task Invalid_known_bootstrap_is_refused_without_enrollment_or_direct_fallback(string defect)
+    {
+        await using var host = NewHub();
+        var dll = BootstrapPackage(protocol: defect == "unsupported-corrupt" ? 0 : 1);
+        if (defect == "missing") File.Delete(Path.ChangeExtension(dll, ".runtimeconfig.json"));
+        if (defect == "unsupported-corrupt") File.WriteAllText(Path.ChangeExtension(dll, ".runtimeconfig.json"), "damaged");
+        if (defect == "corrupt") File.WriteAllText(dll, "damaged");
+        if (defect == "foreign") { var foreign = Path.Combine(Path.GetDirectoryName(dll)!, "Foreign.dll"); File.Copy(dll, foreign); dll = foreign; }
+        if (defect == "inside-updates")
+        {
+            var nested = Path.Combine(DataDir, "updates", "versions", new string('A', 64));
+            Directory.CreateDirectory(nested);
+            foreach (var file in Directory.GetFiles(Path.GetDirectoryName(dll)!)) File.Copy(file, Path.Combine(nested, Path.GetFileName(file)));
+            dll = Path.Combine(nested, "CoCern.Adapter.dll");
+        }
+        var transport = Env(host).Transport;
+        transport.SingleCycle = true;
+        Assert.Equal(1, await SetupEnvironment.RunNodeAsync(DataDir, Hub, transport, dll, Dotnet, error, CancellationToken.None,
+            (_, _, _, _) => throw new InvalidOperationException("Invalid bootstrap must never be selected.")));
+        Assert.False(File.Exists(Path.Combine(DataDir, "credential")));
+        Assert.DoesNotContain("bootstrap-needed", error.ToString());
+    }
+
+    [Fact]
+    public void Installed_apphost_and_framework_dependent_startup_keep_the_known_source_and_original_folder()
+    {
+        var installed = Path.Combine(root, "installed package");
+        var dll = Path.Combine(installed, "CoCern.Adapter.dll");
+        var exe = Path.Combine(installed, "CoCern.Adapter.exe");
+        var fdd = SetupEnvironment.Host(Dotnet, null, installed, path => path == dll);
+        Assert.Equal((Dotnet, dll), fdd);
+        var selfContained = SetupEnvironment.Host(exe, null, installed, path => path == dll || path == exe);
+        Assert.Equal(("dotnet", dll), selfContained);
+        var apphost = SetupEnvironment.AdapterLaunch(selfContained.Dotnet, dll, path => path == exe);
+        Assert.Equal(exe, apphost.Command);
+        Assert.Empty(apphost.Arguments);
+        Assert.Equal(new[] { dll }, SetupEnvironment.AdapterLaunch(fdd.Dotnet, dll, path => path == dll).Arguments);
+    }
+
+    private string BootstrapPackage(int protocol = 1)
+    {
+        var folder = Path.Combine(root, "installed-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        var code = "using System.Reflection; [assembly: AssemblyInformationalVersion(\"3.0.0+installed\")] [assembly: AssemblyMetadata(\"CoCernNodeSupervisorProtocol\", \"" + protocol + "\")] public static class InertPackage { }";
+        var compilation = CSharpCompilation.Create("CoCern.Adapter", [CSharpSyntaxTree.ParseText(code)], [MetadataReference.CreateFromFile(typeof(object).Assembly.Location)], new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+        var dll = Path.Combine(folder, "CoCern.Adapter.dll");
+        var result = compilation.Emit(dll);
+        Assert.True(result.Success, string.Join(Environment.NewLine, result.Diagnostics));
+        File.WriteAllText(Path.Combine(folder, "CoCern.Adapter.deps.json"), "{\"runtimeTarget\":{\"name\":\".NETCoreApp,Version=v10.0\"}}");
+        File.WriteAllText(Path.Combine(folder, "CoCern.Adapter.runtimeconfig.json"), "{\"runtimeOptions\":{\"tfm\":\"net10.0\",\"framework\":{\"name\":\"Microsoft.NETCore.App\",\"version\":\"10.0.0\"}}}");
+        return dll;
+    }
+
+    [Fact]
+    public async Task Repeated_setup_keeps_credentials_hooks_and_unrelated_startup_values()
+    {
+        await using var host = NewHub();
+        runKey.Values["OtherProgram"] = "unrelated.exe";
+        Write(Path.Combine(Profile, ".claude", "settings.json"), "{\"hooks\":{\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"other-hook\"}]}]}}");
+        Assert.Equal(0, await Run(host));
+        var identity = File.ReadAllBytes(Path.Combine(DataDir, "node.json"));
+        var credential = File.ReadAllBytes(Path.Combine(DataDir, "credential"));
+        var hooks = File.ReadAllBytes(Path.Combine(Profile, ".claude", "settings.json"));
+        var owned = runKey.Values["CoCernNode"];
+        Assert.Equal(0, await Run(host));
+        Assert.Equal(identity, File.ReadAllBytes(Path.Combine(DataDir, "node.json")));
+        Assert.Equal(credential, File.ReadAllBytes(Path.Combine(DataDir, "credential")));
+        Assert.Equal(hooks, File.ReadAllBytes(Path.Combine(Profile, ".claude", "settings.json")));
+        Assert.Equal(owned, runKey.Values["CoCernNode"]);
+        Assert.Equal("unrelated.exe", runKey.Values["OtherProgram"]);
+        Assert.Contains("other-hook", File.ReadAllText(Path.Combine(Profile, ".claude", "settings.json")));
+    }
 
     private static void Write(string path, string text) { Directory.CreateDirectory(Path.GetDirectoryName(path)!); File.WriteAllText(path, text, new UTF8Encoding(false)); }
 
@@ -221,7 +344,7 @@ public sealed class SetupTests : IDisposable
         Write(Toml, "model = \"x\"\n");
         var before = File.ReadAllBytes(Toml);
         var env = Env(host, TimeSpan.FromMilliseconds(300));
-        env.Transport = new NodeTransport { CreateHandler = (_, _) => new ThrowingHandler(), FirstRetry = TimeSpan.FromMilliseconds(10), MaxRetry = TimeSpan.FromMilliseconds(20), CodexExecutable = () => null };
+        env.Transport = new NodeTransport { Clients = () => [], Locators = [], CreateHandler = (_, _) => new ThrowingHandler(), FirstRetry = TimeSpan.FromMilliseconds(10), MaxRetry = TimeSpan.FromMilliseconds(20), CodexExecutable = () => null };
 
         var code = await SetupCommand.RunAsync(new SetupOptions(Hub, false, DataDir), env, CancellationToken.None);
 

@@ -44,7 +44,7 @@ public static class InternalRequests
 
     public static IReadOnlyDictionary<string, Kind> ByOperation { get; } = new[]
     {
-        Of<TaskUnclaim>(), Of<NextWorkRead>(), Of<StandingRead>(), Of<OrdersRead>(), Of<TaskArchiveSweep>(), Of<HubStandingProposal>(),
+        Of<TaskUnclaim>(), Of<NextWorkRead>(), Of<StandingRead>(), Of<StandingPresentationRequest>(), Of<OrdersRead>(), Of<TaskArchiveSweep>(), Of<HubStandingProposal>(),
         Of<AnomalyStart>(), Of<AnomalySchedule>(), Of<AnomalyCheck>(),
         Of<ResourceResolve>(), Of<ResourceResolveAll>(), Of<SessionSweep>(), Of<SessionOwnersQuery>(), Of<SessionsOpenQuery>(),
         Of<ClaimStateQuery>(), Of<LockLeaseCheck>(), Of<OutboxDispatch>(),

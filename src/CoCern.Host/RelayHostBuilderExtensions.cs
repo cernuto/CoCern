@@ -43,6 +43,7 @@ public static class RelayHostBuilderExtensions
         builder.Services.AddSignalR(options => { options.EnableDetailedErrors = false; options.MaximumReceiveMessageSize = RelayLimits.MaxPayloadBytes; });
         builder.Services.AddSingleton<ICoordinationNotifier, CoordinationNotifier>();
         builder.Services.AddDiscovery();
+        builder.Services.TryAddSingleton(services => new AdapterZipCache(AdapterZipCache.DefaultFolder(services.GetRequiredService<IConfiguration>(), services.GetRequiredService<IHostEnvironment>())));
         builder.Services.AddCoCernCore();
         builder.Services.AddSingleton(services =>
         {
@@ -91,7 +92,8 @@ public static class RelayHostBuilderExtensions
                 tokens: counter,
                 tokenOptions: services.GetRequiredService<TokenOptions>(),
                 feedback: services.GetRequiredService<FeedbackOptions>() is { Enabled: true } feedback ? new FeedbackRules(feedback, counter, services.GetService<IFeedbackRuleStore>()) : null,
-                archive: services.GetService<ITaskArchive>()));
+                archive: services.GetService<ITaskArchive>(),
+                observations: services.GetService<IRelayObservationSource>()));
         }));
         // One shared tokenizer for every token count; it loads its vocabulary on first use.
         builder.Services.AddSingleton<ITokenCounter, O200kTokenCounter>();

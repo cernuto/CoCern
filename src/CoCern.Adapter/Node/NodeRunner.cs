@@ -11,6 +11,8 @@ namespace CoCern.Adapter.Node;
 /// <summary>How the node reaches the hub. Production pins the hub certificate; tests swap in an in-memory server's handlers, shorter timings and a chat list.</summary>
 internal sealed class NodeTransport
 {
+    public Func<NodeUpdateContext, INodeUpdateCoordinator>? CreateUpdater { get; init; }
+    public NodeHostCapabilities? UpdateHost { get; init; }
     public static readonly TimeSpan DefaultMaxRetry = TimeSpan.FromSeconds(60);
     /// <summary>Trust on first use: the fingerprint of the certificate an https hub presents.</summary>
     public Func<Uri, CancellationToken, Task<string>> ProbeFingerprint { get; init; } = PinnedCertificate.ProbeAsync;
@@ -62,6 +64,58 @@ public sealed record NodeRoute(string Provider, string ThreadId, string RelaySes
 /// </summary>
 public sealed class NodeRunner : IAsyncDisposable
 {
+    internal static async Task<int> RunWorkerAsync(string nodeFolder, Guid? activationNonce, string executingFolder, NodeTransport transport, TextWriter error, CancellationToken ct, NodeWorkerStartupContext? startupContext = null)
+    {
+        if (!Path.IsPathFullyQualified(nodeFolder) || !Path.IsPathFullyQualified(executingFolder) || activationNonce == Guid.Empty) return 1;
+        if (startupContext is not null)
+        {
+            if (startupContext.ActivationNonce != activationNonce || startupContext.LaunchId == Guid.Empty && (startupContext.FailedReleaseId is not null || startupContext.FailedAtUtc is not null)) return 1;
+            var argument = startupContext.LaunchId == Guid.Empty ? startupContext.ActivationNonce?.ToString("D") ?? "" : startupContext.ToArgument();
+            if (!NodeWorkerStartupContext.TryParse(argument, out startupContext)) return 1;
+        }
+        NodeState state;
+        var started = TimeProvider.System.GetTimestamp();
+        var reported = false;
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+            try { state = NodeState.OpenExisting(nodeFolder); break; }
+            catch (AdapterConfigurationException) when (SingletonBusy(nodeFolder) && TimeProvider.System.GetElapsedTime(started) < TimeSpan.FromSeconds(30))
+            {
+                if (!reported) { error.WriteLine("node-update:singleton-wait"); reported = true; }
+                await Task.Delay(TimeSpan.FromMilliseconds(100), ct);
+            }
+        }
+        using (state)
+        {
+            try { _ = ResolveHub(state, null); }
+            catch (AdapterConfigurationException exception) { error.WriteLine(exception.Message); return 1; }
+            var image = NodeUpdateState.ValidateWorkerStartup(nodeFolder, activationNonce, executingFolder);
+            if (image is null || !state.Enrolled || state.TryReadCredential(out _) != CredentialRead.Present) { error.WriteLine("node-update:startup-invalid"); return 1; }
+            if (startupContext?.OrdinaryStartup == true)
+            {
+                var root = Path.Combine(nodeFolder, "updates");
+                var primary = NodeUpdateState.ReadPrimary(root);
+                if (activationNonce is not null || primary is not { Phase: NodeUpdatePhase.Committed, Pending: null, ActivationNonce: null } ||
+                    primary.Current.ContentId != image.ContentId || !NodePackage.SupportsOrdinaryStartup(root, image))
+                { error.WriteLine("node-update:startup-invalid"); return 1; }
+            }
+            NodeReady? readiness = null;
+            if (activationNonce is { } nonce)
+            {
+                readiness = new(nonce, image.ContentId, Environment.ProcessId, startupContext?.LaunchId is { } launch && launch != Guid.Empty ? launch : null);
+            }
+            var observation = new NodeBuildObservation(image.Package.ProductVersion, image.ContentId, image.AdapterDllSha256, Environment.ProcessId);
+            return await RunAsync(state, null, transport, error, ct, readiness, workerStartup: true, workerImage: image.ContentId, startupContext: startupContext, nodeBuild: observation);
+        }
+    }
+
+    private static bool SingletonBusy(string nodeFolder)
+    {
+        try { using var probe = new FileStream(Path.Combine(nodeFolder, "node.lock"), FileMode.Open, FileAccess.ReadWrite, FileShare.None); return false; }
+        catch (IOException exception) when ((exception.HResult & 0xffff) is 32 or 33) { return true; }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { return false; }
+    }
     public const int MismatchExitCode = 4;
     private const int MaxReplyBytes = 64 * 1024;
     private const string WakeDatabase = "wake.db";
@@ -97,22 +151,57 @@ public sealed class NodeRunner : IAsyncDisposable
     private CancellationTokenSource? _wakeStop;
     private string? _wakeCredential;
     private bool _wakeTrouble;
+    private readonly NodeDispatchGate _dispatchGate = new();
+    private INodeUpdateCoordinator? _updater;
+    private HttpClient? _updaterClient;
+    private string? _updaterCredential;
+    private CancellationTokenSource? _updateStop;
+    private Task<StagedNode?>? _updateTask;
+    private DateTimeOffset? _nextUpdate;
+    private string? _stagingRelease;
+    private const int FailureHistoryLimit = 8;
+    private readonly Dictionary<string, DateTimeOffset> _failedReleases = new(StringComparer.Ordinal);
+    private NodeReady? _pendingReady;
+    private readonly NodeReady? _activationReady;
+    private readonly string? _workerImage;
+    private readonly NodeBuildObservation? _nodeBuild;
+    private readonly bool _pendingCandidate;
+    private int _activationGateHeld;
+    private bool _workerStartup;
+    private readonly bool _ordinaryStartup;
 
-    private NodeRunner(NodeState state, Uri hub, NodeTransport transport, TextWriter error)
+    private NodeRunner(NodeState state, Uri hub, NodeTransport transport, TextWriter error, NodeReady? readiness = null, bool workerStartup = false, string? workerImage = null, NodeWorkerStartupContext? startupContext = null, NodeBuildObservation? nodeBuild = null)
     {
         (_state, _hub, _transport, _error) = (state, hub, transport, error);
+        _pendingReady = readiness;
+        _activationReady = readiness;
+        _workerImage = workerImage;
+        _nodeBuild = nodeBuild;
+        _workerStartup = workerStartup;
+        _ordinaryStartup = startupContext?.OrdinaryStartup == true;
+        var journal = (workerImage is not null || transport.CreateUpdater is not null && transport.UpdateHost is not null) ? NodeUpdateState.Read(Path.Combine(state.Folder, "updates")).Record : null;
+        _pendingCandidate = readiness is not null && journal?.Current.ContentId != workerImage;
+        _activationGateHeld = _pendingCandidate ? 1 : 0;
+        if (journal?.LastFailedReleaseId is { } failed && journal.LastFailedAtUtc is { } at) _failedReleases[failed] = at;
+        if (startupContext?.FailedReleaseId is { } refused && startupContext.FailedAtUtc is { } failedAt)
+        {
+            var now = transport.Clock.GetUtcNow();
+            var bounded = failedAt > now ? now : failedAt;
+            if (now - bounded < TimeSpan.FromMinutes(15) && (!_failedReleases.TryGetValue(refused, out var existing) || existing < bounded)) _failedReleases[refused] = bounded;
+        }
         _chats = new NodeChats(state.Folder, transport.Locators, transport.Clock, transport.LocateWindow, transport.LocateBudget, () => transport.CodexExecutable() is not null);
     }
 
     /// <summary>Runs until cancelled (exit 0). Exit 1 for configuration problems or a revoked PC, 4 when the hub presents a certificate other than the pinned one.</summary>
     public static Task<int> RunAsync(NodeState state, Uri? hub, CancellationToken ct) => RunAsync(state, hub, new NodeTransport(), Console.Error, ct);
 
-    internal static async Task<int> RunAsync(NodeState state, Uri? hub, NodeTransport transport, TextWriter error, CancellationToken ct)
+    internal static async Task<int> RunAsync(NodeState state, Uri? hub, NodeTransport transport, TextWriter error, CancellationToken ct, NodeReady? readiness = null, bool workerStartup = false, string? workerImage = null, NodeWorkerStartupContext? startupContext = null, NodeBuildObservation? nodeBuild = null)
     {
         Uri target;
         try { target = ResolveHub(state, hub); }
         catch (AdapterConfigurationException exception) { error.WriteLine(exception.Message); return 1; }
-        await using var runner = new NodeRunner(state, target, transport, error);
+        await using var runner = new NodeRunner(state, target, transport, error, readiness, workerStartup, workerImage, startupContext, nodeBuild);
+        if (runner._pendingCandidate) await runner._dispatchGate.TryDrainAsync(TimeSpan.Zero, ct);
         try { return await runner.LoopAsync(ct); }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { return transport.SingleCycle ? 1 : 0; }
     }
@@ -124,7 +213,7 @@ public sealed class NodeRunner : IAsyncDisposable
     internal static TimeSpan NextRetry(TimeSpan current, TimeSpan max) => current * 2 > max ? max : current * 2;
 
     /// <summary>A typed address counts only until the PC has enrolled; afterwards a different one is refused, so a typo cannot move the PC to another hub.</summary>
-    private static Uri ResolveHub(NodeState state, Uri? typed)
+    internal static Uri ResolveHub(NodeState state, Uri? typed)
     {
         if (typed is not null && !AdapterOptions.TryParseOrigin(typed.OriginalString, out typed))
             throw new AdapterConfigurationException("--hub must be a root https:// address, or http:// to this PC's loopback, without credentials, query, or fragment.");
@@ -163,6 +252,7 @@ public sealed class NodeRunner : IAsyncDisposable
             return 1;
         }
         // The hub issues a new credential on every enrollment, so a genuinely missing one cannot be recovered under the old ID.
+        if (_workerStartup && read != CredentialRead.Present) return 1;
         if (read == CredentialRead.Missing && _state.Enrolled) _state.RenewMachineId();
         var retry = _transport.FirstRetry;
         while (true)
@@ -187,6 +277,7 @@ public sealed class NodeRunner : IAsyncDisposable
                     _error.WriteLine($"The hub at {_hub} presented a certificate with fingerprint {presented}, but this PC pinned {_state.Fingerprint}. Nothing was sent; the node keeps trying the pinned hub. If the hub's certificate was replaced on purpose, stop the node, delete '{_state.Folder}', and run setup again.");
                 _mismatchReported = true;
                 _mismatch = null;
+                await ResetUpdaterAsync();
                 _http?.Dispose(); _http = null;
                 _trouble = true;
                 next = Next.Retry;
@@ -220,7 +311,7 @@ public sealed class NodeRunner : IAsyncDisposable
             _error.WriteLine($"CoCern node pinned the certificate of the hub at {_hub}: {_state.Fingerprint}.");
         }
         else if (Https && !ExpectedMatches(_state.Fingerprint!)) return Unexpected(_state.Fingerprint!);
-        _http ??= new HttpClient(_transport.CreateHandler(Https ? _state.Fingerprint : null, presented => _mismatch ??= presented)) { Timeout = _transport.RequestTimeout };
+        _http ??= new HttpClient(new PinnedOriginHandler(_hub, _transport.CreateHandler(Https ? _state.Fingerprint : null, presented => _mismatch ??= presented))) { Timeout = _transport.RequestTimeout };
         if (_credential is null)
         {
             var enrolled = await EnrollAsync(ct);
@@ -310,6 +401,11 @@ public sealed class NodeRunner : IAsyncDisposable
             }
             if (response.StatusCode == HttpStatusCode.Unauthorized)
             {
+                // Ordinary recovery may send the stored join code, so require pinned TLS for this
+                // worker's entire lifetime, including after its first accepted announcement.
+                if ((_ordinaryStartup && (!Https || _state.Fingerprint is null)) || (_workerStartup && !_ordinaryStartup))
+                    return Stop("node-update:authentication-refused");
+                await ResetUpdaterAsync();
                 // Only the hub refusing the credential leads to enrolling again; network errors never do. The credential is kept aside in case the hub turns out to still hold this ID.
                 (_rejected, _credential) = (_credential, null);
                 _transport.Trace?.Invoke("unauthorized");
@@ -319,17 +415,135 @@ public sealed class NodeRunner : IAsyncDisposable
             if (!response.IsSuccessStatusCode)
                 return Busy(response.StatusCode) ? Unreachable() : Retry($"The hub at {_hub} refused this PC's announcement ({(int)response.StatusCode} {refusal ?? Code(await ReadAsync(response, ct))}). Retrying.");
             var accepted = await ReadAsync(response, ct);
+            if (_workerStartup && accepted is null) return Stop("node-update:startup-invalid");
+            if (_pendingReady is { } ready)
+            {
+                var root = Path.Combine(_state.Folder, "updates");
+                var record = NodeUpdateState.ReadPrimary(root);
+                var expected = record?.Phase == NodeUpdatePhase.Starting ? record.Pending : null;
+                if (record is { Phase: NodeUpdatePhase.Committed } && record.Current.ContentId == ready.ContentId)
+                    _pendingReady = null;
+                else if (accepted is null || record?.ActivationNonce != ready.ActivationNonce || (expected?.ContentId != ready.ContentId && record?.Current.ContentId != ready.ContentId))
+                {
+                    // A verified historical Current that already authenticated may have an admitted
+                    // reconcile. Lost recovery observation defers readiness/updates, never that work.
+                    if (_pendingCandidate || _workerStartup) return Stop("node-update:startup-invalid");
+                }
+                else
+                {
+                    try { NodeUpdateState.WriteReady(root, ready); _pendingReady = null; }
+                    catch (Exception exception) when (exception is IOException or InvalidDataException or UnauthorizedAccessException)
+                    {
+                        if (_pendingCandidate) return Stop("node-update:ready-unavailable");
+                        // Retry retained readiness through this same accepted announce cycle.
+                    }
+                }
+            }
+            _workerStartup = false;
             ReportRefused(accepted);
             var routes = Routes(accepted);
             if (!routes.SequenceEqual(_routes)) { _routes = routes; _nudge.Pulse(); }
+            Recovered();
+            _transport.Trace?.Invoke("announced");
+            if (_transport.SingleCycle) return Next.Exit;
+            EnsureHints();
+            EnsureWaking();
+            if (await TryUpdateAsync(accepted, ct)) { _exitCode = 75; return Next.Exit; }
         }
         finally { response.Dispose(); }
-        Recovered();
-        _transport.Trace?.Invoke("announced");
-        if (_transport.SingleCycle) return Next.Exit;
-        EnsureHints();
-        EnsureWaking();
         return Next.Wait;
+    }
+
+    private async Task<bool> TryUpdateAsync(JsonObject? accepted, CancellationToken ct)
+    {
+        if (_transport.CreateUpdater is null || _transport.UpdateHost is null || _credential is null) return false;
+        if (!ObserveCommitAndHandoff()) return false;
+        try
+        {
+            if (_updaterClient != _http || _updaterCredential != _credential)
+            {
+                await ResetUpdaterAsync();
+                _updater = _transport.CreateUpdater(new(_state.Folder, _hub, _http!, _credential, _transport.UpdateHost));
+                (_updaterClient, _updaterCredential) = (_http, _credential);
+                _updateStop = CancellationTokenSource.CreateLinkedTokenSource(_stopping.Token);
+            }
+            if (_updateTask is { IsCompleted: true } completed)
+            {
+                _updateTask = null;
+                StagedNode? staged;
+                try { staged = await completed; }
+                catch { RecordUpdateFailure(_stagingRelease); throw; }
+                if (staged is null) RecordUpdateFailure(_stagingRelease);
+                if (staged is not null)
+                {
+                    if (!await _dispatchGate.TryDrainAsync(TimeSpan.FromSeconds(30), ct)) return false;
+                    try { await _updater!.PrepareAsync(staged, ct); }
+                    catch { RecordUpdateFailure(staged.Release.ReleaseId); _dispatchGate.Resume(); throw; }
+                    return true;
+                }
+            }
+            if (_updateTask is null && (_nextUpdate is null || _transport.Clock.GetUtcNow() >= _nextUpdate))
+            {
+                NodeRelease? offered = null;
+                try { offered = accepted?["nodeRelease"]?.Deserialize<NodeRelease>(new JsonSerializerOptions(JsonSerializerDefaults.Web)); }
+                catch (JsonException) { }
+                PruneUpdateFailures();
+                if (_failedReleases.Count >= FailureHistoryLimit || offered?.ReleaseId is { } release && _failedReleases.ContainsKey(release)) return false;
+                _nextUpdate = _transport.Clock.GetUtcNow() + TimeSpan.FromMinutes(5);
+                _stagingRelease = offered?.ReleaseId;
+                var updater = _updater!;
+                var token = _updateStop!.Token;
+                _updateTask = Task.Run(() => updater.TryStageAsync(offered, token), token);
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception) { _error.WriteLine("node-update:deferred"); }
+        return false;
+    }
+
+    private async Task ResetUpdaterAsync()
+    {
+        if (_updateStop is { } stopping) await stopping.CancelAsync();
+        if (_updateTask is { } pending)
+        {
+            try { if (await pending is null) RecordUpdateFailure(_stagingRelease); }
+            catch (OperationCanceledException) { }
+            catch (Exception) { RecordUpdateFailure(_stagingRelease); }
+        }
+        _updateTask = null;
+        _stagingRelease = null;
+        _updater = null;
+        _updaterClient = null;
+        _updaterCredential = null;
+        _updateStop?.Dispose();
+        _updateStop = null;
+    }
+
+    private void RecordUpdateFailure(string? release)
+    {
+        if (release is null) return;
+        PruneUpdateFailures();
+        if (_failedReleases.ContainsKey(release)) return;
+        if (_failedReleases.Count >= FailureHistoryLimit) { _nextUpdate = _transport.Clock.GetUtcNow() + TimeSpan.FromMinutes(15); return; }
+        _failedReleases.Add(release, _transport.Clock.GetUtcNow());
+    }
+
+    private void PruneUpdateFailures()
+    {
+        var now = _transport.Clock.GetUtcNow();
+        foreach (var release in _failedReleases.Where(pair => now - pair.Value >= TimeSpan.FromMinutes(15)).Select(pair => pair.Key).ToArray()) _failedReleases.Remove(release);
+    }
+
+    private bool ObserveCommitAndHandoff()
+    {
+        if (_workerImage is null) return true; // Setup/test callers without a private-worker lifecycle retain their contract.
+        var root = Path.Combine(_state.Folder, "updates");
+        var record = NodeUpdateState.ReadPrimary(root);
+        if (record is not { Phase: NodeUpdatePhase.Committed } || record.Current.ContentId != _workerImage) return false;
+        if (Interlocked.Exchange(ref _activationGateHeld, 0) == 1) _dispatchGate.Resume();
+        if (File.Exists(Path.Combine(root, "request.json")) || Directory.Exists(Path.Combine(root, "request.json"))) return false;
+        var ready = Path.Combine(root, "ready.json");
+        return !File.Exists(ready) && !Directory.Exists(ready) || _activationReady is not null && NodeUpdateState.ReadReady(root) == _activationReady;
     }
 
     /// <summary>
@@ -358,13 +572,20 @@ public sealed class NodeRunner : IAsyncDisposable
     {
         if (codex is null) return [];
         var targets = new List<WakeTarget>();
+        IReadOnlyList<SessionHandle>? native = null;
         foreach (var route in routes)
         {
             if (route.Provider != ChatProviders.Codex || !ChatLocators.IsUuid(route.ThreadId) || !NodeState.IsFileId(route.RelaySessionId)) continue;
             var path = NodeState.SessionHandlePath(nodeFolder, route.RelaySessionId);
             if (NodeState.ReadSessionHandle(path) is not { Chat: { Provider: ChatProviders.Codex } chat } handle || !string.Equals(chat.ThreadId, route.ThreadId, StringComparison.OrdinalIgnoreCase) ||
                 handle.RepositoryId != route.RepositoryId) continue;
-            targets.Add(new(new WakeRoute(handle.RepositoryId, "default", path, chat.ThreadId, machineName), new WakeSession(handle.SessionId, handle.SessionToken), dispatcher(codex)));
+            if (handle.NativeBindingKey is not null)
+            {
+                native ??= NativeJoinBinding.DispatchSnapshot(nodeFolder);
+                if (!native.Contains(handle) || native.Count(other => other.Chat == handle.Chat) != 1) continue;
+            }
+            targets.Add(new(new WakeRoute(handle.RepositoryId, "default", path, chat.ThreadId, machineName), new WakeSession(handle.SessionId, handle.SessionToken),
+                NativeJoinBinding.ForDispatch(nodeFolder, handle, dispatcher(codex))));
         }
         return targets;
     }
@@ -391,13 +612,14 @@ public sealed class NodeRunner : IAsyncDisposable
     {
         var fingerprint = Https ? _state.Fingerprint : null;
         var options = new AdapterOptions(_hub.AbsoluteUri, credential, signalR: true) { PinnedFingerprint = fingerprint };
-        var runtime = new WakeRuntime(options, Path.Combine(_state.Folder, WakeDatabase), StopFile, _hub.AbsoluteUri) { Nudge = _nudge, HubHandler = _transport.HubHandler, Interval = _transport.WakeInterval };
+        var runtime = new WakeRuntime(options, Path.Combine(_state.Folder, WakeDatabase), StopFile, _hub.AbsoluteUri) { Nudge = _nudge, HubHandler = _transport.HubHandler, Interval = _transport.WakeInterval, TryEnterDispatch = _dispatchGate.TryEnter };
         using var handler = _transport.CreateHandler(fingerprint, presented => _mismatch ??= presented);
         try
         {
             _transport.Trace?.Invoke("waking");
             await WakeWatcher.RunAsync(runtime, _ =>
             {
+                if (Volatile.Read(ref _activationGateHeld) != 0) ObserveCommitAndHandoff();
                 var targets = WakeTargets(_state.Folder, _routes, _transport.CodexExecutable(), _transport.CodexDispatcher, _transport.MachineName);
                 if (targets.Count > 0) _transport.Trace?.Invoke("wake-target");
                 return Task.FromResult(targets);
@@ -423,6 +645,7 @@ public sealed class NodeRunner : IAsyncDisposable
     private Task<HttpResponseMessage> PostAnnounceAsync(JsonArray chats, CancellationToken ct) => PostAsync("api/discovery/announce", new JsonObject
     {
         ["machineName"] = _transport.MachineName,
+        ["nodeBuild"] = JsonSerializer.SerializeToNode(_nodeBuild, new JsonSerializerOptions(JsonSerializerDefaults.Web)),
         ["clients"] = new JsonArray(_transport.Clients().Select(x => (JsonNode)JsonValue.Create(x)!).ToArray()),
         ["chats"] = chats.DeepClone()
     }, _credential, ct);
@@ -573,6 +796,7 @@ public sealed class NodeRunner : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         await _stopping.CancelAsync();
+        await ResetUpdaterAsync();
         try { await _hintsTask; }
         catch (Exception) { /* the hint channel never decides the exit code */ }
         try { await _wakeTask; }

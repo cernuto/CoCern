@@ -17,6 +17,67 @@ namespace CoCern.Domain;
 /// </summary>
 internal static class StandingPreferences
 {
+    /// <summary>The immutable terms eligible for this authenticated presenter, or null when already reserved.</summary>
+    public static JsonObject? PendingPresentation(JsonObject document, string boardId, string proposalId, string principal, string session, string request)
+    {
+        var standing = new StandingState(document);
+        var proposal = standing.Proposal(proposalId);
+        // Goal-linked proposals need the verified owner integration in Task 3; labels and roles are never a substitute.
+        if (proposal is null || proposal.Json["goalTaskId"] is not null || session.Length == 0 || principal.Length == 0) return null;
+        var effect = PresentationEffect(standing, proposal, boardId);
+        if (effect is null) return null;
+        if (proposal.PresentedBy.Length == 0) return effect;
+        // A marker from a future revision cannot be interpreted or silently reassigned by an older reader.
+        if (proposal.PresentedRevision < 0 || proposal.PresentedRevision > standing.Revision || proposal.PresentedEffect is null) return null;
+        if (!JsonNode.DeepEquals(effect, proposal.PresentedEffect)) return effect;
+        return request.Length > 0 && proposal.PresentedBy == session && proposal.PresentedPrincipal == principal && proposal.PresentedRequest == request
+            ? proposal.PresentedEffect.DeepClone().AsObject() : null;
+    }
+
+    /// <summary>Atomically reserves exactly the terms the hub proved fit; never records a decision or changes effective Standing.</summary>
+    public static RelayReply Present(AggregateContext context)
+    {
+        if (!context.Caller.IsInternal) return Error(InternalOnly);
+        if (!StandingPresentationRequest.Decode(context.Args).TryGet(out var presentation, out var malformed)) return Malformed(malformed);
+        var board = new BoardState(context.State);
+        var standing = board.Standing;
+        var id = presentation.ProposalId;
+        var request = presentation.PresentationRequest;
+        if (standing is null) return Ok(new { presented = false });
+        var expected = JsonNode.Parse(presentation.ExpectedEffectJson)!.AsObject();
+        var effect = PendingPresentation(standing.Json, presentation.BoardId ?? "default", id, context.Caller.PrincipalId, presentation.SessionId, request);
+        if (effect is null || !JsonNode.DeepEquals(effect, expected) || ByteSize(effect) > RelayLimits.MaxAttentionOfferBytes) return Ok(new { presented = false }, standing.Revision);
+        var proposal = standing.Proposal(id)!;
+        if (!JsonNode.DeepEquals(proposal.PresentedEffect, effect))
+            proposal.MarkPresented(context.Caller.PrincipalId, context.SessionId, request, context.Now, standing.Revision, effect);
+        return Ok(new JsonObject { ["attention"] = effect }, standing.Revision);
+    }
+
+    private static JsonObject? PresentationEffect(StandingState standing, StandingProposal proposal, string boardId)
+    {
+        var effect = new JsonObject { ["id"] = proposal.Id, ["k"] = AttentionKinds.StandingProposal, ["b"] = boardId };
+        if (proposal.Line is { } line && proposal.Grant is null)
+        {
+            var id = line.Id(proposal.Id);
+            effect["line"] = new JsonObject { ["id"] = id, ["text"] = line.Text };
+            if (standing.Line(id) is { } prior) effect["replaces"] = new JsonObject { ["line"] = new JsonObject { ["id"] = id, ["text"] = prior.Text } };
+            if (standing.HasGrant(id)) return null;
+        }
+        else if (proposal.Grant is { } grant && proposal.Line is null)
+        {
+            var id = grant.Id(proposal.Id);
+            static JsonObject Terms(StandingGrant item, string id) => new()
+            {
+                ["id"] = id, ["scope"] = item.Scope, ["targets"] = item.Targets?.DeepClone(), ["expiresAt"] = item.ExpiresAtText
+            };
+            effect["grant"] = Terms(grant, id);
+            if (standing.Grant(id) is { } prior) effect["replaces"] = new JsonObject { ["grant"] = Terms(prior, id) };
+            if (standing.HasLine(id)) return null;
+        }
+        else return null;
+        return effect;
+    }
+
     /// <summary>A packet's <c>authorityRef</c> names a grant as <c>grant:&lt;id&gt;</c>; any other text stays a prose reference.</summary>
     public const string GrantPrefix = "grant:";
     private static readonly string[] Scopes = ["repository", "resource", "action"];

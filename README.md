@@ -125,6 +125,12 @@ A chat can be woken when something needs it.
 
 Direct messages from another session and urgent items (a task blocked, failed or interrupted, or an action stranded by a closed session) wake a chat at once. Send FYI notes with `wake: false`; they never cause a wake. Task-change notices and other nonurgent items wait for the chat's next reply or for 10 minutes. Tips never wake a chat. The node still avoids waking a busy chat and applies its usual deduplication and rate limits.
 
+## Node updates
+
+After an authorized installation of a compatible bootstrap, the node verifies builds offered by its own hub and updates between wakes. **Updated** means the new node has started and authenticated. **Update deferred** means waking continues on the current node until it can safely restart. **Old node retained** means an unavailable, incompatible or failed update leaves the previous verified node selected. **Bootstrap needed** means an older installation needs one authorized install and restart before automatic updates are available.
+
+Node updates keep the existing credentials, data folder and Windows sign-in entry. They do not rewrite MCP client settings or hooks. A node's `nodeBuild` observation in `chat_directory` describes its running package and process; it does not prove an installed MCP adapter or a chat's loaded tool descriptions changed. The host, the build the hub serves, the running node and an installed MCP adapter can all differ. A missing observation remains unknown.
+
 ## The dashboard
 
 Open it with the sign-in link the hub prints. The link works once, only on the hub's PC, for 24 hours, and each use prints the next one. You can also paste the token from `data/local-client-token`. A sign-in lasts 8 hours in that browser session, or 7 days with **Remember this browser** (`Relay:Dashboard:SessionHours` and `RememberDays`).

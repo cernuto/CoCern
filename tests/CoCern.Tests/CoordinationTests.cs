@@ -1337,10 +1337,9 @@ public sealed class CoordinationTests
         var reopened = Assert.Single(NewEffects(state, ref seen));
         Assert.Equal(["review_ready"], reopened.Item["kinds"]!.AsArray().Select(x => x!.GetValue<string>()));
 
-        // A standing proposal is raised to the managers and closed when an administrator decides it.
+        // New Standing proposals never fan out to managers; decisions still close any legacy queued proposal item.
         var proposed = Data(Call(state, "board", "standing_propose", new() { ["sessionId"] = "worker-a", ["requestId"] = "propose", ["line"] = new JsonObject { ["text"] = "Run tests first" } }));
-        var proposal = Assert.Single(NewEffects(state, ref seen));
-        Assert.Equal(("standing_proposal", proposed["proposalId"]!.GetValue<string>(), "line: Run tests first"), (proposal.Item["kind"]!.GetValue<string>(), proposal.Item["subject"]!.GetValue<string>(), proposal.Item["note"]!.GetValue<string>()));
+        Assert.Empty(NewEffects(state, ref seen));
         Assert.True(Call(state, "board", "standing_put", new() { ["sessionId"] = "admin", ["requestId"] = "approve", ["expectedRevision"] = 0, ["approve"] = new JsonArray(proposed["proposalId"]!.GetValue<string>()) }).Ok);
         var decided = Assert.Single(NewEffects(state, ref seen));
         Assert.Equal(("__attention_close", proposed["proposalId"]!.GetValue<string>()), (decided.Operation, decided.Item["subject"]!.GetValue<string>()));

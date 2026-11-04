@@ -24,10 +24,27 @@ public sealed class RelayForwarder(HttpClient client, AdapterOptions options)
     /// <summary>The pinned handler when the options carry a certificate fingerprint, otherwise the plain one.</summary>
     public static HttpClientHandler CreateHandler(AdapterOptions options) => options.PinnedFingerprint is { } fingerprint ? PinnedCertificate.CreateHandler(fingerprint) : CreateHandler();
 
-    public async Task<AdapterReply> ForwardAsync(string tool, JsonElement arguments, CancellationToken cancellationToken = default)
+    // Uses this transport's closed connection options; callers cannot substitute an unrelated authentication claim.
+    internal bool MatchesNativeBinding(NativeJoinBinding binding) => binding.MatchesConnection(options);
+
+    public Task<AdapterReply> ForwardAsync(string tool, JsonElement arguments, CancellationToken cancellationToken = default)
     {
-        cancellationToken.ThrowIfCancellationRequested();
-        if (!CoordinationTools.IsAllowed(tool, options.Admin, options.ChatOnly, options.Diagnostics)) return new(false, "unknown_tool");
+        if (cancellationToken.IsCancellationRequested) return Task.FromCanceled<AdapterReply>(cancellationToken);
+        return CoordinationTools.IsAllowed(tool, options.Admin, options.ChatOnly, options.Diagnostics)
+            ? SendAsync(tool, arguments, cancellationToken) : Task.FromResult(new AdapterReply(false, "unknown_tool"));
+    }
+
+    // A fixed, internal status read for the exact connection's current private handle, including in the compact profile.
+    internal Task<AdapterReply> ProbeNativeAsync(NativeJoinBinding binding, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        if (!MatchesNativeBinding(binding) || binding.CurrentHandle is not { } own) return Task.FromResult(new AdapterReply(false, "native_handle_unverified"));
+        return SendAsync(RelayTools.GetStatus, JsonSerializer.SerializeToElement(new
+        { repositoryId = own.RepositoryId, sessionId = own.SessionId, sessionToken = own.SessionToken, backgroundCall = true }), ct);
+    }
+
+    private async Task<AdapterReply> SendAsync(string tool, JsonElement arguments, CancellationToken cancellationToken)
+    {
         if (arguments.ValueKind != JsonValueKind.Object) return new(false, "invalid_arguments");
         var json = arguments.GetRawText();
         if (Encoding.UTF8.GetByteCount(json) > MaxRequestBytes) return new(false, "request_too_large");

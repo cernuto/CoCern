@@ -9,6 +9,22 @@ namespace CoCern.Adapter.Node;
 /// </summary>
 public static class StopHook
 {
+    internal static async Task<int> RunNativeAsync(TextReader input, TextWriter error, NativeJoin join, CancellationToken ct, HttpMessageHandler? handler = null, TimeSpan? timeout = null,
+        Func<CancellationToken, Task>? ownerGone = null)
+    {
+        try
+        {
+            var text = await NativeJoinHook.ReadInputAsync(input, ct);
+            if (text is null) return 0;
+            using var document = System.Text.Json.JsonDocument.Parse(text, new System.Text.Json.JsonDocumentOptions { MaxDepth = 32 });
+            var capture = NativeJoinHook.ParseContext("claude", document.RootElement);
+            if (capture is null || ChatLocators.Text(document.RootElement, "hook_event_name") != "Stop") return 0;
+            return await RunAsync(new StringReader(text), error, join.PrivateFolder, ct,
+                (_, _, deliver, limit, cancel) => ClaudeWaiter.RunNativeAsync(join, capture, deliver, timeout ?? limit, cancel, handler), ownerGone: ownerGone);
+        }
+        catch (Exception) { return 0; }
+    }
+
     /// <summary>How long one wait lasts: just under the client's hook timeout, so the waiter stops itself cleanly before the client would kill it.</summary>
     internal static readonly TimeSpan WaitLimit = TimeSpan.FromSeconds(Setup.ClientSettings.StopHookTimeoutSeconds) - TimeSpan.FromMinutes(5);
     /// <summary>How long a hook waits for another client's waiter to end. One whose client is gone ends within seconds; past this, that client is still running and keeps the chat's waiter.</summary>

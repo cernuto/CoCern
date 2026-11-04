@@ -72,7 +72,7 @@ public sealed class DevelopmentWakeSetupTests : IDisposable
         File.WriteAllText(Token, "test-only-connection-token");
         using var output = new StringWriter();
         using var error = new StringWriter();
-        int Connect(params string[] args) => ConnectCommand.Run(["--token-file", Token, .. args], root, null, "dotnet-host", Launcher('a'), output, error);
+        int Connect(params string[] args) => ConnectCommand.Run(["--token-file", Token, .. args], root, null, "dotnet-host", Launcher('a'), output, error, nativeCacheRoot: Path.Combine(root, "native-cache"));
         Assert.Equal(0, Connect("--check"));
         Assert.False(File.Exists(Hooks));
         Assert.Equal(0, Connect("--only", ConnectClients.Codex));
@@ -85,7 +85,7 @@ public sealed class DevelopmentWakeSetupTests : IDisposable
         Assert.Equal(once, File.ReadAllText(Hooks));
     }
 
-    private bool Configure(char version) => DevelopmentSetup.ConfigureClaudeCode(Config, "dotnet-host", Launcher(version), Deployment, Token);
+    private bool Configure(char version) => DevelopmentSetup.ConfigureClaudeCode(Config, "dotnet-host", Launcher(version), Deployment, Token, nativeCacheRoot: Path.Combine(root, "native-cache"));
 
     [Theory]
     [InlineData(false)]
@@ -101,7 +101,7 @@ public sealed class DevelopmentWakeSetupTests : IDisposable
         };
         File.WriteAllText(Config, config.ToJsonString());
         var before = File.ReadAllText(Config);
-        Assert.Equal(0, ConnectCommand.Run(["--token-file", Token, "--only", ConnectClients.ClaudeCode], root, null, "dotnet-host", Launcher('a'), TextWriter.Null, TextWriter.Null));
+        Assert.Equal(0, ConnectCommand.Run(["--token-file", Token, "--only", ConnectClients.ClaudeCode], root, null, "dotnet-host", Launcher('a'), TextWriter.Null, TextWriter.Null, nativeCacheRoot: Path.Combine(root, "native-cache")));
         Assert.Equal(before, File.ReadAllText(Config));
         Assert.False(File.Exists(Hooks));
     }

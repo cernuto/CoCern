@@ -17,6 +17,7 @@ namespace CoCern.Domain;
 internal static class ControlAggregate
 {
     private const int MaxMachineSummaries = 50;
+
     internal static readonly TimeSpan InitialFreshness = TimeSpan.FromMinutes(2);
 
     public static RelayReply Handle(AggregateContext context)
@@ -46,8 +47,10 @@ internal static class ControlAggregate
     private static RelayReply OpenSession(AggregateContext context)
     {
         var args = context.Args;
-        Required(args, "requestId");
+        var participant = Text(args, NativeParticipant.Id);
         var state = new ControlState(context.State);
+        if (participant.Length == 0) Required(args, "requestId");
+        else if (ResumeNative(context, state, participant) is { } resume) return resume;
         if (state.SessionCount >= RelayLimits.MaxRecords) DropStaleSessions(context, state);
         // Every session was seen within StaleSessionHours, or still answers for an unresolved action: refused for now. The first clears as
         // sessions go stale; the second only once those actions are reported or recovered, since expiring their sessions would strand them.
@@ -66,9 +69,62 @@ internal static class ControlAggregate
         // The role given at session_open routes manager-bound attention items; it grants nothing.
         var record = SessionRecord.Opened(id, token, context.Caller.PrincipalId, context.Repository, args).WithInitialFreshness(context.Now);
         state.Enter(record);
+        if (record.NativeId is not null) state.TrackNative(record);
         context.Send(id, new SessionOpen(record));
-        return Ok(new { sessionId = id, sessionToken = token, bindingVersion = 0, binding = args["binding"] });
+        return OpenReply(id, token, args);
     }
+
+    // A null answer permits exactly one new initialization in the same serialized directory operation.
+    private static RelayReply? ResumeNative(AggregateContext context, ControlState state, string participant)
+    {
+        var args = context.Args;
+        if (!context.Caller.IsInternal) return Error(InternalOnly);
+        var generation = Required(args, NativeParticipant.Generation);
+        var request = Required(args, NativeParticipant.Request);
+        if (!state.CanTrackNative(participant)) return Error(CapacityExceeded);
+        if (state.NativeJoin(participant) is { } join)
+        {
+            var currentId = Text(join, "sessionId");
+            var currentGeneration = Text(join, "generation");
+            var retired = join["retired"] as JsonObject;
+            if (retired?.ContainsKey(generation) == true) return ExpiredNative();
+            if (generation == currentGeneration && request != Text(join, "requestId")) return Error(RequestConflict);
+            var duplicates = state.Entries().Where(row => row.Id != currentId && row.Entry is { } older && older.SessionId == row.Id
+                && older.NativeId == participant && older.NativeGeneration.Length > 0
+                && older.PrincipalId == context.Caller.PrincipalId && older.RepositoryId == context.Repository)
+                .Select(row => row.Id).ToHashSet(StringComparer.Ordinal);
+            if (duplicates.Count > 0)
+            {
+                // Only these exact, privately proven entries. Refusals restore their own session and clear its close fence.
+                var cleanup = CloseSessions(context, state, (candidate, _) => duplicates.Contains(candidate), state.DuplicateCloseRoom, idle: true, force: false, nativeDuplicate: true);
+                if (cleanup.Refusal is { } refused) return Error(refused);
+                // The successful internal reply commits the close effects. The public boundary withholds a handle while they settle.
+                return Ok(new { nativePending = true });
+            }
+            if (state.CurrentNativeSession(participant, context.Repository) is not null && state.Entry(currentId) is { } entry)
+                return generation == currentGeneration && entry.PrincipalId == context.Caller.PrincipalId
+                    ? OpenReply(currentId, entry.Token, args) : Error(RequestConflict);
+            if (state.Entry(currentId) is not null) return Error(Unavailable);
+            if (Text(args, NativeParticipant.ConfirmedExpiry) == currentId)
+            {
+                join["expired"] = true;
+                state.Unfence(currentId);
+            }
+            if (!Flag(join, "expired")) return Error(Unavailable, new { nativeCheck = currentId });
+            if (generation == currentGeneration) return ExpiredNative();
+            if (state.NativeClosing(participant) || state.Entries().Any(row => row.Entry?.NativeId == participant)) return Error(Unavailable);
+            if (retired?.Count >= ControlState.MaxNativeGenerations - 1) return Error(CapacityExceeded);
+            if (request == Text(join, "requestId") || retired?.Any(pair => pair.Value?.ToString() == request) == true) return Error(RequestConflict);
+        }
+        else if (state.NativeClosing(participant) || state.Entries().Any(row => row.Entry?.NativeId == participant))
+            return Error(Unavailable);
+        return null;
+    }
+
+    private static RelayReply OpenReply(string id, string token, JsonObject args) =>
+        Ok(new { sessionId = id, sessionToken = token, bindingVersion = 0, binding = args["binding"] });
+
+    private static RelayReply ExpiredNative() => Error(SessionUnknown, new { expired = true, reopen = RelayTools.SessionOpen });
 
     /// <summary>
     /// Makes room in a full directory: drops sessions not seen (fresh, active or observed) for <see cref="RelayLimits.StaleSessionHours"/>,
@@ -93,7 +149,7 @@ internal static class ControlAggregate
     private static DateTimeOffset IdleCutoff(DateTimeOffset now, TimeSpan idle) => now - idle - TimeSpan.FromMinutes(RelayLimits.AttentionActivityReportMinutes);
 
     /// <summary>What one close did: the IDs it closed, least recently seen first, how many it kept for unresolved actions or for unread mail, and whether it left matching sessions for a later run.</summary>
-    private readonly record struct Closing(List<string> Closed, int Kept, int Held, bool More);
+    private readonly record struct Closing(List<string> Closed, int Kept, int Held, bool More, string? Refusal = null);
 
     /// <summary>
     /// The one way the directory closes sessions (a full directory's cleanup, the hub's sweep, <c>close_sessions</c>): of the entries
@@ -109,7 +165,7 @@ internal static class ControlAggregate
     /// gets a clean <c>SessionUnknown</c> and opens again. One that refuses sends <see cref="Operations.SessionRestore"/> and comes back.
     /// Each close is fenced (see <see cref="ControlState.Fence"/>), so only the session's answer to this close can bring it back.
     /// </summary>
-    private static Closing CloseSessions(AggregateContext context, ControlState state, Func<string, DirectoryEntry?, bool> matches, int limit, bool idle, bool force = false)
+    private static Closing CloseSessions(AggregateContext context, ControlState state, Func<string, DirectoryEntry?, bool> matches, int limit, bool idle, bool force = false, bool nativeDuplicate = false, bool exactTarget = false)
     {
         var now = context.Now;
         var matched = state.Entries().Where(entry => matches(entry.Id, entry.Entry))
@@ -118,12 +174,22 @@ internal static class ControlAggregate
         var closable = matched.Where(entry => force || !entry.Owns && !(idle && entry.Hold == Hold.Holding))
             // A forced close takes sessions without mail waiting first.
             .OrderBy(entry => entry.Hold == Hold.Holding).ThenBy(entry => entry.Seen).ThenBy(entry => entry.Key, StringComparer.Ordinal).ToList();
-        var closing = closable.Take(Math.Max(0, limit)).ToList();
-        foreach (var (id, session, seen, _, hold) in closing)
+        var closed = new List<string>();
+        var more = false;
+        foreach (var (id, session, seen, _, hold) in closable)
         {
+            var room = closed.Count < limit;
+            if (state.RetireSuperseded(session, commit: room) is { } refused)
+            {
+                // A targeted operation needs this participant. A broad operation can still close other eligible rows.
+                if (room && (nativeDuplicate || exactTarget)) return new([], 0, 0, false, refused);
+                continue;
+            }
+            if (!room) { more = true; break; } // Another eligible row remains. Its private history was only checked.
+            closed.Add(id);
             state.Leave(id);
             var repository = session?.RepositoryId ?? "";
-            var expire = new SessionExpire(repository, id, state.Fence(id, now),
+            var expire = new SessionExpire(repository, id, state.Fence(id, now, session?.NativeId, nativeDuplicate),
                 // What the directory had heard when it decided; a session that has reported activity since was working, and refuses.
                 SeenAt: !force && seen > DateTimeOffset.MinValue ? seen : null,
                 // A session whose hold lapsed already had its grace, so this idle close takes it as it is.
@@ -131,8 +197,7 @@ internal static class ControlAggregate
             // Its own caller: the session belongs to its repository, which the caller that closed it may not reach (or may reach them all).
             context.Send(id, expire, new RelayCaller("relay-directory", false, [repository]));
         }
-        return new(closing.Select(entry => entry.Key).ToList(), force ? 0 : matched.Count(entry => entry.Owns), idle && !force ? matched.Count(entry => !entry.Owns && entry.Hold == Hold.Holding) : 0,
-            closable.Count > closing.Count);
+        return new(closed, force ? 0 : matched.Count(entry => entry.Owns), idle && !force ? matched.Count(entry => !entry.Owns && entry.Hold == Hold.Holding) : 0, more);
     }
 
     /// <summary>
@@ -201,8 +266,8 @@ internal static class ControlAggregate
             && (target is null || id == target) && (prefix is null || session.Label.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
         var active = labelOnly ? state.Entries().Count(entry => Matches(entry.Id, entry.Entry) && entry.Entry!.LastSeen > cutoff) : 0;
         var result = CloseSessions(context, state, (id, session) => Matches(id, session) && session!.LastSeen <= cutoff, RelayLimits.MaxSessionsClosedPerCall,
-            idle: minutes is not null, force: force);
-        return Ok(new { closed = result.Closed.Count, kept = result.Kept, held = result.Held, active, more = result.More, ids = result.Closed.Take(RelayLimits.MaxClosedSessionIds).ToArray() });
+            idle: minutes is not null, force: force, exactTarget: target is not null);
+        return result.Refusal is { } refused ? Error(refused) : Ok(new { closed = result.Closed.Count, kept = result.Kept, held = result.Held, active, more = result.More, ids = result.Closed.Take(RelayLimits.MaxClosedSessionIds).ToArray() });
     }
 
     private enum Hold { None, Holding, Lapsed }
@@ -254,6 +319,7 @@ internal static class ControlAggregate
         if (!SessionExpired.Decode(context.Args).TryGet(out var expired, out var malformed)) return Malformed(malformed);
         var state = new ControlState(context.State);
         if (!state.Fenced(expired.SessionId, expired.CloseSeq)) return Ok(new { settled = false });
+        state.ConfirmNativeExpiry(expired.SessionId);
         state.Unfence(expired.SessionId);
         return Ok(new { settled = true });
     }

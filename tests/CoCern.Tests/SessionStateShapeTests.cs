@@ -87,7 +87,26 @@ public sealed class SessionStateShapeTests
         Assert.True(hub.Close(new() { ["targetSessionId"] = gone.Id, ["force"] = true }, Now).Ok);
         hub.DeliverAll(Now.AddMinutes(1));
 
-        var documents = new[] { chat, peer, gone }.Select(session => hub.State(AggregateKinds.Session, session.Id)).ToArray();
+        // Include a real admitted native open so the schema's optional native fields are exercised.
+        var native = new JsonObject
+        {
+            ["repositoryId"] = Repository, ["machineId"] = "pc-native", ["requestId"] = Guid.NewGuid().ToString("N"),
+            ["nativeJoin"] = new JsonObject
+            {
+                ["provider"] = "codex", ["nativeId"] = Guid.NewGuid().ToString("D"), ["workspace"] = "/fixture/native-state-shape",
+                ["bindingSecret"] = Convert.ToBase64String(new byte[32]), ["generation"] = Guid.NewGuid().ToString("N")
+            }
+        };
+        Assert.True(NativeParticipant.Admit(AggregateHub.Alice, native));
+        var opened = hub.Apply(AggregateKinds.Control, AggregateKinds.ControlKey, RelayTools.SessionOpen, native, AggregateHub.Alice with { IsInternal = true }, Now);
+        Assert.True(opened.Ok);
+        var nativeSession = AggregateHub.Data(opened)["sessionId"]!.GetValue<string>();
+        hub.DeliverAll(Now.AddMinutes(1));
+        var nativeDocument = hub.State(AggregateKinds.Session, nativeSession);
+        Assert.Equal(native[NativeParticipant.Id]!.GetValue<string>(), nativeDocument[NativeParticipant.Id]!.GetValue<string>());
+        Assert.Equal(native[NativeParticipant.Generation]!.GetValue<string>(), nativeDocument[NativeParticipant.Generation]!.GetValue<string>());
+        Assert.Equal(native[NativeParticipant.Request]!.GetValue<string>(), nativeDocument[NativeParticipant.Request]!.GetValue<string>());
+        var documents = new[] { chat, peer, gone }.Select(session => hub.State(AggregateKinds.Session, session.Id)).Append(nativeDocument).ToArray();
         foreach (var document in documents) Assert.Empty(SessionState.Shape.Undeclared(document));
 
         // The shape is not vacuous: between them the sessions wrote every key it declares, but the request tombstones (written only once a

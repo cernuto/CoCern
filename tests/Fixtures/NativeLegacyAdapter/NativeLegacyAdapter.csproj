@@ -1,0 +1,78 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>CoCern.NativeLegacyFixture</AssemblyName>
+    <ArtifactsProjectName>CoCern.NativeLegacyFixture</ArtifactsProjectName>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <IsPackable>false</IsPackable>
+    <IsPublishable>false</IsPublishable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../../src/CoCern.Contracts/CoCern.Contracts.csproj" />
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="ModelContextProtocol" />
+    <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" />
+    <PackageReference Include="Microsoft.Data.Sqlite" />
+    <None Update="legacy-adapter-source.zip" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="source-manifest.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <Target Name="VerifyAndExtractPinnedLegacySource" BeforeTargets="CoreCompile">
+    <GetFileHash Files="$(MSBuildThisFileDirectory)legacy-adapter-source.zip" Algorithm="SHA256">
+      <Output TaskParameter="Hash" PropertyName="_LegacyArchiveHash" />
+    </GetFileHash>
+    <GetFileHash Files="$(MSBuildThisFileDirectory)source-manifest.json" Algorithm="SHA256">
+      <Output TaskParameter="Hash" PropertyName="_LegacyManifestHash" />
+    </GetFileHash>
+    <Error Condition="'$(_LegacyArchiveHash)' != '9AA0030EFF65B527F20D8AD2296ABB6D0F1432751E360047875944BB3F4978ED' Or '$(_LegacyManifestHash)' != '28B267DDF8AD3C7C8C7FBAF03CD936D30DB02F7FA5DC00411D9F3A85318EE857'" Text="The pinned legacy fixture source failed integrity verification." />
+    <PropertyGroup><_LegacySourceRoot>$(IntermediateOutputPath)legacy-source-9AA0030E</_LegacySourceRoot></PropertyGroup>
+    <Unzip SourceFiles="$(MSBuildThisFileDirectory)legacy-adapter-source.zip" DestinationFolder="$(_LegacySourceRoot)" SkipUnchangedFiles="false" />
+    <ItemGroup>
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/AdapterInstructions.cs" ExpectedSHA256="850CDE96C071EFB25D516F9312989F7F114FBCF9A40CE475BB34B275A5775FE3" />
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/AdapterOptions.cs" ExpectedSHA256="C908690CCFB10018AC568B2F96CEB1F2379429210DD153DC0ECC55CDD0A28660" />
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/CoCern.Adapter.csproj" ExpectedSHA256="0E689B87996C9897B53771E183D622C3CCA106600677B2FA7CA1A8BC2FABAF85" />
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/CodexActivity.cs" ExpectedSHA256="5EF3BB9363369AB1C655B27D27DA006B97551B269A974C5C55B83901252ECF3F" />
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/CodexQueue.cs" ExpectedSHA256="B6F6F232DC58E24A49EE9F1614722A9E19117E08216EAAB0A7573B68977CF70C" />
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/CodexWakeDispatcher.cs" ExpectedSHA256="5A9FF87B56FE999F005174D163CF57178AD901D472068340BF43EAC40DB5BB36" />
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/ConditionalRead.cs" ExpectedSHA256="D42BA1529CCC48B3D7AAC988C44E541D3266ED35A8EA9A3D9BE1C17A6D52D448" />
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/CoordinationTools.cs" ExpectedSHA256="27FEB8F7F799BF497926E198119B34CCCF9E87BF74A15BAE5FFC3D4DAEC063C0" />
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/Development/AdapterDeployment.cs" ExpectedSHA256="D7624A833827137C56C59DEA08B8C7BB76E6C1C07E56303BE35119944E288980" />
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/Development/DevelopmentConnections.cs" ExpectedSHA256="12B548E7DE85DF98F00316C00E07FA4DAAA053F5B0531753D3DE22836D7433E8" />
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/Development/DevelopmentLauncher.cs" ExpectedSHA256="C2F44E7CE37DE61730A075C83416BAB371AD0740AFC7C4A8845F9B93BF7CC914" />
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/Development/DevelopmentSetup.cs" ExpectedSHA256="87A1C19537F638690D8D2F4CA97584676AC96DF3E18C93AB523DCA335A0F15AE" />
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/ExecutableSearch.cs" ExpectedSHA256="FCF8FA6029B991E55C28E5873F3D597E51D470677E8B245A043497D4A2304108" />
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/InboxWait.cs" ExpectedSHA256="13FBCAB2996C7E6975BD1A415EAE7590385C60AACE385C0DF17ABF2A8681EFAE" />
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/NativeCheckout.cs" ExpectedSHA256="5E0582A147DEE8AFFD86CEA7AFDBC68283B2C6636DEF4463F166D2C3E38D775C" />
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/NativeJoin.cs" ExpectedSHA256="019E49333E0F085E14801E80D7D10AF19362A7563FB3767A5A38C74E06E3F575" />
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/Node/ChatLocators.cs" ExpectedSHA256="4D3A89ECB8FA9FB6D11739E2461758A509E5D0D7BB27A591BA3EBA500EA2A172" />
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/Node/ClaudeWaiter.cs" ExpectedSHA256="F1579F2E69C5208D41FEE10D39A1EEA713B10C7395730002040C305CF677E11D" />
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/Node/CodexLocator.cs" ExpectedSHA256="D00F611068467D35A26FAAF8A58D4A0E1E0909BD4A68240D0EF8B3789E73F961" />
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/Node/LocalChatWake.cs" ExpectedSHA256="792ADDE9389AFF3D08AC739F2AECF86841CE4D628FD093A555A050C2DEC83F7E" />
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/Node/LocalWakeConnection.cs" ExpectedSHA256="DE24F08172E1E195459F24D18F66BCF3AFBB1D7E37698B69931707FF9F3F750B" />
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/Node/NativeJoinBinding.cs" ExpectedSHA256="72170BF97FD1BAD37BB967DFC778FB3F23642E0962616450EB70BDFAE158C57D" />
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/Node/NativeJoinHook.cs" ExpectedSHA256="4A8B93D152C72D790BE761B68D90176B6418AAD07ADEE792B1ABC4C29C40E70A" />
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/Node/NodeRunner.cs" ExpectedSHA256="C37B9F9942FDFBC1753D7F434670E54B5DB8E14A4A6F02793329259BB8A990FE" />
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/Node/NodeState.cs" ExpectedSHA256="ED42B72EE884F07E5E2344B85402458145BD4F2BAE785FB19FE1A0CA541C0640" />
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/Node/OwningProcess.cs" ExpectedSHA256="8169F955CFCCF5D94BE3D02A1FCCF3E22AB5BD960C18C66226B9B44F8C792DB5" />
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/Node/PinnedCertificate.cs" ExpectedSHA256="A0770B1B8F219BC767FE9F630F5BACA01CC317AE3BDE3256415F23CFDDB43B7E" />
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/Node/PromptHook.cs" ExpectedSHA256="EA5CF664855A3D6CF9227C4E68750BFB2FB2555804476C8930E01257F963DBF0" />
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/Node/SessionHandoff.cs" ExpectedSHA256="A16AA0FB94B7D7B95FFE37BE8FE020C95090797BDFDE800F8DC9447E16433DC4" />
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/Node/StopHook.cs" ExpectedSHA256="678404D249A766213DC4F73F32DF9917BF925793DFB4C25AC151299FE7A4397F" />
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/Program.cs" ExpectedSHA256="8A3459FA0D1C760FEAF3438223025B702B76724330FCB0BA8231E25076A9D1E6" />
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/RelayForwarder.cs" ExpectedSHA256="F3EC7A48D77CF0CC99C2DD9E7AE4E4B3DEDBBEC033F83649576339F3DC448A47" />
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/RelayHubConnection.cs" ExpectedSHA256="F24085DA357A67B049CF45A9CE5B000EF78E253C6EBFF3EDD815C8DF8E09B586" />
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/SessionHints.cs" ExpectedSHA256="3F5928981FA394F9956BA9FC6525766ABAC1CE3ED43148B54062D80733F730CB" />
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/Setup/ClaudeCli.cs" ExpectedSHA256="086D9565BF49D322EC3947D7B539F7F2AFE1A213B5C30544FCE23A5B953FF101" />
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/Setup/ClientSettings.cs" ExpectedSHA256="7E9F08E9FA62D9D8B4CB4E4E9C02549B2AE871C21AF6FA33B84D32820C0BB3CC" />
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/Setup/ConnectCommand.cs" ExpectedSHA256="3D8F5AD2CCFA422C133A997373F8FC94B94C476B25ED4CBFE3EB04738E1E261C" />
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/Setup/LogonStart.cs" ExpectedSHA256="76A521ECBBCA27A08CC9649D18EC055371D57AE09FD3F75BA006B38729E8859A" />
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/Setup/SetupCommand.cs" ExpectedSHA256="98D1B00E2FF8D6C6DE417A14F0F1B53ADE89973DE14EB0017570E97A5ED078BE" />
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/WakeConfiguration.cs" ExpectedSHA256="C363602DD8A91E2A0C5D88DA69E9F88FA7F164D705E9DFB504F7604832C6FAB7" />
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/WakeReconciler.cs" ExpectedSHA256="C4694073A820EF26DC9DD8EE1CDA233A614F2990D8CB45C85BFB96A7FF19D8F5" />
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/WakeState.cs" ExpectedSHA256="D3E34CC9CFC6473C431CE7F46C7E22D70BBC32C0B94C33F2AD6028C9A18A612F" />
+      <_LegacyInput Include="$(_LegacySourceRoot)/src/CoCern.Adapter/WakeWatcher.cs" ExpectedSHA256="A3FEE11C420C44E0BAC6D4157DEF51BC88CE4575ECC1B0581D4C16C80A161A6C" />
+    </ItemGroup>
+    <GetFileHash Files="@(_LegacyInput)" Algorithm="SHA256"><Output TaskParameter="Items" ItemName="_LegacyActual" /></GetFileHash>
+    <Error Condition="'%(_LegacyActual.FileHash)' != '%(_LegacyActual.ExpectedSHA256)'" Text="An extracted legacy fixture source failed integrity verification." />
+    <ItemGroup><Compile Include="@(_LegacyInput)" Condition="'%(_LegacyInput.Extension)' == '.cs'" /></ItemGroup>
+  </Target>
+</Project>

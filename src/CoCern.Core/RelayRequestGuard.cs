@@ -30,6 +30,18 @@ internal static class RelayRequestGuard
             // A repeated key would let checks and the operation read different values, so it is refused (building the object throws on one).
             args = JsonNode.Parse(raw)!.AsObject();
             _ = args.Count;
+            if (args.ContainsKey(CheckedNativeResolution)) return Replies.Error(InvalidArguments);
+            // A preflight cannot be combined with any allocating or caller-controlled envelope.
+            if (args.ContainsKey("nativePreflight"))
+            {
+                if (tool.Name != RelayTools.SessionOpen || args.Count != 1 || !NativeGitOrigin.ValidCheckoutEvidence(arguments.GetProperty("nativePreflight")))
+                    return Replies.Error(InvalidArguments);
+                return null;
+            }
+            if (arguments.TryGetProperty("nativeJoin", out var native) && native.ValueKind == JsonValueKind.Object &&
+                native.TryGetProperty("resolution", out var evidence) &&
+                (tool.Name != RelayTools.SessionOpen || args.Count != 4 || !NativeGitOrigin.ValidCheckoutEvidence(evidence)))
+                return Replies.Error(InvalidArguments);
         }
         catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or JsonException)
         {
@@ -40,7 +52,7 @@ internal static class RelayRequestGuard
         foreach (var numeric in IntegerFields) if (args.ContainsKey(numeric) && args[numeric] is null) args.Remove(numeric);
         if (NotWholeNumber(args) is { } numberField) return Replies.Error(InvalidArguments, new { field = numberField });
         if (tool.Name == RelayTools.ContextPut && args["content"] is null) return Replies.Error(InvalidArguments, new { field = "content" });
-        foreach (var flag in new[] { "includeNextWork", "attention", "attentionDetail", "seen", "headersOnly" })
+        foreach (var flag in new[] { "includeNextWork", "attention", "attentionDetail", "seen", "headersOnly", "presentStanding" })
             if (args.ContainsKey(flag) && (args[flag] is not JsonValue value || !value.TryGetValue<bool>(out _))) return Replies.Error(InvalidArguments, new { field = flag });
         // Machine revocation dispatches directly to discovery, outside the control aggregate's argument fence.
         if (tool.Name == RelayTools.ControlRequest && Text(args, "command") == "revoke_machine" && args.ContainsKey("allSessions"))
@@ -59,6 +71,20 @@ internal static class RelayRequestGuard
         if (args["knownInboxEtag"] is { } inboxEtag && (inboxEtag is not JsonValue etagValue || !etagValue.TryGetValue<string>(out var etagText) || etagText.Length is 0 or > RelayLimits.MaxKnownEtagLength || etagText.Any(char.IsControl)))
             return Replies.Error(InvalidArguments, new { field = "knownInboxEtag" });
         if (Count(args, "resourceIds") > RelayLimits.MaxClaimResources || Count(args, "messageIds") > RelayLimits.MaxAcknowledgedMessages || Count(args, "ackMessageIds") > RelayLimits.MaxAcknowledgedMessages) return Replies.Error(PayloadTooLarge);
+        if (args.ContainsKey("nativeJoin"))
+        {
+            if (tool.Name != RelayTools.SessionOpen) return Replies.Error(InvalidArguments);
+            JsonNode? evidence = null;
+            try { if (args["nativeJoin"] is JsonObject proof) proof.Remove("resolution", out evidence); }
+            catch (ArgumentException) { return Replies.Error(InvalidArguments); }
+            if (!NativeParticipant.Admit(caller, args)) return Replies.Error(InvalidArguments);
+            if (evidence is not null) args[CheckedNativeResolution] = evidence;
+            return null;
+        }
+        args.Remove(NativeParticipant.Id);
+        args.Remove(NativeParticipant.Generation);
+        args.Remove(NativeParticipant.Request);
+        args.Remove(NativeParticipant.ConfirmedExpiry);
         return null;
     }
 
@@ -73,6 +99,8 @@ internal static class RelayRequestGuard
     });
 
     /// <summary>Within their length, and (when present) not blank and free of control characters, which would break logs and displays.</summary>
+    internal const string CheckedNativeResolution = "__checkedNativeResolution";
+
     private static bool IdentifiersFit(JsonObject args)
     {
         if (IdentifierFields.Any(field => Text(args, field).Length > RelayLimits.MaxIdentifierLength)) return false;
@@ -139,9 +167,9 @@ internal static class RelayRequestGuard
 /// reads and removes them (after <see cref="RelayRequestGuard.Validate"/> has checked their shapes).
 /// </summary>
 internal sealed record CallControls(bool OfferWanted, bool StatusDetail, bool PageSeen, string[] SeenIds, string? KnownEtag, JsonObject? Usage, bool ModelVisible, bool? BackgroundCall,
-    bool HeadersOnly = false, string? KnownInboxEtag = null)
+    bool HeadersOnly = false, string? KnownInboxEtag = null, bool PresentStanding = false)
 {
-    private static readonly string[] Fields = ["usage", "attention", "attentionDetail", "attentionStatus", "maxHoldMinutes", "seen", "seenMessageIds", "knownEtag", "backgroundCall", "headersOnly", "knownInboxEtag"];
+    private static readonly string[] Fields = ["usage", "attention", "attentionDetail", "attentionStatus", "maxHoldMinutes", "seen", "seenMessageIds", "knownEtag", "backgroundCall", "headersOnly", "knownInboxEtag", "presentStanding"];
 
     public static CallControls Take(JsonObject args)
     {
@@ -162,7 +190,8 @@ internal sealed record CallControls(bool OfferWanted, bool StatusDetail, bool Pa
             // A background check_inbox reader that needs only which messages wait (the wake watcher) asks for their headers, and for an
             // unchanged answer when the inbox is the one it last read.
             HeadersOnly: args["headersOnly"] is JsonValue headers && headers.GetValue<bool>(),
-            KnownInboxEtag: JsonFields.Text(args, "knownInboxEtag") is { Length: > 0 } inboxEtag ? inboxEtag : null);
+            KnownInboxEtag: JsonFields.Text(args, "knownInboxEtag") is { Length: > 0 } inboxEtag ? inboxEtag : null,
+            PresentStanding: args["presentStanding"] is JsonValue present && present.GetValue<bool>());
         foreach (var field in Fields) args.Remove(field);
         return controls;
     }

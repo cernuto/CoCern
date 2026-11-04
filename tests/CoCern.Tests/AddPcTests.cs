@@ -397,10 +397,13 @@ public sealed class AddPcTests : IDisposable
         Plant(zip);
         Assert.Equal(["CoCern.Adapter.dll"], await EntriesAsync(new AdapterZipCache(ZipCache), adapter));
 
-        // A rebuilt adapter gets a zip of its own, and the old one goes.
+        // A rebuilt adapter gets a zip of its own, while the immediately previous archive remains available.
         File.WriteAllText(Path.Combine(adapter, "CoCern.Adapter.runtimeconfig.json"), "{}");
         Assert.Contains("CoCern.Adapter.runtimeconfig.json", await EntriesAsync(cache, adapter));
-        Assert.NotEqual(zip, Assert.Single(Directory.GetFiles(ZipCache)));
+        var retained = Directory.GetFiles(ZipCache);
+        Assert.Equal(2, retained.Length);
+        Assert.Contains(zip, retained);
+        Assert.Contains(retained, path => path != zip);
     }
 
     private static async Task<string[]> EntriesAsync(AdapterZipCache cache, string adapter)

@@ -33,7 +33,7 @@ public sealed class ConnectTests : IDisposable
     {
         using var output = new StringWriter();
         using var error = new StringWriter();
-        var code = ConnectCommand.Run(args, Profile, AppData, "dotnet", Adapter, output, error);
+        var code = ConnectCommand.Run(args, Profile, AppData, "dotnet", Adapter, output, error, nativeCacheRoot: Path.Combine(root, "native-cache"));
         return (code, output.ToString(), error.ToString());
     }
 
