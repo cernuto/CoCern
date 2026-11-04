@@ -55,16 +55,15 @@ public sealed class SessionHandoff
     }
 
     /// <summary>
-    /// This chat's newest session in <paramref name="repository"/> among the handles here. Null when the client told the adapter no chat ID: every
-    /// chat on the PC shares these folders, so without one there is no saying whose handle is whose.
+    /// This chat's session in <paramref name="repository"/> among the handles here (see <see cref="NodeState.ChooseForChat"/>). Null when the client told the
+    /// adapter no chat ID: every chat on the PC shares these folders, so without one there is no saying whose handle is whose.
     /// </summary>
     internal SessionHandle? FindOwn(string repository)
     {
         if (_client is null) return null;
         try
         {
-            return NodeState.ReadSessionHandles(_folder).Where(handle => handle.RepositoryId == repository && (handle.Client is not null || handle.Chat is not null) && OwnsNative(handle))
-                .OrderByDescending(handle => handle.OpenedAt).FirstOrDefault();
+            return NodeState.ChooseForChat(NodeState.ReadSessionHandles(_folder).Where(handle => handle.RepositoryId == repository && (handle.Client is not null || handle.Chat is not null) && OwnsNative(handle)), _client.ThreadId);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { return null; }
     }
