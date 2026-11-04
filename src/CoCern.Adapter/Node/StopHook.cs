@@ -17,23 +17,44 @@ public static class StopHook
 
     public static Task<int> RunAsync(TextReader input, TextWriter error, string nodeFolder, CancellationToken cancellationToken) =>
         RunAsync(input, error, nodeFolder, cancellationToken, (folder, chat, deliver, limit, ct) => ClaudeWaiter.RunAsync(folder, chat, deliver, limit, ct, printInbox: true),
-            chat => LocalWakeConnection.FindForClaude(chat));
+            chat => LocalWakeConnection.FindForClaude(chat), OwningProcess.WaitUntilGoneAsync);
 
     /// <param name="findLocal">
     /// The chat's own local connection folder, when exactly one holds its session (a chat on the hub's PC, signed in with the hub's token file);
     /// the waiter uses it before <paramref name="nodeFolder"/>, so a local chat never needs a node.
     /// </param>
-    internal static async Task<int> RunAsync(TextReader input, TextWriter error, string nodeFolder, CancellationToken cancellationToken, Waiter wait, Func<string, string?>? findLocal = null)
+    /// <param name="ownerGone">
+    /// Completes when the client that ran this hook is gone. The wait then ends, so a waiter left behind by an app restart neither blocks the new
+    /// app's hooks nor spends a wake on the old app. A watch that fails only stops watching.
+    /// </param>
+    internal static async Task<int> RunAsync(TextReader input, TextWriter error, string nodeFolder, CancellationToken cancellationToken, Waiter wait, Func<string, string?>? findLocal = null, Func<CancellationToken, Task>? ownerGone = null)
     {
+        using var waiting = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var watch = ownerGone is null ? Task.CompletedTask : CancelWhenOwnerGoneAsync(ownerGone, waiting);
         try
         {
             if (await PromptHook.ReadSessionIdAsync(input) is not { } chat || !ChatLocators.IsUuid(chat)) return 0;
             var folder = findLocal?.Invoke(chat) ?? nodeFolder;
             string? text = null;
-            if (await wait(folder, chat, delivered => text = delivered, WaitLimit, cancellationToken) != "queued" || text is null) return 0;
+            if (await wait(folder, chat, delivered => text = delivered, WaitLimit, waiting.Token) != "queued" || text is null) return 0;
             await error.WriteLineAsync(text);
             return 2;
         }
         catch (Exception) { /* A hook must never trouble the chat: no node, no handle, a running waiter or a failed call all end quietly. */ return 0; }
+        finally
+        {
+            await waiting.CancelAsync();
+            await watch;
+        }
+    }
+
+    private static async Task CancelWhenOwnerGoneAsync(Func<CancellationToken, Task> ownerGone, CancellationTokenSource waiting)
+    {
+        try
+        {
+            await ownerGone(waiting.Token);
+            await waiting.CancelAsync();
+        }
+        catch (Exception) { /* Cancelled because the wait ended, or the owner can't be watched: the wait goes on unwatched. */ }
     }
 }
