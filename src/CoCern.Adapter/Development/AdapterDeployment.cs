@@ -9,6 +9,12 @@ public sealed record AdapterManifest(string Version, string Generation);
 /// <summary>Immutable development copies, selected by an atomic manifest outside build output.</summary>
 public static class AdapterDeployment
 {
+    /// <summary>Validates the tree and returns the same deterministic content identity used by local deployment, without publishing it.</summary>
+    public static string ContentHash(string folder)
+    {
+        var root = Path.GetFullPath(folder);
+        return Hash(root, Files(root));
+    }
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     private static readonly string[] Required = ["CoCern.Adapter.dll", "CoCern.Adapter.deps.json", "CoCern.Adapter.runtimeconfig.json"];
 
