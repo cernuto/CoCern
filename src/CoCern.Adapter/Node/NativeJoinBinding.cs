@@ -135,7 +135,8 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
 
     /// <summary>Provider names are at most 16 characters; native IDs accept only UUID N (32) or D (36) forms.</summary>
     internal static async Task<NativeJoinBinding> AcquireAsync(string folder, string provider, string nativeId,
-        string machineId, string repositoryId, string workspace, CancellationToken ct, bool existingOnly = false)
+        string machineId, string repositoryId, string workspace, CancellationToken ct, bool existingOnly = false,
+        Func<string, CancellationToken, Task<string>>? resolveCheckout = null, Func<NativeJoinBinding, bool>? authenticate = null)
     {
         ct.ThrowIfCancellationRequested();
         if (provider is not { Length: > 0 and <= 16 } || nativeId is not { Length: 32 or 36 })
@@ -146,14 +147,8 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
         nativeId = id.ToString("D");
         folder = CanonicalDirectory(folder);
         ValidateIdentifier(machineId); ValidateIdentifier(repositoryId);
-        workspace = CanonicalDirectory(workspace); // Never use the adapter's cwd or accept a relative native event path.
-        var checkout = await Task.Run(() => CoordinationTools.NativeGitTopLevel(workspace), ct).WaitAsync(ct);
-        if (checkout is null) throw Failure("The native event checkout could not be verified with Git.");
-        checkout = CanonicalDirectory(checkout);
-        var prefix = Path.EndsInDirectorySeparator(checkout) ? checkout : checkout + Path.DirectorySeparatorChar;
-        if (!string.Equals(workspace, checkout, StringComparison.Ordinal) && !workspace.StartsWith(prefix, StringComparison.Ordinal))
-            throw Failure("Git returned a checkout outside the native event directory.");
-        workspace = checkout;
+        if (authenticate is not null && !existingOnly) throw Failure("Authenticated lookup cannot create a binding.");
+        workspace = authenticate is null ? await (resolveCheckout ?? ResolveCheckoutAsync)(workspace, ct) : LexicalDirectory(workspace);
         var identity = ConnectionIdentity(folder);
         var key = Digest("cocern-native-binding-v1", folder, identity, provider, nativeId, machineId, repositoryId, workspace);
         var sessions = Path.Combine(folder, NodeState.SessionsFolder);
@@ -211,10 +206,39 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
             }
             var binding = new NativeJoinBinding(folder, provider, nativeId, repositoryId, workspace, identity, key, frozen, current, lease);
             binding.resolution = evidence;
+            if (authenticate is not null)
+            {
+                // Only private-store reads and the existing lease precede authentication. In particular,
+                // never follow an unauthenticated checkout (including a UNC path) to find its key.
+                if (!authenticate(binding)) throw Failure("The native invocation could not be authenticated.");
+                if (await (resolveCheckout ?? ResolveCheckoutAsync)(workspace, ct) != workspace)
+                    throw Failure("The authenticated native checkout changed.");
+            }
             _ = binding.CurrentHandle; // A missing/foreign active handle is not an invitation to choose another one.
             return binding;
         }
         catch { await lease.DisposeAsync(); throw; }
+    }
+
+    internal static async Task<NativeJoinBinding> AcquireEstablishedAsync(string folder, string provider, string nativeId,
+        string machineId, string workspace, CancellationToken ct)
+    {
+        if (provider is not ("claude" or "codex") || !TryNativeId(nativeId, out var id)) throw Failure("A native capture is required.");
+        nativeId = id.ToString("D");
+        folder = CanonicalDirectory(folder);
+        workspace = await ResolveCheckoutAsync(workspace, ct); // Trusted provider event, never a tool stamp.
+        var identity = ConnectionIdentity(folder);
+        var directory = Path.Combine(folder, NodeState.SessionsFolder, "native");
+        RejectLink(Path.GetDirectoryName(directory)!); RejectLink(directory);
+        if (!Directory.Exists(directory) || Directory.EnumerateFiles(directory, "*.json").Take(2049).Count() > 2048)
+            throw Failure("The established native binding is missing or exceeds the lookup bound.");
+        var matches = DispatchRecords(folder).Where(row =>
+            row.Handle.Client == new ChatLocation(provider, nativeId) &&
+            Path.GetFileName(row.Path) == Digest("cocern-native-binding-v1", folder, identity, provider, nativeId, machineId, row.Handle.RepositoryId, workspace) + ".json")
+            .Take(2).ToArray();
+        if (matches.Length != 1) throw Failure("One established native binding is required.");
+        return await AcquireAsync(folder, provider, nativeId, machineId, matches[0].Handle.RepositoryId, workspace, ct,
+            existingOnly: true, resolveCheckout: (_, _) => Task.FromResult(workspace));
     }
 
     internal bool MatchesFolder(string folder) => CanonicalDirectory(folder) == Folder;
@@ -357,10 +381,27 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
         id = default;
         return value is { Length: 32 or 36 } && Guid.TryParseExact(value, value.Length == 32 ? "N" : "D", out id);
     }
-    private static string CanonicalDirectory(string path)
+    private static async Task<string> ResolveCheckoutAsync(string workspace, CancellationToken ct)
+    {
+        workspace = CanonicalDirectory(workspace);
+        var checkout = await Task.Run(() => CoordinationTools.NativeGitTopLevel(workspace), ct).WaitAsync(ct);
+        if (checkout is null) throw Failure("The native event checkout could not be verified with Git.");
+        checkout = CanonicalDirectory(checkout);
+        var prefix = Path.EndsInDirectorySeparator(checkout) ? checkout : checkout + Path.DirectorySeparatorChar;
+        if (!string.Equals(workspace, checkout, StringComparison.Ordinal) && !workspace.StartsWith(prefix, StringComparison.Ordinal))
+            throw Failure("Git returned a checkout outside the native event directory.");
+        return checkout;
+    }
+
+    private static string LexicalDirectory(string path)
     {
         if (!Path.IsPathFullyQualified(path) || path.Length > 32768 || path.Any(char.IsControl)) throw new ArgumentException("An absolute native event directory is required.");
-        path = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+        return Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+    }
+
+    private static string CanonicalDirectory(string path)
+    {
+        path = LexicalDirectory(path);
         if (!Directory.Exists(path)) throw Failure("The private connection or native checkout directory is missing.");
         RejectLink(path);
         if (OperatingSystem.IsWindows())

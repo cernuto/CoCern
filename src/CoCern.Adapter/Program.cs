@@ -6,6 +6,8 @@ using CoCern.Adapter.Node;
 using CoCern.Adapter.Setup;
 using CoCern.Contracts;
 
+[assembly: System.Reflection.AssemblyMetadata(NativeRegistration.ProtocolMetadata, NativeRegistration.ProtocolVersion)]
+
 try
 {
     if (args is ["--dev-setup", var deploymentRoot, var sourceDirectory, var developmentTokenFile])
@@ -165,7 +167,7 @@ try
         return await NodeRunner.RunAsync(state, hub, new NodeTransport { JoinCode = joinCode }, Console.Error, shutdown.Token);
     }
     NativeRegistration? registration = null;
-    if (args.Contains("--native-client", StringComparer.Ordinal))
+    if (args.Any(argument => argument is "--native-client" or "--native-hook" or "--connection" or "--profile" or "--development-root"))
     {
         registration = NativeRegistration.FromClientArguments(args) ?? throw new AdapterConfigurationException(NativeRegistration.Refusal);
         if (await registration.AcceptAsync(CancellationToken.None) is null) throw new AdapterConfigurationException(NativeRegistration.Refusal);
@@ -183,6 +185,11 @@ try
     builder.Services.AddMcpServer(server =>
     {
         server.ServerInstructions = registration is null ? AdapterInstructions.Server : AdapterInstructions.Native;
+        if (registration is not null) server.ServerInfo = new()
+        {
+            Name = NativeRegistration.PrivateServerName,
+            Version = typeof(NativeRegistration).Assembly.ManifestModule.ModuleVersionId.ToString("D")
+        };
     }).WithStdioServerTransport().WithTools(registration is null
         ? CoordinationTools.Create(forwarder, options.Admin, hints, SessionHandoff.For(options), options.ChatOnly, options.ExportedChat, localWake: localWake, diagnostics: options.Diagnostics)
         : CoordinationTools.CreateNative(forwarder, native!, registration.Provider, options.Admin, options.Diagnostics));

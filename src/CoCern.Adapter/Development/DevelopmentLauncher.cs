@@ -8,6 +8,8 @@ using CoCern.Adapter.Node;
 using ModelContextProtocol;
 using ModelContextProtocol.Server;
 using System.Text.Json;
+using System.Reflection.Metadata;
+using System.Reflection.PortableExecutable;
 
 namespace CoCern.Adapter.Development;
 
@@ -39,6 +41,13 @@ internal static class DevelopmentLauncher
         root = Path.GetFullPath(root);
         await using var connections = new DevelopmentConnections(root, async (manifest, token) =>
         {
+            var adapter = AdapterDeployment.AdapterPath(root, manifest);
+            // Pin and inspect the exact immutable deployment before running any code. A trusted
+            // old image may ignore private arguments, so initialization alone is too late.
+            using var image = nativeContext is null ? null : File.Open(adapter, FileMode.Open, FileAccess.Read, FileShare.Read);
+            var privateVersion = image is null ? null : PrivateImageVersion(image);
+            if (nativeContext is not null && NativeRegistration.FromClientArguments(nativeContext, privateVersion) is null)
+                throw new IOException(NativeRegistration.Refusal);
             // The SDK's Windows StdioClientTransport inserts cmd.exe /c, which misparses
             // a spaced dotnet executable together with a spaced deployment path. Own exactly
             // this backend process and give the SDK its streams, preserving argument boundaries.
@@ -47,10 +56,14 @@ internal static class DevelopmentLauncher
                 UseShellExecute = false, CreateNoWindow = true,
                 RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true
             };
-            start.ArgumentList.Add(AdapterDeployment.AdapterPath(root, manifest));
+            start.ArgumentList.Add(adapter);
             // This is untrusted launch context, not authentication. Every replacement backend
             // must perform its own fresh registration exchange before MCP initialization.
-            if (nativeContext is not null) foreach (var argument in nativeContext) start.ArgumentList.Add(argument);
+            if (nativeContext is not null)
+            {
+                foreach (var argument in nativeContext) start.ArgumentList.Add(argument);
+                NativeRegistration.RestrictPrivateEnvironment(start);
+            }
             start.Environment["COCERN_DEVELOPMENT_GENERATION"] = manifest.Generation;
             var process = Process.Start(start) ?? throw new IOException("The development backend could not start.");
             var stopError = new CancellationTokenSource();
@@ -58,7 +71,13 @@ internal static class DevelopmentLauncher
             try
             {
                 var transport = new StreamClientTransport(process.StandardInput.BaseStream, process.StandardOutput.BaseStream);
-                return new Backend(await McpClient.CreateAsync(transport, cancellationToken: token), process, stopError, error);
+                var client = await McpClient.CreateAsync(transport, cancellationToken: token);
+                if (nativeContext is not null && (client.ServerInfo?.Name != NativeRegistration.PrivateServerName || client.ServerInfo?.Version != privateVersion))
+                {
+                    await client.DisposeAsync();
+                    throw new IOException(NativeRegistration.Refusal);
+                }
+                return new Backend(client, process, stopError, error);
             }
             catch { await StopBackendAsync(process, stopError, error); throw; }
         }, Console.Error.WriteLine);
@@ -94,6 +113,37 @@ internal static class DevelopmentLauncher
             await watching;
         }
         return 0;
+    }
+
+    private static string PrivateImageVersion(Stream image)
+    {
+        if (image.Length is <= 0 or > 64 * 1024 * 1024) throw new IOException(NativeRegistration.Refusal);
+        try
+        {
+            using var pe = new PEReader(image, PEStreamOptions.LeaveOpen);
+            if (!pe.HasMetadata) throw new IOException(NativeRegistration.Refusal);
+            var metadata = pe.GetMetadataReader();
+            var found = false;
+            foreach (var attributeHandle in metadata.GetAssemblyDefinition().GetCustomAttributes())
+            {
+                var attribute = metadata.GetCustomAttribute(attributeHandle);
+                if (attribute.Constructor.Kind != HandleKind.MemberReference) continue;
+                var parent = metadata.GetMemberReference((MemberReferenceHandle)attribute.Constructor).Parent;
+                if (parent.Kind != HandleKind.TypeReference) continue;
+                var type = metadata.GetTypeReference((TypeReferenceHandle)parent);
+                if (metadata.GetString(type.Namespace) != "System.Reflection" || metadata.GetString(type.Name) != "AssemblyMetadataAttribute") continue;
+                var value = metadata.GetBlobReader(attribute.Value);
+                if (value.ReadUInt16() != 1 || value.ReadSerializedString() != NativeRegistration.ProtocolMetadata) continue;
+                if (found || value.ReadSerializedString() != NativeRegistration.ProtocolVersion || value.ReadUInt16() != 0 || value.RemainingBytes != 0)
+                    throw new IOException(NativeRegistration.Refusal);
+                found = true;
+            }
+            var version = metadata.GetGuid(metadata.GetModuleDefinition().Mvid);
+            if (!found || version == Guid.Empty) throw new IOException(NativeRegistration.Refusal);
+            return version.ToString("D");
+        }
+        catch (Exception exception) when (exception is BadImageFormatException or InvalidOperationException or ArgumentException)
+        { throw new IOException(NativeRegistration.Refusal); }
     }
 
     private static async Task WatchAsync(DevelopmentConnections connections, Func<McpServer?> upstream, CancellationToken cancellationToken)

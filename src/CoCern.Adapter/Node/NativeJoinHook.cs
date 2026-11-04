@@ -42,27 +42,48 @@ internal static class NativeJoinHook
         var start = new ProcessStartInfo(dotnet) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
         foreach (var argument in new[] { adapter, "--native-hook", provider, "--connection", folder }) start.ArgumentList.Add(argument);
         if (profile is not null) { start.ArgumentList.Add("--profile"); start.ArgumentList.Add(profile); }
+        NativeRegistration.RestrictPrivateEnvironment(start);
         using var process = Process.Start(start) ?? throw new IOException("The current native helper could not start.");
-        var standard = CopyAsync(process.StandardOutput, output, ct);
-        var diagnostic = CopyAsync(process.StandardError, error, ct);
+        using var copying = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var failed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var standard = CopyAsync(process.StandardOutput, output, copying.Token);
+        var diagnostic = CopyAsync(process.StandardError, error, copying.Token);
         try
         {
             await process.StandardInput.WriteAsync(text.AsMemory(), ct);
             process.StandardInput.Close();
-            await process.WaitForExitAsync(ct);
-            await Task.WhenAll(standard, diagnostic);
+            var exited = process.WaitForExitAsync(ct);
+            await await Task.WhenAny(exited, failed.Task);
+            await Task.WhenAll(standard, diagnostic).WaitAsync(TimeSpan.FromSeconds(2), ct);
             return process.ExitCode;
         }
         finally
         {
-            if (!process.HasExited) { process.Kill(entireProcessTree: true); await process.WaitForExitAsync(); }
+            copying.Cancel();
+            try { process.StandardInput.Close(); } catch (IOException) { }
+            if (!process.HasExited)
+            {
+                try { await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(2)); }
+                catch (TimeoutException)
+                {
+                    if (!process.HasExited) process.Kill();
+                    await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+                }
+            }
+            try { await Task.WhenAll(standard, diagnostic).WaitAsync(TimeSpan.FromSeconds(2)); }
+            catch (Exception exception) when (exception is OperationCanceledException or IOException or TimeoutException) { }
+            if (failed.Task.IsFaulted) _ = failed.Task.Exception;
         }
 
-        static async Task CopyAsync(TextReader from, TextWriter to, CancellationToken cancel)
+        async Task CopyAsync(TextReader from, TextWriter to, CancellationToken cancel)
         {
-            var buffer = new char[4096];
-            while (await from.ReadAsync(buffer.AsMemory(), cancel) is var read && read != 0)
-            { await to.WriteAsync(buffer.AsMemory(0, read), cancel); await to.FlushAsync(cancel); }
+            try
+            {
+                var buffer = new char[4096];
+                while (await from.ReadAsync(buffer.AsMemory(), cancel) is var read && read != 0)
+                { await to.WriteAsync(buffer.AsMemory(0, read), cancel); await to.FlushAsync(cancel); }
+            }
+            catch (Exception exception) { failed.TrySetException(exception); throw; }
         }
     }
 
@@ -201,10 +222,9 @@ internal static class NativeJoinHook
         var business = CloneArguments(input);
         // Validate all canonical scalars before networking or recording a pending intent.
         _ = Canonical(business);
-        var handle = await join.EnsureAsync(capture, ct);
-        await using var binding = await NativeJoinBinding.AcquireAsync(join.PrivateFolder, capture.Provider, capture.NativeId,
-            Environment.MachineName, handle.RepositoryId, capture.Cwd, ct, existingOnly: true);
-        if (binding.CurrentHandle != handle) throw new IOException("The native binding changed before signing.");
+        await using var binding = await NativeJoinBinding.AcquireEstablishedAsync(join.PrivateFolder, capture.Provider, capture.NativeId,
+            Environment.MachineName, capture.Cwd, ct);
+        if (binding.CurrentHandle is null) throw new IOException("An established native binding is required before signing.");
         var expires = (clock ?? TimeProvider.System).GetUtcNow().AddMinutes(2).ToUnixTimeSeconds();
         var unsigned = JsonSerializer.SerializeToElement(new
         {
@@ -218,9 +238,12 @@ internal static class NativeJoinHook
         return JsonSerializer.SerializeToElement(result);
     }
 
-    internal static async Task<AdapterReply> InvokeAsync(NativeJoin join, string provider, string tool, JsonElement input, CancellationToken ct, TimeProvider? clock = null)
+    internal static async Task<AdapterReply> InvokeAsync(NativeJoin join, string provider, string tool, JsonElement input, CancellationToken ct, TimeProvider? clock = null,
+        Func<string, CancellationToken, Task<string>>? resolveCheckout = null,
+        Func<string, byte[], CancellationToken, Task>? writeReadCache = null, Func<TimeSpan, CancellationToken, Task>? retryDelay = null)
     {
         if (input.ValueKind != JsonValueKind.Object || !input.TryGetProperty("_cocernNative", out var stamp)) return new(false, "native_stamp_required");
+        string? authenticationFailure = null;
         try
         {
             if (provider is not ("claude" or "codex") || !Unique(input) || Encoding.UTF8.GetByteCount(input.GetRawText()) > MaximumInputBytes ||
@@ -239,41 +262,50 @@ internal static class NativeJoinHook
             var unsigned = JsonNode.Parse(stamp.GetRawText())!.AsObject();
             unsigned.Remove("mac");
             string ownSession;
-            await using (var binding = await NativeJoinBinding.AcquireAsync(join.PrivateFolder, provider, native, Environment.MachineName, repository, cwd, ct, existingOnly: true))
+            await using (var binding = await NativeJoinBinding.AcquireAsync(join.PrivateFolder, provider, native, Environment.MachineName, repository, cwd, ct, existingOnly: true,
+                resolveCheckout: resolveCheckout, authenticate: candidate =>
+                {
+                    var authenticatedNow = (clock ?? TimeProvider.System).GetUtcNow().ToUnixTimeSeconds();
+                    if (expires <= authenticatedNow || expires > authenticatedNow + 120) { authenticationFailure = "native_stamp_expired"; return false; }
+                    return candidate.Generation == generation && candidate.CurrentHandle is not null && candidate.Provider == provider && candidate.NativeId == native &&
+                        candidate.Workspace == cwd && candidate.RepositoryId == repository &&
+                        CryptographicOperations.FixedTimeEquals(Convert.FromHexString(mac), Convert.FromHexString(Mac(candidate, tool, business, JsonSerializer.SerializeToElement(unsigned))));
+                }))
             {
-                if (binding.Generation != generation || binding.CurrentHandle is null || binding.Provider != provider || binding.NativeId != native ||
-                    binding.Workspace != cwd || binding.RepositoryId != repository ||
-                    !CryptographicOperations.FixedTimeEquals(Convert.FromHexString(mac), Convert.FromHexString(Mac(binding, tool, business, JsonSerializer.SerializeToElement(unsigned)))))
-                    return new(false, "native_stamp_invalid");
+                now = (clock ?? TimeProvider.System).GetUtcNow().ToUnixTimeSeconds();
+                if (expires <= now || expires > now + 120) return new(false, "native_stamp_expired");
                 ownSession = binding.CurrentHandle!.SessionId;
-                if (RelayToolCatalog.TryGet(tool, out var definition) && !definition.IsMutation &&
-                    BindReadInvocation(binding, tool, invocation, business, expires, now) is { } refusal) return new(false, refusal);
+                if (await NativeJoin.AdmitStampedInvocationAsync(binding, tool, invocation, business, expires, now, ct, writeReadCache, retryDelay) is { } refusal) return new(false, refusal);
+                now = (clock ?? TimeProvider.System).GetUtcNow().ToUnixTimeSeconds();
+                if (expires <= now || expires > now + 120) return new(false, "native_stamp_expired");
             }
             // No preflight, status probe, session allocation or business call is possible above this point.
-            // The hub's existing replay fingerprint is representation-sensitive. Keep stable request IDs
-            // paired with the same canonical wire, including equivalent property orders/numeric spellings.
-            using var canonical = JsonDocument.Parse(Canonical(business));
-            return ProjectReply(await join.CallAsync(new(provider, native, cwd), invocation, tool, canonical.RootElement, ct, generation), ownSession, repository);
+            // CallAsync chooses canonical wire for versioned fences and preserves exact legacy wire.
+            return ProjectReply(await join.CallAsync(new(provider, native, cwd), invocation, tool, business, ct, generation), ownSession, repository);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or JsonException or InvalidOperationException or KeyNotFoundException or FormatException or OverflowException)
-        { return new(false, "native_stamp_invalid"); }
+        { return new(false, authenticationFailure ?? "native_stamp_invalid"); }
     }
 
     private sealed record ReadAdmission(string Id, string Digest, long Expires);
 
     // This one bounded adjunct is protected by the existing binding lease. It never consumes or
     // removes mutation/uncertain history and contains no original tool arguments or credentials.
-    internal static string? BindReadInvocation(NativeJoinBinding binding, string tool, string invocation, JsonElement business, long expires, long now)
+    internal static async Task<string?> BindReadInvocationAsync(NativeJoinBinding binding, string tool, string invocation, JsonElement business, long expires, long now,
+        bool admit = true, CancellationToken ct = default, Func<string, byte[], CancellationToken, Task>? writeReadCache = null,
+        Func<TimeSpan, CancellationToken, Task>? retryDelay = null)
     {
         if (expires <= now || expires > now + 120) return "native_stamp_expired";
         var generation = binding.Generation; // Also revalidates the lease's exact credential scope.
         var path = Path.ChangeExtension(binding.StatePath, ".reads");
         ReadAdmission[] prior = [];
+        byte[]? priorBytes = null;
         if (File.Exists(path))
         {
             if (!NodeState.IsPrivateFile(path) || new FileInfo(path).Length > MaximumInputBytes) throw new IOException("The native read cache is not private or bounded.");
-            using var document = JsonDocument.Parse(File.ReadAllBytes(path), new JsonDocumentOptions { MaxDepth = 4 });
+            priorBytes = File.ReadAllBytes(path);
+            using var document = JsonDocument.Parse(priorBytes, new JsonDocumentOptions { MaxDepth = 4 });
             if (!Unique(document.RootElement) || document.RootElement.ValueKind != JsonValueKind.Array || document.RootElement.GetArrayLength() > 4096)
                 throw new IOException("The native read cache is invalid.");
             prior = JsonSerializer.Deserialize<ReadAdmission[]>(document.RootElement) ?? throw new IOException("The native read cache is invalid.");
@@ -292,11 +324,45 @@ internal static class NativeJoinHook
         }
         else
         {
+            if (!admit) return null;
             if (live.Count >= 4096) return "native_read_capacity";
             live.Add(new(key, digest, expires));
         }
-        NodeState.WritePrivately(path, JsonSerializer.SerializeToUtf8Bytes(live));
+        if (!admit) return null;
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(live);
+        for (var attempt = 0; ; attempt++)
+        {
+            ct.ThrowIfCancellationRequested();
+            try
+            {
+                if (writeReadCache is null) NodeState.WritePrivately(path, bytes);
+                else await writeReadCache(path, bytes, ct);
+                break;
+            }
+            catch (Exception exception) when ((exception is IOException or UnauthorizedAccessException) &&
+                (exception.HResult is unchecked((int)0x80070005) or unchecked((int)0x80070020) or unchecked((int)0x80070021)))
+            {
+                ct.ThrowIfCancellationRequested();
+                if (attempt >= 3 || !UnchangedPrior()) throw;
+                if (retryDelay is null) await Task.Delay(TimeSpan.FromMilliseconds(25), ct);
+                else await retryDelay(TimeSpan.FromMilliseconds(25), ct);
+                ct.ThrowIfCancellationRequested();
+                if (!UnchangedPrior()) throw;
+            }
+        }
         return null;
+
+        bool UnchangedPrior()
+        {
+            try
+            {
+                // Recovery is confined to the already-validated ephemeral cache. Never repair or
+                // replace missing, linked, corrupt or externally changed state, or touch mutation history.
+                return priorBytes is not null && binding.Generation == generation && NodeState.IsPrivateFile(path) &&
+                    new FileInfo(path).Length == priorBytes.Length && File.ReadAllBytes(path).AsSpan().SequenceEqual(priorBytes);
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { return false; }
+        }
     }
 
     private static AdapterReply ProjectReply(AdapterReply reply, string ownSession, string repository)
@@ -376,14 +442,26 @@ internal static class NativeJoinHook
 internal sealed class NativeRegistration
 {
     internal const string Refusal = "Native client registration could not be verified.";
+    internal const string ProtocolMetadata = "CoCern.NativeClientProtocol";
+    internal const string ProtocolVersion = "1";
+    internal const string PrivateServerName = "CoCern native private v1";
+    internal static void RestrictPrivateEnvironment(ProcessStartInfo start)
+    {
+        foreach (var name in start.Environment.Keys.Where(name => name.StartsWith("COCERN_", StringComparison.OrdinalIgnoreCase)).ToArray())
+            start.Environment.Remove(name);
+        // Explicit private context is the only authority. An old flag-ignoring helper or an
+        // accidental backend fallback must fail before default node/profile discovery.
+        start.Environment["COCERN_URL"] = "invalid-private-fallback";
+        start.Environment["COCERN_TOKEN"] = "invalid-private-fallback";
+    }
     internal static bool ValidClientArguments(string[] args) =>
         args is ["--native-client", "codex" or "claude", "--connection", var folder, "--profile", var profile] &&
         ValidPath(folder) && ValidPath(profile);
 
     private static bool ValidPath(string path) => path.Length is > 0 and <= 32768 && !path.Any(char.IsControl) && Path.IsPathFullyQualified(path);
 
-    internal static NativeRegistration? FromClientArguments(string[] args) => ValidClientArguments(args)
-        ? Read(Path.Combine(args[3], "native-client-" + args[1] + ".candidate.json"), args[1], args[3], args[5]) : null;
+    internal static NativeRegistration? FromClientArguments(string[] args, string? helperVersion = null) => ValidClientArguments(args)
+        ? Read(Path.Combine(args[3], "native-client-" + args[1] + ".candidate.json"), args[1], args[3], args[5], helperVersion) : null;
 
     internal AdapterOptions Connection => options;
     internal const int MaximumFrameBytes = 2048;
@@ -404,7 +482,7 @@ internal sealed class NativeRegistration
         PipeName = "cocern-native-" + NativeCheckout.Hash(JsonSerializer.Serialize(new[] { provider, scope, profileKey, definition }));
     }
 
-    internal static NativeRegistration? Read(string path, string provider, string folder, string profile)
+    internal static NativeRegistration? Read(string path, string provider, string folder, string profile, string? helperVersion = null)
     {
         try
         {
@@ -420,7 +498,7 @@ internal sealed class NativeRegistration
                 ChatLocators.Text(data, "state") != "inactive" || ChatLocators.Text(data, "provider") != provider ||
                 ChatLocators.Text(data, "connection") is not { } capturedFolder || !string.Equals(capturedFolder, folder, comparison) ||
                 ChatLocators.Text(data, "profile") is not { } capturedProfile || !string.Equals(capturedProfile, profile, comparison) ||
-                ChatLocators.Text(data, "helperVersion") != typeof(NativeRegistration).Assembly.ManifestModule.ModuleVersionId.ToString("D") ||
+                ChatLocators.Text(data, "helperVersion") != (helperVersion ?? typeof(NativeRegistration).Assembly.ManifestModule.ModuleVersionId.ToString("D")) ||
                 ChatLocators.Text(data, "credentialScope") is not { Length: 64 } capturedScope ||
                 ChatLocators.Text(data, "definition") is not { Length: 64 } definition) return null;
             var currentScope = NodeState.HasIdentityFiles(folder) ? NodeState.NativeCredentialIdentity(folder) : LocalWakeConnection.NativeCredentialIdentity(folder);

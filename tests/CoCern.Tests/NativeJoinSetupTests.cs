@@ -367,6 +367,7 @@ public sealed class NativeJoinSetupTests : IDisposable
         var registration = NativeRegistration.Read(candidate, "claude", binding.Folder, Profile)!;
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         // Only the synthetic HttpMessageHandler allocates the private fixture handle. The loopback endpoint is read-only.
+        await binding.Join.EnsureAsync(binding.Capture, timeout.Token);
         var stamped = await NativeJoinHook.StampAsync(binding.Join, binding.Capture, "chat_directory", "actual-mcp-read", JsonSerializer.SerializeToElement(new { }), timeout.Token);
         Assert.Equal(0, relay.Reads);
         await using var child = WiringStart(["--native-client", "claude", "--connection", binding.Folder, "--profile", Profile]);
@@ -513,6 +514,150 @@ public sealed class NativeJoinSetupTests : IDisposable
 
 
 
+    [Fact]
+    public async Task FixRound1_missing_private_selector_refuses_valid_raw_settings_before_startup()
+    {
+        await using var relay = new WiringRelayCounter();
+        var (_, args) = WiringCandidate(relay.Origin);
+        await using var child = WiringStart(args[2..], relay.Origin);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await child.Process.StandardInput.WriteLineAsync("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"owned-incomplete-private\",\"version\":\"1\"}}}");
+        var response = await child.Process.StandardOutput.ReadLineAsync(timeout.Token);
+        child.Process.StandardInput.Close();
+        await child.Process.WaitForExitAsync(timeout.Token);
+        Assert.Equal(0, relay.Count); Assert.Equal(0, relay.BusinessRequests); Assert.Equal(0, relay.HintAttempts);
+        Assert.Equal("unchanged", File.ReadAllText(child.Sentinel));
+        Assert.Null(response);
+        Assert.Equal(1, child.Process.ExitCode);
+        Assert.Equal("Native client registration could not be verified.", (await child.Error).Trim());
+    }
+
+    [Fact]
+    public async Task FixRound1_private_launcher_refuses_initial_actual_flag_ignoring_backend_before_raw_startup()
+    {
+        await using var relay = new WiringRelayCounter();
+        var (_, args) = WiringCandidate(relay.Origin);
+        var deployment = Path.Combine(root, "old deployment with spaces");
+        AdapterDeployment.Publish(FixRound1OldOutput(), deployment);
+        await using var child = WiringStart(["--dev-launch", deployment, .. args], relay.Origin);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await child.Process.StandardInput.WriteLineAsync("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"owned-old-private\",\"version\":\"1\"}}}");
+        var response = await child.Process.StandardOutput.ReadLineAsync(timeout.Token);
+        child.Process.StandardInput.Close();
+        await child.Process.WaitForExitAsync(timeout.Token);
+        Assert.Equal(0, relay.Count); Assert.Equal(0, relay.BusinessRequests); Assert.Equal(0, relay.HintAttempts);
+        Assert.Equal("unchanged", File.ReadAllText(child.Sentinel));
+        Assert.Null(response);
+        Assert.Equal(1, child.Process.ExitCode);
+        Assert.Contains("Native client registration could not be verified.", await child.Error);
+    }
+
+    [Fact]
+    public async Task FixRound1_private_launcher_never_admits_actual_flag_ignoring_replacement_or_forwards_raw_calls()
+    {
+        await using var relay = new WiringRelayCounter();
+        var (registration, args) = WiringCandidate(relay.Origin);
+        var deployment = WiringDeployment();
+        await using var child = WiringStart(["--dev-launch", deployment, .. args], relay.Origin);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var helper = registration.AnswerAsync(timeout.Token);
+        try
+        {
+            await WiringRpc(child, 1, "initialize", new { protocolVersion = "2025-06-18", capabilities = new { }, clientInfo = new { name = "owned-replacement-fixture", version = "1" } }, timeout.Token);
+            Assert.True(await helper);
+            await child.Process.StandardInput.WriteLineAsync("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}");
+            AdapterDeployment.Publish(FixRound1OldOutput(), deployment);
+            var listed = await WiringRpc(child, 2, "tools/list", new { }, timeout.Token);
+            var call = await WiringRpc(child, 3, "tools/call", new { name = "chat_directory", arguments = new { repositoryId = "repo" } }, timeout.Token);
+            var rejected = call.TryGetProperty("error", out _) || call.GetProperty("result").TryGetProperty("isError", out var error) && error.GetBoolean();
+            Assert.Equal(0, relay.Count); Assert.Equal(0, relay.BusinessRequests); Assert.Equal(0, relay.HintAttempts);
+            Assert.Equal("unchanged", File.ReadAllText(child.Sentinel));
+            Assert.DoesNotContain(listed.GetProperty("result").GetProperty("tools").EnumerateArray(), tool => tool.GetProperty("name").GetString() == "session_open");
+            Assert.True(rejected);
+        }
+        finally { timeout.Cancel(); try { await helper; } catch (OperationCanceledException) { } }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task FixRound1_actual_PreToolUse_child_without_dispatch_has_zero_relay_traffic(bool established)
+    {
+        await using var relay = new WiringReadRelay();
+        await using var fixture = new NativeJoinHookTests.HookFixture(origin: relay.Origin);
+        if (established) await fixture.Join.EnsureAsync(fixture.Capture, default);
+        fixture.Requests = 0;
+        await using var child = WiringStart(["--native-hook", "claude", "--connection", fixture.Folder]);
+        var text = JsonSerializer.Serialize(new { hook_event_name = "PreToolUse", session_id = fixture.Capture.NativeId, cwd = fixture.Capture.Cwd,
+            tool_name = "mcp__cocern__send_message", tool_use_id = "cancelled-before-MCP", tool_input = new { recipientSessionId = "peer", text = "never dispatch" } });
+        await child.Process.StandardInput.WriteAsync(text); child.Process.StandardInput.Close();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var output = await child.Process.StandardOutput.ReadToEndAsync(timeout.Token);
+        await child.Process.WaitForExitAsync(timeout.Token);
+        Assert.Equal(0, relay.Connections); Assert.Equal(0, relay.Reads); Assert.Equal(0, relay.Preflights);
+        Assert.Equal(0, relay.Probes); Assert.Equal(0, relay.Mutations); Assert.Equal(0, relay.InvalidWire); Assert.Equal(0, relay.HintAttempts);
+        Assert.Equal(0, fixture.Requests); Assert.Empty(fixture.Business);
+        Assert.Equal(established ? 0 : 2, child.Process.ExitCode);
+        if (established) Assert.Contains("updatedInput", output); else Assert.Empty(output);
+        Assert.Equal("unchanged", File.ReadAllText(child.Sentinel));
+    }
+
+    [Fact]
+    public async Task FixRound1_cancelled_development_hook_preserves_independent_sentinel_descendant()
+    {
+        const string python = "C:/Python314/python.exe";
+        Assert.True(File.Exists(python));
+        var source = Directory.CreateDirectory(Path.Combine(root, "synthetic-helper")).FullName;
+        File.WriteAllText(Path.Combine(source, "CoCern.Adapter.deps.json"), "{}");
+        File.WriteAllText(Path.Combine(source, "CoCern.Adapter.runtimeconfig.json"), "{}");
+        File.WriteAllText(Path.Combine(source, "CoCern.Adapter.dll"), """
+            import json, pathlib, subprocess, sys, time
+            folder = pathlib.Path(sys.argv[sys.argv.index('--connection') + 1])
+            sentinel = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=0x08000000)
+            (folder / 'owned-pids.json').write_text(json.dumps({'helper': __import__('os').getpid(), 'sentinel': sentinel.pid}))
+            sys.stdin.read()
+            time.sleep(60)
+            """);
+        var deployment = Path.Combine(root, "synthetic-helper-deployment");
+        AdapterDeployment.Publish(source, deployment);
+        using var cancel = new CancellationTokenSource();
+        using var output = new StringWriter(); using var error = new StringWriter();
+        var run = NativeJoinHook.RunDevelopmentAsync(deployment, python, "claude", root, new StringReader("{}"), output, error, cancel.Token);
+        Process? sentinel = null; Process? helper = null;
+        try
+        {
+            using var ready = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var marker = Path.Combine(root, "owned-pids.json");
+            while (!File.Exists(marker)) { await Task.Delay(25, ready.Token); if (run.IsCompleted) await run; }
+            using var pids = JsonDocument.Parse(File.ReadAllText(marker));
+            sentinel = Process.GetProcessById(pids.RootElement.GetProperty("sentinel").GetInt32());
+            helper = Process.GetProcessById(pids.RootElement.GetProperty("helper").GetInt32());
+            Assert.False(sentinel.HasExited); Assert.False(helper.HasExited);
+            cancel.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run.WaitAsync(TimeSpan.FromSeconds(10)));
+            Assert.True(helper.HasExited);
+            Assert.False(sentinel.HasExited, "Cancelling an owned hook must leave its separately managed descendant alive.");
+        }
+        finally
+        {
+            cancel.Cancel();
+            foreach (var owned in new[] { helper, sentinel })
+            {
+                if (owned is null) continue;
+                try { if (!owned.HasExited) { owned.Kill(); await owned.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5)); } }
+                finally { owned.Dispose(); }
+            }
+            try { await run.WaitAsync(TimeSpan.FromSeconds(10)); } catch (OperationCanceledException) { }
+        }
+    }
+
+    private static string FixRound1OldOutput()
+    {
+        var output = Path.Combine(Workspace(), "artifacts", "n4cover", "bin", "CoCern.Adapter", "debug");
+        Assert.True(File.Exists(Path.Combine(output, "CoCern.Adapter.dll")), "The preserved own pre-wiring package is required; never substitute primary outputs.");
+        return output;
+    }
+
     private static string WiringOutput() => Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "CoCern.Adapter", "debug"));
     private string WiringDeployment()
     {
@@ -609,7 +754,8 @@ public sealed class NativeJoinSetupTests : IDisposable
         private readonly TcpListener listener = new(IPAddress.Loopback, 0);
         private readonly CancellationTokenSource stopping = new();
         private readonly Task watching;
-        private int reads, preflights, probes, mutations, invalidWire, hintAttempts;
+        private int reads, preflights, probes, mutations, invalidWire, hintAttempts, connections;
+        internal int Connections => Volatile.Read(ref connections);
         internal int Reads => Volatile.Read(ref reads);
         internal int Preflights => Volatile.Read(ref preflights);
         internal int Probes => Volatile.Read(ref probes);
@@ -629,6 +775,7 @@ public sealed class NativeJoinSetupTests : IDisposable
                 while (!stopping.IsCancellationRequested)
                 {
                     using var client = await listener.AcceptTcpClientAsync(stopping.Token);
+                    Interlocked.Increment(ref connections);
                     using var stream = client.GetStream();
                     using var headers = new MemoryStream();
                     var one = new byte[1];
