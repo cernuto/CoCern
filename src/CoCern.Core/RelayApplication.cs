@@ -32,7 +32,7 @@ public sealed class RelayApplication : IRelayApplication
     public string IncarnationId => incarnation;
 
     public RelayApplication(IGrainFactory grains, IMachineDirectory? machines = null, IActivitySink? activity = null, IFullTextSearch? search = null, AttentionOptions? attention = null, IAnalyticsTool? analytics = null, AnomalyOptions? anomaly = null, OrderOptions? orders = null, IDocCacheTools? docs = null,
-        ITokenCounter? tokens = null, TokenOptions? tokenOptions = null, FeedbackRules? feedback = null, ITaskArchive? archive = null, IRelayObservationSource? observations = null)
+        ITokenCounter? tokens = null, TokenOptions? tokenOptions = null, FeedbackRules? feedback = null, ITaskArchive? archive = null, IRelayObservationSource? observations = null, IAdminTools? admin = null)
     {
         // A turned-off feature answers for itself, so no call site checks for it.
         aggregates = new(grains, archive);
@@ -52,7 +52,7 @@ public sealed class RelayApplication : IRelayApplication
             new StatusTools(aggregates, standing, attentionOptions, orders, telemetry),
             new MessageTools(aggregates, machines ?? new MachineDirectory(grains), attentionOptions, telemetry),
             new SearchTools(search, analytics ?? AnalyticsTool.Off),
-            docTools);
+            docTools, admin ?? AdminTools.Off);
         addOns = new(aggregates, claims, standing, guard, tokenStatus, attentionOptions, search, telemetry, counter, tokenOptions ?? new(), observations);
     }
 

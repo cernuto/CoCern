@@ -20,7 +20,7 @@ public static class CoordinationTools
 
     public static IReadOnlyList<string> NamesForRole(bool admin, bool chatOnly = false, bool diagnostics = false) => Surface(admin, chatOnly, diagnostics).Select(tool => tool.Name).ToArray();
     public static bool IsAllowed(string name, bool admin, bool chatOnly = false, bool diagnostics = false) =>
-        RelayToolCatalog.TryGet(name, out var tool) && (admin || !tool.AdministratorOnly) && (!chatOnly || ChatTools.Contains(tool.Name)) && (!diagnostics || !tool.AdministratorOnly || tool.Name == RelayTools.AnalyticsQuery);
+        RelayToolCatalog.TryGet(name, out var tool) && (admin || !tool.AdministratorOnly) && (!chatOnly || ChatTools.Contains(tool.Name)) && (!diagnostics || InDiagnostics(tool));
 
     // Private integration seam. Only a future verified provider surface can supply this callback;
     // the raw registration never inspects arguments for a native ID or stamp.
@@ -41,7 +41,10 @@ public static class CoordinationTools
         return Surface(admin, chatOnly, diagnostics).Select(tool => new ForwardedTool(tool, calls));
     }
 
-    private static IEnumerable<RelayTool> Surface(bool admin, bool chatOnly, bool diagnostics) => RelayToolCatalog.ForRole(admin).Where(tool => (!chatOnly || ChatTools.Contains(tool.Name)) && (!diagnostics || !tool.AdministratorOnly || tool.Name == RelayTools.AnalyticsQuery));
+    private static IEnumerable<RelayTool> Surface(bool admin, bool chatOnly, bool diagnostics) => RelayToolCatalog.ForRole(admin).Where(tool => (!chatOnly || ChatTools.Contains(tool.Name)) && (!diagnostics || InDiagnostics(tool)));
+
+    /// <summary>The diagnostics profile: the worker tools plus the administrator's two reads that change nothing and hold no secret.</summary>
+    private static bool InDiagnostics(RelayTool tool) => !tool.AdministratorOnly || tool.Name is RelayTools.AnalyticsQuery or RelayTools.HubDiagnose;
 
     /// <summary>
     /// Every chat on a PC shares one principal, and agents reuse simple request IDs ("open-1"), so two chats' session_open calls could

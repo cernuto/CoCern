@@ -29,7 +29,7 @@ public sealed class AdapterOptions
     public bool SignalR { get; }
     /// <summary><c>COCERN_PROFILE=chat</c>: advertise and forward only the messaging tools, which keeps tool definitions small in every turn.</summary>
     public bool ChatOnly { get; init; }
-    /// <summary>COCERN_PROFILE=diagnostics: worker tools plus the analytics read; administrator credentials remain required.</summary>
+    /// <summary>COCERN_PROFILE=diagnostics: worker tools plus the analytics read and hub_diagnose; administrator credentials remain required.</summary>
     public bool Diagnostics { get; init; }
     /// <summary>Set only when the adapter runs on the node's credentials; successful <c>session_open</c> calls are then handed to the node there.</summary>
     public string? NodeFolder { get; init; }

@@ -63,7 +63,7 @@ public sealed class AnalyticsBatchSliceTests(Xunit.Abstractions.ITestOutputHelpe
     public void DiagnosticsPreservesWorkerSurfaceAndRequiresAdminForAnalytics()
     {
         var worker = CoordinationTools.NamesForRole(false);
-        Assert.Equal(worker.Append(RelayTools.AnalyticsQuery).Order(), CoordinationTools.NamesForRole(true, diagnostics: true).Order());
+        Assert.Equal(worker.Append(RelayTools.AnalyticsQuery).Append(RelayTools.HubDiagnose).Order(), CoordinationTools.NamesForRole(true, diagnostics: true).Order());
         Assert.Equal(worker, CoordinationTools.NamesForRole(false, diagnostics: true));
         Assert.False(CoordinationTools.IsAllowed(RelayTools.ControlRequest, true, diagnostics: true));
         Assert.False(CoordinationTools.IsAllowed(RelayTools.AnalyticsQuery, false, diagnostics: true));
