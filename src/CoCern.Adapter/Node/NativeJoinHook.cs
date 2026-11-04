@@ -34,13 +34,14 @@ internal static class NativeJoinHook
     }
 
     // The setup-owned launcher identity stays stable while its helper follows the current deployment.
-    internal static async Task<int> RunDevelopmentAsync(string root, string dotnet, string provider, string folder, TextReader input, TextWriter output, TextWriter error, CancellationToken ct)
+    internal static async Task<int> RunDevelopmentAsync(string root, string dotnet, string provider, string folder, TextReader input, TextWriter output, TextWriter error, CancellationToken ct, string? profile = null)
     {
         var text = await ReadInputAsync(input, ct);
         if (text is null) return 0;
         var adapter = AdapterDeployment.AdapterPath(root, AdapterDeployment.Read(root));
         var start = new ProcessStartInfo(dotnet) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
         foreach (var argument in new[] { adapter, "--native-hook", provider, "--connection", folder }) start.ArgumentList.Add(argument);
+        if (profile is not null) { start.ArgumentList.Add("--profile"); start.ArgumentList.Add(profile); }
         using var process = Process.Start(start) ?? throw new IOException("The current native helper could not start.");
         var standard = CopyAsync(process.StandardOutput, output, ct);
         var diagnostic = CopyAsync(process.StandardError, error, ct);
@@ -63,6 +64,30 @@ internal static class NativeJoinHook
             while (await from.ReadAsync(buffer.AsMemory(), cancel) is var read && read != 0)
             { await to.WriteAsync(buffer.AsMemory(0, read), cancel); await to.FlushAsync(cancel); }
         }
+    }
+
+    internal static async Task<int> RunRegisteredAsync(string provider, TextReader input, TextWriter output, TextWriter error,
+        NativeJoin join, NativeRegistration registration, CancellationToken ct)
+    {
+        if (provider != registration.Provider || !registration.StillCurrent()) return await Refuse();
+        var text = await ReadInputAsync(input, ct);
+        if (text is null) return 0;
+        try
+        {
+            using var document = JsonDocument.Parse(text, new JsonDocumentOptions { MaxDepth = 32 });
+            if (ParseContext(provider, document.RootElement) is not null &&
+                ChatLocators.Text(document.RootElement, "hook_event_name") is "SessionStart" or "PreToolUse")
+            {
+                // Opportunistic startup/reconnect answer. An already initialized backend has no waiting listener.
+                // Only the endpoint consumes a successful exchange as registration proof; no answering chat ID is retained.
+                await registration.AnswerAsync(ct, TimeSpan.FromMilliseconds(250));
+            }
+            if (!registration.StillCurrent()) return await Refuse();
+            return await RunAsync(provider, new StringReader(text), output, error, join, ct);
+        }
+        catch (JsonException) { return 0; }
+
+        async Task<int> Refuse() { await error.WriteLineAsync("CoCern native capture could not be verified."); return 2; }
     }
 
     internal static async Task<int> RunAsync(string provider, TextReader input, TextWriter output, TextWriter error, NativeJoin join, CancellationToken ct)
@@ -350,6 +375,17 @@ internal static class NativeJoinHook
 // connection, never an answering chat identity. Normal setup does not launch this endpoint.
 internal sealed class NativeRegistration
 {
+    internal const string Refusal = "Native client registration could not be verified.";
+    internal static bool ValidClientArguments(string[] args) =>
+        args is ["--native-client", "codex" or "claude", "--connection", var folder, "--profile", var profile] &&
+        ValidPath(folder) && ValidPath(profile);
+
+    private static bool ValidPath(string path) => path.Length is > 0 and <= 32768 && !path.Any(char.IsControl) && Path.IsPathFullyQualified(path);
+
+    internal static NativeRegistration? FromClientArguments(string[] args) => ValidClientArguments(args)
+        ? Read(Path.Combine(args[3], "native-client-" + args[1] + ".candidate.json"), args[1], args[3], args[5]) : null;
+
+    internal AdapterOptions Connection => options;
     internal const int MaximumFrameBytes = 2048;
     internal const int MaximumInstances = 4;
     internal static TimeSpan MaximumWait => TimeSpan.FromSeconds(15);
@@ -395,7 +431,7 @@ internal sealed class NativeRegistration
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException or InvalidOperationException) { return null; }
     }
 
-    private bool StillCurrent() => Read(path, Provider, Folder, Profile) is { } current && current.Definition == Definition && current.scope == scope;
+    internal bool StillCurrent() => Read(path, Provider, Folder, Profile) is { } current && current.Definition == Definition && current.scope == scope;
 
     internal async Task<NativeRegistration?> AcceptAsync(CancellationToken ct, TimeSpan? budget = null)
     {

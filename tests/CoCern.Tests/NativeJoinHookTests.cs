@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Net;
 using CoCern.Adapter;
 using CoCern.Adapter.Node;
+using CoCern.Adapter.Setup;
 using CoCern.Contracts;
 using Xunit;
 
@@ -201,6 +202,57 @@ public sealed class NativeJoinHookTests
         Assert.DoesNotContain("synthetic-handle-token", error.ToString());
     }
 
+    [Theory]
+    [InlineData("SessionStart")]
+    [InlineData("PreToolUse")]
+    public async Task Wiring_configured_helper_answers_the_registration_before_its_existing_event_behavior(string eventName)
+    {
+        await using var fixture = new HookFixture();
+        var profile = Directory.CreateDirectory(Path.Combine(fixture.Folder, "owned-profile")).FullName;
+        var candidate = ClientSettings.StageNativeCandidate(fixture.Folder, "claude", "fixture-helper", clientProfile: profile)!;
+        var registration = NativeRegistration.Read(candidate, "claude", fixture.Folder, profile)!;
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var accepting = registration.AcceptAsync(timeout.Token, TimeSpan.FromMilliseconds(750));
+        var input = JsonSerializer.Serialize(new { hook_event_name = eventName, session_id = Parent, cwd = fixture.Capture.Cwd,
+            tool_name = "mcp__cocern__send_message", tool_use_id = "registered-1", tool_input = new { recipientSessionId = "peer", text = "hello", expectedVersion = 5 } });
+        using var output = new StringWriter(); using var error = new StringWriter();
+        Assert.Equal(0, await NativeJoinHook.RunRegisteredAsync("claude", new StringReader(input), output, error, fixture.Join, registration, timeout.Token));
+        Assert.NotNull(await accepting);
+        Assert.Empty(error.ToString());
+        if (eventName == "SessionStart") Assert.Empty(output.ToString());
+        else
+        {
+            using var wrapped = JsonDocument.Parse(output.ToString());
+            var updated = wrapped.RootElement.GetProperty("hookSpecificOutput").GetProperty("updatedInput");
+            Assert.Equal("peer", updated.GetProperty("recipientSessionId").GetString());
+            Assert.Equal(5, updated.GetProperty("expectedVersion").GetInt32());
+            Assert.True(updated.TryGetProperty("_cocernNative", out _));
+            Assert.False(wrapped.RootElement.GetProperty("hookSpecificOutput").TryGetProperty("permissionDecision", out _));
+        }
+    }
+
+    [Theory]
+    [InlineData("provider")]
+    [InlineData("changed-candidate")]
+    public async Task Wiring_helper_refuses_a_conflicting_or_changed_registration_before_relay(string conflict)
+    {
+        await using var fixture = new HookFixture();
+        var profile = Directory.CreateDirectory(Path.Combine(fixture.Folder, "owned-profile")).FullName;
+        var candidate = ClientSettings.StageNativeCandidate(fixture.Folder, "claude", "fixture-helper", clientProfile: profile)!;
+        var registration = NativeRegistration.Read(candidate, "claude", fixture.Folder, profile)!;
+        if (conflict == "changed-candidate")
+        {
+            var changed = JsonNode.Parse(File.ReadAllText(candidate))!.AsObject(); changed["credentialScope"] = new string('0', 64);
+            NodeState.WritePrivately(candidate, JsonSerializer.SerializeToUtf8Bytes(changed));
+        }
+        var input = JsonSerializer.Serialize(new { hook_event_name = "PreToolUse", session_id = Parent, cwd = fixture.Capture.Cwd,
+            tool_name = "mcp__cocern__send_message", tool_use_id = "refused-1", tool_input = new { recipientSessionId = "peer", text = "hello" } });
+        using var output = new StringWriter(); using var error = new StringWriter();
+        Assert.Equal(2, await NativeJoinHook.RunRegisteredAsync(conflict == "provider" ? "codex" : "claude", new StringReader(input), output, error, fixture.Join, registration, default));
+        Assert.Equal(0, fixture.Requests); Assert.Empty(output.ToString());
+        Assert.Contains("could not be verified", error.ToString(), StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task Native_catalog_is_only_the_authorized_compact_surface_and_raw_schemas_stay_identical()
     {
@@ -355,7 +407,7 @@ public sealed class NativeJoinHookTests
         Assert.Equal(first.Version, replay.Version);
     }
 
-    private sealed class HookFixture : IAsyncDisposable
+    internal sealed class HookFixture : IAsyncDisposable
     {
         private readonly string root = Path.Combine(Workspace(), "artifacts", "n4", Guid.NewGuid().ToString("N")[..12]);
         private readonly HttpClient http;
@@ -372,14 +424,14 @@ public sealed class NativeJoinHookTests
         internal List<string> OwnHandles { get; } = [];
         internal List<JsonElement> Business { get; } = [];
 
-        internal HookFixture(string connectionToken = "synthetic-connection")
+        internal HookFixture(string connectionToken = "synthetic-connection", string origin = "http://127.0.0.1:4321")
         {
             var checkout = Directory.CreateDirectory(Path.Combine(root, "checkout")).FullName;
             var git = new ProcessStartInfo("git") { WorkingDirectory = checkout, UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true, RedirectStandardOutput = true };
             git.ArgumentList.Add("init"); git.ArgumentList.Add("-q");
             foreach (var key in git.Environment.Keys.Where(key => key.StartsWith("GIT_", StringComparison.OrdinalIgnoreCase)).ToArray()) git.Environment.Remove(key);
             using (var process = Process.Start(git)!) { var error = process.StandardError.ReadToEnd(); process.WaitForExit(); Assert.True(process.ExitCode == 0, error); }
-            var options = Options = new AdapterOptions("http://127.0.0.1:4321", connectionToken);
+            var options = Options = new AdapterOptions(origin, connectionToken);
             var token = Path.Combine(root, "fixture-token");
             NodeState.WritePrivately(token, System.Text.Encoding.UTF8.GetBytes(options.Token));
             var folder = Folder = LocalWakeConnection.Create(options, token, Path.Combine(root, "cache"))!.Folder;
@@ -421,7 +473,7 @@ public sealed class NativeJoinHookTests
         }
     }
 
-    private sealed class HookHandler(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> send) : HttpMessageHandler
+    internal sealed class HookHandler(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> send) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) => send(request, cancellationToken);
     }

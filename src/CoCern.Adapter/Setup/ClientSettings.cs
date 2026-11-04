@@ -97,6 +97,7 @@ internal static class ClientSettings
             if (ChatLocators.Text(previous.RootElement, "profile") is { } previousProfile && previousProfile != clientProfile) return null;
         }
         var invocation = command + " --native-hook " + provider + " --connection " + LogonStart.Quote(folder) +
+            (clientProfile is null ? "" : " --profile " + LogonStart.Quote(clientProfile)) +
             (developmentRoot is null ? "" : " --development-root " + LogonStart.Quote(Path.GetFullPath(developmentRoot)));
         JsonObject Handler(bool stop = false) => stop
             ? new() { ["type"] = "command", ["command"] = invocation, ["asyncRewake"] = true, ["timeout"] = StopHookTimeoutSeconds }

@@ -391,6 +391,7 @@ public sealed class NodeTests : IDisposable
         var transport = new NodeTransport
         {
             JoinCode = RelayHostFixture.JoinCode,
+            Clients = () => [], Locators = [],
             ProbeFingerprint = (_, _) => throw new InvalidOperationException("A loopback HTTP hub must not be probed."),
             CreateHandler = (fingerprint, _) => { pins.Enqueue(fingerprint); return traffic.Wrap(host.Server.CreateHandler()); },
             HubHandler = () => host.Server.CreateHandler(),
@@ -504,7 +505,7 @@ public sealed class NodeTests : IDisposable
         var run = NodeRunner.RunAsync(state, InMemoryHub, new NodeTransport
         {
             JoinCode = transport.JoinCode, ProbeFingerprint = transport.ProbeFingerprint, CreateHandler = transport.CreateHandler, HubHandler = transport.HubHandler, MachineName = "Node PC",
-            Locators = [locator, new ClaudeChatLocator(claude)], AnnounceInterval = transport.AnnounceInterval, FirstRetry = transport.FirstRetry, MaxRetry = transport.MaxRetry, Trace = events.Enqueue,
+            Clients = () => [], Locators = [locator, new ClaudeChatLocator(claude)], AnnounceInterval = transport.AnnounceInterval, FirstRetry = transport.FirstRetry, MaxRetry = transport.MaxRetry, Trace = events.Enqueue,
             CodexExecutable = () => Path.Combine(root, "codex.exe"), CodexDispatcher = _ => new RecordingDispatcher()
         }, error, stop.Token);
         await WaitForAsync(() => traffic.Accepted is not null && Count("announced") >= 2, run);
@@ -544,7 +545,7 @@ public sealed class NodeTests : IDisposable
         var run = NodeRunner.RunAsync(state, InMemoryHub, new NodeTransport
         {
             JoinCode = transport.JoinCode, ProbeFingerprint = transport.ProbeFingerprint, CreateHandler = transport.CreateHandler, HubHandler = transport.HubHandler, MachineName = "Node PC",
-            Locators = [], AnnounceInterval = transport.AnnounceInterval, FirstRetry = transport.FirstRetry, MaxRetry = transport.MaxRetry, Trace = events.Enqueue, CodexExecutable = () => null
+            Clients = () => [], Locators = [], AnnounceInterval = transport.AnnounceInterval, FirstRetry = transport.FirstRetry, MaxRetry = transport.MaxRetry, Trace = events.Enqueue, CodexExecutable = () => null
         }, error, stop.Token);
         await WaitForAsync(() => Count("announced") >= 4, run);
         stop.Cancel();
@@ -779,7 +780,7 @@ public sealed class NodeTests : IDisposable
         var run = NodeRunner.RunAsync(state, InMemoryHub, new NodeTransport
         {
             JoinCode = transport.JoinCode, ProbeFingerprint = transport.ProbeFingerprint, CreateHandler = transport.CreateHandler, HubHandler = transport.HubHandler, MachineName = "Node PC",
-            Locators = [new CodexChatLocator(codex, open: Counting(opens))], LocateBudget = TimeSpan.Zero,
+            Clients = () => [], Locators = [new CodexChatLocator(codex, open: Counting(opens))], LocateBudget = TimeSpan.Zero,
             AnnounceInterval = transport.AnnounceInterval, FirstRetry = transport.FirstRetry, MaxRetry = transport.MaxRetry, Trace = events.Enqueue, CodexExecutable = () => null
         }, error, stop.Token);
         await WaitForAsync(() => Count("announced") >= 2, run);
@@ -849,7 +850,7 @@ public sealed class NodeTests : IDisposable
             var transport = InMemory(host, traffic, TimeSpan.FromMilliseconds(50));
             return new NodeTransport
             {
-                JoinCode = transport.JoinCode, ProbeFingerprint = transport.ProbeFingerprint, CreateHandler = transport.CreateHandler, HubHandler = transport.HubHandler, MachineName = "Node PC", Locators = [],
+                JoinCode = transport.JoinCode, ProbeFingerprint = transport.ProbeFingerprint, CreateHandler = transport.CreateHandler, HubHandler = transport.HubHandler, MachineName = "Node PC", Clients = () => [], Locators = [],
                 AnnounceInterval = transport.AnnounceInterval, FirstRetry = transport.FirstRetry, MaxRetry = transport.MaxRetry, Trace = events.Enqueue,
                 CodexExecutable = () => Path.Combine(root, "codex.exe"), CodexDispatcher = _ => dispatcher, WakeInterval = TimeSpan.FromMilliseconds(100)
             };
@@ -1225,6 +1226,7 @@ public sealed class NodeTests : IDisposable
     private NodeTransport Transport(Func<HttpClient>? hub = null) => new()
     {
         JoinCode = RelayHostFixture.JoinCode,
+        Clients = () => [], Locators = [],
         MachineName = "Node PC",
         Chats = hub is null ? _ => Task.FromResult(new JsonArray(Chat())) : OwnedChats(hub),
         FirstRetry = TimeSpan.FromMilliseconds(20),
@@ -1235,6 +1237,7 @@ public sealed class NodeTests : IDisposable
     private NodeTransport InMemory(RelayHostFixture host, HubTraffic traffic, TimeSpan? interval = null, int credentialAttempts = 5) => new()
     {
         JoinCode = RelayHostFixture.JoinCode,
+        Clients = () => [], Locators = [],
         CredentialAttempts = credentialAttempts,
         CredentialRetryDelay = TimeSpan.FromMilliseconds(25),
         ProbeFingerprint = (_, _) => Task.FromResult(ProbedFingerprint),

@@ -4,6 +4,8 @@ using System.Text.Json.Nodes;
 using System.Diagnostics;
 using System.IO.Pipes;
 using System.Buffers.Binary;
+using System.Net;
+using System.Net.Sockets;
 using CoCern.Adapter;
 using CoCern.Adapter.Development;
 using CoCern.Adapter.Node;
@@ -317,6 +319,400 @@ public sealed class NativeJoinSetupTests : IDisposable
         var fresh = registration.AcceptAsync(timeout.Token, TimeSpan.FromSeconds(2));
         Assert.True(await registration.AnswerAsync(timeout.Token, TimeSpan.FromSeconds(2)));
         Assert.NotNull(await fresh);
+    }
+
+    [Fact]
+    public async Task Wiring_backend_selects_native_discovery_only_after_a_real_fake_helper_exchange_and_keeps_call_MAC_required()
+    {
+        await using var relay = new WiringRelayCounter();
+        var (registration, args) = WiringCandidate(relay.Origin);
+        await using var child = WiringStart(args);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var helper = registration.AnswerAsync(timeout.Token);
+        try
+        {
+            var initialized = await WiringRpc(child, 1, "initialize", new { protocolVersion = "2025-06-18", capabilities = new { }, clientInfo = new { name = "owned-wiring-fixture", version = "1" } }, timeout.Token);
+            Assert.True(await helper);
+            Assert.Contains("Your native client supplies this chat's current connection context", initialized.GetProperty("result").GetProperty("instructions").GetString());
+            await child.Process.StandardInput.WriteLineAsync("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}");
+            var listed = await WiringRpc(child, 2, "tools/list", new { }, timeout.Token);
+            var tools = listed.GetProperty("result").GetProperty("tools").EnumerateArray().ToArray();
+            Assert.Equal(new[] { "ack", "chat_directory", "check_inbox", "send_message" }, tools.Select(tool => tool.GetProperty("name").GetString()).Order());
+            foreach (var tool in tools)
+                foreach (var own in new[] { "sessionId", "sessionToken", "repositoryId", "requestId", "_cocernNative" })
+                    Assert.False(tool.GetProperty("inputSchema").GetProperty("properties").TryGetProperty(own, out _));
+            var send = tools.Single(tool => tool.GetProperty("name").GetString() == "send_message");
+            Assert.True(send.GetProperty("inputSchema").GetProperty("properties").TryGetProperty("recipientSessionId", out _));
+            foreach (var arguments in new object[] { new { }, new { _cocernNative = new { mac = "forged", invocation = "forged" } } })
+            {
+                var result = await WiringRpc(child, 3, "tools/call", new { name = "check_inbox", arguments }, timeout.Token);
+                Assert.True(result.TryGetProperty("error", out _) || result.GetProperty("result").TryGetProperty("isError", out var failed) && failed.GetBoolean());
+            }
+            Assert.Equal(0, relay.Count); Assert.Equal(0, relay.BusinessRequests); Assert.Equal(0, relay.HintAttempts);
+        }
+        finally
+        {
+            timeout.Cancel();
+            try { await helper; } catch (OperationCanceledException) { }
+        }
+    }
+
+    [Fact]
+    public async Task Wiring_native_MCP_accepts_a_valid_signed_read_without_any_hub_mutation()
+    {
+        await using var relay = new WiringReadRelay();
+        await using var binding = new NativeJoinHookTests.HookFixture(origin: relay.Origin);
+        Directory.CreateDirectory(Profile);
+        var candidate = ClientSettings.StageNativeCandidate(binding.Folder, "claude", "fixture-helper", clientProfile: Profile)!;
+        var registration = NativeRegistration.Read(candidate, "claude", binding.Folder, Profile)!;
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        // Only the synthetic HttpMessageHandler allocates the private fixture handle. The loopback endpoint is read-only.
+        var stamped = await NativeJoinHook.StampAsync(binding.Join, binding.Capture, "chat_directory", "actual-mcp-read", JsonSerializer.SerializeToElement(new { }), timeout.Token);
+        Assert.Equal(0, relay.Reads);
+        await using var child = WiringStart(["--native-client", "claude", "--connection", binding.Folder, "--profile", Profile]);
+        var helper = registration.AnswerAsync(timeout.Token);
+        try
+        {
+            await WiringRpc(child, 1, "initialize", new { protocolVersion = "2025-06-18", capabilities = new { }, clientInfo = new { name = "owned-signed-read-fixture", version = "1" } }, timeout.Token);
+            Assert.True(await helper);
+            await child.Process.StandardInput.WriteLineAsync("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}");
+            var response = await WiringRpc(child, 2, "tools/call", new { name = "chat_directory", arguments = stamped }, timeout.Token);
+            var result = response.GetProperty("result");
+            using var reply = JsonDocument.Parse(result.GetProperty("content")[0].GetProperty("text").GetString()!);
+            var code = ChatLocators.Text(reply.RootElement, "code") ?? "missing-code";
+            var safeCode = code.Length <= 128 && code.All(character => char.IsAsciiLetterOrDigit(character) || character is '_' or '-') ? code : "unrecognized-code";
+            Assert.True(reply.RootElement.GetProperty("ok").GetBoolean(), $"{safeCode}; fixture reads={relay.Reads},preflights={relay.Preflights},probes={relay.Probes},mutations={relay.Mutations},invalidWire={relay.InvalidWire},hints={relay.HintAttempts}");
+            Assert.False(result.TryGetProperty("isError", out var error) && error.GetBoolean());
+            Assert.Equal("fixture-peer", reply.RootElement.GetProperty("data").GetProperty("items")[0].GetProperty("sessionId").GetString());
+            Assert.True(relay.Reads > 0); Assert.True(relay.Preflights > 0); Assert.True(relay.Probes > 0);
+            Assert.True(relay.HintAttempts > 0); // This exact fixture channel intentionally remains unavailable.
+            Assert.Equal(0, relay.Mutations); Assert.Equal(0, relay.InvalidWire);
+            Assert.Equal("unchanged", File.ReadAllText(child.Sentinel));
+        }
+        finally { timeout.Cancel(); try { await helper; } catch (OperationCanceledException) { } }
+    }
+
+    [Theory]
+    [InlineData("no-helper")]
+    [InlineData("wrong-profile")]
+    [InlineData("changed-credential")]
+    public async Task Wiring_private_backend_refuses_unverified_scope_without_raw_fallback_or_relay(string refusal)
+    {
+        await using var relay = new WiringRelayCounter();
+        var (_, args) = WiringCandidate(relay.Origin);
+        if (refusal == "wrong-profile") args[^1] = Directory.CreateDirectory(Path.Combine(root, "another-profile")).FullName;
+        if (refusal == "changed-credential") NodeState.WritePrivately(Token, Encoding.UTF8.GetBytes("different-synthetic-token"));
+        await using var child = WiringStart(args);
+        child.Process.StandardInput.Close();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(refusal == "no-helper" ? 25 : 10));
+        await child.Process.WaitForExitAsync(timeout.Token);
+        Assert.Equal(1, child.Process.ExitCode);
+        Assert.Equal("Native client registration could not be verified.", (await child.Error).Trim());
+        Assert.Empty(await child.Process.StandardOutput.ReadToEndAsync(timeout.Token));
+        Assert.Equal(0, relay.Count); Assert.Equal(0, relay.BusinessRequests); Assert.Equal(0, relay.HintAttempts);
+        Assert.Equal("unchanged", File.ReadAllText(child.Sentinel));
+        Assert.False(Directory.Exists(Path.Combine(Path.GetDirectoryName(child.Sentinel)!, "CoCern", "local-wake")));
+    }
+
+    [Theory]
+    [InlineData("duplicate")]
+    [InlineData("missing")]
+    [InlineData("unknown")]
+    [InlineData("misplaced")]
+    public async Task Wiring_private_backend_rejects_ambiguous_arguments_before_environment_or_relay(string malformed)
+    {
+        await using var relay = new WiringRelayCounter();
+        var (_, args) = WiringCandidate(relay.Origin);
+        args = malformed switch
+        {
+            "duplicate" => [.. args, "--profile", Profile],
+            "missing" => args[..^1],
+            "misplaced" => ["--extra", "value", .. args],
+            _ => [.. args, "--extra", "value"]
+        };
+        await using var child = WiringStart(args);
+        child.Process.StandardInput.Close();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await child.Process.WaitForExitAsync(timeout.Token);
+        Assert.Equal(1, child.Process.ExitCode);
+        Assert.Equal("Native client registration could not be verified.", (await child.Error).Trim());
+        Assert.Empty(await child.Process.StandardOutput.ReadToEndAsync(timeout.Token));
+        Assert.Equal(0, relay.Count); Assert.Equal(0, relay.BusinessRequests); Assert.Equal(0, relay.HintAttempts);
+    }
+
+    [Fact]
+    public async Task Wiring_original_raw_backend_keeps_its_open_tool_and_manual_session_guidance()
+    {
+        await using var relay = new WiringRelayCounter();
+        await using var child = WiringStart([], relay.Origin);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var initialized = await WiringRpc(child, 1, "initialize", new { protocolVersion = "2025-06-18", capabilities = new { }, clientInfo = new { name = "owned-raw-fixture", version = "1" } }, timeout.Token);
+        Assert.Contains("Keep one session per chat and reuse its handle across reconnects", initialized.GetProperty("result").GetProperty("instructions").GetString());
+        await child.Process.StandardInput.WriteLineAsync("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}");
+        var listed = await WiringRpc(child, 2, "tools/list", new { }, timeout.Token);
+        var open = listed.GetProperty("result").GetProperty("tools").EnumerateArray().Single(tool => tool.GetProperty("name").GetString() == "session_open");
+        Assert.True(open.GetProperty("inputSchema").GetProperty("properties").TryGetProperty("requestId", out _));
+        Assert.Equal(0, relay.Count); Assert.Equal(0, relay.BusinessRequests); Assert.Equal(0, relay.HintAttempts);
+    }
+
+    [Fact]
+    public async Task Wiring_development_launcher_forwards_context_and_every_backend_generation_requires_fresh_proof()
+    {
+        await using var relay = new WiringRelayCounter();
+        var (registration, args) = WiringCandidate(relay.Origin);
+        var deployment = WiringDeployment();
+        await using var child = WiringStart(["--dev-launch", deployment, .. args]);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var helper = registration.AnswerAsync(timeout.Token);
+        try
+        {
+            var initialized = await WiringRpc(child, 1, "initialize", new { protocolVersion = "2025-06-18", capabilities = new { }, clientInfo = new { name = "owned-launcher-fixture", version = "1" } }, timeout.Token);
+            Assert.Contains("Your native client supplies this chat's current connection context", initialized.GetProperty("result").GetProperty("instructions").GetString());
+            Assert.True(await helper);
+            await child.Process.StandardInput.WriteLineAsync("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}");
+            AdapterDeployment.Publish(WiringOutput(), deployment); // Same immutable binary, new connection generation.
+            var refreshed = WiringRpc(child, 2, "tools/list", new { }, timeout.Token);
+            helper = registration.AnswerAsync(timeout.Token);
+            var listed = await refreshed;
+            Assert.True(await helper);
+            var tools = listed.GetProperty("result").GetProperty("tools").EnumerateArray().ToArray();
+            Assert.Equal(new[] { "ack", "chat_directory", "check_inbox", "send_message" }, tools.Select(tool => tool.GetProperty("name").GetString()).Order());
+            Assert.Equal(0, relay.Count); Assert.Equal(0, relay.BusinessRequests); Assert.Equal(0, relay.HintAttempts);
+        }
+        finally { timeout.Cancel(); try { await helper; } catch (OperationCanceledException) { } }
+    }
+
+    [Fact]
+    public async Task Wiring_development_launcher_without_helper_refuses_before_advertising_any_catalog()
+    {
+        await using var relay = new WiringRelayCounter();
+        var (_, args) = WiringCandidate(relay.Origin);
+        await using var child = WiringStart(["--dev-launch", WiringDeployment(), .. args]);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(25));
+        await child.Process.StandardInput.WriteLineAsync("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"owned-refusal-fixture\",\"version\":\"1\"}}}");
+        Assert.Null(await child.Process.StandardOutput.ReadLineAsync(timeout.Token));
+        await child.Process.WaitForExitAsync(timeout.Token);
+        Assert.Equal(1, child.Process.ExitCode);
+        Assert.Contains("Native client registration could not be verified.", await child.Error);
+        Assert.Equal(0, relay.Count); Assert.Equal(0, relay.BusinessRequests); Assert.Equal(0, relay.HintAttempts);
+        Assert.Equal("unchanged", File.ReadAllText(child.Sentinel));
+    }
+
+    [Fact]
+    public async Task Wiring_original_development_launcher_still_proxies_the_raw_catalog()
+    {
+        await using var relay = new WiringRelayCounter();
+        await using var child = WiringStart(["--dev-launch", WiringDeployment()], relay.Origin);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await WiringRpc(child, 1, "initialize", new { protocolVersion = "2025-06-18", capabilities = new { }, clientInfo = new { name = "owned-raw-launcher-fixture", version = "1" } }, timeout.Token);
+        await child.Process.StandardInput.WriteLineAsync("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}");
+        var listed = await WiringRpc(child, 2, "tools/list", new { }, timeout.Token);
+        Assert.Contains(listed.GetProperty("result").GetProperty("tools").EnumerateArray(), tool => tool.GetProperty("name").GetString() == "session_open");
+        Assert.Equal(0, relay.Count); Assert.Equal(0, relay.BusinessRequests); Assert.Equal(0, relay.HintAttempts);
+    }
+
+
+
+    private static string WiringOutput() => Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "CoCern.Adapter", "debug"));
+    private string WiringDeployment()
+    {
+        var deployment = Path.Combine(root, "deployment with spaces");
+        AdapterDeployment.Publish(WiringOutput(), deployment);
+        return deployment;
+    }
+
+    private (NativeRegistration Registration, string[] Args) WiringCandidate(string origin)
+    {
+        Directory.CreateDirectory(Profile);
+        var connection = LocalWakeConnection.Create(new AdapterOptions(origin, "synthetic-setup-secret"), Token, Cache)!;
+        var candidate = ClientSettings.StageNativeCandidate(connection.Folder, "codex", "fixture-helper", clientProfile: Profile)!;
+        return (NativeRegistration.Read(candidate, "codex", connection.Folder, Profile)!, ["--native-client", "codex", "--connection", connection.Folder, "--profile", Profile]);
+    }
+
+    private WiringChild WiringStart(string[] args, string? rawOrigin = null)
+    {
+        var (start, sentinel) = WiringStartInfo(args, rawOrigin);
+        return new(Process.Start(start)!, sentinel);
+    }
+
+    private (ProcessStartInfo Start, string Sentinel) WiringStartInfo(string[] args, string? rawOrigin = null)
+    {
+        var adapter = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "CoCern.Adapter", "debug", "CoCern.Adapter.dll"));
+        Assert.True(File.Exists(adapter));
+        var dotnet = Environment.GetEnvironmentVariable("DOTNET_HOST_PATH");
+        if (dotnet is null || !Path.IsPathFullyQualified(dotnet) || !File.Exists(dotnet))
+            dotnet = OperatingSystem.IsWindows() ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "dotnet", "dotnet.exe") : "/usr/bin/dotnet";
+        Assert.True(File.Exists(dotnet));
+        var home = Directory.CreateDirectory(Path.Combine(root, "wiring-child")).FullName;
+        var local = Directory.CreateDirectory(Path.Combine(home, "local")).FullName;
+        var sentinel = Path.Combine(local, "sentinel"); File.WriteAllText(sentinel, "unchanged");
+        var start = new ProcessStartInfo(dotnet) { UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = root,
+            RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
+        start.ArgumentList.Add(adapter); foreach (var argument in args) start.ArgumentList.Add(argument);
+        start.Environment.Clear();
+        foreach (var key in new[] { "SystemRoot", "WINDIR", "COMSPEC", "PROCESSOR_ARCHITECTURE" })
+            if (Environment.GetEnvironmentVariable(key) is { } value) start.Environment[key] = value;
+        var gitFolder = OperatingSystem.IsWindows() ? "C:/Program Files/Git/cmd" : "/usr/bin";
+        Assert.True(File.Exists(Path.Combine(gitFolder, OperatingSystem.IsWindows() ? "git.exe" : "git")));
+        start.Environment["PATH"] = Path.GetDirectoryName(dotnet)! + Path.PathSeparator + gitFolder;
+        start.Environment["DOTNET_ROOT"] = Path.GetDirectoryName(dotnet)!;
+        start.Environment["DOTNET_CLI_HOME"] = Directory.CreateDirectory(Path.Combine(home, "dotnet")).FullName;
+        start.Environment["DOTNET_SKIP_FIRST_TIME_EXPERIENCE"] = "1"; start.Environment["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1";
+        start.Environment["USERPROFILE"] = home; start.Environment["HOME"] = home; start.Environment["LOCALAPPDATA"] = local;
+        start.Environment["APPDATA"] = Directory.CreateDirectory(Path.Combine(home, "roaming")).FullName;
+        start.Environment["TEMP"] = Directory.CreateDirectory(Path.Combine(home, "temp")).FullName; start.Environment["TMP"] = start.Environment["TEMP"];
+        start.Environment["COCERN_URL"] = rawOrigin ?? "deliberately-invalid-origin";
+        start.Environment["COCERN_TOKEN"] = "synthetic-never-used";
+        return (start, sentinel);
+    }
+
+    private static async Task<JsonElement> WiringRpc(WiringChild child, int id, string method, object args, CancellationToken ct)
+    {
+        await child.Process.StandardInput.WriteLineAsync(JsonSerializer.Serialize(new { jsonrpc = "2.0", id, method, @params = args }));
+        while (await child.Process.StandardOutput.ReadLineAsync(ct) is { } line)
+        {
+            using var json = JsonDocument.Parse(line);
+            if (json.RootElement.TryGetProperty("id", out var returned) && returned.TryGetInt32(out var actual) && actual == id) return json.RootElement.Clone();
+        }
+        throw new InvalidOperationException("Own adapter ended before the requested MCP response; fixed error classes: " + WiringClassifyError(await child.Error));
+    }
+
+    private static string WiringClassifyError(string line)
+    {
+        // Fixed vocabulary only. Unknown text, paths, payloads, environment values and credentials never reach a report.
+        foreach (var (fragment, classification) in new[]
+        {
+            ("COCERN_URL", "invalid-origin"), ("CoCern adapter stopped unexpectedly", "adapter-fixed-unexpected"),
+            ("not recognized as an internal or external command", "cmd-command-tokenization"), ("operable program or batch file", "cmd-command-tokenization-continuation"),
+            ("specified command or file was not found", "dotnet-command-file-missing"), ("does not exist", "path-does-not-exist"),
+            ("hostpolicy", "hostpolicy-load"), ("hostfxr", "hostfxr-load"), ("runtimeconfig", "runtimeconfig"),
+            ("dependencies manifest", "dependency-manifest"), ("JSON parsing", "host-json-parse"), ("too long", "path-too-long"),
+            ("CoreCLR", "coreclr-load"), (".NET to run this application", "framework-missing"), ("error", "host-error-other")
+        }) if (line.Contains(fragment, StringComparison.OrdinalIgnoreCase)) return classification;
+        return "other-line";
+    }
+
+    private sealed class WiringChild(Process process, string sentinel) : IAsyncDisposable
+    {
+        internal Process Process { get; } = process;
+        internal string Sentinel { get; } = sentinel;
+        internal Task<string> Error { get; } = process.StandardError.ReadToEndAsync();
+        public async ValueTask DisposeAsync()
+        {
+            if (!Process.HasExited) { Process.Kill(entireProcessTree: true); await Process.WaitForExitAsync(); }
+            await Error; Process.Dispose();
+        }
+    }
+
+    private sealed class WiringReadRelay : IAsyncDisposable
+    {
+        private readonly TcpListener listener = new(IPAddress.Loopback, 0);
+        private readonly CancellationTokenSource stopping = new();
+        private readonly Task watching;
+        private int reads, preflights, probes, mutations, invalidWire, hintAttempts;
+        internal int Reads => Volatile.Read(ref reads);
+        internal int Preflights => Volatile.Read(ref preflights);
+        internal int Probes => Volatile.Read(ref probes);
+        internal int Mutations => Volatile.Read(ref mutations);
+        internal int InvalidWire => Volatile.Read(ref invalidWire);
+        internal int HintAttempts => Volatile.Read(ref hintAttempts);
+        internal string Origin { get; }
+        internal WiringReadRelay()
+        {
+            listener.Start(); Origin = "http://127.0.0.1:" + ((IPEndPoint)listener.LocalEndpoint).Port + "/";
+            watching = Watch();
+        }
+        private async Task Watch()
+        {
+            try
+            {
+                while (!stopping.IsCancellationRequested)
+                {
+                    using var client = await listener.AcceptTcpClientAsync(stopping.Token);
+                    using var stream = client.GetStream();
+                    using var headers = new MemoryStream();
+                    var one = new byte[1];
+                    while (headers.Length < 16384)
+                    {
+                        await stream.ReadExactlyAsync(one, stopping.Token); headers.WriteByte(one[0]);
+                        if (headers.Length >= 4 && headers.GetBuffer().AsSpan((int)headers.Length - 4, 4).SequenceEqual("\r\n\r\n"u8)) break;
+                    }
+                    Assert.True(headers.Length < 16384);
+                    var lines = Encoding.ASCII.GetString(headers.GetBuffer(), 0, (int)headers.Length).Split("\r\n");
+                    var route = lines[0].Split(' ')[1];
+                    if (route.Split('?')[0] == "/hubs/coordination/negotiate")
+                    {
+                        Interlocked.Increment(ref hintAttempts);
+                        await stream.WriteAsync("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"u8.ToArray(), stopping.Token);
+                        continue;
+                    }
+                    var size = int.Parse(lines.Single(line => line.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase))[15..].Trim(), System.Globalization.CultureInfo.InvariantCulture);
+                    Assert.InRange(size, 1, NativeJoinHook.MaximumInputBytes);
+                    var body = new byte[size]; await stream.ReadExactlyAsync(body, stopping.Token);
+                    using var document = JsonDocument.Parse(body);
+                    object data;
+                    var allowed = true;
+                    if (route.EndsWith("/session_open", StringComparison.Ordinal) && document.RootElement.TryGetProperty("nativePreflight", out _) && !document.RootElement.TryGetProperty("nativeJoin", out _))
+                    { Interlocked.Increment(ref preflights); data = new { repositoryId = "repo" }; }
+                    else if (route.EndsWith("/get_status", StringComparison.Ordinal))
+                    { Interlocked.Increment(ref probes); data = new { sessionId = "s-native-hook", control = new { paused = false, requests = Array.Empty<object>() } }; }
+                    else if (route.EndsWith("/chat_directory", StringComparison.Ordinal))
+                    {
+                        Interlocked.Increment(ref reads);
+                        if (document.RootElement.TryGetProperty("_cocernNative", out _) || ChatLocators.Text(document.RootElement, "repositoryId") != "repo")
+                        { Interlocked.Increment(ref invalidWire); allowed = false; }
+                        data = new { items = new[] { new { sessionId = "fixture-peer", label = "fixture peer" } } };
+                    }
+                    else { Interlocked.Increment(ref mutations); allowed = false; data = new { refused = true }; }
+                    var response = JsonSerializer.SerializeToUtf8Bytes(new { ok = allowed, code = allowed ? "Ok" : "fixture_mutation_refused", dataJson = JsonSerializer.Serialize(data), version = 1 });
+                    await stream.WriteAsync(Encoding.ASCII.GetBytes("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: " + response.Length + "\r\n\r\n"), stopping.Token);
+                    await stream.WriteAsync(response, stopping.Token);
+                }
+            }
+            catch (OperationCanceledException) when (stopping.IsCancellationRequested) { }
+        }
+        public async ValueTask DisposeAsync() { stopping.Cancel(); listener.Stop(); await watching; stopping.Dispose(); }
+    }
+
+    private sealed class WiringRelayCounter : IAsyncDisposable
+    {
+        private readonly TcpListener listener = new(IPAddress.Loopback, 0);
+        private readonly CancellationTokenSource stopping = new();
+        private readonly Task watching;
+        private int count;
+        private int hintAttempts;
+        internal int Count => Volatile.Read(ref count);
+        internal int HintAttempts => Volatile.Read(ref hintAttempts);
+        internal int BusinessRequests => Count - HintAttempts;
+        internal string Origin { get; }
+        internal WiringRelayCounter()
+        {
+            listener.Start(); Origin = "http://127.0.0.1:" + ((IPEndPoint)listener.LocalEndpoint).Port + "/";
+            watching = Watch();
+        }
+        private async Task Watch()
+        {
+            try
+            {
+                while (!stopping.IsCancellationRequested)
+                {
+                    using var client = await listener.AcceptTcpClientAsync(stopping.Token);
+                    Interlocked.Increment(ref count); // Count every relay connection, retaining no request data or headers.
+                    using var stream = client.GetStream();
+                    var firstLine = new byte[4096]; var length = 0;
+                    while (length < firstLine.Length)
+                    {
+                        var read = await stream.ReadAsync(firstLine.AsMemory(length, 1), stopping.Token);
+                        if (read == 0) break;
+                        if (firstLine[length++] == '\n') break;
+                    }
+                    var parts = Encoding.ASCII.GetString(firstLine, 0, length).Split(' ');
+                    if (parts.Length >= 2 && parts[1].Split('?')[0] == "/hubs/coordination/negotiate") Interlocked.Increment(ref hintAttempts);
+                }
+            }
+            catch (OperationCanceledException) when (stopping.IsCancellationRequested) { }
+        }
+        public async ValueTask DisposeAsync() { stopping.Cancel(); listener.Stop(); await watching; stopping.Dispose(); }
     }
 
     private (NativeRegistration Registration, string Candidate) Registration()

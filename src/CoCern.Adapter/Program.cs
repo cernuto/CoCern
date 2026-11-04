@@ -23,22 +23,39 @@ try
     }
     if (args is ["--dev-launch", var developmentRoot])
         return await CoCern.Adapter.Development.DevelopmentLauncher.RunAsync(developmentRoot, SetupEnvironment.Host().Dotnet);
+    if (args.Length > 0 && args[0] == "--dev-launch")
+    {
+        if (args.Length != 8 || !Path.IsPathFullyQualified(args[1]) || !NativeRegistration.ValidClientArguments(args[2..]))
+            throw new AdapterConfigurationException(NativeRegistration.Refusal);
+        return await CoCern.Adapter.Development.DevelopmentLauncher.RunNativeAsync(args[1], SetupEnvironment.Host().Dotnet, args[2..]);
+    }
     if (args.Length > 0 && args[0] == "--native-hook")
     {
-        const string usage = "Use --native-hook <codex|claude> --connection <absolute-private-folder> with an optional --development-root <absolute-folder>.";
-        if (args.Length is not (4 or 6) || args[1] is not ("codex" or "claude") || args[2] != "--connection" ||
-            !Path.IsPathFullyQualified(args[3]) || args.Length == 6 && (args[4] != "--development-root" || !Path.IsPathFullyQualified(args[5])))
+        const string usage = "Use --native-hook <codex|claude> --connection <absolute-private-folder> with optional --profile <absolute-profile> and --development-root <absolute-folder>.";
+        if (args.Length is not (4 or 6 or 8) || args[1] is not ("codex" or "claude") || args[2] != "--connection" || !Path.IsPathFullyQualified(args[3]))
             throw new AdapterConfigurationException(usage);
+        string? hookProfile = null; string? hookDevelopmentRoot = null;
+        for (var i = 4; i < args.Length; i += 2)
+        {
+            if (!Path.IsPathFullyQualified(args[i + 1]) || args[i + 1].Length > 32768 || args[i + 1].Any(char.IsControl)) throw new AdapterConfigurationException(usage);
+            if (args[i] == "--profile" && hookProfile is null) hookProfile = args[i + 1];
+            else if (args[i] == "--development-root" && hookDevelopmentRoot is null) hookDevelopmentRoot = args[i + 1];
+            else throw new AdapterConfigurationException(usage);
+        }
         var connection = NativeJoinHook.ReadConnection(args[3]) ?? throw new AdapterConfigurationException("Native hooks need their configured private connection.");
         using var stopping = new CancellationTokenSource();
         Console.CancelKeyPress += (_, cancel) => { cancel.Cancel = true; stopping.Cancel(); };
-        if (args.Length == 6)
-            return await NativeJoinHook.RunDevelopmentAsync(args[5], SetupEnvironment.Host().Dotnet, args[1], args[3], Console.In, Console.Out, Console.Error, stopping.Token);
+        if (hookDevelopmentRoot is not null)
+            return await NativeJoinHook.RunDevelopmentAsync(hookDevelopmentRoot, SetupEnvironment.Host().Dotnet, args[1], args[3], Console.In, Console.Out, Console.Error, stopping.Token, hookProfile);
+        var hookRegistration = hookProfile is null ? null : NativeRegistration.FromClientArguments(["--native-client", args[1], "--connection", args[3], "--profile", hookProfile])
+            ?? throw new AdapterConfigurationException(NativeRegistration.Refusal);
         using var nativeHttp = new HttpClient(RelayForwarder.CreateHandler(connection)) { Timeout = TimeSpan.FromSeconds(15) };
         await using var join = new NativeJoin(args[3], connection, new RelayForwarder(nativeHttp, connection));
         using var output = new StreamWriter(Console.OpenStandardOutput(), new System.Text.UTF8Encoding(false)) { AutoFlush = true };
         using var error = new StreamWriter(Console.OpenStandardError(), new System.Text.UTF8Encoding(false)) { AutoFlush = true };
-        return await NativeJoinHook.RunAsync(args[1], Console.In, output, error, join, stopping.Token);
+        return hookRegistration is null
+            ? await NativeJoinHook.RunAsync(args[1], Console.In, output, error, join, stopping.Token)
+            : await NativeJoinHook.RunRegisteredAsync(args[1], Console.In, output, error, join, hookRegistration, stopping.Token);
     }
     if (args.Length > 0 && args[0] == "--wake")
     {
@@ -147,20 +164,28 @@ try
         Console.CancelKeyPress += (_, cancel) => { cancel.Cancel = true; shutdown.Cancel(); };
         return await NodeRunner.RunAsync(state, hub, new NodeTransport { JoinCode = joinCode }, Console.Error, shutdown.Token);
     }
-    var options = AdapterOptions.FromEnvironment();
+    NativeRegistration? registration = null;
+    if (args.Contains("--native-client", StringComparer.Ordinal))
+    {
+        registration = NativeRegistration.FromClientArguments(args) ?? throw new AdapterConfigurationException(NativeRegistration.Refusal);
+        if (await registration.AcceptAsync(CancellationToken.None) is null) throw new AdapterConfigurationException(NativeRegistration.Refusal);
+    }
+    var options = registration?.Connection ?? AdapterOptions.FromEnvironment();
     // On node credentials the hub certificate is pinned; with explicit settings this is the plain handler, as before.
     using var http = new HttpClient(RelayForwarder.CreateHandler(options)) { Timeout = TimeSpan.FromSeconds(60) };
     await using var hints = new SessionHints(options);
-    await using var localWake = LocalChatWake.TryCreate(options, Environment.GetEnvironmentVariable("COCERN_TOKEN_FILE"));
+    await using var localWake = registration is null ? LocalChatWake.TryCreate(options, Environment.GetEnvironmentVariable("COCERN_TOKEN_FILE")) : null;
     var forwarder = new RelayForwarder(http, options);
-    await using var native = (options.NodeFolder ?? localWake?.Connection.Folder) is { } privateFolder ? new NativeJoin(privateFolder, options, forwarder) : null;
-    var builder = Host.CreateApplicationBuilder(args);
+    await using var native = (registration?.Folder ?? options.NodeFolder ?? localWake?.Connection.Folder) is { } privateFolder ? new NativeJoin(privateFolder, options, forwarder) : null;
+    var builder = Host.CreateApplicationBuilder(registration is null ? args : []);
     // Library request/exception logging can contain handles. Emit only our fixed stderr hints.
     builder.Logging.ClearProviders();
     builder.Services.AddMcpServer(server =>
     {
-        server.ServerInstructions = AdapterInstructions.Server;
-    }).WithStdioServerTransport().WithTools(CoordinationTools.Create(forwarder, options.Admin, hints, SessionHandoff.For(options), options.ChatOnly, options.ExportedChat, localWake: localWake, diagnostics: options.Diagnostics));
+        server.ServerInstructions = registration is null ? AdapterInstructions.Server : AdapterInstructions.Native;
+    }).WithStdioServerTransport().WithTools(registration is null
+        ? CoordinationTools.Create(forwarder, options.Admin, hints, SessionHandoff.For(options), options.ChatOnly, options.ExportedChat, localWake: localWake, diagnostics: options.Diagnostics)
+        : CoordinationTools.CreateNative(forwarder, native!, registration.Provider, options.Admin, options.Diagnostics));
     using var host = builder.Build();
     var lifetime = host.Services.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping;
     _ = localWake?.RunAsync(lifetime);
