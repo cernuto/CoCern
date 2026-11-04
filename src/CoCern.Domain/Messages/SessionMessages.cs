@@ -2,6 +2,13 @@ using System.Text.Json.Nodes;
 
 namespace CoCern.Domain.Messages;
 
+/// <summary>Private lifecycle recheck of the directory's exact session after a close acknowledgement is delayed or lost.</summary>
+public sealed record NativeExpiryCheck(string RepositoryId, string SessionId, string ParticipantId)
+{
+    public const string Operation = "__native_expiry_check";
+    public JsonObject ToJson() => new() { ["repositoryId"] = RepositoryId, ["sessionId"] = SessionId, [NativeParticipant.Id] = ParticipantId };
+}
+
 /// <summary>
 /// <see cref="Operations.Open"/>: initializes a session from its record. Sent twice by design, both built by
 /// <see cref="SessionRecord.Opened"/>: the control directory queues it with the record it keeps (with its initial freshness), and

@@ -29,8 +29,21 @@ internal sealed class SessionTools(Aggregates aggregates, StandingDelivery stand
     private async Task<RelayReply> OpenSessionAsync(RelayCaller caller, JsonObject args)
     {
         var opened = await aggregates.Control(caller, RelayTools.SessionOpen, args);
-        if (!opened.Ok) return opened;
+        if (opened.Code == Unavailable && Text(args, NativeParticipant.Id) is { Length: > 0 } participant
+            && Text(Aggregates.Parse(opened), "nativeCheck") is { Length: > 0 } pending)
+        {
+            var check = new NativeExpiryCheck(Text(args, "repositoryId"), pending, participant);
+            var outcome = await aggregates.Call(AggregateKinds.Session, pending, caller, NativeExpiryCheck.Operation, check.ToJson());
+            if (!outcome.Ok) return outcome;
+            if (!Flag(Aggregates.Parse(outcome), "expired")) return Error(Unavailable);
+            // A second serialized decision compares the exact session that answered; a competing replacement cannot be advanced.
+            var confirmed = args.DeepClone().AsObject();
+            confirmed[NativeParticipant.ConfirmedExpiry] = pending;
+            opened = await aggregates.Control(caller, RelayTools.SessionOpen, confirmed);
+        }
+        if (!opened.Ok) return opened.Code == Unavailable ? Error(Unavailable) : opened;
         var data = Aggregates.Parse(opened);
+        if (Flag(data, "nativePending")) return Error(Unavailable);
         // The same record the directory queued, from the client's fields only: the session takes its freshness from the same defaults.
         var record = SessionRecord.Opened(Text(data, "sessionId"), Text(data, "sessionToken"), caller.PrincipalId, Text(args, "repositoryId"), args);
         var initialized = await aggregates.Call(AggregateKinds.Session, record.SessionId, caller, SessionOpen.Operation, new SessionOpen(record).ToJson());

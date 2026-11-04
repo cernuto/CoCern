@@ -59,6 +59,12 @@ internal static class RelayRequestGuard
         if (args["knownInboxEtag"] is { } inboxEtag && (inboxEtag is not JsonValue etagValue || !etagValue.TryGetValue<string>(out var etagText) || etagText.Length is 0 or > RelayLimits.MaxKnownEtagLength || etagText.Any(char.IsControl)))
             return Replies.Error(InvalidArguments, new { field = "knownInboxEtag" });
         if (Count(args, "resourceIds") > RelayLimits.MaxClaimResources || Count(args, "messageIds") > RelayLimits.MaxAcknowledgedMessages || Count(args, "ackMessageIds") > RelayLimits.MaxAcknowledgedMessages) return Replies.Error(PayloadTooLarge);
+        if (args.ContainsKey("nativeJoin"))
+            return tool.Name == RelayTools.SessionOpen && NativeParticipant.Admit(caller, args) ? null : Replies.Error(InvalidArguments);
+        args.Remove(NativeParticipant.Id);
+        args.Remove(NativeParticipant.Generation);
+        args.Remove(NativeParticipant.Request);
+        args.Remove(NativeParticipant.ConfirmedExpiry);
         return null;
     }
 
