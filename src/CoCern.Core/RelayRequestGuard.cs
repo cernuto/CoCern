@@ -30,6 +30,18 @@ internal static class RelayRequestGuard
             // A repeated key would let checks and the operation read different values, so it is refused (building the object throws on one).
             args = JsonNode.Parse(raw)!.AsObject();
             _ = args.Count;
+            if (args.ContainsKey(CheckedNativeResolution)) return Replies.Error(InvalidArguments);
+            // A preflight cannot be combined with any allocating or caller-controlled envelope.
+            if (args.ContainsKey("nativePreflight"))
+            {
+                if (tool.Name != RelayTools.SessionOpen || args.Count != 1 || !NativeGitOrigin.ValidCheckoutEvidence(arguments.GetProperty("nativePreflight")))
+                    return Replies.Error(InvalidArguments);
+                return null;
+            }
+            if (arguments.TryGetProperty("nativeJoin", out var native) && native.ValueKind == JsonValueKind.Object &&
+                native.TryGetProperty("resolution", out var evidence) &&
+                (tool.Name != RelayTools.SessionOpen || args.Count != 4 || !NativeGitOrigin.ValidCheckoutEvidence(evidence)))
+                return Replies.Error(InvalidArguments);
         }
         catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or JsonException)
         {
@@ -59,6 +71,20 @@ internal static class RelayRequestGuard
         if (args["knownInboxEtag"] is { } inboxEtag && (inboxEtag is not JsonValue etagValue || !etagValue.TryGetValue<string>(out var etagText) || etagText.Length is 0 or > RelayLimits.MaxKnownEtagLength || etagText.Any(char.IsControl)))
             return Replies.Error(InvalidArguments, new { field = "knownInboxEtag" });
         if (Count(args, "resourceIds") > RelayLimits.MaxClaimResources || Count(args, "messageIds") > RelayLimits.MaxAcknowledgedMessages || Count(args, "ackMessageIds") > RelayLimits.MaxAcknowledgedMessages) return Replies.Error(PayloadTooLarge);
+        if (args.ContainsKey("nativeJoin"))
+        {
+            if (tool.Name != RelayTools.SessionOpen) return Replies.Error(InvalidArguments);
+            JsonNode? evidence = null;
+            try { if (args["nativeJoin"] is JsonObject proof) proof.Remove("resolution", out evidence); }
+            catch (ArgumentException) { return Replies.Error(InvalidArguments); }
+            if (!NativeParticipant.Admit(caller, args)) return Replies.Error(InvalidArguments);
+            if (evidence is not null) args[CheckedNativeResolution] = evidence;
+            return null;
+        }
+        args.Remove(NativeParticipant.Id);
+        args.Remove(NativeParticipant.Generation);
+        args.Remove(NativeParticipant.Request);
+        args.Remove(NativeParticipant.ConfirmedExpiry);
         return null;
     }
 
@@ -73,6 +99,8 @@ internal static class RelayRequestGuard
     });
 
     /// <summary>Within their length, and (when present) not blank and free of control characters, which would break logs and displays.</summary>
+    internal const string CheckedNativeResolution = "__checkedNativeResolution";
+
     private static bool IdentifiersFit(JsonObject args)
     {
         if (IdentifierFields.Any(field => Text(args, field).Length > RelayLimits.MaxIdentifierLength)) return false;

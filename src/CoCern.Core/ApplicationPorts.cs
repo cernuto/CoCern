@@ -265,6 +265,8 @@ public sealed class DocSyncException(DocSyncError error, string message, int ret
 /// <summary>Port implemented by the host: runs the doc sync for one repository now, sharing the timer's per-repository lock.</summary>
 public interface IDocSync
 {
+    Task<string?> ResolveNativeAsync(RelayCaller caller, string? checkout, string? common, string? origin) => Task.FromResult<string?>(null);
+
     /// <summary>A repeated <paramref name="requestId"/> returns the first run's outcome instead of running again.</summary>
     Task<DocSyncOutcome> SyncNowAsync(string repositoryId, string? branch, string requestId, CancellationToken cancellationToken = default);
 

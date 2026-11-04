@@ -445,8 +445,12 @@ public sealed class WakeTests
             Nudge = nudge, HubHandler = () => new NoHub(), Limits = Strict
         };
 
-        public Task<string> Await(List<string> prompts, TimeSpan timeout) =>
-            WakeWatcher.RunAsync(Configuration, new InboxWaitDispatcher(prompts.Add), exitWhenQueued: true, timeout, CancellationToken.None, new Handler(this), Clock);
+        public Task<string> Await(List<string> prompts, TimeSpan timeout)
+        {
+            var target = new WakeTarget(Route, WakeConfiguration.ReadSession(Route), new InboxWaitDispatcher(prompts.Add));
+            return WakeWatcher.RunAsync(Runtime(new WakeNudge()), _ => Task.FromResult<IReadOnlyList<WakeTarget>>([target]),
+                exitWhenQueued: true, timeout, CancellationToken.None, new Handler(this), Clock);
+        }
         public void Dispose() { State.Dispose(); _client.Dispose(); Directory.Delete(_directory, true); }
         private sealed class Handler(Fixture fixture) : HttpMessageHandler
         {

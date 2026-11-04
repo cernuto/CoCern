@@ -131,6 +131,20 @@ public static class ClaudeWaiter
         static string Field(JsonElement item, string name) => item.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString()! : "";
     }
 
+    // Task 4's verified Claude hook supplies the root/parent and checkout. This path never asks the ID-only legacy finder.
+    internal static async Task<string> RunNativeAsync(NativeJoin join, NativeHookContext capture, Action<string> deliver, TimeSpan? timeout, CancellationToken ct, HttpMessageHandler? handler = null)
+    {
+        if (capture.Provider != ChatProviders.Claude) throw new AdapterConfigurationException(ChatUsage);
+        var handle = await join.EnsureAsync(capture, ct);
+        var chat = new ChatLocation(ChatProviders.Claude, Guid.Parse(capture.NativeId).ToString("D"));
+        if (handle.NativeBindingKey is null || handle.Client != chat || handle.Chat != chat || handle.Unmapped)
+            throw new AdapterConfigurationException("The native Claude waiter needs its current private chat binding.");
+        Task<IReadOnlyList<WakeTarget>> Targets(CancellationToken _) => Task.FromResult<IReadOnlyList<WakeTarget>>([
+            new(new WakeRoute(handle.RepositoryId, "default", NodeState.SessionHandlePath(join.PrivateFolder, handle.SessionId), chat.ThreadId, Environment.MachineName),
+                new WakeSession(handle.SessionId, handle.SessionToken), NativeJoinBinding.ForDispatch(join.PrivateFolder, handle, new InboxWaitDispatcher(deliver)))]);
+        return await WaitForHandleAsync(join.PrivateFolder, chat.ThreadId, join.WakeOptions, Targets, timeout, ct, handler, null, null, null);
+    }
+
     private static async Task<string> WaitAsync(string nodeFolder, string claudeSessionId, Action<string> deliver, TimeSpan? timeout, CancellationToken cancellationToken, HttpMessageHandler? handler, Func<HttpMessageHandler>? hubHandler, TimeProvider? clock, TimeSpan? interval)
     {
         var folder = Path.GetFullPath(nodeFolder);
@@ -138,13 +152,20 @@ public static class ClaudeWaiter
         var threadId = Normalize(claudeSessionId);
         var options = ConnectionOptions(folder) ?? throw new AdapterConfigurationException($"No enrolled node or local CoCern connection is available in '{folder}'.");
         var handle = FindHandle(folder, threadId) ?? throw new AdapterConfigurationException($"No relay session on this PC belongs to Claude chat {threadId}. Call session_open from that chat first, with CoCern running on the node's credentials.");
-        var statePath = Path.Combine(folder, WaitersFolder, threadId + ".db");
         // Read again on every pass: a later hook finds this waiter alive and leaves it running, so a chat that moved to a newer session is followed from here.
-        IReadOnlyList<WakeTarget> Targets()
+        Task<IReadOnlyList<WakeTarget>> Targets(CancellationToken _)
         {
             handle = FindHandle(folder, threadId) ?? handle;
-            return [new(new WakeRoute(handle.RepositoryId, "default", NodeState.SessionHandlePath(folder, handle.SessionId), threadId, Environment.MachineName), new WakeSession(handle.SessionId, handle.SessionToken), new InboxWaitDispatcher(deliver))];
+            return Task.FromResult<IReadOnlyList<WakeTarget>>([new(new WakeRoute(handle.RepositoryId, "default", NodeState.SessionHandlePath(folder, handle.SessionId), threadId, Environment.MachineName),
+                new WakeSession(handle.SessionId, handle.SessionToken), NativeJoinBinding.ForDispatch(folder, handle, new InboxWaitDispatcher(deliver)))]);
         }
+        return await WaitForHandleAsync(folder, threadId, options, Targets, timeout, cancellationToken, handler, hubHandler, clock, interval);
+    }
+
+    private static async Task<string> WaitForHandleAsync(string folder, string threadId, AdapterOptions options, Func<CancellationToken, Task<IReadOnlyList<WakeTarget>>> targets,
+        TimeSpan? timeout, CancellationToken cancellationToken, HttpMessageHandler? handler, Func<HttpMessageHandler>? hubHandler, TimeProvider? clock, TimeSpan? interval)
+    {
+        var statePath = Path.Combine(folder, WaitersFolder, threadId + ".db");
         // One waiter per chat: the exclusive state is taken before the pid file is written, so a losing second waiter never touches the live one's file.
         var running = $"An inbox waiter for Claude chat {threadId} is already running on this PC.";
         if (IsAlive(PidPath(folder, threadId))) throw new AdapterConfigurationException(running);
@@ -157,7 +178,7 @@ public static class ClaudeWaiter
             if (interval is { } pass) runtime = runtime with { Interval = pass };
             using var self = Process.GetCurrentProcess();
             var written = WritePid(folder, threadId, self.Id, self.StartTime.ToUniversalTime());
-            try { return await WakeWatcher.RunAsync(runtime, _ => Task.FromResult(Targets()), exitWhenQueued: true, timeout, cancellationToken, handler, clock); }
+            try { return await WakeWatcher.RunAsync(runtime, targets, exitWhenQueued: true, timeout, cancellationToken, handler, clock); }
             finally { RemoveIfUnchanged(PidPath(folder, threadId), written); }
         }
     }

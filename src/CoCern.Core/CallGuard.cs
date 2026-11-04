@@ -15,7 +15,10 @@ namespace CoCern.Core;
 /// repositories and administrator rights), the tool and its definition, the checked arguments with the call controls taken out, and the
 /// caller's session record once its handle is verified (null for a call that presents none).
 /// </summary>
-internal sealed record RelayCall(RelayCaller Caller, string Tool, RelayTool Definition, JsonObject Args, CallControls Controls, JsonObject? Session = null);
+internal sealed record RelayCall(RelayCaller Caller, string Tool, RelayTool Definition, JsonObject Args, CallControls Controls, JsonObject? Session = null)
+{
+    internal VerifiedNativeParticipant? NativeParticipant { get; init; }
+}
 
 /// <summary>
 /// The pipeline's first stage, in two steps. <see cref="TryAdmit"/> checks a call before any aggregate is touched: a known tool, the
@@ -59,7 +62,10 @@ internal sealed class CallGuard(Aggregates aggregates, string incarnation)
             var verified = await VerifySessionAsync(caller, args);
             if (!verified.Ok) return (call, verified);
             var session = Aggregates.Parse(verified);
-            call = call with { Session = session };
+            var participant = Text(session, NativeParticipant.Id);
+            session.Remove(NativeParticipant.Id);
+            call = call with { Session = session, NativeParticipant = participant.Length == 0 ? null :
+                new VerifiedNativeParticipant(participant, Text(args, "sessionId"), Text(args, "repositoryId")) };
             // A background status read (the prompt hook, a wake watcher) is not the session's own turn, so it carries no role.
             if (trace is not null) { trace.SessionId = Text(args, "sessionId"); trace.Role = call.Controls.StatusDetail && tool == RelayTools.GetStatus ? null : Text(session, "role"); }
         }

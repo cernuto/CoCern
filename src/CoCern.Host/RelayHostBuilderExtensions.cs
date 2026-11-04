@@ -43,6 +43,7 @@ public static class RelayHostBuilderExtensions
         builder.Services.AddSignalR(options => { options.EnableDetailedErrors = false; options.MaximumReceiveMessageSize = RelayLimits.MaxPayloadBytes; });
         builder.Services.AddSingleton<ICoordinationNotifier, CoordinationNotifier>();
         builder.Services.AddDiscovery();
+        builder.Services.TryAddSingleton(services => new AdapterZipCache(AdapterZipCache.DefaultFolder(services.GetRequiredService<IConfiguration>(), services.GetRequiredService<IHostEnvironment>())));
         builder.Services.AddCoCernCore();
         builder.Services.AddSingleton(services =>
         {

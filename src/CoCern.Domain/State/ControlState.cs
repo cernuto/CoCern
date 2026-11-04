@@ -15,11 +15,14 @@ namespace CoCern.Domain.State;
 public sealed class ControlState(JsonObject json)
 {
     public const string SessionsKey = "sessions";
+    private const string NativeJoinsKey = "nativeJoins";
+    internal const int MaxNativeGenerations = 64;
     public const string ClosingKey = "closing";
     public const string CloseSeqKey = "closeSeq";
     /// <summary>A fence's own fields: the close's number and when it was sent.</summary>
     public const string FenceSeqKey = "closeSeq";
     public const string FenceAtKey = "at";
+    private const string DuplicateCloseKey = "nativeDuplicate";
     public const string ResourcesKey = "resources";
     public const string AliasesKey = "aliases";
     public const string PausedKey = "paused";
@@ -30,12 +33,69 @@ public sealed class ControlState(JsonObject json)
 
     /// <summary>Every key the directory stores: its entries by session ID, close fences by session ID, resources by ID, aliases by machine and name, and cancellations by session and action.</summary>
     public static StateShape Shape { get; } = CommonState.Shape.With(
-        (SessionsKey, StateShape.Map(DirectoryEntry.Shape)), (ClosingKey, StateShape.Map(StateShape.Object((FenceSeqKey, null), (FenceAtKey, null)))), (CloseSeqKey, null),
+        (SessionsKey, StateShape.Map(DirectoryEntry.Shape)), (ClosingKey, StateShape.Map(StateShape.Object((FenceSeqKey, null), (FenceAtKey, null), (NativeParticipant.Id, null), (DuplicateCloseKey, null)))), (CloseSeqKey, null),
+        (NativeJoinsKey, StateShape.Map(StateShape.Object(("sessionId", null), ("generation", null), ("requestId", null), ("expired", null), ("retired", StateShape.Map(null))))),
         (ResourcesKey, StateShape.Map(RegisteredResource.Shape)), (AliasesKey, StateShape.Map(null)),
         (PausedKey, null), (CancellationsKey, StateShape.Map(Cancellation.Shape)),
         (ManagerGenerationKey, null), (ManagerKey, ManagerAssignment.Shape), (ManagerHistoryKey, ManagerSelectionHistoryState.Shape));
 
     private JsonObject Sessions => ObjectAt(json, SessionsKey);
+
+    // Only private opens allocate continuity. Never evict a spent nonce to make room for an unverified new attempt.
+    internal JsonObject? NativeJoin(string participant) => (json[NativeJoinsKey] as JsonObject)?[participant] as JsonObject;
+    internal bool CanTrackNative(string participant) => NativeJoin(participant) is not null || (json[NativeJoinsKey] as JsonObject)?.Count is null or < RelayLimits.MaxRecords;
+
+    internal void TrackNative(SessionRecord record)
+    {
+        var joins = ObjectAt(json, NativeJoinsKey);
+        var join = ObjectAt(joins, record.NativeId!);
+        if (join["generation"] is { } previous)
+            ObjectAt(join, "retired")[previous.GetValue<string>()] = Text(join, "requestId");
+        join["generation"] = record.NativeGeneration;
+        join["sessionId"] = record.SessionId;
+        join["requestId"] = record.NativeRequest;
+        join.Remove("expired");
+    }
+
+    // All directory removal paths preserve an independently opened attempt before deleting its only private row.
+    // A duplicate of the current attempt can disappear without retiring the current generation.
+    internal string? RetireSuperseded(DirectoryEntry? entry, bool commit)
+    {
+        if (entry is null || entry.NativeId.Length == 0) return null;
+        if (NativeJoin(entry.NativeId) is not { } join) return RelayErrorCodes.Unavailable;
+        if (entry.SessionId == Text(join, "sessionId")) return null;
+        var generation = entry.NativeGeneration;
+        var request = entry.NativeRequest;
+        if (generation.Length == 0 || request.Length == 0) return RelayErrorCodes.Unavailable;
+        if (generation == Text(join, "generation"))
+            return request == Text(join, "requestId") ? null : RelayErrorCodes.RequestConflict;
+        if (join["retired"] is JsonObject retired)
+        {
+            if (retired.ContainsKey(generation))
+                return Text(retired, generation) == request ? null : RelayErrorCodes.RequestConflict;
+            if (retired.Count >= MaxNativeGenerations - 1) return RelayErrorCodes.CapacityExceeded;
+        }
+        if (commit) ObjectAt(join, "retired")[generation] = request;
+        return null;
+    }
+
+    public VerifiedNativeParticipant? CurrentNativeSession(string participantId, string repositoryId)
+    {
+        if (NativeJoin(participantId) is not { } join || Flag(join, "expired")) return null;
+        var id = Text(join, "sessionId");
+        var matches = Entries().Where(row => row.Entry?.NativeId == participantId && row.Entry.RepositoryId == repositoryId).Take(2).ToArray();
+        return matches.Length == 1 && matches[0].Id == id && matches[0].Entry!.NativeGeneration == Text(join, "generation")
+            && !NativeClosing(participantId) ? new(participantId, id, repositoryId) : null;
+    }
+
+    internal bool NativeClosing(string participant) => json[ClosingKey] is JsonObject closing
+        && closing.Any(pair => pair.Value is JsonObject fence && Text(fence, NativeParticipant.Id) == participant);
+
+    internal void ConfirmNativeExpiry(string sessionId)
+    {
+        if (json[ClosingKey]?[sessionId] is JsonObject fence && NativeJoin(Text(fence, NativeParticipant.Id)) is { } join
+            && Text(join, "sessionId") == sessionId) join["expired"] = true;
+    }
 
     /// <summary>How many sessions the directory lists.</summary>
     public int SessionCount => Sessions.Count;
@@ -64,14 +124,19 @@ public sealed class ControlState(JsonObject json)
     /// only while its close is in flight, so the directory keeps none for sessions long closed; past <see cref="RelayLimits.MaxRecords"/> in
     /// flight the oldest is dropped, and its late answer is then ignored.
     /// </summary>
-    public long Fence(string sessionId, DateTimeOffset now)
+    public long Fence(string sessionId, DateTimeOffset now, string? participant = null, bool duplicate = false)
     {
         var seq = Number(json, CloseSeqKey) + 1;
         json[CloseSeqKey] = seq;
         var closing = ObjectAt(json, ClosingKey);
+        participant ??= (closing[sessionId] as JsonObject)?[NativeParticipant.Id]?.GetValue<string>();
         closing.Remove(sessionId);
-        closing[sessionId] = new JsonObject { [FenceSeqKey] = seq, [FenceAtKey] = now.ToString("O") };
-        while (closing.Count > RelayLimits.MaxRecords) closing.Remove(closing.First().Key);
+        var fence = new JsonObject { [FenceSeqKey] = seq, [FenceAtKey] = now.ToString("O") };
+        if (participant is { Length: > 0 }) fence[NativeParticipant.Id] = participant;
+        if (duplicate) fence[DuplicateCloseKey] = true;
+        closing[sessionId] = fence;
+        // An idle-protected duplicate's already durable close/refusal must settle under its original sequence.
+        while (closing.Count > RelayLimits.MaxRecords) closing.Remove(closing.First(pair => !IsDuplicateFence(pair.Value)).Key);
         return seq;
     }
 
@@ -84,7 +149,13 @@ public sealed class ControlState(JsonObject json)
     /// within <see cref="RelayLimits.LostCloseAnswerMinutes"/>. An older one's answer is taken as lost.
     /// </summary>
     public bool AwaitingAnswer(string sessionId, DateTimeOffset now) =>
-        json[ClosingKey] is JsonObject closing && closing[sessionId] is JsonObject fence && Date(fence, FenceAtKey) > now.AddMinutes(-RelayLimits.LostCloseAnswerMinutes);
+        json[ClosingKey] is JsonObject closing && closing[sessionId] is JsonObject fence
+        && (IsDuplicateFence(fence) || Date(fence, FenceAtKey) > now.AddMinutes(-RelayLimits.LostCloseAnswerMinutes));
+
+    private static bool IsDuplicateFence(JsonNode? node) => node is JsonObject fence && Flag(fence, DuplicateCloseKey);
+
+    internal int DuplicateCloseRoom => RelayLimits.MaxSessionsClosedPerCall
+        - ((json[ClosingKey] as JsonObject)?.Count(pair => IsDuplicateFence(pair.Value)) ?? 0);
 
     /// <summary>Settles the close of <paramref name="sessionId"/> in flight, if any.</summary>
     public void Unfence(string sessionId)
@@ -174,12 +245,17 @@ public sealed class DirectoryEntry(JsonObject json)
     public static StateShape Shape { get; } = StateShape.Object(
         (SessionIdKey, null), (PrincipalIdKey, null), (RepositoryIdKey, null), (SessionTokenKey, null), (RoleKey, null), (HubIncarnationKey, null), (MachineIdKey, null),
         (LabelKey, null), (BindingKey, StateShape.Any), (BindingVersionKey, null), (ObservedAtKey, null), (FreshUntilKey, null), (AvailabilityKey, null), (ActiveAtKey, null),
+        (NativeParticipant.Id, null), (NativeParticipant.Generation, null), (NativeParticipant.Request, null),
         (OwnsWorkKey, null), (WorkSeqKey, null), (MailHeldAtKey, null));
 
     /// <summary>The keys that never leave the directory in a worker listing: the secret, the principal and the directory's own marks.</summary>
-    private static readonly string[] Private = [SessionTokenKey, PrincipalIdKey, OwnsWorkKey, WorkSeqKey, MailHeldAtKey];
+    private static readonly string[] Private = [SessionTokenKey, PrincipalIdKey, NativeParticipant.Id, NativeParticipant.Generation, NativeParticipant.Request, OwnsWorkKey, WorkSeqKey, MailHeldAtKey];
 
     public string SessionId => Text(json, SessionIdKey);
+    internal string NativeId => Text(json, NativeParticipant.Id);
+    internal string NativeGeneration => Text(json, NativeParticipant.Generation);
+    internal string NativeRequest => Text(json, NativeParticipant.Request);
+    internal string Token => Text(json, SessionTokenKey);
     public string PrincipalId => Text(json, PrincipalIdKey);
     public string RepositoryId => Text(json, RepositoryIdKey);
 

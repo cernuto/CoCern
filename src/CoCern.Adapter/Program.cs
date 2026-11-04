@@ -103,6 +103,24 @@ try
         Console.CancelKeyPress += (_, cancel) => { cancel.Cancel = true; shutdown.Cancel(); };
         return await SetupCommand.RunAsync(setup, SetupEnvironment.Create(), shutdown.Token);
     }
+    if (args.Length > 0 && args[0] == "--node-worker")
+    {
+        const string usage = "Use --node-worker --data-dir <absolute-path> [--activation-nonce <guid>].";
+        if (args.Length is not (3 or 5) || args[1] != "--data-dir" || string.IsNullOrWhiteSpace(args[2]) || !Path.IsPathFullyQualified(args[2]))
+            throw new AdapterConfigurationException(usage);
+        NodeWorkerStartupContext? startupContext = null;
+        if (args.Length == 5 && (args[3] != "--activation-nonce" || !NodeWorkerStartupContext.TryParse(args[4], out startupContext)))
+            throw new AdapterConfigurationException(usage);
+        using var shutdown = new CancellationTokenSource();
+        Console.CancelKeyPress += (_, cancel) => { cancel.Cancel = true; shutdown.Cancel(); };
+        var knownHost = SetupEnvironment.Host().Dotnet;
+        var transport = new NodeTransport
+        {
+            UpdateHost = NodePackage.ReadHostCapabilities(Path.IsPathFullyQualified(knownHost) ? knownHost : null),
+            CreateUpdater = context => new NodeUpdateCoordinator(context)
+        };
+        return await NodeRunner.RunWorkerAsync(args[2], startupContext?.ActivationNonce, AppContext.BaseDirectory, transport, Console.Error, shutdown.Token, startupContext);
+    }
     if (args.Length > 0 && args[0] == "--node")
     {
         // Exit codes: 0 stopped, 1 configuration problem or revoked PC, 4 the hub presented a certificate other than the pinned one.
@@ -136,6 +154,7 @@ try
     await using var hints = new SessionHints(options);
     await using var localWake = LocalChatWake.TryCreate(options, Environment.GetEnvironmentVariable("COCERN_TOKEN_FILE"));
     var forwarder = new RelayForwarder(http, options);
+    await using var native = (options.NodeFolder ?? localWake?.Connection.Folder) is { } privateFolder ? new NativeJoin(privateFolder, options, forwarder) : null;
     var builder = Host.CreateApplicationBuilder(args);
     // Library request/exception logging can contain handles. Emit only our fixed stderr hints.
     builder.Logging.ClearProviders();
@@ -144,7 +163,9 @@ try
         server.ServerInstructions = AdapterInstructions.Server;
     }).WithStdioServerTransport().WithTools(CoordinationTools.Create(forwarder, options.Admin, hints, SessionHandoff.For(options), options.ChatOnly, options.ExportedChat, localWake: localWake, diagnostics: options.Diagnostics));
     using var host = builder.Build();
-    _ = localWake?.RunAsync(host.Services.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping);
+    var lifetime = host.Services.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping;
+    _ = localWake?.RunAsync(lifetime);
+    _ = native?.ResumeAsync(lifetime);
     await host.RunAsync();
     return 0;
 }

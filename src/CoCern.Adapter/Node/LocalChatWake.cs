@@ -81,7 +81,10 @@ public sealed class LocalChatWake : IAsyncDisposable
             while (!lifetime.IsCancellationRequested)
             {
                 chats.Read(_ => true); // The existing bounded locator verifies native identity before a Codex route is used.
-                var targets = NodeState.ReadSessionHandles(Connection.Folder).Where(x => observed.ContainsKey(x.SessionId) && OwnsNative(x) && x.Chat is { Provider: ChatProviders.Codex }).ToArray();
+                var native = NativeJoinBinding.DispatchSnapshot(Connection.Folder).Where(x => x.Chat is { Provider: ChatProviders.Codex }).ToArray();
+                var targets = native.Concat(NodeState.ReadSessionHandles(Connection.Folder).Where(x => observed.ContainsKey(x.SessionId) && OwnsNative(x) &&
+                    x.Chat is { Provider: ChatProviders.Codex } && !native.Any(n => n.Chat == x.Chat))).GroupBy(x => x.Chat!.ThreadId)
+                    .Where(group => group.Count() == 1 || group.All(x => x.NativeBindingKey is null)).SelectMany(group => group).ToArray();
                 foreach (var gone in active.Keys.Where(key => !targets.Any(x => x.Chat!.ThreadId == key && x.SessionId == active[key].Session) || active[key].Task.IsCompleted).ToArray())
                 { var previous = active[gone]; previous.Stop.Cancel(); await previous.Task; previous.Stop.Dispose(); active.Remove(gone); }
                 foreach (var handle in targets)
@@ -103,15 +106,17 @@ public sealed class LocalChatWake : IAsyncDisposable
     private async Task WatchAsync(SessionHandle handle, string codex, CancellationToken ct)
     {
         var latest = NodeState.ReadSessionHandle(NodeState.SessionHandlePath(Connection.Folder, handle.SessionId));
-        if (latest is null || !OwnsNative(latest) || latest.Chat != handle.Chat || latest.RepositoryId != handle.RepositoryId || latest.SessionToken != handle.SessionToken) return;
+        if (latest is null || latest.Chat != handle.Chat || latest.RepositoryId != handle.RepositoryId || latest.SessionToken != handle.SessionToken ||
+            (handle.NativeBindingKey is null ? !OwnsNative(latest) : !NativeJoinBinding.DispatchSnapshot(Connection.Folder).Contains(handle))) return;
         var thread = handle.Chat!.ThreadId;
         try
         {
             var path = Path.Combine(Connection.Folder, "wake-" + thread + ".db");
             using var state = new WakeState(path); // Exclusive per-native-chat state also prevents duplicate MCP processes from dispatching twice.
-            var runtime = new WakeRuntime(Connection.Options, path, Path.Combine(Connection.Folder, "stop"), Connection.Options.BaseUri.AbsoluteUri) { State = state, HubHandler = transport.HubHandler, Interval = transport.WakeInterval };
+            var options = handle.NativeBindingKey is null ? Connection.Options : NativeJoin.BackgroundOptions(Connection.Options);
+            var runtime = new WakeRuntime(options, path, Path.Combine(Connection.Folder, "stop"), Connection.Options.BaseUri.AbsoluteUri) { State = state, HubHandler = transport.HubHandler, Interval = transport.WakeInterval };
             var route = new WakeRoute(handle.RepositoryId, "default", NodeState.SessionHandlePath(Connection.Folder, handle.SessionId), thread, Environment.MachineName);
-            await watch(runtime, new(route, new(handle.SessionId, handle.SessionToken), transport.CodexDispatcher(codex)), ct);
+            await watch(runtime, new(route, new(handle.SessionId, handle.SessionToken), NativeJoinBinding.ForDispatch(Connection.Folder, handle, transport.CodexDispatcher(codex))), ct);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
         catch (IOException) { /* Another live adapter owns the native chat; retry after it releases the state. */ }

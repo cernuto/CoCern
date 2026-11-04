@@ -49,7 +49,11 @@ public sealed class NodeState : IDisposable
         environment("COCERN_NODE_DIR") is { } configured && !string.IsNullOrWhiteSpace(configured) ? configured : DefaultFolder;
 
     /// <summary>Takes the folder's lock and loads its state, creating a machine ID the first time. A second node on the same folder fails at once.</summary>
-    public static NodeState Open(string? dataDir)
+    public static NodeState Open(string? dataDir) => OpenCore(dataDir, createIdentity: true);
+
+    internal static NodeState OpenExisting(string dataDir) => OpenCore(dataDir, createIdentity: false);
+
+    private static NodeState OpenCore(string? dataDir, bool createIdentity)
     {
         var folder = Path.GetFullPath(string.IsNullOrWhiteSpace(dataDir) ? DefaultFolder : dataDir);
         FileStream @lock;
@@ -61,7 +65,7 @@ public sealed class NodeState : IDisposable
         catch (IOException) when (File.Exists(Path.Combine(folder, LockFile))) { throw new AdapterConfigurationException($"Another CoCern node is already running with the data folder '{folder}'."); }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { throw new AdapterConfigurationException($"Unable to use the node data folder '{folder}'."); }
         var state = new NodeState(folder, @lock);
-        try { state.Load(); }
+        try { state.Load(createIdentity); }
         catch { @lock.Dispose(); throw; }
         return state;
     }
@@ -136,9 +140,20 @@ public sealed class NodeState : IDisposable
 
     private static string NewMachineId() => Guid.NewGuid().ToString("N");
 
-    private void Load()
+    private void Load(bool createIdentity)
     {
         var path = Path.Combine(Folder, StateFile);
+        if (!createIdentity)
+        {
+            try
+            {
+                (MachineId, HubUrl, Fingerprint, Enrolled) = Parse(File.ReadAllText(path));
+                if (File.Exists(Path.Combine(Folder, CredentialFile))) NodePackage.ValidatePrivateFile(Path.Combine(Folder, CredentialFile));
+                return; // An existing-only worker never creates or repairs identity/enrollment.
+            }
+            catch (Exception exception) when (exception is JsonException or IOException or InvalidDataException or UnauthorizedAccessException or InvalidOperationException or FormatException)
+            { throw new AdapterConfigurationException("The existing node identity is missing, unreadable, or not private."); }
+        }
         if (File.Exists(path))
         {
             try { (MachineId, HubUrl, Fingerprint, Enrolled) = Parse(File.ReadAllText(path)); }
@@ -206,6 +221,40 @@ public sealed class NodeState : IDisposable
         return new FileInfo(path).Create(FileMode.CreateNew, FileSystemRights.FullControl, FileShare.None, 4096, FileOptions.None, security);
     }
 
+    /// <summary>New native recovery requires the same current-user-only protection as our private writers.</summary>
+    internal static bool IsPrivateFile(string path)
+    {
+        if (!File.Exists(path) || (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0) return false;
+        if (!OperatingSystem.IsWindows())
+            return (File.GetUnixFileMode(path) & (UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute |
+                UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute)) == 0;
+        var security = new FileInfo(path).GetAccessControl(AccessControlSections.Access);
+        if (!security.AreAccessRulesProtected) return false;
+        var user = WindowsIdentity.GetCurrent().User!;
+        var readable = false;
+        foreach (FileSystemAccessRule rule in security.GetAccessRules(true, true, typeof(SecurityIdentifier)))
+        {
+            if (rule.AccessControlType != AccessControlType.Allow) continue;
+            if (!rule.IdentityReference.Equals(user)) return false;
+            readable |= (rule.FileSystemRights & FileSystemRights.ReadData) != 0;
+        }
+        return readable;
+    }
+
+    internal static bool HasIdentityFiles(string folder) => File.Exists(Path.Combine(folder, StateFile)) || File.Exists(Path.Combine(folder, CredentialFile));
+
+    internal static string? NativeCredentialIdentity(string folder)
+    {
+        try
+        {
+            if (new FileInfo(Path.Combine(folder, StateFile)).Length > 16384 ||
+                new FileInfo(Path.Combine(folder, CredentialFile)).Length > 16384 || !IsPrivateFile(Path.Combine(folder, CredentialFile))) return null;
+            var node = ReadEnrollment(folder);
+            return node is null ? null : NativeJoinBinding.CredentialDigest("node", node.Hub.AbsoluteUri, node.Fingerprint, node.Credential);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException) { return null; }
+    }
+
     /// <summary>
     /// What a stdio adapter needs to run on this PC's identity: the hub, its pinned fingerprint and the machine credential.
     /// Read without taking <c>node.lock</c>, which the running node holds. Null unless the folder is fully enrolled.
@@ -243,6 +292,11 @@ public sealed class NodeState : IDisposable
         if (handle.Client is { } client) json["client"] = new JsonObject { ["provider"] = client.Provider, ["chatId"] = client.ThreadId };
         if (handle.Chat is { } chat) json["chat"] = new JsonObject { ["provider"] = chat.Provider, ["threadId"] = chat.ThreadId };
         else if (handle.Unmapped) json["unmapped"] = true;
+        if (handle.NativeBindingKey is { } binding)
+        {
+            if (binding.Length != 64 || !binding.All(Uri.IsHexDigit)) throw new ArgumentException("Invalid private native binding key.");
+            json["nativeBindingKey"] = binding;
+        }
         WritePrivately(Path.Combine(folder, handle.SessionId + ".json"), Encoding.UTF8.GetBytes(json.ToJsonString(new JsonSerializerOptions { WriteIndented = true })));
     }
 
@@ -260,8 +314,11 @@ public sealed class NodeState : IDisposable
                 repositoryId is not { Length: > 0 and <= MaxIdentifierLength } || label is not { Length: > 0 and <= MaxIdentifierLength } || label.Any(char.IsControl) ||
                 !DateTimeOffset.TryParse(Text(root, "openedAt"), System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var openedAt)) return null;
             // Chat IDs are only ever UUIDs; anything else is ignored (a bad claim falls back to transcripts, a bad outcome is located again).
+            var nativeBindingKey = Text(root, "nativeBindingKey");
+            if (root.ContainsKey("nativeBindingKey") && (nativeBindingKey is not { Length: 64 } || !nativeBindingKey.All(Uri.IsHexDigit))) return null;
             return new(sessionId, sessionToken, repositoryId, label, openedAt, Location(root["client"], "chatId"), Location(root["chat"], "threadId"),
-                root["unmapped"] is JsonValue unmapped && unmapped.TryGetValue<bool>(out var value) && value);
+                root["unmapped"] is JsonValue unmapped && unmapped.TryGetValue<bool>(out var value) && value)
+            { NativeBindingKey = nativeBindingKey?.ToLowerInvariant() };
         }
         catch (Exception exception) when (exception is JsonException or IOException or UnauthorizedAccessException or InvalidOperationException or FormatException) { return null; }
     }
@@ -272,9 +329,10 @@ public sealed class NodeState : IDisposable
     /// <summary>The handle file for a relay session; the ID must be one that can name a file.</summary>
     internal static string SessionHandlePath(string nodeFolder, string sessionId) => IsFileId(sessionId) ? Path.Combine(nodeFolder, SessionsFolder, sessionId + ".json") : throw new ArgumentException("Not a session ID that can name a file.", nameof(sessionId));
 
-    /// <summary>Every readable handle in the node folder.</summary>
+    /// <summary>Readable legacy handles. Native handles require their fully scoped private binding reference.</summary>
     public static IReadOnlyList<SessionHandle> ReadSessionHandles(string nodeFolder) =>
-        ChatLocators.Files(Path.Combine(nodeFolder, SessionsFolder), "*.json", SearchOption.TopDirectoryOnly).Select(ReadSessionHandle).OfType<SessionHandle>().ToArray();
+        ChatLocators.Files(Path.Combine(nodeFolder, SessionsFolder), "*.json", SearchOption.TopDirectoryOnly).Select(ReadSessionHandle).OfType<SessionHandle>()
+            .Where(handle => handle.NativeBindingKey is null).ToArray();
 
     /// <summary>
     /// Which of one chat's handles is its session. Carrying the chat's ID proves little: anything the chat starts inherits it, as a test script's
