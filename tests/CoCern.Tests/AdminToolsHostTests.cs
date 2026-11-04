@@ -355,16 +355,91 @@ public sealed class AdminToolsHostTests : IDisposable
         // The hub's lock file is held open and holds nothing.
         foreach (var file in Directory.GetFiles(Path.GetDirectoryName(host.DatabasePath)!).Where(file => !file.EndsWith(".lock", StringComparison.Ordinal)))
         {
-            byte[] bytes;
-            await using (var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
-            {
-                using var buffer = new MemoryStream();
-                await stream.CopyToAsync(buffer);
-                bytes = buffer.ToArray();
-            }
+            var bytes = await ReadLiveDatabaseFileAsync(file);
             Assert.Equal(-1, bytes.AsSpan().IndexOf(Encoding.UTF8.GetBytes(RelayHostFixture.JoinCode)));
             Assert.Equal(-1, bytes.AsSpan().IndexOf(Encoding.Unicode.GetBytes(RelayHostFixture.JoinCode)));
         }
+    }
+
+    /// <summary>
+    /// A live SQLite file's bytes, page by page, waiting out brief locks. SQLite holds byte ranges of its <c>-shm</c> file while it works, and on Windows reading a
+    /// locked range throws whatever the sharing mode. That file is only the write-ahead log's index and never holds row content, so a page there that stays locked
+    /// reads as zeros; the database and the log must be read in full or the scan fails.
+    /// </summary>
+    internal static async Task<byte[]> ReadLiveDatabaseFileAsync(string file, int attempts = 40)
+    {
+        const int Page = 4096;
+        var mayskip = file.EndsWith("-shm", StringComparison.Ordinal);
+        await using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, bufferSize: 0);
+        using var all = new MemoryStream();
+        var page = new byte[Page];
+        while (all.Length < stream.Length)
+        {
+            var length = (int)Math.Min(Page, stream.Length - all.Length);
+            for (var attempt = 1; ; attempt++)
+            {
+                try
+                {
+                    stream.Position = all.Length;
+                    await stream.ReadExactlyAsync(page.AsMemory(0, length));
+                    break;
+                }
+                catch (IOException) when (attempt < attempts) { await Task.Delay(50); }
+                catch (IOException) when (mayskip) { page.AsSpan(0, length).Clear(); break; }
+            }
+            all.Write(page, 0, length);
+        }
+        return all.ToArray();
+    }
+
+    [Theory]
+    [InlineData("relay.db")]
+    [InlineData("relay.db-wal")]
+    public async Task A_database_or_log_range_that_stays_locked_fails_the_scan(string name)
+    {
+        if (!OperatingSystem.IsWindows()) return; // Other systems' byte-range locks do not stop a read.
+        var file = Path.Combine(root, name);
+        Directory.CreateDirectory(root);
+        await File.WriteAllBytesAsync(file, new byte[8192]);
+        await using var holder = new FileStream(file, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
+        holder.Lock(4096, 4096);
+        await Assert.ThrowsAsync<IOException>(() => ReadLiveDatabaseFileAsync(file, attempts: 3));
+    }
+
+    [Fact]
+    public async Task An_index_range_that_stays_locked_is_skipped_and_the_rest_is_still_scanned()
+    {
+        if (!OperatingSystem.IsWindows()) return; // Other systems' byte-range locks do not stop a read.
+        var file = Path.Combine(root, "relay.db-shm");
+        Directory.CreateDirectory(root);
+        var content = new byte[12288];
+        Array.Fill(content, (byte)7);
+        await File.WriteAllBytesAsync(file, content);
+        await using var holder = new FileStream(file, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
+        holder.Lock(4096, 4096);
+        var bytes = await ReadLiveDatabaseFileAsync(file, attempts: 3);
+        Assert.Equal(content.Length, bytes.Length);
+        Assert.All(bytes[..4096], value => Assert.Equal(7, value));
+        Assert.All(bytes[4096..8192], value => Assert.Equal(0, value));
+        Assert.All(bytes[8192..], value => Assert.Equal(7, value));
+    }
+
+    [Fact]
+    public async Task A_lock_released_in_time_loses_no_bytes()
+    {
+        if (!OperatingSystem.IsWindows()) return; // Other systems' byte-range locks do not stop a read.
+        var file = Path.Combine(root, "relay.db");
+        Directory.CreateDirectory(root);
+        var content = new byte[8192];
+        Array.Fill(content, (byte)9);
+        await File.WriteAllBytesAsync(file, content);
+        var holder = new FileStream(file, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
+        holder.Lock(0, 4096);
+        var reading = ReadLiveDatabaseFileAsync(file);
+        await Task.Delay(200);
+        holder.Unlock(0, 4096);
+        await holder.DisposeAsync();
+        Assert.Equal(content, await reading);
     }
 
     private static async Task<long> ActivityRowsAsync(RelayHostFixture host, string tool)
