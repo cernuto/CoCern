@@ -473,7 +473,6 @@ public sealed class NodeRunner : IAsyncDisposable
                 StagedNode? staged;
                 try { staged = await completed; }
                 catch { RecordUpdateFailure(_stagingRelease); throw; }
-                if (staged is null) RecordUpdateFailure(_stagingRelease);
                 if (staged is not null)
                 {
                     if (!await _dispatchGate.TryDrainAsync(TimeSpan.FromSeconds(30), ct)) return false;
