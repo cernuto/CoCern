@@ -505,7 +505,7 @@ public sealed class NodeRunner : IAsyncDisposable
         if (_updateStop is { } stopping) await stopping.CancelAsync();
         if (_updateTask is { } pending)
         {
-            try { if (await pending is null) RecordUpdateFailure(_stagingRelease); }
+            try { await pending; }
             catch (OperationCanceledException) { }
             catch (Exception) { RecordUpdateFailure(_stagingRelease); }
         }

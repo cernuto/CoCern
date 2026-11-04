@@ -992,9 +992,11 @@ public sealed class NodeSupervisorTests(ITestOutputHelper output) : IDisposable
     }
 
     [Theory]
-    [InlineData(true, 5)]
-    [InlineData(false, 15)]
-    public async Task Current_release_rechecks_keep_normal_cadence_while_rejected_packages_back_off(bool alreadyCurrent, int retryMinutes)
+    [InlineData(true, 5, false)]
+    [InlineData(false, 15, false)]
+    [InlineData(true, 5, true)]
+    [InlineData(false, 15, true)]
+    public async Task Current_release_rechecks_keep_normal_cadence_while_rejected_packages_back_off(bool alreadyCurrent, int retryMinutes, bool resetForCredentialRefusal)
     {
         PrepareRoot();
         var current = Image("same-release-scheduler") with { ReleaseId = new string('A', 64) };
@@ -1011,6 +1013,9 @@ public sealed class NodeSupervisorTests(ITestOutputHelper output) : IDisposable
         using var failure = new UpdateFailureObserver();
         var downloads = 0;
         var phase = 0;
+        var refused = 0;
+        var reenrolled = 0;
+        var stagingFinished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         var transport = new NodeTransport
         {
@@ -1018,21 +1023,31 @@ public sealed class NodeSupervisorTests(ITestOutputHelper output) : IDisposable
             AnnounceInterval = TimeSpan.FromMilliseconds(10), UpdateHost = new(dotnet, [new("Microsoft.NETCore.App", "10.0.0")], "win-x64"),
             CreateHandler = (_, _) => new UpdateWorkerHandler(request =>
             {
+                if (request.RequestUri!.AbsolutePath.EndsWith("/enroll", StringComparison.Ordinal))
+                {
+                    Interlocked.Increment(ref reenrolled);
+                    return new(System.Net.HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new { machineId = state.MachineId, credential = new string('b', 64) })) };
+                }
                 if (request.Method == HttpMethod.Get)
                 {
                     Interlocked.Increment(ref downloads);
                     return new(System.Net.HttpStatusCode.ServiceUnavailable);
                 }
+                if (resetForCredentialRefusal && stagingFinished.Task.IsCompleted && Interlocked.CompareExchange(ref refused, 1, 0) == 0)
+                    return new(System.Net.HttpStatusCode.Unauthorized);
                 return new(System.Net.HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new { routes = Array.Empty<object>(), nodeRelease = release }, new JsonSerializerOptions(JsonSerializerDefaults.Web))) };
             }),
             HubHandler = () => new UpdateWorkerHandler(_ => new(System.Net.HttpStatusCode.ServiceUnavailable)),
-            CreateUpdater = context => new ObservedUpdateCoordinator(new NodeUpdateCoordinator(context), () => attempts.Enqueue(clock.GetUtcNow()), () =>
+            CreateUpdater = context => new ObservedUpdateCoordinator(resetForCredentialRefusal && Volatile.Read(ref reenrolled) == 0
+                ? new FinishStagingDuringReset(new NodeUpdateCoordinator(context), stagingFinished)
+                : new NodeUpdateCoordinator(context), () => attempts.Enqueue(clock.GetUtcNow()), () =>
             {
                 if (attempts.Count == 2) stop.Cancel();
             }),
             Trace = value =>
             {
-                if (value != "announced" || attempts.IsEmpty || (!alreadyCurrent && !failure.Recorded.Task.IsCompleted)) return;
+                if (value != "announced" || attempts.IsEmpty) return;
+                if (resetForCredentialRefusal ? Volatile.Read(ref reenrolled) == 0 : !alreadyCurrent && !failure.Recorded.Task.IsCompleted) return;
                 if (phase == 0)
                 {
                     clock.Advance(TimeSpan.FromMinutes(4) + TimeSpan.FromSeconds(59));
@@ -1064,11 +1079,29 @@ public sealed class NodeSupervisorTests(ITestOutputHelper output) : IDisposable
         Assert.Equal(2, observed.Length);
         Assert.Equal(TimeSpan.FromMinutes(retryMinutes), observed[1] - observed[0]);
         Assert.Equal(alreadyCurrent ? 0 : 2, downloads);
+        Assert.Equal(resetForCredentialRefusal ? 1 : 0, reenrolled);
         var unchanged = NodeUpdateState.Read(Updates).Record!;
         Assert.Equal(current.ContentId, unchanged.Current.ContentId);
         Assert.Equal(current.ReleaseId, unchanged.Current.ReleaseId);
         Assert.Equal(NodeUpdatePhase.Committed, unchanged.Phase);
         Assert.Null(unchanged.Pending);
+    }
+
+    // Preserve the real staging result, but let the credential reset consume it before the normal loop can.
+    private sealed class FinishStagingDuringReset(INodeUpdateCoordinator inner, TaskCompletionSource finished) : INodeUpdateCoordinator
+    {
+        public async Task<StagedNode?> TryStageAsync(NodeRelease? offered, CancellationToken ct)
+        {
+            try { return await inner.TryStageAsync(offered, ct); }
+            finally
+            {
+                finished.TrySetResult();
+                try { await Task.Delay(Timeout.InfiniteTimeSpan, ct); }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+            }
+        }
+
+        public Task PrepareAsync(StagedNode staged, CancellationToken ct) => inner.PrepareAsync(staged, ct);
     }
 
     private sealed class UpdateFailureObserver : StringWriter
