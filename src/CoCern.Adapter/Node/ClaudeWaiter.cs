@@ -28,7 +28,7 @@ public static class ClaudeWaiter
     public static Task<string> RunAsync(string nodeFolder, string claudeSessionId, Action<string> deliver, TimeSpan? timeout, CancellationToken cancellationToken, bool printInbox = false, IReadOnlyList<string>? acknowledge = null) =>
         RunAsync(nodeFolder, claudeSessionId, deliver, timeout, cancellationToken, null, null, printInbox: printInbox, acknowledge: acknowledge);
 
-    internal static async Task<string> RunAsync(string nodeFolder, string claudeSessionId, Action<string> deliver, TimeSpan? timeout, CancellationToken cancellationToken, HttpMessageHandler? handler, Func<HttpMessageHandler>? hubHandler, TimeProvider? clock = null, bool printInbox = false, IReadOnlyList<string>? acknowledge = null)
+    internal static async Task<string> RunAsync(string nodeFolder, string claudeSessionId, Action<string> deliver, TimeSpan? timeout, CancellationToken cancellationToken, HttpMessageHandler? handler, Func<HttpMessageHandler>? hubHandler, TimeProvider? clock = null, bool printInbox = false, IReadOnlyList<string>? acknowledge = null, TimeSpan? interval = null)
     {
         // Before --ack, which normalizes the ID, so a bad --chat gets the usage error rather than a FormatException.
         if (!ChatLocators.IsUuid(claudeSessionId)) throw new AdapterConfigurationException(ChatUsage);
@@ -39,9 +39,9 @@ public static class ClaudeWaiter
                 new() { ["messageIds"] = JsonSerializer.SerializeToNode(ids), ["requestId"] = "waiter-ack-" + Guid.NewGuid().ToString("N") }, cancellationToken);
             if (acked is not { Ok: true }) Console.Error.WriteLine($"CoCern waiter could not acknowledge {ids.Length} message(s) ({acked?.Code ?? "no session"}); acknowledge them with ack.");
         }
-        if (!printInbox) return await WaitAsync(nodeFolder, claudeSessionId, deliver, timeout, cancellationToken, handler, hubHandler, clock);
+        if (!printInbox) return await WaitAsync(nodeFolder, claudeSessionId, deliver, timeout, cancellationToken, handler, hubHandler, clock, interval);
         string? prompt = null;
-        var status = await WaitAsync(nodeFolder, claudeSessionId, text => prompt = text, timeout, cancellationToken, handler, hubHandler, clock);
+        var status = await WaitAsync(nodeFolder, claudeSessionId, text => prompt = text, timeout, cancellationToken, handler, hubHandler, clock, interval);
         if (status != "queued") return status;
         var printed = await ReadInboxAsync(nodeFolder, claudeSessionId, handler, cancellationToken);
         // An attention line in the prompt names the waiting item; it is kept when the inbox replaces the prompt.
@@ -49,6 +49,21 @@ public static class ClaudeWaiter
         deliver(printed is null ? prompt : attention is null ? printed : printed + "\n" + attention);
         return status;
     }
+
+    /// <summary>
+    /// Returns once no waiter another client started is running for this chat, or after <paramref name="grace"/>. After an app restart the old
+    /// client's waiter takes a moment to notice its client is gone; a hook that gave up on it at once would leave the chat with no waiter when it
+    /// ends. A waiter of this hook's own client is left to do its job, and without a known client of its own the hook cannot tell the two apart.
+    /// </summary>
+    internal static async Task AwaitOtherClientsWaiterAsync(string nodeFolder, string claudeSessionId, Func<int, ProcessFacts?> read, TimeSpan grace, TimeSpan checkEvery, CancellationToken cancellationToken)
+    {
+        if (!ChatLocators.IsUuid(claudeSessionId) || OwningProcess.ClientOf(Environment.ProcessId, read) is not { } own) return;
+        var path = PidPath(Path.GetFullPath(nodeFolder), claudeSessionId);
+        var waited = Stopwatch.StartNew();
+        while (waited.Elapsed < grace && LiveProcess(path) is { } waiter && OwningProcess.ClientOf(waiter, read) is var client && (client?.Id != own.Id || client.StartedUtc != own.StartedUtc))
+            await Task.Delay(checkEvery, cancellationToken);
+    }
+
 
     /// <summary>The longest inbox text a wake prints; anything beyond is left for check_inbox.</summary>
     internal const int MaxPrintedInbox = 16_000;
@@ -116,7 +131,7 @@ public static class ClaudeWaiter
         static string Field(JsonElement item, string name) => item.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString()! : "";
     }
 
-    private static async Task<string> WaitAsync(string nodeFolder, string claudeSessionId, Action<string> deliver, TimeSpan? timeout, CancellationToken cancellationToken, HttpMessageHandler? handler, Func<HttpMessageHandler>? hubHandler, TimeProvider? clock)
+    private static async Task<string> WaitAsync(string nodeFolder, string claudeSessionId, Action<string> deliver, TimeSpan? timeout, CancellationToken cancellationToken, HttpMessageHandler? handler, Func<HttpMessageHandler>? hubHandler, TimeProvider? clock, TimeSpan? interval)
     {
         var folder = Path.GetFullPath(nodeFolder);
         if (!ChatLocators.IsUuid(claudeSessionId)) throw new AdapterConfigurationException(ChatUsage);
@@ -124,7 +139,12 @@ public static class ClaudeWaiter
         var options = ConnectionOptions(folder) ?? throw new AdapterConfigurationException($"No enrolled node or local CoCern connection is available in '{folder}'.");
         var handle = FindHandle(folder, threadId) ?? throw new AdapterConfigurationException($"No relay session on this PC belongs to Claude chat {threadId}. Call session_open from that chat first, with CoCern running on the node's credentials.");
         var statePath = Path.Combine(folder, WaitersFolder, threadId + ".db");
-        WakeTarget[] targets = [new(new WakeRoute(handle.RepositoryId, "default", NodeState.SessionHandlePath(folder, handle.SessionId), threadId, Environment.MachineName), new WakeSession(handle.SessionId, handle.SessionToken), new InboxWaitDispatcher(deliver))];
+        // Read again on every pass: a later hook finds this waiter alive and leaves it running, so a chat that moved to a newer session is followed from here.
+        IReadOnlyList<WakeTarget> Targets()
+        {
+            handle = FindHandle(folder, threadId) ?? handle;
+            return [new(new WakeRoute(handle.RepositoryId, "default", NodeState.SessionHandlePath(folder, handle.SessionId), threadId, Environment.MachineName), new WakeSession(handle.SessionId, handle.SessionToken), new InboxWaitDispatcher(deliver))];
+        }
         // One waiter per chat: the exclusive state is taken before the pid file is written, so a losing second waiter never touches the live one's file.
         var running = $"An inbox waiter for Claude chat {threadId} is already running on this PC.";
         if (IsAlive(PidPath(folder, threadId))) throw new AdapterConfigurationException(running);
@@ -134,9 +154,10 @@ public static class ClaudeWaiter
         using (state)
         {
             var runtime = new WakeRuntime(options, statePath, Path.Combine(folder, StopFile), options.BaseUri.AbsoluteUri) { HubHandler = hubHandler, State = state };
+            if (interval is { } pass) runtime = runtime with { Interval = pass };
             using var self = Process.GetCurrentProcess();
             var written = WritePid(folder, threadId, self.Id, self.StartTime.ToUniversalTime());
-            try { return await WakeWatcher.RunAsync(runtime, _ => Task.FromResult<IReadOnlyList<WakeTarget>>(targets), exitWhenQueued: true, timeout, cancellationToken, handler, clock); }
+            try { return await WakeWatcher.RunAsync(runtime, _ => Task.FromResult(Targets()), exitWhenQueued: true, timeout, cancellationToken, handler, clock); }
             finally { RemoveIfUnchanged(PidPath(folder, threadId), written); }
         }
     }
@@ -180,23 +201,28 @@ public static class ClaudeWaiter
     private static bool IsClaude(ChatLocation? location, string claudeSessionId) =>
         location is { Provider: ChatProviders.Claude } && string.Equals(location.ThreadId, claudeSessionId, StringComparison.OrdinalIgnoreCase);
 
-    private static bool IsAlive(string path)
+    private static bool IsAlive(string path) => LiveProcess(path) is not null;
+
+    /// <summary>The process ID in the pid file at <paramref name="path"/> while that process is alive.</summary>
+    private static int? LiveProcess(string path)
     {
-        try { return Alive(File.ReadAllText(path)); }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { return false; }
+        try { return LiveId(File.ReadAllText(path)); }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { return null; }
     }
 
-    private static bool Alive(string text)
+    private static bool Alive(string text) => LiveId(text) is not null;
+
+    private static int? LiveId(string text)
     {
         try
         {
             if (JsonNode.Parse(text) is not JsonObject root || root["pid"] is not JsonValue pid || !pid.TryGetValue<int>(out var id) || id <= 0 ||
                 root["startedAt"] is not JsonValue started || !started.TryGetValue<string>(out var startedText) ||
-                !DateTime.TryParse(startedText, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var startedAt)) return false;
+                !DateTime.TryParse(startedText, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var startedAt)) return null;
             using var process = Process.GetProcessById(id);
-            return !process.HasExited && (process.StartTime.ToUniversalTime() - startedAt.ToUniversalTime()).Duration() < StartTolerance;
+            return !process.HasExited && (process.StartTime.ToUniversalTime() - startedAt.ToUniversalTime()).Duration() < StartTolerance ? id : null;
         }
-        catch (Exception exception) when (exception is JsonException or ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException or FormatException) { return false; }
+        catch (Exception exception) when (exception is JsonException or ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException or FormatException) { return null; }
     }
 
     /// <summary>Deletes the file only while it still holds <paramref name="expected"/>, so a waiter that started since is never cleaned up by mistake.</summary>

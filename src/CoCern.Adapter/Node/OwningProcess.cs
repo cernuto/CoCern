@@ -41,6 +41,10 @@ internal static class OwningProcess
         return chain;
     }
 
+    /// <summary>The client that started <paramref name="processId"/>: the top of its chain, or null when the chain ends before a client, as it does once the client has exited.</summary>
+    internal static ProcessFacts? ClientOf(int processId, Func<int, ProcessFacts?> read) =>
+        Chain(processId, read) is { Count: > 0 } chain && IsClient(chain[^1].Name) ? chain[^1] : null;
+
     internal static async Task WaitUntilGoneAsync(IReadOnlyList<ProcessFacts> chain, Func<ProcessFacts, bool> isAlive, TimeSpan checkEvery, CancellationToken cancellationToken)
     {
         if (chain.Count == 0) await Task.Delay(Timeout.Infinite, cancellationToken);

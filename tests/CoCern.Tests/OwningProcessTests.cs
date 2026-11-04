@@ -50,6 +50,16 @@ public sealed class OwningProcessTests
     }
 
     [Fact]
+    public void The_client_of_a_process_is_the_top_of_its_chain_only_when_that_is_a_client()
+    {
+        var read = Tree(new(5, 4, "CoCern.Adapter", T0.AddSeconds(4)), new(4, 2, "bash", T0.AddSeconds(3)), new(2, 1, "claude", T0.AddSeconds(1)), new(1, 0, "explorer", T0));
+        Assert.Equal(2, OwningProcess.ClientOf(5, read)?.Id);
+        // The client has exited, so its parent can no longer be read: there is no client to name.
+        Assert.Null(OwningProcess.ClientOf(5, Tree(new(5, 4, "CoCern.Adapter", T0.AddSeconds(4)), new(4, 2, "bash", T0.AddSeconds(3)))));
+        Assert.Null(OwningProcess.ClientOf(7, read));
+    }
+
+    [Fact]
     public async Task Waiting_ends_when_any_process_in_the_chain_is_gone()
     {
         var chain = new ProcessFacts[] { new(4, 3, "bash", T0), new(3, 2, "claude", T0) };
