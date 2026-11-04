@@ -34,7 +34,7 @@ public sealed class SessionHandoff
     internal static SessionHandoff ForFolder(string folder, ChatLocation? client = null) => new(folder, client, TextWriter.Null);
 
     /// <summary>Perform one exact scoped open. No independently supplied reply can become a private native handle.</summary>
-    internal async Task<(bool Completed, string Code)> OpenNativeJoinAsync(NativeJoinBinding binding, RelayForwarder forwarder, CancellationToken ct)
+    internal async Task<(bool Completed, string Code)> OpenNativeJoinAsync(NativeJoinBinding binding, RelayForwarder forwarder, CancellationToken ct, string? displayTitle = null)
     {
         ct.ThrowIfCancellationRequested();
         try
@@ -43,16 +43,21 @@ public sealed class SessionHandoff
                 return (false, "native_join_scope_mismatch");
             var arguments = binding.FrozenOpenArguments;
             var reply = await forwarder.ForwardAsync(CoCern.Contracts.RelayTools.SessionOpen, arguments, ct);
-            if (!reply.Ok) return (false, reply.Code);
+            if (!reply.Ok)
+            {
+                if (reply.Code == CoCern.Contracts.RelayErrorCodes.SessionUnknown && reply.Version is not null &&
+                    forwarder.MatchesNativeBinding(binding) && binding.AdvanceExpired(arguments)) return (false, "native_generation_advanced");
+                return (false, reply.Code);
+            }
             if (!forwarder.MatchesNativeBinding(binding)) return (false, "native_join_scope_mismatch");
-            return CompleteNativeJoin(binding, arguments, reply) ? (true, reply.Code) : (false, "native_join_handle_conflict");
+            return CompleteNativeJoin(binding, arguments, reply, displayTitle) ? (true, reply.Code) : (false, "native_join_handle_conflict");
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or JsonException)
         { return (false, "native_join_scope_mismatch"); }
     }
 
     /// <summary>Only the immediately preceding transport call can reach this completion boundary.</summary>
-    private bool CompleteNativeJoin(NativeJoinBinding binding, JsonElement arguments, AdapterReply reply)
+    private bool CompleteNativeJoin(NativeJoinBinding binding, JsonElement arguments, AdapterReply reply, string? displayTitle)
     {
         try
         {
@@ -72,7 +77,10 @@ public sealed class SessionHandoff
             }
             if (binding.CurrentHandleReference is not null && binding.CurrentHandleReference != id) return false;
             var client = new ChatLocation(binding.Provider, binding.NativeId);
-            var handle = new SessionHandle(id, token, binding.RepositoryId, Label(arguments) ?? DefaultLabel,
+            // A native title is only display text and never augments the frozen proof.
+            var label = displayTitle?.Trim() is { Length: > 0 and <= NodeState.MaxIdentifierLength } title && !title.Any(char.IsControl)
+                ? title : binding.Provider == CoCern.Contracts.ChatProviders.Codex ? "Codex" : "Claude";
+            var handle = new SessionHandle(id, token, binding.RepositoryId, label,
                 DateTimeOffset.UtcNow, client, client) { NativeBindingKey = binding.OwnershipKey };
             NodeState.WriteSessionHandle(_folder, handle);
             return binding.Complete(handle);

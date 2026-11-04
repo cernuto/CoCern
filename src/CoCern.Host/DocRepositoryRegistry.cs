@@ -29,8 +29,11 @@ internal sealed class DocRepositoryRegistry
     private DocRepository[] all;
     private int capNoted;
 
-    public DocRepositoryRegistry(DocCacheSettings settings, GitCli git, ILogger<DocRepositoryRegistry> logger)
+    private readonly IHttpContextAccessor? transport;
+
+    public DocRepositoryRegistry(DocCacheSettings settings, GitCli git, ILogger<DocRepositoryRegistry> logger, IHttpContextAccessor? transport = null)
     {
+        this.transport = transport;
         (this.settings, this.git, this.logger) = (settings, git, logger);
         all = [.. settings.Repositories];
         Ids = new IdView(this);
@@ -41,6 +44,41 @@ internal sealed class DocRepositoryRegistry
 
     /// <summary>A live view of every repository ID, for the doc tools, so a repository found after startup is searchable at once.</summary>
     public IReadOnlyCollection<string> Ids { get; }
+
+    // Only configured paths reach Git. A loopback socket may additionally match a digest of the actual
+    // checkout or its shared Git directory; a remote caller's paths have no authority on the hub.
+    internal async Task<string?> ResolveNativeAsync(CoCern.Domain.RelayCaller caller, string? checkout, string? common, string? origin)
+    {
+        if (!settings.Enabled) return null;
+        var peer = transport?.HttpContext?.Connection.RemoteIpAddress;
+        var local = peer is not null && System.Net.IPAddress.IsLoopback(peer.IsIPv4MappedToIPv6 ? peer.MapToIPv4() : peer);
+        var ct = transport?.HttpContext?.RequestAborted ?? CancellationToken.None;
+        var paths = new List<string>();
+        var remotes = new List<string>();
+        foreach (var repo in settings.Repositories.Where(r => caller.MayAccess(r.Id)))
+        {
+            async Task<string?> Read(params string[] args)
+            {
+                var result = await git.RunAsync(repo.ClonePath, args, 32768, null, ct);
+                return result is { ExitCode: 0, Truncated: false } ? result.Text.TrimEnd('\r', '\n') : null;
+            }
+            // Git searches parent directories. An ordinary directory inside another checkout is not this configured clone.
+            if (!IsRepository(repo.ClonePath) || await Read("rev-parse", "--show-toplevel") is not { } top || !Path.IsPathFullyQualified(top) ||
+                !string.Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(repo.ClonePath)),
+                    Path.TrimEndingDirectorySeparator(Path.GetFullPath(top)), StringComparison.Ordinal)) continue;
+            if (local && (checkout is not null || common is not null))
+            {
+                bool Matches(string? expected, string? physical) => expected is not null && physical is not null && Path.IsPathFullyQualified(physical)
+                    && Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(
+                        Path.TrimEndingDirectorySeparator(Path.GetFullPath(physical))))) == expected;
+                if (Matches(checkout, top) ||
+                    Matches(common, await Read("rev-parse", "--path-format=absolute", "--git-common-dir"))) paths.Add(repo.Id);
+            }
+            if (origin is not null && NativeGitOrigin.Canonical(await Read("config", "--local", "--get-all", "remote.origin.url")) == origin) remotes.Add(repo.Id);
+        }
+        var matches = paths.Count > 0 ? paths : remotes;
+        return matches.Count == 1 ? matches[0] : null;
+    }
 
     public DocRepository? Find(string id) => settings.Find(id) ?? (Volatile.Read(ref discovered).TryGetValue(id, out var found) ? found : null);
 

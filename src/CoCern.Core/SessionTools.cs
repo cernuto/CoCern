@@ -18,6 +18,12 @@ internal sealed class SessionTools(Aggregates aggregates, StandingDelivery stand
 {
     public async Task<RelayReply> OpenAsync(RelayCaller caller, JsonObject args, CallTrace? trace)
     {
+        if (args["nativePreflight"] is JsonObject evidence)
+        {
+            var repo = await docs.ResolveNativeAsync(caller, (string?)evidence["checkout"], (string?)evidence["common"], (string?)evidence["origin"]);
+            return repo is not null && caller.MayAccess(repo) ? Ok(new { repositoryId = repo }) :
+                Error(RepositoryDenied, new { guidance = "Configure one accessible repository matching this checkout or its Git origin." });
+        }
         var opened = BoundWire(await OpenSessionAsync(caller, args));
         if (trace is not null && opened.Ok) { trace.SessionId = Text(Aggregates.Parse(opened), "sessionId"); trace.Role = Text(args, "role"); }
         if (opened.Ok && string.Equals(Text(args, "role"), SessionRoles.Manager, StringComparison.OrdinalIgnoreCase)) StartAnomalyMonitor(caller, Text(args, "repositoryId"));

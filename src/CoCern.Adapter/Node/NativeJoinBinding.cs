@@ -19,10 +19,53 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
     internal string StatePath => Path.Combine(Folder, NodeState.SessionsFolder, "native", BindingKey + ".json");
     internal string LockPath => Path.ChangeExtension(StatePath, ".lock");
     private readonly string credentialIdentity;
-    private readonly JsonElement arguments;
+    private JsonElement arguments;
     private FileStream? owner;
     private string? currentSessionId;
     private const int MaxStateBytes = 16 * 1024;
+
+    /// <summary>Dispatch observation only. No ID-only credential lookup, file creation or adoption.</summary>
+    internal static IReadOnlyList<SessionHandle> DispatchSnapshot(string folder)
+    {
+        var result = new List<SessionHandle>();
+        try
+        {
+            if (!Directory.Exists(Path.Combine(folder, NodeState.SessionsFolder, "native"))) return result;
+            folder = CanonicalDirectory(folder);
+            var identity = ConnectionIdentity(folder);
+            var sessions = Path.Combine(folder, NodeState.SessionsFolder);
+            var directory = Path.Combine(sessions, "native");
+            if (!Directory.Exists(directory)) return result;
+            RejectLink(sessions); RejectLink(directory);
+            foreach (var path in Directory.EnumerateFiles(directory, "*.json").Take(2048))
+            {
+                try
+                {
+                    // Read under the existing writer fence. A busy/replaced record is retried by the next observation.
+                    var lockPath = Path.ChangeExtension(path, ".lock");
+                    RequirePrivate(lockPath, 0);
+                    using var reader = new FileStream(lockPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+                    RequirePrivate(path, MaxStateBytes);
+                    using var document = JsonDocument.Parse(File.ReadAllBytes(path), new JsonDocumentOptions { MaxDepth = 8 });
+                    var record = Object(document.RootElement, "version", "scope", "currentSessionId", "openArguments");
+                    if (record["version"].GetInt32() != 1 || !record.TryGetValue("currentSessionId", out var id) || !NodeState.IsFileId(Text(id))) continue;
+                    var args = record["openArguments"];
+                    var native = args.GetProperty("nativeJoin");
+                    var provider = Text(native.GetProperty("provider")); var nativeId = Text(native.GetProperty("nativeId"));
+                    var workspace = Text(native.GetProperty("workspace")); var machine = Text(args.GetProperty("machineId")); var repo = Text(args.GetProperty("repositoryId"));
+                    if (provider is not ("claude" or "codex") || !TryNativeId(nativeId, out var parsed) || parsed.ToString("D") != nativeId || !Path.IsPathFullyQualified(workspace)) continue;
+                    ValidateIdentifier(machine); ValidateIdentifier(repo); ValidateArguments(args, provider, nativeId, machine, repo, workspace);
+                    var key = Digest("cocern-native-binding-v1", folder, identity, provider, nativeId, machine, repo, workspace);
+                    if (Path.GetFileName(path) != key + ".json" || Text(record["scope"]) != key) continue;
+                    var snapshot = new NativeJoinBinding(folder, provider, nativeId, repo, workspace, identity, key, args, Text(id), reader);
+                    if (snapshot.CurrentHandle is { } current && current.SessionId == Text(id)) result.Add(current);
+                }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or JsonException or KeyNotFoundException or FormatException) { }
+            }
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException) { }
+        return result;
+    }
     internal string Secret { get { CheckLease(); return arguments.GetProperty("nativeJoin").GetProperty("bindingSecret").GetString()!; } }
     internal string Generation { get { CheckLease(); return arguments.GetProperty("nativeJoin").GetProperty("generation").GetString()!; } }
     internal string OpenRequestId { get { CheckLease(); return arguments.GetProperty("requestId").GetString()!; } }
@@ -130,6 +173,21 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
             authenticatedOptions.PinnedFingerprint, authenticatedOptions.Token) == credentialIdentity;
     }
 
+    // Only SessionHandoff's authenticated exact open may advance the frozen pair after SessionUnknown.
+    internal bool AdvanceExpired(JsonElement expected)
+    {
+        CheckLease();
+        if (expected.GetRawText() != arguments.GetRawText()) return false;
+        var next = System.Text.Json.Nodes.JsonNode.Parse(expected.GetRawText())!.AsObject();
+        next["requestId"] = Guid.NewGuid().ToString("N");
+        next["nativeJoin"]!["generation"] = Guid.NewGuid().ToString("N");
+        var frozen = JsonSerializer.SerializeToElement(next);
+        Write(StatePath, BindingKey, frozen, null);
+        arguments = frozen;
+        currentSessionId = null;
+        return true;
+    }
+
     // Only SessionHandoff's authenticated-open boundary creates an ownership marker and calls this method.
     internal bool Complete(SessionHandle handle)
     {
@@ -159,7 +217,7 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
         if (ConnectionIdentity(Folder) != credentialIdentity) throw Failure("The private connection changed while joining.");
     }
 
-    private static async Task<FileStream> LockAsync(string path, CancellationToken ct)
+    internal static async Task<FileStream> LockAsync(string path, CancellationToken ct)
     {
         var elapsed = Stopwatch.StartNew();
         while (true)

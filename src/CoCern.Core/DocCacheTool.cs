@@ -13,6 +13,7 @@ namespace CoCern.Core;
 /// <summary>The doc cache tools as the hub calls them; a hub with the cache off gets <see cref="DocCacheTool.Off"/>.</summary>
 public interface IDocCacheTools
 {
+    Task<string?> ResolveNativeAsync(RelayCaller caller, string? checkout, string? common, string? origin) => Task.FromResult<string?>(null);
     Task<RelayReply> SearchAsync(JsonObject args);
     Task<RelayReply> SectionAsync(JsonObject args);
     Task<RelayReply> SyncAsync(JsonObject args, CancellationToken cancellationToken);
@@ -32,6 +33,9 @@ public sealed class DocCacheTool(IGrainFactory grains, ITokenCounter tokens, IDo
     private const int CommitLength = 12;
 
     private bool Known(string repository) => repositories.Contains(repository, StringComparer.Ordinal);
+
+    public Task<string?> ResolveNativeAsync(RelayCaller caller, string? checkout, string? common, string? origin) =>
+        sync.ResolveNativeAsync(caller, checkout, common, origin);
 
     public Task<string?> LearnAsync(string repositoryId, string workspace) => sync.LearnAsync(repositoryId, workspace);
 

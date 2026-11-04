@@ -81,7 +81,10 @@ public sealed class LocalChatWake : IAsyncDisposable
             while (!lifetime.IsCancellationRequested)
             {
                 chats.Read(_ => true); // The existing bounded locator verifies native identity before a Codex route is used.
-                var targets = NodeState.ReadSessionHandles(Connection.Folder).Where(x => observed.ContainsKey(x.SessionId) && OwnsNative(x) && x.Chat is { Provider: ChatProviders.Codex }).ToArray();
+                var native = NativeJoinBinding.DispatchSnapshot(Connection.Folder).Where(x => x.Chat is { Provider: ChatProviders.Codex }).ToArray();
+                var targets = native.Concat(NodeState.ReadSessionHandles(Connection.Folder).Where(x => observed.ContainsKey(x.SessionId) && OwnsNative(x) &&
+                    x.Chat is { Provider: ChatProviders.Codex } && !native.Any(n => n.Chat == x.Chat))).GroupBy(x => x.Chat!.ThreadId)
+                    .Where(group => group.Count() == 1 || group.All(x => x.NativeBindingKey is null)).SelectMany(group => group).ToArray();
                 foreach (var gone in active.Keys.Where(key => !targets.Any(x => x.Chat!.ThreadId == key && x.SessionId == active[key].Session) || active[key].Task.IsCompleted).ToArray())
                 { var previous = active[gone]; previous.Stop.Cancel(); await previous.Task; previous.Stop.Dispose(); active.Remove(gone); }
                 foreach (var handle in targets)
@@ -103,7 +106,8 @@ public sealed class LocalChatWake : IAsyncDisposable
     private async Task WatchAsync(SessionHandle handle, string codex, CancellationToken ct)
     {
         var latest = NodeState.ReadSessionHandle(NodeState.SessionHandlePath(Connection.Folder, handle.SessionId));
-        if (latest is null || !OwnsNative(latest) || latest.Chat != handle.Chat || latest.RepositoryId != handle.RepositoryId || latest.SessionToken != handle.SessionToken) return;
+        if (latest is null || latest.Chat != handle.Chat || latest.RepositoryId != handle.RepositoryId || latest.SessionToken != handle.SessionToken ||
+            (handle.NativeBindingKey is null ? !OwnsNative(latest) : !NativeJoinBinding.DispatchSnapshot(Connection.Folder).Contains(handle))) return;
         var thread = handle.Chat!.ThreadId;
         try
         {

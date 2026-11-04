@@ -30,6 +30,14 @@ internal static class RelayRequestGuard
             // A repeated key would let checks and the operation read different values, so it is refused (building the object throws on one).
             args = JsonNode.Parse(raw)!.AsObject();
             _ = args.Count;
+            // A preflight cannot be combined with any allocating or caller-controlled envelope.
+            if (args.ContainsKey("nativePreflight"))
+            {
+                if (tool.Name != RelayTools.SessionOpen || args.Count != 1 || args["nativePreflight"] is not JsonObject evidence ||
+                    evidence.Count is < 1 or > 3 || evidence.Any(field => field.Value is not JsonValue value ||
+                        !value.TryGetValue<string>(out var s) || !ValidEvidence(field.Key, s))) return Replies.Error(InvalidArguments);
+                return null;
+            }
         }
         catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or JsonException)
         {
@@ -79,6 +87,13 @@ internal static class RelayRequestGuard
     });
 
     /// <summary>Within their length, and (when present) not blank and free of control characters, which would break logs and displays.</summary>
+    private static bool ValidEvidence(string key, string value) => key switch
+    {
+        "origin" => NativeGitOrigin.Canonical(value) == value,
+        "checkout" or "common" => value.Length == 64 && value.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f'),
+        _ => false
+    };
+
     private static bool IdentifiersFit(JsonObject args)
     {
         if (IdentifierFields.Any(field => Text(args, field).Length > RelayLimits.MaxIdentifierLength)) return false;
