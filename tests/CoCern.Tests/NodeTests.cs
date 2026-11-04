@@ -24,6 +24,26 @@ namespace CoCern.Tests;
 public sealed class NodeTests : IDisposable
 {
     [Fact]
+    public async Task Direct_setup_enrollment_never_infers_running_build_from_installed_clients()
+    {
+        await using var host = Hub();
+        var traffic = new HubTraffic();
+        using var state = NodeState.Open(DataDir);
+        var basis = InMemory(host, traffic);
+        var transport = new NodeTransport
+        {
+            Clients = () => ["codex"], Locators = [], CodexExecutable = () => null,
+            ProbeFingerprint = basis.ProbeFingerprint, CreateHandler = basis.CreateHandler, HubHandler = basis.HubHandler,
+            Chats = basis.Chats, JoinCode = basis.JoinCode, SingleCycle = true
+        };
+        Assert.Null(transport.CreateUpdater);
+        Assert.Equal(0, await NodeRunner.RunAsync(state, InMemoryHub, transport, error, CancellationToken.None));
+        using var sent = JsonDocument.Parse(traffic.Accepted!);
+        Assert.Equal("codex", Assert.Single(sent.RootElement.GetProperty("clients").EnumerateArray()).GetString());
+        Assert.True(!sent.RootElement.TryGetProperty("nodeBuild", out var build) || build.ValueKind == JsonValueKind.Null);
+    }
+
+    [Fact]
     public async Task Fix1_release_A_B_A_keeps_each_unexpired_failure_until_fifteen_minutes()
     {
         using var state = NodeState.Open(DataDir); state.SetHub("http://localhost/", null); state.SaveCredential(new string('a', 64));

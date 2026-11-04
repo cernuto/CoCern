@@ -47,6 +47,39 @@ internal sealed record SetupOptions(Uri Hub, bool SkipClientConfig, string? Data
 /// <summary>Everything setup touches outside its own arguments, so tests can substitute all of it.</summary>
 internal sealed class SetupEnvironment
 {
+    /// <summary>The existing --node startup, using its known installed package and original node folder.</summary>
+    internal static async Task<int> RunNodeAsync(string? dataDir, Uri? hub, NodeTransport transport, string adapterDll, string? dotnetPath, TextWriter error, CancellationToken ct,
+        Func<string, string, string?, CancellationToken, Task<int>>? supervise = null)
+    {
+        string folder;
+        using (var state = NodeState.Open(dataDir))
+        {
+            folder = state.Folder;
+            var bootstrap = NodePackage.ValidateBootstrapSource(adapterDll, Path.Combine(folder, "updates"));
+            if (bootstrap is null) { error.WriteLine("node-update:bootstrap-invalid"); return 1; }
+            // This is an explicit authorized startup, never an update-time repair of installed files or registration.
+            if (bootstrap.SupervisorProtocol != 1)
+            {
+                error.WriteLine("node-update:bootstrap-needed");
+                return await NodeRunner.RunAsync(state, hub, transport, error, ct);
+            }
+            try { _ = NodeRunner.ResolveHub(state, hub); }
+            catch (AdapterConfigurationException exception) { error.WriteLine(exception.Message); return 1; }
+            if (!state.Enrolled || state.TryReadCredential(out _) != CredentialRead.Present)
+            {
+                var singleCycle = transport.SingleCycle;
+                transport.SingleCycle = true;
+                int enrolled;
+                try { enrolled = await NodeRunner.RunAsync(state, hub, transport, error, ct); }
+                finally { transport.SingleCycle = singleCycle; }
+                if (ct.IsCancellationRequested) return singleCycle ? 1 : 0;
+                if (enrolled != 0) return enrolled;
+            }
+        } // Release the original node singleton before its supervised worker opens it.
+        if (ct.IsCancellationRequested) return 0;
+        return await (supervise ?? NodeSupervisor.RunAsync)(folder, adapterDll, dotnetPath, ct);
+    }
+
     public required string Profile { get; init; }
     public required string DotnetPath { get; init; }
     public required string AdapterDll { get; init; }

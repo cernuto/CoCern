@@ -13,12 +13,17 @@ public static class NodePackageMetadataReader
     private const int PeLimit = 128 * 1024 * 1024;
 
     /// <summary>Reads build output without loading or executing candidate assemblies.</summary>
-    public static NodePackageMetadata? Read(string folder) => TryRead(name =>
+    public static NodePackageMetadata? Read(string folder) => ReadFolder(folder, allowUnsupportedProtocol: false);
+
+    /// <summary>Only initial installed-bootstrap classification accepts a different explicit protocol, after all other metadata checks.</summary>
+    internal static NodePackageMetadata? ReadInstalledBootstrap(string folder) => ReadFolder(folder, allowUnsupportedProtocol: true);
+
+    private static NodePackageMetadata? ReadFolder(string folder, bool allowUnsupportedProtocol) => TryRead(name =>
     {
         var path = Path.Combine(folder, name);
         if (!File.Exists(path) || (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0) return null;
         return new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-    });
+    }, allowUnsupportedProtocol);
 
     /// <summary>Publication reads the completed archive, so metadata and the leased ZIP describe the same immutable bytes.</summary>
     public static NodePackageMetadata? Read(ZipArchive archive) => TryRead(name =>
@@ -27,16 +32,16 @@ public static class NodePackageMetadataReader
         return entries.Length == 1 && entries[0].FullName == name ? entries[0].Open() : null;
     });
 
-    private static NodePackageMetadata? TryRead(Func<string, Stream?> open)
+    private static NodePackageMetadata? TryRead(Func<string, Stream?> open, bool allowUnsupportedProtocol = false)
     {
-        try { return ReadCore(open); }
+        try { return ReadCore(open, allowUnsupportedProtocol); }
         catch (Exception exception) when (exception is IOException or InvalidDataException or UnauthorizedAccessException or BadImageFormatException or JsonException or InvalidOperationException or ArgumentException or OverflowException or KeyNotFoundException)
         {
             return null;
         }
     }
 
-    private static NodePackageMetadata? ReadCore(Func<string, Stream?> open)
+    private static NodePackageMetadata? ReadCore(Func<string, Stream?> open, bool allowUnsupportedProtocol)
     {
         using var dll = Bounded(open, "CoCern.Adapter.dll", PeLimit);
         using var pe = new PEReader(dll);
@@ -72,7 +77,9 @@ public static class NodePackageMetadataReader
                 protocol = blob.ReadSerializedString();
             }
         }
-        if (product is not { Length: > 0 and <= 256 } || product.Any(char.IsControl) || protocol != "1") return null;
+        if (product is not { Length: > 0 and <= 256 } || product.Any(char.IsControl) ||
+            protocol is not { Length: > 0 and <= 10 } || !int.TryParse(protocol, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var supervisorProtocol) ||
+            !allowUnsupportedProtocol && protocol != "1") return null;
         var architecture = pe.PEHeaders.CoffHeader.Machine switch
         {
             Machine.I386 when (cor.Flags & (CorFlags.Requires32Bit | CorFlags.Prefers32Bit)) == 0 => "any",
@@ -131,7 +138,7 @@ public static class NodePackageMetadataReader
                 if (nativePe.PEHeaders.PEHeader is null || nativePe.PEHeaders.CoffHeader.Machine != machine) return null;
             }
         }
-        return new(1, product, tfm, rid, included, declared.OrderBy(f => f.Name, StringComparer.Ordinal).ThenBy(f => f.Version, StringComparer.Ordinal).ToArray(), 1);
+        return new(1, product, tfm, rid, included, declared.OrderBy(f => f.Name, StringComparer.Ordinal).ThenBy(f => f.Version, StringComparer.Ordinal).ToArray(), supervisorProtocol);
     }
 
     private static MemoryStream Bounded(Func<string, Stream?> open, string name, int maximum)

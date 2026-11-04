@@ -7,6 +7,8 @@ using Microsoft.AspNetCore.SignalR;
 using Microsoft.AspNetCore.SignalR.Client;
 using Microsoft.Extensions.DependencyInjection;
 using CoCern.Core;
+using CoCern.Contracts;
+using System.Text.Json.Nodes;
 using CoCern.Domain;
 using CoCern.Host;
 using Serilog;
@@ -19,6 +21,103 @@ namespace CoCern.Tests;
 public sealed class DiscoveryHostTests
 {
     private const string AdminToken = "discovery-admin-test-secret-not-production";
+
+    [Fact]
+    public async Task Node_build_observations_belong_only_to_the_authenticated_announcing_machine_and_old_nodes_clear_them()
+    {
+        await using var host = Host();
+        using var a = Client(host, await EnrollAsync(host, "node-c", "Node C"));
+        using var b = Client(host, await EnrollAsync(host, "node-old", "Old node"));
+        var c = new { productVersion = "3.0.0+running-C", contentId = new string('C', 64), adapterDllSha256 = new string('D', 64), processId = 1234 };
+        var chatA = Chat(thread: "c", session: await OpenSessionAsync(a));
+        var chatB = Chat(thread: "old", session: await OpenSessionAsync(b));
+        Assert.Equal(HttpStatusCode.OK, (await PostAsync(b, "/api/discovery/announce", new { machineName = "Old node", chats = new[] { chatB } })).Status);
+        Assert.Equal(HttpStatusCode.OK, (await PostAsync(a, "/api/discovery/announce", new { machineId = "node-old", machineName = "Node C", nodeBuild = c, chats = new[] { chatA } })).Status);
+        using var admin = Client(host, AdminToken);
+        var directory = await PostAsync(admin, "/api/tools/chat_directory", new { repositoryId = "repo" });
+        using var data = JsonDocument.Parse(directory.Body.GetProperty("dataJson").GetString()!);
+        var rows = data.RootElement.GetProperty("items").EnumerateArray().ToArray();
+        var current = Assert.Single(rows, row => row.GetProperty("machineName").GetString() == "Node C");
+        Assert.True(current.TryGetProperty("nodeBuild", out var observation));
+        Assert.Equal("3.0.0+running-C", observation.GetProperty("productVersion").GetString());
+        Assert.Equal(new string('C', 64), observation.GetProperty("contentId").GetString());
+        Assert.Equal(new string('D', 64), observation.GetProperty("adapterDllSha256").GetString());
+        Assert.Equal(1234, observation.GetProperty("processId").GetInt32());
+        var old = Assert.Single(rows, row => row.GetProperty("machineName").GetString() == "Old node");
+        Assert.True(!old.TryGetProperty("nodeBuild", out var absent) || absent.ValueKind == JsonValueKind.Null);
+        // An older process replacing C must not leave the previous process's observation behind.
+        Assert.Equal(HttpStatusCode.OK, (await PostAsync(a, "/api/discovery/announce", new { machineName = "Node C", nodeBuild = (object?)null, chats = new[] { chatA } })).Status);
+        directory = await PostAsync(admin, "/api/tools/chat_directory", new { repositoryId = "repo" });
+        using var refreshed = JsonDocument.Parse(directory.Body.GetProperty("dataJson").GetString()!);
+        var rowC = Assert.Single(refreshed.RootElement.GetProperty("items").EnumerateArray(), row => row.GetProperty("machineName").GetString() == "Node C");
+        Assert.True(!rowC.TryGetProperty("nodeBuild", out var cleared) || cleared.ValueKind == JsonValueKind.Null);
+    }
+
+    [Theory]
+    [InlineData("version-empty")]
+    [InlineData("version-long")]
+    [InlineData("version-control")]
+    [InlineData("content-short")]
+    [InlineData("dll-nonhex")]
+    [InlineData("pid-zero")]
+    [InlineData("pid-string")]
+    [InlineData("not-object")]
+    public async Task Invalid_node_build_is_rejected_without_replacing_the_previous_announcement(string defect)
+    {
+        await using var host = Host();
+        using var machine = Client(host, await EnrollAsync(host, "observed-node"));
+        var build = new JsonObject { ["productVersion"] = "1.2.3", ["contentId"] = new string('A', 64), ["adapterDllSha256"] = new string('B', 64), ["processId"] = 25 };
+        var chat = Chat(session: await OpenSessionAsync(machine));
+        Assert.Equal(HttpStatusCode.OK, (await PostAsync(machine, "/api/discovery/announce", new { machineName = "Original", nodeBuild = build.DeepClone(), chats = new[] { chat } })).Status);
+        switch (defect)
+        {
+            case "version-empty": build["productVersion"] = ""; break;
+            case "version-long": build["productVersion"] = new string('v', 257); break;
+            case "version-control": build["productVersion"] = "1\n2"; break;
+            case "content-short": build["contentId"] = "abc"; break;
+            case "dll-nonhex": build["adapterDllSha256"] = new string('Z', 64); break;
+            case "pid-zero": build["processId"] = 0; break;
+            case "pid-string": build["processId"] = "25"; break;
+        }
+        var announcement = new JsonObject { ["machineName"] = "Rejected", ["nodeBuild"] = defect == "not-object" ? JsonValue.Create("wrong") : build };
+        Assert.Equal(HttpStatusCode.BadRequest, (await PostAsync(machine, "/api/discovery/announce", announcement)).Status);
+        using var admin = Client(host, AdminToken);
+        var directory = await PostAsync(admin, "/api/tools/chat_directory", new { repositoryId = "repo" });
+        using var data = JsonDocument.Parse(directory.Body.GetProperty("dataJson").GetString()!);
+        var retained = Assert.Single(data.RootElement.GetProperty("items").EnumerateArray());
+        Assert.Equal("Original", retained.GetProperty("machineName").GetString());
+        Assert.Equal("1.2.3", retained.GetProperty("nodeBuild").GetProperty("productVersion").GetString());
+    }
+
+    [Fact]
+    public void Node_build_projection_remains_repository_scoped_and_truncates_to_the_existing_reply_budget()
+    {
+        var envelope = new StateEnvelope<CoordinationDocument>();
+        var caller = new RelayCaller("internal", true, [], IsInternal: true);
+        var now = DateTimeOffset.Parse("2026-11-04T00:00:00Z");
+        for (var machine = 0; machine < 8; machine++)
+        {
+            Assert.True(DiscoveryStateMachine.Apply(envelope, caller, DiscoveryOperations.Enroll,
+                new() { ["machineId"] = "machine" + machine, ["machineName"] = "PC", ["credentialHash"] = "hash" + machine }, now).Ok);
+            var chats = new JsonArray();
+            for (var chat = 0; chat < 64; chat++) chats.Add(new JsonObject { ["provider"] = "codex", ["threadId"] = $"t{chat}", ["relaySessionId"] = $"s{machine}-{chat}", ["repositoryId"] = chat == 63 ? "denied" : "repo", ["label"] = new string('L', 200), ["wakeable"] = false, ["waiterRunning"] = false });
+            Assert.True(DiscoveryStateMachine.Apply(envelope, caller, DiscoveryOperations.Announce,
+                new() { ["machineId"] = "machine" + machine, ["machineName"] = "PC", ["chats"] = chats, ["nodeBuild"] = new JsonObject { ["productVersion"] = new string('V', 256), ["contentId"] = new string('A', 64), ["adapterDllSha256"] = new string('B', 64), ["processId"] = 100 + machine } }, now).Ok);
+        }
+        var reply = DiscoveryStateMachine.Apply(envelope, caller, DiscoveryOperations.Directory, new() { ["repositories"] = new JsonArray("repo") }, now);
+        Assert.True(reply.Ok);
+        Assert.True(Replies.FitsWire(reply, RelayLimits.AggregateReplyBytes));
+        using var data = JsonDocument.Parse(reply.DataJson);
+        Assert.True(data.RootElement.GetProperty("truncated").GetBoolean());
+        var rows = data.RootElement.GetProperty("items").EnumerateArray().ToArray();
+        Assert.NotEmpty(rows);
+        Assert.All(rows, row =>
+        {
+            Assert.Equal("repo", row.GetProperty("repositoryId").GetString());
+            Assert.True(row.TryGetProperty("nodeBuild", out _));
+            Assert.False(row.TryGetProperty("credentialHash", out _));
+        });
+    }
 
     private static RelayHostFixture Host(bool enabled = true, IPAddress? remote = null, string? repositories = "repo", Action<IServiceCollection>? services = null)
     {

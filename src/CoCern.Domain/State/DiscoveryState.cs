@@ -1,4 +1,6 @@
 using System.Text.Json.Nodes;
+using System.Text.Json;
+using CoCern.Contracts;
 using static CoCern.Domain.JsonFields;
 
 namespace CoCern.Domain.State;
@@ -84,9 +86,11 @@ public sealed class EnrolledMachine(JsonObject json)
     public const string LastSeenKey = "lastSeen";
     public const string ClientsKey = "clients";
     public const string ChatsKey = "chats";
+    public const string NodeBuildKey = "nodeBuild";
 
     public static StateShape Shape { get; } = StateShape.Object(
-        (NameKey, null), (CredentialHashKey, null), (EnrolledAtKey, null), (LastSeenKey, null), (ClientsKey, null), (ChatsKey, AnnouncedChat.Shape));
+        (NameKey, null), (CredentialHashKey, null), (EnrolledAtKey, null), (LastSeenKey, null), (ClientsKey, null), (ChatsKey, AnnouncedChat.Shape),
+        (NodeBuildKey, StateShape.Object(("productVersion", null), ("contentId", null), ("adapterDllSha256", null), ("processId", null))));
 
     public string Name
     {
@@ -110,13 +114,17 @@ public sealed class EnrolledMachine(JsonObject json)
     /// <summary>The chats it last announced.</summary>
     public IEnumerable<AnnouncedChat> Chats => (json[ChatsKey] as JsonArray ?? []).OfType<JsonObject>().Select(chat => new AnnouncedChat(chat));
 
+    /// <summary>The last announcing node process, when observed; old or missing announcements remain unknown.</summary>
+    public NodeBuildObservation? NodeBuild => json[NodeBuildKey]?.Deserialize<NodeBuildObservation>(new JsonSerializerOptions(JsonSerializerDefaults.Web));
+
     /// <summary>Takes an announcement: the machine's name, that it was seen at <paramref name="now"/>, and the clients and chats it runs now.</summary>
-    public void Announced(string name, DateTimeOffset now, IEnumerable<string> clients, IEnumerable<AnnouncedChat> chats)
+    public void Announced(string name, DateTimeOffset now, IEnumerable<string> clients, IEnumerable<AnnouncedChat> chats, NodeBuildObservation? nodeBuild = null)
     {
         Name = name;
         json[LastSeenKey] = now.ToString("O");
         json[ClientsKey] = new JsonArray(clients.Select(client => (JsonNode)JsonValue.Create(client)!).ToArray());
         json[ChatsKey] = new JsonArray(chats.Select(chat => (JsonNode)chat.Json).ToArray());
+        json[NodeBuildKey] = JsonSerializer.SerializeToNode(nodeBuild, new JsonSerializerOptions(JsonSerializerDefaults.Web));
     }
 }
 

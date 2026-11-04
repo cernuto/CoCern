@@ -24,6 +24,23 @@ public sealed record NodeLaunchSpec(string FileName, string[] Arguments)
 
 public static class NodePackage
 {
+    /// <summary>Checks only the known installed source; mutable node versions never become the stable bootstrap.</summary>
+    internal static NodePackageMetadata? ValidateBootstrapSource(string bootstrapAdapterDll, string updateRoot)
+    {
+        try
+        {
+            var dll = Canonical(bootstrapAdapterDll);
+            if (!Path.GetFileName(dll).Equals("CoCern.Adapter.dll", StringComparison.OrdinalIgnoreCase) || !File.Exists(dll)) return null;
+            var source = Path.GetDirectoryName(dll)!;
+            var root = UpdateRoot(updateRoot);
+            if (source.Equals(root, StringComparison.OrdinalIgnoreCase) || root.StartsWith(source + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
+                source.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) return null;
+            _ = BootstrapFiles(source, CancellationToken.None);
+            return NodePackageMetadataReader.ReadInstalledBootstrap(source);
+        }
+        catch (Exception exception) when (Unavailable(exception)) { return null; }
+    }
+
     /// <summary>Imports only the explicitly supplied installed package; it neither selects nor executes an adapter.</summary>
     public static async Task<NodeImage> ImportBootstrapAsync(string bootstrapAdapterDll, string updateRoot, CancellationToken ct)
     {

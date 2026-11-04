@@ -314,7 +314,7 @@ Directory rows are keyed by repository and session ID. A registered row without 
 
 ### Setup by hand
 
-The dashboard's **Add another PC** shows one PowerShell command to paste on the other PC (Windows PowerShell 5.1 or PowerShell 7). It downloads the adapter from this hub (`GET /join/adapter.zip`, over HTTPS with the hub's certificate pinned for that download only) and runs setup from `%LOCALAPPDATA%\CoCern\adapter`. Any failure stops it before anything is unpacked or run, and it leaves the window's settings as they were. The zip is unpacked into a fresh folder: a folder holding the same files is left alone, any other is swapped whole (never unpacked over), and when a running node or chat holds the old folder nothing changes and it says to close those chats and stop the node (`Stop-Process -Name CoCern.Adapter`) first. Pasting it again is how a joined PC updates; files added to the folder by hand are not kept. The other PC needs no .NET when the hub serves a self-contained adapter (`artifacts/adapter` from `Build-CoCern.ps1 -Publish`, preferred when present); otherwise it needs the .NET 10 runtime, and the page warns. The command holds the join code, so keep it private. By hand instead, from any copy of `artifacts/adapter` on the other PC:
+The dashboard's **Add another PC** shows one PowerShell command to paste on the other PC (Windows PowerShell 5.1 or PowerShell 7). It downloads the adapter from this hub (`GET /join/adapter.zip`, over HTTPS with the hub's certificate pinned for that download only) and runs setup from `%LOCALAPPDATA%\CoCern\adapter`. Any failure stops it before anything is unpacked or run, and it leaves the window's settings as they were. The zip is unpacked into a fresh folder: a folder holding the same files is left alone, any other is swapped whole (never unpacked over), and when a running node or chat holds the old folder nothing changes and it says to close those chats and stop the node (`Stop-Process -Name CoCern.Adapter`) first. This installs the bootstrap and MCP adapter; files added to that installation by hand are not kept. Later compatible node builds use the node update path below. The other PC needs no .NET when the hub serves a self-contained adapter (`artifacts/adapter` from `Build-CoCern.ps1 -Publish`, preferred when present); otherwise it needs the .NET 10 runtime, and the page warns. The command holds the join code, so keep it private. By hand instead, from any copy of `artifacts/adapter` on the other PC:
 
 ```powershell
 .\CoCern.Adapter.exe --setup --hub https://<hub-pc>:5273/ --join-code <code> --fingerprint <fingerprint>
@@ -333,6 +333,17 @@ Firewall, once on the hub PC, in PowerShell as administrator:
 ```powershell
 New-NetFirewallRule -DisplayName "CoCern hub (HTTPS 5273)" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 5273 -Profile Private
 ```
+
+### Node updates
+
+The existing `--node` startup and Windows `CoCernNode` Run value select a stable supervisor from the explicitly installed adapter package. Its immutable child versions use the original node data folder and singleton. Setup's single enrollment cycle remains separate. Updates never replace the supervisor, rewrite the Run value, edit client settings or hooks, install a runtime, or reenroll because a candidate failed.
+
+- **Updated:** the hub's verified package started and made an authenticated announcement before becoming current.
+- **Update deferred:** the current node keeps waking chats while a busy or uncertain dispatch prevents activation; an incompatible or unavailable offer also leaves it serving.
+- **Old node retained:** a failed candidate is stopped through its owned process handle and the previous verified node is restarted, with existing credentials, unread mail and wake state retained.
+- **Bootstrap needed:** a valid older installation with an unsupported supervisor protocol keeps its existing node behavior and needs one authorized compatible installation and restart. A missing or damaged bootstrap is refused; automatic updates never repair it by rewriting installed files.
+
+An announcing supervised node includes optional `nodeBuild` with `productVersion`, `contentId`, `adapterDllSha256` and `processId`. These are observations of its validated running image and actual process, projected only onto its existing permitted `chat_directory` rows. Missing or null observations from older nodes mean unknown; they do not identify an installed MCP version. Host identity, the hub's offered `nodeRelease`, the running node and the MCP adapter installed in a client are separate. Updating a node does not refresh a chat's loaded tool metadata. Directory replies retain their existing size bound and `truncated` behavior.
 
 ### Wake-ups
 

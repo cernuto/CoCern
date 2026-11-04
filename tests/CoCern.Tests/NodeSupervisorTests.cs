@@ -17,6 +17,37 @@ namespace CoCern.Tests;
 
 public sealed class NodeSupervisorTests(ITestOutputHelper output) : IDisposable
 {
+    [Fact]
+    public async Task Worker_announcement_reports_validated_running_image_and_actual_pid_instead_of_served_release()
+    {
+        PrepareRoot();
+        var running = Image("running-node-C");
+        NodeUpdateState.Write(Updates, Committed(running));
+        using (var state = NodeState.Open(NodeFolder)) { state.SetHub("http://localhost/", null); state.SaveCredential(new string('a', 64)); }
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        string? announcement = null;
+        var served = new NodeRelease(1, new string('B', 64), running.Package with { ProductVersion = "2.0.0+served-B" }, 1, new string('E', 64), new string('F', 64));
+        var transport = new NodeTransport
+        {
+            Clients = () => [], Locators = [], Chats = _ => Task.FromResult(new System.Text.Json.Nodes.JsonArray()), CodexExecutable = () => null,
+            CreateHandler = (_, _) => new UpdateWorkerHandler(request =>
+            {
+                announcement = request.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
+                return new(System.Net.HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new { routes = Array.Empty<object>(), nodeRelease = served }, new JsonSerializerOptions(JsonSerializerDefaults.Web))) };
+            }),
+            HubHandler = () => new UpdateWorkerHandler(_ => new(System.Net.HttpStatusCode.ServiceUnavailable)),
+            Trace = value => { if (value == "announced") stop.Cancel(); }
+        };
+        Assert.Equal(0, await NodeRunner.RunWorkerAsync(NodeFolder, null, Path.Combine(Updates, "versions", running.ContentId), transport, new StringWriter(), stop.Token));
+        using var sent = JsonDocument.Parse(announcement!);
+        Assert.True(sent.RootElement.TryGetProperty("nodeBuild", out var build));
+        Assert.Equal(running.Package.ProductVersion, build.GetProperty("productVersion").GetString());
+        Assert.Equal(running.ContentId, build.GetProperty("contentId").GetString());
+        Assert.Equal(running.AdapterDllSha256, build.GetProperty("adapterDllSha256").GetString());
+        Assert.Equal(Environment.ProcessId, build.GetProperty("processId").GetInt32());
+        Assert.DoesNotContain("2.0.0+served-B", announcement);
+    }
+
     private static NodeHostCapabilities FixHost => new(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "dotnet", "dotnet.exe"), [new("Microsoft.NETCore.App", "10.0.14")], "win-x64");
 
     [Fact]
