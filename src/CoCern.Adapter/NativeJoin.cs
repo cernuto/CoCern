@@ -25,7 +25,10 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
 
     private sealed class Refused(string code) : IOException(code) { internal string Code { get; } = code; }
     private sealed record Intent(string Provider, string NativeId, string Cwd, string? Repository = null);
-    private sealed record Invocation(string Id, string Tool, JsonElement Args);
+    private sealed record Invocation(string Id, string Tool, JsonElement Args)
+    {
+        internal bool LegacyWire { get; set; }
+    }
     // The forwarder reports untyped gateway errors as hub_error; only retry registration, never the user's tool.
     private static bool Transient(string code) => code is "hub_timeout" or "hub_unavailable" or "Unavailable" or "hub_error" or "rate_limited" or "native_generation_advanced";
 
@@ -49,7 +52,40 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
     internal async Task<SessionHandle> EnsureAsync(NativeHookContext context, CancellationToken ct) =>
         (await EnsureBoundAsync(context, null, ct)).Handle;
 
-    private async Task<(SessionHandle Handle,string? Request)> EnsureBoundAsync(NativeHookContext context, Invocation? invocation, CancellationToken ct, bool retry = true)
+    internal async Task<JsonElement> WithEstablishedSigningBindingAsync(NativeHookContext context, Func<NativeJoinBinding, JsonElement> sign,
+        CancellationToken ct, Func<string, CancellationToken, Task<string>>? resolveCheckout = null)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct, stopping.Token);
+        timeout.CancelAfter(TimeSpan.FromSeconds(15));
+        var cancel = timeout.Token;
+        try
+        {
+            cancel.ThrowIfCancellationRequested();
+            if (context.Provider is not ("claude" or "codex") || context.NativeId is not { Length: 32 or 36 } ||
+                !Guid.TryParseExact(context.NativeId, context.NativeId.Length == 32 ? "N" : "D", out var id)) throw new Refused("native_capture_required");
+            var workspace = resolveCheckout is null
+                ? await Task.Run(() => NativeCheckout.Inspect(context.Cwd).Root, cancel).WaitAsync(cancel)
+                : await resolveCheckout(context.Cwd, cancel);
+            var scope = CredentialScope();
+            var directory = IntentDir(scope);
+            SafeDirectory(directory, false);
+            var intent = new Intent(context.Provider, id.ToString("D"), workspace);
+            var name = NativeCheckout.Hash(JsonSerializer.Serialize(intent));
+            // The same fence excludes SessionStart/open and repository remapping for this capture.
+            // Retain it through the complete candidate lookup AND MAC issuance, without relay work.
+            await using var membership = await NativeJoinBinding.LockAsync(Path.Combine(directory, name[..2] + ".lock"), cancel, existingOnly: true);
+            if (CredentialScope() != scope) throw new Refused("native_private_connection_required");
+            Func<string, CancellationToken, Task<string>>? knownCheckout = resolveCheckout is null ? null : (_, _) => Task.FromResult(workspace);
+            await using var binding = await NativeJoinBinding.AcquireEstablishedAsync(folder, context.Provider, id.ToString("D"),
+                Environment.MachineName, workspace, cancel, resolveCheckout: knownCheckout);
+            cancel.ThrowIfCancellationRequested();
+            return sign(binding);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw new OperationCanceledException(ct); }
+        catch (OperationCanceledException) when (!stopping.IsCancellationRequested) { throw new Refused("native_binding_busy"); }
+    }
+
+    private async Task<(SessionHandle Handle,string? Request)> EnsureBoundAsync(NativeHookContext context, Invocation? invocation, CancellationToken ct, bool retry = true, string? expectedGeneration = null)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct, stopping.Token);
         timeout.CancelAfter(Budget);
@@ -100,6 +136,7 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
                 }
                 await using var binding = await NativeJoinBinding.AcquireAsync(folder, intent.Provider, intent.NativeId, Environment.MachineName, repo, checkout.Root, cancel);
                 if (!forwarder.MatchesNativeBinding(binding)) throw new Refused("native_private_connection_required");
+                if (expectedGeneration is not null && binding.Generation != expectedGeneration) throw new Refused("native_stamp_invalid");
                 var handle = binding.CurrentHandle;
                 var client = new ChatLocation(intent.Provider, intent.NativeId);
                 if (handle is not null)
@@ -128,7 +165,7 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
                     await hint.ObserveSessionAsync(JsonSerializer.SerializeToElement(new { repositoryId = handle.RepositoryId }),
                         new(true, "Ok", JsonSerializer.SerializeToElement(new { sessionId = handle.SessionId, sessionToken = handle.SessionToken })), cancel);
                 }
-                var request = invocation is null ? null : BindInvocation(binding, handle, invocation);
+                var request = invocation is null ? null : await BindInvocationAsync(binding, handle, invocation, cancel);
                 File.Delete(path);
                 return (handle, request);
             }
@@ -143,26 +180,65 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
     }
 
     // Reserve before forwarding. A lost reply stays on its original session, even after process restart.
-    private static string BindInvocation(NativeJoinBinding binding, SessionHandle handle, Invocation invocation)
+    private static async Task<string> BindInvocationAsync(NativeJoinBinding binding, SessionHandle handle, Invocation invocation, CancellationToken ct)
     {
-        var directory = Path.Combine(Path.GetDirectoryName(binding.StatePath)!, "calls-" + binding.BindingKey);
-        SafeDirectory(directory, true);
-        var request = NativeCheckout.Hash(binding.BindingKey + ":" + invocation.Id);
-        var path = Path.Combine(directory, request + ".json");
-        var fence = NativeCheckout.Hash(JsonSerializer.Serialize(new[] { binding.Generation, handle.SessionId, invocation.Tool, invocation.Args.GetRawText() }));
-        if (File.Exists(path))
-        {
-            if (!NodeState.IsPrivateFile(path) || new FileInfo(path).Length != 64 || File.ReadAllText(path) != fence) throw new Refused("native_invocation_conflict");
-        }
-        else
-        {
-            if (Directory.EnumerateFiles(directory, "*.json").Take(4096).Count() == 4096) throw new Refused("native_invocation_capacity");
-            NodeState.WritePrivately(path, System.Text.Encoding.ASCII.GetBytes(fence));
-        }
-        return request;
+        var now = TimeProvider.System.GetUtcNow().ToUnixTimeSeconds();
+        if (await NativeJoinHook.BindReadInvocationAsync(binding, invocation.Tool, invocation.Id, invocation.Args, now + 120, now, admit: false, ct: ct) is { } refusal)
+            throw new Refused(refusal);
+        var result = MutationFence(binding, handle, invocation.Id, invocation.Tool, invocation.Args, reserve: true);
+        invocation.LegacyWire = result.Legacy;
+        return result.Request;
     }
 
-    internal async Task<AdapterReply> CallAsync(NativeHookContext context, string invocation, string tool, JsonElement args, CancellationToken ct)
+    // The signed endpoint checks both domains and reserves mutations under its already-authenticated
+    // lease, before any registration/status traffic. A rejected read never poisons a legacy retry.
+    internal static async Task<string?> AdmitStampedInvocationAsync(NativeJoinBinding binding, string tool, string id, JsonElement args, long expires, long now,
+        CancellationToken ct, Func<string, byte[], CancellationToken, Task>? writeReadCache = null, Func<TimeSpan, CancellationToken, Task>? retryDelay = null)
+    {
+        try
+        {
+            if (!RelayToolCatalog.TryGet(tool, out var definition) || binding.CurrentHandle is not { } handle) return "native_invocation_invalid";
+            _ = MutationFence(binding, handle, id, tool, args, reserve: false);
+            if (await NativeJoinHook.BindReadInvocationAsync(binding, tool, id, args, expires, now, admit: !definition.IsMutation, ct: ct,
+                writeReadCache: writeReadCache, retryDelay: retryDelay) is { } refusal) return refusal;
+            if (definition.IsMutation) _ = MutationFence(binding, handle, id, tool, args, reserve: true);
+            return null;
+        }
+        catch (Refused error) { return error.Code; }
+    }
+
+    private static (string Request, bool Legacy) MutationFence(NativeJoinBinding binding, SessionHandle handle, string id, string tool, JsonElement args, bool reserve)
+    {
+        var directory = Path.Combine(Path.GetDirectoryName(binding.StatePath)!, "calls-" + binding.BindingKey);
+        SafeDirectory(directory, false);
+        var request = NativeCheckout.Hash(binding.BindingKey + ":" + id);
+        var path = Path.Combine(directory, request + ".json");
+        var canonical = NativeCheckout.Hash(JsonSerializer.Serialize(new[] { binding.Generation, handle.SessionId, tool, NativeJoinHook.Canonical(args) }));
+        if (File.Exists(path))
+        {
+            if (!NodeState.IsPrivateFile(path) || new FileInfo(path).Length is not (64 or 67)) throw new Refused("native_invocation_conflict");
+            var prior = File.ReadAllText(path);
+            if (prior.Length == 64)
+            {
+                var legacy = NativeCheckout.Hash(JsonSerializer.Serialize(new[] { binding.Generation, handle.SessionId, tool, args.GetRawText() }));
+                if (prior == legacy) return (request, true);
+                // The inactive hook checkpoint also wrote unversioned canonical digests. Preserve
+                // their canonical wire, without changing or deleting either kind of old evidence.
+                if (prior == canonical) return (request, false);
+            }
+            else if (prior == "v2:" + canonical) return (request, false);
+            throw new Refused("native_invocation_conflict");
+        }
+        if (reserve)
+        {
+            SafeDirectory(directory, true);
+            if (Directory.EnumerateFiles(directory, "*.json").Take(4096).Count() == 4096) throw new Refused("native_invocation_capacity");
+            NodeState.WritePrivately(path, System.Text.Encoding.ASCII.GetBytes("v2:" + canonical));
+        }
+        return (request, false);
+    }
+
+    internal async Task<AdapterReply> CallAsync(NativeHookContext context, string invocation, string tool, JsonElement args, CancellationToken ct, string? expectedGeneration = null)
     {
         if (invocation is not { Length: > 0 and <= 256 } || invocation.Any(char.IsControl) || args.ValueKind != JsonValueKind.Object ||
             !RelayToolCatalog.TryGet(tool, out var definition) || tool is RelayTools.SessionOpen or RelayTools.SessionBind) return new(false, "native_invocation_invalid");
@@ -170,13 +246,14 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
             return new(false, "native_invocation_conflict");
         try
         {
-            var (handle, request) = await EnsureBoundAsync(context, definition.IsMutation ? new(invocation, tool, args) : null, ct);
-            var payload = JsonNode.Parse(args.GetRawText())!.AsObject();
+            var admission = definition.IsMutation ? new Invocation(invocation, tool, args) : null;
+            var (handle, request) = await EnsureBoundAsync(context, admission, ct, expectedGeneration: expectedGeneration);
+            var payload = JsonNode.Parse(admission?.LegacyWire == true ? args.GetRawText() : NativeJoinHook.Canonical(args))!.AsObject();
             if (payload.ContainsKey("repositoryId") && (string?)payload["repositoryId"] != handle.RepositoryId) return new(false, "native_repository_conflict");
             payload["repositoryId"] = handle.RepositoryId;
             if (definition.RequiresSession || tool == RelayTools.GetStatus)
             { payload["sessionId"] = handle.SessionId; payload["sessionToken"] = handle.SessionToken; }
-            if (request is not null) payload["requestId"] = request;
+            if (definition.IsMutation && request is not null) payload["requestId"] = request;
             var arguments = RelayForwarder.WithOrigin(JsonSerializer.SerializeToElement(payload), background: false);
             if (tool == RelayTools.ControlRequest) arguments = CoordinationTools.WithOwnSession(arguments, handle.SessionId);
             var reply = tool == RelayTools.CheckInbox ? await InboxWait.CheckAsync(forwarder, arguments, InboxWait.PollInterval, ct) :

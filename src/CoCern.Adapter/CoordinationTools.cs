@@ -11,6 +11,10 @@ namespace CoCern.Adapter;
 
 public static class CoordinationTools
 {
+    internal static IEnumerable<McpServerTool> CreateNative(RelayForwarder forwarder, NativeJoin join, string provider, bool admin, bool diagnostics = false) =>
+        Surface(admin, chatOnly: true, diagnostics).Where(tool => tool.Name is not (RelayTools.SessionOpen or RelayTools.SessionBind))
+            .Select(tool => new ForwardedTool(tool, (args, ct) => NativeJoinHook.InvokeAsync(join, provider, tool.Name, args, ct), native: true));
+
     /// <summary>The chat profile: what a chat needs to find peers and exchange messages, and nothing it would carry unused in every turn.</summary>
     private static readonly HashSet<string> ChatTools = [RelayTools.SessionOpen, RelayTools.SendMessage, RelayTools.CheckInbox, RelayTools.Ack, RelayTools.ChatDirectory];
 
@@ -158,7 +162,7 @@ public static class CoordinationTools
         private readonly Func<JsonElement, CancellationToken, Task<AdapterReply>> call;
         public ForwardedTool(RelayTool tool, ChatCalls calls) : this(tool, (args, ct) => calls.CallAsync(tool.Name, args, ct)) { }
 
-        public ForwardedTool(RelayTool tool, Func<JsonElement, CancellationToken, Task<AdapterReply>> call)
+        public ForwardedTool(RelayTool tool, Func<JsonElement, CancellationToken, Task<AdapterReply>> call, bool native = false)
         {
             this.call = call;
             ProtocolTool = new Tool
@@ -170,6 +174,15 @@ public static class CoordinationTools
                     : ConditionalRead.Applies(tool.Name) ? With(RelayToolCatalog.ForwardingSchema(tool), "ifNoneMatch", ConditionalRead.Schema)
                     : RelayToolCatalog.ForwardingSchema(tool)
             };
+            if (native)
+            {
+                var schema = JsonNode.Parse(ProtocolTool.InputSchema.GetRawText())!.AsObject();
+                var self = new HashSet<string>(["sessionId", "sessionToken", "repositoryId", "requestId", "_cocernNative"], StringComparer.Ordinal);
+                foreach (var field in self) schema["properties"]!.AsObject().Remove(field);
+                if (schema["required"] is JsonArray required)
+                    foreach (var field in required.Where(field => field is not null && self.Contains(field.GetValue<string>())).ToArray()) required.Remove(field);
+                ProtocolTool.InputSchema = JsonSerializer.SerializeToElement(schema);
+            }
         }
 
         public override Tool ProtocolTool { get; }

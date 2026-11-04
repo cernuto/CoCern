@@ -217,6 +217,12 @@ internal static class SetupCommand
                 env.Out.WriteLine(plan.Apply(env.Clock) switch { ClientChange.Created => $"Created {plan.Path} with the CoCern entry.", ClientChange.Updated => $"Added the CoCern entry to {plan.Path} (backup kept next to it).", _ => $"{plan.Path} already has a CoCern entry; left as it was." });
                 if (claudeCode && !plan.IsUnchanged && env.ClaudeCodeRunning()) env.Out.WriteLine("Claude Code appears to be running: restart it to pick up the CoCern entry.");
             }
+            if (!options.SkipClientConfig)
+            {
+                var command = SetupEnvironment.AdapterCommandLine(env.DotnetPath, env.AdapterDll);
+                ClientSettings.StageNativeCandidate(folder, "codex", command, clientProfile: Path.Combine(env.Profile, ".codex"));
+                ClientSettings.StageNativeCandidate(folder, "claude", command, clientProfile: Path.Combine(env.Profile, ".claude"));
+            }
             LogonStart.Register(env.DotnetPath, env.AdapterDll, options.DataDir is null ? null : folder, env.RunKey);
             env.StartNode(env.DotnetPath, env.AdapterDll, options.DataDir is null ? null : folder);
         }

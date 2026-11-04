@@ -171,7 +171,7 @@ public sealed class MinorFixTests : IDisposable
         File.WriteAllText(Path.Combine(data, "local-hub.json"), JsonSerializer.Serialize(new { url = "https://127.0.0.1:5272/", fingerprint = Fingerprint }));
         var profile = Path.Combine(root, "profile");
         using var output = new StringWriter();
-        Assert.Equal(0, ConnectCommand.Run(["--token-file", token, "--only", "claude-code"], profile, null, "dotnet", Path.Combine(root, "CoCern.Adapter.dll"), output, TextWriter.Null));
+        Assert.Equal(0, ConnectCommand.Run(["--token-file", token, "--only", "claude-code"], profile, null, "dotnet", Path.Combine(root, "CoCern.Adapter.dll"), output, TextWriter.Null, nativeCacheRoot: Path.Combine(root, "native-cache")));
         var env = JsonNode.Parse(File.ReadAllText(Path.Combine(profile, ".claude.json")))!["mcpServers"]!["cocern"]!["env"]!;
         Assert.Equal("https://127.0.0.1:5272/", env["COCERN_URL"]!.GetValue<string>());
         Assert.Equal(Fingerprint, env["COCERN_FINGERPRINT"]!.GetValue<string>());
