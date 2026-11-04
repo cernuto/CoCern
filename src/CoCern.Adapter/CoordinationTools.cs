@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -155,11 +156,13 @@ public static class CoordinationTools
 
 /// <summary>
 /// One chat's calls through this adapter: what it adds to them (its own request IDs and workspace on <c>session_open</c>, its own session on
-/// <c>close_sessions</c>) and what it takes from their replies (the chat's current session, the node's session handle, the optional hints).
+/// <c>close_sessions</c> and on any call that needs a session and leaves it out) and what it takes from their replies (the chat's current session,
+/// the node's session handle, the optional hints).
 /// </summary>
 internal sealed class ChatCalls(RelayForwarder forwarder, SessionHints? hints, SessionHandoff? handoff, string requestScope, Func<string?>? workspace = null, LocalChatWake? localWake = null)
 {
     private readonly Func<string?> _workspace = workspace ?? (() => CoordinationTools.Workspace);
+    private readonly ConcurrentDictionary<string, (string Id, string Token)> _own = new(StringComparer.Ordinal);
     private string? _session;
 
     /// <summary>The session this chat last opened, or last used with its token, through this adapter; null until a call succeeds.</summary>
@@ -170,6 +173,7 @@ internal sealed class ChatCalls(RelayForwarder forwarder, SessionHints? hints, S
         arguments = RelayForwarder.WithOrigin(arguments, background: false);
         if (tool == RelayTools.SessionOpen) arguments = CoordinationTools.OwnRequestId(arguments, _workspace(), requestScope);
         else if (tool == RelayTools.ControlRequest) arguments = CoordinationTools.WithOwnSession(arguments, CurrentSession);
+        else arguments = WithOwnHandle(tool, arguments);
         AdapterReply? originalReply = null;
         var reply = tool == RelayTools.CheckInbox
             ? await InboxWait.CheckAsync(forwarder, arguments, InboxWait.PollInterval, cancellationToken)
@@ -192,12 +196,38 @@ internal sealed class ChatCalls(RelayForwarder forwarder, SessionHints? hints, S
         return reply;
     }
 
+    /// <summary>
+    /// A chat's memory of its handle does not outlast its context: when a long conversation is compacted, the token goes with it. The adapter
+    /// already holds the handle, so a call that needs a session and leaves it out gets this chat's own: the one it last used in that repository
+    /// through this adapter, or, after an adapter restart, the handle on disk with this chat's ID. Anything the caller gave stands (even blank),
+    /// and a call naming another session never gains this chat's token. Without either, the call goes on as it was and the hub refuses it.
+    /// </summary>
+    private JsonElement WithOwnHandle(string tool, JsonElement arguments)
+    {
+        if (!RelayToolCatalog.TryGet(tool, out var definition) || !definition.RequiresSession || arguments.ValueKind != JsonValueKind.Object || arguments.TryGetProperty("sessionToken", out _) ||
+            ChatLocators.Text(arguments, "repositoryId") is not { Length: > 0 } repository) return arguments;
+        if (!_own.TryGetValue(repository, out var own))
+        {
+            if ((handoff?.FindOwn(repository) ?? localWake?.FindOwn(repository)) is not { } found) return arguments;
+            own = (found.SessionId, found.SessionToken);
+        }
+        if (arguments.TryGetProperty("sessionId", out var named) && !(named.ValueKind == JsonValueKind.String && named.GetString() == own.Id)) return arguments;
+        var node = JsonNode.Parse(arguments.GetRawText())!.AsObject();
+        node["sessionId"] = own.Id;
+        node["sessionToken"] = own.Token;
+        return JsonSerializer.SerializeToElement(node);
+    }
+
     /// <summary>The session a successful <c>session_open</c> returned, or that a successful call presented with its private token.</summary>
     private void Learn(string tool, JsonElement arguments, AdapterReply reply)
     {
-        var session = tool == RelayTools.SessionOpen
-            ? reply.Data is { ValueKind: JsonValueKind.Object } data ? ChatLocators.Text(data, "sessionId") : null
-            : RelayToolCatalog.TryGet(tool, out var definition) && definition.RequiresSession && ChatLocators.Text(arguments, "sessionToken") is { Length: > 0 } ? ChatLocators.Text(arguments, "sessionId") : null;
-        if (session is { Length: > 0 and <= RelayLimits.MaxIdentifierLength }) Volatile.Write(ref _session, session);
+        var opened = tool == RelayTools.SessionOpen;
+        if (!opened && !(RelayToolCatalog.TryGet(tool, out var definition) && definition.RequiresSession)) return;
+        var source = opened ? reply.Data ?? default : arguments;
+        var token = ChatLocators.Text(source, "sessionToken");
+        if (!opened && token is not { Length: > 0 }) return;
+        if (ChatLocators.Text(source, "sessionId") is not { Length: > 0 and <= RelayLimits.MaxIdentifierLength } session) return;
+        Volatile.Write(ref _session, session);
+        if (token is { Length: > 0 } && ChatLocators.Text(arguments, "repositoryId") is { Length: > 0 } repository) _own[repository] = (session, token);
     }
 }

@@ -67,6 +67,9 @@ public sealed class LocalChatWake : IAsyncDisposable
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException) { }
     }
 
+    /// <summary>This chat's newest session in a repository among its local handles; see <see cref="SessionHandoff.FindOwn"/>.</summary>
+    internal SessionHandle? FindOwn(string repository) => handoff.FindOwn(repository);
+
     public Task RunAsync(CancellationToken ct) => running ??= LoopAsync(ct);
 
     private async Task LoopAsync(CancellationToken ct)

@@ -119,6 +119,145 @@ public sealed class AdapterChatCallsTests : IDisposable
         Assert.Equal("s-1", hub.Sent(RelayTools.ControlRequest)["sessionId"]!.GetValue<string>());
     }
 
+    // ---- A chat need not carry its own session ----
+
+    private static JsonElement Repo(string repository = "repo") => JsonSerializer.SerializeToElement(new { repositoryId = repository });
+
+    private static (string? Id, string? Token) Handle(JsonObject sent) => (sent["sessionId"]?.GetValue<string>(), sent["sessionToken"]?.GetValue<string>());
+
+    [Fact]
+    public async Task A_call_that_leaves_out_its_session_gets_the_one_this_chat_opened()
+    {
+        using var hub = new FakeHub();
+        var calls = new ChatCalls(hub.Forwarder(), null, null, "scope", () => null);
+        Assert.True((await calls.CallAsync(RelayTools.SessionOpen, JsonSerializer.SerializeToElement(new { repositoryId = "repo", requestId = "open-1" }), CancellationToken.None)).Ok);
+
+        Assert.True((await calls.CallAsync(RelayTools.CheckInbox, Repo(), CancellationToken.None)).Ok);
+
+        Assert.Equal(("s-1", "t-1"), Handle(hub.Sent(RelayTools.CheckInbox)));
+    }
+
+    [Fact]
+    public async Task A_session_used_with_its_token_is_kept_for_the_calls_after_it()
+    {
+        using var hub = new FakeHub();
+        var calls = new ChatCalls(hub.Forwarder(), null, null, "scope", () => null);
+        await calls.CallAsync(RelayTools.CheckInbox, JsonSerializer.SerializeToElement(new { repositoryId = "repo", sessionId = "s-old", sessionToken = "t-old" }), CancellationToken.None);
+
+        await calls.CallAsync(RelayTools.Ack, Repo(), CancellationToken.None);
+
+        Assert.Equal(("s-old", "t-old"), Handle(hub.Sent(RelayTools.Ack)));
+    }
+
+    [Fact]
+    public async Task A_restarted_adapter_finds_the_chats_session_in_its_handle_and_never_another_chats()
+    {
+        using var hub = new FakeHub();
+        var folder = Path.Combine(root, "node");
+        var chat = new ChatLocation("claude", Guid.NewGuid().ToString());
+        Assert.True((await new ChatCalls(hub.Forwarder(), null, SessionHandoff.ForFolder(folder, chat), "scope", () => null)
+            .CallAsync(RelayTools.SessionOpen, JsonSerializer.SerializeToElement(new { repositoryId = "repo", requestId = "open-1" }), CancellationToken.None)).Ok);
+
+        await new ChatCalls(hub.Forwarder(), null, SessionHandoff.ForFolder(folder, chat), "scope", () => null).CallAsync(RelayTools.CheckInbox, Repo(), CancellationToken.None);
+        Assert.Equal(("s-1", "t-1"), Handle(hub.Sent(RelayTools.CheckInbox)));
+
+        // Another chat on this PC, and an adapter that was told no chat ID and so can't say whose handle is whose, add nothing.
+        await new ChatCalls(hub.Forwarder(), null, SessionHandoff.ForFolder(folder, new ChatLocation("claude", Guid.NewGuid().ToString())), "scope", () => null).CallAsync(RelayTools.CheckInbox, Repo(), CancellationToken.None);
+        Assert.Equal((null, null), Handle(hub.Sent(RelayTools.CheckInbox)));
+        await new ChatCalls(hub.Forwarder(), null, SessionHandoff.ForFolder(folder), "scope", () => null).CallAsync(RelayTools.CheckInbox, Repo(), CancellationToken.None);
+        Assert.Equal((null, null), Handle(hub.Sent(RelayTools.CheckInbox)));
+    }
+
+    [Fact]
+    public async Task The_handle_found_is_the_chats_newest_in_that_repository_and_not_one_located_on_another_chat()
+    {
+        using var hub = new FakeHub();
+        var folder = Path.Combine(root, "node");
+        var chat = new ChatLocation("claude", Guid.NewGuid().ToString());
+        var now = DateTimeOffset.UtcNow;
+        NodeState.WriteSessionHandle(folder, new SessionHandle("older", "t-older", "repo", "Chat", now.AddHours(-1), chat));
+        NodeState.WriteSessionHandle(folder, new SessionHandle("newest", "t-newest", "repo", "Chat", now, chat));
+        NodeState.WriteSessionHandle(folder, new SessionHandle("elsewhere", "t-elsewhere", "other-repo", "Chat", now.AddHours(1), chat));
+        NodeState.WriteSessionHandle(folder, new SessionHandle("moved", "t-moved", "repo", "Chat", now.AddHours(2), chat, new ChatLocation("claude", Guid.NewGuid().ToString())));
+        var calls = new ChatCalls(hub.Forwarder(), null, SessionHandoff.ForFolder(folder, chat), "scope", () => null);
+
+        await calls.CallAsync(RelayTools.CheckInbox, Repo(), CancellationToken.None);
+
+        Assert.Equal(("newest", "t-newest"), Handle(hub.Sent(RelayTools.CheckInbox)));
+    }
+
+    [Fact]
+    public async Task Values_the_caller_gave_stand_and_only_calls_that_need_a_session_in_its_repository_are_filled()
+    {
+        using var hub = new FakeHub();
+        var calls = new ChatCalls(hub.Forwarder(), null, null, "scope", () => null);
+        await calls.CallAsync(RelayTools.SessionOpen, JsonSerializer.SerializeToElement(new { repositoryId = "repo", requestId = "open-1" }), CancellationToken.None);
+
+        async Task<(string? Id, string? Token)> Check(object arguments)
+        {
+            await calls.CallAsync(RelayTools.CheckInbox, JsonSerializer.SerializeToElement(arguments), CancellationToken.None);
+            return Handle(hub.Sent(RelayTools.CheckInbox));
+        }
+
+        // Its own session, named without the token, gains the token; another session never gains this chat's token.
+        Assert.Equal(("s-1", "t-1"), await Check(new { repositoryId = "repo", sessionId = "s-1" }));
+        Assert.Equal(("s-other", null), await Check(new { repositoryId = "repo", sessionId = "s-other" }));
+        // A token the caller gave stands, even blank.
+        Assert.Equal((null, ""), await Check(new { repositoryId = "repo", sessionToken = "" }));
+        Assert.Equal(("s-mine", "t-mine"), await Check(new { repositoryId = "repo", sessionId = "s-mine", sessionToken = "t-mine" }));
+        // A session belongs to its repository.
+        Assert.Equal((null, null), await Check(new { repositoryId = "other-repo" }));
+
+        // Calls that take no session are sent as they were.
+        await calls.CallAsync(RelayTools.GetStatus, Repo(), CancellationToken.None);
+        Assert.Equal((null, null), Handle(hub.Sent(RelayTools.GetStatus)));
+        await calls.CallAsync(RelayTools.SessionOpen, JsonSerializer.SerializeToElement(new { repositoryId = "repo", requestId = "open-2" }), CancellationToken.None);
+        Assert.Equal((null, null), Handle(hub.Sent(RelayTools.SessionOpen)));
+    }
+
+    [Fact]
+    public async Task A_local_connection_finds_the_chats_handle_after_a_restart()
+    {
+        using var hub = new FakeHub();
+        var cache = Path.Combine(root, "local");
+        var tokenFile = Path.Combine(root, "token.txt");
+        Directory.CreateDirectory(root);
+        File.WriteAllText(tokenFile, "client-secret");
+        var chat = new ChatLocation("claude", Guid.NewGuid().ToString());
+        var options = new AdapterOptions("http://127.0.0.1:5271", "client-secret", false) { ExportedChat = chat };
+        await using (var first = LocalChatWake.TryCreate(options, tokenFile, cache))
+        {
+            Assert.NotNull(first);
+            await new ChatCalls(hub.Forwarder(), null, null, "scope", () => null, first).CallAsync(RelayTools.SessionOpen, JsonSerializer.SerializeToElement(new { repositoryId = "repo", requestId = "open-1" }), CancellationToken.None);
+        }
+
+        await using var restarted = LocalChatWake.TryCreate(options, tokenFile, cache);
+        await new ChatCalls(hub.Forwarder(), null, null, "scope", () => null, restarted).CallAsync(RelayTools.CheckInbox, Repo(), CancellationToken.None);
+
+        Assert.Equal(("s-1", "t-1"), Handle(hub.Sent(RelayTools.CheckInbox)));
+    }
+
+    [Fact]
+    public async Task On_a_real_hub_a_chat_that_lost_its_handle_still_reads_and_acknowledges_but_a_stranger_is_denied()
+    {
+        await using var host = Hub();
+        var folder = Path.Combine(root, "node");
+        var chat = new ChatLocation("claude", Guid.NewGuid().ToString());
+        var opened = await new ChatCalls(Forwarder(host), null, SessionHandoff.ForFolder(folder, chat), "scope", () => null)
+            .CallAsync(RelayTools.SessionOpen, JsonSerializer.SerializeToElement(new { repositoryId = "repo", requestId = "open-1", label = "Chat" }), CancellationToken.None);
+        Assert.True(opened.Ok, opened.Code);
+
+        // What compaction leaves: the same chat, and a call that names only the repository.
+        var restarted = new ChatCalls(Forwarder(host), null, SessionHandoff.ForFolder(folder, chat), "scope", () => null);
+        var inbox = await restarted.CallAsync(RelayTools.CheckInbox, Repo(), CancellationToken.None);
+        Assert.True(inbox.Ok, inbox.Code);
+        Assert.Equal(opened.Data!.Value.GetProperty("sessionId").GetString(), restarted.CurrentSession);
+
+        var stranger = new ChatCalls(Forwarder(host), null, SessionHandoff.ForFolder(folder, new ChatLocation("claude", Guid.NewGuid().ToString())), "stranger", () => null);
+        var denied = await stranger.CallAsync(RelayTools.CheckInbox, Repo(), CancellationToken.None);
+        Assert.False(denied.Ok);
+    }
+
     // ---- A rename reaches the node ----
 
     [Fact]
