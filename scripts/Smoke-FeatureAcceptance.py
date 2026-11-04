@@ -67,6 +67,33 @@ def body_data(reply):
     return reply.get("data", {})
 
 
+def validate_traffic(snapshot):
+    require(isinstance(snapshot, dict) and type(snapshot.get("revision")) is int
+            and snapshot["revision"] >= 0 and isinstance(snapshot.get("traffic"), list)
+            and len(snapshot["traffic"]) <= 120, "Invalid structured traffic snapshot")
+    previous = None
+    for event in snapshot["traffic"]:
+        require(isinstance(event, dict) and type(event.get("sequence")) is int
+                and event["sequence"] > 0 and event.get("kind") in ("request", "response", "push")
+                and isinstance(event.get("name"), str), "Invalid structured traffic event")
+        require(previous is None or event["sequence"] == previous + 1,
+                "Structured traffic sequence gap or rollback")
+        previous = event["sequence"]
+    return previous or 0
+
+
+def protected_request_count(before, after):
+    boundary, latest = validate_traffic(before), validate_traffic(after)
+    require(after["revision"] > before["revision"] and latest >= boundary,
+            "Structured traffic freshness or sequence rollback")
+    # Validate ALL events before filtering. A missing unrelated event could hide
+    # an evicted protected request, while an unrelated present event is harmless.
+    require(not after["traffic"] or after["traffic"][0]["sequence"] <= boundary + 1,
+            "Structured traffic retention lost the observation boundary")
+    return sum(event["sequence"] > boundary and event["kind"] == "request"
+               and event["name"] == "task_get" for event in after["traffic"])
+
+
 def child_environment(parent, root):
     managed = {"HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "WEBSITE_INSTANCE_ID",
                "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
@@ -107,6 +134,13 @@ class Hub:
         self.marker = Path(str(self.certificate) + ".identity")
         self.process = None
         self.reader = None
+        self.dashboard_cookie = None
+        self.observer_path = None
+        self.observer_reader = None
+        self.observer_connection = None
+        self.observer_stopping = threading.Event()
+        self.observer_ready = threading.Event()
+        self.observer_failed = threading.Event()
         self.lines = deque(maxlen=2000)  # Memory only; never published or persisted.
         profile = self.root / "profile"
         profile.mkdir()
@@ -133,7 +167,6 @@ class Hub:
             "Relay__Network__CertificatePath": str(self.certificate),
             "Relay__Connect__AdapterPath": str(adapter),
             "Relay__DocCache__SyncMinutes": "0",
-            "Logging__LogLevel__Microsoft.AspNetCore.Hosting.Diagnostics": "Information",
             "Logging__LogLevel__Microsoft.AspNetCore.DataProtection": "Information",
             "Logging__LogLevel__Microsoft.Hosting.Lifetime": "Information",
         })
@@ -190,6 +223,12 @@ class Hub:
         raise ProbeFailure("Fixture readiness timeout; no live endpoint used")
 
     def stop(self):
+        try:
+            self.stop_observation()
+        finally:
+            self._stop_process()
+
+    def _stop_process(self):
         try:
             stop_owned(self.process)
         finally:
@@ -251,6 +290,7 @@ class Hub:
                             {"repositoryId": self.repo, **arguments}, token)
 
     def verify_key_isolation(self):
+        self.dashboard_cookie = None
         require(self.key_dir.resolve().is_relative_to(self.root), "Cookie key path escapes fixture")
         # Force cookie protection using only this disposable hub's synthetic
         # viewer credential. Never publish the request, response cookies or keys.
@@ -301,6 +341,7 @@ class Hub:
                             "Synthetic dashboard cookie does not match private key evidence")
                 except (ET.ParseError, ValueError):
                     raise ProbeFailure("Synthetic dashboard private key evidence malformed") from None
+                self.dashboard_cookie = cookies[0]
                 return
             time.sleep(0.05)
         raise ProbeFailure("ASP.NET key directory was not verified; refusing further probes")
@@ -317,9 +358,130 @@ class Hub:
             with context.wrap_socket(raw, server_hostname="localhost") as stream:
                 return hashlib.sha256(stream.getpeercert(binary_form=True)).hexdigest().upper()
 
-    def protected_posts(self):
-        return sum("Request starting" in line and "POST" in line and "/api/tools/" in line
-                   for line in list(self.lines))
+    def dashboard_exchange(self, method, path, body=None, polling=False):
+        require(self.dashboard_cookie is not None, "Verified private dashboard cookie unavailable")
+        target = urlsplit(path)
+        require(path.startswith("/dashboard/") and not target.scheme and not target.netloc
+                and not any(ord(char) < 32 for char in path) and ".." not in path
+                and "%" not in target.path, "Invalid owned dashboard target")
+        connection = http.client.HTTPConnection("127.0.0.1", self.http, timeout=30 if polling else 3)
+        headers = {"Content-Type": "text/plain", "Origin": self.origin,
+                   "Cookie": "CoCern.Dashboard=" + self.dashboard_cookie}
+        response = None
+        if polling:
+            self.observer_connection = connection
+        try:
+            connection.request(method, path, body, headers)
+            response = connection.getresponse()
+            raw = response.read(200_001)
+            require(len(raw) <= 200_000, "Oversized dashboard observation response")
+            return response.status, raw
+        finally:
+            try:
+                if response is not None:
+                    response.close()
+            finally:
+                connection.close()
+                if polling:
+                    self.observer_connection = None
+
+    def start_observation(self):
+        require(self.observer_path is None, "Dashboard observer already active")
+        self.observer_stopping.clear()
+        self.observer_ready.clear()
+        self.observer_failed.clear()
+        status, raw = self.dashboard_exchange("POST", "/dashboard/hub/negotiate?negotiateVersion=1")
+        require(status == 200, "Dashboard observer negotiation failed")
+        try:
+            negotiation = json.loads(raw)
+            token = negotiation["connectionToken"]
+            require(isinstance(token, str) and re.fullmatch(r"[A-Za-z0-9_-]+", token) is not None
+                    and any(item.get("transport") == "LongPolling" for item in negotiation["availableTransports"]),
+                    "Dashboard observer transport unavailable")
+        except (ValueError, KeyError, TypeError, AttributeError):
+            raise ProbeFailure("Invalid dashboard observer negotiation") from None
+        self.observer_path = "/dashboard/hub?id=" + token
+        try:
+            status, raw = self.dashboard_exchange("GET", self.observer_path)
+            require(status == 200 and not raw, "Dashboard observer initial poll failed")
+            status, _ = self.dashboard_exchange("POST", self.observer_path,
+                                               b'{"protocol":"json","version":1}\x1e')
+            require(status == 200, "Dashboard observer handshake send failed")
+            self.observer_reader = threading.Thread(target=self._drain_observation, daemon=True)
+            self.observer_reader.start()
+            require(self.observer_ready.wait(self.timeout) and not self.observer_failed.is_set(),
+                    "Dashboard observer handshake failed")
+        except Exception:
+            self.stop_observation()
+            raise
+
+    def _drain_observation(self):
+        try:
+            while not self.observer_stopping.is_set():
+                status, raw = self.dashboard_exchange("GET", self.observer_path, polling=True)
+                if self.observer_stopping.is_set():
+                    return
+                require(status == 200, "Dashboard observer poll failed")
+                frames = raw.split(b"\x1e")
+                require(not frames[-1], "Incomplete dashboard observer frame")
+                for encoded in frames[:-1]:
+                    frame = json.loads(encoded)
+                    require(isinstance(frame, dict) and "error" not in frame and frame.get("type") != 7,
+                            "Dashboard observer closed or rejected")
+                    if not self.observer_ready.is_set():
+                        require(frame == {}, "Invalid dashboard observer handshake")
+                        self.observer_ready.set()
+        except Exception:
+            if not self.observer_stopping.is_set():
+                self.observer_failed.set()
+                self.observer_ready.set()  # Wake setup; it checks failure before proceeding.
+
+    def stop_observation(self):
+        self.observer_stopping.set()
+        try:
+            if self.observer_path is not None:
+                try:
+                    self.dashboard_exchange("DELETE", self.observer_path)
+                except Exception:
+                    pass  # Still close our owned socket and join, even if DELETE fails.
+        finally:
+            connection = self.observer_connection
+            if connection is not None:
+                if connection.sock is not None:
+                    try:
+                        connection.sock.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                connection.close()
+            if self.observer_reader is not None:
+                self.observer_reader.join(timeout=3)
+                require(not self.observer_reader.is_alive(), "Dashboard observer reader did not stop")
+            self.observer_path = None
+
+    def traffic_snapshot(self):
+        require(not self.observer_failed.is_set(), "Dashboard observer transport failed")
+        status, raw = self.dashboard_exchange("GET", "/dashboard/api/snapshot")
+        require(status == 200, "Dashboard traffic observation unavailable")
+        try:
+            snapshot = json.loads(raw)
+        except ValueError:
+            raise ProbeFailure("Invalid structured traffic snapshot") from None
+        validate_traffic(snapshot)
+        return {"revision": snapshot["revision"], "traffic": snapshot["traffic"]}
+
+    def fresh_traffic(self):
+        # Fence AFTER the adapter returns: a revision sampled during its call
+        # cannot prove absence. Require a later completed server collection.
+        fence = self.traffic_snapshot()
+        deadline = time.monotonic() + self.timeout
+        while time.monotonic() < deadline:
+            current = self.traffic_snapshot()
+            require(current["revision"] >= fence["revision"], "Dashboard collection revision rolled back")
+            if current["revision"] > fence["revision"]:
+                protected_request_count(fence, current)  # Also fail on lost retention.
+                return current
+            time.sleep(0.05)
+        raise ProbeFailure("Fresh dashboard collection unavailable")
 
     def adapter_call(self, fingerprint):
         env = dict(self.env, COCERN_URL=f"https://127.0.0.1:{self.local_https}/",
@@ -456,29 +618,31 @@ def pin_refusal(hub):
     fingerprint = hub.fingerprint()
 
     def correct_pin_control():
-        before = hub.protected_posts()
+        before = hub.traffic_snapshot()
         result = hub.adapter_call(fingerprint)
         relay = relay_reply(result)
         require(not result.get("isError") and relay is not None and relay.get("ok") is True,
                 "Correct-pin control did not return a successful relay reply")
-        deadline = time.monotonic() + 2
-        while hub.protected_posts() <= before and time.monotonic() < deadline:
-            time.sleep(0.05)
-        require(hub.protected_posts() > before, "Request observation control unavailable")
+        require(protected_request_count(before, hub.fresh_traffic()) == 1,
+                "Correct-pin control did not observe exactly one protected request")
 
-    correct_pin_control()
-    before = hub.protected_posts()
-    wrong_pin = ("B" if fingerprint[0] == "A" else "A") + fingerprint[1:]
-    result = hub.adapter_call(wrong_pin)
-    relay = relay_reply(result)
-    require(result.get("isError") is True and relay is not None and relay.get("ok") is False
-            and relay.get("code") == "hub_identity_changed",
-            "Wrong-pin call did not report a verified hub identity mismatch")
-    time.sleep(0.2)
-    require(hub.protected_posts() == before, "Protected request reached wrong-identity hub")
-    correct_pin_control()
-    return {"correctPinWorks": True, "freshCorrectPinWorksAfterRefusal": True, "wrongIdentityRefused": True,
-            "noProtectedRequestOnMismatch": True, "humanRetrustJourney": "NOT RUN"}
+    try:
+        hub.start_observation()
+        correct_pin_control()
+        before = hub.traffic_snapshot()
+        wrong_pin = ("B" if fingerprint[0] == "A" else "A") + fingerprint[1:]
+        result = hub.adapter_call(wrong_pin)
+        relay = relay_reply(result)
+        require(result.get("isError") is True and relay is not None and relay.get("ok") is False
+                and relay.get("code") == "hub_identity_changed",
+                "Wrong-pin call did not report a verified hub identity mismatch")
+        require(protected_request_count(before, hub.fresh_traffic()) == 0,
+                "Protected request reached wrong-identity hub")
+        correct_pin_control()
+        return {"correctPinWorks": True, "freshCorrectPinWorksAfterRefusal": True, "wrongIdentityRefused": True,
+                "noProtectedRequestOnMismatch": True, "humanRetrustJourney": "NOT RUN"}
+    finally:
+        hub.stop_observation()
 
 
 PROBES = [("auth-refusal", ["8.4"], authentication),

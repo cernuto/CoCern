@@ -146,12 +146,18 @@ class SafetyBoundaryTests(unittest.TestCase):
     def pin_hub(self, failure_code):
         hub = mock.Mock()
         hub.fingerprint.return_value = "A" * 64
-        count = [0]
-        hub.protected_posts.side_effect = lambda: count[0]
+        revision = [0]
+        events = []
+        def snapshot():
+            revision[0] += 1
+            return {"revision": revision[0], "traffic": list(events)}
+        hub.traffic_snapshot.side_effect = snapshot
+        hub.fresh_traffic.side_effect = snapshot
         def call(pin):
             correct = pin == "A" * 64
             if correct:
-                count[0] += 1
+                events.append({"sequence": len(events) + 1, "kind": "request", "name": "task_get"})
+                events.append({"sequence": len(events) + 1, "kind": "response", "name": "task_get"})
             return {"isError": not correct, "content": [{"type": "text", "text": json.dumps(
                 {"ok": correct, "code": "Ok" if correct else failure_code})}]}
         hub.adapter_call.side_effect = call
@@ -170,6 +176,230 @@ class SafetyBoundaryTests(unittest.TestCase):
         self.assertTrue(result["wrongIdentityRefused"])
         self.assertEqual(hub.adapter_call.call_count, 3)
         self.assertEqual(hub.adapter_call.call_args.args, ("A" * 64,))
+
+
+    def traffic(self, revision, *events):
+        return {"revision": revision, "traffic": [
+            {"sequence": seq, "kind": kind, "name": name} for seq, kind, name in events]}
+
+    def test_structured_observation_counts_requests_only_and_accepts_empty_baseline(self):
+        before = self.traffic(0)
+        after = self.traffic(2, (1, "request", "get_status"), (2, "response", "get_status"),
+                             (3, "request", "task_get"), (4, "response", "task_get"))
+        self.assertEqual(runner.protected_request_count(before, after), 1)
+        self.assertEqual(runner.protected_request_count(self.traffic(0), self.traffic(1)), 0)
+        self.assertEqual(runner.protected_request_count(after, self.traffic(3, *[
+            (e["sequence"], e["kind"], e["name"]) for e in after["traffic"]])), 0)
+
+    def test_observation_rejects_stale_rollback_gaps_and_eviction_before_filtering(self):
+        baseline = self.traffic(4, (1, "request", "task_get"), (2, "response", "task_get"))
+        for after in (self.traffic(4, (1, "request", "task_get"), (2, "response", "task_get")),
+                      self.traffic(3), self.traffic(5),
+                      self.traffic(5, (1, "request", "task_get")),
+                      self.traffic(5, (4, "request", "get_status")),
+                      self.traffic(5, (2, "response", "task_get"), (4, "response", "get_status"))):
+            with self.subTest(after=after), self.assertRaises(runner.ProbeFailure):
+                runner.protected_request_count(baseline, after)
+        with self.assertRaises(runner.ProbeFailure):
+            runner.protected_request_count(self.traffic(0), self.traffic(1, (2, "response", "get_status")))
+
+    def test_retained_all_event_boundary_allows_unrelated_new_events(self):
+        before = self.traffic(1, (1, "request", "task_get"), (2, "response", "task_get"))
+        after = self.traffic(2, (3, "request", "get_status"), (4, "response", "get_status"))
+        self.assertEqual(runner.protected_request_count(before, after), 0)
+
+    def test_malformed_observation_fails_closed(self):
+        for snapshot in ({}, {"revision": True, "traffic": []}, {"revision": 1, "traffic": {}},
+                         self.traffic(1, (0, "request", "task_get")),
+                         self.traffic(1, (1, "request", "task_get"), (1, "response", "task_get")),
+                         self.traffic(1, (1, "unknown", "task_get"))):
+            with self.subTest(snapshot=snapshot), self.assertRaises(runner.ProbeFailure):
+                runner.protected_request_count(self.traffic(0), snapshot)
+
+    def test_positive_reply_without_request_or_duplicate_requests_cannot_pass(self):
+        for counts in ((0,), (2,), (1, 0, 0), (1, 1)):
+            hub = self.pin_hub("hub_identity_changed")
+            with mock.patch.object(runner, "protected_request_count", side_effect=counts):
+                with self.assertRaises(runner.ProbeFailure):
+                    runner.pin_refusal(hub)
+            hub.stop_observation.assert_called_once()
+
+    def test_both_correct_controls_and_wrong_pin_have_exact_request_counts(self):
+        hub = self.pin_hub("hub_identity_changed")
+        with mock.patch.object(runner, "protected_request_count", wraps=runner.protected_request_count) as count:
+            result = runner.pin_refusal(hub)
+        self.assertTrue(result["noProtectedRequestOnMismatch"])
+        self.assertEqual([runner.protected_request_count(*call.args) for call in count.call_args_list], [1, 0, 1])
+        self.assertEqual(hub.fresh_traffic.call_count, 3)
+        hub.stop_observation.assert_called_once()
+
+    def test_observer_setup_or_collection_failure_still_cleans_up(self):
+        for method in ("start_observation", "traffic_snapshot", "fresh_traffic"):
+            hub = self.pin_hub("hub_identity_changed")
+            getattr(hub, method).side_effect = runner.ProbeFailure("inert observation failure")
+            with self.subTest(method=method), self.assertRaises(runner.ProbeFailure):
+                runner.pin_refusal(hub)
+            hub.stop_observation.assert_called_once()
+
+    def test_freshness_requires_revision_newer_than_postcall_fence(self):
+        with tempfile.TemporaryDirectory() as folder:
+            hub = self.make_hub(Path(folder))
+            with mock.patch.object(hub, "traffic_snapshot", side_effect=[self.traffic(4), self.traffic(4), self.traffic(5)]):
+                self.assertEqual(hub.fresh_traffic()["revision"], 5)
+
+    def test_stale_or_rollback_collection_cannot_prove_zero_requests(self):
+        for revisions in ([4, 4, 4], [4, 3]):
+            with self.subTest(revisions=revisions), tempfile.TemporaryDirectory() as folder:
+                hub = self.make_hub(Path(folder))
+                snapshots = [self.traffic(r) for r in revisions]
+                with mock.patch.object(hub, "traffic_snapshot", side_effect=snapshots), \
+                        mock.patch.object(runner.time, "monotonic", side_effect=[0, 0, 2]):
+                    with self.assertRaises(runner.ProbeFailure):
+                        hub.fresh_traffic()
+
+    def test_dashboard_cookie_is_private_verified_and_scoped(self):
+        with tempfile.TemporaryDirectory() as folder:
+            hub = self.make_hub(Path(folder))
+            self.key_evidence(hub)
+            with mock.patch.object(runner.http.client, "HTTPConnection") as connection:
+                self.login_response(connection)
+                hub.verify_key_isolation()
+                hub.dashboard_exchange("GET", "/dashboard/api/snapshot")
+                headers = connection.return_value.request.call_args.args[3]
+                self.assertTrue(headers["Cookie"].startswith("CoCern.Dashboard="))
+                for path in ("/api/tools/task_get", "//elsewhere/dashboard/api/snapshot", "/dashboard/../api/tools/task_get"):
+                    with self.assertRaises(runner.ProbeFailure):
+                        hub.dashboard_exchange("GET", path)
+
+    def test_dashboard_requires_verified_cookie_and_valid_snapshot(self):
+        with tempfile.TemporaryDirectory() as folder:
+            hub = self.make_hub(Path(folder))
+            with mock.patch.object(runner.http.client, "HTTPConnection") as connection:
+                with self.assertRaises(runner.ProbeFailure):
+                    hub.dashboard_exchange("GET", "/dashboard/api/snapshot")
+                connection.assert_not_called()
+            hub.dashboard_cookie = "inert-cookie"
+            for reply in ((401, b"{}"), (200, b"not-json"), (200, b"{}")):
+                with mock.patch.object(hub, "dashboard_exchange", return_value=reply), self.assertRaises(runner.ProbeFailure):
+                    hub.traffic_snapshot()
+
+    def test_signalr_failure_and_stop_release_only_owned_transport(self):
+        with tempfile.TemporaryDirectory() as folder:
+            hub = self.make_hub(Path(folder))
+            hub.dashboard_cookie = "inert-cookie"
+            with mock.patch.object(hub, "dashboard_exchange", return_value=(500, b"{}")):
+                with self.assertRaises(runner.ProbeFailure):
+                    hub.start_observation()
+            hub.observer_path = "/dashboard/hub?id=inert-token"
+            hub.observer_reader = mock.Mock()
+            hub.observer_reader.is_alive.return_value = False
+            with mock.patch.object(hub, "dashboard_exchange", side_effect=OSError("inert")):
+                hub.stop_observation()
+            hub.observer_reader.join.assert_called_once()
+            self.assertIsNone(hub.observer_path)
+
+
+    def test_signalr_owned_connection_handshakes_drains_and_deletes_on_success(self):
+        with tempfile.TemporaryDirectory() as folder:
+            hub = self.make_hub(Path(folder))
+            negotiation = json.dumps({"connectionToken": "inert-token", "availableTransports": [
+                {"transport": "LongPolling"}]}).encode()
+            first_poll = [True]
+            calls = []
+            def exchange(method, path, body=None, polling=False):
+                calls.append((method, path))
+                if "negotiate" in path:
+                    return 200, negotiation
+                if polling:
+                    if first_poll[0]:
+                        first_poll[0] = False
+                        return 200, b'{}\x1e{"type":1,"target":"snapshot","arguments":[]}\x1e'
+                    hub.observer_stopping.wait(2)
+                    return 204, b""
+                return 200, b""
+            with mock.patch.object(hub, "dashboard_exchange", side_effect=exchange):
+                hub.start_observation()
+                self.assertTrue(hub.observer_ready.is_set())
+                self.assertFalse(hub.observer_failed.is_set())
+                hub.stop_observation()
+            self.assertFalse(hub.observer_reader.is_alive())
+            self.assertIn(("DELETE", "/dashboard/hub?id=inert-token"), calls)
+            self.assertIsNone(hub.observer_path)
+
+    def test_signalr_partial_setup_and_bad_handshake_delete_owned_transport(self):
+        negotiation = json.dumps({"connectionToken": "inert-token", "availableTransports": [
+            {"transport": "LongPolling"}]}).encode()
+        for stage in ("initial", "send", "handshake", "closed", "incomplete", "poll-exception"):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as folder:
+                hub = self.make_hub(Path(folder))
+                calls = []
+                def exchange(method, path, body=None, polling=False):
+                    calls.append((method, path))
+                    if "negotiate" in path:
+                        return 200, negotiation
+                    if polling:
+                        if stage == "poll-exception":
+                            raise OSError("inert transport error")
+                        return 200, {"closed": b'{"type":7}\x1e', "incomplete": b'{}'}.get(
+                            stage, b'{"error":"inert"}\x1e')
+                    if method == "GET" and stage == "initial" or method == "POST" and stage == "send":
+                        return 500, b""
+                    return 200, b""
+                with mock.patch.object(hub, "dashboard_exchange", side_effect=exchange):
+                    with self.assertRaises(runner.ProbeFailure):
+                        hub.start_observation()
+                self.assertIn(("DELETE", "/dashboard/hub?id=inert-token"), calls)
+                self.assertIsNone(hub.observer_path)
+                if hub.observer_reader is not None:
+                    self.assertFalse(hub.observer_reader.is_alive())
+
+    def test_transport_failure_blocks_fresh_evidence_and_closes_response(self):
+        with tempfile.TemporaryDirectory() as folder:
+            hub = self.make_hub(Path(folder))
+            hub.observer_failed.set()
+            with mock.patch.object(hub, "dashboard_exchange") as exchange:
+                with self.assertRaises(runner.ProbeFailure):
+                    hub.fresh_traffic()
+                exchange.assert_not_called()
+            hub.dashboard_cookie = "inert-cookie"
+            for raw in (b"{}", b"x" * 200_001):
+                with self.subTest(oversized=len(raw) > 200_000), \
+                        mock.patch.object(runner.http.client, "HTTPConnection") as connection:
+                    response = connection.return_value.getresponse.return_value
+                    response.status = 200
+                    response.read.return_value = raw
+                    if len(raw) > 200_000:
+                        with self.assertRaises(runner.ProbeFailure):
+                            hub.dashboard_exchange("GET", "/dashboard/api/snapshot")
+                    else:
+                        hub.dashboard_exchange("GET", "/dashboard/api/snapshot")
+                    response.close.assert_called_once()
+                    connection.return_value.close.assert_called_once()
+
+    def test_delete_failure_still_closes_owned_socket_joins_and_stops_process(self):
+        with tempfile.TemporaryDirectory() as folder:
+            hub = self.make_hub(Path(folder))
+            hub.observer_path = "/dashboard/hub?id=inert-token"
+            connection = hub.observer_connection = mock.Mock()
+            hub.observer_reader = mock.Mock()
+            hub.observer_reader.is_alive.return_value = False
+            with mock.patch.object(hub, "dashboard_exchange", side_effect=OSError("inert")), \
+                    mock.patch.object(hub, "_stop_process") as stop:
+                hub.stop()
+            connection.sock.shutdown.assert_called_once_with(runner.socket.SHUT_RDWR)
+            connection.close.assert_called_once()
+            hub.observer_reader.join.assert_called_once()
+            stop.assert_called_once()
+
+    def test_failed_reader_join_still_stops_owned_product_process(self):
+        with tempfile.TemporaryDirectory() as folder:
+            hub = self.make_hub(Path(folder))
+            hub.observer_reader = mock.Mock()
+            hub.observer_reader.is_alive.return_value = True
+            with mock.patch.object(hub, "_stop_process") as stop:
+                with self.assertRaises(runner.ProbeFailure):
+                    hub.stop()
+            stop.assert_called_once()
 
     def test_evidence_created_during_probe_is_never_overwritten(self):
         with tempfile.TemporaryDirectory() as folder:
