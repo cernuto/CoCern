@@ -2,6 +2,16 @@ using System.Text.Json.Nodes;
 using CoCern.Contracts;
 namespace CoCern.Domain;
 
+/// <summary>An immutable read candidate, never authorization; the board must recheck and reserve its exact terms.</summary>
+public sealed record StandingPresentation(string BoardId, string ProposalId, string SummaryJson)
+{
+    public static StandingPresentation? ReadPending(JsonObject standing, string boardId, string proposalId, string principalId, string sessionId, string requestCorrelation)
+    {
+        var summary = StandingPreferences.PendingPresentation(standing, boardId, proposalId, principalId, sessionId, requestCorrelation);
+        return summary is null ? null : new(boardId, proposalId, summary.ToJsonString());
+    }
+}
+
 /// <summary>An authenticated principal. <see cref="IsInternal"/> marks calls the hub itself composes; only those may run "__" operations.</summary>
 public sealed record RelayCaller(string PrincipalId, bool IsAdministrator, string[] Repositories, bool IsInternal = false)
 {
@@ -309,6 +319,8 @@ public static class Operations
     /// (<see cref="Messages.AttentionOffer"/>).
     /// </summary>
     public const string AttentionOffer = "__attention_offer";
+    /// <summary>Reserve one immutable pending Standing proposal for a verified human-active boundary; never grants authority.</summary>
+    public const string PresentStanding = "__present_standing";
     /// <summary>Closes the info items of messages an adapter reader showed the model without an offer (<see cref="Messages.AttentionSeen"/>).</summary>
     public const string AttentionSeen = "__attention_seen";
     /// <summary>

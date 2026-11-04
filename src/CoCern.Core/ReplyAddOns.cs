@@ -18,7 +18,7 @@ namespace CoCern.Core;
 /// after compaction, so a message cut from the page stays unseen.
 /// </summary>
 internal sealed class ReplyAddOns(Aggregates aggregates, ClaimComposer claims, StandingDelivery standing, CallGuard guard, ToolTokenStatus tokenStatus, AttentionOptions attention,
-    IFullTextSearch? search, CallTelemetry? telemetry, ITokenCounter? counter, TokenOptions tokenSettings)
+    IFullTextSearch? search, CallTelemetry? telemetry, ITokenCounter? counter, TokenOptions tokenSettings, IRelayObservationSource? observations = null)
 {
     /// <summary>One reply on its way out: the call, the reply so far, and what an earlier step decided for a later one.</summary>
     internal sealed class Outgoing(RelayCall call, RelayReply reply, CallTrace? trace)
@@ -31,6 +31,8 @@ internal sealed class ReplyAddOns(Aggregates aggregates, ClaimComposer claims, S
         public bool RanBoundary { get; set; }
         /// <summary>Set by <c>attention_offer</c>: this <c>check_inbox</c> page is marked seen once it is sent.</summary>
         public bool MarkSeen { get; set; }
+        /// <summary>Standing arbitration delays the ordinary offer until final reply fit is known.</summary>
+        public bool DeferredAttention { get; set; }
     }
 
     internal delegate Task Step(ReplyAddOns addOns, Outgoing reply);
@@ -124,8 +126,9 @@ internal sealed class ReplyAddOns(Aggregates aggregates, ClaimComposer claims, S
     {
         var (call, controls) = (reply.Call, reply.Call.Controls);
         var offers = reply.Reply.Ok && call.Session is not null && controls.OfferWanted && attention.Enabled && IsBoundary(call.Tool);
-        if (offers) reply.Reply = await WithAttentionAsync(call.Caller, call.Args, call.Tool, reply.Reply);
-        reply.RanBoundary = offers;
+        reply.DeferredAttention = offers && controls.ModelVisible && controls.PresentStanding;
+        if (offers && !reply.DeferredAttention) reply.Reply = await WithAttentionAsync(call.Caller, call.Args, call.Tool, reply.Reply);
+        reply.RanBoundary = offers && !reply.DeferredAttention;
         // A page reported as seen is marked from the reply as sent, after compaction, so a message cut from the page stays unseen.
         reply.MarkSeen = reply.Reply.Ok && call.Session is not null && attention.Enabled && call.Tool == RelayTools.CheckInbox && (offers || controls.PageSeen || controls.SeenIds.Length > 0);
     }
@@ -157,10 +160,74 @@ internal sealed class ReplyAddOns(Aggregates aggregates, ClaimComposer claims, S
     }
 
     /// <summary>The composed reply, bounded to the wire: from here on it is the reply as sent.</summary>
-    private Task BoundToWire(Outgoing reply)
+    private async Task BoundToWire(Outgoing reply)
     {
         reply.Reply = Bound(reply.Call.Definition, reply.Call.Args, reply.Reply, reply.Trace);
-        return Task.CompletedTask;
+        if (!reply.DeferredAttention) return;
+        var call = reply.Call;
+        var committed = reply.Reply;
+        try
+        {
+            // An urgent item wins even when its own attachment cannot fit this reply.
+            if (!await HasUrgentAsync(call))
+            {
+                var correlation = Text(call.Args, "requestId") is { Length: > 0 } request ? call.Tool + ":" + request : "";
+                var candidates = observations is null ? null : await observations.ReadPendingStandingAsync(Text(call.Args, "repositoryId"), call.Caller.PrincipalId, Text(call.Args, "sessionId"), correlation);
+                foreach (var candidate in candidates ?? Array.Empty<StandingPresentation>())
+                {
+                    var effect = JsonNode.Parse(candidate.SummaryJson)!.AsObject();
+                    var data = Parse(committed); data["attention"] = effect.DeepClone();
+                    // Compact before reserving, and require the entire escaped effect to survive every actual reply budget.
+                    var prepared = Bound(call.Definition, call.Args, Ok(data, committed.Version), null);
+                    if (!FitsWire(prepared) || !JsonNode.DeepEquals(Parse(prepared)["attention"], effect)
+                        || Encoding.UTF8.GetByteCount(candidate.SummaryJson) > RelayLimits.MaxAttentionOfferBytes
+                        || counter is not null && tokenSettings.Enforces(call.Tool) && counter.Count(prepared.DataJson) > call.Definition.TokenBudget) continue;
+                    if (!reply.RanBoundary)
+                    {
+                        var urgent = await WithAttentionAsync(call.Caller, call.Args, call.Tool, committed, urgentOnly: true);
+                        reply.RanBoundary = true;
+                        if (Parse(urgent)["attention"] is JsonObject)
+                        {
+                            reply.Reply = Bound(call.Definition, call.Args, urgent, reply.Trace);
+                            return;
+                        }
+                    }
+                    if (!(await guard.VerifySessionAsync(call.Caller, call.Args)).Ok) break;
+                    // Keep transport correlation separate from requestId: generic replay runs before the board's pending/effect check.
+                    var claim = new JsonObject
+                    {
+                        ["repositoryId"] = Text(call.Args, "repositoryId"), ["boardId"] = candidate.BoardId,
+                        ["sessionId"] = Text(call.Args, "sessionId"), ["proposalId"] = candidate.ProposalId,
+                        ["presentationRequest"] = correlation, ["expectedEffect"] = effect.DeepClone()
+                    };
+                    var reserved = await aggregates.Board(call.Caller, Operations.PresentStanding, claim);
+                    if (!reserved.Ok || Parse(reserved)["attention"] is not JsonObject shown || shown.ToJsonString() != candidate.SummaryJson) continue;
+                    var final = Parse(prepared); final["attention"] = shown.DeepClone();
+                    reply.Reply = Ok(final, committed.Version);
+                    // No compaction follows the claim. MarkSeen reads this exact final page.
+                    if (reply.Trace is not null && counter is not null && tokenSettings.Enforces(call.Tool)) reply.Trace.ReplyTokens = counter.Count(reply.Reply.DataJson);
+                    telemetry?.RecordOutcome(call.Args, AttentionKinds.StandingProposal, "shown", candidate.ProposalId);
+                    return;
+                }
+            }
+        }
+        catch (Exception) { /* The ordinary call stands; a lost presentation reply leaves its dashboard reservation intact. */ }
+        if (!reply.RanBoundary)
+        {
+            reply.Reply = Bound(call.Definition, call.Args, await WithAttentionAsync(call.Caller, call.Args, call.Tool, committed), reply.Trace);
+            reply.RanBoundary = true;
+        }
+    }
+
+    private async Task<bool> HasUrgentAsync(RelayCall call)
+    {
+        var args = new AttentionOffer(Text(call.Args, "repositoryId"), Text(call.Args, "sessionId"), Text(call.Args, "sessionToken"))
+        {
+            FocusTaskId = Text(call.Args, "taskId"), FocusBoardId = Text(call.Args, "boardId", "default"), SnoozeBoundaries = attention.SnoozeBoundaries
+        }.ToJson();
+        args["urgentOnly"] = true; args["preview"] = true;
+        var preview = await aggregates.Session(call.Caller, AttentionOffer.Operation, args);
+        return !preview.Ok || Parse(preview)["attention"] is JsonObject;
     }
 
     /// <summary>A <c>check_inbox</c> page decided seen closes the info items of the messages it shows, as sent.</summary>
@@ -194,7 +261,7 @@ internal sealed class ReplyAddOns(Aggregates aggregates, ClaimComposer claims, S
     /// Runs one boundary at the caller's session and attaches at most one compact offer. The committed result never changes, and the
     /// boundary is skipped when the reply has no room left for an offer, so an item is marked shown only when its offer is delivered.
     /// </summary>
-    private async Task<RelayReply> WithAttentionAsync(RelayCaller caller, JsonObject args, string tool, RelayReply committed)
+    private async Task<RelayReply> WithAttentionAsync(RelayCaller caller, JsonObject args, string tool, RelayReply committed, bool urgentOnly = false)
     {
         try
         {
@@ -210,7 +277,9 @@ internal sealed class ReplyAddOns(Aggregates aggregates, ClaimComposer claims, S
                 FocusTaskId = Text(args, "taskId"), FocusBoardId = Text(args, "boardId", "default"), SnoozeBoundaries = attention.SnoozeBoundaries,
                 PageMessageIds = onPage is { Length: > 0 } ? onPage : null
             };
-            var offer = await aggregates.Session(caller, AttentionOffer.Operation, request.ToJson());
+            var offerArgs = request.ToJson();
+            if (urgentOnly) offerArgs["urgentOnly"] = true;
+            var offer = await aggregates.Session(caller, AttentionOffer.Operation, offerArgs);
             if (!offer.Ok || Parse(offer)["attention"] is not JsonObject item) return committed;
             data["attention"] = item.DeepClone();
             telemetry?.RecordOutcome(args, Text(item, "k"), "shown", Text(item, "id"));
