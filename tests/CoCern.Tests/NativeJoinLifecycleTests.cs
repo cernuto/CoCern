@@ -53,21 +53,37 @@ public sealed class NativeJoinLifecycleTests
     [InlineData("denied")]
     [InlineData("duplicate")]
     [InlineData("escaped")]
+    [InlineData("wrong-tool")]
+    [InlineData("array")]
+    [InlineData("legacy")]
     public void Token_meter_never_queues_a_native_request_or_its_open_reply(string form)
     {
         var attempt = Attempt();
         if (form == "denied") attempt["repositoryId"] = "other";
+        var tool = form == "wrong-tool" ? RelayTools.WorkerList : RelayTools.SessionOpen;
+        if (form == "legacy") attempt.Remove("nativeJoin");
         var raw = attempt.ToJsonString();
+        if (form == "array") raw = "[" + raw + "]";
         if (form == "duplicate") raw = raw.Insert(1, "\"nativeJoin\":null,");
         if (form == "escaped") raw = raw.Replace("nativeJoin", @"native\u004aoin", StringComparison.Ordinal);
         using var document = JsonDocument.Parse(raw);
         var trace = new CallTrace { At = Now };
         var guard = new CallGuard(null!, "hub");
-        guard.TryAdmit(Alice, RelayTools.SessionOpen, document.RootElement, trace, out _, out var refusal);
+        guard.TryAdmit(Alice, tool, document.RootElement, trace, out _, out var refusal);
+        if (form is "wrong-tool" or "array") Assert.Equal(RelayErrorCodes.InvalidArguments, refusal?.Code);
         var log = new ActivityLog();
-        new CallTelemetry(log, log).RecordCall(RelayTools.SessionOpen, document.RootElement, trace,
+        new CallTelemetry(log, log).RecordCall(tool, document.RootElement, trace,
             refusal ?? Replies.Ok(new { sessionToken = "private-reply" }), TimeSpan.Zero, false);
         var queued = Assert.Single(log.Events);
+        if (form == "legacy")
+        {
+            Assert.Null(refusal);
+            Assert.Equal(raw, queued.RequestText);
+            Assert.Contains("private-reply", queued.ReplyText);
+            Assert.True(queued.RequestBytes > 0);
+            Assert.Single(TokenMeter.Measure(queued, log));
+            return;
+        }
         Assert.Null(queued.RequestText);
         Assert.Null(queued.ReplyText);
         Assert.True(queued.RequestBytes > 0);
@@ -130,12 +146,17 @@ public sealed class NativeJoinLifecycleTests
     private static Chat Handle(JsonObject data) => new(data["sessionId"]!.ToString(), data["sessionToken"]!.ToString());
 
     // Import a genuinely initialized private row and session from an older, independent directory snapshot.
-    private static Chat ImportDuplicate(AggregateHub hub, JsonObject attempt)
+    private static JsonObject NextAttempt(JsonObject attempt)
+    {
+        var next = attempt.DeepClone().AsObject();
+        next["nativeJoin"]!["generation"] = Nonce();
+        next["requestId"] = Nonce();
+        return next;
+    }
+
+    private static Chat ImportDuplicate(AggregateHub hub, JsonObject other)
     {
         var old = new AggregateHub();
-        var other = attempt.DeepClone().AsObject();
-        other["nativeJoin"]!["generation"] = Nonce();
-        other["requestId"] = Nonce();
         var chat = Handle(AggregateHub.Data(Open(old, other)));
         old.DeliverAll(Now);
         var control = hub.State(AggregateKinds.Control, AggregateKinds.ControlKey);
@@ -143,6 +164,60 @@ public sealed class NativeJoinLifecycleTests
         hub.Of(AggregateKinds.Control, AggregateKinds.ControlKey).Value = new() { Json = control.ToJsonString() };
         hub.Of(AggregateKinds.Session, chat.Id).Value = new() { Json = old.State(AggregateKinds.Session, chat.Id).ToJsonString() };
         return chat;
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public void Observed_duplicate_cannot_mint_a_handle_after_current_expiry(bool sameAttempt, bool administrativeClose)
+    {
+        var hub = new AggregateHub();
+        var attempt = Attempt();
+        var current = Handle(AggregateHub.Data(Open(hub, attempt)));
+        hub.DeliverAll(Now);
+        var saved = sameAttempt ? attempt : NextAttempt(attempt);
+        var older = ImportDuplicate(hub, saved);
+        if (administrativeClose) Assert.True(hub.Close(new() { ["targetSessionId"] = older.Id }, Now).Ok);
+        else _ = Open(hub, attempt);
+        hub.DeliverAll(Now);
+        Assert.False(hub.Directory().ContainsKey(older.Id));
+        Assert.Equal(current, Handle(AggregateHub.Data(Open(hub, attempt))));
+        Assert.True(hub.Close(new() { ["targetSessionId"] = current.Id, ["force"] = true }, Now).Ok);
+        hub.DeliverAll(Now);
+        hub = hub.Clone();
+        var stale = Open(hub, saved);
+        Assert.Equal(RelayErrorCodes.SessionUnknown, stale.Code);
+        Assert.DoesNotContain("sessionToken", stale.DataJson);
+        var reusedRequest = NextAttempt(attempt);
+        reusedRequest["requestId"] = saved["requestId"]!.DeepClone();
+        Assert.Equal(RelayErrorCodes.RequestConflict, Open(hub, reusedRequest).Code);
+        Assert.Empty(hub.Directory());
+        var fresh = Handle(AggregateHub.Data(Open(hub, NextAttempt(attempt))));
+        Assert.NotEqual(older, fresh);
+        Assert.NotEqual(current, fresh);
+    }
+
+    [Fact]
+    public void Duplicate_retirement_fails_closed_at_the_existing_history_bound()
+    {
+        var hub = new AggregateHub();
+        var attempt = Attempt();
+        for (var i = 0; i < 63; i++)
+        {
+            var prior = Handle(AggregateHub.Data(Open(hub, attempt)));
+            hub.DeliverAll(Now);
+            Assert.True(hub.Close(new() { ["targetSessionId"] = prior.Id, ["force"] = true }, Now).Ok);
+            hub.DeliverAll(Now);
+            attempt = NextAttempt(attempt);
+        }
+        var current = Handle(AggregateHub.Data(Open(hub, attempt)));
+        hub.DeliverAll(Now);
+        var older = ImportDuplicate(hub, NextAttempt(attempt));
+        Assert.Equal(RelayErrorCodes.CapacityExceeded, Open(hub, attempt).Code);
+        hub.DeliverAll(Now);
+        Assert.True(hub.Directory().ContainsKey(current.Id));
+        Assert.True(hub.Directory().ContainsKey(older.Id));
     }
 
     [Fact]
@@ -199,6 +274,7 @@ public sealed class NativeJoinLifecycleTests
             var workers = AggregateHub.Data(await Call(RelayTools.WorkerList, new { repositoryId = "repo" }));
             var row = Assert.Single(workers["items"]!.AsArray(), item => item!["sessionId"]!.ToString() == first.Id);
             Assert.DoesNotContain(identity.ParticipantId, row!.ToJsonString());
+            Assert.DoesNotContain(attempt["requestId"]!.ToString(), row.ToJsonString());
             Assert.DoesNotContain(first.Token, workers.ToJsonString());
 
             Assert.True((await app.ExecuteAsync(AggregateHub.Admin, RelayTools.ControlRequest, JsonSerializer.SerializeToElement(new {repositoryId = "repo",
@@ -241,9 +317,9 @@ public sealed class NativeJoinLifecycleTests
         var attempt = Attempt();
         var current = Handle(AggregateHub.Data(Open(hub, attempt)));
         hub.DeliverAll(Now);
-        var idle = ImportDuplicate(hub, attempt);
-        var unread = ImportDuplicate(hub, attempt);
-        var owner = ImportDuplicate(hub, attempt);
+        var idle = ImportDuplicate(hub, NextAttempt(attempt));
+        var unread = ImportDuplicate(hub, NextAttempt(attempt));
+        var owner = ImportDuplicate(hub, NextAttempt(attempt));
         var unrelated = hub.Open("unrelated", Now);
         var participant = hub.Directory()[current.Id]![NativeParticipant.Id]!.ToString();
         var at = Now.AddMinutes(5);

@@ -46,7 +46,7 @@ public sealed class SessionState(JsonObject json)
     public static StateShape Shape { get; } = CommonState.Shape.With(
         (SessionIdKey, null), (PrincipalIdKey, null), (SessionTokenKey, null), (RoleKey, null), (HubIncarnationKey, null), (MachineIdKey, null), (LabelKey, null),
         (BindingKey, StateShape.Any), (BindingVersionKey, null), (ObservedAtKey, null), (FreshUntilKey, null), (AvailabilityKey, null),
-        (NativeParticipant.Id, null), (NativeParticipant.Generation, null),
+        (NativeParticipant.Id, null), (NativeParticipant.Generation, null), (NativeParticipant.Request, null),
         (OpenedAtKey, null), (ClosedAtKey, null), (ForceClosedByKey, null), (ActiveReportedAtKey, null),
         (InboxKey, StateShape.Map(StateShape.Object(InboxMessage.Keys.Select(key => (key, (StateShape?)null)).ToArray()))), (AckedKey, StateShape.Map(null)),
         (StandingSeenKey, StateShape.Map(null)), (TargetBoardsKey, StateShape.Map(BoardWatches.EntryShape)), (WorkBoardsKey, StateShape.Map(BoardWatches.EntryShape)),

@@ -70,6 +70,7 @@ public sealed record SessionRecord
 
     public string? NativeId { get; init; }
     public string? NativeGeneration { get; init; }
+    public string? NativeRequest { get; init; }
     public required string SessionId { get; init; }
     public required string PrincipalId { get; init; }
     public required string RepositoryId { get; init; }
@@ -97,6 +98,7 @@ public sealed record SessionRecord
         SessionId = sessionId, SessionToken = sessionToken, PrincipalId = principalId, RepositoryId = repositoryId,
         NativeId = client[NativeParticipant.Id]?.GetValue<string>(),
         NativeGeneration = client[NativeParticipant.Generation]?.GetValue<string>(),
+        NativeRequest = client[NativeParticipant.Request]?.GetValue<string>(),
         Role = JsonFields.Text(client, "role") is { Length: > 0 and <= RelayLimits.MaxActivityRoleLength } role ? role : null,
         Presence = new()
         {
@@ -116,6 +118,7 @@ public sealed record SessionRecord
         var json = new JsonObject { [SessionIdKey] = SessionId, [PrincipalIdKey] = PrincipalId, [RepositoryIdKey] = RepositoryId, [SessionTokenKey] = SessionToken };
         if (NativeId is not null) json[NativeParticipant.Id] = NativeId;
         if (NativeGeneration is not null) json[NativeParticipant.Generation] = NativeGeneration;
+        if (NativeRequest is not null) json[NativeParticipant.Request] = NativeRequest;
         if (Role is not null) json[RoleKey] = Role;
         Presence.WriteTo(json);
         if (ActiveAt is { } active) json[ActiveAtKey] = active.ToString("O");
@@ -133,7 +136,7 @@ public sealed record SessionRecord
     internal static SessionRecord Read(MessageReader read) => new()
     {
         SessionId = read.Text(SessionIdKey), PrincipalId = read.Text(PrincipalIdKey), RepositoryId = read.Text(RepositoryIdKey), SessionToken = read.Text(SessionTokenKey),
-        NativeId = read.OptionalText(NativeParticipant.Id), NativeGeneration = read.OptionalText(NativeParticipant.Generation),
+        NativeId = read.OptionalText(NativeParticipant.Id), NativeGeneration = read.OptionalText(NativeParticipant.Generation), NativeRequest = read.OptionalText(NativeParticipant.Request),
         Role = read.OptionalText(RoleKey), Presence = SessionPresence.Read(read), ActiveAt = read.OptionalDate(ActiveAtKey)
     };
 }
