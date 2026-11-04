@@ -12,10 +12,13 @@ using CoCern.Analytics;
 
 namespace CoCern.Host.Dashboard;
 
-/// <summary>Projects only the public named reports, within the existing analytics reply budget.</summary>
+/// <summary>Projects the bounded public named reports into one dashboard response.</summary>
 public sealed class DashboardAnalytics(IAnalyticsTool tool, IServiceProvider services)
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    // The dashboard contains twelve reports with expanded row field names. The 8 KiB MCP
+    // budget still applies to each tool reply; the combined HTTP response has its own cap.
+    private const int MaxDashboardReplyBytes = 256 * 1024;
     private const string UnknownHistory = "History coverage is unknown; the selected periods may be incomplete.";
 
     public async Task<IResult> GetAsync(HttpContext context)
@@ -101,7 +104,7 @@ public sealed class DashboardAnalytics(IAnalyticsTool tool, IServiceProvider ser
             }
             reports.Add(report);
             snapshot.Queries = reports.ToArray();
-            if (JsonSerializer.SerializeToUtf8Bytes(snapshot, JsonOptions).Length > RelayLimits.MaxAnalyticsReplyBytes)
+            if (JsonSerializer.SerializeToUtf8Bytes(snapshot, JsonOptions).Length > MaxDashboardReplyBytes)
                 return State("too-large", "The combined analytics result exceeds the reply limit. Choose a shorter period.");
         }
         if (source is not null)
@@ -124,7 +127,7 @@ public sealed class DashboardAnalytics(IAnalyticsTool tool, IServiceProvider ser
             snapshot.Status = "error";
             snapshot.Message = "Analytics reports could not be loaded. " + UnknownHistory;
         }
-        if (JsonSerializer.SerializeToUtf8Bytes(snapshot, JsonOptions).Length > RelayLimits.MaxAnalyticsReplyBytes)
+        if (JsonSerializer.SerializeToUtf8Bytes(snapshot, JsonOptions).Length > MaxDashboardReplyBytes)
             return State("too-large", "The combined analytics result exceeds the reply limit. Choose a shorter period.");
         // A conditional dashboard refresh saves transferring and reprocessing an unchanged report.
         // Bind the tag to the entire response, including repository, period and snapshot identity.

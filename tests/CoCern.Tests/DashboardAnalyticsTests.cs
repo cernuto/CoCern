@@ -101,6 +101,41 @@ public sealed class DashboardAnalyticsTests
         Assert.Equal(JsonValueKind.Null, emptyTokens.GetProperty("current").ValueKind);
     }
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(7)]
+    [InlineData(14)]
+    public async Task Combined_reports_can_exceed_one_mcp_reply_without_losing_any_chart(int days)
+    {
+        var queries = new ControlledQueries("many-rows");
+        await using var host = new RelayHostFixture(settings: new Dictionary<string, string?>
+        {
+            ["Relay:Analytics:Enabled"] = "false",
+            ["Relay:Clients:0:IsAdministrator"] = "true",
+            ["Relay:Dashboard:ViewerPrincipalIds:0"] = "test-user"
+        }, configureServices: services => services.AddSingleton<IAnalyticsTool>(new AnalyticsTool(queries, false)));
+        using var client = await Login(host);
+        var response = await client.GetAsync($"/dashboard/api/analytics?repositoryId=repo&days={days}");
+        response.EnsureSuccessStatusCode();
+        var text = await response.Content.ReadAsStringAsync();
+        using var document = JsonDocument.Parse(text);
+        Assert.Equal("ready", document.RootElement.GetProperty("status").GetString());
+        var reports = document.RootElement.GetProperty("queries").EnumerateArray().ToArray();
+        Assert.Equal(12, reports.Length);
+        Assert.All(reports, report =>
+        {
+            Assert.Equal(JsonValueKind.Null, report.GetProperty("error").ValueKind);
+            Assert.Equal(8, report.GetProperty("rows").GetArrayLength());
+            Assert.Equal(0, report.GetProperty("rows")[0].GetProperty("current").GetDouble());
+            Assert.Equal(JsonValueKind.Null, report.GetProperty("rows")[0].GetProperty("previous").ValueKind);
+        });
+        Assert.True(System.Text.Encoding.UTF8.GetByteCount(text) > RelayLimits.MaxAnalyticsReplyBytes);
+        Assert.NotNull(response.Headers.ETag);
+        using var refresh = new HttpRequestMessage(HttpMethod.Get, $"/dashboard/api/analytics?repositoryId=repo&days={days}");
+        refresh.Headers.IfNoneMatch.Add(response.Headers.ETag!);
+        Assert.Equal(HttpStatusCode.NotModified, (await client.SendAsync(refresh)).StatusCode);
+    }
+
     private static RelayHostFixture Host(Dictionary<string, string?>? settings = null)
     {
         settings ??= new();
@@ -154,6 +189,9 @@ public sealed class DashboardAnalyticsTests
             if (mode == "partial" && name == AnalyticsQueryNames.CallsPerTask) throw new AnalyticsException(AnalyticsError.Failed, "private-path");
             var key = mode == "oversize" ? new string('x', RelayLimits.MaxAnalyticsReplyBytes) : "all";
             var at = DateTimeOffset.Parse("2026-11-02T12:00:00Z").AddSeconds(mode == "mixed" ? Selections.Count : 0);
+            if (mode == "many-rows")
+                return Task.FromResult(new AnalyticsResult(["key", "cur", "prev", "cur_n", "prev_n"],
+                    Enumerable.Range(0, 8).Select(index => (IReadOnlyList<object?>)new object?[] { $"tool-{index}", 0.0, null, 1L, 0L }).ToArray(), false, at));
             return Task.FromResult(new AnalyticsResult(["key", "cur", "prev", "cur_n", "prev_n"], [new object?[] { key, 0.0, null, 1L, 0L }], mode == "partial", at));
         }
         public Task<AnalyticsResult> RunSqlAsync(string sql, CancellationToken cancellationToken = default) => throw new InvalidOperationException("Viewer SQL must never execute.");
