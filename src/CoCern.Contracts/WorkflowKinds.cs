@@ -25,8 +25,10 @@ public static class BlockerKinds
 {
     public const string CoordinatorHold = "coordinator_hold";
     public const string ProviderRejection = "provider_rejection";
+    /// <summary>Only a person's answer can clear it. Structure, not prose, is what puts a task on the dashboard's "Waiting on you" list.</summary>
+    public const string HumanDecision = "human_decision";
 
-    public static readonly IReadOnlyList<string> All = [CoordinatorHold, ProviderRejection, "tool_unavailable", "resource_busy", "missing_fixture", "prerequisite", "other"];
+    public static readonly IReadOnlyList<string> All = [CoordinatorHold, ProviderRejection, HumanDecision, "tool_unavailable", "resource_busy", "missing_fixture", "prerequisite", "other"];
 }
 
 /// <summary>What an <c>action_report</c> may say happened.</summary>

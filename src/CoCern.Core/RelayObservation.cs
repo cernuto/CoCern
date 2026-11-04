@@ -13,6 +13,13 @@ public interface IRelayObservationSource
     /// <summary>Repository-scoped pending questions, oldest first. Null means busy; reservations are made only by the board.</summary>
     Task<IReadOnlyList<StandingPresentation>?> ReadPendingStandingAsync(string repositoryId, string principalId, string sessionId, string requestCorrelation, CancellationToken cancellationToken = default) =>
         Task.FromResult<IReadOnlyList<StandingPresentation>?>(Array.Empty<StandingPresentation>());
+    /// <summary>Blocked tasks in every repository that "Waiting on you" may list, bounded, for the dashboard's 15-second read. Null means collection was busy.</summary>
+    Task<WaitingSources?> ReadWaitingBlockersAsync(CancellationToken cancellationToken = default) => Task.FromResult<WaitingSources?>(new());
+    /// <summary>
+    /// Everything "Waiting on you" reads for one repository, and no other, for an administrator's <c>get_status</c>, which reads on call since
+    /// the collector only runs with a viewer. Null means the store stayed busy.
+    /// </summary>
+    Task<WaitingSources?> ReadWaitingAsync(string repositoryId, CancellationToken cancellationToken = default) => Task.FromResult<WaitingSources?>(new());
 }
 
 public sealed record DashboardStandingObservation
@@ -28,6 +35,8 @@ public sealed record RelayObservation
     public DashboardSession[] Sessions { get; init; } = [];
     public bool SessionsTruncated { get; init; }
     public DashboardInteractions Interactions { get; init; } = new();
+    /// <summary>The reports of the sessions in <see cref="Sessions"/>, read from the same rows; <see cref="SessionsTruncated"/> says some sessions were not read.</summary>
+    public WaitingReport[] WaitingReports { get; init; } = [];
     public string[] Warnings { get; init; } = [];
 }
 

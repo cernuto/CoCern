@@ -109,7 +109,7 @@ internal static class DomainBoard
     /// <list type="bullet">
     /// <item>a standing put of more changes than one history entry keeps, and the hub's own proposal; a context note;</item>
     /// <item>two tasks completed with evidence, an order on the second whose notice carries a note, and a blocked task, targeted and
-    /// prioritized and rechecked once, that depends on both;</item>
+    /// prioritized and rechecked once, that depends on both, and one blocked on Paul and on a hold;</item>
     /// <item>a task whose failed action was retried, with a late report on the first attempt;</item>
     /// <item>a task whose session closed with its action in flight, recovered by another session of its principal and completed by a third;</item>
     /// <item>two archive sweeps a month apart: the completed tasks leave for the archive, and their IDs stay remembered as dependencies.</item>
@@ -171,6 +171,13 @@ internal static class DomainBoard
         }));
         blocked["dependsOn"] = new JsonArray("dep", "old"); blocked["targetSessionId"] = "w"; blocked["priority"] = 5; blocked["recheckEvidenceRef"] = "check:1";
         Apply(Writer, RelayTools.TaskUpdate, new() { ["taskId"] = "waiting", ["expectedVersion"] = 0, ["workflow"] = blocked }, 215);
+        Apply(Writer, RelayTools.TaskUpdate, new()
+        {
+            ["taskId"] = "asks-paul", ["expectedVersion"] = 0,
+            ["workflow"] = Workflow("blocked", "rig-10", new JsonArray(
+                new JsonObject { ["id"] = "paul", ["kind"] = BlockerKinds.HumanDecision, ["summary"] = "Which rig should it flash?", ["recheckCondition"] = "Paul answered" },
+                new JsonObject { ["id"] = "hold", ["kind"] = BlockerKinds.CoordinatorHold, ["summary"] = "Held for the answer", ["recheckCondition"] = "Released" }))
+        }, 216);
 
         Apply(Writer, RelayTools.TaskUpdate, new() { ["taskId"] = "retry", ["expectedVersion"] = 0 }, 220);
         Apply(Writer, RelayTools.TaskClaim, new() { ["taskId"] = "retry", ["sessionId"] = "a", ["expectedVersion"] = 1, ["leaseSeconds"] = 600 }, 221);

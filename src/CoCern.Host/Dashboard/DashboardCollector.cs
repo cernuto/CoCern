@@ -1,5 +1,6 @@
 using CoCern.Contracts.Dashboard;
 using CoCern.Core;
+using CoCern.Domain;
 using System.Text;
 using System.Text.Json;
 
@@ -17,6 +18,14 @@ public sealed class DashboardCollector : BackgroundService
     private readonly DocCacheActivity? docCache;
     private DateTimeOffset nextDatabaseAt;
     private DateTimeOffset nextStandingAt;
+    private DateTimeOffset nextWaitingBlockersAt;
+    // What "Waiting on you" last read, kept apart from the snapshot: the frame's size limit can empty the snapshot's standing, and a busy
+    // read must keep the last rows rather than drop them.
+    private DashboardStanding[] waitingBoards = [];
+    private bool waitingBoardsTruncated;
+    private WaitingSources waitingBlockers = new();
+    private WaitingReport[] waitingReports = [];
+    private bool waitingReportsTruncated;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     public DashboardCollector(DashboardLogBuffer logs, DashboardConnections connections, IRelayObservationSource source, DashboardTrafficBuffer traffic, DashboardSecurity security, RelayApplication application, DocCacheActivity? docCache = null)
@@ -79,6 +88,7 @@ public sealed class DashboardCollector : BackgroundService
         try
         {
             var observation = await source.ReadObservationAsync(now, application.IncarnationId, cancellationToken);
+            if (observation is not null) (waitingReports, waitingReportsTruncated) = (observation.WaitingReports, observation.SessionsTruncated);
             snapshot = observation is null
                 ? previous with { Warnings = [.. previous.Warnings.Where(warning => warning != "Observation is busy; the previous observation is retained."), "Observation is busy; the previous observation is retained."] }
                 : previous with
@@ -113,19 +123,49 @@ public sealed class DashboardCollector : BackgroundService
                 if (await source.ReadStandingAsync(cancellationToken) is { } standing)
                 {
                     snapshot = snapshot with { Standing = standing.Boards, StandingTruncated = standing.Truncated };
+                    (waitingBoards, waitingBoardsTruncated) = (standing.Boards, standing.Truncated);
                     nextStandingAt = now.AddSeconds(15);
                 }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
             catch (Exception) { logs.CollectionFailed(); }
         }
+        // On the same cadence and the same retry, but its own query: the standing read skips a board with no standing or orders.
+        if (now >= nextWaitingBlockersAt)
+        {
+            try
+            {
+                if (await source.ReadWaitingBlockersAsync(cancellationToken) is { } blockers)
+                {
+                    waitingBlockers = blockers;
+                    nextWaitingBlockersAt = now.AddSeconds(15);
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+            catch (Exception) { logs.CollectionFailed(); }
+        }
+        // Rebuilt every tick, so a report shows within one and an expiry is noticed within one; nothing here needs a manager.
+        try
+        {
+            var labels = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var session in snapshot.Sessions) labels[session.SessionId] = session.Label;
+            snapshot = snapshot with
+            {
+                Waiting = WaitingList.Build(new()
+                {
+                    Boards = waitingBoards, Blockers = waitingBlockers.Blockers, Reports = waitingReports, Labels = labels,
+                    Truncated = waitingBoardsTruncated || waitingBlockers.Truncated || waitingReportsTruncated
+                }, now)
+            };
+        }
+        catch (Exception) { logs.CollectionFailed(); }
         // Token totals are counted once at startup and tip rule state is in memory, so this read is free.
         try { snapshot = snapshot with { Tokens = application.TokenSummary() }; }
         catch (Exception) { logs.CollectionFailed(); }
         return Bound(snapshot with { Revision = previous.Revision + 1, Logs = logs.Snapshot(), Traffic = traffic.Snapshot(), DocCache = docCache?.Snapshot(now) ?? new() });
     }
 
-    private static DashboardSnapshot Bound(DashboardSnapshot snapshot)
+    internal static DashboardSnapshot Bound(DashboardSnapshot snapshot)
     {
         // Measure the complete frame once. Exact encoded element lengths then bound trimming in one pass.
         // The remaining KiB accommodates the SignalR event envelope within its 256 KiB transport buffer.
@@ -213,6 +253,16 @@ public sealed class DashboardCollector : BackgroundService
         if (!snapshot.Database.Truncated) bytes--;
         var tables = Trim(root.GetProperty("database").GetProperty("tables"));
         snapshot = snapshot with { Database = snapshot.Database with { Tables = snapshot.Database.Tables[..tables], Truncated = true } };
+        if (bytes <= maximumBytes) return snapshot;
+
+        // The last lists to give way, since they say what a person must do: the holds first, then the newest rows, so structural ones stay.
+        var encodedWaiting = root.GetProperty("waiting");
+        var maybe = Trim(encodedWaiting.GetProperty("maybe"));
+        snapshot = snapshot with { Waiting = snapshot.Waiting with { Maybe = snapshot.Waiting.Maybe[..maybe] } };
+        if (bytes <= maximumBytes) return snapshot;
+        if (!snapshot.Waiting.Truncated) bytes--;
+        var waitingRows = Trim(encodedWaiting.GetProperty("items"));
+        snapshot = snapshot with { Waiting = snapshot.Waiting with { Items = snapshot.Waiting.Items[..waitingRows], Truncated = true } };
         if (bytes <= maximumBytes) return snapshot;
 
         // Scalar database metadata can itself be oversized. This fixed, explicit fallback cannot export it.
