@@ -198,8 +198,7 @@ public sealed class NativeJoinLifecycleTests
         Assert.NotEqual(current, fresh);
     }
 
-    [Fact]
-    public void Duplicate_retirement_fails_closed_at_the_existing_history_bound()
+    private static (AggregateHub Hub, JsonObject Attempt, Chat Current, Chat Duplicate) FullHistoryFixture()
     {
         var hub = new AggregateHub();
         var attempt = Attempt();
@@ -213,11 +212,76 @@ public sealed class NativeJoinLifecycleTests
         }
         var current = Handle(AggregateHub.Data(Open(hub, attempt)));
         hub.DeliverAll(Now);
-        var older = ImportDuplicate(hub, NextAttempt(attempt));
+        return (hub, attempt, current, ImportDuplicate(hub, NextAttempt(attempt)));
+    }
+
+    [Fact]
+    public void Duplicate_retirement_fails_closed_at_the_existing_history_bound()
+    {
+        var (hub, attempt, current, older) = FullHistoryFixture();
         Assert.Equal(RelayErrorCodes.CapacityExceeded, Open(hub, attempt).Code);
         hub.DeliverAll(Now);
         Assert.True(hub.Directory().ContainsKey(current.Id));
         Assert.True(hub.Directory().ContainsKey(older.Id));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void A_full_history_duplicate_does_not_block_other_repositories_sweep_or_capacity_prune(bool atCapacity)
+    {
+        var (hub, attempt, current, blocked) = FullHistoryFixture();
+        var other = new RelayCaller("other-worker", false, ["other"]);
+        JsonObject Legacy() => new() { ["repositoryId"] = "other", ["requestId"] = Nonce(), ["label"] = "idle" };
+        var legacy = Handle(AggregateHub.Data(Open(hub, Legacy(), other, Now.AddMinutes(10))));
+        hub.DeliverAll(Now.AddMinutes(10));
+        var later = Now.AddHours(RelayLimits.StaleSessionHours + 48);
+        Assert.True(hub.Verify(current, later).Ok);
+        hub.DeliverAll(later);
+
+        // Oldest first: an unretirable private duplicate, one real session in the other repo, then the other eligible rows.
+        var control = hub.State(AggregateKinds.Control, AggregateKinds.ControlKey);
+        var rows = control["sessions"]!.AsObject();
+        var protectedRow = rows[blocked.Id]!.DeepClone();
+        var participant = protectedRow[NativeParticipant.Id]!.ToString();
+        var retainedAttempts = control["nativeJoins"]![participant]!.DeepClone();
+        int eligible = atCapacity ? RelayLimits.MaxRecords - 2 : RelayLimits.MaxSessionsClosedPerCall + 1;
+        for (var i = 1; i < eligible; i++)
+        {
+            var row = rows[legacy.Id]!.DeepClone().AsObject();
+            var id = Nonce();
+            row["sessionId"] = id;
+            row["freshUntil"] = Now.AddHours(1).ToString("O");
+            rows[id] = row;
+        }
+        hub.Of(AggregateKinds.Control, AggregateKinds.ControlKey).Value = new() { Json = control.ToJsonString() };
+        Assert.Equal(RelayErrorCodes.CapacityExceeded, hub.Close(new() { ["targetSessionId"] = blocked.Id }, later).Code);
+        if (atCapacity)
+        {
+            Assert.Equal(RelayLimits.MaxRecords, hub.Directory().Count);
+            var newcomer = Handle(AggregateHub.Data(Open(hub, Legacy(), other, later)));
+            Assert.True(hub.Directory().ContainsKey(newcomer.Id));
+            Assert.Equal(RelayLimits.RetainedEntriesAfterPrune + 1, hub.Directory().Count);
+        }
+        else
+        {
+            var first = AggregateHub.Data(hub.Sweep(24, later));
+            Assert.Equal(RelayLimits.MaxSessionsClosedPerCall, first["closed"]!.GetValue<int>());
+            Assert.True(first["more"]!.GetValue<bool>());
+            var next = AggregateHub.Data(hub.Sweep(24, later));
+            Assert.Equal(1, next["closed"]!.GetValue<int>());
+            Assert.False(next["more"]!.GetValue<bool>());
+        }
+        var finalControl = hub.State(AggregateKinds.Control, AggregateKinds.ControlKey);
+        Assert.True(JsonNode.DeepEquals(protectedRow, hub.Directory()[blocked.Id]));
+        Assert.True(JsonNode.DeepEquals(retainedAttempts, finalControl["nativeJoins"]![participant]));
+        Assert.Null(finalControl[ControlState.ClosingKey]?[blocked.Id]);
+        Assert.True(hub.Directory().ContainsKey(current.Id));
+        Assert.False(hub.Directory().ContainsKey(legacy.Id));
+        Assert.DoesNotContain(hub.Queued, effect => effect.Operation == Operations.SessionExpire && effect.TargetKey == blocked.Id);
+        var expiry = Assert.Single(hub.Queued, effect => effect.Operation == Operations.SessionExpire && effect.TargetKey == legacy.Id);
+        Assert.True(AggregateHub.Data(hub.Deliver(expiry, later))["expired"]!.GetValue<bool>());
+        Assert.Equal(RelayErrorCodes.CapacityExceeded, Open(hub, attempt, at: later).Code);
     }
 
     [Fact]

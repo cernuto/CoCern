@@ -59,7 +59,7 @@ public sealed class ControlState(JsonObject json)
 
     // All directory removal paths preserve an independently opened attempt before deleting its only private row.
     // A duplicate of the current attempt can disappear without retiring the current generation.
-    internal string? RetireSuperseded(DirectoryEntry? entry)
+    internal string? RetireSuperseded(DirectoryEntry? entry, bool commit)
     {
         if (entry is null || entry.NativeId.Length == 0) return null;
         if (NativeJoin(entry.NativeId) is not { } join) return RelayErrorCodes.Unavailable;
@@ -69,11 +69,13 @@ public sealed class ControlState(JsonObject json)
         if (generation.Length == 0 || request.Length == 0) return RelayErrorCodes.Unavailable;
         if (generation == Text(join, "generation"))
             return request == Text(join, "requestId") ? null : RelayErrorCodes.RequestConflict;
-        var retired = ObjectAt(join, "retired");
-        if (retired.ContainsKey(generation))
-            return Text(retired, generation) == request ? null : RelayErrorCodes.RequestConflict;
-        if (retired.Count >= MaxNativeGenerations - 1) return RelayErrorCodes.CapacityExceeded;
-        retired[generation] = request;
+        if (join["retired"] is JsonObject retired)
+        {
+            if (retired.ContainsKey(generation))
+                return Text(retired, generation) == request ? null : RelayErrorCodes.RequestConflict;
+            if (retired.Count >= MaxNativeGenerations - 1) return RelayErrorCodes.CapacityExceeded;
+        }
+        if (commit) ObjectAt(join, "retired")[generation] = request;
         return null;
     }
 
