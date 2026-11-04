@@ -54,6 +54,21 @@ public sealed class SessionHandoff
         NodeState.WriteSessionHandle(_folder, new(sessionId, token, repository, Label(arguments) ?? DefaultLabel, DateTimeOffset.UtcNow, _client));
     }
 
+    /// <summary>
+    /// This chat's newest session in <paramref name="repository"/> among the handles here. Null when the client told the adapter no chat ID: every
+    /// chat on the PC shares these folders, so without one there is no saying whose handle is whose.
+    /// </summary>
+    internal SessionHandle? FindOwn(string repository)
+    {
+        if (_client is null) return null;
+        try
+        {
+            return NodeState.ReadSessionHandles(_folder).Where(handle => handle.RepositoryId == repository && (handle.Client is not null || handle.Chat is not null) && OwnsNative(handle))
+                .OrderByDescending(handle => handle.OpenedAt).FirstOrDefault();
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { return null; }
+    }
+
     internal void RecordLocal(JsonElement arguments, AdapterReply reply)
     {
         if (!reply.Ok || reply.Data is not { ValueKind: JsonValueKind.Object } data || ChatLocators.Text(data, "sessionId") is not { } session || !NodeState.IsFileId(session)) return;
