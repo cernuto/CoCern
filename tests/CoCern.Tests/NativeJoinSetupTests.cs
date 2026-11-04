@@ -670,6 +670,7 @@ public sealed class NativeJoinSetupTests : IDisposable
     [InlineData("upper-joined")]
     [InlineData("upper-pairs")]
     [InlineData("bare-joined")]
+    [InlineData("bare-pairs")]
     public async Task FixRound2_private_option_names_refuse_all_unsupported_forms_before_raw_configuration(string form)
     {
         await using var relay = new WiringRelayCounter();
@@ -684,6 +685,7 @@ public sealed class NativeJoinSetupTests : IDisposable
             "joined-development-root" => ["--development-root=" + root, "--connection=" + folder, "--profile=" + Profile],
             "upper-joined" => ["--NATIVE-CLIENT=codex", "--CONNECTION=" + folder, "--PROFILE=" + Profile],
             "bare-joined" => ["native-client=codex", "connection=" + folder, "profile=" + Profile],
+            "bare-pairs" => ["native-client", "codex", "connection", folder, "profile", Profile],
             _ => ["--NATIVE-CLIENT", "codex", "--CONNECTION", folder, "--PROFILE", Profile]
         };
         await using var child = WiringStart(args, relay.Origin);

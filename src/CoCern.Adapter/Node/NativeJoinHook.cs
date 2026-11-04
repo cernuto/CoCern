@@ -458,10 +458,8 @@ internal sealed class NativeRegistration
     {
         var name = argument.AsSpan();
         if (name.IsEmpty) return false;
-        var prefixed = name[0] is '-' or '/';
         while (!name.IsEmpty && (name[0] is '-' or '/')) name = name[1..];
         var separator = name.IndexOfAny('=', ':');
-        if (!prefixed && separator < 0) return false;
         if (separator >= 0) name = name[..separator];
         return name.Equals("native-client", StringComparison.OrdinalIgnoreCase) || name.Equals("native-hook", StringComparison.OrdinalIgnoreCase) ||
             name.Equals("connection", StringComparison.OrdinalIgnoreCase) || name.Equals("profile", StringComparison.OrdinalIgnoreCase) ||
