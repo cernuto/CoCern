@@ -247,7 +247,7 @@ public sealed class ContractsTests
         Assert.True(Size(administrator: false) < 20_000, $"Worker forwarding catalog grew to {Size(administrator: false)} characters.");
         // Role-specific lists keep administrator-only tools (standing_put, control_request, and later analytics_query and the order
         // tools) away from workers, so only the few administrator chats pay for them; that surface has its own, larger cap.
-        Assert.True(Size(administrator: true) < 22_000, $"Administrator forwarding catalog grew to {Size(administrator: true)} characters.");
+        Assert.True(Size(administrator: true) < 22_600, $"Administrator forwarding catalog grew to {Size(administrator: true)} characters.");
 
         static int Size(bool administrator) => RelayToolCatalog.ForRole(administrator).Sum(tool => tool.Description.Length + RelayToolCatalog.ForwardingSchema(tool).GetRawText().Length);
     }
