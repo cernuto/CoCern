@@ -24,6 +24,7 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
     private Task? runtime;
     internal TimeSpan Budget { get; init; } = TimeSpan.FromSeconds(15);
     internal TimeSpan ResumeInterval { get; init; } = TimeSpan.FromSeconds(4);
+    internal Func<string, string, string?> RootProof { get; init; } = (cwd, root) => ProtectedCheckoutRoot.ProveOrNull(cwd, root);
 
     private sealed class Refused(string code) : IOException(code) { internal string Code { get; } = code; }
     private sealed record Intent(string Provider, string NativeId, string Cwd, string? Repository = null);
@@ -153,7 +154,8 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
                 if (handle is null)
                 {
                     var handoff = SessionHandoff.ForFolder(folder, client);
-                    var opened = await handoff.OpenNativeJoinAsync(binding, forwarder, cancel, context.DisplayTitle, evidence.GetProperty("nativePreflight"));
+                    var protectedRoot = await ProtectedRootAsync(context.Cwd, checkout.Root, cancel);
+                    var opened = await handoff.OpenNativeJoinAsync(binding, forwarder, cancel, context.DisplayTitle, evidence.GetProperty("nativePreflight"), protectedRoot);
                     if (!opened.Completed) throw new Refused(opened.Code);
                     handle = binding.CurrentHandle ?? throw new Refused("native_handle_unverified");
                 }
@@ -179,6 +181,13 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
             await Task.Delay(delay, cancel);
             delay = TimeSpan.FromMilliseconds(Math.Min(delay.TotalMilliseconds * 2, 4000));
         }
+    }
+
+    // Eligibility only: a refused or stalled proof means this join gets no protected scope, never that the join fails.
+    private async Task<string?> ProtectedRootAsync(string cwd, string root, CancellationToken ct)
+    {
+        try { return await Task.Run(() => RootProof(cwd, root), ct).WaitAsync(TimeSpan.FromSeconds(3), ct); }
+        catch (TimeoutException) { return null; }
     }
 
     // Reserve before forwarding. A lost reply stays on its original session, even after process restart.
@@ -244,7 +253,7 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
     {
         if (invocation is not { Length: > 0 and <= 256 } || invocation.Any(char.IsControl) || args.ValueKind != JsonValueKind.Object ||
             !RelayToolCatalog.TryGet(tool, out var definition) || tool is RelayTools.SessionOpen or RelayTools.SessionBind) return new(false, "native_invocation_invalid");
-        if (args.TryGetProperty("sessionToken", out _) || args.TryGetProperty("sessionId", out _) || args.TryGetProperty("_cocernNative", out _))
+        if (args.TryGetProperty("sessionToken", out _) || args.TryGetProperty("sessionId", out _) || args.TryGetProperty("_cocernNative", out _) || ProtectedCheckoutRoot.NamedIn(args))
             return new(false, "native_invocation_conflict");
         try
         {

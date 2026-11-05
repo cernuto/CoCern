@@ -353,7 +353,7 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
         }
     }
 
-    internal JsonElement OpenWireArguments(JsonElement? evidence)
+    internal JsonElement OpenWireArguments(JsonElement? evidence, string? protectedRoot = null)
     {
         CheckLease();
         if (evidence is { } offered)
@@ -367,9 +367,11 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
                 resolution = offered.Clone();
             }
         }
-        if (resolution is not { } frozen) return arguments.Clone();
+        if (resolution is null && protectedRoot is null) return arguments.Clone();
         var wire = System.Text.Json.Nodes.JsonNode.Parse(arguments.GetRawText())!.AsObject();
-        wire["nativeJoin"]!["resolution"] = System.Text.Json.Nodes.JsonNode.Parse(frozen.GetRawText());
+        if (resolution is { } frozen) wire["nativeJoin"]!["resolution"] = System.Text.Json.Nodes.JsonNode.Parse(frozen.GetRawText());
+        // On the wire only: never in the frozen arguments, the state file or the participant proof, so a retry and an older state file are unaffected.
+        if (protectedRoot is not null) wire["nativeJoin"]![ProtectedCheckoutRoot.Field] = protectedRoot;
         return JsonSerializer.SerializeToElement(wire);
     }
 
