@@ -104,6 +104,10 @@ public static class RelayErrorCodes
     /// <summary>An item that blocks another session cannot be postponed again (at most 2 snoozes and 30 minutes).</summary>
     public const string SnoozeLimit = "SnoozeLimit";
 
+    // Named peers
+    /// <summary>More than one chat here has that name; <c>choices</c> lists them. Nothing breaks the tie: ask again with a choice's <c>ref</c>.</summary>
+    public const string PeerAmbiguous = "PeerAmbiguous";
+
     // Infrastructure
     public const string StorageFailure = "StorageFailure";
     public const string DeliveryPending = "DeliveryPending";
@@ -135,7 +139,7 @@ public static class RelayErrorCodes
     private static readonly FrozenSet<string> Conflicts = new[]
     {
         VersionConflict, RequestConflict, RequestExpired, StaleClaim, Paused, Busy, ActionConflict, UnresolvedAction,
-        DeltaRestartRequired, WorkflowRecheckRequired, WorkflowIncomplete, WorkflowNotReady, DependenciesIncomplete, TaskArchived, SnoozeLimit
+        DeltaRestartRequired, WorkflowRecheckRequired, WorkflowIncomplete, WorkflowNotReady, DependenciesIncomplete, TaskArchived, SnoozeLimit, PeerAmbiguous
     }.ToFrozenSet(StringComparer.Ordinal);
 
     private static readonly FrozenSet<string> Denials = new[] { RepositoryDenied, SessionDenied, AdministratorRequired, HubPcRequired, MachineRevoked, MachineRequired, JoinCodeRequired }.ToFrozenSet(StringComparer.Ordinal);

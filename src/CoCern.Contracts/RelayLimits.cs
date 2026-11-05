@@ -88,6 +88,8 @@ public static class RelayLimits
     public const int ManagerSelectionHistoryEntries = 20;
     public const int ManagerSelectionHistoryPageEntries = 2;
     public const int MaxPageSize = 50;
+    /// <summary>How many chats a refused ambiguous name lists; the reply says when there are more.</summary>
+    public const int MaxPeerChoices = 10;
     public const int DefaultPageSize = 20;
     /// <summary>A whole-task read carries only this many of the latest messages, reports and attempts; older ones stay in the paged sections.</summary>
     public const int RecentTaskEntries = 20;

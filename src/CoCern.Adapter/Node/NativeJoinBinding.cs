@@ -353,7 +353,9 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
         }
     }
 
-    internal JsonElement OpenWireArguments(JsonElement? evidence)
+    /// <param name="evidence">The checkout evidence to freeze on first use.</param>
+    /// <param name="displayLabel">The chat's title for this attempt: display text sent beside the proof, never part of the frozen arguments or the identity.</param>
+    internal JsonElement OpenWireArguments(JsonElement? evidence, string? displayLabel = null)
     {
         CheckLease();
         if (evidence is { } offered)
@@ -367,9 +369,10 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
                 resolution = offered.Clone();
             }
         }
-        if (resolution is not { } frozen) return arguments.Clone();
+        if (resolution is null && displayLabel is null) return arguments.Clone();
         var wire = System.Text.Json.Nodes.JsonNode.Parse(arguments.GetRawText())!.AsObject();
-        wire["nativeJoin"]!["resolution"] = System.Text.Json.Nodes.JsonNode.Parse(frozen.GetRawText());
+        if (resolution is { } frozen) wire["nativeJoin"]!["resolution"] = System.Text.Json.Nodes.JsonNode.Parse(frozen.GetRawText());
+        if (displayLabel is not null) wire["label"] = displayLabel;
         return JsonSerializer.SerializeToElement(wire);
     }
 

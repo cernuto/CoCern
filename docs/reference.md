@@ -37,6 +37,7 @@ Admin tools need a token with `IsAdministrator`. A session's `role` grants nothi
 | `ack` | worker | Acknowledge handled messages, and report what this chat [waits on Paul for](#waiting-on-you) (`waitingFor`). |
 | `context_get`, `context_put` | worker | Read or write shared notes. Never store credentials or chat transcripts. |
 | `chat_directory` | worker | Open registered chats, including hub-local ones, with their session ID and announced direct-wake reachability. |
+| `peers` | native chats | This repository's chats by `name`, `client`, one `state` word (`reachable`, or `unconfirmed` when no live wake route is announced) and `self`. `name` looks one chat up by whole name, ignoring case. Equal names refuse with `PeerAmbiguous` and `choices`, each with a `ref` to ask again with; nothing breaks the tie. Anything else answers `NotFound` with a `reason` (`unknown`, `replacing`, `unverified`), identical for a name nobody has and for another repository's chat. Names come from the chat's title, are untrusted and grant nothing. No raw client lists it. |
 | `search` | worker | Search tasks, notes and your inbox. |
 | `attention_respond` | worker | Accept, dismiss or postpone an attention offer. |
 | `standing_propose` | worker | Propose a standing line or grant. |
