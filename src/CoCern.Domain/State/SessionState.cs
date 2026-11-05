@@ -39,6 +39,9 @@ public sealed class SessionState(JsonObject json)
     public const string WorkKey = "work";
     public const string WorkReportedKey = "workReported";
     public const string WaitingForKey = "waitingFor";
+    public const string EventWaitsKey = "eventWaits";
+    public const string EventWaitOwnerWatchesKey = "eventWaitOwnerWatches";
+    public const string EventWaitOwnerClosureOutcomeKey = "eventWaitOwnerClosureOutcome";
 
     /// <summary>
     /// Every key a session stores. Its tool binding is the client's own, as it reported it; an inbox message holds the keys
@@ -51,13 +54,15 @@ public sealed class SessionState(JsonObject json)
         (OpenedAtKey, null), (ClosedAtKey, null), (ForceClosedByKey, null), (ActiveReportedAtKey, null),
         (InboxKey, StateShape.Map(StateShape.Object(InboxMessage.Keys.Select(key => (key, (StateShape?)null)).ToArray()))), (AckedKey, StateShape.Map(null)),
         (StandingSeenKey, StateShape.Map(null)), (TargetBoardsKey, StateShape.Map(BoardWatches.EntryShape)), (WorkBoardsKey, StateShape.Map(BoardWatches.EntryShape)),
-        (WorkKey, WorkLedger.Shape), (WorkReportedKey, WorkReport.Shape), (WaitingForKey, WaitingMark.Shape)).With(AttentionQueue.Fields);
+        (WorkKey, WorkLedger.Shape), (WorkReportedKey, WorkReport.Shape), (WaitingForKey, WaitingMark.Shape),
+        (EventWaitsKey, StateShape.Map(StateShape.Any)), (EventWaitOwnerWatchesKey, StateShape.Map(StateShape.Any)),
+        (EventWaitOwnerClosureOutcomeKey, null), (EventWaitRetirement.Key, StateShape.Map(null))).With(AttentionQueue.Fields);
 
     /// <summary>What a closed session forgets: its secret, its mail and attention, its tool binding, its report of waiting, and the boards waiting on it (told as it closes).</summary>
     private static readonly string[] ForgottenOnClose =
     [
         SessionTokenKey, InboxKey, AckedKey, AttentionQueue.ItemsKey, AttentionQueue.ClosedKey, AttentionQueue.ArchivedKey, AttentionQueue.RecentKey, StandingSeenKey,
-        BindingKey, TargetBoardsKey, WorkBoardsKey, WaitingForKey
+        BindingKey, TargetBoardsKey, WorkBoardsKey, WaitingForKey, EventWaitsKey
     ];
 
     /// <summary>Whether a <see cref="SessionOpen"/> ever initialized this session.</summary>

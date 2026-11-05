@@ -27,6 +27,17 @@ internal static class SessionAggregate
         // and refuses attention, which its sources then drop.
         switch (context.Operation)
         {
+            case EventWaitAggregate.RegisterOperation:
+            case EventWaitAggregate.CancelOperation:
+            case EventWaitAggregate.DueOperation:
+                return EventWaitAggregate.Handle(context);
+            case EventWaitSources.WatchOperation:
+            case EventWaitSources.UnwatchOperation:
+            case EventWaitSources.LifecycleOperation:
+            case EventWaitSources.SourceBindOperation:
+            case EventWaitSources.SourceAckOperation:
+            case EventWaitSources.SourceSignalOperation:
+                return EventWaitSources.Handle(context);
             case Operations.Open: return Initialize(context);
             case NativeExpiryCheck.Operation:
                 var check = new SessionState(context.State);
@@ -140,6 +151,8 @@ internal static class SessionAggregate
         if (!state.Opened)
         {
             state.ClosedAt = context.Now;
+            var closed = EventWaitSources.OnClosed(context, stranded: false);
+            if (!closed.Ok) return closed;
             return Settled(context, expire, Ok(new { expired = true }));
         }
         var force = expire.Force;
@@ -156,8 +169,13 @@ internal static class SessionAggregate
         foreach (var (boardKey, boardId) in state.BoardsToTell(withWork: owns))
             if (told.Add(boardKey)) TellBoard(context, state, boardKey, boardId);
         ReturnUnread(context, state);
+        // Tear down this session's own subscriptions before forgetting them.
+        // The source-side tombstones remain for installs overtaken by unwatch.
+        EventWaitSources.CloseWaiter(context);
         state.Forget();
         state.ClosedAt = context.Now;
+        var notification = EventWaitSources.OnClosed(context, stranded: owns);
+        if (!notification.Ok) return notification;
         return Settled(context, expire, Ok(new { expired = true }));
     }
 
