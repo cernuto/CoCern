@@ -489,6 +489,31 @@ public sealed class NodeSupervisorTests : IDisposable
         catch (JsonException) { return null; }
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Journal_replace_failure_recovers_the_actual_durable_commit_boundary(bool failBackupAfterCommit)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        PrepareRoot();
+        var current = Image("A");
+        var candidate = Image("B") with { ReleaseId = new string('B', 64) };
+        NodeUpdateState.Write(Updates, Committed(current));
+        var path = Path.Combine(Updates, failBackupAfterCommit ? "committed.json" : "state.json");
+        var next = failBackupAfterCommit
+            ? Committed(candidate) with { Previous = current }
+            : new NodeUpdateRecord(1, current, null, candidate, Guid.Parse("4add542d-1e4a-47eb-a812-0fb0071907ab"), NodeUpdatePhase.Starting, null, null);
+        using (var blockedReplace = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+            Assert.Throws<InvalidDataException>(() => NodeUpdateState.Write(Updates, next));
+        var recovered = NodeUpdateState.Read(Updates);
+        Assert.Equal(NodeUpdateReadStatus.Valid, recovered.Status);
+        Assert.Equal(NodeUpdatePhase.Committed, recovered.Record!.Phase);
+        Assert.Equal(failBackupAfterCommit ? candidate.ContentId : current.ContentId, recovered.Record.Current.ContentId);
+        Assert.Null(recovered.Record.Pending);
+        var backup = JsonSerializer.Deserialize<NodeUpdateRecord>(File.ReadAllText(Path.Combine(Updates, "committed.json")))!;
+        Assert.Equal(current.ContentId, backup.Current.ContentId);
+    }
+
     private static void AssertImage(NodeImage expected, NodeImage actual)
     {
         Assert.Equal(expected.ContentId, actual.ContentId);
