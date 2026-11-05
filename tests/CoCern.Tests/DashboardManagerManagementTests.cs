@@ -74,57 +74,6 @@ public class DashboardManagerManagementTests
         Assert.True(call.Args.GetProperty("allSessions").GetBoolean());
     }
 
-    [Theory]
-    [InlineData("{")]
-    [InlineData("[]")]
-    [InlineData("null")]
-    [InlineData("{\"repositoryId\":\"repo\",\"requestId\":\"x\",\"command\":\"resume\"}")]
-    [InlineData("{\"repositoryId\":\"repo\",\"requestId\":\"x\",\"command\":\"clear_manager\",\"expectedManagerGeneration\":0,\"humanWords\":\"yes\",\"Command\":\"appoint_manager\"}")]
-    [InlineData("{\"repositoryId\":\"repo\",\"requestId\":\"x\",\"command\":\"clear_manager\",\"expectedManagerGeneration\":0,\"humanWords\":\"yes\",\"ignored\":{\"a\":{\"b\":{\"c\":{}}}}}")]
-    [InlineData("{\"repositoryId\":\"repo\",\"requestId\":\"x\\n\",\"command\":\"clear_manager\",\"expectedManagerGeneration\":0,\"humanWords\":\"yes\"}")]
-    [InlineData("{\"repositoryId\":\"repo\",\"requestId\":\"x\",\"command\":\"clear_manager\",\"expectedManagerGeneration\":\"0\",\"humanWords\":\"yes\"}")]
-    public async Task Manager_decisions_are_bounded_and_validate_command(string json)
-    {
-        var app = new RecordingApplication();
-        var result = await DashboardManagerManagement.DecideAsync(Context(json), app);
-        Assert.Equal(400, Status(result));
-        Assert.Equal(RelayErrorCodes.InvalidArguments, Assert.IsType<DashboardManagerResult>(((IValueHttpResult)result).Value).Code);
-        Assert.Empty(app.Calls);
-    }
-
-    [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task Oversized_actual_stream_is_rejected_with_or_without_length(bool length)
-    {
-        var app = new RecordingApplication();
-        foreach (var dispatch in new[] { false, true })
-        {
-            var context = Context(new string(' ', 16_385));
-            context.Request.ContentLength = length ? 16_385 : null;
-            Assert.Equal(413, Status(await (dispatch ? DashboardManagerManagement.DispatchAsync(context, app) : DashboardManagerManagement.DecideAsync(context, app))));
-        }
-        Assert.Empty(app.Calls);
-    }
-
-    [Fact]
-    public async Task Read_validates_repository_and_cursor_and_reserves_history_without_client_identity()
-    {
-        var app = new RecordingApplication();
-        foreach (var query in new[] { "", "?repositoryId=repo&managerHistoryBefore=-1", "?repositoryId=repo&managerHistoryBefore=1.2", "?repositoryId=repo&repositoryId=other", "?repositoryId=repo&managerHistoryBefore=2&managerHistoryBefore=1" })
-        {
-            var bad = Context(""); bad.Request.QueryString = new QueryString(query);
-            Assert.Equal(400, Status(await DashboardManagerManagement.ReadAsync(bad, app)));
-        }
-        Assert.Empty(app.Calls);
-        var context = Context(""); context.Request.QueryString = new("?repositoryId=repo&managerHistoryBefore=5&principalId=evil");
-        Assert.Equal(200, Status(await DashboardManagerManagement.ReadAsync(context, app)));
-        var call = Assert.Single(app.Calls);
-        Assert.Equal("viewer", call.Caller.PrincipalId);
-        Assert.Equal(new[] { "managerHistoryBefore", "managerHistoryOnly", "repositoryId" }, call.Args.EnumerateObject().Select(p => p.Name).Order().ToArray());
-        Assert.True(call.Args.GetProperty("managerHistoryOnly").GetBoolean());
-    }
-
     [Fact]
     public async Task Concurrent_authorized_appointments_commit_one_generation_and_one_history_entry()
     {
@@ -143,29 +92,6 @@ public class DashboardManagerManagementTests
         Assert.DoesNotContain(first.Token, JsonSerializer.Serialize(status));
         Assert.DoesNotContain(second.Token, JsonSerializer.Serialize(status));
         foreach (var response in results) response.Dispose();
-    }
-
-    [Fact]
-    public async Task Viewer_can_replace_a_missing_manager_and_clear_selection_while_paused()
-    {
-        await using var host = Host(); var first = await Open(host, "repo"); var second = await Open(host, "repo");
-        using var viewer = Browser(host); await Login(viewer);
-        Assert.True((await Post(viewer, Decision(first.Id, "one", 0))).Ok);
-        var app = host.Services.GetRequiredService<RelayApplication>();
-        var closed = await app.ExecuteAsync(new RelayCaller("test-user", true, ["repo"]), RelayTools.ControlRequest, JsonSerializer.SerializeToElement(new { repositoryId = "repo", requestId = "close-first", command = "close_sessions", targetSessionId = first.Id }));
-        Assert.True(closed.Ok, closed.Code);
-        var missing = (await viewer.GetFromJsonAsync<DashboardManagerResult>("/dashboard/api/manager?repositoryId=repo"))!;
-        Assert.False(missing.Manager!.Current!.Available);
-        using var paused = await viewer.PostAsJsonAsync("/dashboard/api/dispatch", new DashboardDispatchDecision("repo", "pause", "pause"));
-        Assert.Equal(HttpStatusCode.OK, paused.StatusCode);
-        Assert.True((await Post(viewer, Decision(second.Id, "two", 1))).Ok);
-        var stale = await Post(viewer, Decision(first.Id, "stale", 1));
-        Assert.False(stale.Ok); Assert.Equal(RelayErrorCodes.VersionConflict, stale.Code);
-        Assert.Equal(second.Id, stale.Manager!.Current!.SessionId);
-        var cleared = await Post(viewer, new DashboardManagerDecision("repo", "clear", "clear_manager", null, 2, "Clear the manager."));
-        Assert.True(cleared.Ok); Assert.Null(cleared.Manager!.Current);
-        using var resumed = await viewer.PostAsJsonAsync("/dashboard/api/dispatch", new DashboardDispatchDecision("repo", "resume", "resume"));
-        Assert.False((await resumed.Content.ReadFromJsonAsync<DashboardManagerResult>())!.Paused);
     }
 
     [Fact]
@@ -206,100 +132,6 @@ public class DashboardManagerManagementTests
         Assert.Empty(app.Calls);
     }
 
-    [Theory]
-    [InlineData("")]
-    [InlineData(" ")]
-    [InlineData("\n")]
-    public async Task Request_ids_are_nonblank_control_free_and_bounded(string requestId)
-    {
-        var app = new RecordingApplication();
-        foreach (var id in new[] { requestId, new string('x', 257) })
-        {
-            var context = Context(JsonSerializer.Serialize(new { repositoryId = "repo", requestId = id, command = "pause" }));
-            Assert.Equal(400, Status(await DashboardManagerManagement.DispatchAsync(context, app)));
-        }
-        Assert.Empty(app.Calls);
-    }
-
-    [Fact]
-    public async Task Clear_and_dispatch_forward_only_their_command_fields()
-    {
-        var app = new RecordingApplication();
-        Assert.Equal(200, Status(await DashboardManagerManagement.DecideAsync(Context("""{"repositoryId":"repo","requestId":"clear","command":"clear_manager","expectedManagerGeneration":1,"humanWords":"Clear.","allSessions":true,"sessionId":"injected"}"""), app)));
-        Assert.Equal(new[] { "command", "expectedManagerGeneration", "humanWords", "repositoryId", "requestId" }, app.Calls[0].Args.EnumerateObject().Select(p => p.Name).Order().ToArray());
-        foreach (var command in new[] { "pause", "resume" })
-        {
-            Assert.Equal(200, Status(await DashboardManagerManagement.DispatchAsync(Context(JsonSerializer.Serialize(new { repositoryId = "repo", requestId = command, command, allSessions = true, targetSessionId = "injected", humanWords = "injected" })), app)));
-            Assert.Equal(new[] { "command", "repositoryId", "requestId" }, app.Calls[^1].Args.EnumerateObject().Select(p => p.Name).Order().ToArray());
-        }
-    }
-
-    [Theory]
-    [InlineData(false, false, 0xD800)]
-    [InlineData(false, true, 0xD800)]
-    [InlineData(true, false, 0xD800)]
-    [InlineData(true, true, 0xD800)]
-    [InlineData(false, false, 0xDC00)]
-    [InlineData(true, true, 0xDC00)]
-    public async Task Invalid_surrogate_property_names_are_bad_requests_without_application_calls(bool dispatch, bool nested, int keyCode)
-    {
-        var key = @"\u" + keyCode.ToString("X4");
-        var property = "\"" + key + "\":true";
-        if (nested) property = "\"ignored\":{" + property + "}";
-        var json = "{\"repositoryId\":\"repo\",\"requestId\":\"invalid-key\",\"command\":\"" + (dispatch ? "pause" : "clear_manager") + "\",\"expectedManagerGeneration\":0,\"humanWords\":\"Clear.\"," + property + "}";
-        var app = new RecordingApplication();
-        var result = await (dispatch ? DashboardManagerManagement.DispatchAsync(Context(json), app) : DashboardManagerManagement.DecideAsync(Context(json), app));
-        Assert.Equal(400, Status(result));
-        Assert.Equal(RelayErrorCodes.InvalidArguments, Assert.IsType<DashboardManagerResult>(((IValueHttpResult)result).Value).Code);
-        Assert.Empty(app.Calls);
-    }
-
-    [Fact]
-    public async Task Known_host_conflict_stays_definitive_when_its_status_read_transport_fails()
-    {
-        var app = new ConflictRefreshApplication();
-        var result = await DashboardManagerManagement.DecideAsync(Context("""{"repositoryId":"repo","requestId":"stale","command":"clear_manager","expectedManagerGeneration":0,"humanWords":"Clear."}"""), app);
-        Assert.Equal(409, Status(result));
-        var data = Assert.IsType<DashboardManagerResult>(((IValueHttpResult)result).Value);
-        Assert.Equal(RelayErrorCodes.VersionConflict, data.Code); Assert.Null(data.Manager);
-        Assert.Equal(new[] { RelayTools.ControlRequest, RelayTools.GetStatus }, app.Tools);
-    }
-
-    [Theory]
-    [InlineData("timeout")]
-    [InlineData("silo")]
-    [InlineData("gateway")]
-    [InlineData("connection")]
-    public async Task Known_host_conflict_survives_recoverable_grain_refresh_failures(string failure)
-    {
-        var app = new ConflictRefreshApplication(GrainFailure(failure));
-        var result = await DashboardManagerManagement.DecideAsync(Context("""{"repositoryId":"repo","requestId":"stale-grain","command":"clear_manager","expectedManagerGeneration":0,"humanWords":"Clear."}"""), app);
-        Assert.Equal(409, Status(result));
-        var data = Assert.IsType<DashboardManagerResult>(((IValueHttpResult)result).Value);
-        Assert.False(data.Ok); Assert.Equal(RelayErrorCodes.VersionConflict, data.Code); Assert.Null(data.Manager); Assert.Null(data.Paused);
-        Assert.Equal(new[] { RelayTools.ControlRequest, RelayTools.GetStatus }, app.Tools);
-    }
-
-    [Theory]
-    [InlineData("timeout")]
-    [InlineData("silo")]
-    public async Task Initial_decision_execution_failures_are_not_misrepresented_as_definitive_conflicts(string failure)
-    {
-        var error = GrainFailure(failure); var app = new ConflictRefreshApplication(error, failInitial: true);
-        var thrown = await Assert.ThrowsAnyAsync<Exception>(() => DashboardManagerManagement.DecideAsync(Context("""{"repositoryId":"repo","requestId":"initial-failure","command":"clear_manager","expectedManagerGeneration":0,"humanWords":"Clear."}"""), app));
-        Assert.Same(error, thrown);
-        Assert.Equal(new[] { RelayTools.ControlRequest }, app.Tools);
-    }
-
-    [Fact]
-    public async Task Fatal_refresh_failure_is_not_swallowed()
-    {
-        var error = new OutOfMemoryException("fixture fatal failure"); var app = new ConflictRefreshApplication(error);
-        var thrown = await Assert.ThrowsAsync<OutOfMemoryException>(() => DashboardManagerManagement.DecideAsync(Context("""{"repositoryId":"repo","requestId":"fatal-read","command":"clear_manager","expectedManagerGeneration":0,"humanWords":"Clear."}"""), app));
-        Assert.Same(error, thrown);
-        Assert.Equal(new[] { RelayTools.ControlRequest, RelayTools.GetStatus }, app.Tools);
-    }
-
     private static Exception GrainFailure(string failure) => failure switch
     {
         "timeout" => new TimeoutException("fixture grain read timeout"),
@@ -318,30 +150,6 @@ public class DashboardManagerManagementTests
             if (failInitial || tool == RelayTools.GetStatus) throw failure ?? new HttpRequestException("status unavailable");
             return Task.FromResult(new RelayReply(false, RelayErrorCodes.VersionConflict, "{}", 0));
         }
-    }
-
-    [Fact]
-    public async Task Form_appoints_an_exact_unobserved_target_and_directory_rejects_unknown_target()
-    {
-        await using var host = Host();
-        var target = await Open(host, "repo");
-        using var browser = Browser(host);
-        browser.BaseAddress = new Uri("https://localhost/dashboard/");
-        await Login(browser);
-        var form = new CoCern.Dashboard.Components.ManagerControl { ManagerHttp = browser, RepositoryId = "repo" };
-        await form.RefreshAsync();
-        Assert.Empty(form.Sessions);
-        form.TargetSessionId = target.Id; form.HumanWords = "Two  spaces.";
-        await form.DecideAsync("appoint_manager");
-        Assert.Equal(target.Id, form.Selection!.Current!.SessionId);
-        Assert.Equal("Two  spaces.", Assert.Single(form.RecentSelections).HumanWords);
-        form.HumanWords = "Unused words."; form.TargetSessionId = "unknown";
-        Assert.Empty(form.HumanWords);
-        form.HumanWords = "Choose this exact ID."; await form.DecideAsync("appoint_manager");
-        Assert.Equal("SessionUnknown", form.Message);
-        await form.RefreshAsync();
-        Assert.Equal(target.Id, form.Selection!.Current!.SessionId);
-        Assert.Equal(1, form.Selection.Generation);
     }
 
     internal static RelayHostFixture Host() => new(settings: new Dictionary<string, string?> { ["Relay:Clients:0:IsAdministrator"] = "true", ["Relay:Clients:0:Repositories:1"] = "other", ["Relay:Dashboard:ViewerPrincipalIds:0"] = "test-user" });

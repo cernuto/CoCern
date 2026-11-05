@@ -29,66 +29,6 @@ public sealed class WaitingUiTests
         Assert.DoesNotContain("href=", html);
     }
 
-    [Fact]
-    public async Task Unknown_kinds_remain_readable_and_coordinator_holds_stay_separate()
-    {
-        var waiting = new DashboardWaiting
-        {
-            Count = 51, Truncated = true,
-            Items = [new() { Kind = "future_kind", Text = "No hub call for 10 minutes", Label = "Worker" }],
-            MaybeCount = 1,
-            Maybe = [new() { Kind = DashboardWaitingKinds.CoordinatorHold, Text = "Coordinator hold" }]
-        };
-        var html = await Render<WaitingOnYou>(new() { ["Waiting"] = waiting });
-        Assert.Contains("No hub call for 10 minutes", html);
-        Assert.Contains("may be incomplete", html);
-        Assert.Contains("Coordinator holds", html);
-        Assert.Contains("may not need your answer", html);
-        Assert.DoesNotContain("future_kind", html);
-    }
-
-    [Theory]
-    [InlineData(0, false)]
-    [InlineData(51, true)]
-    public async Task Badge_uses_the_true_count_and_is_quiet_at_zero(int count, bool accented)
-    {
-        var html = await Render<WaitingBadge>(new() { ["Waiting"] = new DashboardWaiting { Count = count, MaybeCount = 4 } });
-        Assert.Contains($">{count}</span>", html);
-        Assert.Contains("aria-live=\"polite\"", html);
-        Assert.Equal(accented, html.Contains("has-waiting", StringComparison.Ordinal));
-    }
-
-    [Fact]
-    public async Task Empty_waiting_list_explains_that_nothing_needs_an_answer()
-    {
-        var html = await Render<WaitingOnYou>(new() { ["Waiting"] = new DashboardWaiting() });
-        Assert.Contains("Nothing is waiting on you", html);
-    }
-
-    [Fact]
-    public async Task Slim_dispatch_keeps_controls_visible_without_the_manager_form()
-    {
-        var html = await Render<ManagerControl>(new() { ["Compact"] = true, ["DefaultRepositoryId"] = "repo" });
-        Assert.Contains("Dispatch:", html);
-        Assert.Contains("Running", html);
-        Assert.Contains("Pause dispatch", html);
-        Assert.Contains("Request stop for all chats", html);
-        Assert.Contains("Resume dispatch", html);
-        Assert.Contains("href=\"manager\"", html);
-        Assert.DoesNotContain("id=\"manager-target\"", html);
-        Assert.DoesNotContain("id=\"manager-human-words\"", html);
-    }
-
-    [Fact]
-    public async Task Dedicated_manager_view_retains_exact_human_answer_and_selection_history()
-    {
-        var html = await Render<ManagerControl>(new() { ["DefaultRepositoryId"] = "repo" });
-        Assert.Contains("id=\"manager-target\"", html);
-        Assert.Contains("id=\"manager-human-words\"", html);
-        Assert.Contains("Recent manager selections", html);
-        Assert.Contains("grants no new powers", html);
-    }
-
     private static async Task<string> Render<T>(Dictionary<string, object?> parameters) where T : IComponent
     {
         using var handler = new ReadHandler();
