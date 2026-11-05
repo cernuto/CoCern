@@ -580,6 +580,42 @@ public sealed class NativeJoinSetupTests : IDisposable
         finally { timeout.Cancel(); try { await helper; } catch (OperationCanceledException) { } }
     }
 
+    [Fact]
+    public async Task Actual_native_Stop_child_delivers_its_wake_on_standard_error_without_route_status_lines()
+    {
+        await using var relay = new WiringReadRelay { InboxReady = true };
+        await using var fixture = new NativeJoinHookTests.HookFixture(origin: relay.Origin);
+        await fixture.Join.EnsureAsync(fixture.Capture, default);
+        await using var child = WiringStart(["--native-hook", "claude", "--connection", fixture.Folder]);
+        await child.Process.StandardInput.WriteAsync(JsonSerializer.Serialize(new { hook_event_name = "Stop", session_id = fixture.Capture.NativeId, cwd = fixture.Capture.Cwd }));
+        child.Process.StandardInput.Close();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var output = child.Process.StandardOutput.ReadToEndAsync(timeout.Token);
+        await child.Process.WaitForExitAsync(timeout.Token);
+        var delivered = await child.Error;
+        Assert.True(child.Process.ExitCode == 2, $"exit {child.Process.ExitCode}: {delivered}");
+        Assert.Contains("- m-wire: UNTRUSTED", delivered);
+        // Everything on a Stop hook's standard error enters the chat.
+        Assert.DoesNotContain("CoCern wake route", delivered);
+        Assert.Empty(await output);
+        Assert.Equal("unchanged", File.ReadAllText(child.Sentinel));
+    }
+
+    [Fact]
+    public async Task Actual_native_child_still_writes_its_refusal_to_standard_error()
+    {
+        await using var relay = new WiringReadRelay();
+        await using var fixture = new NativeJoinHookTests.HookFixture(origin: relay.Origin);
+        await using var child = WiringStart(["--native-hook", "claude", "--connection", fixture.Folder]);
+        await child.Process.StandardInput.WriteAsync(JsonSerializer.Serialize(new { hook_event_name = "PreToolUse", session_id = fixture.Capture.NativeId, cwd = fixture.Capture.Cwd,
+            tool_name = "mcp__cocern__send_message", tool_use_id = "refused-child", tool_input = new { recipientSessionId = "peer", text = "never dispatch" } }));
+        child.Process.StandardInput.Close();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await child.Process.WaitForExitAsync(timeout.Token);
+        Assert.Equal(2, child.Process.ExitCode);
+        Assert.Contains("CoCern native capture could not be verified.", await child.Error);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -879,6 +915,8 @@ public sealed class NativeJoinSetupTests : IDisposable
         internal int InvalidWire => Volatile.Read(ref invalidWire);
         internal int HintAttempts => Volatile.Read(ref hintAttempts);
         internal string Origin { get; }
+        /// <summary>Answers a native open and one waiting message, enough for a real Stop wake.</summary>
+        internal bool InboxReady { get; init; }
         internal WiringReadRelay()
         {
             listener.Start(); Origin = "http://127.0.0.1:" + ((IPEndPoint)listener.LocalEndpoint).Port + "/";
@@ -917,6 +955,9 @@ public sealed class NativeJoinSetupTests : IDisposable
                     var allowed = true;
                     if (route.EndsWith("/session_open", StringComparison.Ordinal) && document.RootElement.TryGetProperty("nativePreflight", out _) && !document.RootElement.TryGetProperty("nativeJoin", out _))
                     { Interlocked.Increment(ref preflights); data = new { repositoryId = "repo" }; }
+                    else if (InboxReady && route.EndsWith("/session_open", StringComparison.Ordinal)) data = new { sessionId = "s-native-hook", sessionToken = "synthetic-handle-token" };
+                    else if (InboxReady && route.EndsWith("/check_inbox", StringComparison.Ordinal))
+                        data = new { items = new[] { new { messageId = "m-wire", repositoryId = "repo", text = "UNTRUSTED" } }, total = 1, nextCursor = (int?)null, truncated = false };
                     else if (route.EndsWith("/get_status", StringComparison.Ordinal))
                     { Interlocked.Increment(ref probes); data = new { sessionId = "s-native-hook", control = new { paused = false, requests = Array.Empty<object>() } }; }
                     else if (route.EndsWith("/chat_directory", StringComparison.Ordinal))
