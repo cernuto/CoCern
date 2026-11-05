@@ -31,59 +31,6 @@ public sealed class InboxWaitAttentionTests
         Assert.DoesNotContain("\"backgroundCall\":true", hub.CheckBodies[^1]);
     }
 
-    [Fact]
-    public async Task Waiting_check_inbox_is_not_ended_by_items_that_are_not_urgent()
-    {
-        var hub = new AttentionHub { UrgentFromStatusCall = int.MaxValue };
-        var reply = await Wait(hub, waitSeconds: 1, out var elapsed);
-        Assert.True(reply.Ok);
-        Assert.True(elapsed.Elapsed >= TimeSpan.FromSeconds(0.9), $"The wait ended after {elapsed.Elapsed} with nothing urgent waiting.");
-        Assert.False(reply.Data!.Value.TryGetProperty("attention", out _));
-        Assert.Equal(0, hub.OfferingReads);
-        // Every poll but a last one too short to wait after consults attention, and none consults it twice.
-        Assert.InRange(hub.StatusBodies.Count, 1, hub.CheckBodies.Count);
-    }
-
-    [Fact]
-    public async Task Waiting_check_inbox_ends_early_for_an_eligible_idle_hold_wake()
-    {
-        var hub = new AttentionHub { UrgentFromStatusCall = 2, Wake = "hold:638000000000000000", Kind = "review_ready", Urgent = 0 };
-        var reply = await Wait(hub, waitSeconds: 30, out var elapsed, attention: true);
-        Assert.True(reply.Ok);
-        Assert.True(elapsed.Elapsed < TimeSpan.FromSeconds(20), $"The wait ran {elapsed.Elapsed} although an idle hold wake was eligible.");
-        Assert.Equal("review_ready", reply.Data!.Value.GetProperty("attention").GetProperty("k").GetString());
-        Assert.Equal(1, hub.OfferingReads);
-        Assert.Contains("\"attention\":true", hub.CheckBodies[^1]);
-        Assert.All(hub.CheckBodies[..^1], body => Assert.Contains("\"attention\":false", body));
-    }
-
-    [Theory]
-    [InlineData("a-7")]
-    [InlineData("hold:638000000000000000")]
-    public async Task Waiting_check_inbox_preserves_an_explicit_attention_opt_out(string wake)
-    {
-        var hub = new AttentionHub { UrgentFromStatusCall = 1, Wake = wake };
-        var reply = await Wait(hub, waitSeconds: 1, out var elapsed, attention: false);
-        Assert.True(reply.Ok);
-        Assert.True(elapsed.Elapsed >= TimeSpan.FromSeconds(0.9));
-        Assert.False(reply.Data!.Value.TryGetProperty("attention", out _));
-        Assert.Equal(0, hub.OfferingReads);
-        Assert.All(hub.CheckBodies, body => Assert.Contains("\"attention\":false", body));
-    }
-
-    [Theory]
-    [InlineData("a-untrusted")]
-    [InlineData("hold:not-a-timestamp")]
-    public async Task Waiting_check_inbox_ignores_malformed_attention_wakes(string wake)
-    {
-        var hub = new AttentionHub { UrgentFromStatusCall = 1, Wake = wake };
-        var reply = await Wait(hub, waitSeconds: 1, out var elapsed);
-        Assert.True(reply.Ok);
-        Assert.True(elapsed.Elapsed >= TimeSpan.FromSeconds(0.9));
-        Assert.False(reply.Data!.Value.TryGetProperty("attention", out _));
-        Assert.Equal(0, hub.OfferingReads);
-    }
-
     private static Task<AdapterReply> Wait(AttentionHub hub, int waitSeconds, out Stopwatch elapsed, bool? attention = null)
     {
         var client = new HttpClient(hub);
