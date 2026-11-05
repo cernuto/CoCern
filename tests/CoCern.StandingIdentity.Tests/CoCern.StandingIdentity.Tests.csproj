@@ -8,6 +8,7 @@
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <ProjectReference Include="../../src/CoCern.Domain/CoCern.Domain.csproj" />
     <RazorComponent Include="../../src/CoCern.Dashboard/Components/StandingView.razor" Link="Components/StandingView.razor" />
+    <RazorComponent Include="../../src/CoCern.Dashboard/Components/DecisionEvidence.razor" Link="Components/DecisionEvidence.razor" />
     <RazorComponent Include="../../src/CoCern.Dashboard/Components/WaitingOnYou.razor" Link="Components/WaitingOnYou.razor" />
     <RazorComponent Include="../../src/CoCern.Dashboard/Components/WaitingBadge.razor" Link="Components/WaitingBadge.razor" />
     <RazorComponent Include="../../src/CoCern.Dashboard/Components/ManagerControl.razor" Link="Components/ManagerControl.razor" />

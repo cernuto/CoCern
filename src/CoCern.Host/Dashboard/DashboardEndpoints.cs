@@ -101,6 +101,7 @@ public static class DashboardEndpoints
         }).RequireAuthorization(DashboardSecurity.Policy);
         api.MapGet("/snapshot", (DashboardCollector collector) => Results.Ok(collector.Current)).RequireAuthorization(DashboardSecurity.Policy);
         api.MapGet("/analytics", (HttpContext context, DashboardAnalytics analytics) => analytics.GetAsync(context)).RequireAuthorization(DashboardSecurity.Policy);
+        api.MapGet("/analytics/test-effort", (HttpContext context, DashboardAnalytics analytics) => analytics.GetTestEffortAsync(context)).RequireAuthorization(DashboardSecurity.Policy);
         // The Sessions page's "Close idle sessions": the cookie alone would let another site's form post this, so it also needs this origin.
         api.MapPost("/sessions/close", CloseSessionsAsync).RequireAuthorization(DashboardSecurity.Policy);
         api.MapPost("/standing/decide", DashboardStandingManagement.DecideAsync).RequireAuthorization(DashboardSecurity.Policy);

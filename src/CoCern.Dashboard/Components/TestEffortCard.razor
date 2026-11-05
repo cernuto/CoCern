@@ -1,0 +1,63 @@
+@implements IDisposable
+@inject HttpClient Http
+
+<section class="surface analytics-chart test-effort-card" aria-labelledby="test-effort-card-heading">
+    <header><h3 id="test-effort-card-heading">Test effort</h3><p>What recorded test runs cost, all recorded days. From a precomputed file, not the hourly snapshot.</p></header>
+    @if (_loading)
+    {
+        <p class="analytics-empty" role="status">Loading test effort…</p>
+    }
+    else if (_data?.Report is { Runs: > 0 } report)
+    {
+        <dl class="test-effort-tiles">
+            <div><dt>Test minutes <TestEffortBadge Status="@TestEffortRules.Measured" /></dt><dd>@TestEffortPresentation.Minutes(report.WallMinutes)</dd></div>
+            <div><dt>Pointless <TestEffortBadge Status="@TestEffortRules.Measured" /></dt><dd>@TestEffortPresentation.Minutes(report.PointlessMeasuredMinutes) <small>@TestEffortPresentation.Percent(report.PointlessMeasuredMinutes, report.WallMinutes)</small></dd></div>
+            <div><dt>Pointless <TestEffortBadge Status="@TestEffortRules.Estimate" /></dt><dd>@TestEffortPresentation.Minutes(report.PointlessEstimatedMinutes) <small>@TestEffortPresentation.Percent(report.PointlessEstimatedMinutes, report.WallMinutes)</small></dd></div>
+            <div><dt>Tests added / deleted <TestEffortBadge Status="@TestEffortRules.Measured" /></dt><dd>@report.Days.Sum(day => (long)day.TestsAdded) / @report.Days.Sum(day => (long)day.TestsDeleted)</dd></div>
+        </dl>
+    }
+    else
+    {
+        <p class="analytics-empty" role="status">@(_data?.Message ?? _problem ?? TestEffortPresentation.NoRunData)</p>
+    }
+    <a class="test-effort-link" href="analytics/test-effort">Open test effort</a>
+</section>
+
+@code {
+    [Parameter] public string RepositoryId { get; set; } = "";
+    private DashboardTestEffort? _data;
+    private string? _problem;
+    private string? _loaded;
+    private bool _loading;
+    private CancellationTokenSource? _pending;
+
+    // Fetched when the repository changes, never on the dashboard's tick.
+    protected override async Task OnParametersSetAsync()
+    {
+        if (RepositoryId == _loaded || string.IsNullOrWhiteSpace(RepositoryId)) return;
+        _loaded = RepositoryId;
+        _pending?.Cancel();
+        _pending?.Dispose();
+        var pending = _pending = new CancellationTokenSource();
+        _loading = true;
+        _data = null;
+        _problem = null;
+        DashboardTestEffort? data = null;
+        string? problem = null;
+        try { data = await TestEffortPresentation.LoadAsync(Http, RepositoryId, pending.Token); }
+        catch (OperationCanceledException) when (pending.IsCancellationRequested) { return; }
+        catch (Exception exception) when (TestEffortPresentation.IsLoadFailure(exception)) { problem = TestEffortPresentation.LoadProblem; }
+        // A newer selection or disposal replaced this request: its reply, whatever it was, must not touch the display.
+        if (!ReferenceEquals(pending, _pending)) return;
+        _data = data;
+        _problem = problem;
+        _loading = false;
+    }
+
+    public void Dispose()
+    {
+        _pending?.Cancel();
+        _pending?.Dispose();
+        _pending = null;
+    }
+}

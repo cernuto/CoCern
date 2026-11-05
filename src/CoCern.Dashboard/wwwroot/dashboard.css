@@ -637,6 +637,26 @@ small { font-size: .8rem; }
 .analytics-stack-group h4 { font-size: .92rem; margin: 0 0 10px; overflow-wrap: anywhere; }
 .analytics-stack-caption { font-size: .73rem; color: var(--muted); margin: 7px 0 14px; }
 .analytics-empty { padding: 12px 0; color: var(--muted); font-size: .87rem; }
+.test-effort-card { margin: 0 0 18px; }
+.test-effort-link { display: inline-block; margin-top: 12px; font-weight: 600; font-size: .85rem; }
+.test-effort-view { display: grid; gap: 18px; min-width: 0; }
+.test-effort-view .warning-note { margin: 0; max-width: 100ch; }
+.test-effort-view .analytics-history { margin: 0; }
+.test-effort-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 16px; margin: 0; }
+.test-effort-tiles.surface { padding: 20px; }
+.test-effort-tiles dt { color: var(--muted); font-size: .76rem; }
+.test-effort-tiles dd { margin: 6px 0 0; font-size: 1.2rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.test-effort-tiles dd small { display: block; color: var(--muted); font-size: .75rem; font-weight: 400; }
+.test-effort-badge { display: inline-block; padding: 0 6px; border: 1px solid var(--line); border-radius: 999px; font-size: .66rem; font-weight: 600; white-space: nowrap; }
+.test-effort-badge.estimate { border-style: dashed; }
+.test-effort-badge.not-available { color: var(--muted); }
+.test-effort-scroll { overflow-x: auto; }
+.test-effort-table { width: 100%; margin: 0; table-layout: auto; }
+.test-effort-table th, .test-effort-table th:first-child, .test-effort-table th:nth-child(2), .test-effort-table th:nth-child(3), .test-effort-table th:nth-child(4) { width: auto; }
+.test-effort-table th, .test-effort-table td { padding: 10px; }
+.test-effort-table small { color: var(--muted); }
+.test-effort-note { display: block; margin-top: 4px; max-width: 70ch; font-weight: 400; }
+.test-effort-bar { display: block; width: 100%; min-width: 80px; height: 6px; margin-top: 5px; }
 .analytics-chart .warning-note, .analytics-chart .limit-note { margin: 10px 0 0; }
 @media (max-width: 1050px) {
     .analytics-toolbar { flex-direction: column; align-items: stretch; }

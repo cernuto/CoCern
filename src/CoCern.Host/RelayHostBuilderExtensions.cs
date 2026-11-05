@@ -169,7 +169,8 @@ public static class RelayHostBuilderExtensions
                 ExtensionDirectory = configuration["Relay:Analytics:ExtensionDirectory"] is { Length: > 0 } extensions ? Path.GetFullPath(Path.Combine(provider.GetRequiredService<IHostEnvironment>().ContentRootPath, extensions)) : AnalyticsOptions.DefaultExtensionDirectory,
                 QueryTimeout = configuration.GetValue("Relay:Analytics:QueryTimeout", TimeSpan.FromSeconds(RelayLimits.DefaultAnalyticsQueryTimeoutSeconds)),
                 MaxRows = configuration.GetValue("Relay:Analytics:MaxRows", RelayLimits.DefaultAnalyticsMaxRows),
-                LiveDatabasePath = provider.GetRequiredService<SqliteStore>().DatabasePath
+                LiveDatabasePath = provider.GetRequiredService<SqliteStore>().DatabasePath,
+                TestEffortFile = configuration["Relay:Analytics:TestEffortFile"] is { Length: > 0 } testEffort ? Path.GetFullPath(Path.Combine(provider.GetRequiredService<IHostEnvironment>().ContentRootPath, testEffort)) : null
             });
         });
         // Resolved lazily, so settings applied after registration (hosts, tests) still decide; null when off.

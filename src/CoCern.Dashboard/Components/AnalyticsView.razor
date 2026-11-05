@@ -12,6 +12,7 @@
             <button type="button" class="analytics-refresh" @onclick="LoadAsync" disabled="@_loading" title="Read the latest available hourly snapshot">Refresh analytics</button>
         </div>
     </div>
+    <TestEffortCard RepositoryId="@_repository" />
     @if (_loading)
     {
         <p class="analytics-state surface" role="status">Loading hourly analytics for @_repository…</p>

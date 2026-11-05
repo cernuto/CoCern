@@ -20,6 +20,9 @@ public sealed record AnalyticsOptions
     /// <summary>The hub's live database. A snapshot at this path is refused, so DuckDB never opens the live file.</summary>
     public string? LiveDatabasePath { get; init; }
 
+    /// <summary>The compact test-effort file <c>test_effort</c> reads, or null for none. It is refreshed outside the hub; the hub never runs git.</summary>
+    public string? TestEffortFile { get; init; }
+
     /// <summary>Refuses settings outside their limits with a message that names the setting.</summary>
     public AnalyticsOptions Validated() =>
         QueryTimeout <= TimeSpan.Zero || QueryTimeout > TimeSpan.FromSeconds(RelayLimits.MaxAnalyticsQueryTimeoutSeconds) ? throw new InvalidOperationException($"Relay:Analytics:QueryTimeout must be more than 0 and at most {RelayLimits.MaxAnalyticsQueryTimeoutSeconds} seconds.")

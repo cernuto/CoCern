@@ -18,7 +18,8 @@ public static class AnalyticsReportCatalog
         new(AnalyticsQueryNames.QualityGuardrails, "Quality guardrails", "Closure, reopening and action outcome event counts; retained history may be incomplete.", "events"),
         new(AnalyticsQueryNames.AttentionOutcomesByKind, "Attention offer outcomes", "Shown, accepted, later and dismissed events by kind; each kind has its own denominator.", "events"),
         new(AnalyticsQueryNames.RelayTokens, "Measured relay tokens", "Measured request and reply tokens by reported origin. These exclude other model context and do not measure billing or total model usage.", "tokens"),
-        new(AnalyticsQueryNames.UsageCoverage, "Reported usage coverage", "Percentage of touched tasks with a successful model-usage report; sample counts show all touched tasks.", "%")
+        new(AnalyticsQueryNames.UsageCoverage, "Reported usage coverage", "Percentage of touched tasks with a successful model-usage report; sample counts show all touched tasks.", "%"),
+        new(AnalyticsQueryNames.TestEffort, "Test effort", "Test run minutes, pointless minutes, tests added and deleted, and costly tests that never failed, from a precomputed file. Each row says measured or estimate.", "minutes")
     ];
 
     public static AnalyticsReportDefinition Get(string name) =>

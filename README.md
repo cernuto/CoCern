@@ -139,7 +139,7 @@ Open it with the sign-in link the hub prints. The link works once, only on the h
 | --- | --- |
 | Overview | Machines and sessions, live traffic and recent logs. |
 | Sessions | Each session in detail. **Close idle sessions** clears out finished chats (idle sessions also close on their own after a day, unless they have unread messages; closing by label skips chats active in about the last 70 minutes), and **Close session** closes one, optionally forcing it past unresolved actions. |
-| Analytics | Twelve reports for one repository from the hourly snapshot, this period against the one before (1–14 days), with Top 10 / Show all and an origin filter. |
+| Analytics | Twelve reports for one repository from the hourly snapshot, this period against the one before (1–14 days), with Top 10 / Show all and an origin filter. A **Test effort** card opens a page of test minutes, pointless runs, tests added and deleted and costly tests, each marked measured or estimate. |
 | Database | Table sizes. |
 | Logs | Recent hub events, with level and text search filters and a filter for successful routine HTTP requests. |
 | Standing | Each board's instructions, grants, proposals and orders, token use, and Approve / Dismiss / Remove controls for the exact board. |

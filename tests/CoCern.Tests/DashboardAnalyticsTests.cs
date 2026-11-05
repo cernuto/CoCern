@@ -23,6 +23,39 @@ public sealed class DashboardAnalyticsTests
         Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/dashboard/api/analytics?repositoryId=repo&days=7")).StatusCode);
         using var bearer = host.AuthorizedClient();
         Assert.Equal(HttpStatusCode.Unauthorized, (await bearer.GetAsync("/dashboard/api/analytics?repositoryId=repo&days=7")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/dashboard/api/analytics/test-effort?repositoryId=repo")).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await bearer.GetAsync("/dashboard/api/analytics/test-effort?repositoryId=repo")).StatusCode);
+    }
+
+    // Security boundary: the file describes one repository, and a bad file must not put its path in a reply.
+    [Fact]
+    public async Task Test_effort_answers_only_the_repository_its_file_names_and_never_shows_the_path()
+    {
+        var directory = Directory.CreateTempSubdirectory("cocern-test-effort-");
+        try
+        {
+            var file = Path.Combine(directory.FullName, "effort.json");
+            using var service = new AnalyticsService(new AnalyticsOptions { TestEffortFile = file });
+            async Task<string> Reply(string repository) => JsonSerializer.Serialize(await service.RunNamedAsync(AnalyticsQueryNames.TestEffort, repository));
+
+            Assert.Contains("no_run_data", await Reply("repo"));
+            var rules = string.Join(",", "abcd".Select(rule => $$"""{"rule":"{{rule}}","runs":0,"judgedRuns":1,"minutes":0}"""));
+            await File.WriteAllTextAsync(file, $$"""
+                {"schema":1,"repositoryId":"repo","generatedAt":"2026-11-05T00:00:00Z","runs":1,"cases":1,"wallMinutes":2,"rules":[{{rules}}],
+                 "days":[{"day":"2026-11-05","runs":1,"wallMinutes":2,"caseMinutes":1}],"expensiveNeverFailed":[{"test":"secret.Name","minutes":1,"executions":1}]}
+                """);
+            Assert.Contains("secret.Name", await Reply("repo"));
+            var other = await Reply("other");
+            Assert.Contains("no_run_data", other);
+            Assert.DoesNotContain("secret.Name", other);
+
+            await File.WriteAllTextAsync(file, """{"schema":1,"repositoryId":"repo","expensiveNeverFailed":[{"test":"C:/private/path.cs"}]}""");
+            var refused = await Reply("repo");
+            Assert.Contains("run_data_unreadable", refused);
+            Assert.DoesNotContain("private", refused);
+            Assert.DoesNotContain(directory.Name, refused);
+        }
+        finally { directory.Delete(recursive: true); }
     }
 
     private static RelayHostFixture Host(Dictionary<string, string?>? settings = null)

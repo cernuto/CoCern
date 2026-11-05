@@ -422,6 +422,14 @@ public static class RelayLimits
     /// Longest period a named query compares, in days. Two periods of 14 days fit inside the default 30 days of raw activity.
     /// </summary>
     public const int MaxAnalyticsPeriodDays = 14;
+    /// <summary>Largest test-effort file the hub reads, in bytes; a larger one reads as unreadable.</summary>
+    public const int MaxTestEffortFileBytes = 256 * 1024;
+    /// <summary>Most days one test-effort file may hold.</summary>
+    public const int MaxTestEffortDays = 120;
+    /// <summary>Most costly tests one test-effort file may list.</summary>
+    public const int MaxTestEffortTests = 10;
+    /// <summary>Longest test name in a test-effort file.</summary>
+    public const int MaxTestEffortTestNameLength = 200;
     /// <summary>Memory DuckDB may use for analytics, in megabytes, so a heavy query cannot starve the hub.</summary>
     public const int AnalyticsMemoryLimitMegabytes = 512;
     /// <summary>Threads DuckDB may use for analytics.</summary>

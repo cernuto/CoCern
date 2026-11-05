@@ -1,6 +1,7 @@
 @page "/"
 @page "/sessions"
 @page "/analytics"
+@page "/analytics/test-effort"
 @page "/sql"
 @page "/logs"
 @page "/standing"
@@ -89,6 +90,9 @@ else
                         break;
                     case "analytics":
                         <AnalyticsView Snapshot="@snapshot" />
+                        break;
+                    case "test-effort":
+                        <TestEffortView Snapshot="@snapshot" />
                         break;
                     case "connect":
                         <ConnectView />

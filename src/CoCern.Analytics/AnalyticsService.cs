@@ -25,6 +25,7 @@ public sealed class AnalyticsService(AnalyticsOptions options) : IAnalyticsQueri
     });
 
     private readonly AnalyticsOptions _options = options.Validated();
+    private readonly TestEffortFile _testEffort = new(options.TestEffortFile);
     private readonly Lock _sync = new();
     private Snapshot? _current;
     private bool _disposed;
@@ -78,6 +79,11 @@ public sealed class AnalyticsService(AnalyticsOptions options) : IAnalyticsQueri
 
     public Task<AnalyticsResult> RunNamedAsync(string name, string repositoryId, JsonElement parameters = default, CancellationToken cancellationToken = default)
     {
+        if (name == AnalyticsQueryNames.TestEffort)
+        {
+            if (string.IsNullOrEmpty(repositoryId)) throw new AnalyticsException(AnalyticsError.InvalidArguments, "A repository is required.");
+            return RunTestEffortAsync(repositoryId, Days(parameters), cancellationToken);
+        }
         if (!NamedQueries.TryGet(name ?? "", out var sql)) throw new AnalyticsException(AnalyticsError.UnknownQuery, $"Unknown query. Known queries: {string.Join(", ", NamedQueries.Names)}.");
         if (string.IsNullOrEmpty(repositoryId)) throw new AnalyticsException(AnalyticsError.InvalidArguments, "A repository is required.");
         var days = Days(parameters);
@@ -90,6 +96,30 @@ public sealed class AnalyticsService(AnalyticsOptions options) : IAnalyticsQueri
             return RunAsync(snapshot, sql, bound, checkSelect: false, cancellationToken);
         }
         catch { snapshot.Release(); throw; }
+    }
+
+    /// <summary>The test-effort file's content for one repository, under the query timeout, off the caller's thread. Needs no snapshot.</summary>
+    public async Task<TestEffortRead> ReadTestEffortAsync(string repositoryId, CancellationToken cancellationToken = default)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(_options.QueryTimeout);
+        try { return await Task.Run(() => _testEffort.ReadAsync(repositoryId, timeout.Token), CancellationToken.None); }
+        catch (OperationCanceledException) when (timeout.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            throw new AnalyticsException(AnalyticsError.Timeout, $"The query ran longer than {_options.QueryTimeout.TotalSeconds:0.#} seconds. Ask a narrower question.");
+        }
+    }
+
+    /// <summary>
+    /// Rows from the test-effort file, in the shape of every named query. The result is stamped with the loaded snapshot's time when there is one, so
+    /// a batch mixing this with snapshot reports stays one snapshot; the file's own dates are in its <c>data_range</c> row.
+    /// </summary>
+    private async Task<AnalyticsResult> RunTestEffortAsync(string repositoryId, int days, CancellationToken cancellationToken)
+    {
+        var read = await ReadTestEffortAsync(repositoryId, cancellationToken);
+        var rows = TestEffortRows.Build(read, days);
+        var truncated = rows.Count > _options.MaxRows;
+        return new(NamedQueries.Columns, truncated ? rows.Take(_options.MaxRows).ToArray() : rows, truncated, SnapshotAt ?? read.Report?.GeneratedAt ?? DateTimeOffset.UtcNow);
     }
 
     public Task<AnalyticsResult> RunSqlAsync(string sql, CancellationToken cancellationToken = default)

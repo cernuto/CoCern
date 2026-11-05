@@ -310,7 +310,7 @@ DuckDB needs its `sqlite` extension. The Windows x64 build is bundled in `extens
 { "repositoryId": "cocern", "name": "tokens_per_task", "params": { "days": 7 } }
 ```
 
-The twelve public named reports compare the last `days` days (`cur`, 1 to 14, default 7) with the days before (`prev`); `cur_n` and `prev_n` count the rows behind each. Periods use the completed snapshot, not realtime hub activity. Retained workflow history may be incomplete; reports surface that limitation and exclude unknown durations from duration averages.
+Twelve public named reports compare the last `days` days (`cur`, 1 to 14, default 7) with the days before (`prev`); `cur_n` and `prev_n` count the rows behind each. Periods use the completed snapshot, not realtime hub activity. Retained workflow history may be incomplete; reports surface that limitation and exclude unknown durations from duration averages.
 
 Use `name: "batch"` with a `reports` array of public report names and common `params` to select several reports from one snapshot. By default each report returns its first summary row with counts and `more`; `includeDetails: true` returns full rows within the row and payload bounds. A strong `etag` supports `ifNoneMatch` for the exact selection, including repository, reports and parameters; do not reuse it for another selection. Partial errors are explicit and produce no ETag.
 
@@ -332,8 +332,43 @@ Use `name: "batch"` with a `reports` array of public report names and common `pa
 | `manager_assignment_latency` | Minutes from `ready` to first claim. |
 | `quality_guardrails` | Closures, reopened tasks, and failed, abandoned and retried actions. |
 | `attention_outcomes_by_kind` | Attention offer events (shown, accepted, later and dismissed), by kind. |
+| `test_effort` | What test runs cost, from a precomputed file rather than the snapshot. See [Test effort](#test-effort). |
 
 Ad hoc SQL: `"name": "sql", "sql": "SELECT ..."` runs one `SELECT` over the views `tasks`, `tool_calls`, `context_by_role`, `messages`, `action_reports`, `claim_conflicts`, `attention_outcomes`, `budget_events`, `board_doc`, `task_doc`, `archived_tasks` and `activity`. Every ad hoc query is logged. Errors: `AdministratorRequired`, `AnalyticsUnavailable`, `AnalyticsRefused` (ad hoc SQL off, or not one `SELECT`), `AnalyticsTimeout`, `AnalyticsFailed`, `PayloadTooLarge` (over 8 KB).
+
+### Test effort
+
+`test_effort` shows how much effort test runs cost: test minutes, pointless minutes and percent, tests added and deleted, and the ten most expensive tests that never failed. Nothing here writes to the hub's state. It follows the other named reports: `analytics_query` by an administrator, or `GET /dashboard/api/analytics/test-effort?repositoryId=cocern` by a dashboard viewer, with **Test effort** on the Analytics page and its detail page at `/dashboard/analytics/test-effort`. Beyond numbers it reveals test names, which no other report does, and no commit IDs, filters, run names, failure text or paths.
+
+The hub never runs git and reads only a compact file named by `Relay:Analytics:TestEffortFile`, on request, never on the dashboard's tick, and parses it once per change. Refresh it outside the hub, by hand or on a schedule:
+
+```
+python scripts/Build-TestEffort.py --repository cocern --out <file> [--runs <retrospective.json>] [--root <repository>] [--ref HEAD]
+```
+
+The script only reads. With no setting, no file, or a file for another repository, the query answers one `no_run_data` row and the page says "No run data yet". A file that breaks the shape below or exceeds 256 KB answers one `run_data_unreadable` row. A file with no runs still shows tests added and deleted. `--runs` takes a JSON list with one object per run:
+
+```json
+[{ "Run": "name", "Commit": "full sha or null", "StartedUtc": "2026-11-04T17:08:23-08:00", "EndedUtc": "2026-11-04T17:09:11-08:00", "ExitCode": 0, "TimedOut": false, "Filter": "text, or null or empty for the whole suite", "Cases": [{ "Method": "Namespace.Class.Test", "Outcome": "Passed", "Seconds": 0.02 }] }]
+```
+
+`Outcome` is `Passed`, `Failed` or `NotExecuted`. The script's output is `TestEffortReport` in `CoCern.Contracts`: `schema` 1, `repositoryId`, `generatedAt`, totals, `rules` (a, b, c and d with `runs`, `judgedRuns` and `minutes`), up to 120 UTC `days` and up to 10 `expensiveNeverFailed`. It holds numbers and test names only; rule wording and each rule's status are fixed in code, so a file cannot relabel an estimate.
+
+| Number | Status | How it is derived |
+| --- | --- | --- |
+| Test minutes | Measured | Each run's start to end, build included. Overlapping runs each count in full. |
+| Case minutes | Measured | Each test's own duration, summed across parallel threads. |
+| Case time repeated at the same commit | Measured | Case time for a test that had already run at that commit. Shown beside the rules, not in the pointless totals. |
+| Tests added and deleted | Measured | `[Fact]` and `[Theory]` lines added and removed under `tests`, per first-parent step, on its UTC day. A test moved between files counts as both. |
+| Top 10 expensive tests that never failed | Measured | Summed durations; "never failed" means in the recorded runs only. |
+| Rule a, no covering test for the changed symbols | Estimate | A filtered run whose test class files name no production file its commit changed. Name matching, not coverage, so it can overcount. |
+| Rule b, rerun with no code change | Measured | Every case had already run at the same recorded commit. Uncommitted edits are not recorded; diagnostic reruns count. |
+| Rule c, whole-suite run with nothing under test changed | Estimate | An unfiltered run with no file under `src` or `tests` changed since the previous unfiltered run's commit. Partly unrelated whole-suite runs need coverage data and are not counted. |
+| Rule d, fixture-only failures | Estimate | A failed case that passed at the same commit, or at a later commit with no change under `src`. Counted as failures, apart from product failures, and not in the pointless minutes. |
+
+Pointless minutes appear twice and never as one number: rule b alone as measured, and each run counted by rule a, b or c once as an estimate. The estimate can miss some runs and overcount others: rule a is name matching and can overcount, only recorded runs count, and runs with no commit cannot be judged. Rule b can also count a run whose uncommitted edits did change the code. A rule that could judge no run shows "not available", not zero, and a day with no recorded run shows as no data. `test_effort` periods end on the file's latest day, not the snapshot's time; `at` is the loaded snapshot's time when there is one, so a batch stays one snapshot.
+
+Adding the name costs 14 characters in the `analytics_query` forwarding schema, 28 in the full input schema (two lists), on the administrator catalog only; the worker catalog is unchanged.
 
 ## Other PCs
 
@@ -454,6 +489,7 @@ All on by default except the two for other PCs.
 | `Relay:Analytics:ExtensionDirectory` | `duckdb_extensions` beside the hub | Where the DuckDB extension is. |
 | `Relay:Analytics:QueryTimeout` | `00:00:10` | Longest query (at most 5 minutes). |
 | `Relay:Analytics:MaxRows` | 50 | Rows per result (at most 500). |
+| `Relay:Analytics:TestEffortFile` | none | The compact file `test_effort` reads; relative paths start at the hub's content root. See [Test effort](#test-effort). |
 | `Relay:Discovery:Enabled` | `false` | Lets PCs join and announce chats. |
 | `Relay:Discovery:Repositories` | `["cocern"]` | Repositories joined PCs may use. |
 | `Relay:Discovery:JoinCode` | generated | The join code. Unset: made on first start, kept owner-only in `join-code` next to the database. At least 8 characters. |
@@ -543,7 +579,7 @@ The dashboard provides Overview, Sessions, Analytics, Database, Logs, Standing, 
 
 Open **Analytics** to compare one repository over 1–14 days with the preceding equal period. Both periods end relative to the displayed hourly snapshot completion timestamp, not realtime activity or the current hub connection time. The repository selector uses repository IDs known to the dashboard and defaults conservatively when none are present. Changing either selector fetches one combined report; an older response cannot overwrite the latest selection.
 
-The twelve public named reports include relay request/reply token estimates and successful canonical usage-report coverage among touched tasks, alongside reports covering average tokens, calls and messages per task; average reply bytes per session by role; noisiest tools by reply bytes; claim conflicts by resource; quality guardrail events; attention offer events (shown, accepted, later and dismissed) by kind and outcome; average ready-to-first-claim latency in minutes (an assignment proxy); and average hours of ended blocked spells, with open blocked spells counted separately. The shared `AnalyticsReportCatalog` supplies report titles and units. Charts include numeric equivalents, units and sample counts; **Top 10** / **Show all** and the origin filter make noisy-tool rows easier to inspect. Attention event denominators are per kind and are not summed across outcome categories.
+The **Test effort** card sits above them and opens its own page; see [Test effort](#test-effort). The twelve public named reports include relay request/reply token estimates and successful canonical usage-report coverage among touched tasks, alongside reports covering average tokens, calls and messages per task; average reply bytes per session by role; noisiest tools by reply bytes; claim conflicts by resource; quality guardrail events; attention offer events (shown, accepted, later and dismissed) by kind and outcome; average ready-to-first-claim latency in minutes (an assignment proxy); and average hours of ended blocked spells, with open blocked spells counted separately. The shared `AnalyticsReportCatalog` supplies report titles and units. Charts include numeric equivalents, units and sample counts; **Top 10** / **Show all** and the origin filter make noisy-tool rows easier to inspect. Attention event denominators are per kind and are not summed across outcome categories.
 
 Noisiest tools groups each tool by its reported adapter path: model-facing, background or unknown. Current adapters mark ordinary MCP calls separately from internal inbox, watcher and hook reads; an explicit `attention: false` alone does not make a model-facing call background. Older adapters and unmarked raw callers remain unknown. Origin is telemetry, not proof that a model ran or consumed a reply. Counts and bytes survive raw-log retention through daily totals, whose boundary days have day precision rather than exact rolling timestamps.
 
