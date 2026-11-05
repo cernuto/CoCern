@@ -272,6 +272,108 @@ public sealed class HubResponseCompactionTests(ITestOutputHelper output)
         return JsonNode.Parse(reply.GetProperty("dataJson").GetString()!)!.AsObject();
     }
 
+    [Theory]
+    [InlineData(true, "principal")]
+    [InlineData(true, "administrator")]
+    [InlineData(true, "repository")]
+    [InlineData(false, "principal")]
+    [InlineData(false, "administrator")]
+    public void Compact_continuations_do_not_accept_a_tag_from_another_caller_or_repository(bool workers, string change)
+    {
+        var state = workers ? Worker().State : Board();
+        var baseline = new RelayCaller("alice", true, ["repo", "other"], true);
+        var changed = change switch
+        {
+            "principal" => new RelayCaller("bob", true, ["repo", "other"], true),
+            "administrator" => new RelayCaller("alice", false, ["repo", "other"], true),
+            _ => baseline
+        };
+        RelayReply Read(RelayCaller caller, string repository, int cursor, string? tag = null)
+        {
+            var arguments = new JsonObject { ["repositoryId"] = repository, ["limit"] = 1, ["cursor"] = cursor };
+            if (!workers) arguments["openOnly"] = true;
+            if (tag is not null) arguments["snapshotTag"] = tag;
+            return CoordinationStateMachine.Apply(state, workers ? "control" : "board", "key", caller,
+                workers ? RelayTools.WorkerList : RelayTools.TaskGet, arguments, Now);
+        }
+        var first = Data(Read(baseline, "repo", 0));
+        var tag = first["snapshotTag"]!.GetValue<string>();
+        var repository = change == "repository" ? "other" : "repo";
+        var reused = Read(changed, repository, 1, tag);
+        Assert.False(reused.Ok);
+        Assert.Equal("ListRestartRequired", reused.Code);
+        var fresh = Data(Read(changed, repository, 0));
+        Assert.NotEqual(tag, fresh["snapshotTag"]!.GetValue<string>());
+        if (change == "repository") Assert.Empty(fresh["items"]!.AsArray());
+        Assert.Empty(state.Effects);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Compact_list_metadata_and_oversized_pieces_fit_and_reassemble_without_skipping_the_next_item(bool workers)
+    {
+        StateEnvelope<CoordinationDocument> state;
+        string oversizedId;
+        const int resources = 400;
+        var largeLabel = new string('\\', RelayLimits.AggregateReplyBytes) + "tail";
+        if (workers)
+        {
+            var worker = Worker(); state = worker.State;
+            var second = Data(Call(state, "control", RelayTools.SessionOpen, new() { ["requestId"] = "piece-next", ["label"] = "next chat" }));
+            oversizedId = new[] { worker.Id, second["sessionId"]!.GetValue<string>() }.Order(StringComparer.Ordinal).First();
+            ChangeWorker(state, oversizedId, row => row["label"] = largeLabel);
+        }
+        else
+        {
+            state = Board(); oversizedId = "b-claimed";
+            var document = JsonNode.Parse(state.Value.Json)!.AsObject();
+            document["tasks"]![oversizedId]!["resourceIds"] = new JsonArray(Enumerable.Range(0, resources)
+                .Select(index => (JsonNode)JsonValue.Create($"resource-{index:D4}-" + new string('x', 96))!).ToArray());
+            state.Value = new() { Json = document.ToJsonString() };
+        }
+        state.Effects.Clear();
+        var before = state.Value.Json;
+        var assembled = new StringBuilder();
+        long? offset = 0;
+        string? tag = null;
+        var pieces = 0;
+        while (offset is { } at)
+        {
+            var arguments = new JsonObject { ["cursor"] = 0, ["limit"] = 1 };
+            if (!workers) arguments["openOnly"] = true;
+            if (tag is not null) arguments["snapshotTag"] = tag;
+            if (at > 0) arguments["partOffset"] = at;
+            var reply = Call(state, workers ? "control" : "board", workers ? RelayTools.WorkerList : RelayTools.TaskGet, arguments);
+            Assert.True(reply.Ok, reply.Code);
+            Assert.True(Replies.FitsWire(reply, RelayLimits.AggregateReplyBytes));
+            var page = Data(reply);
+            var returnedTag = page["snapshotTag"]!.GetValue<string>();
+            if (tag is not null) Assert.Equal(tag, returnedTag);
+            tag = returnedTag;
+            var piece = Assert.Single(page["items"]!.AsArray())!.AsObject();
+            Assert.Equal(oversizedId, piece[workers ? "sessionId" : "taskId"]!.GetValue<string>());
+            Assert.Equal(at, piece["partOffset"]!.GetValue<long>());
+            Assert.Equal(1, page["nextCursor"]!.GetValue<int>());
+            var part = piece["part"]!.GetValue<string>();
+            Assert.NotEmpty(part);
+            assembled.Append(part);
+            offset = piece["nextPartOffset"]?.GetValue<long>();
+            Assert.True(++pieces < 100, "Oversized list item did not make bounded forward progress.");
+        }
+        Assert.True(pieces > 1);
+        var restored = JsonNode.Parse(assembled.ToString())!.AsObject();
+        if (workers) { Assert.Equal(largeLabel, restored["label"]!.GetValue<string>()); Assert.Null(restored["binding"]); }
+        else Assert.Equal(resources, restored["resourceIds"]!.AsArray().Count);
+        var next = new JsonObject { ["cursor"] = 1, ["snapshotTag"] = tag };
+        if (!workers) next["openOnly"] = true;
+        var remainder = Data(Call(state, workers ? "control" : "board", workers ? RelayTools.WorkerList : RelayTools.TaskGet, next));
+        Assert.NotEmpty(remainder["items"]!.AsArray());
+        Assert.DoesNotContain(remainder["items"]!.AsArray(), row => row![workers ? "sessionId" : "taskId"]!.GetValue<string>() == oversizedId);
+        Assert.Equal(before, state.Value.Json);
+        Assert.Empty(state.Effects);
+    }
+
     [Fact]
     public async Task Semantic_status_is_opt_in_and_identical_poll_returns_only_the_scoped_tag()
     {
@@ -320,6 +422,52 @@ public sealed class HubResponseCompactionTests(ITestOutputHelper output)
         var tag = full["statusTag"]!.GetValue<string>();
         Assert.Null((await Status(second, tag, 5))["unchanged"]);
         Assert.Null((await Status(first, tag, 6))["unchanged"]);
+    }
+
+    [Theory]
+    [InlineData("principal")]
+    [InlineData("administrator")]
+    [InlineData("repositories")]
+    [InlineData("repository")]
+    public async Task Semantic_status_reauthorizes_a_reused_tag_and_scopes_it_to_caller_privileges(string change)
+    {
+        var alternateToken = Guid.NewGuid().ToString("N");
+        var settings = new Dictionary<string, string?>
+        {
+            ["Relay:Clients:1:Token"] = alternateToken,
+            ["Relay:Clients:1:PrincipalId"] = change == "principal" ? "other-user" : "test-user",
+            ["Relay:Clients:1:IsAdministrator"] = (change == "administrator").ToString(),
+            ["Relay:Clients:1:Repositories:0"] = "repo"
+        };
+        if (change is "repository" or "repositories") settings["Relay:Clients:1:Repositories:1"] = "other";
+        await using var host = new RelayHostFixture(settings: settings);
+        using var original = host.AuthorizedClient();
+        using var alternate = host.AuthorizedClient();
+        alternate.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", alternateToken);
+        var session = HostData(await host.Call(original, RelayTools.SessionOpen, new { repositoryId = "repo", requestId = "scope-open" }));
+        var sessionId = session["sessionId"]!.GetValue<string>();
+        var sessionToken = session["sessionToken"]!.GetValue<string>();
+        var full = HostData(await host.Call(original, RelayTools.GetStatus, new { repositoryId = "repo", sessionId, sessionToken, attentionDetail = true, statusTag = "" }));
+        var tag = full["statusTag"]!.GetValue<string>();
+        using var response = await alternate.PostAsJsonAsync("/api/tools/" + RelayTools.GetStatus, new
+        {
+            repositoryId = change == "repository" ? "other" : "repo", sessionId, sessionToken, attentionDetail = true, statusTag = tag
+        });
+        if (change is "principal" or "repository")
+        {
+            Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+            var denied = await response.Content.ReadFromJsonAsync<JsonElement>();
+            Assert.False(denied.GetProperty("ok").GetBoolean());
+        }
+        else
+        {
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            var changed = HostData(await response.Content.ReadFromJsonAsync<JsonElement>());
+            Assert.Null(changed["unchanged"]);
+            Assert.NotNull(changed["statusTag"]);
+            Assert.NotEqual(tag, changed["statusTag"]!.GetValue<string>());
+            Assert.Equal(sessionId, changed["sessionId"]!.GetValue<string>());
+        }
     }
 
     [Fact]
