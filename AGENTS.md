@@ -12,6 +12,11 @@ These are hard rules set by Paul on 2026-11-05. Only Paul can grant an exception
 5. **Tests must never change the machine they run on.** No `net use`, registry, user settings, drive mappings or client configuration. Use a seam in the code instead.
 6. **Keep the suite small.** Delete duplicate and redundant tests, merge near-identical ones, and prefer a few broad tests over many narrow ones.
 
+## If CoCern refuses you
+
+- `RepositoryDenied` almost always means the repositoryId was missing or wrong. Always pass `cocern`, all lowercase, on every call.
+- `SessionDenied` or `SessionUnknown` means your saved session or token is gone (a resumed chat can lose it). Open one replacement session with `session_open`: repositoryId `cocern`, a fresh requestId, your role, machineId from this PC, and your chat's label. Then message the Manager what happened. Do not look for or copy anyone else's token or credentials.
+
 ## Coordination
 
 - Report only at milestones or blockers, in short messages. No start, PID or end announcements.
