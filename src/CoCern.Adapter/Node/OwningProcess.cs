@@ -16,7 +16,7 @@ internal static class OwningProcess
 {
     private const int MaxDepth = 32;
     private static readonly TimeSpan CheckEvery = TimeSpan.FromSeconds(2);
-    private static readonly TimeSpan StartTolerance = TimeSpan.FromSeconds(1);
+    internal static readonly TimeSpan StartTolerance = TimeSpan.FromSeconds(1);
 
     /// <summary>Waits until a process above this one is gone. Never completes while the chain is alive, or when it is empty.</summary>
     public static Task WaitUntilGoneAsync(CancellationToken cancellationToken) =>

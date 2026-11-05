@@ -19,6 +19,7 @@ public sealed class LocalChatWake : IAsyncDisposable
     private readonly string? statusRoot;
     private readonly TaskCompletionSource firstPass = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly HttpMessageHandler? hub;
+    private readonly ArmedChats armed;
     private readonly HashSet<string> rearmRefused = new(StringComparer.Ordinal);
     private DateTimeOffset? rearmAt = DateTimeOffset.MinValue;
     private string? observeProblem;
@@ -31,11 +32,12 @@ public sealed class LocalChatWake : IAsyncDisposable
     /// <summary>How long a restarted adapter waits before reading again when the hub could not be reached, as when both restart together.</summary>
     internal static readonly TimeSpan RearmRetry = TimeSpan.FromSeconds(60);
 
-    internal LocalChatWake(LocalWakeConnection connection, NodeTransport? transport = null, Func<WakeRuntime, WakeTarget, CancellationToken, Task>? watch = null, string? statusRoot = null, HttpMessageHandler? hub = null)
+    internal LocalChatWake(LocalWakeConnection connection, NodeTransport? transport = null, Func<WakeRuntime, WakeTarget, CancellationToken, Task>? watch = null, string? statusRoot = null, HttpMessageHandler? hub = null, ArmedChats? armed = null)
     {
         // Beside the connection folders, so a status file always lands in the root this connection itself lives under.
         this.statusRoot = statusRoot ?? Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(connection.Folder));
         this.hub = hub;
+        this.armed = armed ?? ArmedChats.ForThisProcess(connection.Folder);
         Connection = connection;
         this.transport = transport ?? new();
         chats = new(connection.Folder, this.transport.Locators, this.transport.Clock, NodeChats.DefaultLocateWindow, NodeChats.DefaultBudget);
@@ -95,7 +97,8 @@ public sealed class LocalChatWake : IAsyncDisposable
             var current = NodeState.ReadSessionHandle(NodeState.SessionHandlePath(Connection.Folder, session));
             if (current is null) { ObserveProblem(LocalWakeCodes.ObserveHandleMismatch); return; }
             if (!OwnsNative(current)) { Report(LocalWakeCodes.ObserveNotOwned); return; }
-            observed.TryAdd(session, 0);
+            // A chat of another provider is woken its own way, so its adapter has nothing to re-arm.
+            if (observed.TryAdd(session, 0) && Connection.Options.ExportedChat is not { Provider: not ChatProviders.Codex } && !armed.Record(session)) Report(LocalWakeCodes.RearmRecordFailed);
             if (Interlocked.Exchange(ref observeProblem, null) is not null) Report(LocalWakeCodes.Observed);
             changed.Writer.TryWrite(true);
         }
@@ -127,18 +130,29 @@ public sealed class LocalChatWake : IAsyncDisposable
     public Task RunAsync(CancellationToken ct) => running ??= LoopAsync(ct);
 
     /// <summary>
-    /// <c>observed</c> lives in memory, so after a restart an idle chat has no watcher until it next calls the hub. This re-arms located Codex handles from disk,
-    /// each only after one session-authenticated background read succeeds: the same rule as <see cref="Observe"/>, and the read neither touches the handle nor writes anything.
-    /// Two adapters may both re-arm one chat; the exclusive state file in <see cref="WatchAsync"/> lets one dispatch.
+    /// <c>observed</c> lives in memory, so after a backend swap an idle chat has no watcher until it next calls the hub. This re-arms only the chats this owner armed
+    /// (<see cref="ArmedChats"/>), located and active within <see cref="RearmWindow"/>, each only after one session-authenticated background read succeeds: the same rule
+    /// as <see cref="Observe"/>, and the read neither touches the handle nor writes anything. A chat merely touched, located or armed by another owner is left alone, since
+    /// an unexpected turn in a thread someone left is the worse failure. Old and new backends of one owner may overlap; the exclusive state file in <see cref="WatchAsync"/> lets one dispatch.
     /// </summary>
     private async Task RearmAsync(CancellationToken ct)
     {
         var now = transport.Clock.GetUtcNow();
         if (rearmAt is not { } due || now < due) return;
         rearmAt = now + RearmRetry;
-        var pending = NodeState.ReadSessionHandles(Connection.Folder).Where(x => ShouldRearm(x, now)).OrderByDescending(x => x.OpenedAt)
-            .DistinctBy(x => x.Chat!.ThreadId).Take(NodeChats.MaxChats).ToArray();
-        if (pending.Length == 0) { rearmAt = null; return; }
+        armed.Prune(session => File.Exists(NodeState.SessionHandlePath(Connection.Folder, session)));
+        var skips = new List<string>();
+        var pending = new List<SessionHandle>();
+        var threads = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var handle in NodeState.ReadSessionHandles(Connection.Folder).Where(x => !observed.ContainsKey(x.SessionId)).OrderByDescending(x => x.OpenedAt))
+        {
+            if (RearmSkip(handle, now) is { } skip) skips.Add(skip);
+            else if (threads.Add(handle.Chat!.ThreadId)) pending.Add(handle);
+            else skips.Add(LocalWakeCodes.RearmSkipOlderSession);
+        }
+        // In order, so a run of one reason costs one status write.
+        foreach (var skip in skips.Order(StringComparer.Ordinal)) Report(skip);
+        if (pending.Count == 0) { rearmAt = null; return; }
         using var http = new HttpClient(hub ?? RelayForwarder.CreateHandler(Connection.Options), disposeHandler: hub is null) { Timeout = TimeSpan.FromSeconds(15) };
         var forwarder = new RelayForwarder(http, Connection.Options);
         foreach (var handle in pending)
@@ -148,14 +162,22 @@ public sealed class LocalChatWake : IAsyncDisposable
             if (reply is { Ok: false, Version: null }) { Report(LocalWakeCodes.RearmHubUnavailable); return; }
             if (reply.Ok && reply.Version is not null && SessionHandoff.IsSessionReply(RelayTools.GetStatus, JsonSerializer.SerializeToElement(new { sessionId = handle.SessionId }), reply))
                 observed.TryAdd(handle.SessionId, 0);
-            else { rearmRefused.Add(handle.SessionId); Report(LocalWakeCodes.RearmRefused); }
+            else { rearmRefused.Add(handle.SessionId); Report(LocalWakeCodes.RearmSkipRefused); }
         }
         rearmAt = null;
     }
 
-    private bool ShouldRearm(SessionHandle handle, DateTimeOffset now) => handle is { Chat.Provider: ChatProviders.Codex, Unmapped: false } && OwnsNative(handle) &&
-        !observed.ContainsKey(handle.SessionId) && !rearmRefused.Contains(handle.SessionId) &&
-        now - new DateTimeOffset(File.GetLastWriteTimeUtc(NodeState.SessionHandlePath(Connection.Folder, handle.SessionId)), TimeSpan.Zero) <= RearmWindow;
+    /// <summary>Why a handle is not re-armed, or null when it may be, once its read succeeds.</summary>
+    private string? RearmSkip(SessionHandle handle, DateTimeOffset now)
+    {
+        if (!armed.HasOwner) return LocalWakeCodes.RearmSkipNoOwner;
+        if (handle.Chat is { Provider: not ChatProviders.Codex }) return LocalWakeCodes.RearmSkipNotCodex;
+        if (!OwnsNative(handle)) return LocalWakeCodes.RearmSkipNotOwned;
+        if (!armed.IsArmedHere(handle.SessionId)) return LocalWakeCodes.RearmSkipNotArmedHere;
+        if (handle.Chat is null || handle.Unmapped) return LocalWakeCodes.RearmSkipUnlocated;
+        if (now - new DateTimeOffset(File.GetLastWriteTimeUtc(NodeState.SessionHandlePath(Connection.Folder, handle.SessionId)), TimeSpan.Zero) > RearmWindow) return LocalWakeCodes.RearmSkipStale;
+        return rearmRefused.Contains(handle.SessionId) ? LocalWakeCodes.RearmSkipRefused : null;
+    }
 
     private async Task LoopAsync(CancellationToken ct)
     {

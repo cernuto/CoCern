@@ -748,7 +748,11 @@ public sealed class LocalWakeTests : IDisposable
         public override DateTimeOffset GetUtcNow() => new(Interlocked.Read(ref ticks), TimeSpan.Zero);
     }
 
-    /// <summary>An adapter after a restart: nothing observed in memory, only what is on disk.</summary>
+    private static readonly ProcessFacts Launcher = new(4242, 1, "dotnet", new DateTime(2026, 11, 1, 9, 0, 0, DateTimeKind.Utc));
+    private static readonly ProcessFacts OtherLauncher = new(5353, 1, "dotnet", new DateTime(2026, 11, 1, 9, 0, 0, DateTimeKind.Utc));
+    private static ArmedChats ArmedBy(LocalWakeConnection connection, ProcessFacts? owner) => new(connection.Folder, owner, _ => true);
+
+    /// <summary>A backend just started: nothing observed in memory, only what is on disk.</summary>
     private sealed class Restarted : IAsyncDisposable
     {
         public required LocalChatWake Wake { get; init; }
@@ -758,39 +762,47 @@ public sealed class LocalWakeTests : IDisposable
         public async ValueTask DisposeAsync() => await Wake.DisposeAsync();
     }
 
-    private Restarted Restart(LocalWakeConnection connection, ProbeHandler hub, string? statusRoot = null, TimeProvider? clock = null, string? codex = "synthetic-codex", bool run = true)
+    private Restarted Restart(LocalWakeConnection connection, ProbeHandler hub, string? statusRoot = null, TimeProvider? clock = null, string? codex = "synthetic-codex", bool run = true, ProcessFacts? owner = null, bool noOwner = false)
     {
         var started = new System.Collections.Concurrent.ConcurrentQueue<WakeTarget>();
         var transport = new NodeTransport { Locators = [], CodexExecutable = () => codex, CodexDispatcher = _ => new NoDispatch(), Clock = clock ?? TimeProvider.System };
-        var wake = new LocalChatWake(connection, transport, async (_, target, ct) => { started.Enqueue(target); await target.Dispatcher.QueueAsync(target.Route.ThreadId, "synthetic", ct); await Task.Delay(Timeout.Infinite, ct); }, statusRoot ?? StatusRoot, hub);
+        var wake = new LocalChatWake(connection, transport, async (_, target, ct) => { started.Enqueue(target); await target.Dispatcher.QueueAsync(target.Route.ThreadId, "synthetic", ct); await Task.Delay(Timeout.Infinite, ct); },
+            statusRoot ?? StatusRoot, hub, ArmedBy(connection, noOwner ? null : owner ?? Launcher));
         if (run) _ = wake.RunAsync(CancellationToken.None);
         return new() { Wake = wake, Started = started, StatusRoot = statusRoot ?? StatusRoot };
     }
 
-    private static SessionHandle CodexHandle(LocalWakeConnection connection, string session = "original-session", string? thread = null, DateTimeOffset? opened = null)
+    /// <summary>A located Codex handle on disk, with a record of <see cref="Launcher"/> arming it unless <paramref name="armed"/> says otherwise.</summary>
+    private static SessionHandle CodexHandle(LocalWakeConnection connection, string session = "original-session", string? thread = null, DateTimeOffset? opened = null, bool armed = true)
     {
         var handle = new SessionHandle(session, "private-session-token", "repo", "Codex", opened ?? DateTimeOffset.UtcNow, Chat: new("codex", thread ?? Guid.NewGuid().ToString()));
         NodeState.WriteSessionHandle(connection.Folder, handle);
+        if (armed) Assert.True(ArmedBy(connection, Launcher).Record(session));
         return handle;
     }
 
+    private int SkipCount(string code) => Status().GetProperty("codeCounts").TryGetProperty(code, out var count) ? count.GetInt32() : 0;
+
     [Fact]
-    public async Task A_restart_rearms_a_located_codex_handle_after_one_authenticated_background_read()
+    public async Task A_backend_swap_under_the_same_owner_rearms_its_own_chat_after_one_authenticated_read()
     {
         var connection = Connection();
-        var handle = CodexHandle(connection);
+        var handle = CodexHandle(connection, armed: false);
+        using var hub = new ProbeHandler();
+        await using (var before = Restart(connection, hub, run: false))
+            before.Wake.Observe(RelayTools.GetStatus, Arguments(), OkReply);
+        Assert.Empty(hub.Requests);
         var path = NodeState.SessionHandlePath(connection.Folder, handle.SessionId);
         var touched = DateTime.UtcNow.AddHours(-23);
         File.SetLastWriteTimeUtc(path, touched);
         var text = File.ReadAllText(path);
-        using var hub = new ProbeHandler();
-        await using var restarted = Restart(connection, hub);
-        await restarted.Pass;
 
-        var target = Assert.Single(restarted.Started);
+        await using var after = Restart(connection, hub);
+        await after.Pass;
+
+        var target = Assert.Single(after.Started);
         Assert.Equal((handle.Chat!.ThreadId, handle.SessionId), (target.Route.ThreadId, target.Session.SessionId));
-        var request = Assert.Single(hub.Requests);
-        Assert.Equal((RelayTools.GetStatus, true, handle.SessionId, handle.SessionToken), request);
+        Assert.Equal((RelayTools.GetStatus, true, handle.SessionId, handle.SessionToken), Assert.Single(hub.Requests));
         // Re-arming is not chat activity: a handle that keeps its age can still fall out of the limit.
         Assert.Equal(touched, File.GetLastWriteTimeUtc(path));
         Assert.Equal(text, File.ReadAllText(path));
@@ -798,6 +810,68 @@ public sealed class LocalWakeTests : IDisposable
         Assert.Equal((1, 1), (status.GetProperty("observed").GetInt32(), status.GetProperty("watchers").GetInt32()));
         Assert.Equal(LocalWakeCodes.Watching, LocalWakeStatus.LastCode(StatusRoot));
         Assert.DoesNotContain(handle.SessionToken, File.ReadAllText(OwnStatusFile));
+    }
+
+    [Fact]
+    public async Task A_located_handle_armed_by_another_owner_is_refused_with_its_reason()
+    {
+        var connection = Connection();
+        CodexHandle(connection, armed: false);
+        Assert.True(ArmedBy(connection, OtherLauncher).Record("original-session"));
+        using var hub = new ProbeHandler();
+        await using var restarted = Restart(connection, hub);
+        await restarted.Pass;
+        Assert.Empty(hub.Requests);
+        Assert.Empty(restarted.Started);
+        Assert.Equal(1, SkipCount("rearm_skip_not_armed_here"));
+    }
+
+    [Fact]
+    public async Task A_located_recent_handle_with_no_record_is_refused_with_its_reason()
+    {
+        var connection = Connection();
+        CodexHandle(connection, armed: false);
+        using var hub = new ProbeHandler();
+        await using var restarted = Restart(connection, hub);
+        await restarted.Pass;
+        Assert.Empty(hub.Requests);
+        Assert.Empty(restarted.Started);
+        Assert.Equal(1, SkipCount("rearm_skip_not_armed_here"));
+    }
+
+    [Fact]
+    public async Task A_reused_process_id_with_a_different_start_time_does_not_match()
+    {
+        var connection = Connection();
+        CodexHandle(connection);
+        var reused = Launcher with { StartedUtc = Launcher.StartedUtc.AddHours(1) };
+        Assert.False(ArmedBy(connection, reused).IsArmedHere("original-session"));
+        Assert.True(ArmedBy(connection, Launcher).IsArmedHere("original-session"));
+        using var hub = new ProbeHandler();
+        await using var restarted = Restart(connection, hub, owner: reused);
+        await restarted.Pass;
+        Assert.Empty(hub.Requests);
+        Assert.Empty(restarted.Started);
+        Assert.Equal(1, SkipCount("rearm_skip_not_armed_here"));
+    }
+
+    [Fact]
+    public async Task A_record_holds_only_its_owner_and_session_and_never_a_token()
+    {
+        var connection = Connection();
+        CodexHandle(connection, armed: false);
+        using var hub = new ProbeHandler();
+        await using (var adapter = Restart(connection, hub, run: false))
+            adapter.Wake.Observe(RelayTools.GetStatus, Arguments(), OkReply);
+        var path = Assert.Single(Directory.GetFiles(Path.Combine(connection.Folder, "armed")));
+        AssertPrivate(path);
+        var text = File.ReadAllText(path);
+        Assert.DoesNotContain("private-session-token", text);
+        Assert.DoesNotContain(Secret, text);
+        using var document = JsonDocument.Parse(text);
+        Assert.Equal(["ownerPid", "ownerStartedUtc", "sessionId"], document.RootElement.EnumerateObject().Select(x => x.Name));
+        Assert.Equal(Launcher.Id, document.RootElement.GetProperty("ownerPid").GetInt32());
+        Assert.Equal("original-session", document.RootElement.GetProperty("sessionId").GetString());
     }
 
     [Theory]
@@ -813,12 +887,12 @@ public sealed class LocalWakeTests : IDisposable
         Assert.Empty(restarted.Started);
         Assert.Single(hub.Requests);
         Assert.Equal(0, Status().GetProperty("observed").GetInt32());
-        Assert.Equal(1, Status().GetProperty("codeCounts").GetProperty("rearm_refused").GetInt32());
+        Assert.Equal(1, SkipCount("rearm_skip_refused"));
         Assert.Null(LocalWakeStatus.Problem(StatusRoot));
     }
 
     [Fact]
-    public async Task A_stale_handle_is_not_read_or_rearmed()
+    public async Task A_stale_handle_is_not_read_or_rearmed_even_when_it_was_armed_here()
     {
         var connection = Connection();
         var handle = CodexHandle(connection, opened: DateTimeOffset.UtcNow.AddDays(-2));
@@ -828,10 +902,11 @@ public sealed class LocalWakeTests : IDisposable
         await restarted.Pass;
         Assert.Empty(hub.Requests);
         Assert.Empty(restarted.Started);
+        Assert.Equal(1, SkipCount("rearm_skip_stale"));
     }
 
     [Fact]
-    public async Task An_unlocated_or_unmapped_handle_is_not_read_or_rearmed()
+    public async Task An_unlocated_or_unmapped_handle_is_not_read_or_rearmed_even_when_it_was_armed_here()
     {
         var connection = Connection();
         NodeState.WriteSessionHandle(connection.Folder, new("not-located", "private-session-token", "repo", "Codex", DateTimeOffset.UtcNow));
@@ -843,28 +918,33 @@ public sealed class LocalWakeTests : IDisposable
         node["unmapped"] = true;
         File.WriteAllText(path, node.ToJsonString());
         Assert.True(NodeState.ReadSessionHandle(path)!.Unmapped);
+        Assert.True(ArmedBy(connection, Launcher).Record("not-located"));
+        Assert.True(ArmedBy(connection, Launcher).Record("unmapped-session"));
         using var hub = new ProbeHandler();
         await using var restarted = Restart(connection, hub);
         await restarted.Pass;
         Assert.Empty(hub.Requests);
         Assert.Empty(restarted.Started);
+        Assert.Equal(3, SkipCount("rearm_skip_unlocated"));
     }
 
     [Fact]
-    public async Task A_claude_handle_is_not_read_or_rearmed()
+    public async Task A_claude_handle_is_not_read_or_rearmed_with_its_reason()
     {
         var connection = Connection();
         var chat = new ChatLocation("claude", Guid.NewGuid().ToString());
         NodeState.WriteSessionHandle(connection.Folder, new("claude-session", "private-session-token", "repo", "Claude", DateTimeOffset.UtcNow, Client: chat, Chat: chat));
+        Assert.True(ArmedBy(connection, Launcher).Record("claude-session"));
         using var hub = new ProbeHandler();
         await using var restarted = Restart(connection, hub);
         await restarted.Pass;
         Assert.Empty(hub.Requests);
         Assert.Empty(restarted.Started);
+        Assert.Equal(1, SkipCount("rearm_skip_not_codex"));
     }
 
     [Fact]
-    public async Task A_claude_adapter_never_rearms_a_codex_handle_it_does_not_own()
+    public async Task A_claude_adapter_never_rearms_a_codex_handle_and_keeps_no_records()
     {
         var chat = new ChatLocation("claude", Guid.NewGuid().ToString());
         var connection = Connection(new AdapterOptions("http://127.0.0.1:5271/", Secret) { ExportedChat = chat });
@@ -875,18 +955,37 @@ public sealed class LocalWakeTests : IDisposable
         Assert.Empty(hub.Requests);
         Assert.Empty(restarted.Started);
         Assert.Equal(0, Status().GetProperty("observed").GetInt32());
+        Assert.Equal(1, SkipCount("rearm_skip_not_owned"));
+
+        restarted.Wake.Observe(RelayTools.GetStatus, Arguments("claude-own-session"), new(true, "Ok", JsonSerializer.SerializeToElement(new { sessionId = "claude-own-session" }), 0));
+        Assert.False(ArmedBy(connection, Launcher).IsArmedHere("claude-own-session"));
     }
 
     [Fact]
-    public async Task An_adapter_with_no_exported_chat_rearms_every_recent_codex_handle_it_can_authenticate()
+    public async Task An_adapter_with_no_exported_chat_rearms_only_the_handle_it_armed_of_several_recent_ones()
     {
         var connection = Connection();
-        var first = CodexHandle(connection, "first-session");
-        var second = CodexHandle(connection, "second-session");
+        var mine = CodexHandle(connection, "first-session");
+        CodexHandle(connection, "second-session", armed: false);
         using var hub = new ProbeHandler();
         await using var restarted = Restart(connection, hub);
         await restarted.Pass;
-        Assert.Equal(new[] { first.SessionId, second.SessionId }.Order(), restarted.Started.Select(x => x.Session.SessionId).Order());
+        Assert.Equal(mine.SessionId, Assert.Single(restarted.Started).Session.SessionId);
+        Assert.Equal(mine.SessionId, Assert.Single(hub.Requests).Session);
+        Assert.Equal(1, SkipCount("rearm_skip_not_armed_here"));
+    }
+
+    [Fact]
+    public async Task An_adapter_whose_owner_cannot_be_read_rearms_nothing_and_says_so()
+    {
+        var connection = Connection();
+        CodexHandle(connection);
+        using var hub = new ProbeHandler();
+        await using var restarted = Restart(connection, hub, noOwner: true);
+        await restarted.Pass;
+        Assert.Empty(hub.Requests);
+        Assert.Empty(restarted.Started);
+        Assert.Equal(1, SkipCount("rearm_skip_no_owner"));
     }
 
     [Fact]
@@ -915,7 +1014,7 @@ public sealed class LocalWakeTests : IDisposable
         await restarted.Pass;
         Assert.Empty(restarted.Started);
         Assert.Single(hub.Requests);
-        Assert.Equal(1, Status().GetProperty("codeCounts").GetProperty("rearm_hub_unavailable").GetInt32());
+        Assert.Equal(1, SkipCount("rearm_hub_unavailable"));
 
         Volatile.Write(ref hub.Mode, "ok");
         clock.Advance(LocalChatWake.RearmRetry + TimeSpan.FromSeconds(1));
@@ -923,7 +1022,7 @@ public sealed class LocalWakeTests : IDisposable
     }
 
     [Fact]
-    public async Task Two_restarted_adapters_dispatch_once_and_the_survivor_takes_over()
+    public async Task Overlapping_backends_of_one_owner_dispatch_once_and_the_survivor_takes_over()
     {
         var connection = Connection();
         var handle = CodexHandle(connection);
@@ -938,6 +1037,47 @@ public sealed class LocalWakeTests : IDisposable
 
         await firstAdapter.DisposeAsync();
         await WaitFor(() => secondAdapter.Started.Count == 1);
+    }
+
+    [Fact]
+    public void Records_of_ended_owners_gone_sessions_and_unreadable_files_are_pruned()
+    {
+        var connection = Connection();
+        var live = new ArmedChats(connection.Folder, Launcher, owner => owner.Id == Launcher.Id);
+        var ended = new ArmedChats(connection.Folder, OtherLauncher, owner => owner.Id == Launcher.Id);
+        Assert.True(live.Record("kept-session"));
+        Assert.True(live.Record("gone-session"));
+        Assert.True(ended.Record("ended-session"));
+        var folder = Path.Combine(connection.Folder, "armed");
+        File.WriteAllText(Path.Combine(folder, "junk.1.json"), "not json");
+
+        live.Prune(session => session != "gone-session");
+
+        Assert.True(live.IsArmedHere("kept-session"));
+        Assert.False(live.IsArmedHere("gone-session"));
+        Assert.False(ended.IsArmedHere("ended-session"));
+        Assert.Single(Directory.GetFiles(folder));
+    }
+
+    [Fact]
+    public void The_owner_is_the_launcher_for_a_marked_backend_and_the_process_itself_otherwise()
+    {
+        var launcher = new ProcessFacts(10, 1, "dotnet", new DateTime(2026, 11, 1, 9, 0, 0, DateTimeKind.Utc));
+        var firstBackend = new ProcessFacts(20, 10, "dotnet", launcher.StartedUtc.AddMinutes(1));
+        var secondBackend = new ProcessFacts(30, 10, "dotnet", launcher.StartedUtc.AddMinutes(9));
+        var orphan = new ProcessFacts(40, 50, "dotnet", launcher.StartedUtc.AddMinutes(1));
+        var reusedParent = new ProcessFacts(50, 1, "other", launcher.StartedUtc.AddMinutes(5));
+        var processes = new[] { launcher, firstBackend, secondBackend, orphan, reusedParent }.ToDictionary(x => x.Id);
+        ProcessFacts? Read(int id) => processes.GetValueOrDefault(id);
+        string? Marked(string name) => name == "COCERN_DEVELOPMENT_GENERATION" ? "generation" : null;
+        string? Unmarked(string name) => null;
+
+        // A swap keeps the owner; a backend the launcher did not start, or one whose parent ID was reused, owns itself.
+        Assert.Equal(launcher, ArmedChats.OwnerOf(20, Marked, Read));
+        Assert.Equal(launcher, ArmedChats.OwnerOf(30, Marked, Read));
+        Assert.Equal(firstBackend, ArmedChats.OwnerOf(20, Unmarked, Read));
+        Assert.Equal(orphan, ArmedChats.OwnerOf(40, Marked, Read));
+        Assert.Null(ArmedChats.OwnerOf(99, Marked, Read));
     }
 
     private LocalWakeConnection Connection(AdapterOptions? options = null) => LocalWakeConnection.Create(options ?? new("http://127.0.0.1:5271/", Secret, admin: true), TokenFile(), Path.Combine(root, "cache"))!;
