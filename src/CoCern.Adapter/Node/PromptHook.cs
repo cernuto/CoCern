@@ -34,6 +34,8 @@ public static class PromptHook
             var printed = false;
             if (chat is not null)
             {
+                // A new prompt means any client prompt the chat reported is over. Side by side with the mail, so it adds no time; with no report from a hook it makes no call.
+                var clearing = WaitingHook.ClearAsync(chat, nodeFolder, findLocal, timeout, handler);
                 // The poll has a full timeout of its own, so a status read that took its time does not cost the chat its mail. All of it stays well inside the client's limit.
                 await HookMail.DeliverAsync(chat, nodeFolder, findLocal, ClaudeWaiter.MaxPrintedInbox - line.Length - 1, timeout, handler, async text =>
                 {
@@ -41,6 +43,7 @@ public static class PromptHook
                     await output.FlushAsync();
                     printed = true;
                 });
+                await clearing;
             }
             if (!printed && line.Length > 0) await output.WriteLineAsync(line);
         }

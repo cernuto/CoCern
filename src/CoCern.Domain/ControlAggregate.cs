@@ -398,10 +398,22 @@ internal static class ControlAggregate
     private static RelayReply ListWorkers(AggregateContext context)
     {
         var hubIncarnation = Text(context.Args, "hubIncarnation");
-        var workers = new ControlState(context.State).Entries().Select(entry => entry.Entry).OfType<DirectoryEntry>()
-            .Where(entry => entry.RepositoryId == context.Repository).Select(entry => (JsonNode)entry.Worker(context.Now, hubIncarnation)).ToArray();
+        var full = context.Args["includeStale"] is JsonValue flag && flag.TryGetValue<bool>(out var include) && include;
+        var entries = new ControlState(context.State).Entries().Where(entry => entry.Entry?.RepositoryId == context.Repository).ToArray();
+        var allWorkers = entries.ToDictionary(entry => entry.Id, entry => entry.Entry!.Worker(context.Now, hubIncarnation), StringComparer.Ordinal);
+        var selected = full ? entries : entries.Where(entry => KeepInWorkerList(context.State[ControlState.SessionsKey]![entry.Id]!.AsObject(), context.Now))
+            .OrderBy(entry => entry.Id, StringComparer.Ordinal).ToArray();
+        var workers = selected.Select(entry =>
+            {
+                var row = allWorkers[entry.Id];
+                if (!full) row.Remove(DirectoryEntry.BindingKey);
+                return (JsonNode)row;
+            }).ToArray();
+        var tag = full ? null : ListSnapshot.Tag(new { kind = "workers", context.Repository, context.Caller.PrincipalId, context.Caller.IsAdministrator, hubIncarnation }, selected.Select(entry => entry.Id));
+        if (tag is not null && !ListSnapshot.Matches(context.Args, tag)) return Error("ListRestartRequired");
         var data = JsonNode.Parse(Page(workers, context.Args).DataJson)!.AsObject();
-        var machines = workers.GroupBy(x => Text(x.AsObject(), "machineId")).Where(x => x.Key.Length > 0).Select(group => new
+        if (tag is not null) { data["snapshotTag"] = tag; data["omittedCount"] = allWorkers.Count - workers.Length; }
+        var machines = allWorkers.Values.GroupBy(x => Text(x, "machineId")).Where(x => x.Key.Length > 0).Select(group => new
         {
             machineId = group.Key,
             sessionCount = group.Count(),
@@ -420,7 +432,16 @@ internal static class ControlAggregate
         }
         var machinePage = data["machines"]!.AsArray();
         while (!FitsWire(Ok(data), RelayLimits.AggregateReplyBytes) && machinePage.Count > 0) { machinePage.RemoveAt(machinePage.Count - 1); data["machineSummariesTruncated"] = true; }
-        return Ok(data);
+        return full ? Ok(data) : ListSnapshot.Fit(data, workers, context.Args);
+    }
+
+    private static bool KeepInWorkerList(JsonObject row, DateTimeOffset now)
+    {
+        // Directory marks are eventually consistent. Retain even old or malformed marks rather than infer that work or mail disappeared.
+        if (row[DirectoryEntry.OwnsWorkKey] is not null || row[DirectoryEntry.MailHeldAtKey] is not null) return true;
+        foreach (var field in new[] { DirectoryEntry.ObservedAtKey, DirectoryEntry.FreshUntilKey, DirectoryEntry.ActiveAtKey })
+            if (!DateTimeOffset.TryParse(Text(row, field), out var seen) || seen >= now.AddHours(-24)) return true;
+        return false;
     }
 
     /// <summary>Whether the worker reply fits the aggregate budget with only the first <paramref name="count"/> of <paramref name="page"/>, as the wire measures it.</summary>
@@ -577,5 +598,39 @@ internal static class ControlAggregate
         }
         registry.Register(canonical, context.Repository, machine, names);
         return Ok(new { resourceId = canonical });
+    }
+}
+
+/// <summary>Continuation evidence for a freshly authorized list, never an authorization or a stored snapshot.</summary>
+internal static class ListSnapshot
+{
+    internal static string Tag(object scope, IEnumerable<string> ids) =>
+        Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(new { scope, ids = ids.ToArray() })));
+
+    internal static bool Matches(JsonObject args, string tag) => Text(args, "snapshotTag") is { Length: > 0 } known
+        ? string.Equals(known, tag, StringComparison.Ordinal)
+        : Number(args, "cursor") == 0 && Number(args, "partOffset") == 0;
+
+    // Extra list metadata must fit together with the page, including the single oversized-item/piece case.
+    internal static RelayReply Fit(JsonObject data, JsonNode[] source, JsonObject args)
+    {
+        var page = data["items"]!.AsArray();
+        var offset = (int)Math.Clamp(Number(args, "cursor"), 0, RelayLimits.MaxRecords);
+        while (page.Count > 1 && !FitsWire(Ok(data), RelayLimits.AggregateReplyBytes))
+        {
+            page.RemoveAt(page.Count - 1);
+            data["nextCursor"] = offset + page.Count;
+            data["truncated"] = true;
+        }
+        if (page.Count == 1 && !FitsWire(Ok(data), RelayLimits.AggregateReplyBytes))
+        {
+            page[0] = Piece(source[offset], Number(args, "partOffset"), piece =>
+            {
+                var probe = data.DeepClone().AsObject();
+                probe["items"] = new JsonArray(piece.DeepClone());
+                return FitsWire(Ok(probe), RelayLimits.AggregateReplyBytes);
+            });
+        }
+        return Ok(data);
     }
 }

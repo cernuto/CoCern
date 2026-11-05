@@ -267,6 +267,8 @@ public sealed class SetupTests : IDisposable
         Assert.DoesNotContain("--prompt-hook", File.ReadAllText(claudeSettings));
         Assert.DoesNotContain("--post-tool-hook", File.ReadAllText(claudeSettings));
         Assert.DoesNotContain("PostToolUse", File.ReadAllText(claudeSettings));
+        Assert.DoesNotContain("--waiting-hook", File.ReadAllText(claudeSettings));
+        Assert.DoesNotContain("Notification", File.ReadAllText(claudeSettings));
         Assert.Contains("--stop-hook", File.ReadAllText(claudeSettings));
         Assert.False(File.Exists(codexHooks));
 
@@ -289,6 +291,16 @@ public sealed class SetupTests : IDisposable
         Assert.Equal($"{LogonStart.Quote(Dotnet)} {LogonStart.Quote(Dll)} --post-tool-hook --data-dir {LogonStart.Quote(SetupCommand.NormalizeFolder(DataDir))}", postTool["hooks"]![0]!["command"]!.GetValue<string>());
         Assert.Equal(ClientSettings.PostToolHookTimeoutSeconds, postTool["hooks"]![0]!["timeout"]!.GetValue<int>());
         Assert.DoesNotContain("--post-tool-hook", File.ReadAllText(codexHooks));
+        // And the waiting hooks: each event once, on its own matcher, for Claude Code only.
+        var installed = JsonNode.Parse(File.ReadAllText(claudeSettings))!["hooks"]!;
+        foreach (var (hookEvent, matcher) in new (string Event, string? Matcher)[] { ("Notification", "permission_prompt"), ("PreToolUse", "AskUserQuestion"), ("Stop", null), ("PostToolUseFailure", null) })
+        {
+            var group = Assert.Single(installed[hookEvent]!.AsArray(), entry => entry!["hooks"]![0]!["command"]!.GetValue<string>().Contains("--waiting-hook"))!;
+            Assert.Equal(matcher, group["matcher"]?.GetValue<string>());
+            Assert.Equal($"{LogonStart.Quote(Dotnet)} {LogonStart.Quote(Dll)} --waiting-hook --data-dir {LogonStart.Quote(SetupCommand.NormalizeFolder(DataDir))}", group["hooks"]![0]!["command"]!.GetValue<string>());
+            Assert.Equal(ClientSettings.WaitingHookTimeoutSeconds, group["hooks"]![0]!["timeout"]!.GetValue<int>());
+        }
+        Assert.DoesNotContain("--waiting-hook", File.ReadAllText(codexHooks));
         var once = File.ReadAllBytes(claudeSettings);
         Assert.Equal(0, await SetupCommand.RunAsync(options, Env(host), CancellationToken.None));
         Assert.Equal(once, File.ReadAllBytes(claudeSettings));
