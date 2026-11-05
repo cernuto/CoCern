@@ -1127,6 +1127,9 @@ public sealed class WaitingOnYouTests
         {
             var sent = Data(await host.Call(worker, RelayTools.SendMessage, new { repositoryId = Repository, requestId = "send-" + text.Length, sessionId = a.Id, sessionToken = a.Token, recipientSessionId = b.Id, text = "hello", ackMessageIds = new[] { "m-handled" }, waitingFor = text }));
             Assert.True(sent.GetProperty("conveniences").GetProperty("ack").GetProperty("ok").GetBoolean());
+            // The acknowledgment a reply's replyTo implies carries it no further.
+            var answered = Data(await host.Call(worker, RelayTools.SendMessage, new { repositoryId = Repository, requestId = "reply-" + text.Length, sessionId = a.Id, sessionToken = a.Token, recipientSessionId = b.Id, text = "hello", replyTo = "m-answered", waitingFor = text }));
+            Assert.True(answered.GetProperty("conveniences").GetProperty("ack").GetProperty("ok").GetBoolean());
         }
         var source = host.Services.GetRequiredService<IRelayObservationSource>();
         WaitingSources? read = null;
