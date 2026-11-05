@@ -65,10 +65,7 @@ else
             {
                 <p class="connection-notice" role="status">@Connection.Notice</p>
             }
-            @if (View != "manager")
-            {
-                <ManagerControl Compact Sessions="@(Connection.Snapshot?.Sessions ?? [])" DefaultRepositoryId="@(Connection.Snapshot?.Sessions.FirstOrDefault()?.RepositoryId)" />
-            }
+            <ManagerControl Compact="@(View != "manager")" Sessions="@(Connection.Snapshot?.Sessions ?? [])" DefaultRepositoryId="@(Connection.Snapshot?.Sessions.FirstOrDefault()?.RepositoryId)" />
             @if (Connection.Snapshot is { } snapshot)
             {
                 <section class="relay-summary" aria-label="Relay summary">
@@ -88,7 +85,6 @@ else
                 @switch (View)
                 {
                     case "manager":
-                        <ManagerControl Sessions="@snapshot.Sessions" DefaultRepositoryId="@(snapshot.Sessions.FirstOrDefault()?.RepositoryId)" />
                         break;
                     case "analytics":
                         <AnalyticsView Snapshot="@snapshot" />
