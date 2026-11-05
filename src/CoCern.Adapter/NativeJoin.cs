@@ -13,6 +13,8 @@ internal sealed record NativeHookContext(string Provider, string NativeId, strin
 internal sealed class NativeJoin(string folder, AdapterOptions options, RelayForwarder forwarder) : IAsyncDisposable
 {
     private readonly CancellationTokenSource stopping = new();
+    // A chat's tool calls report as the model's; this binding's own checks do not, whichever process runs them. The native opening envelopes go untagged either way.
+    private readonly RelayForwarder modelCalls = forwarder.Tagged(CallOrigins.Mcp), ownChecks = forwarder.Tagged(CallOrigins.Node);
     internal string PrivateFolder => folder;
     internal AdapterOptions WakeOptions => BackgroundOptions(options);
     // The private waiter/watcher has a fixed inbox/status protocol and uses the same pin and credential.
@@ -142,7 +144,7 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
                 if (handle is not null)
                 {
                     // Verify the exact durable handle, never resume a nearby session by chat name or repo.
-                    var probe = await forwarder.ProbeNativeAsync(binding, cancel);
+                    var probe = await ownChecks.ProbeNativeAsync(binding, cancel);
                     if (!probe.Ok && probe.Version is not null && probe.Code == RelayErrorCodes.SessionUnknown) handle = null;
                     else if (!probe.Ok) throw new Refused(probe.Code);
                     else if (probe.Version is null || !SessionHandoff.IsSessionReply(RelayTools.GetStatus, JsonSerializer.SerializeToElement(new { sessionId = handle.SessionId }), probe))
@@ -256,8 +258,8 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
             if (definition.IsMutation && request is not null) payload["requestId"] = request;
             var arguments = RelayForwarder.WithOrigin(JsonSerializer.SerializeToElement(payload), background: false);
             if (tool == RelayTools.ControlRequest) arguments = CoordinationTools.WithOwnSession(arguments, handle.SessionId);
-            var reply = tool == RelayTools.CheckInbox ? await InboxWait.CheckAsync(forwarder, arguments, InboxWait.PollInterval, ct) :
-                await ConditionalRead.ForwardAsync(forwarder, tool, arguments, ct);
+            var reply = tool == RelayTools.CheckInbox ? await InboxWait.CheckAsync(modelCalls, arguments, InboxWait.PollInterval, ct) :
+                await ConditionalRead.ForwardAsync(modelCalls, tool, arguments, ct);
             if (reply.Ok && options.SignalR && tool == RelayTools.CheckInbox)
                 foreach (var entry in hints.Values.Where(entry => entry.Session == handle.SessionId)) entry.Keeper.ResetHint();
             return reply;

@@ -218,6 +218,7 @@ public static class CoordinationTools
 internal sealed class ChatCalls(RelayForwarder forwarder, SessionHints? hints, SessionHandoff? handoff, string requestScope, Func<string?>? workspace = null, LocalChatWake? localWake = null, string? wakeStatusRoot = null)
 {
     private readonly Func<string?> _workspace = workspace ?? (() => CoordinationTools.Workspace);
+    private readonly RelayForwarder _forwarder = forwarder.Tagged(CallOrigins.Mcp);
     private readonly Dictionary<string, (string Id, string Token)> _own = new(StringComparer.Ordinal);
     // Never evict: forgetting a binding could turn a retry into a new write under another session.
     private const int MaxImplicitRequests = 4096;
@@ -238,8 +239,8 @@ internal sealed class ChatCalls(RelayForwarder forwarder, SessionHints? hints, S
             return new(false, "implicit_request_capacity", JsonSerializer.SerializeToElement(new { guidance = "For a new write, supply your own sessionId and sessionToken. Reconcile an uncertain write in its original session." }));
         AdapterReply? originalReply = null;
         var reply = tool == RelayTools.CheckInbox
-            ? await InboxWait.CheckAsync(forwarder, arguments, InboxWait.PollInterval, cancellationToken)
-            : await ConditionalRead.ForwardAsync(forwarder, tool, arguments, cancellationToken, value => originalReply = value);
+            ? await InboxWait.CheckAsync(_forwarder, arguments, InboxWait.PollInterval, cancellationToken)
+            : await ConditionalRead.ForwardAsync(_forwarder, tool, arguments, cancellationToken, value => originalReply = value);
         if (!reply.Ok) return reply;
         Learn(tool, arguments, reply, suppliedToken);
         localWake?.Observe(tool, arguments, originalReply ?? reply);

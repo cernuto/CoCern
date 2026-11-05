@@ -1666,6 +1666,72 @@ public sealed class NodeTests : IDisposable
         Assert.Contains("top a-4 failed", held);
     }
 
+    /// <summary>What a hook leaves behind once it has printed <paramref name="ids"/> for this chat.</summary>
+    private void PrintedByHook(string chatId, params string[] ids) =>
+        WakeState.RecordPrinted(Path.Combine(DataDir, ClaudeWaiter.WaitersFolder, chatId + ".db"), WakeState.Key("repo", "s-claude"), ids);
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("{\"actionable\":1,\"top\":{\"id\":\"a-1\",\"k\":\"info\"},\"wake\":\"a-1\"}")]
+    public async Task A_waiter_that_finds_a_hook_printed_everything_does_not_wake_the_chat_with_no_new_messages(string? attention)
+    {
+        var (chatId, inbox) = PrintingChat();
+        inbox.Messages = ["m1"];
+        inbox.Attention = attention;
+        PrintedByHook(chatId, "m1");
+        var delivered = new List<string>();
+        var status = await ClaudeWaiter.RunAsync(DataDir, chatId, delivered.Add, TimeSpan.FromSeconds(2), CancellationToken.None, inbox, () => new NoHub(), new ManualClock(DateTimeOffset.UtcNow.AddMinutes(++_wakeMinutes)), printInbox: true, interval: TimeSpan.FromMilliseconds(50));
+        Assert.Empty(delivered);
+        Assert.Equal("timeout", status);
+        // The hub still hears the printed message reached the chat, so its info item closes and stops offering this wake.
+        Assert.Contains(inbox.InboxReads, read => read.Contains("\"seenMessageIds\":[\"m1\"]"));
+    }
+
+    [Fact]
+    public async Task An_empty_wake_keeps_the_waiter_armed_for_the_next_message()
+    {
+        var (chatId, inbox) = PrintingChat();
+        inbox.Messages = ["m1"];
+        PrintedByHook(chatId, "m1");
+        // New mail arrives once the read that finds nothing new has been answered.
+        inbox.OnFullRead = () => inbox.Messages = ["m1", "m2"];
+        var delivered = new List<string>();
+        var status = await ClaudeWaiter.RunAsync(DataDir, chatId, delivered.Add, TimeSpan.FromSeconds(20), CancellationToken.None, inbox, () => new NoHub(), new SteppingClock(DateTimeOffset.UtcNow.AddMinutes(++_wakeMinutes)), printInbox: true, interval: TimeSpan.FromMilliseconds(50));
+        Assert.Equal("queued", status);
+        Assert.StartsWith("- m2:", Assert.Single(MessageLines(Assert.Single(delivered))));
+    }
+
+    /// <summary>A minute later at every reading, so the rate limit never holds a second wake back within one waiter's run.</summary>
+    private sealed class SteppingClock(DateTimeOffset start) : TimeProvider
+    {
+        private long _minutes;
+        public override DateTimeOffset GetUtcNow() => start.AddMinutes(Interlocked.Increment(ref _minutes));
+    }
+
+    [Fact]
+    public async Task A_top_tier_item_still_wakes_a_chat_whose_mail_a_hook_printed()
+    {
+        var (chatId, inbox) = PrintingChat();
+        inbox.Messages = ["m1"];
+        inbox.Attention = "{\"actionable\":1,\"top\":{\"id\":\"a-1\",\"k\":\"blocked\"},\"wake\":\"a-1\"}";
+        PrintedByHook(chatId, "m1");
+        var output = await PrintedWake(chatId, inbox);
+        Assert.Empty(MessageLines(output));
+        Assert.Contains("top a-1 blocked", output);
+    }
+
+    [Fact]
+    public async Task A_stop_hook_whose_only_wake_was_empty_stays_silent_and_exits_zero()
+    {
+        var (chatId, inbox) = PrintingChat();
+        inbox.Messages = ["m1"];
+        PrintedByHook(chatId, "m1");
+        var hook = new StringWriter();
+        Assert.Equal(0, await StopHook.RunAsync(new StringReader($"{{ \"session_id\": \"{chatId}\" }}"), hook, DataDir, CancellationToken.None,
+            (folder, chat, deliver, _, ct) => ClaudeWaiter.RunAsync(folder, chat, deliver, TimeSpan.FromSeconds(2), ct, inbox, () => new NoHub(), printInbox: true, interval: TimeSpan.FromMilliseconds(50))));
+        Assert.Equal("", hook.ToString());
+    }
+
     [Theory]
     [InlineData("info", false)]
     [InlineData("tip", false)]

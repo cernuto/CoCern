@@ -100,6 +100,68 @@ public sealed class WakeState : IDisposable
             transaction.Commit();
         }
     }
+    /// <summary>How long a hook's ledger call waits for a waiter's write to finish; a hook must stay short, and these writes take milliseconds.</summary>
+    private const int LedgerBusySeconds = 1;
+
+    /// <summary>
+    /// Those of <paramref name="ids"/> whose text has already been handed to this route's chat, read from the database at <paramref name="path"/> on a connection of its own.
+    /// A waiter owns its state for the whole wait, across the chat's later turns, so an ordinary-turn hook could never open a <see cref="WakeState"/> to ask. The ownership
+    /// lock guards the wake reservations; the ledger is one small table that SQLite's own file locks keep consistent. A database not created yet, or from before the ledger, has printed nothing.
+    /// </summary>
+    internal static IReadOnlySet<string> ReadPrinted(string path, string route, IEnumerable<string> ids)
+    {
+        var printed = new HashSet<string>(StringComparer.Ordinal);
+        if (!File.Exists(path)) return printed;
+        using var connection = new SqliteConnection(LedgerConnection(path, SqliteOpenMode.ReadWrite));
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM printed WHERE route=$route AND message=$message";
+        command.Parameters.AddWithValue("$route", route);
+        var message = command.Parameters.AddWithValue("$message", "");
+        try
+        {
+            foreach (var id in ids)
+            {
+                message.Value = Key(id);
+                if ((long)command.ExecuteScalar()! > 0) printed.Add(id);
+            }
+        }
+        catch (SqliteException exception) when (exception.SqliteErrorCode == NoSuchTable) { }
+        return printed;
+    }
+
+    /// <summary>Records <paramref name="ids"/> as handed to this route's chat, the way <see cref="ReadPrinted"/> reads them: without the ownership lock, creating the database if no waiter has yet.</summary>
+    internal static void RecordPrinted(string path, string route, IEnumerable<string> ids)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
+        using var connection = new SqliteConnection(LedgerConnection(path, SqliteOpenMode.ReadWriteCreate));
+        connection.Open();
+        using var transaction = connection.BeginTransaction();
+        using (var create = connection.CreateCommand())
+        {
+            create.CommandText = "CREATE TABLE IF NOT EXISTS printed (route TEXT NOT NULL, message TEXT NOT NULL, PRIMARY KEY(route,message))";
+            create.ExecuteNonQuery();
+        }
+        using (var insert = connection.CreateCommand())
+        {
+            insert.CommandText = "INSERT OR IGNORE INTO printed(route,message) VALUES($route,$message)";
+            insert.Parameters.AddWithValue("$route", route);
+            var message = insert.Parameters.AddWithValue("$message", "");
+            foreach (var id in ids)
+            {
+                message.Value = Key(id);
+                insert.ExecuteNonQuery();
+            }
+        }
+        transaction.Commit();
+    }
+
+    /// <summary>SQLite's generic error, which is what reading a table that does not exist gives.</summary>
+    private const int NoSuchTable = 1;
+
+    private static string LedgerConnection(string path, SqliteOpenMode mode) =>
+        new SqliteConnectionStringBuilder { DataSource = path, Mode = mode, Pooling = false, DefaultTimeout = LedgerBusySeconds }.ToString();
+
     private long Scalar(string sql, string route, object? value = null)
     {
         using var command = Command(sql, route, value);
