@@ -195,7 +195,7 @@ public sealed class NodeState : IDisposable
         try
         {
             File.WriteAllText(temporary, json);
-            File.Move(temporary, path, overwrite: true);
+            TransientMove.Run(() => File.Move(temporary, path, overwrite: true));
         }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }
@@ -207,7 +207,7 @@ public sealed class NodeState : IDisposable
         try
         {
             using (var stream = CreatePrivateFile(temporary)) { stream.Write(content); stream.Flush(flushToDisk: true); }
-            File.Move(temporary, path, overwrite: true);
+            TransientMove.Run(() => File.Move(temporary, path, overwrite: true));
         }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }

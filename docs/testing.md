@@ -29,6 +29,6 @@ One command builds into isolated output and runs only that selection:
 ./scripts/Build-CoCern.ps1 -Selection artifacts/deploy-smoke-selection.json
 ```
 
-The runner bounds the entire check, preserves logs and a receipt, and refuses an unchanged repeat with the same selection. An empty test selection builds only; it never expands into an unfiltered test run. `-Publish` retains the Windows host and self-contained adapter packaging option after verification; it does not deploy or restart an installed service. Do not publish into a running app's output folders.
+The runner bounds the entire check, preserves logs and a receipt, and refuses an unchanged repeat with the same selection. A successful process exit is insufficient: each selected method must have executed and passed in the TRX evidence, with no skipped, missing or unselected methods. An empty test selection builds only; it never expands into an unfiltered test run. `-Publish` retains the Windows host and self-contained adapter packaging option after verification; it does not deploy or restart an installed service. Do not publish into a running app's output folders.
 
 Tests use disposable fixtures only. They must not change drive mappings, registry, user or client settings. KEEP covers actual authentication, token/provenance and route-binding boundaries, replay/data-loss fences and the minimal related startup checks. Presentation permutations, repeated catalog/shape assertions, timing thresholds and duplicate server fixtures are removed.
