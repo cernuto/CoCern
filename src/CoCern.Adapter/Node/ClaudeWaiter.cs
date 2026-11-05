@@ -47,10 +47,11 @@ public static class ClaudeWaiter
     }
 
     /// <summary>
-    /// A queued wake's text: the messages <paramref name="handle"/>'s session has not printed before, or <paramref name="prompt"/> if they cannot be read. It runs
-    /// still holding the state and pid file, so a hook that starts now can neither print these messages too nor keep this one from recording them.
+    /// A queued wake's text: the messages <paramref name="handle"/>'s session has not printed before, or <paramref name="prompt"/> if they cannot be read. An ordinary-turn hook
+    /// reads and records the same ledger while this runs, so the two can print one message twice in a narrow race, which costs one repeat and never loses it.
     /// </summary>
-    private static async Task DeliverPrintedAsync(string prompt, WakeState state, SessionHandle? handle, AdapterOptions? options, HttpMessageHandler? handler, Action<string> deliver, CancellationToken cancellationToken)
+    /// <returns>Whether anything was delivered. False is an empty wake (<see cref="IsEmptyWake"/>): the chat is left alone and the waiter goes on waiting.</returns>
+    private static async Task<bool> DeliverPrintedAsync(string prompt, WakeState state, SessionHandle? handle, AdapterOptions? options, HttpMessageHandler? handler, Action<string> deliver, CancellationToken cancellationToken)
     {
         // An attention line in the prompt names the waiting item; it is kept when the inbox replaces the prompt.
         var attention = prompt.Split('\n').FirstOrDefault(line => line.StartsWith(WakeReconciler.AttentionLinePrefix, StringComparison.Ordinal));
@@ -60,12 +61,22 @@ public static class ClaudeWaiter
             try { printed = await ReadInboxAsync(handle, options, state, handler, attention, cancellationToken); }
             catch (Microsoft.Data.Sqlite.SqliteException) { printed = null; }
         }
+        if (printed is not null && IsEmptyWake(printed, attention)) return false;
         deliver(printed?.Text ?? prompt);
-        if (printed is null) return;
+        if (printed is null) return true;
         // Only now the text is on its way: a record that fails costs one repeat, while one made too early would lose the message from later wakes.
         try { state.MarkPrinted(printed.Route, printed.Shown); }
         catch (Microsoft.Data.Sqlite.SqliteException) { }
+        return true;
     }
+
+    /// <summary>
+    /// Whether a wake has nothing to say: no message it has not printed, and no attention worth waking for. A waiter that got past its wake check finds this when an
+    /// ordinary-turn hook printed the mail first. A lesser item's pointer still counts when the inbox is otherwise empty, since then the item is the only news; next to
+    /// printed mail it is most likely that mail's own info item, whose seen report the hub had not yet taken when the waiter asked.
+    /// </summary>
+    private static bool IsEmptyWake(PrintedInbox printed, string? attention) =>
+        printed.Fresh == 0 && (attention is null || (printed.Earlier > 0 && !WakeReconciler.AttentionMatters(attention)));
 
     /// <summary>
     /// Returns once no waiter another client started is running for this chat, or after <paramref name="grace"/>. After an app restart the old
@@ -90,8 +101,11 @@ public static class ClaudeWaiter
     /// <summary>How many inbox pages a wake reads looking for messages it has not printed.</summary>
     private const int MaxInboxPages = 20;
 
-    /// <summary>A wake's text, and what to record once it has been delivered: <paramref name="Shown"/> are the messages printed in full, under <paramref name="Route"/>.</summary>
-    private sealed record PrintedInbox(string Text, string Route, IReadOnlyList<string> Shown);
+    /// <summary>
+    /// A wake's text, and what to record once it has been delivered: <paramref name="Shown"/> are the messages printed in full, under <paramref name="Route"/>.
+    /// <paramref name="Fresh"/> counts the messages the read found unprinted, <paramref name="Earlier"/> those it found printed already.
+    /// </summary>
+    private sealed record PrintedInbox(string Text, string Route, IReadOnlyList<string> Shown, int Fresh, int Earlier);
 
     /// <summary>The chat's messages not printed by an earlier wake as one compact block, or null when the inbox cannot be read.</summary>
     /// <param name="handle">The one session for the whole read and its report: a chat that moves meanwhile must not mix two inboxes' pages, or record one's messages under the other.</param>
@@ -137,7 +151,7 @@ public static class ClaudeWaiter
             }
             catch (Exception exception) when (exception is not OperationCanceledException) { /* The inbox is still printed. */ }
         }
-        return new(text, route, shown);
+        return new(text, route, shown, fresh.Count, earlier.Count);
     }
 
     /// <summary>One relay call as the chat's own session on the node's credentials, or null when the node or the chat's session is missing.</summary>
@@ -233,11 +247,11 @@ public static class ClaudeWaiter
                 new(new WakeRoute(handle.RepositoryId, "default", NodeState.SessionHandlePath(join.PrivateFolder, handle.SessionId), chat.ThreadId, Environment.MachineName),
                     new WakeSession(handle.SessionId, handle.SessionToken), NativeJoinBinding.ForDispatch(join.PrivateFolder, handle, new InboxWaitDispatcher(queued)))]);
         }
-        Func<WakeState, Task>? onQueued = printInbox ? state => DeliverPrintedAsync(prompt!, state, handle, join.WakeOptions, handler, deliver, ct) : null;
+        Func<WakeState, Task<bool>>? onQueued = printInbox ? state => DeliverPrintedAsync(prompt!, state, handle, join.WakeOptions, handler, deliver, ct) : null;
         return await WaitForHandleAsync(join.PrivateFolder, chat.ThreadId, join.WakeOptions, Targets, timeout, ct, handler, hubHandler, clock, interval, onQueued);
     }
 
-    private static async Task<string> WaitAsync(string nodeFolder, string claudeSessionId, Action<string> deliver, TimeSpan? timeout, CancellationToken cancellationToken, HttpMessageHandler? handler, Func<HttpMessageHandler>? hubHandler, TimeProvider? clock, TimeSpan? interval, Func<WakeState, Task>? onQueued = null)
+    private static async Task<string> WaitAsync(string nodeFolder, string claudeSessionId, Action<string> deliver, TimeSpan? timeout, CancellationToken cancellationToken, HttpMessageHandler? handler, Func<HttpMessageHandler>? hubHandler, TimeProvider? clock, TimeSpan? interval, Func<WakeState, Task<bool>>? onQueued = null)
     {
         var folder = Path.GetFullPath(nodeFolder);
         if (!ChatLocators.IsUuid(claudeSessionId)) throw new AdapterConfigurationException(ChatUsage);
@@ -254,8 +268,9 @@ public static class ClaudeWaiter
         return await WaitForHandleAsync(folder, threadId, options, Targets, timeout, cancellationToken, handler, hubHandler, clock, interval, onQueued);
     }
 
+    /// <param name="onQueued">Runs after a queued wake; false means it had nothing to deliver, so the wait goes on within the same <paramref name="timeout"/>.</param>
     private static async Task<string> WaitForHandleAsync(string folder, string threadId, AdapterOptions options, Func<CancellationToken, Task<IReadOnlyList<WakeTarget>>> targets,
-        TimeSpan? timeout, CancellationToken cancellationToken, HttpMessageHandler? handler, Func<HttpMessageHandler>? hubHandler, TimeProvider? clock, TimeSpan? interval, Func<WakeState, Task>? onQueued = null)
+        TimeSpan? timeout, CancellationToken cancellationToken, HttpMessageHandler? handler, Func<HttpMessageHandler>? hubHandler, TimeProvider? clock, TimeSpan? interval, Func<WakeState, Task<bool>>? onQueued = null)
     {
         var statePath = Path.Combine(folder, WaitersFolder, threadId + ".db");
         // One waiter per chat: the exclusive state is taken before the pid file is written, so a losing second waiter never touches the live one's file.
@@ -272,9 +287,16 @@ public static class ClaudeWaiter
             var written = WritePid(folder, threadId, self.Id, self.StartTime.ToUniversalTime());
             try
             {
-                var status = await WakeWatcher.RunAsync(runtime, targets, exitWhenQueued: true, timeout, cancellationToken, handler, clock);
-                if (status == "queued" && onQueued is not null) await onQueued(state);
-                return status;
+                // An empty wake must not end the wait: the later Stop hook that would re-arm may already have found this waiter alive and left, so the chat would sit idle with no
+                // waiter. Going round costs no busy loop, because the state remembers what woke this time and the next pass stays quiet until something new arrives.
+                var waited = Stopwatch.StartNew();
+                while (true)
+                {
+                    var left = timeout - waited.Elapsed;
+                    if (left <= TimeSpan.Zero) return "timeout";
+                    var status = await WakeWatcher.RunAsync(runtime, targets, exitWhenQueued: true, left, cancellationToken, handler, clock);
+                    if (status != "queued" || onQueued is null || await onQueued(state)) return status;
+                }
             }
             finally { RemoveIfUnchanged(PidPath(folder, threadId), written); }
         }
