@@ -724,6 +724,222 @@ public sealed class LocalWakeTests : IDisposable
         Assert.False(reply.Data!.Value.TryGetProperty("localWake", out _));
     }
 
+    private sealed class ProbeHandler : HttpMessageHandler
+    {
+        public string Mode = "ok";
+        public readonly System.Collections.Concurrent.ConcurrentQueue<(string Tool, bool Background, string? Session, string? Token)> Requests = new();
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            if (Volatile.Read(ref Mode) == "unreachable") { Requests.Enqueue((request.RequestUri!.Segments[^1], false, null, null)); throw new HttpRequestException("synthetic"); }
+            using var args = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(ct));
+            var data = args.RootElement;
+            var session = data.GetProperty("sessionId").GetString();
+            Requests.Enqueue((request.RequestUri!.Segments[^1], data.TryGetProperty("backgroundCall", out var background) && background.GetBoolean(), session, data.GetProperty("sessionToken").GetString()));
+            var ok = Mode != "denied";
+            var said = Mode == "other-session" ? "another-session" : session;
+            return new(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new { ok, code = ok ? "Ok" : "SessionDenied", dataJson = JsonSerializer.Serialize(new { sessionId = said }), version = 0 })) };
+        }
+    }
+
+    private sealed class ManualClock : TimeProvider
+    {
+        private long ticks = DateTimeOffset.UtcNow.UtcTicks;
+        public void Advance(TimeSpan by) => Interlocked.Add(ref ticks, by.Ticks);
+        public override DateTimeOffset GetUtcNow() => new(Interlocked.Read(ref ticks), TimeSpan.Zero);
+    }
+
+    /// <summary>An adapter after a restart: nothing observed in memory, only what is on disk.</summary>
+    private sealed class Restarted : IAsyncDisposable
+    {
+        public required LocalChatWake Wake { get; init; }
+        public required System.Collections.Concurrent.ConcurrentQueue<WakeTarget> Started { get; init; }
+        public required string StatusRoot { get; init; }
+        public Task Pass => Wake.FirstPass.WaitAsync(TimeSpan.FromSeconds(15));
+        public async ValueTask DisposeAsync() => await Wake.DisposeAsync();
+    }
+
+    private Restarted Restart(LocalWakeConnection connection, ProbeHandler hub, string? statusRoot = null, TimeProvider? clock = null, string? codex = "synthetic-codex", bool run = true)
+    {
+        var started = new System.Collections.Concurrent.ConcurrentQueue<WakeTarget>();
+        var transport = new NodeTransport { Locators = [], CodexExecutable = () => codex, CodexDispatcher = _ => new NoDispatch(), Clock = clock ?? TimeProvider.System };
+        var wake = new LocalChatWake(connection, transport, async (_, target, ct) => { started.Enqueue(target); await target.Dispatcher.QueueAsync(target.Route.ThreadId, "synthetic", ct); await Task.Delay(Timeout.Infinite, ct); }, statusRoot ?? StatusRoot, hub);
+        if (run) _ = wake.RunAsync(CancellationToken.None);
+        return new() { Wake = wake, Started = started, StatusRoot = statusRoot ?? StatusRoot };
+    }
+
+    private static SessionHandle CodexHandle(LocalWakeConnection connection, string session = "original-session", string? thread = null, DateTimeOffset? opened = null)
+    {
+        var handle = new SessionHandle(session, "private-session-token", "repo", "Codex", opened ?? DateTimeOffset.UtcNow, Chat: new("codex", thread ?? Guid.NewGuid().ToString()));
+        NodeState.WriteSessionHandle(connection.Folder, handle);
+        return handle;
+    }
+
+    [Fact]
+    public async Task A_restart_rearms_a_located_codex_handle_after_one_authenticated_background_read()
+    {
+        var connection = Connection();
+        var handle = CodexHandle(connection);
+        var path = NodeState.SessionHandlePath(connection.Folder, handle.SessionId);
+        var touched = DateTime.UtcNow.AddHours(-23);
+        File.SetLastWriteTimeUtc(path, touched);
+        var text = File.ReadAllText(path);
+        using var hub = new ProbeHandler();
+        await using var restarted = Restart(connection, hub);
+        await restarted.Pass;
+
+        var target = Assert.Single(restarted.Started);
+        Assert.Equal((handle.Chat!.ThreadId, handle.SessionId), (target.Route.ThreadId, target.Session.SessionId));
+        var request = Assert.Single(hub.Requests);
+        Assert.Equal((RelayTools.GetStatus, true, handle.SessionId, handle.SessionToken), request);
+        // Re-arming is not chat activity: a handle that keeps its age can still fall out of the limit.
+        Assert.Equal(touched, File.GetLastWriteTimeUtc(path));
+        Assert.Equal(text, File.ReadAllText(path));
+        var status = Status();
+        Assert.Equal((1, 1), (status.GetProperty("observed").GetInt32(), status.GetProperty("watchers").GetInt32()));
+        Assert.Equal(LocalWakeCodes.Watching, LocalWakeStatus.LastCode(StatusRoot));
+        Assert.DoesNotContain(handle.SessionToken, File.ReadAllText(OwnStatusFile));
+    }
+
+    [Theory]
+    [InlineData("denied")]
+    [InlineData("other-session")]
+    public async Task A_failed_or_unproven_read_does_not_rearm_and_is_not_repeated(string mode)
+    {
+        var connection = Connection();
+        CodexHandle(connection);
+        using var hub = new ProbeHandler { Mode = mode };
+        await using var restarted = Restart(connection, hub);
+        await restarted.Pass;
+        Assert.Empty(restarted.Started);
+        Assert.Single(hub.Requests);
+        Assert.Equal(0, Status().GetProperty("observed").GetInt32());
+        Assert.Equal(1, Status().GetProperty("codeCounts").GetProperty("rearm_refused").GetInt32());
+        Assert.Null(LocalWakeStatus.Problem(StatusRoot));
+    }
+
+    [Fact]
+    public async Task A_stale_handle_is_not_read_or_rearmed()
+    {
+        var connection = Connection();
+        var handle = CodexHandle(connection, opened: DateTimeOffset.UtcNow.AddDays(-2));
+        File.SetLastWriteTimeUtc(NodeState.SessionHandlePath(connection.Folder, handle.SessionId), DateTime.UtcNow - LocalChatWake.RearmWindow - TimeSpan.FromMinutes(1));
+        using var hub = new ProbeHandler();
+        await using var restarted = Restart(connection, hub);
+        await restarted.Pass;
+        Assert.Empty(hub.Requests);
+        Assert.Empty(restarted.Started);
+    }
+
+    [Fact]
+    public async Task An_unlocated_or_unmapped_handle_is_not_read_or_rearmed()
+    {
+        var connection = Connection();
+        NodeState.WriteSessionHandle(connection.Folder, new("not-located", "private-session-token", "repo", "Codex", DateTimeOffset.UtcNow));
+        NodeState.WriteSessionHandle(connection.Folder, new("unmapped-session", "private-session-token", "repo", "Codex", DateTimeOffset.UtcNow, Unmapped: true));
+        // The writer never stores both, so a file holding a chat and unmapped:true can only come from elsewhere. It still counts as unmapped.
+        var both = CodexHandle(connection, "both-session");
+        var path = NodeState.SessionHandlePath(connection.Folder, both.SessionId);
+        var node = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path))!.AsObject();
+        node["unmapped"] = true;
+        File.WriteAllText(path, node.ToJsonString());
+        Assert.True(NodeState.ReadSessionHandle(path)!.Unmapped);
+        using var hub = new ProbeHandler();
+        await using var restarted = Restart(connection, hub);
+        await restarted.Pass;
+        Assert.Empty(hub.Requests);
+        Assert.Empty(restarted.Started);
+    }
+
+    [Fact]
+    public async Task A_claude_handle_is_not_read_or_rearmed()
+    {
+        var connection = Connection();
+        var chat = new ChatLocation("claude", Guid.NewGuid().ToString());
+        NodeState.WriteSessionHandle(connection.Folder, new("claude-session", "private-session-token", "repo", "Claude", DateTimeOffset.UtcNow, Client: chat, Chat: chat));
+        using var hub = new ProbeHandler();
+        await using var restarted = Restart(connection, hub);
+        await restarted.Pass;
+        Assert.Empty(hub.Requests);
+        Assert.Empty(restarted.Started);
+    }
+
+    [Fact]
+    public async Task A_claude_adapter_never_rearms_a_codex_handle_it_does_not_own()
+    {
+        var chat = new ChatLocation("claude", Guid.NewGuid().ToString());
+        var connection = Connection(new AdapterOptions("http://127.0.0.1:5271/", Secret) { ExportedChat = chat });
+        CodexHandle(connection);
+        using var hub = new ProbeHandler();
+        await using var restarted = Restart(connection, hub);
+        await restarted.Pass;
+        Assert.Empty(hub.Requests);
+        Assert.Empty(restarted.Started);
+        Assert.Equal(0, Status().GetProperty("observed").GetInt32());
+    }
+
+    [Fact]
+    public async Task An_adapter_with_no_exported_chat_rearms_every_recent_codex_handle_it_can_authenticate()
+    {
+        var connection = Connection();
+        var first = CodexHandle(connection, "first-session");
+        var second = CodexHandle(connection, "second-session");
+        using var hub = new ProbeHandler();
+        await using var restarted = Restart(connection, hub);
+        await restarted.Pass;
+        Assert.Equal(new[] { first.SessionId, second.SessionId }.Order(), restarted.Started.Select(x => x.Session.SessionId).Order());
+    }
+
+    [Fact]
+    public async Task Only_the_newest_session_of_a_chat_is_rearmed()
+    {
+        var connection = Connection();
+        var thread = Guid.NewGuid().ToString();
+        CodexHandle(connection, "older-session", thread, DateTimeOffset.UtcNow.AddHours(-2));
+        var newer = CodexHandle(connection, "newer-session", thread, DateTimeOffset.UtcNow.AddHours(-1));
+        using var hub = new ProbeHandler();
+        await using var restarted = Restart(connection, hub);
+        await restarted.Pass;
+        Assert.Equal(newer.SessionId, Assert.Single(restarted.Started).Session.SessionId);
+        Assert.Equal(newer.SessionId, Assert.Single(hub.Requests).Session);
+    }
+
+    [Fact]
+    public async Task An_unreachable_hub_stops_after_one_read_and_retries_on_the_timer()
+    {
+        var connection = Connection();
+        CodexHandle(connection, "first-session");
+        CodexHandle(connection, "second-session");
+        var clock = new ManualClock();
+        using var hub = new ProbeHandler { Mode = "unreachable" };
+        await using var restarted = Restart(connection, hub, clock: clock);
+        await restarted.Pass;
+        Assert.Empty(restarted.Started);
+        Assert.Single(hub.Requests);
+        Assert.Equal(1, Status().GetProperty("codeCounts").GetProperty("rearm_hub_unavailable").GetInt32());
+
+        Volatile.Write(ref hub.Mode, "ok");
+        clock.Advance(LocalChatWake.RearmRetry + TimeSpan.FromSeconds(1));
+        await WaitFor(() => restarted.Started.Count == 2);
+    }
+
+    [Fact]
+    public async Task Two_restarted_adapters_dispatch_once_and_the_survivor_takes_over()
+    {
+        var connection = Connection();
+        var handle = CodexHandle(connection);
+        using var hub = new ProbeHandler();
+        var firstAdapter = Restart(connection, hub, Path.Combine(root, "first-status"));
+        await firstAdapter.Pass;
+        await using var secondAdapter = Restart(connection, hub, Path.Combine(root, "second-status"));
+        await secondAdapter.Pass;
+        Assert.Equal(handle.Chat!.ThreadId, Assert.Single(firstAdapter.Started).Route.ThreadId);
+        Assert.Empty(secondAdapter.Started);
+        Assert.Null(LocalWakeStatus.Problem(secondAdapter.StatusRoot));
+
+        await firstAdapter.DisposeAsync();
+        await WaitFor(() => secondAdapter.Started.Count == 1);
+    }
+
     private LocalWakeConnection Connection(AdapterOptions? options = null) => LocalWakeConnection.Create(options ?? new("http://127.0.0.1:5271/", Secret, admin: true), TokenFile(), Path.Combine(root, "cache"))!;
     private static JsonElement Arguments(string session = "original-session") => JsonSerializer.SerializeToElement(new { repositoryId = "repo", sessionId = session, sessionToken = "private-session-token" });
 

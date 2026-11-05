@@ -18,16 +18,24 @@ public sealed class LocalChatWake : IAsyncDisposable
     private Task? running;
     private readonly string? statusRoot;
     private readonly TaskCompletionSource firstPass = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly HttpMessageHandler? hub;
+    private readonly HashSet<string> rearmRefused = new(StringComparer.Ordinal);
+    private DateTimeOffset? rearmAt = DateTimeOffset.MinValue;
     private string? observeProblem;
     private string? watchFailure;
     internal LocalWakeConnection Connection { get; }
     /// <summary>Completes when the loop has finished its first pass.</summary>
     internal Task FirstPass => firstPass.Task;
+    /// <summary>How recently a chat must have called the hub for a restarted adapter to watch it again, so abandoned chats are not woken. A handle is touched at most hourly.</summary>
+    internal static readonly TimeSpan RearmWindow = TimeSpan.FromHours(24);
+    /// <summary>How long a restarted adapter waits before reading again when the hub could not be reached, as when both restart together.</summary>
+    internal static readonly TimeSpan RearmRetry = TimeSpan.FromSeconds(60);
 
-    internal LocalChatWake(LocalWakeConnection connection, NodeTransport? transport = null, Func<WakeRuntime, WakeTarget, CancellationToken, Task>? watch = null, string? statusRoot = null)
+    internal LocalChatWake(LocalWakeConnection connection, NodeTransport? transport = null, Func<WakeRuntime, WakeTarget, CancellationToken, Task>? watch = null, string? statusRoot = null, HttpMessageHandler? hub = null)
     {
         // Beside the connection folders, so a status file always lands in the root this connection itself lives under.
         this.statusRoot = statusRoot ?? Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(connection.Folder));
+        this.hub = hub;
         Connection = connection;
         this.transport = transport ?? new();
         chats = new(connection.Folder, this.transport.Locators, this.transport.Clock, NodeChats.DefaultLocateWindow, NodeChats.DefaultBudget);
@@ -118,6 +126,37 @@ public sealed class LocalChatWake : IAsyncDisposable
 
     public Task RunAsync(CancellationToken ct) => running ??= LoopAsync(ct);
 
+    /// <summary>
+    /// <c>observed</c> lives in memory, so after a restart an idle chat has no watcher until it next calls the hub. This re-arms located Codex handles from disk,
+    /// each only after one session-authenticated background read succeeds: the same rule as <see cref="Observe"/>, and the read neither touches the handle nor writes anything.
+    /// Two adapters may both re-arm one chat; the exclusive state file in <see cref="WatchAsync"/> lets one dispatch.
+    /// </summary>
+    private async Task RearmAsync(CancellationToken ct)
+    {
+        var now = transport.Clock.GetUtcNow();
+        if (rearmAt is not { } due || now < due) return;
+        rearmAt = now + RearmRetry;
+        var pending = NodeState.ReadSessionHandles(Connection.Folder).Where(x => ShouldRearm(x, now)).OrderByDescending(x => x.OpenedAt)
+            .DistinctBy(x => x.Chat!.ThreadId).Take(NodeChats.MaxChats).ToArray();
+        if (pending.Length == 0) { rearmAt = null; return; }
+        using var http = new HttpClient(hub ?? RelayForwarder.CreateHandler(Connection.Options), disposeHandler: hub is null) { Timeout = TimeSpan.FromSeconds(15) };
+        var forwarder = new RelayForwarder(http, Connection.Options);
+        foreach (var handle in pending)
+        {
+            var reply = await forwarder.ProbeHandleAsync(handle, ct);
+            // No version means the hub never answered, which says nothing about this session, and the rest would only wait out the same timeout.
+            if (reply is { Ok: false, Version: null }) { Report(LocalWakeCodes.RearmHubUnavailable); return; }
+            if (reply.Ok && reply.Version is not null && SessionHandoff.IsSessionReply(RelayTools.GetStatus, JsonSerializer.SerializeToElement(new { sessionId = handle.SessionId }), reply))
+                observed.TryAdd(handle.SessionId, 0);
+            else { rearmRefused.Add(handle.SessionId); Report(LocalWakeCodes.RearmRefused); }
+        }
+        rearmAt = null;
+    }
+
+    private bool ShouldRearm(SessionHandle handle, DateTimeOffset now) => handle is { Chat.Provider: ChatProviders.Codex, Unmapped: false } && OwnsNative(handle) &&
+        !observed.ContainsKey(handle.SessionId) && !rearmRefused.Contains(handle.SessionId) &&
+        now - new DateTimeOffset(File.GetLastWriteTimeUtc(NodeState.SessionHandlePath(Connection.Folder, handle.SessionId)), TimeSpan.Zero) <= RearmWindow;
+
     private async Task LoopAsync(CancellationToken ct)
     {
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(ct, stopping.Token);
@@ -129,6 +168,7 @@ public sealed class LocalChatWake : IAsyncDisposable
                 try
                 {
                     chats.Read(_ => true); // The existing bounded locator verifies native identity before a Codex route is used.
+                    await RearmAsync(lifetime.Token);
                     var native = NativeJoinBinding.DispatchSnapshot(Connection.Folder).Where(x => x.Chat is { Provider: ChatProviders.Codex }).ToArray();
                     var targets = native.Concat(NodeState.ReadSessionHandles(Connection.Folder).Where(x => observed.ContainsKey(x.SessionId) && OwnsNative(x) &&
                         x.Chat is { Provider: ChatProviders.Codex } && !native.Any(n => n.Chat == x.Chat))).GroupBy(x => x.Chat!.ThreadId)
