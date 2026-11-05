@@ -29,6 +29,8 @@ internal interface IEditClaimLifecycleTransport
     Task<AdapterReply> ReadAsync(string relativePath, long generation);
     /// <summary>Gives back the fence of a renewal that can never be sent again. True when nothing is left to do; false means the outcome is unconfirmed, and the caller keeps the obligation.</summary>
     Task<bool> RetireRenewalAsync(string relativePath, long generation, string invocation);
+    /// <summary>Gives back acquire and release fences only after the ledger has permanently refused this released intent's replay. False keeps its receipt for retry.</summary>
+    Task<bool> RetireSettledAsync(string relativePath, long generation, string acquireInvocation);
 }
 
 /// <summary>The sidecar beside the ledger, under the same repository/session/generation/checkout partition, so a saved attempt only ever correlates within its own native generation.</summary>
@@ -199,7 +201,6 @@ internal sealed class EditClaimLifecycle(EditClaimLedger ledger, EditClaimLifecy
         {
             // Null is uncertainty about every obligation, never an empty set of them.
             if (ledger.Snapshot() is not { } snapshot || await store.ReadAsync(ct) is not { } document) return now;
-            foreach (var settled in snapshot.Where(intent => intent.Outcome == "released")) ledger.RetireReleased(settled.Id);
             foreach (var resource in HeldLeases(snapshot).GroupBy(held => held.Lease.ResourceId, StringComparer.Ordinal))
             {
                 var current = resource.Max(held => held.Lease.Generation!.Value);
@@ -208,6 +209,7 @@ internal sealed class EditClaimLifecycle(EditClaimLedger ledger, EditClaimLifecy
                     await SettleClaimAsync(older, resource.Key, older.Key, ct);
                 await SweepClaimAsync(resource.Key, current, resource.Where(held => held.Lease.Generation == current).ToArray(), document, ct);
             }
+            await RetireReleasedAsync(ct);
             return await FinishAsync(ct);
         }
     }
@@ -343,7 +345,9 @@ internal sealed class EditClaimLifecycle(EditClaimLedger ledger, EditClaimLifecy
             foreach (var row in document.Claims.Where(row => live.Contains((row.RelativePath, row.Generation))))
                 if (row.LeaseUntil - RenewWithin is var next && (due is null || next < due)) due = next;
         }, ct);
-        return live.Count == 0 ? null : due ?? now;
+        var retirementPending = remaining.Any(intent => intent.Outcome == "released");
+        if (retirementPending && (due is null || now + RenewWithin < due)) due = now + RenewWithin;
+        return live.Count == 0 && !retirementPending ? null : due ?? now;
     }
 
     // No saved attempt means a PRE that never finished publishing, so it counts as open.
@@ -398,7 +402,26 @@ internal sealed class EditClaimLifecycle(EditClaimLedger ledger, EditClaimLifecy
             if (ledger.Read(id) is not { } intent) continue;
             var targets = intent.Targets.Select(target => target.ResourceId == path && target.Generation == generation ? target with { Outcome = "released" } : target).ToArray();
             var whole = targets.All(target => target.Outcome == "released");
-            if (ledger.Save(intent with { Targets = targets, Outcome = whole ? "released" : intent.Outcome }) && whole) ledger.RetireReleased(id);
+            ledger.Save(intent with { Targets = targets, Outcome = whole ? "released" : intent.Outcome });
+        }
+    }
+
+    /// <summary>Refuses replay durably before giving back any acquire/release fence. Receipts survive crashes and failed deletions until every exact fence is confirmed retired.</summary>
+    private async Task RetireReleasedAsync(CancellationToken ct)
+    {
+        // PRE holds this same gate through its calls and published attempt, so no stale guard can be in flight while its fences disappear.
+        await using var gate = await store.DecisionGateAsync(SweepDecisionWait, ct);
+        if (gate is null || ledger.Snapshot() is not { } snapshot) return;
+        foreach (var intent in snapshot.Where(intent => intent.Outcome == "released"))
+        {
+            if (!ledger.RetireReleased(intent.Id, keepReceipt: true)) continue;
+            var confirmed = true;
+            foreach (var lease in intent.Targets)
+            {
+                if (!await transport.RetireSettledAsync(lease.ResourceId, lease.Generation!.Value, lease.RequestId))
+                { confirmed = false; break; }
+            }
+            if (confirmed) ledger.RetireReleased(intent.Id);
         }
     }
 

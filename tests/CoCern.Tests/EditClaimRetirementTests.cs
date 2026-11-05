@@ -19,6 +19,14 @@ public sealed class EditClaimRetirementTests
             Assert.True(ledger.Save(held));
             Assert.False(ledger.RetireReleased(held.Id));
             Assert.True(ledger.Save(held with { Outcome = "released", Targets = [held.Targets[0] with { Outcome = "released" }] }));
+            Assert.True(ledger.RetireReleased(held.Id, keepReceipt: true));
+            // The permanent refusal is committed before any fence goes, while the exact invocation identities stay for cleanup after a restart.
+            var pending = new EditClaimLedger(directory);
+            Assert.Equal("old-acquire", pending.Read(held.Id)!.Targets[0].RequestId);
+            Assert.False(pending.Save(held));
+            var pendingTransport = new NeverCalled();
+            Assert.False((await new EditClaimGuard(pending, pendingTransport).AcquireAsync(held.Id, ["file.cs"])).Abstain);
+            Assert.Equal(0, pendingTransport.Calls);
             Assert.True(ledger.RetireReleased(held.Id));
             var unknown = new EditClaimIntent("unknown-edit", [new("other.cs", "uncertain-acquire", null, true, "unknown")], "unknown");
             Assert.True(ledger.Save(unknown));

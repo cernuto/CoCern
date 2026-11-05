@@ -80,6 +80,14 @@ internal sealed class NativeEditClaims(string privateDirectory, string protected
         public Task<bool> RetireRenewalAsync(string relativePath, long generation, string invocation) =>
             join.RetireRenewalFenceAsync(context, repositoryId, expectedGeneration, invocation, JsonSerializer.SerializeToElement(Arguments(relativePath, generation, null, EditClaimLifecycle.LeaseSeconds)), cancellationToken);
 
+        public async Task<bool> RetireSettledAsync(string relativePath, long generation, string acquireInvocation) =>
+            await RetireAsync(RelayTools.ClaimAcquire, relativePath, null, acquireInvocation)
+            && await RetireAsync(RelayTools.ClaimRelease, relativePath, generation, acquireInvocation + "-release")
+            && await RetireAsync(RelayTools.ClaimRelease, relativePath, generation, acquireInvocation + "-clean-release");
+
+        private Task<bool> RetireAsync(string tool, string path, long? generation, string invocation) =>
+            join.RetireClaimFenceAsync(context, repositoryId, expectedGeneration, invocation, tool, JsonSerializer.SerializeToElement(Arguments(path, generation, null, null)), cancellationToken);
+
         private static JsonObject Arguments(string path, long? generation, long? confirmGeneration, int? leaseSeconds)
         {
             var args = new JsonObject { ["filePath"] = path };

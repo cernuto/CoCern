@@ -74,10 +74,20 @@ public sealed class EditClaimLifecycleTests
         Assert.Equal(4, fixture.Transport.RetiredRenewals.Count);
         Assert.Equal("held", fixture.Ledger.Read("edit-1")!.Outcome);
         fixture.Transport.RetireFails = false;
-        await fixture.Lifecycle.SweepAsync(default);
+        fixture.Transport.SettledRetireFails = true;
+        Assert.NotNull(await fixture.Lifecycle.SweepAsync(default));
         Assert.Single(fixture.Transport.Releases);
         Assert.Equal("acquire-1-renew-4", fixture.Transport.RetiredRenewals[^1]);
-        Assert.NotEqual("held", fixture.Ledger.Read("edit-1")?.Outcome);
+        Assert.Equal("released", fixture.Ledger.Read("edit-1")!.Outcome);
+        Assert.DoesNotContain("acquire-1", fixture.Transport.RetiredClaims);
+
+        // A failed acquire/release fence retirement survives a lifecycle restart, without replaying the release.
+        fixture.Transport.SettledRetireFails = false;
+        var restarted = new EditClaimLifecycle(fixture.Ledger, fixture.Store, fixture.Physical, fixture.Transport, fixture.Clock);
+        Assert.Null(await restarted.SweepAsync(default));
+        Assert.Null(fixture.Ledger.Read("edit-1"));
+        Assert.Contains("acquire-1", fixture.Transport.RetiredClaims);
+        Assert.Single(fixture.Transport.Releases);
     }
 
     [Fact]
@@ -109,6 +119,7 @@ public sealed class EditClaimLifecycleTests
         await fixture.Lifecycle.SweepAsync(default);
         Assert.Equal(new[] { "acquire-1-clean-release" }, fixture.Transport.Releases);
         Assert.Equal("held", fixture.Ledger.Read("edit-1")!.Outcome);
+        Assert.DoesNotContain("acquire-1", fixture.Transport.RetiredClaims);
 
         fixture.Physical.Dirt = EditClaimDirt.Dirty;
         await fixture.Lifecycle.SweepAsync(default);
@@ -253,7 +264,9 @@ public sealed class EditClaimLifecycleTests
         internal List<string> Renewals { get; } = [];
         internal List<string> Releases { get; } = [];
         internal List<string> RetiredRenewals { get; } = [];
+        internal List<string> RetiredClaims { get; } = [];
         internal bool RetireFails { get; set; }
+        internal bool SettledRetireFails { get; set; }
         internal AdapterReply ReleaseReply { get; set; } = new(false, "hub_timeout");
         internal AdapterReply ReadReply { get; set; } = new(false, "hub_timeout");
 
@@ -275,6 +288,12 @@ public sealed class EditClaimLifecycleTests
         {
             if (!RetireFails) RetiredRenewals.Add(invocation);
             return Task.FromResult(!RetireFails);
+        }
+
+        public Task<bool> RetireSettledAsync(string relativePath, long generation, string acquireInvocation)
+        {
+            if (!SettledRetireFails) RetiredClaims.Add(acquireInvocation);
+            return Task.FromResult(!SettledRetireFails);
         }
     }
 }

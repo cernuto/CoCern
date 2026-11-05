@@ -35,6 +35,8 @@ internal sealed class EditClaimLedger(string privateDirectory)
             var document = Load(path);
             if (document.Intents.TryGetValue(intent.Id, out var prior))
             {
+                // Released receipts are terminal, including while their mutation fences are still being retired.
+                if (prior.Outcome == "released") return false;
                 if (prior.Targets.Count != intent.Targets.Count) return false;
                 for (var i = 0; i < prior.Targets.Count; i++)
                 {
@@ -73,7 +75,8 @@ internal sealed class EditClaimLedger(string privateDirectory)
         catch (Exception error) when (Unavailable(error)) { return null; }
     }
 
-    public bool RetireReleased(string intentId)
+    /// <summary>Commits permanent replay refusal first; keepReceipt retains the exact fence identities until their cleanup is confirmed.</summary>
+    public bool RetireReleased(string intentId, bool keepReceipt = false)
     {
         if (!Bounded(intentId, 128)) return false;
         try
@@ -84,9 +87,9 @@ internal sealed class EditClaimLedger(string privateDirectory)
             var document = Load(path, allowMissing: false);
             if (!document.Intents.TryGetValue(intentId, out var intent)) return WasRetired(document.Retired!, intentId);
             if (intent.Outcome != "released" || intent.Targets.Any(target => target.Outcome != "released" || target.Generation is not > 0)) return false;
-            document.Intents.Remove(intentId);
+            if (!keepReceipt) document.Intents.Remove(intentId);
             foreach (var bit in RetiredBits(intentId)) document.Retired![bit / 8] |= (byte)(1 << (bit % 8));
-            // Removal and the permanent refusal marker commit together. A failure leaves the old full receipt intact.
+            // A failure leaves the old full receipt intact. Fence cleanup is permitted only after this succeeds.
             return Write(root, path, document);
         }
         catch (Exception error) when (Unavailable(error)) { return false; }

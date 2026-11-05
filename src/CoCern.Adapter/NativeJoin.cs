@@ -257,15 +257,20 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
     /// Gives back the fence of a claim renewal the lifecycle has moved past, so continuous renewal holds one slot per dirty file. Only claim_renew, and only a private file matching this
     /// binding generation, session and these arguments. No hub traffic. True when nothing is left to do: the file has gone, or it isn't this renewal's and must stay, which retrying can't change. False leaves the file and means ask again.
     /// </summary>
-    internal async Task<bool> RetireRenewalFenceAsync(NativeHookContext context, string repositoryId, string expectedGeneration, string invocation, JsonElement args, CancellationToken ct)
+    internal Task<bool> RetireRenewalFenceAsync(NativeHookContext context, string repositoryId, string expectedGeneration, string invocation, JsonElement args, CancellationToken ct) =>
+        RetireClaimFenceAsync(context, repositoryId, expectedGeneration, invocation, RelayTools.ClaimRenew, args, ct);
+
+    /// <summary>Only the lifecycle calls this after its durable retirement proof. A missing or mismatched fence is done; an unavailable exact fence stays owed.</summary>
+    internal async Task<bool> RetireClaimFenceAsync(NativeHookContext context, string repositoryId, string expectedGeneration, string invocation, string tool, JsonElement args, CancellationToken ct)
     {
+        if (tool is not (RelayTools.ClaimAcquire or RelayTools.ClaimRenew or RelayTools.ClaimRelease)) return false;
         try
         {
             await using var binding = await NativeJoinBinding.AcquireAsync(folder, context.Provider, context.NativeId, Environment.MachineName, repositoryId, context.Cwd, ct, existingOnly: true);
             // A ledger is partitioned by generation, so one from an older generation has no further use for this binding's fences.
             if (binding.Generation != expectedGeneration) return true;
             if (binding.CurrentHandle is not { } handle) return false;
-            _ = MutationFence(binding, handle, invocation, RelayTools.ClaimRenew, args, reserve: false);
+            _ = MutationFence(binding, handle, invocation, tool, args, reserve: false);
             File.Delete(FencePath(binding, invocation));
             return true;
         }
