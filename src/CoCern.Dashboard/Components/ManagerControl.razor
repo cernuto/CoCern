@@ -53,7 +53,8 @@ else
         {
             @if (Selection.Current is not { } current)
             {
-                <p>No manager selected</p>
+                <p>No manager is currently appointed in CoCern.</p>
+                <p class="close-sessions-note">A chat's name does not appoint it. Choose the exact chat below to record a manager selection.</p>
             }
             else
             {
@@ -69,7 +70,7 @@ else
                 <option value="">Choose a session</option>
                 @foreach (var session in Sessions)
                 {
-                    <option value="@session.SessionId">@session.Label · @session.SessionId · @session.RepositoryId</option>
+                    <option value="@session.SessionId">@session.Label · @(string.IsNullOrWhiteSpace(session.MachineName) ? (string.IsNullOrWhiteSpace(session.MachineId) ? "PC not reported" : session.MachineId) : session.MachineName) · @session.SessionId · @session.RepositoryId</option>
                 }
             </select>
         </div>
