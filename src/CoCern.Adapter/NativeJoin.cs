@@ -287,18 +287,13 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
                     if (Directory.Exists(directory))
                     foreach (var file in Directory.EnumerateFiles(directory, "*.json").Take(512))
                     {
-                        var stale = false;
                         try
                         {
                             if (!NodeState.IsPrivateFile(file) || new FileInfo(file).Length > 65536) continue;
                             var intent = JsonSerializer.Deserialize<Intent>(File.ReadAllBytes(file));
                             if (intent is null || Path.GetFileName(file) != NativeCheckout.Hash(JsonSerializer.Serialize(intent with { Repository = null })) + ".json") continue;
-                            // An intent saved before roots were physical is named for its old spelling. EnsureBoundAsync works under the physical name, so nothing else would ever remove this file.
-                            stale = NativeCheckout.Physical(intent.Cwd) != intent.Cwd;
                             await EnsureBoundAsync(new(intent.Provider, intent.NativeId, intent.Cwd), null, cancel, retry: false);
-                            if (stale) File.Delete(file);
                         }
-                        catch (Refused error) when (stale && !Transient(error.Code)) { File.Delete(file); }
                         catch (OperationCanceledException) when (!cancel.IsCancellationRequested) { }
                         catch (Exception error) when (error is IOException or ArgumentException or UnauthorizedAccessException or JsonException) { }
                     }
