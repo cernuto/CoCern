@@ -335,6 +335,10 @@ internal static class ToolSchemas
         }
         if (tool is RelayTools.TaskUpdate or RelayTools.TaskClaim or RelayTools.ActionReport or RelayTools.CheckInbox)
             properties["presentStanding"] = new { type = "boolean", description = "Optional: offer one Standing question during direct human interaction; confers no authority." };
+        if (tool is RelayTools.ClaimAcquire or RelayTools.ClaimRenew or RelayTools.ClaimRelease)
+            properties["filePath"] = new { type = "string", minLength = 1, maxLength = 512, description = "Canonical relative file path from the native adapter's physical proof, instead of resourceId. Requires authenticated protected checkout scope; never supplies machine or root." };
+        if (tool == RelayTools.ClaimAcquire)
+            properties["confirmGeneration"] = new { type = "integer", minimum = 1, description = "With filePath only: fresh read-only confirmation of this generation and at least 15 seconds of remaining lease; never acquires or renews." };
         return properties;
     }
 

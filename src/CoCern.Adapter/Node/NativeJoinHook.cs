@@ -131,6 +131,7 @@ internal static class NativeJoinHook
                     return await StopHook.RunNativeAsync(new StringReader(text), error, join, ct, ownerGone: OwningProcess.WaitUntilGoneAsync);
                 case "PreToolUse":
                     var name = ChatLocators.Text(root, "tool_name");
+                    if (NativeEditHook.Enabled && NativeEditHook.IsEdit(name)) return await NativeEditHook.RunAsync(join, capture, root, error, ct);
                     const string prefix = "mcp__cocern__";
                     if (name is null || !name.StartsWith(prefix, StringComparison.Ordinal)) return 0;
                     recognized = true;
