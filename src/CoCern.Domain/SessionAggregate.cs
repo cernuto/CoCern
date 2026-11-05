@@ -409,15 +409,17 @@ internal static class SessionAggregate
 
     private static RelayReply Acknowledge(AggregateContext context, SessionState state)
     {
-        var ids = context.Args["messageIds"] as JsonArray ?? new JsonArray(Text(context.Args, "messageId"));
+        var ids = Strings(context.Args["messageIds"] as JsonArray ?? new JsonArray(Text(context.Args, "messageId"))).ToArray();
+        // The hub's own flag for a reply's replyTo: an ID the inbox does not hold now is left alone and never recorded, so its delivery still lands.
+        if (Flag(context.Args, "heldOnly")) ids = ids.Where(id => state.Inbox.Holds(id)).ToArray();
         var acknowledged = 0;
         var acked = state.Acked;
-        foreach (var id in Strings(ids))
+        foreach (var id in ids)
         {
             if (state.Inbox.Remove(id)) acknowledged++;
             acked.Add(id, context.Now);
         }
-        SessionAttention.CloseMessages(state, Strings(ids), context.Now);
+        SessionAttention.CloseMessages(state, ids, context.Now);
         return Ok(new { acknowledged });
     }
 
