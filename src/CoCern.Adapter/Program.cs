@@ -61,6 +61,7 @@ try
             ? await NativeJoinHook.RunAsync(args[1], Console.In, output, error, join, stopping.Token)
             : await NativeJoinHook.RunRegisteredAsync(args[1], Console.In, output, error, join, hookRegistration, stopping.Token);
     }
+    if (args.Length > 0 && args[0] == "--file-claim-hook") return await NativeEditLifecycleHook.RunCommandAsync(args);
     if (args.Length > 0 && args[0] == "--wake")
     {
         if (args.Length != 2) throw new AdapterConfigurationException("Use --wake with one absolute configuration path.");

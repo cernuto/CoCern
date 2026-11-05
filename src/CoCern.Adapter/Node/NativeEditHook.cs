@@ -10,6 +10,9 @@ internal static class NativeEditHook
     internal static bool Enabled => string.Equals(Environment.GetEnvironmentVariable("COCERN_FILE_CLAIMS"), "true", StringComparison.OrdinalIgnoreCase);
     internal static bool IsEdit(string? name) => name is "Edit" or "Write" or "MultiEdit" or "apply_patch" or "functions.apply_patch";
 
+    /// <summary>The ledger key for one tool call: PRE and POST reach the same receipt only through the exact tool_use_id.</summary>
+    internal static string IntentId(string invocation) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(invocation)));
+
     internal static bool RequiresValidation(JsonElement input)
     {
         if (!Enabled) return false;
@@ -40,7 +43,7 @@ internal static class NativeEditHook
                 targets = [path];
             }
             var claims = await join.EditClaimsAsync(context, budget.Token);
-            var intent = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(invocation)));
+            var intent = IntentId(invocation);
             var decision = await claims.CheckAsync(intent, context.Cwd, targets, budget.Token);
             return decision.Abstain ? 0 : await Deny(error, decision.Holder);
         }

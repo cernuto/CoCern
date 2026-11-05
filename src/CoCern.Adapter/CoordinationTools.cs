@@ -119,7 +119,10 @@ public static class CoordinationTools
 
     internal static string? NativeGitRead(string directory, params string[] arguments) => GitRead(directory, Git.Value, true, arguments);
 
-    private static string? GitRead(string directory, string? git, bool nativeEvent, string[] arguments)
+    /// <summary>As <see cref="NativeGitRead"/>, but for a command whose empty or NUL-separated output is an answer: "" means Git succeeded and printed nothing, and null means anything else, including too much output.</summary>
+    internal static string? NativeGitOutput(string directory, params string[] arguments) => GitRead(directory, Git.Value, true, arguments, raw: true);
+
+    private static string? GitRead(string directory, string? git, bool nativeEvent, string[] arguments, bool raw = false)
     {
         if (git is null) return null;
         try
@@ -136,6 +139,7 @@ public static class CoordinationTools
             using var process = System.Diagnostics.Process.Start(start);
             if (process is null) return null;
             process.StandardInput.Close();
+            var overflowed = false;
             var output = nativeEvent ? ReadBounded(process.StandardOutput) : process.StandardOutput.ReadToEndAsync();
             _ = process.StandardError.BaseStream.CopyToAsync(Stream.Null);
             if (!process.WaitForExit(GitTimeout) || !output.Wait(GitTimeout))
@@ -143,14 +147,16 @@ public static class CoordinationTools
                 try { process.Kill(entireProcessTree: true); } catch (InvalidOperationException) { } catch (System.ComponentModel.Win32Exception) { }
                 return null;
             }
+            if (raw) return process.ExitCode == 0 && !overflowed ? output.Result : null;
             var value = nativeEvent ? output.Result.TrimEnd('\r', '\n') : output.Result.Trim();
             return process.ExitCode == 0 && value.Length > 0 && (!nativeEvent || !value.Any(char.IsControl)) ? value : null;
 
-            static async Task<string> ReadBounded(StreamReader reader)
+            async Task<string> ReadBounded(StreamReader reader)
             {
                 var buffer = new char[32769];
                 var count = await reader.ReadBlockAsync(buffer);
-                return count == buffer.Length ? "" : new string(buffer, 0, count);
+                overflowed = count == buffer.Length;
+                return overflowed ? "" : new string(buffer, 0, count);
             }
         }
         catch (Exception exception) when (exception is System.ComponentModel.Win32Exception or InvalidOperationException or IOException or ArgumentException or UnauthorizedAccessException) { return null; }

@@ -35,7 +35,7 @@ internal static class NativeJoinHook
 
     // The setup-owned launcher identity stays stable while its helper follows the current deployment.
     internal static async Task<int> RunDevelopmentAsync(string root, string dotnet, string provider, string folder, TextReader input, TextWriter output, TextWriter error, CancellationToken ct, string? profile = null,
-        Action<ProcessStartInfo>? configureProcess = null)
+        Action<ProcessStartInfo>? configureProcess = null, string entry = "--native-hook")
     {
         string? text;
         try { text = await ReadInputAsync(input, ct); }
@@ -48,7 +48,7 @@ internal static class NativeJoinHook
         }
         var adapter = AdapterDeployment.AdapterPath(root, AdapterDeployment.Read(root));
         var start = new ProcessStartInfo(dotnet) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
-        foreach (var argument in new[] { adapter, "--native-hook", provider, "--connection", folder }) start.ArgumentList.Add(argument);
+        foreach (var argument in new[] { adapter, entry, provider, "--connection", folder }) start.ArgumentList.Add(argument);
         if (profile is not null) { start.ArgumentList.Add("--profile"); start.ArgumentList.Add(profile); }
         configureProcess?.Invoke(start);
         NativeRegistration.RestrictPrivateEnvironment(start);
@@ -198,13 +198,13 @@ internal static class NativeJoinHook
         return Encoding.UTF8.GetByteCount(value) <= MaximumInputBytes ? value : null;
     }
 
-    internal static NativeHookContext? ParseContext(string provider, JsonElement input)
+    internal static NativeHookContext? ParseContext(string provider, JsonElement input, bool postTool = false)
     {
         if (provider is not ("codex" or "claude") || input.ValueKind != JsonValueKind.Object || !Unique(input)) return null;
         var eventName = ChatLocators.Text(input, "hook_event_name");
         var native = ChatLocators.Text(input, "session_id");
         var cwd = ChatLocators.Text(input, "cwd");
-        if (eventName is not ("SessionStart" or "PreToolUse" or "Stop") || native is not { Length: 32 or 36 } ||
+        if (eventName is not ("SessionStart" or "PreToolUse" or "Stop") && !(postTool && eventName is "PostToolUse" or "PostToolUseFailure") || native is not { Length: 32 or 36 } ||
             !Guid.TryParseExact(native, native.Length == 32 ? "N" : "D", out var id) ||
             cwd is not { Length: > 0 and <= 32768 } || !Path.IsPathFullyQualified(cwd) || cwd.Any(char.IsControl)) return null;
         // session_id is the documented parent capture for delegated events. Neither agent_id nor a

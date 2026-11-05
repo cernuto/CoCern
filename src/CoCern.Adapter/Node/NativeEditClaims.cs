@@ -23,12 +23,18 @@ internal sealed class NativeEditClaims(string privateDirectory, string protected
         var decision = await new EditClaimGuard(new EditClaimLedger(ledgerDirectory), transport).AcquireAsync(intentId, paths, cancellationToken);
         if (!decision.Abstain) return decision;
         var current = EditClaimResolver.Resolve(protectedRoot, cwd, targets);
-        return current.Supported && current.Targets.SequenceEqual(resolved.Targets) && ProtectedCheckoutRoot.Prove(cwd) == protectedRoot
-            ? decision : new(false, "path-changed");
+        if (!current.Supported || !current.Targets.SequenceEqual(resolved.Targets) || ProtectedCheckoutRoot.Prove(cwd) != protectedRoot) return new(false, "path-changed");
+        // Without the saved attempt this edit could never be told from a sibling still needing the claim, so it refuses like an unavailable ledger.
+        if (!await Lifecycle(cancellationToken).PrepareAsync(intentId, paths, cancellationToken)) return new(false, "lifecycle-unavailable");
+        EditClaimLifecycleMarker.Set(join.PrivateFolder, context, DateTimeOffset.UtcNow.AddSeconds(EditClaimLifecycle.LeaseSeconds / 2));
+        return decision;
     }
 
+    internal EditClaimLifecycle Lifecycle(CancellationToken cancellationToken) => new(new EditClaimLedger(ledgerDirectory), new EditClaimLifecycleStore(ledgerDirectory),
+        new EditClaimCheckout(protectedRoot, context.Cwd), new FileTransport(protectedRoot, generation, join, context, cancellationToken));
+
     // The persisted guard identifiers are canonical relative paths. The hub alone derives opaque resource keys.
-    private sealed class FileTransport(string root, string expectedGeneration, NativeJoin join, NativeHookContext context, CancellationToken cancellationToken) : IEditClaimTransport
+    private sealed class FileTransport(string root, string expectedGeneration, NativeJoin join, NativeHookContext context, CancellationToken cancellationToken) : IEditClaimTransport, IEditClaimLifecycleTransport
     {
         public async Task<EditClaimAcquireResult> AcquireAsync(string resourceId, string requestId)
         {
@@ -56,7 +62,16 @@ internal sealed class NativeEditClaims(string privateDirectory, string protected
             return reply.Ok ? true : null;
         }
 
-        private Task<AdapterReply> CallAsync(string tool, string path, string requestId, long? generation = null, long? confirmGeneration = null)
+        public Task<AdapterReply> RenewAsync(string relativePath, long generation, string invocation) =>
+            CallAsync(RelayTools.ClaimRenew, relativePath, invocation, generation: generation, leaseSeconds: EditClaimLifecycle.LeaseSeconds);
+
+        public Task<AdapterReply> CleanReleaseAsync(string relativePath, long generation, string invocation) =>
+            CallAsync(RelayTools.ClaimRelease, relativePath, invocation, generation: generation);
+
+        public Task<AdapterReply> ReadAsync(string relativePath, long generation) =>
+            CallAsync(RelayTools.ClaimAcquire, relativePath, Guid.NewGuid().ToString("N"), confirmGeneration: generation);
+
+        private Task<AdapterReply> CallAsync(string tool, string path, string requestId, long? generation = null, long? confirmGeneration = null, int? leaseSeconds = null)
         {
             // Revalidate local containment/case/link semantics at every use, including the final ownership read.
             var physical = EditClaimResolver.Resolve(root, root, [path]);
@@ -66,6 +81,7 @@ internal sealed class NativeEditClaims(string privateDirectory, string protected
             var args = new JsonObject { ["filePath"] = path };
             if (generation is { } grant) args["generation"] = grant;
             if (confirmGeneration is { } expected) args["confirmGeneration"] = expected;
+            if (leaseSeconds is { } lease) args["leaseSeconds"] = lease;
             return join.CallAsync(context, requestId, tool, JsonSerializer.SerializeToElement(args), cancellationToken, expectedGeneration);
         }
     }
