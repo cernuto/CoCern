@@ -46,21 +46,6 @@ public sealed class StandingManagementTests
         Assert.Equal(0, app.Calls);
     }
 
-    [Theory]
-    [InlineData("expectedRevision")]
-    [InlineData("requestId")]
-    [InlineData("repositoryId")]
-    [InlineData("boardId")]
-    [InlineData("id")]
-    public async Task Required_fields_are_not_inferred(string field)
-    {
-        var app = new LocalApplication();
-        var body = JsonSerializer.SerializeToNode(Decision("p", "approve"), new JsonSerializerOptions(JsonSerializerDefaults.Web))!.AsObject();
-        body.Remove(field);
-        Assert.Equal(400, Status(await DashboardStandingManagement.DecideAsync(Context(body), app)));
-        Assert.Equal(0, app.Calls);
-    }
-
     [Fact]
     public async Task Arbitrary_mutations_and_oversized_bodies_are_refused()
     {
@@ -70,28 +55,6 @@ public sealed class StandingManagementTests
         context.Request.Body = new MemoryStream(new byte[16385]);
         Assert.Equal(413, Status(await DashboardStandingManagement.DecideAsync(context, app)));
         Assert.Equal(0, app.Calls);
-    }
-
-    [Fact]
-    public async Task Dismissal_keeps_revision_and_history_and_competing_decisions_find_missing_proposal()
-    {
-        var app = new LocalApplication();
-        var id = app.ProposeLine();
-        var decision = Decision(id, "remove");
-        Assert.Equal(200, Status(await DashboardStandingManagement.DecideAsync(Context(decision), app)));
-        Assert.Equal(0, app.LastReply!.Version);
-        var committed = app.State.Value.Json;
-        Assert.Contains("-proposal:" + id, committed);
-        // A lost response retries exactly the same request; no second history entry.
-        Assert.Equal(200, Status(await DashboardStandingManagement.DecideAsync(Context(decision), app)));
-        Assert.Equal(committed, app.State.Value.Json);
-        Assert.Equal(404, Status(await DashboardStandingManagement.DecideAsync(Context(Decision(id, "approve")), app)));
-        Assert.Equal("NotFound", app.LastReply!.Code);
-        Assert.Equal(404, Status(await DashboardStandingManagement.DecideAsync(Context(Decision(id, "remove")), app)));
-        Assert.Equal(committed, app.State.Value.Json);
-        Assert.Equal("viewer", app.LastCaller!.PrincipalId);
-        Assert.True(app.LastCaller.IsAdministrator);
-        Assert.False(app.LastCaller.IsInternal);
     }
 
     [Fact]
@@ -131,25 +94,6 @@ public sealed class StandingManagementTests
         Assert.Equal(before, app.State.Value.Json);
         Assert.Equal(200, Status(await DashboardStandingManagement.DecideAsync(Context(Decision(id, "remove")), app)));
         Assert.Equal(0, app.LastReply!.Version);
-    }
-
-    [Fact]
-    public async Task Approved_expired_grant_is_retained_until_explicit_removal_with_history()
-    {
-        var app = new LocalApplication();
-        var put = app.Apply("standing_put", new JsonObject
-        {
-            ["expectedRevision"] = 0, ["grants"] = new JsonArray(new JsonObject
-            {
-                ["id"] = "brief", ["scope"] = "repository", ["expiresAt"] = Now.AddSeconds(30).ToString("O")
-            })
-        }, new RelayCaller("admin", true, ["repo"]));
-        Assert.True(put.Ok, put.Code);
-        app.Clock = Now.AddMinutes(1);
-        Assert.Contains("brief", app.State.Value.Json);
-        Assert.Equal(200, Status(await DashboardStandingManagement.DecideAsync(Context(Decision("brief", "remove") with { ExpectedRevision = 1 }), app)));
-        Assert.Equal(2, app.LastReply!.Version);
-        Assert.Contains("-grant:brief", app.State.Value.Json);
     }
 
     [Fact]

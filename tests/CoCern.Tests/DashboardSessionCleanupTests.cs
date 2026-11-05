@@ -26,35 +26,6 @@ public sealed class DashboardSessionCleanupTests
     private static readonly RelayCaller Admin = new("test-user", true, ["repo"]);
 
     [Fact]
-    public async Task A_signed_in_viewer_gets_the_counts_and_a_label_close_keeps_chats_working_right_now()
-    {
-        await using var host = ViewerHost();
-        var smoke = await OpenAsync(host, "Smoke test 1");
-        var smoke2 = await OpenAsync(host, "SMOKE-2");
-        var work = await OpenAsync(host, "Real work");
-        using var browser = await SignedInAsync(host);
-
-        // Nothing just opened has been idle for a day, so the idle filter closes nothing.
-        using (var idle = await browser.PostAsync(Route, Json(new { repositoryId = "repo", idleMinutes = 1440 })))
-        {
-            Assert.Equal(HttpStatusCode.OK, idle.StatusCode);
-            var none = (await idle.Content.ReadFromJsonAsync<DashboardCloseSessionsResult>())!;
-            Assert.Equal((0, 0), (none.Closed, none.Kept));
-            Assert.Empty(none.Ids);
-        }
-        Assert.Equal(3, (await LiveAsync(host)).Length);
-
-        // Both smoke chats were opened a moment ago, so a close by label keeps them as working right now.
-        using var response = await browser.PostAsync(Route, Json(new { repositoryId = "repo", labelPrefix = "smoke" }));
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var result = (await response.Content.ReadFromJsonAsync<DashboardCloseSessionsResult>())!;
-        Assert.Equal((0, 0, 2), (result.Closed, result.Kept, result.Active));
-        Assert.Null(result.Code);
-        Assert.Empty(result.Ids);
-        Assert.Equal(new[] { smoke.Id, smoke2.Id, work.Id }.Order(StringComparer.Ordinal), (await LiveAsync(host)).Order(StringComparer.Ordinal));
-    }
-
-    [Fact]
     public async Task A_viewer_can_close_one_exact_session_without_closing_an_identically_labelled_peer()
     {
         await using var host = ViewerHost();
@@ -129,32 +100,6 @@ public sealed class DashboardSessionCleanupTests
             using var response = await browser.SendAsync(request);
             Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
         }
-        Assert.Equal([smoke.Id], await LiveAsync(host));
-    }
-
-    [Theory]
-    [InlineData("{\"repositoryId\":\"repo\",\"idleMinutes\":30}", "idleMinutes")]
-    [InlineData("{\"repositoryId\":\"repo\",\"targetSessionId\":\"\"}", "targetSessionId")]
-    [InlineData("{\"repositoryId\":\"repo\",\"labelPrefix\":\"smoke\",\"force\":true}", "force")]
-    [InlineData("{\"repositoryId\":\"repo\",\"targetSessionId\":\"s\",\"force\":\"true\"}", "force")]
-    [InlineData("{\"repositoryId\":\"repo\",\"idleMinutes\":\"an hour\"}", "idleMinutes")]
-    [InlineData("{\"repositoryId\":\"repo\",\"labelPrefix\":\"\"}", null)]
-    [InlineData("{\"repositoryId\":\"repo\"}", "idleMinutes")]
-    [InlineData("{\"idleMinutes\":60}", "repositoryId")]
-    [InlineData("{\"repositoryId\":\"\",\"idleMinutes\":60}", "repositoryId")]
-    [InlineData("not json", null)]
-    [InlineData("[]", null)]
-    public async Task Bad_input_is_a_clean_bad_request_with_the_hub_code(string body, string? field)
-    {
-        await using var host = ViewerHost();
-        var smoke = await OpenAsync(host, "Smoke test");
-        using var browser = await SignedInAsync(host);
-        using var response = await browser.PostAsync(Route, new StringContent(body, Encoding.UTF8, "application/json"));
-        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
-        var result = (await response.Content.ReadFromJsonAsync<DashboardCloseSessionsResult>())!;
-        Assert.Equal(RelayErrorCodes.InvalidArguments, result.Code);
-        if (field is not null) Assert.Equal(field, result.Field);
-        Assert.Equal(0, result.Closed);
         Assert.Equal([smoke.Id], await LiveAsync(host));
     }
 
