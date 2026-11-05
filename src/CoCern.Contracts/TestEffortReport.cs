@@ -86,7 +86,7 @@ public sealed record TestEffortDay
     public int RowsDeleted { get; init; }
 
     internal bool IsValid() =>
-        DateOnly.TryParseExact(Day, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out _)
+        DateOnly.TryParseExact(Day, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var date) && date.Year >= 2000
         && new[] { Runs, WholeSuiteRuns, Failures, FixtureOnlyFailures, Commits, TestsAdded, TestsDeleted, RowsAdded, RowsDeleted }.All(count => count >= 0)
         && TestEffortReport.Amounts(WholeSuiteMinutes, WallMinutes, CaseMinutes, RuleAMinutes, RuleBMinutes, RuleCMinutes, PointlessEstimatedMinutes);
 }

@@ -98,7 +98,7 @@ internal static class TestEffortRows
         void Add(string key, Func<TestEffortDay, double> value, Func<TestEffortDay, long> samples) =>
             rows.Add(Row(key, Total(current, value, samples), Total(previous, value, samples), current.Sum(samples), previous.Sum(samples)));
         void AddPercent(string key, Func<TestEffortDay, double> part) =>
-            rows.Add(Row(key, Percent(current, part), Percent(previous, part), current.Sum(day => day.Runs), previous.Sum(day => day.Runs)));
+            rows.Add(Row(key, Percent(current, part), Percent(previous, part), current.Sum(day => (long)day.Runs), previous.Sum(day => (long)day.Runs)));
         void AddRule(string rule, string name, Func<TestEffortDay, double> value)
         {
             var status = TestEffortRules.Status(report.Rules.First(result => result.Rule == rule));

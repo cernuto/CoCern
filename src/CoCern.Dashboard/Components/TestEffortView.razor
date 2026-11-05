@@ -31,7 +31,7 @@
         @if (report is { Runs: > 0 })
         {
             var whole = report.WallMinutes;
-            <p class="warning-note">Only recorded runs count (@report.Runs runs, @report.Cases.ToString("#,0", CultureInfo.InvariantCulture) results), so a day with no recorded runs is unknown, not zero. Test minutes add each run's start to end, build included, and overlapping runs each count in full. The pointless totals cover only what the data can judge, so they are a floor: @TestEffortPresentation.Minutes(report.WholeSuiteMinutes) of whole-suite runs are not counted because code changed between them, and telling which of their tests were unrelated needs coverage data the results do not have.</p>
+            <p class="warning-note">Only recorded runs count (@report.Runs runs, @report.Cases.ToString("#,0", CultureInfo.InvariantCulture) results), so a day with no recorded runs is unknown, not zero. Test minutes add each run's start to end, build included, and overlapping runs each count in full. The estimated pointless total can miss some runs and overcount others: rule a is name matching and can overcount, runs with no recorded commit cannot be judged, and @TestEffortPresentation.Minutes(report.WholeSuiteMinutes) of whole-suite runs are not counted because code changed between them and telling which of their tests were unrelated needs coverage data the results do not have.</p>
             <dl class="test-effort-tiles surface">
                 <div><dt>Test minutes <TestEffortBadge Status="@TestEffortRules.Measured" /></dt><dd>@TestEffortPresentation.Minutes(whole)</dd></div>
                 <div><dt>Summed case minutes <TestEffortBadge Status="@TestEffortRules.Measured" /></dt><dd>@TestEffortPresentation.Minutes(report.CaseMinutes)</dd></div>
@@ -159,10 +159,16 @@
         _loading = true;
         _data = null;
         _problem = null;
-        try { _data = await TestEffortPresentation.LoadAsync(Http, _repository, pending.Token); }
+        DashboardTestEffort? data = null;
+        string? problem = null;
+        try { data = await TestEffortPresentation.LoadAsync(Http, _repository, pending.Token); }
         catch (OperationCanceledException) when (pending.IsCancellationRequested) { return; }
-        catch (Exception exception) when (TestEffortPresentation.IsLoadFailure(exception)) { _problem = TestEffortPresentation.LoadProblem; }
-        if (ReferenceEquals(pending, _pending)) _loading = false;
+        catch (Exception exception) when (TestEffortPresentation.IsLoadFailure(exception)) { problem = TestEffortPresentation.LoadProblem; }
+        // A newer selection or disposal replaced this request: its reply, whatever it was, must not touch the display.
+        if (!ReferenceEquals(pending, _pending)) return;
+        _data = data;
+        _problem = problem;
+        _loading = false;
     }
 
     public void Dispose()

@@ -13,7 +13,7 @@
             <div><dt>Test minutes <TestEffortBadge Status="@TestEffortRules.Measured" /></dt><dd>@TestEffortPresentation.Minutes(report.WallMinutes)</dd></div>
             <div><dt>Pointless <TestEffortBadge Status="@TestEffortRules.Measured" /></dt><dd>@TestEffortPresentation.Minutes(report.PointlessMeasuredMinutes) <small>@TestEffortPresentation.Percent(report.PointlessMeasuredMinutes, report.WallMinutes)</small></dd></div>
             <div><dt>Pointless <TestEffortBadge Status="@TestEffortRules.Estimate" /></dt><dd>@TestEffortPresentation.Minutes(report.PointlessEstimatedMinutes) <small>@TestEffortPresentation.Percent(report.PointlessEstimatedMinutes, report.WallMinutes)</small></dd></div>
-            <div><dt>Tests added / deleted <TestEffortBadge Status="@TestEffortRules.Measured" /></dt><dd>@report.Days.Sum(day => day.TestsAdded) / @report.Days.Sum(day => day.TestsDeleted)</dd></div>
+            <div><dt>Tests added / deleted <TestEffortBadge Status="@TestEffortRules.Measured" /></dt><dd>@report.Days.Sum(day => (long)day.TestsAdded) / @report.Days.Sum(day => (long)day.TestsDeleted)</dd></div>
         </dl>
     }
     else
@@ -42,10 +42,16 @@
         _loading = true;
         _data = null;
         _problem = null;
-        try { _data = await TestEffortPresentation.LoadAsync(Http, RepositoryId, pending.Token); }
+        DashboardTestEffort? data = null;
+        string? problem = null;
+        try { data = await TestEffortPresentation.LoadAsync(Http, RepositoryId, pending.Token); }
         catch (OperationCanceledException) when (pending.IsCancellationRequested) { return; }
-        catch (Exception exception) when (TestEffortPresentation.IsLoadFailure(exception)) { _problem = TestEffortPresentation.LoadProblem; }
-        if (ReferenceEquals(pending, _pending)) _loading = false;
+        catch (Exception exception) when (TestEffortPresentation.IsLoadFailure(exception)) { problem = TestEffortPresentation.LoadProblem; }
+        // A newer selection or disposal replaced this request: its reply, whatever it was, must not touch the display.
+        if (!ReferenceEquals(pending, _pending)) return;
+        _data = data;
+        _problem = problem;
+        _loading = false;
     }
 
     public void Dispose()
