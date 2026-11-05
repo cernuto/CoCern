@@ -181,9 +181,10 @@ public sealed class AnalyticsCorrectnessTests
                 CREATE TABLE relay.task_archive(repository_id VARCHAR, board_id VARCHAR, task_id VARCHAR, completed_ticks BIGINT, archived_ticks BIGINT, json VARCHAR);
                 CREATE TABLE relay.activity_log(id BIGINT, at_ticks BIGINT, kind VARCHAR, repository_id VARCHAR, session_id VARCHAR, role VARCHAR, tool VARCHAR, ok INTEGER, code VARCHAR,
                     request_bytes BIGINT, reply_bytes BIGINT, duration_ms DOUBLE, input_tokens BIGINT, output_tokens BIGINT, request_id VARCHAR, target VARCHAR, workflow_state VARCHAR,
-                    offer_target VARCHAR, request_tokens BIGINT, reply_tokens BIGINT, background_call INTEGER);
+                    offer_target VARCHAR, request_tokens BIGINT, reply_tokens BIGINT, background_call INTEGER, call_origin VARCHAR);
                 CREATE TABLE relay.activity_daily(repository_id VARCHAR, day VARCHAR, tool VARCHAR, kind VARCHAR, calls BIGINT, request_bytes BIGINT, reply_bytes BIGINT,
                     model_calls BIGINT, model_request_bytes BIGINT, model_reply_bytes BIGINT, background_calls BIGINT, background_request_bytes BIGINT, background_reply_bytes BIGINT);
+                CREATE TABLE relay.activity_origin_daily(day VARCHAR, repository_id VARCHAR, tool VARCHAR, call_origin VARCHAR, calls BIGINT, request_bytes BIGINT, reply_bytes BIGINT);
                 """);
             using var resource = typeof(NamedQueries).Assembly.GetManifestResourceStream("CoCern.Analytics.Views.sql")!;
             using var reader = new StreamReader(resource);
@@ -194,7 +195,10 @@ public sealed class AnalyticsCorrectnessTests
             string task = "T", string repository = "repo", string? target = null, long? requestTokens = null, long? replyTokens = null, bool? background = null)
         {
             Execute("""
-                INSERT INTO relay.activity_log VALUES ($id, $at, 'call', $repository, 'session', 'worker', $tool, $ok, $code,
+                INSERT INTO relay.activity_log(id, at_ticks, kind, repository_id, session_id, role, tool, ok, code,
+                    request_bytes, reply_bytes, duration_ms, input_tokens, output_tokens, request_id, target, workflow_state,
+                    offer_target, request_tokens, reply_tokens, background_call)
+                VALUES ($id, $at, 'call', $repository, 'session', 'worker', $tool, $ok, $code,
                     0, 0, 0, $input, NULL, $request, $target, $workflow, NULL, $requestTokens, $replyTokens, $background)
                 """, ("id", ++id), ("at", at), ("repository", repository), ("tool", tool), ("ok", ok ? 1 : 0), ("code", code),
                 ("input", input), ("request", request), ("target", target ?? $"task:{repository}/default/{task}"), ("workflow", workflow),
