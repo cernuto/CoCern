@@ -137,23 +137,21 @@ internal static class LocalWakeStatus
 
         private void ReportLocked(string value)
         {
+            var next = StateOf(value);
+            // The loop repeats its reason every pass; that is no change, and it must not bury the last routine exit.
+            if (next is not null && value == stateReason) { WriteIfChanged(); return; }
+            var now = Clock.GetUtcNow();
+            counts[value] = counts.GetValueOrDefault(value) + 1;
+            setupReached |= value is not (LocalWakeCodes.Starting or LocalWakeCodes.NativeRegistration or LocalWakeCodes.InvalidCode);
+            if (code != value) { code = value; codeAt = now; unwritten = true; }
+            if (next is not null)
             {
-                var next = StateOf(value);
-                // The loop repeats its reason every pass; that is no change, and it must not bury the last routine exit.
-                if (next is not null && value == stateReason) { WriteIfChanged(); return; }
-                var now = Clock.GetUtcNow();
-                counts[value] = counts.GetValueOrDefault(value) + 1;
-                setupReached |= value is not (LocalWakeCodes.Starting or LocalWakeCodes.NativeRegistration or LocalWakeCodes.InvalidCode);
-                if (code != value) { code = value; codeAt = now; unwritten = true; }
-                if (next is not null)
-                {
-                    stateReason = value;
-                    unwritten = true;
-                    stateAt ??= now;
-                    if (next != state) { state = next; stateAt = now; Say($"CoCern local wake: {next} ({value})."); }
-                }
-                WriteIfChanged();
+                stateReason = value;
+                unwritten = true;
+                stateAt ??= now;
+                if (next != state) { state = next; stateAt = now; Say($"CoCern local wake: {next} ({value})."); }
             }
+            WriteIfChanged();
         }
 
         public void Counts(int sessions, int active)
