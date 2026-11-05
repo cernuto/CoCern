@@ -140,7 +140,7 @@ public sealed class HubResponseCompactionTests(ITestOutputHelper output)
         {
             Value = new() { Json = new JsonObject
             {
-                ["repositoryId"] = "repo", ["taskRevision"] = 1,
+                ["repositoryId"] = "repo", ["taskRevision"] = 1, [ReadModels.RequestsKey] = new JsonObject(),
                 ["tasks"] = new JsonObject
                 {
                     ["a-finished"] = Task("a-finished", "completed"),
