@@ -34,7 +34,7 @@ public sealed class RelayForwarder(HttpClient client, AdapterOptions options, st
     public Task<AdapterReply> ForwardAsync(string tool, JsonElement arguments, CancellationToken cancellationToken = default)
     {
         if (cancellationToken.IsCancellationRequested) return Task.FromCanceled<AdapterReply>(cancellationToken);
-        return CoordinationTools.IsAllowed(tool, options.Admin, options.ChatOnly, options.Diagnostics)
+        return CoordinationTools.IsAllowed(tool, options.Admin, options.ChatOnly, options.Diagnostics, options.EventWaits)
             ? SendAsync(tool, arguments, cancellationToken) : Task.FromResult(new AdapterReply(false, "unknown_tool"));
     }
 

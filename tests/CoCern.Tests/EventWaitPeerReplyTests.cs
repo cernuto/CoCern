@@ -61,6 +61,32 @@ public sealed class EventWaitPeerReplyTests
         Assert.DoesNotContain(hub.Inbox(owner, Epoch.AddSeconds(2)), message => message["kind"]?.GetValue<string>() == "event_wait_terminal");
     }
 
+    [Fact]
+    public void Delayed_delivery_of_a_pre_arm_reply_cannot_complete_a_new_wait()
+    {
+        var hub = new AggregateHub(); var owner = hub.Open("owner", Epoch); var peer = hub.Open("peer", Epoch); hub.DeliverAll(Epoch);
+        var original = MessageId(hub.Send(owner, peer.Id, "original", Epoch)); hub.DeliverAll(Epoch);
+        Assert.True(Reply(hub, peer, owner.Id, original, Epoch.AddSeconds(1)).Ok);
+        Assert.True(Register(hub, owner, peer.Id, original, Epoch.AddSeconds(2)).Ok);
+        hub.DeliverAll(Epoch.AddSeconds(3));
+        Assert.Null(Entry(hub, owner)["terminal"]);
+        Assert.DoesNotContain(hub.Inbox(owner, Epoch.AddSeconds(3)), message => message["kind"]?.GetValue<string>() == "event_wait_terminal");
+    }
+
+    [Fact]
+    public void A_fresh_read_expires_a_due_wait_once_without_waiting_for_its_timer()
+    {
+        var hub = new AggregateHub(); var owner = hub.Open("owner", Epoch); var peer = hub.Open("peer", Epoch); hub.DeliverAll(Epoch);
+        var original = MessageId(hub.Send(owner, peer.Id, "original", Epoch)); hub.DeliverAll(Epoch);
+        Assert.True(Register(hub, owner, peer.Id, original, Epoch.AddSeconds(1)).Ok);
+        var args = new JsonObject { ["repositoryId"] = "repo", ["sessionId"] = owner.Id, ["sessionToken"] = owner.Token, ["waitId"] = "reply-wait" };
+        var first = hub.Apply("session", owner.Id, EventWaitAggregate.ReadOperation, args, AggregateHub.Alice with { IsInternal = true }, Epoch.AddMinutes(11));
+        Assert.True(first.Ok); Assert.Equal("expired", AggregateHub.Data(first)["terminal"]!["outcome"]!.GetValue<string>());
+        Assert.True(hub.Apply("session", owner.Id, EventWaitAggregate.ReadOperation, args, AggregateHub.Alice with { IsInternal = true }, Epoch.AddMinutes(12)).Ok);
+        hub.DeliverAll(Epoch.AddMinutes(12));
+        Assert.Single(hub.Inbox(owner, Epoch.AddMinutes(12)), message => message["kind"]?.GetValue<string>() == "event_wait_terminal");
+    }
+
     private static RelayReply Register(AggregateHub hub, Chat owner, string peer, string original, DateTimeOffset at)
     {
         var args = new JsonObject { ["repositoryId"] = "repo", ["sessionId"] = owner.Id, ["sessionToken"] = owner.Token,

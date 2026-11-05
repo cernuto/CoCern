@@ -16,6 +16,7 @@ internal static class ToolSchemas
         var all = Properties(tool.Name);
         string[] extra = tool.Name switch
         {
+            RelayTools.EventWait => ["kind", "taskId", "resourceId", "generation", "peerSessionId", "replyTo", "expiresAt", "boardId"],
             RelayTools.SessionOpen => ["machineId", "label"],
             RelayTools.SessionBind => ["binding", "label", "machineId"],
             RelayTools.TaskGet => ["taskId", "section", "sinceRevision", "snapshotRevision", "cursor", "limit"],
@@ -168,6 +169,15 @@ internal static class ToolSchemas
         Text("machineId", "Reported machine or registered tool-host identity; not a permission grant.");
         switch (tool)
         {
+            case RelayTools.EventWait:
+                properties["action"] = new { type = "string", @enum = new[] { "register", "cancel", "read" } };
+                properties["waitId"] = new { type = "string", minLength = 1, maxLength = 128 };
+                properties["kind"] = new { type = "string", @enum = new[] { "task_completed", "claim_released", "peer_reply" } };
+                properties["generation"] = new { type = "integer", minimum = 1 };
+                properties["peerSessionId"] = new { type = "string", minLength = 1, maxLength = 128 };
+                properties["replyTo"] = new { type = "string", minLength = 1, maxLength = 128 };
+                properties["expiresAt"] = new { type = "string", format = "date-time", description = "Absolute deadline, at most one hour ahead; reuse unchanged on retry." };
+                break;
             case RelayTools.GetStatus:
                 properties["managerHistoryBefore"] = new { type = "integer", minimum = 0, description = "Administrator-only: read manager selections older than this generation." };
                 properties["managerHistoryOnly"] = new { type = "boolean", description = "Reserve this read for the visible manager summary and administrator history, omitting cancellation requests. Use when ordinary status omits manager or manager.historyReadRequired is true. Retain the incoming cursor for history continuation." }; break;

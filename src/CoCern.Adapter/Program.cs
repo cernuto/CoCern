@@ -225,7 +225,7 @@ try
             Version = typeof(NativeRegistration).Assembly.ManifestModule.ModuleVersionId.ToString("D")
         };
     }).WithStdioServerTransport().WithTools(registration is null
-        ? CoordinationTools.Create(forwarder, options.Admin, hints, SessionHandoff.For(options), options.ChatOnly, options.ExportedChat, localWake: localWake, diagnostics: options.Diagnostics)
+        ? CoordinationTools.Create(forwarder, options.Admin, hints, SessionHandoff.For(options), options.ChatOnly, options.ExportedChat, localWake: localWake, diagnostics: options.Diagnostics, eventWaits: options.EventWaits)
         : CoordinationTools.CreateNative(forwarder, native!, registration.Provider, options.Admin, options.Diagnostics));
     using var host = builder.Build();
     var lifetime = host.Services.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping;

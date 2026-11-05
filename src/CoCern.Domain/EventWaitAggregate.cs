@@ -23,6 +23,16 @@ public static class EventWaitAggregate
     internal static RelayReply Handle(AggregateContext context)
     {
         if (!context.Caller.IsInternal) return Error("InternalOnly");
+        if (context.Operation == ReadOperation)
+        {
+            if (Authorize(context) is { } denied) return denied;
+            if (new EventWaitState(context.State).Entries?[context.Args["waitId"]?.GetValue<string>() ?? ""] is not JsonObject row)
+                return Error("WaitUnknown");
+            var current = EventWaitState.Request(row);
+            if (row["terminal"] is null && current.ExpiresAt <= context.Now)
+                Terminal(context, row, current, "expired", current.Revision);
+            return Reply(row);
+        }
         if (context.Operation == DueOperation)
             return new SessionState(context.State).Closed ? Ok(new { checkedWaits = false }) : Due(context);
         if (context.Operation == CancelOperation) return Cancel(context, context.Args["waitId"]?.GetValue<string>() ?? "");
@@ -31,9 +41,20 @@ public static class EventWaitAggregate
         try { request = context.Args["request"]?.Deserialize<EventWaitRequest>(EventWaitState.Json); }
         catch (JsonException) { return Error("InvalidArguments"); }
         if (request is null) return Error("InvalidArguments");
+        if (Authorize(context) is { } unauthorized) return unauthorized;
+        if (PeerReplyWaits.Validate(context, request) is { } invalidPeer) return invalidPeer;
         var existed = new EventWaitState(context.State).Entries?.ContainsKey(request.WaitId) == true;
         var result = Register(context, request);
         if (!result.Ok || existed) return result;
+        PeerReplyWaits.Armed(context, request);
+        if (request.Kind == "peer_reply")
+        {
+            var watchIdentity = JsonSerializer.Serialize(new[] { context.Repository, context.Key, request.WaitId, request.PeerSessionId });
+            var watchId = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(watchIdentity)));
+            var bound = EventWaitSources.Bind(context, new EventWaitOwnerWatch(context.Repository, context.Key,
+                request.WaitId, watchId, request.PeerSessionId!, request.ExpiresAt));
+            if (!bound.Ok) return bound;
+        }
         // A future outbox effect is indexed by the existing due-work store and
         // pump. Its payload carries no session credential; the private target
         // rechecks persisted deadlines, so replay and stale timers cannot refire.
@@ -41,7 +62,7 @@ public static class EventWaitAggregate
         var id = "event-wait-due-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(identity)));
         context.Effects.Add(new(id, AggregateKinds.Session, context.Key, DueOperation,
             new JsonObject { ["repositoryId"] = context.Repository, ["sessionId"] = context.Key }.ToJsonString(), request.ExpiresAt));
-        return result;
+        return Reply(new EventWaitState(context.State).Entries![request.WaitId]!.AsObject());
     }
 
     // Domain transition entry, analogous to CoordinationStateMachine.Apply. No tool
@@ -225,7 +246,14 @@ public static class EventWaitAggregate
         EventWaitSources.EndWatch(context, entry, request);
     }
 
-    private static RelayReply Reply(JsonObject entry) => Ok(new { registered = true, terminal = entry["terminal"]?.DeepClone() });
+    public const string ReadOperation = "__event_wait_read";
+
+    private static RelayReply Reply(JsonObject entry) => Ok(new
+    {
+        registered = true, waitId = EventWaitState.Request(entry).WaitId,
+        alreadySatisfied = entry["alreadySatisfied"]?.GetValue<bool>() ?? entry["sourceAck"]?["alreadySatisfied"]?.GetValue<bool>() ?? false,
+        terminal = entry["terminal"]?.DeepClone()
+    });
     private static RelayReply Ok(object data) => new(true, "Ok", JsonSerializer.Serialize(data), 0);
     private static RelayReply Error(string code) => new(false, code, "{}", 0);
 }

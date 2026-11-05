@@ -30,6 +30,7 @@ internal static class SessionAggregate
             case EventWaitAggregate.RegisterOperation:
             case EventWaitAggregate.CancelOperation:
             case EventWaitAggregate.DueOperation:
+            case EventWaitAggregate.ReadOperation:
                 return EventWaitAggregate.Handle(context);
             case EventWaitSources.WatchOperation:
             case EventWaitSources.UnwatchOperation:
@@ -310,6 +311,7 @@ internal static class SessionAggregate
         // The sender is told instead.
         if (inbox.Count >= RelayLimits.MaxRecords) return Undelivered(context, state, message, Ok(new { delivered = false, full = true }), "full");
         inbox.Add(message);
+        PeerReplyWaits.Delivered(context, message);
         // With attention on, the dispatcher passes the item lifetime: a message that may wake its chat is then an info item.
         var infoDays = (int)Math.Min(delivery.AttentionExpiryDays ?? 0, int.MaxValue);
         if (infoDays > 0 && message.Wake) SessionAttention.AddMessage(state, message, infoDays, context.Now);
@@ -482,6 +484,7 @@ internal static class SessionAggregate
         };
         // Measured as the recipient's check_inbox returns it, so a message escaping would make unreadable is never accepted.
         if (CheckReadable(message.ToJson()) is { } unreadable) return unreadable;
+        PeerReplyWaits.Sent(context, id, recipient);
         context.Send(recipient, new MessageDelivery(message));
         return Ok(new { messageId = id, delivery = "pending" });
     }

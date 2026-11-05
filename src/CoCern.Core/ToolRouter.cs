@@ -20,6 +20,7 @@ internal sealed class ToolRouter(Aggregates aggregates, ClaimComposer claims, Se
         return tool switch
         {
             RelayTools.SessionOpen => sessions.OpenAsync(caller, args, trace),
+            RelayTools.EventWait => new EventWaitTools(aggregates).RunAsync(caller, args),
             RelayTools.GetStatus => status.StatusAsync(caller, args, call.Controls.StatusDetail),
             RelayTools.TaskClaim => claims.ClaimTaskAsync(caller, args, session),
             RelayTools.ClaimRenew or RelayTools.ClaimRelease when Text(args, "taskId").Length > 0 && Text(args, "resourceId").Length == 0 => aggregates.Board(caller, tool, args),
