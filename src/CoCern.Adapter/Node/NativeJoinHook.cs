@@ -501,12 +501,16 @@ internal sealed class NativeRegistration
     }
     internal static void RestrictPrivateEnvironment(ProcessStartInfo start)
     {
+        // This noncredential feature switch can only add a refusal gate; it never supplies native identity or grants permission.
+        var fileClaims = start.Environment.TryGetValue("COCERN_FILE_CLAIMS", out var flag)
+            && string.Equals(flag, "true", StringComparison.OrdinalIgnoreCase);
         foreach (var name in start.Environment.Keys.Where(name => name.StartsWith("COCERN_", StringComparison.OrdinalIgnoreCase)).ToArray())
             start.Environment.Remove(name);
         // Explicit private context is the only authority. An old flag-ignoring helper or an
         // accidental backend fallback must fail before default node/profile discovery.
         start.Environment["COCERN_URL"] = "invalid-private-fallback";
         start.Environment["COCERN_TOKEN"] = "invalid-private-fallback";
+        if (fileClaims) start.Environment["COCERN_FILE_CLAIMS"] = "true";
     }
     internal static bool ValidClientArguments(string[] args) =>
         args is ["--native-client", "codex" or "claude", "--connection", var folder, "--profile", var profile] &&
