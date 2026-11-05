@@ -27,6 +27,8 @@ internal static class LocalWakeStatus
     private const int MaxCodeLength = 64;
     private const string StartingState = "starting", Healthy = "healthy", Degraded = "degraded", Off = "off", NotApplicable = "not_applicable";
     private static readonly TimeSpan MaxAge = TimeSpan.FromDays(7);
+    /// <summary>How soon the same state-change line may repeat, so a flapping watcher can't fill standard error. The file still records every change.</summary>
+    internal static readonly TimeSpan RepeatEvery = TimeSpan.FromMinutes(1);
     private static readonly ConcurrentDictionary<string, Recorder> Recorders = new(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
 
     /// <summary>Records a fixed reason code (<c>^[a-z_]{1,64}$</c>; anything else is stored as <c>invalid_code</c>) for this process.</summary>
@@ -44,6 +46,8 @@ internal static class LocalWakeStatus
 
     /// <summary>Sends this root's state-change lines to <paramref name="error"/> instead of standard error.</summary>
     internal static void UseError(string root, TextWriter error) => Use(root, recorder => recorder.Error = error);
+
+    internal static void UseClock(string root, TimeProvider clock) => Use(root, recorder => recorder.Clock = clock);
 
     /// <summary>Adds <c>localWake { state, reason }</c> to a reply while there is a problem; a healthy adapter spends nothing on it.</summary>
     internal static AdapterReply AddTo(AdapterReply reply, string? root = null)
@@ -110,19 +114,27 @@ internal static class LocalWakeStatus
         private bool unwritten = true;
         private bool pruned;
         private bool warned;
+        private readonly List<string> outgoing = [];
+        private readonly Dictionary<string, DateTimeOffset> said = new(StringComparer.Ordinal);
 
         public TextWriter? Error { get; set; }
+        public TimeProvider Clock { get; set; } = TimeProvider.System;
         public string? Code { get { lock (gate) return code; } }
         public (string State, string Reason)? Problem { get { lock (gate) return state is Degraded or Off && stateReason is not null ? (state, stateReason) : null; } }
 
         public void Report(string value)
         {
-            lock (gate)
+            lock (gate) ReportLocked(value);
+            Flush();
+        }
+
+        private void ReportLocked(string value)
+        {
             {
                 var next = StateOf(value);
                 // The loop repeats its reason every pass; that is no change, and it must not bury the last routine exit.
                 if (next is not null && value == stateReason) { WriteIfChanged(); return; }
-                var now = DateTimeOffset.UtcNow;
+                var now = Clock.GetUtcNow();
                 counts[value] = counts.GetValueOrDefault(value) + 1;
                 setupReached |= value is not (LocalWakeCodes.Starting or LocalWakeCodes.NativeRegistration);
                 if (code != value) { code = value; codeAt = now; unwritten = true; }
@@ -141,11 +153,12 @@ internal static class LocalWakeStatus
         {
             lock (gate)
             {
-                var now = DateTimeOffset.UtcNow;
+                var now = Clock.GetUtcNow();
                 if (observed != sessions) { observed = sessions; observedAt = now; unwritten = true; }
                 if (watchers != active) { watchers = active; watchersAt = now; unwritten = true; }
                 WriteIfChanged();
             }
+            Flush();
         }
 
         private void WriteIfChanged()
@@ -182,10 +195,30 @@ internal static class LocalWakeStatus
             }
         }
 
+        /// <summary>Queues a line, under the lock, for <see cref="Flush"/>.</summary>
         private void Say(string line)
         {
-            try { (Error ?? Console.Error).WriteLine(line); }
-            catch (Exception) { /* A closed standard error must not stop the adapter either. */ }
+            var now = Clock.GetUtcNow();
+            if (said.TryGetValue(line, out var last) && now - last < RepeatEvery) return;
+            said[line] = now;
+            outgoing.Add(line);
+        }
+
+        /// <summary>Writes outside the lock: a blocked standard error must not hold up a chat's reply, which reads the state under it.</summary>
+        private void Flush()
+        {
+            string[] lines;
+            lock (gate)
+            {
+                if (outgoing.Count == 0) return;
+                lines = [.. outgoing];
+                outgoing.Clear();
+            }
+            foreach (var line in lines)
+            {
+                try { (Error ?? Console.Error).WriteLine(line); }
+                catch (Exception) { /* A closed standard error must not stop the adapter either. */ }
+            }
         }
 
         /// <summary>Keeps the folder bounded: a file goes when its process has ended or after <see cref="MaxAge"/>. A process whose file went writes it again on its next change.</summary>

@@ -420,6 +420,47 @@ public sealed class LocalWakeTests : IDisposable
     }
 
     [Fact]
+    public void Repeated_transitions_are_rate_limited_on_stderr_and_still_change_the_state()
+    {
+        var error = new StringWriter();
+        var clock = new ManualClock();
+        LocalWakeStatus.UseError(StatusRoot, error);
+        LocalWakeStatus.UseClock(StatusRoot, clock);
+        int Lines() => error.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries).Length;
+        foreach (var code in new[] { LocalWakeCodes.NoCodexExecutable, LocalWakeCodes.Watching, LocalWakeCodes.NoCodexExecutable, LocalWakeCodes.Watching })
+            LocalWakeStatus.Report(code, StatusRoot);
+        Assert.Equal(2, Lines());
+        Assert.Null(LocalWakeStatus.Problem(StatusRoot));
+        LocalWakeStatus.Report(LocalWakeCodes.NoCodexExecutable, StatusRoot);
+        Assert.Equal(("degraded", "no_codex_executable"), LocalWakeStatus.Problem(StatusRoot));
+        Assert.Equal(2, Lines());
+
+        clock.Advance(LocalWakeStatus.RepeatEvery + TimeSpan.FromSeconds(1));
+        LocalWakeStatus.Report(LocalWakeCodes.Watching, StatusRoot);
+        Assert.Equal(3, Lines());
+    }
+
+    private sealed class ProbingWriter(Func<bool> probe) : StringWriter
+    {
+        public bool? ProbeFinished { get; private set; }
+        public override void WriteLine(string? value)
+        {
+            ProbeFinished = Task.Run(probe).Wait(TimeSpan.FromSeconds(5));
+            base.WriteLine(value);
+        }
+    }
+
+    [Fact]
+    public void Standard_error_is_written_outside_the_recorder_lock()
+    {
+        var root = StatusRoot;
+        using var error = new ProbingWriter(() => LocalWakeStatus.Problem(root) is { });
+        LocalWakeStatus.UseError(root, error);
+        LocalWakeStatus.Report(LocalWakeCodes.NoCodexExecutable, root);
+        Assert.True(error.ProbeFinished);
+    }
+
+    [Fact]
     public void A_routine_exit_is_recorded_without_changing_the_state_and_a_repeated_pass_keeps_it_visible()
     {
         var error = new StringWriter();
