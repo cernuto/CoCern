@@ -1,5 +1,7 @@
 # Origin instrumentation tests-first preparation
 
+Current cycle: `codex/origin-compaction-cycle1` starts from deployed main `5acb9ef0a770ba33e21f830094d294059ae3ae5a`. The twelve origin cases were carried forward without production changes and remain unrun. The older integration and gate references below are preparation history, not the current baseline. Manager schedules the origin RED/GREEN window after PC2's Part 5/Part 6 window; compaction follows separately. No runtime begins merely because the planning deadline has elapsed.
+
 Manager assigned origin instrumentation as the first small separate efficiency change. Approved values for untrusted callOrigin are mcp, claude-stop, claude-waiter, wake-watcher, node and dashboard. Missing, invalid and future values remain unknown. The field must be stripped before aggregate/replay state and cannot affect authority or existing model/background classification. Claude089 owns the adapter producers and confirmed these names.
 
 Exact production file set was sent to Manager before any production edit: src/CoCern.Core/RelayRequestGuard.cs, CallGuard.cs, CallTelemetry.cs, ApplicationPorts.cs; src/CoCern.Storage/SqliteStore.Activity.cs; src/CoCern.Analytics/AnalyticsService.cs and Views.sql. Add documentation in docs/reference.md and tests in tests/CoCern.Tests/TrafficOriginTests.cs. Do not edit ReplyAddOns.cs today; Claude089 has Manager's approved post-merge replyTo auto-ack scope there.
