@@ -256,8 +256,9 @@ internal static class SessionAttention
         var directMessages = state.Unread.Where(stored => InboxMessage.Decode(stored).TryGet(out var message, out _)
                 && message.Wake && message.Kind is null && string.IsNullOrEmpty(message.TaskId) && !string.IsNullOrWhiteSpace(message.SenderSessionId))
             .Select(stored => Text(stored, InboxMessage.MessageIdKey)).ToHashSet(StringComparer.Ordinal);
+        // Newest first: each ID wakes once, so a queued wake that never ran must not hold the candidate and block newer mail.
         var direct = eligible.Where(item => item.Kind == AttentionKinds.Info && directMessages.Contains(item.Subject))
-            .OrderBy(item => item.CreatedAt).ThenBy(item => item.Id, StringComparer.Ordinal).FirstOrDefault()?.Id;
+            .OrderByDescending(item => item.CreatedAt).ThenByDescending(item => item.Id, StringComparer.Ordinal).FirstOrDefault()?.Id;
         var wake = urgent.OrderByDescending(item => item.CreatedAt).ThenByDescending(item => item.Id, StringComparer.Ordinal).FirstOrDefault()?.Id
             ?? direct
             ?? (eligible.Any(item => item.Kind != AttentionKinds.Tip && now - Waiting(item) >= hold) ? AttentionWeights.HoldWakePrefix + (boundary?.UtcTicks ?? 0).ToString(CultureInfo.InvariantCulture) : null);

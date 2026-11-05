@@ -215,7 +215,7 @@ public static class CoordinationTools
 /// <c>close_sessions</c> and on any call that needs a session and leaves it out) and what it takes from their replies (the chat's current session,
 /// the node's session handle, the optional hints).
 /// </summary>
-internal sealed class ChatCalls(RelayForwarder forwarder, SessionHints? hints, SessionHandoff? handoff, string requestScope, Func<string?>? workspace = null, LocalChatWake? localWake = null)
+internal sealed class ChatCalls(RelayForwarder forwarder, SessionHints? hints, SessionHandoff? handoff, string requestScope, Func<string?>? workspace = null, LocalChatWake? localWake = null, string? wakeStatusRoot = null)
 {
     private readonly Func<string?> _workspace = workspace ?? (() => CoordinationTools.Workspace);
     private readonly Dictionary<string, (string Id, string Token)> _own = new(StringComparer.Ordinal);
@@ -255,7 +255,7 @@ internal sealed class ChatCalls(RelayForwarder forwarder, SessionHints? hints, S
             if (tool == RelayTools.SessionOpen) await hints.ObserveSessionAsync(arguments, reply, cancellationToken);
             if (tool == RelayTools.CheckInbox) hints.ResetHint();
         }
-        return reply;
+        return tool is RelayTools.SessionOpen or RelayTools.GetStatus ? LocalWakeStatus.AddTo(reply, wakeStatusRoot) : reply;
     }
 
     /// <summary>

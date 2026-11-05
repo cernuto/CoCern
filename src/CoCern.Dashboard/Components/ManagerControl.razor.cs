@@ -7,6 +7,7 @@ namespace CoCern.Dashboard.Components;
 
 public partial class ManagerControl : ComponentBase
 {
+    [Parameter] public bool Compact { get; set; }
     [Parameter] public DashboardSession[] Sessions { get; set; } = [];
     [Parameter] public string? DefaultRepositoryId { get; set; }
     [Inject] public HttpClient ManagerHttp { get; set; } = default!;

@@ -25,6 +25,7 @@ public sealed class DashboardCollector : BackgroundService
     private bool waitingBoardsTruncated;
     private WaitingSources waitingBlockers = new();
     private WaitingReport[] waitingReports = [];
+    private WaitingMail[] waitingMail = [];
     private bool waitingReportsTruncated;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -88,7 +89,7 @@ public sealed class DashboardCollector : BackgroundService
         try
         {
             var observation = await source.ReadObservationAsync(now, application.IncarnationId, cancellationToken);
-            if (observation is not null) (waitingReports, waitingReportsTruncated) = (observation.WaitingReports, observation.SessionsTruncated);
+            if (observation is not null) (waitingReports, waitingMail, waitingReportsTruncated) = (observation.WaitingReports, observation.WaitingMail, observation.SessionsTruncated);
             snapshot = observation is null
                 ? previous with { Warnings = [.. previous.Warnings.Where(warning => warning != "Observation is busy; the previous observation is retained."), "Observation is busy; the previous observation is retained."] }
                 : previous with
@@ -153,7 +154,7 @@ public sealed class DashboardCollector : BackgroundService
             {
                 Waiting = WaitingList.Build(new()
                 {
-                    Boards = waitingBoards, Blockers = waitingBlockers.Blockers, Reports = waitingReports, Labels = labels,
+                    Boards = waitingBoards, Blockers = waitingBlockers.Blockers, Reports = waitingReports, Mail = waitingMail, Labels = labels,
                     Truncated = waitingBoardsTruncated || waitingBlockers.Truncated || waitingReportsTruncated
                 }, now)
             };

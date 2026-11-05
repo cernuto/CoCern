@@ -6,6 +6,7 @@
 @page "/standing"
 @page "/documents"
 @page "/connect"
+@page "/manager"
 
 <PageTitle>@PageTitle · CoCern</PageTitle>
 @if (Connection.State == DashboardLinkState.SignIn)
@@ -29,6 +30,7 @@ else
                 <NavLink href="sql"><Icon Name="database" />Database</NavLink>
                 <NavLink href="logs"><Icon Name="logs" />Logs</NavLink>
                 <NavLink href="standing"><Icon Name="standing" />Standing</NavLink>
+                <NavLink href="manager"><Icon Name="sessions" />Manager</NavLink>
                 <NavLink href="documents"><Icon Name="documents" />Documents</NavLink>
                 <NavLink href="connect"><Icon Name="plug" />Connect</NavLink>
             </nav>
@@ -43,8 +45,9 @@ else
                 <div class="page-tools @(View == "analytics" ? "analytics-page-tools" : null)">
                     <div class="connection-status"><span class="connection-chip @(IsLive ? "live" : "waiting")" role="status"><span class="status-dot"></span>@(View == "analytics" ? $"Hub connection: {ConnectionLabel}" : ConnectionLabel)</span><span title="@DashboardFormat.Timestamp(Connection.Snapshot?.ObservedAt)">@(View == "analytics" ? "Hub updated" : "Updated") @DashboardFormat.Ago(Connection.Snapshot?.ObservedAt, _now).ToLowerInvariant()</span></div>
                     <details class="observation-warnings">
-                        <summary>Notices <span class="notice-count" aria-live="polite">@(Connection.Snapshot?.Warnings.Length ?? 0)</span></summary>
+                        <summary><WaitingBadge Waiting="@(Connection.Snapshot?.Waiting ?? new DashboardWaiting())" /><span>Notices <span class="notice-count" aria-live="polite">@(Connection.Snapshot?.Warnings.Length ?? 0)</span></span></summary>
                         <div class="observation-warnings-panel" role="region" aria-label="Dashboard notices" tabindex="0">
+                            <WaitingOnYou Waiting="@(Connection.Snapshot?.Waiting ?? new DashboardWaiting())" HeadingId="notices-waiting-heading" Now="@_now" OnSelectSession="OpenWaitingSession" OnOpenStanding="OpenStanding" />
                             <h2>Dashboard notices</h2>
                             @if (Connection.Snapshot is { Warnings.Length: > 0 } notices)
                             {
@@ -62,7 +65,7 @@ else
             {
                 <p class="connection-notice" role="status">@Connection.Notice</p>
             }
-            <ManagerControl Sessions="@(Connection.Snapshot?.Sessions ?? [])" DefaultRepositoryId="@(Connection.Snapshot?.Sessions.FirstOrDefault()?.RepositoryId)" />
+            <ManagerControl Compact="@(View != "manager")" Sessions="@(Connection.Snapshot?.Sessions ?? [])" DefaultRepositoryId="@(Connection.Snapshot?.Sessions.FirstOrDefault()?.RepositoryId)" />
             @if (Connection.Snapshot is { } snapshot)
             {
                 <section class="relay-summary" aria-label="Relay summary">
@@ -75,8 +78,14 @@ else
                 {
                     <p class="limit-note">Showing @snapshot.Sessions.Length of @snapshot.Host.SessionCount sessions.</p>
                 }
+                @if (View is "overview" or "sessions")
+                {
+                    <div class="surface waiting-surface"><WaitingOnYou Waiting="@snapshot.Waiting" Now="@_now" OnSelectSession="OpenWaitingSession" OnOpenStanding="OpenStanding" /></div>
+                }
                 @switch (View)
                 {
+                    case "manager":
+                        break;
                     case "analytics":
                         <AnalyticsView Snapshot="@snapshot" />
                         break;
