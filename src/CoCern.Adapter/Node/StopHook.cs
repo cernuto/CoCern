@@ -20,7 +20,7 @@ public static class StopHook
             var capture = NativeJoinHook.ParseContext("claude", document.RootElement);
             if (capture is null || ChatLocators.Text(document.RootElement, "hook_event_name") != "Stop") return 0;
             return await RunAsync(new StringReader(text), error, join.PrivateFolder, ct,
-                (_, _, deliver, limit, cancel) => ClaudeWaiter.RunNativeAsync(join, capture, deliver, timeout ?? limit, cancel, handler, printInbox: true), ownerGone: ownerGone,
+                (_, _, deliver, limit, cancel) => ClaudeWaiter.RunNativeAsync(join, capture, deliver, timeout ?? limit, cancel, handler, printInbox: true, origin: CallOrigins.ClaudeStop), ownerGone: ownerGone,
                 // The waiter's pid file is named by the captured chat, which may not be this event's session_id.
                 otherClient: (_, _, cancel) => ClaudeWaiter.AwaitOtherClientsWaiterAsync(join.PrivateFolder, Guid.Parse(capture.NativeId).ToString("D"), read ?? OwningProcess.Read, grace ?? OtherClientGrace, OtherClientCheck, cancel));
         }
@@ -37,9 +37,13 @@ public static class StopHook
     internal delegate Task<string> Waiter(string nodeFolder, string chat, Action<string> deliver, TimeSpan limit, CancellationToken cancellationToken);
 
     public static Task<int> RunAsync(TextReader input, TextWriter error, string nodeFolder, CancellationToken cancellationToken) =>
-        RunAsync(input, error, nodeFolder, cancellationToken, (folder, chat, deliver, limit, ct) => ClaudeWaiter.RunAsync(folder, chat, deliver, limit, ct, printInbox: true),
+        RunAsync(input, error, nodeFolder, cancellationToken, Wait(),
             chat => LocalWakeConnection.FindForClaude(chat), OwningProcess.WaitUntilGoneAsync,
             (folder, chat, ct) => ClaudeWaiter.AwaitOtherClientsWaiterAsync(folder, chat, OwningProcess.Read, OtherClientGrace, OtherClientCheck, ct));
+
+    /// <summary>The hook's wait on the node's connection; its calls report as this hook's, not as a waiter a chat started.</summary>
+    internal static Waiter Wait(HttpMessageHandler? handler = null, Func<HttpMessageHandler>? hubHandler = null) =>
+        (folder, chat, deliver, limit, ct) => ClaudeWaiter.RunAsync(folder, chat, deliver, limit, ct, handler, hubHandler, printInbox: true, origin: CallOrigins.ClaudeStop);
 
     /// <param name="findLocal">
     /// The chat's own local connection folder, when exactly one holds its session (a chat on the hub's PC, signed in with the hub's token file);
