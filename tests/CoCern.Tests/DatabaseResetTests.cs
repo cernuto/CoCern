@@ -30,16 +30,17 @@ public sealed class DatabaseResetTests
                 discovery[DiscoveryState.MachinesKey]!["fixture-pc"]![EnrolledMachine.LastSeenKey] = lastSeen.ToString("O");
                 discovery[DiscoveryState.MachinesKey]!["fixture-pc"]![EnrolledMachine.ChatsKey] = new JsonArray(new JsonObject { ["sessionId"] = "old-chat" });
                 var payload = JsonSerializer.Serialize(new StateEnvelope<CoordinationDocument> { Value = new() { Json = discovery.ToJsonString() } });
-                using var connection = new SqliteConnection("Data Source=" + database);
+                using var connection = new SqliteConnection("Data Source=" + database + ";Pooling=False");
                 await connection.OpenAsync();
                 using var seed = connection.CreateCommand();
                 seed.CommandText = """
                     INSERT INTO grain_state(state_name,grain_type,grain_key,generation,etag,payload) VALUES ('discovery','cocern.discovery','hub',1,'enrollment',$payload);
-                    INSERT INTO grain_state(state_name,grain_type,grain_key,generation,etag,payload) VALUES ('board','cocern.board','repo/default',1,'board','{}');
+                    INSERT INTO grain_state(state_name,grain_type,grain_key,generation,etag,payload) VALUES ('board','cocern.board','repo/default',1,'board',$board);
                     INSERT INTO due_work VALUES ('board','cocern.board','repo/default','work','effect',0);
                     INSERT INTO hub_metadata VALUES ('feedback_rule:fixture','{}');
                     """;
                 seed.Parameters.AddWithValue("$payload", payload);
+                seed.Parameters.AddWithValue("$board", "{\"padding\":\"" + new string('x', 2 * 1024 * 1024) + "\"}");
                 await seed.ExecuteNonQueryAsync();
                 await store.ScheduleCoordinationResetAsync(cancel: false);
                 Assert.True(await store.CoordinationResetPendingAsync());
@@ -52,12 +53,15 @@ public sealed class DatabaseResetTests
                 Assert.Single(await canceled.ReadDueAsync(DateTimeOffset.UtcNow, 10));
                 await canceled.ScheduleCoordinationResetAsync(cancel: false);
             }
+            var allocatedBeforeReset = new FileInfo(database).Length;
+            Assert.True(allocatedBeforeReset > 2 * 1024 * 1024);
             using (var reset = new SqliteStore(database))
             {
+                Assert.True(new FileInfo(database).Length < allocatedBeforeReset / 2);
                 Assert.Equal(serviceId, reset.ServiceId);
                 Assert.False(await reset.CoordinationResetPendingAsync());
                 Assert.Empty(await reset.ReadDueAsync(DateTimeOffset.UtcNow, 10));
-                using var connection = new SqliteConnection("Data Source=" + database);
+                using var connection = new SqliteConnection("Data Source=" + database + ";Pooling=False");
                 await connection.OpenAsync();
                 using var read = connection.CreateCommand();
                 read.CommandText = "SELECT payload FROM grain_state;";
@@ -71,10 +75,28 @@ public sealed class DatabaseResetTests
                 Assert.False(await rows.ReadAsync());
             }
             Assert.Equal("fixture-credential", await File.ReadAllTextAsync(credential));
-            // A consumed request must not erase data from a later run.
+            // Simulate a reset committed before compaction finished. Retrying
+            // compaction must preserve coordination data from the later run.
+            using (var connection = new SqliteConnection("Data Source=" + database + ";Pooling=False"))
+            {
+                await connection.OpenAsync();
+                using var seed = connection.CreateCommand();
+                seed.CommandText = """
+                    INSERT INTO grain_state(state_name,grain_type,grain_key,generation,etag,payload) VALUES ('board','cocern.board','new/default',1,'new','{}');
+                    INSERT INTO hub_metadata VALUES ('coordination_reset_compaction_pending','1');
+                    """;
+                await seed.ExecuteNonQueryAsync();
+            }
             using var reopened = new SqliteStore(database);
             Assert.Equal(serviceId, reopened.ServiceId);
             Assert.False(await reopened.CoordinationResetPendingAsync());
+            using var verifyConnection = new SqliteConnection("Data Source=" + database + ";Pooling=False");
+            await verifyConnection.OpenAsync();
+            using var verify = verifyConnection.CreateCommand();
+            verify.CommandText = "SELECT COUNT(*) FROM grain_state WHERE grain_key='new/default';";
+            Assert.Equal(1L, await verify.ExecuteScalarAsync());
+            verify.CommandText = "SELECT COUNT(*) FROM hub_metadata WHERE name='coordination_reset_compaction_pending';";
+            Assert.Equal(0L, await verify.ExecuteScalarAsync());
         }
         finally { SqliteConnection.ClearAllPools(); Directory.Delete(directory, recursive: true); }
     }

@@ -1,6 +1,6 @@
 <BbCard role="region" Class="surface sql-view" aria-labelledby="sql-heading">
     <div class="section-heading"><div><h2 id="sql-heading">Tables</h2></div></div>
-    <dl class="database-summary"><div><dt>Provider</dt><dd>@Known(Metrics.Provider)</dd></div><div><dt>Database</dt><dd>@Known(Metrics.Name)</dd></div><div><dt>Database size</dt><dd>@DashboardFormat.Bytes(Metrics.SizeBytes)</dd></div>@if (Metrics.ArchivedTasks is { } archived) { <div><dt>Archived tasks</dt><dd>@archived.ToString("N0")</dd></div> }<div><dt>Collected</dt><dd title="@DashboardFormat.Timestamp(Metrics.ObservedAt)">@DashboardFormat.Ago(Metrics.ObservedAt, Now)</dd></div></dl>
+    <dl class="database-summary"><div><dt>Provider</dt><dd>@Known(Metrics.Provider)</dd></div><div><dt>Database</dt><dd>@Known(Metrics.Name)</dd></div><div><dt>Allocated size</dt><dd>@DashboardFormat.Bytes(Metrics.SizeBytes)</dd></div>@if (Metrics.ArchivedTasks is { } archived) { <div><dt>Archived tasks</dt><dd>@archived.ToString("N0")</dd></div> }<div><dt>Collected</dt><dd title="@DashboardFormat.Timestamp(Metrics.ObservedAt)">@DashboardFormat.Ago(Metrics.ObservedAt, Now)</dd></div></dl>
     @if (!string.IsNullOrWhiteSpace(Metrics.Warning)) { <p class="warning-note" role="status">@Metrics.Warning</p> }
     <div class="sql-table-scroll" role="region" aria-label="Database tables" tabindex="0">
     <table class="metrics-table">
@@ -16,7 +16,7 @@
     </div>
     @if (Metrics.Tables.Length == 0) { <p class="empty-copy">No table sizes yet.</p> }
     @if (Metrics.Truncated) { <p class="limit-note">Some tables aren't shown.</p> }
-    <p class="table-footnote">≥ means at least that many rows. — means not measured.</p>
+    <p class="table-footnote">Allocated size includes unused space reserved for reuse. ≥ means at least that many rows. — means not measured.</p>
 </BbCard>
 
 @code {

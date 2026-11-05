@@ -35,6 +35,7 @@ public sealed partial class SqliteStore : IDueWorkSource, IDisposable, IAsyncDis
         {
             _connection.Open();
             Initialize(existingDatabase, searchModule);
+            CompactPendingCoordinationReset();
             // New -wal/-shm files inherit the database's mode; ones left by an older hub are tightened here.
             RestrictToOwner(DatabasePath + "-wal", createIfMissing: false);
             RestrictToOwner(DatabasePath + "-shm", createIfMissing: false);

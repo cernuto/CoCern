@@ -9,6 +9,7 @@ namespace CoCern.Storage;
 public sealed partial class SqliteStore
 {
     private const string ResetKey = "coordination_reset_pending";
+    private const string ResetCompactionKey = "coordination_reset_compaction_pending";
 
     public async Task<bool> CoordinationResetPendingAsync(CancellationToken cancellationToken = default)
     {
@@ -99,5 +100,32 @@ public sealed partial class SqliteStore
             insert.Parameters.AddWithValue("$payload", enrollment.Payload);
             insert.ExecuteNonQuery();
         }
+
+        // Keep compaction separate from reset intent: retrying it must never erase
+        // coordination data created after the reset transaction committed.
+        using var compact = Command("INSERT INTO hub_metadata(name,value) VALUES ($name,'1');", transaction);
+        compact.Parameters.AddWithValue("$name", ResetCompactionKey);
+        compact.ExecuteNonQuery();
+    }
+
+    // Initialize has returned, so its transaction and prepared statements are
+    // disposed. No search connection, activity writer or grain exists yet.
+    private void CompactPendingCoordinationReset()
+    {
+        using (var pending = Command("SELECT 1 FROM hub_metadata WHERE name=$name;"))
+        {
+            pending.Parameters.AddWithValue("$name", ResetCompactionKey);
+            if (pending.ExecuteScalar() is null) return;
+        }
+        using (var vacuum = Command("VACUUM;"))
+            vacuum.ExecuteNonQuery();
+        using (var checkpoint = Command("PRAGMA wal_checkpoint(TRUNCATE);"))
+        {
+            if (Convert.ToInt32(checkpoint.ExecuteScalar()) != 0)
+                throw new IOException("Cannot finish reclaiming SQLite space after the coordination reset. Restart the hub to retry compaction.");
+        }
+        using var complete = Command("DELETE FROM hub_metadata WHERE name=$name;");
+        complete.Parameters.AddWithValue("$name", ResetCompactionKey);
+        complete.ExecuteNonQuery();
     }
 }

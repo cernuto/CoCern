@@ -39,7 +39,7 @@
 .sql-view { padding: 22px; gap: 16px; min-width: 0; box-shadow: none; }
 .sql-view > .section-heading { padding: 0; }
 .sql-view > h2, .connect-view h2, .document-inventory h2, .doc-cache-view h2 { font-size: 1.15rem; font-weight: 650; letter-spacing: -.02em; }
-.database-summary { display: grid; grid-template-columns: repeat(auto-fit,minmax(140px,1fr)); gap: 18px; padding: 0; margin: 0 0 6px; }
+.database-summary { display: grid; grid-template-columns: repeat(auto-fit,minmax(140px,1fr)); gap: 18px; padding: 18px; margin: 0 0 6px; }
 .database-summary > div { min-width: 0; }
 .database-summary dt { color: var(--muted-foreground); font-size: .72rem; }
 .database-summary dd { margin: 5px 0 0; overflow-wrap: anywhere; font-size: .9rem; }

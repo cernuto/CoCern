@@ -8,7 +8,7 @@
     {
         @foreach (var directory in Cache.Grains.Where(grain => grain.Kind == "Directory"))
         {
-            <details class="document-repository" open="@IsFirstRepository(directory)">
+            <details class="document-repository" @key="directory.Repository">
                 <summary class="document-repository-heading"><span class="document-repository-name">@directory.Repository</span><span>@directory.Documents.ToString("N0") @(directory.Documents == 1 ? "document" : "documents")</span></summary>
                 <ul class="document-file-list">
                     @foreach (var path in directory.DocumentPaths)
@@ -97,9 +97,6 @@
     protected override bool ShouldRender() => _key != _shown;
 
     protected override void OnAfterRender(bool firstRender) => _shown = _key;
-
-    private bool IsFirstRepository(DashboardDocGrain directory) =>
-        directory == Cache.Grains.FirstOrDefault(grain => grain.Kind == "Directory" && grain.Documents > 0);
 
     private static string DocumentName(string path) => System.IO.Path.GetFileName(path.Replace('\\', '/'));
 

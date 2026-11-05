@@ -1,7 +1,7 @@
 <div class="sessions-view">
     <div class="sessions-toolbar">
         <div class="session-view-switch" role="group" aria-label="Session view">
-            <BbButton Variant="@(_graph ? ButtonVariant.Secondary : ButtonVariant.Ghost)" aria-pressed="@(_graph ? "true" : "false")" OnClick="() => _graph = true"><ChildContent><Icon Name="activity" Size="16" />Interaction map</ChildContent></BbButton>
+            <BbButton Variant="@(_graph ? ButtonVariant.Secondary : ButtonVariant.Ghost)" aria-pressed="@(_graph ? "true" : "false")" OnClick="() => _graph = true"><ChildContent><svg class="icon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false"><circle cx="5" cy="5" r="3" /><circle cx="19" cy="5" r="3" /><circle cx="12" cy="19" r="3" /><path d="m7 7 3.5 9M17 7l-3.5 9M8 5h8" /></svg>Interaction map</ChildContent></BbButton>
             <BbButton Variant="@(!_graph ? ButtonVariant.Secondary : ButtonVariant.Ghost)" aria-pressed="@(!_graph ? "true" : "false")" OnClick="() => _graph = false"><ChildContent><Icon Name="sessions" Size="16" />Session list</ChildContent></BbButton>
         </div>
         <CloseSessionsControl Sessions="@Sessions" />
