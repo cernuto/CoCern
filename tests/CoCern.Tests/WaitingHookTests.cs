@@ -445,16 +445,18 @@ public sealed class WaitingHookTests : IDisposable
     [Fact]
     public async Task A_parallel_hook_holding_the_chats_lock_means_this_one_gives_up_quietly()
     {
-        await Hook(Permission());
+        await Hook(Question());
         using (new FileStream(Path.Combine(_folder, PromptHook.CacheFolder, _chat + ".waiting.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None))
         {
-            await PostTool();
-            await Hook(Question());
+            // A clear and a report that would both call the hub if they did not respect the lock.
+            await PostTool(toolUseId: "tool-1");
+            await Hook(Permission());
             Assert.Single(_hub.Acks);
         }
-        // Nothing was lost: the marker is still there, and the next prompt clears.
-        await Prompt();
+        // Nothing was lost: the marker is still there, and the question's completion still clears.
+        await PostTool(toolUseId: "tool-1");
         Assert.Equal("", _hub.Acks.Last()["waitingFor"]!.GetValue<string>());
+        Assert.False(File.Exists(Marker));
     }
 
     [Fact]
