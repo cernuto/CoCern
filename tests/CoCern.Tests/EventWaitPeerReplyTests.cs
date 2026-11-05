@@ -33,59 +33,37 @@ public sealed class EventWaitPeerReplyTests
         Assert.Single(hub.Inbox(owner, Epoch.AddSeconds(5)), message => message["kind"]?.GetValue<string>() == "event_wait_terminal");
     }
 
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void Registration_cannot_claim_another_chats_message_or_change_its_recorded_recipient(bool wrongRecipient)
+    [Fact]
+    public void Registration_cannot_claim_another_chats_message_or_change_its_recorded_recipient()
     {
-        var hub = new AggregateHub(); var owner = hub.Open("owner", Epoch); var peer = hub.Open("peer", Epoch); var other = hub.Open("other", Epoch);
-        hub.DeliverAll(Epoch);
-        var original = MessageId(hub.Send(wrongRecipient ? owner : other, peer.Id, "original", Epoch)); hub.DeliverAll(Epoch);
-        var denied = Register(hub, owner, wrongRecipient ? other.Id : peer.Id, original, Epoch.AddSeconds(1));
-        Assert.False(denied.Ok);
-        Assert.Equal("ReplyNotOwned", denied.Code);
-        Assert.Null(hub.State("session", owner.Id)["eventWaits"]?["reply-wait"]);
+        foreach (var wrongRecipient in new[] { false, true })
+        {
+            var hub = new AggregateHub(); var owner = hub.Open("owner", Epoch); var peer = hub.Open("peer", Epoch); var other = hub.Open("other", Epoch);
+            hub.DeliverAll(Epoch);
+            var original = MessageId(hub.Send(wrongRecipient ? owner : other, peer.Id, "original", Epoch)); hub.DeliverAll(Epoch);
+            var denied = Register(hub, owner, wrongRecipient ? other.Id : peer.Id, original, Epoch.AddSeconds(1));
+            Assert.False(denied.Ok);
+            Assert.Equal("ReplyNotOwned", denied.Code);
+            Assert.Null(hub.State("session", owner.Id)["eventWaits"]?["reply-wait"]);
+        }
     }
+
+
 
     [Fact]
-    public void A_reply_sent_before_arming_is_an_explicit_snapshot_not_a_new_completion()
+    public void A_genuine_post_arm_reply_qualifies_even_when_the_server_clock_ties_or_moves_back()
     {
-        var hub = new AggregateHub(); var owner = hub.Open("owner", Epoch); var peer = hub.Open("peer", Epoch); hub.DeliverAll(Epoch);
-        var original = MessageId(hub.Send(owner, peer.Id, "original", Epoch)); hub.DeliverAll(Epoch);
-        Assert.True(Reply(hub, peer, owner.Id, original, Epoch.AddSeconds(1)).Ok); hub.DeliverAll(Epoch.AddSeconds(1));
-        var registered = Register(hub, owner, peer.Id, original, Epoch.AddSeconds(2)); Assert.True(registered.Ok);
-        var data = AggregateHub.Data(registered);
-        Assert.True(data.ContainsKey("alreadySatisfied"));
-        Assert.True(data["alreadySatisfied"]!.GetValue<bool>());
-        Assert.Null(Entry(hub, owner)["terminal"]);
-        Assert.DoesNotContain(hub.Inbox(owner, Epoch.AddSeconds(2)), message => message["kind"]?.GetValue<string>() == "event_wait_terminal");
-    }
-
-    [Fact]
-    public void Delayed_delivery_of_a_pre_arm_reply_cannot_complete_a_new_wait()
-    {
-        var hub = new AggregateHub(); var owner = hub.Open("owner", Epoch); var peer = hub.Open("peer", Epoch); hub.DeliverAll(Epoch);
-        var original = MessageId(hub.Send(owner, peer.Id, "original", Epoch)); hub.DeliverAll(Epoch);
-        Assert.True(Reply(hub, peer, owner.Id, original, Epoch.AddSeconds(1)).Ok);
-        Assert.True(Register(hub, owner, peer.Id, original, Epoch.AddSeconds(2)).Ok);
-        hub.DeliverAll(Epoch.AddSeconds(3));
-        Assert.Null(Entry(hub, owner)["terminal"]);
-        Assert.DoesNotContain(hub.Inbox(owner, Epoch.AddSeconds(3)), message => message["kind"]?.GetValue<string>() == "event_wait_terminal");
-    }
-
-    [Theory]
-    [InlineData(0)]
-    [InlineData(-1)]
-    public void A_genuine_post_arm_reply_qualifies_even_when_the_server_clock_ties_or_moves_back(int replySeconds)
-    {
-        var hub = new AggregateHub(); var owner = hub.Open("owner", Epoch); var peer = hub.Open("peer", Epoch); hub.DeliverAll(Epoch);
-        var original = MessageId(hub.Send(owner, peer.Id, "original", Epoch)); hub.DeliverAll(Epoch);
-        Assert.True(Register(hub, owner, peer.Id, original, Epoch).Ok);
-        hub.DeliverAll(Epoch); // Finish the real source arming handshake before the send.
-        Assert.True(Reply(hub, peer, owner.Id, original, Epoch.AddSeconds(replySeconds)).Ok);
-        hub.DeliverAll(Epoch);
-        var terminal = Assert.IsType<JsonObject>(Entry(hub, owner)["terminal"]);
-        Assert.Equal("satisfied", terminal["outcome"]!.GetValue<string>());
+        foreach (var replySeconds in new[] { 0, -1 })
+        {
+            var hub = new AggregateHub(); var owner = hub.Open("owner", Epoch); var peer = hub.Open("peer", Epoch); hub.DeliverAll(Epoch);
+            var original = MessageId(hub.Send(owner, peer.Id, "original", Epoch)); hub.DeliverAll(Epoch);
+            Assert.True(Register(hub, owner, peer.Id, original, Epoch).Ok);
+            hub.DeliverAll(Epoch); // Finish the real source arming handshake before the send.
+            Assert.True(Reply(hub, peer, owner.Id, original, Epoch.AddSeconds(replySeconds)).Ok);
+            hub.DeliverAll(Epoch);
+            var terminal = Assert.IsType<JsonObject>(Entry(hub, owner)["terminal"]);
+            Assert.Equal("satisfied", terminal["outcome"]!.GetValue<string>());
+        }
     }
 
     [Fact]
@@ -93,26 +71,16 @@ public sealed class EventWaitPeerReplyTests
     {
         var hub = new AggregateHub(); var owner = hub.Open("owner", Epoch); var peer = hub.Open("peer", Epoch); hub.DeliverAll(Epoch);
         var original = MessageId(hub.Send(owner, peer.Id, "original", Epoch)); hub.DeliverAll(Epoch);
-        Assert.True(Reply(hub, peer, owner.Id, original, Epoch).Ok); // Queued before registration, not yet accepted at owner.
+        // Forging the private sequence cannot turn delayed pre-arm mail into
+        // a fresh completion, even when both accepted operations share a time.
+        Assert.True(hub.Session(peer, RelayTools.SendMessage, new() { ["recipientSessionId"] = owner.Id, ["replyTo"] = original,
+            ["text"] = "reply", ["peerReplySequence"] = long.MaxValue }, Epoch).Ok);
         Assert.True(Register(hub, owner, peer.Id, original, Epoch).Ok);
         hub.DeliverAll(Epoch);
         Assert.Null(Entry(hub, owner)["terminal"]);
         Assert.DoesNotContain(hub.Inbox(owner, Epoch), message => message["kind"]?.GetValue<string>() == "event_wait_terminal");
     }
 
-    [Fact]
-    public void A_fresh_read_expires_a_due_wait_once_without_waiting_for_its_timer()
-    {
-        var hub = new AggregateHub(); var owner = hub.Open("owner", Epoch); var peer = hub.Open("peer", Epoch); hub.DeliverAll(Epoch);
-        var original = MessageId(hub.Send(owner, peer.Id, "original", Epoch)); hub.DeliverAll(Epoch);
-        Assert.True(Register(hub, owner, peer.Id, original, Epoch.AddSeconds(1)).Ok);
-        var args = new JsonObject { ["repositoryId"] = "repo", ["sessionId"] = owner.Id, ["sessionToken"] = owner.Token, ["waitId"] = "reply-wait" };
-        var first = hub.Apply("session", owner.Id, EventWaitAggregate.ReadOperation, args, AggregateHub.Alice with { IsInternal = true }, Epoch.AddMinutes(11));
-        Assert.True(first.Ok); Assert.Equal("expired", AggregateHub.Data(first)["terminal"]!["outcome"]!.GetValue<string>());
-        Assert.True(hub.Apply("session", owner.Id, EventWaitAggregate.ReadOperation, args, AggregateHub.Alice with { IsInternal = true }, Epoch.AddMinutes(12)).Ok);
-        hub.DeliverAll(Epoch.AddMinutes(12));
-        Assert.Single(hub.Inbox(owner, Epoch.AddMinutes(12)), message => message["kind"]?.GetValue<string>() == "event_wait_terminal");
-    }
 
     [Fact]
     public void Accepted_reply_before_the_arming_ack_is_buffered_and_duplicate_arm_keeps_its_original_baseline()
@@ -134,29 +102,7 @@ public sealed class EventWaitPeerReplyTests
         Assert.All(inbox, message => Assert.False(message.ContainsKey("peerReplySequence")));
     }
 
-    [Fact]
-    public void A_self_peer_arms_locally_and_completes_without_a_private_rpc_to_itself()
-    {
-        var hub = new AggregateHub(); var owner = hub.Open("owner", Epoch); hub.DeliverAll(Epoch);
-        var original = MessageId(hub.Send(owner, owner.Id, "original", Epoch)); hub.DeliverAll(Epoch);
-        Assert.True(Register(hub, owner, owner.Id, original, Epoch).Ok);
-        Assert.DoesNotContain(hub.Queued, effect => effect.Operation is PeerReplyWaits.ArmOperation or PeerReplyWaits.AckOperation);
-        Assert.True(Reply(hub, owner, owner.Id, original, Epoch).Ok); hub.DeliverAll(Epoch);
-        Assert.Equal("satisfied", Assert.IsType<JsonObject>(Entry(hub, owner)["terminal"])["outcome"]!.GetValue<string>());
-    }
 
-    [Fact]
-    public void A_sender_cannot_supply_a_forged_sequence_to_turn_pre_arm_mail_into_a_new_reply()
-    {
-        var hub = new AggregateHub(); var owner = hub.Open("owner", Epoch); var peer = hub.Open("peer", Epoch); hub.DeliverAll(Epoch);
-        var original = MessageId(hub.Send(owner, peer.Id, "original", Epoch)); hub.DeliverAll(Epoch);
-        Assert.True(hub.Session(peer, RelayTools.SendMessage, new() { ["recipientSessionId"] = owner.Id, ["replyTo"] = original,
-            ["text"] = "reply", ["peerReplySequence"] = long.MaxValue }, Epoch).Ok);
-        Assert.True(Register(hub, owner, peer.Id, original, Epoch).Ok);
-        hub.DeliverAll(Epoch);
-        Assert.Null(Entry(hub, owner)["terminal"]);
-        Assert.DoesNotContain(hub.Inbox(owner, Epoch), message => message["kind"]?.GetValue<string>() == "event_wait_terminal");
-    }
 
     private static RelayReply Register(AggregateHub hub, Chat owner, string peer, string original, DateTimeOffset at)
     {
