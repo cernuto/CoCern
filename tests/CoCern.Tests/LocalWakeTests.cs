@@ -1059,25 +1059,94 @@ public sealed class LocalWakeTests : IDisposable
         Assert.Single(Directory.GetFiles(folder));
     }
 
-    [Fact]
-    public void The_owner_is_the_launcher_for_a_marked_backend_and_the_process_itself_otherwise()
+    private static readonly DateTime OwnerT0 = new(2026, 11, 1, 9, 0, 0, DateTimeKind.Utc);
+    private static string? Marked(string name) => name == "COCERN_DEVELOPMENT_GENERATION" ? "generation" : null;
+    private static string? Unmarked(string name) => null;
+    private static Func<int, ProcessFacts?> Tree(params ProcessFacts[] processes)
     {
-        var launcher = new ProcessFacts(10, 1, "dotnet", new DateTime(2026, 11, 1, 9, 0, 0, DateTimeKind.Utc));
-        var firstBackend = new ProcessFacts(20, 10, "dotnet", launcher.StartedUtc.AddMinutes(1));
-        var secondBackend = new ProcessFacts(30, 10, "dotnet", launcher.StartedUtc.AddMinutes(9));
-        var orphan = new ProcessFacts(40, 50, "dotnet", launcher.StartedUtc.AddMinutes(1));
-        var reusedParent = new ProcessFacts(50, 1, "other", launcher.StartedUtc.AddMinutes(5));
-        var processes = new[] { launcher, firstBackend, secondBackend, orphan, reusedParent }.ToDictionary(x => x.Id);
-        ProcessFacts? Read(int id) => processes.GetValueOrDefault(id);
-        string? Marked(string name) => name == "COCERN_DEVELOPMENT_GENERATION" ? "generation" : null;
-        string? Unmarked(string name) => null;
+        var known = processes.ToDictionary(x => x.Id);
+        return id => known.GetValueOrDefault(id);
+    }
 
-        // A swap keeps the owner; a backend the launcher did not start, or one whose parent ID was reused, owns itself.
-        Assert.Equal(launcher, ArmedChats.OwnerOf(20, Marked, Read));
-        Assert.Equal(launcher, ArmedChats.OwnerOf(30, Marked, Read));
-        Assert.Equal(firstBackend, ArmedChats.OwnerOf(20, Unmarked, Read));
-        Assert.Equal(orphan, ArmedChats.OwnerOf(40, Marked, Read));
-        Assert.Null(ArmedChats.OwnerOf(99, Marked, Read));
+    [Fact]
+    public void A_current_launcher_is_the_direct_parent_and_stays_the_owner_across_a_swap()
+    {
+        var launcher = new ProcessFacts(10, 1, "dotnet", OwnerT0);
+        var read = Tree(launcher, new(20, 10, "dotnet", OwnerT0.AddMinutes(1)), new(30, 10, "dotnet", OwnerT0.AddMinutes(9)));
+        Assert.Equal(launcher, ArmedChats.OwnerOf(20, Marked, read, out var first));
+        Assert.Equal(launcher, ArmedChats.OwnerOf(30, Marked, read, out var second));
+        Assert.Null(first);
+        Assert.Null(second);
+    }
+
+    [Fact]
+    public void An_older_launcher_behind_one_cmd_stays_the_owner_though_the_cmd_changes_on_a_swap()
+    {
+        var launcher = new ProcessFacts(10, 1, "dotnet", OwnerT0);
+        var read = Tree(launcher,
+            new(11, 10, "cmd", OwnerT0.AddMinutes(1)), new(20, 11, "dotnet", OwnerT0.AddMinutes(1)),
+            new(12, 10, "CMD.EXE", OwnerT0.AddMinutes(9)), new(30, 12, "dotnet", OwnerT0.AddMinutes(9)));
+        Assert.Equal(launcher, ArmedChats.OwnerOf(20, Marked, read, out var first));
+        Assert.Equal(launcher, ArmedChats.OwnerOf(30, Marked, read, out var second));
+        Assert.Null(first);
+        Assert.Null(second);
+
+        var connection = Connection();
+        Assert.True(ArmedBy(connection, ArmedChats.OwnerOf(20, Marked, read, out _)).Record("original-session"));
+        Assert.True(ArmedBy(connection, ArmedChats.OwnerOf(30, Marked, read, out _)).IsArmedHere("original-session"));
+    }
+
+    private static readonly Dictionary<string, ProcessFacts[]> NoLauncherShapes = new()
+    {
+        ["parent is not dotnet"] = [new(10, 1, "node", OwnerT0)],
+        ["parent is gone"] = [],
+        ["direct parent is younger"] = [new(10, 1, "dotnet", OwnerT0.AddHours(1))],
+        ["cmd has no parent"] = [new(10, 9, "cmd", OwnerT0)],
+        ["cmd's parent is not dotnet"] = [new(10, 9, "cmd", OwnerT0), new(9, 1, "node", OwnerT0)],
+        ["cmd's parent is younger than the cmd"] = [new(10, 9, "cmd", OwnerT0), new(9, 1, "dotnet", OwnerT0.AddSeconds(30))],
+        ["the cmd is younger than this process"] = [new(10, 9, "cmd", OwnerT0.AddHours(1)), new(9, 1, "dotnet", OwnerT0)],
+        ["two cmds are more than the one step"] = [new(10, 9, "cmd", OwnerT0), new(9, 8, "cmd", OwnerT0), new(8, 1, "dotnet", OwnerT0)]
+    };
+
+    [Theory]
+    [InlineData("parent is not dotnet")]
+    [InlineData("parent is gone")]
+    [InlineData("direct parent is younger")]
+    [InlineData("cmd has no parent")]
+    [InlineData("cmd's parent is not dotnet")]
+    [InlineData("cmd's parent is younger than the cmd")]
+    [InlineData("the cmd is younger than this process")]
+    [InlineData("two cmds are more than the one step")]
+    public void A_marked_backend_without_a_verified_launcher_owns_itself_and_says_why(string shape)
+    {
+        var self = new ProcessFacts(20, 10, "dotnet", OwnerT0.AddMinutes(1));
+        Assert.Equal(self, ArmedChats.OwnerOf(20, Marked, Tree([self, .. NoLauncherShapes[shape]]), out var fallback));
+        Assert.Equal(LocalWakeCodes.RearmOwnerNotLauncher, fallback);
+    }
+
+    [Fact]
+    public void An_unmarked_process_owns_itself_with_no_reason_and_an_unreadable_one_has_no_owner()
+    {
+        var launcher = new ProcessFacts(10, 1, "dotnet", OwnerT0);
+        var self = new ProcessFacts(20, 10, "dotnet", OwnerT0.AddMinutes(1));
+        Assert.Equal(self, ArmedChats.OwnerOf(20, Unmarked, Tree(launcher, self), out var unmarked));
+        Assert.Null(unmarked);
+        Assert.Null(ArmedChats.OwnerOf(99, Marked, Tree(launcher, self), out var unreadable));
+        Assert.Null(unreadable);
+    }
+
+    [Fact]
+    public async Task The_loop_records_why_a_marked_backend_owns_itself()
+    {
+        var connection = Connection();
+        using var hub = new ProbeHandler();
+        var transport = new NodeTransport { Locators = [], CodexExecutable = () => "synthetic-codex", CodexDispatcher = _ => new NoDispatch() };
+        await using var wake = new LocalChatWake(connection, transport, (_, _, ct) => Task.Delay(Timeout.Infinite, ct), StatusRoot, hub,
+            new ArmedChats(connection.Folder, Launcher, _ => true, LocalWakeCodes.RearmOwnerNotLauncher));
+        _ = wake.RunAsync(CancellationToken.None);
+        await wake.FirstPass.WaitAsync(TimeSpan.FromSeconds(15));
+        Assert.Equal(1, SkipCount("rearm_owner_not_launcher"));
+        Assert.Null(LocalWakeStatus.Problem(StatusRoot));
     }
 
     private LocalWakeConnection Connection(AdapterOptions? options = null) => LocalWakeConnection.Create(options ?? new("http://127.0.0.1:5271/", Secret, admin: true), TokenFile(), Path.Combine(root, "cache"))!;

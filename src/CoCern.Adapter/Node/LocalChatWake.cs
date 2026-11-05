@@ -140,6 +140,7 @@ public sealed class LocalChatWake : IAsyncDisposable
         var now = transport.Clock.GetUtcNow();
         if (rearmAt is not { } due || now < due) return;
         rearmAt = now + RearmRetry;
+        if (armed.OwnerFallback is { } fallback) Report(fallback);
         armed.Prune(session => File.Exists(NodeState.SessionHandlePath(Connection.Folder, session)));
         var skips = new List<string>();
         var pending = new List<SessionHandle>();
