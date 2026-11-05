@@ -292,6 +292,7 @@ public sealed class HubResponseCompactionTests
             attentionDetail = true, maxHoldMinutes = hold, statusTag = tag
         }));
         var full = await Status(first, "", 5);
+        Assert.NotNull(full["statusTag"]);
         var tag = full["statusTag"]!.GetValue<string>();
         Assert.Null((await Status(second, tag, 5))["unchanged"]);
         Assert.Null((await Status(first, tag, 6))["unchanged"]);
