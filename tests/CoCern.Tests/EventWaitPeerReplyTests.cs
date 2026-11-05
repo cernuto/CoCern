@@ -27,7 +27,8 @@ public sealed class EventWaitPeerReplyTests
         var replyId = MessageId(reply);
         var delivery = Assert.Single(hub.Queued, effect => effect.Operation == "__deliver" && JsonNode.Parse(effect.PayloadJson)?["messageId"]?.GetValue<string>() == replyId);
         hub.DeliverAll(Epoch.AddSeconds(4));
-        Assert.Equal("satisfied", Entry(hub, owner)["terminal"]!["outcome"]!.GetValue<string>());
+        var terminal = Assert.IsType<JsonObject>(Entry(hub, owner)["terminal"]);
+        Assert.Equal("satisfied", terminal["outcome"]!.GetValue<string>());
         Assert.True(hub.Deliver(delivery, Epoch.AddSeconds(5)).Ok); hub.DeliverAll(Epoch.AddSeconds(5));
         Assert.Single(hub.Inbox(owner, Epoch.AddSeconds(5)), message => message["kind"]?.GetValue<string>() == "event_wait_terminal");
     }

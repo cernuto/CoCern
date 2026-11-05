@@ -82,5 +82,10 @@ public sealed class EventWaitPublicToolsTests
         return JsonNode.Parse(await response.Content.ReadAsStringAsync())!.AsObject();
     }
     private static void AssertOk(JsonObject reply) => Assert.True(reply["ok"]!.GetValue<bool>(), reply["code"]?.GetValue<string>());
-    private static JsonObject Data(JsonObject reply) { AssertOk(reply); return reply["data"]!.AsObject(); }
+    private static JsonObject Data(JsonObject reply)
+    {
+        AssertOk(reply);
+        var wireData = Assert.IsAssignableFrom<JsonValue>(reply["dataJson"]);
+        return Assert.IsType<JsonObject>(JsonNode.Parse(wireData.GetValue<string>()));
+    }
 }
