@@ -28,6 +28,7 @@
                         <p class="waiting-text">@item.Text</p>
                         <div class="waiting-item-details">
                             @if (!string.IsNullOrEmpty(item.RepositoryId)) { <span>@item.RepositoryId@if (!string.IsNullOrEmpty(item.BoardId)) { <text> / @item.BoardId</text> }</span> }
+                            @if (!string.IsNullOrEmpty(item.TaskId)) { <span>Task @item.TaskId</span> }
                             @if (item.Since is { } since) { <time datetime="@since.ToString("O")" title="@DashboardFormat.Timestamp(since)">@DashboardFormat.Ago(since, Now)</time> }
                             @if (item.Kind == DashboardWaitingKinds.StandingProposal) { <button type="button" class="waiting-session" @onclick="() => OnOpenStanding.InvokeAsync()">Review proposal</button> }
                         </div>
@@ -50,6 +51,7 @@
         DashboardWaitingKinds.StandingProposal => "Standing proposal",
         DashboardWaitingKinds.HumanBlocker => "Human decision",
         DashboardWaitingKinds.SelfReport => "Reported by the chat",
+        DashboardWaitingKinds.Unresponsive => "Unread messages waiting",
         DashboardWaitingKinds.CoordinatorHold => "Coordinator hold",
         _ => "Update"
     };
