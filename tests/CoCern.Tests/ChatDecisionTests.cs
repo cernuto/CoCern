@@ -144,6 +144,70 @@ public sealed class ChatDecisionTests
         await fixture.AssertNoAuthority();
     }
 
+    [Fact]
+    public async Task Recorded_answer_is_presenter_bound_exact_and_replay_cannot_restore_removed_authority()
+    {
+        await using var fixture = new Fixture();
+        var session = await fixture.Open(); var other = await fixture.Open();
+        var id = await fixture.Propose(session, Line("Review the receipt", "review-rule"));
+        Assert.NotNull(Question(await fixture.Boundary(session, present: true)));
+        JsonObject Answer(Session recorder) { var args = fixture.Args(recorder); args["proposalId"] = id; args["decision"] = "approve"; args["humanWords"] = "  Yes <approve> — keep this spacing.\n  "; return args; }
+        Assert.False((await fixture.Call(Worker, RelayTools.RecordDecision, Answer(other))).Ok);
+        foreach (var field in new[] { "role", "grant", "settings", "hubIncarnation", "__actor" })
+        {
+            var widened = Answer(session); widened[field] = "forged";
+            Assert.Equal(RelayErrorCodes.InvalidArguments, (await fixture.Call(Worker, RelayTools.RecordDecision, widened)).Code);
+        }
+        var answer = Answer(session);
+        using var client = fixture.Host.AuthorizedClient();
+        var response = await fixture.Host.Call(client, RelayTools.RecordDecision, answer);
+        Assert.True(response.GetProperty("ok").GetBoolean(), response.GetRawText());
+        var receipt = JsonNode.Parse(response.GetProperty("dataJson").GetString()!)!.AsObject();
+        var view = await fixture.View();
+        var line = Assert.Single(view["lines"]!.AsArray())!.AsObject();
+        var change = Assert.Single(view["history"]!.AsArray())!.AsObject();
+        Assert.Equal((string?)answer["humanWords"], (string?)line["decision"]?["humanWords"]);
+        Assert.True(JsonNode.DeepEquals(line["decision"], change["decision"]));
+        Assert.Equal(session.Id, (string?)line["decision"]?["sessionId"]);
+        var projected = BoardReadModels.Standing("repo/default", new JsonObject
+        {
+            ["lines"] = new JsonObject { ["review-rule"] = line.DeepClone() }, ["history"] = new JsonArray(change.DeepClone())
+        }.ToJsonString(), null);
+        Assert.Equal((string?)answer["humanWords"], Assert.Single(projected.Lines).Decision!.HumanWords);
+        var replay = await fixture.Call(Worker, RelayTools.RecordDecision, answer);
+        Assert.True(replay.Ok, replay.Code);
+        Assert.Equal((string?)receipt["auditRef"], (string?)Data(replay)["auditRef"]);
+        var changed = answer.DeepClone().AsObject(); changed["humanWords"] = "Different quote";
+        Assert.Equal(RelayErrorCodes.RequestConflict, (await fixture.Call(Worker, RelayTools.RecordDecision, changed)).Code);
+        await fixture.Put(new() { ["remove"] = new JsonArray("review-rule") });
+        Assert.True((await fixture.Call(Worker, RelayTools.RecordDecision, answer)).Ok);
+        Assert.Empty((await fixture.View())["lines"]!.AsArray());
+        Assert.False((await fixture.Call(Worker, RelayTools.RecordDecision, Answer(session))).Ok);
+        Assert.False((await fixture.Call(Worker, RelayTools.StandingPut, new() { ["repositoryId"] = "repo", ["requestId"] = "still-worker", ["expectedRevision"] = 2, ["lines"] = new JsonArray() })).Ok);
+    }
+
+    [Fact]
+    public async Task A_changed_offer_requires_a_fresh_question_and_dismissal_grants_nothing()
+    {
+        await using var fixture = new Fixture(); var session = await fixture.Open();
+        await fixture.Put(new() { ["lines"] = new JsonArray(new JsonObject { ["id"] = "rule", ["text"] = "Original" }) });
+        var id = await fixture.Propose(session, Line("Replacement", "rule"));
+        Assert.NotNull(Question(await fixture.Boundary(session, present: true)));
+        var answer = fixture.Args(session); answer["proposalId"] = id; answer["decision"] = "approve"; answer["humanWords"] = "Yes, replace it.";
+        await fixture.Put(new() { ["lines"] = new JsonArray(new JsonObject { ["id"] = "rule", ["text"] = "Changed by administrator" }) });
+        Assert.Equal(RelayErrorCodes.VersionConflict, (await fixture.Call(Worker, RelayTools.RecordDecision, answer)).Code);
+        Assert.Equal("Changed by administrator", (string?)(await fixture.View())["lines"]?[0]?["text"]);
+        Assert.NotNull(Question(await fixture.Boundary(session, present: true)));
+        answer["requestId"] = Guid.NewGuid().ToString("N"); answer["decision"] = "dismiss"; answer["humanWords"] = "No, keep the changed rule.";
+        var dismissed = await fixture.Call(Worker, RelayTools.RecordDecision, answer);
+        Assert.True(dismissed.Ok, dismissed.Code);
+        var view = await fixture.View();
+        Assert.Equal(2, (long)view["revision"]!);
+        Assert.Empty(view["proposals"]!.AsArray());
+        Assert.Equal("Changed by administrator", (string?)view["lines"]?[0]?["text"]);
+        Assert.Equal("dismiss", (string?)view["history"]?[0]?["decision"]?["outcome"]);
+    }
+
     private static JsonObject Line(string text, string? id = null) => new() { ["line"] = id is null ? new JsonObject { ["text"] = text } : new JsonObject { ["id"] = id, ["text"] = text } };
     private static JsonObject Grant(string scope, string[] targets, string expiry, string? id = null)
     {
