@@ -37,12 +37,25 @@ public sealed class EditClaimLifecycleTests
         await fixture.Lifecycle.ObserveAsync("edit-2", true, null, default);
         await fixture.Lifecycle.SweepAsync(default);
         Assert.Equal(new[] { "acquire-1-renew-0" }, fixture.Transport.Renewals);
+        Assert.Empty(fixture.Transport.RetiredRenewals);
+
+        // The next renewal gives back the fence of the one it moved past, and only that one.
+        fixture.Clock.Now = fixture.Clock.Now.AddSeconds(61);
+        await fixture.Lifecycle.SweepAsync(default);
+        Assert.Equal(new[] { "acquire-1-renew-0", "acquire-1-renew-1" }, fixture.Transport.Renewals);
+        Assert.Equal(new[] { "acquire-1-renew-0" }, fixture.Transport.RetiredRenewals);
 
         // Someone else's later content is not this chat's change, even though Git still calls the file dirty.
         fixture.Physical.Content = "someone else's change";
         fixture.Clock.Now = fixture.Clock.Now.AddSeconds(61);
         await fixture.Lifecycle.SweepAsync(default);
-        Assert.Single(fixture.Transport.Renewals);
+        Assert.Equal(2, fixture.Transport.Renewals.Count);
+
+        // A settled claim gives back its last answered renewal's fence too.
+        fixture.Physical.Dirt = EditClaimDirt.Clean;
+        fixture.Transport.ReleaseReply = new AdapterReply(true, "Ok", JsonSerializer.SerializeToElement(new { generation = 7L, released = true }), 7);
+        await fixture.Lifecycle.SweepAsync(default);
+        Assert.Equal(new[] { "acquire-1-renew-0", "acquire-1-renew-1" }, fixture.Transport.RetiredRenewals);
     }
 
     [Fact]
@@ -216,6 +229,7 @@ public sealed class EditClaimLifecycleTests
     {
         internal List<string> Renewals { get; } = [];
         internal List<string> Releases { get; } = [];
+        internal List<string> RetiredRenewals { get; } = [];
         internal AdapterReply ReleaseReply { get; set; } = new(false, "hub_timeout");
         internal AdapterReply ReadReply { get; set; } = new(false, "hub_timeout");
 
@@ -232,5 +246,11 @@ public sealed class EditClaimLifecycleTests
         }
 
         public Task<AdapterReply> ReadAsync(string relativePath, long generation) => Task.FromResult(ReadReply);
+
+        public Task RetireRenewalAsync(string relativePath, long generation, string invocation)
+        {
+            RetiredRenewals.Add(invocation);
+            return Task.CompletedTask;
+        }
     }
 }

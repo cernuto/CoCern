@@ -218,12 +218,16 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
         catch (Refused error) { return error.Code; }
     }
 
+    private static string FenceDirectory(NativeJoinBinding binding) => Path.Combine(Path.GetDirectoryName(binding.StatePath)!, "calls-" + binding.BindingKey);
+
+    private static string FencePath(NativeJoinBinding binding, string id) => Path.Combine(FenceDirectory(binding), NativeCheckout.Hash(binding.BindingKey + ":" + id) + ".json");
+
     private static (string Request, bool Legacy) MutationFence(NativeJoinBinding binding, SessionHandle handle, string id, string tool, JsonElement args, bool reserve)
     {
-        var directory = Path.Combine(Path.GetDirectoryName(binding.StatePath)!, "calls-" + binding.BindingKey);
+        var directory = FenceDirectory(binding);
         SafeDirectory(directory, false);
         var request = NativeCheckout.Hash(binding.BindingKey + ":" + id);
-        var path = Path.Combine(directory, request + ".json");
+        var path = FencePath(binding, id);
         var canonical = NativeCheckout.Hash(JsonSerializer.Serialize(new[] { binding.Generation, handle.SessionId, tool, NativeJoinHook.Canonical(args) }));
         if (File.Exists(path))
         {
@@ -247,6 +251,23 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
             NodeState.WritePrivately(path, System.Text.Encoding.ASCII.GetBytes("v2:" + canonical));
         }
         return (request, false);
+    }
+
+    /// <summary>
+    /// Gives back the fence of a claim renewal the lifecycle has moved past, so continuous renewal holds one slot per dirty file. Only claim_renew, and only a private file matching this
+    /// binding generation, session and these arguments. No hub traffic. Best effort: a refusal or file error leaves the fence, and the lifecycle asks again.
+    /// </summary>
+    internal async Task RetireRenewalFenceAsync(NativeHookContext context, string repositoryId, string expectedGeneration, string invocation, JsonElement args, CancellationToken ct)
+    {
+        try
+        {
+            await using var binding = await NativeJoinBinding.AcquireAsync(folder, context.Provider, context.NativeId, Environment.MachineName, repositoryId, context.Cwd, ct, existingOnly: true);
+            if (binding.Generation != expectedGeneration || binding.CurrentHandle is not { } handle) return;
+            _ = MutationFence(binding, handle, invocation, RelayTools.ClaimRenew, args, reserve: false);
+            File.Delete(FencePath(binding, invocation));
+        }
+        catch (Refused) { }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException or InvalidOperationException) { }
     }
 
     internal async Task<NativeEditClaims> EditClaimsAsync(NativeHookContext context, CancellationToken ct)

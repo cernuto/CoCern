@@ -27,6 +27,8 @@ internal interface IEditClaimLifecycleTransport
     Task<AdapterReply> RenewAsync(string relativePath, long generation, string invocation);
     Task<AdapterReply> CleanReleaseAsync(string relativePath, long generation, string invocation);
     Task<AdapterReply> ReadAsync(string relativePath, long generation);
+    /// <summary>Best effort: gives back the fence of a renewal that can never be sent again. Failing changes nothing, because the next renewal or settlement asks again.</summary>
+    Task RetireRenewalAsync(string relativePath, long generation, string invocation);
 }
 
 /// <summary>The sidecar beside the ledger, under the same repository/session/generation/checkout partition, so a saved attempt only ever correlates within its own native generation.</summary>
@@ -203,7 +205,7 @@ internal sealed class EditClaimLifecycle(EditClaimLedger ledger, EditClaimLifecy
                 var current = resource.Max(held => held.Lease.Generation!.Value);
                 // Generations only rise, and this ledger holds a confirmed newer grant, so an older one is over without asking anyone.
                 foreach (var older in resource.Where(held => held.Lease.Generation != current).GroupBy(held => held.Lease.Generation!.Value))
-                    Settle(older.Select(held => held.Intent.Id), resource.Key, older.Key);
+                    await SettleClaimAsync(older, resource.Key, older.Key, ct);
                 await SweepClaimAsync(resource.Key, current, resource.Where(held => held.Lease.Generation == current).ToArray(), document, ct);
             }
             return await FinishAsync(ct);
@@ -219,7 +221,7 @@ internal sealed class EditClaimLifecycle(EditClaimLedger ledger, EditClaimLifecy
             tracked = new(path, generation, now.AddSeconds(LeaseSeconds));
             if (!await ChangeAsync(path, generation, row => row, ct)) return;
         }
-        if (tracked.ReleaseOutcome == Settled) { Settle(receipts.Select(held => held.Intent.Id), path, generation); return; }
+        if (tracked.ReleaseOutcome == Settled) { await SettleClaimAsync(receipts, path, generation, ct); return; }
         var grant = Grant(receipts);
         // Only says whether to bother with the gate. The decision is taken again inside it, from state read there.
         var dirt = physical.Status(path);
@@ -231,7 +233,7 @@ internal sealed class EditClaimLifecycle(EditClaimLedger ledger, EditClaimLifecy
         else if (grant is not null && dirt == EditClaimDirt.Dirty)
         {
             var renewed = await RenewAsync(tracked, grant, ct);
-            if (renewed is null) { Settle(receipts.Select(held => held.Intent.Id), path, generation); return; }
+            if (renewed is null) { await SettleClaimAsync(receipts, path, generation, ct); return; }
             tracked = renewed;
         }
         // A pre-owned duplicate never made a grant, so like the guard's own compensation it owes no release. Its evidence already lives on the claim row, so it can leave the ledger.
@@ -273,7 +275,7 @@ internal sealed class EditClaimLifecycle(EditClaimLedger ledger, EditClaimLifecy
         if (reply is { Ok: false, Code: RelayErrorCodes.StaleClaim } || reply.Ok && ReplyGeneration(reply) == generation && reply.Data is { } data && data.TryGetProperty("released", out var released) && released.ValueKind == JsonValueKind.True)
         {
             await ChangeAsync(path, generation, row => row with { ReleaseOutcome = Settled }, ct);
-            Settle(receipts.Select(held => held.Intent.Id), path, generation);
+            await SettleClaimAsync(receipts, path, generation, ct);
             return true;
         }
         if (!uncertain && reply is { Ok: false, Code: RelayErrorCodes.UnresolvedAction }) await ChangeAsync(path, generation, row => row with { ReleaseOutcome = ReleaseBlocked }, ct);
@@ -287,8 +289,10 @@ internal sealed class EditClaimLifecycle(EditClaimLedger ledger, EditClaimLifecy
         if (tracked.ReleaseOutcome == ReleaseUnknown || tracked.OwnFingerprint is null) return tracked;
         if (!tracked.RenewPending && tracked.LeaseUntil - time.GetUtcNow() > RenewWithin) return tracked;
         if (physical.Fingerprint(path) != tracked.OwnFingerprint) return tracked;
+        // The saved sequence has moved past the last renewal, so nothing can send it again and each dirty file keeps only one fence. The current one stays, answered or not.
+        if (tracked.RenewSequence > 0) await transport.RetireRenewalAsync(path, generation, Renewal(grant, tracked.RenewSequence - 1));
         // Reserved before sending, so a lost reply replays the same invocation rather than spending a new one.
-        var invocation = grant.Lease.RequestId + "-renew-" + tracked.RenewSequence.ToString(CultureInfo.InvariantCulture);
+        var invocation = Renewal(grant, tracked.RenewSequence);
         if (!await ChangeAsync(path, generation, row => row with { RenewPending = true }, ct)) return tracked;
         AdapterReply reply;
         try { reply = await transport.RenewAsync(path, generation, invocation); }
@@ -321,7 +325,7 @@ internal sealed class EditClaimLifecycle(EditClaimLedger ledger, EditClaimLifecy
         var definite = ReplyGeneration(reply) is { } current && (current != generation || ReplyLease(reply) is { } past && past + HubMargin < time.GetUtcNow());
         if (held.ValueKind != JsonValueKind.False || !definite) return;
         await ChangeAsync(path, generation, row => row with { ReleaseOutcome = Settled }, ct);
-        Settle(receipts.Select(receipt => receipt.Intent.Id), path, generation);
+        await SettleClaimAsync(receipts, path, generation, ct);
     }
 
     private async Task<DateTimeOffset?> FinishAsync(CancellationToken ct)
@@ -360,6 +364,17 @@ internal sealed class EditClaimLifecycle(EditClaimLedger ledger, EditClaimLifecy
     /// <summary>An acquire or release on this path whose result is not known. It may yet need this generation, so the claim stays and lapses instead.</summary>
     private static bool UnsettledSibling(IEnumerable<EditClaimIntent> intents, string path, long generation) => intents.Any(intent => intent.Targets.Any(target =>
         target.ResourceId == path && (target.Generation is null || target.Generation == generation) && UnsettledLease.Contains(target.Outcome)));
+
+    private static string Renewal(Held grant, long sequence) => grant.Lease.RequestId + "-renew-" + sequence.ToString(CultureInfo.InvariantCulture);
+
+    /// <summary>Ends a claim's receipts and gives back its last answered renewal's fence. A pending renewal whose reply was lost keeps its fence, since that call's outcome is unknown.</summary>
+    private async Task SettleClaimAsync(IEnumerable<Held> receipts, string path, long generation, CancellationToken ct)
+    {
+        var held = receipts.ToArray();
+        if (Grant(held) is { } grant && (await store.ReadAsync(ct))?.Claims.FirstOrDefault(row => row.RelativePath == path && row.Generation == generation) is { RenewSequence: > 0 } tracked)
+            await transport.RetireRenewalAsync(path, generation, Renewal(grant, tracked.RenewSequence - 1));
+        Settle(held.Select(receipt => receipt.Intent.Id), path, generation);
+    }
 
     private void Settle(IEnumerable<string> intentIds, string path, long generation)
     {
