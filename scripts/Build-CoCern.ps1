@@ -26,7 +26,7 @@ try {
     New-Item -ItemType Directory -Path $taskOutput | Out-Null
     $taskBuild=Join-Path $taskOutput 'build'
     $taskDeadline=[DateTimeOffset]::UtcNow.AddMinutes($TimeoutMinutes)
-    $taskReceipt=[ordered]@{Commit=$taskHead;ChangedSymbols=$taskSymbols;Tests=$taskTests;StartedUtc=[DateTimeOffset]::UtcNow.ToString('O');Outcome='incomplete'}
+    $taskReceipt=[ordered]@{Commit=$taskHead;ChangedSymbols=$taskSymbols;Tests=$taskTests;ExecutedMethods=@();StartedUtc=[DateTimeOffset]::UtcNow.ToString('O');Outcome='incomplete'}
     $taskReceipt | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $taskOutput 'receipt.json')
     function Invoke-BoundedDotnet([string]$Name,[string[]]$Arguments) {
         $taskStart=[Diagnostics.ProcessStartInfo]::new((Get-Command dotnet).Source)
@@ -50,14 +50,41 @@ try {
             if($taskTimedOut -or $taskProcess.ExitCode -ne 0){throw ($Name+' failed or timed out; inspect the retained logs.')}
         } finally { $taskProcess.Dispose() }
     }
+    function Read-SelectedResults([string]$ResultsDirectory,[string[]]$SelectedMethods) {
+        $taskResults=@()
+        $taskFiles=@(Get-ChildItem -LiteralPath $ResultsDirectory -Filter '*.trx' -File)
+        if(!$taskFiles.Count){throw 'The selected smoke run produced no TRX evidence.'}
+        foreach($taskFile in $taskFiles){
+            [xml]$taskXml=Get-Content -LiteralPath $taskFile.FullName
+            $taskDefinitions=@{}
+            foreach($taskDefinition in $taskXml.SelectNodes("//*[local-name()='TestDefinitions']/*[local-name()='UnitTest']")){
+                $taskDefinitions[$taskDefinition.id]=[string]$taskDefinition.TestMethod.className+'.'+[string]$taskDefinition.TestMethod.name
+            }
+            foreach($taskResult in $taskXml.SelectNodes("//*[local-name()='UnitTestResult']")){
+                $taskMethod=$taskDefinitions[$taskResult.testId]
+                if(!$taskMethod -or $taskMethod -notin $SelectedMethods){throw 'TRX contains an unresolved or unselected test method.'}
+                $taskResults+=[pscustomobject]@{Method=$taskMethod;Outcome=[string]$taskResult.outcome}
+            }
+        }
+        foreach($taskMethod in ($SelectedMethods | Sort-Object -Unique)){
+            $taskCases=@($taskResults | Where-Object Method -eq $taskMethod)
+            if(!$taskCases.Count -or @($taskCases | Where-Object Outcome -ne 'Passed').Count){throw ('Selected method is missing, unexecuted, skipped or failed: '+$taskMethod)}
+            [pscustomobject]@{Method=$taskMethod;PassedCases=$taskCases.Count}
+        }
+    }
     try {
         Invoke-BoundedDotnet 'build' @('build','CoCern.slnx','--artifacts-path',$taskBuild,'-m:1','-p:BuildInParallel=false','--disable-build-servers','--nologo')
         $taskIndex=0
         foreach($taskGroup in ($taskTests | Group-Object project)){
             $taskFilter=($taskGroup.Group.method | Sort-Object -Unique | ForEach-Object {'FullyQualifiedName='+$_}) -join '|'
-            Invoke-BoundedDotnet ('smoke-'+(++$taskIndex)) @('test',$taskGroup.Name,'--no-build','--no-restore','--artifacts-path',$taskBuild,'--filter',$taskFilter,'--logger','trx','--results-directory',(Join-Path $taskOutput 'results'),'-m:1','--disable-build-servers','--nologo')
+            $taskResultsDirectory=Join-Path $taskOutput ('results/'+(++$taskIndex))
+            Invoke-BoundedDotnet ('smoke-'+$taskIndex) @('test',$taskGroup.Name,'--no-build','--no-restore','--artifacts-path',$taskBuild,'--filter',$taskFilter,'--logger','trx','--results-directory',$taskResultsDirectory,'-m:1','--disable-build-servers','--nologo')
+            $taskReceipt.ExecutedMethods+=@(Read-SelectedResults $taskResultsDirectory @($taskGroup.Group.method))
         }
         $taskReceipt.Outcome='passed'
+    } catch {
+        $taskReceipt.Outcome='failed'
+        throw
     } finally {
         $taskReceipt['FinishedUtc']=[DateTimeOffset]::UtcNow.ToString('O')
         $taskReceipt | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $taskOutput 'receipt.json')

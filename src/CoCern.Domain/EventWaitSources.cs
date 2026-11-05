@@ -354,7 +354,7 @@ public static class EventWaitSources
         context.Emit(watch.SourceKind, watch.SourceKey, SourceUnwatchOperation, JsonSerializer.SerializeToNode(watch, EventWaitState.Json)!.AsObject());
     }
 
-    private static RelayReply Bind(AggregateContext context, EventWaitOwnerWatch watch)
+    internal static RelayReply Bind(AggregateContext context, EventWaitOwnerWatch watch)
     {
         if (EventWaitAggregate.Authorize(context) is { } denied) return denied;
         if (!Valid(watch) || watch.RepositoryId != context.Repository || watch.OwnerSessionId != context.Key) return Error("InvalidArguments");

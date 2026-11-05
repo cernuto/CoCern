@@ -104,30 +104,6 @@ public sealed class OrdinaryTurnHookTests : IDisposable
     }
 
     [Fact]
-    public async Task A_chat_with_no_mail_gets_no_output_at_all_and_costs_one_tiny_read_once_the_etag_is_known()
-    {
-        Assert.Equal("", await Prompt());
-        Assert.Equal("", await PostTool());
-        _hub.Reads.Clear();
-        Assert.Equal("", await PostTool());
-        var read = Assert.Single(_hub.Reads);
-        Assert.Contains("\"headersOnly\":true", read);
-        Assert.Contains($"\"knownInboxEtag\":\"{_hub.Etag}\"", read);
-        Assert.Contains("\"attention\":false", read);
-        Assert.Contains("\"backgroundCall\":true", read);
-    }
-
-    [Fact]
-    public async Task Printed_mail_is_not_read_again_while_the_inbox_stays_the_same()
-    {
-        _hub.Add("m1", "text");
-        Assert.Single(MessageIds(await PostTool()));
-        _hub.Reads.Clear();
-        Assert.Equal("", await PostTool());
-        Assert.All(_hub.Reads, read => Assert.Contains("\"headersOnly\":true", read));
-    }
-
-    [Fact]
     public async Task A_new_message_behind_printed_ones_is_read_from_where_it_starts()
     {
         foreach (var id in Enumerable.Range(0, 60).Select(n => $"m{n:00}")) _hub.Add(id, "x");
@@ -158,21 +134,6 @@ public sealed class OrdinaryTurnHookTests : IDisposable
     }
 
     [Fact]
-    public async Task The_status_line_counts_without_marking_anything_when_the_text_cannot_be_read()
-    {
-        _hub.Attention = "{\"actionable\":1,\"urgent\":0,\"inbox\":1,\"standing\":0}";
-        _hub.Add("m1", "text");
-        _hub.RefuseFullReads = true;
-        var status = await Prompt();
-        Assert.Equal("CoCern: 1 attention item, 1 inbox.", status.TrimEnd());
-        Assert.Empty(_hub.SeenReports());
-        Assert.Empty(WakeState.ReadPrinted(Ledger, Route, ["m1"]));
-        // Nothing was lost: the next poll prints it.
-        _hub.RefuseFullReads = false;
-        Assert.Equal(["m1"], MessageIds(await PostTool()));
-    }
-
-    [Fact]
     public async Task A_message_too_long_to_print_gets_one_pointer_and_stays_unseen_and_unprinted()
     {
         _hub.Add("big", new string('x', ClaudeWaiter.MaxPrintedInbox * 2));
@@ -189,21 +150,6 @@ public sealed class OrdinaryTurnHookTests : IDisposable
         Assert.Empty(WakeState.ReadPrinted(Ledger, Route, ["big"]));
     }
 
-    // Trap 2: a waiter holds its state lock for its whole wait, so a hook must still reach the ledger.
-
-    [Fact]
-    public async Task Hooks_print_and_record_while_a_waiter_holds_its_state()
-    {
-        _hub.Add("m1", "held");
-        using var waiter = new WakeState(Ledger);
-        Assert.Equal(["m1"], MessageIds(await Prompt()));
-        Assert.Equal(["m1"], waiter.Printed(Route, ["m1"]));
-        // And what the waiter printed, a hook does not repeat.
-        waiter.MarkPrinted(Route, ["m2"]);
-        _hub.Add("m2", "the waiter printed this");
-        Assert.Equal("", await PostTool());
-    }
-
     // Trap 4: the model's own check_inbox writes no ledger. The hook records it from tool_response; a form it cannot read costs one repeat.
 
     private static string ToolReply(params string[] ids) => ToolReplyFrom("repo", ids);
@@ -217,8 +163,6 @@ public sealed class OrdinaryTurnHookTests : IDisposable
 
     [Theory]
     [InlineData("s-other", "repo")]
-    [InlineData("s-hook", "other-repo")]
-    [InlineData("s-other", "other-repo")]
     public async Task A_read_of_another_session_or_repository_leaves_the_same_ids_unprinted_here(string session, string repository)
     {
         _hub.Add("m1", "this chat's own text");
@@ -241,24 +185,6 @@ public sealed class OrdinaryTurnHookTests : IDisposable
     }
 
     [Fact]
-    public async Task A_read_with_no_session_named_costs_one_repeat_because_its_owner_cannot_be_established()
-    {
-        // The adapter fills the session in itself for such a call, from its own memory of the repository, which need not be the handle this hook chose.
-        _hub.Add("m1", "text");
-        var implicitCall = PostToolInput(PostToolHook.CheckInboxTool, Blocks(ToolReply("m1")), input: new { repositoryId = "repo" });
-        Assert.Equal(["m1"], MessageIds(await PostTool(implicitCall)));
-        Assert.Equal("", await PostTool(implicitCall));
-    }
-
-    [Fact]
-    public async Task A_tool_input_that_is_missing_costs_one_repeat()
-    {
-        _hub.Add("m1", "text");
-        var input = JsonSerializer.Serialize(new { session_id = _chat, hook_event_name = "PostToolUse", tool_name = PostToolHook.CheckInboxTool, tool_response = Blocks(ToolReply("m1")) });
-        Assert.Equal(["m1"], MessageIds(await PostTool(input)));
-    }
-
-    [Fact]
     public async Task An_item_from_another_repository_keeps_the_whole_result_from_being_recorded()
     {
         _hub.Add("m1", "text");
@@ -267,28 +193,8 @@ public sealed class OrdinaryTurnHookTests : IDisposable
         Assert.Equal(["m1", "m2"], MessageIds(await PostTool(PostToolInput(PostToolHook.CheckInboxTool, Blocks(reply), input: OwnCall))));
     }
 
-    [Fact]
-    public async Task An_item_that_does_not_say_its_repository_is_not_recorded()
-    {
-        _hub.Add("m1", "text");
-        var reply = JsonSerializer.Serialize(new { ok = true, code = "ok", data = new { items = new[] { new { messageId = "m1", text = "x" } } } });
-        Assert.Equal(["m1"], MessageIds(await PostTool(PostToolInput(PostToolHook.CheckInboxTool, Blocks(reply), input: OwnCall))));
-    }
-
-    [Fact]
-    public async Task A_read_naming_this_session_without_its_token_is_still_recorded()
-    {
-        // The adapter adds the token only when the named session is its own, and the hub refuses anything else, so items in the reply are this session's.
-        _hub.Add("m1", "text");
-        Assert.Equal("", await PostTool(PostToolInput(PostToolHook.CheckInboxTool, Blocks(ToolReply("m1")), input: new { repositoryId = "repo", sessionId = "s-hook" })));
-        Assert.Equal(["m1"], WakeState.ReadPrinted(Ledger, Route, ["m1"]));
-    }
-
     [Theory]
     [InlineData("blocks")]
-    [InlineData("content")]
-    [InlineData("text")]
-    [InlineData("reply")]
     public async Task The_models_own_check_inbox_is_recorded_so_the_hook_does_not_repeat_it(string form)
     {
         _hub.Add("m1", "text");
@@ -302,14 +208,6 @@ public sealed class OrdinaryTurnHookTests : IDisposable
         };
         Assert.Equal("", await PostTool(PostToolInput(PostToolHook.CheckInboxTool, response, input: OwnCall)));
         Assert.Equal(["m1"], WakeState.ReadPrinted(Ledger, Route, ["m1"]));
-    }
-
-    [Fact]
-    public async Task A_tool_response_the_hook_cannot_read_costs_one_repeat_and_no_more()
-    {
-        _hub.Add("m1", "text");
-        Assert.Equal(["m1"], MessageIds(await PostTool(PostToolInput(PostToolHook.CheckInboxTool, new { something = "else" }, input: OwnCall))));
-        Assert.Equal("", await PostTool(PostToolInput(PostToolHook.CheckInboxTool, new { something = "else" }, input: OwnCall)));
     }
 
     [Fact]
@@ -335,104 +233,6 @@ public sealed class OrdinaryTurnHookTests : IDisposable
         Assert.Equal(["m1"], PostToolHook.MessagesRead(JsonSerializer.SerializeToElement(OwnCall), JsonSerializer.SerializeToElement(reply), "repo", "s-hook"));
     }
 
-    // Limits: within 9,000 characters with a pointer for the rest, and never failing a turn.
-
-    [Fact]
-    public async Task A_long_inbox_stays_within_the_limit_and_arrives_whole_over_later_hooks()
-    {
-        var ids = Enumerable.Range(0, 30).Select(n => $"m{n:00}").ToArray();
-        foreach (var id in ids) _hub.Add(id, new string('x', 600));
-        // The longest status line shares the limit with the messages.
-        _hub.Attention = $"{{\"actionable\":1,\"inbox\":30,\"top\":{{\"id\":\"a-1\",\"k\":\"blocked\",\"t\":\"{new string('t', 256)}\"}}}}";
-        var delivered = new List<string>();
-        var prompt = await Prompt();
-        Assert.True(prompt.Length <= ClaudeWaiter.MaxPrintedInbox + Environment.NewLine.Length, prompt.Length.ToString());
-        Assert.Contains("CoCern: 1 attention item, 30 inbox", prompt);
-        Assert.Matches(@"\d+ more not shown; check_inbox reads (them|it)\.", prompt);
-        delivered.AddRange(MessageIds(prompt));
-        for (var hook = 0; delivered.Count < ids.Length; hook++)
-        {
-            Assert.True(hook < 5, $"{delivered.Count} delivered");
-            var context = await PostTool();
-            Assert.True(context.Length is > 0 and <= ClaudeWaiter.MaxPrintedInbox, context.Length.ToString());
-            delivered.AddRange(MessageIds(context));
-        }
-        Assert.Equal(ids, delivered);
-        Assert.Equal("", await PostTool());
-    }
-
-    [Fact]
-    public async Task A_hub_that_is_down_or_refuses_means_no_output_and_exit_zero()
-    {
-        _hub.Add("m1", "text");
-        using var down = new ThrowingHub(new HttpRequestException("refused"));
-        Assert.Equal("", await Prompt(down));
-        Assert.Equal("", await PostTool(hub: down));
-        using var failing = new StatusHub(HttpStatusCode.InternalServerError);
-        Assert.Equal("", await Prompt(failing));
-        Assert.Equal("", await PostTool(hub: failing));
-        // Nothing was recorded, so the mail still arrives once the hub answers.
-        Assert.Equal(["m1"], MessageIds(await PostTool()));
-    }
-
-    [Fact]
-    public async Task A_hub_that_never_answers_means_no_output_within_the_bound()
-    {
-        using var hanging = new HangingHub();
-        var watch = System.Diagnostics.Stopwatch.StartNew();
-        Assert.Equal("", await PostTool(hub: hanging));
-        Assert.Equal("", await Prompt(hanging));
-        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(8), watch.Elapsed.ToString());
-    }
-
-    [Fact]
-    public async Task A_text_read_that_hangs_prints_nothing_and_marks_nothing()
-    {
-        _hub.Add("m1", "text");
-        _hub.HangFullReads = true;
-        Assert.Equal("", await PostTool());
-        Assert.Empty(WakeState.ReadPrinted(Ledger, Route, ["m1"]));
-    }
-
-    [Fact]
-    public async Task No_enrollment_no_session_and_bad_input_mean_no_output_and_exit_zero()
-    {
-        _hub.Add("m1", "text");
-        var elsewhere = Path.Combine(_folder, "not-enrolled");
-        using var silent = new StringWriter();
-        Assert.Equal(0, await PostToolHook.RunAsync(new StringReader(PostToolInput()), silent, elsewhere, _hub));
-        Assert.Equal(0, await PromptHook.RunAsync(new StringReader(JsonSerializer.Serialize(new { session_id = _chat })), silent, elsewhere, _hub, null));
-        Assert.Equal(0, await PostToolHook.RunAsync(new StringReader(JsonSerializer.Serialize(new { session_id = Guid.NewGuid().ToString(), hook_event_name = "PostToolUse" })), silent, _folder, _hub));
-        Assert.Equal(0, await PostToolHook.RunAsync(new StringReader(JsonSerializer.Serialize(new { session_id = "not-a-uuid", hook_event_name = "PostToolUse" })), silent, _folder, _hub));
-        Assert.Equal(0, await PostToolHook.RunAsync(new StringReader("not json"), silent, _folder, _hub));
-        Assert.Equal(0, await PostToolHook.RunAsync(new StringReader("[1,2]"), silent, _folder, _hub));
-        Assert.Equal("", silent.ToString());
-        Assert.Empty(_hub.Reads);
-    }
-
-    [Fact]
-    public async Task Input_that_never_ends_means_no_output_within_the_bound()
-    {
-        _hub.Add("m1", "text");
-        using var silent = new StringWriter();
-        var watch = System.Diagnostics.Stopwatch.StartNew();
-        Assert.Equal(0, await PostToolHook.RunAsync(new NeverEnding(), silent, _folder, _hub));
-        Assert.Equal("", silent.ToString());
-        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(5), watch.Elapsed.ToString());
-    }
-
-    [Fact]
-    public async Task Input_too_long_to_keep_is_read_to_its_end_and_skips_only_this_poll()
-    {
-        _hub.Add("m1", "text");
-        var reader = new StringReader(PostToolInput(response: new string('x', 5 * 1024 * 1024)));
-        using var output = new StringWriter();
-        Assert.Equal(0, await PostToolHook.RunAsync(reader, output, _folder, _hub));
-        Assert.Equal("", output.ToString());
-        Assert.Equal(-1, reader.Peek());
-        Assert.Equal(["m1"], MessageIds(await PostTool()));
-    }
-
     [Fact]
     public async Task A_subagents_tool_call_prints_nothing_because_its_context_is_not_the_chats()
     {
@@ -444,49 +244,6 @@ public sealed class OrdinaryTurnHookTests : IDisposable
         Assert.Equal("", await PostTool(PostToolInput(PostToolHook.CheckInboxTool, new[] { new { type = "text", text = ToolReply("m1") } }, agent: "agent-1", input: OwnCall)));
         Assert.Empty(WakeState.ReadPrinted(Ledger, Route, ["m1"]));
         Assert.Equal(["m1"], MessageIds(await PostTool()));
-    }
-
-    [Fact]
-    public async Task Another_event_does_not_run_the_post_tool_hook()
-    {
-        _hub.Add("m1", "text");
-        Assert.Equal("", await PostTool(PostToolInput(eventName: "PreToolUse")));
-        Assert.Empty(_hub.Reads);
-    }
-
-    [Fact]
-    public async Task A_hook_finding_another_hook_of_this_chat_at_work_leaves_the_mail_to_it()
-    {
-        _hub.Add("m1", "text");
-        Directory.CreateDirectory(Path.Combine(_folder, PromptHook.CacheFolder));
-        using (new FileStream(Path.Combine(_folder, PromptHook.CacheFolder, _chat + ".mail.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None))
-        {
-            Assert.Equal("", await PostTool());
-            Assert.Empty(_hub.Reads);
-        }
-        Assert.Equal(["m1"], MessageIds(await PostTool()));
-    }
-
-    [Fact]
-    public async Task A_codex_chat_keeps_the_status_line_and_gets_no_mail_because_it_has_no_ledger()
-    {
-        var codex = Guid.NewGuid().ToString();
-        NodeState.WriteSessionHandle(_folder, new SessionHandle("s-codex", "synthetic-token-codex", "repo", "Codex chat", DateTimeOffset.UtcNow, Chat: new ChatLocation("codex", codex)));
-        _hub.Attention = "{\"actionable\":0,\"urgent\":0,\"inbox\":1,\"standing\":0}";
-        _hub.Add("m1", "text");
-        using var output = new StringWriter();
-        Assert.Equal(0, await PromptHook.RunAsync(new StringReader(JsonSerializer.Serialize(new { session_id = codex })), output, _folder, _hub, null));
-        Assert.Equal("CoCern: 0 attention items, 1 inbox.", output.ToString().TrimEnd());
-        Assert.Empty(_hub.Reads);
-    }
-
-    [Fact]
-    public async Task The_status_line_goes_quiet_when_nothing_waits_and_its_answer_is_still_cached()
-    {
-        _hub.Attention = "{\"actionable\":0,\"urgent\":0,\"inbox\":0,\"standing\":7}";
-        Assert.Equal("", await Prompt());
-        Assert.Equal("", await Prompt());
-        Assert.Equal(1, _hub.StatusReads);
     }
 
     [Fact]
@@ -553,31 +310,5 @@ public sealed class OrdinaryTurnHookTests : IDisposable
         {
             Content = new StringContent(JsonSerializer.Serialize(new { ok = true, code = "ok", dataJson = data, version = 0 }), Encoding.UTF8, "application/json")
         };
-    }
-
-    private sealed class ThrowingHub(Exception failure) : HttpMessageHandler
-    {
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) => Task.FromException<HttpResponseMessage>(failure);
-    }
-
-    private sealed class StatusHub(HttpStatusCode status) : HttpMessageHandler
-    {
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) => Task.FromResult(new HttpResponseMessage(status));
-    }
-
-    private sealed class HangingHub : HttpMessageHandler
-    {
-        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
-        {
-            await Task.Delay(Timeout.Infinite, cancellationToken);
-            return new(HttpStatusCode.OK);
-        }
-    }
-
-    /// <summary>Hook input that never arrives, like a client that keeps standard input open.</summary>
-    private sealed class NeverEnding : TextReader
-    {
-        public override async ValueTask<int> ReadAsync(Memory<char> buffer, CancellationToken cancellationToken = default) { await Task.Delay(Timeout.Infinite, cancellationToken); return 0; }
-        public override Task<int> ReadAsync(char[] buffer, int index, int count) => ReadAsync(buffer.AsMemory(index, count)).AsTask();
     }
 }

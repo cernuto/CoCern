@@ -11,7 +11,7 @@ public static class ToolResults
 {
     public static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
-    public static IEnumerable<Tool> Tools(bool administrator) => RelayToolCatalog.ForRole(administrator).Select(tool => new Tool
+    public static IEnumerable<Tool> Tools(bool administrator, bool eventWaits = false) => RelayToolCatalog.ForRole(administrator, eventWaits).Select(tool => new Tool
     {
         Name = tool.Name,
         Description = tool.Description,

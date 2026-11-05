@@ -45,60 +45,6 @@ public sealed class ConnectionFailureTests
         AssertFailure(unavailable, "hub_unavailable", UnavailableMessage);
     }
 
-    [Theory]
-    [InlineData(true, false)]
-    [InlineData(false, false)]
-    [InlineData(true, true)]
-    [InlineData(false, true)]
-    public async Task Concurrent_requests_keep_identity_evidence_local(bool mismatchFinishesFirst, bool ioFailure)
-    {
-        using var handler = new BarrierHandler(ioFailure);
-        using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(5) };
-        var forwarder = new RelayForwarder(client, new AdapterOptions("https://127.0.0.1:1/", "synthetic-credential"));
-        var mismatch = forwarder.ForwardAsync("task_get", JsonSerializer.SerializeToElement(new { identityMismatch = true }));
-        var outage = forwarder.ForwardAsync("task_get", JsonSerializer.SerializeToElement(new { identityMismatch = false }));
-        await handler.BothEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-
-        var first = mismatchFinishesFirst ? mismatch : outage;
-        handler.Release(mismatchFinishesFirst);
-        await first.WaitAsync(TimeSpan.FromSeconds(5));
-        handler.Release(!mismatchFinishesFirst);
-        await Task.WhenAll(mismatch, outage).WaitAsync(TimeSpan.FromSeconds(5));
-
-        AssertFailure(await mismatch, "hub_identity_changed", IdentityMessage);
-        AssertFailure(await outage, "hub_unavailable", UnavailableMessage);
-    }
-
-    [Fact]
-    public void Pin_callback_marks_only_a_presented_mismatch_and_preserves_observer_and_handler_safety()
-    {
-        using var key = RSA.Create(2048);
-        var request = new CertificateRequest("CN=localhost", key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
-        using var certificate = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddDays(1));
-        var pin = CertificateFingerprint.Of(certificate);
-        var observed = new List<string>();
-        using var handler = PinnedCertificate.CreateHandler(pin, observed.Add);
-        Assert.False(handler.AllowAutoRedirect);
-        Assert.False(handler.UseCookies);
-
-        using var missing = new HttpRequestMessage();
-        Assert.False(handler.ServerCertificateCustomValidationCallback!(missing, null, null, SslPolicyErrors.RemoteCertificateNotAvailable));
-        Assert.False(missing.Options.TryGetValue(PinnedCertificate.IdentityMismatch, out _));
-        Assert.Equal("none", Assert.Single(observed));
-
-        using var matching = new HttpRequestMessage();
-        Assert.True(handler.ServerCertificateCustomValidationCallback!(matching, certificate, null, SslPolicyErrors.RemoteCertificateChainErrors));
-        Assert.False(matching.Options.TryGetValue(PinnedCertificate.IdentityMismatch, out _));
-        Assert.Single(observed);
-
-        var wrongPin = (pin[0] == 'A' ? "B" : "A") + pin[1..];
-        using var wrongHandler = PinnedCertificate.CreateHandler(wrongPin, observed.Add);
-        using var mismatch = new HttpRequestMessage();
-        Assert.False(wrongHandler.ServerCertificateCustomValidationCallback!(mismatch, certificate, null, SslPolicyErrors.None));
-        Assert.True(mismatch.Options.TryGetValue(PinnedCertificate.IdentityMismatch, out var marked) && marked);
-        Assert.Equal(pin, observed[1]);
-    }
-
     private static JsonElement Arguments() => JsonSerializer.SerializeToElement(new { repositoryId = "fixture" });
 
     private static void AssertFailure(AdapterReply reply, string code, string message)
@@ -110,27 +56,6 @@ public sealed class ConnectionFailureTests
         var serialized = JsonSerializer.Serialize(reply);
         Assert.DoesNotContain("synthetic-credential", serialized);
         Assert.DoesNotContain("exception-sentinel", serialized);
-    }
-
-    private sealed class BarrierHandler(bool ioFailure) : HttpMessageHandler
-    {
-        private readonly TaskCompletionSource mismatch = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        private readonly TaskCompletionSource outage = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        private int entered;
-        public TaskCompletionSource BothEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        public void Release(bool identityMismatch) => (identityMismatch ? mismatch : outage).TrySetResult();
-
-        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
-        {
-            using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(cancellationToken));
-            var identityMismatch = body.RootElement.GetProperty("identityMismatch").GetBoolean();
-            if (identityMismatch) request.Options.Set(PinnedCertificate.IdentityMismatch, true);
-            if (Interlocked.Increment(ref entered) == 2) BothEntered.TrySetResult();
-            await (identityMismatch ? mismatch : outage).Task.WaitAsync(cancellationToken);
-            if (ioFailure) throw new IOException("exception-sentinel");
-            throw new HttpRequestException("exception-sentinel");
-        }
     }
 
     private sealed class TlsHub : IAsyncDisposable

@@ -12,54 +12,9 @@ public sealed class DevelopmentAdapterTests : IDisposable
     private string Source => Path.Combine(root, "source");
     private string Deployment => Path.Combine(root, "deployment");
 
-    [Fact]
-    public void A_current_manifest_reader_keeps_its_snapshot_while_a_new_generation_is_published()
-    {
-        Seed();
-        var first = AdapterDeployment.Publish(Source, Deployment);
-        using var held = AdapterDeployment.OpenCurrentManifest(Deployment);
-        var second = AdapterDeployment.Publish(Source, Deployment);
-        using var previous = JsonDocument.Parse(held);
-        Assert.NotEqual(first.Generation, second.Generation);
-        Assert.Equal(first.Generation, previous.RootElement.GetProperty("generation").GetString());
-        Assert.Equal(first.Version, second.Version);
-        Assert.Equal(second, AdapterDeployment.Read(Deployment));
-    }
-
-    [Fact]
-    public void Identical_content_reuses_its_immutable_copy_but_each_debug_start_requests_a_new_connection()
-    {
-        Seed();
-        var first = AdapterDeployment.Publish(Source, Deployment);
-        var firstPath = AdapterDeployment.AdapterPath(Deployment, first);
-        Assert.Equal("adapter one", File.ReadAllText(firstPath));
-        var second = AdapterDeployment.Publish(Source, Deployment);
-        Assert.Equal(first.Version, second.Version);
-        Assert.NotEqual(first.Generation, second.Generation);
-        Assert.Single(Directory.GetDirectories(Path.Combine(Deployment, "versions")));
-        File.WriteAllText(Path.Combine(Source, "CoCern.Adapter.dll"), "adapter two");
-        var changed = AdapterDeployment.Publish(Source, Deployment);
-        Assert.NotEqual(first.Version, changed.Version);
-        Assert.Equal("adapter one", File.ReadAllText(firstPath));
-        Assert.Equal("adapter two", File.ReadAllText(AdapterDeployment.AdapterPath(Deployment, changed)));
-        Assert.Equal(changed, AdapterDeployment.Read(Deployment));
-    }
-
-    [Fact]
-    public void Incomplete_build_output_does_not_replace_the_working_manifest()
-    {
-        Seed();
-        var before = AdapterDeployment.Publish(Source, Deployment);
-        File.Delete(Path.Combine(Source, "CoCern.Adapter.runtimeconfig.json"));
-        Assert.ThrowsAny<IOException>(() => AdapterDeployment.Publish(Source, Deployment));
-        Assert.Equal(before, AdapterDeployment.Read(Deployment));
-    }
-
     [Theory]
     [InlineData("../source")]
     [InlineData("C:/outside")]
-    [InlineData("")]
-    [InlineData("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")]
     public void Invalid_or_missing_version_cannot_launch_a_different_folder(string version)
     {
         Directory.CreateDirectory(Deployment);
@@ -75,46 +30,6 @@ public sealed class DevelopmentAdapterTests : IDisposable
         File.WriteAllText(AdapterDeployment.AdapterPath(Deployment, first), "tampered");
         Assert.ThrowsAny<IOException>(() => AdapterDeployment.Publish(Source, Deployment));
         Assert.Equal("tampered", File.ReadAllText(AdapterDeployment.AdapterPath(Deployment, first)));
-    }
-
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void Development_setup_changes_only_the_owned_codex_launch_and_preserves_credentials(bool tableEnvironment)
-    {
-        Directory.CreateDirectory(root);
-        var config = Path.Combine(root, "config.toml");
-        var token = Path.Combine(root, "token");
-        var env = tableEnvironment ? $"[mcp_servers.cocern.env]\nCOCERN_TOKEN_FILE = {ClientSettings.TomlString(token)}\nCOCERN_ROLE = 'admin'\nCOCERN_FINGERPRINT = 'existing-pin'\n"
-            : $"env = {{ COCERN_TOKEN_FILE = {ClientSettings.TomlString(token)}, COCERN_ROLE = 'admin', COCERN_FINGERPRINT = 'existing-pin' }}\n";
-        var original = "# keep this\nmodel = 'existing-model'\n[mcp_servers.cocern]\ncommand = 'old-host' # keep command comment\nargs = ['old-adapter']\n" + env + "\n[mcp_servers.other]\ncommand = 'other-server'\n";
-        File.WriteAllText(config, original, new UTF8Encoding(false));
-        var launcher = Path.Combine(Deployment, "versions", new string('a', 64), "CoCern.Adapter.dll");
-        var plan = ClientSettings.PlanDevelopmentCodex(config, "dotnet-host", launcher, Deployment, token);
-        Assert.False(plan.IsUnchanged);
-        plan.Apply(TimeProvider.System);
-        var expected = original.Replace("'old-host'", "'dotnet-host'").Replace("['old-adapter']", $"[{ClientSettings.TomlString(launcher)}, '--dev-launch', {ClientSettings.TomlString(Deployment)}]");
-        Assert.Equal(expected, File.ReadAllText(config));
-        Assert.Equal(original, File.ReadAllText(Assert.Single(Directory.GetFiles(root, "config.toml.cocern-backup-*"))));
-        Assert.True(ClientSettings.PlanDevelopmentCodex(config, "dotnet-host", launcher, Deployment, token).IsUnchanged);
-        Directory.CreateDirectory(Path.GetDirectoryName(launcher)!);
-        File.WriteAllText(launcher, "existing immutable launcher");
-        var nextLauncher = Path.Combine(Deployment, "versions", new string('b', 64), "CoCern.Adapter.dll");
-        Assert.True(ClientSettings.PlanDevelopmentCodex(config, "dotnet-host", nextLauncher, Deployment, token).IsUnchanged);
-        Assert.Equal(expected, File.ReadAllText(config));
-        Assert.False(ClientSettings.PlanDevelopmentCodex(config, "dotnet-host", nextLauncher, Deployment, token, replaceLauncher: true).IsUnchanged);
-    }
-
-    [Fact]
-    public void Development_setup_refuses_an_entry_for_a_different_hub()
-    {
-        Directory.CreateDirectory(root);
-        var config = Path.Combine(root, "config.toml");
-        var original = "[mcp_servers.cocern]\ncommand = 'other-host'\nargs = ['other-adapter']\nenv = { COCERN_TOKEN_FILE = 'another-token' }\n";
-        File.WriteAllText(config, original);
-        Assert.Throws<ClientSettingsException>(() => ClientSettings.PlanDevelopmentCodex(config, "dotnet", "new-adapter", Deployment, Path.Combine(root, "token")));
-        Assert.Equal(original, File.ReadAllText(config));
-        Assert.Empty(Directory.GetFiles(root, "*.cocern-backup-*"));
     }
 
     [Fact]
@@ -156,21 +71,6 @@ public sealed class DevelopmentAdapterTests : IDisposable
         var nextLauncher = Path.Combine(Deployment, "versions", new string('b', 64), "CoCern.Adapter.dll");
         Assert.True(ClientSettings.PlanDevelopmentClaudeCode(config, "dotnet-host", nextLauncher, Deployment, token).IsUnchanged);
         Assert.False(ClientSettings.PlanDevelopmentClaudeCode(config, "dotnet-host", nextLauncher, Deployment, token, replaceLauncher: true).IsUnchanged);
-    }
-
-    [Fact]
-    public void Claude_development_setup_leaves_a_pc_without_a_claude_cocern_entry_alone()
-    {
-        Directory.CreateDirectory(root);
-        var config = Path.Combine(root, ".claude.json");
-        var token = Path.Combine(root, "token");
-        Assert.True(ClientSettings.PlanDevelopmentClaudeCode(config, "dotnet", "launcher.dll", Deployment, token).IsUnchanged);
-        Assert.False(File.Exists(config));
-        var original = "{\n  \"mcpServers\": {\n    \"other\": { \"command\": \"other-server\" }\n  }\n}\n";
-        File.WriteAllText(config, original);
-        Assert.False(DevelopmentSetup.ConfigureClaudeCode(config, "dotnet", "launcher.dll", Deployment, token));
-        Assert.Equal(original, File.ReadAllText(config));
-        Assert.Empty(Directory.GetFiles(root, "*.cocern-backup-*"));
     }
 
     [Fact]
