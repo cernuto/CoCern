@@ -1,5 +1,6 @@
 using CoCern.Adapter;
 using CoCern.Adapter.Node;
+using System.Text.Json;
 using Xunit;
 
 namespace CoCern.Tests;
@@ -76,6 +77,27 @@ public sealed class LocalWakeStartupTests : IDisposable
         Assert.Equal("setup_io_error", Assert.Single(reasons));
         Assert.DoesNotContain(root, string.Join(" ", reasons));
         Assert.DoesNotContain(Secret, string.Join(" ", reasons));
+    }
+
+    [Theory]
+    [InlineData("unconfigured", "token_file_unconfigured")]
+    [InlineData("missing", "token_file_missing")]
+    [InlineData("ready", "connection_ready")]
+    public async Task Default_reporting_records_the_actual_startup_outcome_without_a_callback(string kind, string expected)
+    {
+        Directory.CreateDirectory(root);
+        var tokenFile = kind == "unconfigured" ? null : Path.Combine(root, Secret);
+        if (kind == "ready") File.WriteAllText(tokenFile!, Secret);
+        var cache = Path.Combine(root, "cache");
+        await using var wake = LocalChatWake.TryCreate(Options(), tokenFile, cache);
+        Assert.Equal(kind == "ready", wake is not null);
+        var statusFile = Path.Combine(cache, "status", Environment.ProcessId + ".json");
+        Assert.True(File.Exists(statusFile));
+        var text = File.ReadAllText(statusFile);
+        using var status = JsonDocument.Parse(text);
+        Assert.Equal(expected, status.RootElement.GetProperty("code").GetString());
+        Assert.DoesNotContain(Secret, text);
+        Assert.DoesNotContain(root, text);
     }
 
     private static AdapterOptions Options() => new("http://127.0.0.1:5271/", Secret);

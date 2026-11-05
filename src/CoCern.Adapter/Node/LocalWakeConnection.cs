@@ -14,6 +14,7 @@ internal sealed class LocalWakeConnection
 
     public static LocalWakeConnection? Create(AdapterOptions options, string? tokenFile, string? cacheRoot = null, Action<string>? report = null)
     {
+        report ??= code => LocalWakeStatus.Report(code, cacheRoot);
         LocalWakeConnection? Refuse(string reason) { report?.Invoke(reason); return null; }
         if (options.NodeFolder is not null) return Refuse("node_connection");
         if (string.IsNullOrWhiteSpace(tokenFile)) return Refuse("token_file_unconfigured");

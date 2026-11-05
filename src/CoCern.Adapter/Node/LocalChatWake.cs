@@ -29,6 +29,7 @@ public sealed class LocalChatWake : IAsyncDisposable
 
     public static LocalChatWake? TryCreate(AdapterOptions options, string? tokenFile, string? cacheRoot = null, Action<string>? report = null)
     {
+        report ??= code => LocalWakeStatus.Report(code, cacheRoot);
         try { return LocalWakeConnection.Create(options, tokenFile, cacheRoot, report) is { } connection ? new(connection) : null; }
         catch (IOException) { report?.Invoke("setup_io_error"); return null; }
         catch (UnauthorizedAccessException) { report?.Invoke("setup_access_denied"); return null; }
