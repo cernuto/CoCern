@@ -30,6 +30,9 @@ public sealed class ControlState(JsonObject json)
     public const string ManagerGenerationKey = "managerGeneration";
     public const string ManagerKey = "manager";
     public const string ManagerHistoryKey = "managerHistory";
+    public const string ManagerRevokedKey = "managerRevoked";
+    public const string AdminActionsKey = "adminActions";
+    public const string AdminActionSeqKey = "adminActionSeq";
 
     /// <summary>Every key the directory stores: its entries by session ID, close fences by session ID, resources by ID, aliases by machine and name, and cancellations by session and action.</summary>
     public static StateShape Shape { get; } = CommonState.Shape.With(
@@ -37,7 +40,8 @@ public sealed class ControlState(JsonObject json)
         (NativeJoinsKey, StateShape.Map(StateShape.Object(("sessionId", null), ("generation", null), ("requestId", null), ("expired", null), ("retired", StateShape.Map(null))))),
         (ResourcesKey, StateShape.Map(RegisteredResource.Shape)), (AliasesKey, StateShape.Map(null)),
         (PausedKey, null), (CancellationsKey, StateShape.Map(Cancellation.Shape)),
-        (ManagerGenerationKey, null), (ManagerKey, ManagerAssignment.Shape), (ManagerHistoryKey, ManagerSelectionHistoryState.Shape));
+        (ManagerGenerationKey, null), (ManagerKey, ManagerAssignment.Shape), (ManagerHistoryKey, ManagerSelectionHistoryState.Shape),
+        (ManagerRevokedKey, StateShape.Map(null)), (AdminActionsKey, ManagerSelectionHistoryState.AdminActionShape), (AdminActionSeqKey, null));
 
     private JsonObject Sessions => ObjectAt(json, SessionsKey);
 
@@ -190,6 +194,35 @@ public sealed class ControlState(JsonObject json)
     }
 
     public JsonArray ManagerHistory => ArrayAt(json, ManagerHistoryKey);
+
+    /// <summary>Whether a session or native participant ID was a manager and has since been replaced or revoked. Private; IDs here never leave the hub.</summary>
+    internal bool ManagerRevoked(string id) => id.Length > 0 && json[ManagerRevokedKey] is JsonObject revoked && revoked.ContainsKey(id);
+
+    /// <summary>Remembers <paramref name="manager"/>'s session and native participant as revoked at <paramref name="generation"/>; past the bound the oldest goes.</summary>
+    internal void RevokeManager(ManagerAssignment manager, long generation)
+    {
+        var revoked = ObjectAt(json, ManagerRevokedKey);
+        revoked[manager.SessionId] = generation;
+        if (manager.NativeId.Length > 0) revoked[manager.NativeId] = generation;
+        while (revoked.Count > RelayLimits.ManagerRevokedEntries) revoked.Remove(revoked.OrderBy(entry => entry.Value!.GetValue<long>()).First().Key);
+    }
+
+    /// <summary>A newly appointed chat is no longer a former manager.</summary>
+    internal void RestoreManager(DirectoryEntry target)
+    {
+        if (json[ManagerRevokedKey] is not JsonObject revoked) return;
+        revoked.Remove(target.SessionId);
+        if (target.NativeId.Length > 0) revoked.Remove(target.NativeId);
+    }
+
+    /// <summary>The administrative action log, oldest first (see <c>AdminActionLog</c>).</summary>
+    public JsonArray AdminActions => ArrayAt(json, AdminActionsKey);
+
+    public long AdminActionSeq
+    {
+        get => Number(json, AdminActionSeqKey);
+        set => json[AdminActionSeqKey] = value;
+    }
 
     private JsonObject Cancellations => ObjectAt(json, CancellationsKey);
 

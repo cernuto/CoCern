@@ -87,6 +87,11 @@ public static class RelayLimits
     public const int MaxManagerHumanWordsLength = 200;
     public const int ManagerSelectionHistoryEntries = 20;
     public const int ManagerSelectionHistoryPageEntries = 2;
+    /// <summary>Former managers the hub still refuses to take administrative calls from; past this the oldest revocation is forgotten.</summary>
+    public const int ManagerRevokedEntries = 64;
+    /// <summary>Administrative actions the control document keeps, newest last; the count dropped is reported beside them.</summary>
+    public const int AdminActionEntries = 100;
+    public const int AdminActionPageEntries = 20;
     public const int MaxPageSize = 50;
     public const int DefaultPageSize = 20;
     /// <summary>A whole-task read carries only this many of the latest messages, reports and attempts; older ones stay in the paged sections.</summary>

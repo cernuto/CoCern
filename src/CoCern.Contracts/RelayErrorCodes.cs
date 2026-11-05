@@ -29,6 +29,10 @@ public static class RelayErrorCodes
     public const string RepositoryDenied = "RepositoryDenied";
     public const string SessionDenied = "SessionDenied";
     public const string AdministratorRequired = "AdministratorRequired";
+    /// <summary>The chat presenting this administrative call was the recorded manager and has been replaced or revoked. The caller's token is not the question.</summary>
+    public const string ManagerRevoked = "ManagerRevoked";
+    /// <summary>A chat tried to record its own appointment. Paul names the manager from the dashboard or through another chat.</summary>
+    public const string SelfAppointment = "SelfAppointment";
     /// <summary>The caller is an administrator, but this tool answers only a connection from the hub's own PC.</summary>
     public const string HubPcRequired = "HubPcRequired";
     public const string InternalOnly = "InternalOnly";
@@ -138,7 +142,7 @@ public static class RelayErrorCodes
         DeltaRestartRequired, WorkflowRecheckRequired, WorkflowIncomplete, WorkflowNotReady, DependenciesIncomplete, TaskArchived, SnoozeLimit
     }.ToFrozenSet(StringComparer.Ordinal);
 
-    private static readonly FrozenSet<string> Denials = new[] { RepositoryDenied, SessionDenied, AdministratorRequired, HubPcRequired, MachineRevoked, MachineRequired, JoinCodeRequired }.ToFrozenSet(StringComparer.Ordinal);
+    private static readonly FrozenSet<string> Denials = new[] { RepositoryDenied, SessionDenied, AdministratorRequired, ManagerRevoked, SelfAppointment, HubPcRequired, MachineRevoked, MachineRequired, JoinCodeRequired }.ToFrozenSet(StringComparer.Ordinal);
     private static readonly FrozenSet<string> Missing = new[] { UnknownTool, NotFound }.ToFrozenSet(StringComparer.Ordinal);
 
     /// <summary>Recognized conflicts are the failures a client reconciles by rereading state; they keep their code, data and version end to end.</summary>

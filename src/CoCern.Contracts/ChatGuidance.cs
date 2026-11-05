@@ -21,6 +21,8 @@ public static class ChatGuidance
     public static string? Refusal(string code, string tool) => code switch
     {
         RelayErrorCodes.AdministratorRequired => AdministratorHint(tool),
+        RelayErrorCodes.ManagerRevoked => "This chat is no longer the manager, so it can't act as one. Pass the request to the current manager or to Paul.",
+        RelayErrorCodes.SelfAppointment => "A chat can't appoint itself. Ask Paul to name it from the dashboard or from another chat.",
         RelayErrorCodes.HubPcRequired => "This tool answers only on the PC that runs the hub. Ask Paul to run it there.",
         RelayErrorCodes.RepositoryDenied => "This chat has no access to that repository or record. Ask Paul if it should.",
         // The same words for a wrong token, a closed handle and another chat's session, so they don't tell those apart.

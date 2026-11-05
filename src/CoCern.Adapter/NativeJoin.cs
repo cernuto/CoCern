@@ -255,6 +255,7 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
             payload["repositoryId"] = handle.RepositoryId;
             if (definition.RequiresSession || tool == RelayTools.GetStatus)
             { payload["sessionId"] = handle.SessionId; payload["sessionToken"] = handle.SessionToken; }
+            if (definition.Audited) { payload["actingSessionId"] = handle.SessionId; payload["actingSessionToken"] = handle.SessionToken; }
             if (definition.IsMutation && request is not null) payload["requestId"] = request;
             var arguments = RelayForwarder.WithOrigin(JsonSerializer.SerializeToElement(payload), background: false);
             if (tool == RelayTools.ControlRequest) arguments = CoordinationTools.WithOwnSession(arguments, handle.SessionId);

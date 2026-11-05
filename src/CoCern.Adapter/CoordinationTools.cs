@@ -237,6 +237,7 @@ internal sealed class ChatCalls(RelayForwarder forwarder, SessionHints? hints, S
         else if (tool == RelayTools.ControlRequest) arguments = CoordinationTools.WithOwnSession(arguments, CurrentSession);
         else if (!TryWithOwnHandle(tool, ref arguments))
             return new(false, "implicit_request_capacity", JsonSerializer.SerializeToElement(new { guidance = "For a new write, supply your own sessionId and sessionToken. Reconcile an uncertain write in its original session." }));
+        arguments = WithActingSession(tool, arguments);
         AdapterReply? originalReply = null;
         var reply = tool == RelayTools.CheckInbox
             ? await InboxWait.CheckAsync(_forwarder, arguments, InboxWait.PollInterval, cancellationToken)
@@ -258,6 +259,29 @@ internal sealed class ChatCalls(RelayForwarder forwarder, SessionHints? hints, S
         }
         if (tool == RelayTools.SessionOpen) reply = _forwarder.WithOwnStartHint(reply);
         return tool is RelayTools.SessionOpen or RelayTools.GetStatus ? LocalWakeStatus.AddTo(reply, wakeStatusRoot) : reply;
+    }
+
+    /// <summary>
+    /// An administrative call says which chat is making it, so the hub can attribute it and refuse a former manager. This is the chat's own handle in
+    /// that repository, kept beside the fields the tool itself uses (<c>sessionId</c> names a cancel's target). None known: the token speaks alone.
+    /// </summary>
+    private JsonElement WithActingSession(string tool, JsonElement arguments)
+    {
+        if (!RelayToolCatalog.TryGet(tool, out var definition) || !definition.Audited || arguments.ValueKind != JsonValueKind.Object || arguments.TryGetProperty("actingSessionId", out _) ||
+            ChatLocators.Text(arguments, "repositoryId") is not { Length: > 0 } repository) return arguments;
+        (string Id, string Token) own;
+        lock (_handleLock)
+        {
+            if (!_own.TryGetValue(repository, out own))
+            {
+                if ((handoff?.FindOwn(repository) ?? localWake?.FindOwn(repository)) is not { } found) return arguments;
+                own = (found.SessionId, found.SessionToken);
+            }
+        }
+        var node = JsonNode.Parse(arguments.GetRawText())!.AsObject();
+        node["actingSessionId"] = own.Id;
+        node["actingSessionToken"] = own.Token;
+        return JsonSerializer.SerializeToElement(node);
     }
 
     /// <summary>

@@ -52,6 +52,9 @@ public sealed record RelayTool(string Name, string Description, bool Administrat
     IReadOnlyList<string>? DetailFields = null, int TokenBudget = RelayLimits.DefaultReplyTokens)
 {
     public IReadOnlyList<string> DetailFields { get; init; } = DetailFields ?? [];
+
+    /// <summary>An administrative action: it changes the hub, or (<c>add_pc</c>) hands out what lets a PC join. It goes in the action log and is fenced for a former manager.</summary>
+    public bool Audited => AdministratorOnly && (IsMutation || Name == RelayTools.AddPc);
 }
 
 /// <summary>The single catalog of public tools, read by the hub's REST/MCP surfaces and by the stdio adapter.</summary>

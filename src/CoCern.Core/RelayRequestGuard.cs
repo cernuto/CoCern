@@ -11,7 +11,7 @@ namespace CoCern.Core;
 /// <summary>Public-boundary validation: shape, size, repository scope and request identity, before any aggregate is touched.</summary>
 internal static class RelayRequestGuard
 {
-    private static readonly string[] IdentifierFields = ["requestId", "repositoryId", "sessionId", "sessionToken", "boardId", "machineId", "label", "taskId", "resourceId", "itemId",
+    private static readonly string[] IdentifierFields = ["requestId", "repositoryId", "sessionId", "sessionToken", "actingSessionId", "actingSessionToken", "boardId", "machineId", "label", "taskId", "resourceId", "itemId",
         "actionId", "contextId", "orderId", "recipientSessionId", "messageId", "triggerId"];
 
     /// <summary>Whole-number fields. A non-integer would otherwise read as 0, so a garbled version could match a task that doesn't exist yet.</summary>
@@ -176,9 +176,10 @@ internal static class RelayRequestGuard
 /// reads and removes them (after <see cref="RelayRequestGuard.Validate"/> has checked their shapes).
 /// </summary>
 internal sealed record CallControls(bool OfferWanted, bool StatusDetail, bool PageSeen, string[] SeenIds, string? KnownEtag, JsonObject? Usage, bool ModelVisible, bool? BackgroundCall,
-    bool HeadersOnly = false, string? KnownInboxEtag = null, bool PresentStanding = false, string? StatusTag = null, long? StatusHoldMinutes = null)
+    bool HeadersOnly = false, string? KnownInboxEtag = null, bool PresentStanding = false, string? StatusTag = null, long? StatusHoldMinutes = null,
+    string? ActingSessionId = null, string? ActingSessionToken = null)
 {
-    private static readonly string[] Fields = ["usage", "attention", "attentionDetail", "attentionStatus", "maxHoldMinutes", "seen", "seenMessageIds", "knownEtag", "backgroundCall", "headersOnly", "knownInboxEtag", "presentStanding", "statusTag"];
+    private static readonly string[] Fields = ["usage", "attention", "attentionDetail", "attentionStatus", "maxHoldMinutes", "seen", "seenMessageIds", "knownEtag", "backgroundCall", "headersOnly", "knownInboxEtag", "presentStanding", "statusTag", "actingSessionId", "actingSessionToken"];
 
     public static CallControls Take(JsonObject args)
     {
@@ -202,7 +203,10 @@ internal sealed record CallControls(bool OfferWanted, bool StatusDetail, bool Pa
             KnownInboxEtag: JsonFields.Text(args, "knownInboxEtag") is { Length: > 0 } inboxEtag ? inboxEtag : null,
             PresentStanding: args["presentStanding"] is JsonValue present && present.GetValue<bool>(),
             StatusTag: args["statusTag"] is JsonValue validator && validator.TryGetValue<string>(out var statusTag) ? statusTag : null,
-            StatusHoldMinutes: args["maxHoldMinutes"] is not null ? Number(args, "maxHoldMinutes") : null);
+            StatusHoldMinutes: args["maxHoldMinutes"] is not null ? Number(args, "maxHoldMinutes") : null,
+            // A chat's proof that it is the one making an administrative call. Taken out here, so no aggregate, replay fingerprint or log ever holds it.
+            ActingSessionId: JsonFields.Text(args, "actingSessionId") is { Length: > 0 } acting ? acting : null,
+            ActingSessionToken: JsonFields.Text(args, "actingSessionToken") is { Length: > 0 } proof ? proof : null);
         foreach (var field in Fields) args.Remove(field);
         return controls;
     }

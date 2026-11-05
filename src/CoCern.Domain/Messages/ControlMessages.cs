@@ -110,3 +110,50 @@ public sealed record SessionsOpenQuery(string RepositoryId, IReadOnlyList<string
         return read.Result(new SessionsOpenQuery(read.Text("repositoryId"), read.Strings("sessionIds")));
     }
 }
+
+/// <summary>
+/// <see cref="Operations.ManagerStanding"/>: whether <see cref="SessionId"/> is the seated manager, and whether it was revoked. Only the hub's own
+/// composition asks, for a session it verifies; neither answer grants anything.
+/// </summary>
+public sealed record ManagerStandingQuery(string RepositoryId, string SessionId) : IInternalRequest<ManagerStandingQuery>
+{
+    public static string Operation => Operations.ManagerStanding;
+    public static string TargetKind => AggregateKinds.Control;
+
+    public JsonObject ToJson() => new() { ["repositoryId"] = RepositoryId, ["sessionId"] = SessionId };
+
+    public static Decoding<ManagerStandingQuery> Decode(JsonObject payload)
+    {
+        var read = new MessageReader(payload);
+        return read.Result(new ManagerStandingQuery(read.Text("repositoryId"), read.Text("sessionId")));
+    }
+}
+
+/// <summary>
+/// <see cref="Operations.AdminAction"/>: one administrative call to log. The actor is the caller's own principal, never a field here. Its request
+/// ID travels as <c>actionRequestId</c> so this write takes no slot among the control document's stored replies.
+/// </summary>
+public sealed record AdminActionReport(string RepositoryId, string Tool, string? Command, string? Target, string? ActionRequestId, string Code, bool Succeeded, string? ActingSessionId, long? ManagerGeneration, string? DecisionRef) : IInternalRequest<AdminActionReport>
+{
+    public static string Operation => Operations.AdminAction;
+    public static string TargetKind => AggregateKinds.Control;
+
+    public JsonObject ToJson()
+    {
+        var json = new JsonObject { ["repositoryId"] = RepositoryId, ["tool"] = Tool, ["code"] = Code, ["succeeded"] = Succeeded };
+        if (Command is not null) json["command"] = Command;
+        if (Target is not null) json["target"] = Target;
+        if (ActionRequestId is not null) json["actionRequestId"] = ActionRequestId;
+        if (ActingSessionId is not null) json["actingSessionId"] = ActingSessionId;
+        if (ManagerGeneration is { } generation) json["managerGeneration"] = generation;
+        if (DecisionRef is not null) json["decisionRef"] = DecisionRef;
+        return json;
+    }
+
+    public static Decoding<AdminActionReport> Decode(JsonObject payload)
+    {
+        var read = new MessageReader(payload);
+        return read.Result(new AdminActionReport(read.Text("repositoryId"), read.Text("tool"), read.OptionalText("command"), read.OptionalText("target"), read.OptionalText("actionRequestId"),
+            read.Text("code"), read.Flag("succeeded"), read.OptionalText("actingSessionId"), read.OptionalNumber("managerGeneration"), read.OptionalText("decisionRef")));
+    }
+}

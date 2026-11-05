@@ -18,6 +18,10 @@ namespace CoCern.Core;
 internal sealed record RelayCall(RelayCaller Caller, string Tool, RelayTool Definition, JsonObject Args, CallControls Controls, JsonObject? Session = null)
 {
     internal VerifiedNativeParticipant? NativeParticipant { get; init; }
+    /// <summary>On an administrative call, the chat that proved it is making it; null when it proved nothing and only its token speaks.</summary>
+    internal string? ActingSessionId { get; init; }
+    /// <summary>The manager generation that chat holds, read when it proved itself; null for any other chat. Attribution, never authority.</summary>
+    internal long? ManagerGeneration { get; init; }
 }
 
 /// <summary>
@@ -70,7 +74,29 @@ internal sealed class CallGuard(Aggregates aggregates, string incarnation)
             if (trace is not null) { trace.SessionId = Text(args, "sessionId"); trace.Role = call.Controls.StatusDetail && tool == RelayTools.GetStatus ? null : Text(session, "role"); }
         }
         if (tool is RelayTools.TaskClaim or RelayTools.ClaimAcquire or RelayTools.ActionBegin && await PausedAsync(caller, args) is { } paused) return (call, paused);
-        return (call, null);
+        return call.Definition.Audited && caller.IsAdministrator && call.Controls.ActingSessionId is { Length: > 0 } acting ? await ActingAsync(call, acting) : (call, null);
+    }
+
+    /// <summary>
+    /// An administrative call that names the chat making it. The proof is checked like any session handle, and a wrong one refuses. A former manager is
+    /// then refused, delayed or not: appointing someone else ended what it may present as itself. A chat whose session has closed goes on as its token
+    /// alone unless it was that manager, since an adapter can outlive its handle and a closed handle must not stop a pause. This never adds authority: the token already decided, and the aggregates check it again.
+    /// </summary>
+    private async Task<(RelayCall Call, RelayReply? Refusal)> ActingAsync(RelayCall call, string acting)
+    {
+        var args = call.Args;
+        var repository = Text(args, "repositoryId");
+        var proof = new JsonObject { ["repositoryId"] = repository, ["sessionId"] = acting, ["sessionToken"] = call.Controls.ActingSessionToken ?? "", ["hubIncarnation"] = Text(args, "hubIncarnation") };
+        var verified = await VerifySessionAsync(call.Caller, proof);
+        if (!verified.Ok && verified.Code != SessionUnknown) return (call, verified);
+        var proven = verified.Ok ? call with { ActingSessionId = acting } : call;
+        var standing = await aggregates.Request(AggregateKinds.ControlKey, call.Caller, new ManagerStandingQuery(repository, acting));
+        if (!standing.Ok) return (proven, standing);
+        var seat = Aggregates.Parse(standing);
+        if (IsTrue(seat, "revoked")) return (proven, Error(ManagerRevoked, new { currentGeneration = Number(seat, "generation") }));
+        if (!verified.Ok) return (call, null);
+        if (call.Tool == RelayTools.ControlRequest) args[ServerArguments.ActingSession] = acting;
+        return (proven with { ManagerGeneration = IsTrue(seat, "manager") ? Number(seat, "generation") : null }, null);
     }
 
     /// <summary>The session's own check of its handle: its record when the handle is valid, else the refusal (<c>SessionDenied</c> without one).</summary>
