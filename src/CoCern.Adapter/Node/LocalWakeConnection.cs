@@ -12,15 +12,21 @@ internal sealed class LocalWakeConnection
     public required string Folder { get; init; }
     public required AdapterOptions Options { get; init; }
 
-    public static LocalWakeConnection? Create(AdapterOptions options, string? tokenFile, string? cacheRoot = null)
+    public static LocalWakeConnection? Create(AdapterOptions options, string? tokenFile, string? cacheRoot = null, Action<string>? report = null)
     {
-        if (options.NodeFolder is not null || string.IsNullOrWhiteSpace(tokenFile) || !Path.IsPathFullyQualified(tokenFile)) return null;
+        LocalWakeConnection? Refuse(string reason) { report?.Invoke(reason); return null; }
+        if (options.NodeFolder is not null) return Refuse("node_connection");
+        if (string.IsNullOrWhiteSpace(tokenFile)) return Refuse("token_file_unconfigured");
+        if (!Path.IsPathFullyQualified(tokenFile)) return Refuse("token_file_not_absolute");
         tokenFile = Path.GetFullPath(tokenFile);
         // A different or replaced credential must never silently move this chat onto another principal.
-        if (!File.Exists(tokenFile) || new FileInfo(tokenFile).Length > 16384 || File.ReadAllText(tokenFile).Trim() != options.Token) return null;
+        if (!File.Exists(tokenFile)) return Refuse("token_file_missing");
+        if (new FileInfo(tokenFile).Length > 16384) return Refuse("token_file_oversized");
+        if (File.ReadAllText(tokenFile).Trim() != options.Token) return Refuse("credential_mismatch");
         var folder = Path.Combine(cacheRoot ?? DefaultRoot, Key(options.BaseUri.AbsoluteUri, tokenFile));
         Directory.CreateDirectory(folder);
         NodeState.WritePrivately(Path.Combine(folder, FileName), JsonSerializer.SerializeToUtf8Bytes(new { hub = options.BaseUri.AbsoluteUri, tokenFile, fingerprint = options.PinnedFingerprint }));
+        report?.Invoke("connection_ready");
         return new() { Folder = folder, Options = options };
     }
 

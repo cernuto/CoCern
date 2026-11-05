@@ -27,10 +27,12 @@ public sealed class LocalChatWake : IAsyncDisposable
         this.watch = watch ?? ((runtime, target, ct) => WakeWatcher.RunAsync(runtime, _ => Task.FromResult<IReadOnlyList<WakeTarget>>([target]), false, null, ct, clock: this.transport.Clock));
     }
 
-    public static LocalChatWake? TryCreate(AdapterOptions options, string? tokenFile, string? cacheRoot = null)
+    public static LocalChatWake? TryCreate(AdapterOptions options, string? tokenFile, string? cacheRoot = null, Action<string>? report = null)
     {
-        try { return LocalWakeConnection.Create(options, tokenFile, cacheRoot) is { } connection ? new(connection) : null; }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException) { return null; }
+        try { return LocalWakeConnection.Create(options, tokenFile, cacheRoot, report) is { } connection ? new(connection) : null; }
+        catch (IOException) { report?.Invoke("setup_io_error"); return null; }
+        catch (UnauthorizedAccessException) { report?.Invoke("setup_access_denied"); return null; }
+        catch (ArgumentException) { report?.Invoke("setup_invalid_path"); return null; }
     }
 
     /// <summary>Only a successful session-authenticated reply may restore a pre-existing handle after reconnect.</summary>
