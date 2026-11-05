@@ -54,9 +54,9 @@ public sealed class LocalChatWake : IAsyncDisposable
     {
         report ??= code => LocalWakeStatus.Report(code, cacheRoot);
         try { return LocalWakeConnection.Create(options, tokenFile, cacheRoot, report) is { } connection ? new(connection) : null; }
-        catch (IOException) { report?.Invoke("setup_io_error"); return null; }
-        catch (UnauthorizedAccessException) { report?.Invoke("setup_access_denied"); return null; }
-        catch (ArgumentException) { report?.Invoke("setup_invalid_path"); return null; }
+        catch (IOException) { report?.Invoke(LocalWakeCodes.SetupIoError); return null; }
+        catch (UnauthorizedAccessException) { report?.Invoke(LocalWakeCodes.SetupAccessDenied); return null; }
+        catch (ArgumentException) { report?.Invoke(LocalWakeCodes.SetupInvalidPath); return null; }
     }
 
     /// <summary>The adapter's way in to local wake: says why there is none, and leaves <see cref="TryCreate"/> to say why setup itself refused.</summary>

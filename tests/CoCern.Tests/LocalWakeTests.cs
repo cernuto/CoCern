@@ -249,11 +249,43 @@ public sealed class LocalWakeTests : IDisposable
     }
 
     [Fact]
-    public void A_longest_allowed_code_is_kept()
+    public void A_code_of_the_right_shape_that_is_not_listed_is_invalid_and_changes_no_state()
     {
-        var code = new string('a', 64);
-        LocalWakeStatus.Report(code, StatusRoot);
-        Assert.Contains(code, File.ReadAllText(OwnStatusFile));
+        LocalWakeStatus.Report(LocalWakeCodes.Watching, StatusRoot);
+        LocalWakeStatus.Report("made_up_code", StatusRoot);
+        Assert.False(LocalWakeStatus.IsFixedCode("made_up_code"));
+        Assert.Null(LocalWakeStatus.StateOf("made_up_code"));
+        Assert.Equal(LocalWakeCodes.InvalidCode, LocalWakeStatus.LastCode(StatusRoot));
+        Assert.Null(LocalWakeStatus.Problem(StatusRoot));
+        Assert.Equal("healthy", Status().GetProperty("state").GetString());
+        Assert.DoesNotContain("made_up_code", File.ReadAllText(OwnStatusFile));
+    }
+
+    [Fact]
+    public void Every_code_constant_has_its_expected_state()
+    {
+        var expected = new Dictionary<string, string?>
+        {
+            ["invalid_code"] = null,
+            ["starting"] = "starting", ["setup_reached"] = "starting", ["setup_complete"] = "starting", ["connection_ready"] = "starting",
+            ["native_registration"] = "not_applicable", ["node_connection"] = "not_applicable",
+            ["setup_returned_null"] = "off", ["setup_threw"] = "off", ["token_file_unconfigured"] = "off", ["token_file_not_absolute"] = "off", ["token_file_missing"] = "off", ["token_file_oversized"] = "off",
+            ["credential_mismatch"] = "off", ["setup_io_error"] = "off", ["setup_access_denied"] = "off", ["setup_invalid_path"] = "off",
+            ["watching"] = "healthy", ["no_live_watcher"] = "healthy", ["no_observed_sessions"] = "healthy", ["observed_not_located"] = "healthy", ["no_codex_targets"] = "healthy", ["observed"] = "healthy",
+            ["observed_unmapped"] = "degraded", ["no_codex_executable"] = "degraded", ["loop_failed"] = "degraded", ["watcher_failed"] = "degraded", ["watcher_unavailable"] = "degraded",
+            ["observe_handle_mismatch"] = "degraded", ["observe_failed"] = "degraded", ["restore_lock_busy"] = "degraded", ["record_lock_busy"] = "degraded",
+            ["observe_reply_not_ok"] = null, ["observe_no_reply_data"] = null, ["observe_bad_session_id"] = null, ["observe_not_session_reply"] = null, ["observe_not_owned"] = null,
+            ["watcher_lock_held"] = null, ["watcher_handle_changed"] = null, ["rearm_hub_unavailable"] = null, ["rearm_failed"] = null, ["rearm_record_failed"] = null, ["rearm_owner_not_launcher"] = null,
+            ["rearm_skip_no_owner"] = null, ["rearm_skip_not_codex"] = null, ["rearm_skip_not_owned"] = null, ["rearm_skip_not_armed_here"] = null, ["rearm_skip_unlocated"] = null,
+            ["rearm_skip_stale"] = null, ["rearm_skip_refused"] = null, ["rearm_skip_transient"] = null, ["rearm_skip_older_session"] = null
+        };
+        var constants = typeof(LocalWakeCodes).GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static).Where(x => x.IsLiteral).Select(x => (string)x.GetRawConstantValue()!).ToArray();
+        Assert.Equal(expected.Keys.Order(StringComparer.Ordinal), constants.Order(StringComparer.Ordinal));
+        foreach (var code in constants)
+        {
+            Assert.True(LocalWakeStatus.IsFixedCode(code), code);
+            Assert.True(expected[code] == LocalWakeStatus.StateOf(code), code);
+        }
     }
 
     [Fact]
