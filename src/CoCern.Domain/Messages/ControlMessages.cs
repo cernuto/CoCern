@@ -93,9 +93,7 @@ public sealed record SessionOwnersQuery(string RepositoryId, IReadOnlyList<strin
 }
 
 /// <summary>
-/// <see cref="Operations.SessionsOpen"/>: which of <see cref="SessionIds"/> are still open in this repository, whoever opened them.
-/// Read-only; nothing else about them is returned. The hub asks it before listing announced chats, so a chat whose session closed since its
-/// machine last announced is left out.
+/// Private read of one caller-owned current native scope. The directory rechecks its token, authenticated machine and closing fence.
 /// </summary>
 public sealed record NativeFileScopeQuery(string RepositoryId, string SessionId, string SessionToken, string ParticipantId) : IInternalRequest<NativeFileScopeQuery>
 {
@@ -109,6 +107,7 @@ public sealed record NativeFileScopeQuery(string RepositoryId, string SessionId,
     }
 }
 
+/// <summary>Which given sessions remain open in this repository. Read-only; no other session data is returned.</summary>
 public sealed record SessionsOpenQuery(string RepositoryId, IReadOnlyList<string> SessionIds) : IInternalRequest<SessionsOpenQuery>
 {
     public static string Operation => Operations.SessionsOpen;
