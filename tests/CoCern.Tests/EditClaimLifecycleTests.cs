@@ -175,7 +175,8 @@ public sealed class EditClaimLifecycleTests
         fixture.Clock.Now = fixture.Clock.Now.AddHours(1);
         fixture.Transport.ReadReply = new AdapterReply(true, "Ok", JsonSerializer.SerializeToElement(new { held = false, generation = 7L, leaseUntil = "2000-01-01T00:00:00+00:00" }), 7);
         await fixture.Lifecycle.SweepAsync(default);
-        Assert.Equal("settled", (await fixture.Store.ReadAsync(default))!.Claims.Single().ReleaseOutcome);
+        // The same sweep ends with its finished claim's row removed, so a row left behind would mean it never settled.
+        Assert.Empty((await fixture.Store.ReadAsync(default))!.Claims);
     }
 
     [Fact]
