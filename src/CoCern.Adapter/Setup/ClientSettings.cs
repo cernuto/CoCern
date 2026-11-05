@@ -342,6 +342,31 @@ internal static class ClientSettings
     /// </summary>
     public static ClientPlan PlanStopHook(string path, string command) => PlanHooks(path, StopHook(command));
 
+    /// <summary>
+    /// The Stop hook Connect wants for the <c>cocern</c> entry in <paramref name="claudeJsonPath"/>. Each idle chat's waiter runs from the hook's adapter for up to a day and holds it open,
+    /// which is why a development setup points the hook at an immutable deployed version, and Connect may be running from the build output a rebuild has to overwrite. So with a
+    /// <c>--dev-launch</c> entry, a CoCern Stop handler already there stays as it is, and a missing one is written as <see cref="Development.DevelopmentSetup"/> writes it, at the deployment's
+    /// current version; when that cannot be read, none is written. Any other entry's hook follows the adapter Connect runs from.
+    /// </summary>
+    internal static ClientPlan PlanConnectStopHook(string settingsPath, string claudeJsonPath, string dotnetPath, string adapterDll)
+    {
+        string Command(string adapter) => SetupEnvironment.AdapterCommandLine(dotnetPath, adapter) + " --stop-hook";
+        if (DevelopmentRoot(claudeJsonPath) is not { } root) return PlanStopHook(settingsPath, Command(adapterDll));
+        if (!Path.IsPathFullyQualified(root)) return ClientPlan.Unchanged(settingsPath);
+        string deployed;
+        try { deployed = Development.AdapterDeployment.AdapterPath(root, Development.AdapterDeployment.Read(root)); }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException) { return ClientPlan.Unchanged(settingsPath); }
+        return PlanHooks(settingsPath, StopHook(Command(deployed)) with { ReplaceOwned = false });
+    }
+
+    /// <summary>The deployment folder a <c>cocern</c> entry's <c>--dev-launch</c> names; null when the entry is missing or is not a development launcher.</summary>
+    private static string? DevelopmentRoot(string claudeJsonPath)
+    {
+        if (ReadAll(claudeJsonPath) is not { } original || ParseClaudeJson(claudeJsonPath, original)["mcpServers"]?[Name] is not JsonObject entry || entry["args"] is not JsonArray arguments) return null;
+        var launch = arguments.Select(argument => JsonText(argument)).ToList().IndexOf("--dev-launch");
+        return launch >= 0 && launch + 1 < arguments.Count ? JsonText(arguments[launch + 1]) : null;
+    }
+
     /// <summary>Claude Code's settings.json with the Stop hook and, when asked, the prompt, post-tool and waiting hooks: one plan, so no write loses another.</summary>
     public static ClientPlan PlanClaudeHooks(string path, string stopCommand, string? promptCommand, string? postToolCommand = null, string? waitingCommand = null)
     {

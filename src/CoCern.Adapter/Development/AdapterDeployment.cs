@@ -52,7 +52,7 @@ public static class AdapterDeployment
                     File.Copy(Path.Combine(source, file), target);
                 }
                 if (Hash(staging, Files(staging)) != version) throw new IOException("Adapter output changed while it was being deployed. Build again.");
-                Directory.Move(staging, destination);
+                TransientMove.Run(() => Directory.Move(staging, destination));
             }
             finally { if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true); }
         }

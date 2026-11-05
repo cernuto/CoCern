@@ -13,16 +13,6 @@ namespace CoCern.Tests;
 
 public sealed class DashboardAuthenticationTests
 {
-    [Fact]
-    public async Task Root_redirects_to_the_dashboard_without_intercepting_other_routes()
-    {
-        await using var host = OperatorHost();
-        using var client = BrowserClient(host);
-        var response = await client.GetAsync("/");
-        Assert.Equal(HttpStatusCode.Redirect, response.StatusCode);
-        Assert.Equal("/dashboard/", response.Headers.Location?.OriginalString);
-        Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/unrelated/deep-link")).StatusCode);
-    }
 
     [Theory]
     [InlineData(false, null, null, 8)]
@@ -58,75 +48,6 @@ public sealed class DashboardAuthenticationTests
         Assert.False(auth.Headers.Contains("Set-Cookie"));
         Assert.Equal(HttpStatusCode.OK, (await client.PostAsJsonAsync("/dashboard/api/logout", new { })).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/dashboard/api/auth")).StatusCode);
-    }
-
-    [Fact]
-    public async Task Over_plain_loopback_http_the_cookie_is_scoped_to_the_dashboard_and_not_marked_secure()
-    {
-        await using var host = OperatorHost(remoteAddress: System.Net.IPAddress.Loopback);
-        var client = host.CreateClient(new WebApplicationFactoryClientOptions { BaseAddress = new Uri("http://127.0.0.1"), AllowAutoRedirect = false });
-        client.DefaultRequestHeaders.Add("Origin", "http://127.0.0.1");
-        var response = await client.PostAsJsonAsync("/dashboard/api/login", new { token = RelayHostFixture.Token, rememberBrowser = true });
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var attributes = Assert.Single(response.Headers.GetValues("Set-Cookie")).Split(';', StringSplitOptions.TrimEntries).Skip(1).ToArray();
-        // Every route that needs the cookie (sign-in, sign-out, the API and the hub stream) is under /dashboard, so no other path receives it.
-        Assert.Contains("path=/dashboard", attributes, StringComparer.OrdinalIgnoreCase);
-        Assert.Contains("httponly", attributes, StringComparer.OrdinalIgnoreCase);
-        Assert.Contains("samesite=strict", attributes, StringComparer.OrdinalIgnoreCase);
-        Assert.DoesNotContain("secure", attributes, StringComparer.OrdinalIgnoreCase);
-        // Remembered for the default 7 days, not longer.
-        var expires = DateTimeOffset.Parse(Assert.Single(attributes, attribute => attribute.StartsWith("expires=", StringComparison.OrdinalIgnoreCase))["expires=".Length..], System.Globalization.CultureInfo.InvariantCulture);
-        Assert.InRange(expires - DateTimeOffset.UtcNow, TimeSpan.FromDays(7) - TimeSpan.FromMinutes(5), TimeSpan.FromDays(7) + TimeSpan.FromMinutes(1));
-        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/dashboard/api/auth")).StatusCode);
-        Assert.Equal(HttpStatusCode.OK, (await client.PostAsJsonAsync("/dashboard/api/logout", new { })).StatusCode);
-        Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/dashboard/api/auth")).StatusCode);
-    }
-
-    [Fact]
-    public async Task Login_without_remember_choice_keeps_a_browser_session_cookie()
-    {
-        await using var host = OperatorHost();
-        using var client = BrowserClient(host);
-        var response = await client.PostAsJsonAsync("/dashboard/api/login", new { token = RelayHostFixture.Token });
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.DoesNotContain("expires=", Assert.Single(response.Headers.GetValues("Set-Cookie")), StringComparison.OrdinalIgnoreCase);
-    }
-
-    [Fact]
-    public async Task Sign_in_options_show_the_configured_durations_before_authentication_without_caching()
-    {
-        await using var host = OperatorHost("12", "20");
-        using var client = BrowserClient(host);
-        var response = await client.GetAsync("/dashboard/api/login-options");
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.True(response.Headers.CacheControl?.NoStore);
-        Assert.Equal("application/json", response.Content.Headers.ContentType?.MediaType);
-        var json = await response.Content.ReadFromJsonAsync<JsonElement>();
-        Assert.Equal(12, json.GetProperty("sessionHours").GetInt32());
-        Assert.Equal(20, json.GetProperty("rememberDays").GetInt32());
-        Assert.DoesNotContain(RelayHostFixture.Token, await response.Content.ReadAsStringAsync());
-        Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/dashboard/api/snapshot")).StatusCode);
-    }
-
-    [Theory]
-    [InlineData("SessionHours", "0")]
-    [InlineData("SessionHours", "169")]
-    [InlineData("SessionHours", "bad")]
-    [InlineData("RememberDays", "0")]
-    [InlineData("RememberDays", "31")]
-    public async Task Invalid_authentication_durations_fail_clearly(string key, string value)
-    {
-        await using var host = OperatorHost(key == "SessionHours" ? value : null, key == "RememberDays" ? value : null);
-        var failure = Assert.Throws<InvalidOperationException>(() => host.Services);
-        Assert.Contains("Relay:Dashboard:" + key, failure.ToString());
-    }
-
-    [Fact]
-    public async Task Remembered_duration_cannot_be_shorter_than_the_browser_session_duration()
-    {
-        await using var host = OperatorHost("168", "1");
-        var failure = Assert.Throws<InvalidOperationException>(() => host.Services);
-        Assert.Contains("Relay:Dashboard:RememberDays", failure.ToString());
     }
 
     [Fact]

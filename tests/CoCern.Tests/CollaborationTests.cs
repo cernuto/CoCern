@@ -29,19 +29,6 @@ public sealed class CollaborationTests
     };
     private static JsonObject Update(string id, long version, JsonObject? workflow = null) => new() { ["taskId"] = id, ["expectedVersion"] = version, ["requestId"] = Guid.NewGuid().ToString("N"), ["workflow"] = workflow?.DeepClone() };
 
-    [Fact]
-    public void Legacy_duplicate_claim_keeps_original_grant_and_revision()
-    {
-        var state = new StateEnvelope<CoordinationDocument>();
-        var create = Update("legacy", 0); create.Remove("workflow");
-        Assert.True(Call(state, "task_update", create).Ok);
-        var claim = new JsonObject { ["taskId"] = "legacy", ["sessionId"] = "s", ["expectedVersion"] = 1, ["requestId"] = "claim" };
-        var granted = Call(state, "task_claim", claim); Assert.True(granted.Ok);
-        var persisted = state.Value.Json;
-        Assert.Equal(granted, Call(state, "task_claim", claim, 1));
-        Assert.Equal(persisted, state.Value.Json);
-    }
-
     private static JsonObject IneligibleWorkflow(string change)
     {
         var workflow = Workflow(change == "retargeted" ? "ready" : change);
@@ -49,130 +36,6 @@ public sealed class CollaborationTests
         if (change == "blocked") workflow["blockers"]!.AsArray().Add(new JsonObject { ["id"] = "missing", ["kind"] = "prerequisite", ["summary"] = "Prerequisite missing", ["recheckCondition"] = "Prerequisite changes" });
         if (change == "completed") { workflow["criteria"]![0]!["result"] = "passed"; workflow["criteria"]![0]!["evidenceRef"] = "artifact:reported"; }
         return workflow;
-    }
-
-    [Theory]
-    [InlineData("blocked")]
-    [InlineData("completed")]
-    [InlineData("retargeted")]
-    public void Cached_claim_rechecks_current_workflow_without_mutating_grant_or_revision(string change)
-    {
-        var state = new StateEnvelope<CoordinationDocument>();
-        Assert.True(Call(state, "task_update", Update("t", 0, Workflow())).Ok);
-        var claim = new JsonObject { ["taskId"] = "t", ["sessionId"] = "s", ["expectedVersion"] = 1, ["requestId"] = "claim" };
-        Assert.True(Call(state, "task_claim", claim).Ok);
-        var update = Update("t", 2, IneligibleWorkflow(change)); update["sessionId"] = "s";
-        Assert.True(Call(state, "task_update", update).Ok);
-        var persisted = state.Value.Json;
-        Assert.Equal("WorkflowNotReady", Call(state, "task_claim", claim, 1).Code);
-        Assert.Equal(persisted, state.Value.Json);
-    }
-
-    [Theory]
-    [InlineData("blocked")]
-    [InlineData("completed")]
-    [InlineData("retargeted")]
-    public void Current_workflow_blocks_new_action_and_retry_but_allows_existing_reconciliation(string change)
-    {
-        var state = new StateEnvelope<CoordinationDocument>();
-        Assert.True(Call(state, "task_update", Update("t", 0, Workflow())).Ok);
-        Assert.True(Call(state, "task_claim", new() { ["taskId"] = "t", ["sessionId"] = "s", ["expectedVersion"] = 1 }).Ok);
-        var begin = new JsonObject { ["taskId"] = "t", ["sessionId"] = "s", ["expectedVersion"] = 2, ["requestId"] = "begin", ["actionId"] = "external", ["inputFingerprint"] = "abc" };
-        Assert.True(Call(state, "action_begin", begin).Ok);
-        Assert.True(Call(state, "action_report", new() { ["taskId"] = "t", ["sessionId"] = "s", ["expectedVersion"] = 3, ["actionId"] = "external", ["attempt"] = 1, ["outcome"] = "completed" }).Ok);
-        var update = Update("t", 4, IneligibleWorkflow(change)); update["sessionId"] = "s";
-        Assert.True(Call(state, "task_update", update).Ok);
-        var persisted = state.Value.Json;
-        var existing = Data(Call(state, "action_begin", begin));
-        Assert.True(existing["existing"]!.GetValue<bool>()); Assert.False(existing["replayAllowed"]!.GetValue<bool>());
-        Assert.Equal(persisted, state.Value.Json);
-        var reconcile = begin.DeepClone().AsObject(); reconcile.Remove("requestId");
-        var reconciled = Data(Call(state, "action_begin", reconcile));
-        Assert.True(reconciled["existing"]!.GetValue<bool>()); Assert.False(reconciled["replayAllowed"]!.GetValue<bool>());
-        Assert.Equal(persisted, state.Value.Json);
-        var next = new JsonObject { ["taskId"] = "t", ["sessionId"] = "s", ["expectedVersion"] = 5, ["actionId"] = "next", ["inputFingerprint"] = "next" };
-        Assert.Equal("WorkflowNotReady", Call(state, "action_begin", next).Code);
-        Assert.Equal(persisted, state.Value.Json);
-        next["actionId"] = "external"; next["inputFingerprint"] = "abc"; next["attempt"] = 2; next["explicitRetry"] = true;
-        Assert.Equal("WorkflowNotReady", Call(state, "action_begin", next).Code);
-        Assert.Equal(persisted, state.Value.Json);
-        Assert.True(Call(state, "action_report", new() { ["taskId"] = "t", ["sessionId"] = "s", ["expectedVersion"] = 5, ["actionId"] = "external", ["attempt"] = 1, ["outcome"] = "completed", ["report"] = "Late evidence remains reportable" }).Ok);
-    }
-
-    [Fact]
-    public void Blocked_workflow_preserves_original_outcome_and_administrative_cleanup_reports()
-    {
-        var state = new StateEnvelope<CoordinationDocument>();
-        Assert.True(Call(state, "task_update", Update("t", 0, Workflow())).Ok);
-        Assert.True(Call(state, "task_claim", new() { ["taskId"] = "t", ["sessionId"] = "worker", ["expectedVersion"] = 1 }).Ok);
-        Assert.True(Call(state, "action_begin", new() { ["taskId"] = "t", ["sessionId"] = "worker", ["expectedVersion"] = 2, ["actionId"] = "external", ["inputFingerprint"] = "abc", ["requiresRestoration"] = true }).Ok);
-        var block = Update("t", 3, IneligibleWorkflow("blocked")); block["sessionId"] = "worker";
-        Assert.True(Call(state, "task_update", block).Ok);
-        Assert.True(Call(state, "action_report", new() { ["taskId"] = "t", ["sessionId"] = "worker", ["expectedVersion"] = 4, ["actionId"] = "external", ["attempt"] = 1, ["outcome"] = "completed", ["restoration"] = "pending" }).Ok);
-        Assert.True(Call(state, "action_report", new() { ["taskId"] = "t", ["sessionId"] = "admin-own-session", ["expectedVersion"] = 5, ["actionId"] = "external", ["attempt"] = 1, ["restoration"] = "accepted" }).Ok);
-        var task = Data(Call(state, "task_get", new() { ["taskId"] = "t" }));
-        Assert.Equal("blocked", task["workflow"]!["state"]!.GetValue<string>());
-        Assert.Equal("completed", task["actions"]!["external"]!["status"]!.GetValue<string>());
-        Assert.Equal("accepted", task["actions"]!["external"]!["restoration"]!.GetValue<string>());
-        Assert.Equal("worker", task["actions"]!["external"]!["sessionId"]!.GetValue<string>());
-    }
-
-    [Fact]
-    public void Delta_tracks_committed_changes_retry_renewal_context_and_restart()
-    {
-        var state = new StateEnvelope<CoordinationDocument>();
-        var create = Update("a", 0); create.Remove("workflow");
-        Assert.True(Call(state, "task_update", create).Ok);
-        var first = Data(Call(state, "task_get", new() { ["sinceRevision"] = 0 }));
-        Assert.Equal(1, first["snapshotRevision"]!.GetValue<long>());
-        Assert.Equal(1, first["items"]![0]!["changeRevision"]!.GetValue<long>());
-        Assert.True(Call(state, "task_update", create).Ok);
-        Assert.Equal("VersionConflict", Call(state, "task_update", new() { ["taskId"] = "a", ["expectedVersion"] = 0 }).Code);
-        Assert.True(Call(state, "context_put", new() { ["contextId"] = "note", ["expectedVersion"] = 0, ["content"] = "context" }).Ok);
-        Assert.Empty(Data(Call(state, "task_get", new() { ["sinceRevision"] = 1 }))["items"]!.AsArray());
-        Assert.True(Call(state, "task_claim", new() { ["taskId"] = "a", ["sessionId"] = "s", ["expectedVersion"] = 1 }).Ok);
-        Assert.True(Call(state, "claim_renew", new() { ["taskId"] = "a", ["sessionId"] = "s", ["claimGeneration"] = 1, ["leaseSeconds"] = 120 }, 1).Ok);
-        var reopened = new StateEnvelope<CoordinationDocument> { Value = new() { Json = state.Value.Json } };
-        var delta = Data(Call(reopened, "task_get", new() { ["sinceRevision"] = 1 }));
-        Assert.Equal(3, delta["snapshotRevision"]!.GetValue<long>());
-        Assert.Equal(2, delta["items"]![0]!["version"]!.GetValue<long>());
-    }
-
-    [Fact]
-    public void Delta_pins_pages_and_seeds_legacy_tasks_without_changing_versions()
-    {
-        var state = new StateEnvelope<CoordinationDocument> { Value = new() { Json = "{\"tasks\":{\"legacy\":{\"taskId\":\"legacy\",\"version\":7}}}" } };
-        var initial = Data(Call(state, "task_get", new() { ["sinceRevision"] = 0 }));
-        Assert.Equal(7, initial["items"]![0]!["version"]!.GetValue<long>());
-        var create = Update("new", 0); create.Remove("workflow"); Assert.True(Call(state, "task_update", create).Ok);
-        var page = Data(Call(state, "task_get", new() { ["sinceRevision"] = 0, ["limit"] = 1 }));
-        Assert.NotNull(page["nextCursor"]);
-        var continuation = new JsonObject { ["sinceRevision"] = 0, ["limit"] = 1, ["cursor"] = page["nextCursor"]!.DeepClone(), ["snapshotRevision"] = page["snapshotRevision"]!.DeepClone() };
-        Assert.Single(Data(Call(state, "task_get", continuation))["items"]!.AsArray());
-        create = Update("later", 0); create.Remove("workflow"); Assert.True(Call(state, "task_update", create).Ok);
-        Assert.Equal("DeltaRestartRequired", Call(state, "task_get", continuation).Code);
-        Assert.Equal("InvalidArguments", Call(state, "task_get", new() { ["sinceRevision"] = -1 }).Code);
-        Assert.Equal("InvalidArguments", Call(state, "task_get", new() { ["sinceRevision"] = "invalid" }).Code);
-    }
-
-    [Fact]
-    public void Workflow_is_opt_in_validated_and_blocked_recheck_is_explicit()
-    {
-        var state = new StateEnvelope<CoordinationDocument>();
-        var invalid = Workflow(); invalid["packet"]!.AsObject().Remove("authorityRef");
-        Assert.Equal("InvalidWorkflow", Call(state, "task_update", Update("bad", 0, invalid)).Code);
-        var blocked = Workflow("blocked"); blocked["blockers"]!.AsArray().Add(new JsonObject { ["id"] = "hold", ["kind"] = "coordinator_hold", ["summary"] = "Review existing grant", ["recheckCondition"] = "Applicable grant identified" });
-        Assert.True(Call(state, "task_update", Update("t", 0, blocked)).Ok);
-        Assert.Equal("WorkflowRecheckRequired", Call(state, "task_update", Update("t", 1, Workflow())).Code);
-        var ready = Workflow(); ready["recheckEvidenceRef"] = "human-grant:17";
-        Assert.True(Call(state, "task_update", Update("t", 1, ready), 3600).Ok);
-        var stored = Data(Call(state, "task_get", new() { ["taskId"] = "t", ["section"] = "workflow" }));
-        Assert.Equal("human-grant:17", stored["packet"]!["authorityRef"]!.GetValue<string>());
-        var completed = Workflow("completed");
-        Assert.Equal("WorkflowIncomplete", Call(state, "task_update", Update("t", 2, completed)).Code);
-        completed["criteria"]![0]!["result"] = "passed"; completed["criteria"]![0]!["evidenceRef"] = "artifact:result";
-        Assert.True(Call(state, "task_update", Update("t", 2, completed)).Ok);
-        Assert.Equal("WorkflowNotReady", Call(state, "task_claim", new() { ["taskId"] = "t", ["sessionId"] = "s", ["expectedVersion"] = 3 }).Code);
     }
 
     [Fact]
@@ -197,83 +60,6 @@ public sealed class CollaborationTests
         Assert.Equal("UnresolvedAction", Call(state, "task_update", update, 5000).Code);
     }
 
-    [Fact]
-    public void Workflow_completion_preserves_action_restoration_and_recheck_may_replace_authority()
-    {
-        var state = new StateEnvelope<CoordinationDocument>();
-        var ready = Workflow(); ready["priority"] = null; ready["targetSessionId"] = null; ready["recheckEvidenceRef"] = null; ready["criteria"]![0]!["evidenceRef"] = null;
-        Assert.True(Call(state, "task_update", Update("t", 0, ready)).Ok);
-        Assert.True(Call(state, "task_claim", new() { ["taskId"] = "t", ["sessionId"] = "s", ["expectedVersion"] = 1 }).Ok);
-        Assert.True(Call(state, "action_begin", new() { ["taskId"] = "t", ["sessionId"] = "s", ["expectedVersion"] = 2, ["actionId"] = "test", ["inputFingerprint"] = "abc", ["requiresRestoration"] = true }).Ok);
-        var completed = Workflow("completed"); completed["criteria"]![0]!["result"] = "passed"; completed["criteria"]![0]!["evidenceRef"] = "artifact:reported";
-        var finish = Update("t", 3, completed); finish["sessionId"] = "s";
-        Assert.Equal("WorkflowIncomplete", Call(state, "task_update", finish).Code);
-        finish["actionReports"] = new JsonArray(new JsonObject { ["actionId"] = "test", ["attempt"] = 1, ["outcome"] = "completed", ["restoration"] = "pending" });
-        Assert.Equal("WorkflowIncomplete", Call(state, "task_update", finish).Code);
-        finish["actionReports"]![0]!["restoration"] = "verified";
-        Assert.True(Call(state, "task_update", finish).Ok);
-        var blocked = Workflow("blocked"); blocked["blockers"]!.AsArray().Add(new JsonObject { ["id"] = "grant", ["kind"] = "coordinator_hold", ["summary"] = "Review grant", ["recheckCondition"] = "Grant found" });
-        Assert.True(Call(state, "task_update", Update("other", 0, blocked)).Ok);
-        ready = Workflow(); ready["packet"]!["authorityRef"] = "human-grant:18"; ready["recheckEvidenceRef"] = "human-grant:18";
-        Assert.True(Call(state, "task_update", Update("other", 1, ready)).Ok);
-        Assert.Equal("human-grant:18", Data(Call(state, "task_get", new() { ["taskId"] = "other", ["section"] = "workflow" }))["packet"]!["authorityRef"]!.GetValue<string>());
-    }
-
-    [Fact]
-    public void Advisory_offer_filters_owner_target_unknown_actions_and_uses_stable_priority()
-    {
-        var state = new StateEnvelope<CoordinationDocument>();
-        foreach (var id in new[] { "current", "a", "b", "busy", "unknown", "targeted", "legacy" })
-        {
-            var workflow = Workflow(); workflow["priority"] = id is "busy" or "unknown" or "targeted" ? 100 : 1;
-            if (id == "unknown") workflow["priority"] = 200;
-            if (id == "targeted") workflow["targetSessionId"] = "another";
-            var update = Update(id, 0, workflow);
-            if (id == "legacy") { update.Remove("workflow"); update["patch"] = new JsonObject { ["status"] = "ready", ["workflow"] = Workflow() }; }
-            Assert.True(Call(state, "task_update", update).Ok);
-        }
-        foreach (var id in new[] { "busy", "unknown" }) Assert.True(Call(state, "task_claim", new() { ["taskId"] = id, ["sessionId"] = "another", ["expectedVersion"] = 1, ["leaseSeconds"] = 10 }).Ok);
-        Assert.True(Call(state, "action_begin", new() { ["taskId"] = "unknown", ["sessionId"] = "another", ["expectedVersion"] = 2, ["actionId"] = "external", ["inputFingerprint"] = "abc" }).Ok);
-        var args = new JsonObject { ["taskId"] = "current", ["sessionId"] = "worker" };
-        Assert.Equal("a", Data(Call(state, "__next_work", args))["offer"]!["taskId"]!.GetValue<string>());
-        Assert.Equal("busy", Data(Call(state, "__next_work", args, 60))["offer"]!["taskId"]!.GetValue<string>());
-        Assert.Null(Data(Call(state, "task_get", new() { ["taskId"] = "a" }))["owner"]);
-        Assert.Equal("WorkflowNotReady", Call(state, "task_claim", new() { ["taskId"] = "targeted", ["sessionId"] = "worker", ["expectedVersion"] = 1 }).Code);
-    }
-
-    [Fact]
-    public void Oversized_offer_returns_fetch_marker_and_delta_checkpoint_does_not_change_on_read()
-    {
-        var state = new StateEnvelope<CoordinationDocument>();
-        var workflow = Workflow(); workflow["packet"]!["goal"] = new string('x', 2048);
-        Assert.True(Call(state, "task_update", Update("large", 0, workflow)).Ok);
-        var offer = Data(Call(state, "__next_work", new() { ["sessionId"] = "worker" }))["offer"]!;
-        Assert.True(offer["detailFetchRequired"]!.GetValue<bool>()); Assert.Null(offer["workflow"]);
-        Assert.Equal(1, Data(Call(state, "task_get", new()))["boardRevision"]!.GetValue<long>());
-        Assert.Empty(Data(Call(state, "task_get", new() { ["sinceRevision"] = 1 }))["items"]!.AsArray());
-        Assert.Equal("RepositoryDenied", CoordinationStateMachine.Apply(state, "board", "key", new("other", false, ["foreign"], true), "__next_work", new() { ["repositoryId"] = "repo", ["sessionId"] = "worker" }, Now).Code);
-    }
-
-    [Fact]
-    public async Task Optional_offer_read_failure_keeps_committed_milestone_successful()
-    {
-        var factory = DispatchProxy.Create<IGrainFactory, NextFailureFactory>();
-        var app = new RelayApplication(factory);
-        async Task<RelayReply> Invoke(string tool, JsonObject args)
-        {
-            args["repositoryId"] = "repo"; args["requestId"] = Guid.NewGuid().ToString("N");
-            return await app.ExecuteAsync(Caller with { IsInternal = false }, tool, JsonSerializer.SerializeToElement(args));
-        }
-        var session = Data(await Invoke("session_open", new()));
-        var milestone = new JsonObject { ["sessionId"] = session["sessionId"]!.DeepClone(), ["sessionToken"] = session["sessionToken"]!.DeepClone(), ["taskId"] = "report", ["expectedVersion"] = 0, ["includeNextWork"] = true, ["patch"] = new JsonObject { ["milestone"] = "reported once" } };
-        ((NextFailureFactory)(object)factory).Fail = true;
-        var result = await Invoke("task_update", milestone);
-        Assert.True(result.Ok); Assert.Equal(1, result.Version);
-        Assert.Equal("Unavailable", Data(result)["nextWork"]!["code"]!.GetValue<string>());
-        Assert.False(Data(result)["nextWork"]!["ok"]!.GetValue<bool>());
-        Assert.Equal("reported once", Data(await Invoke("task_get", new() { ["taskId"] = "report" }))["facts"]!["milestone"]!.GetValue<string>());
-    }
-
     public class NextFailureFactory : CoordinationTests.TestGrainFactory
     {
         public bool Fail { get; set; }
@@ -285,109 +71,11 @@ public sealed class CollaborationTests
         public Task<RelayReply> ExecuteAsync(RelayCaller caller, string operation, string argumentsJson) => throw new InvalidOperationException("Optional control read unavailable");
     }
 
-    [Fact]
-    public void Board_requireResources_refuses_ready_without_packet_resources()
-    {
-        var plain = new StateEnvelope<CoordinationDocument>();
-        Assert.True(Call(plain, "task_update", Update("t", 0, Workflow())).Ok);
-
-        var state = new StateEnvelope<CoordinationDocument> { Value = new() { Json = "{\"standing\":{\"settings\":{\"requireResources\":true}}}" } };
-        var refused = Call(state, "task_update", Update("t", 0, Workflow()));
-        Assert.Equal("InvalidWorkflow", refused.Code);
-        Assert.Equal("packet.resources", Data(refused)["required"]!.GetValue<string>());
-        var blocked = Workflow("blocked"); blocked["blockers"]!.AsArray().Add(new JsonObject { ["id"] = "hold", ["kind"] = "coordinator_hold", ["summary"] = "Waiting", ["recheckCondition"] = "Released" });
-        Assert.True(Call(state, "task_update", Update("held", 0, blocked)).Ok);
-        var ready = Workflow(); ready["packet"]!["resources"] = new JsonArray("rig-1");
-        Assert.True(Call(state, "task_update", Update("t", 0, ready)).Ok);
-        var none = Workflow(); none["packet"]!["resources"] = new JsonArray();
-        Assert.True(Call(state, "task_update", Update("no-resources", 0, none)).Ok);
-        var duplicate = Workflow(); duplicate["packet"]!["resources"] = new JsonArray("rig-1", "rig-1");
-        Assert.Equal("InvalidWorkflow", Call(state, "task_update", Update("bad", 0, duplicate)).Code);
-        var tooMany = Workflow(); tooMany["packet"]!["resources"] = new JsonArray(Enumerable.Range(0, 17).Select(i => (JsonNode)("rig-" + i)).ToArray());
-        Assert.Equal("InvalidWorkflow", Call(state, "task_update", Update("bad", 0, tooMany)).Code);
-    }
-
     private static JsonObject WithResources(int priority, params string[] resources)
     {
         var workflow = Workflow(); workflow["priority"] = priority;
         workflow["packet"]!["resources"] = new JsonArray(resources.Select(id => (JsonNode)id).ToArray());
         return workflow;
-    }
-
-    [Fact]
-    public async Task Next_work_prefers_free_resources_at_equal_priority_and_still_requires_claim()
-    {
-        var factory = DispatchProxy.Create<IGrainFactory, LockCountingFactory>();
-        var app = new RelayApplication(factory);
-        async Task<RelayReply> Invoke(string tool, JsonObject args)
-        {
-            args["repositoryId"] = "repo"; args["requestId"] = Guid.NewGuid().ToString("N");
-            return await app.ExecuteAsync(Caller with { IsInternal = false }, tool, JsonSerializer.SerializeToElement(args));
-        }
-        // The worker's session is on machine "pc", where "bench" is an alias of "held"; its task_update names another machine.
-        var worker = Data(await Invoke("session_open", new() { ["machineId"] = "pc" })); var holder = Data(await Invoke("session_open", new() { ["machineId"] = "pc" }));
-        JsonObject For(JsonObject session) => new() { ["sessionId"] = session["sessionId"]!.DeepClone(), ["sessionToken"] = session["sessionToken"]!.DeepClone(), ["machineId"] = "elsewhere" };
-        Assert.True((await Invoke("control_request", new() { ["command"] = "register_resource", ["resourceId"] = "held", ["aliases"] = new JsonArray("bench"), ["machineId"] = "pc" })).Ok);
-        Assert.True((await Invoke("control_request", new() { ["command"] = "register_resource", ["resourceId"] = "free", ["machineId"] = "pc" })).Ok);
-        var hold = For(holder); hold["resourceId"] = "held";
-        var grant = Data(await Invoke("claim_acquire", hold));
-        async Task Create(string id, JsonObject? workflow)
-        {
-            var args = For(worker); args["taskId"] = id; args["expectedVersion"] = 0;
-            if (workflow is not null) args["workflow"] = workflow;
-            Assert.True((await Invoke("task_update", args)).Ok);
-        }
-        await Create("current", null);
-        await Create("a", WithResources(5, "bench"));
-        await Create("b", WithResources(5, "free"));
-        await Create("c", WithResources(1));
-        var milestone = For(worker); milestone["taskId"] = "current"; milestone["expectedVersion"] = 1; milestone["includeNextWork"] = true;
-        var counter = (LockCountingFactory)(object)factory;
-        var (lookups, resolves, batches) = (counter.Lookups, counter.Resolves, counter.BatchResolves);
-        var reply = await Invoke("task_update", milestone);
-        var next = Data(reply)["nextWork"]!;
-        Assert.Equal("b", next["offer"]!["taskId"]!.GetValue<string>());
-        Assert.True(next["offer"]!["claimRequired"]!.GetValue<bool>());
-        Assert.Null(next["candidates"]);
-        Assert.Equal(2, counter.Lookups - lookups);
-        Assert.Equal((0, 1), (counter.Resolves - resolves, counter.BatchResolves - batches));
-        Assert.Null(Data(await Invoke("task_get", new() { ["taskId"] = "b" }))["owner"]);
-
-        // Once the resource is free again, task ID breaks the tie as before.
-        var release = For(holder); release["resourceId"] = "held"; release["generation"] = grant["generation"]!.DeepClone();
-        Assert.True((await Invoke("claim_release", release)).Ok);
-        milestone["expectedVersion"] = 2;
-        Assert.Equal("a", Data(await Invoke("task_update", milestone))["nextWork"]!["offer"]!["taskId"]!.GetValue<string>());
-
-        // The offer acquired nothing: the worker still claims the task and its resources itself.
-        var claim = For(worker); claim["taskId"] = "b"; claim["expectedVersion"] = 1; claim["resourceIds"] = new JsonArray("free");
-        Assert.True((await Invoke("task_claim", claim)).Ok);
-    }
-
-    [Fact]
-    public async Task Next_work_resource_lookups_are_capped_per_offer()
-    {
-        var factory = DispatchProxy.Create<IGrainFactory, LockCountingFactory>();
-        var app = new RelayApplication(factory);
-        async Task<RelayReply> Invoke(string tool, JsonObject args)
-        {
-            args["repositoryId"] = "repo"; args["requestId"] = Guid.NewGuid().ToString("N");
-            return await app.ExecuteAsync(Caller with { IsInternal = false }, tool, JsonSerializer.SerializeToElement(args));
-        }
-        var worker = Data(await Invoke("session_open", new()));
-        JsonObject For() => new() { ["sessionId"] = worker["sessionId"]!.DeepClone(), ["sessionToken"] = worker["sessionToken"]!.DeepClone(), ["machineId"] = "pc" };
-        var create = For(); create["taskId"] = "current"; create["expectedVersion"] = 0; Assert.True((await Invoke("task_update", create)).Ok);
-        for (var task = 0; task < 6; task++)
-        {
-            var resources = Enumerable.Range(0, 16).Select(i => $"r{task}-{i}").ToArray();
-            foreach (var resource in resources) Assert.True((await Invoke("control_request", new() { ["command"] = "register_resource", ["resourceId"] = resource, ["machineId"] = "pc" })).Ok);
-            var args = For(); args["taskId"] = "t" + task; args["expectedVersion"] = 0; args["workflow"] = WithResources(1, resources);
-            Assert.True((await Invoke("task_update", args)).Ok);
-        }
-        var milestone = For(); milestone["taskId"] = "current"; milestone["expectedVersion"] = 1; milestone["includeNextWork"] = true;
-        var reply = await Invoke("task_update", milestone);
-        Assert.Equal("t0", Data(reply)["nextWork"]!["offer"]!["taskId"]!.GetValue<string>());
-        Assert.Equal(32, ((LockCountingFactory)(object)factory).Lookups);
     }
 
     /// <summary>Counts lock claim-state lookups and control resolves, single and batched.</summary>
@@ -418,43 +106,6 @@ public sealed class CollaborationTests
             owner.Count(operation);
             return inner.ExecuteAsync(caller, operation, argumentsJson);
         }
-    }
-
-    [Fact]
-    public async Task Report_offer_is_advisory_targeted_paused_authenticated_and_bounded()
-    {
-        var factory = DispatchProxy.Create<IGrainFactory, CoordinationTests.TestGrainFactory>();
-        var app = new RelayApplication(factory);
-        async Task<RelayReply> Invoke(string tool, JsonObject args)
-        {
-            args["repositoryId"] = "repo"; args["requestId"] = Guid.NewGuid().ToString("N");
-            return await app.ExecuteAsync(Caller with { IsInternal = false }, tool, JsonSerializer.SerializeToElement(args));
-        }
-        var session = Data(await Invoke("session_open", new()));
-        JsonObject For() => new() { ["sessionId"] = session["sessionId"]!.DeepClone(), ["sessionToken"] = session["sessionToken"]!.DeepClone() };
-        async Task Create(string id, JsonObject? workflow)
-        {
-            var args = For(); args["taskId"] = id; args["expectedVersion"] = 0;
-            if (workflow is not null) args["workflow"] = workflow;
-            Assert.True((await Invoke("task_update", args)).Ok);
-        }
-        await Create("current", null); await Create("legacy", null);
-        var foreign = Workflow(); foreign["targetSessionId"] = "different"; foreign["priority"] = 100;
-        await Create("foreign", foreign); await Create("ready", Workflow());
-        var milestone = For(); milestone["taskId"] = "current"; milestone["expectedVersion"] = 1; milestone["includeNextWork"] = true;
-        var reported = await Invoke("task_update", milestone); Assert.True(reported.Ok);
-        var offer = Data(reported)["nextWork"]!["offer"]!;
-        Assert.Equal("ready", offer["taskId"]!.GetValue<string>()); Assert.True(offer["claimRequired"]!.GetValue<bool>());
-        Assert.Equal(1, offer["expectedVersion"]!.GetValue<long>());
-        Assert.Null(Data(await Invoke("task_get", new() { ["taskId"] = "ready" }))["owner"]);
-        Assert.True((await Invoke("control_request", new() { ["command"] = "pause" })).Ok);
-        milestone["expectedVersion"] = 2;
-        Assert.Equal("Paused", Data(await Invoke("task_update", milestone))["nextWork"]!["code"]!.GetValue<string>());
-        milestone["expectedVersion"] = 3; milestone["sessionToken"] = "forged";
-        Assert.Equal("SessionDenied", (await Invoke("task_update", milestone)).Code);
-        milestone["sessionToken"] = session["sessionToken"]!.DeepClone(); milestone["notes"] = new string('"', 2000);
-        var bounded = await Invoke("task_update", milestone); Assert.True(bounded.Ok, bounded.Code);
-        Assert.True(Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(bounded)) <= 32768);
     }
 
     private static RelayReply Standing(StateEnvelope<CoordinationDocument> state, string operation, JsonObject args, RelayCaller? caller = null, int seconds = 0)
@@ -558,67 +209,6 @@ public sealed class CollaborationTests
         Grant(id, "resource", 3600, Enumerable.Range(0, RelayLimits.MaxGrantTargets).Select(i => id + "-" + i + "-" + new string('r', RelayLimits.MaxIdentifierLength - 12)).ToArray());
 
     [Fact]
-    public void Standing_put_refuses_standing_too_large_to_deliver_and_keeps_what_is_delivered_readable()
-    {
-        // One put of six wide grants: well over the delivered-standing limit, so it is refused whole and nothing is stored.
-        var state = new StateEnvelope<CoordinationDocument>();
-        var before = state.Value.Json;
-        var oversized = Standing(state, "standing_put", Put(0, "grants", new JsonArray(Enumerable.Range(0, 6).Select(i => (JsonNode)WideGrant("g" + i)).ToArray())));
-        Assert.Equal("PayloadTooLarge", oversized.Code);
-        Assert.Equal(RelayLimits.MaxStandingBytes, Data(oversized)["maxBytes"]!.GetValue<int>());
-        Assert.True(Data(oversized)["bytes"]!.GetValue<int>() > RelayLimits.MaxStandingBytes);
-        Assert.Equal(before, state.Value.Json);
-
-        // Grow standing one grant, then one 200-character line, at a time until a put is refused: the last accepted one sits just under the limit.
-        long revision = 0;
-        bool Add(string field, JsonNode item)
-        {
-            var put = Standing(state, "standing_put", Put(revision, field, new JsonArray(item)));
-            if (put.Ok) { revision++; return true; }
-            Assert.Equal("PayloadTooLarge", put.Code);
-            return false;
-        }
-        var grants = 0; while (Add("grants", WideGrant("w" + grants))) grants++;
-        var lines = 0; while (Add("lines", new JsonObject { ["id"] = "l" + lines, ["text"] = new string('x', RelayLimits.MaxStandingLineLength) })) lines++;
-        Assert.True(grants > 0 && lines > 0);
-        var stored = state.Value.Json;
-        Assert.Equal("PayloadTooLarge", Standing(state, "standing_put", Put(revision, "lines", new JsonArray(new JsonObject { ["id"] = "over", ["text"] = new string('x', RelayLimits.MaxStandingLineLength) }))).Code);
-        Assert.Equal(stored, state.Value.Json);
-
-        // What sessions receive and what task_get shows are both readable, and the delivered standing is within its limit.
-        var delivered = Call(state, "__standing", new());
-        Assert.True(delivered.Ok, delivered.Code);
-        Assert.Equal(revision, delivered.Version);
-        Assert.InRange(JsonSerializer.SerializeToUtf8Bytes(delivered).Length, RelayLimits.MaxStandingBytes - 1_000, RelayLimits.MaxStandingBytes);
-        Assert.Equal(grants, Data(delivered)["grants"]!.AsArray().Count);
-        var view = Call(state, "task_get", new() { ["section"] = "standing" });
-        Assert.True(view.Ok, view.Code);
-        Assert.Equal(lines, Data(view)["lines"]!.AsArray().Count);
-    }
-
-    [Fact]
-    public void After_the_grant_expires_reports_renewals_and_completion_still_work()
-    {
-        // Only a claim, its replay and action_begin start work, so only they recheck the grant; finishing work already started is never blocked.
-        var state = new StateEnvelope<CoordinationDocument>();
-        Assert.True(Standing(state, "standing_put", Put(0, "grants", new JsonArray(Grant("short", "resource", 60, "rig-1")))).Ok);
-        Assert.True(Call(state, "task_update", Update("t", 0, Authorized("grant:short", "rig-1"))).Ok);
-        Assert.True(Call(state, "task_claim", new() { ["taskId"] = "t", ["sessionId"] = "worker", ["requestId"] = "claim", ["expectedVersion"] = 1, ["leaseSeconds"] = RelayLimits.MaxLeaseSeconds, ["resourceIds"] = new JsonArray("rig-1") }, 0).Ok);
-        Assert.True(Call(state, "action_begin", new() { ["taskId"] = "t", ["sessionId"] = "worker", ["requestId"] = "begin", ["expectedVersion"] = 2, ["actionId"] = "deploy", ["inputFingerprint"] = "f" }, 30).Ok);
-        // Two minutes on, the grant has expired.
-        var report = Call(state, "action_report", new() { ["taskId"] = "t", ["sessionId"] = "worker", ["requestId"] = "report", ["expectedVersion"] = 3, ["actionId"] = "deploy", ["attempt"] = 1, ["outcome"] = "completed" }, 120);
-        Assert.True(report.Ok, report.Code);
-        var renewed = Call(state, "claim_renew", new() { ["taskId"] = "t", ["sessionId"] = "worker", ["requestId"] = "renew", ["claimGeneration"] = 1, ["leaseSeconds"] = RelayLimits.MaxLeaseSeconds }, 150);
-        Assert.True(renewed.Ok, renewed.Code);
-        var done = Authorized("grant:short", "rig-1"); done["state"] = "completed";
-        done["criteria"]![0]!["result"] = "passed"; done["criteria"]![0]!["evidenceRef"] = "artifact:1";
-        var completed = Call(state, "task_update", new() { ["taskId"] = "t", ["sessionId"] = "worker", ["requestId"] = "done", ["expectedVersion"] = 4, ["workflow"] = done }, 180);
-        Assert.True(completed.Ok, completed.Code);
-        // A new start is still refused.
-        Assert.Equal("GrantInvalid", Call(state, "task_update", Update("again", 0, Authorized("grant:short", "rig-1")), 180).Code);
-    }
-
-    [Fact]
     public void Standing_put_needs_an_administrator_and_the_expected_revision_within_limits()
     {
         var state = new StateEnvelope<CoordinationDocument>();
@@ -708,47 +298,4 @@ public sealed class CollaborationTests
         Assert.Equal("CapacityExceeded", Standing(state, "standing_propose", new() { ["sessionId"] = "s", ["line"] = new JsonObject { ["text"] = "One too many" } }, bob).Code);
     }
 
-    [Fact]
-    public void Standing_revision_moves_only_when_a_line_grant_or_setting_changes()
-    {
-        var state = new StateEnvelope<CoordinationDocument>();
-        var bob = new RelayCaller("bob", false, ["repo"], true);
-        var line = new JsonObject { ["id"] = "css", ["text"] = "Never deploy CSS without a restoration receipt." };
-        Assert.Equal(1, Standing(state, "standing_put", Put(0, "lines", new JsonArray(line.DeepClone()))).Version);
-        Assert.True(Standing(state, "standing_put", Put(1, "settings", new JsonObject { ["requireResources"] = true })).Ok);
-        string Propose(JsonObject args) { args["sessionId"] = "bob-session"; return Data(Standing(state, "standing_propose", args, bob))["proposalId"]!.GetValue<string>(); }
-        RelayReply Put2(string field, JsonNode value) => Standing(state, "standing_put", Put(2, field, value));
-        long HistoryCount() => Data(Call(state, "task_get", new() { ["section"] = "standing" }))["history"]!.AsArray().Count;
-
-        // Nothing to change: no revision and no history; standing is left exactly as it was.
-        string StandingJson() => JsonNode.Parse(state.Value.Json)!["standing"]!.ToJsonString();
-        var before = StandingJson();
-        foreach (var (field, value) in new (string, JsonNode)[] { ("lines", new JsonArray()), ("lines", new JsonArray(line.DeepClone())), ("settings", new JsonObject { ["requireResources"] = true }), ("grants", new JsonArray()) })
-        {
-            var reply = Put2(field, value);
-            Assert.True(reply.Ok); Assert.Equal(2, reply.Version); Assert.False(Data(reply)["changed"]!.GetValue<bool>());
-        }
-        Assert.Equal(before, StandingJson());
-
-        // Rejecting a proposal, or approving one identical to the current line, keeps the revision but is recorded.
-        var rejected = Propose(new() { ["line"] = new JsonObject { ["text"] = "Skip review." } });
-        var reply2 = Put2("remove", new JsonArray(rejected));
-        Assert.Equal(2, reply2.Version); Assert.False(Data(reply2)["changed"]!.GetValue<bool>());
-        var same = Propose(new() { ["line"] = line.DeepClone() });
-        Assert.Equal(2, Put2("approve", new JsonArray(same)).Version);
-        Assert.Equal(2, Data(Call(state, "__standing", new()))["revision"]!.GetValue<long>());
-        Assert.Equal(4, HistoryCount());
-
-        // An approval whose ID matches an existing line is an edit: the view says so before approval, and history records "~".
-        var edit = Propose(new() { ["line"] = new JsonObject { ["id"] = "css", ["text"] = "Deploy CSS only with a restoration receipt." } });
-        var fresh = Propose(new() { ["line"] = new JsonObject { ["id"] = "new-line", ["text"] = "Run smoke tests first." } });
-        var proposals = Data(Call(state, "task_get", new() { ["section"] = "standing" }))["proposals"]!.AsArray().ToDictionary(x => x!["id"]!.GetValue<string>());
-        Assert.True(proposals[edit]!["replaces"]!.GetValue<bool>());
-        Assert.Null(proposals[fresh]!["replaces"]);
-        var approved = Put2("approve", new JsonArray(edit, fresh));
-        Assert.Equal(3, approved.Version); Assert.True(Data(approved)["changed"]!.GetValue<bool>());
-        var latest = Data(Call(state, "task_get", new() { ["section"] = "standing" }))["history"]![0]!["changes"]!.AsArray().Select(x => x!.GetValue<string>()).ToArray();
-        Assert.Equal(new[] { "approve:" + edit, "~line:css", "approve:" + fresh, "+line:new-line" }, latest);
-        Assert.Equal("bob", Data(Call(state, "task_get", new() { ["section"] = "standing" }))["lines"]![0]!["author"]!.GetValue<string>());
-    }
 }

@@ -49,7 +49,7 @@ public sealed class RelayApplication : IRelayApplication
         guard = new(aggregates, incarnation);
         var machineDirectory = machines ?? new MachineDirectory(grains);
         router = new(aggregates, claims,
-            new SessionTools(aggregates, standing, attentionOptions, anomaly, docTools),
+            new SessionTools(aggregates, standing, attentionOptions, anomaly, docTools, searchOn: search is not null, analyticsOn: analytics is not null && !ReferenceEquals(analytics, AnalyticsTool.Off)),
             new StatusTools(aggregates, standing, attentionOptions, orders, telemetry),
             new MessageTools(aggregates, machineDirectory, attentionOptions, telemetry),
             new PeerTools(aggregates, machineDirectory),
@@ -73,12 +73,27 @@ public sealed class RelayApplication : IRelayApplication
         }
     }
 
+    /// <summary>The stages, then the refusal's line. It is added here, on the way out, so no stored reply holds it and a replayed refusal gets it too.</summary>
+    private async Task<RelayReply> ExecuteCoreAsync(RelayCaller caller, string tool, JsonElement arguments, CallTrace? trace, CancellationToken cancellationToken) =>
+        WithRefusalHint(tool, await RunStagesAsync(caller, tool, arguments, trace, cancellationToken));
+
+    /// <summary>A refusal about what the chat may do keeps its code and data, and says what's missing and how to get it, unless it already says so.</summary>
+    private static RelayReply WithRefusalHint(string tool, RelayReply reply)
+    {
+        if (reply.Ok || ChatGuidance.Refusal(reply.Code, tool) is not { } hint) return reply;
+        var data = Aggregates.Parse(reply);
+        if (data.ContainsKey(ChatGuidance.HintField) || data.ContainsKey("guidance")) return reply;
+        data[ChatGuidance.HintField] = hint;
+        var hinted = reply with { DataJson = data.ToJsonString() };
+        return FitsWire(hinted) ? hinted : reply;
+    }
+
     /// <summary>
     /// Guard, router, add-ons. From session verification on, an argument that a handler or aggregate cannot read answers
     /// <c>InvalidArguments</c>; the admission checks before it answer for themselves. <c>session_open</c> is complete as routed: its reply
     /// is bounded there and takes no add-ons.
     /// </summary>
-    private async Task<RelayReply> ExecuteCoreAsync(RelayCaller caller, string tool, JsonElement arguments, CallTrace? trace, CancellationToken cancellationToken)
+    private async Task<RelayReply> RunStagesAsync(RelayCaller caller, string tool, JsonElement arguments, CallTrace? trace, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (!guard.TryAdmit(caller, tool, arguments, trace, out var admitted, out var rejected)) return rejected;

@@ -266,6 +266,7 @@ internal sealed class ChatCalls(RelayForwarder forwarder, SessionHints? hints, S
             if (tool == RelayTools.SessionOpen) await hints.ObserveSessionAsync(arguments, reply, cancellationToken);
             if (tool == RelayTools.CheckInbox) hints.ResetHint();
         }
+        if (tool == RelayTools.SessionOpen) reply = _forwarder.WithOwnStartHint(reply);
         return tool is RelayTools.SessionOpen or RelayTools.GetStatus ? LocalWakeStatus.AddTo(reply, wakeStatusRoot) : reply;
     }
 

@@ -66,8 +66,9 @@ internal sealed class DashboardConnect(IConfiguration configuration, IHostEnviro
     }
 
     /// <summary>
-    /// The page shows four states. An entry the adapter reports <c>outdated</c> (this hub's, but pinned to an old address or certificate) is one to
+    /// The page shows five states. An entry the adapter reports <c>outdated</c> (this hub's, but pinned to an old address or certificate) is one to
     /// connect, so the page offers Connect; one it <c>updated</c> was just changed, so the page says to restart the app, as for one just added.
+    /// One it reports <c>other-hub</c> passes through: Connect would not change it, so the page offers nothing and says why.
     /// </summary>
     internal static DashboardConnectClient PageState(DashboardConnectClient client) => client.State switch
     {

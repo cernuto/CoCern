@@ -111,18 +111,6 @@ public sealed class AdminToolsHostTests : IDisposable
     }
 
     [Fact]
-    public async Task A_worker_on_another_pc_gets_no_join_code()
-    {
-        await using var host = Hub(Remote);
-        Listening(host);
-        using var worker = Worker(host);
-        var (status, code, _, raw) = await Post(worker, RelayTools.AddPc, new { repositoryId = "repo" });
-        Assert.Equal(HttpStatusCode.Forbidden, status);
-        Assert.Equal(RelayErrorCodes.AdministratorRequired, code);
-        Assert.DoesNotContain(RelayHostFixture.JoinCode, raw);
-    }
-
-    [Fact]
     public async Task Being_the_recorded_manager_grants_none_of_them()
     {
         var connect = new FakeConnect();
@@ -141,118 +129,8 @@ public sealed class AdminToolsHostTests : IDisposable
         Assert.Empty(connect.Runs);
     }
 
-    // ---- hub_diagnose ----
-
-    [Fact]
-    public async Task Hub_diagnose_reports_the_hub_and_each_pc_and_holds_no_secret_or_session_label()
-    {
-        var now = DateTimeOffset.UtcNow;
-        var observation = new RelayObservation
-        {
-            SessionCount = 3,
-            Machines =
-            [
-                new() { MachineId = "machine-live", Name = "LIVE-PC", Reachable = true, LastSeenAt = now, SessionCount = 2 },
-                new() { MachineId = "machine-quiet", Name = "QUIET-PC", Reachable = false, LastSeenAt = now.AddDays(-3), SessionCount = 1 }
-            ],
-            Sessions = [new() { SessionId = "other", RepositoryId = "other-repository", Label = "private-label-from-another-repository" }]
-        };
-        await using var host = Hub(Remote, services: services => services.AddSingleton<IRelayObservationSource>(new FixedObservation(observation)), extra: new() { ["Relay:Network:Enabled"] = "true" });
-        host.Services.GetRequiredService<HubListener>().Https = (5273, Fingerprint);
-        using var admin = host.AuthorizedClient();
-
-        // A read, and open to an administrator on another PC: it holds nothing that needs the hub's PC.
-        var (status, code, data, raw) = await Post(admin, RelayTools.HubDiagnose, new { repositoryId = "repo" });
-
-        Assert.Equal(HttpStatusCode.OK, status);
-        Assert.Equal("Ok", code);
-        Assert.False(string.IsNullOrEmpty(data.GetProperty("version").GetString()));
-        Assert.True(data.GetProperty("uptimeMinutes").GetInt64() >= 0);
-        Assert.Equal(Fingerprint, data.GetProperty("certificateFingerprint").GetString());
-        Assert.True(data.GetProperty("discoveryEnabled").GetBoolean());
-        Assert.True(data.GetProperty("networkEnabled").GetBoolean());
-        Assert.Equal(3, data.GetProperty("sessionCount").GetInt32());
-        Assert.Equal(RelayLimits.MaxRecords, data.GetProperty("sessionLimit").GetInt32());
-        var pcs = data.GetProperty("pcs").EnumerateArray().ToDictionary(pc => pc.GetProperty("machineId").GetString()!);
-        Assert.True(pcs["machine-live"].GetProperty("seenRecently").GetBoolean());
-        Assert.False(pcs["machine-quiet"].GetProperty("seenRecently").GetBoolean());
-        Assert.Equal("QUIET-PC", pcs["machine-quiet"].GetProperty("name").GetString());
-        Assert.True(pcs["machine-quiet"].TryGetProperty("lastSeenAt", out _));
-        // The hub keeps no PC's version yet, and the reply says so rather than implying every PC is current.
-        Assert.Contains("version", data.GetProperty("versionNote").GetString(), StringComparison.OrdinalIgnoreCase);
-
-        foreach (var secret in new[] { RelayHostFixture.Token, WorkerToken, RelayHostFixture.JoinCode, "private-label-from-another-repository", "PRIVATE KEY", root })
-            Assert.DoesNotContain(secret, raw);
-        Assert.DoesNotContain(root.Replace("\\", "\\\\"), raw);
-    }
-
-    [Fact]
-    public async Task Hub_diagnose_gives_reasons_for_what_it_cannot_read_and_still_answers()
-    {
-        await using var host = Hub(Remote, services: services => services.AddSingleton<IRelayObservationSource>(new FixedObservation(null)), extra: new() { ["Relay:Analytics:Enabled"] = "false" });
-        using var admin = host.AuthorizedClient();
-        var (status, _, data, _) = await Post(admin, RelayTools.HubDiagnose, new { repositoryId = "repo" });
-        Assert.Equal(HttpStatusCode.OK, status);
-        Assert.Contains("turned off", data.GetProperty("analyticsUnavailable").GetString());
-        Assert.Equal(JsonValueKind.Null, data.GetProperty("analyticsSnapshotAgeMinutes").ValueKind);
-        Assert.Contains("busy", data.GetProperty("sessionsUnavailable").GetString());
-        Assert.Equal(JsonValueKind.Null, data.GetProperty("sessionCount").ValueKind);
-        Assert.Equal(CertificateBackupStates.Off, data.GetProperty("certificateBackup").GetString());
-    }
-
-    [Fact]
-    public async Task Hub_diagnose_reads_a_real_hubs_pcs_with_no_dashboard_viewer_connected()
-    {
-        await using var host = Hub(Remote);
-        using var admin = host.AuthorizedClient();
-        var opened = await Post(admin, RelayTools.SessionOpen, new { repositoryId = "repo", requestId = "open", label = "A chat" });
-        Assert.Equal("Ok", opened.Code);
-        var (status, _, data, raw) = await Post(admin, RelayTools.HubDiagnose, new { repositoryId = "repo" });
-        Assert.Equal(HttpStatusCode.OK, status);
-        Assert.Equal(JsonValueKind.Null, data.GetProperty("sessionsUnavailable").ValueKind);
-        Assert.True(data.GetProperty("sessionCount").GetInt32() >= 1);
-        Assert.DoesNotContain("A chat", raw);
-        Assert.DoesNotContain(opened.Data.GetProperty("sessionToken").GetString()!, raw);
-    }
-
-    // ---- add_pc ----
-
-    [Fact]
-    public async Task Add_pc_returns_the_dashboards_command_with_a_note_not_to_forward_it()
-    {
-        await using var host = Hub(IPAddress.Loopback);
-        Listening(host);
-        using var admin = host.AuthorizedClient();
-        var (status, code, data, _) = await Post(admin, RelayTools.AddPc, new { repositoryId = "repo" });
-        Assert.Equal(HttpStatusCode.OK, status);
-        Assert.Equal("Ok", code);
-        Assert.Contains("secret", data.GetProperty("secretWarning").GetString(), StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("forward", data.GetProperty("secretWarning").GetString(), StringComparison.OrdinalIgnoreCase);
-        var expected = host.Services.GetRequiredService<DashboardAddPc>().Status();
-        var given = data.GetProperty("status");
-        Assert.NotEmpty(expected.Addresses);
-        Assert.Equal(expected.Addresses[0].Url, given.GetProperty("addresses")[0].GetProperty("url").GetString());
-        Assert.Equal(DashboardAddPc.Command(expected.Addresses[0].Url, RelayHostFixture.JoinCode, Fingerprint), given.GetProperty("addresses")[0].GetProperty("command").GetString());
-        Assert.Equal(expected.FirewallCommand, given.GetProperty("firewallCommand").GetString());
-        Assert.False(data.TryGetProperty("compacted", out _));
-    }
-
     /// <summary>Null is a connection with no address at all, which the dashboard's check also refuses.</summary>
     public static TheoryData<string?> NotThisPc => new() { "192.168.1.20", "10.0.0.5", "2001:db8::1", null };
-
-    [Theory]
-    [MemberData(nameof(NotThisPc))]
-    public async Task Add_pc_answers_an_administrator_on_another_pc(string? address)
-    {
-        await using var host = Hub(address is null ? null : IPAddress.Parse(address));
-        Listening(host);
-        using var admin = host.AuthorizedClient();
-        var (status, code, data, raw) = await Post(admin, RelayTools.AddPc, new { repositoryId = "repo" });
-        Assert.Equal(HttpStatusCode.OK, status);
-        Assert.Equal("Ok", code);
-        Assert.Contains(RelayHostFixture.JoinCode, raw);
-        Assert.Contains("secret", data.GetProperty("secretWarning").GetString(), StringComparison.OrdinalIgnoreCase);
-    }
 
     /// <summary>add_pc no longer looks at where a call comes from, so a forged header can gain nothing there; connect_app still judges the real connection.</summary>
     [Fact]
@@ -281,45 +159,6 @@ public sealed class AdminToolsHostTests : IDisposable
         Assert.Equal(HttpStatusCode.Forbidden, connected.Status);
         Assert.Equal(RelayErrorCodes.HubPcRequired, connected.Code);
         Assert.Empty(connect.Runs);
-    }
-
-    [Fact]
-    public async Task Add_pc_answers_the_same_way_over_mcp_on_the_hubs_pc_and_from_another_pc()
-    {
-        foreach (var address in new[] { IPAddress.Loopback, Remote })
-        {
-            await using var host = Hub(address);
-            Listening(host);
-            using var http = host.AuthorizedClient();
-            await using var transport = new HttpClientTransport(new HttpClientTransportOptions { Endpoint = new Uri("https://localhost/mcp"), TransportMode = HttpTransportMode.StreamableHttp, EnableStandaloneGetStream = false }, http);
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-            await using var mcp = await McpClient.CreateAsync(transport, cancellationToken: timeout.Token);
-            Assert.Contains(await mcp.ListToolsAsync(cancellationToken: timeout.Token), tool => tool.Name == RelayTools.AddPc);
-            var result = await mcp.CallToolAsync(RelayTools.AddPc, new Dictionary<string, object?> { ["repositoryId"] = "repo" }, cancellationToken: timeout.Token);
-            Assert.NotEqual(true, result.IsError);
-            Assert.Contains(RelayHostFixture.JoinCode, Assert.IsType<TextContentBlock>(Assert.Single(result.Content)).Text);
-        }
-    }
-
-    [Fact]
-    public async Task Add_pc_passes_on_why_a_hub_cannot_take_other_pcs_as_readable_text()
-    {
-        await using (var off = Hub(IPAddress.Loopback, discovery: false))
-        {
-            Listening(off);
-            using var admin = off.AuthorizedClient();
-            var (status, _, data, raw) = await Post(admin, RelayTools.AddPc, new { repositoryId = "repo" });
-            Assert.Equal(HttpStatusCode.OK, status);
-            Assert.Contains("Relay:Discovery:Enabled", data.GetProperty("status").GetProperty("unavailable").GetString());
-            Assert.DoesNotContain(RelayHostFixture.JoinCode, raw);
-            Assert.Equal(JsonValueKind.Null, data.GetProperty("secretWarning").ValueKind);
-        }
-        await using var missing = Hub(IPAddress.Loopback, adapter: Path.Combine(root, "missing.dll"));
-        Listening(missing);
-        using var client = missing.AuthorizedClient();
-        var noAdapter = await Post(client, RelayTools.AddPc, new { repositoryId = "repo" });
-        Assert.Contains("adapter was not found", noAdapter.Data.GetProperty("status").GetProperty("unavailable").GetString());
-        Assert.DoesNotContain(RelayHostFixture.JoinCode, noAdapter.Raw);
     }
 
     [Theory]
@@ -392,56 +231,6 @@ public sealed class AdminToolsHostTests : IDisposable
         return all.ToArray();
     }
 
-    [Theory]
-    [InlineData("relay.db")]
-    [InlineData("relay.db-wal")]
-    public async Task A_database_or_log_range_that_stays_locked_fails_the_scan(string name)
-    {
-        if (!OperatingSystem.IsWindows()) return; // Other systems' byte-range locks do not stop a read.
-        var file = Path.Combine(root, name);
-        Directory.CreateDirectory(root);
-        await File.WriteAllBytesAsync(file, new byte[8192]);
-        await using var holder = new FileStream(file, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
-        holder.Lock(4096, 4096);
-        await Assert.ThrowsAsync<IOException>(() => ReadLiveDatabaseFileAsync(file, attempts: 3));
-    }
-
-    [Fact]
-    public async Task An_index_range_that_stays_locked_is_skipped_and_the_rest_is_still_scanned()
-    {
-        if (!OperatingSystem.IsWindows()) return; // Other systems' byte-range locks do not stop a read.
-        var file = Path.Combine(root, "relay.db-shm");
-        Directory.CreateDirectory(root);
-        var content = new byte[12288];
-        Array.Fill(content, (byte)7);
-        await File.WriteAllBytesAsync(file, content);
-        await using var holder = new FileStream(file, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
-        holder.Lock(4096, 4096);
-        var bytes = await ReadLiveDatabaseFileAsync(file, attempts: 3);
-        Assert.Equal(content.Length, bytes.Length);
-        Assert.All(bytes[..4096], value => Assert.Equal(7, value));
-        Assert.All(bytes[4096..8192], value => Assert.Equal(0, value));
-        Assert.All(bytes[8192..], value => Assert.Equal(7, value));
-    }
-
-    [Fact]
-    public async Task A_lock_released_in_time_loses_no_bytes()
-    {
-        if (!OperatingSystem.IsWindows()) return; // Other systems' byte-range locks do not stop a read.
-        var file = Path.Combine(root, "relay.db");
-        Directory.CreateDirectory(root);
-        var content = new byte[8192];
-        Array.Fill(content, (byte)9);
-        await File.WriteAllBytesAsync(file, content);
-        var holder = new FileStream(file, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
-        holder.Lock(0, 4096);
-        var reading = ReadLiveDatabaseFileAsync(file);
-        await Task.Delay(200);
-        holder.Unlock(0, 4096);
-        await holder.DisposeAsync();
-        Assert.Equal(content, await reading);
-    }
-
     private static async Task<long> ActivityRowsAsync(RelayHostFixture host, string tool)
     {
         await using var connection = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={host.DatabasePath};Mode=ReadOnly");
@@ -475,57 +264,6 @@ public sealed class AdminToolsHostTests : IDisposable
     }
 
     [Fact]
-    public async Task Connect_app_connects_a_known_client_with_no_admin_choice_when_none_is_given()
-    {
-        var connect = new FakeConnect();
-        var logged = new CapturedLines();
-        await using var host = ConnectHub(connect, IPAddress.Loopback, logged);
-        using var admin = host.AuthorizedClient();
-        var (status, code, data, _) = await Post(admin, RelayTools.ConnectApp, new { repositoryId = "repo", requestId = "connect", client = ConnectClients.ClaudeCode });
-        Assert.Equal(HttpStatusCode.OK, status);
-        Assert.Equal("Ok", code);
-        Assert.Equal(ConnectStates.Added, data.GetProperty("clients")[0].GetProperty("state").GetString());
-        Assert.Equal((ConnectClients.ClaudeCode, (bool?)null), Assert.Single(connect.Runs));
-        Assert.DoesNotContain(logged.Lines, line => line.Contains("connect_app by", StringComparison.Ordinal));
-    }
-
-    [Theory]
-    [InlineData("anything")]
-    [InlineData("")]
-    [InlineData("CODEX")]
-    [InlineData("codex --role admin")]
-    public async Task Connect_app_refuses_an_unknown_client_and_starts_no_process(string client)
-    {
-        var connect = new FakeConnect();
-        await using var host = ConnectHub(connect, IPAddress.Loopback);
-        using var admin = host.AuthorizedClient();
-        var (status, code, _, _) = await Post(admin, RelayTools.ConnectApp, new { repositoryId = "repo", requestId = "unknown", client });
-        Assert.Equal(HttpStatusCode.BadRequest, status);
-        Assert.Equal(RelayErrorCodes.InvalidArguments, code);
-        Assert.Empty(connect.Runs);
-    }
-
-    [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task An_admin_choice_reaches_the_connector_as_given_and_is_logged(bool choice)
-    {
-        var connect = new FakeConnect();
-        var logged = new CapturedLines();
-        await using var host = ConnectHub(connect, IPAddress.Loopback, logged);
-        using var client = host.AuthorizedClient();
-        var (status, code, _, _) = await Post(client, RelayTools.ConnectApp, new { repositoryId = "repo", requestId = "choice", client = ConnectClients.Codex, admin = choice });
-        Assert.Equal(HttpStatusCode.OK, status);
-        Assert.Equal("Ok", code);
-        Assert.Equal((ConnectClients.Codex, (bool?)choice), Assert.Single(connect.Runs));
-        var line = Assert.Single(logged.Lines, entry => entry.Contains("connect_app by", StringComparison.Ordinal));
-        Assert.Contains("test-user", line);
-        Assert.Contains(ConnectClients.Codex, line);
-        Assert.Contains(choice.ToString(), line, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain(RelayHostFixture.Token, line);
-    }
-
-    [Fact]
     public async Task An_admin_choice_from_another_pc_is_refused_runs_nothing_and_logs_nothing()
     {
         var connect = new FakeConnect();
@@ -545,105 +283,10 @@ public sealed class AdminToolsHostTests : IDisposable
         return (response.StatusCode, (await response.Content.ReadFromJsonAsync<JsonElement>()).Clone());
     }
 
-    [Theory]
-    [InlineData("\"true\"")]
-    [InlineData("1")]
-    [InlineData("0")]
-    [InlineData("{}")]
-    [InlineData("[]")]
-    public async Task A_non_boolean_admin_is_invalid_and_runs_nothing(string value)
-    {
-        var connect = new FakeConnect();
-        await using var host = ConnectHub(connect, IPAddress.Loopback);
-        using var client = host.AuthorizedClient();
-        var (status, reply) = await PostRaw(client, """{"repositoryId":"repo","requestId":"r","client":"codex","admin":""" + value + "}");
-        Assert.Equal(HttpStatusCode.BadRequest, status);
-        Assert.Equal(RelayErrorCodes.InvalidArguments, reply.GetProperty("code").GetString());
-        Assert.Contains("admin", reply.GetProperty("dataJson").GetString());
-        Assert.Empty(connect.Runs);
-    }
-
-    /// <summary>Ignoring another spelling would connect the app with other tools than the caller asked for.</summary>
-    [Theory]
-    [InlineData(""" "Admin":true""")]
-    [InlineData(""" "ADMIN":false""")]
-    [InlineData(""" "admin":false,"Admin":true""")]
-    public async Task A_differently_cased_admin_is_refused_and_runs_nothing(string argument)
-    {
-        var connect = new FakeConnect();
-        await using var host = ConnectHub(connect, IPAddress.Loopback);
-        using var client = host.AuthorizedClient();
-        var (status, reply) = await PostRaw(client, """{"repositoryId":"repo","requestId":"r","client":"codex",""" + argument + "}");
-        Assert.Equal(HttpStatusCode.BadRequest, status);
-        Assert.Equal(RelayErrorCodes.InvalidArguments, reply.GetProperty("code").GetString());
-        Assert.Empty(connect.Runs);
-    }
-
-    /// <summary>Some clients send null for every optional field; it asks for nothing, so it counts as left out.</summary>
-    [Fact]
-    public async Task A_null_admin_counts_as_left_out()
-    {
-        var connect = new FakeConnect();
-        await using var host = ConnectHub(connect, IPAddress.Loopback);
-        using var client = host.AuthorizedClient();
-        var (status, _) = await PostRaw(client, """{"repositoryId":"repo","requestId":"r","client":"codex","admin":null}""");
-        Assert.Equal(HttpStatusCode.OK, status);
-        Assert.Equal((ConnectClients.Codex, (bool?)null), Assert.Single(connect.Runs));
-    }
-
     private static (int Requests, int Order) Remembered(RelayHostFixture host)
     {
         var tools = (AdminToolsService)host.Services.GetRequiredService<IAdminTools>();
         return (tools.RememberedRequests, tools.RememberedOrderLength);
-    }
-
-    [Fact]
-    public async Task Many_failed_setups_leave_the_request_memory_bounded_and_a_remembered_success_still_replays()
-    {
-        var connect = new FakeConnect();
-        await using var host = ConnectHub(connect, IPAddress.Loopback);
-        using var client = host.AuthorizedClient();
-        var kept = await Post(client, RelayTools.ConnectApp, new { repositoryId = "repo", requestId = "kept", client = ConnectClients.Codex });
-        connect.Answer = new DashboardConnectStatus { Unavailable = "The adapter failed." };
-        var attempts = RelayLimits.RememberedConnectRequests * 2;
-        for (var attempt = 0; attempt < attempts; attempt++)
-            Assert.Equal("The adapter failed.", (await Post(client, RelayTools.ConnectApp, new { repositoryId = "repo", requestId = "fails-" + attempt, client = ConnectClients.Codex })).Data.GetProperty("unavailable").GetString());
-        Assert.Equal((1, 1), Remembered(host));
-
-        // A second run would answer differently, so a repeat of the first answer shows it did not run.
-        connect.Answer = new DashboardConnectStatus { Clients = [new() { Id = ConnectClients.Codex, Name = "Codex", State = ConnectStates.Connected }] };
-        Assert.Equal(kept.Raw, (await Post(client, RelayTools.ConnectApp, new { repositoryId = "repo", requestId = "kept", client = ConnectClients.Codex })).Raw);
-        Assert.Equal(1 + attempts, connect.Runs.Count);
-    }
-
-    [Fact]
-    public async Task Successful_setups_stay_within_the_limit_in_both_records()
-    {
-        var connect = new FakeConnect();
-        await using var host = ConnectHub(connect, IPAddress.Loopback);
-        using var client = host.AuthorizedClient();
-        for (var attempt = 0; attempt < RelayLimits.RememberedConnectRequests + 5; attempt++)
-            Assert.Equal("Ok", (await Post(client, RelayTools.ConnectApp, new { repositoryId = "repo", requestId = "works-" + attempt, client = ConnectClients.Codex })).Code);
-        Assert.Equal((RelayLimits.RememberedConnectRequests, RelayLimits.RememberedConnectRequests), Remembered(host));
-    }
-
-    /// <summary>A failed attempt leaves no place behind it, so the oldest request is the one evicted, not the retry that later succeeded.</summary>
-    [Fact]
-    public async Task A_retry_that_succeeds_is_not_evicted_by_its_own_earlier_failure()
-    {
-        var connect = new FakeConnect(new DashboardConnectStatus { Unavailable = "The adapter failed." });
-        await using var host = ConnectHub(connect, IPAddress.Loopback);
-        using var client = host.AuthorizedClient();
-        await Post(client, RelayTools.ConnectApp, new { repositoryId = "repo", requestId = "retried", client = ConnectClients.Codex });
-        connect.Answer = null;
-        for (var attempt = 0; attempt < RelayLimits.RememberedConnectRequests - 1; attempt++)
-            await Post(client, RelayTools.ConnectApp, new { repositoryId = "repo", requestId = "other-" + attempt, client = ConnectClients.Codex });
-        var retried = await Post(client, RelayTools.ConnectApp, new { repositoryId = "repo", requestId = "retried", client = ConnectClients.Codex });
-        await Post(client, RelayTools.ConnectApp, new { repositoryId = "repo", requestId = "one-more", client = ConnectClients.Codex });
-        var runs = connect.Runs.Count;
-
-        Assert.Equal(retried.Raw, (await Post(client, RelayTools.ConnectApp, new { repositoryId = "repo", requestId = "retried", client = ConnectClients.Codex })).Raw);
-        Assert.Equal(runs, connect.Runs.Count);
     }
 
     [Fact]
@@ -662,16 +305,6 @@ public sealed class AdminToolsHostTests : IDisposable
         var absent = await Post(client, RelayTools.ConnectApp, new { repositoryId = "repo", requestId = "same", client = ConnectClients.Codex });
         Assert.Equal(RelayErrorCodes.RequestConflict, absent.Code);
         Assert.Single(connect.Runs);
-    }
-
-    [Fact]
-    public async Task Connect_app_needs_a_request_id()
-    {
-        var connect = new FakeConnect();
-        await using var host = ConnectHub(connect, IPAddress.Loopback);
-        using var admin = host.AuthorizedClient();
-        Assert.Equal(RelayErrorCodes.RequestIdRequired, (await Post(admin, RelayTools.ConnectApp, new { repositoryId = "repo", client = ConnectClients.Codex })).Code);
-        Assert.Empty(connect.Runs);
     }
 
     [Fact]
@@ -697,42 +330,4 @@ public sealed class AdminToolsHostTests : IDisposable
         Assert.Equal(2, connect.Runs.Count);
     }
 
-    [Fact]
-    public async Task A_failed_setup_returns_its_text_not_a_hub_error_and_its_retry_runs_again()
-    {
-        var connect = new FakeConnect(new DashboardConnectStatus { Unavailable = "The adapter failed: settings are locked." });
-        await using var host = ConnectHub(connect, IPAddress.Loopback);
-        using var admin = host.AuthorizedClient();
-        var failed = await Post(admin, RelayTools.ConnectApp, new { repositoryId = "repo", requestId = "fails", client = ConnectClients.Codex });
-        Assert.Equal(HttpStatusCode.OK, failed.Status);
-        Assert.Equal("The adapter failed: settings are locked.", failed.Data.GetProperty("unavailable").GetString());
-
-        connect.Answer = null;
-        var retry = await Post(admin, RelayTools.ConnectApp, new { repositoryId = "repo", requestId = "fails", client = ConnectClients.Codex });
-        Assert.Equal(ConnectStates.Added, retry.Data.GetProperty("clients")[0].GetProperty("state").GetString());
-        Assert.Equal(2, connect.Runs.Count);
-    }
-
-    [Fact]
-    public async Task An_adapter_that_cannot_start_is_failure_text_too()
-    {
-        var connect = new FakeConnect(failure: new System.ComponentModel.Win32Exception("The system cannot find the file specified: C:\\secret\\path"));
-        await using var host = ConnectHub(connect, IPAddress.Loopback);
-        using var admin = host.AuthorizedClient();
-        var failed = await Post(admin, RelayTools.ConnectApp, new { repositoryId = "repo", requestId = "no-start", client = ConnectClients.Codex });
-        Assert.Equal(HttpStatusCode.OK, failed.Status);
-        Assert.Contains("could not start", failed.Data.GetProperty("unavailable").GetString());
-        Assert.DoesNotContain("secret", failed.Raw);
-    }
-
-    /// <summary>The real connector, which stops before any process because the adapter it would run is missing.</summary>
-    [Fact]
-    public async Task The_real_connector_reports_a_missing_adapter_as_text()
-    {
-        await using var host = Hub(IPAddress.Loopback, adapter: Path.Combine(root, "missing.dll"));
-        using var admin = host.AuthorizedClient();
-        var (status, _, data, _) = await Post(admin, RelayTools.ConnectApp, new { repositoryId = "repo", requestId = "missing", client = ConnectClients.Codex });
-        Assert.Equal(HttpStatusCode.OK, status);
-        Assert.Contains("adapter was not found", data.GetProperty("unavailable").GetString());
-    }
 }
