@@ -98,12 +98,12 @@ public static class WaitingList
                 Kind = DashboardWaitingKinds.SelfReport, RepositoryId = report.RepositoryId, SessionId = DashboardText.Safe(report.SessionId), Label = DashboardText.Safe(report.Label),
                 Text = Cut(report.Text), Since = report.Since, ExpiresAt = report.ExpiresAt
             }).Where(row => row.Text.Length > 0);
-        // What the hub saw comes first and a chat's own word last, so no number of reports can push an observed row out at the cap.
-        DashboardWaitingItem[] rows = [.. Ordered(proposals.Concat(blockers.Where(blocker => blocker.Human).Select(blocker => blocker.Row))), .. Ordered(Unresponsive(sources.Mail.Where(mail => InScope(mail.RepositoryId)), now)), .. Ordered(reports)];
-        var maybe = Ordered(blockers.Where(blocker => !blocker.Human).Select(blocker => blocker.Row)).ToArray();
+        // Only explicit pending decisions belong in the human-action count. A chat's claim, unread mail, or a coordinator hold does not establish a pending human decision.
+        var rows = Ordered(proposals.Concat(blockers.Where(blocker => blocker.Human).Select(blocker => blocker.Row))).ToArray();
+        DashboardWaitingItem[] maybe = [.. Ordered(blockers.Where(blocker => !blocker.Human).Select(blocker => blocker.Row)), .. Ordered(Unresponsive(sources.Mail.Where(mail => InScope(mail.RepositoryId)), now)), .. Ordered(reports)];
         return new()
         {
-            Items = rows.Take(RelayLimits.MaxWaitingItems).ToArray(), Count = rows.Length, Truncated = sources.Truncated || rows.Length > RelayLimits.MaxWaitingItems,
+            Items = rows.Take(RelayLimits.MaxWaitingItems).ToArray(), Count = rows.Length, Truncated = sources.Truncated || rows.Length > RelayLimits.MaxWaitingItems || maybe.Length > RelayLimits.MaxWaitingMaybeItems,
             Maybe = maybe.Take(RelayLimits.MaxWaitingMaybeItems).ToArray(), MaybeCount = maybe.Length
         };
     }

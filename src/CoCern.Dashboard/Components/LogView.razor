@@ -17,7 +17,7 @@
     </ol>
     @if (!VisibleEntries.Any()) { <p class="empty-copy" role="status">@(Entries.Length == 0 ? "No recent events were returned." : Compact ? "No recent events after hiding routine successful HTTP completions." : "No events match the current filters. Clear search, choose All levels or include routine HTTP completions.")</p> }
     @if (Compact) { <p class="table-footnote">Routine successful HTTP completions hidden. <a href="logs">Search and filter all recent logs</a></p> }
-    @if (!Compact) { <p class="table-footnote" role="status">Showing @VisibleEntries.Count() of @MatchingEntries.Count() matching events (@Entries.Length returned), newest first, up to 200. Recent events only, in your local time. Search checks category, message and session ID; tool/repository names are searchable only when present in that text. Generic HTTP events have no tool or repository correlation.</p> }
+    @if (!Compact) { <p class="table-footnote" role="status">Showing @VisibleEntries.Count() of @MatchingEntries.Count() matching events (@Entries.Length returned), newest first, up to 200. Recent events only, in your local time. Search checks category, message and session ID. Tool failures include the tool, error code and relevant field when available. Generic HTTP events have no tool or repository correlation.</p> }
 </section>
 
 @code {

@@ -60,8 +60,15 @@ internal static class RelayRequestGuard
         if (tool.Name == RelayTools.ContextPut && args["content"] is null) return Replies.Error(InvalidArguments, new { field = "content" });
         foreach (var flag in new[] { "includeNextWork", "attention", "attentionDetail", "seen", "headersOnly", "presentStanding", "includeStale", "includeDetails", "openOnly" })
             if (args.ContainsKey(flag) && (args[flag] is not JsonValue value || !value.TryGetValue<bool>(out _))) return Replies.Error(InvalidArguments, new { field = flag });
-        if (tool.Name == RelayTools.TaskGet && (args.ContainsKey("openOnly") || args.ContainsKey("includeDetails") || args.ContainsKey("snapshotTag"))
-            && (args.ContainsKey("taskId") || args.ContainsKey("section") || args.ContainsKey("sinceRevision"))) return Replies.Error(InvalidArguments);
+        if (tool.Name == RelayTools.TaskGet && (args.ContainsKey("taskId") || args.ContainsKey("section") || args.ContainsKey("sinceRevision")))
+        {
+            var listField = new[] { "openOnly", "includeDetails", "snapshotTag" }.FirstOrDefault(args.ContainsKey);
+            if (listField is not null) return Replies.Error(InvalidArguments, new
+            {
+                field = listField,
+                reason = "Board-list fields cannot accompany taskId, section or sinceRevision, even when false. Omit openOnly, includeDetails and snapshotTag for a task, section or delta read."
+            });
+        }
         if (args["snapshotTag"] is { } listTag && (listTag is not JsonValue tagValue || !tagValue.TryGetValue<string>(out var tagText)
             || tagText.Length > 64 || tagText.Any(char.IsControl))) return Replies.Error(InvalidArguments, new { field = "snapshotTag" });
         if (args.ContainsKey("statusTag") && (tool.Name != RelayTools.GetStatus || args["statusTag"] is not JsonValue statusValue

@@ -32,6 +32,11 @@ public static class ChatGuidance
         RelayErrorCodes.SessionDenied => "This session handle was not accepted. Use the one this chat got from session_open. If it is gone, open one replacement session with session_open and tell the Manager. Never use the token of another chat.",
         RelayErrorCodes.SessionUnknown => "This session no longer exists. Open one replacement session with session_open, with a new requestId, and tell the Manager.",
         RelayErrorCodes.ActionDenied => "Only the session that owns this can do that. Ask it, or ask Paul.",
+        RelayErrorCodes.InvalidArguments when tool == RelayTools.TaskGet => "Use one task_get mode: task/section, board list, or sinceRevision delta. Omit openOnly, includeDetails and snapshotTag outside a board list, even when false. Check the returned field/reason before correcting the read.",
+        RelayErrorCodes.InvalidArguments => "Check the returned field/reason and the tool argument schema. Correct the arguments before retrying. For a mutation, first reconcile any uncertain earlier call in its original session; never replay it under a replacement session.",
+        RelayErrorCodes.AttemptRequired => "Read this task action and supply its positive attempt from action_begin in the report. Do not start or replay the action to obtain another attempt.",
+        RelayErrorCodes.VersionConflict => "Reread the affected task, binding or standing state and inspect the current version before changing the request. Reconcile an uncertain mutation in its original session; never bypass the version check or replay it under a replacement session.",
+        RelayErrorCodes.InvalidWorkflow => "Check the returned workflow validation details. A completed workflow needs evidence for every passed criterion and no unresolved action, blocker or restoration. Correct the workflow without inventing results or bypassing its checks.",
         _ => null
     };
 

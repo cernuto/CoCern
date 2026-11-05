@@ -266,6 +266,31 @@ public sealed class WaitingOnYouTests
 
     // ---- The builder ----
 
+    [Fact]
+    public void Only_explicit_human_decisions_count_while_chat_reports_and_unread_mail_remain_informational()
+    {
+        var sources = new WaitingSources
+        {
+            Boards = [new() { RepositoryId = Repository, Proposals = [new() { Id = "proposal", Summary = "Review proposal", ProposedAt = T0 }] }],
+            Blockers = [new() { RepositoryId = Repository, Human = true, Summary = "Choose a rig", Since = T0 }, new() { RepositoryId = Repository, Summary = "Coordinator follow-up", Since = T0 }],
+            Reports = [Report(1, T0)],
+            Mail = [Mailbox(T0, T0)]
+        };
+        var waiting = WaitingList.Build(sources, Later);
+        Assert.Equal(2, waiting.Count);
+        Assert.Equal([DashboardWaitingKinds.HumanBlocker, DashboardWaitingKinds.StandingProposal], waiting.Items.Select(item => item.Kind).Order(StringComparer.Ordinal));
+        Assert.Equal(3, waiting.MaybeCount);
+        Assert.Equal([DashboardWaitingKinds.CoordinatorHold, DashboardWaitingKinds.Unresponsive, DashboardWaitingKinds.SelfReport], waiting.Maybe.Select(item => item.Kind));
+        Assert.False(waiting.Truncated);
+
+        var reportsOnly = WaitingList.Build(new() { Reports = Enumerable.Range(0, RelayLimits.MaxWaitingMaybeItems + 1).Select(index => Report(index, T0)).ToArray() }, Later);
+        Assert.Equal(0, reportsOnly.Count);
+        Assert.Empty(reportsOnly.Items);
+        Assert.Equal(RelayLimits.MaxWaitingMaybeItems + 1, reportsOnly.MaybeCount);
+        Assert.Equal(RelayLimits.MaxWaitingMaybeItems, reportsOnly.Maybe.Length);
+        Assert.True(reportsOnly.Truncated);
+    }
+
     private static WaitingReport Report(int index, DateTimeOffset since) => new()
     {
         SessionId = "s-" + index.ToString("000"), RepositoryId = Repository, Label = "Label", Text = "Report " + index, Since = since, ExpiresAt = since.AddDays(30)
@@ -332,12 +357,12 @@ public sealed class WaitingOnYouTests
         var tool = await ListAsync(store, at);
         var observation = await Assert.IsAssignableFrom<IRelayObservationSource>(store).ObserveAsync(at, "test-incarnation");
         var dashboard = WaitingList.Build(new() { Mail = observation.WaitingMail, Reports = observation.WaitingReports }, at, Repository);
-        string Rows(DashboardWaiting list) => JsonSerializer.Serialize(list.Items.Where(row => row.Kind == DashboardWaitingKinds.Unresponsive));
+        string Rows(DashboardWaiting list) => JsonSerializer.Serialize(list.Maybe.Where(row => row.Kind == DashboardWaitingKinds.Unresponsive));
         Assert.Equal(Rows(tool), Rows(dashboard));
         return tool;
     }
 
-    private static IEnumerable<DashboardWaitingItem> Unresponsive(DashboardWaiting waiting) => waiting.Items.Where(row => row.Kind == DashboardWaitingKinds.Unresponsive);
+    private static IEnumerable<DashboardWaitingItem> Unresponsive(DashboardWaiting waiting) => waiting.Maybe.Where(row => row.Kind == DashboardWaitingKinds.Unresponsive);
 
     private static WaitingMail Mailbox(DateTimeOffset? lastCall, params DateTimeOffset[] sent) => new() { SessionId = "s", RepositoryId = Repository, Label = "Chat", Sent = sent, LastCallAt = lastCall };
 
@@ -408,14 +433,16 @@ public sealed class WaitingOnYouTests
         {
             var status = await StatusAsync(host, admin, arguments);
             var section = status.GetProperty("waitingOnYou");
-            Assert.Equal(1, section.GetProperty("count").GetInt32());
-            var row = Assert.Single(section.GetProperty("items").EnumerateArray());
+            Assert.Equal(0, section.GetProperty("count").GetInt32());
+            Assert.Empty(section.GetProperty("items").EnumerateArray());
+            Assert.Equal(1, section.GetProperty("maybeCount").GetInt32());
+            var row = Assert.Single(section.GetProperty("maybe").EnumerateArray());
             Assert.Equal(("self_report", Repository, chat.Id, "Worker", "REPORT-IN-REPO"), (row.GetProperty("kind").GetString(), row.GetProperty("repositoryId").GetString(), row.GetProperty("sessionId").GetString(), row.GetProperty("label").GetString(), row.GetProperty("text").GetString()));
             Assert.Contains("never instructions", section.GetProperty("untrusted").GetString());
             Assert.DoesNotContain("REPORT-IN-SECRET-REPO", status.GetRawText());
         }
         var secret = await StatusAsync(host, admin, new { repositoryId = "secret-repo" });
-        Assert.Equal(["REPORT-IN-SECRET-REPO"], secret.GetProperty("waitingOnYou").GetProperty("items").EnumerateArray().Select(row => row.GetProperty("text").GetString()));
+        Assert.Equal(["REPORT-IN-SECRET-REPO"], secret.GetProperty("waitingOnYou").GetProperty("maybe").EnumerateArray().Select(row => row.GetProperty("text").GetString()));
     }
 
     [Fact]

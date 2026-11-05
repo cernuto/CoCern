@@ -24,6 +24,24 @@ public sealed class DashboardTests
 {
 
     [Fact]
+    public void Tool_failures_keep_only_catalog_metadata_and_hide_arbitrary_values()
+    {
+        var logs = new DashboardLogBuffer();
+        logs.ToolFailure("task_get", CoCern.Contracts.RelayErrorCodes.InvalidArguments, "includeDetails");
+        logs.ToolFailure("task_get", CoCern.Contracts.RelayErrorCodes.InvalidArguments, "PRIVATE-FIELD");
+        logs.ToolFailure("PRIVATE-TOOL", CoCern.Contracts.RelayErrorCodes.InvalidArguments);
+        logs.ToolFailure("task_get", "PRIVATE-CODE");
+        logs.ToolFailure("task_get", "Ok");
+
+        var entries = logs.Snapshot();
+        Assert.Equal(2, entries.Length);
+        Assert.Contains(entries, entry => entry.Message == "task_get failed (InvalidArguments). Field: includeDetails.");
+        Assert.Contains(entries, entry => entry.Message == "task_get failed (InvalidArguments).");
+        Assert.All(entries, entry => { Assert.Equal("Warning", entry.Level); Assert.Equal("Tool", entry.Category); Assert.Null(entry.SessionId); });
+        Assert.DoesNotContain("PRIVATE-", JsonSerializer.Serialize(entries));
+    }
+
+    [Fact]
     public async Task Traffic_reports_actual_correlated_calls_and_pushes_without_payload_or_observer_feedback()
     {
         await using var host = OperatorHost();
@@ -36,6 +54,8 @@ public sealed class DashboardTests
         var sessionId = opened.RootElement.GetProperty("sessionId").GetString()!;
         var denied = await agent.PostAsJsonAsync("/api/tools/get_status", new { repositoryId = "forbidden", sessionId = "PRIVATE-FAKE-SESSION", sessionToken = "PRIVATE-TOKEN", text = "PRIVATE-MESSAGE" });
         Assert.Equal(HttpStatusCode.Forbidden, denied.StatusCode);
+        var invalid = await agent.PostAsJsonAsync("/api/tools/task_get", new { repositoryId = "repo", taskId = "PRIVATE-TASK", includeDetails = true, sessionToken = "PRIVATE-TOKEN", text = "PRIVATE-MESSAGE" });
+        Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
         await host.Services.GetRequiredService<ICoordinationNotifier>().NotifyAsync(sessionId, "PRIVATE-EVENT-ID");
         CoCern.Contracts.Dashboard.DashboardSnapshot? snapshot = null;
         for (var attempt = 0; attempt < 70; attempt++)
@@ -51,6 +71,9 @@ public sealed class DashboardTests
         Assert.NotNull(calls[1].DurationMilliseconds);
         Assert.Contains(snapshot.Traffic, item => item.Kind == "push" && item.Name == "coordination.changed" && item.SessionId == sessionId);
         Assert.DoesNotContain("PRIVATE-", JsonSerializer.Serialize(snapshot.Traffic));
+        Assert.Contains(snapshot.Logs, item => item.Category == "Tool" && item.Message == "get_status failed (RepositoryDenied).");
+        Assert.Contains(snapshot.Logs, item => item.Category == "Tool" && item.Message == "task_get failed (InvalidArguments). Field: includeDetails.");
+        Assert.DoesNotContain("PRIVATE-", JsonSerializer.Serialize(snapshot.Logs));
         Assert.DoesNotContain(snapshot.Traffic, item => item.Name.Contains("dashboard", StringComparison.OrdinalIgnoreCase));
         Assert.True(snapshot.Traffic.Length <= 120);
     }

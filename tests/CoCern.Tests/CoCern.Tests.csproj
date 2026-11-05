@@ -9,6 +9,7 @@
     <!-- The Documents view's redraw key, with the formatting it reads times through. -->
     <Compile Include="../../src/CoCern.Dashboard/Services/DocCacheRender.cs" Link="Dashboard/DocCacheRender.cs" />
     <Compile Include="../../src/CoCern.Dashboard/Services/DashboardFormat.cs" Link="Dashboard/DashboardFormat.cs" />
+    <Compile Include="../../src/CoCern.Dashboard/Services/DashboardStations.cs" Link="Dashboard/DashboardStations.cs" />
     <ProjectReference Include="../../src/CoCern.Core/CoCern.Core.csproj" />
     <ProjectReference Include="../../src/CoCern.Storage/CoCern.Storage.csproj" />
     <ProjectReference Include="../../src/CoCern.Host/CoCern.Host.csproj" />
