@@ -100,7 +100,7 @@ internal static class ConnectCommand
             {
                 var plan = client.Plan();
                 var hook = client.Id == ConnectClients.ClaudeCode && (!plan.IsUnchanged || owned.Contains(client.Id))
-                    ? ClientSettings.PlanStopHook(Path.Combine(profile, ".claude", "settings.json"), SetupEnvironment.AdapterCommandLine(dotnetPath, adapterDll) + " --stop-hook")
+                    ? ClientSettings.PlanConnectStopHook(Path.Combine(profile, ".claude", "settings.json"), Path.Combine(profile, ".claude.json"), dotnetPath, adapterDll)
                     : null;
                 // An entry that is not this hub's is never changed, so its plan is always unchanged: it is checked first, or it would read as connected.
                 var state = foreign.ContainsKey(client.Id) ? ConnectStates.OtherHub : plan.IsUnchanged ? ConnectStates.Connected : plan.Refreshes ? check ? ConnectStates.Outdated : ConnectStates.Updated : check ? ConnectStates.Available : ConnectStates.Added;
