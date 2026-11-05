@@ -40,8 +40,8 @@ public static class PostToolHook
                 root.TryGetProperty("tool_input", out var toolInput);
                 readByModel = handle => MessagesRead(toolInput, response, handle.RepositoryId, handle.SessionId);
             }
-            // Answering a permission prompt or AskUserQuestion brings no new prompt, so this is where the report it left clears. Side by side with the mail, so it adds no time.
-            var clearing = WaitingHook.ClearAsync(chat, nodeFolder, findLocal, remaining, handler);
+            // Answering AskUserQuestion brings no new prompt, so its own completion clears the report it left; any other tool leaves it. Side by side with the mail, so it adds no time.
+            var clearing = WaitingHook.ToolFinishedAsync(chat, ChatLocators.Text(root, "tool_use_id"), nodeFolder, findLocal, remaining, handler);
             await HookMail.DeliverAsync(chat, nodeFolder, findLocal, ClaudeWaiter.MaxPrintedInbox, remaining, handler, async block =>
             {
                 await output.WriteLineAsync(Envelope(block));

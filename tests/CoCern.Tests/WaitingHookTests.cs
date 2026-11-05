@@ -38,10 +38,10 @@ public sealed class WaitingHookTests : IDisposable
     private string Permission(string? tool = null, string message = "Claude needs your permission", string? agent = null, string type = "permission_prompt") =>
         Input(new JsonObject { ["hook_event_name"] = "Notification", ["message"] = message, ["title"] = "Permission needed", ["notification_type"] = type, ["tool_name"] = tool, ["agent_id"] = agent });
 
-    private string Question(string? agent = null) =>
-        Input(new JsonObject { ["hook_event_name"] = "PreToolUse", ["tool_name"] = WaitingHook.QuestionTool, ["tool_use_id"] = "tool-1", ["agent_id"] = agent, ["tool_input"] = new JsonObject { ["questions"] = new JsonArray(new JsonObject { ["question"] = "SECRET QUESTION TEXT", ["header"] = "h" }) } });
+    private string Question(string? agent = null, string? toolUseId = "tool-1") =>
+        Input(new JsonObject { ["hook_event_name"] = "PreToolUse", ["tool_name"] = WaitingHook.QuestionTool, ["tool_use_id"] = toolUseId, ["agent_id"] = agent, ["tool_input"] = new JsonObject { ["questions"] = new JsonArray(new JsonObject { ["question"] = "SECRET QUESTION TEXT", ["header"] = "h" }) } });
 
-    private string TurnEnd(string eventName, string? agent = null) => Input(new JsonObject { ["hook_event_name"] = eventName, ["agent_id"] = agent });
+    private string TurnEnd(string eventName, string? agent = null, string? toolUseId = null) => Input(new JsonObject { ["hook_event_name"] = eventName, ["tool_use_id"] = toolUseId, ["agent_id"] = agent });
 
     private string Input(JsonObject fields)
     {
@@ -59,10 +59,11 @@ public sealed class WaitingHookTests : IDisposable
         Assert.Equal(0, await PromptHook.RunAsync(new StringReader(JsonSerializer.Serialize(new { session_id = _chat, hook_event_name = "UserPromptSubmit", prompt = "go on" })), output, _folder, hub ?? _hub, null));
     }
 
-    private async Task PostTool(string? agent = null, HttpMessageHandler? hub = null)
+    /// <summary>A tool finishing, as the hook sees it. Unless told otherwise it is some other call than the question <see cref="Question"/> asks with <c>tool-1</c>.</summary>
+    private async Task PostTool(string? agent = null, HttpMessageHandler? hub = null, string? toolUseId = "tool-other")
     {
         using var output = new StringWriter();
-        var input = Input(new JsonObject { ["hook_event_name"] = "PostToolUse", ["tool_name"] = "Bash", ["agent_id"] = agent, ["tool_input"] = new JsonObject(), ["tool_response"] = new JsonObject() });
+        var input = Input(new JsonObject { ["hook_event_name"] = "PostToolUse", ["tool_name"] = "Bash", ["tool_use_id"] = toolUseId, ["agent_id"] = agent, ["tool_input"] = new JsonObject(), ["tool_response"] = new JsonObject() });
         Assert.Equal(0, await PostToolHook.RunAsync(new StringReader(input), output, _folder, hub ?? _hub));
     }
 
@@ -142,23 +143,107 @@ public sealed class WaitingHookTests : IDisposable
     }
 
     [Fact]
-    public async Task The_next_tool_clears_because_an_answered_prompt_brings_no_new_one()
+    public async Task An_unrelated_parallel_tool_finishing_leaves_a_question_row()
     {
         await Hook(Question());
         await PostTool();
-        Assert.Equal("", _hub.Acks.Last()["waitingFor"]!.GetValue<string>());
+        await Hook(TurnEnd("PostToolUseFailure", toolUseId: "tool-other"));
+        await PostTool(toolUseId: null);
+        Assert.Single(_hub.Acks);
+        Assert.True(File.Exists(Marker));
+    }
+
+    [Fact]
+    public async Task The_questions_own_completion_clears_it()
+    {
+        await Hook(Question());
         await PostTool();
+        await PostTool(toolUseId: "tool-1");
+        Assert.Equal("", _hub.Acks.Last()["waitingFor"]!.GetValue<string>());
+        Assert.False(File.Exists(Marker));
+        await PostTool(toolUseId: "tool-1");
         Assert.Equal(2, _hub.Acks.Count);
     }
 
-    [Theory]
-    [InlineData("Stop")]
-    [InlineData("PostToolUseFailure")]
-    public async Task The_end_of_the_turn_or_a_failed_tool_clears(string eventName)
+    [Fact]
+    public async Task The_questions_own_failure_clears_it()
+    {
+        await Hook(Question());
+        await Hook(TurnEnd("PostToolUseFailure", toolUseId: "tool-1"));
+        Assert.Equal("", _hub.Acks.Last()["waitingFor"]!.GetValue<string>());
+        Assert.False(File.Exists(Marker));
+    }
+
+    [Fact]
+    public async Task No_tool_event_clears_a_permission_row_because_the_notification_names_no_call()
     {
         await Hook(Permission());
-        await Hook(TurnEnd(eventName));
+        await PostTool();
+        await PostTool(toolUseId: "tool-1");
+        await PostTool(toolUseId: null);
+        await Hook(TurnEnd("PostToolUseFailure", toolUseId: "tool-other"));
+        Assert.Single(_hub.Acks);
+        Assert.True(File.Exists(Marker));
+    }
+
+    [Fact]
+    public async Task Stop_clears_a_permission_row()
+    {
+        await Hook(Permission());
+        await Hook(TurnEnd("Stop"));
         Assert.Equal("", _hub.Acks.Last()["waitingFor"]!.GetValue<string>());
+        Assert.False(File.Exists(Marker));
+    }
+
+    [Fact]
+    public async Task Stop_and_the_next_prompt_clear_a_question_that_never_completed()
+    {
+        await Hook(Question());
+        await Hook(TurnEnd("Stop"));
+        Assert.Equal("", _hub.Acks.Last()["waitingFor"]!.GetValue<string>());
+        await Hook(Question(toolUseId: "tool-2"));
+        await Prompt();
+        Assert.Equal("", _hub.Acks.Last()["waitingFor"]!.GetValue<string>());
+        Assert.False(File.Exists(Marker));
+    }
+
+    [Fact]
+    public async Task A_question_with_no_tool_use_id_cannot_be_matched_so_it_lasts_until_the_turn_ends()
+    {
+        await Hook(Question(toolUseId: null));
+        await PostTool();
+        await PostTool(toolUseId: null);
+        Assert.Single(_hub.Acks);
+        await Hook(TurnEnd("Stop"));
+        Assert.Equal("", _hub.Acks.Last()["waitingFor"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task A_questions_completion_leaves_a_permission_prompt_that_is_also_waiting()
+    {
+        await Hook(Question());
+        await Hook(Permission());
+        await PostTool(toolUseId: "tool-1");
+        Assert.Equal(2, _hub.Acks.Count);
+        await Prompt();
+        Assert.Equal("", _hub.Acks.Last()["waitingFor"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task Two_open_questions_keep_the_row_until_both_are_answered_and_the_marker_stays_bounded()
+    {
+        await Hook(Question());
+        await Hook(Question(toolUseId: "tool-2"));
+        await PostTool(toolUseId: "tool-1");
+        Assert.Equal(2, _hub.Acks.Count);
+        await PostTool(toolUseId: "tool-2");
+        Assert.Equal("", _hub.Acks.Last()["waitingFor"]!.GetValue<string>());
+        // Past what the marker tracks by ID, the row lasts until the turn ends rather than growing the file.
+        foreach (var n in Enumerable.Range(0, 20)) await Hook(Question(toolUseId: $"many-{n}"));
+        Assert.True(new FileInfo(Marker).Length < 1_000, new FileInfo(Marker).Length.ToString());
+        foreach (var n in Enumerable.Range(0, 20)) await PostTool(toolUseId: $"many-{n}");
+        Assert.True(File.Exists(Marker));
+        await Prompt();
         Assert.False(File.Exists(Marker));
     }
 
@@ -179,6 +264,19 @@ public sealed class WaitingHookTests : IDisposable
         await PostTool();
         Assert.Equal(3, _hub.Acks.Count);
         Assert.Equal("", _hub.Acks.Last()["waitingFor"]!.GetValue<string>());
+        Assert.False(File.Exists(Marker));
+    }
+
+    [Fact]
+    public async Task A_failed_clear_of_a_question_is_tried_again_by_the_next_tool()
+    {
+        await Hook(Question());
+        _hub.FailClears = (HttpStatusCode.Conflict, RelayErrorCodes.Busy);
+        await PostTool(toolUseId: "tool-1");
+        Assert.True(File.Exists(Marker));
+        _hub.FailClears = null;
+        await PostTool();
+        Assert.Equal(3, _hub.Acks.Count);
         Assert.False(File.Exists(Marker));
     }
 
@@ -204,6 +302,29 @@ public sealed class WaitingHookTests : IDisposable
         Assert.False(File.Exists(Marker));
         await Prompt();
         Assert.Equal(2, _hub.Acks.Count);
+    }
+
+    [Fact]
+    public async Task A_later_report_the_hub_refused_leaves_the_earlier_one_still_to_be_cleared()
+    {
+        await Hook(Question());
+        _hub.FailSets = (HttpStatusCode.Conflict, RelayErrorCodes.Busy);
+        await Hook(Permission());
+        _hub.FailSets = null;
+        // The refused permission report set nothing, so the question's own completion still ends the row.
+        await PostTool(toolUseId: "tool-1");
+        Assert.Equal("", _hub.Acks.Last()["waitingFor"]!.GetValue<string>());
+        Assert.False(File.Exists(Marker));
+    }
+
+    [Fact]
+    public async Task A_failure_the_hook_did_not_expect_stays_silent_and_exits_zero()
+    {
+        using var broken = new ThrowingHub(new NotSupportedException("unexpected"));
+        await Hook(Permission(), broken);
+        await Hook(TurnEnd("Stop"), broken);
+        await PostTool(hub: broken);
+        await Prompt(broken);
     }
 
     [Fact]
@@ -236,9 +357,10 @@ public sealed class WaitingHookTests : IDisposable
         await Hook(Permission(agent: "agent-1"));
         await Hook(Question(agent: "agent-1"));
         Assert.Empty(_hub.Acks);
-        await Hook(Permission());
-        await PostTool(agent: "agent-1");
-        await Hook(TurnEnd("PostToolUseFailure", agent: "agent-1"));
+        await Hook(Question());
+        await PostTool(agent: "agent-1", toolUseId: "tool-1");
+        await Hook(TurnEnd("PostToolUseFailure", agent: "agent-1", toolUseId: "tool-1"));
+        await Hook(TurnEnd("Stop", agent: "agent-1"));
         Assert.Single(_hub.Acks);
         Assert.True(File.Exists(Marker));
     }
@@ -246,7 +368,7 @@ public sealed class WaitingHookTests : IDisposable
     [Fact]
     public async Task A_hub_that_is_down_stays_silent_and_exits_zero_and_the_report_is_cleared_once_it_answers()
     {
-        using var down = new ThrowingHub();
+        using var down = new ThrowingHub(new HttpRequestException("refused"));
         await Hook(Permission(), down);
         await Hook(Question(), down);
         // The call may have landed, so the marker stays and a later hook clears it.
@@ -330,8 +452,8 @@ public sealed class WaitingHookTests : IDisposable
             await Hook(Question());
             Assert.Single(_hub.Acks);
         }
-        // Nothing was lost: the marker is still there, and the next hook clears.
-        await PostTool();
+        // Nothing was lost: the marker is still there, and the next prompt clears.
+        await Prompt();
         Assert.Equal("", _hub.Acks.Last()["waitingFor"]!.GetValue<string>());
     }
 
@@ -353,6 +475,7 @@ public sealed class WaitingHookTests : IDisposable
         public bool KeepModelReport;
         public bool Refuse;
         public (HttpStatusCode Status, string Code)? FailClears;
+        public (HttpStatusCode Status, string Code)? FailSets;
         public List<JsonNode> Acks => RawAcks.Select(raw => JsonNode.Parse(raw)!).ToList();
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
@@ -365,7 +488,7 @@ public sealed class WaitingHookTests : IDisposable
             RawAcks.Enqueue(body);
             if (Refuse) return new(HttpStatusCode.Forbidden) { Content = new StringContent(JsonSerializer.Serialize(new { ok = false, code = RelayErrorCodes.SessionDenied, dataJson = "{}", version = 0 }), Encoding.UTF8, "application/json") };
             var text = JsonNode.Parse(body)!["waitingFor"]!.GetValue<string>();
-            if (text.Length == 0 && FailClears is { } failure) return new(failure.Status) { Content = new StringContent(JsonSerializer.Serialize(new { ok = false, code = failure.Code, dataJson = "{}", version = 0 }), Encoding.UTF8, "application/json") };
+            if ((text.Length == 0 ? FailClears : FailSets) is { } failure) return new(failure.Status) { Content = new StringContent(JsonSerializer.Serialize(new { ok = false, code = failure.Code, dataJson = "{}", version = 0 }), Encoding.UTF8, "application/json") };
             var data = new JsonObject { ["acknowledged"] = 0 };
             if (KeepModelReport) data["waitingForKept"] = true;
             else data["waitingFor"] = text.Length == 0 ? null : new JsonObject { ["since"] = "2026-11-05T00:00:00.0000000+00:00", ["expiresAt"] = "2026-11-05T12:00:00.0000000+00:00" };
@@ -378,9 +501,9 @@ public sealed class WaitingHookTests : IDisposable
         };
     }
 
-    private sealed class ThrowingHub : HttpMessageHandler
+    private sealed class ThrowingHub(Exception failure) : HttpMessageHandler
     {
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) => Task.FromException<HttpResponseMessage>(new HttpRequestException("refused"));
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) => Task.FromException<HttpResponseMessage>(failure);
     }
 
     private sealed class HangingHub : HttpMessageHandler

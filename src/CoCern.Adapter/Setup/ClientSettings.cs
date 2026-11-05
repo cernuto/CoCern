@@ -371,7 +371,7 @@ internal static class ClientSettings
         new("PostToolUse", "--post-tool-hook", new JsonObject { ["type"] = "command", ["command"] = command, ["timeout"] = PostToolHookTimeoutSeconds }, ReplaceOwned: true, AdapterOnly: true);
 
     // What sets a chat's report on "Waiting on you" and, past the post-tool and prompt hooks, what clears it. PermissionDenied is left out: the hooks reference says it fires only in
-    // auto mode, never for a dialog someone answered. PostToolUseFailure has no matcher because any failed tool ends the wait; the reference does not say whether a rejected prompt fires it.
+    // auto mode, never for a dialog someone answered. PostToolUseFailure has no matcher because the hook itself matches the question's tool_use_id, as it does on PostToolUse.
     private static HookSpec[] WaitingHooks(string command) =>
     [
         WaitingHook("Notification", command, "permission_prompt"),
