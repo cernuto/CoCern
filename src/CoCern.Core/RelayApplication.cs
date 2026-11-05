@@ -47,10 +47,12 @@ public sealed class RelayApplication : IRelayApplication
         var standing = new StandingDelivery(aggregates);
         var docTools = docs ?? DocCacheTool.Off;
         guard = new(aggregates, incarnation);
+        var machineDirectory = machines ?? new MachineDirectory(grains);
         router = new(aggregates, claims,
             new SessionTools(aggregates, standing, attentionOptions, anomaly, docTools),
             new StatusTools(aggregates, standing, attentionOptions, orders, telemetry),
-            new MessageTools(aggregates, machines ?? new MachineDirectory(grains), attentionOptions, telemetry),
+            new MessageTools(aggregates, machineDirectory, attentionOptions, telemetry),
+            new PeerTools(aggregates, machineDirectory),
             new SearchTools(search, analytics ?? AnalyticsTool.Off),
             docTools, admin ?? AdminTools.Off);
         addOns = new(aggregates, claims, standing, guard, tokenStatus, attentionOptions, search, telemetry, counter, tokenOptions ?? new(), observations);
