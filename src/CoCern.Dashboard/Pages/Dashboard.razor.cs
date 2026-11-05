@@ -26,15 +26,17 @@ public partial class Dashboard : IAsyncDisposable
         "standing" => "standing",
         "documents" => "documents",
         "connect" => "connect",
+        "manager" => "manager",
         _ => "overview"
     };
-    private string PageTitle => View switch { "sessions" => "Sessions", "analytics" => "Analytics", "sql" => "Database", "logs" => "Logs", "standing" => "Standing", "documents" => "Documents", "connect" => "Connect", _ => "Overview" };
+    private string PageTitle => View switch { "sessions" => "Sessions", "analytics" => "Analytics", "sql" => "Database", "logs" => "Logs", "standing" => "Standing", "documents" => "Documents", "connect" => "Connect", "manager" => "Manager", _ => "Overview" };
     private string? PageDescription => View switch
     {
         "analytics" => "Task efficiency, coordination and outcomes from the hourly analytics snapshot.",
         "standing" => "Instructions, access grants and pending proposals for each board.",
         "documents" => "Indexed files and document activity for each repository.",
         "connect" => "Add CoCern to Claude and Codex, here and on your other PCs.",
+        "manager" => "Choose the manager and control dispatch for a repository.",
         _ => null
     };
     private bool IsLive => Connection.State == DashboardLinkState.Live && Connection.ObservationsFresh;
@@ -71,6 +73,12 @@ public partial class Dashboard : IAsyncDisposable
 
     private void Refresh() => _ = InvokeAsync(StateHasChanged);
     private void SelectSession(string sessionId) => _selectedId = sessionId;
+    private void OpenWaitingSession(string sessionId)
+    {
+        _selectedId = sessionId;
+        Navigation.NavigateTo("sessions");
+    }
+    private void OpenStanding() => Navigation.NavigateTo("standing");
     // Motion follows the system's reduced-motion setting (see dashboard.css).
     private bool Pulse(string sessionId) => IsLive && Connection.IsPulsing(sessionId, DateTimeOffset.UtcNow);
     private async Task SignInAsync(DashboardLoginRequest request) => await Connection.LoginAsync(request.Token, request.RememberBrowser);
