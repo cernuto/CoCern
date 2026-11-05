@@ -19,7 +19,7 @@ internal sealed class NativeEditClaims(string privateDirectory, string protected
         if (!resolved.Supported) return new(false, resolved.Reason);
         var paths = resolved.Targets.Select(target => target.RelativeKey).ToArray();
         if (ProtectedCheckoutRoot.Prove(cwd) != protectedRoot) return new(false, "path-changed");
-        var transport = new FileTransport(protectedRoot, generation, join, context, cancellationToken);
+        var transport = new FileTransport(protectedRoot, repositoryId, generation, join, context, cancellationToken);
         EditClaimDecision decision;
         // A clean release must not land between this confirmation and the published attempt, or this edit would go ahead on a claim it no longer has.
         await using (var gate = await new EditClaimLifecycleStore(ledgerDirectory).DecisionGateAsync(EditClaimLifecycle.PreDecisionWait, cancellationToken))
@@ -37,10 +37,10 @@ internal sealed class NativeEditClaims(string privateDirectory, string protected
     }
 
     internal EditClaimLifecycle Lifecycle(CancellationToken cancellationToken) => new(new EditClaimLedger(ledgerDirectory), new EditClaimLifecycleStore(ledgerDirectory),
-        new EditClaimCheckout(protectedRoot, context.Cwd), new FileTransport(protectedRoot, generation, join, context, cancellationToken));
+        new EditClaimCheckout(protectedRoot, context.Cwd), new FileTransport(protectedRoot, repositoryId, generation, join, context, cancellationToken));
 
     // The persisted guard identifiers are canonical relative paths. The hub alone derives opaque resource keys.
-    private sealed class FileTransport(string root, string expectedGeneration, NativeJoin join, NativeHookContext context, CancellationToken cancellationToken) : IEditClaimTransport, IEditClaimLifecycleTransport
+    private sealed class FileTransport(string root, string repositoryId, string expectedGeneration, NativeJoin join, NativeHookContext context, CancellationToken cancellationToken) : IEditClaimTransport, IEditClaimLifecycleTransport
     {
         public async Task<EditClaimAcquireResult> AcquireAsync(string resourceId, string requestId)
         {
@@ -77,6 +77,18 @@ internal sealed class NativeEditClaims(string privateDirectory, string protected
         public Task<AdapterReply> ReadAsync(string relativePath, long generation) =>
             CallAsync(RelayTools.ClaimAcquire, relativePath, Guid.NewGuid().ToString("N"), confirmGeneration: generation);
 
+        public Task<bool> RetireRenewalAsync(string relativePath, long generation, string invocation) =>
+            join.RetireRenewalFenceAsync(context, repositoryId, expectedGeneration, invocation, JsonSerializer.SerializeToElement(Arguments(relativePath, generation, null, EditClaimLifecycle.LeaseSeconds)), cancellationToken);
+
+        private static JsonObject Arguments(string path, long? generation, long? confirmGeneration, int? leaseSeconds)
+        {
+            var args = new JsonObject { ["filePath"] = path };
+            if (generation is { } grant) args["generation"] = grant;
+            if (confirmGeneration is { } expected) args["confirmGeneration"] = expected;
+            if (leaseSeconds is { } lease) args["leaseSeconds"] = lease;
+            return args;
+        }
+
         private Task<AdapterReply> CallAsync(string tool, string path, string requestId, long? generation = null, long? confirmGeneration = null, int? leaseSeconds = null)
         {
             // Revalidate local containment/case/link semantics at every use, including the final ownership read.
@@ -84,11 +96,7 @@ internal sealed class NativeEditClaims(string privateDirectory, string protected
             if (!physical.Supported || physical.Targets.Count != 1 || physical.Targets[0].RelativeKey != path)
                 return Task.FromResult(new AdapterReply(false, "physical-scope-unavailable"));
             if (ProtectedCheckoutRoot.Prove(context.Cwd) != root) return Task.FromResult(new AdapterReply(false, "physical-scope-unavailable"));
-            var args = new JsonObject { ["filePath"] = path };
-            if (generation is { } grant) args["generation"] = grant;
-            if (confirmGeneration is { } expected) args["confirmGeneration"] = expected;
-            if (leaseSeconds is { } lease) args["leaseSeconds"] = lease;
-            return join.CallAsync(context, requestId, tool, JsonSerializer.SerializeToElement(args), cancellationToken, expectedGeneration);
+            return join.CallAsync(context, requestId, tool, JsonSerializer.SerializeToElement(Arguments(path, generation, confirmGeneration, leaseSeconds)), cancellationToken, expectedGeneration);
         }
     }
 }
