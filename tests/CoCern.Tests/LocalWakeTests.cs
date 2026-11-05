@@ -249,11 +249,43 @@ public sealed class LocalWakeTests : IDisposable
     }
 
     [Fact]
-    public void A_longest_allowed_code_is_kept()
+    public void A_code_of_the_right_shape_that_is_not_listed_is_invalid_and_changes_no_state()
     {
-        var code = new string('a', 64);
-        LocalWakeStatus.Report(code, StatusRoot);
-        Assert.Contains(code, File.ReadAllText(OwnStatusFile));
+        LocalWakeStatus.Report(LocalWakeCodes.Watching, StatusRoot);
+        LocalWakeStatus.Report("made_up_code", StatusRoot);
+        Assert.False(LocalWakeStatus.IsFixedCode("made_up_code"));
+        Assert.Null(LocalWakeStatus.StateOf("made_up_code"));
+        Assert.Equal(LocalWakeCodes.InvalidCode, LocalWakeStatus.LastCode(StatusRoot));
+        Assert.Null(LocalWakeStatus.Problem(StatusRoot));
+        Assert.Equal("healthy", Status().GetProperty("state").GetString());
+        Assert.DoesNotContain("made_up_code", File.ReadAllText(OwnStatusFile));
+    }
+
+    [Fact]
+    public void Every_code_constant_has_its_expected_state()
+    {
+        var expected = new Dictionary<string, string?>
+        {
+            ["invalid_code"] = null,
+            ["starting"] = "starting", ["setup_reached"] = "starting", ["setup_complete"] = "starting", ["connection_ready"] = "starting",
+            ["native_registration"] = "not_applicable", ["node_connection"] = "not_applicable",
+            ["setup_returned_null"] = "off", ["setup_threw"] = "off", ["token_file_unconfigured"] = "off", ["token_file_not_absolute"] = "off", ["token_file_missing"] = "off", ["token_file_oversized"] = "off",
+            ["credential_mismatch"] = "off", ["setup_io_error"] = "off", ["setup_access_denied"] = "off", ["setup_invalid_path"] = "off",
+            ["watching"] = "healthy", ["no_live_watcher"] = "healthy", ["no_observed_sessions"] = "healthy", ["observed_not_located"] = "healthy", ["no_codex_targets"] = "healthy", ["observed"] = "healthy",
+            ["observed_unmapped"] = "degraded", ["no_codex_executable"] = "degraded", ["loop_failed"] = "degraded", ["watcher_failed"] = "degraded", ["watcher_unavailable"] = "degraded",
+            ["observe_handle_mismatch"] = "degraded", ["observe_failed"] = "degraded", ["restore_lock_busy"] = "degraded", ["record_lock_busy"] = "degraded",
+            ["observe_reply_not_ok"] = null, ["observe_no_reply_data"] = null, ["observe_bad_session_id"] = null, ["observe_not_session_reply"] = null, ["observe_not_owned"] = null,
+            ["watcher_lock_held"] = null, ["watcher_handle_changed"] = null, ["rearm_hub_unavailable"] = null, ["rearm_failed"] = null, ["rearm_record_failed"] = null, ["rearm_owner_not_launcher"] = null,
+            ["rearm_skip_no_owner"] = null, ["rearm_skip_not_codex"] = null, ["rearm_skip_not_owned"] = null, ["rearm_skip_not_armed_here"] = null, ["rearm_skip_unlocated"] = null,
+            ["rearm_skip_stale"] = null, ["rearm_skip_refused"] = null, ["rearm_skip_transient"] = null, ["rearm_skip_older_session"] = null
+        };
+        var constants = typeof(LocalWakeCodes).GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static).Where(x => x.IsLiteral).Select(x => (string)x.GetRawConstantValue()!).ToArray();
+        Assert.Equal(expected.Keys.Order(StringComparer.Ordinal), constants.Order(StringComparer.Ordinal));
+        foreach (var code in constants)
+        {
+            Assert.True(LocalWakeStatus.IsFixedCode(code), code);
+            Assert.True(expected[code] == LocalWakeStatus.StateOf(code), code);
+        }
     }
 
     [Fact]
@@ -417,6 +449,58 @@ public sealed class LocalWakeTests : IDisposable
         Assert.Equal(2, lines.Length);
         Assert.Contains("degraded", lines[0]); Assert.Contains("no_codex_executable", lines[0]);
         Assert.Contains("healthy", lines[1]); Assert.Contains("watching", lines[1]);
+    }
+
+    [Fact]
+    public void Staging_a_native_candidate_from_setup_writes_no_status()
+    {
+        var cache = Path.Combine(root, "setup-cache");
+        var environment = new Dictionary<string, string> { ["COCERN_URL"] = "http://127.0.0.1:5271/", ["COCERN_TOKEN_FILE"] = TokenFile() };
+        CoCern.Adapter.Setup.ClientSettings.StageLocalNativeCandidate("codex", "dotnet", Path.Combine(root, "CoCern.Adapter.dll"), environment, cache);
+        Assert.Single(Directory.GetDirectories(cache));
+        Assert.False(Directory.Exists(Path.Combine(cache, "status")));
+        Assert.Null(LocalWakeStatus.LastCode(cache));
+    }
+
+    [Fact]
+    public void Repeated_transitions_are_rate_limited_on_stderr_and_still_change_the_state()
+    {
+        var error = new StringWriter();
+        var clock = new ManualClock();
+        LocalWakeStatus.UseError(StatusRoot, error);
+        LocalWakeStatus.UseClock(StatusRoot, clock);
+        int Lines() => error.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries).Length;
+        foreach (var code in new[] { LocalWakeCodes.NoCodexExecutable, LocalWakeCodes.Watching, LocalWakeCodes.NoCodexExecutable, LocalWakeCodes.Watching })
+            LocalWakeStatus.Report(code, StatusRoot);
+        Assert.Equal(2, Lines());
+        Assert.Null(LocalWakeStatus.Problem(StatusRoot));
+        LocalWakeStatus.Report(LocalWakeCodes.NoCodexExecutable, StatusRoot);
+        Assert.Equal(("degraded", "no_codex_executable"), LocalWakeStatus.Problem(StatusRoot));
+        Assert.Equal(2, Lines());
+
+        clock.Advance(LocalWakeStatus.RepeatEvery + TimeSpan.FromSeconds(1));
+        LocalWakeStatus.Report(LocalWakeCodes.Watching, StatusRoot);
+        Assert.Equal(3, Lines());
+    }
+
+    private sealed class ProbingWriter(Func<bool> probe) : StringWriter
+    {
+        public bool? ProbeFinished { get; private set; }
+        public override void WriteLine(string? value)
+        {
+            ProbeFinished = Task.Run(probe).Wait(TimeSpan.FromSeconds(5));
+            base.WriteLine(value);
+        }
+    }
+
+    [Fact]
+    public void Standard_error_is_written_outside_the_recorder_lock()
+    {
+        var root = StatusRoot;
+        using var error = new ProbingWriter(() => LocalWakeStatus.Problem(root) is { });
+        LocalWakeStatus.UseError(root, error);
+        LocalWakeStatus.Report(LocalWakeCodes.NoCodexExecutable, root);
+        Assert.True(error.ProbeFinished);
     }
 
     [Fact]
@@ -728,6 +812,7 @@ public sealed class LocalWakeTests : IDisposable
     private sealed class ProbeHandler : HttpMessageHandler
     {
         public string Mode = "ok";
+        public TaskCompletionSource? Hold;
         public volatile string? Origin;
         public readonly System.Collections.Concurrent.ConcurrentQueue<(string Tool, bool Background, string? Session, string? Token)> Requests = new();
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
@@ -738,9 +823,11 @@ public sealed class LocalWakeTests : IDisposable
             var session = data.GetProperty("sessionId").GetString();
             Origin = data.TryGetProperty("callOrigin", out var origin) ? origin.GetString() : null;
             Requests.Enqueue((request.RequestUri!.Segments[^1], data.TryGetProperty("backgroundCall", out var background) && background.GetBoolean(), session, data.GetProperty("sessionToken").GetString()));
-            var ok = Mode != "denied";
-            var said = Mode == "other-session" ? "another-session" : session;
-            return new(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new { ok, code = ok ? "Ok" : "SessionDenied", dataJson = JsonSerializer.Serialize(new { sessionId = said }), version = 0 })) };
+            if (Volatile.Read(ref Hold) is { } hold) await hold.Task.WaitAsync(ct);
+            var mode = Volatile.Read(ref Mode);
+            var ok = mode is not ("denied" or "busy");
+            var said = mode == "other-session" ? "another-session" : session;
+            return new(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new { ok, code = ok ? "Ok" : mode == "busy" ? "Busy" : "SessionDenied", dataJson = JsonSerializer.Serialize(new { sessionId = said }), version = 0 })) };
         }
     }
 
@@ -997,13 +1084,138 @@ public sealed class LocalWakeTests : IDisposable
     {
         var connection = Connection();
         var thread = Guid.NewGuid().ToString();
-        CodexHandle(connection, "older-session", thread, DateTimeOffset.UtcNow.AddHours(-2));
-        var newer = CodexHandle(connection, "newer-session", thread, DateTimeOffset.UtcNow.AddHours(-1));
+        var older = CodexHandle(connection, "older-session", thread, DateTimeOffset.UtcNow.AddHours(-2));
+        var newer = CodexHandle(connection, "newer-session", thread.ToUpperInvariant(), DateTimeOffset.UtcNow.AddHours(-1));
         using var hub = new ProbeHandler();
-        await using var restarted = Restart(connection, hub);
-        await restarted.Pass;
-        Assert.Equal(newer.SessionId, Assert.Single(restarted.Started).Session.SessionId);
+        await using var restarted = Restart(connection, hub, run: false);
+        // Called directly: in the loop NodeChats.Read deletes the older handle first, so the rule here would never be reached.
+        await restarted.Wake.RearmAsync(CancellationToken.None);
+        Assert.True(File.Exists(NodeState.SessionHandlePath(connection.Folder, older.SessionId)));
         Assert.Equal(newer.SessionId, Assert.Single(hub.Requests).Session);
+        Assert.Equal(1, SkipCount("rearm_skip_older_session"));
+    }
+
+    [Fact]
+    public async Task A_chat_located_after_the_restart_is_rearmed_on_the_timer_and_its_skip_counts_once()
+    {
+        var connection = Connection();
+        var located = CodexHandle(connection);
+        NodeState.WriteSessionHandle(connection.Folder, located with { Chat = null });
+        var clock = new ManualClock();
+        using var hub = new ProbeHandler();
+        await using var restarted = Restart(connection, hub, clock: clock);
+        await restarted.Pass;
+        Assert.Empty(hub.Requests);
+        Assert.Empty(restarted.Started);
+        Assert.Equal(1, SkipCount("rearm_skip_unlocated"));
+
+        NodeState.WriteSessionHandle(connection.Folder, located);
+        clock.Advance(LocalChatWake.RearmRetry + TimeSpan.FromSeconds(1));
+        await WaitFor(() => restarted.Started.Count == 1);
+        Assert.Equal(located.SessionId, Assert.Single(hub.Requests).Session);
+        Assert.Equal(1, SkipCount("rearm_skip_unlocated"));
+    }
+
+    [Fact]
+    public async Task A_chat_that_is_never_located_stops_being_retried_when_the_window_ends()
+    {
+        var connection = Connection();
+        var handle = CodexHandle(connection);
+        NodeState.WriteSessionHandle(connection.Folder, handle with { Chat = null });
+        var clock = new ManualClock();
+        using var hub = new ProbeHandler();
+        await using var restarted = Restart(connection, hub, clock: clock, run: false);
+        await restarted.Wake.RearmAsync(CancellationToken.None);
+        Assert.True(restarted.Wake.RearmPending);
+        clock.Advance(LocalChatWake.RearmWindow + TimeSpan.FromMinutes(1));
+        await restarted.Wake.RearmAsync(CancellationToken.None);
+        Assert.False(restarted.Wake.RearmPending);
+        Assert.Equal(1, SkipCount("rearm_skip_stale"));
+    }
+
+    [Fact]
+    public async Task A_skip_reason_counts_once_however_many_attempts_find_it()
+    {
+        var connection = Connection();
+        var handle = CodexHandle(connection);
+        NodeState.WriteSessionHandle(connection.Folder, handle with { Chat = null });
+        var clock = new ManualClock();
+        using var hub = new ProbeHandler();
+        await using var restarted = Restart(connection, hub, clock: clock, run: false);
+        await restarted.Wake.RearmAsync(CancellationToken.None);
+        clock.Advance(LocalChatWake.RearmRetry + TimeSpan.FromSeconds(1));
+        await restarted.Wake.RearmAsync(CancellationToken.None);
+        Assert.True(restarted.Wake.RearmPending);
+        Assert.Equal(1, SkipCount("rearm_skip_unlocated"));
+    }
+
+    [Fact]
+    public async Task An_unmapped_chat_is_final_and_is_not_retried()
+    {
+        var connection = Connection();
+        var handle = CodexHandle(connection);
+        NodeState.WriteSessionHandle(connection.Folder, handle with { Chat = null, Unmapped = true });
+        using var hub = new ProbeHandler();
+        await using var restarted = Restart(connection, hub, run: false);
+        await restarted.Wake.RearmAsync(CancellationToken.None);
+        Assert.False(restarted.Wake.RearmPending);
+    }
+
+    [Fact]
+    public async Task A_slow_rearm_read_does_not_hold_up_a_chat_already_observed()
+    {
+        var connection = Connection();
+        CodexHandle(connection, "observed-session");
+        CodexHandle(connection, "armed-session");
+        using var hub = new ProbeHandler { Hold = new(TaskCreationOptions.RunContinuationsAsynchronously) };
+        await using var restarted = Restart(connection, hub, run: false);
+        restarted.Wake.Observe(RelayTools.GetStatus, Arguments("observed-session"), new(true, "Ok", JsonSerializer.SerializeToElement(new { sessionId = "observed-session" }), 0));
+        _ = restarted.Wake.RunAsync(CancellationToken.None);
+
+        await WaitFor(() => !hub.Requests.IsEmpty && restarted.Started.Count == 1);
+        Assert.Equal("observed-session", Assert.Single(restarted.Started).Session.SessionId);
+        Assert.Equal("armed-session", Assert.Single(hub.Requests).Session);
+        Assert.False(restarted.Wake.FirstPass.IsCompleted);
+
+        hub.Hold.SetResult();
+        await WaitFor(() => restarted.Started.Count == 2);
+        await restarted.Pass;
+    }
+
+    [Fact]
+    public async Task A_transient_refusal_is_retried_on_the_timer_and_a_final_one_is_not()
+    {
+        var connection = Connection();
+        CodexHandle(connection);
+        var clock = new ManualClock();
+        using var hub = new ProbeHandler { Mode = "busy" };
+        await using var restarted = Restart(connection, hub, clock: clock);
+        await restarted.Pass;
+        Assert.Empty(restarted.Started);
+        Assert.Equal(1, SkipCount("rearm_skip_transient"));
+        Assert.Equal(0, SkipCount("rearm_skip_refused"));
+        Assert.True(restarted.Wake.RearmPending);
+
+        Volatile.Write(ref hub.Mode, "ok");
+        clock.Advance(LocalChatWake.RearmRetry + TimeSpan.FromSeconds(1));
+        await WaitFor(() => restarted.Started.Count == 1);
+        Assert.Equal(2, hub.Requests.Count);
+        Assert.False(restarted.Wake.RearmPending);
+    }
+
+    [Fact]
+    public async Task An_older_armed_session_is_not_rearmed_beside_an_observed_newer_one_of_its_chat()
+    {
+        var connection = Connection();
+        var thread = Guid.NewGuid().ToString();
+        CodexHandle(connection, "older-session", thread, DateTimeOffset.UtcNow.AddHours(-2));
+        CodexHandle(connection, "newer-session", thread.ToUpperInvariant(), DateTimeOffset.UtcNow.AddHours(-1));
+        using var hub = new ProbeHandler();
+        await using var restarted = Restart(connection, hub, run: false);
+        restarted.Wake.Observe(RelayTools.GetStatus, Arguments("newer-session"), new(true, "Ok", JsonSerializer.SerializeToElement(new { sessionId = "newer-session" }), 0));
+        await restarted.Wake.RearmAsync(CancellationToken.None);
+        Assert.Empty(hub.Requests);
+        Assert.Equal(1, SkipCount("rearm_skip_older_session"));
     }
 
     [Fact]
