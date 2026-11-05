@@ -18,9 +18,9 @@ public static class CoordinationTools
     /// <summary>The chat profile: what a chat needs to find peers and exchange messages, and nothing it would carry unused in every turn.</summary>
     private static readonly HashSet<string> ChatTools = [RelayTools.SessionOpen, RelayTools.SendMessage, RelayTools.CheckInbox, RelayTools.Ack, RelayTools.ChatDirectory];
 
-    public static IReadOnlyList<string> NamesForRole(bool admin, bool chatOnly = false, bool diagnostics = false) => Surface(admin, chatOnly, diagnostics).Select(tool => tool.Name).ToArray();
-    public static bool IsAllowed(string name, bool admin, bool chatOnly = false, bool diagnostics = false) =>
-        RelayToolCatalog.TryGet(name, out var tool) && (admin || !tool.AdministratorOnly) && (!chatOnly || ChatTools.Contains(tool.Name)) && (!diagnostics || InDiagnostics(tool));
+    public static IReadOnlyList<string> NamesForRole(bool admin, bool chatOnly = false, bool diagnostics = false, bool eventWaits = false) => Surface(admin, chatOnly, diagnostics, eventWaits).Select(tool => tool.Name).ToArray();
+    public static bool IsAllowed(string name, bool admin, bool chatOnly = false, bool diagnostics = false, bool eventWaits = false) =>
+        RelayToolCatalog.TryGet(name, out var tool) && (admin || !tool.AdministratorOnly) && (eventWaits || name != RelayTools.EventWait) && (!chatOnly || ChatTools.Contains(tool.Name)) && (!diagnostics || InDiagnostics(tool));
 
     // Private integration seam. Only a future verified provider surface can supply this callback;
     // the raw registration never inspects arguments for a native ID or stamp.
@@ -34,14 +34,14 @@ public static class CoordinationTools
     }
 
     /// <param name="chat">The chat ID the client exported to this process (<see cref="AdapterOptions.ExportedChat"/>), if any; it keeps the chat's request IDs its own across adapter restarts.</param>
-    public static IEnumerable<McpServerTool> Create(RelayForwarder forwarder, bool admin, SessionHints? hints = null, SessionHandoff? handoff = null, bool chatOnly = false, ChatLocation? chat = null, LocalChatWake? localWake = null, bool diagnostics = false)
+    public static IEnumerable<McpServerTool> Create(RelayForwarder forwarder, bool admin, SessionHints? hints = null, SessionHandoff? handoff = null, bool chatOnly = false, ChatLocation? chat = null, LocalChatWake? localWake = null, bool diagnostics = false, bool eventWaits = false)
     {
         // One per adapter, so every tool sees the session this chat opened.
         var calls = new ChatCalls(forwarder, hints, handoff, RequestScope(chat), localWake: localWake);
-        return Surface(admin, chatOnly, diagnostics).Select(tool => new ForwardedTool(tool, calls));
+        return Surface(admin, chatOnly, diagnostics, eventWaits).Select(tool => new ForwardedTool(tool, calls));
     }
 
-    private static IEnumerable<RelayTool> Surface(bool admin, bool chatOnly, bool diagnostics) => RelayToolCatalog.ForRole(admin).Where(tool => (!chatOnly || ChatTools.Contains(tool.Name)) && (!diagnostics || InDiagnostics(tool)));
+    private static IEnumerable<RelayTool> Surface(bool admin, bool chatOnly, bool diagnostics, bool eventWaits = false) => RelayToolCatalog.ForRole(admin, eventWaits).Where(tool => (!chatOnly || ChatTools.Contains(tool.Name)) && (!diagnostics || InDiagnostics(tool)));
 
     /// <summary>The diagnostics profile: the worker tools plus the administrator's two reads that change nothing and hold no secret.</summary>
     private static bool InDiagnostics(RelayTool tool) => !tool.AdministratorOnly || tool.Name is RelayTools.AnalyticsQuery or RelayTools.HubDiagnose;

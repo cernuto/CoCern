@@ -116,7 +116,8 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
             // exposing the target's state or changing generic transfer retries.
             var permanentWaitDenial = result.Code == RelayErrorCodes.RepositoryDenied && effect.Operation is
                 EventWaitSources.WatchOperation or EventWaitSources.UnwatchOperation or EventWaitSources.LifecycleOperation or
-                EventWaitSources.SourceWatchOperation or EventWaitSources.SourceUnwatchOperation or EventWaitSources.SourceAckOperation or EventWaitSources.SourceSignalOperation;
+                EventWaitSources.SourceWatchOperation or EventWaitSources.SourceUnwatchOperation or EventWaitSources.SourceAckOperation or EventWaitSources.SourceSignalOperation or
+                PeerReplyWaits.ArmOperation or PeerReplyWaits.AckOperation;
             var failure = result.Ok ? (EffectDelivery.Failure?)null : permanentWaitDenial ? EffectDelivery.Failure.Drop
                 : EffectDelivery.OnFailure(effect, payload, result.Code, Kind, ordersOn);
             if (result.Code == RelayErrorCodes.MalformedEffect) ReportMalformed(effect, payload, result, failure!.Value);

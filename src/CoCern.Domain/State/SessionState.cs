@@ -56,13 +56,15 @@ public sealed class SessionState(JsonObject json)
         (StandingSeenKey, StateShape.Map(null)), (TargetBoardsKey, StateShape.Map(BoardWatches.EntryShape)), (WorkBoardsKey, StateShape.Map(BoardWatches.EntryShape)),
         (WorkKey, WorkLedger.Shape), (WorkReportedKey, WorkReport.Shape), (WaitingForKey, WaitingMark.Shape),
         (EventWaitsKey, StateShape.Map(StateShape.Any)), (EventWaitOwnerWatchesKey, StateShape.Map(StateShape.Any)),
-        (EventWaitOwnerClosureOutcomeKey, null), (EventWaitRetirement.Key, StateShape.Map(null))).With(AttentionQueue.Fields);
+        (EventWaitOwnerClosureOutcomeKey, null), (EventWaitRetirement.Key, StateShape.Map(null)),
+        (PeerReplyWaits.Key, StateShape.Map(StateShape.Any)), (PeerReplyWaits.SequenceKey, null),
+        (PeerReplyWaits.ArmsKey, StateShape.Map(StateShape.Any))).With(AttentionQueue.Fields);
 
     /// <summary>What a closed session forgets: its secret, its mail and attention, its tool binding, its report of waiting, and the boards waiting on it (told as it closes).</summary>
     private static readonly string[] ForgottenOnClose =
     [
         SessionTokenKey, InboxKey, AckedKey, AttentionQueue.ItemsKey, AttentionQueue.ClosedKey, AttentionQueue.ArchivedKey, AttentionQueue.RecentKey, StandingSeenKey,
-        BindingKey, TargetBoardsKey, WorkBoardsKey, WaitingForKey, EventWaitsKey
+        BindingKey, TargetBoardsKey, WorkBoardsKey, WaitingForKey, EventWaitsKey, PeerReplyWaits.Key, PeerReplyWaits.SequenceKey, PeerReplyWaits.ArmsKey
     ];
 
     /// <summary>Whether a <see cref="SessionOpen"/> ever initialized this session.</summary>

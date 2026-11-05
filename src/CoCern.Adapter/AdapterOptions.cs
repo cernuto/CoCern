@@ -31,6 +31,8 @@ public sealed class AdapterOptions
     public bool ChatOnly { get; init; }
     /// <summary>COCERN_PROFILE=diagnostics: worker tools plus the analytics read and hub_diagnose; administrator credentials remain required.</summary>
     public bool Diagnostics { get; init; }
+    /// <summary>COCERN_EVENT_WAITS=true: explicitly opt in to event_wait discovery and forwarding.</summary>
+    public bool EventWaits { get; init; }
     /// <summary>Set only when the adapter runs on the node's credentials; successful <c>session_open</c> calls are then handed to the node there.</summary>
     public string? NodeFolder { get; init; }
     /// <summary>The chat ID the client exported to this process, if any (node mode only), as handed to the node with each session.</summary>
@@ -66,8 +68,9 @@ public sealed class AdapterOptions
         readFile ??= File.ReadAllText;
         var chatOnly = string.Equals(environment("COCERN_PROFILE"), "chat", StringComparison.OrdinalIgnoreCase);
         var diagnostics = string.Equals(environment("COCERN_PROFILE"), "diagnostics", StringComparison.OrdinalIgnoreCase);
+        var eventWaits = string.Equals(environment("COCERN_EVENT_WAITS"), "true", StringComparison.OrdinalIgnoreCase);
         var chat = Exported(environment);
-        if (environment("COCERN_URL") is null && environment("COCERN_TOKEN_FILE") is null && environment("COCERN_TOKEN") is null && FromNode(environment, processEnvironment) is { } node) return new(node) { ChatOnly = chatOnly, Diagnostics = diagnostics, ExportedChat = chat };
+        if (environment("COCERN_URL") is null && environment("COCERN_TOKEN_FILE") is null && environment("COCERN_TOKEN") is null && FromNode(environment, processEnvironment) is { } node) return new(node) { ChatOnly = chatOnly, Diagnostics = diagnostics, EventWaits = eventWaits, ExportedChat = chat };
         string? token;
         var tokenFile = environment("COCERN_TOKEN_FILE");
         if (!string.IsNullOrWhiteSpace(tokenFile))
@@ -85,7 +88,7 @@ public sealed class AdapterOptions
         var fingerprint = ParseFingerprint(url, environment("COCERN_FINGERPRINT"));
         return new AdapterOptions(url, token ?? "",
             string.Equals(environment("COCERN_ROLE"), "admin", StringComparison.OrdinalIgnoreCase),
-            string.Equals(environment("COCERN_SIGNALR"), "true", StringComparison.OrdinalIgnoreCase)) { ChatOnly = chatOnly, Diagnostics = diagnostics, PinnedFingerprint = fingerprint, ExportedChat = chat };
+            string.Equals(environment("COCERN_SIGNALR"), "true", StringComparison.OrdinalIgnoreCase)) { ChatOnly = chatOnly, Diagnostics = diagnostics, EventWaits = eventWaits, PinnedFingerprint = fingerprint, ExportedChat = chat };
     }
 
     /// <summary>Normalizes an optional configured certificate pin and refuses using one with plaintext HTTP.</summary>
@@ -101,7 +104,7 @@ public sealed class AdapterOptions
     /// <summary>A copy of <paramref name="other"/>, so a caller can change one init-only setting.</summary>
     private AdapterOptions(AdapterOptions other) : this(other.BaseUri.AbsoluteUri, other.Token, other.Admin, other.SignalR)
     {
-        PinnedFingerprint = other.PinnedFingerprint; NodeFolder = other.NodeFolder; ClientChat = other.ClientChat; ChatOnly = other.ChatOnly; Diagnostics = other.Diagnostics; ExportedChat = other.ExportedChat;
+        PinnedFingerprint = other.PinnedFingerprint; NodeFolder = other.NodeFolder; ClientChat = other.ClientChat; ChatOnly = other.ChatOnly; Diagnostics = other.Diagnostics; EventWaits = other.EventWaits; ExportedChat = other.ExportedChat;
     }
 
     /// <summary>The chat IDs a client exports to its MCP servers. Only these exact variables are read; Codex exports none (see docs/reference.md#wake-ups).</summary>

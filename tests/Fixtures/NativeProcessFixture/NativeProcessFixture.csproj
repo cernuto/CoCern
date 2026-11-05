@@ -1,9 +1,0 @@
-<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <OutputType>Exe</OutputType>
-    <AssemblyName>CoCern.NativeProcessFixture</AssemblyName>
-    <ArtifactsProjectName>CoCern.NativeProcessFixture</ArtifactsProjectName>
-    <IsPackable>false</IsPackable>
-    <IsPublishable>false</IsPublishable>
-  </PropertyGroup>
-</Project>

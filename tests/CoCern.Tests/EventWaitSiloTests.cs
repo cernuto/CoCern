@@ -93,7 +93,8 @@ public sealed class EventWaitSiloTests(Xunit.Abstractions.ITestOutputHelper outp
         var sender = new StateEnvelope<CoordinationDocument> { Value = new() { Json = "{\"repositoryId\":\"repo\"}" } };
         var now = DateTimeOffset.UtcNow.AddMinutes(-1);
         var callbacks = new[] { EventWaitSources.WatchOperation, EventWaitSources.UnwatchOperation, EventWaitSources.LifecycleOperation,
-            EventWaitSources.SourceWatchOperation, EventWaitSources.SourceUnwatchOperation, EventWaitSources.SourceAckOperation, EventWaitSources.SourceSignalOperation };
+            EventWaitSources.SourceWatchOperation, EventWaitSources.SourceUnwatchOperation, EventWaitSources.SourceAckOperation, EventWaitSources.SourceSignalOperation,
+            PeerReplyWaits.ArmOperation, PeerReplyWaits.AckOperation };
         foreach (var operation in callbacks)
             sender.Effects.Add(new("denied-" + operation,
                 operation is EventWaitSources.SourceWatchOperation or EventWaitSources.SourceUnwatchOperation ? "board" : "session",
@@ -132,6 +133,7 @@ public sealed class EventWaitSiloTests(Xunit.Abstractions.ITestOutputHelper outp
             Assert.Equal("other", foreign["repositoryId"]!.GetValue<string>());
             Assert.False(foreign.ContainsKey("eventWaitOwnerWatches"));
             Assert.False(foreign.ContainsKey("eventWaits"));
+            Assert.False(foreign.ContainsKey("eventWaitPeerArms"));
         }
         finally { await host.StopAsync(); }
     }
