@@ -49,7 +49,7 @@ internal static class HookMail
         if (turn is null) return;
 
         using var http = new HttpClient(handler ?? RelayForwarder.CreateHandler(options), disposeHandler: handler is null) { Timeout = TimeSpan.FromSeconds(5) };
-        var forwarder = new RelayForwarder(http, options);
+        var forwarder = new RelayForwarder(http, options, CallOrigins.Node);
         // The hook's reads are never the model's, so none of them takes an attention offer.
         Task<AdapterReply> Call(JsonObject arguments, CancellationToken cancellationToken)
         {

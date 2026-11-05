@@ -131,6 +131,19 @@ public sealed class CallOriginAdapterTests : IDisposable
         Assert.Equal(CallOrigins.Node, Origin(call.Body));
     }
 
+    [Fact]
+    public async Task The_post_tool_hook_reports_node_on_every_read()
+    {
+        EnrollWithClaudeHandle();
+        var hub = new FakeHub();
+        var input = JsonSerializer.Serialize(new { session_id = Chat, hook_event_name = "PostToolUse", tool_name = "Bash", tool_input = new { }, tool_response = (object?)null });
+
+        Assert.Equal(0, await PostToolHook.RunAsync(new StringReader(input), new StringWriter(), root, hub));
+
+        Assert.NotEmpty(hub.Tools);
+        Assert.All(hub.Tools, call => Assert.Equal(CallOrigins.Node, Origin(call.Body)));
+    }
+
     /// <summary>The watcher makes its calls through its reconciler. A runtime that names no origin, as the local chat wake's does not, reports as the watcher.</summary>
     [Fact]
     public async Task The_wake_watcher_and_its_reconciler_report_wake_watcher_by_default()
