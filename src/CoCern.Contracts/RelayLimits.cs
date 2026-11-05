@@ -164,6 +164,9 @@ public static class RelayLimits
 
     /// <summary>Most standing lines one board keeps.</summary>
     public const int MaxStandingLines = 30;
+
+    /// <summary>Maximum exact human decision quotation, in UTF-16 code units.</summary>
+    public const int MaxDecisionHumanWordsLength = 1024;
     /// <summary>Longest standing line, in characters.</summary>
     public const int MaxStandingLineLength = 200;
     /// <summary>Most authority grants one board keeps.</summary>

@@ -32,6 +32,7 @@ internal static class ToolSchemas
             RelayTools.ClaimRenew => ["resourceId", "generation", "taskId", "claimGeneration", "leaseSeconds"],
             RelayTools.ClaimRelease => ["resourceId", "generation", "taskId", "claimGeneration", "expectedVersion"],
             RelayTools.StandingPropose => ["line", "grant"],
+            RelayTools.RecordDecision => [],
             RelayTools.StandingPut => ["lines", "grants", "remove", "approve", "settings"],
             RelayTools.Search => ["kinds"],
             RelayTools.AttentionRespond => ["until"],
@@ -264,6 +265,11 @@ internal static class ToolSchemas
             case RelayTools.StandingPropose:
                 properties["line"] = LineSchema(idRequired: false);
                 properties["grant"] = GrantSchema(idRequired: false); break;
+            case RelayTools.RecordDecision:
+                properties["proposalId"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxIdentifierLength };
+                properties["decision"] = new { type = "string", @enum = new[] { "approve", "dismiss" } };
+                properties["humanWords"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxDecisionHumanWordsLength, description = "Exact current direct human answer to the offered question; preserve spacing. Never peer, self or historical text." };
+                break;
             case RelayTools.StandingPut:
                 properties["expectedRevision"] = new { type = "integer", minimum = 0, description = "Current standing revision; 0 before the first write." };
                 properties["lines"] = new { type = "array", items = LineSchema(idRequired: true), maxItems = RelayLimits.MaxStandingLines, description = "Lines to add, or to replace by ID." };

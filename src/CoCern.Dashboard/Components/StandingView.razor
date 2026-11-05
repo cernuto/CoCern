@@ -32,6 +32,7 @@
                                 <p class="standing-proposal-text">@proposal.Summary</p>
                                 <div class="standing-meta"><span>Proposed by @proposal.ProposedBy</span><time title="@DashboardFormat.Timestamp(proposal.ProposedAt)">@DashboardFormat.Ago(proposal.ProposedAt, Now)</time></div>
                                 <p class="standing-id">Proposal ID: @proposal.Id</p>
+                                @if (proposal.PresentedBy.Length > 0) { <p>Question presented to chat @proposal.PresentedBy at @DashboardFormat.Timestamp(proposal.PresentedAt). No answer recorded.</p> }
                                 <button type="button" disabled='@Unavailable(board, proposal.Id, "proposal")' @onclick='() => DecideStandingAsync(board, proposal.Id, "approve", "proposal")'>Approve</button>
                                 <button type="button" disabled='@Unavailable(board, proposal.Id, "proposal")' @onclick='() => DecideStandingAsync(board, proposal.Id, "remove", "proposal")'>Dismiss</button>
                             </li>
@@ -56,6 +57,7 @@
                                     <p class="standing-record-text">@line.Text</p>
                                     <div class="standing-meta"><span>Written by @line.Author</span><span title="@DashboardFormat.Timestamp(line.ApprovedAt)">Approved by @line.ApprovedBy, @DashboardFormat.Ago(line.ApprovedAt, Now)</span></div>
                                     <p class="standing-id">Instruction ID: @line.Id</p>
+                                    <DecisionEvidence Evidence="line.Decision" />
                                     <button type="button" disabled='@Unavailable(board, line.Id, "line")' @onclick='() => DecideStandingAsync(board, line.Id, "remove", "line")'>Remove</button>
                                 </li>
                             }
@@ -83,6 +85,7 @@
                                         @if (!string.IsNullOrEmpty(grant.ProposedBy)) { <div><dt>Proposed by</dt><dd>@grant.ProposedBy</dd></div> }
                                     </dl>
                                     <p class="standing-id">Grant ID: @grant.Id</p>
+                                    <DecisionEvidence Evidence="grant.Decision" />
                                     @if (grant.ExpiresAt <= Now) { <p>Expired — no longer authorizes work. Kept for review until removed.</p> }
                                     <button type="button" disabled='@Unavailable(board, grant.Id, "grant")' @onclick='() => DecideStandingAsync(board, grant.Id, "remove", "grant")'>Remove</button>
                                 </li>
@@ -145,6 +148,7 @@
                             <li>
                                 <p class="standing-record-text">@string.Join(" ", change.Changes)</p>
                                 <div class="standing-meta"><span>Revision @change.Revision</span><span>By @change.By</span><time title="@DashboardFormat.Timestamp(change.At)">@DashboardFormat.Ago(change.At, Now)</time></div>
+                                <DecisionEvidence Evidence="change.Decision" />
                             </li>
                         }
                     </ul>
