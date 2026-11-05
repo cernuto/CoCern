@@ -384,7 +384,7 @@ A chat is **reachable** when its PC announced within the last 90 seconds of the 
 
 ### Prompt hook
 
-`--prompt-hook` on setup adds a hook to `~/.claude/settings.json` and `~/.codex/hooks.json` that prints one line per message you type when something waits, and nothing when nothing does. In a Claude chat it also prints messages the chat has not been given yet, within 9,000 characters, and records them so they are not printed again. It never blocks a message; Codex asks you to approve it in `/hooks`. `COCERN_HOOK_TIMEOUT_MS` (default 1000) bounds its wait for the hub.
+`--prompt-hook` on setup adds a hook to `~/.claude/settings.json` and `~/.codex/hooks.json` that prints one line per message you type when something waits, and nothing when nothing does. In a Claude chat it also prints messages the chat has not been given yet, within 9,000 characters, and records them so they are not printed again. For Claude Code the same option also adds a `PostToolUse` hook that does this after each tool call, so mail arrives during a turn; both are off unless you ask for them. It never blocks a message; Codex asks you to approve it in `/hooks`. `COCERN_HOOK_TIMEOUT_MS` (default 1000) bounds its wait for the hub.
 
 ```
 CoCern: 3 attention items (1 urgent), 2 inbox, standing r4; top a-91 blocked "T-12".
