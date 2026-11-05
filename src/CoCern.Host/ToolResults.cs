@@ -11,6 +11,10 @@ public static class ToolResults
 {
     public static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
+    internal static IEnumerable<Tool> Tools(HttpContext context) => Tools(
+        RelayAuthentication.Caller(context.User).IsAdministrator,
+        string.Equals(context.RequestServices.GetRequiredService<IConfiguration>()["COCERN_EVENT_WAITS"], "true", StringComparison.OrdinalIgnoreCase));
+
     public static IEnumerable<Tool> Tools(bool administrator, bool eventWaits = false) => RelayToolCatalog.ForRole(administrator, eventWaits).Select(tool => new Tool
     {
         Name = tool.Name,

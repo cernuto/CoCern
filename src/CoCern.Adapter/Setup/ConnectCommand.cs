@@ -7,7 +7,7 @@ namespace CoCern.Adapter.Setup;
 /// <c>--connect</c>: on the hub's own PC, adds CoCern to Claude Code, the Claude desktop app (when installed) and Codex, using the hub's
 /// local token file. No join code or node: the adapter talks to the loopback hub directly. An existing <c>cocern</c> entry is left alone,
 /// unless it is this hub's and names an address or certificate other than the hub's current ones, or <c>--role</c> asks for other tools than it
-/// gives (see <see cref="Refresh"/>): then those are updated.
+/// gives (see <see cref="Refresh"/>): then those are updated. An entry that is not this hub's is reported as <see cref="ConnectStates.OtherHub"/>, never as connected.
 /// Exit codes: 0 done, 1 no token file found, 5 a client settings file could not be parsed (nothing is written then).
 /// </summary>
 internal static class ConnectCommand
@@ -67,10 +67,12 @@ internal static class ConnectCommand
         // Without a current address (an older hub, no --hub) the address and certificate are left as they are; without --role, the tools.
         var seen = new Dictionary<string, (bool Admin, IReadOnlyDictionary<string, string?>? Changes)>(StringComparer.Ordinal);
         var owned = new HashSet<string>(StringComparer.Ordinal);
+        // Per app whose entry could be read and is not this hub's: what to say about it.
+        var foreign = new Dictionary<string, string>(StringComparer.Ordinal);
         var nativeEnvironments = new Dictionary<string, IReadOnlyDictionary<string, string>>(StringComparer.Ordinal);
         EntryRefresh RefreshFor(string id) => variables =>
         {
-            if (BelongsToHub(variables, tokenFile, hub, localHub?.Url)) owned.Add(id);
+            if (BelongsToHub(variables, tokenFile, hub, localHub?.Url)) owned.Add(id); else foreign[id] = NotThisHub(variables);
             var changes = Refresh(variables, tokenFile, hub, fingerprint, localHub?.Url, admin);
             if (owned.Contains(id))
             {
@@ -98,9 +100,10 @@ internal static class ConnectCommand
             {
                 var plan = client.Plan();
                 var hook = client.Id == ConnectClients.ClaudeCode && (!plan.IsUnchanged || owned.Contains(client.Id))
-                    ? ClientSettings.PlanStopHook(Path.Combine(profile, ".claude", "settings.json"), SetupEnvironment.AdapterCommandLine(dotnetPath, adapterDll) + " --stop-hook")
+                    ? ClientSettings.PlanConnectStopHook(Path.Combine(profile, ".claude", "settings.json"), Path.Combine(profile, ".claude.json"), dotnetPath, adapterDll)
                     : null;
-                var state = plan.IsUnchanged ? ConnectStates.Connected : plan.Refreshes ? check ? ConnectStates.Outdated : ConnectStates.Updated : check ? ConnectStates.Available : ConnectStates.Added;
+                // An entry that is not this hub's is never changed, so its plan is always unchanged: it is checked first, or it would read as connected.
+                var state = foreign.ContainsKey(client.Id) ? ConnectStates.OtherHub : plan.IsUnchanged ? ConnectStates.Connected : plan.Refreshes ? check ? ConnectStates.Outdated : ConnectStates.Updated : check ? ConnectStates.Available : ConnectStates.Added;
                 if (state is ConnectStates.Added or ConnectStates.Updated)
                 {
                     plan.Apply(clock ?? TimeProvider.System);
@@ -116,10 +119,10 @@ internal static class ConnectCommand
                 {
                     ConnectStates.Added => admin == true,
                     ConnectStates.Updated when changes?.TryGetValue(RoleVariable, out var role) == true => role is not null,
-                    ConnectStates.Available => null,
+                    ConnectStates.Available or ConnectStates.OtherHub => null,
                     _ => entry?.Admin
                 };
-                results.Add(new() { Id = client.Id, Name = client.Name, State = state, Detail = changes is null ? null : Detail(check, changes), Admin = gives });
+                results.Add(new() { Id = client.Id, Name = client.Name, State = state, Detail = foreign.GetValueOrDefault(client.Id) ?? (changes is null ? null : Detail(check, changes)), Admin = gives });
             }
             catch (Exception exception) when (exception is ClientSettingsException or IOException or UnauthorizedAccessException)
             {
@@ -157,6 +160,12 @@ internal static class ConnectCommand
             });
         return $"Its CoCern entry for this hub {string.Join(" and ", parts)}. {(check ? "Connect updates it." : "Restart the app to use it.")}";
     }
+
+    /// <summary>What to say about an entry that is not this hub's. One with none of the hub variables is a node's, which names no hub, so it is not said to point at another one.</summary>
+    private static string NotThisHub(IReadOnlyDictionary<string, string> variables) =>
+        variables.Keys.Any(key => HubVariables.Contains(key, StringComparer.OrdinalIgnoreCase))
+            ? "Its CoCern entry points at another hub, so Connect leaves it as it is."
+            : "Its CoCern entry connects through this PC's node, not this hub's local connection, so Connect leaves it as it is.";
 
     /// <summary>Whether an entry's variables make its chats list the administrator tools, as the adapter reads <c>COCERN_ROLE</c>.</summary>
     private static bool IsAdmin(IReadOnlyDictionary<string, string> variables) =>

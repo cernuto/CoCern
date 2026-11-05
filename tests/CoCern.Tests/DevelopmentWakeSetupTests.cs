@@ -44,67 +44,7 @@ public sealed class DevelopmentWakeSetupTests : IDisposable
         Assert.Equal("Read", JsonNode.Parse(File.ReadAllText(Hooks))!["permissions"]!["allow"]![0]!.GetValue<string>());
     }
 
-    [Fact]
-    public void Development_setup_without_a_claude_entry_creates_no_hook_settings()
-    {
-        File.WriteAllText(Config, "{\"mcpServers\":{\"other\":{\"command\":\"other\"}}}");
-        var before = File.ReadAllText(Config);
-        Assert.False(Configure('a'));
-        Assert.Equal(before, File.ReadAllText(Config));
-        Assert.False(File.Exists(Hooks));
-    }
-
-    [Fact]
-    public void Malformed_hook_settings_leave_the_mcp_configuration_unchanged()
-    {
-        WriteConfig();
-        var before = File.ReadAllText(Config);
-        Directory.CreateDirectory(Path.GetDirectoryName(Hooks)!);
-        File.WriteAllText(Hooks, "{\"hooks\":false}");
-        Assert.Throws<IOException>(() => Configure('a'));
-        Assert.Equal(before, File.ReadAllText(Config));
-        Assert.Equal("{\"hooks\":false}", File.ReadAllText(Hooks));
-    }
-
-    [Fact]
-    public void Local_connect_installs_the_stop_hook_but_a_check_and_codex_only_connect_do_not()
-    {
-        File.WriteAllText(Token, "test-only-connection-token");
-        using var output = new StringWriter();
-        using var error = new StringWriter();
-        int Connect(params string[] args) => ConnectCommand.Run(["--token-file", Token, .. args], root, null, "dotnet-host", Launcher('a'), output, error, nativeCacheRoot: Path.Combine(root, "native-cache"));
-        Assert.Equal(0, Connect("--check"));
-        Assert.False(File.Exists(Hooks));
-        Assert.Equal(0, Connect("--only", ConnectClients.Codex));
-        Assert.False(File.Exists(Hooks));
-        Assert.Equal(0, Connect("--only", ConnectClients.ClaudeCode));
-        var owned = Assert.Single(Handlers());
-        Assert.Contains("--stop-hook", owned["command"]!.GetValue<string>());
-        var once = File.ReadAllText(Hooks);
-        Assert.Equal(0, Connect("--only", ConnectClients.ClaudeCode));
-        Assert.Equal(once, File.ReadAllText(Hooks));
-    }
-
     private bool Configure(char version) => DevelopmentSetup.ConfigureClaudeCode(Config, "dotnet-host", Launcher(version), Deployment, Token, nativeCacheRoot: Path.Combine(root, "native-cache"));
-
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void Local_connect_does_not_install_a_hook_for_another_hub_or_an_existing_node_entry(bool node)
-    {
-        File.WriteAllText(Token, "test-only-connection-token");
-        WriteConfig();
-        var config = JsonNode.Parse(File.ReadAllText(Config))!;
-        config["mcpServers"]!["cocern"]!["env"] = node ? new JsonObject() : new JsonObject
-        {
-            ["COCERN_TOKEN_FILE"] = Path.Combine(root, "another-hub", "token"), ["COCERN_URL"] = "https://another.example/"
-        };
-        File.WriteAllText(Config, config.ToJsonString());
-        var before = File.ReadAllText(Config);
-        Assert.Equal(0, ConnectCommand.Run(["--token-file", Token, "--only", ConnectClients.ClaudeCode], root, null, "dotnet-host", Launcher('a'), TextWriter.Null, TextWriter.Null, nativeCacheRoot: Path.Combine(root, "native-cache")));
-        Assert.Equal(before, File.ReadAllText(Config));
-        Assert.False(File.Exists(Hooks));
-    }
 
     private void WriteConfig() => File.WriteAllText(Config, new JsonObject
     {

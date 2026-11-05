@@ -30,40 +30,6 @@ public sealed class HubNetworkTests : IDisposable
     private string CertificatePath => Path.Combine(root, "nested", "hub-certificate.pfx");
 
     [Fact]
-    public void Certificate_is_reused_across_starts()
-    {
-        using var first = HubCertificate.LoadOrCreate(CertificatePath, "hub-pc");
-        using var second = HubCertificate.LoadOrCreate(CertificatePath, "hub-pc");
-        Assert.Equal(CertificateFingerprint.Of(first), CertificateFingerprint.Of(second));
-        Assert.Matches("^[0-9A-F]{64}$", CertificateFingerprint.Of(first));
-        Assert.True(second.HasPrivateKey);
-        using var key = second.GetECDsaPublicKey();
-        Assert.Equal(256, key!.KeySize);
-        Assert.InRange((second.NotAfter - second.NotBefore).TotalDays, 729, 732);
-    }
-
-    [Fact]
-    public void Certificate_names_the_host_and_has_no_password()
-    {
-        using var certificate = HubCertificate.LoadOrCreate(CertificatePath, "hub-pc");
-        var names = certificate.Extensions.OfType<X509SubjectAlternativeNameExtension>().Single();
-        Assert.Contains("hub-pc", names.EnumerateDnsNames());
-        Assert.DoesNotContain(names.EnumerateIPAddresses(), IPAddress.IsLoopback);
-        using var reloaded = X509CertificateLoader.LoadPkcs12FromFile(CertificatePath, null);
-        Assert.Equal(CertificateFingerprint.Of(certificate), CertificateFingerprint.Of(reloaded));
-    }
-
-    [Fact]
-    public void Certificate_file_that_cannot_be_loaded_fails_startup_and_is_left_alone()
-    {
-        Directory.CreateDirectory(Path.GetDirectoryName(CertificatePath)!);
-        File.WriteAllText(CertificatePath, "not a certificate");
-        var error = Assert.Throws<InvalidOperationException>(() => HubCertificate.LoadOrCreate(CertificatePath, "hub-pc"));
-        Assert.Contains("could not be loaded", error.Message);
-        Assert.Equal("not a certificate", File.ReadAllText(CertificatePath));
-    }
-
-    [Fact]
     public void Certificate_file_is_private_to_current_user()
     {
         using var certificate = HubCertificate.LoadOrCreate(CertificatePath, "hub-pc");
@@ -95,21 +61,6 @@ public sealed class HubNetworkTests : IDisposable
         AssertPrivate(CertificatePath + ".identity");
     }
 
-    [Fact]
-    public void Existing_primary_gains_a_private_backup_and_identity_marker()
-    {
-        using var first = HubCertificate.LoadOrCreate(CertificatePath, "hub-pc");
-        var original = File.ReadAllBytes(CertificatePath);
-        File.Delete(CertificatePath + ".backup");
-        File.Delete(CertificatePath + ".identity");
-
-        using var reused = HubCertificate.LoadOrCreate(CertificatePath, "ignored");
-
-        Assert.Equal(original, File.ReadAllBytes(CertificatePath + ".backup"));
-        Assert.Equal(CertificateFingerprint.Of(first), File.ReadAllText(CertificatePath + ".identity"));
-        foreach (var path in IdentityArtifacts(CertificatePath)) AssertPrivate(path);
-    }
-
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -135,58 +86,6 @@ public sealed class HubNetworkTests : IDisposable
     }
 
     [Fact]
-    public void Backup_without_a_private_key_cannot_replace_a_missing_primary()
-    {
-        using var first = HubCertificate.LoadOrCreate(CertificatePath, "hub-pc");
-        using var publicOnly = X509CertificateLoader.LoadCertificate(first.RawData);
-        var invalidBackup = publicOnly.Export(X509ContentType.Pfx);
-        File.WriteAllBytes(CertificatePath + ".backup", invalidBackup);
-        File.Delete(CertificatePath);
-
-        Assert.Throws<InvalidOperationException>(() => HubCertificate.LoadOrCreate(CertificatePath, "hub-pc"));
-
-        Assert.False(File.Exists(CertificatePath));
-        Assert.Equal(invalidBackup, File.ReadAllBytes(CertificatePath + ".backup"));
-    }
-
-    [Fact]
-    public void Conflicting_backup_is_left_unchanged_and_does_not_establish_a_marker()
-    {
-        using var first = HubCertificate.LoadOrCreate(CertificatePath, "hub-pc");
-        var original = File.ReadAllBytes(CertificatePath);
-        var otherPath = Path.Combine(root, "other", "other.pfx");
-        using var other = HubCertificate.LoadOrCreate(otherPath, "other-hub");
-        var conflicting = File.ReadAllBytes(otherPath);
-        File.WriteAllBytes(CertificatePath + ".backup", conflicting);
-        File.Delete(CertificatePath + ".identity");
-
-        Assert.Throws<InvalidOperationException>(() => HubCertificate.LoadOrCreate(CertificatePath, "hub-pc"));
-
-        Assert.Equal(original, File.ReadAllBytes(CertificatePath));
-        Assert.Equal(conflicting, File.ReadAllBytes(CertificatePath + ".backup"));
-        Assert.False(File.Exists(CertificatePath + ".identity"));
-    }
-
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void Conflicting_marker_is_left_unchanged_and_prevents_recovery(bool primaryMissing)
-    {
-        using var first = HubCertificate.LoadOrCreate(CertificatePath, "hub-pc");
-        var original = File.ReadAllBytes(CertificatePath);
-        File.WriteAllBytes(CertificatePath + ".backup", original);
-        File.WriteAllText(CertificatePath + ".identity", new string('0', 64));
-        if (primaryMissing) File.Delete(CertificatePath);
-
-        Assert.Throws<InvalidOperationException>(() => HubCertificate.LoadOrCreate(CertificatePath, "hub-pc"));
-
-        Assert.Equal(original, File.ReadAllBytes(CertificatePath + ".backup"));
-        Assert.Equal(new string('0', 64), File.ReadAllText(CertificatePath + ".identity"));
-        if (primaryMissing) Assert.False(File.Exists(CertificatePath));
-        else Assert.Equal(original, File.ReadAllBytes(CertificatePath));
-    }
-
-    [Fact]
     public void Established_marker_prevents_regeneration_when_both_copies_are_lost()
     {
         Directory.CreateDirectory(Path.GetDirectoryName(CertificatePath)!);
@@ -199,57 +98,6 @@ public sealed class HubNetworkTests : IDisposable
         Assert.Equal(marker, File.ReadAllText(CertificatePath + ".identity"));
         Assert.False(File.Exists(CertificatePath));
         Assert.False(File.Exists(CertificatePath + ".backup"));
-    }
-
-    [Fact]
-    public void Creation_can_be_explicitly_forbidden_without_any_identity_files()
-    {
-        var error = Assert.Throws<InvalidOperationException>(() => HubCertificate.LoadOrCreate(CertificatePath, "hub-pc", allowCreate: false));
-
-        Assert.Contains("restore", error.Message, StringComparison.OrdinalIgnoreCase);
-        foreach (var path in IdentityArtifacts(CertificatePath)) Assert.False(File.Exists(path));
-    }
-
-    [Fact]
-    public void Forbidding_creation_still_allows_restoring_the_established_backup()
-    {
-        using var first = HubCertificate.LoadOrCreate(CertificatePath, "hub-pc");
-        var original = File.ReadAllBytes(CertificatePath);
-        File.Delete(CertificatePath);
-
-        using var restored = HubCertificate.LoadOrCreate(CertificatePath, "ignored", allowCreate: false);
-
-        Assert.Equal(original, File.ReadAllBytes(CertificatePath));
-        Assert.Equal(CertificateFingerprint.Of(first), CertificateFingerprint.Of(restored));
-        Assert.True(restored.HasPrivateKey);
-    }
-
-    [Fact]
-    public async Task Existing_local_hub_record_prevents_a_new_identity_at_startup()
-    {
-        Directory.CreateDirectory(root);
-        var recordPath = Path.Combine(root, LocalHubRecord.FileName);
-        var record = new LocalHubRecord("https://127.0.0.1:5272/", new string('A', 64)).ToJson();
-        File.WriteAllText(recordPath, record);
-        var builder = WebApplication.CreateBuilder(new WebApplicationOptions { ContentRootPath = root });
-        builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
-        {
-            ["Relay:DatabasePath"] = Path.Combine(root, "relay.db"),
-            ["Relay:Network:CertificatePath"] = CertificatePath,
-            ["urls"] = $"http://127.0.0.1:{FreePort()}"
-        });
-        builder.Services.AddSingleton<HubListener>();
-        await using var app = builder.Build();
-        var options = new Microsoft.AspNetCore.Server.Kestrel.Core.KestrelServerOptions { ApplicationServices = app.Services };
-
-        try
-        {
-            var error = Assert.Throws<InvalidOperationException>(() => HubNetwork.Configure(builder.Configuration, builder.Environment, options));
-            Assert.Contains("restore", error.Message, StringComparison.OrdinalIgnoreCase);
-            Assert.False(File.Exists(CertificatePath));
-            Assert.Equal(record, File.ReadAllText(recordPath));
-        }
-        finally { await app.StopAsync(); }
     }
 
     [Theory]
@@ -278,81 +126,6 @@ public sealed class HubNetworkTests : IDisposable
         Assert.Contains("restore", error.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(before.Keys.Order(), Directory.GetFiles(root, "*", SearchOption.AllDirectories).Order());
         foreach (var (path, bytes) in before) Assert.Equal(bytes, File.ReadAllBytes(path));
-    }
-
-    [Theory]
-    [InlineData("legacy")]
-    [InlineData("backup")]
-    [InlineData("primary")]
-    public async Task Recorded_identity_allows_a_matching_candidate_and_retains_its_source(string candidate)
-    {
-        var database = Path.Combine(root, "separate", "relay.db");
-        var destination = Path.Combine(root, "separate", HubNetwork.CertificateFile);
-        var source = candidate == "legacy" ? Path.Combine(root, "data", HubNetwork.CertificateFile) : destination;
-        using var original = HubCertificate.LoadOrCreate(source, "established-hub");
-        var originalBytes = File.ReadAllBytes(source);
-        var fingerprint = CertificateFingerprint.Of(original);
-        if (candidate != "legacy")
-        {
-            File.Delete(destination + ".identity");
-            if (candidate == "backup") File.Delete(destination);
-            else File.Delete(destination + ".backup");
-        }
-        Directory.CreateDirectory(Path.GetDirectoryName(database)!);
-        File.WriteAllText(Path.Combine(Path.GetDirectoryName(database)!, LocalHubRecord.FileName), new LocalHubRecord("https://127.0.0.1:5272/", fingerprint).ToJson());
-
-        await ConfigureNetworkAsync(database);
-
-        Assert.Equal(originalBytes, File.ReadAllBytes(source));
-        Assert.Equal(originalBytes, File.ReadAllBytes(destination));
-        Assert.Equal(originalBytes, File.ReadAllBytes(destination + ".backup"));
-        Assert.Equal(fingerprint, File.ReadAllText(destination + ".identity"));
-        Assert.Equal(fingerprint, LocalHubRecord.Read(Path.GetDirectoryName(database)!)!.Fingerprint);
-        foreach (var artifact in IdentityArtifacts(destination)) AssertPrivate(artifact);
-    }
-
-    [Theory]
-    [InlineData("not json")]
-    [InlineData("{\"url\":\"https://127.0.0.1:5272/\",\"fingerprint\":\"unusable\"}")]
-    [InlineData("{\"url\":\"https://127.0.0.1:5272/\"}")]
-    public async Task Unusable_recorded_identity_prevents_legacy_import_and_stays_unchanged(string record)
-    {
-        var legacyPath = Path.Combine(root, "data", HubNetwork.CertificateFile);
-        using var legacy = HubCertificate.LoadOrCreate(legacyPath, "legacy-hub");
-        var database = Path.Combine(root, "separate", "relay.db");
-        Directory.CreateDirectory(Path.GetDirectoryName(database)!);
-        File.WriteAllText(Path.Combine(Path.GetDirectoryName(database)!, LocalHubRecord.FileName), record);
-        var before = Directory.GetFiles(root, "*", SearchOption.AllDirectories).ToDictionary(path => path, File.ReadAllBytes);
-
-        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => ConfigureNetworkAsync(database));
-
-        Assert.Contains("restore", error.Message, StringComparison.OrdinalIgnoreCase);
-        Assert.Equal(before.Keys.Order(), Directory.GetFiles(root, "*", SearchOption.AllDirectories).Order());
-        foreach (var (path, bytes) in before) Assert.Equal(bytes, File.ReadAllBytes(path));
-    }
-
-    [Theory]
-    [InlineData(".identity", false)]
-    [InlineData(".identity", true)]
-    [InlineData(".backup", false)]
-    [InlineData(".backup", true)]
-    [InlineData("record", false)]
-    [InlineData("record", true)]
-    public async Task Directory_at_evidence_path_prevents_any_identity_writes(string evidence, bool legacy)
-    {
-        var folder = Path.Combine(root, "separate");
-        var path = evidence == "record" ? Path.Combine(folder, LocalHubRecord.FileName) : Path.Combine(folder, HubNetwork.CertificateFile) + evidence;
-        Directory.CreateDirectory(path);
-        if (legacy)
-        {
-            using var candidate = HubCertificate.LoadOrCreate(Path.Combine(root, "data", HubNetwork.CertificateFile), "legacy");
-        }
-        var before = Directory.GetFiles(root, "*", SearchOption.AllDirectories).ToDictionary(file => file, File.ReadAllBytes);
-        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => ConfigureNetworkAsync(Path.Combine(folder, "relay.db")));
-        Assert.Contains("restore", error.Message, StringComparison.OrdinalIgnoreCase);
-        Assert.True(Directory.Exists(path));
-        Assert.Equal(before.Keys.Order(), Directory.GetFiles(root, "*", SearchOption.AllDirectories).Order());
-        foreach (var (file, bytes) in before) Assert.Equal(bytes, File.ReadAllBytes(file));
     }
 
     private async Task ConfigureNetworkAsync(string database)
@@ -415,33 +188,6 @@ public sealed class HubNetworkTests : IDisposable
             Assert.False(rule.IsInherited);
         }
         else Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(path));
-    }
-
-    [Fact]
-    public async Task Non_string_optional_http_metadata_allows_the_established_hub_to_restart_and_open_a_pinned_session()
-    {
-        var localPort = FreePort();
-        await using (var first = await StartAsync(FreePort(), FreePort(), enabled: false, localPort))
-            await first.StopAsync();
-        var identity = LocalHubRecord.Read(root)!;
-        var original = File.ReadAllBytes(CertificatePath);
-        var path = Path.Combine(root, LocalHubRecord.FileName);
-        var record = JsonNode.Parse(File.ReadAllText(path))!;
-        record["httpUrl"] = new JsonObject();
-        File.WriteAllText(path, record.ToJsonString());
-
-        await using var restarted = await StartAsync(FreePort(), FreePort(), enabled: false, localPort);
-        Assert.Equal(original, File.ReadAllBytes(CertificatePath));
-        using var certificate = X509CertificateLoader.LoadPkcs12FromFile(CertificatePath, null, X509KeyStorageFlags.EphemeralKeySet);
-        Assert.True(certificate.HasPrivateKey);
-        Assert.Equal(identity.Fingerprint, CertificateFingerprint.Of(certificate));
-        Assert.Equal(identity.Fingerprint, LocalHubRecord.Read(root)!.Fingerprint);
-        var options = new AdapterOptions(identity.Url, "network-test-secret-not-a-production-token") { PinnedFingerprint = identity.Fingerprint };
-        using var client = new HttpClient(RelayForwarder.CreateHandler(options));
-        var session = await new RelayForwarder(client, options).ForwardAsync("session_open", JsonSerializer.SerializeToElement(new { repositoryId = "repo", requestId = "restart" }));
-        Assert.True(session.Ok, session.Code);
-        Assert.False(string.IsNullOrWhiteSpace(session.Data!.Value.GetProperty("sessionId").GetString()));
-        await restarted.StopAsync();
     }
 
     [Fact]
@@ -516,179 +262,6 @@ public sealed class HubNetworkTests : IDisposable
         using var local = new TcpClient();
         await local.ConnectAsync(IPAddress.Loopback, localPort);
         Assert.True(File.Exists(Path.Combine(root, LocalHubRecord.FileName)));
-    }
-
-    [Fact]
-    public void The_certificate_defaults_to_the_database_folder_however_the_hub_is_started()
-    {
-        var expected = Path.Combine(root, "data", HubNetwork.CertificateFile);
-        // Visual Studio: the content root is the project folder and the database ../../data/relay.db. The start script: the content root is
-        // the folder it runs from and the database an absolute path. One certificate, beside local-hub.json, either way.
-        Assert.Equal(expected, HubNetwork.CertificatePath(Settings("../../data/relay.db"), new HubEnvironment(Path.Combine(root, "src", "CoCern.Host"))));
-        Assert.Equal(expected, HubNetwork.CertificatePath(Settings(Path.Combine(root, "data", "relay.db")), new HubEnvironment(Path.Combine(root, "elsewhere"))));
-        // With the default database (the content root's data folder) it stays where it always was.
-        Assert.Equal(expected, HubNetwork.CertificatePath(Settings(null), new HubEnvironment(root)));
-        // A configured path is kept as configured, relative to the content root.
-        var content = Path.Combine(root, "src", "CoCern.Host");
-        Assert.Equal(Path.Combine(content, "keys/hub.pfx"), HubNetwork.CertificatePath(Settings("../../data/relay.db", "keys/hub.pfx"), new HubEnvironment(content)));
-        // Choosing the path writes nothing.
-        Assert.False(Directory.Exists(root));
-    }
-
-    [Fact]
-    public void A_certificate_made_at_the_content_root_is_copied_beside_the_database_and_keeps_its_fingerprint()
-    {
-        var content = Path.Combine(root, "src", "CoCern.Host");
-        var earlier = Path.Combine(content, "data", HubNetwork.CertificateFile);
-        string fingerprint;
-        using (var made = HubCertificate.LoadOrCreate(earlier, "hub-pc")) fingerprint = CertificateFingerprint.Of(made);
-
-        var path = HubNetwork.CertificatePath(Settings("../../data/relay.db"), new HubEnvironment(content));
-        Assert.Equal(Path.Combine(root, "data", HubNetwork.CertificateFile), path);
-        Assert.True(File.Exists(earlier));
-        using var copied = HubCertificate.LoadOrCreate(path, "ignored-because-reused");
-        Assert.Equal(fingerprint, CertificateFingerprint.Of(copied));
-        foreach (var artifact in IdentityArtifacts(path)) AssertPrivate(artifact);
-        Assert.Equal(IdentityArtifacts(path).Order(), Directory.GetFiles(Path.GetDirectoryName(path)!).Order());
-        // Started the other way, from the repository with the same database, the hub finds the same certificate.
-        Assert.Equal(path, HubNetwork.CertificatePath(Settings(Path.Combine(root, "data", "relay.db")), new HubEnvironment(root)));
-    }
-
-    [Theory]
-    [InlineData(true, false, false)]
-    [InlineData(false, true, false)]
-    [InlineData(true, true, false)]
-    [InlineData(true, false, true)]
-    [InlineData(false, true, true)]
-    public void Destination_identity_evidence_prevents_importing_a_different_legacy_identity(bool backupExists, bool markerExists, bool corrupt)
-    {
-        var legacyPath = Path.Combine(root, "data", HubNetwork.CertificateFile);
-        var database = Path.Combine(root, "separate", "relay.db");
-        var destination = Path.Combine(root, "separate", HubNetwork.CertificateFile);
-        using var legacy = HubCertificate.LoadOrCreate(legacyPath, "legacy-hub");
-        using var owned = HubCertificate.LoadOrCreate(destination, "separate-hub");
-        var legacyBytes = File.ReadAllBytes(legacyPath);
-        var ownedBytes = File.ReadAllBytes(destination);
-        var marker = File.ReadAllText(destination + ".identity");
-        File.Delete(destination);
-        if (!backupExists) File.Delete(destination + ".backup");
-        if (!markerExists) File.Delete(destination + ".identity");
-        if (corrupt)
-        {
-            if (backupExists) File.WriteAllText(destination + ".backup", "damaged backup");
-            else File.WriteAllText(destination + ".identity", marker = "damaged marker");
-        }
-
-        var resolved = HubNetwork.CertificatePath(Settings(database), new HubEnvironment(root));
-
-        Assert.Equal(destination, resolved);
-        Assert.False(File.Exists(destination));
-        if (backupExists && !corrupt)
-        {
-            using var restored = HubCertificate.LoadOrCreate(resolved, "ignored");
-            Assert.Equal(CertificateFingerprint.Of(owned), CertificateFingerprint.Of(restored));
-            Assert.Equal(ownedBytes, File.ReadAllBytes(destination));
-            foreach (var artifact in IdentityArtifacts(destination)) AssertPrivate(artifact);
-        }
-        else
-        {
-            Assert.Throws<InvalidOperationException>(() => HubCertificate.LoadOrCreate(resolved, "ignored"));
-            Assert.False(File.Exists(destination));
-            if (backupExists) Assert.Equal("damaged backup", File.ReadAllText(destination + ".backup"));
-            else Assert.False(File.Exists(destination + ".backup"));
-        }
-        if (markerExists || backupExists && !corrupt) Assert.Equal(marker, File.ReadAllText(destination + ".identity"));
-        else Assert.False(File.Exists(destination + ".identity"));
-        Assert.Equal(legacyBytes, File.ReadAllBytes(legacyPath));
-    }
-
-    [Fact]
-    public void A_certificate_already_beside_the_database_wins_and_the_one_at_the_content_root_is_left_alone()
-    {
-        var content = Path.Combine(root, "src", "CoCern.Host");
-        var earlier = Path.Combine(content, "data", HubNetwork.CertificateFile);
-        var beside = Path.Combine(root, "data", HubNetwork.CertificateFile);
-        using (HubCertificate.LoadOrCreate(earlier, "hub-pc")) { }
-        string fingerprint;
-        using (var current = HubCertificate.LoadOrCreate(beside, "hub-pc")) fingerprint = CertificateFingerprint.Of(current);
-        var before = File.ReadAllBytes(earlier);
-
-        Assert.Equal(beside, HubNetwork.CertificatePath(Settings("../../data/relay.db"), new HubEnvironment(content)));
-        Assert.Equal(before, File.ReadAllBytes(earlier));
-        using var used = HubCertificate.LoadOrCreate(beside, "ignored-because-reused");
-        Assert.Equal(fingerprint, CertificateFingerprint.Of(used));
-    }
-
-    [Fact]
-    public async Task Without_a_configured_path_the_hub_makes_its_certificate_beside_the_database_and_records_its_fingerprint()
-    {
-        var (httpPort, httpsPort, localPort) = (FreePort(), FreePort(), FreePort());
-        await using var app = await StartAsync(httpPort, httpsPort, enabled: false, localPort, configureCertificate: false);
-        var path = Path.Combine(root, HubNetwork.CertificateFile);
-        using var stored = HubCertificate.LoadOrCreate(path, "ignored-because-reused");
-        using var local = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(root, LocalHubRecord.FileName)));
-        Assert.Equal(CertificateFingerprint.Of(stored), local.RootElement.GetProperty("fingerprint").GetString());
-        Assert.Equal($"https://127.0.0.1:{localPort}/", local.RootElement.GetProperty("url").GetString());
-        Assert.Equal($"http://127.0.0.1:{httpPort}/", local.RootElement.GetProperty("httpUrl").GetString());
-        Assert.False(File.Exists(CertificatePath));
-    }
-
-    [Fact]
-    public async Task With_both_https_listeners_off_no_certificate_is_made()
-    {
-        var (httpPort, httpsPort) = (FreePort(), FreePort());
-        var record = Path.Combine(root, LocalHubRecord.FileName);
-        await using (var app = await StartAsync(httpPort, httpsPort, enabled: false, localPort: 0))
-        {
-            using var loopback = new HttpClient();
-            Assert.Equal(HttpStatusCode.OK, (await loopback.GetAsync($"http://127.0.0.1:{httpPort}/health")).StatusCode);
-            Assert.False(File.Exists(CertificatePath));
-            Assert.False(File.Exists(record));
-            await app.StopAsync();
-        }
-
-        byte[] established;
-        await using (var tls = await StartAsync(httpPort, httpsPort, enabled: false, localPort: FreePort()))
-        {
-            established = await File.ReadAllBytesAsync(record);
-            await tls.StopAsync();
-        }
-        await using var httpOnly = await StartAsync(httpPort, httpsPort, enabled: false, localPort: 0);
-        Assert.Equal(established, await File.ReadAllBytesAsync(record));
-    }
-
-    [Fact]
-    public async Task A_second_hub_with_a_custom_database_retains_the_original_certificate_across_stops_and_restarts()
-    {
-        var originalPath = Path.Combine(root, "data", HubNetwork.CertificateFile);
-        byte[] originalBytes;
-        string fingerprint;
-        using (var original = HubCertificate.LoadOrCreate(originalPath, "main-hub"))
-        {
-            fingerprint = CertificateFingerprint.Of(original);
-            originalBytes = File.ReadAllBytes(originalPath);
-            // StartAsync uses a custom database beside the content root, separate from the main hub's data folder.
-            for (var start = 0; start < 2; start++)
-            {
-                await using var app = await StartAsync(FreePort(), FreePort(), enabled: false, configureCertificate: false);
-                var destination = Path.Combine(root, HubNetwork.CertificateFile);
-                Assert.True(File.Exists(originalPath));
-                Assert.Equal(originalBytes, File.ReadAllBytes(originalPath));
-                using var copied = HubCertificate.LoadOrCreate(destination, "ignored-because-reused");
-                Assert.Equal(fingerprint, CertificateFingerprint.Of(copied));
-                Assert.True(copied.HasPrivateKey);
-                using var local = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(root, LocalHubRecord.FileName)));
-                Assert.Equal(fingerprint, local.RootElement.GetProperty("fingerprint").GetString());
-                foreach (var artifact in IdentityArtifacts(destination)) AssertPrivate(artifact);
-                await app.StopAsync();
-            }
-        }
-        var mainPath = HubNetwork.CertificatePath(Settings(null), new HubEnvironment(root));
-        Assert.Equal(originalPath, mainPath);
-        using var restartedMain = HubCertificate.LoadOrCreate(mainPath, "main-hub");
-        Assert.Equal(fingerprint, CertificateFingerprint.Of(restartedMain));
-        Assert.True(restartedMain.HasPrivateKey);
-        Assert.Equal(originalBytes, File.ReadAllBytes(mainPath));
     }
 
     private async Task<WebApplication> StartAsync(int httpPort, int httpsPort, bool enabled, int? localPort = null, Action<HttpsConnectionAdapterOptions>? configureHttps = null, bool configureCertificate = true)

@@ -36,7 +36,7 @@ public static class RelayEndpoints
     public static WebApplication MapRelayEndpoints(this WebApplication app)
     {
         app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
-        app.MapGet("/api/tools", (HttpContext context) => Results.Ok(ToolResults.Tools(RelayAuthentication.Caller(context.User).IsAdministrator))).RequireAuthorization();
+        app.MapGet("/api/tools", (HttpContext context) => Results.Ok(ToolResults.Tools(context))).RequireAuthorization();
         app.MapPost("/api/tools/{tool}", ExecuteToolAsync).RequireAuthorization()
             .Accepts<CoordinationRequest>("application/json").Produces<RelayReply>().Produces<RelayReply>(400).Produces(401).Produces<RelayReply>(403).Produces<RelayReply>(404).Produces<RelayReply>(409).Produces<RelayReply>(413)
             .WithDescription("Authenticated repository-scoped coordination. Arguments are the raw tool JSON object. Inspect GET /api/tools for the fixed catalog and required fields; actor identity always comes from authentication. dataJson is a JSON string containing structured domain data.");
