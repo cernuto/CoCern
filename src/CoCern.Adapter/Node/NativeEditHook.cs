@@ -10,6 +10,15 @@ internal static class NativeEditHook
     internal static bool Enabled => string.Equals(Environment.GetEnvironmentVariable("COCERN_FILE_CLAIMS"), "true", StringComparison.OrdinalIgnoreCase);
     internal static bool IsEdit(string? name) => name is "Edit" or "Write" or "MultiEdit" or "apply_patch" or "functions.apply_patch";
 
+    internal static bool RequiresValidation(JsonElement input)
+    {
+        if (!Enabled) return false;
+        if (input.ValueKind != JsonValueKind.Object) return true;
+        var eventName = ChatLocators.Text(input, "hook_event_name");
+        var toolName = ChatLocators.Text(input, "tool_name");
+        return eventName is null || eventName == "PreToolUse" && (toolName is null || IsEdit(toolName));
+    }
+
     internal static async Task<int> RunAsync(NativeJoin join, NativeHookContext context, JsonElement input, TextWriter error, CancellationToken ct)
     {
         using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
