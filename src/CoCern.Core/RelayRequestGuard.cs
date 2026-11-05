@@ -54,8 +54,15 @@ internal static class RelayRequestGuard
         foreach (var numeric in IntegerFields) if (args.ContainsKey(numeric) && args[numeric] is null) args.Remove(numeric);
         if (NotWholeNumber(args) is { } numberField) return Replies.Error(InvalidArguments, new { field = numberField });
         if (tool.Name == RelayTools.ContextPut && args["content"] is null) return Replies.Error(InvalidArguments, new { field = "content" });
-        foreach (var flag in new[] { "includeNextWork", "attention", "attentionDetail", "seen", "headersOnly", "presentStanding" })
+        foreach (var flag in new[] { "includeNextWork", "attention", "attentionDetail", "seen", "headersOnly", "presentStanding", "includeStale", "includeDetails", "openOnly" })
             if (args.ContainsKey(flag) && (args[flag] is not JsonValue value || !value.TryGetValue<bool>(out _))) return Replies.Error(InvalidArguments, new { field = flag });
+        if (tool.Name == RelayTools.TaskGet && (args.ContainsKey("openOnly") || args.ContainsKey("includeDetails") || args.ContainsKey("snapshotTag"))
+            && (args.ContainsKey("taskId") || args.ContainsKey("section") || args.ContainsKey("sinceRevision"))) return Replies.Error(InvalidArguments);
+        if (args["snapshotTag"] is { } listTag && (listTag is not JsonValue tagValue || !tagValue.TryGetValue<string>(out var tagText)
+            || tagText.Length > 64 || tagText.Any(char.IsControl))) return Replies.Error(InvalidArguments, new { field = "snapshotTag" });
+        if (args.ContainsKey("statusTag") && (tool.Name != RelayTools.GetStatus || args["statusTag"] is not JsonValue statusValue
+            || !statusValue.TryGetValue<string>(out var statusText) || statusText.Length > 64 || statusText.Any(char.IsControl)))
+            return Replies.Error(InvalidArguments, new { field = "statusTag" });
         // Machine revocation dispatches directly to discovery, outside the control aggregate's argument fence.
         if (tool.Name == RelayTools.ControlRequest && Text(args, "command") == "revoke_machine" && args.ContainsKey("allSessions"))
             return Replies.Error(InvalidArguments, new { field = "allSessions" });
@@ -169,9 +176,9 @@ internal static class RelayRequestGuard
 /// reads and removes them (after <see cref="RelayRequestGuard.Validate"/> has checked their shapes).
 /// </summary>
 internal sealed record CallControls(bool OfferWanted, bool StatusDetail, bool PageSeen, string[] SeenIds, string? KnownEtag, JsonObject? Usage, bool ModelVisible, bool? BackgroundCall,
-    bool HeadersOnly = false, string? KnownInboxEtag = null, bool PresentStanding = false)
+    bool HeadersOnly = false, string? KnownInboxEtag = null, bool PresentStanding = false, string? StatusTag = null, long? StatusHoldMinutes = null)
 {
-    private static readonly string[] Fields = ["usage", "attention", "attentionDetail", "attentionStatus", "maxHoldMinutes", "seen", "seenMessageIds", "knownEtag", "backgroundCall", "headersOnly", "knownInboxEtag", "presentStanding"];
+    private static readonly string[] Fields = ["usage", "attention", "attentionDetail", "attentionStatus", "maxHoldMinutes", "seen", "seenMessageIds", "knownEtag", "backgroundCall", "headersOnly", "knownInboxEtag", "presentStanding", "statusTag"];
 
     public static CallControls Take(JsonObject args)
     {
@@ -193,7 +200,9 @@ internal sealed record CallControls(bool OfferWanted, bool StatusDetail, bool Pa
             // unchanged answer when the inbox is the one it last read.
             HeadersOnly: args["headersOnly"] is JsonValue headers && headers.GetValue<bool>(),
             KnownInboxEtag: JsonFields.Text(args, "knownInboxEtag") is { Length: > 0 } inboxEtag ? inboxEtag : null,
-            PresentStanding: args["presentStanding"] is JsonValue present && present.GetValue<bool>());
+            PresentStanding: args["presentStanding"] is JsonValue present && present.GetValue<bool>(),
+            StatusTag: args["statusTag"] is JsonValue validator && validator.TryGetValue<string>(out var statusTag) ? statusTag : null,
+            StatusHoldMinutes: args["maxHoldMinutes"] is not null ? Number(args, "maxHoldMinutes") : null);
         foreach (var field in Fields) args.Remove(field);
         return controls;
     }

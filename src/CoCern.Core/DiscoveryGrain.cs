@@ -232,7 +232,7 @@ public sealed class MachineDirectory(IGrainFactory grains, TimeProvider? clock =
             while (cursor < RelayLimits.MaxRecords)
             {
                 ct.ThrowIfCancellationRequested();
-                var args = new JsonObject { ["repositoryId"] = repository, ["cursor"] = cursor, ["limit"] = RelayLimits.MaxPageSize };
+                var args = new JsonObject { ["repositoryId"] = repository, ["cursor"] = cursor, ["limit"] = RelayLimits.MaxPageSize, ["includeStale"] = true };
                 var found = await grains.GetGrain<IControlGrain>(AggregateKinds.ControlKey).ExecuteAsync(new RelayCaller(Internal.PrincipalId, false, [repository], true), RelayTools.WorkerList, args.ToJsonString());
                 if (!found.Ok || JsonNode.Parse(found.DataJson) is not JsonObject data || data["items"] is not JsonArray page) break;
                 available = true;
