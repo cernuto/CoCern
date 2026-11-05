@@ -77,7 +77,7 @@ internal sealed class NativeEditClaims(string privateDirectory, string protected
         public Task<AdapterReply> ReadAsync(string relativePath, long generation) =>
             CallAsync(RelayTools.ClaimAcquire, relativePath, Guid.NewGuid().ToString("N"), confirmGeneration: generation);
 
-        public Task RetireRenewalAsync(string relativePath, long generation, string invocation) =>
+        public Task<bool> RetireRenewalAsync(string relativePath, long generation, string invocation) =>
             join.RetireRenewalFenceAsync(context, repositoryId, expectedGeneration, invocation, JsonSerializer.SerializeToElement(Arguments(relativePath, generation, null, EditClaimLifecycle.LeaseSeconds)), cancellationToken);
 
         private static JsonObject Arguments(string path, long? generation, long? confirmGeneration, int? leaseSeconds)

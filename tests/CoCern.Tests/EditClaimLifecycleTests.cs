@@ -45,17 +45,39 @@ public sealed class EditClaimLifecycleTests
         Assert.Equal(new[] { "acquire-1-renew-0", "acquire-1-renew-1" }, fixture.Transport.Renewals);
         Assert.Equal(new[] { "acquire-1-renew-0" }, fixture.Transport.RetiredRenewals);
 
+        // A retirement that fails is not forgotten: renewals go on, and once it works every one still owed goes.
+        fixture.Transport.RetireFails = true;
+        fixture.Clock.Now = fixture.Clock.Now.AddSeconds(61);
+        await fixture.Lifecycle.SweepAsync(default);
+        fixture.Clock.Now = fixture.Clock.Now.AddSeconds(61);
+        await fixture.Lifecycle.SweepAsync(default);
+        Assert.Equal(4, fixture.Transport.Renewals.Count);
+        Assert.Single(fixture.Transport.RetiredRenewals);
+        fixture.Transport.RetireFails = false;
+        fixture.Clock.Now = fixture.Clock.Now.AddSeconds(61);
+        await fixture.Lifecycle.SweepAsync(default);
+        Assert.Equal(5, fixture.Transport.Renewals.Count);
+        Assert.Equal(new[] { "acquire-1-renew-0", "acquire-1-renew-1", "acquire-1-renew-2", "acquire-1-renew-3" }, fixture.Transport.RetiredRenewals);
+
         // Someone else's later content is not this chat's change, even though Git still calls the file dirty.
         fixture.Physical.Content = "someone else's change";
         fixture.Clock.Now = fixture.Clock.Now.AddSeconds(61);
         await fixture.Lifecycle.SweepAsync(default);
-        Assert.Equal(2, fixture.Transport.Renewals.Count);
+        Assert.Equal(5, fixture.Transport.Renewals.Count);
 
-        // A settled claim gives back its last answered renewal's fence too.
+        // A settled claim keeps its receipts until its last answered renewal's fence is confirmed gone, and doesn't release twice.
         fixture.Physical.Dirt = EditClaimDirt.Clean;
         fixture.Transport.ReleaseReply = new AdapterReply(true, "Ok", JsonSerializer.SerializeToElement(new { generation = 7L, released = true }), 7);
+        fixture.Transport.RetireFails = true;
         await fixture.Lifecycle.SweepAsync(default);
-        Assert.Equal(new[] { "acquire-1-renew-0", "acquire-1-renew-1" }, fixture.Transport.RetiredRenewals);
+        Assert.Single(fixture.Transport.Releases);
+        Assert.Equal(4, fixture.Transport.RetiredRenewals.Count);
+        Assert.Equal("held", fixture.Ledger.Read("edit-1")!.Outcome);
+        fixture.Transport.RetireFails = false;
+        await fixture.Lifecycle.SweepAsync(default);
+        Assert.Single(fixture.Transport.Releases);
+        Assert.Equal("acquire-1-renew-4", fixture.Transport.RetiredRenewals[^1]);
+        Assert.NotEqual("held", fixture.Ledger.Read("edit-1")?.Outcome);
     }
 
     [Fact]
@@ -230,6 +252,7 @@ public sealed class EditClaimLifecycleTests
         internal List<string> Renewals { get; } = [];
         internal List<string> Releases { get; } = [];
         internal List<string> RetiredRenewals { get; } = [];
+        internal bool RetireFails { get; set; }
         internal AdapterReply ReleaseReply { get; set; } = new(false, "hub_timeout");
         internal AdapterReply ReadReply { get; set; } = new(false, "hub_timeout");
 
@@ -247,10 +270,10 @@ public sealed class EditClaimLifecycleTests
 
         public Task<AdapterReply> ReadAsync(string relativePath, long generation) => Task.FromResult(ReadReply);
 
-        public Task RetireRenewalAsync(string relativePath, long generation, string invocation)
+        public Task<bool> RetireRenewalAsync(string relativePath, long generation, string invocation)
         {
-            RetiredRenewals.Add(invocation);
-            return Task.CompletedTask;
+            if (!RetireFails) RetiredRenewals.Add(invocation);
+            return Task.FromResult(!RetireFails);
         }
     }
 }

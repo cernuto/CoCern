@@ -12,7 +12,7 @@ internal enum EditClaimDirt { Unknown, Clean, Dirty }
 internal sealed record EditClaimAttempt(string IntentId, string RelativePath, string? BeforeFingerprint, string? AfterFingerprint, DateTimeOffset? ObservedActivity, DateTimeOffset PreparedAt, bool Settled);
 
 /// <summary>One claim, meaning one path at one generation, however many intents share it. No token, proof or file content is stored, only SHA-256 fingerprints.</summary>
-internal sealed record EditClaimTracking(string RelativePath, long Generation, DateTimeOffset LeaseUntil, long RenewSequence = 0, bool RenewPending = false, string? ReleaseOutcome = null, string? OwnFingerprint = null);
+internal sealed record EditClaimTracking(string RelativePath, long Generation, DateTimeOffset LeaseUntil, long RenewSequence = 0, bool RenewPending = false, string? ReleaseOutcome = null, string? OwnFingerprint = null, long RetiredBelow = 0);
 
 /// <summary>Read fresh at every use. Anything that cannot be proven answers null or <see cref="EditClaimDirt.Unknown"/>.</summary>
 internal interface IEditClaimPhysicalState
@@ -27,8 +27,8 @@ internal interface IEditClaimLifecycleTransport
     Task<AdapterReply> RenewAsync(string relativePath, long generation, string invocation);
     Task<AdapterReply> CleanReleaseAsync(string relativePath, long generation, string invocation);
     Task<AdapterReply> ReadAsync(string relativePath, long generation);
-    /// <summary>Best effort: gives back the fence of a renewal that can never be sent again. Failing changes nothing, because the next renewal or settlement asks again.</summary>
-    Task RetireRenewalAsync(string relativePath, long generation, string invocation);
+    /// <summary>Gives back the fence of a renewal that can never be sent again. True when nothing is left to do; false means the outcome is unconfirmed, and the caller keeps the obligation.</summary>
+    Task<bool> RetireRenewalAsync(string relativePath, long generation, string invocation);
 }
 
 /// <summary>The sidecar beside the ledger, under the same repository/session/generation/checkout partition, so a saved attempt only ever correlates within its own native generation.</summary>
@@ -289,8 +289,8 @@ internal sealed class EditClaimLifecycle(EditClaimLedger ledger, EditClaimLifecy
         if (tracked.ReleaseOutcome == ReleaseUnknown || tracked.OwnFingerprint is null) return tracked;
         if (!tracked.RenewPending && tracked.LeaseUntil - time.GetUtcNow() > RenewWithin) return tracked;
         if (physical.Fingerprint(path) != tracked.OwnFingerprint) return tracked;
-        // The saved sequence has moved past the last renewal, so nothing can send it again and each dirty file keeps only one fence. The current one stays, answered or not.
-        if (tracked.RenewSequence > 0) await transport.RetireRenewalAsync(path, generation, Renewal(grant, tracked.RenewSequence - 1));
+        // An unconfirmed retirement stays on record and the renewal still goes, because losing the claim would cost more than a slot for now.
+        if (tracked.RetiredBelow < tracked.RenewSequence) await RetireAnsweredRenewalsAsync(grant, path, generation, ct);
         // Reserved before sending, so a lost reply replays the same invocation rather than spending a new one.
         var invocation = Renewal(grant, tracked.RenewSequence);
         if (!await ChangeAsync(path, generation, row => row with { RenewPending = true }, ct)) return tracked;
@@ -367,12 +367,27 @@ internal sealed class EditClaimLifecycle(EditClaimLedger ledger, EditClaimLifecy
 
     private static string Renewal(Held grant, long sequence) => grant.Lease.RequestId + "-renew-" + sequence.ToString(CultureInfo.InvariantCulture);
 
-    /// <summary>Ends a claim's receipts and gives back its last answered renewal's fence. A pending renewal whose reply was lost keeps its fence, since that call's outcome is unknown.</summary>
+    /// <summary>
+    /// Retires every renewal the saved sequence has moved past, from the saved cursor up, stopping at the first unconfirmed one. The sequence only rises and only after an answer, so nothing can send these again.
+    /// The current sequence's fence stays, answered or not. True when none is left owing.
+    /// </summary>
+    private async Task<bool> RetireAnsweredRenewalsAsync(Held grant, string path, long generation, CancellationToken ct)
+    {
+        if (await store.ReadAsync(ct) is not { } document) return false;
+        if (document.Claims.FirstOrDefault(row => row.RelativePath == path && row.Generation == generation) is not { } tracked) return true;
+        var next = tracked.RetiredBelow;
+        var confirmed = true;
+        while (next < tracked.RenewSequence && (confirmed = await transport.RetireRenewalAsync(path, generation, Renewal(grant, next)))) next++;
+        // A cursor that fails to save only repeats retirements that are already done, and those change nothing.
+        if (next > tracked.RetiredBelow && !await ChangeAsync(path, generation, row => row with { RetiredBelow = Math.Max(row.RetiredBelow, next) }, ct)) return false;
+        return confirmed;
+    }
+
+    /// <summary>Ends a claim's receipts once its answered renewals' fences are given back. Until then the receipts stay, so the next sweep comes back here; the claim itself is already over and its row says so.</summary>
     private async Task SettleClaimAsync(IEnumerable<Held> receipts, string path, long generation, CancellationToken ct)
     {
         var held = receipts.ToArray();
-        if (Grant(held) is { } grant && (await store.ReadAsync(ct))?.Claims.FirstOrDefault(row => row.RelativePath == path && row.Generation == generation) is { RenewSequence: > 0 } tracked)
-            await transport.RetireRenewalAsync(path, generation, Renewal(grant, tracked.RenewSequence - 1));
+        if (Grant(held) is { } grant && !await RetireAnsweredRenewalsAsync(grant, path, generation, ct)) return;
         Settle(held.Select(receipt => receipt.Intent.Id), path, generation);
     }
 

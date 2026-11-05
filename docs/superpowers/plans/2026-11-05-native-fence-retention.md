@@ -15,19 +15,30 @@ A fence holds a call to one session, tool and argument set, and keeps its reques
 Keep one fence for each dirty file by retiring a renewal's fence once its sequence has moved on.
 
 - **When a renewal is finished.** `RenewSequence` only rises and is durable. Once the store shows a sequence above N, nothing can send `-renew-N` again. A renewal is answered first, then the sequence moves, so a sequence above N also means N was answered.
-- **When to retire.** Before sending a renewal, retire the fence for sequence minus one. When a claim settles, retire the same one. A retirement lost to a crash or IO failure is tried again before the next renewal, and it is a no-op once the file has gone.
-- **What stays.** The current sequence's fence is never retired, answered or not. That includes a pending renewal whose reply was lost, even after its claim settles: it costs one slot per lost final reply, which is rare, and the rule stays simple. Acquire and release fences are untouched.
-- **Only exact matches go.** `NativeJoin` retires only `claim_renew`, and only after `MutationFence` with `reserve: false` confirms the file is private and matches this binding generation, session, tool and arguments. Anything else leaves the file in place.
+- **When to retire.** Before sending a renewal, and when a claim settles, retire every sequence from the saved cursor `RetiredBelow` up to, but not including, the current one. Stop at the first unconfirmed retirement. The cursor saves what was confirmed.
+- **A failed retirement stays owed.** The cursor only moves past a confirmed retirement, so the next pass starts from the same sequence. Renewals still go meanwhile, because losing the claim costs more than a slot for now. A settling claim keeps its receipts until its retirements are confirmed, so the sweep keeps coming back; the claim itself is already over and its row says so.
+- **What stays.** The current sequence's fence is never retired, answered or not. That includes a pending renewal whose reply was lost, even after its claim settles. Acquire and release fences are untouched.
+- **Only exact matches go.** `NativeJoin` retires only `claim_renew`, and only after `MutationFence` with `reserve: false` confirms the file is private and matches this binding generation, session, tool and arguments. A fence that doesn't match is left in place and reported as done, because retrying can't change that. File errors, a missing handle or a reparse point report unconfirmed.
 
 ## Why this is safe
 
 Removing an answered fence changes nothing at the hub: the request ID is still derived from the invocation, so a late duplicate of N is replayed or refused there. A late renewal can only extend a live grant of this same generation, or be refused as stale. Sweeps of one binding are already serialized by the sweep gate, so no second process can be sending N while it is retired.
+
+## What can still be left behind
+
+Each of these is a permanent slot, or a refusal that fails safe.
+
+- One slot per settled generation whose final renewal reply was lost.
+- One slot for a fence that doesn't match its renewal. That takes outside tampering or a hash collision.
+- Fences of an older binding generation, because its ledger is no longer used.
+- While retirement keeps failing, renewals still spend a slot each, so a lasting file error can still reach the 4096 refusal. Nothing is deleted to make room, and the owed fences go once the error clears, provided the sweep can still run.
 
 ## Alternatives rejected
 
 - **No fence for renewals.** It would also drop the session and argument check on a real in-flight call, so a replay after a rebind would no longer be refused locally.
 - **Reusing one invocation for every renewal.** The hub would replay the first stored reply, with its old lease, and never extend the claim.
 - **A longer lease or fewer renewals.** That only delays exhaustion, and a longer lease keeps a crashed chat's file locked for longer.
+- **Not advancing a renewal until the last fence is confirmed gone.** A file error on cleanup would then drop the claim on an edit in progress. Keeping the obligation on record gives the same bound without that.
 - **Deleting the oldest fences at the limit.** The oldest may be an uncertain call, so this could break replay.
 
 ## What this does not cover
@@ -38,7 +49,8 @@ Removing an answered fence changes nothing at the hub: the request ID is still d
 
 ## Change
 
-- `IEditClaimLifecycleTransport` gains `RetireRenewalAsync(path, generation, invocation)`, best effort.
+- `EditClaimTracking` gains the saved cursor `RetiredBelow`.
+- `IEditClaimLifecycleTransport` gains `RetireRenewalAsync(path, generation, invocation)`, which answers whether anything is still owed.
 - `NativeEditClaims.FileTransport` builds the same arguments as the renewal and calls a new `NativeJoin.RetireRenewalFenceAsync`.
-- `EditClaimLifecycle` retires before each renewal and in one settle path.
-- `A_claim_renews_only_for_this_chats_own_change_still_dirty_in_the_file` asserts that the previous fence goes and the current one stays. This is a replay fence, so a test is allowed. Nothing has been compiled or run.
+- `EditClaimLifecycle` retires before each renewal and in one settle path, which holds the receipts until retirement is confirmed.
+- `A_claim_renews_only_for_this_chats_own_change_still_dirty_in_the_file` covers the previous fence going, the current one staying, and a failed retirement being retried at both points. This is a replay fence, so a test is allowed. Nothing has been compiled or run.
