@@ -37,6 +37,8 @@ public sealed record RelayObservation
     public DashboardInteractions Interactions { get; init; } = new();
     /// <summary>The reports of the sessions in <see cref="Sessions"/>, read from the same rows; <see cref="SessionsTruncated"/> says some sessions were not read.</summary>
     public WaitingReport[] WaitingReports { get; init; } = [];
+    /// <summary>The unread direct mail of the sessions in <see cref="Sessions"/> and their own last hub calls, for the unresponsive row.</summary>
+    public WaitingMail[] WaitingMail { get; init; } = [];
     public string[] Warnings { get; init; } = [];
 }
 

@@ -92,6 +92,10 @@ public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
                 PRIMARY KEY (day, repository_id, tool, call_origin)
             );
             """, transaction)) origins.ExecuteNonQuery();
+        // A session's own last call, however many of a watcher's rows came after it: walking those through ix_activity_log_session_call
+        // measured about 75 ms per session over a day of polling. This holds only the rows it is for, so polling adds nothing to it.
+        using (var foreground = Command("CREATE INDEX IF NOT EXISTS ix_activity_log_session_foreground ON activity_log(repository_id, session_id, at_ticks DESC) WHERE kind = 'call' AND ok = 1 AND background_call = 0;", transaction))
+            foreground.ExecuteNonQuery();
         void AddColumns(string table, IEnumerable<(string Column, string Type)> additions)
         {
             var existing = new HashSet<string>(StringComparer.OrdinalIgnoreCase);

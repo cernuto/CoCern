@@ -1,0 +1,56 @@
+<section class="waiting-on-you" aria-labelledby="@HeadingId">
+    <h2 id="@HeadingId">Waiting on you</h2>
+    @if (Waiting.Count == 0 && Waiting.Items.Length == 0)
+    {
+        <p class="muted">@(Waiting.Truncated ? "None reported in this update." : "Nothing is waiting on you.")</p>
+    }
+    @foreach (var group in new[] { (Rows: Waiting.Items, Maybe: false), (Rows: Waiting.Maybe, Maybe: true) })
+    {
+        @if (group.Maybe && (Waiting.MaybeCount > 0 || group.Rows.Length > 0))
+        {
+            <h3>Coordinator holds <span class="muted">@Waiting.MaybeCount</span></h3>
+            <p class="muted">These may not need your answer. They are separate from the badge count.</p>
+        }
+        @if (group.Rows.Length > 0)
+        {
+            <ul class="waiting-items">
+                @foreach (var item in group.Rows)
+                {
+                    <li>
+                        <div class="waiting-item-heading">
+                            <span class="waiting-kind">@KindLabel(item.Kind)</span>
+                            @if (!string.IsNullOrEmpty(item.SessionId))
+                            {
+                                <button type="button" class="waiting-session" @onclick="() => OnSelectSession.InvokeAsync(item.SessionId)">@(string.IsNullOrEmpty(item.Label) ? "Open chat" : item.Label)</button>
+                            }
+                            else if (!string.IsNullOrEmpty(item.Label)) { <strong>@item.Label</strong> }
+                        </div>
+                        <p class="waiting-text">@item.Text</p>
+                        <div class="waiting-item-details">
+                            @if (!string.IsNullOrEmpty(item.RepositoryId)) { <span>@item.RepositoryId@if (!string.IsNullOrEmpty(item.BoardId)) { <text> / @item.BoardId</text> }</span> }
+                            @if (item.Since is { } since) { <time datetime="@since.ToString("O")" title="@DashboardFormat.Timestamp(since)">@DashboardFormat.Ago(since, Now)</time> }
+                            @if (item.Kind == DashboardWaitingKinds.StandingProposal) { <button type="button" class="waiting-session" @onclick="() => OnOpenStanding.InvokeAsync()">Review proposal</button> }
+                        </div>
+                    </li>
+                }
+            </ul>
+        }
+    }
+    @if (Waiting.Truncated) { <p class="limit-note">This list may be incomplete. @Waiting.Count items were reported.</p> }
+</section>
+@code {
+    [Parameter] public DashboardWaiting Waiting { get; set; } = new();
+    [Parameter] public DateTimeOffset Now { get; set; } = DateTimeOffset.UtcNow;
+    [Parameter] public string HeadingId { get; set; } = "waiting-heading";
+    [Parameter] public EventCallback<string> OnSelectSession { get; set; }
+    [Parameter] public EventCallback OnOpenStanding { get; set; }
+
+    private static string KindLabel(string kind) => kind switch
+    {
+        DashboardWaitingKinds.StandingProposal => "Standing proposal",
+        DashboardWaitingKinds.HumanBlocker => "Human decision",
+        DashboardWaitingKinds.SelfReport => "Reported by the chat",
+        DashboardWaitingKinds.CoordinatorHold => "Coordinator hold",
+        _ => "Update"
+    };
+}
