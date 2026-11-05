@@ -191,7 +191,7 @@ internal static class ToolSchemas
             case RelayTools.GetStatus:
                 properties["statusTag"] = new { type = "string", maxLength = 64, description = "Opt in with an empty string; echo the returned tag for freshly authorized unchanged status. Missing tags mean full reads." };
                 properties["managerHistoryBefore"] = new { type = "integer", minimum = 0, description = "Administrator-only: read manager selections older than this generation." };
-                properties["managerHistoryOnly"] = new { type = "boolean", description = "Reserve this read for the visible manager summary and administrator history, omitting cancellation requests. Use when ordinary status omits manager or manager.historyReadRequired is true. Retain the incoming cursor for history continuation." }; break;
+                properties["managerHistoryOnly"] = new { type = "boolean", description = "Reserve this read for the visible manager summary and administrator history, omitting cancellation requests. Administrators also get the action log. Use when ordinary status omits manager or manager.historyReadRequired is true. Retain the incoming cursor for history continuation." }; break;
             case RelayTools.WorkerList:
                 properties["includeStale"] = new { type = "boolean", description = "Full directory rows, including stale entries and bindings." };
                 properties["snapshotTag"] = new { type = "string", maxLength = 64, description = "Echo with a compact list continuation; restart on ListRestartRequired." }; break;

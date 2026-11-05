@@ -27,6 +27,7 @@ public sealed record InboxMessage
     public const string TaskVersionKey = "taskVersion";
     public const string SupersedeKey = "supersede";
     public const string WakeKey = "wake";
+    public const string ManagerGenerationKey = "managerGeneration";
 
     /// <summary>Every key a stored message may hold.</summary>
     public static IReadOnlyList<string> Keys { get; } =
@@ -77,6 +78,12 @@ public sealed record InboxMessage
     /// <summary>False for a status or FYI message, which never wakes its recipient; it is read with the next wake or inbox check.</summary>
     public bool Wake { get; init; } = true;
 
+    /// <summary>
+    /// Set by the hub alone when the verified sender held the manager's seat, at this generation. It says who sent the message, not that Paul approved
+    /// anything: the recipient treats it as a request unless it falls inside a goal he approved.
+    /// </summary>
+    public long? ManagerGeneration { get; init; }
+
     /// <summary>A board's notice that <paramref name="taskId"/> changed to <paramref name="taskVersion"/>, for the session it concerns.</summary>
     public static InboxMessage TaskChanged(string repositoryId, string messageId, string boardId, string taskId, long taskVersion) => new()
     {
@@ -100,6 +107,7 @@ public sealed record InboxMessage
         if (TaskVersion is { } version) json[TaskVersionKey] = version;
         if (Supersede) json[SupersedeKey] = true;
         if (!Wake) json[WakeKey] = false;
+        if (ManagerGeneration is { } generation) json[ManagerGenerationKey] = generation;
         return json;
     }
 
@@ -116,7 +124,8 @@ public sealed record InboxMessage
         BoardId = read.OptionalText(BoardIdKey), Text = read.OptionalText(TextKey), Author = read.OptionalText(AuthorKey), SenderSessionId = read.OptionalText(SenderSessionIdKey),
         SentAt = read.OptionalDate(SentAtKey), ReplyTo = read.OptionalText(ReplyToKey), UndeliveredMessageId = read.OptionalText(UndeliveredMessageIdKey),
         RecipientSessionId = read.OptionalText(RecipientSessionIdKey), Reason = read.OptionalText(ReasonKey), TaskVersion = read.OptionalNumber(TaskVersionKey),
-        Supersede = read.OptionalFlag(SupersedeKey), Wake = read.Node(WakeKey) is null || read.Flag(WakeKey)
+        Supersede = read.OptionalFlag(SupersedeKey), Wake = read.Node(WakeKey) is null || read.Flag(WakeKey),
+        ManagerGeneration = read.OptionalNumber(ManagerGenerationKey)
     };
 }
 

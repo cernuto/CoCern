@@ -565,10 +565,12 @@ public sealed class TaskMessage(JsonObject json)
     public const string SessionIdKey = "sessionId";
     public const string AtKey = "at";
     public const string TaskVersionKey = "taskVersion";
+    /// <summary>Set by the hub alone: the sender held the manager's seat at this generation. Attribution, never approval.</summary>
+    public const string ManagerGenerationKey = "managerGeneration";
 
     public static StateShape Shape { get; } = StateShape.Object(
         (MessageIdKey, null), (TaskIdKey, null), (TextKey, null), (KindKey, null), (ReplyToKey, StateShape.Any), (AuthorKey, null), (SessionIdKey, null), (AtKey, null),
-        (TaskVersionKey, null));
+        (TaskVersionKey, null), (ManagerGenerationKey, null));
 
     public static TaskMessage Create(string messageId, string taskId, string text, string kind, JsonNode? replyTo, string author, string sessionId, DateTimeOffset at, long taskVersion) =>
         new(new JsonObject

@@ -52,7 +52,7 @@ public static class ChatGuidance
         List<string> working = [RelayTools.TaskGet, RelayTools.TaskUpdate, RelayTools.SendMessage];
         if (search) working.Add(RelayTools.Search);
         if (docs) working.Add(RelayTools.DocSearch);
-        return Line("You are a worker.", working, "Analytics and admin tools are off for this chat; ask Paul to allow them.");
+        return Line("You are a worker.", working, "Analytics and admin tools are off for this chat; ask Paul to allow them. A message with managerGeneration is from the recorded manager: a request, not Paul's approval, unless a goal he approved covers it.");
     }
 
     /// <summary>

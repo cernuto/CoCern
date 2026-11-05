@@ -448,6 +448,9 @@ internal static class TaskBoardAggregate
         var nextVersion = task.Version + 1;
         var entry = TaskMessage.Create(Guid.NewGuid().ToString("N"), task.TaskId, SessionAggregate.MessageText(message), Text(message, "kind", "message"), message["replyTo"]?.DeepClone(),
             context.Caller.PrincipalId, context.SessionId, context.Now, nextVersion);
+        // send_message alone: its copy of this field is the hub's, and a task_update's arguments are still the client's.
+        if (context.Operation == RelayTools.SendMessage && context.Args[ServerArguments.ManagerOrigin] is not null)
+            entry.Json[TaskMessage.ManagerGenerationKey] = Number(context.Args, ServerArguments.ManagerOrigin);
         if (CheckReadable(entry.Json) is { } unreadable) return unreadable;
         messages.Add(entry.Json);
         var recipient = Text(message, "recipientSessionId", task.Owner);
