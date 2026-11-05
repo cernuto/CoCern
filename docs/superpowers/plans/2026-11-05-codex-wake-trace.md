@@ -34,7 +34,7 @@ Inferred from those: `LocalChatWake.TryCreate` returned null in the Codex adapte
 
 ## Not established
 
-The reason `Create` did not complete in the Codex adapter. My shell run kept my full environment, while the Codex process has only 23 to 25 variables. The difference is the leading suspect but it is untested: a replay using the Codex process's exact environment was refused by this session's permission check, and I did not pursue it. I also could not separate which of the adapters started at 23:50 wrote the file. The diagnostic in step 1 below answers this without touching another process.
+The reason `Create` did not complete in the Codex adapter. The Codex process's smaller environment was the first suspect, and it is ruled out: the deployed adapter completed setup with only `COCERN_TOKEN_FILE` and `COCERN_URL` set, using a throwaway token and an unused port. The Codex adapter also runs as the same user. Root and the reviewer having no handle at all looks systematic rather than a one-off race, but that is inference. I also could not separate which of the adapters started at 23:50 wrote the file. The diagnostic in step 1 below is meant to answer this; it must cover `Observe` as well as setup, since the cause may not be in `Create`.
 
 This also does not explain the second PC. `104fd233` uses a node rather than `LocalChatWake`, and I did not inspect it.
 
