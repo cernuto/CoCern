@@ -2,7 +2,7 @@
 
 ## Current state
 
-`codex/hub-response-compaction-main` contains the prepared tests and implementation source. It is WIP and is not deployed. The first 24-case run produced 22 failures and two compatibility passes. After implementing the worker and task lists and replacing missing-field null dereferences with explicit assertions, the next run passed 22 cases; only the two status-validator cases remained red. The status implementation and additional HTTP and wire-measurement cases are now authored but unverified. Runtime work is paused while the exclusive Batch E full gate runs.
+`codex/hub-response-compaction-main` contains the implementation and tests, includes main through `d3fd48d`, and is not deployed. The original 24-case red run established the missing behavior; the expanded focused suite passed 27/27 at `88ceb44`. The first integrated affected run completed 460 cases with 456 passes and four fixture failures: exact pipeline order, explicit full bindings and continuation tags. These fixtures are corrected. The subsequent review-boundary run passed 45/46, including scoped status/list validators and oversized worker/task piece reassembly; its only failure was the synthetic board fixture omitting the framework's normal request map before a strict state comparison. That fixture is corrected in `7592ccb`; the corrected affected run and narrow re-review remain pending while the other worker owns the timing window.
 
 ## Worker and task lists
 
@@ -25,5 +25,7 @@ The production edit set is `ToolSchemas.cs`, `ControlAggregate.cs`, `TaskBoardAg
 Remaining checks include full binding recovery, safe retention, byte and piece bounds, clock-only membership restarts, unchanged detail/delta/archive contracts, fresh authorization, scoped validators, pause/cancel/inbox and attention transitions, history/piggyback fallback, pipeline ordering and catalog caps. Broader affected suites and the project gate remain required before completion. No cap increase is part of this feature.
 
 Efficiency comparisons use the same authorized fixture for compact and full responses, measuring serialized UTF-8 bytes and the production o200k token counter separately. Historical cohorts were response bytes: background status 10,916,527 across 22,040 calls; inbox with unknown origin 9,690,383 across 6,361; workers with unknown origin 4,038,039 across 533; task reads with unknown origin 2,424,816 across 581. These figures are not token counts or measured savings. Unknown origin does not identify a provider, and unmatched cumulative snapshots cannot establish improvement.
+
+The `88ceb44` focused run measured full/compact pairs on the same fixtures: status 519/97 bytes and 172/43 tokens; workers 4,636/3,054 bytes and 1,561/1,140 tokens; board lists 2,055/1,418 bytes and 571/415 tokens. These are fixture measurements, not estimates of historical production savings. Random fixture identifiers can change token totals between runs.
 
 The separate call-origin telemetry work is already integrated into the relevant release batches and is not part of this compaction edit set. It grants no authority and cannot classify historical calls retrospectively.
