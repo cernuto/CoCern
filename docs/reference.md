@@ -531,6 +531,7 @@ Connect sets `COCERN_TOKEN_FILE` and the known `COCERN_URL`. It sets `COCERN_FIN
 | `COCERN_TOKEN_FILE` | | File holding the client token. Wins over `COCERN_TOKEN`. |
 | `COCERN_TOKEN` | | The token itself. |
 | `COCERN_PROFILE` | | `chat`: only `session_open`, `send_message`, `check_inbox`, `ack` and `chat_directory`. `diagnostics`: worker tools plus analytics and `hub_diagnose`, requiring an administrator credential role for those two and exposing no administrator mutations. Default and `chat` behavior are unchanged. |
+| `COCERN_REPOSITORY` | | The repository ID a call gets when it leaves `repositoryId` out. Without it, the adapter uses the only repository this chat has a session in, or answers `InvalidArguments` without calling the hub. It grants nothing: the hub still authorizes every call. |
 | `COCERN_ROLE` | | `admin` also lists administrator tools, for a chat whose token is an administrator's (Connect's is). The hub still checks the token. |
 | `COCERN_SIGNALR` | `false` | `true` prints a hint on standard error when the inbox changes. |
 | `COCERN_FINGERPRINT` | | The hub certificate's SHA-256 fingerprint, for an `https://` `COCERN_URL`: only that certificate is accepted. Connect sets it for pinned HTTPS, omits it for local HTTP and removes the old pin when moving an owned entry to HTTP. |

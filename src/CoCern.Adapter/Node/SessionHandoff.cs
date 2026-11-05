@@ -130,6 +130,19 @@ public sealed class SessionHandoff
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { return null; }
     }
 
+    /// <summary>The repository this chat has sessions in among the handles here, or null with no chat ID, none, or more than one, which would be a guess.</summary>
+    internal string? OwnRepository()
+    {
+        if (_client is null) return null;
+        try
+        {
+            var repositories = NodeState.ReadSessionHandles(_folder).Where(handle => handle.NativeBindingKey is null && (handle.Client is not null || handle.Chat is not null) && OwnsNative(handle))
+                .Select(handle => handle.RepositoryId).Distinct(StringComparer.Ordinal).Take(2).ToArray();
+            return repositories.Length == 1 ? repositories[0] : null;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { return null; }
+    }
+
     internal void RecordLocal(JsonElement arguments, AdapterReply reply)
     {
         if (!reply.Ok || reply.Data is not { ValueKind: JsonValueKind.Object } data || ChatLocators.Text(data, "sessionId") is not { } session || !NodeState.IsFileId(session)) return;

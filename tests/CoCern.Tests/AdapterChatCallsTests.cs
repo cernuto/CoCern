@@ -51,6 +51,26 @@ public sealed class AdapterChatCallsTests : IDisposable
     private static (string? Id, string? Token) Handle(JsonObject sent) => (sent["sessionId"]?.GetValue<string>(), sent["sessionToken"]?.GetValue<string>());
 
     [Fact]
+    public async Task A_call_that_leaves_out_its_repository_gets_the_configured_one_or_a_plain_answer_never_a_denial()
+    {
+        using var hub = new FakeHub();
+        var omitted = JsonSerializer.SerializeToElement(new { limit = 1 });
+
+        var unknown = await new ChatCalls(hub.Forwarder(), null, null, "scope", () => null).CallAsync(RelayTools.CheckInbox, omitted, CancellationToken.None);
+        Assert.Equal(RelayErrorCodes.InvalidArguments, unknown.Code);
+
+        var configured = new ChatCalls(hub.Forwarder(), null, null, "scope", () => null, repository: "configured");
+        await configured.CallAsync(RelayTools.CheckInbox, omitted, CancellationToken.None);
+        Assert.Equal("configured", hub.Sent(RelayTools.CheckInbox)["repositoryId"]!.GetValue<string>());
+        await configured.CallAsync(RelayTools.CheckInbox, JsonSerializer.SerializeToElement(new { repositoryId = " " }), CancellationToken.None);
+        Assert.Equal("configured", hub.Sent(RelayTools.CheckInbox)["repositoryId"]!.GetValue<string>());
+
+        // A repository the caller named stands, for the hub to authorize.
+        await configured.CallAsync(RelayTools.CheckInbox, Repo("named"), CancellationToken.None);
+        Assert.Equal("named", hub.Sent(RelayTools.CheckInbox)["repositoryId"]!.GetValue<string>());
+    }
+
+    [Fact]
     public async Task A_restarted_adapter_finds_the_chats_session_in_its_handle_and_never_another_chats()
     {
         using var hub = new FakeHub();

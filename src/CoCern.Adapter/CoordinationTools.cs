@@ -44,10 +44,10 @@ public static class CoordinationTools
     }
 
     /// <param name="chat">The chat ID the client exported to this process (<see cref="AdapterOptions.ExportedChat"/>), if any; it keeps the chat's request IDs its own across adapter restarts.</param>
-    public static IEnumerable<McpServerTool> Create(RelayForwarder forwarder, bool admin, SessionHints? hints = null, SessionHandoff? handoff = null, bool chatOnly = false, ChatLocation? chat = null, LocalChatWake? localWake = null, bool diagnostics = false, bool eventWaits = false)
+    public static IEnumerable<McpServerTool> Create(RelayForwarder forwarder, bool admin, SessionHints? hints = null, SessionHandoff? handoff = null, bool chatOnly = false, ChatLocation? chat = null, LocalChatWake? localWake = null, bool diagnostics = false, bool eventWaits = false, string? repository = null)
     {
         // One per adapter, so every tool sees the session this chat opened.
-        var calls = new ChatCalls(forwarder, hints, handoff, RequestScope(chat), localWake: localWake);
+        var calls = new ChatCalls(forwarder, hints, handoff, RequestScope(chat), localWake: localWake, repository: repository);
         return Surface(admin, chatOnly, diagnostics, eventWaits).Select(tool => new ForwardedTool(tool, calls));
     }
 
@@ -231,7 +231,7 @@ public static class CoordinationTools
 /// <c>close_sessions</c> and on any call that needs a session and leaves it out) and what it takes from their replies (the chat's current session,
 /// the node's session handle, the optional hints).
 /// </summary>
-internal sealed class ChatCalls(RelayForwarder forwarder, SessionHints? hints, SessionHandoff? handoff, string requestScope, Func<string?>? workspace = null, LocalChatWake? localWake = null, string? wakeStatusRoot = null)
+internal sealed class ChatCalls(RelayForwarder forwarder, SessionHints? hints, SessionHandoff? handoff, string requestScope, Func<string?>? workspace = null, LocalChatWake? localWake = null, string? wakeStatusRoot = null, string? repository = null)
 {
     private readonly Func<string?> _workspace = workspace ?? (() => CoordinationTools.Workspace);
     private readonly RelayForwarder _forwarder = forwarder.Tagged(CallOrigins.Mcp);
@@ -249,6 +249,8 @@ internal sealed class ChatCalls(RelayForwarder forwarder, SessionHints? hints, S
     {
         if (ProtectedCheckoutRoot.NamedIn(arguments)) return new(false, "native_invocation_conflict");
         arguments = RelayForwarder.WithOrigin(arguments, background: false);
+        if (!TryWithRepository(ref arguments))
+            return new(false, RelayErrorCodes.InvalidArguments, JsonSerializer.SerializeToElement(new { field = "repositoryId", hint = ChatGuidance.MissingRepository }));
         var suppliedToken = arguments.ValueKind == JsonValueKind.Object && arguments.TryGetProperty("sessionToken", out _);
         if (tool == RelayTools.SessionOpen) arguments = CoordinationTools.OwnRequestId(arguments, _workspace(), requestScope);
         else if (tool == RelayTools.ControlRequest) arguments = CoordinationTools.WithOwnSession(arguments, CurrentSession);
@@ -276,6 +278,24 @@ internal sealed class ChatCalls(RelayForwarder forwarder, SessionHints? hints, S
         }
         if (tool == RelayTools.SessionOpen) reply = _forwarder.WithOwnStartHint(reply);
         return tool is RelayTools.SessionOpen or RelayTools.GetStatus ? LocalWakeStatus.AddTo(reply, wakeStatusRoot) : reply;
+    }
+
+    /// <summary>
+    /// A model can leave out <c>repositoryId</c>, and the hub would call that <c>RepositoryDenied</c> and send the chat looking for an access problem it doesn't have. A blank counts as left out. This fills in
+    /// the configured repository, else the only one this chat has a session in, here or on disk. With neither known it answers without calling the hub. A value the caller gave stands, and the hub still authorizes whatever is sent.
+    /// </summary>
+    private bool TryWithRepository(ref JsonElement arguments)
+    {
+        if (arguments.ValueKind != JsonValueKind.Object) return true;
+        if (arguments.TryGetProperty("repositoryId", out var given) && given.ValueKind != JsonValueKind.Null && !(given.ValueKind == JsonValueKind.String && string.IsNullOrWhiteSpace(given.GetString()))) return true;
+        var known = repository;
+        if (known is null) lock (_handleLock) known = _own.Count == 1 ? _own.Keys.First() : null;
+        known ??= handoff?.OwnRepository() ?? localWake?.OwnRepository();
+        if (known is null) return false;
+        var node = JsonNode.Parse(arguments.GetRawText())!.AsObject();
+        node["repositoryId"] = known;
+        arguments = JsonSerializer.SerializeToElement(node);
+        return true;
     }
 
     /// <summary>
