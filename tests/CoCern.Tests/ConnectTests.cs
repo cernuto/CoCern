@@ -85,7 +85,7 @@ public sealed class ConnectTests : IDisposable
         {
             var result = Connect(args);
             Assert.Equal(0, result.Code);
-            Assert.All(States(result.Output).Values, state => Assert.Equal("connected", state));
+            Assert.All(States(result.Output).Values, state => Assert.Equal("other-hub", state));
             Assert.Equal(json, File.ReadAllBytes(ClaudeJson));
             Assert.Equal(toml, File.ReadAllBytes(Toml));
             Assert.Empty(Backups(ClaudeJson));
@@ -385,10 +385,17 @@ public sealed class ConnectTests : IDisposable
         var node = "{\"mcpServers\":{\"cocern\":{\"command\":\"C:\\\\CoCern\\\\CoCern.Adapter.exe\",\"args\":[]}}}";
         WriteFile(Desktop, node);
 
-        var states = States(Connect("--json").Output);
+        var output = Connect("--json").Output;
 
-        Assert.Equal(3, states.Count);
-        Assert.All(states.Values, state => Assert.Equal("connected", state));
+        Assert.Equal(3, States(output).Count);
+        const string anotherHub = "Its CoCern entry points at another hub, so Connect leaves it as it is.";
+        Assert.Equal(("other-hub", null, anotherHub), Client(output, "claude-code"));
+        Assert.Equal(("other-hub", null, anotherHub), Client(output, "codex"));
+        Assert.Equal(("other-hub", null, "Its CoCern entry connects through this PC's node, not this hub's local connection, so Connect leaves it as it is."), Client(output, "claude-desktop"));
+        Assert.All(States(Connect("--check", "--json").Output).Values, state => Assert.Equal("other-hub", state));
+        var text = Connect().Output;
+        Assert.Contains("Claude Code: " + anotherHub, text);
+        Assert.DoesNotContain("connected", text);
         Assert.Equal(foreign, File.ReadAllText(ClaudeJson));
         Assert.Equal(remote, File.ReadAllText(Toml));
         Assert.Equal(node, File.ReadAllText(Desktop));
@@ -488,7 +495,7 @@ public sealed class ConnectTests : IDisposable
 
         var theirs = "{\"mcpServers\":{\"cocern\":{\"command\":\"dotnet\",\"env\":{\"COCERN_TOKEN_FILE\":\"/elsewhere/other-hub-token\"}}}}";
         WriteFile(ClaudeJson, theirs);
-        Assert.Equal("connected", Client(Connect("--json", "--only", "claude-code", "--role", "admin").Output, "claude-code").State);
+        Assert.Equal("other-hub", Client(Connect("--json", "--only", "claude-code", "--role", "admin").Output, "claude-code").State);
         Assert.Equal(theirs, File.ReadAllText(ClaudeJson));
     }
 
