@@ -121,7 +121,13 @@ public static class RelayToolCatalog
         if (tool.IsMutation) required.Add("requestId");
         if (tool.RequiresSession) required.AddRange(["sessionId", "sessionToken"]);
         required.AddRange(tool.RequiredFields);
-        return Schema(ToolSchemas.Properties(tool.Name), required);
+        if (tool.Name != RelayTools.ClaimAcquire) return Schema(ToolSchemas.Properties(tool.Name), required);
+        required.Remove("resourceId");
+        return JsonSerializer.SerializeToElement(new
+        {
+            type = "object", properties = ToolSchemas.Properties(tool.Name), required, additionalProperties = true,
+            oneOf = new[] { new { required = new[] { "resourceId" } }, new { required = new[] { "filePath" } } }
+        });
     }
 
     /// <summary>A compact schema for clients that forward arguments unchanged: only repositoryId is required and the hub enforces the rest.</summary>
