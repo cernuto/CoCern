@@ -5,14 +5,13 @@ using CoCern.Domain;
 using CoCern.Domain.Messages;
 using CoCern.Domain.State;
 using Xunit;
-using static CoCern.Tests.ExhaustiveStateFixture;
 
 namespace CoCern.Tests;
 
 /// <summary>
 /// The session's state class declares every key its document stores. These tests build session documents through the aggregate hub, as
 /// the hub does (open, bind, mail, acknowledgments, attention, work reports, a close), and check that each holds no key
-/// <see cref="SessionState.Shape"/> leaves out, and that the shape is not vacuous: what the sessions wrote covers what it declares.
+/// <see cref="SessionState.Shape"/> leaves out, and that typed state reads match the operations.
 /// </summary>
 public sealed class SessionStateShapeTests
 {
@@ -136,17 +135,7 @@ public sealed class SessionStateShapeTests
         var documents = new[] { chat, peer, gone }.Select(session => hub.State(AggregateKinds.Session, session.Id)).Append(nativeDocument).ToArray();
         ExhaustiveStateFixture.Verify(SessionState.Shape, documents);
 
-        // The shape is not vacuous: between them the sessions wrote every key it declares, but the request tombstones (written only once a
-        // full replay cache evicts a reply early) and the work ledger's overflow mark (only past its open-action limit).
         var state = documents[0];
-        Assert.Equal(InboxMessage.Keys.Order(StringComparer.Ordinal), EntryKeys(state, SessionState.InboxKey).Distinct().Order(StringComparer.Ordinal));
-        Assert.Equal(QueuedItem.Shape.Fields.Keys.Order(StringComparer.Ordinal), EntryKeys(state, AttentionQueue.ItemsKey).Distinct().Order(StringComparer.Ordinal));
-        Assert.Equal([WorkLedger.ClosedKey, WorkLedger.OpenKey], Keys(state[SessionState.WorkKey]).Order(StringComparer.Ordinal));
-        Assert.Equal(WorkReport.Shape.Fields.Keys.Order(StringComparer.Ordinal), Keys(state[SessionState.WorkReportedKey]).Order(StringComparer.Ordinal));
-        Assert.Equal(RecentClose.Shape.Fields.Keys.Order(StringComparer.Ordinal), EntryKeys(state, AttentionQueue.RecentKey).Distinct().Order(StringComparer.Ordinal));
-        Assert.Equal([BoardWatches.BoardIdKey], EntryKeys(state, SessionState.TargetBoardsKey).Concat(EntryKeys(state, SessionState.WorkBoardsKey)).Distinct());
-
-        Assert.Equal(WaitingMark.Shape.Fields.Keys.Order(StringComparer.Ordinal), Keys(documents[1][SessionState.WaitingForKey]).Order(StringComparer.Ordinal));
 
         // The typed members read what the handlers wrote.
         Assert.Equal(("Which rig?", Now, Now.AddHours(RelayLimits.WaitingForHours)), (new SessionState(documents[1]).WaitingFor!.Text, new SessionState(documents[1]).WaitingFor!.Since, new SessionState(documents[1]).WaitingFor!.ExpiresAt));

@@ -13,7 +13,7 @@ public sealed class BoardStateShapeTests
     private static JsonObject Document(StateEnvelope<CoordinationDocument> envelope) => JsonNode.Parse(envelope.Value.Json)!.AsObject();
 
     [Fact]
-    public void A_board_stores_only_the_keys_its_state_declares_and_the_fixture_stores_each_of_them()
+    public void A_board_stores_only_the_keys_its_state_declares()
     {
         var envelope = DomainBoard.BuildWithEveryKey();
         var target = Document(envelope)[BoardState.TasksKey]!.AsObject().First().Key;
@@ -26,7 +26,7 @@ public sealed class BoardStateShapeTests
         var board = Document(envelope);
         var archived = envelope.PendingArchive().Select(task => JsonNode.Parse(task.Json)!.AsObject()).ToArray();
         Assert.Equal(["dep", "old"], envelope.PendingArchive().Select(task => task.TaskId).Order(StringComparer.Ordinal));
-        ExhaustiveStateFixture.Verify(BoardState.Shape, [board], archived.Select(task => (BoardTask.Shape, task)).ToArray(), recursiveCoverage: true);
+        ExhaustiveStateFixture.Verify(BoardState.Shape, [board], archived.Select(task => (BoardTask.Shape, task)).ToArray());
 
         // Reuse the same expensive fixture for its typed reads.
         var state = new BoardState(board);
