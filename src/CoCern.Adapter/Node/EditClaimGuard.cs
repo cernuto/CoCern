@@ -1,6 +1,6 @@
 namespace CoCern.Adapter.Node;
 
-internal sealed record EditClaimAcquireResult(string Outcome, long? Generation = null, bool PreOwned = false);
+internal sealed record EditClaimAcquireResult(string Outcome, long? Generation = null, bool PreOwned = false, string? Holder = null);
 internal interface IEditClaimTransport
 {
     Task<EditClaimAcquireResult> AcquireAsync(string resourceId, string requestId);
@@ -11,7 +11,7 @@ internal interface IEditClaimTransport
 }
 
 // Abstain preserves the provider's permission gate; it is never an allow directive.
-internal sealed record EditClaimDecision(bool Abstain, string Reason);
+internal sealed record EditClaimDecision(bool Abstain, string Reason, string? Holder = null);
 
 // Internal canonical-target consumer only. Native auth, activity evidence and
 // post-permission revalidation are external prerequisites, not implemented hooks.
@@ -52,7 +52,7 @@ internal sealed class EditClaimGuard(EditClaimLedger ledger, IEditClaimTransport
                     {
                         intent = Replace(intent, index, lease with { Outcome = "busy" }, "conflict");
                         if (ledger.Save(intent)) await Compensate(intent, token);
-                        return Denied("busy");
+                        return new(false, "busy", acquired.Holder);
                     }
                     if (acquired.Outcome != "held" || acquired.Generation is not > 0)
                     {

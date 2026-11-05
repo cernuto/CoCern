@@ -33,7 +33,8 @@ internal sealed class NativeEditClaims(string privateDirectory, string protected
         public async Task<EditClaimAcquireResult> AcquireAsync(string resourceId, string requestId)
         {
             var reply = await CallAsync(RelayTools.ClaimAcquire, resourceId, requestId);
-            if (!reply.Ok) return new(reply.Code == RelayErrorCodes.Busy ? "busy" : "unknown");
+            if (!reply.Ok) return new(reply.Code == RelayErrorCodes.Busy ? "busy" : "unknown",
+                Holder: reply.Data is { ValueKind: JsonValueKind.Object } busy ? ChatLocators.Text(busy, "holder") : null);
             if (reply.Data is not { ValueKind: JsonValueKind.Object } data
                 || !data.TryGetProperty("generation", out var generation) || !generation.TryGetInt64(out var value) || value <= 0
                 || !data.TryGetProperty("newlyAcquired", out var acquired) || acquired.ValueKind is not (JsonValueKind.True or JsonValueKind.False))

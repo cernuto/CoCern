@@ -33,15 +33,17 @@ internal static class NativeEditHook
             var claims = await join.EditClaimsAsync(context, budget.Token);
             var intent = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(invocation)));
             var decision = await claims.CheckAsync(intent, context.Cwd, targets, budget.Token);
-            return decision.Abstain ? 0 : await Deny(error);
+            return decision.Abstain ? 0 : await Deny(error, decision.Holder);
         }
         catch (Exception failure) when (failure is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or OperationCanceledException)
         { return await Deny(error); }
     }
 
-    private static async Task<int> Deny(TextWriter error)
+    private static async Task<int> Deny(TextWriter error, string? holder = null)
     {
-        await error.WriteLineAsync("CoCern could not confirm this chat's file claims. The edit is blocked; inspect the claim holder or retry after coordination.");
+        await error.WriteLineAsync(holder is { Length: > 0 and <= 256 } && !holder.Any(char.IsControl)
+            ? $"CoCern blocked the edit: session {holder} holds a file claim. Coordinate with that session before retrying."
+            : "CoCern could not confirm this chat's file claims. The edit is blocked; inspect the claim holder or retry after coordination.");
         return 2;
     }
 }
