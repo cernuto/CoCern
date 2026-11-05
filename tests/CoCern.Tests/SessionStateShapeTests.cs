@@ -106,6 +106,18 @@ public sealed class SessionStateShapeTests
         Assert.Equal("target_gone", hub.State(AggregateKinds.Session, peer.Id)[SessionState.EventWaitsKey]!["shape-wait"]!["terminal"]!["outcome"]!.GetValue<string>());
         Assert.NotEmpty(hub.State(AggregateKinds.Session, gone.Id)["eventWaitRetired"]!.AsObject());
 
+        // Authenticated direct send and real source-arm delivery exercise the
+        // private sender sequence and immutable arming snapshot, not raw keys.
+        var sent = hub.Send(chat, peer.Id, "peer-shape-original", Now.AddMinutes(1));
+        Assert.True(sent.Ok);
+        var peerRequest = new EventWaitRequest("peer-shape-wait", "peer_reply", AggregateHub.Data(sent)["messageId"]!.GetValue<string>(), "",
+            Now.AddMinutes(10), PeerSessionId: peer.Id, ReplyTo: AggregateHub.Data(sent)["messageId"]!.GetValue<string>());
+        var peerArgs = new JsonObject { ["repositoryId"] = Repository, ["sessionId"] = chat.Id, ["sessionToken"] = chat.Token,
+            ["request"] = JsonSerializer.SerializeToNode(peerRequest, new JsonSerializerOptions(JsonSerializerDefaults.Web)) };
+        Assert.True(hub.Apply(AggregateKinds.Session, chat.Id, EventWaitAggregate.RegisterOperation, peerArgs,
+            AggregateHub.Alice with { IsInternal = true }, Now.AddMinutes(1)).Ok);
+        hub.DeliverAll(Now.AddMinutes(1));
+
         // Include a real admitted native open so the schema's optional native fields are exercised.
         var native = new JsonObject
         {
