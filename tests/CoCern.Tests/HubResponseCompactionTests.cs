@@ -97,6 +97,7 @@ public sealed class HubResponseCompactionTests
         var before = state.Value.Json;
         var compact = Data(Call(state, "control", RelayTools.WorkerList, new()));
         Assert.Equal(kept ? 1 : 0, compact["items"]!.AsArray().Count);
+        Assert.NotNull(compact["omittedCount"]);
         Assert.Equal(kept ? 0 : 1, compact["omittedCount"]!.GetValue<int>());
         var full = Data(Call(state, "control", RelayTools.WorkerList, new() { ["includeStale"] = true }));
         Assert.Equal(id, Assert.Single(full["items"]!.AsArray())!["sessionId"]!.GetValue<string>());
@@ -163,6 +164,7 @@ public sealed class HubResponseCompactionTests
     {
         var state = Board();
         var first = Data(Call(state, "board", RelayTools.TaskGet, new() { ["openOnly"] = true, ["limit"] = 1 }));
+        Assert.NotNull(first["snapshotTag"]);
         var snapshot = first["snapshotTag"]!.GetValue<string>();
         var cursor = first["nextCursor"]!.GetValue<int>();
         var next = Call(state, "board", RelayTools.TaskGet, new()
@@ -187,6 +189,7 @@ public sealed class HubResponseCompactionTests
         });
         state.Effects.Clear();
         var first = Data(Call(state, "control", RelayTools.WorkerList, new() { ["limit"] = 1 }));
+        Assert.NotNull(first["snapshotTag"]);
         var next = Call(state, "control", RelayTools.WorkerList, new()
         {
             ["limit"] = 1, ["cursor"] = first["nextCursor"]!.GetValue<int>(), ["snapshotTag"] = first["snapshotTag"]!.GetValue<string>()
@@ -260,6 +263,7 @@ public sealed class HubResponseCompactionTests
         {
             repositoryId = "repo", sessionId, sessionToken, attentionDetail = true, statusTag = ""
         }));
+        Assert.NotNull(full["statusTag"]);
         var tag = full["statusTag"]!.GetValue<string>();
         var same = HostData(await host.Call(client, RelayTools.GetStatus, new
         {
