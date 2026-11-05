@@ -98,6 +98,28 @@ public sealed class WaitingHookTests : IDisposable
     }
 
     [Fact]
+    public async Task A_questions_own_permission_alert_keeps_it_a_question_its_answer_clears()
+    {
+        await Hook(Question());
+        await Hook(Permission(message: WaitingHook.QuestionNotification));
+        Assert.Equal(2, _hub.Acks.Count);
+        Assert.All(_hub.Acks, ack => Assert.Equal(WaitingHook.QuestionText, ack["waitingFor"]!.GetValue<string>()));
+        Assert.Single(_hub.Acks.Select(ReportId).Distinct());
+
+        await Hook(TurnEnd("PostToolUseFailure", toolUseId: "tool-1"));
+        Assert.Equal("", _hub.Acks.Last()["waitingFor"]!.GetValue<string>());
+
+        // With no question on record, for instance if its PreToolUse never ran, the wait still shows, until the turn ends.
+        await Hook(Permission(message: WaitingHook.QuestionNotification));
+        Assert.Equal(WaitingHook.QuestionText, _hub.Acks.Last()["waitingFor"]!.GetValue<string>());
+        var shown = _hub.Acks.Count;
+        await Hook(TurnEnd("PostToolUseFailure", toolUseId: "tool-1"));
+        Assert.Equal(shown, _hub.Acks.Count);
+        await Prompt();
+        Assert.Equal("", _hub.Acks.Last()["waitingFor"]!.GetValue<string>());
+    }
+
+    [Fact]
     public async Task The_next_prompt_clears_what_the_hook_set_once()
     {
         await Hook(Permission());

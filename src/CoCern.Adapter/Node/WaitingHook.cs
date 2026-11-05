@@ -13,11 +13,14 @@ namespace CoCern.Adapter.Node;
 /// The hub keeps a report the model made itself: every call here carries <see cref="RelayLimits.HookWaitingField"/>, and the hub neither replaces nor clears a report without that mark.
 /// A clear that timed out here may still reach the hub later, and the lock only orders what is sent, so each report has an ID (<see cref="RelayLimits.HookReportIdField"/>) and a clear names the one it
 /// means: the hub leaves any other report standing.
-/// A marker file per chat records what a hook set, so ordinary turns make no hub call. None of this has been tried on a real client.
+/// A question raises that same notification about six seconds later, so one saying exactly <see cref="QuestionNotification"/> repeats the question's report instead of replacing it, and the answer still clears it. The text is only compared, never sent.
+/// If a client words it differently, the row lasts until the turn ends, as a permission prompt's does. A marker file per chat records what a hook set, so ordinary turns make no hub call. A Claude Code 2.1.317 desktop chat showed these events; this hook itself has not been tried on a real client.
 /// </summary>
 public static class WaitingHook
 {
     internal const string QuestionTool = "AskUserQuestion";
+    /// <summary>The message of the <c>permission_prompt</c> notification an open question raises, as Claude Code 2.1.317 words it.</summary>
+    internal const string QuestionNotification = "Claude needs your permission to use " + QuestionTool;
     internal const string PermissionText = "Claude Code is waiting for your permission.";
     internal const string QuestionText = "Claude Code asked you a question and is waiting for your answer.";
     private const int MaxToolNameLength = 120;
@@ -41,6 +44,10 @@ public static class WaitingHook
             if (ChatLocators.Text(root, "session_id") is not { } chat || ChatLocators.Text(root, "agent_id") is { Length: > 0 }) return 0;
             switch (ChatLocators.Text(root, "hook_event_name"))
             {
+                // Repeated, not skipped: if the question's first report never landed, this one still shows the wait. With no question on record it has no ID to match, so it lasts until the turn ends.
+                case "Notification" when ChatLocators.Text(root, "notification_type") == "permission_prompt" && ChatLocators.Text(root, "message") == QuestionNotification:
+                    await SetAsync(chat, nodeFolder, findLocal, QuestionText, PendingQuestion(chat, nodeFolder, findLocal), timeout, handler, clock);
+                    break;
                 case "Notification" when ChatLocators.Text(root, "notification_type") == "permission_prompt":
                     await SetAsync(chat, nodeFolder, findLocal, PermissionReport(ChatLocators.Text(root, "tool_name")), null, timeout, handler, clock);
                     break;
@@ -58,6 +65,9 @@ public static class WaitingHook
         catch (Exception) { /* A hook must never trouble the chat: hub down, slow, no node or no handle all end quietly. */ }
         return 0;
     }
+
+    private static string PendingQuestion(string chat, string nodeFolder, Func<string, string?>? findLocal) =>
+        Locate(chat, nodeFolder, findLocal) is { } place && ReadMarker(place.Marker) is { Questions.Length: > 0 } marker ? marker.Questions[^1] : "";
 
     /// <summary>The fixed text, naming the tool only when the input gives a plain tool name. The notification's message is never read, because it could carry command contents.</summary>
     internal static string PermissionReport(string? toolName) =>
