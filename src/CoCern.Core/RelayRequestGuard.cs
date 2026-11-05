@@ -30,6 +30,8 @@ internal static class RelayRequestGuard
             // A repeated key would let checks and the operation read different values, so it is refused (building the object throws on one).
             args = JsonNode.Parse(raw)!.AsObject();
             _ = args.Count;
+            // Untrusted telemetry only; never part of native envelopes, replay or aggregate state.
+            args.Remove("callOrigin");
             if (args.ContainsKey(CheckedNativeResolution)) return Replies.Error(InvalidArguments);
             // A preflight cannot be combined with any allocating or caller-controlled envelope.
             if (args.ContainsKey("nativePreflight"))

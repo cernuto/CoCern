@@ -57,6 +57,7 @@ internal sealed class CallTelemetry(IActivitySink activity, ITokenCounter? count
             {
                 Timestamp = trace.At, Kind = ActivityEvent.Call, RepositoryId = repository.Length <= RelayLimits.MaxIdentifierLength ? repository : "",
                 SessionId = Bounded(trace.SessionId), Role = role, Tool = tool, Ok = ok, BackgroundCall = trace.BackgroundCall,
+                CallOrigin = arguments.ValueKind == JsonValueKind.Object && arguments.TryGetProperty("callOrigin", out var origin) && origin.ValueKind == JsonValueKind.String ? origin.GetString() : null,
                 Code = reply?.Code ?? (canceled ? "Canceled" : Unavailable),
                 RequestBytes = raw is null ? 0 : Encoding.UTF8.GetByteCount(raw),
                 ReplyBytes = reply is null ? 0 : Encoding.UTF8.GetByteCount(reply.DataJson), DurationMilliseconds = elapsed.TotalMilliseconds,

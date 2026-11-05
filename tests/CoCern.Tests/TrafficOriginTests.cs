@@ -11,6 +11,19 @@ namespace CoCern.Tests;
 
 public sealed class TrafficOriginTests
 {
+    [Theory]
+    [InlineData("mcp")]
+    [InlineData("future-provider")]
+    public void Call_origin_is_removed_before_private_preflight_shape_validation(string origin)
+    {
+        Assert.True(CoCern.Contracts.RelayToolCatalog.TryGet("session_open", out var tool));
+        var input = JsonSerializer.SerializeToElement(new { nativePreflight = new { checkout = new string('a', 64) }, callOrigin = origin });
+        var refusal = RelayRequestGuard.Validate(new CoCern.Domain.RelayCaller("origin-test", true, ["repo"]), tool, input, out var args);
+        Assert.Null(refusal);
+        Assert.Single(args);
+        Assert.False(args.ContainsKey("callOrigin"));
+    }
+
     [Fact]
     public async Task Model_reads_including_attention_opt_out_are_classified_and_legacy_calls_remain_unknown()
     {
@@ -43,13 +56,18 @@ public sealed class TrafficOriginTests
             await original.FlushActivityAsync();
         }
         using (var db = Open(path))
+        {
             Scalar(db, "INSERT INTO activity_daily(day, repository_id, kind, role, tool, calls, errors, request_bytes, reply_bytes, duration_ms, input_tokens, output_tokens) VALUES (date('now', '-2 day'), 'repo', 'call', '', 'task_get', 4, 0, 26, 13, 0, 0, 0)");
+            Scalar(db, "ALTER TABLE activity_log DROP COLUMN call_origin; DROP TABLE activity_origin_daily;");
+        }
         RemoveOriginColumns(path);
         using (var migrated = new SqliteStore(path))
         using (var db = Open(path))
         {
             Assert.Equal(1L, Scalar(db, "SELECT count(*) FROM pragma_table_info('activity_log') WHERE name = 'background_call'"));
             Assert.Equal(1L, Scalar(db, "SELECT count(*) FROM activity_log WHERE background_call IS NULL"));
+            Assert.Equal(1L, Scalar(db, "SELECT count(*) FROM pragma_table_info('activity_log') WHERE name = 'call_origin'"));
+            Assert.Equal(1L, Scalar(db, "SELECT count(*) FROM activity_log WHERE call_origin IS NULL"));
             await migrated.CreateAnalyticsSnapshotAsync(Path.Combine(root, "old.db"));
         }
         RemoveOriginColumns(Path.Combine(root, "old.db"));

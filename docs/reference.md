@@ -234,6 +234,8 @@ Replies stay under 2,000 tokens; hits that don't fit are counted in `more`. Erro
 
 Every tool call goes to the `activity_log` table: time, session, role, tool, result, sizes and duration, never arguments or reply text. Wakes and attention offers and answers are logged too, and so is each hub-internal message a grain refused for good (kind `effect_refused`, which should stay at zero). Logging never slows or fails a call. Raw rows are kept 30 days, then rolled up into `activity_daily`.
 
+Calls may report `callOrigin` as `mcp`, `claude-stop`, `claude-waiter`, `wake-watcher`, `node` or `dashboard`. Missing, invalid and future values remain `unknown`. This untrusted telemetry tag is independent of model/background classification and grants no authority or provider attestation; the hub removes it before aggregate or replay processing. `activity_log.call_origin` and the companion `activity_origin_daily` preserve per-origin call and byte totals through retention. Analytics exposes them in `tool_origin_traffic`; historical daily totals without an origin remain `unknown`. Existing `activity_daily` and `tool_traffic` totals are unchanged.
+
 | Counter | Definition |
 | --- | --- |
 | Tokens | Reported `inputTokens` plus `outputTokens` on successful calls; a retry counts once. |
