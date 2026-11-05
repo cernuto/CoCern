@@ -48,6 +48,135 @@ public sealed class WaitingOnYouTests
     private static RelayReply HookAck(AggregateHub hub, Chat chat, string waitingFor, DateTimeOffset at) =>
         hub.Session(chat, RelayTools.Ack, new JsonObject { ["waitingFor"] = waitingFor, [RelayLimits.HookWaitingField] = true }, at);
 
+    private static RelayReply FencedAck(AggregateHub hub, Chat chat, string waitingFor, string id, DateTimeOffset at, string? requestId = null)
+    {
+        var args = new JsonObject { ["waitingFor"] = waitingFor, [RelayLimits.HookWaitingField] = true, [RelayLimits.HookReportIdField] = id };
+        if (requestId is not null) args["requestId"] = requestId;
+        return hub.Session(chat, RelayTools.Ack, args, at);
+    }
+
+    private static Chat Opened(AggregateHub hub)
+    {
+        var chat = hub.Open("a", T0);
+        hub.DeliverAll(T0);
+        return chat;
+    }
+
+    [Fact]
+    public void A_clear_that_lands_after_a_later_report_leaves_it_and_says_so()
+    {
+        var hub = new AggregateHub();
+        var chat = Opened(hub);
+        Assert.True(FencedAck(hub, chat, "first", "r1", T0).Ok);
+        // The later report takes the slot while the clear for the first is still on its way.
+        Assert.True(FencedAck(hub, chat, "second", "r2", T0.AddMinutes(1)).Ok);
+        var late = AggregateHub.Data(FencedAck(hub, chat, "", "r1", T0.AddMinutes(2)));
+        Assert.True(late["waitingForKept"]!.GetValue<bool>());
+        Assert.False(late.ContainsKey("waitingFor"));
+        Assert.Equal(("second", "r2", true), (Mark(hub, chat)!.Text, Mark(hub, chat)!.ReportId, Mark(hub, chat)!.FromHook));
+    }
+
+    [Fact]
+    public void A_clear_naming_the_active_report_clears_it()
+    {
+        var hub = new AggregateHub();
+        var chat = Opened(hub);
+        Assert.True(FencedAck(hub, chat, "first", "r1", T0).Ok);
+        var cleared = AggregateHub.Data(FencedAck(hub, chat, "", "r1", T0.AddMinutes(1)));
+        Assert.True(cleared.ContainsKey("waitingFor"));
+        Assert.Null(cleared["waitingFor"]);
+        Assert.Null(Mark(hub, chat));
+        // With nothing there, a late or repeated clear changes nothing and is not an error.
+        Assert.Null(AggregateHub.Data(FencedAck(hub, chat, "", "r1", T0.AddMinutes(2)))["waitingFor"]);
+    }
+
+    [Fact]
+    public void A_clear_naming_no_id_is_an_older_adapters_and_still_clears_a_hooks_report()
+    {
+        var hub = new AggregateHub();
+        var chat = Opened(hub);
+        Assert.True(FencedAck(hub, chat, "first", "r1", T0).Ok);
+        Assert.True(HookAck(hub, chat, "", T0.AddMinutes(1)).Ok);
+        Assert.Null(Mark(hub, chat));
+        // An older adapter's report has no ID, and its own clear still works.
+        Assert.True(HookAck(hub, chat, "old", T0.AddMinutes(2)).Ok);
+        Assert.Equal("", Mark(hub, chat)!.ReportId);
+        Assert.True(HookAck(hub, chat, "", T0.AddMinutes(3)).Ok);
+        Assert.Null(Mark(hub, chat));
+    }
+
+    [Fact]
+    public void A_clear_naming_an_id_leaves_a_report_with_none_because_it_cannot_be_the_one_meant()
+    {
+        var hub = new AggregateHub();
+        var chat = Opened(hub);
+        Assert.True(HookAck(hub, chat, "old", T0).Ok);
+        Assert.True(AggregateHub.Data(FencedAck(hub, chat, "", "r1", T0.AddMinutes(1)))["waitingForKept"]!.GetValue<bool>());
+        Assert.Equal("old", Mark(hub, chat)!.Text);
+    }
+
+    [Fact]
+    public void A_models_report_stays_protected_from_a_hook_naming_any_id_and_its_own_calls_are_unchanged()
+    {
+        var hub = new AggregateHub();
+        var chat = Opened(hub);
+        Assert.True(Ack(hub, chat, "Which rig?", T0).Ok);
+        Assert.True(AggregateHub.Data(FencedAck(hub, chat, "report", "r1", T0.AddMinutes(1)))["waitingForKept"]!.GetValue<bool>());
+        Assert.True(AggregateHub.Data(FencedAck(hub, chat, "", "r1", T0.AddMinutes(2)))["waitingForKept"]!.GetValue<bool>());
+        Assert.Equal(("Which rig?", false, ""), (Mark(hub, chat)!.Text, Mark(hub, chat)!.FromHook, Mark(hub, chat)!.ReportId));
+        // The model takes a hook's slot and clears anything, with no ID. An ID on its call is not a hook's and is ignored.
+        Assert.True(Ack(hub, chat, "", T0.AddMinutes(3)).Ok);
+        Assert.True(FencedAck(hub, chat, "report", "r2", T0.AddMinutes(4)).Ok);
+        Assert.True(hub.Session(chat, RelayTools.Ack, new JsonObject { ["waitingFor"] = "mine", [RelayLimits.HookReportIdField] = "r9" }, T0.AddMinutes(5)).Ok);
+        Assert.Equal(("mine", false, ""), (Mark(hub, chat)!.Text, Mark(hub, chat)!.FromHook, Mark(hub, chat)!.ReportId));
+        Assert.True(Ack(hub, chat, "", T0.AddMinutes(6)).Ok);
+        Assert.Null(Mark(hub, chat));
+    }
+
+    [Fact]
+    public void A_retried_clear_replays_its_stored_answer_and_the_id_is_part_of_the_request()
+    {
+        var hub = new AggregateHub();
+        var chat = Opened(hub);
+        Assert.True(FencedAck(hub, chat, "first", "r1", T0).Ok);
+        var cleared = FencedAck(hub, chat, "", "r1", T0.AddMinutes(1), "clear-1");
+        Assert.True(FencedAck(hub, chat, "second", "r2", T0.AddMinutes(2)).Ok);
+        // The retry answers as the first time and touches nothing, whatever has happened since.
+        Assert.Equal(cleared.DataJson, FencedAck(hub, chat, "", "r1", T0.AddMinutes(3), "clear-1").DataJson);
+        Assert.Equal("second", Mark(hub, chat)!.Text);
+        // A kept answer replays as kept, even once the report it kept has gone.
+        var kept = FencedAck(hub, chat, "", "r1", T0.AddMinutes(4), "clear-2");
+        Assert.True(AggregateHub.Data(kept)["waitingForKept"]!.GetValue<bool>());
+        Assert.True(FencedAck(hub, chat, "", "r2", T0.AddMinutes(5)).Ok);
+        Assert.Equal(kept.DataJson, FencedAck(hub, chat, "", "r1", T0.AddMinutes(6), "clear-2").DataJson);
+        // The same request ID naming another report is another request.
+        Assert.Equal(RelayErrorCodes.RequestConflict, FencedAck(hub, chat, "", "r2", T0.AddMinutes(7), "clear-1").Code);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("bad\nid")]
+    public void A_report_id_that_is_not_an_identifier_is_refused_without_changing_anything(string id)
+    {
+        var hub = new AggregateHub();
+        var chat = Opened(hub);
+        Assert.True(FencedAck(hub, chat, "first", "r1", T0).Ok);
+        Assert.Equal(RelayErrorCodes.InvalidArguments, FencedAck(hub, chat, "", id, T0.AddMinutes(1)).Code);
+        Assert.Equal(RelayErrorCodes.InvalidArguments, FencedAck(hub, chat, "", new string('x', RelayLimits.MaxIdentifierLength + 1), T0.AddMinutes(1)).Code);
+        Assert.Equal("first", Mark(hub, chat)!.Text);
+    }
+
+    [Fact]
+    public void No_reply_or_projection_gives_the_report_id_back()
+    {
+        var hub = new AggregateHub();
+        var chat = Opened(hub);
+        const string Id = "report-id-not-to-be-returned";
+        var replies = new[] { FencedAck(hub, chat, "first", Id, T0), FencedAck(hub, chat, "", "other", T0.AddMinutes(1)), hub.Session(chat, RelayTools.GetStatus, new JsonObject(), T0.AddMinutes(2)) };
+        Assert.All(replies, reply => Assert.DoesNotContain(Id, reply.DataJson));
+        Assert.DoesNotContain(Id, JsonSerializer.Serialize(Assert.Single(Reports(hub, chat))));
+    }
+
     [Fact]
     public void A_hook_report_never_replaces_or_clears_the_models_own()
     {

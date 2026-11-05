@@ -11,6 +11,8 @@ namespace CoCern.Adapter.Node;
 /// notification names no tool call, and the hooks reference names no event for an answered prompt, so that row, and a question with no <c>tool_use_id</c>, lasts until <c>UserPromptSubmit</c> or
 /// <c>Stop</c>; an allowed tool's row can last until the turn ends. This hook writes nothing to standard output and always exits 0, so it can never influence the tool call or the turn.
 /// The hub keeps a report the model made itself: every call here carries <see cref="RelayLimits.HookWaitingField"/>, and the hub neither replaces nor clears a report without that mark.
+/// A clear that timed out here may still reach the hub later, and the lock only orders what is sent, so each report has an ID (<see cref="RelayLimits.HookReportIdField"/>) and a clear names the one it
+/// means: the hub leaves any other report standing.
 /// A marker file per chat records what a hook set, so ordinary turns make no hub call. None of this has been tried on a real client.
 /// </summary>
 public static class WaitingHook
@@ -75,9 +77,12 @@ public static class WaitingHook
         var questions = (previous?.Questions ?? []).ToList();
         var tracked = question is { Length: > 0 } && (questions.Contains(question) || questions.Count < MaxQuestions);
         if (tracked && !questions.Contains(question!)) questions.Add(question!);
+        // A marker with nothing pending has had its clear sent, and that clear may still land, so a new report takes a new ID. One still pending has sent no clear, so it keeps its ID,
+        // and the hub's report matches this marker whether or not this call lands.
+        var reportId = previous is { ReportId: { } current } && (previous.UntilTurnEnd || previous.Questions.Length > 0) ? current : Guid.NewGuid().ToString("N");
         // Written first: a reply that never comes may still have set the report, and a clear that finds nothing there changes nothing.
-        WriteMarker(place.Marker, new(route, (clock ?? TimeProvider.System).GetUtcNow().UtcTicks, previous?.UntilTurnEnd == true || !tracked, questions.ToArray()));
-        var reply = await AckAsync(options, handle, text, timeout, handler);
+        WriteMarker(place.Marker, new(route, (clock ?? TimeProvider.System).GetUtcNow().UtcTicks, previous?.UntilTurnEnd == true || !tracked, questions.ToArray(), reportId));
+        var reply = await AckAsync(options, handle, text, reportId, timeout, handler);
         if (reply.Ok)
         {
             // Without a mark back, the hub kept the model's own report: nothing of a hook's is there to clear now.
@@ -126,7 +131,8 @@ public static class WaitingHook
             var left = apply(marker);
             if (left.UntilTurnEnd != marker.UntilTurnEnd || left.Questions.Length != marker.Questions.Length) WriteMarker(place.Marker, left);
             if (left.UntilTurnEnd || left.Questions.Length > 0) return;
-            var reply = await AckAsync(options, handle, "", timeout, handler);
+            // A marker from before report IDs names none, and its report has none either.
+            var reply = await AckAsync(options, handle, "", marker.ReportId, timeout, handler);
             if (reply.Ok || IsPermanent(reply)) File.Delete(place.Marker);
         }
         catch (Exception) { /* A hook must never trouble the chat. */ }
@@ -135,7 +141,7 @@ public static class WaitingHook
     /// <summary>The hub answered that this session is closed or not this caller's: no later call can change its report, and closing already dropped it.</summary>
     private static bool IsPermanent(AdapterReply reply) => reply.Version is not null && reply.Code is RelayErrorCodes.SessionDenied or RelayErrorCodes.SessionUnknown;
 
-    private static async Task<AdapterReply> AckAsync(AdapterOptions options, SessionHandle handle, string text, TimeSpan timeout, HttpMessageHandler? handler)
+    private static async Task<AdapterReply> AckAsync(AdapterOptions options, SessionHandle handle, string text, string? reportId, TimeSpan timeout, HttpMessageHandler? handler)
     {
         using var http = new HttpClient(handler ?? RelayForwarder.CreateHandler(options), disposeHandler: handler is null) { Timeout = TimeSpan.FromSeconds(5) };
         var arguments = new JsonObject
@@ -143,6 +149,7 @@ public static class WaitingHook
             ["repositoryId"] = handle.RepositoryId, ["sessionId"] = handle.SessionId, ["sessionToken"] = handle.SessionToken, ["requestId"] = "waiting-hook-" + Guid.NewGuid().ToString("N"),
             ["waitingFor"] = text, [RelayLimits.HookWaitingField] = true
         };
+        if (reportId is not null) arguments[RelayLimits.HookReportIdField] = reportId;
         using var limit = new CancellationTokenSource(timeout);
         return await new RelayForwarder(http, options, CallOrigins.Node).ForwardAsync(RelayTools.Ack, RelayForwarder.WithOrigin(JsonSerializer.SerializeToElement(arguments), background: true), limit.Token);
     }
@@ -174,12 +181,13 @@ public static class WaitingHook
     /// <param name="At">UTC ticks of the latest report.</param>
     /// <param name="UntilTurnEnd">Only the next prompt or the end of the turn can end this wait.</param>
     /// <param name="Questions">The <c>tool_use_id</c>s of the questions still open.</param>
-    private sealed record Marker(string Route, long At, bool UntilTurnEnd, string[] Questions);
+    /// <param name="ReportId">The ID of the report a hook last sent, which a clear names; null in a marker from before report IDs.</param>
+    private sealed record Marker(string Route, long At, bool UntilTurnEnd, string[] Questions, string? ReportId);
 
     private static void WriteMarker(string path, Marker marker) =>
         NodeState.WritePrivately(path, System.Text.Encoding.UTF8.GetBytes(new JsonObject
         {
-            ["route"] = marker.Route, ["at"] = marker.At, ["untilTurnEnd"] = marker.UntilTurnEnd, ["questions"] = new JsonArray(marker.Questions.Select(question => (JsonNode)question).ToArray())
+            ["route"] = marker.Route, ["at"] = marker.At, ["untilTurnEnd"] = marker.UntilTurnEnd, ["questions"] = new JsonArray(marker.Questions.Select(question => (JsonNode)question).ToArray()), ["reportId"] = marker.ReportId
         }.ToJsonString()));
 
     /// <summary>The marker at <paramref name="path"/>, or null when there is none or it cannot be read.</summary>
@@ -192,7 +200,8 @@ public static class WaitingHook
                 || root["at"] is not JsonValue at || !at.TryGetValue<long>(out var ticks) || ticks < 0 || ticks > DateTimeOffset.MaxValue.UtcTicks) return null;
             var untilTurnEnd = root["untilTurnEnd"] is JsonValue flag && flag.TryGetValue<bool>(out var value) && value;
             var questions = root["questions"] is JsonArray list ? list.OfType<JsonValue>().Select(item => item.TryGetValue<string>(out var id) ? id : null).OfType<string>().ToArray() : [];
-            return new(text, ticks, untilTurnEnd, questions);
+            var reportId = root["reportId"] is JsonValue report && report.TryGetValue<string>(out var named) && named.Length > 0 ? named : null;
+            return new(text, ticks, untilTurnEnd, questions, reportId);
         }
         catch (JsonException) { return null; }
     }

@@ -327,6 +327,123 @@ public sealed class WaitingHookTests : IDisposable
         await Prompt(broken);
     }
 
+    private static string? ReportId(JsonNode ack) => ack[RelayLimits.HookReportIdField]?.GetValue<string>();
+
+    [Fact]
+    public async Task A_report_and_its_clear_name_the_same_id_and_the_next_wait_gets_a_new_one()
+    {
+        await Hook(Permission());
+        await Prompt();
+        await Hook(Permission());
+        var acks = _hub.Acks;
+        Assert.False(string.IsNullOrEmpty(ReportId(acks[0])));
+        Assert.Equal(ReportId(acks[0]), ReportId(acks[1]));
+        Assert.NotEqual(ReportId(acks[0]), ReportId(acks[2]));
+    }
+
+    [Fact]
+    public async Task A_report_while_one_is_still_pending_keeps_its_id()
+    {
+        await Hook(Question());
+        await Hook(Permission());
+        await Prompt();
+        Assert.Single(_hub.Acks.Select(ReportId).Distinct());
+    }
+
+    [Fact]
+    public async Task A_report_after_a_clear_was_sent_takes_a_new_id_and_a_refused_one_restores_the_old()
+    {
+        await Hook(Permission());
+        _hub.FailClears = (HttpStatusCode.Conflict, RelayErrorCodes.Busy);
+        await Hook(TurnEnd("Stop"));
+        _hub.FailClears = null;
+        var first = ReportId(_hub.Acks[0]);
+        Assert.Equal(first, ReportId(_hub.Acks[1]));
+
+        // Refused, so the hub still holds the first report, and the retried clear must still name it.
+        _hub.FailSets = (HttpStatusCode.Conflict, RelayErrorCodes.Busy);
+        await Hook(Question());
+        _hub.FailSets = null;
+        Assert.NotEqual(first, ReportId(_hub.Acks[2]));
+        await PostTool();
+        Assert.Equal(first, ReportId(_hub.Acks[3]));
+        Assert.False(File.Exists(Marker));
+    }
+
+    [Fact]
+    public async Task A_marker_from_before_report_ids_clears_naming_none()
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(Marker)!);
+        File.WriteAllText(Marker, new JsonObject { ["route"] = WakeState.Key("repo", "s-hook"), ["at"] = DateTimeOffset.UtcNow.UtcTicks, ["untilTurnEnd"] = true, ["questions"] = new JsonArray() }.ToJsonString());
+        await Prompt();
+        var clear = Assert.Single(_hub.Acks);
+        Assert.Equal("", clear["waitingFor"]!.GetValue<string>());
+        Assert.Null(ReportId(clear));
+        Assert.False(File.Exists(Marker));
+    }
+
+    /// <summary>Runs the hook against the real session aggregate, under a session that replaces the fixture's.</summary>
+    private LiveHub Live()
+    {
+        var live = new LiveHub();
+        NodeState.WriteSessionHandle(_folder, new SessionHandle(live.Chat.Id, live.Chat.Token, AggregateHub.Repository, "Hook chat", DateTimeOffset.UtcNow, Chat: new ChatLocation("claude", _chat)));
+        return live;
+    }
+
+    [Fact]
+    public async Task A_clear_that_timed_out_and_lands_after_a_later_report_leaves_the_report_and_its_marker()
+    {
+        using var live = Live();
+        await Hook(Permission(), live);
+        // The clear is sent and the hook hears nothing, but it is still on its way.
+        live.HoldClears = true;
+        await Hook(TurnEnd("Stop"), live);
+        live.HoldClears = false;
+        Assert.True(File.Exists(Marker));
+        await Hook(Question(), live);
+        Assert.Equal(WaitingHook.QuestionText, live.Mark!.Text);
+
+        var landed = AggregateHub.Data(live.LandHeldClear());
+        Assert.True(landed["waitingForKept"]!.GetValue<bool>());
+        Assert.Equal(WaitingHook.QuestionText, live.Mark!.Text);
+        Assert.True(File.Exists(Marker));
+
+        // The later report's own wait still ends it.
+        await PostTool(hub: live, toolUseId: "tool-1");
+        Assert.Null(live.Mark);
+        Assert.False(File.Exists(Marker));
+    }
+
+    [Fact]
+    public async Task A_retried_clear_succeeds_and_the_first_landing_late_changes_nothing()
+    {
+        using var live = Live();
+        await Hook(Permission(), live);
+        live.HoldClears = true;
+        await Hook(TurnEnd("Stop"), live);
+        live.HoldClears = false;
+        await Hook(TurnEnd("Stop"), live);
+        Assert.Null(live.Mark);
+        Assert.False(File.Exists(Marker));
+        var first = live.LandHeldClear();
+        Assert.True(first.Ok);
+        Assert.Null(live.Mark);
+        // Sent once more with its request ID, it replays the same answer.
+        Assert.Equal(first.DataJson, live.LandHeldClear().DataJson);
+    }
+
+    [Fact]
+    public async Task A_model_report_stays_when_the_hook_runs_against_the_real_hub()
+    {
+        using var live = Live();
+        Assert.True(live.ModelReports("Which rig?").Ok);
+        await Hook(Permission(), live);
+        Assert.Equal("Which rig?", live.Mark!.Text);
+        Assert.False(File.Exists(Marker));
+        await Hook(TurnEnd("Stop"), live);
+        Assert.Equal("Which rig?", live.Mark!.Text);
+    }
+
     [Fact]
     public async Task A_report_the_hub_kept_for_the_model_is_not_cleared_later()
     {
@@ -500,6 +617,51 @@ public sealed class WaitingHookTests : IDisposable
         private static HttpResponseMessage Reply(string data) => new(HttpStatusCode.OK)
         {
             Content = new StringContent(JsonSerializer.Serialize(new { ok = true, code = "ok", dataJson = data, version = 0 }), Encoding.UTF8, "application/json")
+        };
+    }
+
+    /// <summary>The real session aggregate behind the hook's <c>ack</c>, which can hold a clear back as if the network delayed it: the hook hears nothing, and it lands when the test says.</summary>
+    private sealed class LiveHub : HttpMessageHandler
+    {
+        private readonly AggregateHub _hub = new();
+        private JsonObject? _held;
+        public Chat Chat { get; }
+        public bool HoldClears;
+
+        public LiveHub()
+        {
+            Chat = _hub.Open("chat", DateTimeOffset.UtcNow);
+            _hub.DeliverAll(DateTimeOffset.UtcNow);
+        }
+
+        public CoCern.Domain.State.WaitingMark? Mark => new CoCern.Domain.State.SessionState(_hub.State(CoCern.Domain.AggregateKinds.Session, Chat.Id)).WaitingFor;
+
+        public CoCern.Domain.RelayReply ModelReports(string text) => _hub.Session(Chat, RelayTools.Ack, new JsonObject { ["waitingFor"] = text }, DateTimeOffset.UtcNow);
+
+        public CoCern.Domain.RelayReply LandHeldClear() => _hub.Session(Chat, RelayTools.Ack, (JsonObject)_held!.DeepClone(), DateTimeOffset.UtcNow);
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var path = request.RequestUri!.AbsolutePath;
+            if (path.EndsWith("/check_inbox")) return Reply("{\"items\":[],\"nextCursor\":null,\"truncated\":false,\"total\":0,\"etag\":\"e\"}", true, "ok");
+            if (path.EndsWith("/get_status")) return Reply("{\"sessionId\":\"s\",\"attention\":{\"actionable\":0,\"urgent\":0,\"inbox\":0,\"standing\":0}}", true, "ok");
+            Assert.EndsWith("/ack", path);
+            var body = JsonNode.Parse(await request.Content!.ReadAsStringAsync(cancellationToken))!;
+            var args = new JsonObject();
+            foreach (var field in new[] { "requestId", "waitingFor", RelayLimits.HookWaitingField, RelayLimits.HookReportIdField })
+                if (body[field] is { } value) args[field] = value.DeepClone();
+            if (HoldClears && body["waitingFor"]!.GetValue<string>().Length == 0)
+            {
+                _held = args;
+                throw new HttpRequestException("No answer reached the hook.");
+            }
+            var reply = _hub.Session(Chat, RelayTools.Ack, args, DateTimeOffset.UtcNow);
+            return Reply(reply.DataJson, reply.Ok, reply.Code);
+        }
+
+        private static HttpResponseMessage Reply(string data, bool ok, string code) => new(HttpStatusCode.OK)
+        {
+            Content = new StringContent(JsonSerializer.Serialize(new { ok, code, dataJson = data, version = 0 }), Encoding.UTF8, "application/json")
         };
     }
 
