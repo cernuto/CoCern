@@ -400,20 +400,20 @@ internal static class ControlAggregate
         var hubIncarnation = Text(context.Args, "hubIncarnation");
         var full = context.Args["includeStale"] is JsonValue flag && flag.TryGetValue<bool>(out var include) && include;
         var entries = new ControlState(context.State).Entries().Where(entry => entry.Entry?.RepositoryId == context.Repository).ToArray();
-        var allWorkers = entries.Select(entry => (JsonNode)entry.Entry!.Worker(context.Now, hubIncarnation)).ToArray();
+        var allWorkers = entries.ToDictionary(entry => entry.Id, entry => entry.Entry!.Worker(context.Now, hubIncarnation), StringComparer.Ordinal);
         var selected = full ? entries : entries.Where(entry => KeepInWorkerList(context.State[ControlState.SessionsKey]![entry.Id]!.AsObject(), context.Now))
             .OrderBy(entry => entry.Id, StringComparer.Ordinal).ToArray();
-        var workers = full ? allWorkers : selected.Select(entry =>
+        var workers = selected.Select(entry =>
             {
-                var row = entry.Entry!.Worker(context.Now, hubIncarnation);
-                row.Remove(DirectoryEntry.BindingKey);
+                var row = allWorkers[entry.Id];
+                if (!full) row.Remove(DirectoryEntry.BindingKey);
                 return (JsonNode)row;
             }).ToArray();
         var tag = full ? null : ListSnapshot.Tag(new { kind = "workers", context.Repository, context.Caller.PrincipalId, context.Caller.IsAdministrator, hubIncarnation }, selected.Select(entry => entry.Id));
         if (tag is not null && !ListSnapshot.Matches(context.Args, tag)) return Error("ListRestartRequired");
         var data = JsonNode.Parse(Page(workers, context.Args).DataJson)!.AsObject();
-        if (tag is not null) { data["snapshotTag"] = tag; data["omittedCount"] = allWorkers.Length - workers.Length; }
-        var machines = allWorkers.GroupBy(x => Text(x.AsObject(), "machineId")).Where(x => x.Key.Length > 0).Select(group => new
+        if (tag is not null) { data["snapshotTag"] = tag; data["omittedCount"] = allWorkers.Count - workers.Length; }
+        var machines = allWorkers.Values.GroupBy(x => Text(x, "machineId")).Where(x => x.Key.Length > 0).Select(group => new
         {
             machineId = group.Key,
             sessionCount = group.Count(),
