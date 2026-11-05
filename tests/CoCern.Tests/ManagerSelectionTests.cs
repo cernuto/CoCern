@@ -102,44 +102,34 @@ public sealed class ManagerSelectionTests
         var own = AggregateHub.Data(Status(hub, Worker))["manager"]!; Assert.NotNull(own["current"]); Assert.Empty(own["history"]!.AsArray());
     }
 
-    /// <summary>The log lives in a hub-wide document, and MayAccess admits any administrator anywhere, so this is the line that keeps one repository's actions from another's reader.</summary>
+    /// <summary>The log lives in a hub-wide document but reads one selected repository, with that repository's own numbers, cursor and counts.</summary>
     [Fact]
-    public void An_administrator_limited_to_one_repository_sees_nothing_of_another_in_the_action_log()
+    public void Reading_the_action_log_shows_only_the_selected_repository()
     {
         var hub = new AggregateHub();
         void Log(string repository, string request) => Assert.True(hub.Apply(AggregateKinds.Control, AggregateKinds.ControlKey, Operations.AdminAction,
             new AdminActionReport(repository, RelayTools.ControlRequest, "close_sessions", "target-" + repository, request, "Ok", true, "session-" + repository, null, null).ToJson(),
             new RelayCaller("actor-" + repository, true, [repository], true), Now).Ok);
-        JsonObject Read(RelayCaller caller, string repository)
-        {
-            var reply = hub.Apply(AggregateKinds.Control, AggregateKinds.ControlKey, RelayTools.GetStatus, new JsonObject { ["repositoryId"] = repository, ["managerHistoryOnly"] = true }, caller, Now);
-            Assert.True(reply.Ok);
-            foreach (var marker in new[] { "target-other", "session-other", "actor-other", "request-other" })
-                if (repository != "other") Assert.DoesNotContain(marker, reply.DataJson);
-            return AggregateHub.Data(reply);
-        }
+        RelayReply Read(string repository) => hub.Apply(AggregateKinds.Control, AggregateKinds.ControlKey, RelayTools.GetStatus, new JsonObject { ["repositoryId"] = repository, ["managerHistoryOnly"] = true }, new RelayCaller("administrator", true, []), Now);
         Log("mine", "request-mine");
         // Enough to evict in the other repository, which must not show in this one's number, count or entries.
         for (var i = 0; i < RelayLimits.AdminActionEntries + 5; i++) Log("other", "request-other-" + i);
 
-        var limited = new RelayCaller("limited", true, ["mine"]);
-        var own = Read(limited, "mine")["actions"]!;
-        var entry = Assert.Single(own["items"]!.AsArray());
-        Assert.Equal(1, entry!["seq"]!.GetValue<long>());
+        var selected = Read("mine");
+        Assert.True(selected.Ok);
+        foreach (var marker in new[] { "target-other", "session-other", "actor-other", "request-other" }) Assert.DoesNotContain(marker, selected.DataJson);
+        var own = AggregateHub.Data(selected)["actions"]!;
+        Assert.Equal(1, Assert.Single(own["items"]!.AsArray())!["seq"]!.GetValue<long>());
         Assert.Equal(0, own["dropped"]!.GetValue<long>());
         Assert.Null(own["nextBefore"]);
 
-        // Naming the other repository is admitted, as for any administrator, and reads exactly like one with no history.
-        var refused = hub.Apply(AggregateKinds.Control, AggregateKinds.ControlKey, RelayTools.GetStatus, new JsonObject { ["repositoryId"] = "other", ["managerHistoryOnly"] = true }, limited, Now);
-        foreach (var marker in new[] { "target-other", "session-other", "actor-other", "request-other" }) Assert.DoesNotContain(marker, refused.DataJson);
-        var nothing = AggregateHub.Data(refused)["actions"]!;
-        Assert.Empty(nothing["items"]!.AsArray());
-        Assert.Equal(0, nothing["dropped"]!.GetValue<long>());
-        Assert.Null(nothing["nextBefore"]);
-
-        var hubWide = Read(new RelayCaller("hub", true, []), "other")["actions"]!;
-        Assert.Equal(RelayLimits.AdminActionPageEntries, hubWide["items"]!.AsArray().Count);
-        Assert.Equal(5, hubWide["dropped"]!.GetValue<long>());
+        // The same administrator selects the other repository and sees its actions, which it could perform.
+        var other = Read("other");
+        Assert.True(other.Ok);
+        Assert.DoesNotContain("target-mine", other.DataJson);
+        var others = AggregateHub.Data(other)["actions"]!;
+        Assert.Equal(RelayLimits.AdminActionPageEntries, others["items"]!.AsArray().Count);
+        Assert.Equal(5, others["dropped"]!.GetValue<long>());
     }
 
     private static AggregateHub Seed() { var hub = new AggregateHub(); Add(hub, "a"); return hub; }

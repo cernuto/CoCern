@@ -12,9 +12,9 @@ namespace CoCern.Domain;
 /// The administrative action log: who did what to what, and how it ended, kept in the control document so it survives a restart and needs no running
 /// chat to read. Only the hub's own composition writes it; the actor is always the authenticated caller, so no client argument can name someone else.
 /// Selection decisions keep Paul's words in their own history, which an entry refers to.
-/// <para>The control document is hub-wide, but this log reads one repository at a time. Numbers, cursors, the dropped count and eviction are all per
-/// repository, so a page says nothing about any other, not even how busy it is. <see cref="RelayCaller.MayAccess"/> admits every administrator to
-/// every repository, so it can't draw this line: <see cref="MayRead"/> honours the repositories an administrator's credential lists.</para>
+/// <para>The control document is hub-wide, but this log reads one repository at a time: the one the call selected. Numbers, cursors, the dropped count
+/// and eviction are all per repository, so a page holds only that repository's story. This is a view, not a boundary: administrators are hub-wide by
+/// policy (<see cref="RelayCaller.MayAccess"/>), and each can read the actions it could perform by selecting that repository.</para>
 /// </summary>
 internal static class AdminActionLog
 {
@@ -45,11 +45,11 @@ internal static class AdminActionLog
 
     /// <summary>
     /// A page of <paramref name="repository"/>'s entries older than <paramref name="before"/>, newest first, shortened until <paramref name="fits"/> accepts it,
-    /// with the cursor following the cut. A caller with no claim on the repository gets the same page as a repository with no history.
+    /// with the cursor following the cut.
     /// </summary>
     public static AdminActionPage Page(ControlState state, RelayCaller caller, string repository, long? before, Func<AdminActionPage, bool> fits)
     {
-        if (!MayRead(caller, repository)) return new([], null, 0);
+        if (!caller.MayAccess(repository)) return new([], null, 0);
         var retained = Entries(state.AdminActions, repository).ToArray();
         var dropped = Math.Max(0, Number(state.AdminActionSeqs, repository) - retained.Length);
         var candidates = retained.Where(entry => before is null || entry.Seq < before).OrderByDescending(entry => entry.Seq).ToArray();
@@ -62,10 +62,6 @@ internal static class AdminActionLog
             count--;
         }
     }
-
-    /// <summary>A credential that lists repositories reads only those; one that lists none is the hub's own and reads whichever it names.</summary>
-    private static bool MayRead(RelayCaller caller, string repository) =>
-        caller.MayAccess(repository) && (caller.Repositories.Length == 0 || caller.Repositories.Contains(repository, StringComparer.Ordinal));
 
     private static IEnumerable<AdminActionEntry> Entries(JsonArray log, string repository) =>
         log.Where(entry => RepositoryOf(entry) == repository).Select(entry => entry!.Deserialize<AdminActionEntry>()!);
