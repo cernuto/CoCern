@@ -662,7 +662,7 @@ public sealed class LocalWakeTests : IDisposable
         cache = Path.Combine(root, "open-working");
         await using var wake = LocalChatWake.Open(new AdapterOptions("http://127.0.0.1:5271/", Secret), TokenFile(), registered: false, cache);
         Assert.NotNull(wake);
-        Assert.Equal(LocalWakeCodes.SetupComplete, LocalWakeStatus.LastCode(cache));
+        Assert.Equal("connection_ready", LocalWakeStatus.LastCode(cache));
         Assert.Null(LocalWakeStatus.Problem(cache));
         wake.Observe(RelayTools.DocSearch, Arguments(), new(true, "Ok"));
         Assert.Equal(LocalWakeCodes.ObserveNotSessionReply, LocalWakeStatus.LastCode(cache));
