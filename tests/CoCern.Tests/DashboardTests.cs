@@ -307,7 +307,7 @@ public sealed class DashboardTests
         Assert.True(sample is { Truncated: false }, "The small metadata fixture did not produce complete database metrics after 20 samples. Last result: " + System.Text.Json.JsonSerializer.Serialize(sample));
         var metrics = Assert.IsType<CoCern.Contracts.Dashboard.DatabaseMetrics>(sample);
         Assert.Equal("SQLite", metrics.Provider);
-        Assert.Equal(new[] { "activity_daily", "activity_log", "due_work", "grain_state", "hub_metadata", "search_docs", "search_index", "task_archive" }, metrics.Tables.Select(table => table.Name));
+        Assert.Equal(new[] { "activity_daily", "activity_log", "activity_origin_daily", "due_work", "grain_state", "hub_metadata", "search_docs", "search_index", "task_archive" }, metrics.Tables.Select(table => table.Name));
         Assert.Equal(0, metrics.ArchivedTasks);
         var metadata = Assert.Single(metrics.Tables, table => table.Name == "hub_metadata");
         Assert.Equal(2, metadata.RowCount);

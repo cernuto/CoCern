@@ -13,6 +13,20 @@ public sealed class DevelopmentAdapterTests : IDisposable
     private string Deployment => Path.Combine(root, "deployment");
 
     [Fact]
+    public void A_current_manifest_reader_keeps_its_snapshot_while_a_new_generation_is_published()
+    {
+        Seed();
+        var first = AdapterDeployment.Publish(Source, Deployment);
+        using var held = AdapterDeployment.OpenCurrentManifest(Deployment);
+        var second = AdapterDeployment.Publish(Source, Deployment);
+        using var previous = JsonDocument.Parse(held);
+        Assert.NotEqual(first.Generation, second.Generation);
+        Assert.Equal(first.Generation, previous.RootElement.GetProperty("generation").GetString());
+        Assert.Equal(first.Version, second.Version);
+        Assert.Equal(second, AdapterDeployment.Read(Deployment));
+    }
+
+    [Fact]
     public void Identical_content_reuses_its_immutable_copy_but_each_debug_start_requests_a_new_connection()
     {
         Seed();
