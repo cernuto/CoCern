@@ -71,7 +71,11 @@ public static class AdapterDeployment
     public static AdapterManifest Read(string deploymentRoot)
     {
         AdapterManifest manifest;
-        try { manifest = JsonSerializer.Deserialize<AdapterManifest>(File.ReadAllText(Path.Combine(deploymentRoot, "current.json")), Json) ?? throw new IOException("Missing adapter manifest."); }
+        try
+        {
+            using var reader = new StreamReader(OpenCurrentManifest(deploymentRoot));
+            manifest = JsonSerializer.Deserialize<AdapterManifest>(reader.ReadToEnd(), Json) ?? throw new IOException("Missing adapter manifest.");
+        }
         catch (JsonException exception) { throw new IOException("Invalid adapter manifest.", exception); }
         if (!Guid.TryParseExact(manifest.Generation, "N", out _)) throw new IOException("Invalid adapter generation.");
         var path = AdapterPath(deploymentRoot, manifest);
@@ -81,6 +85,9 @@ public static class AdapterDeployment
         CheckRequired(Path.GetDirectoryName(path)!);
         return manifest;
     }
+
+    internal static FileStream OpenCurrentManifest(string deploymentRoot) =>
+        new(Path.Combine(deploymentRoot, "current.json"), FileMode.Open, FileAccess.Read, FileShare.Read);
 
     public static string AdapterPath(string deploymentRoot, AdapterManifest manifest)
     {
