@@ -452,6 +452,17 @@ public sealed class LocalWakeTests : IDisposable
     }
 
     [Fact]
+    public void Staging_a_native_candidate_from_setup_writes_no_status()
+    {
+        var cache = Path.Combine(root, "setup-cache");
+        var environment = new Dictionary<string, string> { ["COCERN_URL"] = "http://127.0.0.1:5271/", ["COCERN_TOKEN_FILE"] = TokenFile() };
+        CoCern.Adapter.Setup.ClientSettings.StageLocalNativeCandidate("codex", "dotnet", Path.Combine(root, "CoCern.Adapter.dll"), environment, cache);
+        Assert.Single(Directory.GetDirectories(cache));
+        Assert.False(Directory.Exists(Path.Combine(cache, "status")));
+        Assert.Null(LocalWakeStatus.LastCode(cache));
+    }
+
+    [Fact]
     public void Repeated_transitions_are_rate_limited_on_stderr_and_still_change_the_state()
     {
         var error = new StringWriter();

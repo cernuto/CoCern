@@ -151,7 +151,7 @@ public sealed class AdminToolsTests : IDisposable
         using var error = new StringWriter();
 
         // What DashboardConnect.ConnectAsync(client, null, ...) passes the adapter: no --role.
-        var code = ConnectCommand.Run(["--json", "--token-file", token, "--only", ConnectClients.ClaudeCode], profile, Path.Combine(root, "appdata"), "dotnet", Path.Combine(root, "CoCern.Adapter.dll"), output, error);
+        var code = ConnectCommand.Run(["--json", "--token-file", token, "--only", ConnectClients.ClaudeCode], profile, Path.Combine(root, "appdata"), "dotnet", Path.Combine(root, "CoCern.Adapter.dll"), output, error, nativeCacheRoot: Path.Combine(root, "native-cache"));
 
         Assert.Equal(0, code);
         var written = JsonNode.Parse(File.ReadAllText(settings))!;

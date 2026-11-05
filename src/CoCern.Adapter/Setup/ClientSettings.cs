@@ -129,7 +129,8 @@ internal static class ClientSettings
         try
         {
             var options = AdapterOptions.FromEnvironment(key => environment.GetValueOrDefault(key));
-            if (LocalWakeConnection.Create(options, environment.GetValueOrDefault("COCERN_TOKEN_FILE"), cacheRoot) is { } connection)
+            // A setup command is not an adapter: it leaves no status file, and prints no wake lines over its own output.
+            if (LocalWakeConnection.Create(options, environment.GetValueOrDefault("COCERN_TOKEN_FILE"), cacheRoot, _ => { }) is { } connection)
                 StageNativeCandidate(connection.Folder, provider, SetupEnvironment.AdapterCommandLine(dotnet, adapter), developmentRoot, clientProfile);
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException or AdapterConfigurationException)
