@@ -30,14 +30,14 @@ internal sealed record RelayCall(RelayCaller Caller, string Tool, RelayTool Defi
 /// <see cref="VerifyAsync"/> then reads aggregates: it verifies the session handle and holds claims while dispatch is paused. Each answers
 /// a refusal, or the call to route. The second step runs inside the caller's argument-error mapping, the first does not.
 /// </summary>
-internal sealed class CallGuard(Aggregates aggregates, string incarnation)
+internal sealed class CallGuard(Aggregates aggregates, string incarnation, Func<string, string?>? canonicalRepository = null)
 {
     /// <summary>Admits a call, or refuses it before anything reads it. An admitted call carries this hub's incarnation.</summary>
     public bool TryAdmit(RelayCaller caller, string tool, JsonElement arguments, CallTrace? trace, [NotNullWhen(true)] out RelayCall? call, [NotNullWhen(false)] out RelayReply? refusal)
     {
         (call, refusal) = (null, null);
         if (!RelayToolCatalog.TryGet(tool, out var definition)) { refusal = Error(UnknownTool); return false; }
-        if (RelayRequestGuard.Validate(caller, definition, arguments, out var args) is { } rejected) { refusal = rejected; return false; }
+        if (RelayRequestGuard.Validate(caller, definition, arguments, out var args, canonicalRepository) is { } rejected) { refusal = rejected; return false; }
         // Fields only the hub sets are dropped from what the client sent, before anything reads them.
         ServerArguments.StripClientValues(tool, args);
         var controls = CallControls.Take(args);

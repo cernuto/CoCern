@@ -58,7 +58,7 @@ internal sealed record DocCacheSettings(bool Enabled, int SyncMinutes, int IdleM
 
     private static readonly Regex Name = new("^[A-Za-z0-9._-]{1,64}$", RegexOptions.CultureInvariant);
 
-    public DocRepository? Find(string id) => Repositories.FirstOrDefault(repository => repository.Id == id);
+    public DocRepository? Find(string id) => Repositories.FirstOrDefault(repository => string.Equals(repository.Id, id, StringComparison.OrdinalIgnoreCase));
 
     public static DocCacheSettings From(IConfiguration configuration, IHostEnvironment environment)
     {
@@ -92,7 +92,7 @@ internal sealed record DocCacheSettings(bool Enabled, int SyncMinutes, int IdleM
             var where = $"Relay:DocCache:Repositories:{entry.Key}";
             var id = entry["Id"];
             if (string.IsNullOrWhiteSpace(id) || id.Length > RelayLimits.MaxIdentifierLength) throw new InvalidOperationException($"{where}:Id is required.");
-            if (repositories.Any(existing => existing.Id == id)) throw new InvalidOperationException($"{where}:Id {id} is listed twice.");
+            if (repositories.Any(existing => string.Equals(existing.Id, id, StringComparison.OrdinalIgnoreCase))) throw new InvalidOperationException($"{where}:Id {id} is listed twice, ignoring case.");
             if (string.IsNullOrWhiteSpace(entry["ClonePath"])) throw new InvalidOperationException($"{where}:ClonePath is required.");
             var branch = entry["Branch"] is { Length: > 0 } configured ? configured : "main";
             if (!DocGlob.SafeRef(branch)) throw new InvalidOperationException($"{where}:Branch is not a valid branch name.");

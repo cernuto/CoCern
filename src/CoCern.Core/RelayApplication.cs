@@ -33,7 +33,7 @@ public sealed class RelayApplication : IRelayApplication
     public string IncarnationId => incarnation;
 
     public RelayApplication(IGrainFactory grains, IMachineDirectory? machines = null, IActivitySink? activity = null, IFullTextSearch? search = null, AttentionOptions? attention = null, IAnalyticsTool? analytics = null, AnomalyOptions? anomaly = null, OrderOptions? orders = null, IDocCacheTools? docs = null,
-        ITokenCounter? tokens = null, TokenOptions? tokenOptions = null, FeedbackRules? feedback = null, ITaskArchive? archive = null, IRelayObservationSource? observations = null, IAdminTools? admin = null)
+        ITokenCounter? tokens = null, TokenOptions? tokenOptions = null, FeedbackRules? feedback = null, ITaskArchive? archive = null, IRelayObservationSource? observations = null, IAdminTools? admin = null, Func<string, string?>? canonicalRepository = null)
     {
         // A turned-off feature answers for itself, so no call site checks for it.
         aggregates = new(grains, archive);
@@ -47,7 +47,7 @@ public sealed class RelayApplication : IRelayApplication
         // One standing cache for every reader, so a standing write through this hub reaches all of them.
         var standing = new StandingDelivery(aggregates);
         var docTools = docs ?? DocCacheTool.Off;
-        guard = new(aggregates, incarnation);
+        guard = new(aggregates, incarnation, canonicalRepository);
         actions = new(aggregates);
         var machineDirectory = machines ?? new MachineDirectory(grains);
         router = new(aggregates, claims,

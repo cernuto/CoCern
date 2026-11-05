@@ -22,19 +22,21 @@ internal sealed class DocRepositoryRegistry
     private readonly DocCacheSettings settings;
     private readonly GitCli git;
     private readonly ILogger<DocRepositoryRegistry> logger;
+    private readonly string[] configuredIds;
     private readonly Lock gate = new();
     // One scan at a time: concurrent timer and test runs would otherwise start the same git commands twice.
     private readonly SemaphoreSlim scanning = new(1, 1);
-    private ImmutableDictionary<string, DocRepository> discovered = ImmutableDictionary.Create<string, DocRepository>(StringComparer.Ordinal);
+    private ImmutableDictionary<string, DocRepository> discovered = ImmutableDictionary.Create<string, DocRepository>(StringComparer.OrdinalIgnoreCase);
     private DocRepository[] all;
     private int capNoted;
 
     private readonly IHttpContextAccessor? transport;
 
-    public DocRepositoryRegistry(DocCacheSettings settings, GitCli git, ILogger<DocRepositoryRegistry> logger, IHttpContextAccessor? transport = null)
+    public DocRepositoryRegistry(DocCacheSettings settings, GitCli git, ILogger<DocRepositoryRegistry> logger, IHttpContextAccessor? transport = null, IConfiguration? configuration = null)
     {
         this.transport = transport;
         (this.settings, this.git, this.logger) = (settings, git, logger);
+        configuredIds = configuration is null ? RepositoryIds.Configured(settings.Repositories.Select(repository => repository.Id)) : RepositoryCatalog.ConfiguredNames(configuration);
         all = [.. settings.Repositories];
         Ids = new IdView(this);
     }
@@ -96,7 +98,9 @@ internal sealed class DocRepositoryRegistry
             foreach (var path in settings.Roots.SelectMany(root => Candidates(root, settings.RootDepth)).Order(StringComparer.Ordinal))
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                if (IdOf(path) is not { } id || Find(id) is not null || Registered(path)) continue;
+                if (IdOf(path) is not { } supplied) continue;
+                var id = RepositoryIds.Match(supplied, configuredIds) ?? supplied;
+                if (Find(id) is not null || Registered(path)) continue;
                 if (Full()) { NoteCap(path); break; }
                 if (await BranchAsync(path, cancellationToken) is { } branch) Add(Discovered(id, path, branch));
             }
@@ -119,6 +123,7 @@ internal sealed class DocRepositoryRegistry
         if (Normalize(workspace) is not { } path || settings.Roots.FirstOrDefault(candidate => Inside(path, candidate)) is not { } root || !IsRepository(path) || Linked(path, root)) return (null, false);
         if (RegisteredAs(path) is { } known) return (known, false);
         var id = Find(repositoryId) is null ? repositoryId : IdOf(path);
+        if (id is not null) id = RepositoryIds.Match(id, configuredIds) ?? id;
         if (id is null || Find(id) is not null) return (null, false);
         if (await BranchAsync(path, cancellationToken) is not { } branch) return (null, false);
         if (Add(Discovered(id, path, branch))) return (id, true);

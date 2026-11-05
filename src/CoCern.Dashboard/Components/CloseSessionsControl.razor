@@ -81,14 +81,14 @@
     private string? _message;
     private ElementReference _confirmButton;
 
-    private string[] Repositories => Sessions.Select(session => session.RepositoryId).Where(id => !string.IsNullOrWhiteSpace(id)).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
+    private string[] Repositories => Sessions.Select(session => session.RepositoryId).Where(id => !string.IsNullOrWhiteSpace(id)).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.Ordinal).ToArray();
     private bool CanReview => _repository is not null && (_filter != Filter.Label || !string.IsNullOrWhiteSpace(_prefix));
 
     protected override void OnParametersSet()
     {
         // Keep the chosen repository while it is still listed; otherwise take the first.
         var repositories = Repositories;
-        if (_repository is null || !repositories.Contains(_repository, StringComparer.Ordinal)) _repository = repositories.FirstOrDefault();
+        _repository = repositories.FirstOrDefault(repository => string.Equals(repository, _repository, StringComparison.OrdinalIgnoreCase)) ?? repositories.FirstOrDefault();
     }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)

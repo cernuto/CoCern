@@ -19,6 +19,7 @@ public partial class ManagerControl : ComponentBase
         set
         {
             repositoryTouched = true;
+            value = RepositoryIds.Match(value, Sessions.Select(session => session.RepositoryId)) ?? value;
             if (repositoryId == value) return;
             repositoryId = value;
             HumanWords = "";

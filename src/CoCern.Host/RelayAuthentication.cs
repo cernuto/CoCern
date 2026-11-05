@@ -154,9 +154,9 @@ public static class RelayAuthentication
     public static RelayCaller Caller(ClaimsPrincipal principal) => new(principal.FindFirstValue(ClaimTypes.NameIdentifier) ?? throw new UnauthorizedAccessException(), principal.HasClaim("relay_admin", "true"), principal.FindAll("relay_repository").Select(c => c.Value).ToArray(), AuthenticatedMachineId: principal.FindFirstValue(MachineClaim));
 }
 
-internal sealed class RelayConfigurationValidator(IConfiguration configuration, IHostEnvironment environment) : IHostedService
+internal sealed class RelayConfigurationValidator(IConfiguration configuration, IHostEnvironment environment, RepositoryCatalog repositories) : IHostedService
 {
-    public Task StartAsync(CancellationToken cancellationToken) { RelayAuthentication.Validate(configuration, environment); return Task.CompletedTask; }
+    public Task StartAsync(CancellationToken cancellationToken) { _ = repositories; RelayAuthentication.Validate(configuration, environment); return Task.CompletedTask; }
     public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 }
 

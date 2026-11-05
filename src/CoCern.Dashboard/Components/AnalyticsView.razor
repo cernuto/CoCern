@@ -65,7 +65,7 @@
     private CancellationTokenSource? _pending;
     private IEnumerable<string> Repositories => Snapshot.Sessions.Select(session => session.RepositoryId)
         .Concat(Snapshot.DocCache.Grains.Select(grain => grain.Repository)).Append(_repository)
-        .Where(repository => !string.IsNullOrWhiteSpace(repository)).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal);
+        .Where(repository => !string.IsNullOrWhiteSpace(repository)).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.Ordinal);
     private string StateTitle => _analytics?.Status switch
     {
         "no-snapshot" => "Waiting for the first snapshot",
@@ -76,7 +76,7 @@
     };
     protected override async Task OnInitializedAsync()
     {
-        _repository = Repositories.Contains("cocern", StringComparer.Ordinal) ? "cocern" : Repositories.FirstOrDefault() ?? "cocern";
+        _repository = Repositories.FirstOrDefault(repository => string.Equals(repository, "cocern", StringComparison.OrdinalIgnoreCase)) ?? Repositories.FirstOrDefault() ?? "cocern";
         await LoadAsync();
     }
     private async Task RepositoryChangedAsync(ChangeEventArgs args)
@@ -126,11 +126,12 @@
             var data = await response.Content.ReadFromJsonAsync<DashboardAnalyticsSnapshot>(cancellationToken);
             if (!_disposed && request == _request)
             {
-                if (data is null || data.RepositoryId != repository || data.Days != days)
+                if (data is null || !string.Equals(data.RepositoryId, repository, StringComparison.OrdinalIgnoreCase) || data.Days != days)
                     _error = "The analytics response did not match the selected repository and period.";
                 else
                 {
                     _analytics = data;
+                    _repository = data.RepositoryId;
                     var cacheable = data.Status == "ready" && data.SnapshotAt is not null
                         && data.Queries.All(query => string.IsNullOrWhiteSpace(query.Error)) && response.Headers.ETag is not null;
                     _cachedAnalytics = cacheable ? data : null;

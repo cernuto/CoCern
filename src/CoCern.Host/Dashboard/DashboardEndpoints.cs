@@ -76,6 +76,21 @@ public static class DashboardEndpoints
                     open: app.Configuration.GetValue("Relay:Dashboard:OpenOnStart", false));
         });
         var api = app.MapGroup("/dashboard/api");
+        // Analytics reads bypass the tool pipeline. Normalize their query at the same boundary as every other dashboard API.
+        api.AddEndpointFilter(async (invocation, next) =>
+        {
+            var context = invocation.HttpContext;
+            var supplied = context.Request.Query["repositoryId"];
+            if (supplied.Count == 1 && supplied[0] is { Length: > 0 } value && value.Length <= RelayLimits.MaxIdentifierLength && !value.Any(char.IsControl))
+            {
+                var canonical = context.RequestServices.GetRequiredService<RepositoryCatalog>().Find(value);
+                if (canonical is null) return Results.Json(new { ok = false, code = RelayErrorCodes.RepositoryDenied }, statusCode: 403);
+                var query = context.Request.Query.ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.OrdinalIgnoreCase);
+                query["repositoryId"] = canonical;
+                context.Request.Query = new QueryCollection(query);
+            }
+            return await next(invocation);
+        });
         api.MapGet("/login-options", () => Results.Ok(new DashboardLoginOptions { SessionHours = authentication.SessionHours, RememberDays = authentication.RememberDays }));
         api.MapGet("/auth", (HttpContext context) => Results.Ok(new DashboardAuthStatus { Authenticated = true, PrincipalId = context.User.FindFirstValue(ClaimTypes.NameIdentifier) }))
             .RequireAuthorization(DashboardSecurity.Policy);

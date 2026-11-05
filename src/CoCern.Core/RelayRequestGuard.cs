@@ -19,7 +19,7 @@ internal static class RelayRequestGuard
         "sinceRevision", "snapshotRevision", "partOffset", "freshnessSeconds", "revision"];
 
     /// <summary>Returns a rejection, or null with the parsed arguments.</summary>
-    public static RelayReply? Validate(RelayCaller caller, RelayTool tool, JsonElement arguments, out JsonObject args)
+    public static RelayReply? Validate(RelayCaller caller, RelayTool tool, JsonElement arguments, out JsonObject args, Func<string, string?>? canonicalRepository = null)
     {
         args = new();
         if (arguments.ValueKind != JsonValueKind.Object) return Replies.Error(InvalidArguments);
@@ -70,7 +70,12 @@ internal static class RelayRequestGuard
         // Machine revocation dispatches directly to discovery, outside the control aggregate's argument fence.
         if (tool.Name == RelayTools.ControlRequest && Text(args, "command") == "revoke_machine" && args.ContainsKey("allSessions"))
             return Replies.Error(InvalidArguments, new { field = "allSessions" });
-        if (!caller.MayAccess(Text(args, "repositoryId"))) return Replies.Error(RepositoryDenied);
+        var suppliedRepository = Text(args, "repositoryId");
+        var repository = canonicalRepository is null
+            ? RepositoryIds.Match(suppliedRepository, caller.Repositories) ?? (caller.IsAdministrator ? suppliedRepository : null)
+            : canonicalRepository(suppliedRepository);
+        if (repository is null || !caller.MayAccess(repository)) return Replies.Error(RepositoryDenied);
+        args["repositoryId"] = repository;
         if (tool.IsMutation && Text(args, "requestId").Length == 0) return Replies.Error(RequestIdRequired);
         if (!IdentifiersFit(args)) return Replies.Error(InvalidArguments);
         // replyTo names a message: a bounded single-line identifier, never free text.

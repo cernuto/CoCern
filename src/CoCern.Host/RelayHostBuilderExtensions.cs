@@ -45,6 +45,7 @@ public static class RelayHostBuilderExtensions
         builder.Services.AddDiscovery();
         builder.Services.TryAddSingleton(services => new AdapterZipCache(AdapterZipCache.DefaultFolder(services.GetRequiredService<IConfiguration>(), services.GetRequiredService<IHostEnvironment>())));
         builder.Services.AddCoCernCore();
+        builder.Services.AddSingleton<RepositoryCatalog>();
         builder.Services.AddSingleton(services =>
         {
             var configuration = services.GetRequiredService<IConfiguration>();
@@ -94,7 +95,8 @@ public static class RelayHostBuilderExtensions
                 feedback: services.GetRequiredService<FeedbackOptions>() is { Enabled: true } feedback ? new FeedbackRules(feedback, counter, services.GetService<IFeedbackRuleStore>()) : null,
                 archive: services.GetService<ITaskArchive>(),
                 observations: services.GetService<IRelayObservationSource>(),
-                admin: services.GetRequiredService<IAdminTools>()));
+                admin: services.GetRequiredService<IAdminTools>(),
+                canonicalRepository: services.GetRequiredService<RepositoryCatalog>().Find));
         }));
         // One shared tokenizer for every token count; it loads its vocabulary on first use.
         builder.Services.AddSingleton<ITokenCounter, O200kTokenCounter>();

@@ -16,7 +16,7 @@ public sealed record StandingPresentation(string BoardId, string ProposalId, str
 public sealed record RelayCaller(string PrincipalId, bool IsAdministrator, string[] Repositories, bool IsInternal = false, string? AuthenticatedMachineId = null)
 {
     public bool MayAccess(string repository) =>
-        repository.Length > 0 && (IsAdministrator || Repositories.Contains(repository, StringComparer.Ordinal));
+        repository.Length > 0 && (IsAdministrator || Repositories.Contains(repository, StringComparer.OrdinalIgnoreCase));
 }
 
 /// <summary>Every operation's outcome. <see cref="DataJson"/> is the structured payload; <see cref="Version"/> is the record version it observed or produced.</summary>

@@ -14,7 +14,7 @@ public static class TestEffortPresentation
         using var response = await http.GetAsync($"api/analytics/test-effort?repositoryId={Uri.EscapeDataString(repositoryId)}", cancellationToken);
         response.EnsureSuccessStatusCode();
         var data = await response.Content.ReadFromJsonAsync<DashboardTestEffort>(cancellationToken);
-        return data?.RepositoryId == repositoryId ? data : throw new HttpRequestException("The response did not match the selected repository.");
+        return data is not null && string.Equals(data.RepositoryId, repositoryId, StringComparison.OrdinalIgnoreCase) ? data : throw new HttpRequestException("The response did not match the selected repository.");
     }
 
     public static bool IsLoadFailure(Exception exception) => exception is HttpRequestException or System.Text.Json.JsonException or OperationCanceledException;
@@ -38,5 +38,5 @@ public static class TestEffortPresentation
 
     public static IEnumerable<string> Repositories(DashboardSnapshot snapshot, string selected) => snapshot.Sessions.Select(session => session.RepositoryId)
         .Concat(snapshot.DocCache.Grains.Select(grain => grain.Repository)).Append(selected)
-        .Where(repository => !string.IsNullOrWhiteSpace(repository)).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal);
+        .Where(repository => !string.IsNullOrWhiteSpace(repository)).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.Ordinal);
 }

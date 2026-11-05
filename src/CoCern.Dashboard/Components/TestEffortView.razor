@@ -140,7 +140,7 @@
     protected override async Task OnInitializedAsync()
     {
         var known = TestEffortPresentation.Repositories(Snapshot, "").ToArray();
-        _repository = known.Contains("cocern", StringComparer.Ordinal) ? "cocern" : known.FirstOrDefault() ?? "cocern";
+        _repository = known.FirstOrDefault(repository => string.Equals(repository, "cocern", StringComparison.OrdinalIgnoreCase)) ?? known.FirstOrDefault() ?? "cocern";
         await LoadAsync();
     }
 
@@ -167,6 +167,7 @@
         // A newer selection or disposal replaced this request: its reply, whatever it was, must not touch the display.
         if (!ReferenceEquals(pending, _pending)) return;
         _data = data;
+        if (data is not null) _repository = data.RepositoryId;
         _problem = problem;
         _loading = false;
     }
