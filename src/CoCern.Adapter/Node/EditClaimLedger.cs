@@ -17,6 +17,7 @@ internal sealed class EditClaimLedger(string privateDirectory)
 {
     private const int ByteLimit = 262144;
     private const int RetiredBytes = 8192;
+    private static readonly byte[] Initialized = Encoding.ASCII.GetBytes("cocern-file-claims-initialized-v2");
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web)
     { UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow };
     private sealed record Document(int Schema, Dictionary<string, EditClaimIntent> Intents, byte[]? Retired = null);
@@ -26,9 +27,9 @@ internal sealed class EditClaimLedger(string privateDirectory)
         if (!Valid(intent)) return false;
         try
         {
+            using var gate = AcquireGate(create: true);
             var existed = Directory.Exists(privateDirectory);
             var root = Prepare(create: true);
-            using var gate = OpenPrivate(Path.Combine(root, "edit-claims.lock"), create: true);
             var path = Path.Combine(root, "edit-claims.json");
             if (existed && !File.Exists(path)) return false;
             var document = Load(path);
@@ -53,8 +54,8 @@ internal sealed class EditClaimLedger(string privateDirectory)
     {
         try
         {
+            using var gate = AcquireGate(create: false);
             var root = Prepare(create: false);
-            using var gate = OpenPrivate(Path.Combine(root, "edit-claims.lock"), create: true);
             return Load(Path.Combine(root, "edit-claims.json"), allowMissing: false).Intents.GetValueOrDefault(intentId);
         }
         catch (Exception error) when (Unavailable(error)) { return null; }
@@ -65,8 +66,8 @@ internal sealed class EditClaimLedger(string privateDirectory)
     {
         try
         {
+            using var gate = AcquireGate(create: false);
             var root = Prepare(create: false);
-            using var gate = OpenPrivate(Path.Combine(root, "edit-claims.lock"), create: true);
             return Load(Path.Combine(root, "edit-claims.json"), allowMissing: false).Intents.Values.OrderBy(intent => intent.Id, StringComparer.Ordinal).ToArray();
         }
         catch (Exception error) when (Unavailable(error)) { return null; }
@@ -77,8 +78,8 @@ internal sealed class EditClaimLedger(string privateDirectory)
         if (!Bounded(intentId, 128)) return false;
         try
         {
+            using var gate = AcquireGate(create: false);
             var root = Prepare(create: false);
-            using var gate = OpenPrivate(Path.Combine(root, "edit-claims.lock"), create: true);
             var path = Path.Combine(root, "edit-claims.json");
             var document = Load(path, allowMissing: false);
             if (!document.Intents.TryGetValue(intentId, out var intent)) return WasRetired(document.Retired!, intentId);
@@ -113,6 +114,38 @@ internal sealed class EditClaimLedger(string privateDirectory)
             return true;
         }
         finally { if (temporary is not null) { try { File.Delete(temporary); } catch (Exception error) when (error is IOException or UnauthorizedAccessException) { } } }
+    }
+
+    // The initialization fence and serialization lock live beside the ledger directory in the accepted native binding.
+    // Losing that directory cannot turn a previously initialized generation back into a fresh one.
+    private FileStream AcquireGate(bool create)
+    {
+        if (!OperatingSystem.IsWindows() || !Path.IsPathFullyQualified(privateDirectory)) throw new PlatformNotSupportedException();
+        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(privateDirectory));
+        RejectLinks(root);
+        var parent = Path.GetDirectoryName(root) ?? throw new IOException("Missing private binding folder");
+        var marker = Path.Combine(parent, "." + Path.GetFileName(root) + ".initialized");
+        var existed = File.Exists(marker);
+        var gate = OpenPrivate(marker, create);
+        try
+        {
+            if (existed)
+            {
+                var stamp = new byte[Initialized.Length];
+                if (gate.Length != Initialized.Length || gate.Read(stamp) != stamp.Length || !stamp.SequenceEqual(Initialized)
+                    || !Directory.Exists(root)) throw new IOException("Initialized file claim storage is unavailable");
+            }
+            else
+            {
+                // A partially initialized or legacy directory with no receipt file is not fresh storage.
+                if (!create || Directory.Exists(root) && !File.Exists(Path.Combine(root, "edit-claims.json")))
+                    throw new IOException("File claim initialization cannot be verified");
+                gate.Write(Initialized);
+                gate.Flush(true); // Persist the fence before creating the directory or permitting a request.
+            }
+            return gate;
+        }
+        catch { gate.Dispose(); throw; }
     }
 
     private string Prepare(bool create)

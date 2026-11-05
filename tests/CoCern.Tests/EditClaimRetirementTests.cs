@@ -34,6 +34,11 @@ public sealed class EditClaimRetirementTests
             File.Delete(Path.Combine(directory, "edit-claims.json"));
             Assert.Null(reopened.Snapshot());
             Assert.False(reopened.Save(held)); // Losing the file cannot silently reset durable replay history.
+            Directory.Move(directory, directory + "-lost");
+            Assert.Null(reopened.Snapshot());
+            Assert.False(reopened.Save(held)); // The parent initialization fence also survives losing the whole ledger directory.
+            Assert.False((await new EditClaimGuard(reopened, transport).AcquireAsync(held.Id, ["file.cs"])).Abstain);
+            Assert.Equal(0, transport.Calls);
         }
         finally
         {
