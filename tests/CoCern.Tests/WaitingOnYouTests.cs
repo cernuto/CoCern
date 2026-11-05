@@ -489,17 +489,26 @@ public sealed class WaitingOnYouTests
         {
             ["repositoryId"] = "repo2", ["requestId"] = "other", ["taskId"] = "there", ["sessionId"] = "worker", ["expectedVersion"] = 0, ["workflow"] = Workflow("blocked", ("a", BlockerKinds.HumanDecision, "There"))
         }, AggregateHub.Admin, T0).Ok);
+        Assert.True(hub.Apply(AggregateKinds.Board, elsewhere, RelayTools.StandingPropose, new()
+        {
+            ["repositoryId"] = "repo2", ["requestId"] = "other-line", ["sessionId"] = "worker", ["line"] = new JsonObject { ["text"] = "Line there." }
+        }, AggregateHub.Admin, T0).Ok);
         using var store = Stored(hub, (AggregateKinds.Board, AggregateHub.BoardKey), (AggregateKinds.Board, elsewhere), (AggregateKinds.Session, chat.Id));
         await new SqliteGrainStorage(store).WriteStateAsync(AggregateKinds.Session, GrainId.Create("cocern.session", "s-there"), new GrainState<StateEnvelope<CoordinationDocument>>(new() { Value = new() { Json = new JsonObject
         {
             ["sessionId"] = "s-there", ["repositoryId"] = "repo2", ["label"] = "In repo2", [SessionState.WaitingForKey] = WaitingMark.Create("Report there", T0, T0.AddHours(12)).Json
         }.ToJsonString() } }));
 
+        // Each query scopes for itself; the builder's own filter below must not be what hides another repository's rows.
+        var read = Assert.IsType<WaitingSources>(await store.ReadWaitingAsync(Repository));
+        Assert.Equal(["here"], read.Blockers.Select(blocker => blocker.TaskId));
+        Assert.Equal([Repository], read.Boards.Select(board => board.RepositoryId));
+        Assert.Equal([chat.Id], read.Reports.Select(report => report.SessionId));
         var here = await ListAsync(store, T0.AddMinutes(1));
         Assert.Equal(["Line here.", "Here", "Report here"], here.Items.Select(row => row.Text));
         Assert.All(here.Items, row => Assert.Equal(Repository, row.RepositoryId));
         var there = await ListAsync(store, T0.AddMinutes(1), "repo2");
-        Assert.Equal(["There", "Report there"], there.Items.Select(row => row.Text));
+        Assert.Equal(["Line there.", "There", "Report there"], there.Items.Select(row => row.Text));
         Assert.All(there.Items, row => Assert.Equal("repo2", row.RepositoryId));
 
         // The dashboard's read of blocked tasks is across every repository, and each row says which.
