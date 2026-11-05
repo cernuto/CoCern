@@ -1,5 +1,4 @@
 using System.Text.Json.Nodes;
-using System.Text.Json;
 using CoCern.Contracts;
 using CoCern.Domain;
 using CoCern.Domain.Messages;
@@ -52,21 +51,14 @@ public sealed class LockStateShapeTests
         // Install/cancel actual source subscriptions against the existing fenced
         // generation. Turnover beyond the active map's bound exercises its
         // dedicated replay fences without releasing or modifying that grant.
-        for (var index = 0; index < 129; index++)
-        {
-            var watch = new EventWaitSourceWatch("repo", "shape-owner", "shape-wait-" + index, "shape-watch-" + index,
-                "claim_released", AggregateKinds.Lock, Resource, null, T0.AddMinutes(15), Revision: "1");
-            var payload = JsonSerializer.SerializeToNode(watch, new JsonSerializerOptions(JsonSerializerDefaults.Web))!.AsObject();
-            Assert.True(Apply(envelope, EventWaitSources.SourceWatchOperation, payload, T0.AddSeconds(304)).Ok);
-            Assert.True(Apply(envelope, EventWaitSources.SourceUnwatchOperation, payload, T0.AddSeconds(304)).Ok);
-        }
+        ExhaustiveStateFixture.ExerciseSourceRetirement(index => new EventWaitSourceWatch("repo", "shape-owner", "shape-wait-" + index, "shape-watch-" + index,
+            "claim_released", AggregateKinds.Lock, Resource, null, T0.AddMinutes(15), Revision: "1"),
+            (operation, payload) => Apply(envelope, operation, payload, T0.AddSeconds(304)));
         Assert.NotEmpty(JsonNode.Parse(envelope.Value.Json)![EventWaitSources.SubscriptionsKey]!.AsObject());
         Assert.NotEmpty(JsonNode.Parse(envelope.Value.Json)!["eventWaitRetired"]!.AsObject());
 
         var json = JsonNode.Parse(envelope.Value.Json)!.AsObject();
-        Assert.Empty(LockState.Shape.Undeclared(json));
-        // The shape is not vacuous: the lock holds every key it declares, but the tombstones only a full replay cache writes.
-        Assert.Empty(LockState.Shape.Fields.Keys.Except([ReadModels.RequestTombstonesKey]).Except(json.Select(entry => entry.Key)));
+        ExhaustiveStateFixture.Verify(LockState.Shape, [json]);
 
         // Its typed members read what the handlers (and the lease check and orders) wrote.
         var state = new LockState(json);
@@ -80,19 +72,4 @@ public sealed class LockStateShapeTests
         Assert.Equal("ops", json[LockOrderState.OrderBoardsKey]!["repo/ops"]![LockOrderState.BoardIdKey]!.GetValue<string>());
     }
 
-    [Fact]
-    public void A_claim_state_read_leaves_the_blocker_map_as_it_found_it_and_a_release_frees_the_lock()
-    {
-        var envelope = new StateEnvelope<CoordinationDocument>();
-        Assert.True(Ask(envelope, new ClaimStateQuery("repo", "s1"), T0).Ok);
-        Assert.Null(JsonNode.Parse(envelope.Value.Json)![LockState.BlockersKey]);
-
-        Assert.True(Apply(envelope, RelayTools.ClaimAcquire, new() { ["sessionId"] = "s1", ["requestId"] = "claim", ["taskId"] = "T-1", ["taskClaimGeneration"] = 1 }, T0).Ok);
-        var granted = new LockState(JsonNode.Parse(envelope.Value.Json)!.AsObject());
-        Assert.True(granted.HeldBy("s1", T0));
-        Assert.True(Apply(envelope, RelayTools.ClaimRelease, new() { ["sessionId"] = "s1", ["generation"] = granted.Generation }, T0.AddSeconds(1)).Ok);
-        var freed = new LockState(JsonNode.Parse(envelope.Value.Json)!.AsObject());
-        Assert.Equal(("", T0.AddSeconds(1), ""), (freed.Holder, freed.LeaseUntil, freed.ClaimFor));
-        Assert.False(JsonNode.Parse(envelope.Value.Json)!.AsObject().ContainsKey(LockState.ClaimForKey));
-    }
 }

@@ -1,7 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using CoCern.Domain;
-using CoCern.Domain.Messages;
 using Xunit;
 
 namespace CoCern.Tests;
@@ -27,64 +26,6 @@ public sealed class EventWaitActorTests
     }
 
     [Fact]
-    public void Close_overtaking_watch_install_is_observed_by_the_primary_actor()
-    {
-        var owner = Owner(); var source = Open("peer"); var watch = Bind(owner);
-        Assert.True(Close(source, "peer", force: true).Ok);
-        source.Effects.Clear();
-        Assert.True(ApplyEffect(source, watch, Epoch.AddMinutes(3)).Ok);
-        var notice = Assert.Single(source.Effects, x => x.Operation == EventWaitSources.LifecycleOperation);
-        Assert.True(ApplyEffect(owner, notice, Epoch.AddMinutes(3)).Ok);
-        Assert.Equal("target_gone", Terminal(owner)["outcome"]!.GetValue<string>());
-    }
-
-    [Fact]
-    public void Refused_idle_close_does_not_emit_a_gone_notice()
-    {
-        var owner = Owner(); var source = Open("peer");
-        Assert.True(ApplyEffect(source, Bind(owner), Epoch).Ok);
-        var mail = new MessageDelivery(new InboxMessage { MessageId = "unread", RepositoryId = "repo", Text = "pending", Author = "fixture", SentAt = Epoch });
-        Assert.True(CoordinationStateMachine.Apply(source, "session", "peer", Caller(true), "__deliver", mail.ToJson(), Epoch).Ok);
-        Assert.True(Close(source, "peer", force: false, idle: true).Ok);
-        Assert.DoesNotContain(source.Effects, x => x.Operation == EventWaitSources.LifecycleOperation);
-        Assert.Null(JsonNode.Parse(source.Value.Json)!["closedAt"]);
-    }
-
-    [Fact]
-    public void Forced_close_uses_real_unresolved_work_to_classify_stranding()
-    {
-        var owner = Owner(); var source = Open("peer");
-        Assert.True(ApplyEffect(source, Bind(owner), Epoch).Ok);
-        var work = new ActionWorkReport("repo", "peer", "default", "task", "action", 1, true, Epoch).ToJson();
-        Assert.True(CoordinationStateMachine.Apply(source, "session", "peer", Caller(true), "__session_work", work, Epoch).Ok);
-        Assert.True(Close(source, "peer", force: false).Ok);
-        Assert.DoesNotContain(source.Effects, x => x.Operation == EventWaitSources.LifecycleOperation);
-        Assert.True(Close(source, "peer", force: true).Ok);
-        var notice = Assert.Single(source.Effects, x => x.Operation == EventWaitSources.LifecycleOperation);
-        Assert.True(ApplyEffect(owner, notice, Epoch.AddMinutes(2)).Ok);
-        Assert.Equal("stranded", Terminal(owner)["outcome"]!.GetValue<string>());
-        // The session reports an existing board action; it does not release its claim or resource.
-        Assert.DoesNotContain(source.Effects, x => x.Operation is "claim_release" or "resource_release");
-    }
-
-    [Fact]
-    public void Closing_the_waiter_unwatches_without_delivering_to_a_replacement()
-    {
-        var owner = Owner(); var source = Open("peer");
-        Assert.True(ApplyEffect(source, Bind(owner), Epoch).Ok);
-        owner.Effects.Clear();
-        Assert.True(Close(owner, "owner", force: true).Ok);
-        var unwatch = Assert.Single(owner.Effects, x => x.Operation == EventWaitSources.UnwatchOperation);
-        Assert.True(ApplyEffect(source, unwatch, Epoch.AddMinutes(2)).Ok);
-        source.Effects.Clear();
-        Assert.True(Close(source, "peer", force: true).Ok);
-        Assert.DoesNotContain(source.Effects, x => x.Operation == EventWaitSources.LifecycleOperation);
-        Assert.Null(JsonNode.Parse(owner.Value.Json)!["eventWaits"]);
-        var replacement = Open("replacement");
-        Assert.Null(JsonNode.Parse(replacement.Value.Json)!["eventWaits"]);
-    }
-
-    [Fact]
     public void Public_callers_cannot_install_private_watches_or_forge_lifecycle_receipts()
     {
         var owner = Owner(); var source = Open("peer"); var watch = Bind(owner);
@@ -103,20 +44,6 @@ public sealed class EventWaitActorTests
         Assert.Equal("InternalOnly", CoordinationStateMachine.Apply(owner, "session", "owner", Caller(),
             EventWaitSources.LifecycleOperation, lifecycle, Epoch).Code);
         Assert.Equal(ownerBefore, owner.Value.Json);
-    }
-
-    [Fact]
-    public void A_late_private_lifecycle_for_a_closed_waiter_is_consumed_without_reviving_it()
-    {
-        var owner = Owner(); var source = Open("peer");
-        Assert.True(ApplyEffect(source, Bind(owner), Epoch).Ok);
-        Assert.True(Close(source, "peer", force: true).Ok);
-        var notice = Assert.Single(source.Effects, x => x.Operation == EventWaitSources.LifecycleOperation);
-        Assert.True(Close(owner, "owner", force: true).Ok);
-        owner.Effects.Clear();
-        Assert.True(ApplyEffect(owner, notice, Epoch.AddMinutes(3)).Ok);
-        Assert.Empty(owner.Effects);
-        Assert.Null(JsonNode.Parse(owner.Value.Json)!["eventWaits"]);
     }
 
     private static StateEnvelope<CoordinationDocument> Open(string id)

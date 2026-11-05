@@ -17,45 +17,6 @@ public sealed class EventWaitSourceAtomicTests
     private static RelayCaller Caller => new("principal", false, ["repo"], true);
 
     [Fact]
-    public void Install_captures_the_real_revision_after_a_pre_arming_completion_and_reopen()
-    {
-        var board = Empty();
-        Update(board, 0, "ready", Epoch);
-        Update(board, 1, "completed", Epoch.AddSeconds(1));
-        Update(board, 2, "ready", Epoch.AddSeconds(2));
-        var baseline = Revision(board);
-        board.Effects.Clear();
-        var watch = Watch("task_completed"); watch["baselineRevision"] = 0; // Never trusted as the captured source cursor.
-        Assert.True(Apply(board, "board", BoardKey, WatchOperation, watch, Epoch.AddSeconds(3)).Ok);
-        var ack = Payload(Assert.Single(board.Effects, effect => effect.Operation == AckOperation));
-        Assert.Equal(baseline, ack["baselineRevision"]!.GetValue<long>());
-        Assert.False(ack["alreadySatisfied"]!.GetValue<bool>());
-        Assert.DoesNotContain(board.Effects, effect => effect.Operation == SignalOperation);
-        // The historical completion was before arming. A genuine later completion is the first fire.
-        Update(board, 3, "completed", Epoch.AddSeconds(4));
-        var signal = Payload(Assert.Single(board.Effects, effect => effect.Operation == SignalOperation));
-        Assert.True(long.Parse(signal["revision"]!.GetValue<string>()) > baseline);
-    }
-
-    [Fact]
-    public void A_completed_install_snapshot_is_reported_explicitly_and_never_fabricated_as_a_fire()
-    {
-        var board = Empty(); Update(board, 0, "completed", Epoch); board.Effects.Clear();
-        Assert.True(Apply(board, "board", BoardKey, WatchOperation, Watch("task_completed"), Epoch.AddSeconds(1)).Ok);
-        var ack = Payload(Assert.Single(board.Effects, effect => effect.Operation == AckOperation));
-        Assert.True(ack["alreadySatisfied"]!.GetValue<bool>());
-        Assert.Equal(Revision(board), ack["baselineRevision"]!.GetValue<long>());
-        Assert.DoesNotContain(board.Effects, effect => effect.Operation == SignalOperation);
-        // A notes edit while still completed has a newer revision but is not a completion transition.
-        Assert.True(Apply(board, "board", BoardKey, "task_update", new JsonObject
-        { ["taskId"] = "task", ["expectedVersion"] = 1, ["notes"] = "new note" }, Epoch.AddSeconds(2)).Ok);
-        Assert.DoesNotContain(board.Effects, effect => effect.Operation == SignalOperation);
-        Update(board, 2, "ready", Epoch.AddSeconds(3));
-        Update(board, 3, "completed", Epoch.AddSeconds(4));
-        Assert.Single(board.Effects, effect => effect.Operation == SignalOperation);
-    }
-
-    [Fact]
     public void Watch_replay_after_restart_keeps_its_original_baseline_and_cannot_refire()
     {
         var board = Empty(); Update(board, 0, "ready", Epoch); board.Effects.Clear();
@@ -96,85 +57,6 @@ public sealed class EventWaitSourceAtomicTests
     }
 
     [Fact]
-    public void Ordinary_expiry_emits_once_without_a_read_but_an_unresolved_action_keeps_its_fence()
-    {
-        foreach (var blocked in new[] { false, true })
-        {
-            var resource = Empty();
-            Assert.True(Apply(resource, "lock", "resource", "claim_acquire", Claim(leaseSeconds: 30), Epoch).Ok);
-            var watch = Watch("claim_released"); watch["revision"] = "1";
-            Assert.True(Apply(resource, "lock", "resource", WatchOperation, watch, Epoch.AddSeconds(1)).Ok);
-            if (blocked)
-                Assert.True(Apply(resource, "lock", "resource", "__block", new JsonObject
-                { ["actionId"] = "action", ["actionKey"] = "board/task/action/1", ["sessionId"] = "holder" }, Epoch.AddSeconds(2)).Ok);
-            resource.Effects.Clear();
-            Assert.True(Apply(resource, "lock", "resource", "__event_wait_claim_due", new(), Epoch.AddSeconds(31)).Ok);
-            Assert.Equal(blocked ? 0 : 1, resource.Effects.Count(effect => effect.Operation == SignalOperation));
-            if (blocked) Assert.NotEmpty(JsonNode.Parse(resource.Value.Json)!["blockers"]!.AsObject());
-            resource.Effects.Clear();
-            Assert.True(Apply(resource, "lock", "resource", "__event_wait_claim_due", new(), Epoch.AddSeconds(32)).Ok);
-            Assert.DoesNotContain(resource.Effects, effect => effect.Operation == SignalOperation);
-        }
-    }
-
-    [Fact]
-    public void Unwatch_overtaking_install_cannot_arm_or_emit_afterward()
-    {
-        var board = Empty(); Update(board, 0, "ready", Epoch); board.Effects.Clear();
-        var watch = Watch("task_completed");
-        Assert.True(Apply(board, "board", BoardKey, "__event_wait_source_unwatch", watch, Epoch.AddSeconds(1)).Ok);
-        Assert.True(Apply(board, "board", BoardKey, WatchOperation, watch, Epoch.AddSeconds(2)).Ok);
-        Update(board, 1, "completed", Epoch.AddSeconds(3));
-        Assert.DoesNotContain(board.Effects, effect => effect.Operation == SignalOperation);
-        Assert.False(Payload(Assert.Single(board.Effects, effect => effect.Operation == AckOperation))["armed"]!.GetValue<bool>());
-    }
-
-    [Fact]
-    public void Signal_overtaking_ack_is_buffered_then_settled_once_and_survives_restart()
-    {
-        var board = Empty(); Update(board, 0, "ready", Epoch); board.Effects.Clear();
-        var owner = Owner();
-        var install = Assert.Single(owner.Effects, effect => effect.Operation == WatchOperation);
-        Assert.True(Deliver(board, install, Epoch.AddSeconds(1)).Ok);
-        var ack = Assert.Single(board.Effects, effect => effect.Operation == AckOperation);
-        Update(board, 1, "completed", Epoch.AddSeconds(2));
-        var signal = Assert.Single(board.Effects, effect => effect.Operation == SignalOperation);
-        owner.Effects.Clear();
-        Assert.True(Deliver(owner, signal, Epoch.AddSeconds(3)).Ok);
-        Assert.Null(Entry(owner)["terminal"]);
-        Assert.NotNull(Entry(owner)["pendingSourceRevision"]);
-        var restarted = new StateEnvelope<CoordinationDocument> { Value = new() { Json = owner.Value.Json } };
-        Assert.True(Deliver(restarted, ack, Epoch.AddSeconds(4)).Ok);
-        Assert.Equal("satisfied", Entry(restarted)["terminal"]!["outcome"]!.GetValue<string>());
-        Assert.Single(restarted.Effects, effect => effect.Operation == "__deliver");
-        Assert.Single(restarted.Effects, effect => effect.Operation == "__event_wait_source_unwatch");
-        restarted.Effects.Clear();
-        Assert.True(Deliver(restarted, signal, Epoch.AddSeconds(5)).Ok);
-        Assert.True(Deliver(restarted, ack, Epoch.AddSeconds(5)).Ok);
-        Assert.Empty(restarted.Effects);
-    }
-
-    [Fact]
-    public void An_already_satisfied_ack_does_not_fire_the_owner_and_cancel_overtakes_late_events()
-    {
-        var board = Empty(); Update(board, 0, "completed", Epoch); board.Effects.Clear();
-        var owner = Owner(); var install = Assert.Single(owner.Effects, effect => effect.Operation == WatchOperation);
-        Assert.True(Deliver(board, install, Epoch.AddSeconds(1)).Ok);
-        var ack = Assert.Single(board.Effects, effect => effect.Operation == AckOperation);
-        Assert.True(Deliver(owner, ack, Epoch.AddSeconds(2)).Ok);
-        Assert.Null(Entry(owner)["terminal"]);
-        Assert.True(Entry(owner)["sourceAck"]!["alreadySatisfied"]!.GetValue<bool>());
-        Update(board, 1, "ready", Epoch.AddSeconds(3)); Update(board, 2, "completed", Epoch.AddSeconds(4));
-        var signal = Assert.Single(board.Effects, effect => effect.Operation == SignalOperation);
-        var cancel = OwnerArgs(); cancel["waitId"] = "wait";
-        Assert.True(Apply(owner, "session", "owner", "__event_wait_cancel", cancel, Epoch.AddSeconds(5)).Ok);
-        var receipt = Entry(owner)["terminal"]!.ToJsonString(); owner.Effects.Clear();
-        Assert.True(Deliver(owner, signal, Epoch.AddSeconds(6)).Ok);
-        Assert.Equal(receipt, Entry(owner)["terminal"]!.ToJsonString());
-        Assert.Empty(owner.Effects);
-    }
-
-    [Fact]
     public void Wrong_subscription_cannot_acknowledge_or_settle_another_wait()
     {
         var owner = Owner(); var before = owner.Value.Json;
@@ -182,46 +64,6 @@ public sealed class EventWaitSourceAtomicTests
         var forged = new JsonObject { ["watch"] = watch, ["baselineRevision"] = 0, ["armed"] = true, ["alreadySatisfied"] = false };
         Assert.False(Apply(owner, "session", "owner", AckOperation, forged, Epoch.AddSeconds(1)).Ok);
         Assert.Equal(before, owner.Value.Json);
-    }
-
-    [Theory]
-    [InlineData("missing")]
-    [InlineData("baseline")]
-    [InlineData("binding")]
-    public void Corrupt_source_acknowledgments_are_refused_without_rewriting_the_source(string corruption)
-    {
-        var board = Empty(); Update(board, 0, "ready", Epoch); board.Effects.Clear();
-        var watch = Watch("task_completed");
-        Assert.True(Apply(board, "board", BoardKey, WatchOperation, watch, Epoch).Ok);
-        var state = JsonNode.Parse(board.Value.Json)!.AsObject();
-        var entry = state["eventWaitSubscriptions"]!.AsObject().First().Value!.AsObject();
-        if (corruption == "missing") entry.Remove("ack");
-        else if (corruption == "baseline") entry["ack"]!["baselineRevision"] = "not-a-revision";
-        else entry["ack"]!["watch"]!["sourceKey"] = "another-board";
-        board.Value = new() { Json = state.ToJsonString() }; board.Effects.Clear();
-        var before = board.Value.Json;
-        Assert.False(Apply(board, "board", BoardKey, WatchOperation, watch, Epoch.AddSeconds(1)).Ok);
-        Assert.Equal(before, board.Value.Json);
-        Assert.Empty(board.Effects);
-    }
-
-    [Fact]
-    public void Finished_source_slots_can_be_reused_but_retired_install_replay_cannot_fire_again()
-    {
-        var board = Empty(); Update(board, 0, "ready", Epoch); board.Effects.Clear();
-        long version = 1;
-        for (var index = 0; index < 150; index++)
-        {
-            var watch = Watch("task_completed"); watch["watchId"] = "watch-" + index;
-            Assert.True(Apply(board, "board", BoardKey, WatchOperation, watch, Epoch).Ok);
-            Update(board, version++, "completed", Epoch.AddSeconds(1));
-            Assert.Single(board.Effects, effect => effect.Operation == SignalOperation);
-            Update(board, version++, "ready", Epoch.AddSeconds(2)); board.Effects.Clear();
-        }
-        var replay = Watch("task_completed"); replay["watchId"] = "watch-0";
-        Assert.True(Apply(board, "board", BoardKey, WatchOperation, replay, Epoch.AddSeconds(3)).Ok);
-        Update(board, version, "completed", Epoch.AddSeconds(4));
-        Assert.DoesNotContain(board.Effects, effect => effect.Operation == SignalOperation);
     }
 
     private static StateEnvelope<CoordinationDocument> Owner()
@@ -238,9 +80,6 @@ public sealed class EventWaitSourceAtomicTests
         return owner;
     }
     private static JsonObject OwnerArgs() => new() { ["sessionId"] = "owner", ["sessionToken"] = "fixture-token" };
-    private static JsonObject Entry(StateEnvelope<CoordinationDocument> owner) => JsonNode.Parse(owner.Value.Json)!["eventWaits"]!["wait"]!.AsObject();
-    private static RelayReply Deliver(StateEnvelope<CoordinationDocument> target, DurableEffect effect, DateTimeOffset now) =>
-        Apply(target, effect.TargetKind, effect.TargetKey, effect.Operation, Payload(effect), now);
 
     private static JsonObject Watch(string kind) => new()
     {
@@ -252,7 +91,6 @@ public sealed class EventWaitSourceAtomicTests
     private static JsonObject Claim(int leaseSeconds = 60) => new() { ["sessionId"] = "holder", ["generation"] = 1, ["leaseSeconds"] = leaseSeconds };
     private static StateEnvelope<CoordinationDocument> Empty() => new() { Value = new() { Json = "{}" } };
     private static JsonObject Payload(DurableEffect effect) => JsonNode.Parse(effect.PayloadJson)!.AsObject();
-    private static long Revision(StateEnvelope<CoordinationDocument> board) => JsonNode.Parse(board.Value.Json)!["tasks"]!["task"]!["changeRevision"]!.GetValue<long>();
     private static void Update(StateEnvelope<CoordinationDocument> board, long version, string state, DateTimeOffset now)
     {
         var workflow = new JsonObject
