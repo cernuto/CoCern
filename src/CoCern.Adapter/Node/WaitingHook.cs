@@ -92,11 +92,14 @@ public static class WaitingHook
                 return;
             }
             var reply = await AckAsync(options, handle, "", timeout, handler);
-            // Any answer from the hub ends it, a refusal included; with none, the next hook tries again.
-            if (reply.Version is not null) File.Delete(place.Marker);
+            // Only a clear the hub took, a report it kept for the model, or a session it will never accept again ends it; any other failure leaves it for the next event to retry.
+            if (reply.Ok || IsPermanent(reply)) File.Delete(place.Marker);
         }
         catch (Exception) { /* A hook must never trouble the chat. */ }
     }
+
+    /// <summary>The hub answered that this session is closed or not this caller's: no later call can change its report, and closing already dropped it.</summary>
+    private static bool IsPermanent(AdapterReply reply) => reply.Version is not null && reply.Code is RelayErrorCodes.SessionDenied or RelayErrorCodes.SessionUnknown;
 
     private static async Task<AdapterReply> AckAsync(AdapterOptions options, SessionHandle handle, string text, TimeSpan timeout, HttpMessageHandler? handler)
     {

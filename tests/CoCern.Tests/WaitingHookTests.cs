@@ -162,6 +162,50 @@ public sealed class WaitingHookTests : IDisposable
         Assert.False(File.Exists(Marker));
     }
 
+    [Theory]
+    [InlineData(HttpStatusCode.Conflict, RelayErrorCodes.Busy)]
+    [InlineData(HttpStatusCode.Conflict, RelayErrorCodes.Paused)]
+    [InlineData(HttpStatusCode.TooManyRequests, RelayErrorCodes.RateLimited)]
+    [InlineData(HttpStatusCode.BadRequest, RelayErrorCodes.InvalidArguments)]
+    public async Task A_clear_the_hub_refused_for_now_is_tried_again_on_a_later_event(HttpStatusCode status, string code)
+    {
+        await Hook(Permission());
+        _hub.FailClears = (status, code);
+        await Hook(TurnEnd("Stop"));
+        Assert.Equal(2, _hub.Acks.Count);
+        Assert.True(File.Exists(Marker));
+        _hub.FailClears = null;
+        // The turn is over, so nothing is pending and any later event retries, a tool finishing included.
+        await PostTool();
+        Assert.Equal(3, _hub.Acks.Count);
+        Assert.Equal("", _hub.Acks.Last()["waitingFor"]!.GetValue<string>());
+        Assert.False(File.Exists(Marker));
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.Forbidden, RelayErrorCodes.SessionDenied)]
+    [InlineData(HttpStatusCode.BadRequest, RelayErrorCodes.SessionUnknown)]
+    public async Task A_session_the_hub_will_never_accept_again_ends_the_marker(HttpStatusCode status, string code)
+    {
+        await Hook(Permission());
+        _hub.FailClears = (status, code);
+        await Hook(TurnEnd("Stop"));
+        Assert.False(File.Exists(Marker));
+        await Prompt();
+        Assert.Equal(2, _hub.Acks.Count);
+    }
+
+    [Fact]
+    public async Task A_clear_answered_with_the_models_report_kept_ends_the_marker()
+    {
+        await Hook(Permission());
+        _hub.KeepModelReport = true;
+        await Hook(TurnEnd("Stop"));
+        Assert.False(File.Exists(Marker));
+        await Prompt();
+        Assert.Equal(2, _hub.Acks.Count);
+    }
+
     [Fact]
     public async Task A_report_the_hub_kept_for_the_model_is_not_cleared_later()
     {
@@ -308,6 +352,7 @@ public sealed class WaitingHookTests : IDisposable
         public readonly ConcurrentQueue<string> RawAcks = new();
         public bool KeepModelReport;
         public bool Refuse;
+        public (HttpStatusCode Status, string Code)? FailClears;
         public List<JsonNode> Acks => RawAcks.Select(raw => JsonNode.Parse(raw)!).ToList();
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
@@ -320,6 +365,7 @@ public sealed class WaitingHookTests : IDisposable
             RawAcks.Enqueue(body);
             if (Refuse) return new(HttpStatusCode.Forbidden) { Content = new StringContent(JsonSerializer.Serialize(new { ok = false, code = RelayErrorCodes.SessionDenied, dataJson = "{}", version = 0 }), Encoding.UTF8, "application/json") };
             var text = JsonNode.Parse(body)!["waitingFor"]!.GetValue<string>();
+            if (text.Length == 0 && FailClears is { } failure) return new(failure.Status) { Content = new StringContent(JsonSerializer.Serialize(new { ok = false, code = failure.Code, dataJson = "{}", version = 0 }), Encoding.UTF8, "application/json") };
             var data = new JsonObject { ["acknowledged"] = 0 };
             if (KeepModelReport) data["waitingForKept"] = true;
             else data["waitingFor"] = text.Length == 0 ? null : new JsonObject { ["since"] = "2026-11-05T00:00:00.0000000+00:00", ["expiresAt"] = "2026-11-05T12:00:00.0000000+00:00" };
