@@ -12,7 +12,7 @@ internal enum EditClaimDirt { Unknown, Clean, Dirty }
 internal sealed record EditClaimAttempt(string IntentId, string RelativePath, string? BeforeFingerprint, string? AfterFingerprint, DateTimeOffset? ObservedActivity, DateTimeOffset PreparedAt, bool Settled);
 
 /// <summary>One claim, meaning one path at one generation, however many intents share it. No token, proof or file content is stored, only SHA-256 fingerprints.</summary>
-internal sealed record EditClaimTracking(string RelativePath, long Generation, DateTimeOffset LeaseUntil, long RenewSequence = 0, bool RenewPending = false, string? ReleaseOutcome = null, string? OwnFingerprint = null);
+internal sealed record EditClaimTracking(string RelativePath, long Generation, DateTimeOffset LeaseUntil, long RenewSequence = 0, bool RenewPending = false, string? ReleaseOutcome = null, string? OwnFingerprint = null, DateTimeOffset? ReleaseSentAt = null);
 
 /// <summary>Read fresh at every use. Anything that cannot be proven answers null or <see cref="EditClaimDirt.Unknown"/>.</summary>
 internal interface IEditClaimPhysicalState
@@ -44,6 +44,21 @@ internal sealed class EditClaimLifecycleStore(string directory)
     internal bool Exists => Directory.Exists(directory);
 
     internal Task<FileStream> SweepGateAsync(CancellationToken ct) => NativeJoinBinding.LockAsync(Path.Combine(directory, "edit-claim-sweep.lock"), ct);
+
+    /// <summary>
+    /// The one cross-process gate between a PRE and a clean release: PRE holds it from acquire and confirmation through publishing its attempt, and a sweep holds it from reading that state through the release's answer.
+    /// Either the sweep sees the attempt, or the release finished before the guard confirmed. It lives beside the ledger directory because the first PRE needs it before the ledger creates that directory.
+    /// Lock order: sweep gate, this gate, then the ledger's and sidecar's short gates and the binding's. Null when it can't be had in time, which every caller treats as uncertainty.
+    /// </summary>
+    internal async Task<FileStream?> DecisionGateAsync(TimeSpan wait, CancellationToken ct)
+    {
+        var full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(directory));
+        var parent = Path.GetDirectoryName(full) ?? throw new IOException("Missing private binding folder");
+        using var waiting = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        waiting.CancelAfter(wait);
+        try { return await NativeJoinBinding.LockAsync(Path.Combine(parent, "." + Path.GetFileName(full) + ".decision.lock"), waiting.Token); }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested) { return null; }
+    }
 
     internal async Task<Document?> ReadAsync(CancellationToken ct)
     {
@@ -102,12 +117,16 @@ internal sealed class EditClaimLifecycle(EditClaimLedger ledger, EditClaimLifecy
     private static readonly TimeSpan OpenAttempt = TimeSpan.FromSeconds(LeaseSeconds);
     private static readonly TimeSpan SweepWait = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan HubMargin = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan SweepDecisionWait = TimeSpan.FromSeconds(2);
+    // A release whose reply was lost may still reach the hub, so for this long a confirmation of its generation proves nothing.
+    private static readonly TimeSpan ReleaseInFlight = TimeSpan.FromSeconds(60);
+    internal static readonly TimeSpan PreDecisionWait = TimeSpan.FromSeconds(4);
     private static readonly string[] UnsettledLease = ["acquire-pending", "unknown", "grant-unconfirmed", "ownership-unknown", "release-pending", ReleaseUnknown];
     private readonly TimeProvider time = clock ?? TimeProvider.System;
 
     private sealed record Held(EditClaimIntent Intent, EditClaimLease Lease);
 
-    /// <summary>After the guard abstained, before the edit: saves the attempt and its before-fingerprint. False leaves no way to find this edit later, so the caller refuses it.</summary>
+    /// <summary>After the guard abstained, before the edit and still under the decision gate: saves the attempt and its before-fingerprint. False leaves no way to find this edit later, so the caller refuses it.</summary>
     public async Task<bool> PrepareAsync(string intentId, IReadOnlyList<string> paths, CancellationToken ct)
     {
         if (await ReadReceiptAsync(intentId, ct) is not { Outcome: "held" } receipt) return false;
@@ -117,13 +136,15 @@ internal sealed class EditClaimLifecycle(EditClaimLedger ledger, EditClaimLifecy
         {
             foreach (var path in paths)
             {
-                // A replayed PRE keeps the first before-fingerprint, so it can never rewrite what the change is measured against.
-                if (document.Attempts.Any(attempt => attempt.IntentId == intentId && attempt.RelativePath == path)) continue;
                 var lease = receipt.Targets.FirstOrDefault(target => target.ResourceId == path);
                 if (lease?.Generation is not > 0) throw new InvalidDataException();
+                var generation = lease.Generation!.Value;
+                if (document.Claims.FirstOrDefault(row => row.RelativePath == path && row.Generation == generation) is { } claim && ReleaseMayStillApply(claim, now)) throw new InvalidDataException();
+                // A replayed PRE keeps the first before-fingerprint, so it can never rewrite what the change is measured against.
+                if (document.Attempts.Any(attempt => attempt.IntentId == intentId && attempt.RelativePath == path)) continue;
                 document.Attempts.Add(new(intentId, path, before[path], null, null, now, false));
-                // The guard's fresh read has just confirmed this exact generation, so an unanswered release of it did not take effect.
-                Change(document, path, lease.Generation!.Value, now, row => row.ReleaseOutcome == ReleaseUnknown ? row with { ReleaseOutcome = null } : row);
+                // The guard's fresh read has just confirmed this exact generation, and past the in-flight window an unanswered release of it did not take effect.
+                Change(document, path, generation, now, row => row.ReleaseOutcome == ReleaseUnknown ? row with { ReleaseOutcome = null } : row);
             }
         }, ct);
     }
@@ -185,13 +206,13 @@ internal sealed class EditClaimLifecycle(EditClaimLedger ledger, EditClaimLifecy
                 // Generations only rise, and this ledger holds a confirmed newer grant, so an older one is over without asking anyone.
                 foreach (var older in resource.Where(held => held.Lease.Generation != current).GroupBy(held => held.Lease.Generation!.Value))
                     Settle(older.Select(held => held.Intent.Id), resource.Key, older.Key);
-                await SweepClaimAsync(resource.Key, current, resource.Where(held => held.Lease.Generation == current).ToArray(), snapshot, document, ct);
+                await SweepClaimAsync(resource.Key, current, resource.Where(held => held.Lease.Generation == current).ToArray(), document, ct);
             }
             return await FinishAsync(ct);
         }
     }
 
-    private async Task SweepClaimAsync(string path, long generation, Held[] receipts, IReadOnlyList<EditClaimIntent> snapshot, EditClaimLifecycleStore.Document document, CancellationToken ct)
+    private async Task SweepClaimAsync(string path, long generation, Held[] receipts, EditClaimLifecycleStore.Document document, CancellationToken ct)
     {
         var now = time.GetUtcNow();
         var tracked = document.Claims.FirstOrDefault(row => row.RelativePath == path && row.Generation == generation);
@@ -201,18 +222,12 @@ internal sealed class EditClaimLifecycle(EditClaimLedger ledger, EditClaimLifecy
             if (!await ChangeAsync(path, generation, row => row, ct)) return;
         }
         if (tracked.ReleaseOutcome == Settled) { Settle(receipts.Select(held => held.Intent.Id), path, generation); return; }
-        // No saved attempt means a PRE between its ledger write and its sidecar write, which is still running.
-        bool StillOpen(string intentId)
-        {
-            var own = document.Attempts.Where(row => row.IntentId == intentId).ToArray();
-            return own.Length == 0 || own.Any(row => !row.Settled && now - row.PreparedAt < OpenAttempt);
-        }
-        // Duplicates are one claim: this is the receipt whose grant it is, and its request ID never changes.
-        var grant = receipts.Where(held => held.Lease.NewlyAcquired).OrderBy(held => held.Lease.RequestId, StringComparer.Ordinal).FirstOrDefault();
+        var grant = Grant(receipts);
+        // Only says whether to bother with the gate. The decision is taken again inside it, from state read there.
         var dirt = physical.Status(path);
-        if (grant is not null && dirt == EditClaimDirt.Clean && !receipts.Any(held => StillOpen(held.Intent.Id)) && !UnsettledSibling(snapshot, path, generation))
+        if (grant is not null && dirt == EditClaimDirt.Clean)
         {
-            if (await ReleaseAsync(tracked, grant, receipts, ct)) return;
+            if (await ReleaseIfStillCleanAsync(path, generation, ct)) return;
             tracked = (await store.ReadAsync(ct))?.Claims.FirstOrDefault(row => row.RelativePath == path && row.Generation == generation) ?? tracked;
         }
         else if (grant is not null && dirt == EditClaimDirt.Dirty)
@@ -222,17 +237,34 @@ internal sealed class EditClaimLifecycle(EditClaimLedger ledger, EditClaimLifecy
             tracked = renewed;
         }
         // A pre-owned duplicate never made a grant, so like the guard's own compensation it owes no release. Its evidence already lives on the claim row, so it can leave the ledger.
-        foreach (var duplicate in receipts.Where(held => held.Intent.Targets.All(target => !target.NewlyAcquired) && !StillOpen(held.Intent.Id)))
+        foreach (var duplicate in receipts.Where(held => held.Intent.Targets.All(target => !target.NewlyAcquired) && !StillOpen(document, held.Intent.Id, now)))
             Settle([duplicate.Intent.Id], path, generation);
         // A claim that was not renewed lapses at the hub, and nothing else would ever tell this ledger. Ask with a read once the lease should be over.
         if (tracked.LeaseUntil + HubMargin < time.GetUtcNow()) await ReconcileAsync(tracked, receipts, ct);
     }
 
-    /// <summary>True when the claim is settled. A definite refusal or answer is recorded; everything else stays release-unknown and replays the same invocation only if Git still says clean.</summary>
-    private async Task<bool> ReleaseAsync(EditClaimTracking tracked, Held grant, Held[] receipts, CancellationToken ct)
+    /// <summary>
+    /// The whole release decision under the decision gate, so no PRE can confirm this generation between the read and the hub's answer. Attempts come first and Git after, because a clean answer read before an attempt settled
+    /// could be about a file that edit has since dirtied. No gate in time means no release, and the claim stays to lapse or to be looked at again.
+    /// </summary>
+    private async Task<bool> ReleaseIfStillCleanAsync(string path, long generation, CancellationToken ct)
     {
-        var (path, generation) = (tracked.RelativePath, tracked.Generation);
-        if (!await ChangeAsync(path, generation, row => row with { ReleaseOutcome = ReleaseUnknown }, ct)) return false;
+        await using var gate = await store.DecisionGateAsync(SweepDecisionWait, ct);
+        if (gate is null || ledger.Snapshot() is not { } snapshot || await store.ReadAsync(ct) is not { } document) return false;
+        var now = time.GetUtcNow();
+        var leases = HeldLeases(snapshot).Where(held => held.Lease.ResourceId == path).ToArray();
+        if (leases.Length == 0 || leases.Max(held => held.Lease.Generation!.Value) != generation) return false;
+        var receipts = leases.Where(held => held.Lease.Generation == generation).ToArray();
+        if (Grant(receipts) is not { } grant || receipts.Any(held => StillOpen(document, held.Intent.Id, now)) || UnsettledSibling(snapshot, path, generation)) return false;
+        if (physical.Status(path) != EditClaimDirt.Clean) return false;
+        return await ReleaseAsync(path, generation, grant, receipts, ct);
+    }
+
+    /// <summary>True when the claim is settled. A definite refusal or answer is recorded; everything else stays release-unknown and replays the same invocation only if Git still says clean.</summary>
+    private async Task<bool> ReleaseAsync(string path, long generation, Held grant, Held[] receipts, CancellationToken ct)
+    {
+        var sent = time.GetUtcNow();
+        if (!await ChangeAsync(path, generation, row => row with { ReleaseOutcome = ReleaseUnknown, ReleaseSentAt = sent }, ct)) return false;
         AdapterReply reply;
         try { reply = await transport.CleanReleaseAsync(path, generation, grant.Lease.RequestId + "-clean-release"); }
         catch (Exception error) when (Uncertain(error)) { return false; }
@@ -280,8 +312,9 @@ internal sealed class EditClaimLifecycle(EditClaimLedger ledger, EditClaimLifecy
         if (!reply.Ok || reply.Data is not { ValueKind: JsonValueKind.Object } data || !data.TryGetProperty("held", out var held)) return;
         if (held.ValueKind == JsonValueKind.True && ReplyGeneration(reply) == generation && ReplyLease(reply) is { } until)
         {
-            // A fresh read of this holder and generation: any release still unanswered did not take effect.
-            await ChangeAsync(path, generation, row => row with { LeaseUntil = until, ReleaseOutcome = row.ReleaseOutcome == ReleaseUnknown ? null : row.ReleaseOutcome }, ct);
+            // A fresh read of this holder and generation: past the in-flight window, any release still unanswered did not take effect.
+            var read = time.GetUtcNow();
+            await ChangeAsync(path, generation, row => row with { LeaseUntil = until, ReleaseOutcome = row.ReleaseOutcome == ReleaseUnknown && !ReleaseMayStillApply(row, read) ? null : row.ReleaseOutcome }, ct);
             return;
         }
         var lease = ReplyLease(reply);
@@ -308,6 +341,18 @@ internal sealed class EditClaimLifecycle(EditClaimLedger ledger, EditClaimLifecy
         }, ct);
         return live.Count == 0 ? null : due ?? now;
     }
+
+    // No saved attempt means a PRE that never finished publishing, so it counts as open.
+    private static bool StillOpen(EditClaimLifecycleStore.Document document, string intentId, DateTimeOffset now)
+    {
+        var own = document.Attempts.Where(row => row.IntentId == intentId).ToArray();
+        return own.Length == 0 || own.Any(row => !row.Settled && now - row.PreparedAt < OpenAttempt);
+    }
+
+    private static bool ReleaseMayStillApply(EditClaimTracking row, DateTimeOffset now) => row.ReleaseOutcome == ReleaseUnknown && (row.ReleaseSentAt is not { } sent || now - sent < ReleaseInFlight);
+
+    // Duplicates are one claim: this is the receipt whose grant it is, and its request ID never changes.
+    private static Held? Grant(IEnumerable<Held> receipts) => receipts.Where(held => held.Lease.NewlyAcquired).OrderBy(held => held.Lease.RequestId, StringComparer.Ordinal).FirstOrDefault();
 
     private static IEnumerable<Held> HeldLeases(IEnumerable<EditClaimIntent> intents) =>
         from intent in intents where intent.Outcome == "held"

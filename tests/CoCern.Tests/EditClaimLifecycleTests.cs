@@ -86,6 +86,41 @@ public sealed class EditClaimLifecycleTests
         Assert.Empty(Assert.IsAssignableFrom<IReadOnlyList<EditClaimIntent>>(fixture.Ledger.Snapshot()));
     }
 
+    [Fact]
+    public async Task A_release_never_lands_on_an_edit_its_PRE_has_just_confirmed()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        using var fixture = new Fixture();
+        fixture.Hold("edit-1", "acquire-1", newlyAcquired: true);
+        Assert.True(await fixture.Lifecycle.PrepareAsync("edit-1", [File1], default));
+        await fixture.Lifecycle.ObserveAsync("edit-1", false, null, default);
+
+        // A PRE finishes after the sweep has loaded its state and looked at Git: the decision inside the gate must still see its attempt.
+        fixture.Physical.BeforeStatus = () =>
+        {
+            fixture.Physical.BeforeStatus = null;
+            fixture.Hold("edit-2", "acquire-2", newlyAcquired: false);
+            Assert.True(fixture.Lifecycle.PrepareAsync("edit-2", [File1], default).GetAwaiter().GetResult());
+        };
+        await fixture.Lifecycle.SweepAsync(default);
+        Assert.Empty(fixture.Transport.Releases);
+
+        // With the gate held elsewhere the sweep skips, as uncertainty.
+        await fixture.Lifecycle.ObserveAsync("edit-2", false, null, default);
+        await using (var held = await fixture.Store.DecisionGateAsync(TimeSpan.FromSeconds(5), default))
+        {
+            Assert.NotNull(held);
+            await fixture.Lifecycle.SweepAsync(default);
+            Assert.Empty(fixture.Transport.Releases);
+        }
+
+        // A release with no answer may still reach the hub, so a PRE on that generation refuses until that can no longer happen.
+        await fixture.Lifecycle.SweepAsync(default);
+        Assert.Single(fixture.Transport.Releases);
+        fixture.Hold("edit-3", "acquire-3", newlyAcquired: false);
+        Assert.False(await fixture.Lifecycle.PrepareAsync("edit-3", [File1], default));
+    }
+
     private sealed class Fixture : IDisposable
     {
         private readonly string parent = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "cocern-claim-lifecycle-" + Guid.NewGuid().ToString("N")));
@@ -93,6 +128,7 @@ public sealed class EditClaimLifecycleTests
         internal Checkout Physical { get; } = new();
         internal Hub Transport { get; }
         internal EditClaimLedger Ledger { get; }
+        internal EditClaimLifecycleStore Store { get; }
         internal EditClaimLifecycle Lifecycle { get; }
 
         internal Fixture()
@@ -101,7 +137,8 @@ public sealed class EditClaimLifecycleTests
             var directory = Path.Combine(parent, "private");
             Transport = new(Clock);
             Ledger = new(directory);
-            Lifecycle = new(Ledger, new EditClaimLifecycleStore(directory), Physical, Transport, Clock);
+            Store = new(directory);
+            Lifecycle = new(Ledger, Store, Physical, Transport, Clock);
         }
 
         internal void Hold(string intent, string request, bool newlyAcquired) =>
@@ -126,7 +163,12 @@ public sealed class EditClaimLifecycleTests
         internal EditClaimDirt Dirt { get; set; } = EditClaimDirt.Clean;
         internal string Content { get; set; } = "committed";
         public string? Fingerprint(string relativePath) => Content;
-        public EditClaimDirt Status(string relativePath) => Dirt;
+        internal Action? BeforeStatus { get; set; }
+        public EditClaimDirt Status(string relativePath)
+        {
+            BeforeStatus?.Invoke();
+            return Dirt;
+        }
         public string? RelativeKey(string reportedPath) => reportedPath;
     }
 

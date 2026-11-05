@@ -20,12 +20,18 @@ internal sealed class NativeEditClaims(string privateDirectory, string protected
         var paths = resolved.Targets.Select(target => target.RelativeKey).ToArray();
         if (ProtectedCheckoutRoot.Prove(cwd) != protectedRoot) return new(false, "path-changed");
         var transport = new FileTransport(protectedRoot, generation, join, context, cancellationToken);
-        var decision = await new EditClaimGuard(new EditClaimLedger(ledgerDirectory), transport).AcquireAsync(intentId, paths, cancellationToken);
-        if (!decision.Abstain) return decision;
-        var current = EditClaimResolver.Resolve(protectedRoot, cwd, targets);
-        if (!current.Supported || !current.Targets.SequenceEqual(resolved.Targets) || ProtectedCheckoutRoot.Prove(cwd) != protectedRoot) return new(false, "path-changed");
-        // Without the saved attempt this edit could never be told from a sibling still needing the claim, so it refuses like an unavailable ledger.
-        if (!await Lifecycle(cancellationToken).PrepareAsync(intentId, paths, cancellationToken)) return new(false, "lifecycle-unavailable");
+        EditClaimDecision decision;
+        // A clean release must not land between this confirmation and the published attempt, or this edit would go ahead on a claim it no longer has.
+        await using (var gate = await new EditClaimLifecycleStore(ledgerDirectory).DecisionGateAsync(EditClaimLifecycle.PreDecisionWait, cancellationToken))
+        {
+            if (gate is null) return new(false, "lifecycle-busy");
+            decision = await new EditClaimGuard(new EditClaimLedger(ledgerDirectory), transport).AcquireAsync(intentId, paths, cancellationToken);
+            if (!decision.Abstain) return decision;
+            var current = EditClaimResolver.Resolve(protectedRoot, cwd, targets);
+            if (!current.Supported || !current.Targets.SequenceEqual(resolved.Targets) || ProtectedCheckoutRoot.Prove(cwd) != protectedRoot) return new(false, "path-changed");
+            // Without the saved attempt this edit could never be told from a sibling still needing the claim, so it refuses like an unavailable ledger.
+            if (!await Lifecycle(cancellationToken).PrepareAsync(intentId, paths, cancellationToken)) return new(false, "lifecycle-unavailable");
+        }
         EditClaimLifecycleMarker.Set(join.PrivateFolder, context, DateTimeOffset.UtcNow.AddSeconds(EditClaimLifecycle.LeaseSeconds / 2));
         return decision;
     }
