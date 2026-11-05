@@ -369,7 +369,7 @@ public sealed class HubResponseCompactionTests(ITestOutputHelper output)
         HostData(await host.Call(client, RelayTools.ControlRequest, new { repositoryId = "repo", sessionId, requestId = "changed-status-cancel", command = "cancel", actionId = "fixture-action" }));
         var canceled = await Status(paused["statusTag"]!.GetValue<string>());
         Assert.Null(canceled["unchanged"]);
-        Assert.Equal("fixture-action", Assert.Single(canceled["control"]!["requests"]!.AsArray())!["target"]!.GetValue<string>());
+        Assert.Equal(sessionId + ":fixture-action", Assert.Single(canceled["control"]!["requests"]!.AsArray())!["target"]!.GetValue<string>());
     }
 
     [Fact]
