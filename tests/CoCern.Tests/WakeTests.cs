@@ -25,6 +25,20 @@ public sealed class WakeTests
         Assert.Equal(2, fixture.Dispatcher.Prompts.Count);
     }
 
+    [Fact]
+    public async Task An_unchanged_status_answer_keeps_the_pause_its_tag_was_read_with()
+    {
+        using var fixture = new Fixture { StatusTags = true, Status = "paused", Messages = ["first"] };
+        Assert.Equal("control-blocked", await fixture.Reconcile());
+        Assert.Equal("control-blocked", await fixture.Reconcile());
+        Assert.Contains(fixture.CallBodies, body => body.Contains("\"statusTag\":\"") && !body.Contains("\"statusTag\":\"\""));
+        Assert.Empty(fixture.Dispatcher.Prompts);
+
+        // The unpaused status has a different tag, so the decision is taken again.
+        fixture.Status = "ok";
+        Assert.Equal("queued", await fixture.Reconcile());
+    }
+
     [Theory]
     [InlineData("wrong-session")]
     [InlineData("unauthorized")]
@@ -262,6 +276,8 @@ public sealed class WakeTests
         public string? Attention;
         /// <summary>Pauses the session on the status read that asks for no attention detail, the one just before a reservation.</summary>
         public bool PauseSecondRead;
+        /// <summary>Answers like a hub with status tags: a matching tag gets only {unchanged, statusTag}, and the tag covers what the reply would say.</summary>
+        public bool StatusTags;
         public int PageSize = 50;
         public readonly List<int> Cursors = [];
         /// <summary>The body of every check_inbox request.</summary>
@@ -332,6 +348,12 @@ public sealed class WakeTests
                 {
                     var withAttention = System.Text.Json.Nodes.JsonNode.Parse(data)!.AsObject(); withAttention["attention"] = System.Text.Json.Nodes.JsonNode.Parse(attention);
                     data = withAttention.ToJsonString();
+                }
+                if (fixture.StatusTags && request.RequestUri.AbsolutePath.EndsWith("get_status") && args.RootElement.TryGetProperty("statusTag", out var sent))
+                {
+                    var tag = RelayEtag.Of(data);
+                    var tagged = System.Text.Json.Nodes.JsonNode.Parse(data)!.AsObject(); tagged["statusTag"] = tag;
+                    data = sent.GetString() == tag ? JsonSerializer.Serialize(new { unchanged = true, statusTag = tag }) : tagged.ToJsonString();
                 }
                 return new(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new { ok = true, code = "ok", dataJson = data, version = 0 }), Encoding.UTF8, "application/json") };
             }

@@ -36,15 +36,16 @@ public static class InboxWait
         var forwarded = JsonNode.Parse(arguments.GetRawText())!.AsObject();
         forwarded.Remove("waitSeconds");
         var offeredRequest = JsonSerializer.SerializeToElement(forwarded);
-        JsonElement? attentionRequest = null;
+        JsonObject? attentionRequest = null;
         if ((!arguments.TryGetProperty("attention", out var attention) || attention.ValueKind != JsonValueKind.False) &&
             arguments.TryGetProperty("sessionId", out var session) && session.ValueKind == JsonValueKind.String &&
             arguments.TryGetProperty("sessionToken", out var token) && token.ValueKind == JsonValueKind.String)
         {
-            var status = new JsonObject { ["attentionDetail"] = true, ["backgroundCall"] = true };
+            // These polls only look for a wake, so one that answers unchanged has none: a wake would have ended this wait, and a new one changes the tag.
+            var status = new JsonObject { ["attentionDetail"] = true, ["backgroundCall"] = true, ["statusTag"] = "" };
             foreach (var key in new[] { "repositoryId", "boardId", "sessionId", "sessionToken" })
                 if (forwarded.TryGetPropertyValue(key, out var value)) status[key] = value?.DeepClone();
-            attentionRequest = JsonSerializer.SerializeToElement(status);
+            attentionRequest = status;
         }
         // Most polls are discarded unseen, so none of them takes an attention offer. The poll that returns
         // reaches the model, so the hub closes the info items of the messages on its page (seen); an empty poll lists none.
@@ -73,9 +74,12 @@ public static class InboxWait
                 if (attentionRequest is { } statusRequest)
                 {
                     // Status reads never consume offers. Only a hub-validated eligible wake ends the wait with one ordinary inbox read.
-                    var status = await forwarder.ForwardAsync(RelayTools.GetStatus, statusRequest, poll.Token);
-                    if (status.Ok && status.Data is { ValueKind: JsonValueKind.Object } data && WakeReconciler.Attention(data).Wake is not null)
-                        return await forwarder.ForwardAsync(RelayTools.CheckInbox, offeredRequest, poll.Token);
+                    var status = await forwarder.ForwardAsync(RelayTools.GetStatus, JsonSerializer.SerializeToElement(statusRequest), poll.Token);
+                    if (status.Ok && status.Data is { ValueKind: JsonValueKind.Object } data)
+                    {
+                        if (WakeReconciler.Attention(data).Wake is not null) return await forwarder.ForwardAsync(RelayTools.CheckInbox, offeredRequest, poll.Token);
+                        if (WakeReconciler.StatusTag(data) is { } tag) statusRequest["statusTag"] = tag;
+                    }
                 }
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return last ?? new(false, "hub_timeout"); }
