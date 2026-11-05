@@ -1,3 +1,4 @@
+<span class="waiting-badge">Waiting on you <span class="waiting-count @(Waiting.Count > 0 ? "has-waiting" : null)" aria-live="polite">@Waiting.Count</span></span>
 @code {
     [Parameter] public DashboardWaiting Waiting { get; set; } = new();
 }

@@ -1,3 +1,25 @@
+@if (Compact)
+{
+    <section class="dispatch-strip" aria-label="Dispatch controls">
+        <strong>Dispatch: @(Paused is true ? "Paused" : Paused is false ? "Running" : "Not yet read")</strong>
+        <span class="dispatch-repository">@(NeedsRepository ? "Choose a repository on Manager" : RepositoryId)</span>
+        <div class="dispatch-actions">
+            <button type="button" @onclick='() => DispatchAsync("pause")' disabled="@(DispatchBusy || NeedsRepository)" aria-label="Pause dispatch">Pause</button>
+            <button type="button" @onclick='() => DispatchAsync("stop")' disabled="@(DispatchBusy || NeedsRepository)" aria-label="Request stop for all chats" title="Prevents new work and asks known chats to cancel; running tools and wake delivery continue.">Stop</button>
+            <button type="button" @onclick='() => DispatchAsync("resume")' disabled="@(DispatchBusy || NeedsRepository)" aria-label="Resume dispatch">Resume</button>
+            <a href="manager">Manager</a>
+        </div>
+        @if (DispatchMessage is not null) { <p role="status">@DispatchMessage</p> }
+        @if (Message is not null) { <p role="status">@Message</p> }
+        @if (UnconfirmedDispatch is not null)
+        {
+            <p>Unconfirmed dispatch: @UnconfirmedDispatch.Command.</p>
+            <button type="button" @onclick="RetryDispatchAsync" disabled="@DispatchBusy">Retry dispatch</button>
+        }
+    </section>
+}
+else
+{
 <section class="surface sql-view standing-view" aria-labelledby="manager-heading">
     <h2 id="manager-heading">@RecoveryPanelKind</h2>
     <p>Pause prevents new claims and actions. Stop also asks known chats to cancel. Running tools and wake delivery are not interrupted.</p>
@@ -21,8 +43,8 @@
             <button class="close-sessions-secondary" type="button" @onclick="RetryDispatchAsync" disabled="@DispatchBusy">Retry dispatch</button>
         }
     </div>
-    <details class="standing-section">
-        <summary>Manager selection</summary>
+    <section class="standing-section" aria-labelledby="manager-selection-heading">
+        <h3 id="manager-selection-heading">Manager selection</h3>
         @if (Selection is null)
         {
             <p>Enter a repository and refresh selection.</p>
@@ -97,8 +119,9 @@
         {
             <button class="close-sessions-secondary" type="button" @onclick="LoadEarlierAsync" disabled="@ReadBusy">Load earlier decisions</button>
         }
-    </details>
+    </section>
 </section>
+}
 @code {
     private bool NeedsRepository => string.IsNullOrWhiteSpace(RepositoryId);
     private string RecoveryPanelKind => "Manager and dispatch";

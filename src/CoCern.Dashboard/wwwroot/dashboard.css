@@ -71,6 +71,25 @@ small { font-size: .8rem; }
 .page-heading { display: flex; justify-content: space-between; align-items: center; gap: 20px; margin-bottom: 25px; }
 .page-heading p { color: var(--muted); margin-top: 9px; font-size: .95rem; }
 .page-tools { display: flex; align-items: center; gap: 18px; flex-shrink: 0; }
+.waiting-badge { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); }
+.waiting-count { display: inline-grid; min-width: 24px; min-height: 24px; padding: 1px 6px; place-items: center; border-radius: 20px; background: var(--surface-alt); }
+.waiting-count.has-waiting { background: var(--gold); color: #18384a; font-weight: 700; }
+.observation-warnings > summary { gap: 14px; flex-wrap: wrap; }
+.dispatch-strip { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 14px; margin-bottom: 18px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); font-size: .86rem; }
+.dispatch-repository { color: var(--muted); overflow-wrap: anywhere; }
+.dispatch-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-left: auto; }
+.dispatch-strip button, .dispatch-actions a { padding: 6px 10px; min-height: 36px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-alt); color: var(--ink); }
+.dispatch-strip > p { flex-basis: 100%; }
+.waiting-surface { padding: 18px; margin-bottom: 20px; }
+.waiting-on-you h2, .waiting-on-you h3 { margin-bottom: 8px; }
+.waiting-on-you h3 { margin-top: 18px; }
+.waiting-items { list-style: none; padding: 0; margin: 12px 0 0; }
+.waiting-items li { padding: 12px 0; border-top: 1px solid var(--line); }
+.waiting-item-heading, .waiting-item-details { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.waiting-kind, .waiting-item-details { font-size: .78rem; color: var(--muted); }
+.waiting-text { margin: 5px 0; white-space: pre-wrap; }
+.waiting-session { border: 0; padding: 2px 0; background: transparent; color: var(--ink); text-align: left; text-decoration: underline; text-underline-offset: 3px; overflow-wrap: anywhere; }
+@media (max-width: 700px) { .dispatch-actions { margin-left: 0; } .page-tools { flex-wrap: wrap; } }
 .connection-status { display: flex; align-items: flex-end; flex-direction: column; gap: 7px; font-size: .78rem; color: var(--muted); flex-shrink: 0; }
 .connection-chip { display: inline-flex; gap: 7px; align-items: center; border-radius: 30px; padding: 6px 11px; font-weight: 650; font-size: .8rem; }
 .connection-chip.live { color: #166d61; background: #dbf1ea; }
