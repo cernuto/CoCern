@@ -53,6 +53,8 @@ label { font-weight: 600; }
 small { font-size: .8rem; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 .muted { color: var(--muted); }
+.notification-control { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; margin-bottom: 1rem; }
+.notification-control .muted { max-width: 28rem; font-size: .8rem; }
 .skip-link { position: fixed; top: -100px; left: 20px; z-index: 10; padding: 12px 20px; background: var(--surface); }
 .skip-link:focus { top: 12px; }
 .relay-mark { width: 43px; height: 43px; display: grid; place-content: center; position: relative; flex-shrink: 0; color: #fff; background: var(--board); border: 1px solid #426478; border-radius: 13px 13px 13px 4px; font-size: 1.4rem; font-weight: 650; letter-spacing: -.08em; }

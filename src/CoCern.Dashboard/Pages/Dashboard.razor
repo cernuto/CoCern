@@ -47,6 +47,7 @@ else
                     <details class="observation-warnings">
                         <summary><WaitingBadge Waiting="@(Connection.Snapshot?.Waiting ?? new DashboardWaiting())" /><span>Notices <span class="notice-count" aria-live="polite">@(Connection.Snapshot?.Warnings.Length ?? 0)</span></span></summary>
                         <div class="observation-warnings-panel" role="region" aria-label="Dashboard notices" tabindex="0">
+                            <WaitingNotifications Waiting="@(Connection.Snapshot?.Waiting ?? new DashboardWaiting())" />
                             <WaitingOnYou Waiting="@(Connection.Snapshot?.Waiting ?? new DashboardWaiting())" HeadingId="notices-waiting-heading" Now="@_now" OnSelectSession="OpenWaitingSession" OnOpenStanding="OpenStanding" />
                             <h2>Dashboard notices</h2>
                             @if (Connection.Snapshot is { Warnings.Length: > 0 } notices)
