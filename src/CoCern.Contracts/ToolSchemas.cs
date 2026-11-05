@@ -20,10 +20,11 @@ internal static class ToolSchemas
             RelayTools.Peers => ["name", "ref"],
             RelayTools.SessionOpen => ["machineId", "label"],
             RelayTools.SessionBind => ["binding", "label", "machineId"],
-            RelayTools.TaskGet => ["taskId", "section", "sinceRevision", "snapshotRevision", "cursor", "limit", "openOnly", "includeDetails", "snapshotTag"],
+            RelayTools.TaskGet => ["boardId", "taskId", "section", "sinceRevision", "snapshotRevision", "cursor", "limit", "openOnly", "includeDetails", "snapshotTag"],
             RelayTools.WorkerList => ["includeStale", "cursor", "limit", "snapshotTag"],
             RelayTools.TaskUpdate => ["taskId", "expectedVersion", "workflow", "includeNextWork", "usage", "attention", "presentStanding"],
-            RelayTools.TaskClaim or RelayTools.ActionReport => ["attention", "presentStanding"],
+            RelayTools.TaskClaim => ["attention", "presentStanding"],
+            RelayTools.ActionReport => ["outcome", "attention", "presentStanding"],
             RelayTools.SendMessage => ["text", "recipientSessionId", "taskId", "replyTo", "ackMessageIds", "supersede", "wake"],
             RelayTools.CheckInbox => ["cursor", "limit", "presentStanding"],
             RelayTools.GetStatus => ["managerHistoryBefore", "managerHistoryOnly", "statusTag"],
@@ -139,6 +140,13 @@ internal static class ToolSchemas
             foreach (var field in new[] { "includeStale", "includeDetails", "openOnly" })
                 if (properties.ContainsKey(field)) properties[field] = new { type = "boolean" };
         }
+        if (tool.Name == RelayTools.TaskGet)
+        {
+            properties["boardId"] = new { type = "string", description = "Optional; defaults to default." };
+            properties["includeDetails"] = new { type = "boolean", description = "Board list only; omit with taskId, section or sinceRevision, even when false." };
+            properties["openOnly"] = new { type = "boolean", description = "Board list only." };
+            properties["snapshotTag"] = new { type = "string", description = "Board-list continuation only." };
+        }
         if (tool.Name == RelayTools.GetStatus)
         {
             foreach (var field in ForwardingFields) properties[field] = new { type = "string" };
@@ -160,6 +168,9 @@ internal static class ToolSchemas
         // The same budget leaves room only for typed names of workflow dependsOn and packet.resources; InputSchema describes them in full.
         if (properties.ContainsKey("workflow")) properties["workflow"] = WorkflowSchema(compact: true);
         if (properties.ContainsKey("presentStanding")) properties["presentStanding"] = new { type = "boolean" };
+        // session_open describes the shared envelope once; avoid repeating it on every tool so operation requirements fit the compact catalog.
+        if (tool.Name != RelayTools.SessionOpen)
+            foreach (var field in ForwardingFields.Where(properties.ContainsKey)) properties[field] = new { type = "string" };
         return properties;
     }
 
@@ -168,7 +179,7 @@ internal static class ToolSchemas
         var properties = new Dictionary<string, object>
         {
             ["repositoryId"] = new { type = "string", maxLength = RelayLimits.MaxIdentifierLength, description = EnvelopeDescription("repositoryId") },
-            ["boardId"] = new { type = "string", maxLength = RelayLimits.MaxIdentifierLength },
+            ["boardId"] = new { type = "string", maxLength = RelayLimits.MaxIdentifierLength, description = "Optional board ID; defaults to default." },
             ["sessionId"] = new { type = "string", maxLength = RelayLimits.MaxIdentifierLength, description = EnvelopeDescription("sessionId") },
             ["sessionToken"] = new { type = "string", maxLength = RelayLimits.MaxIdentifierLength, description = EnvelopeDescription("sessionToken") },
             ["requestId"] = new { type = "string", maxLength = RelayLimits.MaxIdentifierLength, description = EnvelopeDescription("requestId") },
@@ -218,9 +229,9 @@ internal static class ToolSchemas
                 Integer("sinceRevision", "Board delta checkpoint; omit taskId. Save snapshotRevision only after all pages.");
                 Integer("snapshotRevision", "Pinned revision from the first delta page; a concurrent change returns DeltaRestartRequired.");
                 properties["cursor"] = new { type = "integer", minimum = 0, description = "Continuation from a bounded list; keep the same sinceRevision and snapshotRevision." };
-                properties["openOnly"] = new { type = "boolean", description = "Omit safely completed tasks. Echo snapshotTag on continuation; restart on ListRestartRequired." };
-                properties["includeDetails"] = new { type = "boolean", description = "Use the previous full board-list summaries." };
-                properties["snapshotTag"] = new { type = "string", maxLength = 64, description = "Echo with an open-only list continuation." };
+                properties["openOnly"] = new { type = "boolean", description = "Board list only: omit safely completed tasks. Omit this field with taskId, section or sinceRevision, even when false." };
+                properties["includeDetails"] = new { type = "boolean", description = "Board list only: return full summaries. Omit this field with taskId, section or sinceRevision, even when false." };
+                properties["snapshotTag"] = new { type = "string", maxLength = 64, description = "Board-list continuation only; omit with taskId, section or sinceRevision. Restart on ListRestartRequired." };
                 Text("factKey", "Optional selected task fact key."); break;
             case RelayTools.TaskUpdate:
                 Object("patch", "Shared task facts; cannot overwrite coordination ownership/version internals.");
@@ -246,7 +257,8 @@ internal static class ToolSchemas
                 Text("inputFingerprint", "Stable identity of this action's intended inputs."); Text("triggerId", "Optional delivery trigger consumed by this action."); Integer("attempt", "Explicit next attempt number after a resolved prior attempt.");
                 properties["requiresRestoration"] = new { type = "boolean" }; properties["explicitRetry"] = new { type = "boolean" }; break;
             case RelayTools.ActionReport:
-                properties["outcome"] = new { type = "string", @enum = ActionOutcomes.All.ToArray() };
+                properties["attempt"] = new { type = "integer", minimum = 1, description = "Required attempt returned by action_begin; do not infer a new attempt or replay the action." };
+                properties["outcome"] = new { type = "string", @enum = ActionOutcomes.All.ToArray(), description = "Required for an ordinary report; authorized recover:true or restoration:accepted may omit it." };
                 properties["restoration"] = new { type = "string", @enum = Restorations.Reported.ToArray() };
                 properties["report"] = new { description = "Bounded reported evidence; not a claim that the relay performed or verified external execution." };
                 properties["recover"] = new { type = "boolean", description = "Take over an action whose session is gone: an administrator, or its own principal once that claim lapsed. Without outcome it is abandoned." };

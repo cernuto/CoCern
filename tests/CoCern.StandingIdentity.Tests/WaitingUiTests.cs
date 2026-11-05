@@ -17,13 +17,15 @@ public sealed class WaitingUiTests
     {
         var waiting = new DashboardWaiting
         {
-            Count = 1,
-            Items = [new() { Kind = DashboardWaitingKinds.SelfReport, SessionId = "own-session", Label = "<img src=x onerror=bad()>", Text = "<script>bad()</script> https://untrusted.invalid", Since = DateTimeOffset.UtcNow }]
+            MaybeCount = 1,
+            Maybe = [new() { Kind = DashboardWaitingKinds.SelfReport, SessionId = "own-session", Label = "<img src=x onerror=bad()>", Text = "<script>bad()</script> https://untrusted.invalid", Since = DateTimeOffset.UtcNow }]
         };
         var html = await Render<WaitingOnYou>(new() { ["Waiting"] = waiting });
         Assert.Contains("&lt;script&gt;", html);
         Assert.Contains("&lt;img", html);
-        Assert.Contains("Reported by the chat", html);
+        Assert.Contains("Chat reported", html);
+        Assert.Contains("No pending decisions.", html);
+        Assert.Contains("Chat reports and follow-up", html);
         Assert.DoesNotContain("<script", html);
         Assert.DoesNotContain("<img", html);
         Assert.DoesNotContain("href=", html);

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CoCern.Contracts;
 
 namespace CoCern.Adapter;
 
@@ -51,9 +52,10 @@ public sealed class WakeReconciler(WakeConfiguration configuration, WakeState st
         // A hub with attention on answers with an attention block. Then only its wake candidate wakes the chat: a message is an info
         // item that waits for a reply or the idle-hold wake. A hub without one (attention off, or older) keeps the message wakes.
         var urgentOnly = false;
+        string? sessionProblem = null;
         try
         {
-            if (!await Permitted(readAttention: true)) return "control-blocked";
+            if (!await Permitted(readAttention: true)) return sessionProblem ?? "control-blocked";
             var wakeable = new HashSet<string>(StringComparer.Ordinal);
             // With attention on, only the hub's wake candidate wakes the chat, so the inbox is not read at all: paging every message's
             // text on each pass, only to find none of them may wake, was nearly all of this watcher's traffic under load.
@@ -72,7 +74,7 @@ public sealed class WakeReconciler(WakeConfiguration configuration, WakeState st
             // candidate would otherwise pay it on every pass until its next boundary.
             if (!state.HasUnseen(key, wakeable)) return "empty";
             if (File.Exists(configuration.StopFile)) return "stopped";
-            if (!await Permitted()) return "control-blocked";
+            if (!await Permitted()) return sessionProblem ?? "control-blocked";
             cancellationToken.ThrowIfCancellationRequested();
             using var ownership = (dispatcher as IWakeDispatchFence)?.TryAcquire(route.ThreadId);
             if (dispatcher is IWakeDispatchFence && ownership is null) return "route-changed";
@@ -117,6 +119,7 @@ public sealed class WakeReconciler(WakeConfiguration configuration, WakeState st
             for (var page = 0; page < 20; page++)
             {
                 var reply = await forwarder.ForwardAsync("check_inbox", RelayForwarder.WithOrigin(InboxArguments(cursor, page == 0 ? known?.Etag : null), background: true), cancellationToken);
+                if (RejectedSession(reply)) return (SessionRejected, []);
                 if (!reply.Ok || reply.Data is not { ValueKind: JsonValueKind.Object } data) return ("inbox-unavailable", []);
                 if (page == 0 && known is { } remembered && data.TryGetProperty("unchanged", out var unchanged) && unchanged.ValueKind == JsonValueKind.True &&
                     data.TryGetProperty("etag", out var same) && same.ValueKind == JsonValueKind.String && same.GetString() == remembered.Etag) return (null, remembered.Messages);
@@ -157,6 +160,7 @@ public sealed class WakeReconciler(WakeConfiguration configuration, WakeState st
             var known = readAttention ? coverage?.KnownStatus(key) : null;
             var arguments = readAttention ? AttentionArguments(known?.Tag) : Arguments();
             var status = await forwarder.ForwardAsync("get_status", RelayForwarder.WithOrigin(arguments, background: true), cancellationToken);
+            if (RejectedSession(status)) { sessionProblem = SessionRejected; return false; }
             if (status is { Ok: true, Data: { ValueKind: JsonValueKind.Object } answer } && answer.TryGetProperty("unchanged", out var unchanged) && unchanged.ValueKind == JsonValueKind.True)
             {
                 // An answer about any other tag says nothing about this session, so it refuses, like every other reply that names no session.
@@ -186,6 +190,9 @@ public sealed class WakeReconciler(WakeConfiguration configuration, WakeState st
             return true;
         }
     }
+
+    internal const string SessionRejected = "session-rejected";
+    private static bool RejectedSession(AdapterReply reply) => !reply.Ok && reply.Code is RelayErrorCodes.SessionDenied or RelayErrorCodes.SessionUnknown;
 
     /// <summary>The hub's <c>statusTag</c> in a status reply, or null when it has none this adapter could send back.</summary>
     internal static string? StatusTag(JsonElement status) =>

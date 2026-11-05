@@ -50,6 +50,70 @@ public sealed class WakeTests
     }
 
     [Fact]
+    public async Task Rejected_private_handles_stay_quiet_until_replaced_while_other_routes_keep_working()
+    {
+        using var fixture = new Fixture();
+        var pass = 0;
+        var earlyHintConnections = 0;
+        var runtime = fixture.Runtime(new WakeNudge()) with
+        {
+            State = fixture.State,
+            Interval = TimeSpan.FromMilliseconds(1),
+            HubHandler = () => { if (pass < 4) earlyHintConnections++; return new NoHub(); }
+        };
+        using var hub = new RejectedHandleHub();
+        Task<IReadOnlyList<WakeTarget>> Targets(CancellationToken _)
+        {
+            pass++;
+            if (pass == 7) File.WriteAllText(fixture.Configuration.StopFile, "stop");
+            var current = new List<WakeTarget>
+            {
+                new(fixture.Route, new("denied", pass < 4 ? "denied-secret" : "replacement-secret"), fixture.Dispatcher),
+                new(fixture.Route with { ThreadId = "00000000-0000-0000-0000-000000000002" }, new("unknown", "unknown-secret"), fixture.Dispatcher)
+            };
+            if (pass >= 4) current.Add(new(fixture.Route with { ThreadId = "00000000-0000-0000-0000-000000000003" }, new("healthy", "healthy-secret"), fixture.Dispatcher));
+            return Task.FromResult<IReadOnlyList<WakeTarget>>(current);
+        }
+
+        Assert.Equal("stopped", await WakeWatcher.RunAsync(runtime, Targets, exitWhenQueued: false, TimeSpan.FromSeconds(10), CancellationToken.None, hub, fixture.Clock));
+        Assert.Equal(1, hub.Calls("denied-secret", "get_status"));
+        Assert.Equal(1, hub.Calls("unknown-secret", "get_status"));
+        Assert.Equal(1, hub.Calls("unknown-secret", "check_inbox"));
+        Assert.True(hub.Calls("replacement-secret", "get_status") >= 2);
+        Assert.True(hub.Calls("healthy-secret", "get_status") >= 2);
+        Assert.Equal(0, earlyHintConnections);
+        Assert.Empty(fixture.Dispatcher.Prompts);
+    }
+
+    private sealed class RejectedHandleHub : HttpMessageHandler
+    {
+        private readonly Dictionary<(string Token, string Tool), int> _calls = [];
+        public int Calls(string token, string tool) => _calls.GetValueOrDefault((token, tool));
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            using var arguments = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(cancellationToken));
+            var token = arguments.RootElement.GetProperty("sessionToken").GetString()!;
+            var session = arguments.RootElement.GetProperty("sessionId").GetString()!;
+            var tool = request.RequestUri!.Segments[^1];
+            _calls[(token, tool)] = Calls(token, tool) + 1;
+            var code = token == "denied-secret" ? RelayErrorCodes.SessionDenied : token == "unknown-secret" && tool == "check_inbox" ? RelayErrorCodes.SessionUnknown : null;
+            var data = token == "unknown-secret"
+                ? JsonSerializer.Serialize(new { sessionId = session, control = new { paused = false, requests = Array.Empty<object>() } })
+                : JsonSerializer.Serialize(new { sessionId = session, control = new { paused = false, requests = Array.Empty<object>() }, attention = new { actionable = 0 } });
+            var status = code is null ? HttpStatusCode.OK : RelayErrorCodes.Classify(code) switch
+            {
+                RelayErrorKind.Denied => HttpStatusCode.Forbidden,
+                RelayErrorKind.Missing => HttpStatusCode.NotFound,
+                _ => HttpStatusCode.BadRequest
+            };
+            return new(status)
+            {
+                Content = new StringContent(JsonSerializer.Serialize(new { ok = code is null, code = code ?? "Ok", dataJson = data, version = 0 }), Encoding.UTF8, "application/json")
+            };
+        }
+    }
+
+    [Fact]
     public async Task Restart_preserves_deduplication_and_uncertain_dispatch_holds_the_route_then_never_resends()
     {
         using var fixture = new Fixture { Messages = ["first"] };

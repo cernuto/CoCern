@@ -6,9 +6,9 @@
     <div class="station-grid">
         @foreach (var machine in Stations)
         {
-            var sessions = Snapshot.Sessions.Where(session => session.MachineId == machine.MachineId).OrderBy(session => session.SessionId, StringComparer.Ordinal).ToArray();
+            var sessions = machine.Sessions;
             var machineRecorded = HasMachineIdentity(machine.MachineId);
-            var enrolled = IsEnrolled(machine.MachineId);
+            var enrolled = machine.Enrolled;
             var directRoute = sessions.Any(session => session.Reachable);
             <BbCard Class="@(machineRecorded ? "machine-station" : "session-metadata-group")" role="article" @key="machine.MachineId">
                 @if (!machineRecorded)
@@ -59,7 +59,6 @@
     [Parameter] public bool Live { get; set; }
     [Parameter] public Func<string, bool> IsPulsing { get; set; } = _ => false;
 
-    private bool IsEnrolled(string machineId) => Snapshot.Machines.Any(machine => machine.MachineId == machineId);
     private static bool HasMachineIdentity(string machineId) => !string.IsNullOrWhiteSpace(machineId);
 
     private static string SessionTokenLetters(DashboardSession session)
@@ -77,10 +76,6 @@
         return $"{kind} {DashboardFormat.Ago(latest.Timestamp, Now).ToLowerInvariant()}";
     }
 
-    private DashboardMachine[] Stations => Snapshot.Machines
-        .Concat(Snapshot.Sessions.Where(session => !Snapshot.Machines.Any(machine => machine.MachineId == session.MachineId))
-            .GroupBy(session => session.MachineId)
-            .Select(group => new DashboardMachine { MachineId = group.Key, Name = DashboardFormat.Machine(group.First()), SessionCount = group.Count(), Reachable = group.Any(session => session.Reachable) }))
-        .OrderBy(machine => machine.MachineId, StringComparer.Ordinal).ToArray();
+    private DashboardStation[] Stations => DashboardStations.Build(Snapshot);
 }
 

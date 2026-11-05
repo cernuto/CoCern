@@ -2,14 +2,14 @@
     <h2 id="@HeadingId">Waiting on you</h2>
     @if (Waiting.Count == 0 && Waiting.Items.Length == 0)
     {
-        <p class="muted">@(Waiting.Truncated ? "None reported in this update." : "Nothing is waiting on you.")</p>
+        <p class="muted">@(Waiting.Truncated ? "No pending decisions reported in this update." : "No pending decisions.")</p>
     }
     @foreach (var group in new[] { (Rows: Waiting.Items, Maybe: false), (Rows: Waiting.Maybe, Maybe: true) })
     {
         @if (group.Maybe && (Waiting.MaybeCount > 0 || group.Rows.Length > 0))
         {
-            <h3>Coordinator holds <span class="muted">@Waiting.MaybeCount</span></h3>
-            <p class="muted">These may not need your answer. They are separate from the badge count.</p>
+            <h3>Chat reports and follow-up <span class="muted">@Waiting.MaybeCount</span></h3>
+            <p class="muted">Informational updates; these do not confirm that your input is needed.</p>
         }
         @if (group.Rows.Length > 0)
         {
@@ -37,7 +37,7 @@
             </ul>
         }
     }
-    @if (Waiting.Truncated) { <p class="limit-note">This list may be incomplete. @Waiting.Count items were reported.</p> }
+    @if (Waiting.Truncated) { <p class="limit-note">This list may be incomplete. @Waiting.Count pending decisions were reported.</p> }
 </section>
 @code {
     [Parameter] public DashboardWaiting Waiting { get; set; } = new();
@@ -50,8 +50,8 @@
     {
         DashboardWaitingKinds.StandingProposal => "Standing proposal",
         DashboardWaitingKinds.HumanBlocker => "Human decision",
-        DashboardWaitingKinds.SelfReport => "Reported by the chat",
-        DashboardWaitingKinds.Unresponsive => "Unread messages waiting",
+        DashboardWaitingKinds.SelfReport => "Chat reported",
+        DashboardWaitingKinds.Unresponsive => "Unread chat messages",
         DashboardWaitingKinds.CoordinatorHold => "Coordinator hold",
         _ => "Update"
     };

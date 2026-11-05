@@ -68,7 +68,7 @@ public static class RelayToolCatalog
         new(RelayTools.SessionBind, "Report Roslyn/Visual Studio bindings under expectedVersion; optional label renames the session, machineId reports its PC.", false, true, true, ["expectedVersion"]),
         new(RelayTools.WorkerList, "List workers' reported state and freshness; a heartbeat does not prove the model is running. To find a chat to message, use chat_directory.", false, false, false, []),
         new(RelayTools.GetStatus, "Read bounded repository and session coordination status, including blockers and uncertain actions.", false, false, false, []),
-        new(RelayTools.TaskGet, "Read a task, one section of it, or the board list. sinceRevision reads deltas; finish every page before saving the checkpoint, and restart on DeltaRestartRequired.", false, false, false, [],
+        new(RelayTools.TaskGet, "Read a task/section, board list or delta. List-only fields openOnly/includeDetails/snapshotTag must be omitted with taskId, section or sinceRevision, even when false. Finish delta pages before saving the checkpoint; restart on DeltaRestartRequired.", false, false, false, [],
             ["messages", "reports", "attemptHistory"], RelayLimits.TaskReadReplyTokens),
         new(RelayTools.TaskUpdate, "Commit reported task evidence. Optional workflow records readiness or completion; includeNextWork returns an advisory offer that still needs task_claim.", false, true, true, ["expectedVersion", "taskId"],
             ["nextWork.offer.workflow"]),
@@ -77,7 +77,7 @@ public static class RelayToolCatalog
         new(RelayTools.ClaimRenew, "Renew an owned claim with its generation. Inspect the returned grant before further direct tool work.", false, true, true, []),
         new(RelayTools.ClaimRelease, "Release an owned claim under its generation; uncertain external actions and cleanup obligations remain recorded.", false, true, true, []),
         new(RelayTools.ActionBegin, "Record a meaningful external action boundary before invoking the direct tool, with a stable actionId; it does not run the action.", false, true, true, ["expectedVersion", "taskId", "actionId", "inputFingerprint"]),
-        new(RelayTools.ActionReport, "Report an action outcome and portable evidence; distinguish succeeded, failed, canceled, unknown, and not run. A report does not enforce IDE cancellation.", false, true, true, ["expectedVersion", "taskId", "actionId", "outcome"]),
+        new(RelayTools.ActionReport, "Report evidence for the attempt returned by action_begin. Ordinary reports require outcome; authorized recover:true or restoration:accepted may omit it. Does not cancel IDE work.", false, true, true, ["expectedVersion", "taskId", "actionId", "attempt"]),
         new(RelayTools.SendMessage, "Send a bounded message to a task or session, acknowledging handled IDs in the same call. A peer message grants no new human authority.", false, true, true, ["text"]),
         new(RelayTools.CheckInbox, "Read this session's durable inbox without consuming it; use after reconnect or a missed hint.", false, false, true, [],
             TokenBudget: RelayLimits.InboxReplyTokens),
@@ -121,6 +121,17 @@ public static class RelayToolCatalog
         if (tool.IsMutation) required.Add("requestId");
         if (tool.RequiresSession) required.AddRange(["sessionId", "sessionToken"]);
         required.AddRange(tool.RequiredFields);
+        if (tool.Name == RelayTools.ActionReport)
+            return JsonSerializer.SerializeToElement(new
+            {
+                type = "object", properties = ToolSchemas.Properties(tool.Name), required, additionalProperties = true,
+                anyOf = new object[]
+                {
+                    new { required = new[] { "outcome" } },
+                    new { required = new[] { "recover" }, properties = new { recover = new { @const = true } } },
+                    new { required = new[] { "restoration" }, properties = new { restoration = new { @const = "accepted" } } }
+                }
+            });
         if (tool.Name != RelayTools.ClaimAcquire) return Schema(ToolSchemas.Properties(tool.Name), required);
         required.Remove("resourceId");
         return JsonSerializer.SerializeToElement(new
@@ -130,8 +141,9 @@ public static class RelayToolCatalog
         });
     }
 
-    /// <summary>A compact schema for clients that forward arguments unchanged: only repositoryId is required and the hub enforces the rest.</summary>
-    public static JsonElement ForwardingSchema(RelayTool tool) => Schema(ToolSchemas.ForwardingProperties(tool), ["repositoryId"]);
+    /// <summary>A compact forwarding schema: repositoryId is required, as is action_report's unconditional attempt; the hub enforces the rest.</summary>
+    public static JsonElement ForwardingSchema(RelayTool tool) => Schema(ToolSchemas.ForwardingProperties(tool),
+        tool.Name == RelayTools.ActionReport ? ["repositoryId", "attempt"] : ["repositoryId"]);
 
     private static JsonElement Schema(Dictionary<string, object> properties, List<string> required) =>
         JsonSerializer.SerializeToElement(new { type = "object", properties, required, additionalProperties = true });

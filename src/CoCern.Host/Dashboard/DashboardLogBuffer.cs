@@ -1,3 +1,4 @@
+using CoCern.Contracts;
 using CoCern.Contracts.Dashboard;
 using Serilog.Core;
 using Serilog.Events;
@@ -7,6 +8,9 @@ namespace CoCern.Host.Dashboard;
 /// <summary>Only fixed templates enter the observer. Formatted log text and exceptions are never read.</summary>
 public sealed class DashboardLogBuffer : ILogEventSink
 {
+    private static readonly HashSet<string> FailureCodes = typeof(RelayErrorCodes).GetFields()
+        .Where(field => field.IsLiteral && field.FieldType == typeof(string))
+        .Select(field => (string)field.GetRawConstantValue()!).ToHashSet(StringComparer.Ordinal);
     private readonly object gate = new();
     private readonly Queue<DashboardLogEntry> entries = new();
     private long sequence;
@@ -34,6 +38,20 @@ public sealed class DashboardLogBuffer : ILogEventSink
     }
 
     public void CollectionFailed() => Add(DateTimeOffset.UtcNow, "Warning", "Observer", "Observation collection was unavailable; the previous observation is retained.");
+
+    /// <summary>Retains only catalog names, fixed error codes and schema field names, including refusals before a session is verified.</summary>
+    public void ToolFailure(string tool, string code, string? field = null)
+    {
+        try
+        {
+            if (!RelayToolCatalog.TryGet(tool, out var definition) || !FailureCodes.Contains(code)) return;
+            var schema = RelayToolCatalog.InputSchema(definition);
+            var suffix = field is not null && schema.GetProperty("properties").TryGetProperty(field, out _)
+                ? $" Field: {field}." : "";
+            Add(DateTimeOffset.UtcNow, "Warning", "Tool", $"{tool} failed ({code}).{suffix}");
+        }
+        catch (Exception) { /* Observation must never fail or change a tool call. */ }
+    }
 
     private void Add(DateTimeOffset timestamp, string level, string category, string message)
     {

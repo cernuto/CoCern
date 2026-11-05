@@ -80,12 +80,19 @@ public static class WakeWatcher
     public static Task<string> AwaitInboxAsync(WakeConfiguration config, Action<string> deliver, TimeSpan? timeout, CancellationToken cancellationToken) =>
         RunAsync(config, new InboxWaitDispatcher(deliver), exitWhenQueued: true, timeout, cancellationToken);
 
-    /// <summary>A configuration file's routes are fixed for the run: they are the static targets.</summary>
+    /// <summary>A configuration file's routes are fixed for the run; their private session handles are reread on each pass.</summary>
     internal static async Task<string> RunAsync(WakeConfiguration config, IWakeDispatcher dispatcher, bool exitWhenQueued, TimeSpan? timeout, CancellationToken cancellationToken, HttpMessageHandler? handler = null, TimeProvider? clock = null)
     {
         var runtime = new WakeRuntime(config.AdapterOptions(), config.StatePath, config.StopFile, config.RelayUrl) { Limits = config.ResolvedLimits() };
-        IReadOnlyList<WakeTarget>? targets = null;
-        return await RunAsync(runtime, _ => Task.FromResult(targets ??= config.Routes.Select(route => new WakeTarget(route, WakeConfiguration.ReadSession(route), dispatcher)).ToArray()),
+        var handles = config.Routes.Distinct().ToDictionary(route => route, WakeConfiguration.ReadSession);
+        Task<IReadOnlyList<WakeTarget>> Targets(CancellationToken _)
+        {
+            foreach (var route in config.Routes)
+                try { handles[route] = WakeConfiguration.ReadSession(route); }
+                catch (AdapterConfigurationException) { /* A handle being replaced stays suspended until its complete replacement is readable. */ }
+            return Task.FromResult<IReadOnlyList<WakeTarget>>(config.Routes.Select(route => new WakeTarget(route, handles[route], dispatcher)).ToArray());
+        }
+        return await RunAsync(runtime, Targets,
             exitWhenQueued, timeout, cancellationToken, handler, clock);
     }
 
@@ -104,6 +111,8 @@ public static class WakeWatcher
         var settings = new WakeConfiguration(runtime.RelayUrl, "", "", runtime.StatePath, runtime.StopFile, []);
         var changed = runtime.Nudge?.Changes ?? Channel.CreateBounded<bool>(new BoundedChannelOptions(1) { FullMode = BoundedChannelFullMode.DropWrite });
         var watches = new Dictionary<string, Watch>(StringComparer.Ordinal);
+        // Rejection applies only to this exact private handle, not every future handle for the same chat or session ID.
+        var rejected = new Dictionary<string, (string Repository, WakeSession Session)>(StringComparer.Ordinal);
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         if (timeout is { } limit) lifetime.CancelAfter(limit);
         var stopMonitor = MonitorStop();
@@ -115,6 +124,7 @@ public static class WakeWatcher
             {
                 var current = (await targets(lifetime.Token)).DistinctBy(x => x.Session.SessionId, StringComparer.Ordinal).ToArray();
                 var live = current.Select(x => x.Session.SessionId).ToHashSet(StringComparer.Ordinal);
+                foreach (var gone in rejected.Keys.Where(id => !live.Contains(id)).ToArray()) rejected.Remove(gone);
                 foreach (var gone in watches.Keys.Where(x => !live.Contains(x)).ToArray())
                 {
                     var watch = watches[gone];
@@ -126,17 +136,37 @@ public static class WakeWatcher
                 for (var i = 0; i < current.Length && !File.Exists(runtime.StopFile); i++)
                 {
                     var target = current[i];
+                    var routeKey = WakeState.Key(target.Route.ThreadId);
+                    if (watches.TryGetValue(target.Session.SessionId, out var oldWatch) &&
+                        (oldWatch.Target.Session != target.Session || oldWatch.Target.Route.RepositoryId != target.Route.RepositoryId))
+                    {
+                        watches.Remove(target.Session.SessionId);
+                        await oldWatch.Connection.DisposeAsync();
+                    }
+                    if (rejected.TryGetValue(target.Session.SessionId, out var refused))
+                    {
+                        if (refused.Repository == target.Route.RepositoryId && refused.Session == target.Session) { settled = false; continue; }
+                        rejected.Remove(target.Session.SessionId);
+                        lastStatus.Remove(routeKey);
+                    }
                     string status;
                     using (var dispatch = runtime.TryEnterDispatch?.Invoke())
                     {
                         if (runtime.TryEnterDispatch is not null && dispatch is null) continue;
                         status = await new WakeReconciler(settings, state, forwarder, target.Dispatcher, clock, coverage).ReconcileAsync(target.Route, target.Session, lifetime.Token);
                     }
-                    var routeKey = WakeState.Key(target.Route.ThreadId);
                     if (!lastStatus.TryGetValue(routeKey, out var previous) || previous != status || status == "queued")
-                        Console.Error.WriteLine($"CoCern wake route {i + 1}: {status}.");
+                        Console.Error.WriteLine(status == WakeReconciler.SessionRejected
+                            ? $"CoCern wake route {i + 1}: session rejected; waiting for this chat's replacement session handle. Reopen its CoCern session from that chat."
+                            : $"CoCern wake route {i + 1}: {status}.");
                     lastStatus[routeKey] = status;
                     settled &= status is "empty" or "queued";
+                    if (status == WakeReconciler.SessionRejected)
+                    {
+                        rejected[target.Session.SessionId] = (target.Route.RepositoryId, target.Session);
+                        if (watches.Remove(target.Session.SessionId, out var refusedWatch)) await refusedWatch.Connection.DisposeAsync();
+                        continue;
+                    }
                     if (exitWhenQueued && status == "queued") return status;
                     if (!watches.TryGetValue(target.Session.SessionId, out var watch)) watches[target.Session.SessionId] = watch = Watch.Create(options, runtime.HubHandler, target, changed, lifetime.Token);
                     watch.Target = target;

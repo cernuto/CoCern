@@ -59,12 +59,12 @@ public static class DashboardWaitingKinds
     public const string StandingProposal = "standing_proposal";
     /// <summary>A task blocked by a <c>human_decision</c> blocker. Only in <see cref="DashboardWaiting.Items"/>.</summary>
     public const string HumanBlocker = "human_blocker";
-    /// <summary>A chat's own <c>ack waitingFor</c>. A claim, not a fact: show it as reported by the chat. Only in <see cref="DashboardWaiting.Items"/>.</summary>
+    /// <summary>A chat's own <c>ack waitingFor</c>. A claim, not a confirmed human decision. Only in <see cref="DashboardWaiting.Maybe"/>.</summary>
     public const string SelfReport = "self_report";
     /// <summary>
     /// A chat holding old unread direct mail that has made no hub call of its own for as long. The hub records no model turn, so a chat busy
     /// without calling the hub looks the same: it says "no hub call", not that the chat is stuck. Its text is the hub's, with counts only.
-    /// Only in <see cref="DashboardWaiting.Items"/>.
+    /// Only in <see cref="DashboardWaiting.Maybe"/>; unread mail does not establish a pending human decision.
     /// </summary>
     public const string Unresponsive = "unresponsive";
     /// <summary>A task blocked by a <c>coordinator_hold</c>, which may or may not be a person's. Only in <see cref="DashboardWaiting.Maybe"/>.</summary>
@@ -79,15 +79,15 @@ public static class DashboardWaitingKinds
 /// </summary>
 public sealed record DashboardWaiting
 {
-    /// <summary>At most 50 rows: proposals and human blockers oldest first, then unresponsive chats oldest first, then self-reports oldest first, so a self-report never pushes out a row the hub observed.</summary>
+    /// <summary>At most 50 pending Standing proposals and explicit human blockers, oldest first.</summary>
     public DashboardWaitingItem[] Items { get; init; } = [];
-    /// <summary>The true total observed, the badge's number; it can exceed <see cref="Items"/>. Zero means nothing is waiting, unless <see cref="Truncated"/>.</summary>
+    /// <summary>The true total of pending decisions observed, the badge's number; it can exceed <see cref="Items"/>. Zero means no pending decision was observed, unless <see cref="Truncated"/>.</summary>
     public int Count { get; init; }
     /// <summary>Say the list may be incomplete: the rows were cut, or the read behind them hit its bound (200 sessions, 4 MB of rows, 20 boards).</summary>
     public bool Truncated { get; init; }
-    /// <summary>At most 20 coordinator holds, oldest first: a separate "maybe" group that <see cref="Count"/> and the badge leave out.</summary>
+    /// <summary>At most 20 informational rows: coordinator holds, unread-mail follow-up, then chat reports, oldest first within each group. Excluded from <see cref="Count"/> and the badge.</summary>
     public DashboardWaitingItem[] Maybe { get; init; } = [];
-    /// <summary>The true total of holds observed; it can exceed <see cref="Maybe"/>.</summary>
+    /// <summary>The true total of informational rows observed; it can exceed <see cref="Maybe"/>.</summary>
     public int MaybeCount { get; init; }
 }
 
