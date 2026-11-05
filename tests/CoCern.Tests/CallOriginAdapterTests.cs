@@ -21,6 +21,19 @@ public sealed class CallOriginAdapterTests : IDisposable
 
     public void Dispose() { try { Directory.Delete(root, true); } catch (IOException) { } catch (UnauthorizedAccessException) { } }
 
+    [Theory]
+    [InlineData(CallOrigins.Mcp, "mcp")]
+    [InlineData(CallOrigins.ClaudeStop, "claude-stop")]
+    [InlineData(CallOrigins.ClaudeWaiter, "claude-waiter")]
+    [InlineData(CallOrigins.WakeWatcher, "wake-watcher")]
+    [InlineData(CallOrigins.Node, "node")]
+    public void Each_tag_is_the_exact_text_the_hub_accepts(string tag, string expected)
+    {
+        // The hub keeps only its own list and turns anything else into null, so a misspelt tag would vanish silently.
+        Assert.Equal(expected, tag);
+        Assert.Equal(expected, new CoCern.Core.ActivityEvent { CallOrigin = tag }.CallOrigin);
+    }
+
     // ---- One test per caller ----
 
     [Fact]
