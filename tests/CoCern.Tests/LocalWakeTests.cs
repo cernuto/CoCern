@@ -813,6 +813,7 @@ public sealed class LocalWakeTests : IDisposable
     {
         public string Mode = "ok";
         public TaskCompletionSource? Hold;
+        public volatile string? Origin;
         public readonly System.Collections.Concurrent.ConcurrentQueue<(string Tool, bool Background, string? Session, string? Token)> Requests = new();
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
@@ -820,6 +821,7 @@ public sealed class LocalWakeTests : IDisposable
             using var args = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(ct));
             var data = args.RootElement;
             var session = data.GetProperty("sessionId").GetString();
+            Origin = data.TryGetProperty("callOrigin", out var origin) ? origin.GetString() : null;
             Requests.Enqueue((request.RequestUri!.Segments[^1], data.TryGetProperty("backgroundCall", out var background) && background.GetBoolean(), session, data.GetProperty("sessionToken").GetString()));
             if (Volatile.Read(ref Hold) is { } hold) await hold.Task.WaitAsync(ct);
             var mode = Volatile.Read(ref Mode);
@@ -891,6 +893,7 @@ public sealed class LocalWakeTests : IDisposable
         var target = Assert.Single(after.Started);
         Assert.Equal((handle.Chat!.ThreadId, handle.SessionId), (target.Route.ThreadId, target.Session.SessionId));
         Assert.Equal((RelayTools.GetStatus, true, handle.SessionId, handle.SessionToken), Assert.Single(hub.Requests));
+        Assert.Equal(CallOrigins.WakeWatcher, hub.Origin);
         // Re-arming is not chat activity: a handle that keeps its age can still fall out of the limit.
         Assert.Equal(touched, File.GetLastWriteTimeUtc(path));
         Assert.Equal(text, File.ReadAllText(path));

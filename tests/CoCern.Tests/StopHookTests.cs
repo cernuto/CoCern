@@ -17,6 +17,25 @@ public sealed class StopHookTests : IDisposable
     private string Settings => Path.Combine(root, "settings.json");
 
     [Fact]
+    public void One_plan_keeps_the_stop_prompt_and_post_tool_hooks_and_moves_an_older_post_tool_handler_forward()
+    {
+        Directory.CreateDirectory(root);
+        File.WriteAllText(Settings, "{\n  \"hooks\": { \"PostToolUse\": [ { \"matcher\": \"Bash\", \"hooks\": [ { \"type\": \"command\", \"command\": \"echo mine\" } ] }, { \"hooks\": [ { \"type\": \"command\", \"command\": \"\\\"C:/old/CoCern.Adapter.exe\\\" --post-tool-hook\" } ] } ] }\n}\n");
+        const string PostTool = "\"C:/new/CoCern.Adapter.exe\" --post-tool-hook";
+        ClientSettings.PlanClaudeHooks(Settings, "\"C:/new/CoCern.Adapter.exe\" --stop-hook", "\"C:/new/CoCern.Adapter.exe\" --prompt-hook", PostTool).Apply(TimeProvider.System);
+        var hooks = JsonNode.Parse(File.ReadAllText(Settings))!["hooks"]!;
+        Assert.NotNull(hooks["Stop"]);
+        Assert.NotNull(hooks["UserPromptSubmit"]);
+        var commands = hooks["PostToolUse"]!.AsArray().SelectMany(group => group!["hooks"]!.AsArray()).Select(handler => handler!["command"]!.GetValue<string>()).ToArray();
+        Assert.Equal(["echo mine", PostTool], commands);
+        Assert.True(ClientSettings.PlanClaudeHooks(Settings, "\"C:/new/CoCern.Adapter.exe\" --stop-hook", "\"C:/new/CoCern.Adapter.exe\" --prompt-hook", PostTool).IsUnchanged);
+        // Without the opt-in, nothing about it is added, and what is there is not touched.
+        File.Delete(Settings);
+        ClientSettings.PlanClaudeHooks(Settings, "\"C:/new/CoCern.Adapter.exe\" --stop-hook", null).Apply(TimeProvider.System);
+        Assert.DoesNotContain("PostToolUse", File.ReadAllText(Settings));
+    }
+
+    [Fact]
     public void Plan_stop_hook_adds_an_async_rewake_handler_with_a_day_long_timeout_and_keeps_other_hooks()
     {
         Directory.CreateDirectory(root);

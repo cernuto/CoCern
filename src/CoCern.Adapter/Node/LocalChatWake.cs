@@ -171,7 +171,7 @@ public sealed class LocalChatWake : IAsyncDisposable
         LocalWakeStatus.WriteCounts(statusRoot);
         if (pending.Count == 0) { if (!retry) rearmAt = null; return; }
         using var http = new HttpClient(hub ?? RelayForwarder.CreateHandler(Connection.Options), disposeHandler: hub is null) { Timeout = TimeSpan.FromSeconds(15) };
-        var forwarder = new RelayForwarder(http, Connection.Options);
+        var forwarder = new RelayForwarder(http, Connection.Options, CallOrigins.WakeWatcher);
         foreach (var handle in pending)
         {
             var reply = await forwarder.ProbeHandleAsync(handle, ct);

@@ -265,6 +265,8 @@ public sealed class SetupTests : IDisposable
         Assert.Equal(0, await Run(host));
         // The prompt hook is off by default; only Claude Code's Stop hook, which wakes an idle chat, is installed.
         Assert.DoesNotContain("--prompt-hook", File.ReadAllText(claudeSettings));
+        Assert.DoesNotContain("--post-tool-hook", File.ReadAllText(claudeSettings));
+        Assert.DoesNotContain("PostToolUse", File.ReadAllText(claudeSettings));
         Assert.Contains("--stop-hook", File.ReadAllText(claudeSettings));
         Assert.False(File.Exists(codexHooks));
 
@@ -281,6 +283,12 @@ public sealed class SetupTests : IDisposable
         }
         Assert.Contains("echo mine", File.ReadAllText(claudeSettings));
         Assert.Contains("\"model\": \"opus\"", File.ReadAllText(claudeSettings));
+        // The same opt-in adds Claude Code's post-tool hook, with no matcher so every tool call polls. Codex's hooks are not known to take it, so its file does not get it.
+        var postTool = Assert.Single(JsonNode.Parse(File.ReadAllText(claudeSettings))!["hooks"]!["PostToolUse"]!.AsArray())!;
+        Assert.Null(postTool["matcher"]);
+        Assert.Equal($"{LogonStart.Quote(Dotnet)} {LogonStart.Quote(Dll)} --post-tool-hook --data-dir {LogonStart.Quote(SetupCommand.NormalizeFolder(DataDir))}", postTool["hooks"]![0]!["command"]!.GetValue<string>());
+        Assert.Equal(ClientSettings.PostToolHookTimeoutSeconds, postTool["hooks"]![0]!["timeout"]!.GetValue<int>());
+        Assert.DoesNotContain("--post-tool-hook", File.ReadAllText(codexHooks));
         var once = File.ReadAllBytes(claudeSettings);
         Assert.Equal(0, await SetupCommand.RunAsync(options, Env(host), CancellationToken.None));
         Assert.Equal(once, File.ReadAllBytes(claudeSettings));
