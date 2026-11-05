@@ -11,6 +11,7 @@ namespace CoCern.Tests;
 public sealed class ProtectedCheckoutRootTests
 {
     private const string WindowsOnly = "Junctions, drive letters and UNC paths exist only on Windows.";
+    private const string ProofNeedsWindows = "Only Windows can prove a path is local; the platform tests cover the refusal elsewhere.";
 
     [SkippableFact]
     public void A_junction_to_a_directory_proves_the_targets_root()
@@ -131,9 +132,10 @@ public sealed class ProtectedCheckoutRootTests
         Assert.ThrowsAny<IOException>(() => ProtectedCheckoutRoot.Prove(repo, link));
     }
 
-    [Fact]
+    [SkippableFact]
     public void A_nonexistent_relative_or_file_path_is_refused()
     {
+        Skip.IfNot(OperatingSystem.IsWindows(), ProofNeedsWindows);
         using var links = new Links();
         var repo = links.Repository("real/checkout");
         var file = Path.Combine(repo, "file.txt");
@@ -162,9 +164,10 @@ public sealed class ProtectedCheckoutRootTests
         Assert.False(ProtectedCheckoutRoot.Contains(repo, dangling));
     }
 
-    [Fact]
+    [SkippableFact]
     public void A_core_worktree_outside_the_cwd_is_refused()
     {
+        Skip.IfNot(OperatingSystem.IsWindows(), ProofNeedsWindows);
         using var links = new Links();
         var repo = links.Repository("real/checkout");
         Links.Git(repo, "config", "--local", "core.worktree", links.Folder("outside"));
@@ -206,9 +209,10 @@ public sealed class ProtectedCheckoutRootTests
         Assert.ThrowsAny<IOException>(() => ProtectedCheckoutRoot.Prove(escape, repo));
     }
 
-    [Fact]
+    [SkippableFact]
     public void A_sibling_sharing_the_roots_name_prefix_is_not_inside_it()
     {
+        Skip.IfNot(OperatingSystem.IsWindows(), ProofNeedsWindows);
         using var links = new Links();
         var repo = links.Repository("real/checkout");
         var sibling = links.Folder("real/checkout-sibling");
@@ -219,6 +223,7 @@ public sealed class ProtectedCheckoutRootTests
     [SkippableFact]
     public void Directory_symlinks_resolve_like_junctions()
     {
+        Skip.IfNot(OperatingSystem.IsWindows(), ProofNeedsWindows);
         using var links = new Links();
         var repo = links.Repository("real/checkout");
         links.Folder("real/checkout/nested");
@@ -233,9 +238,10 @@ public sealed class ProtectedCheckoutRootTests
         AssertRefusal(dangling!);
     }
 
-    [Fact]
+    [SkippableFact]
     public void A_plain_path_proves_itself_and_matches_the_general_answer()
     {
+        Skip.IfNot(OperatingSystem.IsWindows(), ProofNeedsWindows);
         using var links = new Links();
         var repo = links.Repository("real/checkout");
         var nested = links.Folder("real/checkout/nested/deeper");
@@ -247,8 +253,35 @@ public sealed class ProtectedCheckoutRootTests
     }
 
     [Fact]
+    public void A_platform_that_cannot_prove_locality_refuses_every_proof()
+    {
+        using var links = new Links();
+        var repo = links.Repository("real/checkout");
+        AssertPlatformRefusal(() => ProtectedCheckoutRoot.Physical(repo, localityProvable: false));
+        AssertPlatformRefusal(() => ProtectedCheckoutRoot.Prove(repo, repo, localityProvable: false));
+        Assert.False(ProtectedCheckoutRoot.Contains(repo, repo, localityProvable: false));
+        // The policy belongs to protected scope alone: general inspection and bindings have no such refusal.
+        Assert.Equal(Links.TopLevel(repo), NativeCheckout.Inspect(repo).Root);
+    }
+
+    [SkippableFact]
+    public void A_host_outside_windows_refuses_every_proof_without_the_seam()
+    {
+        Skip.If(OperatingSystem.IsWindows(), "Windows can prove locality; the seam test covers this refusal there.");
+        using var links = new Links();
+        var repo = links.Repository("real/checkout");
+        AssertPlatformRefusal(() => ProtectedCheckoutRoot.Physical(repo));
+        AssertPlatformRefusal(() => ProtectedCheckoutRoot.Prove(repo));
+        AssertPlatformRefusal(() => ProtectedCheckoutRoot.Prove(repo, repo));
+        AssertPlatformRefusal(() => ProtectedCheckoutRoot.Physical(repo, localityProvable: true)); // True cannot lift it.
+        Assert.False(ProtectedCheckoutRoot.Contains(repo, repo));
+        Assert.Equal(Links.TopLevel(repo), NativeCheckout.Inspect(repo).Root);
+    }
+
+    [SkippableFact]
     public async Task A_proven_root_is_the_workspace_of_the_local_binding()
     {
+        Skip.IfNot(OperatingSystem.IsWindows(), ProofNeedsWindows);
         using var fixture = new NativeJoinBindingTests.ScopeFixture();
         await using var binding = await fixture.Acquire();
         Assert.Equal(binding.Workspace, ProtectedCheckoutRoot.Prove(fixture.Workspace));
@@ -273,7 +306,7 @@ public sealed class ProtectedCheckoutRootTests
         var outside = links.Folder("outside");
         Links.Git(repo, "config", "--local", "core.worktree", outside);
         Assert.Equal(Links.TopLevel(repo), NativeCheckout.Inspect(repo).Root);
-        Assert.Equal(ProtectedCheckoutRoot.Physical(outside), NativeCheckout.Inspect(repo).Root);
+        Assert.Equal("outside", Path.GetFileName(NativeCheckout.Inspect(repo).Root));
     }
 
     [SkippableFact]
@@ -307,6 +340,13 @@ public sealed class ProtectedCheckoutRootTests
         Skip.If(Links.TryGit(share, "rev-parse", "--show-toplevel").Code != 0, "Git refuses this share as dubious without a safe.directory entry, and a test must not change global Git settings.");
         await using var binding = await fixture.Acquire(share);
         Assert.StartsWith(@"\\", binding.Workspace, StringComparison.Ordinal);
+    }
+
+    // Names the reason, so that a refusal for a missing path or a wrong spelling cannot pass as the platform policy.
+    private static void AssertPlatformRefusal(Func<object> proof)
+    {
+        var error = Assert.ThrowsAny<IOException>(proof);
+        Assert.Contains("platform", error.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     private static void AssertRefusal(string path)
