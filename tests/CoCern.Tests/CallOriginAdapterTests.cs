@@ -19,7 +19,7 @@ public sealed class CallOriginAdapterTests : IDisposable
     private const string Chat = "4f0c2d6e-7a1b-4c3d-9e8f-0a1b2c3d4e5f";
     private readonly string root = Path.Combine(Path.GetTempPath(), "cocern-call-origin-adapter-" + Guid.NewGuid().ToString("N"));
 
-    public void Dispose() { try { Directory.Delete(root, true); } catch (IOException) { } catch (UnauthorizedAccessException) { } catch (DirectoryNotFoundException) { } }
+    public void Dispose() { try { Directory.Delete(root, true); } catch (IOException) { } catch (UnauthorizedAccessException) { } }
 
     // ---- One test per caller ----
 
