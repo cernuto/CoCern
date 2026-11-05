@@ -24,7 +24,7 @@ internal static class ToolSchemas
             RelayTools.TaskClaim or RelayTools.ActionReport => ["attention", "presentStanding"],
             RelayTools.SendMessage => ["text", "recipientSessionId", "taskId", "replyTo", "ackMessageIds", "supersede", "wake"],
             RelayTools.CheckInbox => ["cursor", "limit", "presentStanding"],
-            RelayTools.GetStatus => ["managerHistoryBefore", "managerHistoryOnly"],
+            RelayTools.GetStatus => ["managerHistoryBefore", "managerHistoryOnly", "statusTag"],
             RelayTools.ControlRequest => ["targetSessionId", "expectedManagerGeneration", "humanWords"],
             RelayTools.Ack => ["messageId", "messageIds", "waitingFor"],
             RelayTools.ClaimRenew => ["resourceId", "generation", "taskId", "claimGeneration", "leaseSeconds"],
@@ -142,6 +142,7 @@ internal static class ToolSchemas
             properties.Remove("requestId");
             properties["managerHistoryBefore"] = new { type = "integer" };
             properties["managerHistoryOnly"] = new { type = "boolean" };
+            properties["statusTag"] = new { type = "string" };
         }
         // Each boundary tool advertises the attention opt-out with a short description; InputSchema gives the full one.
         if (properties.ContainsKey("attention")) properties["attention"] = new { type = "boolean", description = "false: no attention offer." };
@@ -178,6 +179,7 @@ internal static class ToolSchemas
         switch (tool)
         {
             case RelayTools.GetStatus:
+                properties["statusTag"] = new { type = "string", maxLength = 64, description = "Opt in with an empty string; echo the returned tag for freshly authorized unchanged status. Missing tags mean full reads." };
                 properties["managerHistoryBefore"] = new { type = "integer", minimum = 0, description = "Administrator-only: read manager selections older than this generation." };
                 properties["managerHistoryOnly"] = new { type = "boolean", description = "Reserve this read for the visible manager summary and administrator history, omitting cancellation requests. Use when ordinary status omits manager or manager.historyReadRequired is true. Retain the incoming cursor for history continuation." }; break;
             case RelayTools.WorkerList:

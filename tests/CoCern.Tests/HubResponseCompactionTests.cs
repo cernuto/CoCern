@@ -1,18 +1,35 @@
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using CoCern.Contracts;
 using CoCern.Core;
 using CoCern.Domain;
 using CoCern.Domain.State;
+using CoCern.Host;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace CoCern.Tests;
 
 /// <summary>Read projections never retire sessions or discard actionable task detail.</summary>
-public sealed class HubResponseCompactionTests
+public sealed class HubResponseCompactionTests(ITestOutputHelper output)
 {
     private static readonly DateTimeOffset Now = DateTimeOffset.Parse("2026-11-04T00:00:00Z");
     private static readonly RelayCaller Caller = new("alice", true, ["repo"], true);
+
+    private void MeasureSavings(string kind, JsonObject compact, JsonObject full)
+    {
+        var counter = new O200kTokenCounter();
+        var small = compact.ToJsonString();
+        var large = full.ToJsonString();
+        var smallBytes = Encoding.UTF8.GetByteCount(small);
+        var largeBytes = Encoding.UTF8.GetByteCount(large);
+        var smallTokens = counter.Count(small);
+        var largeTokens = counter.Count(large);
+        output.WriteLine("{0}: full={1} bytes/{2} tokens, compact={3} bytes/{4} tokens (same fixture).", kind, largeBytes, largeTokens, smallBytes, smallTokens);
+        Assert.True(smallBytes < largeBytes);
+        Assert.True(smallTokens < largeTokens);
+    }
 
     private static RelayReply Call(StateEnvelope<CoordinationDocument> state, string kind, string tool, JsonObject args, DateTimeOffset? now = null)
     {
@@ -149,6 +166,7 @@ public sealed class HubResponseCompactionTests
         Assert.NotNull(detail["workflow"]);
         var full = Data(Call(state, "board", RelayTools.TaskGet, new() { ["includeDetails"] = true }));
         Assert.All(full["items"]!.AsArray(), row => Assert.NotNull(row!["sections"]));
+        MeasureSavings("board", list, full);
     }
 
     [Fact]
@@ -272,6 +290,7 @@ public sealed class HubResponseCompactionTests
         Assert.Equal(2, same.Count);
         Assert.True(same["unchanged"]!.GetValue<bool>());
         Assert.Equal(tag, same["statusTag"]!.GetValue<string>());
+        MeasureSavings("status", same, full);
         var ordinary = HostData(await host.Call(client, RelayTools.GetStatus, new { repositoryId = "repo", sessionId, sessionToken, attentionDetail = true }));
         Assert.Null(ordinary["statusTag"]);
         Assert.NotNull(ordinary["sessionId"]);
@@ -296,6 +315,81 @@ public sealed class HubResponseCompactionTests
         var tag = full["statusTag"]!.GetValue<string>();
         Assert.Null((await Status(second, tag, 5))["unchanged"]);
         Assert.Null((await Status(first, tag, 6))["unchanged"]);
+    }
+
+    [Fact]
+    public void Compact_worker_wire_savings_preserve_the_same_authorized_population()
+    {
+        var (state, _) = Worker();
+        for (var index = 1; index < 10; index++)
+            Data(Call(state, "control", RelayTools.SessionOpen, new()
+            {
+                ["requestId"] = "worker-wire-" + index,
+                ["label"] = "ordinary chat " + index,
+                ["binding"] = new JsonObject
+                {
+                    ["workspacePath"] = @"C:\fixture\repo",
+                    ["roslyn"] = new JsonObject { ["solutionPath"] = @"C:\fixture\repo\Repo.slnx" },
+                    ["visualStudio"] = new JsonObject { ["solutionPath"] = @"C:\fixture\repo\Repo.slnx" }
+                }
+            }));
+        state.Effects.Clear();
+        var compact = Data(Call(state, "control", RelayTools.WorkerList, new() { ["limit"] = 20 }));
+        var full = Data(Call(state, "control", RelayTools.WorkerList, new() { ["limit"] = 20, ["includeStale"] = true }));
+        Assert.Equal(10, compact["items"]!.AsArray().Count);
+        Assert.Equal(full["items"]!.AsArray().Select(row => row!["sessionId"]!.GetValue<string>()).Order(StringComparer.Ordinal),
+            compact["items"]!.AsArray().Select(row => row!["sessionId"]!.GetValue<string>()).Order(StringComparer.Ordinal));
+        Assert.Empty(state.Effects);
+        MeasureSavings("workers", compact, full);
+    }
+
+    [Fact]
+    public async Task Semantic_status_recomputes_inbox_pause_and_cancellation_before_matching()
+    {
+        await using var host = new RelayHostFixture();
+        using var client = host.AuthorizedClient();
+        var session = HostData(await host.Call(client, RelayTools.SessionOpen, new { repositoryId = "repo", requestId = "changed-status-open" }));
+        var other = HostData(await host.Call(client, RelayTools.SessionOpen, new { repositoryId = "repo", requestId = "changed-status-sender" }));
+        var sessionId = session["sessionId"]!.GetValue<string>();
+        var sessionToken = session["sessionToken"]!.GetValue<string>();
+        async Task<JsonObject> Status(string tag) => HostData(await host.Call(client, RelayTools.GetStatus, new { repositoryId = "repo", sessionId, sessionToken, attentionDetail = true, statusTag = tag }));
+        var first = await Status("");
+        HostData(await host.Call(client, RelayTools.SendMessage, new
+        {
+            repositoryId = "repo", sessionId = other["sessionId"]!.GetValue<string>(), sessionToken = other["sessionToken"]!.GetValue<string>(),
+            recipientSessionId = sessionId, requestId = "changed-status-mail", text = "fixture update", wake = false
+        }));
+        var mail = await Status(first["statusTag"]!.GetValue<string>());
+        Assert.Null(mail["unchanged"]);
+        Assert.Equal(1, mail["attention"]!["inbox"]!.GetValue<int>());
+        HostData(await host.Call(client, RelayTools.ControlRequest, new { repositoryId = "repo", requestId = "changed-status-pause", command = "pause" }));
+        var paused = await Status(mail["statusTag"]!.GetValue<string>());
+        Assert.Null(paused["unchanged"]);
+        Assert.True(paused["control"]!["paused"]!.GetValue<bool>());
+        HostData(await host.Call(client, RelayTools.ControlRequest, new { repositoryId = "repo", sessionId, requestId = "changed-status-cancel", command = "cancel", actionId = "fixture-action" }));
+        var canceled = await Status(paused["statusTag"]!.GetValue<string>());
+        Assert.Null(canceled["unchanged"]);
+        Assert.Equal("fixture-action", Assert.Single(canceled["control"]!["requests"]!.AsArray())!["target"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task Semantic_status_history_and_piggyback_reads_keep_the_full_reply()
+    {
+        await using var host = new RelayHostFixture();
+        using var client = host.AuthorizedClient();
+        var session = HostData(await host.Call(client, RelayTools.SessionOpen, new { repositoryId = "repo", requestId = "fallback-status-open" }));
+        var sessionId = session["sessionId"]!.GetValue<string>();
+        var sessionToken = session["sessionToken"]!.GetValue<string>();
+        var full = HostData(await host.Call(client, RelayTools.GetStatus, new { repositoryId = "repo", sessionId, sessionToken, attentionDetail = true, statusTag = "" }));
+        var tag = full["statusTag"]!.GetValue<string>();
+        var history = HostData(await host.Call(client, RelayTools.GetStatus, new { repositoryId = "repo", sessionId, sessionToken, attentionDetail = true, statusTag = tag, managerHistoryOnly = true }));
+        Assert.Null(history["unchanged"]);
+        Assert.Null(history["statusTag"]);
+        Assert.NotNull(history["control"]);
+        var piggyback = HostData(await host.Call(client, RelayTools.GetStatus, new { repositoryId = "repo", sessionId, sessionToken, attentionDetail = true, statusTag = tag, renewClaims = Array.Empty<object>() }));
+        Assert.Null(piggyback["unchanged"]);
+        Assert.Null(piggyback["statusTag"]);
+        Assert.NotNull(piggyback["conveniences"]);
     }
 
     [Theory]
