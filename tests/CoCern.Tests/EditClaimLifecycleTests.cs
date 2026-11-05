@@ -126,6 +126,21 @@ public sealed class EditClaimLifecycleTests
         await fixture.Lifecycle.SweepAsync(default);
         fixture.Hold("edit-4", "acquire-4", newlyAcquired: false);
         Assert.False(await fixture.Lifecycle.PrepareAsync("edit-4", [File1], default));
+
+        // Held false proves the release is over only with a generation and lease that show it, so an answer missing or garbling either changes nothing.
+        object[] unproven = [new { held = false }, new { held = false, generation = 7L }, new { held = false, generation = 7L, leaseUntil = "" }, new { held = false, generation = "7", leaseUntil = "2000-01-01T00:00:00+00:00" }];
+        foreach (var answer in unproven)
+        {
+            fixture.Clock.Now = fixture.Clock.Now.AddHours(1);
+            fixture.Transport.ReadReply = new AdapterReply(true, "Ok", JsonSerializer.SerializeToElement(answer), 7);
+            await fixture.Lifecycle.SweepAsync(default);
+            Assert.Equal("release-unknown", (await fixture.Store.ReadAsync(default))!.Claims.Single().ReleaseOutcome);
+        }
+
+        fixture.Clock.Now = fixture.Clock.Now.AddHours(1);
+        fixture.Transport.ReadReply = new AdapterReply(true, "Ok", JsonSerializer.SerializeToElement(new { held = false, generation = 7L, leaseUntil = "2000-01-01T00:00:00+00:00" }), 7);
+        await fixture.Lifecycle.SweepAsync(default);
+        Assert.Equal("settled", (await fixture.Store.ReadAsync(default))!.Claims.Single().ReleaseOutcome);
     }
 
     [Fact]

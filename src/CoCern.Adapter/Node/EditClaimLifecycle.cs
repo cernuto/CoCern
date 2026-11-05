@@ -317,9 +317,9 @@ internal sealed class EditClaimLifecycle(EditClaimLedger ledger, EditClaimLifecy
             await ChangeAsync(path, generation, row => row with { LeaseUntil = until }, ct);
             return;
         }
-        var lease = ReplyLease(reply);
-        // Held false alone also means under fifteen seconds left or a blocker, so only a moved generation or a clearly past lease is definite.
-        if (held.ValueKind != JsonValueKind.False || ReplyGeneration(reply) == generation && lease is { } past && past + HubMargin >= time.GetUtcNow()) return;
+        // Held false alone also means under fifteen seconds left or a blocker, so only a moved generation or a clearly past lease is definite. An answer that shows neither proves nothing, so a missing or unreadable field keeps the uncertainty.
+        var definite = ReplyGeneration(reply) is { } current && (current != generation || ReplyLease(reply) is { } past && past + HubMargin < time.GetUtcNow());
+        if (held.ValueKind != JsonValueKind.False || !definite) return;
         await ChangeAsync(path, generation, row => row with { ReleaseOutcome = Settled }, ct);
         Settle(receipts.Select(receipt => receipt.Intent.Id), path, generation);
     }
@@ -396,7 +396,7 @@ internal sealed class EditClaimLifecycle(EditClaimLedger ledger, EditClaimLifecy
         else document.Claims.Add(change(new(path, generation, now.AddSeconds(LeaseSeconds))));
     }
 
-    private static long? ReplyGeneration(AdapterReply reply) => reply.Data is { ValueKind: JsonValueKind.Object } data && data.TryGetProperty("generation", out var value) && value.TryGetInt64(out var generation) ? generation : null;
+    private static long? ReplyGeneration(AdapterReply reply) => reply.Data is { ValueKind: JsonValueKind.Object } data && data.TryGetProperty("generation", out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out var generation) ? generation : null;
     private static DateTimeOffset? ReplyLease(AdapterReply reply) => reply.Data is { ValueKind: JsonValueKind.Object } data && ChatLocators.Text(data, "leaseUntil") is { } text &&
         DateTimeOffset.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.None, out var until) ? until : null;
     private static bool Uncertain(Exception error) => error is IOException or HttpRequestException or TimeoutException;
