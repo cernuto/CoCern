@@ -37,6 +37,7 @@ public static class RelayTools
     public const string HubDiagnose = "hub_diagnose";
     public const string AddPc = "add_pc";
     public const string ConnectApp = "connect_app";
+    public const string EventWait = "event_wait";
 }
 
 /// <param name="IsMutation">Mutations require a stable requestId and are deduplicated by it.</param>
@@ -95,13 +96,15 @@ public static class RelayToolCatalog
         new(RelayTools.HubDiagnose, "Report hub health and when each PC was last seen.", true, false, false, []),
         new(RelayTools.AddPc, "Get a new PC's setup command. It holds the join code, a secret: never forward or store it.", true, false, false, []),
         new(RelayTools.ConnectApp, "Connect an app, on the hub's PC only. admin sets its administrator tools; left out keeps them.", true, true, false, ["client"]),
+        new(RelayTools.EventWait, "Register, cancel or read your bounded wait. Stable waitId and absolute expiresAt (at most one hour); server captures source baselines. Opt-in.", false, true, true, ["action", "waitId"]),
     ];
 
     private static readonly Dictionary<string, RelayTool> ByName = All.ToDictionary(tool => tool.Name, StringComparer.Ordinal);
 
     public static bool TryGet(string name, out RelayTool tool) => ByName.TryGetValue(name, out tool!);
 
-    public static IEnumerable<RelayTool> ForRole(bool administrator) => All.Where(tool => administrator || !tool.AdministratorOnly);
+    public static IEnumerable<RelayTool> ForRole(bool administrator, bool eventWaits = false) =>
+        All.Where(tool => (administrator || !tool.AdministratorOnly) && (eventWaits || tool.Name != RelayTools.EventWait));
 
     /// <summary>The complete JSON Schema for a tool's arguments, as the hub enforces it.</summary>
     public static JsonElement InputSchema(RelayTool tool)

@@ -127,7 +127,7 @@ public sealed record InboxMessage
 /// until it lands: a session that cannot take the message (closed, never opened, its inbox full) still accepts it and tells its sender, so
 /// nothing refuses one for good.
 /// </summary>
-public sealed record MessageDelivery(InboxMessage Message, long? AttentionExpiryDays = null) : IEffectMessage<MessageDelivery>
+public sealed record MessageDelivery(InboxMessage Message, long? AttentionExpiryDays = null, long? PeerReplySequence = null) : IEffectMessage<MessageDelivery>
 {
     public static string Operation => Operations.Deliver;
     public static string TargetKind => AggregateKinds.Session;
@@ -135,11 +135,14 @@ public sealed record MessageDelivery(InboxMessage Message, long? AttentionExpiry
 
     /// <summary>The field the dispatcher sets on a delivery's payload; see <see cref="AttentionExpiryDays"/>.</summary>
     public const string AttentionExpiryDaysKey = "attentionExpiryDays";
+    /// <summary>Private sender order; delivery metadata is not stored in the inbox.</summary>
+    public const string PeerReplySequenceKey = "peerReplySequence";
 
     public JsonObject ToJson()
     {
         var json = Message.ToJson();
         if (AttentionExpiryDays is { } days) json[AttentionExpiryDaysKey] = days;
+        if (PeerReplySequence is { } sequence) json[PeerReplySequenceKey] = sequence;
         return json;
     }
 
@@ -147,6 +150,6 @@ public sealed record MessageDelivery(InboxMessage Message, long? AttentionExpiry
     {
         var read = new MessageReader(payload);
         var message = InboxMessage.Read(read);
-        return read.Result(new MessageDelivery(message, read.OptionalNumber(AttentionExpiryDaysKey, minimum: 0)));
+        return read.Result(new MessageDelivery(message, read.OptionalNumber(AttentionExpiryDaysKey, minimum: 0), read.OptionalNumber(PeerReplySequenceKey, minimum: 1)));
     }
 }
