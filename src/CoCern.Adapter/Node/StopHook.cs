@@ -10,7 +10,7 @@ namespace CoCern.Adapter.Node;
 public static class StopHook
 {
     internal static async Task<int> RunNativeAsync(TextReader input, TextWriter error, NativeJoin join, CancellationToken ct, HttpMessageHandler? handler = null, TimeSpan? timeout = null,
-        Func<CancellationToken, Task>? ownerGone = null)
+        Func<CancellationToken, Task>? ownerGone = null, Func<int, ProcessFacts?>? read = null, TimeSpan? grace = null)
     {
         try
         {
@@ -20,7 +20,9 @@ public static class StopHook
             var capture = NativeJoinHook.ParseContext("claude", document.RootElement);
             if (capture is null || ChatLocators.Text(document.RootElement, "hook_event_name") != "Stop") return 0;
             return await RunAsync(new StringReader(text), error, join.PrivateFolder, ct,
-                (_, _, deliver, limit, cancel) => ClaudeWaiter.RunNativeAsync(join, capture, deliver, timeout ?? limit, cancel, handler), ownerGone: ownerGone);
+                (_, _, deliver, limit, cancel) => ClaudeWaiter.RunNativeAsync(join, capture, deliver, timeout ?? limit, cancel, handler, printInbox: true), ownerGone: ownerGone,
+                // The waiter's pid file is named by the captured chat, which may not be this event's session_id.
+                otherClient: (_, _, cancel) => ClaudeWaiter.AwaitOtherClientsWaiterAsync(join.PrivateFolder, Guid.Parse(capture.NativeId).ToString("D"), read ?? OwningProcess.Read, grace ?? OtherClientGrace, OtherClientCheck, cancel));
         }
         catch (Exception) { return 0; }
     }
