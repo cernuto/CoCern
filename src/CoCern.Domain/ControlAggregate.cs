@@ -494,7 +494,7 @@ internal static class ControlAggregate
             if (fitted.HistoryReadRequired) return Error(PayloadTooLarge);
             // The reserved read is where the action log is seen, so ordinary status stays small. A worker never got this far.
             RelayReply WithActions(CoCern.Contracts.AdminActionPage page) => Ok(new { paused = state.Paused, cancellations = state.CancellationCount, requests, requestsOmitted = true, manager = fitted, actions = page });
-            return WithActions(AdminActionLog.Page(state, actionsBefore, page => FitsWire(WithActions(page), RelayLimits.AggregateReplyBytes)));
+            return WithActions(AdminActionLog.Page(state, context.Caller, context.Repository, actionsBefore, page => FitsWire(WithActions(page), RelayLimits.AggregateReplyBytes)));
         }
         return FitsWire(augmented, RelayLimits.AggregateReplyBytes) ? augmented
             : Ok(new { paused = state.Paused, cancellations = state.CancellationCount, requests });

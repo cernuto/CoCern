@@ -32,7 +32,7 @@ public sealed class ControlState(JsonObject json)
     public const string ManagerHistoryKey = "managerHistory";
     public const string ManagerRevokedKey = "managerRevoked";
     public const string AdminActionsKey = "adminActions";
-    public const string AdminActionSeqKey = "adminActionSeq";
+    public const string AdminActionSeqsKey = "adminActionSeqs";
 
     /// <summary>Every key the directory stores: its entries by session ID, close fences by session ID, resources by ID, aliases by machine and name, and cancellations by session and action.</summary>
     public static StateShape Shape { get; } = CommonState.Shape.With(
@@ -41,7 +41,7 @@ public sealed class ControlState(JsonObject json)
         (ResourcesKey, StateShape.Map(RegisteredResource.Shape)), (AliasesKey, StateShape.Map(null)),
         (PausedKey, null), (CancellationsKey, StateShape.Map(Cancellation.Shape)),
         (ManagerGenerationKey, null), (ManagerKey, ManagerAssignment.Shape), (ManagerHistoryKey, ManagerSelectionHistoryState.Shape),
-        (ManagerRevokedKey, StateShape.Map(null)), (AdminActionsKey, ManagerSelectionHistoryState.AdminActionShape), (AdminActionSeqKey, null));
+        (ManagerRevokedKey, StateShape.Map(null)), (AdminActionsKey, ManagerSelectionHistoryState.AdminActionShape), (AdminActionSeqsKey, StateShape.Map(null)));
 
     private JsonObject Sessions => ObjectAt(json, SessionsKey);
 
@@ -226,11 +226,8 @@ public sealed class ControlState(JsonObject json)
     /// <summary>The administrative action log, oldest first (see <c>AdminActionLog</c>).</summary>
     public JsonArray AdminActions => ArrayAt(json, AdminActionsKey);
 
-    public long AdminActionSeq
-    {
-        get => Number(json, AdminActionSeqKey);
-        set => json[AdminActionSeqKey] = value;
-    }
+    /// <summary>The last action number by repository. Numbered per repository, so a number says nothing about another repository's activity.</summary>
+    public JsonObject AdminActionSeqs => ObjectAt(json, AdminActionSeqsKey);
 
     private JsonObject Cancellations => ObjectAt(json, CancellationsKey);
 
