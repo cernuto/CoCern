@@ -107,6 +107,19 @@ public sealed class ReplyAcknowledgmentTests
     }
 
     [Fact]
+    public async Task A_hook_report_flag_survives_the_router_so_the_hub_can_keep_the_models_report()
+    {
+        var hub = new Hub();
+        var chat = await hub.Open();
+        var model = hub.Handle(chat); model["waitingFor"] = "Waiting on a rig";
+        Assert.True((await hub.Call(RelayTools.Ack, model)).Ok);
+        var hook = hub.Handle(chat); hook["waitingFor"] = ""; hook[RelayLimits.HookWaitingField] = true;
+        var kept = await hub.Call(RelayTools.Ack, hook);
+        Assert.True(kept.Ok, kept.Code);
+        Assert.True(Data(kept)["waitingForKept"]!.GetValue<bool>());
+    }
+
+    [Fact]
     public async Task A_client_heldOnly_flag_changes_nothing()
     {
         // Needs "heldOnly" stripped from the ack tool's client arguments (ServerArguments), since every routed call reaches the aggregate as internal.

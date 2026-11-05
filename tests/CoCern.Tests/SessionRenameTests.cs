@@ -71,7 +71,7 @@ public sealed class SessionRenameTests
             async Task<JsonNode> Listed()
             {
                 Assert.True((await factory.GetGrain<ISessionGrain>(id).ExecuteAsync(caller with { IsInternal = true }, "__dispatch", "{}")).Ok);
-                var workers = JsonNode.Parse((await Call(RelayTools.WorkerList, new { repositoryId = "repo" })).DataJson)!["items"]!.AsArray();
+                var workers = JsonNode.Parse((await Call(RelayTools.WorkerList, new { repositoryId = "repo", includeStale = true })).DataJson)!["items"]!.AsArray();
                 return workers.Single(worker => worker!["sessionId"]!.GetValue<string>() == id)!;
             }
 
@@ -82,7 +82,7 @@ public sealed class SessionRenameTests
             var listed = await Listed();
             Assert.Equal("16XAURORA", listed["machineId"]!.GetValue<string>());
             Assert.Equal("Renamed chat", listed["label"]!.GetValue<string>());
-            Assert.Equal("codelens", listed["binding"]!["roslyn"]!.GetValue<string>());
+            Assert.Equal("codelens", Assert.IsType<JsonObject>(listed["binding"])["roslyn"]!.GetValue<string>());
 
             // A retry of the same request is the same answer, and another token cannot move the session to another machine.
             Assert.Equal(updated.DataJson, (await Call(RelayTools.SessionBind, metadata)).DataJson);

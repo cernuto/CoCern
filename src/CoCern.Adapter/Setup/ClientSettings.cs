@@ -342,12 +342,13 @@ internal static class ClientSettings
     /// </summary>
     public static ClientPlan PlanStopHook(string path, string command) => PlanHooks(path, StopHook(command));
 
-    /// <summary>Claude Code's settings.json with the Stop hook and, when asked, the prompt and post-tool hooks: one plan, so no write loses another.</summary>
-    public static ClientPlan PlanClaudeHooks(string path, string stopCommand, string? promptCommand, string? postToolCommand = null)
+    /// <summary>Claude Code's settings.json with the Stop hook and, when asked, the prompt, post-tool and waiting hooks: one plan, so no write loses another.</summary>
+    public static ClientPlan PlanClaudeHooks(string path, string stopCommand, string? promptCommand, string? postToolCommand = null, string? waitingCommand = null)
     {
         var specs = new List<HookSpec> { StopHook(stopCommand) };
         if (promptCommand is not null) specs.Add(PromptHook(promptCommand));
         if (postToolCommand is not null) specs.Add(PostToolHook(postToolCommand));
+        if (waitingCommand is not null) specs.AddRange(WaitingHooks(waitingCommand));
         return PlanHooks(path, specs.ToArray());
     }
 
@@ -356,7 +357,7 @@ internal static class ClientSettings
     /// <paramref name="AdapterOnly"/> only when the command also runs the CoCern adapter, so another tool's handler that happens to use the
     /// same switch is never replaced or removed.
     /// </summary>
-    private sealed record HookSpec(string Event, string Marker, JsonObject Handler, bool ReplaceOwned, bool AdapterOnly = false)
+    private sealed record HookSpec(string Event, string Marker, JsonObject Handler, bool ReplaceOwned, bool AdapterOnly = false, string? Matcher = null)
     {
         public bool Owns(string command) => command.Contains(Marker, StringComparison.Ordinal)
             && (!AdapterOnly || command.Contains("CoCern.Adapter.dll", StringComparison.OrdinalIgnoreCase) || command.Contains("CoCern.Adapter.exe", StringComparison.OrdinalIgnoreCase));
@@ -368,6 +369,19 @@ internal static class ClientSettings
     // No matcher: mail can arrive during any tool call. An older handler of ours is moved forward like the Stop hook's.
     private static HookSpec PostToolHook(string command) =>
         new("PostToolUse", "--post-tool-hook", new JsonObject { ["type"] = "command", ["command"] = command, ["timeout"] = PostToolHookTimeoutSeconds }, ReplaceOwned: true, AdapterOnly: true);
+
+    // What sets a chat's report on "Waiting on you" and, past the post-tool and prompt hooks, what clears it. PermissionDenied is left out: the hooks reference says it fires only in
+    // auto mode, never for a dialog someone answered. PostToolUseFailure has no matcher because the hook itself matches the question's tool_use_id, as it does on PostToolUse.
+    private static HookSpec[] WaitingHooks(string command) =>
+    [
+        WaitingHook("Notification", command, "permission_prompt"),
+        WaitingHook("PreToolUse", command, Node.WaitingHook.QuestionTool),
+        WaitingHook("Stop", command, null),
+        WaitingHook("PostToolUseFailure", command, null)
+    ];
+
+    private static HookSpec WaitingHook(string hookEvent, string command, string? matcher) =>
+        new(hookEvent, "--waiting-hook", new JsonObject { ["type"] = "command", ["command"] = command, ["timeout"] = WaitingHookTimeoutSeconds }, ReplaceOwned: true, AdapterOnly: true, Matcher: matcher);
 
     private static HookSpec StopHook(string command) =>
         new("Stop", "--stop-hook", new JsonObject { ["type"] = "command", ["command"] = command, ["asyncRewake"] = true, ["timeout"] = StopHookTimeoutSeconds }, ReplaceOwned: true, AdapterOnly: true);
@@ -409,7 +423,10 @@ internal static class ClientSettings
             .ToArray();
         if (owned.Length == 0)
         {
-            groups.Add(new JsonObject { ["hooks"] = new JsonArray(spec.Handler.DeepClone()) });
+            var group = new JsonObject();
+            if (spec.Matcher is not null) group["matcher"] = spec.Matcher;
+            group["hooks"] = new JsonArray(spec.Handler.DeepClone());
+            groups.Add(group);
             return true;
         }
         if (!spec.ReplaceOwned || owned.Length == 1 && JsonNode.DeepEquals(owned[0].Entry, spec.Handler)) return false;
@@ -424,6 +441,9 @@ internal static class ClientSettings
 
     /// <summary>The client-side limit on one post-tool hook run; the hook gives up well before it, and when the inbox has not changed it is done after one small read.</summary>
     internal const int PostToolHookTimeoutSeconds = 5;
+
+    /// <summary>The client-side limit on one waiting hook run; the hook gives up on the hub about a second in.</summary>
+    internal const int WaitingHookTimeoutSeconds = 5;
 
     /// <summary>
     /// The client-side limit on one Stop hook run: a day, the same as the hub's default idle limit for sessions. Claude Code enforces a hook's

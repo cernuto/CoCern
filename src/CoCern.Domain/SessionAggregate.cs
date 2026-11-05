@@ -435,7 +435,8 @@ internal static class SessionAggregate
     /// <c>ack</c>: acknowledges the named messages and takes this session's own report of what it waits on Paul for. A call that names no
     /// message acknowledges nothing, so a report alone records no empty ID. <c>waitingFor</c> follows <see cref="Bind"/>'s rule, since some
     /// clients send null for every optional field: left out or null keeps the report, empty clears it, and a refused one changes nothing,
-    /// the acknowledgments included. The reply leaves the text out, so a stored replay does not outlive the report on close.
+    /// the acknowledgments included. The reply leaves the text out, so a stored replay does not outlive the report on close. A call from the chat's client hook
+    /// (<see cref="RelayLimits.HookWaitingField"/>) leaves an active report from the model alone, and says so with <c>waitingForKept</c>; only the hub can decide that atomically.
     /// </summary>
     private static RelayReply Acknowledge(AggregateContext context, SessionState state)
     {
@@ -455,9 +456,15 @@ internal static class SessionAggregate
         SessionAttention.CloseMessages(state, ids, context.Now);
         var reply = new JsonObject { ["acknowledged"] = acknowledged };
         if (report is null) return Ok(reply);
+        var fromHook = Flag(context.Args, RelayLimits.HookWaitingField);
+        if (fromHook && state.WaitingFor is { FromHook: false } held && held.ExpiresAt > context.Now)
+        {
+            reply["waitingForKept"] = true;
+            return Ok(reply);
+        }
         if (report.GetValue<string>() is { Length: > 0 } text)
         {
-            var mark = state.ReportWaitingFor(text, context.Now);
+            var mark = state.ReportWaitingFor(text, context.Now, fromHook);
             reply["waitingFor"] = new JsonObject { [WaitingMark.SinceKey] = mark.Since.ToString("O"), [WaitingMark.ExpiresAtKey] = mark.ExpiresAt.ToString("O") };
         }
         else
