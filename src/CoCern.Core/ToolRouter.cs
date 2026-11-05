@@ -12,7 +12,7 @@ namespace CoCern.Core;
 /// composes them (<see cref="ClaimComposer"/>, <see cref="SessionTools"/>, <see cref="StatusTools"/>, <see cref="MessageTools"/>,
 /// <see cref="SearchTools"/>). A turned-off feature answers for itself, so no route checks for one.
 /// </summary>
-internal sealed class ToolRouter(Aggregates aggregates, ClaimComposer claims, SessionTools sessions, StatusTools status, MessageTools messages, SearchTools searches, IDocCacheTools docs, IAdminTools admin)
+internal sealed class ToolRouter(Aggregates aggregates, ClaimComposer claims, SessionTools sessions, StatusTools status, MessageTools messages, PeerTools peers, SearchTools searches, IDocCacheTools docs, IAdminTools admin)
 {
     public Task<RelayReply> RouteAsync(RelayCall call, CallTrace? trace, CancellationToken cancellationToken)
     {
@@ -28,6 +28,7 @@ internal sealed class ToolRouter(Aggregates aggregates, ClaimComposer claims, Se
             RelayTools.ActionBegin => claims.BeginActionAsync(caller, args, session),
             RelayTools.SendMessage => messages.SendMessageAsync(caller, args),
             RelayTools.ChatDirectory => messages.DirectoryAsync(args),
+            RelayTools.Peers => peers.RunAsync(caller, args, call.NativeParticipant, cancellationToken),
             RelayTools.ControlRequest when Text(args, "command") == "revoke_machine" => messages.RevokeMachineAsync(caller, args),
             RelayTools.Search => searches.SearchAsync(args, cancellationToken),
             RelayTools.AnalyticsQuery => searches.AnalyticsAsync(caller, args, cancellationToken),

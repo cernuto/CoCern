@@ -297,6 +297,10 @@ public static class Operations
     public const string ManagerStanding = "__manager_standing";
     /// <summary>Appends one entry to the administrative action log (<see cref="Messages.AdminActionReport"/>).</summary>
     public const string AdminAction = "__admin_action";
+    /// <summary>Read-only, sent to the control directory: which one chat a name or ref means in this repository (<see cref="Messages.PeerResolve"/>).</summary>
+    public const string PeerResolve = "__peer_resolve";
+    /// <summary>Read-only, sent to the control directory: this repository's chats, for a verified native caller (<see cref="Messages.PeerList"/>).</summary>
+    public const string PeerList = "__peer_list";
     /// <summary>
     /// Adds an attention item to a session, or refreshes the open one with the same kind, task and subject. Sent through an aggregate's
     /// outbox (<see cref="Messages.AttentionRaise"/>). Sources should always send <c>revision</c>; without one, only an identical copy within
@@ -364,7 +368,7 @@ public static class Operations
     public static bool IsInternal(string operation) => operation.StartsWith("__", StringComparison.Ordinal);
 
     /// <summary>Internal operations that only read: never deduplicated by requestId, never committed for themselves.</summary>
-    public static bool IsRead(string operation) => operation is Verify or Resolve or ResolveAll or NextWork or ClaimState or SessionOwners or SessionsOpen or ManagerStanding or Standing or Orders or EventWaitAggregate.ReadOperation;
+    public static bool IsRead(string operation) => operation is Verify or Resolve or ResolveAll or NextWork or ClaimState or SessionOwners or SessionsOpen or PeerResolve or PeerList or ManagerStanding or Standing or Orders or EventWaitAggregate.ReadOperation;
 
     /// <summary>Order effects run only while standing orders are on; a target that refuses one is not asked again.</summary>
     public static bool IsOrder(string operation) => operation is OrderFire or OrderWatch or OrderRelease or OrderFailed or OrderWatchFailed;

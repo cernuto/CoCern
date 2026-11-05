@@ -42,7 +42,7 @@ internal static class RelayRequestGuard
             }
             if (arguments.TryGetProperty("nativeJoin", out var native) && native.ValueKind == JsonValueKind.Object &&
                 native.TryGetProperty("resolution", out var evidence) &&
-                (tool.Name != RelayTools.SessionOpen || args.Count != 4 || !NativeGitOrigin.ValidCheckoutEvidence(evidence)))
+                (tool.Name != RelayTools.SessionOpen || args.Count != NativeParticipant.JoinFields(args) || !NativeGitOrigin.ValidCheckoutEvidence(evidence)))
                 return Replies.Error(InvalidArguments);
         }
         catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or JsonException)
@@ -75,6 +75,7 @@ internal static class RelayRequestGuard
         if (tool.Name == RelayTools.Search && SearchProblem(args) is { } field) return Replies.Error(InvalidArguments, new { field });
         if (tool.Name == RelayTools.AnalyticsQuery && AnalyticsProblem(args) is { } analyticsField) return Replies.Error(InvalidArguments, new { field = analyticsField });
         if (tool.Name is RelayTools.DocSearch or RelayTools.DocSection or RelayTools.DocSync && DocProblem(tool.Name, args) is { } docField) return Replies.Error(InvalidArguments, new { field = docField });
+        if (tool.Name == RelayTools.Peers && PeerProblem(args) is { } peerField) return Replies.Error(InvalidArguments, new { field = peerField });
         if (args.ContainsKey("seenMessageIds") && (args["seenMessageIds"] is not JsonArray seen || seen.Count > RelayLimits.MaxAcknowledgedMessages
             || seen.Any(id => id is not JsonValue value || !value.TryGetValue<string>(out var text) || text.Length is 0 or > RelayLimits.MaxIdentifierLength))) return Replies.Error(InvalidArguments, new { field = "seenMessageIds" });
         if (args["knownInboxEtag"] is { } inboxEtag && (inboxEtag is not JsonValue etagValue || !etagValue.TryGetValue<string>(out var etagText) || etagText.Length is 0 or > RelayLimits.MaxKnownEtagLength || etagText.Any(char.IsControl)))
@@ -94,6 +95,7 @@ internal static class RelayRequestGuard
         args.Remove(NativeParticipant.Generation);
         args.Remove(NativeParticipant.Request);
         args.Remove(NativeParticipant.ConfirmedExpiry);
+        args.Remove(NativeParticipant.Client);
         return null;
     }
 
@@ -166,6 +168,15 @@ internal static class RelayRequestGuard
         if (Text(args, "path") is { Length: > 0 } path && (path.StartsWith('/') || path.Contains('\\') || path.Split('/').Contains(".."))) return "path";
         if (args["limit"] is not null && (args["limit"] is not JsonValue limit || limit.GetValueKind() != JsonValueKind.Number || !long.TryParse(limit.ToJsonString(), out _))) return "limit";
         return null;
+    }
+
+    /// <summary>The first invalid <c>peers</c> argument, or null: at most one of a whole name and a ref, each a bounded single line. A null reads as absent.</summary>
+    private static string? PeerProblem(JsonObject args)
+    {
+        foreach (var field in new[] { "name", "ref" })
+            if (args[field] is { } given && (given is not JsonValue value || !value.TryGetValue<string>(out var text) || string.IsNullOrWhiteSpace(text) || text.Length > RelayLimits.MaxIdentifierLength || text.Any(char.IsControl)))
+                return field;
+        return args["name"] is not null && args["ref"] is not null ? "ref" : null;
     }
 
     private static int Count(JsonObject args, string key) => args[key] is JsonArray array ? array.Count : 0;

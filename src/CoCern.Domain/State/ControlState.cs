@@ -37,7 +37,7 @@ public sealed class ControlState(JsonObject json)
     /// <summary>Every key the directory stores: its entries by session ID, close fences by session ID, resources by ID, aliases by machine and name, and cancellations by session and action.</summary>
     public static StateShape Shape { get; } = CommonState.Shape.With(
         (SessionsKey, StateShape.Map(DirectoryEntry.Shape)), (ClosingKey, StateShape.Map(StateShape.Object((FenceSeqKey, null), (FenceAtKey, null), (NativeParticipant.Id, null), (DuplicateCloseKey, null)))), (CloseSeqKey, null),
-        (NativeJoinsKey, StateShape.Map(StateShape.Object(("sessionId", null), ("generation", null), ("requestId", null), ("expired", null), ("retired", StateShape.Map(null))))),
+        (NativeJoinsKey, StateShape.Map(StateShape.Object(("sessionId", null), ("generation", null), ("requestId", null), ("expired", null), ("client", null), ("retired", StateShape.Map(null))))),
         (ResourcesKey, StateShape.Map(RegisteredResource.Shape)), (AliasesKey, StateShape.Map(null)),
         (PausedKey, null), (CancellationsKey, StateShape.Map(Cancellation.Shape)),
         (ManagerGenerationKey, null), (ManagerKey, ManagerAssignment.Shape), (ManagerHistoryKey, ManagerSelectionHistoryState.Shape),
@@ -49,7 +49,7 @@ public sealed class ControlState(JsonObject json)
     internal JsonObject? NativeJoin(string participant) => (json[NativeJoinsKey] as JsonObject)?[participant] as JsonObject;
     internal bool CanTrackNative(string participant) => NativeJoin(participant) is not null || (json[NativeJoinsKey] as JsonObject)?.Count is null or < RelayLimits.MaxRecords;
 
-    internal void TrackNative(SessionRecord record)
+    internal void TrackNative(SessionRecord record, string client = "")
     {
         var joins = ObjectAt(json, NativeJoinsKey);
         var join = ObjectAt(joins, record.NativeId!);
@@ -58,8 +58,16 @@ public sealed class ControlState(JsonObject json)
         join["generation"] = record.NativeGeneration;
         join["sessionId"] = record.SessionId;
         join["requestId"] = record.NativeRequest;
+        // Display only. It stays here, off the row, so worker listings do not change.
+        if (client.Length > 0) join["client"] = client;
         join.Remove("expired");
     }
+
+    /// <summary>The client this participant joined with, as its proof named it; empty when none is recorded.</summary>
+    internal string NativeClient(string participant) => NativeJoin(participant) is { } join ? Text(join, "client") : "";
+
+    /// <summary>The session this participant's private join names; empty when it has none.</summary>
+    internal string NativeCurrentSession(string participant) => NativeJoin(participant) is { } join ? Text(join, "sessionId") : "";
 
     // All directory removal paths preserve an independently opened attempt before deleting its only private row.
     // A duplicate of the current attempt can disappear without retiring the current generation.
@@ -296,6 +304,7 @@ public sealed class DirectoryEntry(JsonObject json)
     public string Role => Text(json, RoleKey);
 
     public string Label => Text(json, LabelKey);
+    internal string MachineId => Text(json, MachineIdKey);
     public long BindingVersion => Number(json, BindingVersionKey);
     public DateTimeOffset ObservedAt => Date(json, ObservedAtKey);
     public DateTimeOffset FreshUntil => Date(json, FreshUntilKey);

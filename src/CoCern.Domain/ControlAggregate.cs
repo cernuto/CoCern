@@ -41,6 +41,8 @@ internal static class ControlAggregate
             Operations.ManagerStanding => ManagerSelection.Standing(context),
             Operations.AdminAction => AdminActionLog.Record(context),
             Operations.AttentionRoute => RouteAttention(context),
+            Operations.PeerResolve => PeerDirectory.Resolve(context),
+            Operations.PeerList => PeerDirectory.ListPeers(context),
             RelayTools.ControlRequest => Control(context),
             _ => Error(UnknownTool)
         };
@@ -71,7 +73,7 @@ internal static class ControlAggregate
         // The role given at session_open routes manager-bound attention items; it grants nothing.
         var record = SessionRecord.Opened(id, token, context.Caller.PrincipalId, context.Repository, args).WithInitialFreshness(context.Now);
         state.Enter(record);
-        if (record.NativeId is not null) state.TrackNative(record);
+        if (record.NativeId is not null) state.TrackNative(record, Text(args, NativeParticipant.Client));
         context.Send(id, new SessionOpen(record));
         return OpenReply(id, token, args);
     }

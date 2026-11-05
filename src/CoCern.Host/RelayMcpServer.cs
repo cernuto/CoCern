@@ -17,7 +17,7 @@ internal static class RelayMcpServer
             .WithListToolsHandler((request, _) =>
             {
                 var context = HttpContextOf(request.Server.Services!);
-                return ValueTask.FromResult(new ListToolsResult { Tools = ToolResults.Tools(RelayAuthentication.Caller(context.User).IsAdministrator).ToList() });
+                return ValueTask.FromResult(new ListToolsResult { Tools = ToolResults.Tools(context).ToList() });
             })
             .WithCallToolHandler(async (request, cancellationToken) =>
             {

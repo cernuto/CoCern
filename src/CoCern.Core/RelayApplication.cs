@@ -49,10 +49,12 @@ public sealed class RelayApplication : IRelayApplication
         var docTools = docs ?? DocCacheTool.Off;
         guard = new(aggregates, incarnation);
         actions = new(aggregates);
+        var machineDirectory = machines ?? new MachineDirectory(grains);
         router = new(aggregates, claims,
             new SessionTools(aggregates, standing, attentionOptions, anomaly, docTools, searchOn: search is not null, analyticsOn: analytics is not null && !ReferenceEquals(analytics, AnalyticsTool.Off)),
             new StatusTools(aggregates, standing, attentionOptions, orders, telemetry),
-            new MessageTools(aggregates, machines ?? new MachineDirectory(grains), attentionOptions, telemetry),
+            new MessageTools(aggregates, machineDirectory, attentionOptions, telemetry),
+            new PeerTools(aggregates, machineDirectory),
             new SearchTools(search, analytics ?? AnalyticsTool.Off),
             docTools, admin ?? AdminTools.Off);
         addOns = new(aggregates, claims, standing, guard, tokenStatus, attentionOptions, search, telemetry, counter, tokenOptions ?? new(), observations);
