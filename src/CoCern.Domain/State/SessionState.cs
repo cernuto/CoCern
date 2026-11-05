@@ -57,7 +57,7 @@ public sealed class SessionState(JsonObject json)
     private static readonly string[] ForgottenOnClose =
     [
         SessionTokenKey, InboxKey, AckedKey, AttentionQueue.ItemsKey, AttentionQueue.ClosedKey, AttentionQueue.ArchivedKey, AttentionQueue.RecentKey, StandingSeenKey,
-        BindingKey, TargetBoardsKey, WorkBoardsKey, WaitingForKey
+        BindingKey, TargetBoardsKey, WorkBoardsKey, WaitingForKey, "eventWaits"
     ];
 
     /// <summary>Whether a <see cref="SessionOpen"/> ever initialized this session.</summary>
