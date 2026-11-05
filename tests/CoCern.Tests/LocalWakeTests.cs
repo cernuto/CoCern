@@ -1131,6 +1131,22 @@ public sealed class LocalWakeTests : IDisposable
     }
 
     [Fact]
+    public async Task A_skip_reason_counts_once_however_many_attempts_find_it()
+    {
+        var connection = Connection();
+        var handle = CodexHandle(connection);
+        NodeState.WriteSessionHandle(connection.Folder, handle with { Chat = null });
+        var clock = new ManualClock();
+        using var hub = new ProbeHandler();
+        await using var restarted = Restart(connection, hub, clock: clock, run: false);
+        await restarted.Wake.RearmAsync(CancellationToken.None);
+        clock.Advance(LocalChatWake.RearmRetry + TimeSpan.FromSeconds(1));
+        await restarted.Wake.RearmAsync(CancellationToken.None);
+        Assert.True(restarted.Wake.RearmPending);
+        Assert.Equal(1, SkipCount("rearm_skip_unlocated"));
+    }
+
+    [Fact]
     public async Task An_unmapped_chat_is_final_and_is_not_retried()
     {
         var connection = Connection();
