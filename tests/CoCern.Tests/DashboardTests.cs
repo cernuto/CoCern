@@ -36,6 +36,9 @@ public sealed class DashboardTests
         Assert.True(recovery >= 0, "Manager recovery marker is missing.");
         Assert.True(snapshot >= 0, "Snapshot branch marker is missing.");
         Assert.True(recovery > authenticated && recovery < snapshot, "Recovery must remain available without a snapshot.");
+        Assert.True(page.IndexOf("<ManagerControl", recovery + 1, StringComparison.Ordinal) < 0,
+            "A second Manager-only instance inside the snapshot branch loses recovery when the stream is unavailable.");
+        Assert.Contains("Compact=\"@(View != \"manager\")\"", page[recovery..snapshot]);
         var component = File.ReadAllText(Path.Combine(root.FullName, "src/CoCern.Dashboard/Components/ManagerControl.razor"));
         Assert.Contains("Pause prevents new claims and actions. Stop also asks known chats to cancel. Running tools and wake delivery are not interrupted.", component);
         Assert.Contains("Recent manager selections", component);

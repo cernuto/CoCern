@@ -96,6 +96,12 @@ public sealed class LocalWakeStartupTests : IDisposable
         var text = File.ReadAllText(statusFile);
         using var status = JsonDocument.Parse(text);
         Assert.Equal(expected, status.RootElement.GetProperty("code").GetString());
+        if (kind == "ready")
+        {
+            Assert.NotEqual("off", status.RootElement.GetProperty("state").GetString());
+            Assert.Null(LocalWakeStatus.Problem(cache));
+        }
+        else Assert.Equal("off", status.RootElement.GetProperty("state").GetString());
         Assert.DoesNotContain(Secret, text);
         Assert.DoesNotContain(root, text);
     }

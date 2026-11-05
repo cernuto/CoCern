@@ -34,7 +34,8 @@ public sealed class LocalWakeTests : IDisposable
     {
         var connection = LocalWakeConnection.Create(new AdapterOptions("http://127.0.0.1:5271/", Secret), null, Path.Combine(root, "cache"));
         Assert.Null(connection);
-        Assert.False(Directory.Exists(Path.Combine(root, "cache")));
+        var cache = Path.Combine(root, "cache");
+        Assert.Empty(Directory.Exists(cache) ? Directory.EnumerateFiles(cache, LocalWakeConnection.FileName, SearchOption.AllDirectories) : Array.Empty<string>());
     }
 
     [Fact]
