@@ -49,6 +49,8 @@ public static class AttentionWeights
     public const string ProviderRejection = BlockerKinds.ProviderRejection;
     /// <summary>A <c>blocked</c> item whose blocker is a coordinator hold; it ranks with reviews (tier 3).</summary>
     public const string CoordinatorHold = BlockerKinds.CoordinatorHold;
+    /// <summary>A <c>blocked</c> item whose blocker needs a person; it ranks with reviews (tier 3), since waking a manager cannot answer it.</summary>
+    public const string HumanDecision = BlockerKinds.HumanDecision;
 
     public const string Low = "low";
     public const string Normal = "normal";
@@ -68,9 +70,9 @@ public static class AttentionWeights
         [AttentionKinds.RelatedWork] = 4, [AttentionKinds.NextWork] = 4, [AttentionKinds.Info] = 4, [AttentionKinds.Tip] = 4
     }.ToFrozenDictionary(StringComparer.Ordinal);
 
-    /// <summary>The kind's tier; a <c>blocked</c> item from a coordinator hold ranks in tier 3. Unknown kinds rank lowest.</summary>
+    /// <summary>The kind's tier; a <c>blocked</c> item from a coordinator hold or a human decision ranks in tier 3. Unknown kinds rank lowest.</summary>
     public static int BaseTier(string kind, string? blocker = null) =>
-        kind == AttentionKinds.Blocked && blocker == CoordinatorHold ? 3 : Tiers.TryGetValue(kind, out var tier) ? tier : LowestTier;
+        kind == AttentionKinds.Blocked && (blocker is CoordinatorHold or HumanDecision) ? 3 : Tiers.TryGetValue(kind, out var tier) ? tier : LowestTier;
 
     /// <summary>The tier used for ranking: an item that blocks another session's claimed task ranks one tier higher.</summary>
     public static int Tier(string kind, string? blocker = null, bool blocking = false) => Math.Max(TopTier, BaseTier(kind, blocker) - (blocking ? 1 : 0));

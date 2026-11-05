@@ -41,6 +41,7 @@ internal sealed class ReplyAddOns(Aggregates aggregates, ClaimComposer claims, S
     internal static IReadOnlyList<(string Name, Step Run)> Steps { get; } =
     [
         ("token_status", static (addOns, reply) => addOns.AddTokenStatus(reply)),
+        ("waiting_on_you", static (addOns, reply) => addOns.AddWaitingAsync(reply)),
         ("piggyback", static (addOns, reply) => addOns.PiggybackAsync(reply)),
         ("next_work", static (addOns, reply) => addOns.OfferNextWorkAsync(reply)),
         ("standing", static (addOns, reply) => addOns.DeliverStandingAsync(reply)),
@@ -66,6 +67,27 @@ internal sealed class ReplyAddOns(Aggregates aggregates, ClaimComposer claims, S
         var call = reply.Call;
         if (reply.Reply.Ok && call.Tool == RelayTools.GetStatus && call.Caller.IsAdministrator && !call.Controls.StatusDetail) reply.Reply = tokenStatus.AddTo(reply.Reply);
         return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// An administrator's <c>get_status</c>, but not a background detail read, shows what waits on Paul in the call's repository, read from
+    /// storage on call, since the collector only runs with a viewer. The gate is the administrator token: a session's role, or being the
+    /// appointed manager, grants nothing, and a worker's reply has no such field. An administrator may name any repository, so the scope is
+    /// the repository the call names (<see cref="WaitingList.Build"/>), not what the caller may access.
+    /// </summary>
+    private async Task AddWaitingAsync(Outgoing reply)
+    {
+        var call = reply.Call;
+        if (!reply.Reply.Ok || call.Tool != RelayTools.GetStatus || !call.Caller.IsAdministrator || call.Controls.StatusDetail || observations is null) return;
+        var repository = Text(call.Args, "repositoryId");
+        var status = reply.Reply;
+        JsonObject With(JsonObject section) { var data = Parse(status); data["waitingOnYou"] = section.DeepClone(); return data; }
+        // The reply keeps room for what it is composed with, and a section that cannot fit gives up rows, not the reply.
+        bool Fits(JsonObject section) => ByteSize(section) <= RelayLimits.CompositionReserveBytes && FitsWire(Ok(With(section), status.Version));
+        JsonObject waiting;
+        try { waiting = await observations.ReadWaitingAsync(repository) is { } sources ? WaitingList.ToStatus(WaitingList.Build(sources, DateTimeOffset.UtcNow, repository), Fits) : new JsonObject { ["unavailable"] = true }; }
+        catch (Exception) { waiting = new JsonObject { ["unavailable"] = true }; }
+        if (Fits(waiting)) reply.Reply = Ok(With(waiting), status.Version);
     }
 
     /// <summary>Optional claim renewals and inbox acknowledgments riding on another call. Their outcomes never change the committed result.</summary>
@@ -121,7 +143,8 @@ internal sealed class ReplyAddOns(Aggregates aggregates, ClaimComposer claims, S
     {
         if (args["ackMessageIds"] is JsonArray ids)
         {
-            var ack = args.DeepClone().AsObject(); ack.Remove("requestId"); ack.Remove("heldOnly"); ack["messageIds"] = ids.DeepClone();
+            // Piggyback acknowledgments never adopt a different tool's waiting report.
+            var ack = args.DeepClone().AsObject(); ack.Remove("requestId"); ack.Remove("heldOnly"); ack.Remove("waitingFor"); ack["messageIds"] = ids.DeepClone();
             var result = await aggregates.Session(caller, RelayTools.Ack, ack);
             if (!result.Ok || answers.Length == 0 || ids.Any(id => id is JsonValue value && value.TryGetValue<string>(out var listed) && listed == answers)) return result;
         }

@@ -245,6 +245,8 @@ public sealed class ContractsTests
         // Every connected agent carries these definitions on every turn; the pre-refactor adapter was about 19,400 characters.
         // Workers are most agents, so their surface keeps the original 20,000-character budget.
         Assert.True(Size(administrator: false) < 20_000, $"Worker forwarding catalog grew to {Size(administrator: false)} characters.");
+        // The room left for work already planned is smaller than that budget, so this is the cap a change actually meets.
+        Assert.True(Size(administrator: false) <= 18_968, $"Worker forwarding catalog grew to {Size(administrator: false)} characters.");
         // Role-specific lists keep administrator-only tools (standing_put, control_request, and later analytics_query and the order
         // tools) away from workers, so only the few administrator chats pay for them; that surface has its own, larger cap.
         Assert.True(Size(administrator: true) < 22_600, $"Administrator forwarding catalog grew to {Size(administrator: true)} characters.");

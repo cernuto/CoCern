@@ -524,6 +524,47 @@ public sealed class DashboardTests
         catch { await viewer.DisposeAsync(); throw; }
     }
 
+    [Fact]
+    public async Task Waiting_rows_outlive_standing_being_trimmed_from_the_frame_and_say_when_sessions_are_truncated()
+    {
+        await using var host = new RelayHostFixture(settings: new Dictionary<string, string?> { ["Relay:Clients:0:IsAdministrator"] = "true", ["Relay:Dashboard:ViewerPrincipalIds:0"] = "test-user" }, configureServices: services => services.AddSingleton<IRelayObservationSource>(new TruncatedWaitingSource()));
+        using var client = BrowserClient(host);
+        await using var viewer = await StartViewerAsync(host, client);
+        // The standing read runs once in 15 seconds, so the later frames here only have the proposal if the collector kept it apart from the
+        // snapshot whose standing the size limit emptied.
+        CoCern.Contracts.Dashboard.DashboardSnapshot snapshot = new();
+        for (var attempt = 0; attempt < 200 && snapshot.Revision < 3; attempt++)
+        {
+            snapshot = JsonSerializer.Deserialize<CoCern.Contracts.Dashboard.DashboardSnapshot>(await client.GetByteArrayAsync("/dashboard/api/snapshot"), new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+            await Task.Delay(50);
+        }
+        Assert.True(snapshot.Revision >= 3, "The collector gave only revision " + snapshot.Revision + ".");
+        Assert.Empty(snapshot.Standing);
+        Assert.True(snapshot.StandingTruncated);
+        var row = Assert.Single(snapshot.Waiting.Items);
+        Assert.Equal(("standing_proposal", "p-1", "A line"), (row.Kind, row.ProposalId, row.Text));
+        Assert.Equal(1, snapshot.Waiting.Count);
+        Assert.True(snapshot.Waiting.Truncated);
+    }
+
+    private sealed class TruncatedWaitingSource : IRelayObservationSource
+    {
+        public Task<RelayObservation?> ReadObservationAsync(DateTimeOffset now, string incarnationId, CancellationToken cancellationToken = default)
+        {
+            var text = new string('\u754c', 256);
+            return Task.FromResult<RelayObservation?>(new()
+            {
+                SessionsTruncated = true,
+                Sessions = Enumerable.Range(0, 200).Select(index => new CoCern.Contracts.Dashboard.DashboardSession { SessionId = index.ToString(), Label = text, Provider = text, MachineId = text, MachineName = text, RepositoryId = text }).ToArray()
+            });
+        }
+        public Task<CoCern.Contracts.Dashboard.DatabaseMetrics?> ReadDatabaseMetricsAsync(int rowCountLimit = 10_000, CancellationToken cancellationToken = default) => Task.FromResult<CoCern.Contracts.Dashboard.DatabaseMetrics?>(new());
+        public Task<DashboardStandingObservation?> ReadStandingAsync(CancellationToken cancellationToken = default) => Task.FromResult<DashboardStandingObservation?>(new()
+        {
+            Boards = [new CoCern.Contracts.Dashboard.DashboardStanding { RepositoryId = "repo", BoardId = "default", Proposals = [new CoCern.Contracts.Dashboard.DashboardStandingProposal { Id = "p-1", Kind = "line", Summary = "A line", ProposedAt = DateTimeOffset.UtcNow }] }]
+        });
+    }
+
     private sealed class LargeObservationSource : IRelayObservationSource
     {
         public Task<RelayObservation?> ReadObservationAsync(DateTimeOffset now, string incarnationId, CancellationToken cancellationToken = default)

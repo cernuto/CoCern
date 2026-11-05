@@ -62,6 +62,9 @@ public sealed class SessionStateShapeTests
         var read = hub.Inbox(chat, Now).Single(message => message["text"]?.GetValue<string>() == "read me")["messageId"]!.GetValue<string>();
         Assert.True(hub.Session(chat, RelayTools.Ack, new() { ["messageIds"] = new JsonArray(read) }, Now).Ok);
 
+        // Its own report of waiting on Paul, in a session that stays open.
+        Assert.True(hub.Session(peer, RelayTools.Ack, new() { ["waitingFor"] = "Which rig?" }, Now).Ok);
+
         // Attention: a blocking item on another board, an item closed without a revision and one with, an archived task, the hub's own
         // offered work and its close after a claim, an offer, a snooze, and an info item closed as seen.
         Effect(hub, chat, new AttentionRaise(Repository, new AttentionContent
@@ -121,7 +124,10 @@ public sealed class SessionStateShapeTests
         Assert.Equal(RecentClose.Shape.Fields.Keys.Order(StringComparer.Ordinal), EntryKeys(state, AttentionQueue.RecentKey).Distinct().Order(StringComparer.Ordinal));
         Assert.Equal([BoardWatches.BoardIdKey], EntryKeys(state, SessionState.TargetBoardsKey).Concat(EntryKeys(state, SessionState.WorkBoardsKey)).Distinct());
 
+        Assert.Equal(WaitingMark.Shape.Fields.Keys.Order(StringComparer.Ordinal), Keys(documents[1][SessionState.WaitingForKey]).Order(StringComparer.Ordinal));
+
         // The typed members read what the handlers wrote.
+        Assert.Equal(("Which rig?", Now, Now.AddHours(RelayLimits.WaitingForHours)), (new SessionState(documents[1]).WaitingFor!.Text, new SessionState(documents[1]).WaitingFor!.Since, new SessionState(documents[1]).WaitingFor!.ExpiresAt));
         var session = new SessionState(state);
         Assert.Equal((chat.Id, SessionRoles.Manager, "pc-1", 1L, "available"), (session.SessionId, session.Role, session.MachineId, session.BindingVersion, session.Availability));
         Assert.Equal(3, session.StandingSeen.Of(AggregateKinds.DefaultBoard));
