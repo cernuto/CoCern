@@ -13,7 +13,7 @@ public sealed record StandingPresentation(string BoardId, string ProposalId, str
 }
 
 /// <summary>An authenticated principal. <see cref="IsInternal"/> marks calls the hub itself composes; only those may run "__" operations.</summary>
-public sealed record RelayCaller(string PrincipalId, bool IsAdministrator, string[] Repositories, bool IsInternal = false)
+public sealed record RelayCaller(string PrincipalId, bool IsAdministrator, string[] Repositories, bool IsInternal = false, string? AuthenticatedMachineId = null)
 {
     public bool MayAccess(string repository) =>
         repository.Length > 0 && (IsAdministrator || Repositories.Contains(repository, StringComparer.Ordinal));
@@ -368,7 +368,10 @@ public static class Operations
     public static bool IsInternal(string operation) => operation.StartsWith("__", StringComparison.Ordinal);
 
     /// <summary>Internal operations that only read: never deduplicated by requestId, never committed for themselves.</summary>
-    public static bool IsRead(string operation) => operation is Verify or Resolve or ResolveAll or NextWork or ClaimState or SessionOwners or SessionsOpen or PeerResolve or PeerList or ManagerStanding or Standing or Orders or EventWaitAggregate.ReadOperation;
+    public static bool IsRead(string operation) => operation is Verify or Resolve or ResolveAll or NextWork or ClaimState or SessionOwners or SessionsOpen or PeerResolve or PeerList or ManagerStanding or Standing or Orders or EventWaitAggregate.ReadOperation or NativeFileScope;
+
+    /// <summary>Private, uncached read of one authenticated current native join's protected file scope.</summary>
+    public const string NativeFileScope = "__native_file_scope";
 
     /// <summary>Order effects run only while standing orders are on; a target that refuses one is not asked again.</summary>
     public static bool IsOrder(string operation) => operation is OrderFire or OrderWatch or OrderRelease or OrderFailed or OrderWatchFailed;

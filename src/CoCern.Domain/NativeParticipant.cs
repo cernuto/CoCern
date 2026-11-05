@@ -9,6 +9,9 @@ namespace CoCern.Domain;
 /// <summary>A session identity produced by hub verification, without its credential.</summary>
 public sealed record VerifiedNativeParticipant(string ParticipantId, string SessionId, string RepositoryId);
 
+/// <summary>A current native join's authenticated machine and adapter-proven checkout. Consumers must revalidate at file use.</summary>
+public sealed record VerifiedNativeFileScope(string ParticipantId, string SessionId, string RepositoryId, string MachineScope, string CanonicalWorkingCopyRoot, string NativeGeneration);
+
 public static class NativeParticipant
 {
     public const string Id = "nativeParticipantId";
@@ -22,6 +25,8 @@ public static class NativeParticipant
 
     /// <summary>How many top-level fields a join carries: repository, machine, request and proof, and the optional display label.</summary>
     public static int JoinFields(JsonObject args) => args.ContainsKey(DisplayLabel) ? 5 : 4;
+    public const string WorkingCopy = "nativeWorkingCopy";
+    public const string ProtectedRoot = "nativeProtectedRoot";
 
     // Replace the adapter's exact frozen proof with hub-only arguments before tracing, replay or persistence.
     public static bool Admit(RelayCaller caller, JsonObject args)
@@ -30,7 +35,8 @@ public static class NativeParticipant
         try
         {
             if (args.ContainsKey(DisplayLabel) && !String(args, DisplayLabel, out _)) return false;
-            if (join.Count != 5 || !String(join, "provider", out var provider) || provider is not ("claude" or "codex")
+            var hasProtectedRoot = join.ContainsKey("protectedRoot");
+            if (join.Count != (hasProtectedRoot ? 6 : 5) || !String(join, "provider", out var provider) || provider is not ("claude" or "codex")
                 || !String(join, "nativeId", out var native) || !CanonicalGuid(native, "D")
                 || !String(join, "workspace", out var workspace) || workspace.Length > 32767 || workspace.Any(char.IsControl)
                 || !(workspace.StartsWith('/') || workspace.StartsWith(@"\\", StringComparison.Ordinal)
@@ -39,6 +45,8 @@ public static class NativeParticipant
                 || !String(join, "generation", out var generation) || !CanonicalGuid(generation, "N")
                 || !String(args, "requestId", out var request) || !CanonicalGuid(request, "N")
                 || !String(args, "machineId", out var machine) || !String(args, "repositoryId", out var repository)) return false;
+            string? protectedRoot = null;
+            if (hasProtectedRoot && (!String(join, "protectedRoot", out protectedRoot) || !ValidProtectedRoot(protectedRoot))) return false;
             Span<byte> secret = stackalloc byte[32];
             if (!Convert.TryFromBase64String(encoded, secret, out var length) || length != secret.Length || Convert.ToBase64String(secret) != encoded) return false;
             using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
@@ -61,10 +69,20 @@ public static class NativeParticipant
             args[Generation] = generation;
             args[Request] = request;
             args[Client] = provider;
+            args[WorkingCopy] = workspace;
+            if (protectedRoot is not null) args[ProtectedRoot] = protectedRoot;
             return true;
         }
         catch (ArgumentException) { return false; } // Repeated nested JSON keys.
     }
+
+    // Validate the private adapter proof's representation without interpreting a remote machine's path on the hub.
+    // This is not physical verification: only the adapter's ProtectedCheckoutRoot.Prove may supply this field.
+    internal static bool ValidProtectedRoot(string root) => root.Length is >= 3 and <= 32767
+        && char.IsAsciiLetter(root[0]) && root[1] == ':' && root[2] == '\\'
+        && !root.Any(character => char.IsControl(character) || character is '/' or '"' or '<' or '>' or '|' or '?' or '*')
+        && !root.AsSpan(3).Contains(':')
+        && (root.Length == 3 || !root[3..].Split('\\').Any(part => part is "" or "." or ".."));
 
     private static bool String(JsonObject json, string key, out string text)
     {

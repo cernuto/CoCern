@@ -96,6 +96,8 @@ internal static class RelayRequestGuard
         args.Remove(NativeParticipant.Request);
         args.Remove(NativeParticipant.ConfirmedExpiry);
         args.Remove(NativeParticipant.Client);
+        args.Remove(NativeParticipant.WorkingCopy);
+        args.Remove(NativeParticipant.ProtectedRoot);
         return null;
     }
 

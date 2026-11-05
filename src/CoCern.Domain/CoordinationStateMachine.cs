@@ -233,8 +233,8 @@ public static class CoordinationStateMachine
     /// <summary>Removes the originating caller recorded by <see cref="StampEffects"/> and returns it as an internal caller.</summary>
     public static RelayCaller TakeEffectCaller(JsonObject payload)
     {
-        var caller = new RelayCaller(Text(payload, CallerPrincipal), payload[CallerAdministrator]?.GetValue<bool>() ?? false, payload[CallerRepositories]?.Deserialize<string[]>() ?? [], true);
-        payload.Remove(CallerPrincipal); payload.Remove(CallerAdministrator); payload.Remove(CallerRepositories);
+        var caller = new RelayCaller(Text(payload, CallerPrincipal), payload[CallerAdministrator]?.GetValue<bool>() ?? false, payload[CallerRepositories]?.Deserialize<string[]>() ?? [], true, payload[CallerMachine]?.GetValue<string>());
+        payload.Remove(CallerPrincipal); payload.Remove(CallerAdministrator); payload.Remove(CallerRepositories); payload.Remove(CallerMachine);
         return caller;
     }
 
@@ -242,6 +242,7 @@ public static class CoordinationStateMachine
     private const string CallerPrincipal = "__principalId";
     private const string CallerAdministrator = "__administrator";
     private const string CallerRepositories = "__repositories";
+    private const string CallerMachine = "__authenticatedMachineId";
 
     /// <summary>Records <paramref name="caller"/> in an effect's payload, so its delivery runs with that authority.</summary>
     internal static JsonObject WithCaller(JsonObject payload, RelayCaller caller)
@@ -249,6 +250,8 @@ public static class CoordinationStateMachine
         payload[CallerPrincipal] = caller.PrincipalId;
         payload[CallerAdministrator] = caller.IsAdministrator;
         payload[CallerRepositories] = JsonSerializer.SerializeToNode(caller.Repositories);
+        if (caller.AuthenticatedMachineId is { } machine) payload[CallerMachine] = machine;
+        else payload.Remove(CallerMachine);
         return payload;
     }
 }
