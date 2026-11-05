@@ -27,6 +27,8 @@ Proposed producer files and responsibilities:
 
 The frozen producer result is `CoCern.Domain.VerifiedNativeFileScope(ParticipantId, SessionId, RepositoryId, MachineScope, CanonicalWorkingCopyRoot, NativeGeneration)`, with all six fields strings and no secrets. PC2 confirmed this distinct producer record on 2026-11-05. Its consumer remains `CoCern.Domain.FileClaimScope.TryCreate(repository, machineScope, canonicalWorkingCopyRoot, relativePath, out scope)`. PC2 owns FileClaimScope and adapter file-claim enforcement; root must not duplicate those files. Protected file scope is a separate gate and must not delay the basic local wake correction.
 
+The physical root comes from `ProtectedCheckoutRoot.Prove` (adapter). It fails closed for UNC paths, mapped network drives, subst onto a share, roots it cannot prove, and every non-Windows platform, where locality cannot yet be proven. General `NativeCheckout` and UNC binding behaviour is unchanged. It is a point-in-time eligibility check, not durable authority: renaming or retargeting a link between the proof and its use is not fenced. The `VerifiedNativeFileScope` consumer must revalidate identity at use or hold handles, and gets its own review.
+
 ## Real-client activation gates
 
 1. Produce immutable reviewed adapter bits and deploy through the supported development deployment path. Record Git head, deployed DLL hash, adapter version, and generation. Check root's existing CoCern session can still authenticate after replacement.

@@ -437,11 +437,16 @@ internal static class SessionAggregate
     /// clients send null for every optional field: left out or null keeps the report, empty clears it, and a refused one changes nothing,
     /// the acknowledgments included. The reply leaves the text out, so a stored replay does not outlive the report on close. A call from the chat's client hook
     /// (<see cref="RelayLimits.HookWaitingField"/>) leaves an active report from the model alone, and says so with <c>waitingForKept</c>; only the hub can decide that atomically.
+    /// So does a hook's clear naming a <see cref="RelayLimits.HookReportIdField"/> other than the active report's, which is a clear that landed after a later report. A hook's clear naming none is an
+    /// older adapter's and clears any hook's report, as it always has; a model's call ignores the ID and is unchanged. The ID is an ordinary client argument, so it enters the replay fingerprint: a retry
+    /// with the same request ID replays the stored answer, and reusing that request ID for another report is a <c>RequestConflict</c>. No reply carries the ID.
     /// </summary>
     private static RelayReply Acknowledge(AggregateContext context, SessionState state)
     {
         var report = context.Args["waitingFor"];
         if (report is not null && !ValidWaitingFor(report)) return Error(InvalidArguments, new { field = "waitingFor", maxLength = RelayLimits.MaxWaitingTextLength });
+        var fromHook = Flag(context.Args, RelayLimits.HookWaitingField);
+        if (fromHook && context.Args[RelayLimits.HookReportIdField] is { } named && !ValidReportId(named)) return Error(InvalidArguments, new { field = RelayLimits.HookReportIdField, maxLength = RelayLimits.MaxIdentifierLength });
         var supplied = context.Args["messageIds"] as JsonArray ?? (Text(context.Args, "messageId") is { Length: > 0 } single ? new JsonArray(single) : new JsonArray());
         var ids = Strings(supplied).ToArray();
         // The hub's own flag for a reply's replyTo: an ID the inbox does not hold now is left alone and never recorded, so its delivery still lands.
@@ -456,15 +461,16 @@ internal static class SessionAggregate
         SessionAttention.CloseMessages(state, ids, context.Now);
         var reply = new JsonObject { ["acknowledged"] = acknowledged };
         if (report is null) return Ok(reply);
-        var fromHook = Flag(context.Args, RelayLimits.HookWaitingField);
-        if (fromHook && state.WaitingFor is { FromHook: false } held && held.ExpiresAt > context.Now)
+        var text = report.GetValue<string>();
+        var reportId = fromHook ? Text(context.Args, RelayLimits.HookReportIdField) : "";
+        if (fromHook && state.WaitingFor is { } held && held.ExpiresAt > context.Now && (!held.FromHook || (text.Length == 0 && reportId.Length > 0 && held.ReportId != reportId)))
         {
             reply["waitingForKept"] = true;
             return Ok(reply);
         }
-        if (report.GetValue<string>() is { Length: > 0 } text)
+        if (text.Length > 0)
         {
-            var mark = state.ReportWaitingFor(text, context.Now, fromHook);
+            var mark = state.ReportWaitingFor(text, context.Now, fromHook, reportId);
             reply["waitingFor"] = new JsonObject { [WaitingMark.SinceKey] = mark.Since.ToString("O"), [WaitingMark.ExpiresAtKey] = mark.ExpiresAt.ToString("O") };
         }
         else
@@ -474,6 +480,9 @@ internal static class SessionAggregate
         }
         return Ok(reply);
     }
+
+    private static bool ValidReportId(JsonNode id) =>
+        id is JsonValue value && value.TryGetValue<string>(out var text) && text.Length is > 0 and <= RelayLimits.MaxIdentifierLength && !text.Any(char.IsControl);
 
     /// <summary>Empty, or text that still reads as something once the dashboard's cleaning leaves it: only zero-width marks would show as a blank row.</summary>
     private static bool ValidWaitingFor(JsonNode report) =>
