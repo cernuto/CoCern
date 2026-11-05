@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using CoCern.Contracts;
 using CoCern.Contracts.Dashboard;
+using CoCern.Domain.Messages;
 using CoCern.Domain.State;
 
 namespace CoCern.Domain;
@@ -30,6 +31,19 @@ public sealed record WaitingReport
     public DateTimeOffset ExpiresAt { get; init; }
 }
 
+/// <summary>
+/// A session's unread direct mail that may wake it, by when each was sent and nothing else of it, and its own last hub call. Null means none
+/// is known: an unmarked call may be a watcher's, so only one marked as not background counts.
+/// </summary>
+public sealed record WaitingMail
+{
+    public string SessionId { get; init; } = "";
+    public string RepositoryId { get; init; } = "";
+    public string Label { get; init; } = "";
+    public IReadOnlyList<DateTimeOffset> Sent { get; init; } = [];
+    public DateTimeOffset? LastCallAt { get; init; }
+}
+
 /// <summary>What the list is built from: board and session storage only, so it needs no manager. <see cref="Truncated"/> says a read behind it hit its bound.</summary>
 public sealed record WaitingSources
 {
@@ -37,6 +51,7 @@ public sealed record WaitingSources
     public IReadOnlyList<DashboardStanding> Boards { get; init; } = [];
     public IReadOnlyList<WaitingBlocker> Blockers { get; init; } = [];
     public IReadOnlyList<WaitingReport> Reports { get; init; } = [];
+    public IReadOnlyList<WaitingMail> Mail { get; init; } = [];
     /// <summary>Labels by session, to name a proposer or a task's owner. A session missing here has no label to show.</summary>
     public IReadOnlyDictionary<string, string> Labels { get; init; } = new Dictionary<string, string>();
     public bool Truncated { get; init; }
@@ -83,14 +98,37 @@ public static class WaitingList
                 Kind = DashboardWaitingKinds.SelfReport, RepositoryId = report.RepositoryId, SessionId = DashboardText.Safe(report.SessionId), Label = DashboardText.Safe(report.Label),
                 Text = Cut(report.Text), Since = report.Since, ExpiresAt = report.ExpiresAt
             }).Where(row => row.Text.Length > 0);
-        // Self-reports come last, so no number of them can push a structural row out at the cap.
-        DashboardWaitingItem[] rows = [.. Ordered(proposals.Concat(blockers.Where(blocker => blocker.Human).Select(blocker => blocker.Row))), .. Ordered(reports)];
+        // What the hub saw comes first and a chat's own word last, so no number of reports can push an observed row out at the cap.
+        DashboardWaitingItem[] rows = [.. Ordered(proposals.Concat(blockers.Where(blocker => blocker.Human).Select(blocker => blocker.Row))), .. Ordered(Unresponsive(sources.Mail.Where(mail => InScope(mail.RepositoryId)), now)), .. Ordered(reports)];
         var maybe = Ordered(blockers.Where(blocker => !blocker.Human).Select(blocker => blocker.Row)).ToArray();
         return new()
         {
             Items = rows.Take(RelayLimits.MaxWaitingItems).ToArray(), Count = rows.Length, Truncated = sources.Truncated || rows.Length > RelayLimits.MaxWaitingItems,
             Maybe = maybe.Take(RelayLimits.MaxWaitingMaybeItems).ToArray(), MaybeCount = maybe.Length
         };
+    }
+
+    /// <summary>
+    /// The chats holding direct mail older than <see cref="RelayLimits.DefaultUnresponsiveMinutes"/> whose own last hub call is older too, and
+    /// within <see cref="RelayLimits.UnresponsiveActiveHours"/>, so abandoned chats stay out. The hub records no model turn, so a chat working
+    /// without calling the hub looks the same, and the line says only what the hub saw: counts, so an unchanged state keeps its etag, and never
+    /// the mail itself.
+    /// </summary>
+    private static IEnumerable<DashboardWaitingItem> Unresponsive(IEnumerable<WaitingMail> mailboxes, DateTimeOffset now)
+    {
+        var quiet = now.AddMinutes(-RelayLimits.DefaultUnresponsiveMinutes);
+        var active = now.AddHours(-RelayLimits.UnresponsiveActiveHours);
+        foreach (var mailbox in mailboxes)
+        {
+            if (mailbox.LastCallAt is not { } last || last >= quiet || last < active) continue;
+            var waiting = mailbox.Sent.Where(sent => sent < quiet).ToArray();
+            if (waiting.Length == 0) continue;
+            yield return new()
+            {
+                Kind = DashboardWaitingKinds.Unresponsive, RepositoryId = mailbox.RepositoryId, SessionId = DashboardText.Safe(mailbox.SessionId), Label = DashboardText.Safe(mailbox.Label),
+                Text = $"{waiting.Length} unread direct message{(waiting.Length == 1 ? "" : "s")}; no hub call in over {RelayLimits.DefaultUnresponsiveMinutes} minutes.", Since = waiting.Min()
+            };
+        }
     }
 
     /// <summary>Oldest first, then by identity, so the same rows always read the same and an unchanged list keeps its etag.</summary>
@@ -114,6 +152,20 @@ public static class WaitingList
         if (mark.ValueKind != JsonValueKind.Object || Date(mark, WaitingMark.SinceKey) is not { } since || Date(mark, WaitingMark.ExpiresAtKey) is not { } expiresAt
             || !mark.TryGetProperty(WaitingMark.TextKey, out var text) || text.ValueKind != JsonValueKind.String) return null;
         return new() { SessionId = sessionId, RepositoryId = repositoryId, Text = text.GetString()!, Since = since, ExpiresAt = expiresAt };
+    }
+
+    /// <summary>
+    /// A session's stored inbox as <see cref="WaitingMail"/>, or null when it holds no direct mail that may wake it, by the rule the chat's own
+    /// wake follows: from a session, with no task and no notice kind, and not sent with <c>wake: false</c>. Only when each was sent is read.
+    /// </summary>
+    public static WaitingMail? Mail(string sessionId, string repositoryId, JsonElement inbox)
+    {
+        if (inbox.ValueKind != JsonValueKind.Object) return null;
+        static bool Direct(JsonElement message) => message.ValueKind == JsonValueKind.Object && Text(message, InboxMessage.TaskIdKey).Length == 0 && !string.IsNullOrWhiteSpace(Text(message, InboxMessage.SenderSessionIdKey))
+            && (!message.TryGetProperty(InboxMessage.KindKey, out var kind) || kind.ValueKind == JsonValueKind.Null)
+            && !(message.TryGetProperty(InboxMessage.WakeKey, out var wake) && wake.ValueKind == JsonValueKind.False);
+        var sent = inbox.EnumerateObject().Select(entry => entry.Value).Where(Direct).Select(message => Date(message, InboxMessage.SentAtKey)).OfType<DateTimeOffset>().ToArray();
+        return sent.Length == 0 ? null : new() { SessionId = sessionId, RepositoryId = repositoryId, Sent = sent };
     }
 
     /// <summary>
