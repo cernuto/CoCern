@@ -212,7 +212,7 @@ public sealed class LocalWakeTests : IDisposable
         AssertPrivate(OwnStatusFile);
         using var document = JsonDocument.Parse(File.ReadAllText(OwnStatusFile));
         var data = document.RootElement;
-        Assert.Equal(["pid", "processStartedAt", "adapterVersion", "code", "codeAt", "observed", "watchers"], data.EnumerateObject().Select(x => x.Name));
+        foreach (var field in new[] { "pid", "processStartedAt", "adapterVersion", "code", "codeAt", "observed", "watchers" }) Assert.True(data.TryGetProperty(field, out _), field);
         Assert.Equal(Environment.ProcessId, data.GetProperty("pid").GetInt32());
         Assert.Equal("connection_ready", data.GetProperty("code").GetString());
         Assert.False(string.IsNullOrEmpty(data.GetProperty("adapterVersion").GetString()));
@@ -332,6 +332,396 @@ public sealed class LocalWakeTests : IDisposable
         File.SetLastWriteTimeUtc(running, DateTime.UtcNow.AddDays(-8));
         LocalWakeStatus.Report("connection_ready", StatusRoot);
         Assert.False(File.Exists(running));
+    }
+
+    private JsonElement Status(string? statusRoot = null)
+    {
+        using var document = JsonDocument.Parse(File.ReadAllText(Path.Combine(statusRoot ?? StatusRoot, "status", Environment.ProcessId + ".json")));
+        return document.RootElement.Clone();
+    }
+
+    private static readonly AdapterReply OkReply = new(true, "Ok", JsonSerializer.SerializeToElement(new { sessionId = "original-session" }), 0);
+    private static async Task WaitFor(Func<bool> condition)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(15);
+        while (!condition())
+        {
+            Assert.True(DateTime.UtcNow < deadline, "The condition did not become true in time.");
+            await Task.Delay(20);
+        }
+    }
+
+    [Fact]
+    public void Status_file_tracks_setup_state_and_when_each_changed()
+    {
+        LocalWakeStatus.Report(LocalWakeCodes.Starting, StatusRoot);
+        var first = Status();
+        Assert.Equal("starting", first.GetProperty("state").GetString());
+        Assert.False(first.GetProperty("setupReached").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, first.GetProperty("observedAt").ValueKind);
+
+        LocalWakeStatus.Report(LocalWakeCodes.SetupReached, StatusRoot);
+        LocalWakeStatus.Counts(2, 1, StatusRoot);
+        var after = Status();
+        Assert.True(after.GetProperty("setupReached").GetBoolean());
+        Assert.True(after.GetProperty("observedAt").TryGetDateTimeOffset(out _));
+        Assert.True(after.GetProperty("watchersAt").TryGetDateTimeOffset(out _));
+        Assert.True(after.GetProperty("stateAt").TryGetDateTimeOffset(out _));
+    }
+
+    [Theory]
+    [InlineData("token_file_missing", "off")]
+    [InlineData("credential_mismatch", "off")]
+    [InlineData("setup_io_error", "off")]
+    [InlineData("setup_returned_null", "off")]
+    [InlineData("no_codex_executable", "degraded")]
+    [InlineData("observed_unmapped", "degraded")]
+    public void Unhealthy_codes_are_a_problem_with_that_state_and_reason(string code, string state)
+    {
+        LocalWakeStatus.Report(code, StatusRoot);
+        Assert.Equal((state, code), LocalWakeStatus.Problem(StatusRoot));
+        Assert.Equal(state, Status().GetProperty("state").GetString());
+        Assert.Equal(code, Status().GetProperty("stateReason").GetString());
+        // Setup was reached for any setup reason, and the code stays fixed text.
+        Assert.True(Status().GetProperty("setupReached").GetBoolean());
+    }
+
+    [Theory]
+    [InlineData("starting", "starting")]
+    [InlineData("connection_ready", "starting")]
+    [InlineData("setup_complete", "starting")]
+    [InlineData("node_connection", "not_applicable")]
+    [InlineData("native_registration", "not_applicable")]
+    [InlineData("watching", "healthy")]
+    [InlineData("no_observed_sessions", "healthy")]
+    [InlineData("no_codex_targets", "healthy")]
+    public void Healthy_or_inapplicable_codes_are_not_a_problem(string code, string state)
+    {
+        LocalWakeStatus.Report(code, StatusRoot);
+        Assert.Null(LocalWakeStatus.Problem(StatusRoot));
+        Assert.Equal(state, Status().GetProperty("state").GetString());
+    }
+
+    [Fact]
+    public void State_changes_write_one_stderr_line_and_repeats_write_none()
+    {
+        var error = new StringWriter();
+        LocalWakeStatus.UseError(StatusRoot, error);
+        LocalWakeStatus.Report(LocalWakeCodes.Starting, StatusRoot);
+        Assert.Equal("", error.ToString());
+        LocalWakeStatus.Report(LocalWakeCodes.NoCodexExecutable, StatusRoot);
+        LocalWakeStatus.Report(LocalWakeCodes.NoCodexExecutable, StatusRoot);
+        LocalWakeStatus.Report(LocalWakeCodes.Watching, StatusRoot);
+        var lines = error.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        Assert.Equal(2, lines.Length);
+        Assert.Contains("degraded", lines[0]); Assert.Contains("no_codex_executable", lines[0]);
+        Assert.Contains("healthy", lines[1]); Assert.Contains("watching", lines[1]);
+    }
+
+    [Fact]
+    public void A_routine_exit_is_recorded_without_changing_the_state_and_a_repeated_pass_keeps_it_visible()
+    {
+        var error = new StringWriter();
+        LocalWakeStatus.UseError(StatusRoot, error);
+        LocalWakeStatus.Report(LocalWakeCodes.NoCodexExecutable, StatusRoot);
+        LocalWakeStatus.Report(LocalWakeCodes.ObserveNotSessionReply, StatusRoot);
+        LocalWakeStatus.Report(LocalWakeCodes.ObserveNotSessionReply, StatusRoot);
+        Assert.Equal(("degraded", "no_codex_executable"), LocalWakeStatus.Problem(StatusRoot));
+
+        // The loop repeats its own reason every pass; that neither hides the last exit nor writes again.
+        LocalWakeStatus.Report(LocalWakeCodes.NoCodexExecutable, StatusRoot);
+        Assert.Equal(LocalWakeCodes.ObserveNotSessionReply, LocalWakeStatus.LastCode(StatusRoot));
+
+        LocalWakeStatus.Counts(1, 0, StatusRoot);
+        var data = Status();
+        Assert.Equal("observe_not_session_reply", data.GetProperty("code").GetString());
+        Assert.Equal("no_codex_executable", data.GetProperty("stateReason").GetString());
+        Assert.Equal(2, data.GetProperty("codeCounts").GetProperty("observe_not_session_reply").GetInt32());
+        Assert.Equal(1, data.GetProperty("codeCounts").GetProperty("no_codex_executable").GetInt32());
+        Assert.Single(error.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries));
+    }
+
+    [Fact]
+    public void A_status_write_failure_is_reported_once_and_the_state_is_still_known()
+    {
+        Directory.CreateDirectory(root);
+        var blocked = Path.Combine(root, "a-file-not-a-folder");
+        File.WriteAllText(blocked, "");
+        var error = new StringWriter();
+        LocalWakeStatus.UseError(blocked, error);
+        LocalWakeStatus.Report(LocalWakeCodes.NoCodexExecutable, blocked);
+        LocalWakeStatus.Report(LocalWakeCodes.LoopFailed, blocked);
+        Assert.Equal(1, error.ToString().Split('\n').Count(line => line.Contains("could not be written", StringComparison.Ordinal)));
+        Assert.Equal(("degraded", "loop_failed"), LocalWakeStatus.Problem(blocked));
+
+        var relative = "cocern-status-" + Guid.NewGuid().ToString("N");
+        LocalWakeStatus.Report(LocalWakeCodes.NoCodexExecutable, relative);
+        Assert.False(Directory.Exists(relative));
+        Assert.Equal(("degraded", "no_codex_executable"), LocalWakeStatus.Problem(relative));
+    }
+
+    [Fact]
+    public async Task Every_early_return_in_observe_leaves_its_reason_and_the_file_holds_no_token()
+    {
+        var claude = new ChatLocation("claude", Guid.NewGuid().ToString());
+        await using var local = new LocalChatWake(Connection(new AdapterOptions("http://127.0.0.1:5271/", Secret) { ExportedChat = claude }), statusRoot: StatusRoot);
+        var folder = local.Connection.Folder;
+        var open = JsonSerializer.SerializeToElement(new { repositoryId = "repo", label = "x" });
+        string? Last() => LocalWakeStatus.LastCode(StatusRoot);
+
+        local.Observe(RelayTools.GetStatus, Arguments(), new(false, "SessionDenied"));
+        Assert.Equal(LocalWakeCodes.ObserveReplyNotOk, Last());
+        local.Observe(RelayTools.SessionOpen, open, new(true, "Ok"));
+        Assert.Equal(LocalWakeCodes.ObserveNoReplyData, Last());
+        local.Observe(RelayTools.SessionOpen, open, new(true, "Ok", JsonSerializer.SerializeToElement(new { sessionId = "bad/id", sessionToken = "private-session-token" }), 0));
+        Assert.Equal(LocalWakeCodes.ObserveBadSessionId, Last());
+        local.Observe(RelayTools.DocSearch, Arguments(), OkReply);
+        Assert.Equal(LocalWakeCodes.ObserveNotSessionReply, Last());
+        local.Observe(RelayTools.GetStatus, JsonSerializer.SerializeToElement(new { repositoryId = "repo", sessionId = "bad/id", sessionToken = "private-session-token" }), new(true, "Ok", JsonSerializer.SerializeToElement(new { sessionId = "bad/id" }), 0));
+        Assert.Equal(LocalWakeCodes.ObserveBadSessionId, Last());
+
+        // A different token for a cached session: the handle stays as it was and the call says why.
+        var foreign = new SessionHandle("foreign-session", "other-token", "repo", "Foreign", DateTimeOffset.UtcNow, Chat: new("codex", Guid.NewGuid().ToString()));
+        NodeState.WriteSessionHandle(folder, foreign);
+        local.Observe(RelayTools.GetStatus, JsonSerializer.SerializeToElement(new { repositoryId = "repo", sessionId = "foreign-session", sessionToken = "wrong-token" }), new(true, "Ok", JsonSerializer.SerializeToElement(new { sessionId = "foreign-session" }), 0));
+        Assert.Equal(LocalWakeCodes.ObserveHandleMismatch, Last());
+        // The right token, but the handle belongs to another native chat.
+        local.Observe(RelayTools.GetStatus, JsonSerializer.SerializeToElement(new { repositoryId = "repo", sessionId = "foreign-session", sessionToken = "other-token" }), new(true, "Ok", JsonSerializer.SerializeToElement(new { sessionId = "foreign-session" }), 0));
+        Assert.Equal(LocalWakeCodes.ObserveNotOwned, Last());
+
+        var text = File.ReadAllText(OwnStatusFile);
+        foreach (var secret in new[] { Secret, "private-session-token", "other-token", "wrong-token", "foreign-session" }) Assert.DoesNotContain(secret, text);
+    }
+
+    [Fact]
+    public async Task Restore_and_record_failing_to_take_the_lock_leave_their_reasons()
+    {
+        await using var local = new LocalChatWake(Connection(), statusRoot: StatusRoot);
+        var sessions = Directory.CreateDirectory(Path.Combine(local.Connection.Folder, "sessions")).FullName;
+        using (NodeState.CreatePrivateFile(Path.Combine(sessions, "original-session.restore.lock")))
+        {
+            local.Observe(RelayTools.GetStatus, Arguments(), OkReply);
+            local.Observe(RelayTools.SessionOpen, JsonSerializer.SerializeToElement(new { repositoryId = "repo", label = "x" }),
+                new(true, "Ok", JsonSerializer.SerializeToElement(new { sessionId = "original-session", sessionToken = "private-session-token" }), 0));
+        }
+        var counts = Status().GetProperty("codeCounts");
+        Assert.Equal(1, counts.GetProperty("restore_lock_busy").GetInt32());
+        Assert.Equal(1, counts.GetProperty("record_lock_busy").GetInt32());
+        Assert.NotNull(LocalWakeStatus.Problem(StatusRoot));
+    }
+
+    [Fact]
+    public async Task A_lock_failure_with_no_session_stays_a_problem_across_passes_until_a_call_succeeds()
+    {
+        var transport = new NodeTransport { Locators = [], CodexExecutable = () => "synthetic-codex", CodexDispatcher = _ => new NoDispatch() };
+        await using var local = new LocalChatWake(Connection(), transport, (_, _, ct) => Task.Delay(Timeout.Infinite, ct), StatusRoot);
+        var sessions = Directory.CreateDirectory(Path.Combine(local.Connection.Folder, "sessions")).FullName;
+        using (NodeState.CreatePrivateFile(Path.Combine(sessions, "original-session.restore.lock")))
+            local.Observe(RelayTools.GetStatus, Arguments(), OkReply);
+        _ = local.RunAsync(CancellationToken.None);
+        await local.FirstPass.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.NotNull(LocalWakeStatus.Problem(StatusRoot));
+
+        local.Observe(RelayTools.GetStatus, Arguments(), OkReply);
+        Assert.Null(LocalWakeStatus.Problem(StatusRoot));
+    }
+
+    [Fact]
+    public async Task The_loop_records_no_sessions_then_an_unlocated_then_an_unmapped_handle()
+    {
+        var connection = Connection();
+        var transport = new NodeTransport { Locators = [], CodexExecutable = () => "synthetic-codex", CodexDispatcher = _ => new NoDispatch() };
+        await using var local = new LocalChatWake(connection, transport, (_, _, ct) => Task.Delay(Timeout.Infinite, ct), StatusRoot);
+        _ = local.RunAsync(CancellationToken.None);
+        await local.FirstPass.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(LocalWakeCodes.NoObservedSessions, LocalWakeStatus.LastCode(StatusRoot));
+        Assert.Null(LocalWakeStatus.Problem(StatusRoot));
+
+        local.Observe(RelayTools.GetStatus, Arguments(), OkReply);
+        await WaitFor(() => LocalWakeStatus.LastCode(StatusRoot) == LocalWakeCodes.ObservedNotLocated);
+        Assert.Null(LocalWakeStatus.Problem(StatusRoot));
+
+        var handle = NodeState.ReadSessionHandle(NodeState.SessionHandlePath(connection.Folder, "original-session"))!;
+        NodeState.WriteSessionHandle(connection.Folder, handle with { Unmapped = true });
+        local.Observe(RelayTools.GetStatus, Arguments(), OkReply);
+        await WaitFor(() => LocalWakeStatus.LastCode(StatusRoot) == LocalWakeCodes.ObservedUnmapped);
+        Assert.Equal(("degraded", "observed_unmapped"), LocalWakeStatus.Problem(StatusRoot));
+    }
+
+    [Fact]
+    public async Task The_loop_records_a_missing_codex_executable_then_recovers_and_counts_its_watcher()
+    {
+        var connection = Connection();
+        NodeState.WriteSessionHandle(connection.Folder, new("original-session", "private-session-token", "repo", "Codex", DateTimeOffset.UtcNow, Chat: new("codex", Guid.NewGuid().ToString())));
+        string? codex = null;
+        var transport = new NodeTransport { Locators = [], CodexExecutable = () => codex, CodexDispatcher = _ => new NoDispatch() };
+        await using var local = new LocalChatWake(connection, transport, (_, _, ct) => Task.Delay(Timeout.Infinite, ct), StatusRoot);
+        local.Observe(RelayTools.GetStatus, Arguments(), OkReply);
+        _ = local.RunAsync(CancellationToken.None);
+        await local.FirstPass.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(("degraded", "no_codex_executable"), LocalWakeStatus.Problem(StatusRoot));
+
+        codex = "synthetic-codex";
+        local.Observe(RelayTools.GetStatus, Arguments(), OkReply);
+        await WaitFor(() => LocalWakeStatus.LastCode(StatusRoot) == LocalWakeCodes.Watching);
+        Assert.Null(LocalWakeStatus.Problem(StatusRoot));
+        var data = Status();
+        Assert.Equal((1, 1), (data.GetProperty("observed").GetInt32(), data.GetProperty("watchers").GetInt32()));
+    }
+
+    [Fact]
+    public async Task A_failing_pass_or_watcher_is_recorded_and_does_not_end_the_loop()
+    {
+        var connection = Connection();
+        NodeState.WriteSessionHandle(connection.Folder, new("original-session", "private-session-token", "repo", "Codex", DateTimeOffset.UtcNow, Chat: new("codex", Guid.NewGuid().ToString())));
+        var mode = 0;
+        var transport = new NodeTransport
+        {
+            Locators = [], CodexDispatcher = _ => new NoDispatch(),
+            CodexExecutable = () => Volatile.Read(ref mode) == 0 ? throw new InvalidOperationException("synthetic") : "synthetic-codex"
+        };
+        await using var local = new LocalChatWake(connection, transport, async (_, _, ct) =>
+        {
+            await Task.Yield();
+            if (Volatile.Read(ref mode) == 1) throw new InvalidOperationException("synthetic");
+            await Task.Delay(Timeout.Infinite, ct);
+        }, StatusRoot);
+        local.Observe(RelayTools.GetStatus, Arguments(), OkReply);
+        var run = local.RunAsync(CancellationToken.None);
+        await local.FirstPass.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(("degraded", "loop_failed"), LocalWakeStatus.Problem(StatusRoot));
+        Assert.False(run.IsCompleted);
+
+        Volatile.Write(ref mode, 1);
+        local.Observe(RelayTools.GetStatus, Arguments(), OkReply);
+        await WaitFor(() => LocalWakeStatus.Problem(StatusRoot) == ("degraded", "watcher_failed"));
+        Assert.False(run.IsCompleted);
+
+        Volatile.Write(ref mode, 2);
+        await WaitFor(() => LocalWakeStatus.LastCode(StatusRoot) == LocalWakeCodes.Watching);
+        Assert.Null(LocalWakeStatus.Problem(StatusRoot));
+    }
+
+    [Fact]
+    public async Task A_second_adapter_that_loses_the_chat_lock_records_it_and_stays_healthy()
+    {
+        var connection = Connection();
+        NodeState.WriteSessionHandle(connection.Folder, new("original-session", "private-session-token", "repo", "Codex", DateTimeOffset.UtcNow, Chat: new("codex", Guid.NewGuid().ToString())));
+        var transport = new NodeTransport { Locators = [], CodexExecutable = () => "synthetic-codex", CodexDispatcher = _ => new NoDispatch() };
+        var (firstRoot, secondRoot) = (Path.Combine(root, "first-status"), Path.Combine(root, "second-status"));
+        await using var first = new LocalChatWake(connection, transport, (_, _, ct) => Task.Delay(Timeout.Infinite, ct), firstRoot);
+        await using var second = new LocalChatWake(connection, transport, (_, _, ct) => Task.Delay(Timeout.Infinite, ct), secondRoot);
+        first.Observe(RelayTools.GetStatus, Arguments(), OkReply);
+        second.Observe(RelayTools.GetStatus, Arguments(), OkReply);
+        _ = first.RunAsync(CancellationToken.None);
+        await first.FirstPass.WaitAsync(TimeSpan.FromSeconds(10));
+        _ = second.RunAsync(CancellationToken.None);
+        await second.FirstPass.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(LocalWakeCodes.Watching, LocalWakeStatus.LastCode(firstRoot));
+        var data = Status(secondRoot);
+        Assert.True(data.GetProperty("codeCounts").GetProperty("watcher_lock_held").GetInt32() >= 1);
+        Assert.Equal("no_live_watcher", data.GetProperty("stateReason").GetString());
+        Assert.Equal(0, data.GetProperty("watchers").GetInt32());
+        Assert.Null(LocalWakeStatus.Problem(secondRoot));
+    }
+
+    [Fact]
+    public async Task A_claude_adapter_with_nothing_for_codex_to_do_is_healthy()
+    {
+        var chat = new ChatLocation("claude", Guid.NewGuid().ToString());
+        var connection = Connection(new AdapterOptions("http://127.0.0.1:5271/", Secret) { ExportedChat = chat });
+        var transport = new NodeTransport { Locators = [], CodexExecutable = () => null, CodexDispatcher = _ => new NoDispatch() };
+        await using var local = new LocalChatWake(connection, transport, (_, _, ct) => Task.Delay(Timeout.Infinite, ct), StatusRoot);
+        local.Observe(RelayTools.GetStatus, Arguments(), OkReply);
+        _ = local.RunAsync(CancellationToken.None);
+        await local.FirstPass.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(LocalWakeCodes.NoCodexTargets, LocalWakeStatus.LastCode(StatusRoot));
+        Assert.Null(LocalWakeStatus.Problem(StatusRoot));
+    }
+
+    [Fact]
+    public async Task Open_records_why_there_is_no_local_wake_and_marks_setup_reached()
+    {
+        var cache = Path.Combine(root, "open-native");
+        Assert.Null(LocalChatWake.Open(new AdapterOptions("http://127.0.0.1:5271/", Secret), TokenFile(), registered: true, cache));
+        Assert.Equal(LocalWakeCodes.NativeRegistration, LocalWakeStatus.LastCode(cache));
+        Assert.Null(LocalWakeStatus.Problem(cache));
+
+        cache = Path.Combine(root, "open-raw");
+        Assert.Null(LocalChatWake.Open(new AdapterOptions("http://127.0.0.1:5271/", Secret), null, registered: false, cache));
+        Assert.Equal(("off", "setup_returned_null"), LocalWakeStatus.Problem(cache));
+        Assert.True(Status(cache).GetProperty("setupReached").GetBoolean());
+
+        cache = Path.Combine(root, "open-node");
+        var node = new AdapterOptions("http://127.0.0.1:5271/", Secret) { NodeFolder = Path.Combine(root, "node") };
+        Assert.Null(LocalChatWake.Open(node, TokenFile(), registered: false, cache));
+        Assert.Equal(LocalWakeCodes.NodeConnection, LocalWakeStatus.LastCode(cache));
+        Assert.Null(LocalWakeStatus.Problem(cache));
+
+        cache = Path.Combine(root, "open-working");
+        await using var wake = LocalChatWake.Open(new AdapterOptions("http://127.0.0.1:5271/", Secret), TokenFile(), registered: false, cache);
+        Assert.NotNull(wake);
+        Assert.Equal(LocalWakeCodes.SetupComplete, LocalWakeStatus.LastCode(cache));
+        Assert.Null(LocalWakeStatus.Problem(cache));
+        wake.Observe(RelayTools.DocSearch, Arguments(), new(true, "Ok"));
+        Assert.Equal(LocalWakeCodes.ObserveNotSessionReply, LocalWakeStatus.LastCode(cache));
+    }
+
+    [Fact]
+    public async Task A_more_specific_reason_from_setup_is_not_overwritten()
+    {
+        var cache = Path.Combine(root, "open-specific");
+        // Open adds its own reason only when setup left none.
+        Assert.Null(LocalChatWake.SetupOutcome(null, "credential_mismatch"));
+        Assert.Equal(LocalWakeCodes.SetupReturnedNull, LocalChatWake.SetupOutcome(null, LocalWakeCodes.SetupReached));
+        await using var wake = new LocalChatWake(Connection(), statusRoot: cache);
+        Assert.Null(LocalChatWake.SetupOutcome(wake, "connection_ready"));
+        Assert.Equal(LocalWakeCodes.SetupComplete, LocalChatWake.SetupOutcome(wake, LocalWakeCodes.SetupReached));
+    }
+
+    [Fact]
+    public async Task Session_open_and_get_status_carry_the_field_only_while_unhealthy()
+    {
+        using var handler = new ReplyHandler();
+        using var http = new HttpClient(handler);
+        var connection = Connection();
+        var calls = new ChatCalls(new RelayForwarder(http, connection.Options), null, null, "test", wakeStatusRoot: StatusRoot);
+        LocalWakeStatus.Report(LocalWakeCodes.Watching, StatusRoot);
+        var healthy = await calls.CallAsync(RelayTools.GetStatus, Arguments(), CancellationToken.None);
+        Assert.False(healthy.Data!.Value.TryGetProperty("localWake", out _));
+
+        LocalWakeStatus.Report(LocalWakeCodes.NoCodexExecutable, StatusRoot);
+        foreach (var tool in new[] { RelayTools.GetStatus, RelayTools.SessionOpen })
+        {
+            var reply = await calls.CallAsync(tool, Arguments(), CancellationToken.None);
+            var field = reply.Data!.Value.GetProperty("localWake");
+            Assert.Equal("degraded", field.GetProperty("state").GetString());
+            Assert.Equal("no_codex_executable", field.GetProperty("reason").GetString());
+            Assert.Equal(2, field.EnumerateObject().Count());
+        }
+        var other = await calls.CallAsync(RelayTools.Ack, JsonSerializer.SerializeToElement(new { repositoryId = "repo", sessionId = "original-session", sessionToken = "private-session-token", messageId = "m", requestId = "r" }), CancellationToken.None);
+        Assert.False(other.Data is { ValueKind: JsonValueKind.Object } data && data.TryGetProperty("localWake", out _));
+
+        // An unchanged conditional read still says so while unhealthy, and the field does not move the etag.
+        var etag = (await calls.CallAsync(RelayTools.GetStatus, Arguments(), CancellationToken.None)).Data!.Value.GetProperty("etag").GetString();
+        var conditional = JsonSerializer.SerializeToElement(new { repositoryId = "repo", sessionId = "original-session", sessionToken = "private-session-token", ifNoneMatch = etag });
+        var unhealthy = await calls.CallAsync(RelayTools.GetStatus, conditional, CancellationToken.None);
+        Assert.True(unhealthy.Data!.Value.GetProperty("unchanged").GetBoolean());
+        Assert.Equal("degraded", unhealthy.Data!.Value.GetProperty("localWake").GetProperty("state").GetString());
+        LocalWakeStatus.Report(LocalWakeCodes.Watching, StatusRoot);
+        var recovered = await calls.CallAsync(RelayTools.GetStatus, conditional, CancellationToken.None);
+        Assert.True(recovered.Data!.Value.GetProperty("unchanged").GetBoolean());
+        Assert.False(recovered.Data!.Value.TryGetProperty("localWake", out _));
+    }
+
+    [Fact]
+    public async Task Without_a_status_report_for_the_default_root_no_field_is_added_and_nothing_is_read()
+    {
+        using var handler = new ReplyHandler();
+        using var http = new HttpClient(handler);
+        var calls = new ChatCalls(new RelayForwarder(http, Connection().Options), null, null, "test");
+        var reply = await calls.CallAsync(RelayTools.GetStatus, Arguments(), CancellationToken.None);
+        Assert.False(reply.Data!.Value.TryGetProperty("localWake", out _));
     }
 
     private LocalWakeConnection Connection(AdapterOptions? options = null) => LocalWakeConnection.Create(options ?? new("http://127.0.0.1:5271/", Secret, admin: true), TokenFile(), Path.Combine(root, "cache"))!;

@@ -27,6 +27,8 @@ public sealed class SessionHandoff
     private readonly Dictionary<string, DateTime> _touched = new(StringComparer.Ordinal);
     /// <summary>How often a chat's activity refreshes its handle file; the node prunes handles idle for <see cref="NodeChats.IdleAfter"/>.</summary>
     internal static readonly TimeSpan TouchEvery = TimeSpan.FromHours(1);
+    /// <summary>Told a fixed reason when <see cref="Restore"/> or <see cref="RecordLocal"/> gives up because another adapter holds the session.</summary>
+    internal Action<string>? Report { get; set; }
 
     private SessionHandoff(string folder, ChatLocation? client, TextWriter error) => (_folder, _client, _error) = (folder, client, error);
 
@@ -97,7 +99,7 @@ public sealed class SessionHandoff
             ChatLocators.Text(arguments, "repositoryId") is not { Length: > 0 and <= NodeState.MaxIdentifierLength } repository) return;
         var path = NodeState.SessionHandlePath(_folder, sessionId);
         using var owner = Acquire(sessionId);
-        if (owner is null) return;
+        if (owner is null) { Report?.Invoke(LocalWakeCodes.RestoreLockBusy); return; }
         var previous = NodeState.ReadSessionHandle(path);
         if (previous is not null)
         {
@@ -130,7 +132,7 @@ public sealed class SessionHandoff
     {
         if (!reply.Ok || reply.Data is not { ValueKind: JsonValueKind.Object } data || ChatLocators.Text(data, "sessionId") is not { } session || !NodeState.IsFileId(session)) return;
         using var owner = Acquire(session);
-        if (owner is null) return;
+        if (owner is null) { Report?.Invoke(LocalWakeCodes.RecordLockBusy); return; }
         var previous = NodeState.ReadSessionHandle(NodeState.SessionHandlePath(_folder, session));
         if (previous is null) Record(arguments, reply);
         else if (previous.RepositoryId == ChatLocators.Text(arguments, "repositoryId") && previous.SessionToken == ChatLocators.Text(data, "sessionToken") && OwnsNative(previous)) Touch(arguments);

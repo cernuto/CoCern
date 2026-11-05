@@ -193,10 +193,12 @@ try
         if (await registration.AcceptAsync(CancellationToken.None) is null) throw new AdapterConfigurationException(NativeRegistration.Refusal);
     }
     var options = registration?.Connection ?? AdapterOptions.FromEnvironment();
+    // First, so a status file that never appears means this adapter never got past reading its options.
+    LocalWakeStatus.Report(LocalWakeCodes.Starting);
     // On node credentials the hub certificate is pinned; with explicit settings this is the plain handler, as before.
     using var http = new HttpClient(RelayForwarder.CreateHandler(options)) { Timeout = TimeSpan.FromSeconds(60) };
     await using var hints = new SessionHints(options);
-    await using var localWake = registration is null ? LocalChatWake.TryCreate(options, Environment.GetEnvironmentVariable("COCERN_TOKEN_FILE")) : null;
+    await using var localWake = LocalChatWake.Open(options, Environment.GetEnvironmentVariable("COCERN_TOKEN_FILE"), registration is not null);
     var forwarder = new RelayForwarder(http, options);
     await using var native = (registration?.Folder ?? options.NodeFolder ?? localWake?.Connection.Folder) is { } privateFolder ? new NativeJoin(privateFolder, options, forwarder) : null;
     var builder = Host.CreateApplicationBuilder(registration is null ? args : []);
