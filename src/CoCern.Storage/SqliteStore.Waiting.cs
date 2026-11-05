@@ -3,6 +3,7 @@ using CoCern.Contracts;
 using CoCern.Contracts.Dashboard;
 using CoCern.Core;
 using CoCern.Domain;
+using CoCern.Domain.Messages;
 using CoCern.Domain.State;
 
 namespace CoCern.Storage;
@@ -19,28 +20,32 @@ public sealed partial class SqliteStore
     /// <summary>A tool read may wait this long for a busy writer before it answers busy; the dashboard's read gives up at once.</summary>
     private static readonly TimeSpan WaitingToolWait = TimeSpan.FromMilliseconds(250);
 
-    private const string BoardDocument = "CASE WHEN json_valid(json_extract(payload, '$.Value.Json')) THEN json_extract(payload, '$.Value.Json') ELSE '{}' END";
+    private const string BlockerKind = "CASE WHEN blocker.type = 'object' THEN json_extract(blocker.value, '$." + WorkflowBlocker.KindKey + "') END";
+
+    private const string StoredDocument = "CASE WHEN json_valid(json_extract(payload, '$.Value.Json')) THEN json_extract(payload, '$.Value.Json') ELSE '{}' END";
 
     /// <summary>
     /// The tasks in <c>blocked</c> that may count, from any board: it does not use <see cref="StandingQuery"/>'s filter, which skips a board
-    /// with no standing or orders. A task's kinds are checked in the Domain; the text test here only saves the read.
+    /// with no standing or orders. Each blocker's own <c>kind</c> decides here too, so a task that only names a kind in its words cannot use up the
+    /// read before the Domain leaves it out.
     /// </summary>
     internal const string WaitingBlockersQuery = $"""
         WITH boards AS (
-            SELECT grain_key, {BoardDocument} AS document
+            SELECT grain_key, {StoredDocument} AS document
             FROM grain_state
             WHERE state_name='{AggregateKinds.Board}' AND grain_type='cocern.board' AND json_valid(payload)
                 AND substr(grain_key, 1, length($prefix)) = $prefix
                 AND (instr(payload, '{BlockerKinds.HumanDecision}') > 0 OR instr(payload, '{BlockerKinds.CoordinatorHold}') > 0)
         ), tasks AS (
-            SELECT grain_key, task.key AS task_id, task.value AS task, json_extract(task.value, '$.{BoardTask.WorkflowKey}.{WorkflowRecord.BlockersKey}') AS blockers
+            SELECT grain_key, task.key AS task_id, task.value AS task,
+                CASE WHEN json_type(task.value, '$.{BoardTask.WorkflowKey}.{WorkflowRecord.BlockersKey}') = 'array' THEN json_extract(task.value, '$.{BoardTask.WorkflowKey}.{WorkflowRecord.BlockersKey}') END AS blockers
             FROM boards, json_each(boards.document, '$.{BoardState.TasksKey}') AS task
             WHERE task.type = 'object' AND json_extract(task.value, '$.{BoardTask.WorkflowKey}.{WorkflowRecord.StateKey}') = '{WorkflowStates.Blocked}'
         )
         SELECT grain_key, task_id, json_extract(task, '$.{BoardTask.OwnerKey}'), json_extract(task, '$.{BoardTask.HumanSinceKey}'), json_extract(task, '$.{BoardTask.HoldSinceKey}'), json_extract(task, '$.{BoardTask.UpdatedAtKey}'), blockers
         FROM tasks
-        WHERE instr(blockers, '{BlockerKinds.HumanDecision}') > 0 OR instr(blockers, '{BlockerKinds.CoordinatorHold}') > 0
-        ORDER BY instr(blockers, '{BlockerKinds.HumanDecision}') = 0, coalesce(json_extract(task, '$.{BoardTask.HumanSinceKey}'), json_extract(task, '$.{BoardTask.HoldSinceKey}'), json_extract(task, '$.{BoardTask.UpdatedAtKey}')), grain_key, task_id
+        WHERE EXISTS (SELECT 1 FROM json_each(blockers) AS blocker WHERE {BlockerKind} IN ('{BlockerKinds.HumanDecision}', '{BlockerKinds.CoordinatorHold}'))
+        ORDER BY NOT EXISTS (SELECT 1 FROM json_each(blockers) AS blocker WHERE {BlockerKind} = '{BlockerKinds.HumanDecision}'), coalesce(json_extract(task, '$.{BoardTask.HumanSinceKey}'), json_extract(task, '$.{BoardTask.HoldSinceKey}'), json_extract(task, '$.{BoardTask.UpdatedAtKey}')), grain_key, task_id
         LIMIT $limit;
         """;
 
@@ -48,7 +53,7 @@ public sealed partial class SqliteStore
     internal const string WaitingProposalsQuery = $"""
         SELECT grain_key, CASE WHEN length(standing) <= $maximum THEN standing END FROM (
             SELECT grain_key, json_extract(document, '$.{BoardReadModels.StandingKey}') AS standing FROM (
-                SELECT grain_key, {BoardDocument} AS document
+                SELECT grain_key, {StoredDocument} AS document
                 FROM grain_state
                 WHERE state_name='{AggregateKinds.Board}' AND grain_type='cocern.board' AND json_valid(payload)
                     AND substr(grain_key, 1, length($prefix)) = $prefix AND instr(payload, '{StandingState.ProposalsKey}') > 0))
@@ -56,14 +61,47 @@ public sealed partial class SqliteStore
         ORDER BY grain_key LIMIT $limit;
         """;
 
-    /// <summary>One repository's open sessions with a report: its ID, label and the report, and nothing else of the session.</summary>
+    /// <summary>
+    /// One repository's open sessions with a report: its ID, label and the report, and nothing else of the session. Latest to expire first: a lapsed
+    /// mark stays stored until its chat reports again or closes, so the read's limit must fall on those and not on a current report.
+    /// </summary>
     internal const string WaitingReportsQuery = $"""
         SELECT json_extract(document, '$.{SessionState.SessionIdKey}'), json_extract(document, '$.{SessionState.LabelKey}'), json_extract(document, '$.{SessionState.WaitingForKey}') FROM (
-            SELECT {BoardDocument} AS document
+            SELECT {StoredDocument} AS document
             FROM grain_state
             WHERE state_name='session' AND grain_type='cocern.session'{OpenSessionsOnly} AND json_valid(payload) AND instr(payload, '{SessionState.WaitingForKey}') > 0)
         WHERE json_extract(document, '$.{CommonState.RepositoryIdKey}') = $repository AND json_extract(document, '$.{SessionState.WaitingForKey}') IS NOT NULL
-        ORDER BY json_extract(document, '$.{SessionState.WaitingForKey}.{WaitingMark.SinceKey}') LIMIT $limit;
+        ORDER BY json_extract(document, '$.{SessionState.WaitingForKey}.{WaitingMark.ExpiresAtKey}') DESC LIMIT $limit;
+        """;
+
+    /// <summary>Unread rows read at once for the unresponsive row, across a repository's sessions.</summary>
+    private const int MaximumWaitingMailRows = 4096;
+
+    /// <summary>
+    /// One repository's open sessions and when each of their unread direct messages that may wake them was sent, by the rule of
+    /// <see cref="WaitingList.Mail"/>. SQLite reads the messages, so no message's text is ever copied out.
+    /// </summary>
+    internal const string WaitingMailQuery = $"""
+        WITH sessions AS (
+            SELECT document FROM (
+                SELECT {StoredDocument} AS document
+                FROM grain_state
+                WHERE state_name='session' AND grain_type='cocern.session'{OpenSessionsOnly} AND json_valid(payload) AND instr(payload, '{InboxMessage.SenderSessionIdKey}') > 0)
+            WHERE json_extract(document, '$.{CommonState.RepositoryIdKey}') = $repository
+        )
+        SELECT json_extract(document, '$.{SessionState.SessionIdKey}'), json_extract(document, '$.{SessionState.LabelKey}'), json_extract(message.value, '$.{InboxMessage.SentAtKey}')
+        FROM sessions, json_each(sessions.document, '$.{SessionState.InboxKey}') AS message
+        WHERE message.type = 'object' AND coalesce(json_extract(message.value, '$.{InboxMessage.WakeKey}'), 1) <> 0
+            AND json_extract(message.value, '$.{InboxMessage.KindKey}') IS NULL AND coalesce(json_extract(message.value, '$.{InboxMessage.TaskIdKey}'), '') = ''
+            AND trim(coalesce(json_extract(message.value, '$.{InboxMessage.SenderSessionIdKey}'), '')) <> ''
+        ORDER BY 1 LIMIT $limit;
+        """;
+
+    /// <summary>A session's own last hub call: an unclassified row may be a watcher's, so only a call marked as not background counts.</summary>
+    internal const string WaitingLastCallQuery = """
+        SELECT at_ticks FROM activity_log
+        WHERE repository_id = $repository AND session_id = $session AND kind = 'call' AND ok = 1 AND background_call = 0
+        ORDER BY at_ticks DESC LIMIT 1;
         """;
 
     public async Task<WaitingSources?> ReadWaitingBlockersAsync(CancellationToken cancellationToken = default)
@@ -85,6 +123,8 @@ public sealed partial class SqliteStore
         var blockerRows = new List<BlockerRow>();
         var standingRows = new List<(string Key, string? Standing)>();
         var reportRows = new List<(string? SessionId, string? Label, string Mark)>();
+        var mailRows = new List<(string SessionId, string? Label, string? SentAt)>();
+        var lastCalls = new Dictionary<string, DateTimeOffset>(StringComparer.Ordinal);
         if (!await _gate.WaitAsync(WaitingToolWait, cancellationToken)) return null;
         try
         {
@@ -105,11 +145,28 @@ public sealed partial class SqliteStore
                 using var reader = command.ExecuteReader();
                 while (reader.Read()) if (!reader.IsDBNull(2)) reportRows.Add((reader.IsDBNull(0) ? null : reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetString(1), reader.GetString(2)));
             }
+            using (var command = Command(WaitingMailQuery))
+            {
+                command.Parameters.AddWithValue("$repository", repositoryId);
+                command.Parameters.AddWithValue("$limit", MaximumWaitingMailRows + 1);
+                using var reader = command.ExecuteReader();
+                while (reader.Read()) if (!reader.IsDBNull(0)) mailRows.Add((reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2)));
+            }
+            using (var command = Command(WaitingLastCallQuery))
+            {
+                var session = command.Parameters.AddWithValue("$session", "");
+                command.Parameters.AddWithValue("$repository", repositoryId);
+                foreach (var id in mailRows.Select(row => row.SessionId).Distinct(StringComparer.Ordinal).Take(MaximumSessions))
+                {
+                    session.Value = id;
+                    if (command.ExecuteScalar() is long ticks) lastCalls[id] = new DateTimeOffset(ticks, TimeSpan.Zero);
+                }
+            }
         }
         finally { _gate.Release(); }
 
         // Only the bounded SQL holds the shared writer gate, as for the observation.
-        var truncated = blockerRows.Count > MaximumWaitingBlockers || standingRows.Count > MaximumStandingBoards || reportRows.Count > MaximumSessions;
+        var truncated = blockerRows.Count > MaximumWaitingBlockers || standingRows.Count > MaximumStandingBoards || reportRows.Count > MaximumSessions || mailRows.Count > MaximumWaitingMailRows;
         var blockers = ProjectBlockers(blockerRows, out var skipped);
         truncated |= skipped;
         var boards = new List<DashboardStanding>();
@@ -133,7 +190,14 @@ public sealed partial class SqliteStore
         }
         var owners = blockers.Select(blocker => blocker.OwnerSessionId).Concat(boards.SelectMany(board => board.Proposals).Select(proposal => proposal.SessionId))
             .Where(session => session.Length > 0).Distinct(StringComparer.Ordinal).Take(MaximumSessions).ToArray();
-        return new() { Boards = boards, Blockers = blockers, Reports = reports, Labels = await ReadWaitingLabelsAsync(repositoryId, owners, cancellationToken), Truncated = truncated };
+        var mail = mailRows.Take(MaximumWaitingMailRows).GroupBy(row => row.SessionId, StringComparer.Ordinal).Select(rows => new WaitingMail
+        {
+            SessionId = rows.Key, RepositoryId = repositoryId, Label = rows.First().Label ?? "",
+            Sent = rows.Select(row => DateTimeOffset.TryParse(row.SentAt, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var sent) ? sent : (DateTimeOffset?)null).OfType<DateTimeOffset>().ToArray(),
+            LastCallAt = lastCalls.TryGetValue(rows.Key, out var last) ? last : null
+        }).ToArray();
+        truncated |= mailRows.Select(row => row.SessionId).Distinct(StringComparer.Ordinal).Count() > MaximumSessions;
+        return new() { Boards = boards, Blockers = blockers, Reports = reports, Mail = mail, Labels = await ReadWaitingLabelsAsync(repositoryId, owners, cancellationToken), Truncated = truncated };
     }
 
     /// <summary>The labels of the open sessions named, in that repository. They only decorate a row, so a busy writer leaves them out rather than delay the read.</summary>
@@ -147,7 +211,7 @@ public sealed partial class SqliteStore
             var parameters = string.Join(", ", Enumerable.Range(0, sessions.Length).Select(index => "$key" + index));
             using var command = Command($"""
                 SELECT grain_key, json_extract(document, '$.{SessionState.LabelKey}') FROM (
-                    SELECT grain_key, {BoardDocument} AS document
+                    SELECT grain_key, {StoredDocument} AS document
                     FROM grain_state
                     WHERE state_name='session' AND grain_type='cocern.session'{OpenSessionsOnly} AND json_valid(payload) AND grain_key IN ({parameters}))
                 WHERE json_extract(document, '$.{CommonState.RepositoryIdKey}') = $repository;
