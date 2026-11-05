@@ -360,7 +360,7 @@ public static class Operations
     public static bool IsInternal(string operation) => operation.StartsWith("__", StringComparison.Ordinal);
 
     /// <summary>Internal operations that only read: never deduplicated by requestId, never committed for themselves.</summary>
-    public static bool IsRead(string operation) => operation is Verify or Resolve or ResolveAll or NextWork or ClaimState or SessionOwners or SessionsOpen or Standing or Orders;
+    public static bool IsRead(string operation) => operation is Verify or Resolve or ResolveAll or NextWork or ClaimState or SessionOwners or SessionsOpen or Standing or Orders or EventWaitAggregate.ReadOperation;
 
     /// <summary>Order effects run only while standing orders are on; a target that refuses one is not asked again.</summary>
     public static bool IsOrder(string operation) => operation is OrderFire or OrderWatch or OrderRelease or OrderFailed or OrderWatchFailed;
