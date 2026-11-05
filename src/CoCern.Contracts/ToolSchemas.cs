@@ -18,12 +18,13 @@ internal static class ToolSchemas
         {
             RelayTools.SessionOpen => ["machineId", "label"],
             RelayTools.SessionBind => ["binding", "label", "machineId"],
-            RelayTools.TaskGet => ["taskId", "section", "sinceRevision", "snapshotRevision", "cursor", "limit"],
+            RelayTools.TaskGet => ["taskId", "section", "sinceRevision", "snapshotRevision", "cursor", "limit", "openOnly", "includeDetails", "snapshotTag"],
+            RelayTools.WorkerList => ["includeStale", "cursor", "limit", "snapshotTag"],
             RelayTools.TaskUpdate => ["taskId", "expectedVersion", "workflow", "includeNextWork", "usage", "attention", "presentStanding"],
             RelayTools.TaskClaim or RelayTools.ActionReport => ["attention", "presentStanding"],
             RelayTools.SendMessage => ["text", "recipientSessionId", "taskId", "replyTo", "ackMessageIds", "supersede", "wake"],
             RelayTools.CheckInbox => ["cursor", "limit", "presentStanding"],
-            RelayTools.GetStatus => ["managerHistoryBefore", "managerHistoryOnly"],
+            RelayTools.GetStatus => ["managerHistoryBefore", "managerHistoryOnly", "statusTag"],
             RelayTools.ControlRequest => ["targetSessionId", "expectedManagerGeneration", "humanWords"],
             RelayTools.Ack => ["messageId", "messageIds", "waitingFor"],
             RelayTools.ClaimRenew => ["resourceId", "generation", "taskId", "claimGeneration", "leaseSeconds"],
@@ -126,6 +127,14 @@ internal static class ToolSchemas
             properties["humanWords"] = new { type = "string" };
         }
         // Keep the added status cursor within the forwarding catalog budget; the full schema retains envelope descriptions.
+        if (tool.Name is RelayTools.WorkerList or RelayTools.TaskGet)
+        {
+            foreach (var field in ForwardingFields) properties[field] = new { type = "string" };
+            properties.Remove("requestId");
+            properties["snapshotTag"] = new { type = "string" };
+            foreach (var field in new[] { "includeStale", "includeDetails", "openOnly" })
+                if (properties.ContainsKey(field)) properties[field] = new { type = "boolean" };
+        }
         if (tool.Name == RelayTools.GetStatus)
         {
             foreach (var field in ForwardingFields) properties[field] = new { type = "string" };
@@ -133,6 +142,7 @@ internal static class ToolSchemas
             properties.Remove("requestId");
             properties["managerHistoryBefore"] = new { type = "integer" };
             properties["managerHistoryOnly"] = new { type = "boolean" };
+            properties["statusTag"] = new { type = "string" };
         }
         // Each boundary tool advertises the attention opt-out with a short description; InputSchema gives the full one.
         if (properties.ContainsKey("attention")) properties["attention"] = new { type = "boolean", description = "false: no attention offer." };
@@ -169,8 +179,12 @@ internal static class ToolSchemas
         switch (tool)
         {
             case RelayTools.GetStatus:
+                properties["statusTag"] = new { type = "string", maxLength = 64, description = "Opt in with an empty string; echo the returned tag for freshly authorized unchanged status. Missing tags mean full reads." };
                 properties["managerHistoryBefore"] = new { type = "integer", minimum = 0, description = "Administrator-only: read manager selections older than this generation." };
                 properties["managerHistoryOnly"] = new { type = "boolean", description = "Reserve this read for the visible manager summary and administrator history, omitting cancellation requests. Use when ordinary status omits manager or manager.historyReadRequired is true. Retain the incoming cursor for history continuation." }; break;
+            case RelayTools.WorkerList:
+                properties["includeStale"] = new { type = "boolean", description = "Full directory rows, including stale entries and bindings." };
+                properties["snapshotTag"] = new { type = "string", maxLength = 64, description = "Echo with a compact list continuation; restart on ListRestartRequired." }; break;
             case RelayTools.SessionOpen:
                 Text("label", "Display label for this chat's session."); properties["requestId"] = new { type = "string", maxLength = RelayLimits.MaxIdentifierLength, description = SessionOpenRequestId }; Object("binding", "Reported configured Roslyn/Visual Studio binding and source identity."); break;
             case RelayTools.SessionBind:
@@ -181,6 +195,9 @@ internal static class ToolSchemas
                 Integer("sinceRevision", "Board delta checkpoint; omit taskId. Save snapshotRevision only after all pages.");
                 Integer("snapshotRevision", "Pinned revision from the first delta page; a concurrent change returns DeltaRestartRequired.");
                 properties["cursor"] = new { type = "integer", minimum = 0, description = "Continuation from a bounded list; keep the same sinceRevision and snapshotRevision." };
+                properties["openOnly"] = new { type = "boolean", description = "Omit safely completed tasks. Echo snapshotTag on continuation; restart on ListRestartRequired." };
+                properties["includeDetails"] = new { type = "boolean", description = "Use the previous full board-list summaries." };
+                properties["snapshotTag"] = new { type = "string", maxLength = 64, description = "Echo with an open-only list continuation." };
                 Text("factKey", "Optional selected task fact key."); break;
             case RelayTools.TaskUpdate:
                 Object("patch", "Shared task facts; cannot overwrite coordination ownership/version internals.");

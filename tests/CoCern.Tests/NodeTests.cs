@@ -86,7 +86,8 @@ public sealed class NodeTests : IDisposable
         string credential;
         string controlBefore;
         using var state = NodeState.Open(DataDir);
-        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        // Whole-fixture hang guard includes host setup; each condition keeps its separate 20-second wait.
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(60));
         await using (var host = Hub(databasePath: database))
         {
             var traffic = new HubTraffic();
@@ -128,6 +129,7 @@ public sealed class NodeTests : IDisposable
                 Assert.Empty(dispatcher.Threads);
                 Assert.Equal(controlBefore, (await UpdateStatusAsync(host, machine, receiver)).GetProperty("control").GetRawText());
                 Assert.Equal(1, (await UpdateInboxAsync(host, machine, receiver)).GetProperty("items").GetArrayLength());
+                Assert.False(stop.IsCancellationRequested, "The fixture watchdog cannot count as a successful update.");
             }
             finally { stop.Cancel(); Assert.Equal(0, await run); }
         }

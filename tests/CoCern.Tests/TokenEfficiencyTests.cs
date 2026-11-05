@@ -349,6 +349,24 @@ public sealed class TokenEfficiencyTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public async Task Session_open_tells_the_chat_in_one_short_line_to_report_waits_with_ack()
+    {
+        await using var host = new RelayHostFixture();
+        using var client = host.AuthorizedClient();
+        var session = Data(await host.Call(client, "session_open", new { repositoryId = "repo", requestId = "hint-open" }));
+        var hint = session.GetProperty("waitingHint").GetString()!;
+        Assert.Contains("ack waitingFor", hint);
+        Assert.DoesNotContain('\n', hint);
+        // It costs once per session, in the reply; the cap is here so it stays one line.
+        var tokens = new O200kTokenCounter().Count(hint);
+        Assert.True(tokens <= 30, $"The hint costs {tokens} tokens.");
+        // A retry of the open answers with the same line.
+        var retried = Data(await host.Call(client, "session_open", new { repositoryId = "repo", requestId = "hint-open" }));
+        Assert.Equal(hint, retried.GetProperty("waitingHint").GetString());
+        Assert.Equal(session.GetProperty("sessionId").GetString(), retried.GetProperty("sessionId").GetString());
+    }
+
+    [Fact]
     public async Task Every_call_records_estimated_request_and_reply_tokens_with_tool_session_and_role()
     {
         await using var host = new RelayHostFixture();

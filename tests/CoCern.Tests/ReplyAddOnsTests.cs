@@ -12,7 +12,7 @@ public sealed class ReplyAddOnsTests
         // The attention offer is chosen once the reply carries the rest, so it is skipped when no room is left; the offered work is raised
         // after that offer was chosen; and a page is marked seen from the reply as sent, after compaction, so a message cut from it stays unseen.
         Assert.Equal(
-            new[] { "token_status", "waiting_on_you", "piggyback", "next_work", "standing", "attention_offer", "raise_offered_work", "close_claimed_work", "related_work", "bound", "mark_seen" },
+            new[] { "token_status", "waiting_on_you", "piggyback", "next_work", "standing", "attention_offer", "raise_offered_work", "close_claimed_work", "related_work", "status_tag", "bound", "mark_seen" },
             ReplyAddOns.Steps.Select(step => step.Name));
     }
 }

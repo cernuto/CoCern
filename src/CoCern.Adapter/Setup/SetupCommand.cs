@@ -237,11 +237,13 @@ internal static class SetupCommand
             planners.Add((() => ClientSettings.PlanClaudeCode(Path.Combine(env.Profile, ".claude.json"), env.DotnetPath, env.AdapterDll), true));
             // The Stop hook is on by default: it is how an idle Claude Code chat wakes for a message (Codex chats are woken by the node instead).
             // The prompt hook is opt-in: a status line and new mail with each human message, at no tool call for the model. The same opt-in adds Claude Code's post-tool hook, which
-            // brings new mail during a turn; it stays off by default until it has been tried on a real client. All go into Claude Code's settings.json in one plan, so no write loses another.
+            // brings new mail during a turn, and its waiting hooks, which report a chat stopped at a client prompt on "Waiting on you". They stay off by default until they have been tried on a
+            // real client, and Codex's file gets neither. All go into Claude Code's settings.json in one plan, so no write loses another.
             string Hook(string flag) => $"{SetupEnvironment.AdapterCommandLine(env.DotnetPath, env.AdapterDll)} {flag}" + (options.DataDir is null ? "" : $" --data-dir {LogonStart.Quote(folder)}");
             var promptHook = options.PromptHook ? Hook("--prompt-hook") : null;
             var postToolHook = options.PromptHook ? Hook("--post-tool-hook") : null;
-            planners.Add((() => ClientSettings.PlanClaudeHooks(Path.Combine(env.Profile, ".claude", "settings.json"), Hook("--stop-hook"), promptHook, postToolHook), false));
+            var waitingHook = options.PromptHook ? Hook("--waiting-hook") : null;
+            planners.Add((() => ClientSettings.PlanClaudeHooks(Path.Combine(env.Profile, ".claude", "settings.json"), Hook("--stop-hook"), promptHook, postToolHook, waitingHook), false));
             if (promptHook is not null) planners.Add((() => ClientSettings.PlanPromptHook(Path.Combine(env.Profile, ".codex", "hooks.json"), promptHook), false));
         }
         try { foreach (var (planner, claudeCode) in planners) if (!claudeCode || env.ClaudeCli is null) planner(); }

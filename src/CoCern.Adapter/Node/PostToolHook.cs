@@ -40,11 +40,14 @@ public static class PostToolHook
                 root.TryGetProperty("tool_input", out var toolInput);
                 readByModel = handle => MessagesRead(toolInput, response, handle.RepositoryId, handle.SessionId);
             }
+            // Answering AskUserQuestion brings no new prompt, so its own completion clears the report it left; any other tool leaves it. Side by side with the mail, so it adds no time.
+            var clearing = WaitingHook.ToolFinishedAsync(chat, ChatLocators.Text(root, "tool_use_id"), nodeFolder, findLocal, remaining, handler);
             await HookMail.DeliverAsync(chat, nodeFolder, findLocal, ClaudeWaiter.MaxPrintedInbox, remaining, handler, async block =>
             {
                 await output.WriteLineAsync(Envelope(block));
                 await output.FlushAsync();
             }, readByModel);
+            await clearing;
         }
         catch (Exception) { /* A hook must never fail the turn. */ }
         return 0;
@@ -54,7 +57,7 @@ public static class PostToolHook
         new JsonObject { ["hookSpecificOutput"] = new JsonObject { ["hookEventName"] = "PostToolUse", ["additionalContext"] = context } }.ToJsonString();
 
     /// <summary>Reads the input to its end, so the client's write never blocks; null when it was too long to keep.</summary>
-    private static async Task<string?> ReadBoundedAsync(TextReader input)
+    internal static async Task<string?> ReadBoundedAsync(TextReader input)
     {
         var text = new StringBuilder();
         var buffer = new char[8192];

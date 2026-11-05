@@ -66,7 +66,7 @@ public sealed class WorkerListFitTests
     public void A_large_directory_page_is_cut_by_count_with_its_bindings_and_machines_intact(int limit)
     {
         var (state, _) = Directory(120);
-        var items = AssertFittedPage(Call(state, "worker_list", new() { ["limit"] = limit }), 120);
+        var items = AssertFittedPage(Call(state, "worker_list", new() { ["limit"] = limit, ["includeStale"] = true }), 120);
         // The page is shortened, never degraded: each returned worker still carries its binding.
         Assert.All(items, item => { Assert.IsType<JsonObject>(item!["binding"]); Assert.Null(item["bindingTruncated"]); });
     }
@@ -80,18 +80,30 @@ public sealed class WorkerListFitTests
         AssertFittedPage(Call(state, "worker_list", new() { ["limit"] = limit }), 120);
     }
 
-    [Fact]
-    public void Following_the_cursor_visits_every_session_once()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Following_the_cursor_visits_every_session_once(bool includeStale)
     {
         var (state, ids) = Directory(120);
         var seen = new List<string>();
         int? cursor = 0;
+        string? snapshotTag = null;
         while (cursor is not null)
         {
-            var reply = Call(state, "worker_list", new() { ["limit"] = 50, ["cursor"] = cursor.Value });
+            var arguments = new JsonObject { ["limit"] = 50, ["cursor"] = cursor.Value, ["includeStale"] = includeStale };
+            if (snapshotTag is not null) arguments["snapshotTag"] = snapshotTag;
+            var reply = Call(state, "worker_list", arguments);
             Assert.True(reply.Ok, reply.Code);
             Assert.True(Replies.FitsWire(reply, RelayLimits.AggregateReplyBytes));
             var data = Data(reply);
+            if (!includeStale)
+            {
+                var returnedTag = data["snapshotTag"]!.GetValue<string>();
+                Assert.False(string.IsNullOrEmpty(returnedTag));
+                if (snapshotTag is not null) Assert.Equal(snapshotTag, returnedTag);
+                snapshotTag = returnedTag;
+            }
             seen.AddRange(data["items"]!.AsArray().Select(x => x!["sessionId"]!.GetValue<string>()));
             cursor = data["nextCursor"]?.GetValue<int>();
             Assert.True(seen.Count <= 120, "the cursor never ends");

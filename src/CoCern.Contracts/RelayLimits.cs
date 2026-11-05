@@ -245,6 +245,8 @@ public static class RelayLimits
     public const int MaxAttentionExpiryDays = 90;
     /// <summary>Longest <c>ack</c> <c>waitingFor</c>, and longest text a "Waiting on you" row shows.</summary>
     public const int MaxWaitingTextLength = 200;
+    /// <summary>An <c>ack</c> field saying its <c>waitingFor</c> comes from one of the chat's own client hooks, not the model. Such a call neither replaces nor clears a report the model made. It only restricts its caller, so a client sending it gains nothing.</summary>
+    public const string HookWaitingField = "hookReport";
     /// <summary>Hours a chat's <c>waitingFor</c> lasts from its latest report.</summary>
     public const int WaitingForHours = 12;
     /// <summary>Hours renewals can carry one <c>waitingFor</c> from when it was first set; it survives a night and still ends.</summary>

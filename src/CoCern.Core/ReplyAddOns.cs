@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -49,6 +50,7 @@ internal sealed class ReplyAddOns(Aggregates aggregates, ClaimComposer claims, S
         ("raise_offered_work", static (addOns, reply) => addOns.RaiseOfferedWorkAsync(reply)),
         ("close_claimed_work", static (addOns, reply) => addOns.CloseClaimedWorkAsync(reply)),
         ("related_work", static (addOns, reply) => addOns.LookUpRelatedWork(reply)),
+        ("status_tag", static (addOns, reply) => addOns.CompactStatus(reply)),
         ("bound", static (addOns, reply) => addOns.BoundToWire(reply)),
         ("mark_seen", static (addOns, reply) => addOns.MarkSeenAsync(reply)),
     ];
@@ -60,6 +62,43 @@ internal sealed class ReplyAddOns(Aggregates aggregates, ClaimComposer claims, S
         foreach (var (_, run) in Steps) await run(this, reply);
         return reply.Reply;
     }
+
+    /// <summary>Opt-in wire compaction after fresh authorization and composition; no status payload is cached.</summary>
+    private Task CompactStatus(Outgoing reply)
+    {
+        var call = reply.Call;
+        var controls = call.Controls;
+        if (!reply.Reply.Ok || call.Tool != RelayTools.GetStatus || controls.StatusTag is null || call.Session is null
+            || controls.PageSeen || controls.SeenIds.Length > 0 || controls.Usage is not null || controls.PresentStanding
+            || new[] { "managerHistoryBefore", "managerHistoryOnly", "renewClaims", "ackMessageIds" }.Any(call.Args.ContainsKey)) return Task.CompletedTask;
+        var data = Parse(reply.Reply);
+        if (Text(data, "sessionId") != Text(call.Args, "sessionId") || data["control"] is not JsonObject control
+            || control["paused"] is not JsonValue paused || !paused.TryGetValue<bool>(out _) || control["requests"] is not JsonArray
+            || controls.StatusDetail && data["attention"] is not JsonObject || Uncertain(data)
+            || control["manager"] is JsonObject manager && manager["history"] is JsonArray { Count: > 0 }) return Task.CompletedTask;
+        var scope = new
+        {
+            call.Caller.PrincipalId, call.Caller.IsAdministrator, repositories = call.Caller.Repositories.Order(StringComparer.Ordinal).ToArray(),
+            repository = Text(call.Args, "repositoryId"), board = Text(call.Args, "boardId"), incarnation = Text(call.Args, "hubIncarnation"),
+            controls.StatusDetail, controls.StatusHoldMinutes, attention.Enabled, attention.MaxHoldMinutes
+        };
+        var tag = Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(new { scope, reply.Reply.Version, data })));
+        data["statusTag"] = tag;
+        var full = Ok(data, reply.Reply.Version);
+        // Never send a validator for a full reply that a later fit step would have to truncate.
+        if (!FitsWire(full) || counter is not null && tokenSettings.Enforces(call.Tool) && counter.Count(full.DataJson) > call.Definition.TokenBudget) return Task.CompletedTask;
+        reply.Reply = string.Equals(controls.StatusTag, tag, StringComparison.Ordinal)
+            ? Ok(new { unchanged = true, statusTag = tag }, reply.Reply.Version) : full;
+        return Task.CompletedTask;
+    }
+
+    private static bool Uncertain(JsonNode? node) => node switch
+    {
+        JsonObject obj => obj.Any(field => field.Key is "unavailable" or "truncated" or "requestsOmitted" or "historyTruncated" or "historyReadRequired"
+            && field.Value is JsonValue value && value.TryGetValue<bool>(out var set) && set) || obj.Any(field => Uncertain(field.Value)),
+        JsonArray array => array.Any(Uncertain),
+        _ => false
+    };
 
     /// <summary>An administrator's <c>get_status</c>, but not a background detail read, shows what the tool definitions cost (<see cref="ToolTokenStatus"/>).</summary>
     private Task AddTokenStatus(Outgoing reply)

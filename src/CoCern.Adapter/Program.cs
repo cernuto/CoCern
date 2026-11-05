@@ -125,6 +125,13 @@ try
         using var output = new StreamWriter(Console.OpenStandardOutput(), new System.Text.UTF8Encoding(false)) { AutoFlush = true };
         return await PostToolHook.RunAsync(Console.In, output, folder);
     }
+    if (args.Length > 0 && args[0] == "--waiting-hook")
+    {
+        // Claude Code's Notification, PreToolUse, Stop and PostToolUseFailure hooks for "Waiting on you": no output at all, and always exit 0, so it can never influence a tool call or a turn.
+        var folder = args.Length == 3 && args[1] == "--data-dir" && !string.IsNullOrWhiteSpace(args[2]) ? args[2]
+            : NodeState.ConfiguredFolder(Environment.GetEnvironmentVariable);
+        return await WaitingHook.RunAsync(Console.In, folder);
+    }
     if (args.Length > 0 && args[0] == "--stop-hook")
     {
         // A Claude Code Stop hook run with asyncRewake: exit 2 with the waiting messages on standard error wakes the idle chat; anything else exits 0.
