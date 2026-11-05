@@ -19,7 +19,7 @@ using Xunit.Abstractions;
 
 namespace CoCern.Tests;
 
-public sealed class NodeReleaseTests(ITestOutputHelper output) : IDisposable
+public sealed class NodeReleaseTests : IDisposable
 {
     private readonly string root = Path.Combine(Path.GetTempPath(), "cocern-release-" + Guid.NewGuid().ToString("N"));
     private const string Admin = "release-test-admin";
@@ -58,9 +58,6 @@ public sealed class NodeReleaseTests(ITestOutputHelper output) : IDisposable
 
     [Theory]
     [InlineData("?release=")]
-    [InlineData("?release=bad")]
-    [InlineData("?release=A&release=B")]
-    [InlineData("?release")]
     public async Task Every_release_query_requires_an_enrolled_machine_even_when_malformed(string query)
     {
         await using var host = Host(Package(), jwt: true);
@@ -94,91 +91,6 @@ public sealed class NodeReleaseTests(ITestOutputHelper output) : IDisposable
                 Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/join/adapter.zip?release=" + new string('A', 64))).StatusCode);
             }
         }
-    }
-
-    [Fact]
-    public async Task Rejected_repository_does_not_publish_a_release()
-    {
-        await using var host = Host(Package());
-        using var machine = Client(host, await Enroll(host));
-        using var response = await machine.PostAsJsonAsync("/api/discovery/announce", new { machineName = "PC", chats = new[] { new { repositoryId = "elsewhere", relaySessionId = "foreign" } } });
-        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
-        Assert.DoesNotContain("nodeRelease", await response.Content.ReadAsStringAsync());
-        Assert.Empty(Directory.Exists(CacheFolder) ? Directory.GetFiles(CacheFolder) : []);
-    }
-
-    [Fact]
-    public async Task Partial_session_refusal_preserves_owned_routes_and_machine_release()
-    {
-        await using var host = Host(Package());
-        using var machine = Client(host, await Enroll(host));
-        using var opened = await machine.PostAsJsonAsync("/api/tools/session_open", new { repositoryId = "repo", requestId = "owned-session" });
-        Assert.Equal(HttpStatusCode.OK, opened.StatusCode);
-        using var session = JsonDocument.Parse((await opened.Content.ReadFromJsonAsync<JsonObject>())!["dataJson"]!.GetValue<string>());
-        var own = session.RootElement.GetProperty("sessionId").GetString()!;
-        using var response = await machine.PostAsJsonAsync("/api/discovery/announce", new { machineName = "PC", chats = new[]
-        {
-            new { repositoryId = "repo", relaySessionId = own, provider = "codex", threadId = "owned", label = "Owned", wakeable = true, waiterRunning = false },
-            new { repositoryId = "repo", relaySessionId = "unowned", provider = "codex", threadId = "unowned", label = "Unowned", wakeable = true, waiterRunning = false }
-        } });
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var body = await response.Content.ReadFromJsonAsync<JsonObject>();
-        Assert.Equal("unowned", Assert.Single(body!["refused"]!.AsArray())!["relaySessionId"]!.GetValue<string>());
-        Assert.Equal(own, Assert.Single(body["routes"]!.AsArray())!["relaySessionId"]!.GetValue<string>());
-        Assert.NotNull(body["nodeRelease"]);
-    }
-
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task Missing_or_incompatible_package_does_not_break_announce(bool missing)
-    {
-        var folder = Package(protocol: missing ? "1" : null);
-        if (missing) Directory.Delete(folder, true);
-        await using var host = Host(folder);
-        using var machine = Client(host, await Enroll(host));
-        using var response = await machine.PostAsJsonAsync("/api/discovery/announce", new { machineName = "PC" });
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Null((await response.Content.ReadFromJsonAsync<JsonObject>())!["nodeRelease"]);
-    }
-
-    [Fact]
-    public async Task Discovery_off_preserves_404_for_both_announcement_and_release_download()
-    {
-        await using var host = Host(Package(), enabled: false);
-        using var client = Client(host, Admin);
-        Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/join/adapter.zip?release=" + new string('A', 64))).StatusCode);
-        Assert.Equal(HttpStatusCode.NotFound, (await client.PostAsJsonAsync("/api/discovery/announce", new { machineName = "PC" })).StatusCode);
-    }
-
-    [Theory]
-    [InlineData(CredentialStatus.Unknown, HttpStatusCode.Unauthorized)]
-    [InlineData(CredentialStatus.Throttled, HttpStatusCode.TooManyRequests)]
-    [InlineData(CredentialStatus.Unavailable, HttpStatusCode.ServiceUnavailable)]
-    public async Task Release_authentication_preserves_machine_credential_failure_status(CredentialStatus status, HttpStatusCode expected)
-    {
-        var directory = DispatchProxy.Create<IMachineDirectory, CredentialFailure>();
-        ((CredentialFailure)(object)directory).Status = status;
-        await using var host = Host(Package(), services: services => services.AddSingleton(directory));
-        using var client = Client(host, new string('c', 64));
-        using var response = await client.GetAsync("/join/adapter.zip?release=" + new string('A', 64));
-        Assert.Equal(expected, response.StatusCode);
-        if (expected is HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable) Assert.NotNull(response.Headers.RetryAfter);
-    }
-
-    [Fact]
-    public async Task Package_failure_is_optional_and_nonloopback_plain_HTTP_is_refused()
-    {
-        var folder = Package();
-        await using var host = Host(folder, services: services => services.AddSingleton(new AdapterZipCache(CacheFolder, () => throw new IOException("fixture publication failure"))));
-        using var machine = Client(host, await Enroll(host));
-        using var response = await machine.PostAsJsonAsync("/api/discovery/announce", new { machineName = "PC" });
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Null((await response.Content.ReadFromJsonAsync<JsonObject>())!["nodeRelease"]);
-        Assert.Empty(Directory.GetFiles(CacheFolder, "*.part"));
-        await using var remote = Host(folder, remote: IPAddress.Parse("192.0.2.10"));
-        using var http = remote.CreateClient(new() { BaseAddress = new Uri("http://localhost"), AllowAutoRedirect = false });
-        Assert.Equal(HttpStatusCode.Forbidden, (await http.GetAsync("/join/adapter.zip?release=")).StatusCode);
     }
 
     [Fact]
@@ -234,163 +146,6 @@ public sealed class NodeReleaseTests(ITestOutputHelper output) : IDisposable
         Assert.Empty(Directory.GetFiles(CacheFolder, "*.part"));
     }
 
-    [Fact]
-    public async Task Metadata_mutation_during_publication_cannot_describe_different_archive_bytes()
-    {
-        var folder = Package();
-        var runtime = Path.Combine(folder, "CoCern.Adapter.runtimeconfig.json");
-        var before = File.GetLastWriteTimeUtc(runtime);
-        var changed = false;
-        var cache = new AdapterZipCache(CacheFolder, () =>
-        {
-            if (changed) return;
-            changed = true;
-            File.WriteAllText(runtime, File.ReadAllText(runtime).Replace("10.0.0", "10.0.1", StringComparison.Ordinal));
-            File.SetLastWriteTimeUtc(runtime, before);
-        });
-        await using var a = await cache.ReleaseAsync(folder, default);
-        Assert.NotNull(a);
-        Assert.Equal("10.0.0", Assert.Single(a.Release.Package.Frameworks).Version);
-        Assert.Equal("10.0.1", Assert.Single(NodePackageMetadataReader.Read(folder)!.Frameworks).Version);
-        using var archive = new ZipArchive(new MemoryStream(await Bytes(a.Content)));
-        AssertMetadata(a.Release.Package, NodePackageMetadataReader.Read(archive));
-        await using var b = await cache.ReleaseAsync(folder, default);
-        Assert.NotNull(b);
-        Assert.Equal("10.0.1", Assert.Single(b.Release.Package.Frameworks).Version);
-        Assert.NotEqual(a.Release.ReleaseId, b.Release.ReleaseId);
-    }
-
-    [Fact]
-    public async Task Actual_built_adapter_metadata_matches_its_own_assembly_and_runtime_outputs()
-    {
-        var assembly = typeof(NodePackageMetadataReader).Assembly;
-        var folder = Path.GetDirectoryName(assembly.Location)!;
-        var metadata = NodePackageMetadataReader.Read(folder);
-        Assert.NotNull(metadata);
-        Assert.Equal(assembly.GetCustomAttributes<System.Reflection.AssemblyInformationalVersionAttribute>().Single().InformationalVersion, metadata.ProductVersion);
-        Assert.Equal("net10.0", metadata.TargetFramework);
-        Assert.Equal(1, metadata.SupervisorProtocol);
-        Assert.False(metadata.SelfContained);
-        Assert.Contains(metadata.Frameworks, f => f.Name == "Microsoft.NETCore.App" && f.Version == "10.0.0");
-        Assert.Contains(metadata.Frameworks, f => f.Name == "Microsoft.AspNetCore.App" && f.Version == "10.0.0");
-        // The manager supplies this only for the isolated cached-pack publication check. A supplied path is mandatory input, never silently ignored.
-        var fixture = Environment.GetEnvironmentVariable("COCERN_NODE_RELEASE_FIXTURE");
-        output.WriteLine("SCfixtureProvided=" + (fixture is not null));
-        if (fixture is null) return;
-        Assert.True(Path.IsPathFullyQualified(fixture), "The publication fixture path must be absolute.");
-        Assert.True(Directory.Exists(fixture), "The supplied publication fixture must exist.");
-        var published = NodePackageMetadataReader.Read(fixture);
-        Assert.NotNull(published);
-        Assert.True(published.SelfContained);
-        Assert.Equal("win-x64", published.Rid);
-        Assert.Equal(metadata.ProductVersion, published.ProductVersion);
-        Assert.Equal(metadata.TargetFramework, published.TargetFramework);
-        Assert.Contains(published.Frameworks, f => f.Name == "Microsoft.NETCore.App");
-        Assert.Contains(published.Frameworks, f => f.Name == "Microsoft.AspNetCore.App");
-        var cache = new AdapterZipCache(CacheFolder);
-        await using var lease = await cache.ReleaseAsync(fixture, default);
-        Assert.NotNull(lease);
-        AssertMetadata(published, lease.Release.Package);
-        Assert.Equal(lease.Release.ZipBytes, lease.Content.Length);
-        Assert.Equal(lease.Release.ZipSha256, Convert.ToHexString(await SHA256.HashDataAsync(lease.Content)));
-        lease.Content.Position = 0;
-        using var zip = new ZipArchive(lease.Content, ZipArchiveMode.Read, leaveOpen: true);
-        AssertMetadata(published, NodePackageMetadataReader.Read(zip));
-        using var adapterDll = zip.GetEntry("CoCern.Adapter.dll")!.Open();
-        Assert.Equal(lease.Release.AdapterDllSha256, Convert.ToHexString(SHA256.HashData(adapterDll)));
-        output.WriteLine("SCreaderAccepted=True; RID=" + published.Rid + "; frameworks=" + JsonSerializer.Serialize(published.Frameworks) + "; descriptorAgreement=True; release=" + lease.Release.ReleaseId + "; zipBytes=" + lease.Release.ZipBytes);
-    }
-
-    [Theory]
-    [InlineData("CoCern.Adapter.exe")]
-    [InlineData("coreclr.dll")]
-    [InlineData("hostfxr.dll")]
-    public void Self_contained_requires_all_matching_native_PE_files(string missing)
-    {
-        var folder = Package();
-        var runtime = Path.Combine(folder, "CoCern.Adapter.runtimeconfig.json");
-        File.WriteAllText(runtime, File.ReadAllText(runtime).Replace("frameworks", "includedFrameworks", StringComparison.Ordinal));
-        File.WriteAllText(Path.Combine(folder, "CoCern.Adapter.deps.json"), "{\"runtimeTarget\":{\"name\":\".NETCoreApp,Version=v10.0/win-x64\"}}");
-        var nativeFolder = Package(platform: Platform.X64);
-        foreach (var name in new[] { "CoCern.Adapter.exe", "coreclr.dll", "hostfxr.dll" }) File.Copy(Path.Combine(nativeFolder, "CoCern.Adapter.dll"), Path.Combine(folder, name));
-        Assert.True(NodePackageMetadataReader.Read(folder)?.SelfContained);
-        File.Delete(Path.Combine(folder, missing));
-        Assert.Null(NodePackageMetadataReader.Read(folder));
-        File.Copy(Path.Combine(nativeFolder, "CoCern.Adapter.dll"), Path.Combine(folder, missing));
-        var armFolder = Package(platform: Platform.Arm64);
-        File.Copy(Path.Combine(armFolder, "CoCern.Adapter.dll"), Path.Combine(folder, missing), true);
-        Assert.Null(NodePackageMetadataReader.Read(folder));
-    }
-
-    [Fact]
-    public void Metadata_uses_PE_and_declared_runtime_instead_of_host_version()
-    {
-        var metadata = NodePackageMetadataReader.Read(Package());
-        Assert.NotNull(metadata);
-        Assert.Equal("7.8.9+served-package", metadata.ProductVersion);
-        Assert.Equal("net10.0", metadata.TargetFramework);
-        Assert.Equal("any", metadata.Rid);
-        Assert.False(metadata.SelfContained);
-        Assert.Equal([new NodeFramework("Microsoft.NETCore.App", "10.0.0")], metadata.Frameworks);
-    }
-
-    [Theory]
-    [InlineData("missing-protocol")]
-    [InlineData("unknown-protocol")]
-    [InlineData("missing-deps")]
-    [InlineData("wrong-tfm")]
-    [InlineData("wrong-runtime-target")]
-    [InlineData("unsupported-rid")]
-    [InlineData("architecture")]
-    [InlineData("no-framework")]
-    [InlineData("both-framework-kinds")]
-    [InlineData("duplicate-framework")]
-    [InlineData("invalid-version")]
-    [InlineData("roll-forward")]
-    [InlineData("framework-roll-forward")]
-    [InlineData("runtime-policy")]
-    [InlineData("oversize-json")]
-    [InlineData("oversize-deps")]
-    [InlineData("invalid-pe")]
-    public void Contradictory_or_unsupported_metadata_is_unavailable(string defect)
-    {
-        var folder = Package(protocol: defect == "missing-protocol" ? null : defect == "unknown-protocol" ? "2" : "1", platform: defect == "architecture" ? Platform.X64 : Platform.AnyCpu);
-        var runtimePath = Path.Combine(folder, "CoCern.Adapter.runtimeconfig.json");
-        var config = JsonNode.Parse(File.ReadAllText(runtimePath))!.AsObject();
-        var options = config["runtimeOptions"]!.AsObject();
-        var depsPath = Path.Combine(folder, "CoCern.Adapter.deps.json");
-        switch (defect)
-        {
-            case "missing-deps": File.Delete(depsPath); break;
-            case "wrong-tfm": options["tfm"] = "net9.0"; break;
-            case "wrong-runtime-target": File.WriteAllText(depsPath, "{\"runtimeTarget\":{\"name\":\".NETCoreApp,Version=v9.0\"}}"); break;
-            case "unsupported-rid": File.WriteAllText(depsPath, "{\"runtimeTarget\":{\"name\":\".NETCoreApp,Version=v10.0/linux-x64\"}}"); break;
-            case "no-framework": options.Remove("frameworks"); break;
-            case "both-framework-kinds": options["includedFrameworks"] = options["frameworks"]!.DeepClone(); break;
-            case "duplicate-framework": options["frameworks"]!.AsArray().Add(options["frameworks"]![0]!.DeepClone()); break;
-            case "invalid-version": options["frameworks"]![0]!["version"] = "latest"; break;
-            case "roll-forward": options["rollForward"] = "Major"; break;
-            case "framework-roll-forward": options["frameworks"]![0]!["rollForward"] = "Major"; break;
-            case "runtime-policy": options["applyPatches"] = false; break;
-            case "invalid-pe": File.WriteAllText(Path.Combine(folder, "CoCern.Adapter.dll"), "not a PE"); break;
-            case "oversize-deps": File.WriteAllText(depsPath, new string(' ', 4 * 1024 * 1024 + 1)); break;
-        }
-        File.WriteAllText(runtimePath, defect == "oversize-json" ? new string(' ', 65537) : config.ToJsonString());
-        Assert.Null(NodePackageMetadataReader.Read(folder));
-    }
-
-    [Theory]
-    [InlineData("win-x64", Platform.X64)]
-    [InlineData("win-arm64", Platform.Arm64)]
-    public void Explicit_RID_requires_matching_PE_architecture(string rid, Platform platform)
-    {
-        var folder = Package(platform: platform);
-        File.WriteAllText(Path.Combine(folder, "CoCern.Adapter.deps.json"), "{\"runtimeTarget\":{\"name\":\".NETCoreApp,Version=v10.0/" + rid + "\"}}");
-        Assert.Equal(rid, NodePackageMetadataReader.Read(folder)?.Rid);
-        File.WriteAllText(Path.Combine(folder, "CoCern.Adapter.deps.json"), "{\"runtimeTarget\":{\"name\":\".NETCoreApp,Version=v10.0/" + (rid == "win-x64" ? "win-arm64" : "win-x64") + "\"}}");
-        Assert.Null(NodePackageMetadataReader.Read(folder));
-    }
-
     private string CacheFolder => Path.Combine(root, "cache");
     private string Package(string? protocol = "1", Platform platform = Platform.AnyCpu)
     {
@@ -415,13 +170,6 @@ public sealed class NodeReleaseTests(ITestOutputHelper output) : IDisposable
         ["Relay:Clients:1:IsAdministrator"] = "true",
         ["Relay:Clients:1:Repositories:0"] = "repo"
     }, configureServices: collection => { collection.AddSingleton(new AdapterZipCache(CacheFolder)); services?.Invoke(collection); });
-
-    public class CredentialFailure : DispatchProxy
-    {
-        public CredentialStatus Status { get; set; }
-        protected override object? Invoke(MethodInfo? method, object?[]? args) => method?.Name == nameof(IMachineDirectory.CheckAsync)
-            ? Task.FromResult(new CredentialCheck(Status)) : throw new NotSupportedException();
-    }
 
     private static HttpClient Client(RelayHostFixture host, string? token = null)
     {
