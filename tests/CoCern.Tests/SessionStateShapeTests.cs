@@ -5,6 +5,7 @@ using CoCern.Domain;
 using CoCern.Domain.Messages;
 using CoCern.Domain.State;
 using Xunit;
+using static CoCern.Tests.ExhaustiveStateFixture;
 
 namespace CoCern.Tests;
 
@@ -31,11 +32,6 @@ public sealed class SessionStateShapeTests
         Assert.True(reply.Ok, T.Operation + ": " + reply.Code + " " + reply.DataJson);
         return reply;
     }
-
-    private static IEnumerable<string> Keys(JsonNode? node) => node is JsonObject json ? json.Select(entry => entry.Key) : [];
-
-    private static IEnumerable<string> EntryKeys(JsonObject state, string map) =>
-        state[map] is JsonObject entries ? entries.SelectMany(entry => Keys(entry.Value)) : [];
 
     [Fact]
     public void A_session_stores_only_the_keys_its_state_declares()
@@ -138,13 +134,11 @@ public sealed class SessionStateShapeTests
         Assert.Equal(native[NativeParticipant.Generation]!.GetValue<string>(), nativeDocument[NativeParticipant.Generation]!.GetValue<string>());
         Assert.Equal(native[NativeParticipant.Request]!.GetValue<string>(), nativeDocument[NativeParticipant.Request]!.GetValue<string>());
         var documents = new[] { chat, peer, gone }.Select(session => hub.State(AggregateKinds.Session, session.Id)).Append(nativeDocument).ToArray();
-        foreach (var document in documents) Assert.Empty(SessionState.Shape.Undeclared(document));
+        ExhaustiveStateFixture.Verify(SessionState.Shape, documents);
 
         // The shape is not vacuous: between them the sessions wrote every key it declares, but the request tombstones (written only once a
         // full replay cache evicts a reply early) and the work ledger's overflow mark (only past its open-action limit).
         var state = documents[0];
-        Assert.Equal(SessionState.Shape.Fields.Keys.Except([ReadModels.RequestTombstonesKey]).Order(StringComparer.Ordinal),
-            documents.SelectMany(Keys).Distinct().Order(StringComparer.Ordinal));
         Assert.Equal(InboxMessage.Keys.Order(StringComparer.Ordinal), EntryKeys(state, SessionState.InboxKey).Distinct().Order(StringComparer.Ordinal));
         Assert.Equal(QueuedItem.Shape.Fields.Keys.Order(StringComparer.Ordinal), EntryKeys(state, AttentionQueue.ItemsKey).Distinct().Order(StringComparer.Ordinal));
         Assert.Equal([WorkLedger.ClosedKey, WorkLedger.OpenKey], Keys(state[SessionState.WorkKey]).Order(StringComparer.Ordinal));
@@ -167,18 +161,4 @@ public sealed class SessionStateShapeTests
         Assert.Equal((true, Now.AddMinutes(1), "admin"), (closed.Closed, closed.ClosedAt, closed.ForceClosedBy));
     }
 
-    [Fact]
-    public void A_shape_names_an_inbox_or_attention_key_the_session_does_not_declare()
-    {
-        var hub = new AggregateHub();
-        var chat = hub.Open("chat", Now);
-        hub.DeliverAll(Now);
-        Effect(hub, chat, new AttentionRaise(Repository, new AttentionContent { Kind = AttentionKinds.Info, TaskId = "t-1" }), Now);
-        var state = hub.State(AggregateKinds.Session, chat.Id);
-        state[SessionState.InboxKey] = new JsonObject { ["m"] = new JsonObject { [InboxMessage.MessageIdKey] = "m", ["requestId"] = "r" } };
-        state[AttentionQueue.ItemsKey]!.AsObject().First().Value!["stray"] = true;
-        state["activeAt"] = Now.ToString("O");
-        // A session's own copy of its record never holds the directory's activity time.
-        Assert.Equal(["activeAt", "attention.*.stray", "inbox.*.requestId"], SessionState.Shape.Undeclared(state).Order(StringComparer.Ordinal));
-    }
 }
