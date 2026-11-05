@@ -1,6 +1,7 @@
 // Deliberately tab-local: browser permission alone never opts a viewer in.
 let enabled = false;
 let unavailable = false;
+let generation = 0;
 const seen = new Set();
 const open = new Set();
 const available = () => window.isSecureContext && "Notification" in window;
@@ -9,12 +10,15 @@ const state = () => unavailable || !available() ? "unavailable" : Notification.p
 // Called only by the explicit Enable button, never by initialization or publish.
 export async function enable() {
     if (!available()) return "unavailable";
+    const operation = ++generation;
     const permission = Notification.permission === "default" ? await Notification.requestPermission() : Notification.permission;
+    if (operation !== generation) return state();
     enabled = permission === "granted";
     return state();
 }
 
 export function disable() {
+    ++generation; // Invalidate a permission prompt still waiting for the viewer.
     enabled = false;
     for (const notification of open) notification.close();
     open.clear();
