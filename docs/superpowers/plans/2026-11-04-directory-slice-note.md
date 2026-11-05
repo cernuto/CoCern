@@ -96,3 +96,17 @@ Mechanism: IDs stay on the in-process record and under private state keys, `peer
 - **g. Replay order.** A `record_decision` retry after a name turned ambiguous must return its stored receipt, so the replay check must precede resolving.
 - **h. Plan scope.** Task 3's file list omits the control files, so this slice lands first. Task 3 owns the board side of resync and the private grant keys, so resync has no consumer until then. Resolve and grant commit in different grains; that is acceptable because identity is stable.
 - **i. Dashboard fallback.** The design and plan rely on the dashboard when an owner is gone. In the dashboard's `.razor` markup on main, "blocked" and "failed" appear only in analytics and "stranded" not at all, and stranded alerts go to manager sessions. Task 3 or 4 must confirm or add this view, or a gone owner's item is visible nowhere.
+
+## 9. As built on claude/directory-resolver (base 5f61704, not compiled)
+
+The section "not on main" above is stale: `NativeParticipant`, `VerifiedNativeParticipant` and `CurrentNativeSession` are on main. Sections 2, 4 and 5 are in. Section 3 is not: the route alone is small, but resync needs state on the join and a board side, and Decisions Task 3 is its only consumer.
+
+- **Internal requests:** `PeerResolve` and `PeerList` go to the control aggregate, answered in `PeerDirectory`. `PeerTools` is the only reader and projects by allow-list. `PeerTools.ResolveAsync` is the typed entry Task 3 calls.
+- **8b, the name:** an optional `label` beside the private join's frozen proof, sent by the adapter on the wire only. It is outside the identity hash and the frozen arguments, flows to the existing `SessionRecord` label, is bounded by the guard, and grants nothing. `Admit` also records the proof's provider as `nativeClient`, kept on the private join entry, not the row, so worker listings do not change. With no title, the name reads as the client's default. Native opens are not replayed by request ID, so a changed title cannot conflict with a retry; it applies when a session is next opened. Hub before adapter: an older hub refuses the extra field.
+- **8c, `gone`:** no snapshot. A closed chat answers `unknown` and is not listed.
+- **8d, untitled chats:** they share "Claude" or "Codex" and are refused as ambiguous. Nothing breaks a tie.
+- **8e, `ref`:** the row's current session ID, on the choice only.
+- **8f, row data:** `state` is `reachable` (a live announced wake route) or `unconfirmed` (no proof of one), since the hub has no mid-turn signal. `on` is left out until a board read is justified.
+- **8g, replay:** `peers` is a read and stores nothing. A mutation must check its stored receipt before calling the resolver; the contract is on `PeerTools.ResolveAsync`.
+- **Differs from section 4:** the native surface adds `peers` and keeps `chat_directory`, because `send_message` still takes a recipient's session ID and `peers` shows one only in a choice. Drop it when a name can address a message.
+- **Catalog:** `RelayToolCatalog.ForRole` leaves `peers` out, as raw clients never get it, so the capped worker and administrator catalogs do not change. The native surface pays about 431 characters.
