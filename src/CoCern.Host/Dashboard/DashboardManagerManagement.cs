@@ -26,6 +26,11 @@ public static class DashboardManagerManagement
             if (query["managerHistoryBefore"].Count != 1 || !long.TryParse(query["managerHistoryBefore"][0], NumberStyles.None, CultureInfo.InvariantCulture, out var before) || before < 0) return Invalid();
             args["managerHistoryBefore"] = before;
         }
+        if (query.ContainsKey("managerActionsBefore"))
+        {
+            if (query["managerActionsBefore"].Count != 1 || !long.TryParse(query["managerActionsBefore"][0], NumberStyles.None, CultureInfo.InvariantCulture, out var before) || before < 0) return Invalid();
+            args["managerActionsBefore"] = before;
+        }
         var reply = await application.ExecuteAsync(new(principal, true, [query["repositoryId"][0]!]), RelayTools.GetStatus, JsonSerializer.SerializeToElement(args), context.RequestAborted);
         return Project(reply);
     }
@@ -123,7 +128,8 @@ public static class DashboardManagerManagement
         if (root.TryGetProperty("control", out var control)) root = control;
         var manager = root.TryGetProperty("manager", out var selection) ? selection.Deserialize<ManagerSelectionStatus>(Json) : null;
         bool? paused = root.TryGetProperty("paused", out var pausedValue) && pausedValue.ValueKind is JsonValueKind.True or JsonValueKind.False ? pausedValue.GetBoolean() : null;
-        return new(reply.Ok, reply.Code, manager, paused);
+        var actions = root.TryGetProperty("actions", out var page) ? page.Deserialize<AdminActionPage>(Json) : null;
+        return new(reply.Ok, reply.Code, manager, paused, actions);
     }
 
     private static async Task<DashboardManagerResult> ReadStatusAsync(HttpContext context, IRelayApplication application, string principal, string repository)
