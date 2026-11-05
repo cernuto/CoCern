@@ -33,7 +33,7 @@ public sealed record InboxMessage
     public static IReadOnlyList<string> Keys { get; } =
     [
         MessageIdKey, RepositoryIdKey, KindKey, TaskIdKey, BoardIdKey, TextKey, AuthorKey, SenderSessionIdKey, SentAtKey, ReplyToKey, UndeliveredMessageIdKey,
-        RecipientSessionIdKey, ReasonKey, TaskVersionKey, SupersedeKey, WakeKey
+        RecipientSessionIdKey, ReasonKey, TaskVersionKey, SupersedeKey, WakeKey, ManagerGenerationKey
     ];
 
     /// <summary>The kind of the notice a sender gets when its message could not be delivered, or was never read.</summary>
