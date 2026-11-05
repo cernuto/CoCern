@@ -1,51 +1,57 @@
 # Why hub mail does not wake an idle Codex chat, and the unresponsive row
 
-Note only; nothing here is built. Read against main 5acb9ef and this PC's live state on 2026-11-05 at about 00:50Z. Paths are under `src/CoCern.Adapter/` unless shown otherwise.
+Note only. Read against main on 2026-11-05. Paths are under `src/CoCern.Adapter/` unless shown otherwise.
+
+**Correction.** The first version of this note said no Codex chat was watched, that Codex chats had no handles, and that local wake setup was failing silently. All three were wrong. The check looked in the wrong folder, as described below. The fixes it led to are still useful, for a different reason.
 
 ## Finding
 
-On the hub PC, no Codex chat is being watched at all. The path stops inside the Codex chat's own adapter, before any wake decision. The wake code itself exists and is not what is missing.
+Idle Codex chats are unwatched after every adapter restart. `LocalChatWake`'s `observed` set is in memory, so a restarted adapter has no watcher for a chat until that chat next calls the hub. A deploy restarts every backend, and there were many deploys on the day of the stalls. This fits "wakes only when something pokes it", but it is inferred: no real idle chat has yet been shown waking or failing to wake because of it.
 
-The dashboard's "No direct chat route" is not the cause. It is set only from node announcements, and `LocalChatWake` never announces, so on the hub PC it reads false even for a working route (`SessionInspector.razor:11`, `ReadModels.cs:85`, `SqliteStore.Observation.cs:291`, inferred from reading).
+The dashboard's "No direct chat route" is not the cause. It is set only from node announcements, and `LocalChatWake` never announces, so on the hub PC it reads false even for a working route (`SessionInspector.razor:11`, `ReadModels.cs:85`, `SqliteStore.Observation.cs:291`, from reading).
 
-## How it should work
+## Where local wake state lives
+
+The Claude and Codex desktop apps are packaged, so Windows redirects AppData writes by them and their child processes, including MCP adapters. Each client sees its own view of `%LOCALAPPDATA%\CoCern\local-wake`:
+
+- Codex: `%LOCALAPPDATA%\Packages\OpenAI.Codex_2p2nqsd0c76g0\LocalCache\Local\CoCern\local-wake`
+- Claude: `%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Local\CoCern\local-wake`
+
+A file missing from one client's view says nothing about another client. Check `status\<pid>.json` in the right folder. Status files hold no secrets; session handles hold tokens, so list their names only.
+
+## How it works
 
 1. The hub stores the message, raises an attention item and sends a hint. It dispatches nothing.
 2. On the hub PC, each adapter creates a `LocalChatWake` when `COCERN_TOKEN_FILE` is set (`Program.cs:199`).
-3. Any successful session call goes through `LocalChatWake.Observe`, which writes a session handle under `%LOCALAPPDATA%\CoCern\local-wake\<key>\sessions\` and marks the session observed. `SessionHandoff.Restore` recreates a missing handle on the next call.
+3. Any successful session call goes through `LocalChatWake.Observe`, which writes a session handle under `sessions\` and marks the session observed. `SessionHandoff.Restore` recreates a missing handle on the next call.
 4. The locator maps the handle to a Codex thread by scanning rollouts, since Codex exports no chat ID (`AdapterOptions.cs:107`).
 5. A watcher runs per thread, with its state in `wake-<thread>.db`, and calls `codex queue` (`CodexWakeDispatcher.cs:34`).
 
 ## Evidence
 
-Observed on this PC:
+Observed in Codex's package folder at 03:19Z on 2026-11-05, about five minutes after a deploy:
 
 | Check | Result |
 |---|---|
-| Handles in the real key folder | `089e8a81`, `69cd88a2`, `39172b3b`, `7742d45f`, all with provider `claude` |
-| Root `8926ff7a` or reviewer `3aa66e5b` | No handle and no restore lock, though both call the hub constantly |
-| `wake-*.db` anywhere under `%LOCALAPPDATA%\CoCern` | None, so no Codex watcher has run under this folder |
-| Codex `queue_1.sqlite` | 0 queued items, so stop point E below is not the cause now |
-| Codex adapter process (PID 6888, started 00:33:21Z, version 0db52f8e, parent chain to `codex.exe`) | `COCERN_URL` and `COCERN_TOKEN_FILE` match Claude's; token not restricted, normal integrity |
-| `connection.json`, rewritten on every `LocalWakeConnection.Create` | Last written 23:50:48Z, so PID 6888 did not complete `Create` 43 minutes later |
-| The same adapter version started from my shell with the same three settings | Rewrote `connection.json` and exited 0 |
-
-Inferred from those: `LocalChatWake.TryCreate` returned null in the Codex adapter, or the adapter never reached it. Every failure there is silent: `LocalWakeConnection.Create` returns null on three guards, and `TryCreate` swallows I/O errors (`LocalChatWake.cs`, `LocalWakeConnection.cs:17-20`).
+| Session handles | Three, including root and the reviewer |
+| `wake-*.db` | Two |
+| Codex adapters reporting status | Six, all on the deployed build |
+| Status `watching` | One adapter, root's, after root's call at 03:14:25Z |
+| Status `no_observed_sessions` | Five, each with `rearm_skip_not_armed_here` |
+| Armed records | One, root's |
+| Codex `queue_1.sqlite` | 0 queued items, so a stuck queue item isn't the cause now |
 
 ## Not established
 
-The reason `Create` did not complete in the Codex adapter. The Codex process's smaller environment was the first suspect, and it is ruled out: the deployed adapter completed setup with only `COCERN_TOKEN_FILE` and `COCERN_URL` set, using a throwaway token and an unused port. The Codex adapter also runs as the same user. Root and the reviewer having no handle at all looks systematic rather than a one-off race, but that is inference. I also could not separate which of the adapters started at 23:50 wrote the file. The diagnostic in step 1 below is meant to answer this; it must cover `Observe` as well as setup, since the cause may not be in `Create`.
+- That restarts are the whole cause. A real idle chat needs to be sent wake-on mail while watched, and the reply correlated.
+- The second PC, which uses a node rather than `LocalChatWake`.
+- Other stop points found by reading, which may also apply: mail carrying a `taskId` isn't direct, so it waits for the 10-minute hold (`src/CoCern.Domain/SessionAttention.cs`); and a handle never located within 30 minutes stays unmapped (`Node/ChatLocators.cs`).
 
-This also does not explain the second PC. `104fd233` uses a node rather than `LocalChatWake`, and I did not inspect it.
+## What was built
 
-## Plan, smallest first
-
-1. **Make the failure visible.** Record why local wake did not start: a one-line reason per adapter, in a small file in the local-wake root plus stderr. Today nothing records it, and `logs_2.sqlite` holds no CoCern wake lines. Files: `Node/LocalWakeConnection.cs`, `Node/LocalChatWake.cs`, tests in `LocalWakeTests`. This needs a deploy and one Codex restart, which root owns. Then fix whatever it names.
-2. **Survive adapter restarts.** `observed` is in memory, so after every deploy an idle chat has no watcher until it next calls the hub, even once step 1's cause is fixed. This matches "wakes only when poked". At the start of `LoopAsync`, re-arm located Codex handles after one authenticated background read, with a recency limit so abandoned chats are not woken. `WakeState`'s per-chat exclusive file already stops two adapters dispatching twice. Files: `Node/LocalChatWake.cs`, `LocalWakeTests`.
-3. **Stop one stuck wake blocking newer mail.** `direct` always picks the oldest unread message and each ID wakes once (`src/CoCern.Domain/SessionAttention.cs:259-260`, `WakeReconciler.cs:65`). If a queued wake never runs, newer direct mail reconciles as `empty` and only one hold wake follows. Prefer the newest unread. Files: `SessionAttention.cs`, which is reserved for root, and `AttentionSchedulerTests`.
-4. **Optional, dashboard only.** Announce local routes so "No direct chat route" stops being wrong on the hub PC.
-
-Mail carrying a `taskId` is not direct, so it waits for the 10-minute hold (`SessionAttention.cs:257,263`). That is by design today, but it explains some delays and is worth a decision.
+- Restart re-arm: a backend swapped under the same launcher re-arms the chats its launcher had armed, if active within 24 hours. Armed records exist only since that build, so the first deploy after it could not re-arm anything; the next one is the first that can. A restart of Codex itself still re-arms nothing, by ruling, and those chats wait for their next call.
+- Status files and fixed reason codes, which is how this correction was found.
+- Newest-unread wake candidate, so one wake that never ran can't block newer mail.
 
 ## Must be proven on a real Codex client
 
