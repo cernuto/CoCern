@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CoCern.Adapter;
 using CoCern.Adapter.Node;
+using CoCern.Contracts;
 using Xunit;
 
 namespace CoCern.Tests;
@@ -114,11 +115,35 @@ public sealed class EditClaimLifecycleTests
             Assert.Empty(fixture.Transport.Releases);
         }
 
-        // A release with no answer may still reach the hub, so a PRE on that generation refuses until that can no longer happen.
+        // A release with no answer may still reach the hub, so a PRE on that generation refuses, and neither time nor a read still showing this holder ends that.
         await fixture.Lifecycle.SweepAsync(default);
         Assert.Single(fixture.Transport.Releases);
         fixture.Hold("edit-3", "acquire-3", newlyAcquired: false);
         Assert.False(await fixture.Lifecycle.PrepareAsync("edit-3", [File1], default));
+
+        fixture.Clock.Now = fixture.Clock.Now.AddHours(1);
+        fixture.Transport.ReadReply = new AdapterReply(true, "Ok", JsonSerializer.SerializeToElement(new { held = true, generation = 7L, leaseUntil = fixture.Clock.Now.AddSeconds(120).ToString("O") }), 7);
+        await fixture.Lifecycle.SweepAsync(default);
+        fixture.Hold("edit-4", "acquire-4", newlyAcquired: false);
+        Assert.False(await fixture.Lifecycle.PrepareAsync("edit-4", [File1], default));
+    }
+
+    [Fact]
+    public async Task A_blocker_refusal_of_a_replay_says_nothing_about_the_unanswered_send_before_it()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        using var fixture = new Fixture();
+        fixture.Hold("edit-1", "acquire-1", newlyAcquired: true);
+        Assert.True(await fixture.Lifecycle.PrepareAsync("edit-1", [File1], default));
+        await fixture.Lifecycle.ObserveAsync("edit-1", false, null, default);
+
+        await fixture.Lifecycle.SweepAsync(default);
+        fixture.Transport.ReleaseReply = new AdapterReply(false, RelayErrorCodes.UnresolvedAction);
+        await fixture.Lifecycle.SweepAsync(default);
+        Assert.Equal(2, fixture.Transport.Releases.Count);
+
+        fixture.Hold("edit-2", "acquire-2", newlyAcquired: false);
+        Assert.False(await fixture.Lifecycle.PrepareAsync("edit-2", [File1], default));
     }
 
     private sealed class Fixture : IDisposable
@@ -177,6 +202,7 @@ public sealed class EditClaimLifecycleTests
         internal List<string> Renewals { get; } = [];
         internal List<string> Releases { get; } = [];
         internal AdapterReply ReleaseReply { get; set; } = new(false, "hub_timeout");
+        internal AdapterReply ReadReply { get; set; } = new(false, "hub_timeout");
 
         public Task<AdapterReply> RenewAsync(string relativePath, long generation, string invocation)
         {
@@ -190,6 +216,6 @@ public sealed class EditClaimLifecycleTests
             return Task.FromResult(ReleaseReply);
         }
 
-        public Task<AdapterReply> ReadAsync(string relativePath, long generation) => Task.FromResult(new AdapterReply(false, "hub_timeout"));
+        public Task<AdapterReply> ReadAsync(string relativePath, long generation) => Task.FromResult(ReadReply);
     }
 }
