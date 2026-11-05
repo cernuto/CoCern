@@ -15,14 +15,17 @@ public sealed record AdapterReply(bool Ok, string Code, JsonElement? Data = null
 }
 
 /// <param name="callOrigin">Who this forwarder's calls report as their origin (<see cref="CallOrigins"/>). Telemetry only; null reports none.</param>
-public sealed class RelayForwarder(HttpClient client, AdapterOptions options, string? callOrigin = null)
+public sealed class RelayForwarder(HttpClient client, AdapterOptions options, string? callOrigin = null, bool nativeSurface = false)
 {
     public const int MaxRequestBytes = RelayLimits.MaxPayloadBytes; // the hub refuses anything larger
     public const int MaxResponseBytes = 128 * 1024;
     private const string ResponseTooLarge = "response_too_large";
 
     /// <summary>The same transport, reporting another origin.</summary>
-    internal RelayForwarder Tagged(string origin) => new(client, options, origin);
+    internal RelayForwarder Tagged(string origin) => new(client, options, origin, nativeSurface);
+
+    /// <summary>The same transport for a verified native chat's own calls, which may also forward the one tool only that surface lists.</summary>
+    internal RelayForwarder ForNativeCalls(string origin) => new(client, options, origin, nativeSurface: true);
 
     public static HttpClientHandler CreateHandler() => new() { AllowAutoRedirect = false, UseCookies = false };
     /// <summary>The pinned handler when the options carry a certificate fingerprint, otherwise the plain one.</summary>
@@ -34,8 +37,20 @@ public sealed class RelayForwarder(HttpClient client, AdapterOptions options, st
     public Task<AdapterReply> ForwardAsync(string tool, JsonElement arguments, CancellationToken cancellationToken = default)
     {
         if (cancellationToken.IsCancellationRequested) return Task.FromCanceled<AdapterReply>(cancellationToken);
-        return CoordinationTools.IsAllowed(tool, options.Admin, options.ChatOnly, options.Diagnostics, options.EventWaits)
-            ? SendAsync(tool, arguments, cancellationToken) : Task.FromResult(new AdapterReply(false, "unknown_tool"));
+        return nativeSurface && tool == RelayTools.Peers || CoordinationTools.IsAllowed(tool, options.Admin, options.ChatOnly, options.Diagnostics, options.EventWaits)
+            ? SendAsync(tool, arguments, cancellationToken)
+            : Task.FromResult(new AdapterReply(false, "unknown_tool", ChatGuidance.ToolOff(tool) is { } hint ? JsonSerializer.SerializeToElement(new Dictionary<string, string> { [ChatGuidance.HintField] = hint }) : null));
+    }
+
+    /// <summary>A <c>session_open</c> reply with its startup line narrowed to the tools this adapter lists (<see cref="ChatGuidance.NarrowStartHint"/>). A reply without one stays as it is.</summary>
+    internal AdapterReply WithOwnStartHint(AdapterReply reply)
+    {
+        if (reply.Data is not { ValueKind: JsonValueKind.Object } data || !data.TryGetProperty(ChatGuidance.StartHintField, out var line) || line.ValueKind != JsonValueKind.String) return reply;
+        var narrowed = ChatGuidance.NarrowStartHint(line.GetString()!, options.Admin, options.ChatOnly);
+        if (narrowed == line.GetString()) return reply;
+        var node = System.Text.Json.Nodes.JsonNode.Parse(data.GetRawText())!.AsObject();
+        node[ChatGuidance.StartHintField] = narrowed;
+        return reply with { Data = JsonSerializer.SerializeToElement(node) };
     }
 
     // A fixed, internal status read for the exact connection's current private handle, including in the compact profile.

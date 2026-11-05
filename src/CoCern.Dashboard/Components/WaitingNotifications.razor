@@ -1,0 +1,69 @@
+@implements IAsyncDisposable
+@inject IJSRuntime JS
+
+<div class="notification-control">
+    <button type="button" class="connect-button" disabled="@(_busy || _state is "loading" or "unavailable" or "denied")" @onclick="ToggleAsync">@(_state == "enabled" ? "Turn off desktop alerts" : "Enable desktop alerts")</button>
+    <span class="muted" role="status">@Status</span>
+</div>
+
+@code {
+    [Parameter] public DashboardWaiting Waiting { get; set; } = new();
+    private IJSObjectReference? _module;
+    private string _state = "loading";
+    private bool _busy;
+    private bool _disposed;
+    private string Status => _state switch
+    {
+        "enabled" => "On for this tab · silent alerts",
+        "denied" => "Blocked by your browser. Change this site's notification permission to enable alerts.",
+        "unavailable" => "Desktop alerts are unavailable in this browser or connection.",
+        "loading" => "Checking desktop alerts…",
+        _ => "Off · enable to receive silent waiting-on-you alerts in this tab."
+    };
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (_disposed) return;
+        try
+        {
+            if (firstRender)
+            {
+                _module = await JS.InvokeAsync<IJSObjectReference>("import", "./waiting-notifications.js");
+                if (_disposed) { await _module.DisposeAsync(); return; }
+            }
+            if (_module is null) return;
+            // Identity excludes mutable display text; refreshed snapshots do not re-alert.
+            var ids = Waiting.Items.Select(item => System.Text.Json.JsonSerializer.Serialize(new object?[]
+            {
+                item.Kind, item.RepositoryId, item.BoardId, item.TaskId, item.ProposalId, item.SessionId, item.Since
+            })).ToArray();
+            var state = await _module.InvokeAsync<string>("publish", (object)ids);
+            if (state != _state) { _state = state; StateHasChanged(); }
+        }
+        catch (JSException) { SetUnavailable(); }
+    }
+
+    private async Task ToggleAsync()
+    {
+        if (_busy || _module is null) return;
+        _busy = true;
+        try { _state = await _module.InvokeAsync<string>(_state == "enabled" ? "disable" : "enable"); }
+        catch (JSException) { _state = "unavailable"; }
+        finally { _busy = false; }
+    }
+
+    private void SetUnavailable()
+    {
+        if (_state == "unavailable" || _disposed) return;
+        _state = "unavailable";
+        StateHasChanged();
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        _disposed = true;
+        if (_module is null) return;
+        try { await _module.InvokeVoidAsync("disable"); await _module.DisposeAsync(); }
+        catch (JSException) { }
+    }
+}

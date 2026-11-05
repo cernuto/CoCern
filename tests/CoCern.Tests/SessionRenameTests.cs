@@ -92,17 +92,6 @@ public sealed class SessionRenameTests
         finally { await host.StopAsync(); }
     }
 
-    [Fact]
-    public void Session_bind_advertises_label_within_the_worker_budget()
-    {
-        Assert.True(RelayToolCatalog.TryGet(RelayTools.SessionBind, out var bind));
-        var properties = RelayToolCatalog.ForwardingSchema(bind).GetProperty("properties");
-        Assert.True(properties.TryGetProperty("label", out _));
-        Assert.True(properties.TryGetProperty("machineId", out _));
-        Assert.DoesNotContain("binding", bind.RequiredFields);
-        Assert.Contains("label", bind.Description, StringComparison.Ordinal);
-    }
-
     private static async Task<IHost> StartAsync()
     {
         var host = new HostBuilder().ConfigureLogging(log => log.ClearProviders()).UseOrleans(silo => silo

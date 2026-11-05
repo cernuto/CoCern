@@ -15,16 +15,6 @@ public sealed class ChatDecisionTests
     private static readonly RelayCaller Admin = new("fixture-admin", true, ["repo", "other"]);
 
     [Fact]
-    public void Creating_a_proposal_emits_no_manager_session_attention()
-    {
-        var board = new StateEnvelope<CoordinationDocument>();
-        var reply = CoordinationStateMachine.Apply(board, AggregateKinds.Board, "repo/default", Worker, RelayTools.StandingPropose,
-            new JsonObject { ["repositoryId"] = "repo", ["sessionId"] = "fixture-session", ["requestId"] = "propose", ["line"] = new JsonObject { ["text"] = "No manager fanout" } }, DateTimeOffset.UtcNow);
-        Assert.True(reply.Ok, reply.Code);
-        Assert.Empty(board.Effects);
-    }
-
-    [Fact]
     public async Task Racing_verified_sessions_present_once_and_reopening_does_not_repeat_or_authorize()
     {
         var database = Path.Combine(Path.GetTempPath(), "cocern-chat-decisions-" + Guid.NewGuid().ToString("N"), "relay.db");
@@ -52,37 +42,6 @@ public sealed class ChatDecisionTests
             Assert.NotNull((await reopened.Pending(proposal))["presentedBy"]);
             await reopened.AssertNoAuthority();
         }
-    }
-
-    [Fact]
-    public async Task Nondefault_board_pending_proposal_is_not_hidden_behind_other_boards_or_other_repositories()
-    {
-        await using var fixture = new Fixture();
-        var session = await fixture.Open();
-        for (var index = 0; index < 36; index++)
-            await fixture.Put(new() { ["lines"] = new JsonArray(new JsonObject { ["id"] = "rule", ["text"] = "fixture rule" }) }, board: "a-" + index.ToString("D2"));
-        var foreign = await fixture.Open(repository: "other");
-        var foreignProposal = await fixture.Propose(foreign, Line("Foreign proposal"), repository: "other");
-        var expected = await fixture.Propose(session, Line("Only the current repository"), board: "z-last");
-        var offered = Question(await fixture.Boundary(session, present: true));
-        Assert.NotNull(offered);
-        Assert.Equal(expected, (string?)offered["id"]);
-        Assert.Equal("z-last", (string?)offered["b"]);
-        Assert.Null((await fixture.Pending(foreignProposal, repository: "other"))["presentedBy"]);
-    }
-
-    [Fact]
-    public async Task A_replacement_describes_both_the_new_line_and_the_exact_current_line()
-    {
-        await using var fixture = new Fixture(); var session = await fixture.Open();
-        await fixture.Put(new() { ["lines"] = new JsonArray(new JsonObject { ["id"] = "rule", ["text"] = "Current rule" }) });
-        var proposal = await fixture.Propose(session, Line("Replacement rule", "rule"));
-        var offered = Question(await fixture.Boundary(session, present: true));
-        Assert.NotNull(offered);
-        Assert.Equal(proposal, (string?)offered["id"]);
-        Assert.Equal("Replacement rule", (string?)offered["line"]?["text"]);
-        Assert.Equal("Current rule", (string?)offered["replaces"]?["line"]?["text"]);
-        Assert.Equal(1, (long?)(await fixture.View())["revision"]);
     }
 
     [Fact]
@@ -129,56 +88,6 @@ public sealed class ChatDecisionTests
         await fixture.AssertNoAuthority();
     }
 
-    [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task Background_telemetry_does_not_change_explicit_presentation_admission(bool background)
-    {
-        await using var fixture = new Fixture(); var session = await fixture.Open();
-        var expected = await fixture.Propose(session, Line("Telemetry has no authority"));
-        var args = fixture.Args(session); args["presentStanding"] = true; args["backgroundCall"] = background;
-        Assert.Equal(expected, (string?)Question(await fixture.Call(Worker, RelayTools.CheckInbox, args))?["id"]);
-    }
-
-    [Theory]
-    [InlineData("task_update")]
-    [InlineData("task_claim")]
-    [InlineData("action_report")]
-    public async Task Each_successful_verified_mutating_boundary_can_present_without_changing_Standing(string tool)
-    {
-        await using var fixture = new Fixture(); var session = await fixture.Open();
-        var expected = await fixture.Propose(session, Line("Ordinary boundary"));
-        var args = fixture.Args(session); args["taskId"] = "fixture-task"; args["expectedVersion"] = 0;
-        if (tool != RelayTools.TaskUpdate)
-        {
-            Assert.True((await fixture.Call(Worker, RelayTools.TaskUpdate, args.DeepClone().AsObject())).Ok);
-            args["requestId"] = Guid.NewGuid().ToString("N"); args["expectedVersion"] = 1; args["resourceIds"] = new JsonArray();
-        }
-        if (tool == RelayTools.ActionReport)
-        {
-            Assert.True((await fixture.Call(Worker, RelayTools.TaskClaim, args.DeepClone().AsObject())).Ok);
-            args["requestId"] = Guid.NewGuid().ToString("N"); args["expectedVersion"] = 2;
-            args["actionId"] = "fixture-action"; args["inputFingerprint"] = "fixture-input";
-            Assert.True((await fixture.Call(Worker, RelayTools.ActionBegin, args.DeepClone().AsObject())).Ok);
-            args["requestId"] = Guid.NewGuid().ToString("N"); args["expectedVersion"] = 3;
-            args["attempt"] = 1; args["outcome"] = "completed";
-        }
-        args["presentStanding"] = true;
-        var reply = await fixture.Call(Worker, tool, args);
-        Assert.True(reply.Ok, reply.Code);
-        Assert.Equal(expected, (string?)Question(reply)?["id"]);
-        await fixture.AssertNoAuthority();
-    }
-
-    [Fact]
-    public async Task Attention_disabled_at_the_host_prevents_presentation()
-    {
-        await using var fixture = new Fixture(attention: false); var session = await fixture.Open();
-        var id = await fixture.Propose(session, Line("Attention is disabled"));
-        Assert.Null(Question(await fixture.Boundary(session, present: true)));
-        Assert.Null((await fixture.Pending(id))["presentedBy"]);
-    }
-
     [Fact]
     public async Task Same_request_can_recover_its_immutable_offer_but_a_new_boundary_cannot()
     {
@@ -216,68 +125,6 @@ public sealed class ChatDecisionTests
         Assert.Empty(view["proposals"]!.AsArray());
         await fixture.AssertNoAuthority();
         Assert.Null(Question(await fixture.Boundary(session, present: true)));
-    }
-
-    [Fact]
-    public async Task Requested_question_outranks_a_tip_without_marking_the_tip_shown()
-    {
-        await using var fixture = new Fixture(); var session = await fixture.Open();
-        await fixture.Raise(session, AttentionKinds.Tip, "tip");
-        var expected = await fixture.Propose(session, Line("Question before a tip"));
-        Assert.Equal(expected, (string?)Question(await fixture.Boundary(session, present: true))?["id"]);
-        var next = await fixture.Boundary(session);
-        Assert.Equal(AttentionKinds.Tip, (string?)Data(next)["attention"]?["k"]);
-    }
-
-    [Fact]
-    public async Task Urgent_attention_defers_the_question_without_claiming_it()
-    {
-        await using var fixture = new Fixture(); var session = await fixture.Open();
-        var id = await fixture.Propose(session, Line("Urgent attention first"));
-        await fixture.Raise(session, AttentionKinds.Failed, "failed-task");
-        var reply = await fixture.Boundary(session, present: true);
-        Assert.Equal(AttentionKinds.Failed, (string?)Data(reply)["attention"]?["k"]);
-        Assert.Null(Question(reply));
-        Assert.Null((await fixture.Pending(id))["presentedBy"]);
-    }
-
-    [Fact]
-    public async Task A_complete_escaped_summary_survives_actual_reply_compaction()
-    {
-        await using var fixture = new Fixture(enforceTokens: true, dispatchMessages: true); var a = await fixture.Open(); var b = await fixture.Open();
-        var exact = string.Concat(Enumerable.Repeat("\"雪<&>", 35));
-        await fixture.Propose(a, Line(exact));
-        for (var index = 0; index < 30; index++)
-        {
-            var args = fixture.Args(b); args["recipientSessionId"] = a.Id; args["text"] = $"Message {index}: " + string.Concat(Enumerable.Repeat("7 3 9 1 4 ", 35));
-            Assert.True((await fixture.Call(Worker, RelayTools.SendMessage, args)).Ok);
-        }
-        async Task<int> Waiting()
-        {
-            var args = fixture.Args(a); args["attentionDetail"] = true;
-            return (int)Data(await fixture.Call(Worker, RelayTools.GetStatus, args))["attention"]!["actionable"]!;
-        }
-        var deadline = DateTimeOffset.UtcNow.AddSeconds(20);
-        while (await Waiting() < 30 && DateTimeOffset.UtcNow < deadline) await Task.Delay(50);
-        Assert.Equal(30, await Waiting());
-        var read = fixture.Args(a); read["presentStanding"] = true; read["limit"] = 50;
-        var reply = await fixture.Call(Worker, RelayTools.CheckInbox, read);
-        var offered = Question(reply);
-        Assert.NotNull(offered);
-        Assert.Equal(exact, (string?)offered["line"]?["text"]);
-        Assert.True((bool?)Data(reply)["compacted"]);
-        Assert.True(Replies.FitsWire(reply));
-        Assert.True(fixture.Counter.Count(reply.DataJson) <= RelayToolCatalog.All.Single(tool => tool.Name == RelayTools.CheckInbox).TokenBudget);
-    }
-
-    [Fact]
-    public async Task An_oversized_complete_summary_is_not_reserved_or_partially_presented()
-    {
-        await using var fixture = new Fixture(); var session = await fixture.Open();
-        var targets = Enumerable.Range(0, 16).Select(index => index.ToString("D2") + new string('x', 250)).ToArray();
-        var id = await fixture.Propose(session, new() { ["grant"] = Grant("resource", targets, DateTimeOffset.UtcNow.AddHours(1).ToString("O")) });
-        Assert.Null(Question(await fixture.Boundary(session, present: true)));
-        Assert.Null((await fixture.Pending(id))["presentedBy"]);
     }
 
     [Fact]

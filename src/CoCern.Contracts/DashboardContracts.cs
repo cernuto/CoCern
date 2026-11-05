@@ -386,8 +386,10 @@ public static class ConnectClients
 /// <summary>What the adapter's <c>--connect --json</c> reports for each app (<see cref="DashboardConnectClient.State"/>).</summary>
 public static class ConnectStates
 {
-    /// <summary>It has a CoCern entry.</summary>
+    /// <summary>It has a CoCern entry: this hub's, or one whose variables could not be read.</summary>
     public const string Connected = "connected";
+    /// <summary>Its CoCern entry is not this hub's (another hub's, or a joined PC's node entry). Connect leaves it as it is; see the detail.</summary>
+    public const string OtherHub = "other-hub";
     /// <summary>It can get one.</summary>
     public const string Available = "available";
     /// <summary>This run added one.</summary>
@@ -407,7 +409,7 @@ public sealed record DashboardConnectClient
     public string Name { get; init; } = "";
     public string State { get; init; } = "";
     public string? Detail { get; init; }
-    /// <summary>Whether the app's CoCern entry gives its chats the administrator tools; null when it has no entry, or it could not be read.</summary>
+    /// <summary>Whether the app's CoCern entry gives its chats the administrator tools; null when it has no entry, the entry is not this hub's, or it could not be read.</summary>
     public bool? Admin { get; init; }
 }
 

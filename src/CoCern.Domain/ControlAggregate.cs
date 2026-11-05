@@ -38,7 +38,12 @@ internal static class ControlAggregate
             Operations.ResolveAll => ResolveAll(context),
             Operations.SessionOwners => OwnedSessions(context),
             Operations.SessionsOpen => OpenSessions(context),
+            Operations.ManagerStanding => ManagerSelection.Standing(context),
+            Operations.AdminAction => AdminActionLog.Record(context),
+            Operations.NativeFileScope => NativeFileScope(context),
             Operations.AttentionRoute => RouteAttention(context),
+            Operations.PeerResolve => PeerDirectory.Resolve(context),
+            Operations.PeerList => PeerDirectory.ListPeers(context),
             RelayTools.ControlRequest => Control(context),
             _ => Error(UnknownTool)
         };
@@ -69,7 +74,7 @@ internal static class ControlAggregate
         // The role given at session_open routes manager-bound attention items; it grants nothing.
         var record = SessionRecord.Opened(id, token, context.Caller.PrincipalId, context.Repository, args).WithInitialFreshness(context.Now);
         state.Enter(record);
-        if (record.NativeId is not null) state.TrackNative(record);
+        if (record.NativeId is not null) state.TrackNative(record, context.Caller, args);
         context.Send(id, new SessionOpen(record));
         return OpenReply(id, token, args);
     }
@@ -119,6 +124,17 @@ internal static class ControlAggregate
         else if (state.NativeClosing(participant) || state.Entries().Any(row => row.Entry?.NativeId == participant))
             return Error(Unavailable);
         return null;
+    }
+
+    private static RelayReply NativeFileScope(AggregateContext context)
+    {
+        if (!NativeFileScopeQuery.Decode(context.Args).TryGet(out var query, out var malformed)) return Malformed(malformed);
+        var scope = new ControlState(context.State).CurrentNativeFileScope(context.Caller, query.ParticipantId, query.RepositoryId, query.SessionId, query.SessionToken);
+        return scope is null ? Error(SessionDenied) : Ok(new
+        {
+            participantId = scope.ParticipantId, sessionId = scope.SessionId, repositoryId = scope.RepositoryId,
+            machineScope = scope.MachineScope, canonicalWorkingCopyRoot = scope.CanonicalWorkingCopyRoot, nativeGeneration = scope.NativeGeneration
+        });
     }
 
     private static RelayReply OpenReply(string id, string token, JsonObject args) =>
@@ -463,6 +479,13 @@ internal static class ControlAggregate
             if (!ManagerSelection.WholeNumber(context.Args["managerHistoryBefore"], out var parsed)) return Error(InvalidArguments);
             before = parsed;
         }
+        long? actionsBefore = null;
+        if (context.Args.ContainsKey("managerActionsBefore"))
+        {
+            if (!context.Caller.IsAdministrator) return Error(AdministratorRequired);
+            if (!ManagerSelection.WholeNumber(context.Args["managerActionsBefore"], out var parsed)) return Error(InvalidArguments);
+            actionsBefore = parsed;
+        }
         var historyOnly = false;
         if (context.Args.ContainsKey("managerHistoryOnly"))
         {
@@ -478,7 +501,13 @@ internal static class ControlAggregate
         var selection = ManagerSelection.Status(state, context.Caller, context.Now, before);
         var fitted = ManagerSelection.Fit(selection, candidate => FitsWire(Reply(candidate), RelayLimits.AggregateReplyBytes), before);
         var augmented = Reply(fitted);
-        if (historyOnly) return fitted.HistoryReadRequired ? Error(PayloadTooLarge) : augmented;
+        if (historyOnly)
+        {
+            if (fitted.HistoryReadRequired) return Error(PayloadTooLarge);
+            // The reserved read is where the action log is seen, so ordinary status stays small. A worker never got this far.
+            RelayReply WithActions(CoCern.Contracts.AdminActionPage page) => Ok(new { paused = state.Paused, cancellations = state.CancellationCount, requests, requestsOmitted = true, manager = fitted, actions = page });
+            return WithActions(AdminActionLog.Page(state, context.Caller, context.Repository, actionsBefore, page => FitsWire(WithActions(page), RelayLimits.AggregateReplyBytes)));
+        }
         return FitsWire(augmented, RelayLimits.AggregateReplyBytes) ? augmented
             : Ok(new { paused = state.Paused, cancellations = state.CancellationCount, requests });
     }

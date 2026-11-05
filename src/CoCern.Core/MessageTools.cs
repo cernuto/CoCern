@@ -1,6 +1,7 @@
 using System.Text.Json.Nodes;
 using CoCern.Contracts;
 using CoCern.Domain;
+using CoCern.Domain.Messages;
 using static CoCern.Contracts.RelayErrorCodes;
 using static CoCern.Domain.JsonFields;
 using static CoCern.Domain.Replies;
@@ -14,19 +15,16 @@ namespace CoCern.Core;
 internal sealed class MessageTools(Aggregates aggregates, IMachineDirectory directory, AttentionOptions attention, CallTelemetry? telemetry)
 {
     /// <summary>
-    /// A private send first reads one worker entry to check the caller's access to the repository; the entries are never used, so one
-    /// keeps the check while a large directory can no longer make the probe's reply too large and refuse every private message.
+    /// The directory first answers whether the caller may reach the repository, as a small read, and whether the session the guard just verified holds
+    /// the manager's seat. Only then is the message marked, with the generation, from the hub's state and never from the call's arguments. A former
+    /// manager's message simply goes unmarked. Delivery itself enforces repository identity, and unknown recipients stay visibly pending.
     /// </summary>
-    private const int WorkerProbeLimit = 1;
-
-    /// <summary>A named recipient is probed in the worker directory first; delivery itself enforces repository identity and unknown recipients stay visibly pending.</summary>
     public async Task<RelayReply> SendMessageAsync(RelayCaller caller, JsonObject args)
     {
-        if (Text(args, "recipientSessionId").Length > 0)
-        {
-            var probe = await aggregates.Control(caller, RelayTools.WorkerList, new JsonObject { ["repositoryId"] = Text(args, "repositoryId"), ["limit"] = WorkerProbeLimit });
-            if (!probe.Ok) return probe;
-        }
+        var standing = await aggregates.Request(AggregateKinds.ControlKey, caller, new ManagerStandingQuery(Text(args, "repositoryId"), Text(args, "sessionId")));
+        if (!standing.Ok) return standing;
+        var seat = Aggregates.Parse(standing);
+        if (IsTrue(seat, "manager")) args[ServerArguments.ManagerOrigin] = Number(seat, "generation");
         return Text(args, "taskId").Length > 0 ? await aggregates.Board(caller, RelayTools.SendMessage, args) : await aggregates.Session(caller, RelayTools.SendMessage, args);
     }
 

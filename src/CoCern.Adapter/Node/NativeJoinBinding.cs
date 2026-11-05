@@ -353,7 +353,10 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
         }
     }
 
-    internal JsonElement OpenWireArguments(JsonElement? evidence, string? protectedRoot = null)
+    /// <param name="evidence">The checkout evidence to freeze on first use.</param>
+    /// <param name="displayLabel">The chat's title for this attempt: display text sent beside the proof, never part of the frozen arguments or the identity.</param>
+    /// <param name="protectedRoot">The physical root proven for this attempt: on the wire only, never in the frozen arguments, the state file or the participant proof.</param>
+    internal JsonElement OpenWireArguments(JsonElement? evidence, string? displayLabel = null, string? protectedRoot = null)
     {
         CheckLease();
         if (evidence is { } offered)
@@ -367,9 +370,10 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
                 resolution = offered.Clone();
             }
         }
-        if (resolution is null && protectedRoot is null) return arguments.Clone();
+        if (resolution is null && displayLabel is null && protectedRoot is null) return arguments.Clone();
         var wire = System.Text.Json.Nodes.JsonNode.Parse(arguments.GetRawText())!.AsObject();
         if (resolution is { } frozen) wire["nativeJoin"]!["resolution"] = System.Text.Json.Nodes.JsonNode.Parse(frozen.GetRawText());
+        if (displayLabel is not null) wire["label"] = displayLabel;
         // On the wire only: never in the frozen arguments, the state file or the participant proof, so a retry and an older state file are unaffected.
         if (protectedRoot is not null) wire["nativeJoin"]![ProtectedCheckoutRoot.Field] = protectedRoot;
         return JsonSerializer.SerializeToElement(wire);

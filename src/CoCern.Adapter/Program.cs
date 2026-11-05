@@ -217,7 +217,7 @@ try
     // On node credentials the hub certificate is pinned; with explicit settings this is the plain handler, as before.
     using var http = new HttpClient(RelayForwarder.CreateHandler(options)) { Timeout = TimeSpan.FromSeconds(60) };
     await using var hints = new SessionHints(options);
-    await using var localWake = LocalChatWake.Open(options, Environment.GetEnvironmentVariable("COCERN_TOKEN_FILE"), registration is not null);
+    await using var localWake = await LocalChatWake.OpenAsync(options, Environment.GetEnvironmentVariable("COCERN_TOKEN_FILE"), registration is not null);
     var forwarder = new RelayForwarder(http, options);
     await using var native = (registration?.Folder ?? options.NodeFolder ?? localWake?.Connection.Folder) is { } privateFolder ? new NativeJoin(privateFolder, options, forwarder) : null;
     var builder = Host.CreateApplicationBuilder(registration is null ? args : []);

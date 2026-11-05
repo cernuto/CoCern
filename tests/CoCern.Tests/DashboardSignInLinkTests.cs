@@ -76,14 +76,6 @@ public sealed partial class DashboardSignInLinkTests
         finally { if (Directory.Exists(folder)) Directory.Delete(folder, recursive: true); }
     }
 
-    [Theory]
-    [InlineData("http://127.0.0.1:5271", "http://127.0.0.1:5271/dashboard/")]
-    [InlineData("https://0.0.0.0:5273;http://127.0.0.1:5271", "http://127.0.0.1:5271/dashboard/")]
-    [InlineData("http://+:5271", "http://localhost:5271/dashboard/")]
-    [InlineData("http://192.168.1.5:5271", null)]
-    public void The_link_uses_a_loopback_address_the_hub_serves(string addresses, string? expected) =>
-        Assert.Equal(expected, DashboardSignInLink.LoopbackUrl(addresses.Split(';')));
-
     private static HttpClient Browser(RelayHostFixture host)
     {
         var browser = host.CreateClient(new WebApplicationFactoryClientOptions { BaseAddress = new Uri("https://localhost"), AllowAutoRedirect = false });

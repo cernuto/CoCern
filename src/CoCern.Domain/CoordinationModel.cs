@@ -13,7 +13,7 @@ public sealed record StandingPresentation(string BoardId, string ProposalId, str
 }
 
 /// <summary>An authenticated principal. <see cref="IsInternal"/> marks calls the hub itself composes; only those may run "__" operations.</summary>
-public sealed record RelayCaller(string PrincipalId, bool IsAdministrator, string[] Repositories, bool IsInternal = false)
+public sealed record RelayCaller(string PrincipalId, bool IsAdministrator, string[] Repositories, bool IsInternal = false, string? AuthenticatedMachineId = null)
 {
     public bool MayAccess(string repository) =>
         repository.Length > 0 && (IsAdministrator || Repositories.Contains(repository, StringComparer.Ordinal));
@@ -293,6 +293,14 @@ public static class Operations
     public const string SessionOwners = "__session_owners";
     /// <summary>Read-only, sent to the control directory: which of the given session IDs are open in this repository, whoever opened them.</summary>
     public const string SessionsOpen = "__sessions_open";
+    /// <summary>Whether a session is the seated manager or a revoked one (<see cref="Messages.ManagerStandingQuery"/>). Read-only.</summary>
+    public const string ManagerStanding = "__manager_standing";
+    /// <summary>Appends one entry to the administrative action log (<see cref="Messages.AdminActionReport"/>).</summary>
+    public const string AdminAction = "__admin_action";
+    /// <summary>Read-only, sent to the control directory: which one chat a name or ref means in this repository (<see cref="Messages.PeerResolve"/>).</summary>
+    public const string PeerResolve = "__peer_resolve";
+    /// <summary>Read-only, sent to the control directory: this repository's chats, for a verified native caller (<see cref="Messages.PeerList"/>).</summary>
+    public const string PeerList = "__peer_list";
     /// <summary>
     /// Adds an attention item to a session, or refreshes the open one with the same kind, task and subject. Sent through an aggregate's
     /// outbox (<see cref="Messages.AttentionRaise"/>). Sources should always send <c>revision</c>; without one, only an identical copy within
@@ -360,7 +368,10 @@ public static class Operations
     public static bool IsInternal(string operation) => operation.StartsWith("__", StringComparison.Ordinal);
 
     /// <summary>Internal operations that only read: never deduplicated by requestId, never committed for themselves.</summary>
-    public static bool IsRead(string operation) => operation is Verify or Resolve or ResolveAll or NextWork or ClaimState or SessionOwners or SessionsOpen or Standing or Orders or EventWaitAggregate.ReadOperation;
+    public static bool IsRead(string operation) => operation is Verify or Resolve or ResolveAll or NextWork or ClaimState or SessionOwners or SessionsOpen or PeerResolve or PeerList or ManagerStanding or Standing or Orders or EventWaitAggregate.ReadOperation or NativeFileScope;
+
+    /// <summary>Private, uncached read of one authenticated current native join's protected file scope.</summary>
+    public const string NativeFileScope = "__native_file_scope";
 
     /// <summary>Order effects run only while standing orders are on; a target that refuses one is not asked again.</summary>
     public static bool IsOrder(string operation) => operation is OrderFire or OrderWatch or OrderRelease or OrderFailed or OrderWatchFailed;
@@ -378,6 +389,12 @@ public static class ServerArguments
     /// <summary>The <c>resourceIds</c> a <c>task_claim</c>'s client named, before the hub made them canonical; the fingerprint uses these.</summary>
     public const string RequestedResources = "requestedResourceIds";
 
+    /// <summary>On a <c>send_message</c>: the generation of the recorded manager that sent it, which the hub sets from a verified session and its own state alone.</summary>
+    public const string ManagerOrigin = "managerOrigin";
+
+    /// <summary>On a <c>control_request</c>: the session the hub verified as the chat making the call. <c>sessionId</c> there names the target of a cancel instead.</summary>
+    public const string ActingSession = "actingSession";
+
     private static readonly Dictionary<string, string[]> ByTool = new(StringComparer.Ordinal)
     {
         [RelayTools.TaskUpdate] = ["archivedDependsOn"],
@@ -388,7 +405,9 @@ public static class ServerArguments
         [RelayTools.ClaimRenew] = ["taskClaimGeneration", Operations.ForgetRequestField, Operations.RestoreClaimForField],
         [RelayTools.ClaimRelease] = ["taskClaimGeneration", Operations.ForgetRequestField, Operations.RestoreClaimForField],
         [RelayTools.OrderPut] = ["defaultExpiryDays"],
-        [RelayTools.AttentionRespond] = ["snoozeBoundaries"]
+        [RelayTools.AttentionRespond] = ["snoozeBoundaries"],
+        [RelayTools.SendMessage] = [ManagerOrigin],
+        [RelayTools.ControlRequest] = [ActingSession]
     };
 
     public static IReadOnlyList<string> For(string tool) => ByTool.TryGetValue(tool, out var fields) ? fields : [];

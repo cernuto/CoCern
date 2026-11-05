@@ -60,16 +60,41 @@ public sealed class LocalChatWake : IAsyncDisposable
     }
 
     /// <summary>The adapter's way in to local wake: says why there is none, and leaves <see cref="TryCreate"/> to say why setup itself refused.</summary>
-    internal static LocalChatWake? Open(AdapterOptions options, string? tokenFile, bool registered, string? cacheRoot = null)
+    internal static LocalChatWake? Open(AdapterOptions options, string? tokenFile, bool registered, string? cacheRoot = null, Action<string>? report = null)
     {
-        if (registered) { LocalWakeStatus.Report(LocalWakeCodes.NativeRegistration, cacheRoot); return null; }
-        if (options.NodeFolder is not null) { LocalWakeStatus.Report(LocalWakeCodes.NodeConnection, cacheRoot); return null; }
-        LocalWakeStatus.Report(LocalWakeCodes.SetupReached, cacheRoot);
+        report ??= code => LocalWakeStatus.Report(code, cacheRoot);
+        string? last = null;
+        void Record(string code) { last = code; report(code); }
+        if (registered) { Record(LocalWakeCodes.NativeRegistration); return null; }
+        if (options.NodeFolder is not null) { Record(LocalWakeCodes.NodeConnection); return null; }
+        Record(LocalWakeCodes.SetupReached);
         LocalChatWake? wake;
-        try { wake = TryCreate(options, tokenFile, cacheRoot); }
-        catch (Exception) { LocalWakeStatus.Report(LocalWakeCodes.SetupThrew, cacheRoot); throw; }
-        if (SetupOutcome(wake, LocalWakeStatus.LastCode(cacheRoot)) is { } outcome) LocalWakeStatus.Report(outcome, cacheRoot);
+        try { wake = TryCreate(options, tokenFile, cacheRoot, Record); }
+        catch (Exception) { Record(LocalWakeCodes.SetupThrew); throw; }
+        if (SetupOutcome(wake, last) is { } outcome) Record(outcome);
         return wake;
+    }
+
+    /// <summary>Three startup attempts for transient file I/O only, before the adapter starts serving calls.</summary>
+    internal static Task<LocalChatWake?> OpenAsync(AdapterOptions options, string? tokenFile, bool registered, string? cacheRoot = null, CancellationToken ct = default) =>
+        RetryStartupAsync(() =>
+        {
+            string? reason = null;
+            var wake = Open(options, tokenFile, registered, cacheRoot, code => { reason = code; LocalWakeStatus.Report(code, cacheRoot); });
+            return (wake, reason);
+        }, Task.Delay, ct);
+
+    internal static async Task<LocalChatWake?> RetryStartupAsync(Func<(LocalChatWake? Wake, string? Reason)> attempt,
+        Func<TimeSpan, CancellationToken, Task> delay, CancellationToken ct)
+    {
+        for (var index = 0; ; index++)
+        {
+            ct.ThrowIfCancellationRequested();
+            var (wake, reason) = attempt();
+            if (wake is not null || index == 2 || reason is not (LocalWakeCodes.SetupIoError or LocalWakeCodes.TokenFileMissing)) return wake;
+            // Keep the same options and credential expectation; a mismatch or access refusal is terminal.
+            await delay(TimeSpan.FromMilliseconds(index == 0 ? 250 : 750), ct);
+        }
     }
 
     /// <summary>What to report after setup: nothing when setup already gave its own reason, which is more specific than this.</summary>

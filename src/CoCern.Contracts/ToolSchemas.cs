@@ -17,6 +17,7 @@ internal static class ToolSchemas
         string[] extra = tool.Name switch
         {
             RelayTools.EventWait => ["kind", "taskId", "resourceId", "generation", "peerSessionId", "replyTo", "expiresAt", "boardId"],
+            RelayTools.Peers => ["name", "ref"],
             RelayTools.SessionOpen => ["machineId", "label"],
             RelayTools.SessionBind => ["binding", "label", "machineId"],
             RelayTools.TaskGet => ["taskId", "section", "sinceRevision", "snapshotRevision", "cursor", "limit", "openOnly", "includeDetails", "snapshotTag"],
@@ -145,6 +146,13 @@ internal static class ToolSchemas
             properties["managerHistoryOnly"] = new { type = "boolean" };
             properties["statusTag"] = new { type = "string" };
         }
+        // A read, so it leaves out requestId; its description says what the two fields do.
+        if (tool.Name == RelayTools.Peers)
+        {
+            properties.Remove("requestId");
+            properties["name"] = new { type = "string" };
+            properties["ref"] = new { type = "string" };
+        }
         // Each boundary tool advertises the attention opt-out with a short description; InputSchema gives the full one.
         if (properties.ContainsKey("attention")) properties["attention"] = new { type = "boolean", description = "false: no attention offer." };
         // The same budget leaves room only for typed names of workflow dependsOn and packet.resources; InputSchema describes them in full.
@@ -191,10 +199,13 @@ internal static class ToolSchemas
             case RelayTools.GetStatus:
                 properties["statusTag"] = new { type = "string", maxLength = 64, description = "Opt in with an empty string; echo the returned tag for freshly authorized unchanged status. Missing tags mean full reads." };
                 properties["managerHistoryBefore"] = new { type = "integer", minimum = 0, description = "Administrator-only: read manager selections older than this generation." };
-                properties["managerHistoryOnly"] = new { type = "boolean", description = "Reserve this read for the visible manager summary and administrator history, omitting cancellation requests. Use when ordinary status omits manager or manager.historyReadRequired is true. Retain the incoming cursor for history continuation." }; break;
+                properties["managerHistoryOnly"] = new { type = "boolean", description = "Reserve this read for the visible manager summary and administrator history, omitting cancellation requests. Administrators also get the action log. Use when ordinary status omits manager or manager.historyReadRequired is true. Retain the incoming cursor for history continuation." }; break;
             case RelayTools.WorkerList:
                 properties["includeStale"] = new { type = "boolean", description = "Full directory rows, including stale entries and bindings." };
                 properties["snapshotTag"] = new { type = "string", maxLength = 64, description = "Echo with a compact list continuation; restart on ListRestartRequired." }; break;
+            case RelayTools.Peers:
+                properties["name"] = new { type = "string", maxLength = RelayLimits.MaxIdentifierLength, description = "A chat's whole name, ignoring case. Leave out to list." };
+                properties["ref"] = new { type = "string", maxLength = RelayLimits.MaxIdentifierLength, description = "A ref from an earlier choice, valid only while that chat's session is current." }; break;
             case RelayTools.SessionOpen:
                 Text("label", "Display label for this chat's session."); properties["requestId"] = new { type = "string", maxLength = RelayLimits.MaxIdentifierLength, description = SessionOpenRequestId }; Object("binding", "Reported configured Roslyn/Visual Studio binding and source identity."); break;
             case RelayTools.SessionBind:

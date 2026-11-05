@@ -44,7 +44,7 @@ public sealed class SessionHandoff
             if (!binding.MatchesFolder(_folder) || !binding.MatchesClient(_client) || !forwarder.MatchesNativeBinding(binding))
                 return (false, "native_join_scope_mismatch");
             var arguments = binding.FrozenOpenArguments;
-            var reply = await forwarder.ForwardAsync(CoCern.Contracts.RelayTools.SessionOpen, binding.OpenWireArguments(resolution, protectedRoot), ct);
+            var reply = await forwarder.ForwardAsync(CoCern.Contracts.RelayTools.SessionOpen, binding.OpenWireArguments(resolution, NativeTitle(displayTitle), protectedRoot), ct);
             if (!reply.Ok)
             {
                 if (reply.Code == CoCern.Contracts.RelayErrorCodes.SessionUnknown && reply.Version is not null &&
@@ -57,6 +57,9 @@ public sealed class SessionHandoff
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or JsonException)
         { return (false, "native_join_scope_mismatch"); }
     }
+
+    private static string? NativeTitle(string? displayTitle) =>
+        displayTitle?.Trim() is { Length: > 0 and <= NodeState.MaxIdentifierLength } title && !title.Any(char.IsControl) ? title : null;
 
     /// <summary>Only the immediately preceding transport call can reach this completion boundary.</summary>
     private bool CompleteNativeJoin(NativeJoinBinding binding, JsonElement arguments, AdapterReply reply, string? displayTitle)
@@ -80,8 +83,7 @@ public sealed class SessionHandoff
             if (binding.CurrentHandleReference is not null && binding.CurrentHandleReference != id) return false;
             var client = new ChatLocation(binding.Provider, binding.NativeId);
             // A native title is only display text and never augments the frozen proof.
-            var label = displayTitle?.Trim() is { Length: > 0 and <= NodeState.MaxIdentifierLength } title && !title.Any(char.IsControl)
-                ? title : binding.Provider == CoCern.Contracts.ChatProviders.Codex ? "Codex" : "Claude";
+            var label = NativeTitle(displayTitle) ?? (binding.Provider == CoCern.Contracts.ChatProviders.Codex ? "Codex" : "Claude");
             var handle = new SessionHandle(id, token, binding.RepositoryId, label,
                 DateTimeOffset.UtcNow, client, client) { NativeBindingKey = binding.OwnershipKey };
             NodeState.WriteSessionHandle(_folder, handle);

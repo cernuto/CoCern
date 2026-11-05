@@ -8,10 +8,11 @@ namespace CoCern.Dashboard.Services;
 
 public static class ManagerManagementClient
 {
-    public static async Task<DashboardManagerResult> ReadAsync(HttpClient http, string repositoryId, long? historyBefore, CancellationToken cancellationToken = default)
+    public static async Task<DashboardManagerResult> ReadAsync(HttpClient http, string repositoryId, long? historyBefore, CancellationToken cancellationToken = default, long? actionsBefore = null)
     {
         var route = "api/manager?repositoryId=" + Uri.EscapeDataString(repositoryId);
         if (historyBefore is { } before) route += "&managerHistoryBefore=" + before.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        if (actionsBefore is { } older) route += "&managerActionsBefore=" + older.ToString(System.Globalization.CultureInfo.InvariantCulture);
         using var response = await http.GetAsync(route, cancellationToken);
         return await ResultAsync(response, cancellationToken);
     }
@@ -66,7 +67,7 @@ public static class ManagerManagementClient
             _ => HttpStatusCode.BadRequest
         };
         if (response.StatusCode != expected || result.Ok && result.Manager is null && result.Paused is null
-            || result.Manager is { History: null })
+            || result.Manager is { History: null } || result.Actions is { Items: null })
             throw new HttpRequestException("No definitive manager response was received.");
         return result;
     }
