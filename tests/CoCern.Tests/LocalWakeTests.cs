@@ -728,6 +728,7 @@ public sealed class LocalWakeTests : IDisposable
     private sealed class ProbeHandler : HttpMessageHandler
     {
         public string Mode = "ok";
+        public TaskCompletionSource? Hold;
         public readonly System.Collections.Concurrent.ConcurrentQueue<(string Tool, bool Background, string? Session, string? Token)> Requests = new();
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
@@ -736,6 +737,7 @@ public sealed class LocalWakeTests : IDisposable
             var data = args.RootElement;
             var session = data.GetProperty("sessionId").GetString();
             Requests.Enqueue((request.RequestUri!.Segments[^1], data.TryGetProperty("backgroundCall", out var background) && background.GetBoolean(), session, data.GetProperty("sessionToken").GetString()));
+            if (Volatile.Read(ref Hold) is { } hold) await hold.Task.WaitAsync(ct);
             var mode = Volatile.Read(ref Mode);
             var ok = mode is not ("denied" or "busy");
             var said = mode == "other-session" ? "another-session" : session;
@@ -1054,6 +1056,27 @@ public sealed class LocalWakeTests : IDisposable
         await using var restarted = Restart(connection, hub, run: false);
         await restarted.Wake.RearmAsync(CancellationToken.None);
         Assert.False(restarted.Wake.RearmPending);
+    }
+
+    [Fact]
+    public async Task A_slow_rearm_read_does_not_hold_up_a_chat_already_observed()
+    {
+        var connection = Connection();
+        CodexHandle(connection, "observed-session");
+        CodexHandle(connection, "armed-session");
+        using var hub = new ProbeHandler { Hold = new(TaskCreationOptions.RunContinuationsAsynchronously) };
+        await using var restarted = Restart(connection, hub, run: false);
+        restarted.Wake.Observe(RelayTools.GetStatus, Arguments("observed-session"), new(true, "Ok", JsonSerializer.SerializeToElement(new { sessionId = "observed-session" }), 0));
+        _ = restarted.Wake.RunAsync(CancellationToken.None);
+
+        await WaitFor(() => !hub.Requests.IsEmpty && restarted.Started.Count == 1);
+        Assert.Equal("observed-session", Assert.Single(restarted.Started).Session.SessionId);
+        Assert.Equal("armed-session", Assert.Single(hub.Requests).Session);
+        Assert.False(restarted.Wake.FirstPass.IsCompleted);
+
+        hub.Hold.SetResult();
+        await WaitFor(() => restarted.Started.Count == 2);
+        await restarted.Pass;
     }
 
     [Fact]

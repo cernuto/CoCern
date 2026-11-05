@@ -12,7 +12,7 @@ internal static class LocalWakeCodes
         Watching = "watching", NoLiveWatcher = "no_live_watcher", NoObservedSessions = "no_observed_sessions", ObservedNotLocated = "observed_not_located", NoCodexTargets = "no_codex_targets", Observed = "observed",
         ObservedUnmapped = "observed_unmapped", NoCodexExecutable = "no_codex_executable", LoopFailed = "loop_failed", WatcherFailed = "watcher_failed", WatcherUnavailable = "watcher_unavailable",
         ObserveHandleMismatch = "observe_handle_mismatch", ObserveFailed = "observe_failed", RestoreLockBusy = "restore_lock_busy", RecordLockBusy = "record_lock_busy",
-        ObserveReplyNotOk = "observe_reply_not_ok", ObserveNoReplyData = "observe_no_reply_data", ObserveBadSessionId = "observe_bad_session_id", ObserveNotSessionReply = "observe_not_session_reply", ObserveNotOwned = "observe_not_owned", WatcherLockHeld = "watcher_lock_held", WatcherHandleChanged = "watcher_handle_changed", RearmHubUnavailable = "rearm_hub_unavailable", RearmRecordFailed = "rearm_record_failed", RearmOwnerNotLauncher = "rearm_owner_not_launcher",
+        ObserveReplyNotOk = "observe_reply_not_ok", ObserveNoReplyData = "observe_no_reply_data", ObserveBadSessionId = "observe_bad_session_id", ObserveNotSessionReply = "observe_not_session_reply", ObserveNotOwned = "observe_not_owned", WatcherLockHeld = "watcher_lock_held", WatcherHandleChanged = "watcher_handle_changed", RearmHubUnavailable = "rearm_hub_unavailable", RearmFailed = "rearm_failed", RearmRecordFailed = "rearm_record_failed", RearmOwnerNotLauncher = "rearm_owner_not_launcher",
         RearmSkipNoOwner = "rearm_skip_no_owner", RearmSkipNotCodex = "rearm_skip_not_codex", RearmSkipNotOwned = "rearm_skip_not_owned", RearmSkipNotArmedHere = "rearm_skip_not_armed_here", RearmSkipUnlocated = "rearm_skip_unlocated", RearmSkipStale = "rearm_skip_stale", RearmSkipRefused = "rearm_skip_refused", RearmSkipTransient = "rearm_skip_transient", RearmSkipOlderSession = "rearm_skip_older_session";
 }
 
@@ -63,7 +63,7 @@ internal static class LocalWakeStatus
         LocalWakeCodes.ObservedUnmapped or LocalWakeCodes.NoCodexExecutable or LocalWakeCodes.LoopFailed or LocalWakeCodes.WatcherFailed or LocalWakeCodes.WatcherUnavailable or
             LocalWakeCodes.ObserveHandleMismatch or LocalWakeCodes.ObserveFailed or LocalWakeCodes.RestoreLockBusy or LocalWakeCodes.RecordLockBusy => Degraded,
         LocalWakeCodes.ObserveReplyNotOk or LocalWakeCodes.ObserveNoReplyData or LocalWakeCodes.ObserveBadSessionId or LocalWakeCodes.ObserveNotSessionReply or LocalWakeCodes.ObserveNotOwned or
-            LocalWakeCodes.WatcherLockHeld or LocalWakeCodes.WatcherHandleChanged or LocalWakeCodes.RearmHubUnavailable or LocalWakeCodes.RearmRecordFailed or LocalWakeCodes.RearmOwnerNotLauncher or
+            LocalWakeCodes.WatcherLockHeld or LocalWakeCodes.WatcherHandleChanged or LocalWakeCodes.RearmHubUnavailable or LocalWakeCodes.RearmFailed or LocalWakeCodes.RearmRecordFailed or LocalWakeCodes.RearmOwnerNotLauncher or
             LocalWakeCodes.RearmSkipNoOwner or LocalWakeCodes.RearmSkipNotCodex or LocalWakeCodes.RearmSkipNotOwned or LocalWakeCodes.RearmSkipNotArmedHere or LocalWakeCodes.RearmSkipUnlocated or
             LocalWakeCodes.RearmSkipStale or LocalWakeCodes.RearmSkipRefused or LocalWakeCodes.RearmSkipTransient or LocalWakeCodes.RearmSkipOlderSession => null,
         _ => Off

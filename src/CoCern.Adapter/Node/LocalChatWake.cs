@@ -23,10 +23,11 @@ public sealed class LocalChatWake : IAsyncDisposable
     private readonly HashSet<string> rearmRefused = new(StringComparer.Ordinal);
     private readonly HashSet<(string Session, string Code)> rearmReported = [];
     private DateTimeOffset? rearmAt = DateTimeOffset.MinValue;
+    private Task? rearming;
     private string? observeProblem;
     private string? watchFailure;
     internal LocalWakeConnection Connection { get; }
-    /// <summary>Completes when the loop has finished its first pass.</summary>
+    /// <summary>Completes when the loop has finished a pass that included the first re-arm attempt's result.</summary>
     internal Task FirstPass => firstPass.Task;
     /// <summary>Whether a re-arm attempt is still due or scheduled.</summary>
     internal bool RearmPending => rearmAt is not null;
@@ -199,6 +200,19 @@ public sealed class LocalChatWake : IAsyncDisposable
         return rearmRefused.Contains(handle.SessionId) ? LocalWakeCodes.RearmSkipRefused : null;
     }
 
+    /// <summary>Runs a due attempt beside the loop: a slow hub read (up to 15 seconds each) must not hold up the watchers of chats already observed. Its end wakes the loop to start any it re-armed.</summary>
+    private void StartRearm(CancellationToken ct)
+    {
+        if (rearming is { IsCompleted: false } || rearmAt is not { } due || transport.Clock.GetUtcNow() < due) return;
+        rearming = Task.Run(async () =>
+        {
+            try { await RearmAsync(ct); }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+            catch (Exception) { Report(LocalWakeCodes.RearmFailed); }
+            changed.Writer.TryWrite(true);
+        }, CancellationToken.None);
+    }
+
     private async Task LoopAsync(CancellationToken ct)
     {
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(ct, stopping.Token);
@@ -207,10 +221,12 @@ public sealed class LocalChatWake : IAsyncDisposable
         {
             while (!lifetime.IsCancellationRequested)
             {
+                var settled = true;
                 try
                 {
                     chats.Read(_ => true); // The existing bounded locator verifies native identity before a Codex route is used.
-                    await RearmAsync(lifetime.Token);
+                    StartRearm(lifetime.Token);
+                    settled = rearming is null or { IsCompleted: true };
                     var native = NativeJoinBinding.DispatchSnapshot(Connection.Folder).Where(x => x.Chat is { Provider: ChatProviders.Codex }).ToArray();
                     var targets = native.Concat(NodeState.ReadSessionHandles(Connection.Folder).Where(x => observed.ContainsKey(x.SessionId) && OwnsNative(x) &&
                         x.Chat is { Provider: ChatProviders.Codex } && !native.Any(n => n.Chat == x.Chat))).GroupBy(x => x.Chat!.ThreadId)
@@ -232,14 +248,14 @@ public sealed class LocalChatWake : IAsyncDisposable
                 }
                 // One bad pass used to end this loop for the life of the adapter, with nothing to show for it.
                 catch (Exception error) when (error is not OperationCanceledException || !lifetime.IsCancellationRequested) { Report(LocalWakeCodes.LoopFailed); }
-                firstPass.TrySetResult();
+                if (settled) firstPass.TrySetResult();
                 using var wait = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
                 wait.CancelAfter(TimeSpan.FromSeconds(4));
                 try { await changed.Reader.ReadAsync(wait.Token); } catch (OperationCanceledException) when (!lifetime.IsCancellationRequested) { }
             }
         }
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
-        finally { firstPass.TrySetResult(); foreach (var value in active.Values) value.Stop.Cancel(); await Task.WhenAll(active.Values.Select(value => value.Task)); foreach (var value in active.Values) value.Stop.Dispose(); }
+        finally { firstPass.TrySetResult(); if (rearming is not null) await rearming; foreach (var value in active.Values) value.Stop.Cancel(); await Task.WhenAll(active.Values.Select(value => value.Task)); foreach (var value in active.Values) value.Stop.Dispose(); }
     }
 
     private async Task WatchAsync(SessionHandle handle, string codex, CancellationToken ct)
