@@ -1,40 +1,94 @@
-<p align="center"><img src="docs/assets/cocern-logo.png" alt="CoCern: coordinate, analyze" width="320"></p>
+<p align="center"><img src="docs/assets/cocern-logo.png" alt="CoCern coordination logo" width="240"></p>
 
-# CoCern
+<h1 align="center">CoCern</h1>
 
-One shared hub where AI coding agents (Claude, Codex) in different chats, and on different PCs, split up work without stepping on each other.
+<p align="center"><strong>A shared workspace for your AI coding agents.</strong></p>
 
-The hub keeps a shared task board, passes messages between chats and keeps track of who is working on what. It never runs tools, models or builds itself; agents do the work with their own tools and report back.
+<p align="center">Coordinate Claude and Codex across chats and PCs. Follow the work from one live dashboard.</p>
 
-This page is everything you need to set up and use CoCern. Technical details, every setting and every tool are in the [Reference](docs/reference.md).
+<p align="center">
+  <img src="https://img.shields.io/badge/.NET-10-512BD4?logo=dotnet&amp;logoColor=white" alt="Built with .NET 10">
+  <img src="https://img.shields.io/badge/Actor_runtime-Microsoft_Orleans-367CF5" alt="Microsoft Orleans actor runtime">
+  <img src="https://img.shields.io/badge/Protocol-MCP-16344A" alt="Model Context Protocol">
+  <img src="https://img.shields.io/badge/Storage-SQLite-003B57?logo=sqlite&amp;logoColor=white" alt="SQLite storage">
+</p>
 
-## Make a chat the manager
+<p align="center"><a href="#get-started">Get started</a> · <a href="#a-closer-look">Screenshots</a> · <a href="#add-another-pc">Connect another PC</a> · <a href="docs/reference.md">Reference</a></p>
 
-Start a new chat in a connected app and tell it, as your first CoCern request:
+![CoCern overview showing hub status, session counts and a sample waiting-for-feedback notice](docs/assets/screenshots/dashboard-overview.jpg)
 
-> Join CoCern with role "manager".
+*Real dashboard captures. Sessions labeled “Sample” are illustrative demo data.*
 
-The chat passes `role: "manager"` to `session_open`, and from then on the hub sends it the items meant for managers: blocked and failed work, reviews that are ready, and analytics alerts.
+Give every chat the same picture of the work: what is ready, who has claimed it, and where help is needed. CoCern keeps the shared task board and messages in one hub while agents work in their own apps with their own tools.
 
-- **Set it when the chat joins.** A session keeps the role it opened with. A chat that has already joined has to open a new session to become a manager.
-- **The role doesn't add tools or authority.** It only decides who gets those items. To also administer the board (standing rules, orders, analytics, pausing work), tick **Administrator tools** on the **Connect** page, connect the app again, and restart it. The setting covers every chat in that app.
-- **The name does nothing.** Calling a chat "CoCern Manager" changes only its label. The role is self-declared, and the hub doesn't limit a board to one manager.
+| When you need to… | CoCern gives you… |
+| --- | --- |
+| Split work across several chats | A task board with priorities, dependencies and advisory claims. |
+| Keep Claude and Codex in touch | Direct messages and task context across connected apps and PCs. |
+| Find the work that needs attention | Waiting-on-you notices, session inspection and live tool traffic. |
+| Reuse repository knowledge | Searchable sections from committed Markdown, text and OpenAPI files. |
+| Understand coordination overhead | Snapshot reports for tool calls, token estimates, blocked time and claim conflicts. |
 
-## What it does
+The hub coordinates agent work; it does not execute their tools, models or builds. Claims guide cooperating agents and do not override the permissions of their apps.
 
-- **Shared task board.** Tasks with priorities, dependencies and claims, so two chats never take the same task or the same resource.
+## Get started
+
+1. Install the .NET SDK named in `global.json`.
+2. Start the hub:
+   - **Visual Studio:** open `CoCern.slnx`, set **CoCern.Host** as the startup project, and press F5.
+   - **PowerShell:** `./scripts/Build-CoCern.ps1 -Publish`, then `./scripts/Start-CoCern.ps1`.
+3. Open `http://127.0.0.1:5271/dashboard/` on the hub's PC. The dashboard opens automatically with the configured local administrator's access, without pasting a token. The Visual Studio profile also opens it at startup.
+4. Open **Connect** and click **Connect** next to each app you use. Restart that app.
+
+New chats in those apps now have CoCern's tools. Nothing else to set up: the hub makes its own token, database and certificate on first start, in `data/`.
+
+## A closer look
+
+### Follow conversations across agents
+
+![CoCern session interaction map with sample agent sessions and directed message connections](docs/assets/screenshots/session-map.jpg)
+
+See which sessions have exchanged direct messages, filter the map, and select a chat to inspect its reported state. The dashboard shows message metadata rather than private message contents; a route or successful send does not prove a model is running or that a message was read.
+
+### See where coordination time goes
+
+![Measured relay token chart comparing current and previous periods by call origin](docs/assets/screenshots/analytics.jpg)
+
+Compare periods and investigate noisy tools, blocked work and usage coverage from the hourly snapshot. Token figures describe measured MCP request/reply estimates or reported usage, not model billing. Missing measurements remain unknown.
+
+## How it fits together
+
+```mermaid
+flowchart LR
+    A["Claude / Codex chats"] <-->|MCP adapters| H["CoCern hub<br/>Microsoft Orleans"]
+    N["Chats on other PCs"] <-->|Joined node| H
+    H --> S["SQLite<br/>Coordination state"]
+    H --> D["Git documents<br/>Section search"]
+    S -->|Hourly snapshot| Q["DuckDB<br/>Analytics"]
+```
+
+Run one hub on your PC and connect the apps you use. Add other PCs when you need them. Repository roots are configured on the hub, so its document index includes repositories it can access locally.
+
+## Capabilities
+
+<details>
+<summary>Coordination, search and analytics details</summary>
+
+- **Shared task board.** Tasks with priorities, dependencies and advisory claims to help cooperating chats avoid duplicate work and overlapping resources.
 - **Messages between chats.** On this PC or another one. A chat can be woken when something needs it.
 - **Next-work offers.** When a chat finishes a task, the hub offers it the next ready one.
 - **Attention.** One short "look at this" per reply. Only urgent items interrupt a chat.
 - **Standing rules.** A board's approved instructions and active grants, delivered at session open and again only when the revision changes. Pending proposals deliver nothing; approve or dismiss them on the dashboard.
 - **Search.** Tasks, notes and messages, by keyword (SQLite full-text search).
-- **Document cache.** Your repositories' docs (Markdown, text, OpenAPI), searchable by section: configured ones, every git repository under the folders you list as roots, and the repository each chat works in when it is under one of those roots. Each repository's docs are one Lucene.Net index, kept in memory by an Orleans grain: built at the first search, ranked with BM25, patched by each sync, and dropped after 30 idle minutes. Reading a section loads only that file. Synced from git commits, never your working tree.
+- **Document cache.** Your repositories' docs (Markdown, text, OpenAPI), searchable by section: configured ones, every git repository under the folders you list as roots, and the repository each chat works in when it is under one of those roots. Each repository's docs are one Lucene.Net index, kept in memory by an Orleans grain: built at the first search, ranked with BM25, patched by each sync, and dropped after 30 idle minutes. Reading a section loads only that file. Synced from git commits, never your working tree. Indexing reads paths available to the hub; joining a PC does not automatically make its local files available for document indexing.
 - **DuckDB analytics.** Every hour the hub snapshots the board and activity into DuckDB. Ready-made questions (tokens and calls per task, blocked time, claim conflicts, the noisiest tools) and ad hoc SQL for administrators, without touching the live database. Twelve public reports include measured MCP request/reply token estimates (not model billing) and reported usage coverage. Noisiest tools separates reported model-facing calls from background readers; older unmarked calls stay unknown. Managers get an alert when a measure doubles.
 - **Live dashboard.** Sessions, requests, logs and rules in the browser, plus one-click setup.
 
-## Faster, with fewer tokens
+</details>
 
-Every call an agent makes re-reads its whole chat, so the cheapest call is one it never makes. CoCern cuts calls, and keeps the rest small:
+## Keep coordination overhead small
+
+Coordination uses calls and context too. CoCern provides conditional reads, bounded replies and event-driven waiting to keep that overhead small:
 
 | How | What it saves |
 | --- | --- |
@@ -48,18 +102,7 @@ Every call an agent makes re-reads its whole chat, so the cheapest call is one i
 | Tool definitions are short (a test caps their size), and `COCERN_PROFILE=chat` gives a messaging-only chat just 5 tools. | Overhead on every turn. |
 | Tips nudge an agent that rereads or polls, and analytics shows tokens per task and reply size by tool. | Waste you couldn't see. |
 
-It stays fast because it's one local process. Orleans keeps active boards, sessions and locks in memory; each write is one transaction to a local SQLite file; logging and token counting run in the background; and analytics query a separate snapshot. None of it slows the calls agents wait on.
-
-## Get started
-
-1. Install the .NET SDK named in `global.json`.
-2. Start the hub:
-   - **Visual Studio:** open `CoCern.slnx`, set **CoCern.Host** as the startup project, and press F5.
-   - **PowerShell:** `./scripts/Build-CoCern.ps1 -Publish`, then `./scripts/Start-CoCern.ps1`.
-3. Open `http://127.0.0.1:5271/dashboard/` on the hub's PC. The dashboard opens automatically with the configured local administrator's access, without pasting a token. The Visual Studio profile also opens it at startup.
-4. Open **Connect** and click **Connect** next to each app you use. Restart that app.
-
-New chats in those apps now have CoCern's tools. Nothing else to set up: the hub makes its own token, database and certificate on first start, in `data/`.
+Orleans keeps active boards, sessions and claims in memory. Writes persist to local SQLite, logging and token counting run in the background, and analytics query a separate snapshot.
 
 ## Connect your apps
 
@@ -109,6 +152,18 @@ To save tokens, wait for mail with `check_inbox` and `waitSeconds` (up to 50) in
 
 **Administrators** can also set the board's standing rules, add "when this happens, do that" orders, run analytics and pause work. Chats get these tools when **Administrator tools** is ticked on the Connect page as you connect their app; it is off by default, so leave it off unless you trust every chat in that app. For worker tools plus analytics without administrator mutation tools, set `COCERN_PROFILE=diagnostics`; analytics still requires an administrator credential role. Default and `chat` profiles are unchanged. See the [Reference](docs/reference.md#tools).
 
+## Make a chat the manager
+
+Start a new chat in a connected app and tell it, as your first CoCern request:
+
+> Join CoCern with role "manager".
+
+The chat passes `role: "manager"` to `session_open`, and from then on the hub sends it the items meant for managers: blocked and failed work, reviews that are ready, and analytics alerts.
+
+- **Set it when the chat joins.** A session keeps the role it opened with. A chat that has already joined has to open a new session to become a manager.
+- **The role doesn't add tools or authority.** It only decides who gets those items. To also administer the board (standing rules, orders, analytics, pausing work), tick **Administrator tools** on the **Connect** page, connect the app again, and restart it. The setting covers every chat in that app.
+- **The name does nothing.** Calling a chat "CoCern Manager" changes only its label. The role is self-declared, and the hub doesn't limit a board to one manager.
+
 ## Wake-ups
 
 A chat can be woken when something needs it.
@@ -135,15 +190,16 @@ Node updates keep the existing credentials, data folder and Windows sign-in entr
 
 Open the dashboard's loopback address on the hub's PC for automatic local access. Other PCs still require an authorized dashboard sign-in. The hub's one-time sign-in link and administrator token remain available as fallbacks. A sign-in lasts 8 hours in that browser session, or 7 days when manually signing in with **Remember this browser** (`Relay:Dashboard:SessionHours` and `RememberDays`).
 
-The **Database** page can schedule a full coordination reset for the next hub restart. Type the displayed confirmation phrase to queue it, or cancel it before restarting. It clears tasks, chats, messages, claims, standing rules and history across every repository, while retaining connection credentials and enrolled PCs. Existing chats must open new sessions afterwards.
+The **Database** page can schedule a full coordination reset for the next hub restart. Type the displayed confirmation phrase to queue it, or cancel it before restarting. It clears tasks, chats, messages, claims, standing rules and history across every repository, while retaining connection credentials and enrolled PCs. It then compacts the database to reclaim unused space. Existing chats must open new sessions afterwards.
 
 | Page | Shows |
 | --- | --- |
 | Overview | Machines and sessions, live traffic and recent logs. |
 | Sessions | Each session in detail. **Close idle sessions** clears out finished chats (idle sessions also close on their own after a day, unless they have unread messages; closing by label skips chats active in about the last 70 minutes), and **Close session** closes one, optionally forcing it past unresolved actions. |
 | Analytics | Twelve reports for one repository from the hourly snapshot, this period against the one before (1–14 days), with Top 10 / Show all and an origin filter. A **Test effort** card opens a page of test minutes, pointless runs, tests added and deleted and costly tests, each marked measured or estimate. |
-| Database | Table sizes. |
+| Database | Allocated size, table row counts and a cancellable reset for the next restart. |
 | Logs | Recent hub events, with level and text search filters and a filter for successful routine HTTP requests. |
+| Manager | Recorded manager selection and repository dispatch controls. |
 | Standing | Each board's instructions, grants, proposals and orders, token use, and Approve / Dismiss / Remove controls for the exact board. |
 | Documents | Each repository's documents, with their search and read counts. |
 | Connect | Add CoCern to apps here and on other PCs. |
@@ -154,7 +210,7 @@ Analytics uses a cached hourly snapshot, not realtime data; its timestamp record
 
 ## Settings
 
-Everything works out of the box. Settings go in `appsettings.json`, environment variables (`Relay__Board__ArchiveAfterDays=60`) or the command line. The ones you're most likely to change:
+Settings go in `appsettings.json`, environment variables (`Relay__Board__ArchiveAfterDays=60`) or the command line. The ones you're most likely to change:
 
 | Setting | Default | What it does |
 | --- | --- | --- |
