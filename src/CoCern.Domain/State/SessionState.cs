@@ -229,12 +229,13 @@ public sealed class SessionState(JsonObject json)
     /// Records a report in the one slot. It lasts <see cref="RelayLimits.WaitingForHours"/> from now, and a mark still active keeps its
     /// <c>since</c>, so renewals stop at <see cref="RelayLimits.WaitingForMaxHours"/> from it; a report after it lapsed starts again.
     /// </summary>
-    public WaitingMark ReportWaitingFor(string text, DateTimeOffset now)
+    /// <param name="fromHook">The report comes from one of the chat's client hooks, not the model (<see cref="WaitingMark.FromHook"/>).</param>
+    public WaitingMark ReportWaitingFor(string text, DateTimeOffset now, bool fromHook = false)
     {
         var since = WaitingFor is { } current && current.ExpiresAt > now ? current.Since : now;
         var renewed = now.AddHours(RelayLimits.WaitingForHours);
         var cap = since.AddHours(RelayLimits.WaitingForMaxHours);
-        var mark = WaitingMark.Create(text, since, renewed < cap ? renewed : cap);
+        var mark = WaitingMark.Create(text, since, renewed < cap ? renewed : cap, fromHook);
         json[WaitingForKey] = mark.Json;
         return mark;
     }
@@ -251,16 +252,23 @@ public sealed class WaitingMark(JsonObject json)
     public const string TextKey = "text";
     public const string SinceKey = "since";
     public const string ExpiresAtKey = "expiresAt";
+    public const string FromHookKey = "fromHook";
 
-    public static StateShape Shape { get; } = StateShape.Object((TextKey, null), (SinceKey, null), (ExpiresAtKey, null));
+    public static StateShape Shape { get; } = StateShape.Object((TextKey, null), (SinceKey, null), (ExpiresAtKey, null), (FromHookKey, null));
 
-    public static WaitingMark Create(string text, DateTimeOffset since, DateTimeOffset expiresAt) =>
-        new(new JsonObject { [TextKey] = text, [SinceKey] = since.ToString("O"), [ExpiresAtKey] = expiresAt.ToString("O") });
+    public static WaitingMark Create(string text, DateTimeOffset since, DateTimeOffset expiresAt, bool fromHook = false)
+    {
+        var mark = new JsonObject { [TextKey] = text, [SinceKey] = since.ToString("O"), [ExpiresAtKey] = expiresAt.ToString("O") };
+        if (fromHook) mark[FromHookKey] = true;
+        return new(mark);
+    }
 
     public JsonObject Json => json;
     public string Text => JsonFields.Text(json, TextKey);
     public DateTimeOffset Since => Date(json, SinceKey);
     public DateTimeOffset ExpiresAt => Date(json, ExpiresAtKey);
+    /// <summary>One of the chat's client hooks set this, so a later hook may replace or clear it. A report from the model has no such mark.</summary>
+    public bool FromHook => json[FromHookKey] is JsonValue flag && flag.TryGetValue<bool>(out var value) && value;
 }
 
 /// <summary>A session's unread messages by ID, each as <see cref="InboxMessage"/> writes it.</summary>

@@ -45,6 +45,76 @@ public sealed class WaitingOnYouTests
         return WaitingList.Report(chat.Id, Repository, document.RootElement);
     }).OfType<WaitingReport>().ToArray();
 
+    private static RelayReply HookAck(AggregateHub hub, Chat chat, string waitingFor, DateTimeOffset at) =>
+        hub.Session(chat, RelayTools.Ack, new JsonObject { ["waitingFor"] = waitingFor, [RelayLimits.HookWaitingField] = true }, at);
+
+    [Fact]
+    public void A_hook_report_never_replaces_or_clears_the_models_own()
+    {
+        var hub = new AggregateHub();
+        var chat = hub.Open("a", T0);
+        hub.DeliverAll(T0);
+        Assert.True(Ack(hub, chat, "Which rig should I flash?", T0).Ok);
+        var kept = AggregateHub.Data(HookAck(hub, chat, "Claude Code is waiting for your permission.", T0.AddMinutes(1)));
+        Assert.True(kept["waitingForKept"]!.GetValue<bool>());
+        Assert.False(kept.ContainsKey("waitingFor"));
+        Assert.Equal("Which rig should I flash?", Mark(hub, chat)!.Text);
+        Assert.True(AggregateHub.Data(HookAck(hub, chat, "", T0.AddMinutes(2)))["waitingForKept"]!.GetValue<bool>());
+        Assert.Equal("Which rig should I flash?", Mark(hub, chat)!.Text);
+        Assert.False(Mark(hub, chat)!.FromHook);
+    }
+
+    [Fact]
+    public void A_hook_report_sets_renews_and_clears_its_own_and_the_model_can_take_it_over()
+    {
+        var hub = new AggregateHub();
+        var chat = hub.Open("a", T0);
+        hub.DeliverAll(T0);
+        var set = AggregateHub.Data(HookAck(hub, chat, "Claude Code is waiting for your permission.", T0));
+        Assert.NotNull(set["waitingFor"]);
+        Assert.True(Mark(hub, chat)!.FromHook);
+        Assert.True(HookAck(hub, chat, "Claude Code asked you a question and is waiting for your answer.", T0.AddMinutes(1)).Ok);
+        Assert.Equal(("Claude Code asked you a question and is waiting for your answer.", T0), (Mark(hub, chat)!.Text, Mark(hub, chat)!.Since));
+        Assert.True(HookAck(hub, chat, "", T0.AddMinutes(2)).Ok);
+        Assert.Null(Mark(hub, chat));
+
+        // The model's report takes the slot from a hook's, and from then on the hook leaves it alone.
+        Assert.True(HookAck(hub, chat, "Claude Code is waiting for your permission.", T0.AddMinutes(3)).Ok);
+        Assert.True(Ack(hub, chat, "Waiting for the rig", T0.AddMinutes(4)).Ok);
+        Assert.False(Mark(hub, chat)!.FromHook);
+        Assert.True(HookAck(hub, chat, "", T0.AddMinutes(5)).Ok);
+        Assert.Equal("Waiting for the rig", Mark(hub, chat)!.Text);
+
+        // The model can always clear a hook's.
+        Assert.True(Ack(hub, chat, "", T0.AddMinutes(6)).Ok);
+        Assert.True(HookAck(hub, chat, "Claude Code is waiting for your permission.", T0.AddMinutes(7)).Ok);
+        Assert.True(Ack(hub, chat, "", T0.AddMinutes(8)).Ok);
+        Assert.Null(Mark(hub, chat));
+    }
+
+    [Fact]
+    public void A_hook_report_replaces_a_model_report_that_has_lapsed_and_ends_at_the_same_limits()
+    {
+        var hub = new AggregateHub();
+        var chat = hub.Open("a", T0);
+        hub.DeliverAll(T0);
+        Assert.True(Ack(hub, chat, "Old", T0).Ok);
+        var after = T0.AddHours(RelayLimits.WaitingForHours + 1);
+        Assert.True(HookAck(hub, chat, "Claude Code is waiting for your permission.", after).Ok);
+        var mark = Mark(hub, chat)!;
+        Assert.Equal(("Claude Code is waiting for your permission.", after, after.AddHours(RelayLimits.WaitingForHours)), (mark.Text, mark.Since, mark.ExpiresAt));
+    }
+
+    [Fact]
+    public void A_hook_report_projects_as_an_ordinary_self_report()
+    {
+        var hub = new AggregateHub();
+        var chat = hub.Open("a", T0);
+        hub.DeliverAll(T0);
+        Assert.True(HookAck(hub, chat, "Claude Code is waiting for your permission.", T0).Ok);
+        Assert.Equal("Claude Code is waiting for your permission.", Assert.Single(Reports(hub, chat)).Text);
+    }
+
     [Fact]
     public void Ack_waitingFor_sets_one_mark_on_the_verified_session_only()
     {
