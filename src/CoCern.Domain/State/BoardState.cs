@@ -32,7 +32,8 @@ public sealed class BoardState(JsonObject json)
     /// <summary>Every key a board stores, and the shape of each record under it.</summary>
     public static StateShape Shape { get; } = CommonState.Shape.With(
         (TasksKey, StateShape.Map(BoardTask.Shape)), (TaskRevisionKey, null), (ContextKey, StateShape.Map(ContextNote.Shape)), (ArchivedTasksKey, StateShape.Map(null)),
-        (ArchiveFloorKey, null), (StandingKey, StandingState.Shape), (OrdersKey, OrdersState.Shape));
+        (ArchiveFloorKey, null), (StandingKey, StandingState.Shape), (OrdersKey, OrdersState.Shape),
+        (EventWaitSources.SubscriptionsKey, StateShape.Map(StateShape.Any)));
 
     public JsonObject Json => json;
 

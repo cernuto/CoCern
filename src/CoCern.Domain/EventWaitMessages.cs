@@ -13,3 +13,7 @@ public sealed record EventWaitSignal(string RepositoryId, string Kind, string Ta
 public sealed record EventWaitOwnerWatch(string RepositoryId, string OwnerSessionId, string WaitId,
     string WatchId, string SourceSessionId, DateTimeOffset ExpiresAt);
 public sealed record EventWaitLifecycle(EventWaitOwnerWatch Watch, string Outcome);
+
+public sealed record EventWaitSourceWatch(string RepositoryId, string OwnerSessionId, string WaitId,
+    string WatchId, string Kind, string SourceKind, string SourceKey, string? TaskId,
+    DateTimeOffset ExpiresAt, string? Revision = null, string? QualifyingData = null);

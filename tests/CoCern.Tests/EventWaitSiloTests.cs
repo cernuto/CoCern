@@ -18,6 +18,52 @@ namespace CoCern.Tests;
 public sealed class EventWaitSiloTests(Xunit.Abstractions.ITestOutputHelper output)
 {
     [Fact]
+    public async Task Cross_repository_wait_callbacks_are_consumed_but_generic_transfers_still_retry()
+    {
+        var database = Path.Combine(Path.GetTempPath(), "cocern-event-denial-" + Guid.NewGuid().ToString("N"), "relay.db");
+        var sender = new StateEnvelope<CoordinationDocument> { Value = new() { Json = "{\"repositoryId\":\"repo\"}" } };
+        var now = DateTimeOffset.UtcNow.AddMinutes(-1);
+        var callbacks = new[] { EventWaitSources.WatchOperation, EventWaitSources.UnwatchOperation, EventWaitSources.LifecycleOperation,
+            EventWaitSources.SourceWatchOperation, EventWaitSources.SourceUnwatchOperation, EventWaitSources.SourceAckOperation, EventWaitSources.SourceSignalOperation };
+        foreach (var operation in callbacks)
+            sender.Effects.Add(new("denied-" + operation, "session", "foreign", operation, "{\"repositoryId\":\"repo\"}", now));
+        sender.Effects.Add(new("generic-transfer", "session", "foreign", "__unclassified_transfer", "{\"repositoryId\":\"repo\"}", now));
+        CoordinationStateMachine.StampEffects(sender.Effects, 0, new RelayCaller("principal", false, ["repo"], true));
+        using (var seed = new SqliteStore(database))
+        {
+            var writer = new SqliteGrainStorage(seed);
+            await writer.WriteStateAsync("session", GrainId.Create("cocern.session", "sender"), new GrainState<StateEnvelope<CoordinationDocument>>(sender));
+            await writer.WriteStateAsync("session", GrainId.Create("cocern.session", "foreign"), new GrainState<StateEnvelope<CoordinationDocument>>(
+                new() { Value = new() { Json = "{\"repositoryId\":\"other\"}" } }));
+        }
+        using var host = new HostBuilder().ConfigureLogging(log => log.ClearProviders())
+            .UseOrleans(silo => silo.UseLocalhostClustering(siloPort: FreePort(), gatewayPort: FreePort(),
+                serviceId: "event-wait-denial", clusterId: Guid.NewGuid().ToString("N")).AddCoCernSqlite(database))
+            .ConfigureServices(services => services.AddCoCernCore()).Build();
+        await host.StartAsync();
+        try
+        {
+            var store = host.Services.GetRequiredService<SqliteStore>();
+            var grains = host.Services.GetRequiredService<IGrainFactory>();
+            var failures = 0;
+            var pump = new DueWorkPump(store, (work, ct) => CoordinationGrain.DispatchDueAsync(grains, work, ct), () => failures++);
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            await pump.DispatchNextBatchAsync(DateTimeOffset.UtcNow, timeout.Token).WaitAsync(timeout.Token);
+            Assert.Equal(1, failures); // Only the unrelated transfer stays retryable.
+            var stored = new GrainState<StateEnvelope<CoordinationDocument>>(new());
+            await new SqliteGrainStorage(store).ReadStateAsync("session", GrainId.Create("cocern.session", "sender"), stored);
+            var state = Assert.IsType<StateEnvelope<CoordinationDocument>>(stored.State);
+            Assert.Equal("generic-transfer", Assert.Single(state.Effects).Id);
+            await new SqliteGrainStorage(store).ReadStateAsync("session", GrainId.Create("cocern.session", "foreign"), stored);
+            var foreign = JsonNode.Parse(Assert.IsType<StateEnvelope<CoordinationDocument>>(stored.State).Value.Json)!.AsObject();
+            Assert.Equal("other", foreign["repositoryId"]!.GetValue<string>());
+            Assert.False(foreign.ContainsKey("eventWaitOwnerWatches"));
+            Assert.False(foreign.ContainsKey("eventWaits"));
+        }
+        finally { await host.StopAsync(); }
+    }
+
+    [Fact]
     public async Task The_real_due_pump_expires_a_persisted_wait_without_reads_and_restart_cannot_refire()
     {
         var directory = Path.Combine(Path.GetTempPath(), "cocern-event-wait-" + Guid.NewGuid().ToString("N"));

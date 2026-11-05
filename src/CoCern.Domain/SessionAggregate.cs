@@ -34,6 +34,9 @@ internal static class SessionAggregate
             case EventWaitSources.WatchOperation:
             case EventWaitSources.UnwatchOperation:
             case EventWaitSources.LifecycleOperation:
+            case EventWaitSources.SourceBindOperation:
+            case EventWaitSources.SourceAckOperation:
+            case EventWaitSources.SourceSignalOperation:
                 return EventWaitSources.Handle(context);
             case Operations.Open: return Initialize(context);
             case NativeExpiryCheck.Operation:
