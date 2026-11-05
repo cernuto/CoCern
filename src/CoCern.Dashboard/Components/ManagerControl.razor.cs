@@ -50,6 +50,9 @@ public partial class ManagerControl : ComponentBase
     public bool ReadBusy { get; private set; }
     public bool? Paused { get; private set; }
     public ManagerSelectionHistory[] RecentSelections { get; private set; } = [];
+    public AdminActionEntry[] RecentActions { get; private set; } = [];
+    public long ActionsDropped { get; private set; }
+    private long? nextActionsBefore;
     private string? loadedRepository;
     private bool repositoryTouched;
     private const string RepositoryRequired = "Enter a repository to refresh selection or control dispatch.";
@@ -85,6 +88,7 @@ public partial class ManagerControl : ComponentBase
             if (result.Ok)
             {
                 if (selectionRevision == selectionAtStart && result.Manager is { } manager) ApplySelection(manager, repository);
+                if (selectionRevision == selectionAtStart) ApplyActions(result.Actions);
                 if (dispatchRevision == dispatchAtStart && result.Paused is { } paused) Paused = paused;
                 if (messageRevision == messageAtStart) SetMessage(null);
             }
@@ -120,6 +124,33 @@ public partial class ManagerControl : ComponentBase
         {
             if (RepositoryId == repository && selectionRevision == selectionAtStart && messageRevision == messageAtStart)
                 SetMessage("Could not load earlier selections. Try again.");
+        }
+        finally { ReadBusy = false; }
+    }
+
+    public async Task LoadEarlierActionsAsync()
+    {
+        if (ReadBusy || nextActionsBefore is null || loadedRepository != RepositoryId) return;
+        ReadBusy = true;
+        var repository = loadedRepository;
+        var selectionAtStart = selectionRevision;
+        var messageAtStart = messageRevision;
+        try
+        {
+            var result = await ManagerManagementClient.ReadAsync(ManagerHttp, repository, null, actionsBefore: nextActionsBefore);
+            if (RepositoryId != repository || selectionRevision != selectionAtStart) return;
+            if (result.Ok && result.Actions is { } page)
+            {
+                RecentActions = RecentActions.Concat(page.Items).DistinctBy(item => item.Seq).OrderByDescending(item => item.Seq).ToArray();
+                nextActionsBefore = page.NextBefore;
+                ActionsDropped = page.Dropped;
+            }
+            else if (!result.Ok && messageRevision == messageAtStart) SetMessage(result.Code);
+        }
+        catch (Exception error) when (Uncertain(error))
+        {
+            if (RepositoryId == repository && selectionRevision == selectionAtStart && messageRevision == messageAtStart)
+                SetMessage("Could not load earlier actions. Try again.");
         }
         finally { ReadBusy = false; }
     }
@@ -252,7 +283,10 @@ public partial class ManagerControl : ComponentBase
             var current = await ManagerManagementClient.ReadAsync(ManagerHttp, repository, null);
             if (!current.Ok || current.Manager is null || current.Paused is null || RepositoryId != repository) return false;
             if (selectionRevision == selectionAtStart)
+            {
                 ApplySelection(current.Manager, repository);
+                ApplyActions(current.Actions);
+            }
             if (dispatchRevision == dispatchAtStart) Paused = current.Paused;
             return true;
         }
@@ -267,11 +301,21 @@ public partial class ManagerControl : ComponentBase
         nextHistoryBefore = manager.NextHistoryBefore;
     }
 
+    // A read that carries no page says nothing about the log, so what is showing stays.
+    private void ApplyActions(AdminActionPage? page)
+    {
+        if (page is null) return;
+        RecentActions = page.Items;
+        nextActionsBefore = page.NextBefore;
+        ActionsDropped = page.Dropped;
+    }
+
     private void InvalidateSelection()
     {
         selectionRevision++;
         Selection = null; loadedRepository = null;
         RecentSelections = []; nextHistoryBefore = null;
+        RecentActions = []; nextActionsBefore = null; ActionsDropped = 0;
     }
 
     private static bool UnsafeCharacter(char ch) => char.IsControl(ch) || ch is '\u2028' or '\u2029';

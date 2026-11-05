@@ -92,7 +92,7 @@ else
         </div>
         <div class="close-sessions-actions">
             <button class="close-sessions-secondary" type="button" @onclick='() => DecideAsync("appoint_manager")' disabled="@(DecisionBusy || UnconfirmedDecision is not null)">Appoint or replace manager</button>
-            <button class="close-sessions-secondary" type="button" @onclick='() => DecideAsync("clear_manager")' disabled="@(DecisionBusy || UnconfirmedDecision is not null)">Clear selection</button>
+            <button class="close-sessions-secondary" type="button" @onclick='() => DecideAsync("clear_manager")' disabled="@(DecisionBusy || UnconfirmedDecision is not null)">Revoke manager</button>
         </div>
         @if (Message is not null) { <p role="status">@Message</p> }
         @if (UnconfirmedDecision is not null)
@@ -111,13 +111,29 @@ else
                 <li @key="decision.Generation">
                     <p>Generation @decision.Generation · @decision.Command · @decision.RepositoryId · Session @(decision.SessionId ?? "None")</p>
                     <blockquote class="standing-record-text">@decision.HumanWords</blockquote>
-                    <p>By @decision.ActorPrincipalId at @decision.At.ToString("O") · Request @decision.RequestId</p>
+                    <p>By @decision.ActorPrincipalId at @decision.At.ToString("O") · Request @decision.RequestId@(decision.RecordedBySessionId is { } recorder ? " · Recorded by chat " + recorder : "")</p>
                 </li>
             }
         </ul>
         @if (nextHistoryBefore is not null)
         {
             <button class="close-sessions-secondary" type="button" @onclick="LoadEarlierAsync" disabled="@ReadBusy">Load earlier decisions</button>
+        }
+        <h3>Recent administrative actions</h3>
+        <p>Administrative calls in this repository, from chats and from this dashboard: who, what, on what and how each ended. A session or manager generation appears only when the hub verified it.@(ActionsDropped > 0 ? $" {ActionsDropped} older entries are no longer kept." : "")</p>
+        @if (RecentActions.Length == 0) { <p>No actions loaded.</p> }
+        <ul class="standing-records">
+            @foreach (var action in RecentActions)
+            {
+                <li @key="action.Seq">
+                    <p>@action.Tool@(action.Command is { } command ? " " + command : "")@(action.Target is { } target ? " · " + target : "") · @(action.Succeeded ? "Done" : "Refused: " + action.Code)</p>
+                    <p>By @action.ActorPrincipalId@(action.ActingSessionId is { } session ? " · Chat " + session : "")@(action.ManagerGeneration is { } generation ? $" · As manager, generation {generation}" : "") at @action.At.ToString("O")@(action.DecisionRef is { } decisionRef ? " · " + decisionRef : "")</p>
+                </li>
+            }
+        </ul>
+        @if (nextActionsBefore is not null)
+        {
+            <button class="close-sessions-secondary" type="button" @onclick="LoadEarlierActionsAsync" disabled="@ReadBusy">Load earlier actions</button>
         }
     </section>
 </section>

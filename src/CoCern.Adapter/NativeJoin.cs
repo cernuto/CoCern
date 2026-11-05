@@ -14,7 +14,7 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
 {
     private readonly CancellationTokenSource stopping = new();
     // A chat's tool calls report as the model's; this binding's own checks do not, whichever process runs them. The native opening envelopes go untagged either way.
-    private readonly RelayForwarder modelCalls = forwarder.Tagged(CallOrigins.Mcp), ownChecks = forwarder.Tagged(CallOrigins.Node);
+    private readonly RelayForwarder modelCalls = forwarder.ForNativeCalls(CallOrigins.Mcp), ownChecks = forwarder.Tagged(CallOrigins.Node);
     internal string PrivateFolder => folder;
     internal AdapterOptions WakeOptions => BackgroundOptions(options);
     // The private waiter/watcher has a fixed inbox/status protocol and uses the same pin and credential.
@@ -268,6 +268,7 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
             payload["repositoryId"] = handle.RepositoryId;
             if (definition.RequiresSession || tool == RelayTools.GetStatus)
             { payload["sessionId"] = handle.SessionId; payload["sessionToken"] = handle.SessionToken; }
+            if (definition.Audited) { payload["actingSessionId"] = handle.SessionId; payload["actingSessionToken"] = handle.SessionToken; }
             if (definition.IsMutation && request is not null) payload["requestId"] = request;
             if (fileCheck) payload["requestId"] = invocation;
             var arguments = RelayForwarder.WithOrigin(JsonSerializer.SerializeToElement(payload), background: false);

@@ -28,6 +28,7 @@ public sealed class RelayApplication : IRelayApplication
     private readonly CallGuard guard;
     private readonly ToolRouter router;
     private readonly ReplyAddOns addOns;
+    private readonly AdminActionRecorder actions;
     private readonly string incarnation = Guid.NewGuid().ToString("N");
     public string IncarnationId => incarnation;
 
@@ -47,10 +48,13 @@ public sealed class RelayApplication : IRelayApplication
         var standing = new StandingDelivery(aggregates);
         var docTools = docs ?? DocCacheTool.Off;
         guard = new(aggregates, incarnation);
+        actions = new(aggregates);
+        var machineDirectory = machines ?? new MachineDirectory(grains);
         router = new(aggregates, claims,
             new SessionTools(aggregates, standing, attentionOptions, anomaly, docTools, searchOn: search is not null, analyticsOn: analytics is not null && !ReferenceEquals(analytics, AnalyticsTool.Off)),
             new StatusTools(aggregates, standing, attentionOptions, orders, telemetry),
-            new MessageTools(aggregates, machines ?? new MachineDirectory(grains), attentionOptions, telemetry),
+            new MessageTools(aggregates, machineDirectory, attentionOptions, telemetry),
+            new PeerTools(aggregates, machineDirectory),
             new SearchTools(search, analytics ?? AnalyticsTool.Off),
             docTools, admin ?? AdminTools.Off);
         addOns = new(aggregates, claims, standing, guard, tokenStatus, attentionOptions, search, telemetry, counter, tokenOptions ?? new(), observations);
@@ -98,10 +102,11 @@ public sealed class RelayApplication : IRelayApplication
         try
         {
             var (call, refused) = await guard.VerifyAsync(admitted, trace);
-            if (refused is not null) return refused;
-            var routed = call.Args.ContainsKey("filePath") || call.Args.ContainsKey("confirmGeneration")
+            if (refused is not null) return await actions.AfterAsync(call, refused);
+            var result = call.Args.ContainsKey("filePath") || call.Args.ContainsKey("confirmGeneration")
                 ? await new FileClaimTools(aggregates, guard).RunAsync(call)
                 : await router.RouteAsync(call, trace, cancellationToken);
+            var routed = await actions.AfterAsync(call, result);
             return tool == RelayTools.SessionOpen ? routed : await addOns.ApplyAsync(call, routed, trace);
         }
         catch (ArgumentException) { return Error(InvalidArguments); }

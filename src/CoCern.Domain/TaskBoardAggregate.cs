@@ -57,6 +57,7 @@ internal static class TaskBoardAggregate
             case Operations.PresentStanding: return StandingPreferences.Present(context);
             case RelayTools.StandingPut: return StandingPreferences.Put(context);
             case RelayTools.StandingPropose: return StandingPreferences.Propose(context);
+            case RelayTools.RecordDecision: return StandingPreferences.RecordDecision(context);
             case Operations.StandingProposeHub: return StandingPreferences.ProposeFromHub(context);
             case RelayTools.TaskGet when taskId.Length == 0 && Text(context.Args, "section") == "standing": return StandingPreferences.View(context.State, context.Now);
             case RelayTools.TaskGet when taskId.Length == 0: return context.Args.ContainsKey("sinceRevision") ? DeltaPage(board, context.Args) : ListTasks(board, context);
@@ -448,6 +449,9 @@ internal static class TaskBoardAggregate
         var nextVersion = task.Version + 1;
         var entry = TaskMessage.Create(Guid.NewGuid().ToString("N"), task.TaskId, SessionAggregate.MessageText(message), Text(message, "kind", "message"), message["replyTo"]?.DeepClone(),
             context.Caller.PrincipalId, context.SessionId, context.Now, nextVersion);
+        // send_message alone: its copy of this field is the hub's, and a task_update's arguments are still the client's.
+        if (context.Operation == RelayTools.SendMessage && context.Args[ServerArguments.ManagerOrigin] is not null)
+            entry.Json[TaskMessage.ManagerGenerationKey] = Number(context.Args, ServerArguments.ManagerOrigin);
         if (CheckReadable(entry.Json) is { } unreadable) return unreadable;
         messages.Add(entry.Json);
         var recipient = Text(message, "recipientSessionId", task.Owner);

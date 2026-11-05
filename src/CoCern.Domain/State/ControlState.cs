@@ -30,14 +30,18 @@ public sealed class ControlState(JsonObject json)
     public const string ManagerGenerationKey = "managerGeneration";
     public const string ManagerKey = "manager";
     public const string ManagerHistoryKey = "managerHistory";
+    public const string ManagerRevokedKey = "managerRevoked";
+    public const string AdminActionsKey = "adminActions";
+    public const string AdminActionSeqsKey = "adminActionSeqs";
 
     /// <summary>Every key the directory stores: its entries by session ID, close fences by session ID, resources by ID, aliases by machine and name, and cancellations by session and action.</summary>
     public static StateShape Shape { get; } = CommonState.Shape.With(
         (SessionsKey, StateShape.Map(DirectoryEntry.Shape)), (ClosingKey, StateShape.Map(StateShape.Object((FenceSeqKey, null), (FenceAtKey, null), (NativeParticipant.Id, null), (DuplicateCloseKey, null)))), (CloseSeqKey, null),
-        (NativeJoinsKey, StateShape.Map(StateShape.Object(("sessionId", null), ("generation", null), ("requestId", null), ("expired", null), ("workingCopy", null), ("machineScope", null), ("protectedRoot", null), ("retired", StateShape.Map(null))))),
+        (NativeJoinsKey, StateShape.Map(StateShape.Object(("sessionId", null), ("generation", null), ("requestId", null), ("expired", null), ("client", null), ("workingCopy", null), ("machineScope", null), ("protectedRoot", null), ("retired", StateShape.Map(null))))),
         (ResourcesKey, StateShape.Map(RegisteredResource.Shape)), (AliasesKey, StateShape.Map(null)),
         (PausedKey, null), (CancellationsKey, StateShape.Map(Cancellation.Shape)),
-        (ManagerGenerationKey, null), (ManagerKey, ManagerAssignment.Shape), (ManagerHistoryKey, ManagerSelectionHistoryState.Shape));
+        (ManagerGenerationKey, null), (ManagerKey, ManagerAssignment.Shape), (ManagerHistoryKey, ManagerSelectionHistoryState.Shape),
+        (ManagerRevokedKey, StateShape.Map(null)), (AdminActionsKey, ManagerSelectionHistoryState.AdminActionShape), (AdminActionSeqsKey, StateShape.Map(null)));
 
     private JsonObject Sessions => ObjectAt(json, SessionsKey);
 
@@ -54,12 +58,21 @@ public sealed class ControlState(JsonObject json)
         join["generation"] = record.NativeGeneration;
         join["sessionId"] = record.SessionId;
         join["requestId"] = record.NativeRequest;
+        // Display only. It stays here, off the row, so worker listings do not change.
+        var client = Text(admitted, NativeParticipant.Client);
+        if (client.Length > 0) join["client"] = client;
         join["workingCopy"] = Text(admitted, NativeParticipant.WorkingCopy);
         // A reported machineId is only a label. Only authentication supplies protected machine provenance.
         join["machineScope"] = caller.AuthenticatedMachineId;
         join["protectedRoot"] = caller.AuthenticatedMachineId is { Length: > 0 } ? admitted[NativeParticipant.ProtectedRoot]?.DeepClone() : null;
         join.Remove("expired");
     }
+
+    /// <summary>The client this participant joined with, as its proof named it; empty when none is recorded.</summary>
+    internal string NativeClient(string participant) => NativeJoin(participant) is { } join ? Text(join, "client") : "";
+
+    /// <summary>The session this participant's private join names; empty when it has none.</summary>
+    internal string NativeCurrentSession(string participant) => NativeJoin(participant) is { } join ? Text(join, "sessionId") : "";
 
     // All directory removal paths preserve an independently opened attempt before deleting its only private row.
     // A duplicate of the current attempt can disappear without retiring the current generation.
@@ -205,6 +218,32 @@ public sealed class ControlState(JsonObject json)
 
     public JsonArray ManagerHistory => ArrayAt(json, ManagerHistoryKey);
 
+    /// <summary>Whether a session or native participant ID was a manager and has since been replaced or revoked. Private; IDs here never leave the hub.</summary>
+    internal bool ManagerRevoked(string id) => id.Length > 0 && json[ManagerRevokedKey] is JsonObject revoked && revoked.ContainsKey(id);
+
+    /// <summary>Remembers <paramref name="manager"/>'s session and native participant as revoked at <paramref name="generation"/>; past the bound the oldest goes.</summary>
+    internal void RevokeManager(ManagerAssignment manager, long generation)
+    {
+        var revoked = ObjectAt(json, ManagerRevokedKey);
+        revoked[manager.SessionId] = generation;
+        if (manager.NativeId.Length > 0) revoked[manager.NativeId] = generation;
+        while (revoked.Count > RelayLimits.ManagerRevokedEntries) revoked.Remove(revoked.OrderBy(entry => entry.Value!.GetValue<long>()).First().Key);
+    }
+
+    /// <summary>A newly appointed chat is no longer a former manager.</summary>
+    internal void RestoreManager(DirectoryEntry target)
+    {
+        if (json[ManagerRevokedKey] is not JsonObject revoked) return;
+        revoked.Remove(target.SessionId);
+        if (target.NativeId.Length > 0) revoked.Remove(target.NativeId);
+    }
+
+    /// <summary>The administrative action log, oldest first (see <c>AdminActionLog</c>).</summary>
+    public JsonArray AdminActions => ArrayAt(json, AdminActionsKey);
+
+    /// <summary>The last action number by repository. Numbered per repository, so a number says nothing about another repository's activity.</summary>
+    public JsonObject AdminActionSeqs => ObjectAt(json, AdminActionSeqsKey);
+
     private JsonObject Cancellations => ObjectAt(json, CancellationsKey);
 
     /// <summary>How many cancellation requests the directory holds.</summary>
@@ -277,6 +316,7 @@ public sealed class DirectoryEntry(JsonObject json)
     public string Role => Text(json, RoleKey);
 
     public string Label => Text(json, LabelKey);
+    internal string MachineId => Text(json, MachineIdKey);
     public long BindingVersion => Number(json, BindingVersionKey);
     public DateTimeOffset ObservedAt => Date(json, ObservedAtKey);
     public DateTimeOffset FreshUntil => Date(json, FreshUntilKey);

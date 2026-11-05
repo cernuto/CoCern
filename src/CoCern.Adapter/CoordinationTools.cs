@@ -12,8 +12,18 @@ namespace CoCern.Adapter;
 public static class CoordinationTools
 {
     internal static IEnumerable<McpServerTool> CreateNative(RelayForwarder forwarder, NativeJoin join, string provider, bool admin, bool diagnostics = false) =>
-        Surface(admin, chatOnly: true, diagnostics).Where(tool => tool.Name is not (RelayTools.SessionOpen or RelayTools.SessionBind))
+        NativeSurface(admin, chatOnly: true, diagnostics)
             .Select(tool => new ForwardedTool(tool, (args, ct) => NativeJoinHook.InvokeAsync(join, provider, tool.Name, args, ct), native: true));
+
+    /// <summary>
+    /// What a hub-proven chat gets: no session tools, and <c>peers</c>, which no raw surface lists. It keeps <c>chat_directory</c> until a name can
+    /// address a message, because <c>send_message</c> still takes a recipient's session ID and <c>peers</c> shows none outside a choice.
+    /// </summary>
+    private static IEnumerable<RelayTool> NativeSurface(bool admin, bool chatOnly, bool diagnostics)
+    {
+        RelayToolCatalog.TryGet(RelayTools.Peers, out var peers);
+        return Surface(admin, chatOnly, diagnostics).Where(tool => tool.Name is not (RelayTools.SessionOpen or RelayTools.SessionBind)).Append(peers);
+    }
 
     /// <summary>The chat profile: what a chat needs to find peers and exchange messages, and nothing it would carry unused in every turn.</summary>
     private static readonly HashSet<string> ChatTools = [RelayTools.SessionOpen, RelayTools.SendMessage, RelayTools.CheckInbox, RelayTools.Ack, RelayTools.ChatDirectory];
@@ -28,7 +38,7 @@ public static class CoordinationTools
     internal static IEnumerable<McpServerTool> CreateVerified(NativeJoin join, bool admin, bool chatOnly, bool diagnostics,
         Func<string, JsonElement, CancellationToken, Task<VerifiedInvocation?>> verify)
     {
-        return Surface(admin, chatOnly, diagnostics).Where(tool => tool.Name is not (RelayTools.SessionOpen or RelayTools.SessionBind)).Select(tool =>
+        return NativeSurface(admin, chatOnly, diagnostics).Select(tool =>
             new ForwardedTool(tool, async (args, ct) => await verify(tool.Name, args, ct) is { } call
                 ? await join.CallAsync(call.Context, call.ToolUseId, tool.Name, call.Arguments, ct) : new(false, "native_capture_required")));
     }
@@ -237,6 +247,7 @@ internal sealed class ChatCalls(RelayForwarder forwarder, SessionHints? hints, S
         else if (tool == RelayTools.ControlRequest) arguments = CoordinationTools.WithOwnSession(arguments, CurrentSession);
         else if (!TryWithOwnHandle(tool, ref arguments))
             return new(false, "implicit_request_capacity", JsonSerializer.SerializeToElement(new { guidance = "For a new write, supply your own sessionId and sessionToken. Reconcile an uncertain write in its original session." }));
+        arguments = WithActingSession(tool, arguments);
         AdapterReply? originalReply = null;
         var reply = tool == RelayTools.CheckInbox
             ? await InboxWait.CheckAsync(_forwarder, arguments, InboxWait.PollInterval, cancellationToken)
@@ -258,6 +269,29 @@ internal sealed class ChatCalls(RelayForwarder forwarder, SessionHints? hints, S
         }
         if (tool == RelayTools.SessionOpen) reply = _forwarder.WithOwnStartHint(reply);
         return tool is RelayTools.SessionOpen or RelayTools.GetStatus ? LocalWakeStatus.AddTo(reply, wakeStatusRoot) : reply;
+    }
+
+    /// <summary>
+    /// An administrative call says which chat is making it, so the hub can attribute it and refuse a former manager. This is the chat's own handle in
+    /// that repository, kept beside the fields the tool itself uses (<c>sessionId</c> names a cancel's target). None known: the token speaks alone.
+    /// </summary>
+    private JsonElement WithActingSession(string tool, JsonElement arguments)
+    {
+        if (!RelayToolCatalog.TryGet(tool, out var definition) || !definition.Audited || arguments.ValueKind != JsonValueKind.Object || arguments.TryGetProperty("actingSessionId", out _) ||
+            ChatLocators.Text(arguments, "repositoryId") is not { Length: > 0 } repository) return arguments;
+        (string Id, string Token) own;
+        lock (_handleLock)
+        {
+            if (!_own.TryGetValue(repository, out own))
+            {
+                if ((handoff?.FindOwn(repository) ?? localWake?.FindOwn(repository)) is not { } found) return arguments;
+                own = (found.SessionId, found.SessionToken);
+            }
+        }
+        var node = JsonNode.Parse(arguments.GetRawText())!.AsObject();
+        node["actingSessionId"] = own.Id;
+        node["actingSessionToken"] = own.Token;
+        return JsonSerializer.SerializeToElement(node);
     }
 
     /// <summary>

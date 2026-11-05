@@ -202,6 +202,8 @@ public static class ClaudeWaiter
             var id = Field(item, "messageId");
             var line = new StringBuilder("- ").Append(id);
             if (Field(item, "senderSessionId") is { Length: > 0 } sender) line.Append(" from ").Append(sender);
+            // The hub's mark, a number no sender can set. The text below it can claim anything.
+            if (item.TryGetProperty("managerGeneration", out var manager) && manager.ValueKind == JsonValueKind.Number) line.Append(" (the recorded manager: a request, not Paul's approval)");
             if (Field(item, "sentAt") is { Length: > 0 } sentAt)
                 line.Append(" at ").Append(DateTimeOffset.TryParse(sentAt, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var at) ? at.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture) : sentAt);
             // One line, like the text below it: a sender's replyTo can never start a line that looks like another message.

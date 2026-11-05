@@ -87,7 +87,18 @@ public static class RelayLimits
     public const int MaxManagerHumanWordsLength = 200;
     public const int ManagerSelectionHistoryEntries = 20;
     public const int ManagerSelectionHistoryPageEntries = 2;
+    /// <summary>Former managers the hub still refuses to take administrative calls from; past this the oldest revocation is forgotten.</summary>
+    public const int ManagerRevokedEntries = 64;
+    /// <summary>Administrative actions kept per repository; the count dropped is reported beside them. Only a repository's own actions push its entries out.</summary>
+    public const int AdminActionEntries = 100;
+    /// <summary>The control document's ceiling across repositories, reached only with more than four repositories busy at once.</summary>
+    public const int AdminActionTotalEntries = 400;
+    /// <summary>Past this many repositories with a sequence, those with no entry left are forgotten.</summary>
+    public const int AdminActionSequences = 256;
+    public const int AdminActionPageEntries = 20;
     public const int MaxPageSize = 50;
+    /// <summary>How many chats a refused ambiguous name lists; the reply says when there are more.</summary>
+    public const int MaxPeerChoices = 10;
     public const int DefaultPageSize = 20;
     /// <summary>A whole-task read carries only this many of the latest messages, reports and attempts; older ones stay in the paged sections.</summary>
     public const int RecentTaskEntries = 20;
@@ -162,6 +173,9 @@ public static class RelayLimits
 
     /// <summary>Most standing lines one board keeps.</summary>
     public const int MaxStandingLines = 30;
+
+    /// <summary>Maximum exact human decision quotation, in UTF-16 code units.</summary>
+    public const int MaxDecisionHumanWordsLength = 1024;
     /// <summary>Longest standing line, in characters.</summary>
     public const int MaxStandingLineLength = 200;
     /// <summary>Most authority grants one board keeps.</summary>

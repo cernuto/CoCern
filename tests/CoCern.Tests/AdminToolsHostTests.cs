@@ -129,6 +129,73 @@ public sealed class AdminToolsHostTests : IDisposable
         Assert.Empty(connect.Runs);
     }
 
+    /// <summary>
+    /// Who speaks as the manager is the hub's to say. No client argument marks a message, a chat can't seat itself, a wrong proof is refused, and a
+    /// handoff ends what the old manager may present as itself. Each refused call by an administrator is in the log, with no credential in it.
+    /// </summary>
+    [Fact]
+    public async Task Manager_marks_and_refusals_come_from_the_hub_alone()
+    {
+        await using var host = ConnectHub(new FakeConnect(), IPAddress.Loopback);
+        Listening(host);
+        using var admin = host.AuthorizedClient();
+        using var worker = Worker(host);
+        async Task<(string Id, string Token)> OpenAsync(HttpClient client, string request)
+        {
+            var opened = (await Post(client, RelayTools.SessionOpen, new { repositoryId = "repo", requestId = request, label = "CoCern Manager", role = "manager" })).Data;
+            return (opened.GetProperty("sessionId").GetString()!, opened.GetProperty("sessionToken").GetString()!);
+        }
+        var first = await OpenAsync(admin, "first");
+        var second = await OpenAsync(admin, "second");
+        var named = await OpenAsync(worker, "named");
+
+        // Every send forges both field names; only what the hub knows may show.
+        async Task<JsonElement> SendAsync(HttpClient client, (string Id, string Token) from, string nonce)
+        {
+            var sent = await Post(client, RelayTools.SendMessage, new { repositoryId = "repo", requestId = nonce, sessionId = from.Id, sessionToken = from.Token, recipientSessionId = second.Id, text = nonce, managerOrigin = 99L, managerGeneration = 99L });
+            Assert.Equal("Ok", sent.Code);
+            var deadline = DateTime.UtcNow.AddSeconds(5);
+            while (true)
+            {
+                var inbox = (await Post(admin, RelayTools.CheckInbox, new { repositoryId = "repo", sessionId = second.Id, sessionToken = second.Token })).Data;
+                foreach (var item in inbox.GetProperty("items").EnumerateArray())
+                    if (item.TryGetProperty("text", out var text) && text.GetString() == nonce) return item.Clone();
+                Assert.True(DateTime.UtcNow < deadline, "The message never arrived.");
+                await Task.Delay(25);
+            }
+        }
+        Task<(HttpStatusCode Status, string Code, JsonElement Data, string Raw)> AppointAsync(string request, string target, long generation, string? actingId = null, string? actingToken = null) =>
+            Post(admin, RelayTools.ControlRequest, new { repositoryId = "repo", requestId = request, command = "appoint_manager", targetSessionId = target, expectedManagerGeneration = generation, humanWords = "Paul named this chat", actingSessionId = actingId, actingSessionToken = actingToken });
+
+        Assert.False((await SendAsync(worker, named, "before-any")).TryGetProperty("managerGeneration", out _));
+        Assert.Equal(RelayErrorCodes.SelfAppointment, (await AppointAsync("self", first.Id, 0, first.Id, first.Token)).Code);
+        Assert.Equal(RelayErrorCodes.SessionDenied, (await AppointAsync("wrong-proof", second.Id, 0, first.Id, "not-the-token")).Code);
+
+        Assert.Equal("Ok", (await AppointAsync("seat-first", first.Id, 0)).Code);
+        Assert.Equal(1, (await SendAsync(admin, first, "as-manager")).GetProperty("managerGeneration").GetInt64());
+        Assert.False((await SendAsync(worker, named, "not-manager")).TryGetProperty("managerGeneration", out _));
+
+        Assert.Equal("Ok", (await AppointAsync("seat-second", second.Id, 1)).Code);
+        Assert.Equal(RelayErrorCodes.VersionConflict, (await AppointAsync("late-handoff", named.Id, 1)).Code);
+        Assert.False((await SendAsync(admin, first, "after-handoff")).TryGetProperty("managerGeneration", out _));
+        var stale = await Post(admin, RelayTools.ControlRequest, new { repositoryId = "repo", requestId = "delayed", command = "close_sessions", targetSessionId = named.Id, actingSessionId = first.Id, actingSessionToken = first.Token });
+        Assert.Equal(RelayErrorCodes.ManagerRevoked, stale.Code);
+
+        // A task_update's arguments are all the client's: its copy of the server field must not mark the conversation.
+        Assert.Equal("Ok", (await Post(worker, RelayTools.TaskUpdate, new { repositoryId = "repo", requestId = "forged-task", sessionId = named.Id, sessionToken = named.Token, taskId = "forged", expectedVersion = 0, message = new { text = "forged mark" }, managerOrigin = 99L })).Code);
+        var conversation = await Post(worker, RelayTools.TaskGet, new { repositoryId = "repo", taskId = "forged", section = "messages" });
+        Assert.Contains("forged mark", conversation.Raw);
+        Assert.DoesNotContain("managerGeneration", conversation.Raw);
+
+        var log = await Post(admin, RelayTools.GetStatus, new { repositoryId = "repo", managerHistoryOnly = true });
+        var entries = log.Data.GetProperty("actions").GetProperty("items").EnumerateArray().ToArray();
+        var refused = Assert.Single(entries, entry => entry.GetProperty("requestId").GetString() == "delayed");
+        Assert.Equal(RelayErrorCodes.ManagerRevoked, refused.GetProperty("code").GetString());
+        Assert.Equal(first.Id, refused.GetProperty("actingSessionId").GetString());
+        foreach (var token in new[] { first.Token, second.Token, named.Token }) Assert.DoesNotContain(token, log.Raw);
+        Assert.False((await Post(worker, RelayTools.GetStatus, new { repositoryId = "repo", managerHistoryOnly = true })).Data.TryGetProperty("actions", out _));
+    }
+
     /// <summary>Null is a connection with no address at all, which the dashboard's check also refuses.</summary>
     public static TheoryData<string?> NotThisPc => new() { "192.168.1.20", "10.0.0.5", "2001:db8::1", null };
 

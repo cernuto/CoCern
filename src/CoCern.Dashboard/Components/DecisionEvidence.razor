@@ -1,0 +1,27 @@
+@if (Evidence is { } evidence)
+{
+    <details class="standing-details">
+        <summary>Human answer: @(evidence.Outcome == "approve" ? "approved" : "dismissed")</summary>
+        <blockquote style="white-space: pre-wrap">@evidence.HumanWords</blockquote>
+        <dl class="standing-facts">
+            <div><dt>Recording chat</dt><dd>@evidence.SessionId</dd></div>
+            <div><dt>Recorded by</dt><dd>@evidence.PrincipalId</dd></div>
+            <div><dt>Recorded at</dt><dd>@DashboardFormat.Timestamp(evidence.At)</dd></div>
+            <div><dt>Proposal</dt><dd>@evidence.ProposalId</dd></div>
+            <div><dt>Effect</dt><dd>@evidence.Target</dd></div>
+            @if (evidence.Replaces.Length > 0) { <div><dt>Replaces</dt><dd>@evidence.Replaces</dd></div> }
+            @if (evidence.Scope.Length > 0)
+            {
+                <div><dt>Scope</dt><dd>@evidence.Scope</dd></div>
+                <div><dt>Targets</dt><dd>@string.Join(", ", evidence.Targets)</dd></div>
+                <div><dt>Expires</dt><dd>@DashboardFormat.Timestamp(evidence.ExpiresAt)</dd></div>
+            }
+            <div><dt>Audit reference</dt><dd>@evidence.AuditRef</dd></div>
+        </dl>
+        <p>This records the answer at that time. Removal or expiry ends the resulting grant.</p>
+    </details>
+}
+
+@code {
+    [Parameter] public DashboardDecisionEvidence? Evidence { get; set; }
+}

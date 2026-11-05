@@ -413,7 +413,7 @@ internal static class SessionAggregate
     /// the retry window (<see cref="RelayLimits.RequestReplayRetentionHours"/>), and a full set drops its oldest, so acknowledging never stops working.
     /// </summary>
     /// <summary>The fields a header read keeps: enough to know which messages wait and whether each may wake the chat, never their text.</summary>
-    private static readonly string[] HeaderFields = ["messageId", "repositoryId", "wake", "senderSessionId", "sentAt", "taskId", "replyTo", "kind"];
+    private static readonly string[] HeaderFields = ["messageId", "repositoryId", "wake", "senderSessionId", "sentAt", "taskId", "replyTo", "kind", InboxMessage.ManagerGenerationKey];
 
     /// <summary>
     /// A page of the inbox. A header read (<c>headersOnly</c>, a background reader's control) pages the messages without their text and adds
@@ -499,7 +499,9 @@ internal static class SessionAggregate
             MessageId = id, RepositoryId = context.Repository, Text = MessageText(args), Author = context.Caller.PrincipalId, SenderSessionId = context.SessionId,
             SentAt = context.Now, ReplyTo = Text(args, "replyTo") is { Length: > 0 } replyTo ? replyTo : null, Supersede = Flag(args, "supersede"),
             // A status or FYI message is stored like any other but never wakes the recipient; it is read with its next wake or inbox check.
-            Wake = IsNotFalse(args, "wake")
+            Wake = IsNotFalse(args, "wake"),
+            // Only ever set by MessageTools, from a verified session; a client's copy was dropped on entry.
+            ManagerGeneration = args[ServerArguments.ManagerOrigin] is null ? null : Number(args, ServerArguments.ManagerOrigin)
         };
         // Measured as the recipient's check_inbox returns it, so a message escaping would make unreadable is never accepted.
         if (CheckReadable(message.ToJson()) is { } unreadable) return unreadable;

@@ -12,10 +12,10 @@ namespace CoCern.Domain;
 
 /// <summary>
 /// A board's standing preferences (state key <c>standing</c>): short convention lines, typed authority grants and board settings
-/// under one <c>revision</c>, plus pending proposals and a bounded change history. Only an administrator changes them. Any session
-/// may propose a line or grant; a proposal changes nothing until an administrator approves it, so it does not advance the revision.
+/// under one <c>revision</c>, plus pending proposals and a bounded change history. Administrators manage them directly; a verified
+/// presenting chat may record the human's answer to its exact offered proposal. Proposals alone confer no authority.
 /// </summary>
-internal static class StandingPreferences
+internal static partial class StandingPreferences
 {
     /// <summary>The immutable terms eligible for this authenticated presenter, or null when already reserved.</summary>
     public static JsonObject? PendingPresentation(JsonObject document, string boardId, string proposalId, string principal, string session, string request)
@@ -101,15 +101,11 @@ internal static class StandingPreferences
         var changes = new List<string>();
         void SetLine(string id, string text, string author)
         {
-            if (next.Line(id) is { } existing && existing.Text == text) return;
-            changes.Add((lines.ContainsKey(id) ? "~line:" : "+line:") + id);
-            lines[id] = StandingLine.Create(id, text, author, admin, context.Now).Json;
+            SetApprovedLine(next, id, text, author, context, changes);
         }
         void SetGrant(string id, StandingGrant grant, string? proposer)
         {
-            if (next.Grant(id) is { } existing && SameGrant(existing, grant)) return;
-            changes.Add((grants.ContainsKey(id) ? "~grant:" : "+grant:") + id);
-            grants[id] = StandingGrant.Create(id, grant, admin, context.Now, proposer).Json;
+            SetApprovedGrant(next, id, grant, proposer, context, changes);
         }
 
         if (args.ContainsKey("remove"))
@@ -129,22 +125,7 @@ internal static class StandingPreferences
             foreach (var id in ids)
             {
                 if (next.Proposal(id) is not { } proposal) return Error(NotFound, new { id });
-                proposals.Remove(id);
-                changes.Add("approve:" + id);
-                var proposer = proposal.ProposedBy;
-                if (proposal.Line is { } line)
-                {
-                    var lineId = line.Id(id);
-                    if (grants.ContainsKey(lineId)) return Invalid("approve", lineId);
-                    SetLine(lineId, line.Text, proposer);
-                }
-                else if (proposal.Grant is { } grant)
-                {
-                    var grantId = grant.Id(id);
-                    if (lines.ContainsKey(grantId)) return Invalid("approve", grantId);
-                    if (grant.ExpiresAt <= context.Now) return Error(GrantInvalid, new { grantId, reason = "expired" });
-                    SetGrant(grantId, grant, proposer);
-                }
+                if (ApproveProposal(next, proposal, context, changes) is { } refusal) return refusal;
             }
         }
         if (args.ContainsKey("lines"))

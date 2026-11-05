@@ -18,15 +18,23 @@ public static class NativeParticipant
     public const string Generation = "nativeGeneration";
     public const string Request = "nativeRequestId";
     public const string ConfirmedExpiry = "nativeExpiredSessionId";
+    /// <summary>Hub-set from the proof's provider. Display only, kept on the private join entry.</summary>
+    public const string Client = "nativeClient";
+    /// <summary>The chat's title, which an adapter may send beside the frozen proof. Display only and untrusted: outside the identity hash, it grants nothing.</summary>
+    public const string DisplayLabel = "label";
+
+    /// <summary>How many top-level fields a join carries: repository, machine, request and proof, and the optional display label.</summary>
+    public static int JoinFields(JsonObject args) => args.ContainsKey(DisplayLabel) ? 5 : 4;
     public const string WorkingCopy = "nativeWorkingCopy";
     public const string ProtectedRoot = "nativeProtectedRoot";
 
     // Replace the adapter's exact frozen proof with hub-only arguments before tracing, replay or persistence.
     public static bool Admit(RelayCaller caller, JsonObject args)
     {
-        if (args.Count != 4 || args["nativeJoin"] is not JsonObject join) return false;
+        if (args.Count != JoinFields(args) || args["nativeJoin"] is not JsonObject join) return false;
         try
         {
+            if (args.ContainsKey(DisplayLabel) && !String(args, DisplayLabel, out _)) return false;
             var hasProtectedRoot = join.ContainsKey("protectedRoot");
             if (join.Count != (hasProtectedRoot ? 6 : 5) || !String(join, "provider", out var provider) || provider is not ("claude" or "codex")
                 || !String(join, "nativeId", out var native) || !CanonicalGuid(native, "D")
@@ -60,6 +68,7 @@ public static class NativeParticipant
             args[Id] = Convert.ToHexString(hash.GetHashAndReset());
             args[Generation] = generation;
             args[Request] = request;
+            args[Client] = provider;
             args[WorkingCopy] = workspace;
             if (protectedRoot is not null) args[ProtectedRoot] = protectedRoot;
             return true;

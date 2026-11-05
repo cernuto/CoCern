@@ -11,7 +11,7 @@ namespace CoCern.Core;
 /// <summary>Public-boundary validation: shape, size, repository scope and request identity, before any aggregate is touched.</summary>
 internal static class RelayRequestGuard
 {
-    private static readonly string[] IdentifierFields = ["requestId", "repositoryId", "sessionId", "sessionToken", "boardId", "machineId", "label", "taskId", "resourceId", "itemId",
+    private static readonly string[] IdentifierFields = ["requestId", "repositoryId", "sessionId", "sessionToken", "actingSessionId", "actingSessionToken", "boardId", "machineId", "label", "taskId", "resourceId", "itemId",
         "actionId", "contextId", "orderId", "recipientSessionId", "messageId", "triggerId"];
 
     /// <summary>Whole-number fields. A non-integer would otherwise read as 0, so a garbled version could match a task that doesn't exist yet.</summary>
@@ -30,6 +30,10 @@ internal static class RelayRequestGuard
             // A repeated key would let checks and the operation read different values, so it is refused (building the object throws on one).
             args = JsonNode.Parse(raw)!.AsObject();
             _ = args.Count;
+            // Refuse widened decision envelopes before stripping private or telemetry fields. The hub adds its incarnation later.
+            if (tool.Name == RelayTools.RecordDecision && args.Any(field => field.Key is not
+                ("repositoryId" or "boardId" or "sessionId" or "sessionToken" or "requestId" or "proposalId" or "decision" or "humanWords" or "callOrigin" or "backgroundCall")))
+                return Replies.Error(InvalidArguments);
             // Untrusted telemetry only; never part of native envelopes, replay or aggregate state.
             args.Remove("callOrigin");
             if (args.ContainsKey(CheckedNativeResolution)) return Replies.Error(InvalidArguments);
@@ -42,7 +46,7 @@ internal static class RelayRequestGuard
             }
             if (arguments.TryGetProperty("nativeJoin", out var native) && native.ValueKind == JsonValueKind.Object &&
                 native.TryGetProperty("resolution", out var evidence) &&
-                (tool.Name != RelayTools.SessionOpen || args.Count != 4 || !NativeGitOrigin.ValidCheckoutEvidence(evidence)))
+                (tool.Name != RelayTools.SessionOpen || args.Count != NativeParticipant.JoinFields(args) || !NativeGitOrigin.ValidCheckoutEvidence(evidence)))
                 return Replies.Error(InvalidArguments);
         }
         catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or JsonException)
@@ -75,6 +79,7 @@ internal static class RelayRequestGuard
         if (tool.Name == RelayTools.Search && SearchProblem(args) is { } field) return Replies.Error(InvalidArguments, new { field });
         if (tool.Name == RelayTools.AnalyticsQuery && AnalyticsProblem(args) is { } analyticsField) return Replies.Error(InvalidArguments, new { field = analyticsField });
         if (tool.Name is RelayTools.DocSearch or RelayTools.DocSection or RelayTools.DocSync && DocProblem(tool.Name, args) is { } docField) return Replies.Error(InvalidArguments, new { field = docField });
+        if (tool.Name == RelayTools.Peers && PeerProblem(args) is { } peerField) return Replies.Error(InvalidArguments, new { field = peerField });
         if (args.ContainsKey("seenMessageIds") && (args["seenMessageIds"] is not JsonArray seen || seen.Count > RelayLimits.MaxAcknowledgedMessages
             || seen.Any(id => id is not JsonValue value || !value.TryGetValue<string>(out var text) || text.Length is 0 or > RelayLimits.MaxIdentifierLength))) return Replies.Error(InvalidArguments, new { field = "seenMessageIds" });
         if (args["knownInboxEtag"] is { } inboxEtag && (inboxEtag is not JsonValue etagValue || !etagValue.TryGetValue<string>(out var etagText) || etagText.Length is 0 or > RelayLimits.MaxKnownEtagLength || etagText.Any(char.IsControl)))
@@ -94,6 +99,7 @@ internal static class RelayRequestGuard
         args.Remove(NativeParticipant.Generation);
         args.Remove(NativeParticipant.Request);
         args.Remove(NativeParticipant.ConfirmedExpiry);
+        args.Remove(NativeParticipant.Client);
         args.Remove(NativeParticipant.WorkingCopy);
         args.Remove(NativeParticipant.ProtectedRoot);
         return null;
@@ -170,6 +176,15 @@ internal static class RelayRequestGuard
         return null;
     }
 
+    /// <summary>The first invalid <c>peers</c> argument, or null: at most one of a whole name and a ref, each a bounded single line. A null reads as absent.</summary>
+    private static string? PeerProblem(JsonObject args)
+    {
+        foreach (var field in new[] { "name", "ref" })
+            if (args[field] is { } given && (given is not JsonValue value || !value.TryGetValue<string>(out var text) || string.IsNullOrWhiteSpace(text) || text.Length > RelayLimits.MaxIdentifierLength || text.Any(char.IsControl)))
+                return field;
+        return args["name"] is not null && args["ref"] is not null ? "ref" : null;
+    }
+
     private static int Count(JsonObject args, string key) => args[key] is JsonArray array ? array.Count : 0;
 }
 
@@ -178,9 +193,10 @@ internal static class RelayRequestGuard
 /// reads and removes them (after <see cref="RelayRequestGuard.Validate"/> has checked their shapes).
 /// </summary>
 internal sealed record CallControls(bool OfferWanted, bool StatusDetail, bool PageSeen, string[] SeenIds, string? KnownEtag, JsonObject? Usage, bool ModelVisible, bool? BackgroundCall,
-    bool HeadersOnly = false, string? KnownInboxEtag = null, bool PresentStanding = false, string? StatusTag = null, long? StatusHoldMinutes = null)
+    bool HeadersOnly = false, string? KnownInboxEtag = null, bool PresentStanding = false, string? StatusTag = null, long? StatusHoldMinutes = null,
+    string? ActingSessionId = null, string? ActingSessionToken = null)
 {
-    private static readonly string[] Fields = ["usage", "attention", "attentionDetail", "attentionStatus", "maxHoldMinutes", "seen", "seenMessageIds", "knownEtag", "backgroundCall", "headersOnly", "knownInboxEtag", "presentStanding", "statusTag"];
+    private static readonly string[] Fields = ["usage", "attention", "attentionDetail", "attentionStatus", "maxHoldMinutes", "seen", "seenMessageIds", "knownEtag", "backgroundCall", "headersOnly", "knownInboxEtag", "presentStanding", "statusTag", "actingSessionId", "actingSessionToken"];
 
     public static CallControls Take(JsonObject args)
     {
@@ -204,7 +220,10 @@ internal sealed record CallControls(bool OfferWanted, bool StatusDetail, bool Pa
             KnownInboxEtag: JsonFields.Text(args, "knownInboxEtag") is { Length: > 0 } inboxEtag ? inboxEtag : null,
             PresentStanding: args["presentStanding"] is JsonValue present && present.GetValue<bool>(),
             StatusTag: args["statusTag"] is JsonValue validator && validator.TryGetValue<string>(out var statusTag) ? statusTag : null,
-            StatusHoldMinutes: args["maxHoldMinutes"] is not null ? Number(args, "maxHoldMinutes") : null);
+            StatusHoldMinutes: args["maxHoldMinutes"] is not null ? Number(args, "maxHoldMinutes") : null,
+            // A chat's proof that it is the one making an administrative call. Taken out here, so no aggregate, replay fingerprint or log ever holds it.
+            ActingSessionId: JsonFields.Text(args, "actingSessionId") is { Length: > 0 } acting ? acting : null,
+            ActingSessionToken: JsonFields.Text(args, "actingSessionToken") is { Length: > 0 } proof ? proof : null);
         foreach (var field in Fields) args.Remove(field);
         return controls;
     }
