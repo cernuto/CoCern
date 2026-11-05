@@ -449,8 +449,10 @@ internal static class SessionAggregate
         if (fromHook && context.Args[RelayLimits.HookReportIdField] is { } named && !ValidReportId(named)) return Error(InvalidArguments, new { field = RelayLimits.HookReportIdField, maxLength = RelayLimits.MaxIdentifierLength });
         var supplied = context.Args["messageIds"] as JsonArray ?? (Text(context.Args, "messageId") is { Length: > 0 } single ? new JsonArray(single) : new JsonArray());
         var ids = Strings(supplied).ToArray();
-        // The hub's own flag for a reply's replyTo: an ID the inbox does not hold now is left alone and never recorded, so its delivery still lands.
-        if (Flag(context.Args, "heldOnly")) ids = ids.Where(id => state.Inbox.Holds(id)).ToArray();
+        // A recorded ID's delivery is ignored, so an ID this session has never held stays unrecorded: wrong or not delivered yet, its message must still land. An ID already acknowledged stays acknowledged.
+        // The hub's own flag for a reply's replyTo goes further and acts only on what the inbox holds now.
+        var heldOnly = Flag(context.Args, "heldOnly");
+        ids = ids.Where(id => state.Inbox.Holds(id) || (!heldOnly && state.Acked.Holds(id))).ToArray();
         var acknowledged = 0;
         var acked = state.Acked;
         foreach (var id in ids)

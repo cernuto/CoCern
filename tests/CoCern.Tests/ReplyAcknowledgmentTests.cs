@@ -45,9 +45,22 @@ public sealed class ReplyAcknowledgmentTests
     }
 
     [Fact]
+    public async Task A_plain_ack_of_a_message_not_yet_delivered_does_not_drop_it_when_it_arrives()
+    {
+        var hub = new Hub();
+        var chat = await hub.Open();
+        var ack = hub.Handle(chat); ack["requestId"] = "early"; ack["messageIds"] = new JsonArray("in-flight");
+
+        Assert.True((await hub.Call(RelayTools.Ack, ack)).Ok);
+        await hub.Deliver(chat, "in-flight");
+
+        Assert.Equal(["in-flight"], await hub.Inbox(chat));
+    }
+
+    [Fact]
     public async Task A_reply_to_a_message_not_yet_delivered_does_not_drop_it_when_it_arrives()
     {
-        // An acknowledgment records its IDs and a later delivery of a recorded ID is ignored, so a bare ack here would lose the message.
+        // A later delivery of a recorded ID is ignored, so recording this one would lose the message.
         var hub = new Hub();
         var (chat, peer) = (await hub.Open(), await hub.Open());
 
