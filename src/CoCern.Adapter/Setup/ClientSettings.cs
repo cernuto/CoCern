@@ -129,7 +129,8 @@ internal static class ClientSettings
         try
         {
             var options = AdapterOptions.FromEnvironment(key => environment.GetValueOrDefault(key));
-            if (LocalWakeConnection.Create(options, environment.GetValueOrDefault("COCERN_TOKEN_FILE"), cacheRoot) is { } connection)
+            // A setup command is not an adapter: it leaves no status file, and prints no wake lines over its own output.
+            if (LocalWakeConnection.Create(options, environment.GetValueOrDefault("COCERN_TOKEN_FILE"), cacheRoot, _ => { }) is { } connection)
                 StageNativeCandidate(connection.Folder, provider, SetupEnvironment.AdapterCommandLine(dotnet, adapter), developmentRoot, clientProfile);
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException or AdapterConfigurationException)
@@ -341,9 +342,14 @@ internal static class ClientSettings
     /// </summary>
     public static ClientPlan PlanStopHook(string path, string command) => PlanHooks(path, StopHook(command));
 
-    /// <summary>Claude Code's settings.json with the Stop hook and, when asked, the prompt hook: one plan, so neither write loses the other.</summary>
-    public static ClientPlan PlanClaudeHooks(string path, string stopCommand, string? promptCommand) =>
-        promptCommand is null ? PlanHooks(path, StopHook(stopCommand)) : PlanHooks(path, StopHook(stopCommand), PromptHook(promptCommand));
+    /// <summary>Claude Code's settings.json with the Stop hook and, when asked, the prompt and post-tool hooks: one plan, so no write loses another.</summary>
+    public static ClientPlan PlanClaudeHooks(string path, string stopCommand, string? promptCommand, string? postToolCommand = null)
+    {
+        var specs = new List<HookSpec> { StopHook(stopCommand) };
+        if (promptCommand is not null) specs.Add(PromptHook(promptCommand));
+        if (postToolCommand is not null) specs.Add(PostToolHook(postToolCommand));
+        return PlanHooks(path, specs.ToArray());
+    }
 
     /// <summary>
     /// A CoCern command handler for one hook event. A handler whose command contains <paramref name="Marker"/> is ours, and with
@@ -358,6 +364,10 @@ internal static class ClientSettings
 
     private static HookSpec PromptHook(string command) =>
         new("UserPromptSubmit", "--prompt-hook", new JsonObject { ["type"] = "command", ["command"] = command, ["timeout"] = PromptHookTimeoutSeconds }, ReplaceOwned: false);
+
+    // No matcher: mail can arrive during any tool call. An older handler of ours is moved forward like the Stop hook's.
+    private static HookSpec PostToolHook(string command) =>
+        new("PostToolUse", "--post-tool-hook", new JsonObject { ["type"] = "command", ["command"] = command, ["timeout"] = PostToolHookTimeoutSeconds }, ReplaceOwned: true, AdapterOnly: true);
 
     private static HookSpec StopHook(string command) =>
         new("Stop", "--stop-hook", new JsonObject { ["type"] = "command", ["command"] = command, ["asyncRewake"] = true, ["timeout"] = StopHookTimeoutSeconds }, ReplaceOwned: true, AdapterOnly: true);
@@ -411,6 +421,9 @@ internal static class ClientSettings
 
     /// <summary>The client-side limit on one prompt hook run; the hook itself gives up on the hub much sooner (about one second).</summary>
     internal const int PromptHookTimeoutSeconds = 5;
+
+    /// <summary>The client-side limit on one post-tool hook run; the hook gives up well before it, and when the inbox has not changed it is done after one small read.</summary>
+    internal const int PostToolHookTimeoutSeconds = 5;
 
     /// <summary>
     /// The client-side limit on one Stop hook run: a day, the same as the hub's default idle limit for sessions. Claude Code enforces a hook's

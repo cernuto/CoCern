@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using System.Text.Json;
 using CoCern.Contracts;
 using CoCern.Domain;
 using CoCern.Domain.Messages;
@@ -89,6 +90,21 @@ public sealed class SessionStateShapeTests
         Effect(hub, chat, new ActionWorkReport(Repository, chat.Id, AggregateKinds.DefaultBoard, "t-8", "deploy", 1, false, Now.AddMinutes(1)), Now.AddMinutes(1));
         Assert.True(hub.Close(new() { ["targetSessionId"] = gone.Id, ["force"] = true }, Now).Ok);
         hub.DeliverAll(Now.AddMinutes(1));
+
+        // A genuine wait owned by the still-open peer watches the already
+        // closed session. The primary actor stores the wait; delivery records
+        // the closed-source retirement fence and settles the owner once.
+        var waitArgs = new JsonObject { ["repositoryId"] = Repository, ["sessionId"] = peer.Id, ["sessionToken"] = peer.Token };
+        waitArgs["request"] = JsonSerializer.SerializeToNode(new EventWaitRequest("shape-wait", "claim_released", "shape-resource", "1", Now.AddMinutes(10)),
+            new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        Assert.True(hub.Apply(AggregateKinds.Session, peer.Id, EventWaitAggregate.RegisterOperation, waitArgs,
+            AggregateHub.Alice with { IsInternal = true }, Now.AddMinutes(1)).Ok);
+        var ownerWatch = new EventWaitOwnerWatch(Repository, peer.Id, "shape-wait", "shape-watch", gone.Id, Now.AddMinutes(10));
+        Assert.True(EventWaitSources.Apply(hub.Of(AggregateKinds.Session, peer.Id), AggregateHub.Alice, peer.Id, "bind", waitArgs,
+            Now.AddMinutes(1), ownerWatch).Ok);
+        hub.DeliverAll(Now.AddMinutes(1));
+        Assert.Equal("target_gone", hub.State(AggregateKinds.Session, peer.Id)[SessionState.EventWaitsKey]!["shape-wait"]!["terminal"]!["outcome"]!.GetValue<string>());
+        Assert.NotEmpty(hub.State(AggregateKinds.Session, gone.Id)["eventWaitRetired"]!.AsObject());
 
         // Include a real admitted native open so the schema's optional native fields are exercised.
         var native = new JsonObject

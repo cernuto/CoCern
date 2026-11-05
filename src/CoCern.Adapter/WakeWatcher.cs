@@ -12,6 +12,8 @@ public sealed record WakeTarget(WakeRoute Route, WakeSession Session, IWakeDispa
 public sealed record WakeRuntime(AdapterOptions Options, string StatePath, string StopFile, string RelayUrl)
 {
     public Func<IDisposable?>? TryEnterDispatch { get; init; }
+    /// <summary>What this watcher's calls report as their origin: a waiter running on it reports as itself.</summary>
+    internal string CallOrigin { get; init; } = CallOrigins.WakeWatcher;
     /// <summary>Pulsed when the targets may have changed, so the watcher re-reads them now rather than at its next fallback pass.</summary>
     public WakeNudge? Nudge { get; init; }
     /// <summary>Replaces the hint channel's handler (tests); null keeps SignalR's own, pinned when <see cref="AdapterOptions.PinnedFingerprint"/> is set.</summary>
@@ -97,7 +99,7 @@ public static class WakeWatcher
         using var ownState = runtime.State is null ? new WakeState(runtime.StatePath, runtime.Limits) : null;
         var state = runtime.State ?? ownState!;
         using var http = new HttpClient(handler ?? RelayForwarder.CreateHandler(options), disposeHandler: handler is null) { Timeout = TimeSpan.FromSeconds(15) };
-        var forwarder = new RelayForwarder(http, options);
+        var forwarder = new RelayForwarder(http, options, runtime.CallOrigin);
         // The reconciler reads only the relay URL and stop file from its configuration.
         var settings = new WakeConfiguration(runtime.RelayUrl, "", "", runtime.StatePath, runtime.StopFile, []);
         var changed = runtime.Nudge?.Changes ?? Channel.CreateBounded<bool>(new BoundedChannelOptions(1) { FullMode = BoundedChannelFullMode.DropWrite });

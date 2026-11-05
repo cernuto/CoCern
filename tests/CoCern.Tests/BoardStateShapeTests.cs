@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using System.Text.Json;
 using CoCern.Contracts;
 using CoCern.Domain;
 using CoCern.Domain.Messages;
@@ -23,6 +24,22 @@ public sealed class BoardStateShapeTests
     public void A_board_stores_only_the_keys_its_state_declares_and_the_fixture_stores_each_of_them()
     {
         var envelope = DomainBoard.BuildWithEveryKey();
+        // A real task supplies each captured source baseline. Canceled-watch
+        // turnover exercises both declared subscription state and its replay
+        // fences; no task or archived record is injected or excluded.
+        var target = Document(envelope)[BoardState.TasksKey]!.AsObject().First().Key;
+        for (var index = 0; index < 129; index++)
+        {
+            var watch = new EventWaitSourceWatch("repo", "shape-owner", "shape-wait-" + index, "shape-watch-" + index,
+                "task_completed", AggregateKinds.Board, DomainBoard.Key, target, Now.AddHours(1), QualifyingData: "completed");
+            var payload = JsonSerializer.SerializeToNode(watch, new JsonSerializerOptions(JsonSerializerDefaults.Web))!.AsObject();
+            Assert.True(CoordinationStateMachine.Apply(envelope, AggregateKinds.Board, DomainBoard.Key, Hub,
+                EventWaitSources.SourceWatchOperation, payload, Now.AddMinutes(1), ordersEnabled: true).Ok);
+            Assert.True(CoordinationStateMachine.Apply(envelope, AggregateKinds.Board, DomainBoard.Key, Hub,
+                EventWaitSources.SourceUnwatchOperation, payload, Now.AddMinutes(1), ordersEnabled: true).Ok);
+        }
+        Assert.NotEmpty(Document(envelope)[EventWaitSources.SubscriptionsKey]!.AsObject());
+        Assert.NotEmpty(Document(envelope)["eventWaitRetired"]!.AsObject());
         var board = Document(envelope);
         var archived = envelope.PendingArchive().Select(task => JsonNode.Parse(task.Json)!.AsObject()).ToArray();
         Assert.Equal(["dep", "old"], envelope.PendingArchive().Select(task => task.TaskId).Order(StringComparer.Ordinal));

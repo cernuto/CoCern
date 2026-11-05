@@ -16,18 +16,18 @@ internal sealed class LocalWakeConnection
     {
         report ??= code => LocalWakeStatus.Report(code, cacheRoot);
         LocalWakeConnection? Refuse(string reason) { report?.Invoke(reason); return null; }
-        if (options.NodeFolder is not null) return Refuse("node_connection");
-        if (string.IsNullOrWhiteSpace(tokenFile)) return Refuse("token_file_unconfigured");
-        if (!Path.IsPathFullyQualified(tokenFile)) return Refuse("token_file_not_absolute");
+        if (options.NodeFolder is not null) return Refuse(LocalWakeCodes.NodeConnection);
+        if (string.IsNullOrWhiteSpace(tokenFile)) return Refuse(LocalWakeCodes.TokenFileUnconfigured);
+        if (!Path.IsPathFullyQualified(tokenFile)) return Refuse(LocalWakeCodes.TokenFileNotAbsolute);
         tokenFile = Path.GetFullPath(tokenFile);
         // A different or replaced credential must never silently move this chat onto another principal.
-        if (!File.Exists(tokenFile)) return Refuse("token_file_missing");
-        if (new FileInfo(tokenFile).Length > 16384) return Refuse("token_file_oversized");
-        if (File.ReadAllText(tokenFile).Trim() != options.Token) return Refuse("credential_mismatch");
+        if (!File.Exists(tokenFile)) return Refuse(LocalWakeCodes.TokenFileMissing);
+        if (new FileInfo(tokenFile).Length > 16384) return Refuse(LocalWakeCodes.TokenFileOversized);
+        if (File.ReadAllText(tokenFile).Trim() != options.Token) return Refuse(LocalWakeCodes.CredentialMismatch);
         var folder = Path.Combine(cacheRoot ?? DefaultRoot, Key(options.BaseUri.AbsoluteUri, tokenFile));
         Directory.CreateDirectory(folder);
         NodeState.WritePrivately(Path.Combine(folder, FileName), JsonSerializer.SerializeToUtf8Bytes(new { hub = options.BaseUri.AbsoluteUri, tokenFile, fingerprint = options.PinnedFingerprint }));
-        report?.Invoke("connection_ready");
+        report?.Invoke(LocalWakeCodes.ConnectionReady);
         return new() { Folder = folder, Options = options };
     }
 

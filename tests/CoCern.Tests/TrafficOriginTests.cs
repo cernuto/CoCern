@@ -45,6 +45,22 @@ public sealed class TrafficOriginTests
     }
 
     [Fact]
+    public async Task An_adapter_tool_call_is_recorded_as_mcp_and_the_tag_reaches_neither_the_reply_nor_grain_state()
+    {
+        await using var host = new RelayHostFixture();
+        using var client = host.AuthorizedClient();
+        var forwarder = new RelayForwarder(client, new AdapterOptions(client.BaseAddress!.AbsoluteUri, RelayHostFixture.Token));
+        var reply = await new ChatCalls(forwarder, null, null, "origin-test").CallAsync("task_get", JsonSerializer.SerializeToElement(new { repositoryId = "repo" }), CancellationToken.None);
+        Assert.True(reply.Ok);
+        Assert.DoesNotContain("callOrigin", JsonSerializer.Serialize(reply, AdapterReply.JsonOptions));
+        var store = host.Services.GetRequiredService<SqliteStore>();
+        await store.FlushActivityAsync();
+        using var db = Open(store.DatabasePath);
+        Assert.Equal("mcp", Scalar(db, "SELECT call_origin FROM activity_log WHERE kind = 'call' AND tool = 'task_get'"));
+        Assert.Equal(0L, Scalar(db, "SELECT count(*) FROM grain_state WHERE payload LIKE '%callOrigin%'"));
+    }
+
+    [Fact]
     public async Task Old_database_migration_and_old_snapshot_keep_unrecorded_origin_unknown()
     {
         var root = Path.Combine(Path.GetTempPath(), "cocern-origin-" + Guid.NewGuid().ToString("N"));

@@ -321,6 +321,8 @@ public sealed class AdapterTests
             string? sent = null;
             using var hub = new StubHandler(async (request, ct) =>
             {
+                // The whole command also polls the inbox for mail; this chat has none.
+                if (request.RequestUri!.AbsolutePath.EndsWith("/check_inbox")) return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new { ok = true, code = "ok", dataJson = "{\"items\":[],\"nextCursor\":null,\"truncated\":false,\"total\":0,\"etag\":\"e\"}", version = 0 }), Encoding.UTF8, "application/json") };
                 calls++;
                 sent = await request.Content!.ReadAsStringAsync(ct);
                 Assert.EndsWith("/get_status", request.RequestUri!.AbsolutePath);

@@ -382,6 +382,54 @@ public sealed class WakeTests
     }
 
     [Fact]
+    public void A_hook_reads_and_records_the_ledger_while_a_waiter_holds_the_state_for_its_whole_wait()
+    {
+        using var directory = new TempDirectory();
+        var path = Path.Combine(directory.Path, "state.db");
+        using var waiter = new WakeState(path);
+        // The trap: the waiter's ownership still shuts out anyone who opens the state.
+        Assert.Throws<IOException>(() => new WakeState(path));
+        waiter.MarkPrinted("route", ["m1"]);
+        Assert.Equal(["m1"], WakeState.ReadPrinted(path, "route", ["m1", "m2"]));
+        Assert.Empty(WakeState.ReadPrinted(path, "other", ["m1"]));
+        // What a hook records, the holding waiter sees, and neither repeats what the other printed.
+        WakeState.RecordPrinted(path, "route", ["m2", "m2"]);
+        Assert.Equal(["m1", "m2"], waiter.Printed("route", ["m1", "m2"]).Order(StringComparer.Ordinal));
+        Assert.Equal(["m1", "m2"], WakeState.ReadPrinted(path, "route", ["m1", "m2", "m3"]).Order(StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public void A_ledger_that_does_not_exist_yet_has_printed_nothing_and_a_hook_can_start_it()
+    {
+        using var directory = new TempDirectory();
+        var path = Path.Combine(directory.Path, "new", "state.db");
+        Assert.Empty(WakeState.ReadPrinted(path, "route", ["m1"]));
+        Assert.False(File.Exists(path));
+        WakeState.RecordPrinted(path, "route", ["m1"]);
+        Assert.Equal(["m1"], WakeState.ReadPrinted(path, "route", ["m1"]));
+        // A waiter that starts afterwards finds what the hook recorded.
+        using var waiter = new WakeState(path);
+        Assert.Equal(["m1"], waiter.Printed("route", ["m1"]));
+    }
+
+    [Fact]
+    public void A_database_from_before_the_ledger_has_printed_nothing_and_takes_a_hooks_record()
+    {
+        using var directory = new TempDirectory();
+        var path = Path.Combine(directory.Path, "state.db");
+        using (var old = new Microsoft.Data.Sqlite.SqliteConnection(new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder { DataSource = path, Pooling = false }.ToString()))
+        {
+            old.Open();
+            using var command = old.CreateCommand();
+            command.CommandText = "CREATE TABLE batches (route TEXT NOT NULL, batch TEXT PRIMARY KEY, status TEXT NOT NULL, at INTEGER NOT NULL);";
+            command.ExecuteNonQuery();
+        }
+        Assert.Empty(WakeState.ReadPrinted(path, "route", ["m1"]));
+        WakeState.RecordPrinted(path, "route", ["m1"]);
+        Assert.Equal(["m1"], WakeState.ReadPrinted(path, "route", ["m1"]));
+    }
+
+    [Fact]
     public void A_database_from_before_printed_messages_upgrades_in_place_and_keeps_its_wakes()
     {
         using var directory = new TempDirectory();
