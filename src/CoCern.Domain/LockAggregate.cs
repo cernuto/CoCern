@@ -18,8 +18,16 @@ internal static class LockAggregate
 
     private const int RetryAfterSeconds = 5;
 
-    public static RelayReply Handle(AggregateContext context) => context.Operation switch
+    public static RelayReply Handle(AggregateContext context)
     {
+        // Any successful operation can rebuild the lazy lease timer. Preserve
+        // the old generation's real expiry before that rebuild or reacquisition;
+        // a refused operation discards this candidate and its effects together.
+        EventWaitSources.OnClaimExpiry(context);
+        return context.Operation switch
+        {
+        EventWaitSources.SourceWatchOperation or EventWaitSources.SourceUnwatchOperation => EventWaitSources.HandleSource(context, AggregateKinds.Lock),
+        EventWaitSources.ClaimDueOperation => EventWaitSources.ClaimExpired(context),
         Operations.Block => Block(context),
         Operations.Unblock => Unblock(context),
         Operations.ClaimState => ClaimState(context),
@@ -28,8 +36,9 @@ internal static class LockAggregate
         Operations.OrderRelease => StandingOrders.Release(context),
         RelayTools.ClaimAcquire => Acquire(context),
         RelayTools.ClaimRenew or RelayTools.ClaimRelease => RenewOrRelease(context),
-        _ => Error(UnknownTool)
-    };
+            _ => Error(UnknownTool)
+        };
+    }
 
     /// <summary>
     /// A rolled-back task claim gives an already-held grant back to the claim it served before, and forgets the grant reply it stored
@@ -77,6 +86,7 @@ internal static class LockAggregate
         blockers.Remove(id); state.Resolve(id, context.Now);
         // With no action left in flight, a lease nearing its end is no longer worth a claim_expiring item.
         if (blockers.Count == 0) AttentionSources.OnLeaseSettled(context, state.Holder, context.Key);
+        EventWaitSources.OnClaimExpiry(context);
         return Ok(new { resolved = true });
     }
 
@@ -115,7 +125,10 @@ internal static class LockAggregate
             return Error(Busy, new { holder, leaseUntil = state.LeaseUntilText, blockers = blockers.Count, retryAfterSeconds = RetryAfterSeconds });
         var owned = state.HeldBy(session, context.Now);
         if (blockers.Count > 0 && !owned) return Error(Busy, new { holder, blockers = blockers.Count });
-        if (!owned) generation = state.Grant(Required(context.Args, "sessionId"), context.Now.AddSeconds(Leases.Seconds(context.Args)));
+        if (!owned)
+        {
+            generation = state.Grant(Required(context.Args, "sessionId"), context.Now.AddSeconds(Leases.Seconds(context.Args)));
+        }
         // The task claim this grant now serves (set by task_claim, even when the holder already had it), so a standing order releases the
         // grant only for that claim and never one the same session took again for its next task.
         var previous = state.ClaimFor;
@@ -150,6 +163,7 @@ internal static class LockAggregate
     internal static void Release(AggregateContext context, string holder)
     {
         new LockState(context.State).Free(context.Now);
+        EventWaitSources.ClaimReleased(context);
         AttentionSources.OnLeaseSettled(context, holder, context.Key);
         StandingOrders.OnLockReleased(context);
     }

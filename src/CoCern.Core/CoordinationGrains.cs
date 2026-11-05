@@ -100,7 +100,9 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
             RelayReply result;
             try
             {
-                if (Kind == AggregateKinds.Session && effect.TargetKind == AggregateKinds.Session && (effect.Operation == Operations.Deliver || Operations.IsAttention(effect.Operation)) && GrainContext is not null && effect.TargetKey == this.GetPrimaryKeyString())
+                if (Kind == AggregateKinds.Session && effect.TargetKind == AggregateKinds.Session && (effect.Operation == Operations.Deliver || Operations.IsAttention(effect.Operation)
+                    || effect.Operation is EventWaitAggregate.DueOperation or EventWaitSources.WatchOperation or EventWaitSources.UnwatchOperation or EventWaitSources.LifecycleOperation)
+                    && GrainContext is not null && effect.TargetKey == this.GetPrimaryKeyString())
                 {
                     // A non-reentrant grain cannot await an RPC to itself. Commit its inbox entry
                     // and outbox removal together so a stale dispatch snapshot cannot erase delivery.
@@ -109,7 +111,14 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
                 else result = await Aggregate(grains, effect.TargetKind, effect.TargetKey).ExecuteAsync(effectCaller, effect.Operation, payload.ToJsonString());
             }
             catch (Exception) { result = Replies.Error(RelayErrorCodes.DeliveryUnavailable); }
-            var failure = result.Ok ? (EffectDelivery.Failure?)null : EffectDelivery.OnFailure(effect, payload, result.Code, Kind, ordersOn);
+            // A cross-repository event-wait address can never become valid.
+            // Consume only these bounded private subscription callbacks, without
+            // exposing the target's state or changing generic transfer retries.
+            var permanentWaitDenial = result.Code == RelayErrorCodes.RepositoryDenied && effect.Operation is
+                EventWaitSources.WatchOperation or EventWaitSources.UnwatchOperation or EventWaitSources.LifecycleOperation or
+                EventWaitSources.SourceWatchOperation or EventWaitSources.SourceUnwatchOperation or EventWaitSources.SourceAckOperation or EventWaitSources.SourceSignalOperation;
+            var failure = result.Ok ? (EffectDelivery.Failure?)null : permanentWaitDenial ? EffectDelivery.Failure.Drop
+                : EffectDelivery.OnFailure(effect, payload, result.Code, Kind, ordersOn);
             if (result.Code == RelayErrorCodes.MalformedEffect) ReportMalformed(effect, payload, result, failure!.Value);
             // The failed order run is applied on this board's own state, so it is logged, raised to the managers and counted.
             if (failure == EffectDelivery.Failure.DropAsFailedOrderRun)
@@ -293,7 +302,19 @@ public sealed class TaskBoardGrain([PersistentState("board", "relay")] IPersiste
 
 [GrainType("cocern.lock")]
 public sealed class LockGrain([PersistentState("lock", "relay")] IPersistentState<StateEnvelope<CoordinationDocument>> state, IGrainFactory grains, IServiceProvider services) : CoordinationGrain(state, grains, services), ILockGrain
-{ protected override string Kind => AggregateKinds.Lock; }
+{
+    protected override string Kind => AggregateKinds.Lock;
+
+    private protected override async Task<bool> RunDueChecksAsync(StateEnvelope<CoordinationDocument> candidate, DateTimeOffset now, string workId)
+    {
+        if (!candidate.DueWork.Any(work => work.Kind == DueWorkKinds.Lease && work.DueAt <= now && (workId.Length == 0 || work.Id == workId))) return true;
+        var repository = JsonFields.Text(JsonNode.Parse(candidate.Value.Json)!.AsObject(), "repositoryId");
+        if (repository.Length == 0) return true;
+        var dispatcher = new RelayCaller("relay-claim-expiry", false, [repository], true);
+        if (!ApplyInternal(candidate, dispatcher, EventWaitSources.ClaimDueOperation, new JsonObject { ["repositoryId"] = repository }, now).Ok) return false;
+        return await CommitAsync(candidate);
+    }
+}
 
 [GrainType("cocern.control")]
 public sealed class ControlGrain([PersistentState("control", "relay")] IPersistentState<StateEnvelope<CoordinationDocument>> state, IGrainFactory grains, IServiceProvider services) : CoordinationGrain(state, grains, services), IControlGrain

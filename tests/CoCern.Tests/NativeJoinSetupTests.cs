@@ -367,7 +367,8 @@ public sealed class NativeJoinSetupTests : IDisposable
         Directory.CreateDirectory(Profile);
         var candidate = ClientSettings.StageNativeCandidate(binding.Folder, "claude", "fixture-helper", clientProfile: Profile)!;
         var registration = NativeRegistration.Read(candidate, "claude", binding.Folder, Profile)!;
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        // Whole-fixture hang guard: signing keeps its separate 15-second production fence.
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         // Only the synthetic HttpMessageHandler allocates the private fixture handle. The loopback endpoint is read-only.
         await binding.Join.EnsureAsync(binding.Capture, timeout.Token);
         var stamped = await NativeJoinHook.StampAsync(binding.Join, binding.Capture, "chat_directory", "actual-mcp-read", JsonSerializer.SerializeToElement(new { }), timeout.Token);
@@ -391,6 +392,7 @@ public sealed class NativeJoinSetupTests : IDisposable
             Assert.True(relay.HintAttempts > 0); // This exact fixture channel intentionally remains unavailable.
             Assert.Equal(0, relay.Mutations); Assert.Equal(0, relay.InvalidWire);
             Assert.Equal("unchanged", File.ReadAllText(child.Sentinel));
+            Assert.False(timeout.IsCancellationRequested, "The fixture watchdog cannot count as a successful signed read.");
         }
         finally { timeout.Cancel(); try { await helper; } catch (OperationCanceledException) { } }
     }

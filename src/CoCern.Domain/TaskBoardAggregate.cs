@@ -28,14 +28,19 @@ internal static class TaskBoardAggregate
         // Migrate only current markers. No copied history or changes to optimistic task versions.
         foreach (var task in tasks.OrderBy(x => x.Key, StringComparer.Ordinal).Select(x => new BoardTask(x.Value!.AsObject())))
             if (!task.HasChangeRevision) board.MarkChanged(task);
+        if (context.Operation is EventWaitSources.SourceWatchOperation or EventWaitSources.SourceUnwatchOperation)
+            return EventWaitSources.HandleSource(context, AggregateKinds.Board);
         var taskId = Text(context.Args, "taskId");
         // A write to a nearly full board first moves its oldest finished tasks to the archive.
         if (CoordinationStateMachine.IsMutation(context.Operation) && context.Operation != Operations.TaskArchive) TaskArchiving.Run(context, sweep: false);
         var mutation = CoordinationStateMachine.IsMutation(context.Operation) && taskId.Length > 0;
         var before = mutation ? tasks[taskId]?.ToJsonString() : null;
+        var wasCompleted = mutation && board.Task(taskId)?.Workflow?.State == "completed";
         var result = Dispatch(context, board, taskId);
         if (!result.Ok) return result;
         if (mutation && board.Task(taskId) is { } changedTask && before != changedTask.Json.ToJsonString()) board.MarkChanged(changedTask);
+        if (mutation && !wasCompleted && board.Task(taskId) is { } completed && completed.Workflow?.State == "completed")
+            EventWaitSources.TaskCompleted(context, completed);
         // Standing orders run once the triggering change is marked, so their trigger revision is the task's changeRevision.
         foreach (var (on, target) in context.OrderTriggers) StandingOrders.Run(context, on, target, "task:" + board.Task(target)!.ChangeRevision);
         var data = JsonNode.Parse(result.DataJson)!.AsObject();
