@@ -124,7 +124,7 @@ public sealed class ReplyAcknowledgmentTests
     }
 
     [Fact]
-    public async Task A_full_ackMessageIds_keeps_the_limit_and_the_answered_message_stays()
+    public async Task A_full_ackMessageIds_keeps_the_limit_and_still_acknowledges_the_answered_message()
     {
         var hub = new Hub();
         var (chat, peer) = (await hub.Open(), await hub.Open());
@@ -135,8 +135,105 @@ public sealed class ReplyAcknowledgmentTests
         var send = hub.Reply(chat, peer, "answered"); send["ackMessageIds"] = new JsonArray(listed.Select(id => (JsonNode)id).ToArray());
         Assert.Equal(AckDone, AckOutcome(await hub.Call(RelayTools.SendMessage, send)));
 
-        Assert.Equal(RelayLimits.MaxAcknowledgedMessages, Assert.Single(hub.Acks)["messageIds"]!.AsArray().Count);
-        Assert.Equal(["answered"], await hub.Inbox(chat));
+        var acks = hub.Acks.ToArray();
+        Assert.Equal(2, acks.Length);
+        Assert.Equal(RelayLimits.MaxAcknowledgedMessages, acks[0]["messageIds"]!.AsArray().Count);
+        Assert.Equal("answered", Assert.Single(acks[1]["messageIds"]!.AsArray())!.GetValue<string>());
+        Assert.Empty(await hub.Inbox(chat));
+    }
+
+    [Fact]
+    public async Task A_clients_own_ack_under_a_similar_request_ID_does_not_block_the_reply()
+    {
+        var hub = new Hub();
+        var (chat, peer) = (await hub.Open(), await hub.Open());
+        await hub.Deliver(chat, "answered");
+        await hub.Deliver(chat, "other");
+
+        var ack = hub.Handle(chat); ack["requestId"] = "r/reply-ack"; ack["messageIds"] = new JsonArray("other");
+        Assert.True((await hub.Call(RelayTools.Ack, ack)).Ok);
+        var send = hub.Reply(chat, peer, "answered"); send["requestId"] = "r";
+
+        Assert.Equal(AckDone, AckOutcome(await hub.Call(RelayTools.SendMessage, send)));
+        Assert.Empty(await hub.Inbox(chat));
+    }
+
+    [Fact]
+    public async Task A_client_cannot_send_the_held_acks_request_ID()
+    {
+        var hub = new Hub();
+        var (chat, peer) = (await hub.Open(), await hub.Open());
+        var send = hub.Reply(chat, peer, "absent"); send["requestId"] = "r";
+        Assert.Equal(AckDone, AckOutcome(await hub.Call(RelayTools.SendMessage, send)));
+        var held = hub.Acks.Single(call => call["heldOnly"] is not null);
+
+        var ack = hub.Handle(chat); ack["requestId"] = held["requestId"]!.DeepClone(); ack["messageIds"] = new JsonArray("absent");
+
+        Assert.Equal(RelayErrorCodes.InvalidArguments, (await hub.Call(RelayTools.Ack, ack)).Code);
+    }
+
+    [Fact]
+    public async Task A_reply_under_the_longest_request_ID_acknowledges_and_replays()
+    {
+        var hub = new Hub();
+        var (chat, peer) = (await hub.Open(), await hub.Open());
+        await hub.Deliver(chat, "answered");
+        var send = hub.Reply(chat, peer, "answered"); send["requestId"] = new string('r', RelayLimits.MaxIdentifierLength);
+
+        var first = await hub.Call(RelayTools.SendMessage, send);
+        Assert.Equal(AckDone, AckOutcome(first));
+        Assert.Empty(await hub.Inbox(chat));
+        Assert.Equal(first.DataJson, (await hub.Call(RelayTools.SendMessage, send)).DataJson);
+    }
+
+    [Fact]
+    public async Task HeldOnly_is_not_part_of_a_requests_identity()
+    {
+        // The flag is hub-set, so it stays out of the replay fingerprint: the retry replays rather than conflicts, and does not act on the inbox again.
+        var hub = new Hub();
+        var chat = await hub.Open();
+        JsonObject Ack() { var ack = hub.Handle(chat); ack["repositoryId"] = "repo"; ack["requestId"] = "same"; ack["messageIds"] = new JsonArray("later"); return ack; }
+        var held = Ack(); held["heldOnly"] = true;
+
+        var first = await hub.Session(chat, RelayTools.Ack, held);
+        Assert.True(first.Ok, first.Code);
+        var again = await hub.Session(chat, RelayTools.Ack, Ack());
+
+        Assert.True(again.Ok, again.Code);
+        Assert.Equal(first.DataJson, again.DataJson);
+        await hub.Deliver(chat, "later");
+        Assert.Equal(["later"], await hub.Inbox(chat));
+    }
+
+    [Fact]
+    public async Task A_message_delivered_between_the_send_and_the_held_ack_is_acknowledged()
+    {
+        var hub = new Hub();
+        var (chat, peer) = (await hub.Open(), await hub.Open());
+        hub.Recorded.Before = (operation, args) => operation == RelayTools.Ack && args["heldOnly"] is not null ? hub.Deliver(chat, "racing") : Task.CompletedTask;
+
+        Assert.Equal(AckDone, AckOutcome(await hub.Call(RelayTools.SendMessage, hub.Reply(chat, peer, "racing"))));
+
+        Assert.Empty(await hub.Inbox(chat));
+    }
+
+    [Fact]
+    public async Task A_client_heldOnly_flag_changes_nothing_on_any_tool_that_carries_ackMessageIds()
+    {
+        // A listed ID may be acknowledged before it arrives, so each future ID below is gone on delivery only if the client's flag was dropped.
+        var hub = new Hub();
+        var chat = await hub.Open();
+
+        var create = hub.Handle(chat); create["taskId"] = "t"; create["expectedVersion"] = 0;
+        create["ackMessageIds"] = new JsonArray("future-write"); create["heldOnly"] = true;
+        Assert.Equal(AckDone, AckOutcome(await hub.Call(RelayTools.TaskUpdate, create)));
+        var read = hub.Handle(chat); read["taskId"] = "t";
+        read["ackMessageIds"] = new JsonArray("future-read"); read["heldOnly"] = true;
+        Assert.Equal(AckDone, AckOutcome(await hub.Call(RelayTools.TaskGet, read)));
+
+        await hub.Deliver(chat, "future-write");
+        await hub.Deliver(chat, "future-read");
+        Assert.Empty(await hub.Inbox(chat));
     }
 
     [Fact]
@@ -573,6 +670,9 @@ public sealed class ReplyAcknowledgmentTests
         public string? FailOn { get; set; }
         public int? FailVerifyAfter { get; set; }
 
+        /// <summary>Runs just before a session call reaches its aggregate, for a test to act in the gap before it.</summary>
+        public Func<string, JsonObject, Task>? Before { get; set; }
+
         protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
         {
             var grain = base.Invoke(targetMethod, args);
@@ -590,11 +690,13 @@ public sealed class ReplyAcknowledgmentTests
 
     private sealed class RecordedSession(RecordingFactory factory, ISessionGrain inner) : ISessionGrain
     {
-        public Task<RelayReply> ExecuteAsync(RelayCaller caller, string operation, string argumentsJson)
+        public async Task<RelayReply> ExecuteAsync(RelayCaller caller, string operation, string argumentsJson)
         {
             if (factory.ShouldFail(operation)) throw new TimeoutException("Session grain unavailable");
-            factory.Calls.Add((operation, JsonNode.Parse(argumentsJson)!.AsObject()));
-            return inner.ExecuteAsync(caller, operation, argumentsJson);
+            var args = JsonNode.Parse(argumentsJson)!.AsObject();
+            factory.Calls.Add((operation, args));
+            if (factory.Before is { } before) await before(operation, args);
+            return await inner.ExecuteAsync(caller, operation, argumentsJson);
         }
     }
 }

@@ -111,21 +111,24 @@ internal sealed class ReplyAddOns(Aggregates aggregates, ClaimComposer claims, S
     /// <summary>
     /// Acknowledges a call's <c>ackMessageIds</c> as the <c>ack</c> tool would, then, on a send, the message it answers. The answered message is
     /// <c>heldOnly</c>, so an ID the sender's inbox does not hold changes nothing and the outcome cannot tell whose it is or whether it exists. It
-    /// carries its own request ID, so a retry replays this answer rather than acting on an inbox that has changed since. It stays out when
-    /// already listed, and when the list is at the ID limit.
+    /// carries its own request ID, so a retry replays this answer rather than acting on an inbox that has changed since. That ID holds a control
+    /// character, which the request guard refuses from a client, so no client's own <c>ack</c> can collide with it. It stays out when already
+    /// listed. A list at the ID limit does not keep it out: it is a call of its own, one ID long.
     /// </summary>
+    private const string HeldAckRequestSuffix = "\u001freply-ack";
+
     private async Task<RelayReply> AcknowledgeAsync(RelayCaller caller, JsonObject args, string answers)
     {
         if (args["ackMessageIds"] is JsonArray ids)
         {
             var ack = args.DeepClone().AsObject(); ack.Remove("requestId"); ack.Remove("heldOnly"); ack["messageIds"] = ids.DeepClone();
             var result = await aggregates.Session(caller, RelayTools.Ack, ack);
-            if (!result.Ok || answers.Length == 0 || ids.Count >= RelayLimits.MaxAcknowledgedMessages || ids.Any(id => id is JsonValue value && value.TryGetValue<string>(out var listed) && listed == answers)) return result;
+            if (!result.Ok || answers.Length == 0 || ids.Any(id => id is JsonValue value && value.TryGetValue<string>(out var listed) && listed == answers)) return result;
         }
         var held = new JsonObject
         {
             ["repositoryId"] = Text(args, "repositoryId"), ["sessionId"] = Text(args, "sessionId"), ["sessionToken"] = Text(args, "sessionToken"),
-            ["requestId"] = Text(args, "requestId") + "/reply-ack", ["messageIds"] = new JsonArray(answers), ["heldOnly"] = true
+            ["requestId"] = Text(args, "requestId") + HeldAckRequestSuffix, ["messageIds"] = new JsonArray(answers), ["heldOnly"] = true
         };
         return await aggregates.Session(caller, RelayTools.Ack, held);
     }
