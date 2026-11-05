@@ -247,6 +247,11 @@ public static class RelayLimits
     public const int MaxWaitingTextLength = 200;
     /// <summary>An <c>ack</c> field saying its <c>waitingFor</c> comes from one of the chat's own client hooks, not the model. Such a call neither replaces nor clears a report the model made. It only restricts its caller, so a client sending it gains nothing.</summary>
     public const string HookWaitingField = "hookReport";
+    /// <summary>
+    /// An <c>ack</c> field for a hook's call only: on a report, the ID stored with it; on a clear, the report it means to clear. A clear that lands late therefore cannot erase a later report.
+    /// It comes from the hook's own marker, is not a secret and grants nothing.
+    /// </summary>
+    public const string HookReportIdField = "hookReportId";
     /// <summary>Hours a chat's <c>waitingFor</c> lasts from its latest report.</summary>
     public const int WaitingForHours = 12;
     /// <summary>Hours renewals can carry one <c>waitingFor</c> from when it was first set; it survives a night and still ends.</summary>
