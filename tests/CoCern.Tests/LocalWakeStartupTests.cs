@@ -7,6 +7,21 @@ namespace CoCern.Tests;
 
 public sealed class LocalWakeStartupTests : IDisposable
 {
+    [Fact]
+    public async Task Startup_retries_transient_IO_but_never_retries_a_credential_refusal()
+    {
+        var attempts = 0;
+        var waits = 0;
+        Assert.Null(await LocalChatWake.RetryStartupAsync(() => (null, ++attempts == 1 ? LocalWakeCodes.SetupIoError : LocalWakeCodes.CredentialMismatch),
+            (_, _) => { waits++; return Task.CompletedTask; }, CancellationToken.None));
+        Assert.Equal((2, 1), (attempts, waits));
+
+        attempts = waits = 0;
+        Assert.Null(await LocalChatWake.RetryStartupAsync(() => { attempts++; return (null, LocalWakeCodes.TokenFileMissing); },
+            (_, _) => { waits++; return Task.CompletedTask; }, CancellationToken.None));
+        Assert.Equal((3, 2), (attempts, waits));
+    }
+
     private const string Secret = "synthetic-startup-test-credential";
     private readonly string root = Path.Combine(Path.GetTempPath(), "cocern-wake-startup-" + Guid.NewGuid().ToString("N"));
 
