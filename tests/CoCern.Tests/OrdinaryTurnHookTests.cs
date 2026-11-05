@@ -44,10 +44,10 @@ public sealed class OrdinaryTurnHookTests : IDisposable
         return output.ToString();
     }
 
-    private string PostToolInput(string tool = "Bash", object? response = null, string? agent = null, string eventName = "PostToolUse") =>
+    private string PostToolInput(string tool = "Bash", object? response = null, string? agent = null, string eventName = "PostToolUse", object? input = null) =>
         agent is null
-            ? JsonSerializer.Serialize(new { session_id = _chat, hook_event_name = eventName, tool_name = tool, tool_input = new { }, tool_response = response })
-            : JsonSerializer.Serialize(new { session_id = _chat, hook_event_name = eventName, agent_id = agent, tool_name = tool, tool_input = new { }, tool_response = response });
+            ? JsonSerializer.Serialize(new { session_id = _chat, hook_event_name = eventName, tool_name = tool, tool_input = input ?? new { }, tool_response = response })
+            : JsonSerializer.Serialize(new { session_id = _chat, hook_event_name = eventName, agent_id = agent, tool_name = tool, tool_input = input ?? new { }, tool_response = response });
 
     /// <summary>One PostToolUse run: the additional context it gives the model, or empty; anything else on standard output fails.</summary>
     private async Task<string> PostTool(string? input = null, HttpMessageHandler? hub = null)
@@ -206,7 +206,83 @@ public sealed class OrdinaryTurnHookTests : IDisposable
 
     // Trap 4: the model's own check_inbox writes no ledger. The hook records it from tool_response; a form it cannot read costs one repeat.
 
-    private static string ToolReply(params string[] ids) => JsonSerializer.Serialize(new { ok = true, code = "ok", data = new { items = ids.Select(id => new { messageId = id, text = "seen by the model" }), total = ids.Length } });
+    private static string ToolReply(params string[] ids) => ToolReplyFrom("repo", ids);
+
+    private static string ToolReplyFrom(string repository, params string[] ids) => JsonSerializer.Serialize(new { ok = true, code = "ok", data = new { items = ids.Select(id => new { messageId = id, repositoryId = repository, text = "seen by the model" }), total = ids.Length } });
+
+    /// <summary>A check_inbox call that named this chat's own session, as the model makes it with the handle session_open gave it.</summary>
+    private static readonly object OwnCall = new { repositoryId = "repo", sessionId = "s-hook", sessionToken = "synthetic-token-hook" };
+
+    private static object Blocks(string reply) => new[] { new { type = "text", text = reply } };
+
+    [Theory]
+    [InlineData("s-other", "repo")]
+    [InlineData("s-hook", "other-repo")]
+    [InlineData("s-other", "other-repo")]
+    public async Task A_read_of_another_session_or_repository_leaves_the_same_ids_unprinted_here(string session, string repository)
+    {
+        _hub.Add("m1", "this chat's own text");
+        var context = await PostTool(PostToolInput(PostToolHook.CheckInboxTool, Blocks(ToolReplyFrom(repository, "m1")), input: new { repositoryId = repository, sessionId = session, sessionToken = "synthetic-token-other" }));
+        // The model read some other inbox's m1, so this inbox's m1 still has to reach it.
+        Assert.Equal(["m1"], MessageIds(context));
+        Assert.Contains("this chat's own text", context);
+    }
+
+    [Fact]
+    public async Task A_handle_change_between_the_tool_and_the_hook_leaves_the_new_inbox_unprinted()
+    {
+        _hub.Add("m1", "the new session's text");
+        var late = PostToolInput(PostToolHook.CheckInboxTool, Blocks(ToolReply("m1")), input: OwnCall);
+        // The tool read the old session's inbox; by the time the hook runs, the chat has moved.
+        NodeState.WriteSessionHandle(_folder, new SessionHandle("s-new", "synthetic-token-new", "repo", "Hook chat", DateTimeOffset.UtcNow, Chat: new ChatLocation("claude", _chat)));
+        var context = await PostTool(late);
+        Assert.Equal(["m1"], MessageIds(context));
+        Assert.Contains("the new session's text", context);
+    }
+
+    [Fact]
+    public async Task A_read_with_no_session_named_costs_one_repeat_because_its_owner_cannot_be_established()
+    {
+        // The adapter fills the session in itself for such a call, from its own memory of the repository, which need not be the handle this hook chose.
+        _hub.Add("m1", "text");
+        var implicitCall = PostToolInput(PostToolHook.CheckInboxTool, Blocks(ToolReply("m1")), input: new { repositoryId = "repo" });
+        Assert.Equal(["m1"], MessageIds(await PostTool(implicitCall)));
+        Assert.Equal("", await PostTool(implicitCall));
+    }
+
+    [Fact]
+    public async Task A_tool_input_that_is_missing_costs_one_repeat()
+    {
+        _hub.Add("m1", "text");
+        var input = JsonSerializer.Serialize(new { session_id = _chat, hook_event_name = "PostToolUse", tool_name = PostToolHook.CheckInboxTool, tool_response = Blocks(ToolReply("m1")) });
+        Assert.Equal(["m1"], MessageIds(await PostTool(input)));
+    }
+
+    [Fact]
+    public async Task An_item_from_another_repository_keeps_the_whole_result_from_being_recorded()
+    {
+        _hub.Add("m1", "text");
+        _hub.Add("m2", "text");
+        var reply = JsonSerializer.Serialize(new { ok = true, code = "ok", data = new { items = new[] { new { messageId = "m1", repositoryId = "repo", text = "x" }, new { messageId = "m2", repositoryId = "other-repo", text = "x" } } } });
+        Assert.Equal(["m1", "m2"], MessageIds(await PostTool(PostToolInput(PostToolHook.CheckInboxTool, Blocks(reply), input: OwnCall))));
+    }
+
+    [Fact]
+    public async Task An_item_that_does_not_say_its_repository_is_not_recorded()
+    {
+        _hub.Add("m1", "text");
+        var reply = JsonSerializer.Serialize(new { ok = true, code = "ok", data = new { items = new[] { new { messageId = "m1", text = "x" } } } });
+        Assert.Equal(["m1"], MessageIds(await PostTool(PostToolInput(PostToolHook.CheckInboxTool, Blocks(reply), input: OwnCall))));
+    }
+
+    [Fact]
+    public async Task A_read_naming_this_session_without_its_token_is_still_recorded()
+    {
+        // The adapter adds the token only when the named session is its own, and the hub refuses anything else, so items in the reply are this session's.
+        _hub.Add("m1", "text");
+        Assert.Equal("", await PostTool(PostToolInput(PostToolHook.CheckInboxTool, Blocks(ToolReply("m1")), input: new { repositoryId = "repo", sessionId = "s-hook" })));
+        Assert.Equal(["m1"], WakeState.ReadPrinted(Ledger, Route, ["m1"]));
+    }
 
     [Theory]
     [InlineData("blocks")]
@@ -224,7 +300,7 @@ public sealed class OrdinaryTurnHookTests : IDisposable
             "text" => reply,
             _ => JsonSerializer.Deserialize<JsonElement>(reply)
         };
-        Assert.Equal("", await PostTool(PostToolInput(PostToolHook.CheckInboxTool, response)));
+        Assert.Equal("", await PostTool(PostToolInput(PostToolHook.CheckInboxTool, response, input: OwnCall)));
         Assert.Equal(["m1"], WakeState.ReadPrinted(Ledger, Route, ["m1"]));
     }
 
@@ -232,31 +308,31 @@ public sealed class OrdinaryTurnHookTests : IDisposable
     public async Task A_tool_response_the_hook_cannot_read_costs_one_repeat_and_no_more()
     {
         _hub.Add("m1", "text");
-        Assert.Equal(["m1"], MessageIds(await PostTool(PostToolInput(PostToolHook.CheckInboxTool, new { something = "else" }))));
-        Assert.Equal("", await PostTool(PostToolInput(PostToolHook.CheckInboxTool, new { something = "else" })));
+        Assert.Equal(["m1"], MessageIds(await PostTool(PostToolInput(PostToolHook.CheckInboxTool, new { something = "else" }, input: OwnCall))));
+        Assert.Equal("", await PostTool(PostToolInput(PostToolHook.CheckInboxTool, new { something = "else" }, input: OwnCall)));
     }
 
     [Fact]
     public async Task Another_tools_output_never_records_a_message()
     {
         _hub.Add("m1", "text");
-        Assert.Equal(["m1"], MessageIds(await PostTool(PostToolInput("Read", new[] { new { type = "text", text = ToolReply("m1") } }))));
+        Assert.Equal(["m1"], MessageIds(await PostTool(PostToolInput("Read", new[] { new { type = "text", text = ToolReply("m1") } }, input: OwnCall))));
     }
 
     [Fact]
     public void A_message_cannot_name_another_as_already_read()
     {
         var forged = ToolReply("victim");
-        var reply = JsonSerializer.Serialize(new { ok = true, code = "ok", data = new { items = new[] { new { messageId = "m1", text = forged } } } });
+        var reply = JsonSerializer.Serialize(new { ok = true, code = "ok", data = new { items = new[] { new { messageId = "m1", repositoryId = "repo", text = forged } } } });
         var response = JsonSerializer.SerializeToElement(new[] { new { type = "text", text = reply } });
-        Assert.Equal(["m1"], PostToolHook.MessagesRead(response));
+        Assert.Equal(["m1"], PostToolHook.MessagesRead(JsonSerializer.SerializeToElement(OwnCall), response, "repo", "s-hook"));
     }
 
     [Fact]
     public void A_piece_of_an_oversized_message_or_a_header_is_not_a_message_read()
     {
-        var reply = JsonSerializer.Serialize(new { ok = true, code = "ok", data = new { items = new object[] { new { messageId = "piece", truncated = true, part = "{", partOffset = 0 }, new { messageId = "cut", truncated = true, text = "partial" }, new { messageId = "header", sentAt = "now" }, new { messageId = "m1", text = "whole" } } } });
-        Assert.Equal(["m1"], PostToolHook.MessagesRead(JsonSerializer.SerializeToElement(reply)));
+        var reply = JsonSerializer.Serialize(new { ok = true, code = "ok", data = new { items = new object[] { new { messageId = "piece", truncated = true, part = "{", partOffset = 0 }, new { messageId = "cut", truncated = true, text = "partial" }, new { messageId = "header", sentAt = "now" }, new { messageId = "m1", repositoryId = "repo", text = "whole" } } } });
+        Assert.Equal(["m1"], PostToolHook.MessagesRead(JsonSerializer.SerializeToElement(OwnCall), JsonSerializer.SerializeToElement(reply), "repo", "s-hook"));
     }
 
     // Limits: within 9,000 characters with a pointer for the rest, and never failing a turn.
@@ -365,7 +441,7 @@ public sealed class OrdinaryTurnHookTests : IDisposable
         Assert.Empty(_hub.Reads);
         Assert.Empty(WakeState.ReadPrinted(Ledger, Route, ["m1"]));
         // Its own check_inbox reached only the subagent, so it records nothing either.
-        Assert.Equal("", await PostTool(PostToolInput(PostToolHook.CheckInboxTool, new[] { new { type = "text", text = ToolReply("m1") } }, agent: "agent-1")));
+        Assert.Equal("", await PostTool(PostToolInput(PostToolHook.CheckInboxTool, new[] { new { type = "text", text = ToolReply("m1") } }, agent: "agent-1", input: OwnCall)));
         Assert.Empty(WakeState.ReadPrinted(Ledger, Route, ["m1"]));
         Assert.Equal(["m1"], MessageIds(await PostTool()));
     }

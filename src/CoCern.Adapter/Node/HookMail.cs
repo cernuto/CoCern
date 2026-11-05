@@ -25,14 +25,14 @@ internal static class HookMail
     /// <param name="nodeFolder">This PC's node folder; <paramref name="findLocal"/> may name the chat's own local connection folder before it, as the Stop hook's does, so both use one ledger.</param>
     /// <param name="limit">The most characters the text may have.</param>
     /// <param name="timeout">The limit on the header poll.</param>
-    /// <param name="readByModel">Messages the model has just read with its own check_inbox; recorded first, so they are not repeated.</param>
-    internal static async Task DeliverAsync(string chat, string nodeFolder, Func<string, string?>? findLocal, int limit, TimeSpan timeout, HttpMessageHandler? handler, Func<string, Task> print, IReadOnlyList<string>? readByModel = null)
+    /// <param name="readByModel">Given the handle this run records under, the messages the model has just read from that session with its own check_inbox; recorded first, so they are not repeated.</param>
+    internal static async Task DeliverAsync(string chat, string nodeFolder, Func<string, string?>? findLocal, int limit, TimeSpan timeout, HttpMessageHandler? handler, Func<string, Task> print, Func<SessionHandle, IReadOnlyList<string>>? readByModel = null)
     {
         try { await RunAsync(chat, findLocal?.Invoke(chat) ?? nodeFolder, limit, timeout, handler, print, readByModel).WaitAsync(timeout + ReadLimit + SeenLimit); }
         catch (Exception) { /* A hook must never trouble the chat; the next hook asks again. */ }
     }
 
-    private static async Task RunAsync(string chat, string nodeFolder, int limit, TimeSpan timeout, HttpMessageHandler? handler, Func<string, Task> print, IReadOnlyList<string>? readByModel)
+    private static async Task RunAsync(string chat, string nodeFolder, int limit, TimeSpan timeout, HttpMessageHandler? handler, Func<string, Task> print, Func<SessionHandle, IReadOnlyList<string>>? readByModel)
     {
         if (!ChatLocators.IsUuid(chat)) return;
         var threadId = Guid.ParseExact(chat, "D").ToString("D");
@@ -40,7 +40,7 @@ internal static class HookMail
         if (ClaudeWaiter.ConnectionOptions(folder) is not { } options || ClaudeWaiter.FindHandle(folder, threadId) is not { } handle) return;
         var route = WakeState.Key(handle.RepositoryId, handle.SessionId);
         var ledger = ClaudeWaiter.StatePath(folder, threadId);
-        if (readByModel is { Count: > 0 }) Record(ledger, route, readByModel);
+        if (readByModel?.Invoke(handle) is { Count: > 0 } modelRead) Record(ledger, route, modelRead);
 
         // Parallel tool calls run this hook side by side; one poll is enough, and two would print the same mail twice.
         var hooks = Path.Combine(folder, PromptHook.CacheFolder);

@@ -34,7 +34,12 @@ public static class PostToolHook
             if (ChatLocators.Text(root, "hook_event_name") != "PostToolUse" || ChatLocators.Text(root, "session_id") is not { } chat) return 0;
             // A subagent's event carries its parent's session ID, but its context goes to the subagent: mail printed there would be recorded as delivered and never reach the chat.
             if (ChatLocators.Text(root, "agent_id") is { Length: > 0 }) return 0;
-            var readByModel = ChatLocators.Text(root, "tool_name") == CheckInboxTool && root.TryGetProperty("tool_response", out var response) ? MessagesRead(response) : null;
+            Func<SessionHandle, IReadOnlyList<string>>? readByModel = null;
+            if (ChatLocators.Text(root, "tool_name") == CheckInboxTool && root.TryGetProperty("tool_response", out var response))
+            {
+                root.TryGetProperty("tool_input", out var toolInput);
+                readByModel = handle => MessagesRead(toolInput, response, handle.RepositoryId, handle.SessionId);
+            }
             await HookMail.DeliverAsync(chat, nodeFolder, findLocal, ClaudeWaiter.MaxPrintedInbox, remaining, handler, async block =>
             {
                 await output.WriteLineAsync(Envelope(block));
@@ -65,13 +70,17 @@ public static class PostToolHook
     }
 
     /// <summary>
-    /// The messages a check_inbox tool result gave the model in full. The tool's reply is <c>{ok, code, data}</c> as JSON text in one MCP text block; how the client wraps that block
-    /// in <c>tool_response</c> is not confirmed, so the plausible forms are accepted and anything else finds nothing, which costs one repeat. Only the reply's own items count, and the
-    /// text inside a message is never parsed, so a message cannot name another one as already read.
+    /// The messages a check_inbox tool result gave the model in full, if that result is provably from the session given here, the one the hook is about to record under. Recording a
+    /// message from any other inbox could mark same-ID mail here as printed when its text never reached the model, which loses it, so whenever ownership cannot be established this finds
+    /// nothing and the cost is one repeat. A call that names no session proves nothing: the adapter fills that in from its own memory of the repository, which need not be the handle
+    /// the hook chose. The tool's reply is <c>{ok, code, data}</c> as JSON text in one MCP text block; how the client wraps that block in <c>tool_response</c> is not confirmed, so the
+    /// plausible forms are accepted and anything else finds nothing. Only the reply's own items count, and the text inside a message is never parsed, so a message cannot name another one as already read.
     /// </summary>
-    internal static IReadOnlyList<string> MessagesRead(JsonElement response)
+    internal static IReadOnlyList<string> MessagesRead(JsonElement toolInput, JsonElement response, string repositoryId, string sessionId)
     {
+        if (ChatLocators.Text(toolInput, "sessionId") != sessionId || ChatLocators.Text(toolInput, "repositoryId") != repositoryId) return [];
         var ids = new List<string>();
+        var foreign = false;
         switch (response.ValueKind)
         {
             case JsonValueKind.Array:
@@ -85,7 +94,7 @@ public static class PostToolHook
                 else Reply(response);
                 break;
         }
-        return ids;
+        return foreign ? [] : ids;
 
         void Blocks(JsonElement blocks)
         {
@@ -109,9 +118,13 @@ public static class PostToolHook
                 !data.TryGetProperty("items", out var items) || items.ValueKind != JsonValueKind.Array) return;
             foreach (var item in items.EnumerateArray())
             {
+                // An item naming another repository means this is not the inbox the call said it was, so none of the result counts.
+                var owner = ChatLocators.Text(item, "repositoryId");
+                if (owner is not null && owner != repositoryId) foreign = true;
                 // A piece of an oversized message, or a header without its text, did not give the model the message.
                 if (ChatLocators.Text(item, "text") is null || ChatLocators.Text(item, "messageId") is not { Length: > 0 } id) continue;
                 if (item.TryGetProperty("truncated", out var truncated) && truncated.ValueKind == JsonValueKind.True) continue;
+                if (owner is null) foreign = true;
                 ids.Add(id);
             }
         }
