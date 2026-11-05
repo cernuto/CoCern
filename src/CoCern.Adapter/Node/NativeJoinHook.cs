@@ -118,6 +118,7 @@ internal static class NativeJoinHook
         var editGuardEnabled = NativeEditHook.Enabled;
         // Until a valid envelope proves this is unrelated, an opted-in edit hook cannot safely abstain on malformed input.
         var recognized = editGuardEnabled;
+        var blockingEdit = editGuardEnabled;
         try
         {
             var text = await ReadInputAsync(input, ct);
@@ -131,7 +132,8 @@ internal static class NativeJoinHook
             var eventName = ChatLocators.Text(root, "hook_event_name");
             var toolName = ChatLocators.Text(root, "tool_name");
             var edit = editGuardEnabled && eventName == "PreToolUse" && NativeEditHook.IsEdit(toolName);
-            recognized = edit || editGuardEnabled && eventName == "PreToolUse" && toolName is null;
+            recognized = edit || editGuardEnabled && (eventName is null || eventName == "PreToolUse" && toolName is null);
+            blockingEdit = recognized;
             if (recognized && !edit) throw new ArgumentException("Missing native edit tool identity.");
             var capture = ParseContext(provider, root);
             if (capture is null)
@@ -161,7 +163,7 @@ internal static class NativeJoinHook
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            if (recognized) { await error.WriteLineAsync("CoCern native capture could not be verified."); return 2; }
+            if (blockingEdit) { await error.WriteLineAsync("CoCern native capture could not be verified."); return 2; }
             return 0;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or JsonException or InvalidOperationException or FormatException or OverflowException)

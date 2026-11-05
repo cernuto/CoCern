@@ -38,7 +38,7 @@ internal sealed class FileClaimTools(Aggregates aggregates, CallGuard guard)
             if (!reply.Ok) return reply;
             var state = Aggregates.Parse(reply);
             var held = state["held"]?.GetValue<bool>() == true && Number(state, "generation") == expected
-                && DateTimeOffset.TryParse(Text(state, "leaseUntil"), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var until)
+                && DateTimeOffset.TryParse(Text(state, "leaseUntil"), CultureInfo.InvariantCulture, DateTimeStyles.None, out var until)
                 && until >= DateTimeOffset.UtcNow.AddSeconds(15);
             reply = Ok(new { resourceId = file.ResourceId, held, generation = Number(state, "generation"), leaseUntil = Text(state, "leaseUntil") }, reply.Version);
         }
