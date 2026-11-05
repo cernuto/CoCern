@@ -184,6 +184,46 @@ public sealed class EventWaitSourceAtomicTests
         Assert.Equal(before, owner.Value.Json);
     }
 
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("baseline")]
+    [InlineData("binding")]
+    public void Corrupt_source_acknowledgments_are_refused_without_rewriting_the_source(string corruption)
+    {
+        var board = Empty(); Update(board, 0, "ready", Epoch); board.Effects.Clear();
+        var watch = Watch("task_completed");
+        Assert.True(Apply(board, "board", BoardKey, WatchOperation, watch, Epoch).Ok);
+        var state = JsonNode.Parse(board.Value.Json)!.AsObject();
+        var entry = state["eventWaitSubscriptions"]!.AsObject().First().Value!.AsObject();
+        if (corruption == "missing") entry.Remove("ack");
+        else if (corruption == "baseline") entry["ack"]!["baselineRevision"] = "not-a-revision";
+        else entry["ack"]!["watch"]!["sourceKey"] = "another-board";
+        board.Value = new() { Json = state.ToJsonString() }; board.Effects.Clear();
+        var before = board.Value.Json;
+        Assert.False(Apply(board, "board", BoardKey, WatchOperation, watch, Epoch.AddSeconds(1)).Ok);
+        Assert.Equal(before, board.Value.Json);
+        Assert.Empty(board.Effects);
+    }
+
+    [Fact]
+    public void Finished_source_slots_can_be_reused_but_retired_install_replay_cannot_fire_again()
+    {
+        var board = Empty(); Update(board, 0, "ready", Epoch); board.Effects.Clear();
+        long version = 1;
+        for (var index = 0; index < 150; index++)
+        {
+            var watch = Watch("task_completed"); watch["watchId"] = "watch-" + index;
+            Assert.True(Apply(board, "board", BoardKey, WatchOperation, watch, Epoch).Ok);
+            Update(board, version++, "completed", Epoch.AddSeconds(1));
+            Assert.Single(board.Effects, effect => effect.Operation == SignalOperation);
+            Update(board, version++, "ready", Epoch.AddSeconds(2)); board.Effects.Clear();
+        }
+        var replay = Watch("task_completed"); replay["watchId"] = "watch-0";
+        Assert.True(Apply(board, "board", BoardKey, WatchOperation, replay, Epoch.AddSeconds(3)).Ok);
+        Update(board, version, "completed", Epoch.AddSeconds(4));
+        Assert.DoesNotContain(board.Effects, effect => effect.Operation == SignalOperation);
+    }
+
     private static StateEnvelope<CoordinationDocument> Owner()
     {
         var owner = Empty(); var opening = OwnerArgs(); opening["principalId"] = "principal";

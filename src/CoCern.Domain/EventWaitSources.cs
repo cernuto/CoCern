@@ -33,7 +33,7 @@ public static class EventWaitSources
         if (watch.ExpiresAt - context.Now > TimeSpan.FromHours(1)) return Error("InvalidArguments");
         if (watch.ExpiresAt <= context.Now) return Ok(new { watching = false, expired = true });
         var burial = "event-source\u001f" + context.Repository + "\u001f" + context.Key + "\u001f" + SourceKey(watch);
-        if (Retention.IsBuried(context.State, burial, context.Now)) return Ok(new { watching = false, retired = true });
+        if (EventWaitRetirement.Contains(context.State, burial, context.Now)) return Ok(new { watching = false, retired = true });
         var watches = SourceMap(context, sourceKind);
         var key = SourceKey(watch);
         var cancel = context.Operation == SourceUnwatchOperation;
@@ -127,9 +127,9 @@ public static class EventWaitSources
         foreach (var pair in retired)
         {
             tombstones.Add((prefix + "\u001f" + context.Repository + "\u001f" + context.Key + "\u001f" + identity(pair.Value!.AsObject()), context.Now));
-            map.Remove(pair.Key);
         }
-        Retention.Bury(context.State, tombstones, context.Now);
+        if (!EventWaitRetirement.TryRemember(context.State, tombstones, context.Now)) return;
+        foreach (var pair in retired) map.Remove(pair.Key);
     }
 
     private static bool SourceActive(JsonObject entry, EventWaitSourceWatch watch, DateTimeOffset now) =>
@@ -158,6 +158,20 @@ public static class EventWaitSources
             if (!ValidSource(watch) || watch.RepositoryId != context.Repository || watch.SourceKind != kind || watch.SourceKey != context.Key
                 || pair.Key != SourceKey(watch) || entry["status"]?.GetValue<string>() is not ("active" or "notified" or "inactive" or "canceled"))
                 throw new InvalidOperationException("Invalid subscription binding");
+            if (entry["ack"] is JsonObject ack)
+            {
+                try
+                {
+                    if (ack["watch"]?.Deserialize<EventWaitSourceWatch>(EventWaitState.Json) != watch || ack["repositoryId"]?.GetValue<string>() != context.Repository
+                        || ack["baselineRevision"]?.GetValue<long>() is not >= 0 || ack["armed"] is null || ack["alreadySatisfied"] is null
+                        || ack["outcome"]?.GetValue<string>() is not (null or "target_gone")) throw new InvalidOperationException("Invalid captured source acknowledgment");
+                    var armed = ack["armed"]!.GetValue<bool>();
+                    _ = ack["alreadySatisfied"]!.GetValue<bool>();
+                    if (entry["status"]!.GetValue<string>() is "active" or "notified" && !armed) throw new InvalidOperationException("Invalid armed subscription");
+                }
+                catch (JsonException error) { throw new InvalidOperationException("Invalid source acknowledgment", error); }
+            }
+            else if (entry["status"]!.GetValue<string>() != "canceled") throw new InvalidOperationException("Missing captured source acknowledgment");
         }
         return map;
     }
@@ -367,13 +381,8 @@ public static class EventWaitSources
         if (watch.RepositoryId != context.Repository) return Error("RepositoryDenied");
         if (watch.ExpiresAt <= context.Now) return Ok(new { watching = false, expired = true });
         if (watch.ExpiresAt - context.Now > TimeSpan.FromHours(1)) return Error("InvalidArguments");
-        if (!cancel && new SessionState(context.State).Closed)
-        {
-            Emit(context, watch, ClosureOutcome(context.State) ?? "target_gone");
-            return Ok(new { watching = false, closed = true });
-        }
         var burial = "event-owner\u001f" + context.Repository + "\u001f" + context.Key + "\u001f" + Key(watch);
-        if (Retention.IsBuried(context.State, burial, context.Now)) return Ok(new { watching = false, retired = true });
+        if (EventWaitRetirement.Contains(context.State, burial, context.Now)) return Ok(new { watching = false, retired = true });
         var map = Map(context);
         foreach (var key in map.Where(x => Read(x.Value!.AsObject()).ExpiresAt <= context.Now).Select(x => x.Key).ToArray()) map.Remove(key);
         var id = Key(watch);
@@ -381,7 +390,21 @@ public static class EventWaitSources
         {
             if (Read(prior) != watch) return Error("RequestConflict");
             if (cancel) prior["status"] = "canceled";
+            else if (prior["status"]?.GetValue<string>() == "active" && new SessionState(context.State).Closed)
+            {
+                Emit(context, watch, ClosureOutcome(context.State) ?? "target_gone");
+                prior["status"] = "notified";
+            }
             return Ok(new { watching = !cancel && prior["status"]?.GetValue<string>() == "active" });
+        }
+        if (new SessionState(context.State).Closed)
+        {
+            // Closed sources need no active slot, but they still record a
+            // durable replay fence before emitting. Cancellation can overtake
+            // this first install too; never resurrect it or emit twice.
+            if (!EventWaitRetirement.TryRemember(context.State, [(burial, context.Now)], context.Now)) return Error("CapacityExceeded");
+            if (!cancel) Emit(context, watch, ClosureOutcome(context.State) ?? "target_gone");
+            return Ok(new { watching = false, closed = true });
         }
         if (map.Count >= 128) RetireSourceSlots(context, map, "event-owner", item => Key(Read(item)));
         if (map.Count >= 128) return Error("CapacityExceeded");
@@ -419,7 +442,7 @@ public static class EventWaitSources
         // A close and its unwatch can overtake this delivery. Consume the stale
         // message instead of retrying forever or recreating the closed wait map.
         if (new SessionState(context.State).Closed) return Ok(new { handled = false, closed = true });
-        if (new EventWaitState(context.State).Entries?[watch.WaitId] is not JsonObject entry) return Error("WaitUnknown");
+        if (new EventWaitState(context.State).Entries?[watch.WaitId] is not JsonObject entry) return Ok(new { handled = false, unknown = true });
         if (entry["ownerWatch"]?.Deserialize<EventWaitOwnerWatch>(EventWaitState.Json) != watch) return Error("SubscriptionMismatch");
         if (entry["terminal"] is null)
         {

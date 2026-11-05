@@ -33,7 +33,7 @@ public sealed class BoardState(JsonObject json)
     public static StateShape Shape { get; } = CommonState.Shape.With(
         (TasksKey, StateShape.Map(BoardTask.Shape)), (TaskRevisionKey, null), (ContextKey, StateShape.Map(ContextNote.Shape)), (ArchivedTasksKey, StateShape.Map(null)),
         (ArchiveFloorKey, null), (StandingKey, StandingState.Shape), (OrdersKey, OrdersState.Shape),
-        (EventWaitSources.SubscriptionsKey, StateShape.Map(StateShape.Any)));
+        (EventWaitSources.SubscriptionsKey, StateShape.Map(StateShape.Any)), (EventWaitRetirement.Key, StateShape.Map(null)));
 
     public JsonObject Json => json;
 

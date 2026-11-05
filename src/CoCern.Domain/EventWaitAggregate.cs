@@ -98,12 +98,12 @@ public static class EventWaitAggregate
             return Reply(existing);
         }
         var replayKey = "event-wait\u001f" + context.Repository + "\u001f" + context.Key + "\u001f" + request.WaitId;
-        if (Retention.IsBuried(context.State, replayKey, context.Now)) return Error("RequestExpired");
+        if (EventWaitRetirement.Contains(context.State, replayKey, context.Now)) return Error("RequestExpired");
         if (request.ExpiresAt <= context.Now || request.ExpiresAt - context.Now > TimeSpan.FromHours(1)) return Error("InvalidArguments");
         if (waits.Count >= EventWaitState.MaxRetained)
         {
-            // Reuse the hub's bounded replay tombstones. Active subscriptions
-            // never leave this map; a recent evicted wait ID refuses replay.
+            // Active subscriptions never leave this map. Retirement refuses
+            // pressure instead of evicting any unexpired replay fence.
             var retired = waits.Where(pair => pair.Value?["terminal"] is JsonObject)
                 .OrderBy(pair => pair.Value!["terminal"]!["at"]!.GetValue<string>(), StringComparer.Ordinal)
                 .Take(EventWaitState.MaxRetained / 4).ToArray();
@@ -111,9 +111,9 @@ public static class EventWaitAggregate
             foreach (var pair in retired)
             {
                 buried.Add(("event-wait\u001f" + context.Repository + "\u001f" + context.Key + "\u001f" + pair.Key, context.Now));
-                waits.Remove(pair.Key);
             }
-            Retention.Bury(context.State, buried, context.Now);
+            if (!EventWaitRetirement.TryRemember(context.State, buried, context.Now)) return Error("CapacityExceeded");
+            foreach (var pair in retired) waits.Remove(pair.Key);
         }
         if (waits.Count >= EventWaitState.MaxRetained || waits.Count(x => x.Value?["terminal"] is null) >= EventWaitState.MaxActive)
             return Error("CapacityExceeded");

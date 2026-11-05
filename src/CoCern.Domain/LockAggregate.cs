@@ -18,8 +18,14 @@ internal static class LockAggregate
 
     private const int RetryAfterSeconds = 5;
 
-    public static RelayReply Handle(AggregateContext context) => context.Operation switch
+    public static RelayReply Handle(AggregateContext context)
     {
+        // Any successful operation can rebuild the lazy lease timer. Preserve
+        // the old generation's real expiry before that rebuild or reacquisition;
+        // a refused operation discards this candidate and its effects together.
+        EventWaitSources.OnClaimExpiry(context);
+        return context.Operation switch
+        {
         EventWaitSources.SourceWatchOperation or EventWaitSources.SourceUnwatchOperation => EventWaitSources.HandleSource(context, AggregateKinds.Lock),
         EventWaitSources.ClaimDueOperation => EventWaitSources.ClaimExpired(context),
         Operations.Block => Block(context),
@@ -30,8 +36,9 @@ internal static class LockAggregate
         Operations.OrderRelease => StandingOrders.Release(context),
         RelayTools.ClaimAcquire => Acquire(context),
         RelayTools.ClaimRenew or RelayTools.ClaimRelease => RenewOrRelease(context),
-        _ => Error(UnknownTool)
-    };
+            _ => Error(UnknownTool)
+        };
+    }
 
     /// <summary>
     /// A rolled-back task claim gives an already-held grant back to the claim it served before, and forgets the grant reply it stored
@@ -120,7 +127,6 @@ internal static class LockAggregate
         if (blockers.Count > 0 && !owned) return Error(Busy, new { holder, blockers = blockers.Count });
         if (!owned)
         {
-            EventWaitSources.OnClaimExpiry(context);
             generation = state.Grant(Required(context.Args, "sessionId"), context.Now.AddSeconds(Leases.Seconds(context.Args)));
         }
         // The task claim this grant now serves (set by task_claim, even when the holder already had it), so a standing order releases the

@@ -18,6 +18,75 @@ namespace CoCern.Tests;
 public sealed class EventWaitSiloTests(Xunit.Abstractions.ITestOutputHelper output)
 {
     [Fact]
+    public async Task Ordinary_claim_expiry_reaches_the_waiter_through_real_due_work_without_reads_or_grant_transfer()
+    {
+        var database = Path.Combine(Path.GetTempPath(), "cocern-event-claim-" + Guid.NewGuid().ToString("N"), "relay.db");
+        var caller = new RelayCaller("principal", false, ["repo"], true);
+        var at = DateTimeOffset.UtcNow.AddMinutes(-2);
+        var control = new StateEnvelope<CoordinationDocument> { Value = new() { Json = "{}" } };
+        var opened = CoordinationStateMachine.Apply(control, "control", AggregateKinds.ControlKey, caller, "session_open",
+            new JsonObject { ["repositoryId"] = "repo", ["requestId"] = "fixture-open" }, at);
+        Assert.True(opened.Ok);
+        var handle = JsonNode.Parse(opened.DataJson)!;
+        var id = handle["sessionId"]!.GetValue<string>(); var token = handle["sessionToken"]!.GetValue<string>();
+        var owner = new StateEnvelope<CoordinationDocument> { Value = new() { Json = "{}" } };
+        var opening = Assert.Single(control.Effects, effect => effect.Operation == "__open");
+        Assert.True(CoordinationStateMachine.Apply(owner, "session", id, caller, "__open", JsonNode.Parse(opening.PayloadJson)!.AsObject(), at).Ok);
+        control.Effects.Clear(); owner.Effects.Clear();
+        JsonObject Args() => new() { ["repositoryId"] = "repo", ["sessionId"] = id, ["sessionToken"] = token };
+        var registration = Args();
+        registration["request"] = JsonSerializer.SerializeToNode(new EventWaitRequest("wait", "claim_released", "resource", "1", at.AddMinutes(10)), new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        Assert.True(CoordinationStateMachine.Apply(owner, "session", id, caller, "__event_wait_register", registration, at).Ok);
+        var binding = JsonSerializer.SerializeToNode(new EventWaitSourceWatch("repo", id, "wait", "watch", "claim_released", "lock", "resource", null,
+            at.AddMinutes(10), Revision: "1"), new JsonSerializerOptions(JsonSerializerDefaults.Web))!.AsObject();
+        binding["sessionId"] = id; binding["sessionToken"] = token;
+        Assert.True(CoordinationStateMachine.Apply(owner, "session", id, caller, EventWaitSources.SourceBindOperation, binding, at.AddSeconds(1)).Ok);
+        var resource = new StateEnvelope<CoordinationDocument> { Value = new() { Json = "{}" } };
+        Assert.True(CoordinationStateMachine.Apply(resource, "lock", "resource", caller, "claim_acquire", new JsonObject
+        { ["repositoryId"] = "repo", ["sessionId"] = "holder", ["leaseSeconds"] = 30 }, at).Ok);
+        var install = Assert.Single(owner.Effects, effect => effect.Operation == EventWaitSources.SourceWatchOperation);
+        Assert.False(install.PayloadJson.Contains(token, StringComparison.Ordinal));
+        Assert.True(CoordinationStateMachine.Apply(resource, "lock", "resource", caller, install.Operation,
+            JsonNode.Parse(install.PayloadJson)!.AsObject(), at.AddSeconds(1)).Ok);
+        // Keep the queued install replay: at startup it can arrive after the lease
+        // ended, before its indexed timer. It must not erase the expiry event.
+        using (var seed = new SqliteStore(database))
+        {
+            var writer = new SqliteGrainStorage(seed);
+            await writer.WriteStateAsync("control", GrainId.Create("cocern.control", AggregateKinds.ControlKey), new GrainState<StateEnvelope<CoordinationDocument>>(control));
+            await writer.WriteStateAsync("session", GrainId.Create("cocern.session", id), new GrainState<StateEnvelope<CoordinationDocument>>(owner));
+            await writer.WriteStateAsync("lock", GrainId.Create("cocern.lock", "resource"), new GrainState<StateEnvelope<CoordinationDocument>>(resource));
+        }
+        using var host = new HostBuilder().ConfigureLogging(log => log.ClearProviders())
+            .UseOrleans(silo => silo.UseLocalhostClustering(siloPort: FreePort(), gatewayPort: FreePort(),
+                serviceId: "event-claim-expiry", clusterId: Guid.NewGuid().ToString("N")).AddCoCernSqlite(database))
+            .ConfigureServices(services => services.AddCoCernCore()).Build();
+        await host.StartAsync();
+        try
+        {
+            var store = host.Services.GetRequiredService<SqliteStore>(); var grains = host.Services.GetRequiredService<IGrainFactory>();
+            var failures = 0;
+            var pump = new DueWorkPump(store, (work, ct) => CoordinationGrain.DispatchDueAsync(grains, work, ct), () => failures++);
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            for (var batch = 0; batch < 10; batch++)
+                if (await pump.DispatchNextBatchAsync(DateTimeOffset.UtcNow, timeout.Token).WaitAsync(timeout.Token) == 0) break;
+            Assert.Equal(0, failures);
+            var stored = new GrainState<StateEnvelope<CoordinationDocument>>(new());
+            await new SqliteGrainStorage(store).ReadStateAsync("session", GrainId.Create("cocern.session", id), stored);
+            var state = JsonNode.Parse(Assert.IsType<StateEnvelope<CoordinationDocument>>(stored.State).Value.Json)!;
+            Assert.Equal("satisfied", state["eventWaits"]!["wait"]!["terminal"]!["outcome"]!.GetValue<string>());
+            Assert.Equal("1", state["eventWaits"]!["wait"]!["terminal"]!["revision"]!.GetValue<string>());
+            Assert.Single(state["inbox"]!.AsObject());
+            await new SqliteGrainStorage(store).ReadStateAsync("lock", GrainId.Create("cocern.lock", "resource"), stored);
+            var grant = JsonNode.Parse(Assert.IsType<StateEnvelope<CoordinationDocument>>(stored.State).Value.Json)!;
+            Assert.Equal(1, grant["generation"]!.GetValue<long>());
+            Assert.Equal("holder", grant["holder"]!.GetValue<string>());
+            Assert.Equal(at.AddSeconds(30), grant["leaseUntil"]!.GetValue<DateTimeOffset>());
+        }
+        finally { await host.StopAsync(); }
+    }
+
+    [Fact]
     public async Task Cross_repository_wait_callbacks_are_consumed_but_generic_transfers_still_retry()
     {
         var database = Path.Combine(Path.GetTempPath(), "cocern-event-denial-" + Guid.NewGuid().ToString("N"), "relay.db");
@@ -26,7 +95,9 @@ public sealed class EventWaitSiloTests(Xunit.Abstractions.ITestOutputHelper outp
         var callbacks = new[] { EventWaitSources.WatchOperation, EventWaitSources.UnwatchOperation, EventWaitSources.LifecycleOperation,
             EventWaitSources.SourceWatchOperation, EventWaitSources.SourceUnwatchOperation, EventWaitSources.SourceAckOperation, EventWaitSources.SourceSignalOperation };
         foreach (var operation in callbacks)
-            sender.Effects.Add(new("denied-" + operation, "session", "foreign", operation, "{\"repositoryId\":\"repo\"}", now));
+            sender.Effects.Add(new("denied-" + operation,
+                operation is EventWaitSources.SourceWatchOperation or EventWaitSources.SourceUnwatchOperation ? "board" : "session",
+                "foreign", operation, "{\"repositoryId\":\"repo\"}", now));
         sender.Effects.Add(new("generic-transfer", "session", "foreign", "__unclassified_transfer", "{\"repositoryId\":\"repo\"}", now));
         CoordinationStateMachine.StampEffects(sender.Effects, 0, new RelayCaller("principal", false, ["repo"], true));
         using (var seed = new SqliteStore(database))
@@ -34,6 +105,8 @@ public sealed class EventWaitSiloTests(Xunit.Abstractions.ITestOutputHelper outp
             var writer = new SqliteGrainStorage(seed);
             await writer.WriteStateAsync("session", GrainId.Create("cocern.session", "sender"), new GrainState<StateEnvelope<CoordinationDocument>>(sender));
             await writer.WriteStateAsync("session", GrainId.Create("cocern.session", "foreign"), new GrainState<StateEnvelope<CoordinationDocument>>(
+                new() { Value = new() { Json = "{\"repositoryId\":\"other\"}" } }));
+            await writer.WriteStateAsync("board", GrainId.Create("cocern.board", "foreign"), new GrainState<StateEnvelope<CoordinationDocument>>(
                 new() { Value = new() { Json = "{\"repositoryId\":\"other\"}" } }));
         }
         using var host = new HostBuilder().ConfigureLogging(log => log.ClearProviders())

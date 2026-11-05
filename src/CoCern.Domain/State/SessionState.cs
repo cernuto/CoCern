@@ -56,7 +56,7 @@ public sealed class SessionState(JsonObject json)
         (StandingSeenKey, StateShape.Map(null)), (TargetBoardsKey, StateShape.Map(BoardWatches.EntryShape)), (WorkBoardsKey, StateShape.Map(BoardWatches.EntryShape)),
         (WorkKey, WorkLedger.Shape), (WorkReportedKey, WorkReport.Shape), (WaitingForKey, WaitingMark.Shape),
         (EventWaitsKey, StateShape.Map(StateShape.Any)), (EventWaitOwnerWatchesKey, StateShape.Map(StateShape.Any)),
-        (EventWaitOwnerClosureOutcomeKey, null)).With(AttentionQueue.Fields);
+        (EventWaitOwnerClosureOutcomeKey, null), (EventWaitRetirement.Key, StateShape.Map(null))).With(AttentionQueue.Fields);
 
     /// <summary>What a closed session forgets: its secret, its mail and attention, its tool binding, its report of waiting, and the boards waiting on it (told as it closes).</summary>
     private static readonly string[] ForgottenOnClose =
