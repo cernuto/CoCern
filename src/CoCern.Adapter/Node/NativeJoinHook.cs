@@ -115,23 +115,38 @@ internal static class NativeJoinHook
 
     internal static async Task<int> RunAsync(string provider, TextReader input, TextWriter output, TextWriter error, NativeJoin join, CancellationToken ct)
     {
-        var recognized = false;
+        var editGuardEnabled = NativeEditHook.Enabled;
+        // Until a valid envelope proves this is unrelated, an opted-in edit hook cannot safely abstain on malformed input.
+        var recognized = editGuardEnabled;
         try
         {
             var text = await ReadInputAsync(input, ct);
-            if (text is null) return 0;
+            if (text is null)
+            {
+                if (recognized) { await error.WriteLineAsync("CoCern native edit capture could not be verified."); return 2; }
+                return 0;
+            }
             using var document = JsonDocument.Parse(text, new JsonDocumentOptions { MaxDepth = 32 });
             var root = document.RootElement;
+            var eventName = ChatLocators.Text(root, "hook_event_name");
+            var toolName = ChatLocators.Text(root, "tool_name");
+            var edit = editGuardEnabled && eventName == "PreToolUse" && NativeEditHook.IsEdit(toolName);
+            recognized = edit || editGuardEnabled && eventName == "PreToolUse" && toolName is null;
+            if (recognized && !edit) throw new ArgumentException("Missing native edit tool identity.");
             var capture = ParseContext(provider, root);
-            if (capture is null) return 0;
-            switch (ChatLocators.Text(root, "hook_event_name"))
+            if (capture is null)
+            {
+                if (edit) throw new ArgumentException("Missing native edit context.");
+                return 0;
+            }
+            switch (eventName)
             {
                 case "SessionStart": await join.EnsureAsync(capture, ct); return 0;
                 case "Stop" when provider == "claude":
                     return await StopHook.RunNativeAsync(new StringReader(text), error, join, ct, ownerGone: OwningProcess.WaitUntilGoneAsync);
                 case "PreToolUse":
                     var name = ChatLocators.Text(root, "tool_name");
-                    if (NativeEditHook.Enabled && NativeEditHook.IsEdit(name)) return await NativeEditHook.RunAsync(join, capture, root, error, ct);
+                    if (edit) return await NativeEditHook.RunAsync(join, capture, root, error, ct);
                     const string prefix = "mcp__cocern__";
                     if (name is null || !name.StartsWith(prefix, StringComparison.Ordinal)) return 0;
                     recognized = true;
@@ -144,7 +159,11 @@ internal static class NativeJoinHook
                 default: return 0;
             }
         }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested) { return 0; }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            if (recognized) { await error.WriteLineAsync("CoCern native capture could not be verified."); return 2; }
+            return 0;
+        }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or JsonException or InvalidOperationException or FormatException or OverflowException)
         {
             if (recognized) { await error.WriteLineAsync("CoCern native capture could not be verified."); return 2; }
