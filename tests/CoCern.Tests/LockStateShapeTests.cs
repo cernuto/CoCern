@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using System.Text.Json;
 using CoCern.Contracts;
 using CoCern.Domain;
 using CoCern.Domain.Messages;
@@ -47,6 +48,20 @@ public sealed class LockStateShapeTests
         // A board's standing order watches the lock's release, and one of its runs tried to release the claim.
         Assert.True(Apply(envelope, Operations.OrderWatch, new() { ["boardKey"] = "repo/ops", ["boardId"] = "ops", ["orderId"] = "o1", ["watch"] = true }, T0.AddSeconds(302)).Ok);
         Assert.True(Apply(envelope, Operations.OrderRelease, new() { ["boardKey"] = "repo/ops", ["boardId"] = "ops", ["orderId"] = "o1", ["run"] = 1, ["holderSessionId"] = "s1", ["claimFor"] = "x" }, T0.AddSeconds(303)).Ok);
+
+        // Install/cancel actual source subscriptions against the existing fenced
+        // generation. Turnover beyond the active map's bound exercises its
+        // dedicated replay fences without releasing or modifying that grant.
+        for (var index = 0; index < 129; index++)
+        {
+            var watch = new EventWaitSourceWatch("repo", "shape-owner", "shape-wait-" + index, "shape-watch-" + index,
+                "claim_released", AggregateKinds.Lock, Resource, null, T0.AddMinutes(15), Revision: "1");
+            var payload = JsonSerializer.SerializeToNode(watch, new JsonSerializerOptions(JsonSerializerDefaults.Web))!.AsObject();
+            Assert.True(Apply(envelope, EventWaitSources.SourceWatchOperation, payload, T0.AddSeconds(304)).Ok);
+            Assert.True(Apply(envelope, EventWaitSources.SourceUnwatchOperation, payload, T0.AddSeconds(304)).Ok);
+        }
+        Assert.NotEmpty(JsonNode.Parse(envelope.Value.Json)![EventWaitSources.SubscriptionsKey]!.AsObject());
+        Assert.NotEmpty(JsonNode.Parse(envelope.Value.Json)!["eventWaitRetired"]!.AsObject());
 
         var json = JsonNode.Parse(envelope.Value.Json)!.AsObject();
         Assert.Empty(LockState.Shape.Undeclared(json));
