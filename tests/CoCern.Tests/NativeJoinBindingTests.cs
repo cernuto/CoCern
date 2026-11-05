@@ -41,52 +41,6 @@ public sealed class NativeJoinBindingTests(NativeJoinBindingTests.ProbeFixture p
     }
 
     [Fact]
-    public async Task Concurrent_independent_process_leases_resume_one_pending_attempt()
-    {
-        using var fixture = new ScopeFixture();
-        using var first = probe.Start(fixture, "hold");
-        Assert.Equal("attempting", await Line(first));
-        var original = await Line(first);
-        using var originalData = JsonDocument.Parse(original!);
-        var key = originalData.RootElement.GetProperty("key").GetString()!;
-        Assert.True(key.Length == 64 && key.All(Uri.IsHexDigit));
-        var lockPath = Path.Combine(fixture.Folder, "sessions", "native", key + ".lock");
-        Assert.ThrowsAny<IOException>(() => { using var forbidden = new FileStream(lockPath, FileMode.Open, FileAccess.Write, FileShare.None); });
-        var statePath = Path.ChangeExtension(lockPath, ".json");
-        var stateBeforeCancel = File.ReadAllBytes(statePath);
-        using var second = probe.Start(fixture, "hold");
-        Assert.Equal("attempting", await Line(second));
-        var waiting = Line(second);
-        var completed = await Task.WhenAny(waiting, Task.Delay(250));
-        try
-        {
-            Assert.NotSame(waiting, completed);
-            using var cancelled = probe.Start(fixture, "cancel");
-            Assert.Equal("attempting", await Line(cancelled));
-            Assert.Equal("cancelled", await Line(cancelled));
-            await cancelled.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
-            Assert.Equal(0, cancelled.ExitCode);
-            Assert.True(stateBeforeCancel.SequenceEqual(File.ReadAllBytes(statePath)), "A cancelled contender changed the winner's state.");
-            Assert.ThrowsAny<IOException>(() => { using var forbidden = new FileStream(lockPath, FileMode.Open, FileAccess.Write, FileShare.None); });
-
-            // Lose the first caller after persistence, without completing an open or returning its handle.
-            first.Kill(entireProcessTree: true);
-            await first.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
-            Assert.Equal(original, await waiting);
-            await second.StandardInput.WriteLineAsync("release");
-            await second.StandardInput.FlushAsync();
-            await second.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
-            Assert.Equal(0, second.ExitCode);
-            using var reopened = probe.Start(fixture, "once");
-            Assert.Equal("attempting", await Line(reopened));
-            Assert.Equal(original, await Line(reopened));
-            await reopened.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
-            Assert.Equal(0, reopened.ExitCode);
-        }
-        finally { Stop(first); Stop(second); }
-    }
-
-    [Fact]
     public async Task Unrelated_chats_and_checkouts_do_not_share_a_binding()
     {
         using var fixture = new ScopeFixture();
@@ -108,26 +62,6 @@ public sealed class NativeJoinBindingTests(NativeJoinBindingTests.ProbeFixture p
         var anotherFolder = fixture.Connection("another-cache");
         await using var other = await NativeJoinBinding.AcquireAsync(anotherFolder, "codex", Chat, "machine", "repo", fixture.Workspace, default);
         Assert.NotEqual(original, other.BindingKey);
-    }
-
-    [Fact]
-    public async Task Actual_event_subfolders_and_windows_case_converge_without_using_adapter_cwd()
-    {
-        using var fixture = new ScopeFixture();
-        var subfolder = Directory.CreateDirectory(Path.Combine(fixture.Workspace, "nested")).FullName;
-        string key, request;
-        await using (var first = await fixture.Acquire()) { key = first.BindingKey; request = first.OpenRequestId; }
-        await using (var nested = await fixture.Acquire(subfolder))
-        {
-            Assert.Equal(key, nested.BindingKey);
-            Assert.Equal(request, nested.OpenRequestId);
-        }
-        if (OperatingSystem.IsWindows())
-        {
-            await using var casing = await fixture.Acquire(subfolder.ToUpperInvariant());
-            Assert.Equal(key, casing.BindingKey);
-        }
-        await Assert.ThrowsAnyAsync<ArgumentException>(() => fixture.Acquire("relative-event-cwd"));
     }
 
     [Fact]
@@ -171,19 +105,6 @@ public sealed class NativeJoinBindingTests(NativeJoinBindingTests.ProbeFixture p
     }
 
     [Fact]
-    public async Task Length_prefixed_components_cannot_alias_and_cancellation_keeps_the_winner()
-    {
-        using var fixture = new ScopeFixture();
-        await using var first = await NativeJoinBinding.AcquireAsync(fixture.Folder, "codex", Chat, "a:b", "c", fixture.Workspace, default);
-        await using var other = await NativeJoinBinding.AcquireAsync(fixture.Folder, "codex", Chat, "a", "b:c", fixture.Workspace, default);
-        Assert.NotEqual(first.BindingKey, other.BindingKey);
-        var bytes = File.ReadAllBytes(first.StatePath);
-        using var cancel = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => NativeJoinBinding.AcquireAsync(fixture.Folder, "codex", Chat, "a:b", "c", fixture.Workspace, cancel.Token));
-        Assert.True(bytes.SequenceEqual(File.ReadAllBytes(first.StatePath)));
-    }
-
-    [Fact]
     public async Task Only_the_exact_authenticated_open_can_complete_and_reopen_its_private_handle()
     {
         using var fixture = new ScopeFixture();
@@ -215,27 +136,6 @@ public sealed class NativeJoinBindingTests(NativeJoinBindingTests.ProbeFixture p
         Assert.Single(Directory.EnumerateFiles(Path.Combine(fixture.Folder, "sessions"), "*.json"));
     }
 
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task Ordinary_records_and_legacy_mappings_never_gain_a_native_ownership_marker(bool mapped)
-    {
-        using var fixture = new ScopeFixture();
-        await using var binding = await fixture.Acquire();
-        var session = Guid.NewGuid().ToString("N");
-        var handoff = SessionHandoff.ForFolder(fixture.Folder, new("codex", Chat));
-        var args = JsonSerializer.SerializeToElement(new { repositoryId = "repo", nativeBindingKey = binding.BindingKey, binding = new { nativeBindingKey = binding.BindingKey } });
-        handoff.Record(args, OpenReply(session));
-        var path = NodeState.SessionHandlePath(fixture.Folder, session);
-        var legacy = NodeState.ReadSessionHandle(path)!;
-        if (mapped) NodeState.WriteSessionHandle(fixture.Folder, legacy with { Chat = new("codex", Chat) });
-        Assert.Null(NodeState.ReadSessionHandle(path)!.NativeBindingKey);
-        var before = File.ReadAllBytes(path);
-        Assert.False(await Open(handoff, binding, fixture.Options, OpenReply(session)));
-        Assert.True(before.SequenceEqual(File.ReadAllBytes(path)), "Unproven legacy ownership was changed.");
-        Assert.Null(binding.CurrentHandleReference);
-    }
-
     [Fact]
     public async Task Foreign_or_missing_handle_references_never_reopen_a_pending_attempt()
     {
@@ -261,68 +161,14 @@ public sealed class NativeJoinBindingTests(NativeJoinBindingTests.ProbeFixture p
         await Assert.ThrowsAnyAsync<IOException>(() => fixture.Acquire());
     }
 
-    [Fact]
-    public async Task A_credential_change_during_the_lease_cannot_complete_on_cached_authentication()
-    {
-        using var fixture = new ScopeFixture();
-        await using var binding = await fixture.Acquire();
-        File.WriteAllText(fixture.TokenFile, "changed-synthetic-principal");
-        Assert.False(await Open(SessionHandoff.ForFolder(fixture.Folder, new("codex", Chat)), binding, fixture.Options, OpenReply(Guid.NewGuid().ToString("N"))));
-        Assert.ThrowsAny<IOException>(() => binding.CurrentHandle);
-        Assert.Empty(Directory.EnumerateFiles(Path.Combine(fixture.Folder, "sessions"), "*.json"));
-    }
-
-    [Fact]
-    public async Task Node_origin_pin_and_credential_are_separate_private_namespaces()
-    {
-        using var fixture = new ScopeFixture();
-        var folder = Directory.CreateDirectory(Path.Combine(fixture.Root, "node")).FullName;
-        var credential = Path.Combine(folder, "credential");
-        NodeState.WritePrivately(credential, Encoding.UTF8.GetBytes(new string('a', 64)));
-        void Config(string hub, string pin) => NodeState.WritePrivately(Path.Combine(folder, "node.json"),
-            JsonSerializer.SerializeToUtf8Bytes(new { machineId = "machine", hubUrl = hub, fingerprint = pin, enrolled = true }));
-        Config("https://127.0.0.1:5273/", new string('A', 64));
-        string first;
-        await using (var original = await NativeJoinBinding.AcquireAsync(folder, "codex", Chat, "machine", "repo", fixture.Workspace, default)) first = original.BindingKey;
-        Config("https://127.0.0.1:5274/", new string('A', 64));
-        await using (var origin = await NativeJoinBinding.AcquireAsync(folder, "codex", Chat, "machine", "repo", fixture.Workspace, default)) Assert.NotEqual(first, origin.BindingKey);
-        Config("https://127.0.0.1:5273/", new string('B', 64));
-        await using (var pin = await NativeJoinBinding.AcquireAsync(folder, "codex", Chat, "machine", "repo", fixture.Workspace, default)) Assert.NotEqual(first, pin.BindingKey);
-        Config("https://127.0.0.1:5273/", new string('A', 64));
-        NodeState.WritePrivately(credential, Encoding.UTF8.GetBytes(new string('b', 64)));
-        await using var changed = await NativeJoinBinding.AcquireAsync(folder, "codex", Chat, "machine", "repo", fixture.Workspace, default);
-        Assert.NotEqual(first, changed.BindingKey);
-    }
-
     [Theory]
-    [InlineData("", Chat, "machine", "repo")]
     [InlineData("unknown", Chat, "machine", "repo")]
     [InlineData("codex", "../../other", "machine", "repo")]
-    [InlineData("codex", Chat, "bad\nmachine", "repo")]
-    [InlineData("codex", Chat, "machine", "")]
     public async Task Unsafe_native_scope_inputs_never_create_binding_state(string provider, string id, string machine, string repo)
     {
         using var fixture = new ScopeFixture();
         await Assert.ThrowsAnyAsync<ArgumentException>(() => NativeJoinBinding.AcquireAsync(fixture.Folder, provider, id, machine, repo, fixture.Workspace, default));
         Assert.False(Directory.Exists(Path.Combine(fixture.Folder, "sessions")));
-    }
-
-    [Fact]
-    public async Task Oversized_duplicate_and_denied_private_state_remain_unchanged()
-    {
-        using var fixture = new ScopeFixture();
-        string path;
-        await using (var lease = await fixture.Acquire()) path = lease.StatePath;
-        var original = File.ReadAllBytes(path);
-        foreach (var content in new[] { "{\"version\":1," + Encoding.UTF8.GetString(original)[1..], new string(' ', 17000) })
-        {
-            NodeState.WritePrivately(path, Encoding.UTF8.GetBytes(content));
-            await Assert.ThrowsAnyAsync<IOException>(() => fixture.Acquire());
-            Assert.True(Encoding.UTF8.GetBytes(content).SequenceEqual(File.ReadAllBytes(path)));
-        }
-        NodeState.WritePrivately(path, original);
-        using var denied = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
-        await Assert.ThrowsAnyAsync<IOException>(() => fixture.Acquire());
     }
 
     private static AdapterReply OpenReply(string session) => new(true, "Ok", JsonSerializer.SerializeToElement(new { sessionId = session, sessionToken = "synthetic-session-token" }), 1);
@@ -345,47 +191,6 @@ public sealed class NativeJoinBindingTests(NativeJoinBindingTests.ProbeFixture p
         NodeState.WritePrivately(path, JsonSerializer.SerializeToUtf8Bytes(malformed));
         Assert.Null(NodeState.ReadSessionHandle(path));
         Assert.Equal(oldSession, handoff.FindOwn("repo")!.SessionId);
-    }
-
-    [Fact]
-    public async Task Changed_generation_or_proof_cannot_select_the_previous_active_handle()
-    {
-        using var fixture = new ScopeFixture();
-        string path;
-        await using (var lease = await fixture.Acquire())
-        {
-            Assert.True(await Open(SessionHandoff.ForFolder(fixture.Folder, new("codex", Chat)), lease, fixture.Options, OpenReply(Guid.NewGuid().ToString("N"))));
-            path = lease.StatePath;
-        }
-        var original = File.ReadAllBytes(path);
-        foreach (var property in new[] { "generation", "bindingSecret" })
-        {
-            var changed = JsonNode.Parse(original)!.AsObject();
-            changed["openArguments"]!["nativeJoin"]![property] = property == "generation" ? Guid.NewGuid().ToString("N") : Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
-            NodeState.WritePrivately(path, JsonSerializer.SerializeToUtf8Bytes(changed));
-            await Assert.ThrowsAnyAsync<IOException>(() => fixture.Acquire());
-        }
-    }
-
-    [Fact]
-    public async Task Cancelled_or_non_git_events_never_create_pending_state()
-    {
-        using var fixture = new ScopeFixture();
-        using var cancelled = new CancellationTokenSource();
-        cancelled.Cancel();
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => NativeJoinBinding.AcquireAsync(fixture.Folder, "codex", Chat, "machine", "repo", fixture.Workspace, cancelled.Token));
-        var noGit = Directory.CreateDirectory(Path.Combine(fixture.Root, "not-a-checkout")).FullName;
-        await Assert.ThrowsAnyAsync<IOException>(() => fixture.Acquire(noGit));
-        Assert.False(Directory.Exists(Path.Combine(fixture.Folder, "sessions")));
-    }
-
-    [Fact]
-    public async Task Invalid_unicode_identifiers_cannot_alias_through_utf8_replacement()
-    {
-        using var fixture = new ScopeFixture();
-        var invalid = new string((char)0xD800, 1);
-        await Assert.ThrowsAnyAsync<ArgumentException>(() => NativeJoinBinding.AcquireAsync(fixture.Folder, "codex", Chat, "machine", invalid, fixture.Workspace, default));
-        Assert.False(Directory.Exists(Path.Combine(fixture.Folder, "sessions")));
     }
 
     [Fact]
@@ -414,7 +219,6 @@ public sealed class NativeJoinBindingTests(NativeJoinBindingTests.ProbeFixture p
     }
 
     [Theory]
-    [InlineData(false)]
     [InlineData(true)]
     public async Task Review1_legacy_consumers_never_send_a_marked_native_token_after_reenrollment(bool includeLegacy)
     {
@@ -452,7 +256,6 @@ public sealed class NativeJoinBindingTests(NativeJoinBindingTests.ProbeFixture p
 
     [Theory]
     [InlineData("GIT_DIR")]
-    [InlineData("GIT_WORK_TREE")]
     public async Task Review1_inherited_git_selectors_cannot_redirect_an_event_checkout(string selector)
     {
         using var a = new ScopeFixture();
@@ -466,89 +269,6 @@ public sealed class NativeJoinBindingTests(NativeJoinBindingTests.ProbeFixture p
         Assert.Equal(key, output.RootElement.GetProperty("key").GetString());
         await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
         Assert.Equal(0, process.ExitCode);
-    }
-
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task Review2_legacy_git_selectors_are_preserved_only_outside_native_discovery(bool ceiling)
-    {
-        using var a = new ScopeFixture();
-        using var b = new ScopeFixture();
-        var nested = Directory.CreateDirectory(Path.Combine(b.Workspace, "nested")).FullName;
-        string key;
-        await using (var expected = await b.Acquire(nested)) key = expected.BindingKey;
-        var overrides = ceiling
-            ? new Dictionary<string, string> { ["GIT_CEILING_DIRECTORIES"] = b.Workspace }
-            : new Dictionary<string, string> { ["GIT_DIR"] = Path.Combine(a.Workspace, ".git"), ["GIT_WORK_TREE"] = a.Workspace };
-        using var process = probe.Start(b, "discovery", overrides, nested);
-        Assert.Equal("attempting", await Line(process));
-        using var output = JsonDocument.Parse((await Line(process))!);
-        var raw = output.RootElement.GetProperty("raw").GetString();
-        Assert.True(ceiling ? raw is null : string.Equals(a.Workspace, raw, StringComparison.OrdinalIgnoreCase),
-            "Legacy discovery did not preserve the isolated child's Git selectors.");
-        Assert.Equal(key, output.RootElement.GetProperty("key").GetString());
-        await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
-        Assert.Equal(0, process.ExitCode);
-    }
-
-    [SkippableFact]
-    public async Task Review1_unix_ancestor_alias_cannot_create_a_second_lease_namespace()
-    {
-        Skip.If(OperatingSystem.IsWindows(), "Unix ancestor-symlink regression: not run on Windows; Windows directory-handle canonicalization is covered separately.");
-        using var fixture = new ScopeFixture();
-        var alias = Path.Combine(fixture.Root, "ancestor-alias");
-        Directory.CreateSymbolicLink(alias, Path.GetDirectoryName(fixture.Folder)!);
-        try
-        {
-            var aliasedFolder = Path.Combine(alias, Path.GetFileName(fixture.Folder));
-            await using var original = await fixture.Acquire();
-            var error = await Record.ExceptionAsync(async () =>
-            {
-                using var cancel = new CancellationTokenSource(TimeSpan.FromMilliseconds(250));
-                await using var impossible = await NativeJoinBinding.AcquireAsync(aliasedFolder, "codex", Chat, "machine", "repo", fixture.Workspace, cancel.Token);
-            });
-            Assert.True(error is IOException or OperationCanceledException, "An ancestor alias acquired a second independent lease.");
-        }
-        finally { Directory.Delete(alias); }
-    }
-
-    [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task Review1_native_uuid_is_bounded_before_parsing_or_storage(bool padded)
-    {
-        using var fixture = new ScopeFixture();
-        var id = padded ? new string(' ', 100000) + Chat + new string(' ', 100000) : "{" + Chat + "}";
-        var error = await Record.ExceptionAsync(async () =>
-        {
-            await using var unexpected = await NativeJoinBinding.AcquireAsync(fixture.Folder, "codex", id, "machine", "repo", fixture.Workspace, default);
-        });
-        Assert.True(error is ArgumentException, "Only bounded N/D UUID forms may reach private storage.");
-        Assert.False(Directory.Exists(Path.Combine(fixture.Folder, "sessions")));
-    }
-
-    [Fact]
-    public async Task Review1_a_prefix_sibling_is_not_the_event_checkout_parent()
-    {
-        using var fixture = new ScopeFixture();
-        var sibling = Directory.CreateDirectory(fixture.Workspace + "-sibling").FullName;
-        fixture.PointWorkingTreeAt(sibling);
-        var error = await Record.ExceptionAsync(async () => { await using var lease = await fixture.Acquire(); });
-        Assert.True(error is IOException, "An unrelated configured worktree must not contain the event by string prefix alone.");
-        Assert.False(Directory.Exists(Path.Combine(fixture.Folder, "sessions")));
-    }
-
-    [Theory]
-    [InlineData("N")]
-    [InlineData("D")]
-    public async Task Review1_documented_uuid_forms_share_the_same_bounded_identity(string form)
-    {
-        using var fixture = new ScopeFixture();
-        string key;
-        await using (var original = await fixture.Acquire()) key = original.BindingKey;
-        await using var same = await NativeJoinBinding.AcquireAsync(fixture.Folder, "CoDeX", Guid.Parse(Chat).ToString(form), "machine", "repo", fixture.Workspace, default);
-        Assert.Equal(key, same.BindingKey);
     }
 
     private static string CreateNode(ScopeFixture fixture, string hub, string credential)

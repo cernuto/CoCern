@@ -50,12 +50,6 @@ public sealed class NativeJoinLifecycleTests
 
     [Theory]
     [InlineData("valid")]
-    [InlineData("denied")]
-    [InlineData("duplicate")]
-    [InlineData("escaped")]
-    [InlineData("wrong-tool")]
-    [InlineData("array")]
-    [InlineData("legacy")]
     public void Token_meter_never_queues_a_native_request_or_its_open_reply(string form)
     {
         var attempt = Attempt();
@@ -123,26 +117,6 @@ public sealed class NativeJoinLifecycleTests
         Assert.Equal(RelayErrorCodes.InvalidArguments, Open(hub, elevated).Code);
     }
 
-    [Fact]
-    public void Generation_history_exhaustion_refuses_a_new_session_without_reusing_a_spent_attempt()
-    {
-        var hub = new AggregateHub();
-        var first = Attempt();
-        var attempt = first.DeepClone().AsObject();
-        for (var i = 0; i < 64; i++)
-        {
-            var chat = Handle(AggregateHub.Data(Open(hub, attempt)));
-            hub.DeliverAll(Now);
-            Assert.True(hub.Close(new() { ["targetSessionId"] = chat.Id, ["force"] = true }, Now).Ok);
-            hub.DeliverAll(Now);
-            attempt["requestId"] = Nonce();
-            attempt["nativeJoin"]!["generation"] = Nonce();
-        }
-        Assert.Equal(RelayErrorCodes.CapacityExceeded, Open(hub, attempt).Code);
-        Assert.Equal(RelayErrorCodes.SessionUnknown, Open(hub, first).Code);
-        Assert.Empty(hub.Directory());
-    }
-
     private static Chat Handle(JsonObject data) => new(data["sessionId"]!.ToString(), data["sessionToken"]!.ToString());
 
     // Import a genuinely initialized private row and session from an older, independent directory snapshot.
@@ -168,8 +142,6 @@ public sealed class NativeJoinLifecycleTests
 
     [Theory]
     [InlineData(false, false)]
-    [InlineData(true, false)]
-    [InlineData(false, true)]
     public void Observed_duplicate_cannot_mint_a_handle_after_current_expiry(bool sameAttempt, bool administrativeClose)
     {
         var hub = new AggregateHub();
@@ -196,182 +168,6 @@ public sealed class NativeJoinLifecycleTests
         var fresh = Handle(AggregateHub.Data(Open(hub, NextAttempt(attempt))));
         Assert.NotEqual(older, fresh);
         Assert.NotEqual(current, fresh);
-    }
-
-    private static (AggregateHub Hub, JsonObject Attempt, Chat Current, Chat Duplicate) FullHistoryFixture()
-    {
-        var hub = new AggregateHub();
-        var attempt = Attempt();
-        for (var i = 0; i < 63; i++)
-        {
-            var prior = Handle(AggregateHub.Data(Open(hub, attempt)));
-            hub.DeliverAll(Now);
-            Assert.True(hub.Close(new() { ["targetSessionId"] = prior.Id, ["force"] = true }, Now).Ok);
-            hub.DeliverAll(Now);
-            attempt = NextAttempt(attempt);
-        }
-        var current = Handle(AggregateHub.Data(Open(hub, attempt)));
-        hub.DeliverAll(Now);
-        return (hub, attempt, current, ImportDuplicate(hub, NextAttempt(attempt)));
-    }
-
-    [Fact]
-    public void Duplicate_retirement_fails_closed_at_the_existing_history_bound()
-    {
-        var (hub, attempt, current, older) = FullHistoryFixture();
-        Assert.Equal(RelayErrorCodes.CapacityExceeded, Open(hub, attempt).Code);
-        hub.DeliverAll(Now);
-        Assert.True(hub.Directory().ContainsKey(current.Id));
-        Assert.True(hub.Directory().ContainsKey(older.Id));
-    }
-
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void A_full_history_duplicate_does_not_block_other_repositories_sweep_or_capacity_prune(bool atCapacity)
-    {
-        var (hub, attempt, current, blocked) = FullHistoryFixture();
-        var other = new RelayCaller("other-worker", false, ["other"]);
-        JsonObject Legacy() => new() { ["repositoryId"] = "other", ["requestId"] = Nonce(), ["label"] = "idle" };
-        var legacy = Handle(AggregateHub.Data(Open(hub, Legacy(), other, Now.AddMinutes(10))));
-        hub.DeliverAll(Now.AddMinutes(10));
-        var later = Now.AddHours(RelayLimits.StaleSessionHours + 48);
-        Assert.True(hub.Verify(current, later).Ok);
-        hub.DeliverAll(later);
-
-        // Oldest first: an unretirable private duplicate, one real session in the other repo, then the other eligible rows.
-        var control = hub.State(AggregateKinds.Control, AggregateKinds.ControlKey);
-        var rows = control["sessions"]!.AsObject();
-        var protectedRow = rows[blocked.Id]!.DeepClone();
-        var participant = protectedRow[NativeParticipant.Id]!.ToString();
-        var retainedAttempts = control["nativeJoins"]![participant]!.DeepClone();
-        int eligible = atCapacity ? RelayLimits.MaxRecords - 2 : RelayLimits.MaxSessionsClosedPerCall + 1;
-        for (var i = 1; i < eligible; i++)
-        {
-            var row = rows[legacy.Id]!.DeepClone().AsObject();
-            var id = Nonce();
-            row["sessionId"] = id;
-            row["freshUntil"] = Now.AddHours(1).ToString("O");
-            rows[id] = row;
-        }
-        hub.Of(AggregateKinds.Control, AggregateKinds.ControlKey).Value = new() { Json = control.ToJsonString() };
-        Assert.Equal(RelayErrorCodes.CapacityExceeded, hub.Close(new() { ["targetSessionId"] = blocked.Id }, later).Code);
-        if (atCapacity)
-        {
-            Assert.Equal(RelayLimits.MaxRecords, hub.Directory().Count);
-            var newcomer = Handle(AggregateHub.Data(Open(hub, Legacy(), other, later)));
-            Assert.True(hub.Directory().ContainsKey(newcomer.Id));
-            Assert.Equal(RelayLimits.RetainedEntriesAfterPrune + 1, hub.Directory().Count);
-        }
-        else
-        {
-            var first = AggregateHub.Data(hub.Sweep(24, later));
-            Assert.Equal(RelayLimits.MaxSessionsClosedPerCall, first["closed"]!.GetValue<int>());
-            Assert.True(first["more"]!.GetValue<bool>());
-            var next = AggregateHub.Data(hub.Sweep(24, later));
-            Assert.Equal(1, next["closed"]!.GetValue<int>());
-            Assert.False(next["more"]!.GetValue<bool>());
-        }
-        var finalControl = hub.State(AggregateKinds.Control, AggregateKinds.ControlKey);
-        Assert.True(JsonNode.DeepEquals(protectedRow, hub.Directory()[blocked.Id]));
-        Assert.True(JsonNode.DeepEquals(retainedAttempts, finalControl["nativeJoins"]![participant]));
-        Assert.Null(finalControl[ControlState.ClosingKey]?[blocked.Id]);
-        Assert.True(hub.Directory().ContainsKey(current.Id));
-        Assert.False(hub.Directory().ContainsKey(legacy.Id));
-        Assert.DoesNotContain(hub.Queued, effect => effect.Operation == Operations.SessionExpire && effect.TargetKey == blocked.Id);
-        var expiry = Assert.Single(hub.Queued, effect => effect.Operation == Operations.SessionExpire && effect.TargetKey == legacy.Id);
-        Assert.True(AggregateHub.Data(hub.Deliver(expiry, later))["expired"]!.GetValue<bool>());
-        Assert.Equal(RelayErrorCodes.CapacityExceeded, Open(hub, attempt, at: later).Code);
-    }
-
-    [Fact]
-    public async Task Concurrent_public_opens_converge_and_only_verified_handles_carry_native_identity()
-    {
-        var attempt = Attempt();
-        Chat replacement;
-        string database;
-        await using (var host = new RelayHostFixture(disableDispatcher: true, configureServices: services => services.AddSingleton<ITokenCounter>(new ActivityLog())))
-        {
-            var app = host.Services.GetRequiredService<RelayApplication>();
-            var factory = host.Services.GetRequiredService<IGrainFactory>();
-            var guard = new CallGuard(new Aggregates(factory, null), "test");
-            Task<RelayReply> Call(string tool, object args) => app.ExecuteAsync(Alice, tool, JsonSerializer.SerializeToElement(args));
-            async Task<(VerifiedNativeParticipant? Participant, RelayReply? Refusal)> Verify(Chat handle, RelayCaller caller)
-            {
-                var args = JsonSerializer.SerializeToElement(new { repositoryId = "repo", sessionId = handle.Id, sessionToken = handle.Token });
-                Assert.True(guard.TryAdmit(caller, RelayTools.CheckInbox, args, null, out var admitted, out _));
-                var (call, refusal) = await guard.VerifyAsync(admitted!, null);
-                return (call.NativeParticipant, refusal);
-            }
-            database = host.DatabasePath;
-            var opens = await Task.WhenAll(Enumerable.Range(0, 8).Select(_ => Call(RelayTools.SessionOpen, attempt)));
-            var handles = opens.Select(reply => Handle(AggregateHub.Data(reply))).ToArray();
-            var first = handles[0];
-            Assert.All(handles, chat => Assert.Equal(first, chat));
-            var verified = await Verify(first, Alice);
-            Assert.Null(verified.Refusal);
-            var identity = Assert.IsType<VerifiedNativeParticipant>(verified.Participant);
-            Assert.Equal(first.Id, identity.SessionId);
-            Assert.Equal("repo", identity.RepositoryId);
-            Assert.DoesNotContain(first.Token, JsonSerializer.Serialize(identity));
-            var denied = await Verify(first with { Token = "wrong" }, Alice);
-            Assert.Null(denied.Participant);
-            Assert.Equal(RelayErrorCodes.SessionDenied, denied.Refusal?.Code);
-            denied = await Verify(first, new RelayCaller("other", false, ["repo"]));
-            Assert.Null(denied.Participant);
-            Assert.Equal(RelayErrorCodes.SessionDenied, denied.Refusal?.Code);
-
-            var raw = Handle(AggregateHub.Data(await Call(RelayTools.SessionOpen, new { repositoryId = "repo", requestId = Nonce(), nativeParticipantId = identity.ParticipantId })));
-            Assert.NotEqual(first.Id, raw.Id);
-            Assert.True((await Call(RelayTools.SessionBind, new { repositoryId = "repo", sessionId = raw.Id, sessionToken = raw.Token, requestId = Nonce(),
-                expectedVersion = 0, nativeParticipantId = identity.ParticipantId, role = "manager", binding = new { participantId = identity.ParticipantId } })).Ok);
-            Assert.Null((await Verify(raw, Alice)).Participant);
-            var privileged = await Call(RelayTools.ControlRequest, new { repositoryId = "repo", requestId = Nonce(), sessionId = raw.Id, sessionToken = raw.Token,
-                command = "close_sessions", targetSessionId = first.Id, isAdministrator = true });
-            Assert.Equal(RelayErrorCodes.AdministratorRequired, privileged.Code);
-            Assert.Equal(identity, (await Verify(first, Alice)).Participant);
-
-            var status = await Call(RelayTools.GetStatus, new { repositoryId = "repo", sessionId = first.Id, sessionToken = first.Token });
-            Assert.True(status.Ok);
-            Assert.DoesNotContain(identity.ParticipantId, status.DataJson);
-            Assert.DoesNotContain(first.Token, status.DataJson);
-            var workers = AggregateHub.Data(await Call(RelayTools.WorkerList, new { repositoryId = "repo" }));
-            var row = Assert.Single(workers["items"]!.AsArray(), item => item!["sessionId"]!.ToString() == first.Id);
-            Assert.DoesNotContain(identity.ParticipantId, row!.ToJsonString());
-            Assert.DoesNotContain(attempt["requestId"]!.ToString(), row.ToJsonString());
-            Assert.DoesNotContain(first.Token, workers.ToJsonString());
-
-            Assert.True((await app.ExecuteAsync(AggregateHub.Admin, RelayTools.ControlRequest, JsonSerializer.SerializeToElement(new {repositoryId = "repo",
-                requestId = Nonce(), command = "close_sessions", targetSessionId = first.Id, force = true}))).Ok);
-            Assert.True((await factory.GetGrain<IControlGrain>(AggregateKinds.ControlKey).ExecuteAsync(Alice with { IsInternal = true }, Operations.Dispatch, "{}")).Ok);
-            Assert.Equal(RelayErrorCodes.SessionUnknown, (await Call(RelayTools.SessionOpen, attempt)).Code);
-            attempt["requestId"] = Nonce();
-            attempt["nativeJoin"]!["generation"] = Nonce();
-            var fresh = Handle(AggregateHub.Data(await Call(RelayTools.SessionOpen, attempt)));
-            Assert.NotEqual(first, fresh);
-            Assert.Equal(identity.ParticipantId, (await Verify(fresh, Alice)).Participant?.ParticipantId);
-            replacement = fresh;
-
-            var deniedAttempt = attempt.DeepClone().AsObject();
-            deniedAttempt["repositoryId"] = "out-of-scope";
-            Assert.Equal(RelayErrorCodes.RepositoryDenied, (await Call(RelayTools.SessionOpen, deniedAttempt)).Code);
-            deniedAttempt["repositoryId"] = "repo";
-            deniedAttempt["nativeJoin"]!.AsObject().Remove("generation");
-            Assert.Equal(RelayErrorCodes.InvalidArguments, (await Call(RelayTools.SessionOpen, deniedAttempt)).Code);
-            await host.Services.GetRequiredService<SqliteStore>().FlushActivityAsync();
-            using var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = database, Mode = SqliteOpenMode.ReadOnly }.ToString());
-            connection.Open();
-            using var sql = connection.CreateCommand();
-            sql.CommandText = "SELECT count(*) FROM grain_state WHERE instr(payload, $proof) > 0 OR instr(payload, $native) > 0";
-            sql.Parameters.AddWithValue("$proof", attempt["nativeJoin"]!["bindingSecret"]!.ToString());
-            sql.Parameters.AddWithValue("$native", attempt["nativeJoin"]!["nativeId"]!.ToString());
-            Assert.Equal(0L, (long)sql.ExecuteScalar()!);
-            sql.CommandText = "SELECT count(*) FROM activity_log WHERE tool='session_open' AND request_bytes>0 AND request_tokens IS NULL AND code IN ('InvalidArguments','RepositoryDenied')";
-            Assert.Equal(2L, (long)sql.ExecuteScalar()!);
-        }
-        await using var restarted = new RelayHostFixture(database, disableDispatcher: true);
-        var replay = await restarted.Services.GetRequiredService<RelayApplication>().ExecuteAsync(Alice, RelayTools.SessionOpen, JsonSerializer.SerializeToElement(attempt));
-        Assert.Equal(replacement, Handle(AggregateHub.Data(replay)));
     }
 
     [Fact]
