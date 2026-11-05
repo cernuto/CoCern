@@ -994,13 +994,30 @@ public sealed class LocalWakeTests : IDisposable
     {
         var connection = Connection();
         var thread = Guid.NewGuid().ToString();
-        CodexHandle(connection, "older-session", thread, DateTimeOffset.UtcNow.AddHours(-2));
-        var newer = CodexHandle(connection, "newer-session", thread, DateTimeOffset.UtcNow.AddHours(-1));
+        var older = CodexHandle(connection, "older-session", thread, DateTimeOffset.UtcNow.AddHours(-2));
+        var newer = CodexHandle(connection, "newer-session", thread.ToUpperInvariant(), DateTimeOffset.UtcNow.AddHours(-1));
         using var hub = new ProbeHandler();
-        await using var restarted = Restart(connection, hub);
-        await restarted.Pass;
-        Assert.Equal(newer.SessionId, Assert.Single(restarted.Started).Session.SessionId);
+        await using var restarted = Restart(connection, hub, run: false);
+        // Called directly: in the loop NodeChats.Read deletes the older handle first, so the rule here would never be reached.
+        await restarted.Wake.RearmAsync(CancellationToken.None);
+        Assert.True(File.Exists(NodeState.SessionHandlePath(connection.Folder, older.SessionId)));
         Assert.Equal(newer.SessionId, Assert.Single(hub.Requests).Session);
+        Assert.Equal(1, SkipCount("rearm_skip_older_session"));
+    }
+
+    [Fact]
+    public async Task An_older_armed_session_is_not_rearmed_beside_an_observed_newer_one_of_its_chat()
+    {
+        var connection = Connection();
+        var thread = Guid.NewGuid().ToString();
+        CodexHandle(connection, "older-session", thread, DateTimeOffset.UtcNow.AddHours(-2));
+        CodexHandle(connection, "newer-session", thread.ToUpperInvariant(), DateTimeOffset.UtcNow.AddHours(-1));
+        using var hub = new ProbeHandler();
+        await using var restarted = Restart(connection, hub, run: false);
+        restarted.Wake.Observe(RelayTools.GetStatus, Arguments("newer-session"), new(true, "Ok", JsonSerializer.SerializeToElement(new { sessionId = "newer-session" }), 0));
+        await restarted.Wake.RearmAsync(CancellationToken.None);
+        Assert.Empty(hub.Requests);
+        Assert.Equal(1, SkipCount("rearm_skip_older_session"));
     }
 
     [Fact]

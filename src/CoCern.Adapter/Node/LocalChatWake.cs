@@ -138,7 +138,7 @@ public sealed class LocalChatWake : IAsyncDisposable
     /// as <see cref="Observe"/>, and the read neither touches the handle nor writes anything. A chat merely touched, located or armed by another owner is left alone, since
     /// an unexpected turn in a thread someone left is the worse failure. Old and new backends of one owner may overlap; the exclusive state file in <see cref="WatchAsync"/> lets one dispatch.
     /// </summary>
-    private async Task RearmAsync(CancellationToken ct)
+    internal async Task RearmAsync(CancellationToken ct)
     {
         var now = transport.Clock.GetUtcNow();
         if (rearmAt is not { } due || now < due) return;
@@ -147,8 +147,10 @@ public sealed class LocalChatWake : IAsyncDisposable
         armed.Prune(session => File.Exists(NodeState.SessionHandlePath(Connection.Folder, session)));
         var skips = new List<string>();
         var pending = new List<SessionHandle>();
-        var threads = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var handle in NodeState.ReadSessionHandles(Connection.Folder).Where(x => !observed.ContainsKey(x.SessionId)).OrderByDescending(x => x.OpenedAt))
+        var handles = NodeState.ReadSessionHandles(Connection.Folder);
+        // A chat already watched through its newer session must not gain a second watcher through an older one that NodeChats could not delete. Thread IDs compare as NodeChats.Current does.
+        var threads = handles.Where(x => observed.ContainsKey(x.SessionId) && x.Chat is { Provider: ChatProviders.Codex }).Select(x => x.Chat!.ThreadId).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var handle in handles.Where(x => !observed.ContainsKey(x.SessionId)).OrderByDescending(x => x.OpenedAt))
         {
             if (RearmSkip(handle, now) is { } skip) skips.Add(skip);
             else if (threads.Add(handle.Chat!.ThreadId)) pending.Add(handle);
