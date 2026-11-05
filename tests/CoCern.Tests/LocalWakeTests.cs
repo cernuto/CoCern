@@ -736,9 +736,10 @@ public sealed class LocalWakeTests : IDisposable
             var data = args.RootElement;
             var session = data.GetProperty("sessionId").GetString();
             Requests.Enqueue((request.RequestUri!.Segments[^1], data.TryGetProperty("backgroundCall", out var background) && background.GetBoolean(), session, data.GetProperty("sessionToken").GetString()));
-            var ok = Mode != "denied";
-            var said = Mode == "other-session" ? "another-session" : session;
-            return new(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new { ok, code = ok ? "Ok" : "SessionDenied", dataJson = JsonSerializer.Serialize(new { sessionId = said }), version = 0 })) };
+            var mode = Volatile.Read(ref Mode);
+            var ok = mode is not ("denied" or "busy");
+            var said = mode == "other-session" ? "another-session" : session;
+            return new(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new { ok, code = ok ? "Ok" : mode == "busy" ? "Busy" : "SessionDenied", dataJson = JsonSerializer.Serialize(new { sessionId = said }), version = 0 })) };
         }
     }
 
@@ -1003,6 +1004,77 @@ public sealed class LocalWakeTests : IDisposable
         Assert.True(File.Exists(NodeState.SessionHandlePath(connection.Folder, older.SessionId)));
         Assert.Equal(newer.SessionId, Assert.Single(hub.Requests).Session);
         Assert.Equal(1, SkipCount("rearm_skip_older_session"));
+    }
+
+    [Fact]
+    public async Task A_chat_located_after_the_restart_is_rearmed_on_the_timer_and_its_skip_counts_once()
+    {
+        var connection = Connection();
+        var located = CodexHandle(connection);
+        NodeState.WriteSessionHandle(connection.Folder, located with { Chat = null });
+        var clock = new ManualClock();
+        using var hub = new ProbeHandler();
+        await using var restarted = Restart(connection, hub, clock: clock);
+        await restarted.Pass;
+        Assert.Empty(hub.Requests);
+        Assert.Empty(restarted.Started);
+        Assert.Equal(1, SkipCount("rearm_skip_unlocated"));
+
+        NodeState.WriteSessionHandle(connection.Folder, located);
+        clock.Advance(LocalChatWake.RearmRetry + TimeSpan.FromSeconds(1));
+        await WaitFor(() => restarted.Started.Count == 1);
+        Assert.Equal(located.SessionId, Assert.Single(hub.Requests).Session);
+        Assert.Equal(1, SkipCount("rearm_skip_unlocated"));
+    }
+
+    [Fact]
+    public async Task A_chat_that_is_never_located_stops_being_retried_when_the_window_ends()
+    {
+        var connection = Connection();
+        var handle = CodexHandle(connection);
+        NodeState.WriteSessionHandle(connection.Folder, handle with { Chat = null });
+        var clock = new ManualClock();
+        using var hub = new ProbeHandler();
+        await using var restarted = Restart(connection, hub, clock: clock, run: false);
+        await restarted.Wake.RearmAsync(CancellationToken.None);
+        Assert.True(restarted.Wake.RearmPending);
+        clock.Advance(LocalChatWake.RearmWindow + TimeSpan.FromMinutes(1));
+        await restarted.Wake.RearmAsync(CancellationToken.None);
+        Assert.False(restarted.Wake.RearmPending);
+        Assert.Equal(1, SkipCount("rearm_skip_stale"));
+    }
+
+    [Fact]
+    public async Task An_unmapped_chat_is_final_and_is_not_retried()
+    {
+        var connection = Connection();
+        var handle = CodexHandle(connection);
+        NodeState.WriteSessionHandle(connection.Folder, handle with { Chat = null, Unmapped = true });
+        using var hub = new ProbeHandler();
+        await using var restarted = Restart(connection, hub, run: false);
+        await restarted.Wake.RearmAsync(CancellationToken.None);
+        Assert.False(restarted.Wake.RearmPending);
+    }
+
+    [Fact]
+    public async Task A_transient_refusal_is_retried_on_the_timer_and_a_final_one_is_not()
+    {
+        var connection = Connection();
+        CodexHandle(connection);
+        var clock = new ManualClock();
+        using var hub = new ProbeHandler { Mode = "busy" };
+        await using var restarted = Restart(connection, hub, clock: clock);
+        await restarted.Pass;
+        Assert.Empty(restarted.Started);
+        Assert.Equal(1, SkipCount("rearm_skip_transient"));
+        Assert.Equal(0, SkipCount("rearm_skip_refused"));
+        Assert.True(restarted.Wake.RearmPending);
+
+        Volatile.Write(ref hub.Mode, "ok");
+        clock.Advance(LocalChatWake.RearmRetry + TimeSpan.FromSeconds(1));
+        await WaitFor(() => restarted.Started.Count == 1);
+        Assert.Equal(2, hub.Requests.Count);
+        Assert.False(restarted.Wake.RearmPending);
     }
 
     [Fact]
