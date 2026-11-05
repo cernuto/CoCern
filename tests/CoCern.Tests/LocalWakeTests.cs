@@ -202,6 +202,138 @@ public sealed class LocalWakeTests : IDisposable
         Assert.Equal(2, Volatile.Read(ref count));
     }
 
+    private string StatusRoot => Path.Combine(root, "status-root");
+    private string OwnStatusFile => Path.Combine(StatusRoot, "status", Environment.ProcessId + ".json");
+
+    [Fact]
+    public void Report_writes_this_process_status_privately_with_only_fixed_fields()
+    {
+        LocalWakeStatus.Report("connection_ready", StatusRoot);
+        AssertPrivate(OwnStatusFile);
+        using var document = JsonDocument.Parse(File.ReadAllText(OwnStatusFile));
+        var data = document.RootElement;
+        Assert.Equal(["pid", "processStartedAt", "adapterVersion", "code", "codeAt", "observed", "watchers"], data.EnumerateObject().Select(x => x.Name));
+        Assert.Equal(Environment.ProcessId, data.GetProperty("pid").GetInt32());
+        Assert.Equal("connection_ready", data.GetProperty("code").GetString());
+        Assert.False(string.IsNullOrEmpty(data.GetProperty("adapterVersion").GetString()));
+        Assert.True(data.GetProperty("processStartedAt").TryGetDateTimeOffset(out _));
+        Assert.True(data.GetProperty("codeAt").TryGetDateTimeOffset(out var at));
+        Assert.True(DateTimeOffset.UtcNow - at < TimeSpan.FromMinutes(1));
+        Assert.Equal((0, 0), (data.GetProperty("observed").GetInt32(), data.GetProperty("watchers").GetInt32()));
+
+        LocalWakeStatus.Report("setup_io_error", StatusRoot);
+        using var replaced = JsonDocument.Parse(File.ReadAllText(OwnStatusFile));
+        Assert.Equal("setup_io_error", replaced.RootElement.GetProperty("code").GetString());
+        AssertPrivate(OwnStatusFile);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("Upper_Case")]
+    [InlineData("has space")]
+    [InlineData("digit1")]
+    [InlineData("trailing_newline\n")]
+    [InlineData(@"C:\Users\someone\token")]
+    [InlineData("synthetic-local-token-not-a-real-credential")]
+    [InlineData("the file could not be read: access denied")]
+    [InlineData("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")]
+    [InlineData(null)]
+    public void A_code_that_is_not_a_fixed_code_is_stored_as_invalid(string? code)
+    {
+        LocalWakeStatus.Report(code!, StatusRoot);
+        var text = File.ReadAllText(OwnStatusFile);
+        using var document = JsonDocument.Parse(text);
+        Assert.Equal("invalid_code", document.RootElement.GetProperty("code").GetString());
+        if (!string.IsNullOrEmpty(code)) Assert.DoesNotContain(code, text);
+    }
+
+    [Fact]
+    public void A_longest_allowed_code_is_kept()
+    {
+        var code = new string('a', 64);
+        LocalWakeStatus.Report(code, StatusRoot);
+        Assert.Contains(code, File.ReadAllText(OwnStatusFile));
+    }
+
+    [Fact]
+    public void Report_and_counts_write_only_when_something_changed()
+    {
+        LocalWakeStatus.Report("connection_ready", StatusRoot);
+        File.Delete(OwnStatusFile);
+        LocalWakeStatus.Report("connection_ready", StatusRoot);
+        Assert.False(File.Exists(OwnStatusFile));
+
+        LocalWakeStatus.Counts(2, 1, StatusRoot);
+        using (var document = JsonDocument.Parse(File.ReadAllText(OwnStatusFile)))
+        {
+            Assert.Equal((2, 1), (document.RootElement.GetProperty("observed").GetInt32(), document.RootElement.GetProperty("watchers").GetInt32()));
+            Assert.Equal("connection_ready", document.RootElement.GetProperty("code").GetString());
+        }
+        File.Delete(OwnStatusFile);
+        LocalWakeStatus.Counts(2, 1, StatusRoot);
+        Assert.False(File.Exists(OwnStatusFile));
+    }
+
+    [Fact]
+    public void Counts_alone_writes_a_status_file_and_negative_counts_are_held_at_zero()
+    {
+        LocalWakeStatus.Counts(-1, -5, StatusRoot);
+        using var document = JsonDocument.Parse(File.ReadAllText(OwnStatusFile));
+        Assert.Equal((0, 0), (document.RootElement.GetProperty("observed").GetInt32(), document.RootElement.GetProperty("watchers").GetInt32()));
+    }
+
+    [Fact]
+    public void Status_writes_never_throw_and_a_relative_root_writes_nothing()
+    {
+        Directory.CreateDirectory(root);
+        var blocked = Path.Combine(root, "a-file-not-a-folder");
+        File.WriteAllText(blocked, "");
+        LocalWakeStatus.Report("connection_ready", blocked);
+        LocalWakeStatus.Counts(1, 1, blocked);
+        Assert.Equal("", File.ReadAllText(blocked));
+
+        var relative = "cocern-status-" + Guid.NewGuid().ToString("N");
+        LocalWakeStatus.Report("connection_ready", relative);
+        LocalWakeStatus.Counts(1, 1, relative);
+        Assert.False(Directory.Exists(relative));
+
+        LocalWakeStatus.Report("connection_ready", "");
+        LocalWakeStatus.Report("connection_ready", "bad\0root");
+        LocalWakeStatus.Counts(1, 1, "bad\0root");
+    }
+
+    [Fact]
+    public void Starting_prunes_files_of_ended_processes_and_files_older_than_seven_days()
+    {
+        var folder = Directory.CreateDirectory(Path.Combine(StatusRoot, "status")).FullName;
+        using var alive = System.Diagnostics.Process.GetProcesses().First(x => x.Id != Environment.ProcessId && x.Id > 0);
+        var ended = Path.Combine(folder, int.MaxValue + ".json");
+        var running = Path.Combine(folder, alive.Id + ".json");
+        var old = Path.Combine(folder, "old-leftover.json.tmp");
+        var other = Path.Combine(folder, "recent-leftover.json.tmp");
+        foreach (var path in new[] { ended, running, old, other }) File.WriteAllText(path, "{}");
+        File.SetLastWriteTimeUtc(old, DateTime.UtcNow.AddDays(-8));
+
+        LocalWakeStatus.Report("connection_ready", StatusRoot);
+        Assert.False(File.Exists(ended));
+        Assert.False(File.Exists(old));
+        Assert.True(File.Exists(running));
+        Assert.True(File.Exists(other));
+        Assert.True(File.Exists(OwnStatusFile));
+    }
+
+    [Fact]
+    public void A_running_process_file_older_than_seven_days_is_pruned()
+    {
+        var folder = Directory.CreateDirectory(Path.Combine(StatusRoot, "status")).FullName;
+        using var alive = System.Diagnostics.Process.GetProcesses().First(x => x.Id != Environment.ProcessId && x.Id > 0);
+        var running = Path.Combine(folder, alive.Id + ".json");
+        File.WriteAllText(running, "{}");
+        File.SetLastWriteTimeUtc(running, DateTime.UtcNow.AddDays(-8));
+        LocalWakeStatus.Report("connection_ready", StatusRoot);
+        Assert.False(File.Exists(running));
+    }
+
     private LocalWakeConnection Connection(AdapterOptions? options = null) => LocalWakeConnection.Create(options ?? new("http://127.0.0.1:5271/", Secret, admin: true), TokenFile(), Path.Combine(root, "cache"))!;
     private static JsonElement Arguments(string session = "original-session") => JsonSerializer.SerializeToElement(new { repositoryId = "repo", sessionId = session, sessionToken = "private-session-token" });
 
