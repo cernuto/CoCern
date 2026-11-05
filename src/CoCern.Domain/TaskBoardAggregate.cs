@@ -57,6 +57,7 @@ internal static class TaskBoardAggregate
             case Operations.PresentStanding: return StandingPreferences.Present(context);
             case RelayTools.StandingPut: return StandingPreferences.Put(context);
             case RelayTools.StandingPropose: return StandingPreferences.Propose(context);
+            case RelayTools.RecordDecision: return StandingPreferences.RecordDecision(context);
             case Operations.StandingProposeHub: return StandingPreferences.ProposeFromHub(context);
             case RelayTools.TaskGet when taskId.Length == 0 && Text(context.Args, "section") == "standing": return StandingPreferences.View(context.State, context.Now);
             case RelayTools.TaskGet when taskId.Length == 0: return context.Args.ContainsKey("sinceRevision") ? DeltaPage(board, context.Args) : ListTasks(board, context);

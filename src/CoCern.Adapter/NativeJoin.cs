@@ -249,6 +249,17 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
         return (request, false);
     }
 
+    internal async Task<NativeEditClaims> EditClaimsAsync(NativeHookContext context, CancellationToken ct)
+    {
+        var (handle, _) = await EnsureBoundAsync(context, null, ct);
+        await using var binding = await NativeJoinBinding.AcquireAsync(folder, context.Provider, context.NativeId,
+            Environment.MachineName, handle.RepositoryId, context.Cwd, ct, existingOnly: true);
+        if (binding.CurrentHandle?.SessionId != handle.SessionId || !forwarder.MatchesNativeBinding(binding))
+            throw new IOException("The native edit binding changed.");
+        return new NativeEditClaims(binding.Folder, ProtectedCheckoutRoot.Prove(context.Cwd), handle.RepositoryId,
+            handle.SessionId, binding.Generation, this, context);
+    }
+
     internal async Task<AdapterReply> CallAsync(NativeHookContext context, string invocation, string tool, JsonElement args, CancellationToken ct, string? expectedGeneration = null)
     {
         if (invocation is not { Length: > 0 and <= 256 } || invocation.Any(char.IsControl) || args.ValueKind != JsonValueKind.Object ||
@@ -257,7 +268,9 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
             return new(false, "native_invocation_conflict");
         try
         {
-            var admission = definition.IsMutation ? new Invocation(invocation, tool, args) : null;
+            // A scoped confirmation is a fresh read, despite sharing the acquire wire tool; never persist/replay it as a mutation.
+            var fileCheck = tool == RelayTools.ClaimAcquire && args.TryGetProperty("confirmGeneration", out _);
+            var admission = definition.IsMutation && !fileCheck ? new Invocation(invocation, tool, args) : null;
             var (handle, request) = await EnsureBoundAsync(context, admission, ct, expectedGeneration: expectedGeneration);
             var payload = JsonNode.Parse(admission?.LegacyWire == true ? args.GetRawText() : NativeJoinHook.Canonical(args))!.AsObject();
             if (payload.ContainsKey("repositoryId") && (string?)payload["repositoryId"] != handle.RepositoryId) return new(false, "native_repository_conflict");
@@ -266,6 +279,7 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
             { payload["sessionId"] = handle.SessionId; payload["sessionToken"] = handle.SessionToken; }
             if (definition.Audited) { payload["actingSessionId"] = handle.SessionId; payload["actingSessionToken"] = handle.SessionToken; }
             if (definition.IsMutation && request is not null) payload["requestId"] = request;
+            if (fileCheck) payload["requestId"] = invocation;
             var arguments = RelayForwarder.WithOrigin(JsonSerializer.SerializeToElement(payload), background: false);
             if (tool == RelayTools.ControlRequest) arguments = CoordinationTools.WithOwnSession(arguments, handle.SessionId);
             var reply = tool == RelayTools.CheckInbox ? await InboxWait.CheckAsync(modelCalls, arguments, InboxWait.PollInterval, ct) :

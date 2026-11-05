@@ -205,6 +205,7 @@ public sealed record DashboardOrderLogEntry
 
 public sealed record DashboardStandingLine
 {
+    public DashboardDecisionEvidence? Decision { get; init; }
     public string Id { get; init; } = "";
     public string Text { get; init; } = "";
     public string Author { get; init; } = "";
@@ -214,6 +215,7 @@ public sealed record DashboardStandingLine
 
 public sealed record DashboardStandingGrant
 {
+    public DashboardDecisionEvidence? Decision { get; init; }
     public string Id { get; init; } = "";
     public string Scope { get; init; } = "";
     public string[] Targets { get; init; } = [];
@@ -225,6 +227,8 @@ public sealed record DashboardStandingGrant
 
 public sealed record DashboardStandingProposal
 {
+    public string PresentedBy { get; init; } = "";
+    public DateTimeOffset? PresentedAt { get; init; }
     public string Id { get; init; } = "";
     public string Kind { get; init; } = "";
     public string Summary { get; init; } = "";
@@ -239,10 +243,28 @@ public sealed record DashboardStandingProposal
 
 public sealed record DashboardStandingChange
 {
+    public DashboardDecisionEvidence? Decision { get; init; }
     public long Revision { get; init; }
     public string By { get; init; } = "";
     public DateTimeOffset? At { get; init; }
     public string[] Changes { get; init; } = [];
+}
+
+/// <summary>Exact deliberately recorded answer, distinct from a pending question or a current permission.</summary>
+public sealed record DashboardDecisionEvidence
+{
+    public string AuditRef { get; init; } = "";
+    public string PrincipalId { get; init; } = "";
+    public string SessionId { get; init; } = "";
+    public DateTimeOffset? At { get; init; }
+    public string HumanWords { get; init; } = "";
+    public string Outcome { get; init; } = "";
+    public string ProposalId { get; init; } = "";
+    public string Target { get; init; } = "";
+    public string Replaces { get; init; } = "";
+    public string Scope { get; init; } = "";
+    public string[] Targets { get; init; } = [];
+    public DateTimeOffset? ExpiresAt { get; init; }
 }
 
 public sealed record DashboardHost

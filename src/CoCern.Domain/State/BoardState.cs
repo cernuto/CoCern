@@ -811,7 +811,7 @@ public sealed class StandingLine(JsonObject json)
     public const string ApprovedByKey = "approvedBy";
     public const string ApprovedAtKey = "approvedAt";
 
-    public static StateShape Shape { get; } = StateShape.Object((IdKey, null), (TextKey, null), (AuthorKey, null), (ApprovedByKey, null), (ApprovedAtKey, null));
+    public static StateShape Shape { get; } = StateShape.Object((IdKey, null), (TextKey, null), (AuthorKey, null), (ApprovedByKey, null), (ApprovedAtKey, null), (StandingDecision.Key, StandingDecision.Shape));
 
     /// <summary>The line a proposal carries: its text, and the ID it would be written under when it names one.</summary>
     public static StateShape ProposedShape { get; } = StateShape.Object((IdKey, null), (TextKey, null));
@@ -845,7 +845,7 @@ public sealed class StandingGrant(JsonObject json)
     public const string ProposedByKey = "proposedBy";
 
     public static StateShape Shape { get; } = StateShape.Object(
-        (IdKey, null), (ScopeKey, null), (TargetsKey, null), (ExpiresAtKey, null), (GrantorKey, null), (GrantedAtKey, null), (ProposedByKey, null));
+        (IdKey, null), (ScopeKey, null), (TargetsKey, null), (ExpiresAtKey, null), (GrantorKey, null), (GrantedAtKey, null), (ProposedByKey, null), (StandingDecision.Key, StandingDecision.Shape));
 
     /// <summary>The grant a proposal carries, normalized: its scope, targets and expiry, and the ID it would be written under when it names one.</summary>
     public static StateShape ProposedShape { get; } = StateShape.Object((IdKey, null), (ScopeKey, null), (TargetsKey, null), (ExpiresAtKey, null));
@@ -964,7 +964,7 @@ public static class StandingChange
     public const string ChangesKey = "changes";
     public const string ChangesTotalKey = "changesTotal";
 
-    public static StateShape Shape { get; } = StateShape.Object((RevisionKey, null), (ByKey, null), (AtKey, null), (ChangesKey, null), (ChangesTotalKey, null));
+    public static StateShape Shape { get; } = StateShape.Object((RevisionKey, null), (ByKey, null), (AtKey, null), (ChangesKey, null), (ChangesTotalKey, null), (StandingDecision.Key, StandingDecision.Shape));
 
     public static JsonObject Create(long revision, string by, DateTimeOffset at, IReadOnlyList<string> changes)
     {

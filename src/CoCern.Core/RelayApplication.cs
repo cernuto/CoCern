@@ -103,7 +103,10 @@ public sealed class RelayApplication : IRelayApplication
         {
             var (call, refused) = await guard.VerifyAsync(admitted, trace);
             if (refused is not null) return await actions.AfterAsync(call, refused);
-            var routed = await actions.AfterAsync(call, await router.RouteAsync(call, trace, cancellationToken));
+            var result = call.Args.ContainsKey("filePath") || call.Args.ContainsKey("confirmGeneration")
+                ? await new FileClaimTools(aggregates, guard).RunAsync(call)
+                : await router.RouteAsync(call, trace, cancellationToken);
+            var routed = await actions.AfterAsync(call, result);
             return tool == RelayTools.SessionOpen ? routed : await addOns.ApplyAsync(call, routed, trace);
         }
         catch (ArgumentException) { return Error(InvalidArguments); }
