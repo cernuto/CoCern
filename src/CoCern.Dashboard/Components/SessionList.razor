@@ -1,14 +1,15 @@
 <section class="surface session-list" aria-labelledby="sessions-heading">
-    <div class="section-heading"><h2 id="sessions-heading">Sessions</h2><span class="count-badge">@Sessions.Length</span></div>
-    <label class="search-field"><span class="visually-hidden">Find a session</span><input type="search" placeholder="Find by label, ID, machine or repository" @bind="_query" @bind:event="oninput" /></label>
+    <div class="section-heading"><h2 id="sessions-heading">Sessions</h2><BbBadge Variant="BadgeVariant.Secondary">@Sessions.Length</BbBadge></div>
+    <div class="search-field"><BbInput Type="InputType.Search" AriaLabel="Find a session" Placeholder="Find by label, ID, machine or repository" @bind-Value:get="_query" @bind-Value:set="value => _query = value ?? string.Empty" UpdateTiming="UpdateTiming.Immediate" /></div>
     <div class="session-list-rows">
         @foreach (var session in FilteredSessions)
         {
             <div class="session-list-entry" @key="session.SessionId">
-                <button type="button" class="session-list-row @(SelectedId == session.SessionId ? "selected" : "")" aria-pressed="@(SelectedId == session.SessionId ? "true" : "false")" @onclick="() => OnSelect.InvokeAsync(session.SessionId)">
+                <BbButton Variant="ButtonVariant.Ghost" Class="@($"session-list-row {(SelectedId == session.SessionId ? "selected" : "")}")" aria-pressed="@(SelectedId == session.SessionId ? "true" : "false")" OnClick="() => OnSelect.InvokeAsync(session.SessionId)">
                     <span class="status-dot @(session.Reachable ? "teal" : "amber")" aria-hidden="true"></span>
                     <span class="session-row-label"><strong>@session.Label</strong><span>@session.Provider on @DashboardFormat.Machine(session)</span><span title="@session.SessionId">#@ShortId(session.SessionId) · @(session.OpenedAt is { } opened ? $"Opened {DashboardFormat.Timestamp(opened)}" : "Opened time unavailable")</span></span>
                     <span class="session-row-state">
+                        <BbBadge Class="session-route-badge" Variant="@(session.Reachable ? BadgeVariant.SoftInfo : BadgeVariant.Outline)" title="A direct route lets the hub wake this chat. Its availability does not indicate whether a model is running; MCP calls and inbox communication can work without it.">@(session.Reachable ? "Direct route available" : "No direct route")</BbBadge>
                         @if (session.HasBindingReport is null)
                         {
                             <span>Tool binding not reported</span>
@@ -23,7 +24,7 @@
                         }
                         <small title="Most recent recorded successful tool call, including background polling. This does not indicate whether a model is running.">Last relay call: @DashboardFormat.Ago(session.LastActivityAt, Now)</small>
                     </span>
-                </button>
+                </BbButton>
                 <CloseSessionControl Session="@session" />
             </div>
         }

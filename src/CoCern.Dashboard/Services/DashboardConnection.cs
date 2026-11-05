@@ -122,13 +122,22 @@ public sealed class DashboardConnection(HttpClient http, NavigationManager navig
                         ?? throw new InvalidOperationException("The hub did not return sign-in options.");
                 }
                 using var authResponse = await http.GetAsync("api/auth", cancellationToken);
+                DashboardAuthStatus? auth;
                 if (authResponse.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
                 {
-                    RequireSignIn();
-                    return;
+                    if (LoginOptions.LocalSignInAvailable)
+                    {
+                        using var localResponse = await http.PostAsync("api/login-local", null, cancellationToken);
+                        if (!localResponse.IsSuccessStatusCode) { RequireSignIn(); return; }
+                        auth = await localResponse.Content.ReadFromJsonAsync<DashboardAuthStatus>(cancellationToken);
+                    }
+                    else { RequireSignIn(); return; }
                 }
-                authResponse.EnsureSuccessStatusCode();
-                var auth = await authResponse.Content.ReadFromJsonAsync<DashboardAuthStatus>(cancellationToken);
+                else
+                {
+                    authResponse.EnsureSuccessStatusCode();
+                    auth = await authResponse.Content.ReadFromJsonAsync<DashboardAuthStatus>(cancellationToken);
+                }
                 if (auth?.Authenticated != true)
                 {
                     RequireSignIn();

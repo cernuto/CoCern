@@ -4,9 +4,9 @@
         <div class="traffic-controls">
             @if (SelectedSession is not null)
             {
-                <button type="button" class="traffic-filter @(_sessionOnly ? "active" : "")" aria-pressed="@(_sessionOnly ? "true" : "false")" @onclick="ToggleSessionFilter">This session</button>
+                <BbButton Variant="@(_sessionOnly ? ButtonVariant.Secondary : ButtonVariant.Outline)" Class="@($"traffic-filter {(_sessionOnly ? "active" : "")}")" aria-pressed="@(_sessionOnly ? "true" : "false")" OnClick="ToggleSessionFilter">This session</BbButton>
             }
-            <button type="button" class="traffic-pause" aria-pressed="@(_paused ? "true" : "false")" @onclick="TogglePause">@(_paused ? "Resume" : "Pause")</button>
+            <BbButton Variant="ButtonVariant.Outline" Class="traffic-pause" aria-pressed="@(_paused ? "true" : "false")" OnClick="TogglePause">@(_paused ? "Resume" : "Pause")</BbButton>
         </div>
     </div>
     <div class="traffic-legend"><span><i class="traffic-key request" aria-hidden="true"></i>Request</span><span><i class="traffic-key response" aria-hidden="true"></i>Response</span><span><i class="traffic-key push" aria-hidden="true"></i>Push</span><span><i class="traffic-key error" aria-hidden="true"></i>Error</span><span class="traffic-count">@VisibleEvents.Length shown</span></div>
@@ -27,8 +27,8 @@
                         <td class="traffic-time"><time title="@DashboardFormat.Timestamp(entry.Timestamp)">@entry.Timestamp.ToLocalTime().ToString("HH:mm:ss.fff")</time></td>
                         <td class="traffic-endpoint" title="@EndpointTitle(entry, true)">@TrafficSource(entry)</td>
                         <td class="traffic-endpoint" title="@EndpointTitle(entry, false)">@TrafficDestination(entry)</td>
-                        <td class="traffic-kind">@KindLabel(entry.Kind)</td>
-                        <td class="traffic-info"><button type="button" class="traffic-inspect" aria-expanded="@(inspecting ? "true" : "false")" aria-controls="traffic-selected-event" aria-label="@($"Inspect {KindLabel(entry.Kind).ToLowerInvariant()} {entry.Name}, event {entry.Sequence}")" @onclick="() => Inspect(entry.Sequence)" @onclick:stopPropagation="true">@EventInfo(entry)</button></td>
+                        <td class="traffic-kind"><BbBadge Variant="@(IsError(entry) ? BadgeVariant.SoftDestructive : BadgeVariant.Outline)">@KindLabel(entry.Kind)</BbBadge></td>
+                        <td class="traffic-info"><span @onclick:stopPropagation="true"><BbButton Variant="ButtonVariant.Ghost" Class="traffic-inspect" aria-expanded="@(inspecting ? "true" : "false")" aria-controls="traffic-selected-event" AriaLabel="@($"Inspect {KindLabel(entry.Kind).ToLowerInvariant()} {entry.Name}, event {entry.Sequence}")" OnClick="() => Inspect(entry.Sequence)">@EventInfo(entry)</BbButton></span></td>
                     </tr>
                 }
             </tbody>
@@ -41,7 +41,7 @@
     @if (SelectedEvent is { } selected)
     {
         <div class="traffic-event-detail" id="traffic-selected-event" role="region" aria-label="Selected traffic event">
-            <div class="traffic-detail-heading"><h3>Event @selected.Sequence · @KindLabel(selected.Kind)</h3><button type="button" @onclick="() => Inspect(selected.Sequence)" aria-label="Close event details">Close</button></div>
+            <div class="traffic-detail-heading"><h3>Event @selected.Sequence · @KindLabel(selected.Kind)</h3><BbButton Variant="ButtonVariant.Outline" Size="ButtonSize.Small" OnClick="() => Inspect(selected.Sequence)" AriaLabel="Close event details">Close</BbButton></div>
             <dl>
                 <div><dt>Time</dt><dd>@selected.Timestamp.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss.fff zzz")</dd></div>
                 <div><dt>Source</dt><dd>@EndpointTitle(selected, true)</dd></div>

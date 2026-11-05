@@ -7,9 +7,9 @@
     <div class="analytics-toolbar">
         <div><h2 id="analytics-heading">Hourly snapshot</h2><p>Compare the selected period with the preceding equal period.</p></div>
         <div class="analytics-filters">
-            <label for="analytics-repository">Repository<select id="analytics-repository" value="@_repository" @onchange="RepositoryChangedAsync">@foreach (var repository in Repositories) { <option value="@repository">@repository</option> }</select></label>
-            <label for="analytics-days">Period<select id="analytics-days" value="@_days" @onchange="DaysChangedAsync">@for (var days = 1; days <= 14; days++) { <option value="@days">@days @(days == 1 ? "day" : "days")</option> }</select></label>
-            <button type="button" class="analytics-refresh" @onclick="LoadAsync" disabled="@_loading" title="Read the latest available hourly snapshot">Refresh analytics</button>
+            <label for="analytics-repository">Repository<BbNativeSelect TValue="string" Id="analytics-repository" Value="@_repository" ValueChanged="@(value => RepositoryChangedAsync(new ChangeEventArgs { Value = value ?? string.Empty }))">@foreach (var repository in Repositories) { <option value="@repository">@repository</option> }</BbNativeSelect></label>
+            <label for="analytics-days">Period<BbNativeSelect TValue="int" Id="analytics-days" Value="@_days" ValueChanged="@(value => DaysChangedAsync(new ChangeEventArgs { Value = value }))">@for (var days = 1; days <= 14; days++) { <option value="@days">@days @(days == 1 ? "day" : "days")</option> }</BbNativeSelect></label>
+            <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Outline" Class="analytics-refresh" OnClick="LoadAsync" Disabled="@_loading" title="Read the latest available hourly snapshot">Refresh analytics</BbButton>
         </div>
     </div>
     <TestEffortCard RepositoryId="@_repository" />
@@ -33,7 +33,7 @@
         </div>
         <p class="analytics-history" role="status">@HistoryMessage(data)</p>
         @if (AdditionalMessage(data) is { Length: > 0 } message) { <p class="warning-note" role="status">@message</p> }
-        <p class="analytics-key">Paired bars use teal for current and gold for previous; stacked bars use the labeled category colors. Not measured means unknown; 0 is a measured zero. Sample counts appear with each report.</p>
+        <p class="analytics-key">Paired bars use the legend colors for the current and previous periods; stacked bars use the labeled category colors. Not measured means unknown; 0 is a measured zero. Sample counts appear with each report.</p>
         <div class="analytics-grid">
             <AnalyticsChart Query="@Query("relay_tokens")" Title="Relay tokens" Description="Measured request and reply relay tokens by reported origin; these are not total model context or billing." Unit="tokens" SampleUnit="calls" Mode="horizontal" />
             <AnalyticsChart Query="@Query("usage_coverage")" Title="Reported model usage coverage" Description="Percent of touched tasks with reported model usage." Unit="%" SampleUnit="touched tasks" />

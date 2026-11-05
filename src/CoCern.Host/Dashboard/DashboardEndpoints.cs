@@ -91,10 +91,15 @@ public static class DashboardEndpoints
             }
             return await next(invocation);
         });
-        api.MapGet("/login-options", () => Results.Ok(new DashboardLoginOptions { SessionHours = authentication.SessionHours, RememberDays = authentication.RememberDays }));
+        api.MapGet("/login-options", (HttpContext context, DashboardSecurity security) => Results.Ok(new DashboardLoginOptions
+        {
+            SessionHours = authentication.SessionHours, RememberDays = authentication.RememberDays,
+            LocalSignInAvailable = DashboardSecurity.LocalBrowser(context) && security.Enabled
+        }));
         api.MapGet("/auth", (HttpContext context) => Results.Ok(new DashboardAuthStatus { Authenticated = true, PrincipalId = context.User.FindFirstValue(ClaimTypes.NameIdentifier) }))
             .RequireAuthorization(DashboardSecurity.Policy);
         api.MapPost("/login", LoginAsync).RequireRateLimiting(LoginPolicy);
+        api.MapPost("/login-local", LoginLocalAsync).RequireRateLimiting(LoginPolicy);
         api.MapPost("/logout", async (HttpContext context) =>
         {
             if (!DashboardSecurity.SecureTransport(context) || !DashboardSecurity.SameOrigin(context)) return Results.StatusCode(403);
@@ -115,6 +120,8 @@ public static class DashboardEndpoints
             return ConnectClients.All.Contains(client) ? Results.Ok(await connect.ConnectAsync(client, DashboardConnect.AdminChoice(context), context.RequestAborted)) : Results.NotFound();
         }).RequireAuthorization(DashboardSecurity.Policy);
         api.MapGet("/snapshot", (DashboardCollector collector) => Results.Ok(collector.Current)).RequireAuthorization(DashboardSecurity.Policy);
+        api.MapGet("/database/reset", DashboardDatabaseManagement.ReadAsync).RequireAuthorization(DashboardSecurity.Policy);
+        api.MapPost("/database/reset", DashboardDatabaseManagement.ScheduleAsync).RequireAuthorization(DashboardSecurity.Policy);
         api.MapGet("/analytics", (HttpContext context, DashboardAnalytics analytics) => analytics.GetAsync(context)).RequireAuthorization(DashboardSecurity.Policy);
         api.MapGet("/analytics/test-effort", (HttpContext context, DashboardAnalytics analytics) => analytics.GetTestEffortAsync(context)).RequireAuthorization(DashboardSecurity.Policy);
         // The Sessions page's "Close idle sessions": the cookie alone would let another site's form post this, so it also needs this origin.
@@ -214,6 +221,17 @@ public static class DashboardEndpoints
             body.Write(buffer, 0, count);
         }
         return body.Length > maximumBytes ? null : body.ToArray();
+    }
+
+    private static async Task<IResult> LoginLocalAsync(HttpContext context, DashboardSecurity security, DashboardAuthenticationSettings settings)
+    {
+        if (!DashboardSecurity.LocalBrowser(context) || !DashboardSecurity.SameOrigin(context)) return Results.StatusCode(403);
+        var now = DateTimeOffset.UtcNow;
+        var expires = now.Add(settings.Lifetime(false));
+        var principal = security.LocalViewer(now, expires);
+        if (principal is null) return Results.Unauthorized();
+        await context.SignInAsync(DashboardSecurity.Scheme, principal, new AuthenticationProperties { IsPersistent = false, AllowRefresh = false, IssuedUtc = now, ExpiresUtc = expires });
+        return Results.Ok(new DashboardAuthStatus { Authenticated = true, PrincipalId = principal.FindFirstValue(ClaimTypes.NameIdentifier) });
     }
 
     private static async Task<IResult> LoginAsync(HttpContext context, DashboardSecurity security, DashboardSignInLink link, DashboardAuthenticationSettings settings)

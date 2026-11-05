@@ -24,6 +24,10 @@ public static class RelayEndpoints
         app.UseDashboardBoundary();
         app.UseLocalApiReference();
         app.UseBlazorFrameworkFiles("/dashboard");
+        // RCL modules resolve relative to the dashboard's base URI. Their manifest paths
+        // remain under _content, so expose that public asset subtree at the same base.
+        app.UseWhen(context => context.Request.Path.StartsWithSegments("/dashboard/_content"), branch =>
+            branch.UseStaticFiles(new StaticFileOptions { RequestPath = "/dashboard" }));
         app.UseStaticFiles();
         app.UseRouting();
         app.UseRateLimiter();

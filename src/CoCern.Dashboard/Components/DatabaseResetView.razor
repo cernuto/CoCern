@@ -1,0 +1,89 @@
+@using System.Net.Http.Json
+@inject HttpClient Http
+
+<BbCard role="region" Class="surface sql-view database-reset" aria-labelledby="database-reset-heading">
+    <h2 id="database-reset-heading">Reset coordination data</h2>
+    <p>Clear tasks, chats, messages, claims, standing rules and history across every repository. Connection credentials and enrolled PCs are kept.</p>
+    <p>The reset takes effect when you next restart the hub. All coordination data present at that restart will be permanently removed. Chats must open new sessions afterwards. This does not stop tools already running.</p>
+    @if (_pending is true)
+    {
+        <p class="warning-note" role="status">A reset is queued for the next hub restart. Cancel it here before restarting if you want to keep the data.</p>
+        <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Outline" Class="close-sessions-secondary" Disabled="@_busy" OnClick="CancelAsync">Cancel queued reset</BbButton>
+    }
+    else if (_pending is false)
+    {
+        <details>
+            <summary>Schedule a reset</summary>
+            <div class="database-reset-confirmation">
+                <label for="database-reset-confirmation">Type RESET ALL COORDINATION DATA to confirm</label>
+                <BbInput Type="InputType.Text" Id="database-reset-confirmation" autocomplete="off" spellcheck="false" Value="@_confirmation" ValueChanged="@(value => _confirmation = value ?? string.Empty)" UpdateTiming="UpdateTiming.Immediate" Disabled="@_busy" />
+                <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Destructive" Class="admin-destructive" Disabled="@(_busy || _confirmation != Confirmation)" OnClick="ScheduleAsync">Reset on next restart</BbButton>
+            </div>
+        </details>
+    }
+    <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Outline" Class="close-sessions-secondary" Disabled="@_busy" OnClick="RefreshAsync">Refresh reset status</BbButton>
+    @if (_message is not null) { <p role="status">@_message</p> }
+</BbCard>
+
+@code {
+    private const string Confirmation = "RESET ALL COORDINATION DATA";
+    private string _confirmation = "";
+    private bool? _pending;
+    private bool _busy;
+    private string? _message;
+
+    protected override Task OnInitializedAsync() => RefreshAsync();
+
+    private async Task RefreshAsync()
+    {
+        if (_busy) return;
+        _busy = true;
+        try
+        {
+            using var response = await Http.GetAsync("api/database/reset");
+            await ReadStatusAsync(response);
+        }
+        catch (Exception error) when (error is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException)
+        {
+            _pending = null;
+            _message = "Could not read reset status. Refresh it before restarting the hub.";
+        }
+        finally { _busy = false; }
+    }
+
+    private Task ScheduleAsync() => ChangeAsync(cancel: false);
+    private Task CancelAsync() => ChangeAsync(cancel: true);
+
+    private async Task ChangeAsync(bool cancel)
+    {
+        if (_busy || _pending is null || (!cancel && _confirmation != Confirmation)) return;
+        _busy = true;
+        try
+        {
+            using var response = await Http.PostAsJsonAsync("api/database/reset", new DashboardDatabaseResetRequest(_confirmation, cancel));
+            await ReadStatusAsync(response);
+            _confirmation = "";
+        }
+        catch (Exception error) when (error is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException)
+        {
+            _pending = null;
+            _message = "The reset request could not be confirmed. Refresh reset status before restarting the hub.";
+        }
+        finally { _busy = false; }
+    }
+
+    private async Task ReadStatusAsync(HttpResponseMessage response)
+    {
+        if (response.StatusCode is System.Net.HttpStatusCode.Unauthorized or System.Net.HttpStatusCode.Forbidden)
+        {
+            _pending = null;
+            _message = "Sign in as an administrator on the hub's PC to manage resets.";
+            return;
+        }
+        response.EnsureSuccessStatusCode();
+        var status = await response.Content.ReadFromJsonAsync<DashboardDatabaseResetStatus>()
+            ?? throw new System.Text.Json.JsonException("Missing reset status.");
+        _pending = status.Pending;
+        _message = status.Pending ? "Reset queued. Restart the hub when you are ready." : "No reset is queued.";
+    }
+}

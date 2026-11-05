@@ -5,8 +5,8 @@
     <div class="analytics-toolbar">
         <div><h2 id="test-effort-heading">Test runs</h2><p><a href="analytics">Back to Analytics</a></p></div>
         <div class="analytics-filters">
-            <label for="test-effort-repository">Repository<select id="test-effort-repository" value="@_repository" @onchange="RepositoryChangedAsync">@foreach (var repository in TestEffortPresentation.Repositories(Snapshot, _repository)) { <option value="@repository">@repository</option> }</select></label>
-            <button type="button" class="analytics-refresh" @onclick="LoadAsync" disabled="@_loading" title="Read the test effort file again">Refresh</button>
+            <label for="test-effort-repository">Repository<BbNativeSelect TValue="string" Id="test-effort-repository" Value="@_repository" ValueChanged="@(value => RepositoryChangedAsync(new ChangeEventArgs { Value = value ?? string.Empty }))">@foreach (var repository in TestEffortPresentation.Repositories(Snapshot, _repository)) { <option value="@repository">@repository</option> }</BbNativeSelect></label>
+            <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Outline" Class="analytics-refresh" OnClick="LoadAsync" Disabled="@_loading" title="Read the test effort file again">Refresh</BbButton>
         </div>
     </div>
     @if (_loading)
@@ -41,7 +41,7 @@
                 <div><dt>Case time repeated at the same commit <TestEffortBadge Status="@TestEffortRules.Measured" /></dt><dd>@TestEffortPresentation.Minutes(report.RepeatedCaseMinutes) <small>@TestEffortPresentation.Percent(report.RepeatedCaseMinutes, report.CaseMinutes) of case minutes</small></dd></div>
             </dl>
 
-            <section class="surface analytics-chart" aria-labelledby="test-effort-days-heading">
+            <BbCard role="region" Class="surface analytics-chart" aria-labelledby="test-effort-days-heading">
                 <header><h3 id="test-effort-days-heading">Test minutes per day</h3></header>
                 <div class="test-effort-scroll">
                     <table class="metrics-table test-effort-table">
@@ -61,9 +61,9 @@
                         </tbody>
                     </table>
                 </div>
-            </section>
+            </BbCard>
 
-            <section class="surface analytics-chart" aria-labelledby="test-effort-rules-heading">
+            <BbCard role="region" Class="surface analytics-chart" aria-labelledby="test-effort-rules-heading">
                 <header><h3 id="test-effort-rules-heading">Pointless-run rules</h3><p>@report.RunsWithoutCommit of @report.Runs runs recorded no commit, so rules a, b, c and d cannot judge them.</p></header>
                 <div class="test-effort-scroll">
                     <table class="metrics-table test-effort-table">
@@ -82,9 +82,9 @@
                         </tbody>
                     </table>
                 </div>
-            </section>
+            </BbCard>
 
-            <section class="surface analytics-chart" aria-labelledby="test-effort-failures-heading">
+            <BbCard role="region" Class="surface analytics-chart" aria-labelledby="test-effort-failures-heading">
                 <header><h3 id="test-effort-failures-heading">Failures</h3><p>Fixture-only failures are kept apart from product failures. The results carry no failure text, so the split is an estimate, and the remainder includes deliberate failing-first runs.</p></header>
                 <dl class="test-effort-tiles">
                     <div><dt>All failed cases <TestEffortBadge Status="@TestEffortRules.Measured" /></dt><dd>@report.Failures</dd></div>
@@ -92,9 +92,9 @@
                     <div><dt>Product or undetermined <TestEffortBadge Status="@TestEffortRules.Status(report.Rules[3])" /></dt><dd>@(report.Failures - report.FixtureOnlyFailures - report.UnjudgedFailures)</dd></div>
                     <div><dt>Not judged, no commit <TestEffortBadge Status="@TestEffortRules.Measured" /></dt><dd>@report.UnjudgedFailures</dd></div>
                 </dl>
-            </section>
+            </BbCard>
 
-            <section class="surface analytics-chart" aria-labelledby="test-effort-top-heading">
+            <BbCard role="region" Class="surface analytics-chart" aria-labelledby="test-effort-top-heading">
                 <header><h3 id="test-effort-top-heading">Top @report.ExpensiveNeverFailed.Length expensive tests that never failed</h3><p>Measured: summed durations across recorded runs. Never failed means in those runs only.</p></header>
                 <div class="test-effort-scroll">
                     <table class="metrics-table test-effort-table">
@@ -107,11 +107,11 @@
                         </tbody>
                     </table>
                 </div>
-            </section>
+            </BbCard>
         }
         @if (report is { Days.Length: > 0 })
         {
-            <section class="surface analytics-chart" aria-labelledby="test-effort-growth-heading">
+            <BbCard role="region" Class="surface analytics-chart" aria-labelledby="test-effort-growth-heading">
                 <header><h3 id="test-effort-growth-heading">Tests added and deleted</h3><p>Measured from git history, by first parent, on the day a change landed. A test moved between files counts as both. Rows are data rows on a theory.</p></header>
                 <div class="test-effort-scroll">
                     <table class="metrics-table test-effort-table">
@@ -124,7 +124,7 @@
                         </tbody>
                     </table>
                 </div>
-            </section>
+            </BbCard>
         }
     }
 </section>

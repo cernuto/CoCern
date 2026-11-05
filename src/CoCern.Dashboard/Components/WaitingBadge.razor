@@ -1,4 +1,4 @@
-<span class="waiting-badge">Waiting on you <span class="waiting-count @(Waiting.Count > 0 ? "has-waiting" : null)" aria-live="polite">@Waiting.Count</span></span>
+<span class="waiting-badge">Waiting on you <BbBadge Variant="@(Waiting.Count > 0 ? BadgeVariant.SoftWarning : BadgeVariant.Secondary)" Class="@($"waiting-count {(Waiting.Count > 0 ? "has-waiting" : "")}")" aria-live="polite">@Waiting.Count</BbBadge></span>
 @code {
     [Parameter] public DashboardWaiting Waiting { get; set; } = new();
 }

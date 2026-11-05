@@ -10,11 +10,11 @@
 .document-inventory .document-file-identity small { overflow-wrap: anywhere; }
 .document-usage { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)) minmax(105px, 1.2fr); gap: 14px; margin: 0; align-self: start; }
 .document-usage > div { min-width: 0; }
-.document-usage dt { color: var(--muted); font-size: .72rem; }
+.document-usage dt { color: var(--muted-foreground); font-size: .72rem; }
 .document-usage dd { margin: 4px 0 0; color: var(--ink); font-size: .9rem; font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
-.document-inventory .document-tracking { grid-column: 2; color: var(--muted); font-size: .7rem; }
+.document-inventory .document-tracking { grid-column: 2; color: var(--muted-foreground); font-size: .7rem; }
 .document-inventory .document-inventory-note { margin: 0 0 16px; }
-.document-usage-note { margin: 14px 22px 20px; padding-top: 14px; border-top: 1px solid var(--line); color: var(--muted); font-size: .75rem; max-width: 85ch; }
+.document-usage-note { margin: 14px 22px 20px; padding-top: 14px; border-top: 1px solid var(--line); color: var(--muted-foreground); font-size: .75rem; max-width: 85ch; }
 .document-index-details { margin: 14px 0 18px; }
 .document-index-details > summary { margin-inline: 22px; padding-block: 8px; color: var(--ink); font-size: .82rem; cursor: pointer; }
 .document-index-details .doc-cache-table { margin-top: 8px; }

@@ -16,66 +16,92 @@
 }
 else if (!Connection.Authenticated)
 {
-    <main class="connection-splash"><div class="relay-mark" aria-hidden="true">Co</div><h1>Connecting…</h1><p>@(Connection.Notice ?? "Checking access to this hub.")</p><span class="muted">Retrying automatically.</span></main>
+    <main class="connection-splash"><div class="relay-mark" aria-hidden="true"><img src="cocern-logo.png" alt="" /></div><h1>Connecting…</h1><p>@(Connection.Notice ?? "Checking access to this hub.")</p><span class="muted">Retrying automatically.</span></main>
 }
 else
 {
-    <div class="dashboard-shell">
-        <a class="skip-link" href="#main">Skip to content</a>
-        <header class="app-header">
-            <a class="brand" href="./" aria-label="CoCern overview"><span class="relay-mark" aria-hidden="true">Co</span><span>CoCern</span></a>
-            <nav class="main-nav" aria-label="Dashboard">
+    <div class="dashboard-shell" @onkeydown="HandleShellKeyDown">
+        <a class="skip-link" href="@SkipToContentHref" @onclick="SkipToContentAsync" @onclick:preventDefault="true">Skip to content</a>
+        <aside class="app-sidebar @(_navigationOpen ? "navigation-open" : null)" aria-label="Workspace">
+            <a class="brand" href="./"><span class="relay-mark" aria-hidden="true"><img src="cocern-logo.png" alt="" /></span><span>CoCern<small>@WorkspaceLabel</small></span></a>
+            <div class="sidebar-section-label">Workspace</div>
+            <nav id="workspace-navigation" class="main-nav" aria-label="Dashboard" @onclick="CloseNavigation">
                 <NavLink href="" Match="NavLinkMatch.All"><Icon Name="overview" />Overview</NavLink>
                 <NavLink href="sessions"><Icon Name="sessions" />Sessions</NavLink>
                 <NavLink href="analytics"><svg class="icon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M4 20V10M12 20V4M20 20v-7" /></svg>Analytics</NavLink>
                 <NavLink href="sql"><Icon Name="database" />Database</NavLink>
                 <NavLink href="logs"><Icon Name="logs" />Logs</NavLink>
+                <span class="sidebar-section-label">Manage</span>
                 <NavLink href="standing"><Icon Name="standing" />Standing</NavLink>
                 <NavLink href="manager"><Icon Name="sessions" />Manager</NavLink>
                 <NavLink href="documents"><Icon Name="documents" />Documents</NavLink>
                 <NavLink href="connect"><Icon Name="plug" />Connect</NavLink>
             </nav>
-            <div class="header-actions">
-                <button type="button" class="icon-button" @onclick="ToggleThemeAsync" aria-label="@(_theme == "dark" ? "Use light appearance" : "Use dark appearance")" title="@(_theme == "dark" ? "Light appearance" : "Dark appearance")"><Icon Name="@(_theme == "dark" ? "sun" : "moon")" /></button>
-                <button type="button" class="icon-button" @onclick="SignOutAsync" disabled="@_signingOut" aria-label="Sign out" title="Sign out"><Icon Name="sign-out" /></button>
+            <div class="sidebar-footer">
+                <span class="sidebar-hub-label"><span class="status-dot @(IsLive ? "teal" : "amber")"></span>@(Connection.Snapshot?.Host.Name ?? "Coordination hub")</span>
+                <small>CoCern @(Connection.Snapshot?.Host.Version)</small>
             </div>
-        </header>
-        <main id="main" class="dashboard-main">
-            <div class="page-heading">
-                <div><h1>@PageTitle</h1>@if (PageDescription is { } description) { <p>@description</p> }</div>
-                <div class="page-tools @(View == "analytics" ? "analytics-page-tools" : null)">
-                    <div class="connection-status"><span class="connection-chip @(IsLive ? "live" : "waiting")" role="status"><span class="status-dot"></span>@(View == "analytics" ? $"Hub connection: {ConnectionLabel}" : ConnectionLabel)</span><span title="@DashboardFormat.Timestamp(Connection.Snapshot?.ObservedAt)">@(View == "analytics" ? "Hub updated" : "Updated") @DashboardFormat.Ago(Connection.Snapshot?.ObservedAt, _now).ToLowerInvariant()</span></div>
-                    <details class="observation-warnings">
-                        <summary><WaitingBadge Waiting="@(Connection.Snapshot?.Waiting ?? new DashboardWaiting())" /><span>Notices <span class="notice-count" aria-live="polite">@(Connection.Snapshot?.Warnings.Length ?? 0)</span></span></summary>
-                        <div class="observation-warnings-panel" role="region" aria-label="Dashboard notices" tabindex="0">
+        </aside>
+        <div class="workspace-body">
+            <header class="app-topbar">
+                <div class="topbar-context">
+                    <BbButton Variant="ButtonVariant.Ghost" Size="ButtonSize.Icon" Class="navigation-toggle" OnClick="ToggleNavigation" AriaLabel="Toggle navigation" aria-controls="workspace-navigation" aria-expanded="@(_navigationOpen ? "true" : "false")">
+                        <ChildContent><svg class="icon" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16" /></svg></ChildContent>
+                    </BbButton>
+                    <img class="mobile-brand" src="cocern-logo.png" alt="CoCern" /><span class="breadcrumb-workspace">Workspace</span><span class="breadcrumb-divider" aria-hidden="true">/</span><strong>@PageTitle</strong>
+                </div>
+                <div class="header-actions">
+                    <span class="connection-chip @(IsLive ? "live" : "waiting")" role="status"><span class="status-dot"></span>@ConnectionLabel</span>
+                    <BbPopover @bind-Open="_noticesOpen">
+                        <BbPopoverTrigger>
+                            <BbButton Variant="ButtonVariant.Outline" Class="notices-button" AriaLabel="@($"Open dashboard notices ({NoticeCount})")" title="Open notices">
+                                <ChildContent><span>Notices</span><BbBadge Variant="BadgeVariant.Secondary" aria-hidden="true">@NoticeCount</BbBadge></ChildContent>
+                            </BbButton>
+                        </BbPopoverTrigger>
+                        <BbPopoverContent Align="PopoverAlign.End" Class="dashboard-notices">
+                            <div class="notices-heading"><h2>Notifications</h2><span class="muted">Needs your attention</span></div>
                             <WaitingNotifications Waiting="@(Connection.Snapshot?.Waiting ?? new DashboardWaiting())" />
                             <WaitingOnYou Waiting="@(Connection.Snapshot?.Waiting ?? new DashboardWaiting())" HeadingId="notices-waiting-heading" Now="@_now" OnSelectSession="OpenWaitingSession" OnOpenStanding="OpenStanding" />
-                            <h2>Dashboard notices</h2>
+                            <h3>Hub notices</h3>
                             @if (Connection.Snapshot is { Warnings.Length: > 0 } notices)
                             {
                                 <ul>@foreach (var warning in notices.Warnings) { <li>@warning</li> }</ul>
                             }
                             else
                             {
-                                <p>No active notices.</p>
+                                <p class="muted">No active notices.</p>
                             }
-                        </div>
-                    </details>
+                        </BbPopoverContent>
+                    </BbPopover>
+                    <BbButton Variant="ButtonVariant.Ghost" Size="ButtonSize.Icon" OnClick="ToggleThemeAsync" AriaLabel="@(_theme == "dark" ? "Use light appearance" : "Use dark appearance")" title="@(_theme == "dark" ? "Light appearance" : "Dark appearance")">
+                        <ChildContent><Icon Name="@(_theme == "dark" ? "sun" : "moon")" /></ChildContent>
+                    </BbButton>
+                    <BbButton Variant="ButtonVariant.Ghost" Size="ButtonSize.Icon" OnClick="SignOutAsync" Disabled="@_signingOut" AriaLabel="Sign out" title="Sign out">
+                        <ChildContent><Icon Name="sign-out" /></ChildContent>
+                    </BbButton>
                 </div>
+            </header>
+        <main id="main" class="dashboard-main" tabindex="-1">
+            <div class="page-heading">
+                <div><h1>@PageTitle</h1>@if (PageDescription is { } description) { <p>@description</p> }</div>
+                <span class="last-observed" title="@DashboardFormat.Timestamp(Connection.Snapshot?.ObservedAt)">Updated @DashboardFormat.Ago(Connection.Snapshot?.ObservedAt, _now).ToLowerInvariant()</span>
             </div>
             @if (!string.IsNullOrWhiteSpace(Connection.Notice))
             {
-                <p class="connection-notice" role="status">@Connection.Notice</p>
+                <BbAlert Class="connection-notice" role="status"><BbAlertDescription>@Connection.Notice</BbAlertDescription></BbAlert>
             }
             <ManagerControl Compact="@(View != "manager")" Sessions="@(Connection.Snapshot?.Sessions ?? [])" DefaultRepositoryId="@(Connection.Snapshot?.Sessions.FirstOrDefault()?.RepositoryId)" />
             @if (Connection.Snapshot is { } snapshot)
             {
+                @if (View == "overview")
+                {
                 <section class="relay-summary" aria-label="Relay summary">
                     <div class="host-summary"><span class="host-symbol" aria-hidden="true"><Icon Name="machine" Size="20" /></span><span><strong>@snapshot.Host.Name</strong><small>CoCern @snapshot.Host.Version</small></span></div>
-                    <div class="summary-stat"><strong>@snapshot.Host.MachineCount</strong><span title="Nodes recorded in this hub's discovery inventory; this is not a count of active PCs.">Enrolled nodes</span></div>
+                    <div class="summary-stat"><strong>@snapshot.Host.MachineCount</strong><span title="Nodes recorded in this hub's discovery inventory; this is not a count of active PCs.">@(snapshot.Host.MachineCount == 1 ? "Enrolled node" : "Enrolled nodes")</span></div>
                     <div class="summary-stat"><strong>@snapshot.Host.SessionCount</strong><span>@(snapshot.Host.SessionCount == 1 ? "Session" : "Sessions")</span></div>
-                    <div class="summary-stat"><strong>@snapshot.Host.ReachableCount</strong><span title="Sessions with a current direct wake route. MCP calls and inbox communication can still work without one; this is not a count of running models.">Direct chat routes</span></div>
+                    <div class="summary-stat"><strong>@snapshot.Host.ReachableCount</strong><span title="Sessions with a current direct wake route. MCP calls and inbox communication can still work without one; this is not a count of running models.">@(snapshot.Host.ReachableCount == 1 ? "Direct chat route" : "Direct chat routes")</span></div>
                 </section>
+                }
                 @if (snapshot.SessionsTruncated && View is "overview" or "sessions")
                 {
                     <p class="limit-note">Showing @snapshot.Sessions.Length of @snapshot.Host.SessionCount sessions.</p>
@@ -107,6 +133,7 @@ else
                         break;
                     case "sql":
                         <SqlView Metrics="@snapshot.Database" Now="@_now" />
+                        <DatabaseResetView />
                         break;
                     case "logs":
                         <LogView Entries="@snapshot.Logs" />
@@ -131,7 +158,13 @@ else
                 <section class="surface waiting-snapshot"><Icon Name="empty" Size="28" /><h2>Waiting for the hub</h2><p>Machines and sessions appear with the first update.</p></section>
             }
         </main>
+        </div>
     </div>
 }
 
 
+
+@code {
+    private string WorkspaceLabel => "Coordination workspace";
+    private int NoticeCount => (Connection.Snapshot?.Warnings.Length ?? 0) + (Connection.Snapshot?.Waiting.Count ?? 0) + (Connection.Snapshot?.Waiting.MaybeCount ?? 0);
+}

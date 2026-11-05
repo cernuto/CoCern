@@ -11,7 +11,7 @@
 }
 else
 {
-    <section class="surface connect-view" aria-labelledby="connect-heading">
+    <BbCard role="region" Class="surface connect-view" aria-labelledby="connect-heading">
         <div class="section-heading"><div><h2 id="connect-heading">Apps on this PC</h2><p>Each one gets CoCern as a tool. Restart the app afterwards.</p></div></div>
         @if (_status is null)
         {
@@ -23,8 +23,8 @@ else
         }
         else
         {
-            <label class="admin-tools">
-                <input type="checkbox" checked="@_admin" disabled="@(_busy is not null)" @onchange="ChooseAdminAsync" />
+            <label class="admin-tools" for="connect-admin-tools">
+                <BbCheckbox Id="connect-admin-tools" Checked="@_admin" Disabled="@(_busy is not null)" CheckedChanged="@(value => ChooseAdminAsync(new ChangeEventArgs { Value = value }))" />
                 <span><strong>Administrator tools</strong><small>Chats in these apps can also set standing rules, add orders, run analytics, pause work and close sessions. Leave it off unless you trust every chat in them.</small></span>
             </label>
             <ul class="connect-list">
@@ -35,18 +35,18 @@ else
                         <div><strong>@client.Name</strong><small>@Describe(client)</small></div>
                         @if (client.State is ConnectStates.Connected or ConnectStates.Added)
                         {
-                            <span class="tag good">@(client.State == ConnectStates.Added ? "Connected · restart it" : client.Admin == true ? "Connected · admin tools" : "Connected")</span>
+                            <BbBadge Variant="BadgeVariant.SoftSuccess" Class="connection-state">@(client.State == ConnectStates.Added ? "Connected · restart it" : client.Admin == true ? "Connected · admin tools" : "Connected")</BbBadge>
                         }
                         else if (client.State != ConnectStates.OtherHub)
                         {
-                            <button type="button" class="connect-button" disabled="@(_busy is not null)" @onclick="() => ConnectAsync(client.Id)">@(_busy == client.Id ? "Connecting…" : client.State == ConnectStates.Error ? "Try again" : "Connect")</button>
+                            <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Default" Class="connect-button" Disabled="@(_busy is not null)" OnClick="() => ConnectAsync(client.Id)">@(_busy == client.Id ? "Connecting…" : client.State == ConnectStates.Error ? "Try again" : "Connect")</BbButton>
                         }
                     </li>
                 }
             </ul>
         }
         <p class="table-footnote">ChatGPT: Codex is ChatGPT's coding agent and uses this connection. The ChatGPT chat app can only reach CoCern at a public HTTPS address.</p>
-    </section>
+    </BbCard>
 }
 
 @code {

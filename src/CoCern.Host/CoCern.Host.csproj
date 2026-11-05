@@ -1,5 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
   <ItemGroup>
+    <!-- The host must include the RCL's asset manifest; the standalone WASM reference only exports its own root assets. -->
+    <PackageReference Include="BlazorBlueprint.Components" />
     <AssemblyMetadata Include="CoCern.DevelopmentAdapterSource" Value="$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)/../CoCern.Adapter/bin/$(Configuration)/$(TargetFramework)'))" />
     <ProjectReference Include="../CoCern.Core/CoCern.Core.csproj" />
     <ProjectReference Include="../CoCern.Storage/CoCern.Storage.csproj" />

@@ -147,6 +147,7 @@ public sealed partial class SqliteStore : IDueWorkSource, IDisposable, IAsyncDis
             schema.ExecuteNonQuery();
         AddLateActivityColumns(transaction);
         AddClosedColumn(transaction);
+        ApplyPendingCoordinationReset(transaction);
         using (var createService = Command("INSERT OR IGNORE INTO hub_metadata(name, value) VALUES ('service_id', $value);", transaction))
         {
             createService.Parameters.AddWithValue("$value", Guid.NewGuid().ToString("N"));

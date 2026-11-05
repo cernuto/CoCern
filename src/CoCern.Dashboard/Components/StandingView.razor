@@ -1,10 +1,10 @@
 @inject HttpClient StandingHttp
 
-<section class="surface sql-view standing-view" aria-labelledby="standing-heading">
+<BbCard role="region" Class="surface sql-view standing-view" aria-labelledby="standing-heading">
     <h2 id="standing-heading" class="visually-hidden">Standing by board</h2>
     <p class="standing-section-copy">Pending proposals remain inactive until approved or dismissed; age and session closure do not clear them. Approved rules are delivered when a chat opens and when their revision changes. Instructions stay until removed. Expired grants no longer authorize work and can be removed explicitly.</p>
     @if (!string.IsNullOrEmpty(DecisionMessage)) { <p role="status">@DecisionMessage</p> }
-    @if (UnconfirmedDecision is not null) { <button type="button" disabled="@DecisionBusy" @onclick="RetryStandingAsync">Retry decision</button> }
+    @if (UnconfirmedDecision is not null) { <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Outline" Disabled="@DecisionBusy" OnClick="RetryStandingAsync">Retry decision</BbButton> }
     @if (Boards.Length == 0) { <p class="standing-empty">No board has Standing yet. Proposals will appear here for review; nothing is approved automatically.</p> }
     @foreach (var board in Boards)
     {
@@ -16,7 +16,7 @@
             </header>
 
             <section class="standing-pending" aria-label="Awaiting approval">
-                <div class="standing-section-heading"><h4>Awaiting approval</h4><span class="standing-count">@board.Proposals.Length</span></div>
+                <div class="standing-section-heading"><h4>Awaiting approval</h4><BbBadge Variant="BadgeVariant.Secondary" Class="standing-count">@board.Proposals.Length</BbBadge></div>
                 @if (board.Proposals.Length == 0)
                 {
                     <p class="standing-empty">No proposals are awaiting approval.</p>
@@ -28,13 +28,13 @@
                         @foreach (var proposal in board.Proposals)
                         {
                             <li @key="proposal.Id">
-                                <div class="standing-proposal-heading"><strong>@(proposal.Kind switch { "line" => "Instruction", "grant" => "Access grant", _ => proposal.Kind })@(proposal.Replaces ? " (edit)" : "")</strong><span class="standing-pending-label">Pending approval</span></div>
+                                <div class="standing-proposal-heading"><strong>@(proposal.Kind switch { "line" => "Instruction", "grant" => "Access grant", _ => proposal.Kind })@(proposal.Replaces ? " (edit)" : "")</strong><BbBadge Variant="BadgeVariant.SoftWarning">Pending approval</BbBadge></div>
                                 <p class="standing-proposal-text">@proposal.Summary</p>
                                 <div class="standing-meta"><span>Proposed by @proposal.ProposedBy</span><time title="@DashboardFormat.Timestamp(proposal.ProposedAt)">@DashboardFormat.Ago(proposal.ProposedAt, Now)</time></div>
                                 <p class="standing-id">Proposal ID: @proposal.Id</p>
                                 @if (proposal.PresentedBy.Length > 0) { <p>Question presented to chat @proposal.PresentedBy at @DashboardFormat.Timestamp(proposal.PresentedAt). No answer recorded.</p> }
-                                <button type="button" disabled='@Unavailable(board, proposal.Id, "proposal")' @onclick='() => DecideStandingAsync(board, proposal.Id, "approve", "proposal")'>Approve</button>
-                                <button type="button" disabled='@Unavailable(board, proposal.Id, "proposal")' @onclick='() => DecideStandingAsync(board, proposal.Id, "remove", "proposal")'>Dismiss</button>
+                                <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Default" Disabled='@Unavailable(board, proposal.Id, "proposal")' OnClick='() => DecideStandingAsync(board, proposal.Id, "approve", "proposal")'>Approve</BbButton>
+                                <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Outline" Disabled='@Unavailable(board, proposal.Id, "proposal")' OnClick='() => DecideStandingAsync(board, proposal.Id, "remove", "proposal")'>Dismiss</BbButton>
                             </li>
                         }
                     </ul>
@@ -43,7 +43,7 @@
 
             <div class="standing-approved">
                 <section class="standing-section" aria-label="Active instructions">
-                    <div class="standing-section-heading"><h4>Active instructions</h4><span class="standing-count">@board.Lines.Length</span></div>
+                    <div class="standing-section-heading"><h4>Active instructions</h4><BbBadge Variant="BadgeVariant.Secondary" Class="standing-count">@board.Lines.Length</BbBadge></div>
                     @if (board.Lines.Length == 0)
                     {
                         <p class="standing-empty">No active instructions.</p>
@@ -58,14 +58,14 @@
                                     <div class="standing-meta"><span>Written by @line.Author</span><span title="@DashboardFormat.Timestamp(line.ApprovedAt)">Approved by @line.ApprovedBy, @DashboardFormat.Ago(line.ApprovedAt, Now)</span></div>
                                     <p class="standing-id">Instruction ID: @line.Id</p>
                                     <DecisionEvidence Evidence="line.Decision" />
-                                    <button type="button" disabled='@Unavailable(board, line.Id, "line")' @onclick='() => DecideStandingAsync(board, line.Id, "remove", "line")'>Remove</button>
+                                    <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Destructive" Disabled='@Unavailable(board, line.Id, "line")' OnClick='() => DecideStandingAsync(board, line.Id, "remove", "line")'>Remove</BbButton>
                                 </li>
                             }
                         </ul>
                     }
                 </section>
                 <section class="standing-section" aria-label="Access grants">
-                    <div class="standing-section-heading"><h4>Access grants</h4><span class="standing-count">@board.Grants.Length</span></div>
+                    <div class="standing-section-heading"><h4>Access grants</h4><BbBadge Variant="BadgeVariant.Secondary" Class="standing-count">@board.Grants.Length</BbBadge></div>
                     @if (board.Grants.Length == 0)
                     {
                         <p class="standing-empty">No access grants.</p>
@@ -87,7 +87,7 @@
                                     <p class="standing-id">Grant ID: @grant.Id</p>
                                     <DecisionEvidence Evidence="grant.Decision" />
                                     @if (grant.ExpiresAt <= Now) { <p>Expired — no longer authorizes work. Kept for review until removed.</p> }
-                                    <button type="button" disabled='@Unavailable(board, grant.Id, "grant")' @onclick='() => DecideStandingAsync(board, grant.Id, "remove", "grant")'>Remove</button>
+                                    <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Destructive" Disabled='@Unavailable(board, grant.Id, "grant")' OnClick='() => DecideStandingAsync(board, grant.Id, "remove", "grant")'>Remove</BbButton>
                                 </li>
                             }
                         </ul>
@@ -98,7 +98,7 @@
             @if (board.Orders.Length > 0)
             {
                 <section class="standing-section" aria-label="Standing orders">
-                    <div class="standing-section-heading"><h4>Standing orders</h4><span class="standing-count">@board.Orders.Length</span></div>
+                    <div class="standing-section-heading"><h4>Standing orders</h4><BbBadge Variant="BadgeVariant.Secondary" Class="standing-count">@board.Orders.Length</BbBadge></div>
                     <ul class="standing-records">
                         @foreach (var order in board.Orders)
                         {
@@ -173,7 +173,7 @@
             <div><dt>Tips turned off</dt><dd>@(Tokens.TipRulesOff.Length == 0 ? "None" : string.Join(", ", Tokens.TipRulesOff))</dd></div>
         </dl>
     </details>
-</section>
+</BbCard>
 
 @code {
     [Parameter, EditorRequired] public DashboardStanding[] Boards { get; set; } = [];

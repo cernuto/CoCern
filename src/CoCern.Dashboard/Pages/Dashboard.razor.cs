@@ -1,7 +1,9 @@
 using Microsoft.AspNetCore.Components;
 using Microsoft.JSInterop;
+using Microsoft.AspNetCore.Components.Web;
 using CoCern.Contracts.Dashboard;
 using CoCern.Dashboard.Services;
+using BlazorBlueprint.Components;
 
 namespace CoCern.Dashboard.Pages;
 
@@ -10,12 +12,18 @@ public partial class Dashboard : IAsyncDisposable
     [Inject] private DashboardConnection Connection { get; set; } = null!;
     [Inject] private NavigationManager Navigation { get; set; } = null!;
     [Inject] private IJSRuntime JavaScript { get; set; } = null!;
+    [Inject] private ThemeService BlueprintTheme { get; set; } = null!;
+    private DotNetObjectReference<Dashboard>? _appearanceReference;
     private readonly CancellationTokenSource _lifetime = new();
     private Task? _clock;
     private DateTimeOffset _now => Connection.ObservationNow;
     private string? _selectedId;
     private string _theme = "light";
     private bool _signingOut;
+    private bool _navigationOpen;
+    private bool _focusNavigationPending;
+    private bool _noticesOpen;
+    private string SkipToContentHref => Navigation.Uri.Split('#')[0] + "#main";
 
     private string View => Navigation.ToBaseRelativePath(Navigation.Uri).Split('?', '#')[0].Trim('/').ToLowerInvariant() switch
     {
@@ -33,6 +41,10 @@ public partial class Dashboard : IAsyncDisposable
     private string PageTitle => View switch { "sessions" => "Sessions", "analytics" => "Analytics", "test-effort" => "Test effort", "sql" => "Database", "logs" => "Logs", "standing" => "Standing", "documents" => "Documents", "connect" => "Connect", "manager" => "Manager", _ => "Overview" };
     private string? PageDescription => View switch
     {
+        "overview" => "Your coordination workspace, live across every connected PC.",
+        "sessions" => "Follow active chats, routes and coordination traffic.",
+        "sql" => "Storage health, record counts and hub maintenance.",
+        "logs" => "Recent events from your coordination hub.",
         "analytics" => "Task efficiency, coordination and outcomes from the hourly analytics snapshot.",
         "test-effort" => "What test runs cost, from a precomputed file. Every number says whether it is measured or an estimate.",
         "standing" => "Instructions, access grants and pending proposals for each board.",
@@ -67,20 +79,50 @@ public partial class Dashboard : IAsyncDisposable
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
-        if (!firstRender) return;
-        var preferences = await JavaScript.InvokeAsync<PresentationPreferences>("pkDashboard.preferences");
-        _theme = preferences.Theme == "dark" ? "dark" : "light";
-        StateHasChanged();
+        if (firstRender)
+        {
+            var preferences = await JavaScript.InvokeAsync<PresentationPreferences>("pkDashboard.preferences");
+            _theme = preferences.Theme == "dark" ? "dark" : "light";
+            // Set the desired mode before initialization installs Blueprint's DOM guard.
+            await BlueprintTheme.SetDarkModeAsync(_theme == "dark");
+            await BlueprintTheme.InitializeAsync();
+            _appearanceReference = DotNetObjectReference.Create(this);
+            await JavaScript.InvokeVoidAsync("pkDashboard.attachAppearance", _appearanceReference);
+            StateHasChanged();
+        }
+        if (_focusNavigationPending)
+        {
+            _focusNavigationPending = false;
+            await JavaScript.InvokeVoidAsync("pkDashboard.focusFirstNavigationItem");
+        }
     }
 
     private void Refresh() => _ = InvokeAsync(StateHasChanged);
     private void SelectSession(string sessionId) => _selectedId = sessionId;
+    private async Task SkipToContentAsync() => await JavaScript.InvokeVoidAsync("pkDashboard.focusMain");
+    private void ToggleNavigation()
+    {
+        _navigationOpen = !_navigationOpen;
+        _focusNavigationPending = _navigationOpen;
+    }
+    private void CloseNavigation() => _navigationOpen = false;
+    private async Task HandleShellKeyDown(KeyboardEventArgs args)
+    {
+        if (args.Key != "Escape" || !_navigationOpen) return;
+        _navigationOpen = false;
+        await JavaScript.InvokeVoidAsync("pkDashboard.focusNavigation");
+    }
     private void OpenWaitingSession(string sessionId)
     {
+        _noticesOpen = false;
         _selectedId = sessionId;
         Navigation.NavigateTo("sessions");
     }
-    private void OpenStanding() => Navigation.NavigateTo("standing");
+    private void OpenStanding()
+    {
+        _noticesOpen = false;
+        Navigation.NavigateTo("standing");
+    }
     // Motion follows the system's reduced-motion setting (see dashboard.css).
     private bool Pulse(string sessionId) => IsLive && Connection.IsPulsing(sessionId, DateTimeOffset.UtcNow);
     private async Task SignInAsync(DashboardLoginRequest request) => await Connection.LoginAsync(request.Token, request.RememberBrowser);
@@ -98,7 +140,19 @@ public partial class Dashboard : IAsyncDisposable
         await SavePreferencesAsync();
     }
 
-    private async Task SavePreferencesAsync() => await JavaScript.InvokeVoidAsync("pkDashboard.setPreferences", _theme);
+    private async Task SavePreferencesAsync()
+    {
+        await BlueprintTheme.SetDarkModeAsync(_theme == "dark");
+        await JavaScript.InvokeVoidAsync("pkDashboard.setPreferences", _theme);
+    }
+
+    [JSInvokable]
+    public async Task ApplyAppearanceAsync(string theme)
+    {
+        _theme = theme == "dark" ? "dark" : "light";
+        await BlueprintTheme.SetDarkModeAsync(_theme == "dark");
+        await InvokeAsync(StateHasChanged);
+    }
 
     private async Task TickAsync()
     {
@@ -115,6 +169,11 @@ public partial class Dashboard : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        if (_appearanceReference is not null)
+        {
+            await JavaScript.InvokeVoidAsync("pkDashboard.detachAppearance");
+            _appearanceReference.Dispose();
+        }
         Connection.Changed -= Refresh;
         await _lifetime.CancelAsync();
         if (_clock is not null) await _clock;

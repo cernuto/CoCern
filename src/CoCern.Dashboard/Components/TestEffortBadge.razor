@@ -1,4 +1,4 @@
-<span class="test-effort-badge @TestEffortPresentation.BadgeClass(Status)">@Status</span>
+<BbBadge Variant="BadgeVariant.Outline" Class="@($"test-effort-badge {TestEffortPresentation.BadgeClass(Status)}")">@Status</BbBadge>
 
 @code {
     [Parameter] public string Status { get; set; } = "";

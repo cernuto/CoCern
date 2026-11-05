@@ -85,6 +85,12 @@ public sealed class DashboardSecurity(IConfiguration configuration, IHostEnviron
         && configuration.GetSection("Relay:Dashboard:ViewerPrincipalIds").Get<string[]>() is { } ids
         && ids.Contains(client.PrincipalId, StringComparer.Ordinal);
 
+    public static bool LocalBrowser(HttpContext context) => DashboardConnect.OnThisPc(context)
+        && (string.Equals(context.Request.Host.Host, "localhost", StringComparison.OrdinalIgnoreCase)
+            || IPAddress.TryParse(context.Request.Host.Host.Trim('[', ']'), out var host) && IPAddress.IsLoopback(host))
+        && !context.Request.Headers.ContainsKey("Forwarded")
+        && !context.Request.Headers.Keys.Any(key => key.StartsWith("X-Forwarded-", StringComparison.OrdinalIgnoreCase));
+
     public static bool SecureTransport(HttpContext context) => context.Request.IsHttps
         || context.Connection.RemoteIpAddress is { } address && IPAddress.IsLoopback(address);
 

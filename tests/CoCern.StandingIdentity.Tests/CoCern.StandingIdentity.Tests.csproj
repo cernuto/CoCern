@@ -6,6 +6,7 @@
   </PropertyGroup>
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="BlazorBlueprint.Components" />
     <ProjectReference Include="../../src/CoCern.Domain/CoCern.Domain.csproj" />
     <RazorComponent Include="../../src/CoCern.Dashboard/Components/StandingView.razor" Link="Components/StandingView.razor" />
     <RazorComponent Include="../../src/CoCern.Dashboard/Components/DecisionEvidence.razor" Link="Components/DecisionEvidence.razor" />

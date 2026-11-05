@@ -1,10 +1,10 @@
 <section class="surface session-graph" aria-labelledby="session-graph-heading">
-    <div class="section-heading"><h2 id="session-graph-heading">Session interactions</h2><span class="count-badge">@Sessions.Length sessions</span></div>
+    <div class="section-heading"><h2 id="session-graph-heading">Session interactions</h2><BbBadge Variant="BadgeVariant.Secondary">@Sessions.Length sessions</BbBadge></div>
     <p class="graph-intro">Arrows show successful direct sends in the retained last 24 hours. Select a session to inspect it, or a connection for its call details.</p>
     <div class="graph-controls">
-        <label class="search-field"><span class="visually-hidden">Find sessions in the map</span><input type="search" placeholder="Find by label, ID or repository" @bind="Query" @bind:event="oninput" /></label>
-        <label class="graph-limit">Show <select @bind="VisibleLimit"><option value="12">12 sessions</option><option value="24">24 sessions</option><option value="200">All map sessions</option></select></label>
-        <label class="graph-focus"><input type="checkbox" @bind="FocusSelected" disabled="@(SelectedId is null)" />Focus selected</label>
+        <div class="search-field"><BbInput Type="InputType.Search" AriaLabel="Find sessions in the map" Placeholder="Find by label, ID or repository" @bind-Value:get="Query" @bind-Value:set="value => Query = value ?? string.Empty" UpdateTiming="UpdateTiming.Immediate" /></div>
+        <div class="graph-limit"><label for="graph-session-limit">Show</label><BbNativeSelect Id="graph-session-limit" TValue="int" @bind-Value="VisibleLimit"><option value="12">12 sessions</option><option value="24">24 sessions</option><option value="200">All map sessions</option></BbNativeSelect></div>
+        <div class="graph-focus"><BbCheckbox Id="graph-focus-selected" @bind-Checked="FocusSelected" Disabled="@(SelectedId is null)" /><label for="graph-focus-selected">Focus selected</label></div>
     </div>
     <p class="graph-view-summary" role="status">Showing @_nodes.Length of @_matchingSessionCount matching sessions · @_sessions.Count in map inventory</p>
     <div class="graph-key"><span><i class="graph-key-node"></i>Durable session</span><span><i class="graph-key-edge"></i>Direct send</span><span>@_visibleEdges.Length connections between shown sessions</span></div>
@@ -30,9 +30,9 @@
                 {
                     <foreignObject @key="node.Session.SessionId" x="@(node.X - 120)" y="@(node.Y - 46)" width="240" height="92">
                         <div class="graph-node-shell">
-                            <button type="button" class="graph-node @(SelectedId == node.Session.SessionId ? "selected" : "")" aria-pressed="@(SelectedId == node.Session.SessionId ? "true" : "false")" title="@(Label(node.Session) + " · " + node.Session.SessionId)" @onclick="() => OnSelect.InvokeAsync(node.Session.SessionId)">
+                            <BbButton Variant="ButtonVariant.Outline" Class="@($"graph-node {(SelectedId == node.Session.SessionId ? "selected" : "")}")" aria-pressed="@(SelectedId == node.Session.SessionId ? "true" : "false")" title="@(Label(node.Session) + " · " + node.Session.SessionId)" OnClick="() => OnSelect.InvokeAsync(node.Session.SessionId)">
                                 <strong>@Label(node.Session)</strong><span>#@ShortId(node.Session.SessionId)</span><small>@NodeCounts(node.Session.SessionId)</small>
-                            </button>
+                            </BbButton>
                         </div>
                     </foreignObject>
                 }
@@ -60,7 +60,7 @@
         <details class="graph-connections"><summary>Connection details (@_visibleEdges.Length)</summary><div>
             @foreach (var item in _visibleEdges)
             {
-                <button type="button" class="graph-connection" @onclick="() => SelectEdge(item.Edge)"><span>@SessionLabel(item.Edge.SourceSessionId) → @SessionLabel(item.Edge.TargetSessionId)</span><small>@item.Edge.CallCount sends · @Duration(item.Edge) hub call</small></button>
+                <BbButton Variant="ButtonVariant.Outline" Class="graph-connection" OnClick="() => SelectEdge(item.Edge)"><span>@SessionLabel(item.Edge.SourceSessionId) → @SessionLabel(item.Edge.TargetSessionId)</span><small>@item.Edge.CallCount sends · @Duration(item.Edge) hub call</small></BbButton>
             }
         </div></details>
     }
@@ -138,7 +138,7 @@
     private async Task SelectEdge(DashboardInteractionEdge edge) { _selectedEdgeKey = EdgeKey(edge); await OnSelect.InvokeAsync(edge.SourceSessionId); }
     private string EdgeClass(DashboardInteractionEdge edge) => EdgeKey(edge) == _selectedEdgeKey ? "chosen" : edge.SourceSessionId == SelectedId || edge.TargetSessionId == SelectedId ? "connected" : SelectedId is not null ? "unrelated" : "";
     private string SessionLabel(string id) => _sessions.TryGetValue(id, out var session) ? $"{Label(session)} (#{ShortId(id)})" : $"#{ShortId(id)}";
-    private string EdgeTitle(DashboardInteractionEdge edge) => $"{SessionLabel(edge.SourceSessionId)} → {SessionLabel(edge.TargetSessionId)}: {edge.CallCount} successful sends; {Duration(edge)} mean hub call";
+    private string EdgeTitle(DashboardInteractionEdge edge) => $"{SessionLabel(edge.SourceSessionId)} → {SessionLabel(edge.TargetSessionId)}: {edge.CallCount} successful {(edge.CallCount == 1 ? "send" : "sends")}; {Duration(edge)} mean hub call";
     private string NodeCounts(string id) { var counts = _counts.GetValueOrDefault(id); return $"{counts.Sent} sent · {counts.Received} received"; }
     private static string Label(DashboardSession session) => string.IsNullOrWhiteSpace(session.Label) ? "Unnamed session" : session.Label;
     private static string ShortId(string id) => id[..Math.Min(8, id.Length)];

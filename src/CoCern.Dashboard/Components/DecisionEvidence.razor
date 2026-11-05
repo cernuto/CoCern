@@ -1,7 +1,7 @@
 @if (Evidence is { } evidence)
 {
     <details class="standing-details">
-        <summary>Human answer: @(evidence.Outcome == "approve" ? "approved" : "dismissed")</summary>
+        <summary>Human answer: <BbBadge Variant="BadgeVariant.Outline">@(evidence.Outcome == "approve" ? "approved" : "dismissed")</BbBadge></summary>
         <blockquote style="white-space: pre-wrap">@evidence.HumanWords</blockquote>
         <dl class="standing-facts">
             <div><dt>Recording chat</dt><dd>@evidence.SessionId</dd></div>

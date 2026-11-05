@@ -4,10 +4,10 @@
 @inject HttpClient Http
 
 @* Two siblings, so the toggle sits in the Sessions toolbar and the panel wraps under it at full width. *@
-<button type="button" class="close-sessions-toggle" aria-expanded="@(_open ? "true" : "false")" aria-controls="close-sessions-panel" @onclick="Toggle">Close idle sessions</button>
+<BbButton Type="ButtonType.Button" Variant="ButtonVariant.Outline" Class="close-sessions-toggle" aria-expanded="@(_open ? "true" : "false")" aria-controls="close-sessions-panel" OnClick="Toggle">Close idle sessions</BbButton>
 @if (_open)
 {
-    <section id="close-sessions-panel" class="surface close-sessions-panel" aria-labelledby="close-sessions-heading">
+    <BbCard role="region" id="close-sessions-panel" Class="surface close-sessions-panel" aria-labelledby="close-sessions-heading">
         <h2 id="close-sessions-heading">Close idle sessions</h2>
         @if (Repositories.Length == 0)
         {
@@ -15,7 +15,7 @@
         }
         else if (!_confirming)
         {
-            <form class="close-sessions-form" @onsubmit="Review">
+            <form class="close-sessions-form" @onsubmit="Review" @onsubmit:preventDefault>
                 @if (Repositories.Length == 1)
                 {
                     <p class="close-sessions-repository">Repository <strong>@_repository</strong></p>
@@ -23,12 +23,12 @@
                 else
                 {
                     <label class="close-sessions-repository">Repository
-                        <select @bind="_repository">
+                        <BbNativeSelect TValue="string" @bind-Value:get="_repository" @bind-Value:set="value => _repository = value ?? string.Empty">
                             @foreach (var repository in Repositories)
                             {
                                 <option value="@repository">@repository</option>
                             }
-                        </select>
+                        </BbNativeSelect>
                     </label>
                 }
                 <fieldset>
@@ -38,13 +38,13 @@
                         <label class="close-sessions-option"><input type="radio" name="close-sessions-filter" checked="@(_filter == Filter.Hour)" @onchange="() => Choose(Filter.Hour)" />Idle for over an hour</label>
                         <span class="close-sessions-option close-sessions-prefix">
                             <label class="close-sessions-option"><input type="radio" name="close-sessions-filter" checked="@(_filter == Filter.Label)" @onchange="() => Choose(Filter.Label)" />Labelled starting with</label>
-                            <input type="text" aria-label="Label prefix" placeholder="e.g. smoke" maxlength="256" autocomplete="off" spellcheck="false" @bind="_prefix" @bind:event="oninput" @onfocus="() => Choose(Filter.Label)" />
+                            <BbInput Type="InputType.Text" AriaLabel="Label prefix" Placeholder="e.g. smoke" maxlength="256" autocomplete="off" spellcheck="false" @bind-Value:get="_prefix" @bind-Value:set="value => _prefix = value ?? string.Empty" UpdateTiming="UpdateTiming.Immediate" @onfocus="() => Choose(Filter.Label)" />
                         </span>
                     </div>
                 </fieldset>
                 <div class="close-sessions-actions">
-                    <button type="submit" class="connect-button" disabled="@(!CanReview)">Review</button>
-                    <button type="button" class="close-sessions-secondary" @onclick="Toggle">Cancel</button>
+                    <BbButton Type="ButtonType.Submit" Variant="ButtonVariant.Default" Class="connect-button" Disabled="@(!CanReview)">Review</BbButton>
+                    <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Outline" Class="close-sessions-secondary" OnClick="Toggle">Cancel</BbButton>
                 </div>
             </form>
         }
@@ -54,11 +54,11 @@
             <p class="close-sessions-note">Each one leaves the session list, and its chat is told the session expired and can open a new one. Sessions still answering for an open action stay open@(_confirmFilter == Filter.Label ? ", and so do chats active in about the last 70 minutes" : ", and so do sessions with unread messages"). This can't be undone.</p>
             <div class="close-sessions-actions">
                 <button type="button" class="connect-button" @ref="_confirmButton" disabled="@_busy" @onclick="CloseAsync">@(_busy ? "Closing…" : "Close sessions")</button>
-                <button type="button" class="close-sessions-secondary" disabled="@_busy" @onclick="Back">Back</button>
+                <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Outline" Class="close-sessions-secondary" Disabled="@_busy" OnClick="Back">Back</BbButton>
             </div>
         }
         <p class="close-sessions-result" role="status">@_message</p>
-    </section>
+    </BbCard>
 }
 
 @code {
@@ -82,7 +82,7 @@
     private ElementReference _confirmButton;
 
     private string[] Repositories => Sessions.Select(session => session.RepositoryId).Where(id => !string.IsNullOrWhiteSpace(id)).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.Ordinal).ToArray();
-    private bool CanReview => _repository is not null && (_filter != Filter.Label || !string.IsNullOrWhiteSpace(_prefix));
+    private bool CanReview => !string.IsNullOrWhiteSpace(_repository) && (_filter != Filter.Label || !string.IsNullOrWhiteSpace(_prefix));
 
     protected override void OnParametersSet()
     {

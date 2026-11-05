@@ -1,20 +1,19 @@
 <main class="sign-in-layout">
     <section class="sign-in-art" aria-label="CoCern">
-        <div class="relay-mark">Co<span class="mark-signal" aria-hidden="true"></span></div>
+        <img class="sign-in-logo" src="cocern-logo.png" alt="CoCern coordination logo" />
         <p class="brand-name">CoCern</p>
-        <h1>See what your<br />agents are doing.</h1>
+        <h1>Your coordination workspace.</h1>
         <p class="sign-in-description">Machines, sessions and hub activity, live. Connect Claude and Codex in one click.</p>
-        <div class="decorative-stations" aria-hidden="true"><span></span><i></i><span></span><i></i><span></span></div>
     </section>
     <section class="sign-in-panel">
-        <div class="sign-in-form">
+        <BbCard Class="sign-in-form">
             <h2>Sign in</h2>
             <p>Open the sign-in link the hub prints when it starts, or paste your administrator token from <code>data/local-client-token</code>.</p>
             <form @onsubmit="SignInAsync" @onsubmit:preventDefault>
                 <label for="viewer-token">Token</label>
-                <input id="viewer-token" type="password" autocomplete="off" spellcheck="false" autocapitalize="none" @bind="_token" @bind:event="oninput" disabled="@_busy" required />
+                <BbInput Type="InputType.Password" Id="viewer-token" autocomplete="off" spellcheck="false" autocapitalize="none" Value="@_token" ValueChanged="@(value => _token = value ?? string.Empty)" UpdateTiming="UpdateTiming.Immediate" Disabled="@_busy" Required="true" />
                 <p class="field-note">Your token is exchanged for a protected sign-in cookie.</p>
-                <label class="remember-browser"><input type="checkbox" @bind="_rememberBrowser" disabled="@(_busy || Options is null)" />Remember this browser</label>
+                <label class="remember-browser" for="remember-browser"><BbCheckbox Id="remember-browser" @bind-Checked="_rememberBrowser" Disabled="@(_busy || Options is null)" />Remember this browser</label>
                 @if (Options is { } options)
                 {
                     <p class="field-note">@(_rememberBrowser
@@ -25,10 +24,10 @@
                 {
                     <p class="form-notice" role="alert">@Notice</p>
                 }
-                <button class="primary-button" type="submit" disabled="@(_busy || Options is null || string.IsNullOrWhiteSpace(_token))">@(_busy ? "Signing in…" : "Sign in")</button>
+                <BbButton Type="ButtonType.Submit" Variant="ButtonVariant.Default" Class="primary-button" Disabled="@(_busy || Options is null || string.IsNullOrWhiteSpace(_token))">@(_busy ? "Signing in…" : "Sign in")</BbButton>
             </form>
             <p class="sign-in-footnote">Agent messages and inboxes are never shown.</p>
-        </div>
+        </BbCard>
     </section>
 </main>
 

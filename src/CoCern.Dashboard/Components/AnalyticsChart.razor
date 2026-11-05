@@ -1,10 +1,10 @@
-<section class="surface analytics-chart" aria-labelledby="@_headingId">
+<BbCard role="region" Class="surface analytics-chart" aria-labelledby="@_headingId">
     <header><h3 id="@_headingId">@ReportTitle</h3><p>@ReportDescription</p></header>
     @if (NoisyTools && Query is { Error: null })
     {
         <div class="analytics-filters">
-            <label>Origin<select @bind="_origin"><option value="all">All origins</option><option value="model">Model-facing</option><option value="background">Background</option><option value="unknown">Unknown</option></select></label>
-            <button type="button" class="analytics-refresh" @onclick="() => _showAll = !_showAll" aria-pressed="@_showAll">@(_showAll ? "Show top 10" : "Show all")</button>
+            <label>Origin<BbNativeSelect TValue="string" Value="@_origin" ValueChanged="@(value => _origin = value ?? string.Empty)"><option value="all">All origins</option><option value="model">Model-facing</option><option value="background">Background</option><option value="unknown">Unknown</option></BbNativeSelect></label>
+            <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Outline" Class="analytics-refresh" OnClick="() => _showAll = !_showAll" aria-pressed="@_showAll">@(_showAll ? "Show top 10" : "Show all")</BbButton>
         </div>
         <p class="table-footnote" role="status">Showing @DisplayRows.Length of @FilteredRows.Length matching tool/origin rows (@Query.Rows.Length returned). Ranked by current reply bytes. Totals across matching returned rows: @AnalyticsPresentation.Number(FilteredRows.Sum(row => row.Current ?? 0), "bytes") / @FilteredRows.Sum(row => row.CurrentCount) calls current; @AnalyticsPresentation.Number(FilteredRows.Sum(row => row.Previous ?? 0), "bytes") / @FilteredRows.Sum(row => row.PreviousCount) calls previous. These are returned-sample totals, not complete traffic coverage or model token use.</p>
     }
@@ -97,7 +97,7 @@
         }
     }
     @if (Query?.Truncated == true) { <p class="limit-note">Result limit reached. Only part of this report is shown.</p> }
-</section>
+</BbCard>
 
 @code {
     [Parameter] public DashboardAnalyticsQuery? Query { get; set; }

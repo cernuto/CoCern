@@ -3,6 +3,7 @@
     <StaticWebAssetBasePath>dashboard</StaticWebAssetBasePath>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="BlazorBlueprint.Components" />
     <PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly" />
     <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" />
     <ProjectReference Include="../CoCern.Contracts/CoCern.Contracts.csproj" />

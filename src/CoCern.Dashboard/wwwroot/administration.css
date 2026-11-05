@@ -1,0 +1,192 @@
+/* Reports, administration and setup share Blueprint's semantic theme. */
+.analytics-view, .test-effort-view { display: grid; gap: 20px; min-width: 0; }
+.analytics-toolbar { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 16px; }
+.analytics-toolbar h2 { font-size: 1.35rem; letter-spacing: -.025em; font-weight: 650; }
+.analytics-toolbar p { margin-top: 5px; color: var(--muted-foreground); font-size: .88rem; }
+.analytics-filters { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; }
+.analytics-filters label { display: grid; gap: 6px; color: var(--muted-foreground); font-size: .77rem; min-width: 110px; }
+.analytics-filters label:first-child { min-width: 170px; }
+.analytics-filters select { width: 100%; max-width: 100%; color: var(--foreground); }
+.analytics-filters .analytics-refresh { min-height: 38px; margin: 0; }
+.analytics-grid { gap: 18px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.analytics-chart { min-width: 0; gap: 16px; padding: 22px; border-radius: var(--radius); background: var(--card); box-shadow: none; }
+.analytics-chart > header h3 { font-size: 1rem; line-height: 1.4; font-weight: 650; letter-spacing: -.015em; }
+.analytics-chart > header p { font-size: .8rem; line-height: 1.6; color: var(--muted-foreground); margin-top: 5px; max-width: 90ch; }
+.analytics-chart .analytics-readout-heading { color: var(--muted-foreground); font-size: .7rem; }
+.analytics-chart .analytics-readout { gap: 12px; font-size: .8rem; }
+.analytics-chart .analytics-readout > span { min-width: 0; overflow-wrap: anywhere; }
+.analytics-chart .analytics-readout small, .analytics-chart .analytics-stack-caption,
+.analytics-chart .analytics-bar-labels { color: var(--muted-foreground); }
+.analytics-chart .analytics-comparison-row { padding-block: 10px; }
+.analytics-chart .analytics-pair, .analytics-chart .analytics-stack { background: var(--muted); }
+.analytics-chart .analytics-track { fill: var(--border); }
+.analytics-snapshot-strip { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 20px; padding: 18px 22px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); color: var(--foreground); }
+.analytics-snapshot-strip > div { min-width: 0; }
+.analytics-snapshot-strip span, .analytics-snapshot-strip small { color: var(--muted-foreground); }
+.analytics-snapshot-strip strong { overflow-wrap: anywhere; font-size: .83rem; }
+.analytics-history, .analytics-key { margin: 0; font-size: .78rem; line-height: 1.6; color: var(--muted-foreground); }
+.analytics-state { padding: 22px; margin: 0; border-radius: var(--radius); }
+.test-effort-tiles { gap: 16px; }
+.test-effort-tiles > div { min-width: 0; padding: 16px; background: var(--muted); border: 1px solid var(--border); border-radius: calc(var(--radius) - 2px); }
+.test-effort-tiles dt { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--muted-foreground); font-size: .75rem; }
+.test-effort-tiles dd { font-weight: 650; letter-spacing: -.02em; font-size: 1.35rem; margin-top: 9px; overflow-wrap: anywhere; }
+.test-effort-tiles dd small { display: block; color: var(--muted-foreground); font-size: .75rem; font-weight: 400; letter-spacing: 0; }
+.test-effort-badge { font-size: .64rem; line-height: 1.4; padding: 2px 6px; }
+.test-effort-card .test-effort-link { width: fit-content; font-size: .8rem; }
+.test-effort-scroll, .doc-cache-table, .sql-table-scroll { min-width: 0; max-width: 100%; overflow-x: auto; }
+.test-effort-table { margin: 0; }
+.test-effort-note { color: var(--muted-foreground); line-height: 1.5; }
+.sql-view { padding: 22px; gap: 16px; min-width: 0; box-shadow: none; }
+.sql-view > .section-heading { padding: 0; }
+.sql-view > h2, .connect-view h2, .document-inventory h2, .doc-cache-view h2 { font-size: 1.15rem; font-weight: 650; letter-spacing: -.02em; }
+.database-summary { display: grid; grid-template-columns: repeat(auto-fit,minmax(140px,1fr)); gap: 18px; padding: 0; margin: 0 0 6px; }
+.database-summary > div { min-width: 0; }
+.database-summary dt { color: var(--muted-foreground); font-size: .72rem; }
+.database-summary dd { margin: 5px 0 0; overflow-wrap: anywhere; font-size: .9rem; }
+.sql-view .metrics-table, .doc-cache-view .metrics-table, .test-effort-view .metrics-table { width: 100%; border-collapse: collapse; font-size: .8rem; }
+.sql-view .metrics-table th, .sql-view .metrics-table td,
+.doc-cache-view .metrics-table th, .doc-cache-view .metrics-table td,
+.test-effort-view .metrics-table th, .test-effort-view .metrics-table td { padding: 12px 14px; border-color: var(--border); }
+.sql-view .metrics-table thead, .doc-cache-view .metrics-table thead, .test-effort-view .metrics-table thead { background: var(--muted); color: var(--muted-foreground); }
+.sql-view .metrics-table thead th, .doc-cache-view .metrics-table thead th, .test-effort-view .metrics-table thead th { font-size: .69rem; font-weight: 600; text-transform: none; letter-spacing: .015em; }
+.sql-view .metrics-table tbody tr:hover, .doc-cache-view .metrics-table tbody tr:hover, .test-effort-view .metrics-table tbody tr:hover { background: color-mix(in srgb,var(--muted) 45%,transparent); }
+.sql-view .metrics-table .quality-label { white-space: normal; font-size: .65rem; }
+.database-reset { border-color: color-mix(in srgb,var(--destructive) 40%,var(--border)); }
+.database-reset > p { max-width: 95ch; font-size: .85rem; line-height: 1.65; }
+.database-reset summary { padding-block: 10px; cursor: pointer; font-size: .88rem; font-weight: 600; }
+.database-reset-confirmation { display: grid; gap: 10px; max-width: 520px; padding-block: 10px; }
+.database-reset-confirmation label { font-size: .8rem; }
+.database-reset-confirmation input { width: 100%; min-width: 0; }
+.database-reset > button, .database-reset-confirmation button { width: fit-content; }
+.standing-view { gap: 16px; }
+.standing-view > p, .standing-view .standing-section > p { overflow-wrap: anywhere; font-size: .85rem; line-height: 1.65; }
+.standing-view .standing-board { border: 1px solid var(--border); background: var(--card); border-radius: var(--radius); padding: 22px; }
+.standing-view .standing-board + .standing-board { margin-top: 8px; padding-top: 22px; }
+.standing-view .standing-board-heading { margin-bottom: 18px; }
+.standing-view .standing-board-heading h3 { font-size: 1.1rem; }
+.standing-view .standing-section-heading { align-items: center; margin-bottom: 10px; }
+.standing-view .standing-count { font-size: .7rem; color: var(--secondary-foreground); }
+.standing-view .standing-proposals > li { background: color-mix(in srgb,var(--muted) 50%,transparent); border-radius: var(--radius); border-left-width: 3px; }
+.standing-view .standing-record-text, .standing-view .standing-proposal-text { overflow-wrap: anywhere; }
+.standing-view .standing-records > li > button, .standing-view .standing-proposals > li > button { margin-top: 12px; margin-right: 6px; }
+.standing-view .standing-details > blockquote { padding: 14px; background: var(--muted); border-left: 2px solid var(--primary); border-radius: 0 6px 6px 0; color: var(--foreground); overflow-wrap: anywhere; }
+.standing-view .standing-details { border-color: var(--border); }
+.standing-view .standing-details summary { color: var(--muted-foreground); }
+.standing-view .standing-details summary:hover { color: var(--foreground); }
+.standing-view .close-sessions-repository { flex-wrap: wrap; align-items: center; gap: 10px; }
+.standing-view .close-sessions-repository > label { flex-basis: 100%; margin: 0; font-size: .78rem; color: var(--muted-foreground); }
+.standing-view .close-sessions-repository > input,
+.standing-view .close-sessions-repository > textarea { width: min(100%,620px); min-width: 0; }
+.standing-view .close-sessions-repository > div { min-width: 0; max-width: 100%; }
+.standing-view .close-sessions-repository select { max-width: 100%; width: 100%; text-overflow: ellipsis; }
+.standing-view .close-sessions-actions { margin-block: 12px; }
+.standing-view .standing-facts dd, .standing-view .standing-id { overflow-wrap: anywhere; }
+.dispatch-strip { gap: 10px 18px; border: 1px solid var(--border); background: var(--card); border-radius: var(--radius); padding: 14px 18px; }
+.dispatch-strip strong { font-size: .83rem; }
+.dispatch-strip .dispatch-repository { color: var(--muted-foreground); font-size: .78rem; overflow-wrap: anywhere; }
+.dispatch-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.dispatch-actions button, .dispatch-actions a { min-height: 34px; padding: 7px 12px; font-size: .75rem; }
+.connect-view { min-width: 0; gap: 18px; padding: 22px; box-shadow: none; }
+.connect-view > .section-heading { padding: 0; margin: 0; }
+.connect-view .section-heading p { color: var(--muted-foreground); font-size: .83rem; line-height: 1.65; margin-top: 5px; }
+.connect-view .admin-tools { padding: 15px; border: 1px solid var(--border); background: var(--muted); border-radius: var(--radius); margin: 0; }
+.connect-view .admin-tools small { color: var(--muted-foreground); font-size: .78rem; }
+.connect-view .admin-tools > button { flex-shrink: 0; margin-top: 2px; }
+.connect-view .connect-list { padding: 0; margin: 0; }
+.connect-view .connect-item { gap: 14px; padding: 18px 0; border-color: var(--border); min-width: 0; }
+.connect-view .connect-item > div { min-width: 0; }
+.connect-view .connect-item strong { font-size: .9rem; }
+.connect-view .connect-item small { color: var(--muted-foreground); line-height: 1.5; overflow-wrap: anywhere; font-size: .78rem; }
+.connect-view .provider-token { width: 34px; height: 34px; border-radius: 8px; font-size: .9rem; background: var(--muted); color: var(--primary); border: 1px solid var(--border); }
+.connect-view .connection-state { white-space: normal; text-align: center; }
+.connect-view .join-steps { margin: 0; padding-left: 22px; }
+.connect-view .join-steps > li { padding-left: 5px; }
+.connect-view .join-steps strong { font-size: .85rem; }
+.connect-view .join-steps small { color: var(--muted-foreground); line-height: 1.65; font-size: .78rem; }
+.connect-view .copy-field { display: flex; align-items: flex-start; gap: 10px; padding: 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--muted); margin-block: 12px; min-width: 0; }
+.connect-view .copy-field code { min-width: 0; flex: 1; overflow-wrap: anywhere; white-space: pre-wrap; font-size: .78rem; background: transparent; padding: 0; }
+.connect-view .copy-field button { flex-shrink: 0; }
+.connect-view .join-help { border-top: 1px solid var(--border); padding-top: 4px; }
+.connect-view .join-help summary { cursor: pointer; padding-block: 12px; font-size: .83rem; }
+.connect-view .join-help p { font-size: .8rem; overflow-wrap: anywhere; }
+.connect-prompt { border-color: var(--border); background: var(--card); border-radius: var(--radius); }
+.document-inventory, .doc-cache-view { padding: 22px; gap: 14px; min-width: 0; box-shadow: none; }
+.document-inventory > .section-heading, .doc-cache-view > .section-heading { padding: 0; margin: 0; }
+.document-inventory .section-heading p, .doc-cache-view .section-heading p { color: var(--muted-foreground); font-size: .8rem; line-height: 1.6; margin-top: 5px; }
+.document-inventory .document-repository { margin: 0; padding: 0 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--card); }
+.document-inventory .document-repository-heading { padding: 15px 0; color: var(--muted-foreground); }
+.document-inventory .document-repository-heading > span:last-child { display: inline-block; font-size: .72rem; }
+.document-inventory .document-file { border-color: var(--border); }
+.document-inventory .document-file-identity small { display: block; color: var(--muted-foreground); font-size: .72rem; margin-top: 4px; }
+.document-inventory .document-usage-note { margin: 2px 0 0; padding-top: 16px; }
+.doc-cache-view .document-index-details { margin: 0; }
+.doc-cache-view .document-index-details > summary { margin: 0; padding-block: 12px; }
+.doc-cache-view > .muted { margin: 0; color: var(--muted-foreground); }
+.close-sessions-panel { padding: 22px; gap: 16px; min-width: 0; box-shadow: none; }
+.close-sessions-panel h2 { font-size: 1.1rem; font-weight: 650; }
+.close-sessions-panel .close-sessions-form { display: grid; gap: 16px; }
+.close-sessions-panel .close-sessions-options { display: flex; flex-wrap: wrap; gap: 14px 20px; }
+.close-sessions-panel legend { font-size: .8rem; font-weight: 600; margin-bottom: 12px; }
+.close-sessions-panel .close-sessions-option { color: var(--foreground); font-size: .8rem; }
+.close-sessions-panel .close-sessions-prefix { flex-wrap: wrap; gap: 8px; }
+.close-sessions-panel .close-sessions-prefix input { width: min(100%,230px); min-width: 0; }
+.close-sessions-panel .close-sessions-note { color: var(--muted-foreground); line-height: 1.65; font-size: .8rem; }
+.close-sessions-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.close-session-confirm { padding: 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--muted); }
+.close-session-confirm p { overflow-wrap: anywhere; line-height: 1.6; }
+.close-session-confirm .close-session-id { font-size: .73rem; color: var(--muted-foreground); }
+.close-session-override { display: flex; align-items: center; gap: 9px; padding-block: 10px; font-size: .8rem; }
+.close-sessions-result { font-size: .82rem; overflow-wrap: anywhere; }
+/* Keep the existing native destructive buttons so their ElementReference focus is retained. */
+.close-sessions-actions button.connect-button { min-height: 36px; border: 1px solid var(--destructive); border-radius: calc(var(--radius) - 2px); padding: 8px 14px; background: var(--destructive); color: var(--destructive-foreground); font-size: .8rem; font-weight: 500; }
+.close-sessions-actions button.connect-button:disabled { opacity: .5; cursor: not-allowed; }
+.sign-in-layout { display: grid; grid-template-columns: minmax(0,1fr) minmax(360px,1fr); min-height: 100vh; background: var(--background); color: var(--foreground); }
+.sign-in-art { display: flex; flex-direction: column; align-items: flex-start; justify-content: center; padding: clamp(28px,6vw,90px); background: var(--card); color: var(--foreground); border-right: 1px solid var(--border); }
+.sign-in-logo { width: 108px; height: 108px; object-fit: contain; margin-bottom: 22px; border-radius: 18px; }
+.sign-in-art .brand-name { color: var(--primary); font-size: 1rem; font-weight: 650; letter-spacing: .03em; }
+.sign-in-art h1 { margin-top: 16px; font-size: clamp(1.8rem,3vw,2.8rem); font-weight: 650; line-height: 1.16; letter-spacing: -.04em; max-width: 12ch; }
+.sign-in-art .sign-in-description { font-size: .93rem; color: var(--muted-foreground); max-width: 36ch; line-height: 1.7; margin-top: 18px; }
+.sign-in-panel { display: flex; align-items: center; justify-content: center; min-width: 0; padding: 40px; }
+.sign-in-form { width: min(100%,440px); padding: 30px; gap: 14px; border: 1px solid var(--border); background: var(--card); border-radius: var(--radius); box-shadow: none; }
+.sign-in-form h2 { font-size: 1.5rem; font-weight: 650; letter-spacing: -.025em; }
+.sign-in-form > p { font-size: .83rem; color: var(--muted-foreground); line-height: 1.65; overflow-wrap: anywhere; }
+.sign-in-form form { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
+.sign-in-form label { font-size: .8rem; }
+.sign-in-form .field-note { font-size: .74rem; color: var(--muted-foreground); line-height: 1.6; margin: 0; }
+.sign-in-form .remember-browser { display: flex; align-items: center; gap: 9px; margin-block: 6px; }
+.sign-in-form .primary-button { width: 100%; margin-top: 10px; }
+.sign-in-form .sign-in-footnote { font-size: .72rem; margin-top: 5px; }
+@media(max-width:1000px) {
+    .analytics-grid { grid-template-columns: minmax(0,1fr); }
+    .analytics-toolbar { align-items: stretch; }
+    .analytics-snapshot-strip { grid-template-columns: minmax(0,1fr); }
+}
+@media(max-width:700px) {
+    .sign-in-layout { grid-template-columns: minmax(0,1fr); }
+    .sign-in-art { padding: 28px; border-right: 0; border-bottom: 1px solid var(--border); }
+    .sign-in-logo { width: 64px; height: 64px; margin-bottom: 12px; }
+    .sign-in-art h1 { max-width: none; margin-top: 10px; font-size: 1.8rem; }
+    .sign-in-art .sign-in-description { margin-top: 10px; max-width: none; }
+    .sign-in-panel { padding: 24px 18px; }
+}
+@media(max-width:560px) {
+    .analytics-toolbar, .analytics-filters { width: 100%; }
+    .analytics-filters > label, .analytics-filters > label:first-child { flex: 1 1 120px; min-width: 0; }
+    .analytics-filters > button { flex-basis: 100%; }
+    .analytics-chart, .sql-view, .connect-view, .document-inventory, .doc-cache-view, .close-sessions-panel { padding: 16px; }
+    .analytics-chart .analytics-readout { gap: 8px; font-size: .72rem; }
+    .analytics-snapshot-strip { padding: 16px; gap: 14px; }
+    .standing-view .standing-board { padding: 14px; }
+    .standing-view .standing-approved { gap: 0; }
+    .standing-view .close-sessions-repository > * { max-width: 100%; }
+    .standing-view .close-sessions-actions > button { flex: 1 1 180px; white-space: normal; }
+    .connect-view .connect-item { grid-template-columns: 34px minmax(0,1fr); }
+    .connect-view .connect-item > button, .connect-view .connection-state { grid-column: 2; justify-self: start; }
+    .connect-view .copy-field { flex-direction: column; }
+    .connect-view .copy-field button { align-self: flex-end; }
+    .document-inventory .document-repository { padding-inline: 12px; }
+    .document-inventory .document-repository-heading > span:last-child { margin-left: 0; display: block; padding-top: 4px; }
+    .close-sessions-panel .close-sessions-options { flex-direction: column; }
+    .close-sessions-panel .close-sessions-prefix { align-items: flex-start; }
+    .sign-in-form { padding: 22px; }
+}

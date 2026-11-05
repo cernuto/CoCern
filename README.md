@@ -56,7 +56,7 @@ It stays fast because it's one local process. Orleans keeps active boards, sessi
 2. Start the hub:
    - **Visual Studio:** open `CoCern.slnx`, set **CoCern.Host** as the startup project, and press F5.
    - **PowerShell:** `./scripts/Build-CoCern.ps1 -Publish`, then `./scripts/Start-CoCern.ps1`.
-3. The dashboard opens in your browser, already signed in (from Visual Studio). Otherwise click the **sign-in link** the hub prints, like `http://127.0.0.1:5271/dashboard/#link=…`.
+3. Open `http://127.0.0.1:5271/dashboard/` on the hub's PC. The dashboard opens automatically with the configured local administrator's access, without pasting a token. The Visual Studio profile also opens it at startup.
 4. Open **Connect** and click **Connect** next to each app you use. Restart that app.
 
 New chats in those apps now have CoCern's tools. Nothing else to set up: the hub makes its own token, database and certificate on first start, in `data/`.
@@ -133,7 +133,9 @@ Node updates keep the existing credentials, data folder and Windows sign-in entr
 
 ## The dashboard
 
-Open it with the sign-in link the hub prints. The link works once, only on the hub's PC, for 24 hours, and each use prints the next one. You can also paste the token from `data/local-client-token`. A sign-in lasts 8 hours in that browser session, or 7 days with **Remember this browser** (`Relay:Dashboard:SessionHours` and `RememberDays`).
+Open the dashboard's loopback address on the hub's PC for automatic local access. Other PCs still require an authorized dashboard sign-in. The hub's one-time sign-in link and administrator token remain available as fallbacks. A sign-in lasts 8 hours in that browser session, or 7 days when manually signing in with **Remember this browser** (`Relay:Dashboard:SessionHours` and `RememberDays`).
+
+The **Database** page can schedule a full coordination reset for the next hub restart. Type the displayed confirmation phrase to queue it, or cancel it before restarting. It clears tasks, chats, messages, claims, standing rules and history across every repository, while retaining connection credentials and enrolled PCs. Existing chats must open new sessions afterwards.
 
 | Page | Shows |
 | --- | --- |

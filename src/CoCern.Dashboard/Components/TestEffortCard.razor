@@ -1,7 +1,7 @@
 @implements IDisposable
 @inject HttpClient Http
 
-<section class="surface analytics-chart test-effort-card" aria-labelledby="test-effort-card-heading">
+<BbCard role="region" Class="surface analytics-chart test-effort-card" aria-labelledby="test-effort-card-heading">
     <header><h3 id="test-effort-card-heading">Test effort</h3><p>What recorded test runs cost, all recorded days. From a precomputed file, not the hourly snapshot.</p></header>
     @if (_loading)
     {
@@ -20,8 +20,8 @@
     {
         <p class="analytics-empty" role="status">@(_data?.Message ?? _problem ?? TestEffortPresentation.NoRunData)</p>
     }
-    <a class="test-effort-link" href="analytics/test-effort">Open test effort</a>
-</section>
+    <BbButton Href="analytics/test-effort" Variant="ButtonVariant.Outline" Class="test-effort-link">Open test effort</BbButton>
+</BbCard>
 
 @code {
     [Parameter] public string RepositoryId { get; set; } = "";

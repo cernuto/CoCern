@@ -4,43 +4,46 @@
         <strong>Dispatch: @(Paused is true ? "Paused" : Paused is false ? "Running" : "Not yet read")</strong>
         <span class="dispatch-repository">@(NeedsRepository ? "Choose a repository on Manager" : RepositoryId)</span>
         <div class="dispatch-actions">
-            <button type="button" @onclick='() => DispatchAsync("pause")' disabled="@(DispatchBusy || NeedsRepository)" aria-label="Pause dispatch">Pause</button>
-            <button type="button" @onclick='() => DispatchAsync("stop")' disabled="@(DispatchBusy || NeedsRepository)" aria-label="Request stop for all chats" title="Prevents new work and asks known chats to cancel; running tools and wake delivery continue.">Stop</button>
-            <button type="button" @onclick='() => DispatchAsync("resume")' disabled="@(DispatchBusy || NeedsRepository)" aria-label="Resume dispatch">Resume</button>
-            <a href="manager">Manager</a>
+            <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Outline" OnClick='() => DispatchAsync("pause")' Disabled="@(DispatchBusy || NeedsRepository)" AriaLabel="Pause dispatch">Pause</BbButton>
+            <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Outline" OnClick='() => DispatchAsync("stop")' Disabled="@(DispatchBusy || NeedsRepository)" AriaLabel="Request stop for all chats" title="Prevents new work and asks known chats to cancel; running tools and wake delivery continue.">Stop</BbButton>
+            <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Outline" OnClick='() => DispatchAsync("resume")' Disabled="@(DispatchBusy || NeedsRepository)" AriaLabel="Resume dispatch">Resume</BbButton>
+            <BbButton Href="manager" Variant="ButtonVariant.Ghost">Manager</BbButton>
         </div>
         @if (DispatchMessage is not null) { <p role="status">@DispatchMessage</p> }
-        @if (Message is not null) { <p role="status">@Message</p> }
+        @if (UnconfirmedDecision is not null)
+        {
+            <p role="status">A manager decision is unconfirmed. Open Manager to review its saved request and retry.</p>
+        }
         @if (UnconfirmedDispatch is not null)
         {
             <p>Unconfirmed dispatch: @UnconfirmedDispatch.Command.</p>
-            <button type="button" @onclick="RetryDispatchAsync" disabled="@DispatchBusy">Retry dispatch</button>
+            <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Outline" OnClick="RetryDispatchAsync" Disabled="@DispatchBusy">Retry dispatch</BbButton>
         }
     </section>
 }
 else
 {
-<section class="surface sql-view standing-view" aria-labelledby="manager-heading">
+<BbCard role="region" Class="surface sql-view standing-view" aria-labelledby="manager-heading">
     <h2 id="manager-heading">@RecoveryPanelKind</h2>
     <p>Pause prevents new claims and actions. Stop also asks known chats to cancel. Running tools and wake delivery are not interrupted.</p>
     <div class="standing-section">
         <div class="close-sessions-repository">
             <label for="manager-repository">Repository</label>
-            <input id="manager-repository" @bind="RepositoryId" @bind:event="oninput" maxlength="256" disabled="@(DecisionBusy || UnconfirmedDecision is not null)" />
-            <button class="close-sessions-secondary" type="button" @onclick="RefreshAsync" disabled="@(ReadBusy || NeedsRepository)">Refresh selection</button>
+            <BbInput Type="InputType.Text" Id="manager-repository" Value="@RepositoryId" ValueChanged="@(value => RepositoryId = value ?? string.Empty)" UpdateTiming="UpdateTiming.Immediate" maxlength="256" Disabled="@(DecisionBusy || UnconfirmedDecision is not null)" />
+            <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Outline" Class="close-sessions-secondary" OnClick="RefreshAsync" Disabled="@(ReadBusy || NeedsRepository)">Refresh selection</BbButton>
         </div>
         @if (NeedsRepository) { <p class="close-sessions-note">@RepositoryRequired</p> }
         <p>Dispatch: @(Paused is true ? "Paused" : Paused is false ? "Running" : "Not yet read")</p>
         <div class="close-sessions-actions">
-            <button class="close-sessions-secondary" type="button" @onclick='() => DispatchAsync("pause")' disabled="@(DispatchBusy || NeedsRepository)">Pause dispatch</button>
-            <button class="connect-button" type="button" @onclick='() => DispatchAsync("stop")' disabled="@(DispatchBusy || NeedsRepository)">Request stop for all chats</button>
-            <button class="close-sessions-secondary" type="button" @onclick='() => DispatchAsync("resume")' disabled="@(DispatchBusy || NeedsRepository)">Resume dispatch</button>
+            <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Outline" Class="close-sessions-secondary" OnClick='() => DispatchAsync("pause")' Disabled="@(DispatchBusy || NeedsRepository)">Pause dispatch</BbButton>
+            <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Destructive" Class="connect-button" OnClick='() => DispatchAsync("stop")' Disabled="@(DispatchBusy || NeedsRepository)">Request stop for all chats</BbButton>
+            <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Outline" Class="close-sessions-secondary" OnClick='() => DispatchAsync("resume")' Disabled="@(DispatchBusy || NeedsRepository)">Resume dispatch</BbButton>
         </div>
         @if (DispatchMessage is not null) { <p role="status">@DispatchMessage</p> }
         @if (UnconfirmedDispatch is not null)
         {
             <p>Unconfirmed dispatch: @UnconfirmedDispatch.Command, request @UnconfirmedDispatch.RequestId.</p>
-            <button class="close-sessions-secondary" type="button" @onclick="RetryDispatchAsync" disabled="@DispatchBusy">Retry dispatch</button>
+            <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Outline" Class="close-sessions-secondary" OnClick="RetryDispatchAsync" Disabled="@DispatchBusy">Retry dispatch</BbButton>
         }
     </div>
     <section class="standing-section" aria-labelledby="manager-selection-heading">
@@ -66,17 +69,17 @@ else
         }
         <div class="close-sessions-repository">
             <label for="manager-target">Observed session</label>
-            <select id="manager-target" value="@TargetSessionId" @onchange="SelectTarget" disabled="@(DecisionBusy || UnconfirmedDecision is not null)">
+            <BbNativeSelect TValue="string" Id="manager-target" Value="@TargetSessionId" ValueChanged="@(value => SelectTarget(new ChangeEventArgs { Value = value ?? string.Empty }))" Disabled="@(DecisionBusy || UnconfirmedDecision is not null)">
                 <option value="">Choose a session</option>
                 @foreach (var session in Sessions)
                 {
                     <option value="@session.SessionId">@session.Label · @(string.IsNullOrWhiteSpace(session.MachineName) ? (string.IsNullOrWhiteSpace(session.MachineId) ? "PC not reported" : session.MachineId) : session.MachineName) · @session.SessionId · @session.RepositoryId</option>
                 }
-            </select>
+            </BbNativeSelect>
         </div>
         <div class="close-sessions-repository">
             <label for="manager-target-id">Exact session ID</label>
-            <input id="manager-target-id" @bind="TargetSessionId" @bind:event="oninput" disabled="@(DecisionBusy || UnconfirmedDecision is not null)" />
+            <BbInput Type="InputType.Text" Id="manager-target-id" Value="@TargetSessionId" ValueChanged="@(value => TargetSessionId = value ?? string.Empty)" UpdateTiming="UpdateTiming.Immediate" Disabled="@(DecisionBusy || UnconfirmedDecision is not null)" />
         </div>
         <p class="close-sessions-note">If the chat is missing from the list, enter its exact ID and repository.</p>
         @if (TargetSessionId.Length > CoCern.Contracts.RelayLimits.MaxIdentifierLength) { <p role="alert">The exact session ID exceeds 256 characters.</p> }
@@ -89,19 +92,19 @@ else
         else if (HumanWords.Any(UnsafeCharacter)) { <p id="manager-words-error" role="alert">Enter one line. Edit the answer to remove line breaks or control characters.</p> }
         <div class="close-sessions-repository">
             <label for="manager-human-words">Exact human answer (up to 200 characters)</label>
-            <textarea id="manager-human-words" rows="3" style="font: inherit; width: min(100%, 52ch); padding: 10px 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--ink);" aria-invalid="@(HumanWords.Length > 200 || HumanWords.Any(UnsafeCharacter))" aria-describedby="manager-words-error" @bind="HumanWords" @bind:event="oninput" disabled="@(DecisionBusy || UnconfirmedDecision is not null)"></textarea>
+            <BbTextarea Id="manager-human-words" rows="3" AriaInvalid="@(HumanWords.Length > 200 || HumanWords.Any(UnsafeCharacter))" AriaDescribedBy="manager-words-error" Value="@HumanWords" ValueChanged="@(value => HumanWords = value ?? string.Empty)" UpdateTiming="UpdateTiming.Immediate" Disabled="@(DecisionBusy || UnconfirmedDecision is not null)" />
         </div>
         <div class="close-sessions-actions">
-            <button class="close-sessions-secondary" type="button" @onclick='() => DecideAsync("appoint_manager")' disabled="@(DecisionBusy || UnconfirmedDecision is not null)">Appoint or replace manager</button>
-            <button class="close-sessions-secondary" type="button" @onclick='() => DecideAsync("clear_manager")' disabled="@(DecisionBusy || UnconfirmedDecision is not null)">Revoke manager</button>
+            <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Outline" Class="close-sessions-secondary" OnClick='() => DecideAsync("appoint_manager")' Disabled="@(DecisionBusy || UnconfirmedDecision is not null)">Appoint or replace manager</BbButton>
+            <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Destructive" Class="admin-destructive" OnClick='() => DecideAsync("clear_manager")' Disabled="@(DecisionBusy || UnconfirmedDecision is not null)">Revoke manager</BbButton>
         </div>
         @if (Message is not null) { <p role="status">@Message</p> }
         @if (UnconfirmedDecision is not null)
         {
             <p>Unconfirmed request @UnconfirmedDecision.RequestId · Generation @UnconfirmedDecision.ExpectedManagerGeneration</p>
             <blockquote class="standing-record-text">@UnconfirmedDecision.HumanWords</blockquote>
-            <button class="close-sessions-secondary" type="button" @onclick="RetryDecisionAsync" disabled="@DecisionBusy">Retry decision</button>
-            <button class="close-sessions-secondary" type="button" @onclick="NewDecision" disabled="@DecisionBusy">Start a new decision</button>
+            <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Outline" Class="close-sessions-secondary" OnClick="RetryDecisionAsync" Disabled="@DecisionBusy">Retry decision</BbButton>
+            <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Outline" Class="close-sessions-secondary" OnClick="NewDecision" Disabled="@DecisionBusy">Start a new decision</BbButton>
         }
         <h3>Recent manager selections</h3>
         <p>This bounded list records recent selections.</p>
@@ -112,13 +115,13 @@ else
                 <li @key="decision.Generation">
                     <p>Generation @decision.Generation · @decision.Command · @decision.RepositoryId · Session @(decision.SessionId ?? "None")</p>
                     <blockquote class="standing-record-text">@decision.HumanWords</blockquote>
-                    <p>By @decision.ActorPrincipalId at @decision.At.ToString("O") · Request @decision.RequestId@(decision.RecordedBySessionId is { } recorder ? " · Recorded by chat " + recorder : "")</p>
+                    <p>By @decision.ActorPrincipalId at <time datetime="@decision.At.ToString("O")">@DashboardFormat.Timestamp(decision.At)</time> · Request @decision.RequestId@(decision.RecordedBySessionId is { } recorder ? " · Recorded by chat " + recorder : "")</p>
                 </li>
             }
         </ul>
         @if (nextHistoryBefore is not null)
         {
-            <button class="close-sessions-secondary" type="button" @onclick="LoadEarlierAsync" disabled="@ReadBusy">Load earlier decisions</button>
+            <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Outline" Class="close-sessions-secondary" OnClick="LoadEarlierAsync" Disabled="@ReadBusy">Load earlier decisions</BbButton>
         }
         <h3>Recent administrative actions</h3>
         <p>Administrative calls in this repository, from chats and from this dashboard: who, what, on what and how each ended. A session or manager generation appears only when the hub verified it.@(ActionsDropped > 0 ? $" {ActionsDropped} older entries are no longer kept." : "")</p>
@@ -128,16 +131,16 @@ else
             {
                 <li @key="action.Seq">
                     <p>@action.Tool@(action.Command is { } command ? " " + command : "")@(action.Target is { } target ? " · " + target : "") · @(action.Succeeded ? "Done" : "Refused: " + action.Code)</p>
-                    <p>By @action.ActorPrincipalId@(action.ActingSessionId is { } session ? " · Chat " + session : "")@(action.ManagerGeneration is { } generation ? $" · As manager, generation {generation}" : "") at @action.At.ToString("O")@(action.DecisionRef is { } decisionRef ? " · " + decisionRef : "")</p>
+                    <p>By @action.ActorPrincipalId@(action.ActingSessionId is { } session ? " · Chat " + session : "")@(action.ManagerGeneration is { } generation ? $" · As manager, generation {generation}" : "") at <time datetime="@action.At.ToString("O")">@DashboardFormat.Timestamp(action.At)</time>@(action.DecisionRef is { } decisionRef ? " · " + decisionRef : "")</p>
                 </li>
             }
         </ul>
         @if (nextActionsBefore is not null)
         {
-            <button class="close-sessions-secondary" type="button" @onclick="LoadEarlierActionsAsync" disabled="@ReadBusy">Load earlier actions</button>
+            <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Outline" Class="close-sessions-secondary" OnClick="LoadEarlierActionsAsync" Disabled="@ReadBusy">Load earlier actions</BbButton>
         }
     </section>
-</section>
+</BbCard>
 }
 @code {
     private bool NeedsRepository => string.IsNullOrWhiteSpace(RepositoryId);

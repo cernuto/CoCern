@@ -3,6 +3,7 @@
     const key = "cocern.dashboard.preferences";
     const system = () => matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
     let chosen = null;
+    let appearanceBridge = null;
     try {
         const stored = JSON.parse(localStorage.getItem(key) || "null");
         if (stored?.theme === "dark" || stored?.theme === "light") chosen = stored.theme;
@@ -10,12 +11,31 @@
     const theme = () => chosen ?? system();
     const apply = () => {
         document.documentElement.dataset.theme = theme();
-        document.querySelector('meta[name="theme-color"]')?.setAttribute("content", theme() === "dark" ? "#0c2230" : "#edf3f4");
+        document.documentElement.classList.toggle("dark", theme() === "dark");
+        document.querySelector('meta[name="theme-color"]')?.setAttribute("content", theme() === "dark" ? "#081321" : "#f4f7fb");
     };
     apply();
-    matchMedia("(prefers-color-scheme: dark)").addEventListener?.("change", () => { if (!chosen) apply(); });
+    matchMedia("(prefers-color-scheme: dark)").addEventListener?.("change", async () => {
+        if (chosen) return;
+        // Keep Blueprint's DOM guard aligned before changing the document class.
+        if (appearanceBridge) await appearanceBridge.invokeMethodAsync("ApplyAppearanceAsync", theme());
+        apply();
+    });
     window.pkDashboard = {
         preferences: () => ({ theme: theme() }),
+        // The skip link prevents routing in Blazor, then transfers focus after its click dispatch.
+        focusMain: () => new Promise(resolve => requestAnimationFrame(() => {
+            const main = document.getElementById("main");
+            if (main) {
+                main.focus({ preventScroll: true });
+                main.scrollIntoView({ block: "start" });
+            }
+            resolve();
+        })),
+        attachAppearance: (reference) => { appearanceBridge = reference; apply(); },
+        detachAppearance: () => { appearanceBridge = null; },
+        focusNavigation: () => document.querySelector(".navigation-toggle")?.focus(),
+        focusFirstNavigationItem: () => document.querySelector(".app-sidebar.navigation-open .main-nav a")?.focus(),
         // True once the text is on the clipboard; false where the browser refuses (the viewer can still select it).
         copy: async (text) => { try { await navigator.clipboard.writeText(text); return true; } catch { return false; } },
         setPreferences: (value) => {

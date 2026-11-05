@@ -1,6 +1,7 @@
 <section class="activity-board @(Live ? "" : "board-paused")" aria-labelledby="board-heading">
     <div class="board-heading">
-        <div><h2 id="board-heading">Machines and sessions</h2><p>Grouped by recorded machine identity. Select a session to inspect it.</p></div>
+        <div><h2 id="board-heading">Machines and sessions</h2><p>Select a session to inspect its activity and reported connection.</p></div>
+        <BbBadge Variant="BadgeVariant.Outline">@Snapshot.Sessions.Length sessions</BbBadge>
     </div>
     <div class="station-grid">
         @foreach (var machine in Stations)
@@ -9,7 +10,7 @@
             var machineRecorded = HasMachineIdentity(machine.MachineId);
             var enrolled = IsEnrolled(machine.MachineId);
             var directRoute = sessions.Any(session => session.Reachable);
-            <article class="@(machineRecorded ? "machine-station" : "session-metadata-group")" @key="machine.MachineId">
+            <BbCard Class="@(machineRecorded ? "machine-station" : "session-metadata-group")" role="article" @key="machine.MachineId">
                 @if (!machineRecorded)
                 {
                     <div class="metadata-group-heading"><h3>Sessions without machine information</h3><p>Machine identity was not recorded for these sessions. This group does not represent another computer.</p><span>@sessions.Length @(sessions.Length == 1 ? "session" : "sessions")</span></div>
@@ -17,21 +18,10 @@
                 else
                 {
                 <div class="station-mast">
-                    <span class="station-beacon @(enrolled && machine.Reachable ? "reachable" : "")" aria-hidden="true">
-                        <svg viewBox="0 0 80 72" class="outpost-glyph">
-                            <path class="outpost-shadow" d="M8 49 40 32 72 49 40 67Z" />
-                            <path class="outpost-base" d="M8 44 40 27 72 44 40 61Z" />
-                            <path class="outpost-side" d="M8 44 40 61 40 67 8 50ZM40 61 72 44 72 50 40 67Z" />
-                            <path class="outpost-tower" d="M28 27 40 20 52 27 52 45 40 52 28 45Z" />
-                            <path class="outpost-roof" d="M28 27 40 20 52 27 40 34Z" />
-                            <path class="outpost-window" d="M34 36 38 38 38 43 34 41ZM43 38 47 36 47 41 43 43Z" />
-                            <path class="outpost-antenna" d="M40 20V10" />
-                            <circle class="outpost-light" cx="40" cy="8" r="4" />
-                        </svg>
-                    </span>
+                    <span class="machine-icon" aria-hidden="true"><Icon Name="machine" Size="22" /></span>
                     <div class="station-name">
                         <h3 title="@machine.MachineId">@machine.Name</h3>
-                        <span>@machine.SessionCount @(machine.SessionCount == 1 ? "session" : "sessions")</span>
+                        <BbBadge Variant="BadgeVariant.Secondary">@machine.SessionCount @(machine.SessionCount == 1 ? "session" : "sessions")</BbBadge>
                         @if (!enrolled) { <span class="station-registration" title="No node enrollment is recorded for this machine. This does not indicate whether the PC is online.">No node enrollment</span> }
                         else { <span class="station-registration" title="Freshness of the enrolled node's discovery heartbeat, separate from direct chat routes.">@(machine.Reachable ? "Node heartbeat current" : "No current node heartbeat")</span> }
                     </div>
@@ -41,19 +31,18 @@
                 <div class="station-sessions">
                     @foreach (var session in sessions)
                     {
-                        <button type="button" @key="session.SessionId" title="@(session.Reachable ? "Direct chat route available: the hub can wake this chat. This does not indicate whether a model is running." : "No direct chat route: the hub has no current wake route for this chat. MCP calls and inbox communication can still work.")" class="session-node @(SelectedId == session.SessionId ? "selected" : "") @(IsPulsing(session.SessionId) ? "signal" : "")" aria-pressed="@(SelectedId == session.SessionId ? "true" : "false")" @onclick="() => OnSelect.InvokeAsync(session.SessionId)">
-                            <span class="signal-trail" aria-hidden="true"></span>
-                            <span class="session-token" aria-hidden="true"><span class="token-initials">@SessionTokenLetters(session)</span><span class="node-shape @(session.Reachable ? "teal" : "neutral")"></span></span>
+                        <BbButton Variant="ButtonVariant.Ghost" @key="session.SessionId" title="@(session.Reachable ? "Direct chat route available: the hub can wake this chat. This does not indicate whether a model is running." : "No direct chat route: the hub has no current wake route for this chat. MCP calls and inbox communication can still work.")" Class="@($"session-node {(SelectedId == session.SessionId ? "selected" : "")} {(IsPulsing(session.SessionId) ? "signal" : "")}")" aria-pressed="@(SelectedId == session.SessionId ? "true" : "false")" OnClick="() => OnSelect.InvokeAsync(session.SessionId)">
+                            <span class="session-avatar" aria-hidden="true">@SessionTokenLetters(session)</span>
                             <span class="node-copy"><strong>@session.Label</strong><span>@(string.IsNullOrWhiteSpace(session.Provider) ? "Session" : session.Provider)</span></span>
                             <span class="node-meta">@TrafficNote(session)<span class="visually-hidden">, @(session.Reachable ? "direct chat route available" : "no direct chat route")</span></span>
-                        </button>
+                        </BbButton>
                     }
                     @if (sessions.Length == 0)
                     {
                         <p class="station-idle">No sessions.</p>
                     }
                 </div>
-            </article>
+            </BbCard>
         }
         @if (Stations.Length == 0)
         {

@@ -1,4 +1,4 @@
-<section class="surface document-inventory" aria-labelledby="docs-heading">
+<BbCard role="region" Class="surface document-inventory" aria-labelledby="docs-heading">
     <div class="section-heading"><div><h2 id="docs-heading">Documents</h2><p>Usage for files discovered in each repository. Expand a repository to see its files.</p></div></div>
     @if (Cache.ObservedAt is null)
     {
@@ -40,9 +40,9 @@
         <p class="document-usage-note">Searches count completed checks of a file, including zero-match searches. Matches found are matching sections, which may not have been returned or read. Section reads count successful section responses. Counts cover the tracking period shown; Not recorded means no usage history is available.</p>
         @if (Cache.Truncated) { <p class="table-footnote">Some repository inventories may be omitted from this update.</p> }
     }
-</section>
+</BbCard>
 
-<section class="surface doc-cache-view" aria-labelledby="indexes-heading">
+<BbCard role="region" Class="surface doc-cache-view" aria-labelledby="indexes-heading">
     <div class="section-heading"><div><h2 id="indexes-heading">Index activity</h2><p>@Cache.ActiveDirectories @(Cache.ActiveDirectories == 1 ? "repository index" : "repository indexes") · @Cache.ActiveDocuments @(Cache.ActiveDocuments == 1 ? "document index" : "document indexes") active. Source reads and index builds describe cache work for the current activation.</p></div></div>
     @if (Cache.ObservedAt is null)
     {
@@ -81,7 +81,7 @@
         @if (Cache.Grains.Length == 0 && !Cache.Truncated) { <p class="empty-copy">Nothing loaded. Indexes load when an agent searches or reads documents, and unload when idle.</p> }
         @if (Cache.Truncated) { <p class="limit-note">Showing @Cache.Grains.Length of @(Cache.ActiveDirectories + Cache.ActiveDocuments).</p> }
     }
-</section>
+</BbCard>
 
 @code {
     [Parameter, EditorRequired] public DashboardDocCache Cache { get; set; } = new();

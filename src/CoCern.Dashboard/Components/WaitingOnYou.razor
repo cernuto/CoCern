@@ -18,10 +18,10 @@
                 {
                     <li>
                         <div class="waiting-item-heading">
-                            <span class="waiting-kind">@KindLabel(item.Kind)</span>
+                            <BbBadge Variant="@(group.Maybe ? BadgeVariant.Outline : BadgeVariant.SoftWarning)">@KindLabel(item.Kind)</BbBadge>
                             @if (!string.IsNullOrEmpty(item.SessionId))
                             {
-                                <button type="button" class="waiting-session" @onclick="() => OnSelectSession.InvokeAsync(item.SessionId)">@(string.IsNullOrEmpty(item.Label) ? "Open chat" : item.Label)</button>
+                                <BbButton Variant="ButtonVariant.Link" Class="waiting-session" OnClick="() => OnSelectSession.InvokeAsync(item.SessionId)">@(string.IsNullOrEmpty(item.Label) ? "Open chat" : item.Label)</BbButton>
                             }
                             else if (!string.IsNullOrEmpty(item.Label)) { <strong>@item.Label</strong> }
                         </div>
@@ -30,7 +30,7 @@
                             @if (!string.IsNullOrEmpty(item.RepositoryId)) { <span>@item.RepositoryId@if (!string.IsNullOrEmpty(item.BoardId)) { <text> / @item.BoardId</text> }</span> }
                             @if (!string.IsNullOrEmpty(item.TaskId)) { <span>Task @item.TaskId</span> }
                             @if (item.Since is { } since) { <time datetime="@since.ToString("O")" title="@DashboardFormat.Timestamp(since)">@DashboardFormat.Ago(since, Now)</time> }
-                            @if (item.Kind == DashboardWaitingKinds.StandingProposal) { <button type="button" class="waiting-session" @onclick="() => OnOpenStanding.InvokeAsync()">Review proposal</button> }
+                            @if (item.Kind == DashboardWaitingKinds.StandingProposal) { <BbButton Variant="ButtonVariant.Outline" Size="ButtonSize.Small" Class="waiting-session" OnClick="() => OnOpenStanding.InvokeAsync()">Review proposal</BbButton> }
                         </div>
                     </li>
                 }

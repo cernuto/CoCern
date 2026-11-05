@@ -5,7 +5,7 @@
 <div class="close-session-control">
     @if (!_confirming)
     {
-        <button type="button" class="close-session-toggle" disabled="@(_closed || string.IsNullOrWhiteSpace(Session.RepositoryId))" aria-label="@($"Close session {Session.Label}, #{ShortId(Session.SessionId)}")" @onclick="Review">Close session</button>
+        <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Outline" Class="close-session-toggle" Disabled="@(_closed || string.IsNullOrWhiteSpace(Session.RepositoryId))" AriaLabel="@($"Close session {Session.Label}, #{ShortId(Session.SessionId)}")" OnClick="Review">Close session</BbButton>
     }
     else
     {
@@ -13,7 +13,7 @@
             <p>Close <strong>@_target!.Label</strong> on @DashboardFormat.Machine(_target)?</p>
             <p class="close-session-id">Session @_target.SessionId · Repository @_target.RepositoryId</p>
             <p>Unread messages go back to their senders. This can't be undone. The chat can open a new session if it returns.</p>
-            <label class="close-session-override"><input type="checkbox" @bind="_force" disabled="@_busy" />Override unresolved actions</label>
+            <label class="close-session-override" for="@($"close-session-force-{Session.SessionId}")"><BbCheckbox Id="@($"close-session-force-{Session.SessionId}")" @bind-Checked="_force" Disabled="@_busy" />Override unresolved actions</label>
             @if (_force)
             {
                 <p class="warning-note">The session will close even if it has unresolved actions. They stay on record with their resource safeguards, and its other sessions can recover them at once. Closing a session does not stop running tools.</p>
@@ -24,7 +24,7 @@
             }
             <div class="close-sessions-actions">
                 <button type="button" class="connect-button" @ref="_confirmButton" disabled="@_busy" @onclick="CloseAsync">@(_busy ? "Closing…" : _force ? "Force close session" : "Close session")</button>
-                <button type="button" class="close-sessions-secondary" disabled="@_busy" @onclick="Cancel">Cancel</button>
+                <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Outline" Class="close-sessions-secondary" Disabled="@_busy" OnClick="Cancel">Cancel</BbButton>
             </div>
         </div>
     }

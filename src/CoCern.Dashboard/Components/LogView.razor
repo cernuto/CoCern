@@ -3,16 +3,16 @@
         @if (!Compact)
         {
             <div class="analytics-filters">
-                <label style="min-width:0">Search logs<input type="search" style="min-width:0;width:100%;max-width:100%" @bind="_search" @bind:event="oninput" placeholder="Tool, repository, session or message" /></label>
-                <label class="log-filter">Level<select @bind="_level"><option value="">All levels</option><option value="problems">Warning and above</option><option>Error</option><option>Critical</option><option>Fatal</option><option>Warning</option><option>Information</option><option>Debug</option><option>Verbose</option><option>Trace</option></select></label>
-                <label><input type="checkbox" @bind="_hideRoutine" /> Hide routine successful HTTP completions</label>
+                <div class="log-search"><label for="log-search">Search logs</label><BbInput Id="log-search" Type="InputType.Search" @bind-Value:get="_search" @bind-Value:set="value => _search = value ?? string.Empty" UpdateTiming="UpdateTiming.Immediate" Placeholder="Tool, repository, session or message" /></div>
+                <div class="log-filter"><label for="log-level">Level</label><BbNativeSelect Id="log-level" TValue="string" @bind-Value:get="_level" @bind-Value:set="value => _level = value ?? string.Empty"><option value="">All levels</option><option value="problems">Warning and above</option><option>Error</option><option>Critical</option><option>Fatal</option><option>Warning</option><option>Information</option><option>Debug</option><option>Verbose</option><option>Trace</option></BbNativeSelect></div>
+                <div class="log-routine-filter"><BbCheckbox Id="log-hide-routine" @bind-Checked="_hideRoutine" /><label for="log-hide-routine">Hide routine successful HTTP completions</label></div>
             </div>
         }
     </div>
     <ol class="log-entries @(Compact ? "compact-logs" : "")">
         @foreach (var entry in VisibleEntries)
         {
-            <li class="log-entry" @key="entry.Sequence"><time title="@DashboardFormat.Timestamp(entry.Timestamp)">@entry.Timestamp.ToLocalTime().ToString("HH:mm:ss")</time><span class="log-level @LevelClass(entry.Level)">@entry.Level</span><div><p>@entry.Message</p><small>@entry.Category @if (entry.SessionId is { Length: > 0 } session) { <span> · Session @session</span> }</small></div></li>
+            <li class="log-entry" @key="entry.Sequence"><time title="@DashboardFormat.Timestamp(entry.Timestamp)">@entry.Timestamp.ToLocalTime().ToString("HH:mm:ss")</time><BbBadge Variant="@LevelVariant(entry.Level)" Class="@($"log-level {LevelClass(entry.Level)}")">@entry.Level</BbBadge><div><p>@entry.Message</p><small>@entry.Category @if (entry.SessionId is { Length: > 0 } session) { <span> · Session @session</span> }</small></div></li>
         }
     </ol>
     @if (!VisibleEntries.Any()) { <p class="empty-copy" role="status">@(Entries.Length == 0 ? "No recent events were returned." : Compact ? "No recent events after hiding routine successful HTTP completions." : "No events match the current filters. Clear search, choose All levels or include routine HTTP completions.")</p> }
@@ -29,4 +29,5 @@
     private IEnumerable<DashboardLogEntry> MatchingEntries => Entries.Where(entry => DashboardUsefulness.MatchesLog(entry.Level, entry.Category, entry.Message, entry.SessionId, _level, _search, _hideRoutine));
     private IEnumerable<DashboardLogEntry> VisibleEntries => MatchingEntries.OrderByDescending(entry => entry.Sequence).Take(Compact ? 4 : 200);
     private static string LevelClass(string level) => level.ToLowerInvariant() switch { "critical" or "error" => "error", "warning" => "warning", _ => "information" };
+    private static BadgeVariant LevelVariant(string level) => level.ToLowerInvariant() switch { "fatal" or "critical" or "error" => BadgeVariant.SoftDestructive, "warning" => BadgeVariant.SoftWarning, _ => BadgeVariant.Secondary };
 }

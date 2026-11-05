@@ -2,7 +2,7 @@
 @inject HttpClient Http
 @inject IJSRuntime JavaScript
 
-<section class="surface connect-view" aria-labelledby="add-pc-heading">
+<BbCard role="region" Class="surface connect-view" aria-labelledby="add-pc-heading">
     <div class="section-heading"><div><h2 id="add-pc-heading">Add another PC</h2><p>Its chats can then message chats here. Do this once per PC.</p></div></div>
     @if (_status is null)
     {
@@ -21,27 +21,27 @@
         <ol class="join-steps">
             <li>
                 <strong>On the other PC, open PowerShell and paste this.</strong>
-                <div class="copy-field"><code>@First.Command</code><button type="button" class="copy-button" @onclick="() => CopyAsync(First.Command, First.Url)">@Label(First.Url)</button></div>
+                <div class="copy-field"><code>@First.Command</code><BbButton Type="ButtonType.Button" Variant="ButtonVariant.Outline" Class="copy-button" OnClick="() => CopyAsync(First.Command, First.Url)">@Label(First.Url)</BbButton></div>
                 <small>It downloads CoCern from this hub, joins it, and adds CoCern to Claude Code and Codex there; the PC then shows up under Machines.</small>
             </li>
         </ol>
         <details class="join-help">
             <summary>The other PC can't reach the hub?</summary>
             <p>Allow the hub's port on private networks. Run this once on this PC, in PowerShell as administrator:</p>
-            <div class="copy-field"><code>@_status.FirewallCommand</code><button type="button" class="copy-button" @onclick="() => CopyAsync(_status.FirewallCommand!, FirewallKey)">@Label(FirewallKey)</button></div>
+            <div class="copy-field"><code>@_status.FirewallCommand</code><BbButton Type="ButtonType.Button" Variant="ButtonVariant.Outline" Class="copy-button" OnClick="() => CopyAsync(_status.FirewallCommand!, FirewallKey)">@Label(FirewallKey)</BbButton></div>
             @if (_status.Addresses.Length > 1)
             {
                 <p>If the PC name doesn't resolve, paste the command for one of this hub's addresses instead:</p>
                 @foreach (var address in _status.Addresses.Skip(1))
                 {
                     <p class="address-choice">@address.Url</p>
-                    <div class="copy-field"><code>@address.Command</code><button type="button" class="copy-button" @onclick="() => CopyAsync(address.Command, address.Url)">@Label(address.Url)</button></div>
+                    <div class="copy-field"><code>@address.Command</code><BbButton Type="ButtonType.Button" Variant="ButtonVariant.Outline" Class="copy-button" OnClick="() => CopyAsync(address.Command, address.Url)">@Label(address.Url)</BbButton></div>
                 }
             }
         </details>
         <p class="table-footnote">The command holds this hub's join code. Share it only with PCs you trust.</p>
     }
-</section>
+</BbCard>
 
 @code {
     private const string FirewallKey = "firewall";

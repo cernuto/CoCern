@@ -1,0 +1,142 @@
+/* Live operations surfaces. Loaded after the shared dashboard and Blueprint theme. */
+.activity-board {
+    --focus: var(--ring);
+    min-height: 0;
+    padding: 22px;
+    color: var(--foreground);
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    box-shadow: none;
+    overflow: visible;
+}
+.activity-board::before { display: none; }
+.activity-board .board-heading { align-items: center; margin-bottom: 18px; flex-wrap: wrap; }
+.activity-board .board-heading h2 { font: 650 18px/1.4 "Segoe UI", sans-serif; letter-spacing: -.02em; }
+.activity-board .board-heading p { font-size: 14px; color: var(--muted-foreground); margin-top: 4px; }
+.activity-board .station-grid { gap: 14px; min-height: 0; grid-template-columns: repeat(auto-fit, minmax(min(310px, 100%), 1fr)); }
+.activity-board .machine-station,
+.activity-board .session-metadata-group { min-width: 0; max-width: none; margin: 0; padding: 0; border: 1px solid var(--border); border-radius: 10px; background: var(--background); box-shadow: none; gap: 0; overflow: hidden; }
+.activity-board .session-metadata-group { border-style: dashed; }
+.activity-board .station-mast { display: grid; grid-template-columns: 38px minmax(0, 1fr); gap: 6px 10px; width: 100%; max-width: none; min-height: 0; margin: 0; padding: 16px; border-bottom: 1px solid var(--border); }
+.activity-board .station-mast::after,
+.activity-board .station-sessions::before,
+.activity-board .session-node::before { display: none; }
+.activity-board .machine-icon { display: grid; place-items: center; width: 38px; height: 38px; border: 1px solid var(--border); border-radius: 8px; color: var(--primary); background: var(--accent); }
+.activity-board .station-name { align-self: center; }
+.activity-board .station-name h3 { margin: 0 0 5px; font-size: 15px; color: var(--foreground); }
+.activity-board .station-name > span { margin-right: 6px; color: var(--muted-foreground); font-size: 12px; }
+.activity-board .station-name .station-registration { display: block; margin-top: 6px; color: var(--muted-foreground); }
+.activity-board .station-status { grid-column: 1 / -1; gap: 7px; margin: 4px 0 0; color: var(--muted-foreground); font-size: 12px; line-height: 1.5; }
+.activity-board .station-status .status-dot { width: 7px; height: 7px; }
+.activity-board .station-sessions,
+.activity-board .session-metadata-group .station-sessions { display: flex; flex-direction: column; gap: 4px; padding: 8px; margin: 0; border: 0; }
+.activity-board .session-node { display: grid; grid-template-columns: 32px minmax(0, 1fr); gap: 2px 10px; width: 100%; height: auto; min-height: 74px; padding: 10px; border: 1px solid transparent; border-radius: 7px; color: var(--foreground); background: transparent; box-shadow: none; white-space: normal; text-align: left; justify-content: initial; transition: background-color .15s, border-color .15s; }
+.activity-board .session-node:hover { transform: none; background: var(--accent); border-color: var(--border); }
+.activity-board .session-node.selected { border-color: var(--primary); background: var(--accent); box-shadow: inset 3px 0 var(--primary); }
+.activity-board .session-avatar { display: grid; place-items: center; grid-row: 1 / span 2; align-self: center; width: 32px; height: 32px; border-radius: 7px; color: var(--primary); background: var(--muted); font-size: 12px; font-weight: 650; }
+.activity-board .node-copy { align-self: end; }
+.activity-board .node-copy strong { font-size: 14px; line-height: 1.4; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.activity-board .node-copy > span { font-size: 12px; color: var(--muted-foreground); margin: 2px 0 0; }
+.activity-board .node-meta { font-size: 12px; line-height: 1.5; color: var(--muted-foreground); white-space: normal; }
+.activity-board .session-node.signal .session-avatar { box-shadow: 0 0 0 1px var(--primary); }
+.activity-board.board-paused .session-node.signal .session-avatar { box-shadow: none; }
+.activity-board .metadata-group-heading { padding: 16px 16px 8px; }
+.activity-board .metadata-group-heading p,
+.activity-board .metadata-group-heading > span,
+.activity-board .station-idle,
+.activity-board .board-empty p { font-size: 13px; color: var(--muted-foreground); }
+.activity-board .board-empty { padding: 40px 16px; }
+
+.sessions-view .session-view-switch { display: inline-flex; flex-wrap: wrap; gap: 4px; padding: 4px; border: 1px solid var(--border); border-radius: 9px; background: var(--card); }
+.sessions-view .session-view-switch button { display: inline-flex; gap: 8px; min-height: 36px; padding: 8px 12px; font-size: 13px; border: 0; background: transparent; color: var(--muted-foreground); }
+.sessions-view .session-view-switch button[aria-pressed="true"] { background: var(--accent); color: var(--foreground); border: 0; }
+.session-list .search-field { margin: 0 20px 16px; }
+.session-list .session-list-entry { min-width: 0; border-top: 1px solid var(--border); }
+.session-list .session-list-row { height: auto; min-height: 86px; justify-content: flex-start; white-space: normal; border-top-color: transparent; border-radius: 8px; }
+.session-list .session-list-row:hover { background: var(--accent); }
+.session-list .session-list-row.selected { background: var(--accent); border-color: var(--primary); }
+.session-list .session-row-label strong { font-size: 14px; color: var(--foreground); }
+.session-list .session-row-label > span,
+.session-list .session-row-state { color: var(--muted-foreground); line-height: 1.5; }
+.session-list .session-row-state { max-width: 44%; white-space: normal; flex-shrink: 0; }
+.session-list .session-row-state > span { display: block; margin-top: 4px; }
+.session-list .session-row-state > .session-route-badge { display: inline-flex; margin: 0 0 3px; }
+.session-list .session-list-entry > .close-session-control { margin-top: 0; padding-bottom: 10px; }
+.session-inspector { min-width: 0; }
+.session-inspector .tag-row > * { white-space: normal; text-align: left; line-height: 1.5; }
+.session-inspector .inspector-title > div { min-width: 0; }
+.session-inspector .session-facts { margin-top: 16px; }
+.session-inspector .session-facts > div { grid-template-columns: minmax(85px, .8fr) minmax(0, 1fr); gap: 10px; font-size: 13px; padding-block: 8px; }
+.session-inspector .inspector-counts { padding: 0; gap: 8px; background: transparent; }
+.session-inspector .inspector-counts > div { padding: 12px 6px; gap: 0; border: 1px solid var(--border); box-shadow: none; background: var(--background); }
+.session-inspector .inspector-counts strong { font-size: 24px; }
+.session-inspector .inspector-counts span { font-size: 12px; color: var(--muted-foreground); }
+.session-inspector .session-identifiers p,
+.session-inspector .inspector-event p { overflow-wrap: anywhere; }
+.session-inspector .inspector-empty { min-height: 230px; padding: 36px 20px; }
+
+.traffic-lane { --traffic-request: var(--card); --traffic-response: var(--card); --traffic-push: var(--card); --traffic-error: color-mix(in srgb, var(--destructive) 10%, var(--card)); --traffic-selected: var(--accent); }
+:root[data-theme="dark"] .traffic-lane { --traffic-request: var(--card); --traffic-response: var(--card); --traffic-push: var(--card); --traffic-error: color-mix(in srgb, var(--destructive) 12%, var(--card)); --traffic-selected: var(--accent); }
+.traffic-lane .traffic-controls { flex-wrap: wrap; }
+.traffic-lane .traffic-controls button { min-height: 36px; font-size: 13px; }
+.traffic-lane .traffic-legend { font-size: 12px; color: var(--muted-foreground); gap: 14px; }
+.traffic-lane .traffic-table { font-size: 13px; min-width: 840px; }
+.traffic-lane .traffic-table th { color: var(--muted-foreground); font-size: 12px; background: var(--background); padding-block: 10px; }
+.traffic-lane .traffic-table th:first-child { width: 65px; }
+.traffic-lane .traffic-table th:nth-child(2) { width: 120px; }
+.traffic-lane .traffic-table th:nth-child(3),
+.traffic-lane .traffic-table th:nth-child(4) { width: 170px; }
+.traffic-lane .traffic-table th:nth-child(5) { width: 98px; }
+.traffic-lane .traffic-table td { padding-block: 7px; }
+.traffic-lane .traffic-inspect { min-height: 36px; height: auto; justify-content: flex-start; text-align: left; font-size: 13px; border-radius: 0; }
+.traffic-lane .traffic-info > span { display: block; }
+.traffic-lane .traffic-event:hover,
+.traffic-lane .traffic-event:focus-within { background: var(--accent); filter: none; }
+.traffic-lane .traffic-detail-heading button { min-height: 36px; }
+.traffic-lane .traffic-event-detail dl { font-size: 13px; }
+.traffic-lane .traffic-pair,
+.traffic-lane .traffic-footnote { font-size: 12px; color: var(--muted-foreground); line-height: 1.6; }
+
+.log-view .section-heading { align-items: flex-start; flex-wrap: wrap; }
+.log-view .analytics-filters { display: grid; grid-template-columns: minmax(200px, 1fr) minmax(160px, .65fr); gap: 12px; width: min(100%, 680px); padding: 0; margin: 0; }
+.log-view .log-search,
+.log-view .log-filter { display: flex; flex-direction: column; gap: 6px; min-width: 0; font-size: 13px; }
+.log-view .log-routine-filter { grid-column: 1 / -1; display: flex; align-items: center; gap: 9px; font-size: 13px; }
+.log-view .log-routine-filter label { display: block; margin: 0; cursor: pointer; }
+.log-view .log-entry { grid-template-columns: 65px 92px minmax(0, 1fr); gap: 12px; font-size: 13px; }
+.log-view .log-level { width: fit-content; max-width: 100%; font-size: 11px; background: var(--muted); color: var(--muted-foreground); }
+.log-view .log-level.error { color: var(--destructive); background: color-mix(in srgb, var(--destructive) 12%, var(--card)); }
+.log-view .log-level.warning { color: var(--foreground); background: var(--accent); }
+.log-view .log-entry p { overflow-wrap: anywhere; line-height: 1.6; }
+.log-view .log-entry time,
+.log-view .log-entry small { font-size: 12px; color: var(--muted-foreground); }
+.log-view .table-footnote { font-size: 12px; line-height: 1.65; }
+
+.waiting-on-you .waiting-items li { padding-block: 16px; }
+.waiting-on-you .waiting-session { height: auto; min-height: 36px; max-width: 100%; padding-inline: 4px; font-size: 14px; white-space: normal; text-align: left; line-height: 1.5; }
+.waiting-on-you .waiting-text { font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }
+.waiting-on-you .waiting-item-heading { align-items: center; }
+.waiting-on-you .waiting-item-details { font-size: 12px; color: var(--muted-foreground); }
+.waiting-badge { color: var(--muted-foreground); font-size: 13px; }
+.waiting-badge .waiting-count { min-width: 25px; min-height: 25px; }
+.notification-control { min-width: 0; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.notification-control .notification-toggle { min-height: 36px; white-space: normal; height: auto; }
+.notification-control > [role="status"] { font-size: 12px; color: var(--muted-foreground); overflow-wrap: anywhere; }
+
+@media (max-width: 700px) {
+    .activity-board { padding: 16px; }
+    .activity-board .station-grid { grid-template-columns: minmax(0, 1fr); }
+    .activity-board .station-mast { padding: 14px; }
+    .session-list .session-list-row { flex-wrap: wrap; gap: 8px; }
+    .session-list .session-row-state { width: 100%; max-width: none; padding-left: 21px; text-align: left; }
+    .traffic-lane .traffic-table { min-width: 720px; }
+    .traffic-lane .traffic-table th:first-child, .traffic-lane .traffic-table td:first-child,
+    .traffic-lane .traffic-table th:nth-child(2), .traffic-lane .traffic-table td:nth-child(2),
+    .traffic-lane .traffic-table th:nth-child(5), .traffic-lane .traffic-table td:nth-child(5) { display: table-cell; }
+    .traffic-lane .traffic-table td.traffic-endpoint { white-space: nowrap; }
+    .traffic-lane .traffic-controls { width: auto; }
+    .log-view .analytics-filters { grid-template-columns: minmax(0, 1fr); width: 100%; }
+    .log-view .log-entry { grid-template-columns: 64px minmax(0, 1fr); gap: 8px; }
+    .log-view .log-entry > div { grid-column: 1 / -1; }
+}

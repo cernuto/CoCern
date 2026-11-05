@@ -2,7 +2,7 @@
 @inject IJSRuntime JS
 
 <div class="notification-control">
-    <button type="button" class="connect-button" disabled="@(_busy || _state is "loading" or "unavailable" or "denied")" @onclick="ToggleAsync">@(_state == "enabled" ? "Turn off desktop alerts" : "Enable desktop alerts")</button>
+    <BbButton Variant="ButtonVariant.Outline" Class="notification-toggle" Disabled="@(_busy || _state is "loading" or "unavailable" or "denied")" OnClick="ToggleAsync">@(_state == "enabled" ? "Turn off desktop alerts" : "Enable desktop alerts")</BbButton>
     <span class="muted" role="status">@Status</span>
 </div>
 
