@@ -41,7 +41,8 @@ public sealed class DashboardAnalytics(IAnalyticsTool tool, IServiceProvider ser
         var snapshot = new DashboardAnalyticsSnapshot { RepositoryId = repository, Days = days, Message = UnknownHistory };
         var reports = new List<DashboardAnalyticsQuery>();
         var rowCount = 0;
-        foreach (var name in AnalyticsQueryNames.All)
+        // test_effort reads a precomputed file on its own clock; it has its own endpoint and page, and is no part of one snapshot's comparison.
+        foreach (var name in AnalyticsQueryNames.All.Where(name => name != AnalyticsQueryNames.TestEffort))
         {
             cancellation.ThrowIfCancellationRequested();
             var report = new DashboardAnalyticsQuery { Name = name };
@@ -145,6 +146,40 @@ public sealed class DashboardAnalytics(IAnalyticsTool tool, IServiceProvider ser
         {
             RepositoryId = repository, Days = days, Status = status, Message = message
         });
+    }
+
+    /// <summary>
+    /// The precomputed test-effort file for one repository, under the same viewer policy as the combined report. Read-only, read only on this request,
+    /// and it needs no snapshot. A file for another repository reads as no run data. Messages are fixed text, so a local path cannot reach a viewer.
+    /// </summary>
+    public async Task<IResult> GetTestEffortAsync(HttpContext context)
+    {
+        var repositoryValues = context.Request.Query["repositoryId"];
+        var repository = repositoryValues.ToString();
+        if (repositoryValues.Count != 1 || string.IsNullOrWhiteSpace(repository) || repository.Length > RelayLimits.MaxIdentifierLength || repository.Any(char.IsControl))
+            return Results.BadRequest(new { message = "Choose a repository." });
+        if (context.User.FindFirstValue(ClaimTypes.NameIdentifier) is not { Length: > 0 })
+            return Results.StatusCode(403);
+        if (services.GetService<IAnalyticsQueries>() is not AnalyticsService source)
+            return Results.Ok(new DashboardTestEffort { RepositoryId = repository, Status = DashboardTestEffort.Unavailable, Message = "Analytics is unavailable on this hub." });
+        try
+        {
+            var read = await source.ReadTestEffortAsync(repository, context.RequestAborted);
+            return Results.Ok(new DashboardTestEffort
+            {
+                RepositoryId = repository, Status = read.Status, Report = read.Report,
+                Message = read.Status switch
+                {
+                    DashboardTestEffort.Unreadable => "The test effort file could not be read or does not match its documented shape.",
+                    DashboardTestEffort.NoRunData => "No run data yet.",
+                    _ => null
+                }
+            });
+        }
+        catch (AnalyticsException)
+        {
+            return Results.Ok(new DashboardTestEffort { RepositoryId = repository, Status = DashboardTestEffort.Unreadable, Message = "The test effort file could not be read in time." });
+        }
     }
 
     private static double? Number(JsonElement value)

@@ -1,0 +1,174 @@
+@implements IDisposable
+@inject HttpClient Http
+
+<section class="test-effort-view" aria-labelledby="test-effort-heading" aria-busy="@_loading">
+    <div class="analytics-toolbar">
+        <div><h2 id="test-effort-heading">Test runs</h2><p><a href="analytics">Back to Analytics</a></p></div>
+        <div class="analytics-filters">
+            <label for="test-effort-repository">Repository<select id="test-effort-repository" value="@_repository" @onchange="RepositoryChangedAsync">@foreach (var repository in TestEffortPresentation.Repositories(Snapshot, _repository)) { <option value="@repository">@repository</option> }</select></label>
+            <button type="button" class="analytics-refresh" @onclick="LoadAsync" disabled="@_loading" title="Read the test effort file again">Refresh</button>
+        </div>
+    </div>
+    @if (_loading)
+    {
+        <p class="analytics-state surface" role="status">Loading test effort for @_repository…</p>
+    }
+    else if (_problem is { } problem)
+    {
+        <p class="analytics-state surface" role="alert">@problem</p>
+    }
+    else
+    {
+        var report = _data?.Report;
+        @if (report is null or { Runs: 0 })
+        {
+            <div class="analytics-state surface" role="status"><h3>@TestEffortPresentation.NoRunData</h3><p>@(_data?.Status == DashboardTestEffort.NoRunData ? "Run minutes and pointless runs need results in the file named by Relay:Analytics:TestEffortFile." : _data?.Message)</p></div>
+        }
+        @if (report is not null)
+        {
+            <p class="analytics-history" role="status">File built @report.GeneratedAt.ToUniversalTime().ToString("yyyy-MM-dd HH:mm 'UTC'", CultureInfo.InvariantCulture). Days are UTC.</p>
+        }
+        @if (report is { Runs: > 0 })
+        {
+            var whole = report.WallMinutes;
+            <p class="warning-note">Only recorded runs count (@report.Runs runs, @report.Cases.ToString("#,0", CultureInfo.InvariantCulture) results), so a day with no recorded runs is unknown, not zero. Test minutes add each run's start to end, build included, and overlapping runs each count in full. The pointless totals cover only what the data can judge, so they are a floor: @TestEffortPresentation.Minutes(report.WholeSuiteMinutes) of whole-suite runs are not counted because code changed between them, and telling which of their tests were unrelated needs coverage data the results do not have.</p>
+            <dl class="test-effort-tiles surface">
+                <div><dt>Test minutes <TestEffortBadge Status="@TestEffortRules.Measured" /></dt><dd>@TestEffortPresentation.Minutes(whole)</dd></div>
+                <div><dt>Summed case minutes <TestEffortBadge Status="@TestEffortRules.Measured" /></dt><dd>@TestEffortPresentation.Minutes(report.CaseMinutes)</dd></div>
+                <div><dt>Pointless, rule b <TestEffortBadge Status="@TestEffortRules.Measured" /></dt><dd>@TestEffortPresentation.Minutes(report.PointlessMeasuredMinutes) <small>@TestEffortPresentation.Percent(report.PointlessMeasuredMinutes, whole)</small></dd></div>
+                <div><dt>Pointless, rules a, b, c <TestEffortBadge Status="@TestEffortRules.Estimate" /></dt><dd>@TestEffortPresentation.Minutes(report.PointlessEstimatedMinutes) <small>@TestEffortPresentation.Percent(report.PointlessEstimatedMinutes, whole)</small></dd></div>
+                <div><dt>Whole-suite runs <TestEffortBadge Status="@TestEffortRules.Measured" /></dt><dd>@TestEffortPresentation.Minutes(report.WholeSuiteMinutes) <small>@report.WholeSuiteRuns runs, @TestEffortPresentation.Percent(report.WholeSuiteMinutes, whole)</small></dd></div>
+                <div><dt>Case time repeated at the same commit <TestEffortBadge Status="@TestEffortRules.Measured" /></dt><dd>@TestEffortPresentation.Minutes(report.RepeatedCaseMinutes) <small>@TestEffortPresentation.Percent(report.RepeatedCaseMinutes, report.CaseMinutes) of case minutes</small></dd></div>
+            </dl>
+
+            <section class="surface analytics-chart" aria-labelledby="test-effort-days-heading">
+                <header><h3 id="test-effort-days-heading">Test minutes per day</h3></header>
+                <div class="test-effort-scroll">
+                    <table class="metrics-table test-effort-table">
+                        <thead><tr><th scope="col">Day</th><th scope="col">Runs</th><th scope="col">Test minutes (measured)</th><th scope="col">Pointless, rule b (measured)</th><th scope="col">Pointless, rules a, b, c (estimate)</th></tr></thead>
+                        <tbody>
+                            @{ var longest = report.Days.Select(day => day.WallMinutes).DefaultIfEmpty(0).Max(); }
+                            @foreach (var day in report.Days.Where(day => day.Runs > 0).Reverse())
+                            {
+                                <tr>
+                                    <th scope="row">@day.Day</th>
+                                    <td class="numeric">@day.Runs</td>
+                                    <td class="numeric">@TestEffortPresentation.Minutes(day.WallMinutes)<svg class="test-effort-bar" viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true" focusable="false"><rect width="100" height="6" class="analytics-track" /><rect width="@AnalyticsPresentation.Width(day.WallMinutes, longest)" height="6" class="analytics-current" /></svg></td>
+                                    <td class="numeric">@TestEffortPresentation.Minutes(day.RuleBMinutes) <small>@TestEffortPresentation.Percent(day.RuleBMinutes, day.WallMinutes)</small></td>
+                                    <td class="numeric">@TestEffortPresentation.Minutes(day.PointlessEstimatedMinutes) <small>@TestEffortPresentation.Percent(day.PointlessEstimatedMinutes, day.WallMinutes)</small></td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <section class="surface analytics-chart" aria-labelledby="test-effort-rules-heading">
+                <header><h3 id="test-effort-rules-heading">Pointless-run rules</h3><p>@report.RunsWithoutCommit of @report.Runs runs recorded no commit, so rules a, b, c and d cannot judge them.</p></header>
+                <div class="test-effort-scroll">
+                    <table class="metrics-table test-effort-table">
+                        <thead><tr><th scope="col">Rule</th><th scope="col">Status</th><th scope="col">Runs counted of judged</th><th scope="col">Minutes</th></tr></thead>
+                        <tbody>
+                            @foreach (var rule in report.Rules)
+                            {
+                                var text = TestEffortRules.Text(rule.Rule);
+                                <tr>
+                                    <th scope="row">@rule.Rule. @text.Title<small class="test-effort-note">@text.Note</small></th>
+                                    <td><TestEffortBadge Status="@TestEffortRules.Status(rule)" /></td>
+                                    <td class="numeric">@(rule.JudgedRuns == 0 ? "Not available" : $"{rule.Runs} of {rule.JudgedRuns}")</td>
+                                    <td class="numeric">@TestEffortPresentation.RuleMinutes(rule)</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <section class="surface analytics-chart" aria-labelledby="test-effort-failures-heading">
+                <header><h3 id="test-effort-failures-heading">Failures</h3><p>Fixture-only failures are kept apart from product failures. The results carry no failure text, so the split is an estimate, and the remainder includes deliberate failing-first runs.</p></header>
+                <dl class="test-effort-tiles">
+                    <div><dt>All failed cases <TestEffortBadge Status="@TestEffortRules.Measured" /></dt><dd>@report.Failures</dd></div>
+                    <div><dt>Fixture-only <TestEffortBadge Status="@TestEffortRules.Status(report.Rules[3])" /></dt><dd>@report.FixtureOnlyFailures</dd></div>
+                    <div><dt>Product or undetermined <TestEffortBadge Status="@TestEffortRules.Status(report.Rules[3])" /></dt><dd>@(report.Failures - report.FixtureOnlyFailures - report.UnjudgedFailures)</dd></div>
+                    <div><dt>Not judged, no commit <TestEffortBadge Status="@TestEffortRules.Measured" /></dt><dd>@report.UnjudgedFailures</dd></div>
+                </dl>
+            </section>
+
+            <section class="surface analytics-chart" aria-labelledby="test-effort-top-heading">
+                <header><h3 id="test-effort-top-heading">Top @report.ExpensiveNeverFailed.Length expensive tests that never failed</h3><p>Measured: summed durations across recorded runs. Never failed means in those runs only.</p></header>
+                <div class="test-effort-scroll">
+                    <table class="metrics-table test-effort-table">
+                        <thead><tr><th scope="col">Test</th><th scope="col">Minutes</th><th scope="col">Executions</th></tr></thead>
+                        <tbody>
+                            @foreach (var test in report.ExpensiveNeverFailed)
+                            {
+                                <tr><th scope="row">@test.Test</th><td class="numeric">@TestEffortPresentation.Minutes(test.Minutes)</td><td class="numeric">@test.Executions</td></tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        }
+        @if (report is { Days.Length: > 0 })
+        {
+            <section class="surface analytics-chart" aria-labelledby="test-effort-growth-heading">
+                <header><h3 id="test-effort-growth-heading">Tests added and deleted</h3><p>Measured from git history, by first parent, on the day a change landed. A test moved between files counts as both. Rows are data rows on a theory.</p></header>
+                <div class="test-effort-scroll">
+                    <table class="metrics-table test-effort-table">
+                        <thead><tr><th scope="col">Day</th><th scope="col">Tests added</th><th scope="col">Tests deleted</th><th scope="col">Rows added</th><th scope="col">Rows deleted</th><th scope="col">Commits</th></tr></thead>
+                        <tbody>
+                            @foreach (var day in report.Days.Where(day => day.Commits > 0).Reverse())
+                            {
+                                <tr><th scope="row">@day.Day</th><td class="numeric">@day.TestsAdded</td><td class="numeric">@day.TestsDeleted</td><td class="numeric">@day.RowsAdded</td><td class="numeric">@day.RowsDeleted</td><td class="numeric">@day.Commits</td></tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        }
+    }
+</section>
+
+@code {
+    [Parameter] public DashboardSnapshot Snapshot { get; set; } = new();
+    private DashboardTestEffort? _data;
+    private string? _problem;
+    private string _repository = "";
+    private bool _loading;
+    private CancellationTokenSource? _pending;
+
+    protected override async Task OnInitializedAsync()
+    {
+        var known = TestEffortPresentation.Repositories(Snapshot, "").ToArray();
+        _repository = known.Contains("cocern", StringComparer.Ordinal) ? "cocern" : known.FirstOrDefault() ?? "cocern";
+        await LoadAsync();
+    }
+
+    private async Task RepositoryChangedAsync(ChangeEventArgs args)
+    {
+        if (args.Value is not string value || value == _repository || string.IsNullOrWhiteSpace(value)) return;
+        _repository = value;
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        _pending?.Cancel();
+        _pending?.Dispose();
+        var pending = _pending = new CancellationTokenSource();
+        _loading = true;
+        _data = null;
+        _problem = null;
+        try { _data = await TestEffortPresentation.LoadAsync(Http, _repository, pending.Token); }
+        catch (OperationCanceledException) when (pending.IsCancellationRequested) { return; }
+        catch (Exception exception) when (TestEffortPresentation.IsLoadFailure(exception)) { _problem = TestEffortPresentation.LoadProblem; }
+        if (ReferenceEquals(pending, _pending)) _loading = false;
+    }
+
+    public void Dispose()
+    {
+        _pending?.Cancel();
+        _pending?.Dispose();
+        _pending = null;
+    }
+}

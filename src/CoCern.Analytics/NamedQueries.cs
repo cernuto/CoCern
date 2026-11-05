@@ -4,7 +4,7 @@ using CoCern.Contracts;
 namespace CoCern.Analytics;
 
 /// <summary>
-/// The fixed named queries. Every query returns the same columns: <c>key</c> (what the row measures), <c>cur</c> and <c>prev</c> (the
+/// The fixed named queries, except <c>test_effort</c>, which reads a precomputed file instead (<see cref="TestEffortFile"/>). Every query returns the same columns: <c>key</c> (what the row measures), <c>cur</c> and <c>prev</c> (the
 /// value in the current and the previous period), and <c>cur_n</c> and <c>prev_n</c> (how many rows each value was computed from).
 /// Parameters: <c>$repository</c>; <c>$now</c>, <c>$from</c> and <c>$prev</c> in .NET ticks, so the current period is
 /// [<c>$from</c>, <c>$now</c>) and the previous one [<c>$prev</c>, <c>$from</c>).

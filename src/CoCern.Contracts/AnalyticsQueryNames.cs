@@ -15,6 +15,8 @@ public static class AnalyticsQueryNames
     public const string ManagerAssignmentLatency = "manager_assignment_latency";
     public const string QualityGuardrails = "quality_guardrails";
     public const string AttentionOutcomesByKind = "attention_outcomes_by_kind";
+    /// <summary>Read from a precomputed file, not the snapshot, so the dashboard's combined snapshot report leaves it out.</summary>
+    public const string TestEffort = "test_effort";
 
     // Manager alerts (Relay:Feedback:Alerts): run by the anomaly monitor only, so they stay out of the analytics_query schema.
     public const string TokensPerTaskByRole = "tokens_per_task_by_role";
@@ -28,7 +30,7 @@ public static class AnalyticsQueryNames
     public static readonly IReadOnlyList<string> All =
     [
         TokensPerTask, CallsPerTask, MessagesPerTask, ContextByRole, BlockedTime, ClaimConflictsByResource, NoisiestTools,
-        ManagerAssignmentLatency, QualityGuardrails, AttentionOutcomesByKind, RelayTokens, UsageCoverage
+        ManagerAssignmentLatency, QualityGuardrails, AttentionOutcomesByKind, RelayTokens, UsageCoverage, TestEffort
     ];
 
     /// <summary>The alert queries. The anomaly monitor runs them; <c>analytics_query</c> does not list them.</summary>
