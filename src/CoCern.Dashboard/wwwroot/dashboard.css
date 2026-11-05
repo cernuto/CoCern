@@ -74,7 +74,6 @@ small { font-size: .8rem; }
 .waiting-badge { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); }
 .waiting-count { display: inline-grid; min-width: 24px; min-height: 24px; padding: 1px 6px; place-items: center; border-radius: 20px; background: var(--surface-alt); }
 .waiting-count.has-waiting { background: var(--gold); color: #18384a; font-weight: 700; }
-.observation-warnings > summary { gap: 14px; flex-wrap: wrap; }
 .dispatch-strip { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 14px; margin-bottom: 18px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); font-size: .86rem; }
 .dispatch-repository { color: var(--muted); overflow-wrap: anywhere; }
 .dispatch-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-left: auto; }
@@ -305,7 +304,7 @@ small { font-size: .8rem; }
 .connection-notice, .warning-note { padding: 12px 15px; border-left: 3px solid #be8e38; color: var(--ink); background: var(--surface); font-size: .85rem; margin: 0 0 18px; }
 .sql-view .warning-note { margin: 0 22px 18px; background: var(--surface-alt); }
 .observation-warnings { position: relative; flex-shrink: 0; color: var(--ink); font-size: .8rem; }
-.observation-warnings summary { width: 116px; padding: 11px 10px; min-height: 44px; cursor: pointer; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); white-space: nowrap; }
+.observation-warnings summary { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; width: auto; padding: 11px 10px; min-height: 44px; cursor: pointer; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
 .observation-warnings[open] summary { border-color: var(--focus); }
 .notice-count { display: inline-block; min-width: 2ch; text-align: center; font-weight: 650; font-variant-numeric: tabular-nums; }
 .observation-warnings-panel { position: absolute; z-index: 20; top: calc(100% + 8px); right: 0; width: min(420px, calc(100vw - 32px)); max-height: min(60vh, 420px); overflow-y: auto; overscroll-behavior: contain; padding: 18px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); box-shadow: 0 8px 28px #08233330; }
