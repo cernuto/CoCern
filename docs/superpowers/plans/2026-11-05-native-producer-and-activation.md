@@ -25,7 +25,7 @@ Proposed producer files and responsibilities:
 - `src/CoCern.Core/CallGuard.cs`: resolve protected scope only after ordinary session-token verification and current native generation/closing checks. Avoid adding a scope lookup to every unrelated relay call. Keep all provenance private and strip it from public replies.
 - Native/authentication/surrogate tests: exact own current generation passes; wrong token, repository, machine, working copy, replaced generation, closing session, legacy missing provenance, and forged input fail closed for protected file scope. Existing raw relay behavior remains available under its existing rules.
 
-The accessor's immutable result needs participant ID, session ID, repository ID, authenticated machine scope, canonical physical working-copy root, and scope generation. Final record/namespace must match PC2's reviewed FileClaimScope consumer contract. PC2 owns FileClaimScope and adapter file-claim enforcement; root must not duplicate those files. Protected file scope is a separate gate and must not delay the basic local wake correction.
+The frozen producer result is `CoCern.Domain.VerifiedNativeFileScope(ParticipantId, SessionId, RepositoryId, MachineScope, CanonicalWorkingCopyRoot, NativeGeneration)`, with all six fields strings and no secrets. PC2 confirmed this distinct producer record on 2026-11-05. Its consumer remains `CoCern.Domain.FileClaimScope.TryCreate(repository, machineScope, canonicalWorkingCopyRoot, relativePath, out scope)`. PC2 owns FileClaimScope and adapter file-claim enforcement; root must not duplicate those files. Protected file scope is a separate gate and must not delay the basic local wake correction.
 
 ## Real-client activation gates
 
