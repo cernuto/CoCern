@@ -349,7 +349,6 @@ public sealed class NativeJoinBindingTests(NativeJoinBindingTests.ProbeFixture p
             Git(Workspace, "-c", "core.hooksPath=" + hooks, "worktree", "add", "--detach", "-q", path);
             return path;
         }
-        internal void PointWorkingTreeAt(string path) => Git(Workspace, "config", "--local", "core.worktree", path);
         private static void Git(string cwd, params string[] arguments)
         {
             var start = new ProcessStartInfo(ExecutableSearch.Find("git") ?? throw new InvalidOperationException("Installed Git required"))

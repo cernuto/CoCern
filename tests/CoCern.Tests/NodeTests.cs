@@ -18,6 +18,7 @@ using CoCern.Adapter;
 using CoCern.Adapter.Node;
 using CoCern.Host;
 using Xunit;
+using static CoCern.Tests.AdapterTestKit;
 
 namespace CoCern.Tests;
 
@@ -746,11 +747,6 @@ public sealed class NodeTests : IDisposable
         public Task<bool> QueueAsync(string threadId, string prompt, CancellationToken cancellationToken) { Threads.Enqueue(threadId); return Task.FromResult(true); }
     }
 
-    private sealed class NoHub : HttpMessageHandler
-    {
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
-    }
-
     /// <summary>The hub's get_status and check_inbox for one session, checking the bearer and session token on every call.</summary>
     private sealed class InboxStub(string credential, string sessionId, string sessionToken) : HttpMessageHandler
     {
@@ -985,19 +981,6 @@ public sealed class NodeTests : IDisposable
     private static string[] DirectoryMachineNames(JsonElement directory) => directory.GetProperty("items").EnumerateArray()
         .Where(x => x.TryGetProperty("machineName", out var name) && name.ValueKind == JsonValueKind.String)
         .Select(x => x.GetProperty("machineName").GetString()!).ToArray();
-
-    private static void AssertPrivate(string path)
-    {
-        if (OperatingSystem.IsWindows())
-        {
-            var security = new FileInfo(path).GetAccessControl();
-            var rule = Assert.Single(security.GetAccessRules(true, true, typeof(SecurityIdentifier)).Cast<FileSystemAccessRule>());
-            Assert.True(security.AreAccessRulesProtected);
-            Assert.Equal(WindowsIdentity.GetCurrent().User, rule.IdentityReference);
-            Assert.False(rule.IsInherited);
-        }
-        else Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(path));
-    }
 
     private static async Task WaitForAsync(Func<bool> condition, Task? run = null) => await WaitForAsync(() => Task.FromResult(condition()), run);
 

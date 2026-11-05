@@ -6,6 +6,7 @@ using CoCern.Adapter;
 using CoCern.Adapter.Node;
 using CoCern.Contracts;
 using Xunit;
+using static CoCern.Tests.AdapterTestKit;
 
 namespace CoCern.Tests;
 
@@ -358,19 +359,6 @@ public sealed class LocalWakeTests : IDisposable
     {
         public bool IsBusy(string threadId) => false;
         public Task<bool> QueueAsync(string threadId, string prompt, CancellationToken ct) => Task.FromResult(true);
-    }
-
-    private static void AssertPrivate(string path)
-    {
-        if (OperatingSystem.IsWindows())
-        {
-            var security = new FileInfo(path).GetAccessControl();
-            var rule = Assert.Single(security.GetAccessRules(true, true, typeof(SecurityIdentifier)).Cast<FileSystemAccessRule>());
-            Assert.True(security.AreAccessRulesProtected);
-            Assert.Equal(WindowsIdentity.GetCurrent().User, rule.IdentityReference);
-            Assert.False(rule.IsInherited);
-        }
-        else Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(path));
     }
 
     private string TokenFile()

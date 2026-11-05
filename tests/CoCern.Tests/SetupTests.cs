@@ -234,13 +234,6 @@ public sealed class SetupTests : IDisposable
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) { Interlocked.Exchange(ref onFirst, null)?.Invoke(); return base.SendAsync(request, ct); }
     }
 
-    private sealed class FakeRunKey : IRunKey
-    {
-        public Dictionary<string, string> Values { get; } = [];
-        public string? Get(string name) => Values.GetValueOrDefault(name);
-        public void Set(string name, string value) => Values[name] = value;
-    }
-
     private sealed class ThrowingHandler : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) => throw new HttpRequestException("unreachable");

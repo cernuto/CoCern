@@ -292,8 +292,6 @@ public sealed class WakeTests
             State.Dispose();
         }
 
-        public HttpMessageHandler CreateHandler() => new Handler(this);
-
         /// <summary>The same enrollment as a runtime; the hint channel answers 404 so tests never reach a real hub.</summary>
         public WakeRuntime Runtime(WakeNudge nudge) => new(new AdapterOptions(Configuration.RelayUrl, "client-secret", signalR: true), Configuration.StatePath, Configuration.StopFile, Configuration.RelayUrl)
         {
@@ -338,10 +336,6 @@ public sealed class WakeTests
                 return new(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new { ok = true, code = "ok", dataJson = data, version = 0 }), Encoding.UTF8, "application/json") };
             }
         }
-    }
-    private sealed class NoHub : HttpMessageHandler
-    {
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound));
     }
     private sealed class Clock : TimeProvider
     {

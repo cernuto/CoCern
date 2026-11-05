@@ -93,11 +93,4 @@ public sealed class ClaudeCliRegistrationTests : IDisposable
         Assert.Equal(safe, ClaudeCli.SafeForBatch(ClaudeCli.AddArguments(Dotnet, adapterDll, null)));
         Assert.Equal(safe, ClaudeCli.SafeForBatch(ClaudeCli.AddArguments(Dotnet, @"C:\Apps\CoCern.Adapter.dll", new Dictionary<string, string> { ["COCERN_TOKEN_FILE"] = adapterDll })));
     }
-
-    private sealed class FakeRunKey : IRunKey
-    {
-        public Dictionary<string, string> Values { get; } = [];
-        public string? Get(string name) => Values.GetValueOrDefault(name);
-        public void Set(string name, string value) => Values[name] = value;
-    }
 }
