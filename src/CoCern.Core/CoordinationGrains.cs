@@ -100,7 +100,9 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
             RelayReply result;
             try
             {
-                if (Kind == AggregateKinds.Session && effect.TargetKind == AggregateKinds.Session && (effect.Operation == Operations.Deliver || Operations.IsAttention(effect.Operation)) && GrainContext is not null && effect.TargetKey == this.GetPrimaryKeyString())
+                if (Kind == AggregateKinds.Session && effect.TargetKind == AggregateKinds.Session && (effect.Operation == Operations.Deliver || Operations.IsAttention(effect.Operation)
+                    || effect.Operation is EventWaitAggregate.DueOperation or EventWaitSources.WatchOperation or EventWaitSources.UnwatchOperation or EventWaitSources.LifecycleOperation)
+                    && GrainContext is not null && effect.TargetKey == this.GetPrimaryKeyString())
                 {
                     // A non-reentrant grain cannot await an RPC to itself. Commit its inbox entry
                     // and outbox removal together so a stale dispatch snapshot cannot erase delivery.

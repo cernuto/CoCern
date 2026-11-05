@@ -27,6 +27,10 @@ internal static class SessionAggregate
         // and refuses attention, which its sources then drop.
         switch (context.Operation)
         {
+            case EventWaitAggregate.RegisterOperation:
+            case EventWaitAggregate.CancelOperation:
+            case EventWaitAggregate.DueOperation:
+                return EventWaitAggregate.Handle(context);
             case EventWaitSources.WatchOperation:
             case EventWaitSources.UnwatchOperation:
             case EventWaitSources.LifecycleOperation:

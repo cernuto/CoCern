@@ -11,11 +11,39 @@ namespace CoCern.Domain;
 
 /// <summary>
 /// One-shot records in existing aggregate state with existing MessageDelivery effects.
-/// No tool, watcher, timer or router is registered here. Producer/watch handshake and
-/// due-work dispatch remain final integration requirements, not unit-test claims.
+/// Primary-session private operations reuse its transaction and durable outbox.
+/// Public tool composition and qualifying source handshakes remain separate.
 /// </summary>
 public static class EventWaitAggregate
 {
+    public const string RegisterOperation = "__event_wait_register";
+    public const string CancelOperation = "__event_wait_cancel";
+    public const string DueOperation = "__event_wait_due";
+
+    internal static RelayReply Handle(AggregateContext context)
+    {
+        if (!context.Caller.IsInternal) return Error("InternalOnly");
+        if (context.Operation == DueOperation)
+            return new SessionState(context.State).Closed ? Ok(new { checkedWaits = false }) : Due(context);
+        if (context.Operation == CancelOperation) return Cancel(context, context.Args["waitId"]?.GetValue<string>() ?? "");
+        if (context.Operation != RegisterOperation) return Error("InvalidArguments");
+        EventWaitRequest? request;
+        try { request = context.Args["request"]?.Deserialize<EventWaitRequest>(EventWaitState.Json); }
+        catch (JsonException) { return Error("InvalidArguments"); }
+        if (request is null) return Error("InvalidArguments");
+        var existed = new EventWaitState(context.State).Entries?.ContainsKey(request.WaitId) == true;
+        var result = Register(context, request);
+        if (!result.Ok || existed) return result;
+        // A future outbox effect is indexed by the existing due-work store and
+        // pump. Its payload carries no session credential; the private target
+        // rechecks persisted deadlines, so replay and stale timers cannot refire.
+        var identity = JsonSerializer.Serialize(new[] { context.Repository, context.Key, request.WaitId });
+        var id = "event-wait-due-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(identity)));
+        context.Effects.Add(new(id, AggregateKinds.Session, context.Key, DueOperation,
+            new JsonObject { ["repositoryId"] = context.Repository, ["sessionId"] = context.Key }.ToJsonString(), request.ExpiresAt));
+        return result;
+    }
+
     // Domain transition entry, analogous to CoordinationStateMachine.Apply. No tool
     // or scheduler is registered; final integration can call the internal handlers
     // in the existing session transaction instead of introducing another engine.
