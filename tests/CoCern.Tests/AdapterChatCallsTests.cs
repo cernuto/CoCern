@@ -71,6 +71,31 @@ public sealed class AdapterChatCallsTests : IDisposable
     }
 
     [Fact]
+    public async Task Only_a_configured_repository_fills_in_a_write_so_a_retry_cannot_move_while_a_read_can_use_the_chats_own()
+    {
+        using var hub = new FakeHub();
+        var folder = Path.Combine(root, "node");
+        var chat = new ChatLocation("claude", Guid.NewGuid().ToString());
+        var send = JsonSerializer.SerializeToElement(new { requestId = "send-1", recipientSessionId = "peer", text = "x" });
+        var read = JsonSerializer.SerializeToElement(new { limit = 1 });
+
+        var calls = new ChatCalls(hub.Forwarder(), null, SessionHandoff.ForFolder(folder, chat), "scope", () => null);
+        Assert.True((await calls.CallAsync(RelayTools.SessionOpen, JsonSerializer.SerializeToElement(new { repositoryId = "repo", requestId = "open-1" }), CancellationToken.None)).Ok);
+        await calls.CallAsync(RelayTools.CheckInbox, read, CancellationToken.None);
+        Assert.Equal("repo", hub.Sent(RelayTools.CheckInbox)["repositoryId"]!.GetValue<string>());
+        Assert.Equal(RelayErrorCodes.InvalidArguments, (await calls.CallAsync(RelayTools.SendMessage, send, CancellationToken.None)).Code);
+
+        // After a restart a read still finds it on disk, and even once that read has been learned, a write gets no guess.
+        var restarted = new ChatCalls(hub.Forwarder(), null, SessionHandoff.ForFolder(folder, chat), "scope", () => null);
+        await restarted.CallAsync(RelayTools.CheckInbox, read, CancellationToken.None);
+        Assert.Equal("repo", hub.Sent(RelayTools.CheckInbox)["repositoryId"]!.GetValue<string>());
+        Assert.Equal(RelayErrorCodes.InvalidArguments, (await restarted.CallAsync(RelayTools.SendMessage, send, CancellationToken.None)).Code);
+
+        await new ChatCalls(hub.Forwarder(), null, null, "scope", () => null, repository: "configured").CallAsync(RelayTools.SendMessage, send, CancellationToken.None);
+        Assert.Equal("configured", hub.Sent(RelayTools.SendMessage)["repositoryId"]!.GetValue<string>());
+    }
+
+    [Fact]
     public async Task A_restarted_adapter_finds_the_chats_session_in_its_handle_and_never_another_chats()
     {
         using var hub = new FakeHub();

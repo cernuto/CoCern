@@ -249,7 +249,7 @@ internal sealed class ChatCalls(RelayForwarder forwarder, SessionHints? hints, S
     {
         if (ProtectedCheckoutRoot.NamedIn(arguments)) return new(false, "native_invocation_conflict");
         arguments = RelayForwarder.WithOrigin(arguments, background: false);
-        if (!TryWithRepository(ref arguments))
+        if (!TryWithRepository(tool, ref arguments))
             return new(false, RelayErrorCodes.InvalidArguments, JsonSerializer.SerializeToElement(new { field = "repositoryId", hint = ChatGuidance.MissingRepository }));
         var suppliedToken = arguments.ValueKind == JsonValueKind.Object && arguments.TryGetProperty("sessionToken", out _);
         if (tool == RelayTools.SessionOpen) arguments = CoordinationTools.OwnRequestId(arguments, _workspace(), requestScope);
@@ -281,16 +281,20 @@ internal sealed class ChatCalls(RelayForwarder forwarder, SessionHints? hints, S
     }
 
     /// <summary>
-    /// A model can leave out <c>repositoryId</c>, and the hub would call that <c>RepositoryDenied</c> and send the chat looking for an access problem it doesn't have. A blank counts as left out. This fills in
-    /// the configured repository, else the only one this chat has a session in, here or on disk. With neither known it answers without calling the hub. A value the caller gave stands, and the hub still authorizes whatever is sent.
+    /// A model can leave out <c>repositoryId</c>, and the hub would call that <c>RepositoryDenied</c> and send the chat looking for an access problem it doesn't have. A blank counts as left out. This fills in the configured repository.
+    /// A read can also use the only repository this chat has a session in, here or on disk. A write can't: what this chat holds can change between a send with a lost reply and its retry, which would then apply in another repository.
+    /// With nothing to use it answers without calling the hub. A value the caller gave stands, and the hub still authorizes whatever is sent.
     /// </summary>
-    private bool TryWithRepository(ref JsonElement arguments)
+    private bool TryWithRepository(string tool, ref JsonElement arguments)
     {
         if (arguments.ValueKind != JsonValueKind.Object) return true;
         if (arguments.TryGetProperty("repositoryId", out var given) && given.ValueKind != JsonValueKind.Null && !(given.ValueKind == JsonValueKind.String && string.IsNullOrWhiteSpace(given.GetString()))) return true;
         var known = repository;
-        if (known is null) lock (_handleLock) known = _own.Count == 1 ? _own.Keys.First() : null;
-        known ??= handoff?.OwnRepository() ?? localWake?.OwnRepository();
+        if (known is null && RelayToolCatalog.TryGet(tool, out var definition) && !definition.IsMutation)
+        {
+            lock (_handleLock) known = _own.Count == 1 ? _own.Keys.First() : null;
+            known ??= handoff?.OwnRepository() ?? localWake?.OwnRepository();
+        }
         if (known is null) return false;
         var node = JsonNode.Parse(arguments.GetRawText())!.AsObject();
         node["repositoryId"] = known;
