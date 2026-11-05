@@ -168,6 +168,7 @@ public sealed class LocalChatWake : IAsyncDisposable
         }
         // In order, so a run of one reason costs one status write.
         foreach (var skip in skips.OrderBy(x => x.Code, StringComparer.Ordinal)) ReportRearm(skip.Session, skip.Code);
+        LocalWakeStatus.WriteCounts(statusRoot);
         if (pending.Count == 0) { if (!retry) rearmAt = null; return; }
         using var http = new HttpClient(hub ?? RelayForwarder.CreateHandler(Connection.Options), disposeHandler: hub is null) { Timeout = TimeSpan.FromSeconds(15) };
         var forwarder = new RelayForwarder(http, Connection.Options);

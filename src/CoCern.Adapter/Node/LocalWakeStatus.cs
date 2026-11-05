@@ -43,6 +43,9 @@ internal static class LocalWakeStatus
 
     internal static string? LastCode(string? root = null) => Existing(root)?.Code;
 
+    /// <summary>Writes counts a repeated routine code left behind. A repeat does not write by itself, or an adapter losing a chat's lock every pass would write forever, so a caller that just finished a batch asks.</summary>
+    internal static void WriteCounts(string? root = null) => Use(root, recorder => recorder.WriteCounts());
+
     /// <summary>Sends this root's state-change lines to <paramref name="error"/> instead of standard error.</summary>
     internal static void UseError(string root, TextWriter error) => Use(root, recorder => recorder.Error = error);
 
@@ -121,6 +124,7 @@ internal static class LocalWakeStatus
         private bool unwritten = true;
         private bool pruned;
         private bool warned;
+        private bool countsBehind;
         private readonly List<string> outgoing = [];
         private readonly Dictionary<string, DateTimeOffset> said = new(StringComparer.Ordinal);
 
@@ -144,6 +148,7 @@ internal static class LocalWakeStatus
             counts[value] = counts.GetValueOrDefault(value) + 1;
             setupReached |= value is not (LocalWakeCodes.Starting or LocalWakeCodes.NativeRegistration or LocalWakeCodes.InvalidCode);
             if (code != value) { code = value; codeAt = now; unwritten = true; }
+            else countsBehind = true;
             if (next is not null)
             {
                 stateReason = value;
@@ -152,6 +157,16 @@ internal static class LocalWakeStatus
                 if (next != state) { state = next; stateAt = now; Say($"CoCern local wake: {next} ({value})."); }
             }
             WriteIfChanged();
+        }
+
+        public void WriteCounts()
+        {
+            lock (gate)
+            {
+                unwritten |= countsBehind;
+                WriteIfChanged();
+            }
+            Flush();
         }
 
         public void Counts(int sessions, int active)
@@ -193,6 +208,7 @@ internal static class LocalWakeStatus
                     codeCounts = counts
                 }));
                 unwritten = false;
+                countsBehind = false;
             }
             catch (Exception)
             {
