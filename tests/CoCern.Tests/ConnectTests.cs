@@ -29,6 +29,23 @@ public sealed class ConnectTests : IDisposable
 
     public void Dispose() { try { Directory.Delete(root, true); } catch (IOException) { } catch (UnauthorizedAccessException) { } }
 
+    [Fact]
+    public void A_refresh_adds_a_missing_repository_but_never_moves_one_or_touches_another_hubs_entry()
+    {
+        Dictionary<string, string> Entry(string? repository = null)
+        {
+            var entry = new Dictionary<string, string> { ["COCERN_TOKEN_FILE"] = Token };
+            if (repository is not null) entry["COCERN_REPOSITORY"] = repository;
+            return entry;
+        }
+
+        Assert.Equal("cocern", ConnectCommand.Refresh(Entry(), Token, null, null, null, repository: "cocern")!["COCERN_REPOSITORY"]);
+        Assert.Null(ConnectCommand.Refresh(Entry("chosen"), Token, null, null, null, repository: "cocern"));
+        Assert.Null(ConnectCommand.Refresh(Entry(), Token, null, null, null));
+        var foreign = new Dictionary<string, string> { ["COCERN_TOKEN_FILE"] = Path.Combine(root, "elsewhere", "token") };
+        Assert.Null(ConnectCommand.Refresh(foreign, Token, null, null, null, repository: "cocern"));
+    }
+
     private (int Code, string Output, string Error) Connect(params string[] args)
     {
         using var output = new StringWriter();

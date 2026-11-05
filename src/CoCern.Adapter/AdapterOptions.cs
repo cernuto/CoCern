@@ -94,7 +94,7 @@ public sealed class AdapterOptions
             string.Equals(environment("COCERN_SIGNALR"), "true", StringComparison.OrdinalIgnoreCase)) { Repository = repository, ChatOnly = chatOnly, Diagnostics = diagnostics, EventWaits = eventWaits, PinnedFingerprint = fingerprint, ExportedChat = chat };
     }
 
-    private static string? ParseRepository(string? value)
+    internal static string? ParseRepository(string? value)
     {
         if (string.IsNullOrWhiteSpace(value)) return null;
         var repository = value.Trim();

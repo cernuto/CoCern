@@ -40,7 +40,7 @@ internal sealed class DashboardConnect(IConfiguration configuration, IHostEnviro
         var hubArguments = HubArguments(server.Features.Get<IServerAddressesFeature>()?.Addresses ?? [], listener?.Local);
         if (hubArguments is null) return new() { Unavailable = "This hub has no connection available on this PC." };
         var start = new ProcessStartInfo(DotnetHost()) { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true };
-        foreach (var argument in new[] { adapter, "--connect", "--json", "--token-file", tokenFile }.Concat(hubArguments).Concat(arguments)) start.ArgumentList.Add(argument);
+        foreach (var argument in new[] { adapter, "--connect", "--json", "--token-file", tokenFile }.Concat(hubArguments).Concat(RepositoryArguments()).Concat(arguments)) start.ArgumentList.Add(argument);
         using var process = Process.Start(start) ?? throw new InvalidOperationException("The adapter could not start.");
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(Timeout);
@@ -124,9 +124,17 @@ internal sealed class DashboardConnect(IConfiguration configuration, IHostEnviro
         return null;
     }
 
-    private string? TokenFile() => configuration.GetSection("Relay:Clients").Get<RelayClient[]>()?
+    private string? TokenFile() => LocalClient() is { } client ? TokenPath(client) : null;
+
+    /// <summary>The client whose token Connect gives the apps on this PC.</summary>
+    private RelayClient? LocalClient() => configuration.GetSection("Relay:Clients").Get<RelayClient[]>()?
         .Where(client => client.IsAdministrator && string.IsNullOrWhiteSpace(client.Token) && !string.IsNullOrWhiteSpace(client.TokenFile))
-        .Select(client => Path.GetFullPath(Path.Combine(environment.ContentRootPath, client.TokenFile!))).FirstOrDefault(File.Exists);
+        .FirstOrDefault(client => File.Exists(TokenPath(client)));
+
+    private string TokenPath(RelayClient client) => Path.GetFullPath(Path.Combine(environment.ContentRootPath, client.TokenFile!));
+
+    /// <summary>That client's repository, exactly as configured, when it has just one; with several, a chat must still name the one it means.</summary>
+    private string[] RepositoryArguments() => LocalClient()?.Repositories is [{ } repository] && !string.IsNullOrWhiteSpace(repository) ? ["--repository", repository] : [];
 
     /// <summary>Use the running server's loopback HTTP address, then its known local HTTPS identity.</summary>
     internal static string[]? HubArguments(IEnumerable<string> addresses, (int Port, string Fingerprint)? localHttps)
