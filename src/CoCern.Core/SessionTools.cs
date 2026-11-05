@@ -14,7 +14,7 @@ namespace CoCern.Core;
 /// packet and the board's standing. After the reply, off its path, a manager's open starts the repository's anomaly monitor and a reported
 /// workspace may teach the doc cache. Its reply is bounded here and takes no reply add-ons.
 /// </summary>
-internal sealed class SessionTools(Aggregates aggregates, StandingDelivery standing, AttentionOptions attention, AnomalyOptions? anomaly, IDocCacheTools docs)
+internal sealed class SessionTools(Aggregates aggregates, StandingDelivery standing, AttentionOptions attention, AnomalyOptions? anomaly, IDocCacheTools docs, bool searchOn, bool analyticsOn)
 {
     public async Task<RelayReply> OpenAsync(RelayCaller caller, JsonObject args, CallTrace? trace)
     {
@@ -73,6 +73,7 @@ internal sealed class SessionTools(Aggregates aggregates, StandingDelivery stand
         }
         // In this reply and not the tool's description: it costs once per session, not on every turn, and server instructions have proved not to reach every chat.
         data["waitingHint"] = WaitingHint;
+        data[ChatGuidance.StartHintField] = ChatGuidance.StartHint(caller.IsAdministrator, searchOn, analyticsOn, docs: !ReferenceEquals(docs, DocCacheTool.Off));
         await standing.AttachAtOpenAsync(caller, args, data);
         return Ok(data, opened.Version);
     }

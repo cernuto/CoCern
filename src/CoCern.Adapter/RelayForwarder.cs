@@ -35,7 +35,19 @@ public sealed class RelayForwarder(HttpClient client, AdapterOptions options, st
     {
         if (cancellationToken.IsCancellationRequested) return Task.FromCanceled<AdapterReply>(cancellationToken);
         return CoordinationTools.IsAllowed(tool, options.Admin, options.ChatOnly, options.Diagnostics, options.EventWaits)
-            ? SendAsync(tool, arguments, cancellationToken) : Task.FromResult(new AdapterReply(false, "unknown_tool"));
+            ? SendAsync(tool, arguments, cancellationToken)
+            : Task.FromResult(new AdapterReply(false, "unknown_tool", ChatGuidance.ToolOff(tool) is { } hint ? JsonSerializer.SerializeToElement(new Dictionary<string, string> { [ChatGuidance.HintField] = hint }) : null));
+    }
+
+    /// <summary>A <c>session_open</c> reply with its startup line narrowed to the tools this adapter lists (<see cref="ChatGuidance.NarrowStartHint"/>). A reply without one stays as it is.</summary>
+    internal AdapterReply WithOwnStartHint(AdapterReply reply)
+    {
+        if (reply.Data is not { ValueKind: JsonValueKind.Object } data || !data.TryGetProperty(ChatGuidance.StartHintField, out var line) || line.ValueKind != JsonValueKind.String) return reply;
+        var narrowed = ChatGuidance.NarrowStartHint(line.GetString()!, options.Admin, options.ChatOnly);
+        if (narrowed == line.GetString()) return reply;
+        var node = System.Text.Json.Nodes.JsonNode.Parse(data.GetRawText())!.AsObject();
+        node[ChatGuidance.StartHintField] = narrowed;
+        return reply with { Data = JsonSerializer.SerializeToElement(node) };
     }
 
     // A fixed, internal status read for the exact connection's current private handle, including in the compact profile.
