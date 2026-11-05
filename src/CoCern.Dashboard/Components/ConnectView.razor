@@ -37,7 +37,7 @@ else
                         {
                             <span class="tag good">@(client.State == ConnectStates.Added ? "Connected · restart it" : client.Admin == true ? "Connected · admin tools" : "Connected")</span>
                         }
-                        else
+                        else if (client.State != ConnectStates.OtherHub)
                         {
                             <button type="button" class="connect-button" disabled="@(_busy is not null)" @onclick="() => ConnectAsync(client.Id)">@(_busy == client.Id ? "Connecting…" : client.State == ConnectStates.Error ? "Try again" : "Connect")</button>
                         }
@@ -99,6 +99,7 @@ else
     {
         ConnectStates.Error => client.Detail ?? "Its settings could not be changed.",
         ConnectStates.Available when client.Detail is { } detail => detail,
+        ConnectStates.OtherHub => client.Detail ?? "Its CoCern entry points at another hub, so Connect leaves it as it is.",
         _ => client.Id switch { ConnectClients.ClaudeCode => "The Claude Code CLI and its IDE extensions.", ConnectClients.ClaudeDesktop => "Claude for desktop.", ConnectClients.Codex => "Codex CLI, IDE extension and app.", _ => "" }
     };
 }

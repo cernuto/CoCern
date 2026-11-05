@@ -61,7 +61,7 @@ public sealed class ConnectTests : IDisposable
         {
             var result = Connect(args);
             Assert.Equal(0, result.Code);
-            Assert.All(States(result.Output).Values, state => Assert.Equal("connected", state));
+            Assert.All(States(result.Output).Values, state => Assert.Equal("other-hub", state));
             Assert.Equal(json, File.ReadAllBytes(ClaudeJson));
             Assert.Equal(toml, File.ReadAllBytes(Toml));
             Assert.Empty(Backups(ClaudeJson));
@@ -156,7 +156,7 @@ public sealed class ConnectTests : IDisposable
         var states = States(Connect("--json").Output);
 
         Assert.Equal(3, states.Count);
-        Assert.All(states.Values, state => Assert.Equal("connected", state));
+        Assert.All(states.Values, state => Assert.Equal("other-hub", state));
         Assert.Equal(foreign, File.ReadAllText(ClaudeJson));
         Assert.Equal(remote, File.ReadAllText(Toml));
         Assert.Equal(node, File.ReadAllText(Desktop));
