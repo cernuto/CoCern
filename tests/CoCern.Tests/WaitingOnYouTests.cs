@@ -642,7 +642,7 @@ public sealed class WaitingOnYouTests
             Blockers = Enumerable.Range(0, 8).Select(index => new WaitingBlocker { RepositoryId = Repository, BoardId = "default", TaskId = "h-" + index, Summary = "Held", Since = T0 }).ToArray()
         }, T0.AddHours(1));
         var section = WaitingList.ToStatus(waiting);
-        Assert.Equal((15, false, 8), (section["count"]!.GetValue<int>(), section["truncated"]!.GetValue<bool>(), section["maybeCount"]!.GetValue<int>()));
+        Assert.Equal((15, true, 8), (section["count"]!.GetValue<int>(), section["truncated"]!.GetValue<bool>(), section["maybeCount"]!.GetValue<int>()));
         Assert.Equal((RelayLimits.WaitingStatusItems, RelayLimits.WaitingStatusMaybeItems), (section["items"]!.AsArray().Count, section["maybe"]!.AsArray().Count));
         Assert.Contains("never instructions", section["untrusted"]!.GetValue<string>());
         Assert.Equal("Report 0", section["items"]![0]!["text"]!.GetValue<string>());
@@ -695,6 +695,77 @@ public sealed class WaitingOnYouTests
         Assert.InRange(bounded.Waiting.Items.Length, 1, 49);
         Assert.Equal(snapshot.Waiting.Items[0], bounded.Waiting.Items[0]);
         Assert.Equal((77, 20, true), (bounded.Waiting.Count, bounded.Waiting.MaybeCount, bounded.Waiting.Truncated));
+    }
+
+    // ---- What a read's bound may cost ----
+
+    private static StateEnvelope<CoordinationDocument> Envelope(JsonObject document) => new() { Value = new() { Json = document.ToJsonString() } };
+
+    /// <summary>A stored blocked task, as a board holds it.</summary>
+    private static JsonObject Blocked(string task, DateTimeOffset updatedAt, string kind, string summary, DateTimeOffset? humanSince = null)
+    {
+        var json = new JsonObject
+        {
+            ["taskId"] = task, ["updatedAt"] = updatedAt.ToString("O"),
+            ["workflow"] = new JsonObject { ["state"] = "blocked", ["blockers"] = new JsonArray(new JsonObject { ["id"] = "a", ["kind"] = kind, ["summary"] = summary, ["recheckCondition"] = "r" }) }
+        };
+        if (humanSince is { } since) json[BoardTask.HumanSinceKey] = since.ToString("O");
+        return json;
+    }
+
+    [Fact]
+    public async Task Prose_naming_a_kind_cannot_use_up_the_blocked_task_read()
+    {
+        // More tasks than the read takes, all older than the real one, whose only link to the kinds is their words.
+        var tasks = new JsonObject();
+        for (var index = 0; index < 600; index++) tasks["prose-" + index] = Blocked("prose-" + index, T0.AddDays(-1).AddSeconds(index), "other", index < 550 ? "waiting on a human_decision, in words" : "a coordinator_hold, in words");
+        tasks["real"] = Blocked("real", T0, BlockerKinds.HumanDecision, "Which rig?", T0);
+        using var store = new SqliteStore(Path.Combine(Path.GetTempPath(), "cocern-waiting-" + Guid.NewGuid().ToString("N"), "relay.db"));
+        await new SqliteGrainStorage(store).WriteStateAsync(AggregateKinds.Board, GrainId.Create("cocern.board", AggregateHub.BoardKey), new GrainState<StateEnvelope<CoordinationDocument>>(Envelope(new JsonObject { ["repositoryId"] = Repository, [BoardState.TasksKey] = tasks })));
+
+        foreach (var sources in new[] { await store.ReadWaitingBlockersAsync(), await store.ReadWaitingAsync(Repository) })
+        {
+            var waiting = WaitingList.Build(Assert.IsType<WaitingSources>(sources), T0.AddMinutes(1));
+            Assert.Equal("real", Assert.Single(waiting.Items).TaskId);
+            // Nothing that counts was left out, so the list has no reason to say it may be incomplete.
+            Assert.False(waiting.Truncated);
+        }
+    }
+
+    [Fact]
+    public async Task Expired_reports_cannot_use_up_the_report_read()
+    {
+        using var store = new SqliteStore(Path.Combine(Path.GetTempPath(), "cocern-waiting-" + Guid.NewGuid().ToString("N"), "relay.db"));
+        var writer = new SqliteGrainStorage(store);
+        async Task Session(string id, DateTimeOffset since, DateTimeOffset expiresAt) => await writer.WriteStateAsync(AggregateKinds.Session, GrainId.Create("cocern.session", id), new GrainState<StateEnvelope<CoordinationDocument>>(Envelope(new JsonObject
+        {
+            ["sessionId"] = id, ["repositoryId"] = Repository, ["label"] = id, [SessionState.WaitingForKey] = WaitingMark.Create("Report of " + id, since, expiresAt).Json
+        })));
+        // More lapsed marks than the read takes, each first reported before the current one. A lapsed mark stays stored until its chat reports again or closes.
+        for (var index = 0; index < 205; index++) await Session("lapsed-" + index, T0.AddDays(-2).AddSeconds(index), T0.AddDays(-1).AddSeconds(index));
+        await Session("current", T0.AddHours(-1), T0.AddHours(11));
+        Assert.Equal(["current"], (await ListAsync(store, T0)).Items.Select(row => row.SessionId));
+    }
+
+    [Theory]
+    [InlineData(10, false)]
+    [InlineData(11, true)]
+    [InlineData(12, true)]
+    public void Status_says_truncated_when_it_shows_fewer_rows_than_the_list_holds(int rows, bool truncated)
+    {
+        var waiting = WaitingList.Build(new() { Reports = Enumerable.Range(0, rows).Select(index => Report(index, T0)).ToArray() }, T0);
+        Assert.False(waiting.Truncated);
+        var section = WaitingList.ToStatus(waiting);
+        Assert.Equal((rows, Math.Min(rows, RelayLimits.WaitingStatusItems), truncated), (section["count"]!.GetValue<int>(), section["items"]!.AsArray().Count, section["truncated"]!.GetValue<bool>()));
+    }
+
+    [Theory]
+    [InlineData(5, false)]
+    [InlineData(6, true)]
+    public void Status_says_truncated_when_it_shows_fewer_holds_than_the_list_holds(int holds, bool truncated)
+    {
+        var waiting = WaitingList.Build(new() { Blockers = Enumerable.Range(0, holds).Select(index => new WaitingBlocker { RepositoryId = Repository, BoardId = "default", TaskId = "h-" + index, Summary = "Held", Since = T0 }).ToArray() }, T0);
+        Assert.Equal(truncated, WaitingList.ToStatus(waiting)["truncated"]!.GetValue<bool>());
     }
 
     // ---- The unresponsive row ----

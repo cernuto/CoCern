@@ -20,11 +20,14 @@ public sealed partial class SqliteStore
     /// <summary>A tool read may wait this long for a busy writer before it answers busy; the dashboard's read gives up at once.</summary>
     private static readonly TimeSpan WaitingToolWait = TimeSpan.FromMilliseconds(250);
 
+    private const string BlockerKind = "CASE WHEN blocker.type = 'object' THEN json_extract(blocker.value, '$." + WorkflowBlocker.KindKey + "') END";
+
     private const string StoredDocument = "CASE WHEN json_valid(json_extract(payload, '$.Value.Json')) THEN json_extract(payload, '$.Value.Json') ELSE '{}' END";
 
     /// <summary>
     /// The tasks in <c>blocked</c> that may count, from any board: it does not use <see cref="StandingQuery"/>'s filter, which skips a board
-    /// with no standing or orders. A task's kinds are checked in the Domain; the text test here only saves the read.
+    /// with no standing or orders. Each blocker's own <c>kind</c> decides here too, so a task that only names a kind in its words cannot use up the
+    /// read before the Domain leaves it out.
     /// </summary>
     internal const string WaitingBlockersQuery = $"""
         WITH boards AS (
@@ -34,14 +37,15 @@ public sealed partial class SqliteStore
                 AND substr(grain_key, 1, length($prefix)) = $prefix
                 AND (instr(payload, '{BlockerKinds.HumanDecision}') > 0 OR instr(payload, '{BlockerKinds.CoordinatorHold}') > 0)
         ), tasks AS (
-            SELECT grain_key, task.key AS task_id, task.value AS task, json_extract(task.value, '$.{BoardTask.WorkflowKey}.{WorkflowRecord.BlockersKey}') AS blockers
+            SELECT grain_key, task.key AS task_id, task.value AS task,
+                CASE WHEN json_type(task.value, '$.{BoardTask.WorkflowKey}.{WorkflowRecord.BlockersKey}') = 'array' THEN json_extract(task.value, '$.{BoardTask.WorkflowKey}.{WorkflowRecord.BlockersKey}') END AS blockers
             FROM boards, json_each(boards.document, '$.{BoardState.TasksKey}') AS task
             WHERE task.type = 'object' AND json_extract(task.value, '$.{BoardTask.WorkflowKey}.{WorkflowRecord.StateKey}') = '{WorkflowStates.Blocked}'
         )
         SELECT grain_key, task_id, json_extract(task, '$.{BoardTask.OwnerKey}'), json_extract(task, '$.{BoardTask.HumanSinceKey}'), json_extract(task, '$.{BoardTask.HoldSinceKey}'), json_extract(task, '$.{BoardTask.UpdatedAtKey}'), blockers
         FROM tasks
-        WHERE instr(blockers, '{BlockerKinds.HumanDecision}') > 0 OR instr(blockers, '{BlockerKinds.CoordinatorHold}') > 0
-        ORDER BY instr(blockers, '{BlockerKinds.HumanDecision}') = 0, coalesce(json_extract(task, '$.{BoardTask.HumanSinceKey}'), json_extract(task, '$.{BoardTask.HoldSinceKey}'), json_extract(task, '$.{BoardTask.UpdatedAtKey}')), grain_key, task_id
+        WHERE EXISTS (SELECT 1 FROM json_each(blockers) AS blocker WHERE {BlockerKind} IN ('{BlockerKinds.HumanDecision}', '{BlockerKinds.CoordinatorHold}'))
+        ORDER BY NOT EXISTS (SELECT 1 FROM json_each(blockers) AS blocker WHERE {BlockerKind} = '{BlockerKinds.HumanDecision}'), coalesce(json_extract(task, '$.{BoardTask.HumanSinceKey}'), json_extract(task, '$.{BoardTask.HoldSinceKey}'), json_extract(task, '$.{BoardTask.UpdatedAtKey}')), grain_key, task_id
         LIMIT $limit;
         """;
 
@@ -57,14 +61,17 @@ public sealed partial class SqliteStore
         ORDER BY grain_key LIMIT $limit;
         """;
 
-    /// <summary>One repository's open sessions with a report: its ID, label and the report, and nothing else of the session.</summary>
+    /// <summary>
+    /// One repository's open sessions with a report: its ID, label and the report, and nothing else of the session. Latest to expire first: a lapsed
+    /// mark stays stored until its chat reports again or closes, so the read's limit must fall on those and not on a current report.
+    /// </summary>
     internal const string WaitingReportsQuery = $"""
         SELECT json_extract(document, '$.{SessionState.SessionIdKey}'), json_extract(document, '$.{SessionState.LabelKey}'), json_extract(document, '$.{SessionState.WaitingForKey}') FROM (
             SELECT {StoredDocument} AS document
             FROM grain_state
             WHERE state_name='session' AND grain_type='cocern.session'{OpenSessionsOnly} AND json_valid(payload) AND instr(payload, '{SessionState.WaitingForKey}') > 0)
         WHERE json_extract(document, '$.{CommonState.RepositoryIdKey}') = $repository AND json_extract(document, '$.{SessionState.WaitingForKey}') IS NOT NULL
-        ORDER BY json_extract(document, '$.{SessionState.WaitingForKey}.{WaitingMark.SinceKey}') LIMIT $limit;
+        ORDER BY json_extract(document, '$.{SessionState.WaitingForKey}.{WaitingMark.ExpiresAtKey}') DESC LIMIT $limit;
         """;
 
     /// <summary>Unread rows read at once for the unresponsive row, across a repository's sessions.</summary>
