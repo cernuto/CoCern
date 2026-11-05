@@ -40,7 +40,11 @@ internal sealed class MessageTools(Aggregates aggregates, IMachineDirectory dire
     {
         args["snoozeBoundaries"] = attention.SnoozeBoundaries;
         var reply = await aggregates.Session(caller, RelayTools.AttentionRespond, args);
-        if (reply.Ok) { var data = Aggregates.Parse(reply); telemetry?.RecordOutcome(args, Text(data, "kind"), Text(data, "outcome"), Text(data, "itemId")); }
+        if (!reply.Ok) return reply;
+        var data = Aggregates.Parse(reply);
+        // Each answered item counts once, as it would have answered alone. One that was not answered has no outcome.
+        IEnumerable<JsonObject> answered = data["results"] is JsonArray results ? results.OfType<JsonObject>().Where(row => Text(row, "outcome").Length > 0) : [data];
+        foreach (var one in answered) telemetry?.RecordOutcome(args, Text(one, "kind"), Text(one, "outcome"), Text(one, "itemId"));
         return reply;
     }
 }

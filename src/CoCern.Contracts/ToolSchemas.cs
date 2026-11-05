@@ -35,7 +35,7 @@ internal static class ToolSchemas
             RelayTools.RecordDecision => [],
             RelayTools.StandingPut => ["lines", "grants", "remove", "approve", "settings"],
             RelayTools.Search => ["kinds"],
-            RelayTools.AttentionRespond => ["until"],
+            RelayTools.AttentionRespond => ["itemId", "itemIds", "until"],
             RelayTools.AnalyticsQuery => ["params", "sql", "reports", "ifNoneMatch", "includeDetails"],
             RelayTools.OrderPut => ["expiresAt", "expectedRevision"],
             RelayTools.DocSearch => ["spec", "path"],
@@ -76,6 +76,7 @@ internal static class ToolSchemas
         if (tool.Name == RelayTools.AttentionRespond)
         {
             properties["itemId"] = new { type = "string" };
+            properties["itemIds"] = new { type = "array", items = new { type = "string" } };
             properties["action"] = new { type = "string", @enum = AttentionActions.All };
             properties["until"] = new { type = "string", description = "Optional ISO time for later." };
         }
@@ -284,6 +285,7 @@ internal static class ToolSchemas
                 properties["limit"] = new { type = "integer", minimum = 1, maximum = RelayLimits.MaxSearchResults, description = $"Most hits; default {RelayLimits.DefaultSearchResults}." }; break;
             case RelayTools.AttentionRespond:
                 properties["itemId"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxIdentifierLength, description = "Attention item ID from an offer." };
+                properties["itemIds"] = new { type = "array", minItems = 1, maxItems = RelayLimits.MaxAttentionItems, uniqueItems = true, items = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxIdentifierLength }, description = "Instead of itemId: answer these the same way; results has one row each." };
                 properties["action"] = new { type = "string", @enum = AttentionActions.All, description = "later hides the item for a few replies, or until a time; accept and dismiss close it." };
                 properties["until"] = new { type = "string", format = "date-time", description = "Optional future time when a later item returns." }; break;
             case RelayTools.AnalyticsQuery:

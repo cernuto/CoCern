@@ -164,7 +164,7 @@ A `check_inbox`, `task_update`, `action_report` or `task_claim` reply can carry 
 "attention": { "id": "a-91", "k": "blocked", "t": "T-12", "x": "T-12 blocked: waiting on schema review", "more": 3 }
 ```
 
-Answer with `attention_respond`: `accept` or `dismiss` closes it; `later` hides it for 3 replies (or until `until`). Ignoring it counts as `later`. Pass `"attention": false` on a call to skip offers.
+Answer with `attention_respond`: `accept` or `dismiss` closes it; `later` hides it for 3 replies (or until `until`). To clear a backlog, pass `itemIds` (up to 50 of your own items) instead of `itemId`: all get the same answer, and `results` has one row each, with `outcome` or a `code` such as `NotFound` for one that could not be answered. Ignoring it counts as `later`. Pass `"attention": false` on a call to skip offers.
 
 Direct messages from another session wake a chat at once unless sent with `wake: false`. The message's existing attention item ID makes repeated watcher reads one wake; the adapter's busy-chat checks and rate limits still apply. Urgent attention (`blocked`, except by a `coordinator_hold` or `human_decision`, `failed`, `interrupted` and `stranded`) also wakes at once. Task-change notices and other nonurgent items wait for the next reply or for an idle hold of 10 minutes. Tips never cause a wake.
 

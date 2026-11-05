@@ -91,7 +91,7 @@ public static class RelayToolCatalog
         new(RelayTools.StandingPut, "Add, edit or remove standing lines, grants and board settings under the expected revision.", true, true, false, ["expectedRevision"]),
         new(RelayTools.Search, "Search this repository's tasks, notes and your inbox; returns IDs and snippets to open with task_get, context_get or check_inbox.", false, false, true, ["query"],
             TokenBudget: RelayLimits.SearchReplyTokens),
-        new(RelayTools.AttentionRespond, "Accept, dismiss or postpone an attention offer; postponing never acknowledges the message.", false, true, true, ["itemId", "action"]),
+        new(RelayTools.AttentionRespond, "Accept, dismiss or postpone an attention offer; postponing never acknowledges the message.", false, true, true, ["action"]),
         new(RelayTools.AnalyticsQuery, "Read snapshot analytics by name, batch reports with etag/ifNoneMatch, or SQL when enabled.", true, false, false, ["name"]),
         new(RelayTools.OrderPut, "Create or replace a standing order with a trigger, actions and expiry.", true, true, false, ["orderId", "trigger", "actions"]),
         new(RelayTools.OrderRemove, "Remove a standing order.", true, true, false, ["orderId"]),
