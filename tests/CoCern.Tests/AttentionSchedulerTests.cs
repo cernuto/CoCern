@@ -77,6 +77,70 @@ public sealed class AttentionSchedulerTests
         Assert.Single(Data(Call(session, "check_inbox", new()))["items"]!.AsArray());
     }
 
+    private static void DeliverDirect(StateEnvelope<CoordinationDocument> session, string id, DateTimeOffset at) =>
+        Data(Call(session, "__deliver", new() { ["messageId"] = id, ["senderSessionId"] = "s2", ["text"] = "please review", ["attentionExpiryDays"] = 7 }, at));
+
+    private static void Seen(StateEnvelope<CoordinationDocument> session, string id, DateTimeOffset at) =>
+        Data(Call(session, CoCern.Domain.Messages.AttentionSeen.Operation, new CoCern.Domain.Messages.AttentionSeen("repo", "s1", "secret", [id]).ToJson(), at));
+
+    [Fact]
+    public void A_newer_direct_message_becomes_the_wake_candidate_while_an_older_one_stays_unread()
+    {
+        var session = OpenSession();
+        DeliverDirect(session, "m-old", Now);
+        var older = StatusWake(session);
+        Assert.NotNull(older);
+
+        DeliverDirect(session, "m-new", Now.AddMinutes(1));
+        var newer = StatusWake(session, Now.AddMinutes(1));
+        Assert.NotNull(newer);
+        Assert.NotEqual(older, newer);
+        Assert.Equal(newer, StatusWake(session, Now.AddMinutes(2)));
+        Assert.Equal(2, Data(Call(session, "check_inbox", new()))["items"]!.AsArray().Count);
+    }
+
+    [Fact]
+    public void A_stuck_older_wake_does_not_block_newer_mail_and_a_seen_message_does_not_wake_again()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "cocern-attention-wake-" + Guid.NewGuid().ToString("N"), "wake.db");
+        var session = OpenSession();
+        try
+        {
+            using var state = new CoCern.Adapter.WakeState(path, new CoCern.Adapter.WakeLimits(TimeSpan.Zero, 100, TimeSpan.FromHours(1)));
+            const string Route = "route";
+            string Id(string? wake) => CoCern.Adapter.WakeReconciler.AttentionWakePrefix + wake;
+            void Dispatch(string? wake, DateTimeOffset at)
+            {
+                var (status, batch) = state.Reserve(Route, [Id(wake)], at);
+                Assert.Equal("reserved", status);
+                state.Complete(batch!, queued: true);
+            }
+
+            // The older wake was queued but its turn never ran, so its message stays unread.
+            DeliverDirect(session, "m-old", Now);
+            var older = StatusWake(session);
+            Dispatch(older, Now);
+            Assert.False(state.HasUnseen(Route, [Id(older)]));
+
+            // Newer mail has a candidate of its own, so it can still wake the chat, exactly once.
+            DeliverDirect(session, "m-new", Now.AddMinutes(1));
+            var newer = StatusWake(session, Now.AddMinutes(1));
+            Assert.True(state.HasUnseen(Route, [Id(newer)]));
+            Dispatch(newer, Now.AddMinutes(1));
+            Assert.False(state.HasUnseen(Route, [Id(newer)]));
+
+            // Once it is seen the newer message is no candidate, and what remains already woke the chat.
+            Seen(session, "m-new", Now.AddMinutes(2));
+            var after = StatusWake(session, Now.AddMinutes(2));
+            Assert.NotEqual(newer, after);
+            Assert.Equal(older, after);
+            Assert.False(state.HasUnseen(Route, [Id(after)]));
+            Seen(session, "m-old", Now.AddMinutes(3));
+            Assert.Null(StatusWake(session, Now.AddMinutes(3)));
+        }
+        finally { if (Directory.Exists(Path.GetDirectoryName(path)!)) Directory.Delete(Path.GetDirectoryName(path)!, recursive: true); }
+    }
+
     [Fact]
     public void A_wake_false_message_never_wakes_even_after_the_hold()
     {

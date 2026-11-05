@@ -36,6 +36,9 @@ public sealed class DashboardTests
         Assert.True(recovery >= 0, "Manager recovery marker is missing.");
         Assert.True(snapshot >= 0, "Snapshot branch marker is missing.");
         Assert.True(recovery > authenticated && recovery < snapshot, "Recovery must remain available without a snapshot.");
+        Assert.True(page.IndexOf("<ManagerControl", recovery + 1, StringComparison.Ordinal) < 0,
+            "A second Manager-only instance inside the snapshot branch loses recovery when the stream is unavailable.");
+        Assert.Contains("Compact=\"@(View != \"manager\")\"", page[recovery..snapshot]);
         var component = File.ReadAllText(Path.Combine(root.FullName, "src/CoCern.Dashboard/Components/ManagerControl.razor"));
         Assert.Contains("Pause prevents new claims and actions. Stop also asks known chats to cancel. Running tools and wake delivery are not interrupted.", component);
         Assert.Contains("Recent manager selections", component);
@@ -545,6 +548,31 @@ public sealed class DashboardTests
         Assert.Equal(("standing_proposal", "p-1", "A line"), (row.Kind, row.ProposalId, row.Text));
         Assert.Equal(1, snapshot.Waiting.Count);
         Assert.True(snapshot.Waiting.Truncated);
+    }
+
+    [Fact]
+    public async Task An_unresponsive_chat_reaches_the_frame_from_the_observation()
+    {
+        await using var host = new RelayHostFixture(settings: new Dictionary<string, string?> { ["Relay:Clients:0:IsAdministrator"] = "true", ["Relay:Dashboard:ViewerPrincipalIds:0"] = "test-user" }, configureServices: services => services.AddSingleton<IRelayObservationSource>(new QuietChatSource()));
+        using var client = BrowserClient(host);
+        await using var viewer = await StartViewerAsync(host, client);
+        CoCern.Contracts.Dashboard.DashboardSnapshot snapshot = new();
+        for (var attempt = 0; attempt < 200 && (snapshot.Revision == 0 || snapshot.Waiting.Items.Length == 0); attempt++)
+        {
+            snapshot = JsonSerializer.Deserialize<CoCern.Contracts.Dashboard.DashboardSnapshot>(await client.GetByteArrayAsync("/dashboard/api/snapshot"), new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+            await Task.Delay(50);
+        }
+        var row = Assert.Single(snapshot.Waiting.Items);
+        Assert.Equal(("unresponsive", "quiet", "1 unread direct message; no hub call in over 10 minutes."), (row.Kind, row.SessionId, row.Text));
+    }
+
+    private sealed class QuietChatSource : IRelayObservationSource
+    {
+        public Task<RelayObservation?> ReadObservationAsync(DateTimeOffset now, string incarnationId, CancellationToken cancellationToken = default) => Task.FromResult<RelayObservation?>(new()
+        {
+            WaitingMail = [new WaitingMail { SessionId = "quiet", RepositoryId = "repo", Sent = [now.AddHours(-1)], LastCallAt = now.AddHours(-2) }]
+        });
+        public Task<CoCern.Contracts.Dashboard.DatabaseMetrics?> ReadDatabaseMetricsAsync(int rowCountLimit = 10_000, CancellationToken cancellationToken = default) => Task.FromResult<CoCern.Contracts.Dashboard.DatabaseMetrics?>(new());
     }
 
     private sealed class TruncatedWaitingSource : IRelayObservationSource

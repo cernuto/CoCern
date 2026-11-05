@@ -47,6 +47,14 @@ public sealed class RelayForwarder(HttpClient client, AdapterOptions options, st
         { repositoryId = own.RepositoryId, sessionId = own.SessionId, sessionToken = own.SessionToken, backgroundCall = true }), ct);
     }
 
+    // The same fixed read for one local handle a restarted adapter would watch again, including in the compact profile.
+    internal Task<AdapterReply> ProbeHandleAsync(Node.SessionHandle handle, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        return SendAsync(RelayTools.GetStatus, JsonSerializer.SerializeToElement(new
+        { repositoryId = handle.RepositoryId, sessionId = handle.SessionId, sessionToken = handle.SessionToken, backgroundCall = true }), ct);
+    }
+
     private async Task<AdapterReply> SendAsync(string tool, JsonElement arguments, CancellationToken cancellationToken)
     {
         if (arguments.ValueKind != JsonValueKind.Object) return new(false, "invalid_arguments");

@@ -251,6 +251,10 @@ public static class RelayLimits
     public const int WaitingForMaxHours = 24;
     /// <summary>Days a blocked task stays on "Waiting on you" from when it took the blocker, though the task stays blocked.</summary>
     public const int WaitingBlockerDays = DefaultAttentionExpiryDays;
+    /// <summary>Minutes direct mail must have waited, and the chat's own last hub call have passed, before "Waiting on you" calls it unresponsive.</summary>
+    public const int DefaultUnresponsiveMinutes = 10;
+    /// <summary>Hours after a chat's last hub call of its own that it stops counting, so abandoned chats do not fill the list.</summary>
+    public const int UnresponsiveActiveHours = 24;
     /// <summary>Most rows the dashboard's snapshot carries; <c>Count</c> stays the true total observed.</summary>
     public const int MaxWaitingItems = 50;
     /// <summary>Most coordinator holds the snapshot carries in its "maybe" group.</summary>
