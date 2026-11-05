@@ -151,7 +151,7 @@ public static class RelayAuthentication
         principal.Identity is { IsAuthenticated: true, AuthenticationType: "Relay" } && principal.FindAll(MachineClaim).SingleOrDefault()?.Value is { Length: > 0 } machineId && principal.FindFirstValue(ClaimTypes.NameIdentifier) is { } principalId
             ? new MachineIdentity(machineId, principalId) : null;
 
-    public static RelayCaller Caller(ClaimsPrincipal principal) => new(principal.FindFirstValue(ClaimTypes.NameIdentifier) ?? throw new UnauthorizedAccessException(), principal.HasClaim("relay_admin", "true"), principal.FindAll("relay_repository").Select(c => c.Value).ToArray());
+    public static RelayCaller Caller(ClaimsPrincipal principal) => new(principal.FindFirstValue(ClaimTypes.NameIdentifier) ?? throw new UnauthorizedAccessException(), principal.HasClaim("relay_admin", "true"), principal.FindAll("relay_repository").Select(c => c.Value).ToArray(), AuthenticatedMachineId: principal.FindFirstValue(MachineClaim));
 }
 
 internal sealed class RelayConfigurationValidator(IConfiguration configuration, IHostEnvironment environment) : IHostedService

@@ -34,7 +34,7 @@ public sealed class ControlState(JsonObject json)
     /// <summary>Every key the directory stores: its entries by session ID, close fences by session ID, resources by ID, aliases by machine and name, and cancellations by session and action.</summary>
     public static StateShape Shape { get; } = CommonState.Shape.With(
         (SessionsKey, StateShape.Map(DirectoryEntry.Shape)), (ClosingKey, StateShape.Map(StateShape.Object((FenceSeqKey, null), (FenceAtKey, null), (NativeParticipant.Id, null), (DuplicateCloseKey, null)))), (CloseSeqKey, null),
-        (NativeJoinsKey, StateShape.Map(StateShape.Object(("sessionId", null), ("generation", null), ("requestId", null), ("expired", null), ("retired", StateShape.Map(null))))),
+        (NativeJoinsKey, StateShape.Map(StateShape.Object(("sessionId", null), ("generation", null), ("requestId", null), ("expired", null), ("workingCopy", null), ("machineScope", null), ("protectedRoot", null), ("retired", StateShape.Map(null))))),
         (ResourcesKey, StateShape.Map(RegisteredResource.Shape)), (AliasesKey, StateShape.Map(null)),
         (PausedKey, null), (CancellationsKey, StateShape.Map(Cancellation.Shape)),
         (ManagerGenerationKey, null), (ManagerKey, ManagerAssignment.Shape), (ManagerHistoryKey, ManagerSelectionHistoryState.Shape));
@@ -45,7 +45,7 @@ public sealed class ControlState(JsonObject json)
     internal JsonObject? NativeJoin(string participant) => (json[NativeJoinsKey] as JsonObject)?[participant] as JsonObject;
     internal bool CanTrackNative(string participant) => NativeJoin(participant) is not null || (json[NativeJoinsKey] as JsonObject)?.Count is null or < RelayLimits.MaxRecords;
 
-    internal void TrackNative(SessionRecord record)
+    internal void TrackNative(SessionRecord record, RelayCaller caller, JsonObject admitted)
     {
         var joins = ObjectAt(json, NativeJoinsKey);
         var join = ObjectAt(joins, record.NativeId!);
@@ -54,6 +54,10 @@ public sealed class ControlState(JsonObject json)
         join["generation"] = record.NativeGeneration;
         join["sessionId"] = record.SessionId;
         join["requestId"] = record.NativeRequest;
+        join["workingCopy"] = Text(admitted, NativeParticipant.WorkingCopy);
+        // A reported machineId is only a label. Only authentication supplies protected machine provenance.
+        join["machineScope"] = caller.AuthenticatedMachineId;
+        join["protectedRoot"] = caller.AuthenticatedMachineId is { Length: > 0 } ? admitted[NativeParticipant.ProtectedRoot]?.DeepClone() : null;
         join.Remove("expired");
     }
 
@@ -86,6 +90,16 @@ public sealed class ControlState(JsonObject json)
         var matches = Entries().Where(row => row.Entry?.NativeId == participantId && row.Entry.RepositoryId == repositoryId).Take(2).ToArray();
         return matches.Length == 1 && matches[0].Id == id && matches[0].Entry!.NativeGeneration == Text(join, "generation")
             && !NativeClosing(participantId) ? new(participantId, id, repositoryId) : null;
+    }
+
+    internal VerifiedNativeFileScope? CurrentNativeFileScope(RelayCaller caller, string participantId, string repositoryId, string sessionId, string token)
+    {
+        if (caller.AuthenticatedMachineId is not { Length: > 0 } machine || !caller.MayAccess(repositoryId)
+            || CurrentNativeSession(participantId, repositoryId) is not { } current || current.SessionId != sessionId
+            || Entry(sessionId) is not { } entry || entry.PrincipalId != caller.PrincipalId || !SecretEquals(entry.Token, token)
+            || NativeJoin(participantId) is not { } join || Text(join, "machineScope") != machine
+            || Text(join, "workingCopy").Length == 0 || !NativeParticipant.ValidProtectedRoot(Text(join, "protectedRoot"))) return null;
+        return new(participantId, sessionId, repositoryId, machine, Text(join, "protectedRoot"), Text(join, "generation"));
     }
 
     internal bool NativeClosing(string participant) => json[ClosingKey] is JsonObject closing

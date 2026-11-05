@@ -97,6 +97,18 @@ public sealed record SessionOwnersQuery(string RepositoryId, IReadOnlyList<strin
 /// Read-only; nothing else about them is returned. The hub asks it before listing announced chats, so a chat whose session closed since its
 /// machine last announced is left out.
 /// </summary>
+public sealed record NativeFileScopeQuery(string RepositoryId, string SessionId, string SessionToken, string ParticipantId) : IInternalRequest<NativeFileScopeQuery>
+{
+    public static string Operation => Operations.NativeFileScope;
+    public static string TargetKind => AggregateKinds.Control;
+    public JsonObject ToJson() => new() { ["repositoryId"] = RepositoryId, ["sessionId"] = SessionId, ["sessionToken"] = SessionToken, ["participantId"] = ParticipantId };
+    public static Decoding<NativeFileScopeQuery> Decode(JsonObject payload)
+    {
+        var read = new MessageReader(payload);
+        return read.Result(new NativeFileScopeQuery(read.Text("repositoryId"), read.Text("sessionId"), read.Text("sessionToken"), read.Text("participantId")));
+    }
+}
+
 public sealed record SessionsOpenQuery(string RepositoryId, IReadOnlyList<string> SessionIds) : IInternalRequest<SessionsOpenQuery>
 {
     public static string Operation => Operations.SessionsOpen;
