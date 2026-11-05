@@ -197,6 +197,38 @@ public sealed class HubResponseCompactionTests
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Compact_list_continuation_without_a_snapshot_tag_requires_restart(bool workers)
+    {
+        var state = workers ? Worker().State : Board();
+        var args = new JsonObject { ["cursor"] = 1, ["limit"] = 1 };
+        if (!workers) args["openOnly"] = true;
+
+        var reply = Call(state, workers ? "control" : "board", workers ? RelayTools.WorkerList : RelayTools.TaskGet, args);
+
+        Assert.False(reply.Ok);
+        Assert.Equal("ListRestartRequired", reply.Code);
+        Assert.Empty(state.Effects);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Full_list_continuation_keeps_its_existing_numeric_cursor_contract(bool workers)
+    {
+        var state = workers ? Worker().State : Board();
+        var args = new JsonObject { ["cursor"] = 1, ["limit"] = 1 };
+        if (workers) args["includeStale"] = true;
+        else args["includeDetails"] = true;
+
+        var reply = Call(state, workers ? "control" : "board", workers ? RelayTools.WorkerList : RelayTools.TaskGet, args);
+
+        Assert.True(reply.Ok, reply.Code);
+        Assert.Empty(state.Effects);
+    }
+
+    [Theory]
     [InlineData("taskId", "d-open")]
     [InlineData("section", "standing")]
     [InlineData("sinceRevision", 0)]

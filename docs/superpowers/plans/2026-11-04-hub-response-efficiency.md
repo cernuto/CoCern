@@ -2,6 +2,8 @@
 
 ## Approved rulings, superseding the original proposals below
 
+Source preparation checkpoint 2026-11-05: the tests-only change is rebased onto deployed main `996d225` in `codex/hub-response-compaction-main`. No production implementation or runtime has started in this checkout. Added the explicit continuation rule requested below: a compact worker or open-only task page with a nonzero cursor and no snapshot tag returns `ListRestartRequired`; full worker/task list modes retain their numeric-cursor contract. These cases are authored but unrun while Batch B owns the exclusive runner.
+
 Manager approved source authoring in a separate codex/hub-response-compaction worktree based on integration 7f6714cc41d33c526a640c5958cb44ccf365fc1b. The current integration candidate 49e215a7e4ec54747ec5e52f5a8dbf76118362fe has identical production source and only a two-line test fixture correction. One new tests-only file has been authored; no efficiency implementation or test run has occurred. No runs are permitted while the combined gate owns the runner.
 
 The measured cohorts are RESPONSE BYTES, not tokens: background status 10,916,527 bytes/22,040 calls; inbox unknown 9,690,383/6,361; workers unknown 4,038,039/533; task_get unknown 2,424,816/581. Unknown does not identify a model/provider, and unmatched cumulative snapshots do not prove savings.
