@@ -54,7 +54,9 @@ internal sealed class AdminActionRecorder(Aggregates aggregates)
             : First(args, "targetSessionId", "machineId", "resourceId", "labelPrefix") ?? (Text(args, "command") is "cancel" or "stop" ? First(args, "sessionId") : null),
         RelayTools.OrderPut or RelayTools.OrderRemove => First(args, "orderId"),
         RelayTools.DocSync => First(args, "branch"),
-        RelayTools.ConnectApp => First(args, "client"),
+        RelayTools.ConnectApp => First(args, "client") is { } client
+            ? Bounded(client + (args["admin"] is System.Text.Json.Nodes.JsonValue value && value.TryGetValue<bool>(out var admin)
+                ? " admin=" + (admin ? "true" : "false") : " admin=unchanged")) : null,
         _ => null
     };
 
