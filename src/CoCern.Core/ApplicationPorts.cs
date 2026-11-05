@@ -103,6 +103,14 @@ public sealed record ActivityEvent
     public string? OfferTarget { get; init; }
     /// <summary>Reported adapter origin only: true for internal automation, false for a model-facing call, null when unrecorded. Never authorization or proof of model execution.</summary>
     public bool? BackgroundCall { get; init; }
+
+    private string? _callOrigin;
+    /// <summary>Untrusted reported call path, independent of model/background classification and never authorization.</summary>
+    public string? CallOrigin
+    {
+        get => _callOrigin;
+        init => _callOrigin = value is "mcp" or "claude-stop" or "claude-waiter" or "wake-watcher" or "node" or "dashboard" ? value : null;
+    }
 }
 
 /// <summary>Port implemented by storage: records telemetry without waiting. It never throws and drops events rather than slow a call.</summary>

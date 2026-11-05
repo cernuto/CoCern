@@ -55,6 +55,8 @@ try
         await using var join = new NativeJoin(args[3], connection, new RelayForwarder(nativeHttp, connection));
         using var output = new StreamWriter(Console.OpenStandardOutput(), new System.Text.UTF8Encoding(false)) { AutoFlush = true };
         using var error = new StreamWriter(Console.OpenStandardError(), new System.Text.UTF8Encoding(false)) { AutoFlush = true };
+        // As for --stop-hook: everything on standard error enters the chat, so the watcher's status lines must not; delivered text and refusals use the writer above.
+        Console.SetError(TextWriter.Null);
         return hookRegistration is null
             ? await NativeJoinHook.RunAsync(args[1], Console.In, output, error, join, stopping.Token)
             : await NativeJoinHook.RunRegisteredAsync(args[1], Console.In, output, error, join, hookRegistration, stopping.Token);

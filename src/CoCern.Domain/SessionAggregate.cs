@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json.Nodes;
 using CoCern.Contracts;
+using CoCern.Contracts.Dashboard;
 using CoCern.Domain.Messages;
 using CoCern.Domain.State;
 using static CoCern.Contracts.RelayErrorCodes;
@@ -407,19 +408,47 @@ internal static class SessionAggregate
         return Ok(page);
     }
 
+    /// <summary>
+    /// <c>ack</c>: acknowledges the named messages and takes this session's own report of what it waits on Paul for. A call that names no
+    /// message acknowledges nothing, so a report alone records no empty ID. <c>waitingFor</c> follows <see cref="Bind"/>'s rule, since some
+    /// clients send null for every optional field: left out or null keeps the report, empty clears it, and a refused one changes nothing,
+    /// the acknowledgments included. The reply leaves the text out, so a stored replay does not outlive the report on close.
+    /// </summary>
     private static RelayReply Acknowledge(AggregateContext context, SessionState state)
     {
-        var ids = context.Args["messageIds"] as JsonArray ?? new JsonArray(Text(context.Args, "messageId"));
+        var report = context.Args["waitingFor"];
+        if (report is not null && !ValidWaitingFor(report)) return Error(InvalidArguments, new { field = "waitingFor", maxLength = RelayLimits.MaxWaitingTextLength });
+        var supplied = context.Args["messageIds"] as JsonArray ?? (Text(context.Args, "messageId") is { Length: > 0 } single ? new JsonArray(single) : new JsonArray());
+        var ids = Strings(supplied).ToArray();
+        // The hub's own flag for a reply's replyTo: an ID the inbox does not hold now is left alone and never recorded, so its delivery still lands.
+        if (Flag(context.Args, "heldOnly")) ids = ids.Where(id => state.Inbox.Holds(id)).ToArray();
         var acknowledged = 0;
         var acked = state.Acked;
-        foreach (var id in Strings(ids))
+        foreach (var id in ids)
         {
             if (state.Inbox.Remove(id)) acknowledged++;
             acked.Add(id, context.Now);
         }
-        SessionAttention.CloseMessages(state, Strings(ids), context.Now);
-        return Ok(new { acknowledged });
+        SessionAttention.CloseMessages(state, ids, context.Now);
+        var reply = new JsonObject { ["acknowledged"] = acknowledged };
+        if (report is null) return Ok(reply);
+        if (report.GetValue<string>() is { Length: > 0 } text)
+        {
+            var mark = state.ReportWaitingFor(text, context.Now);
+            reply["waitingFor"] = new JsonObject { [WaitingMark.SinceKey] = mark.Since.ToString("O"), [WaitingMark.ExpiresAtKey] = mark.ExpiresAt.ToString("O") };
+        }
+        else
+        {
+            state.ClearWaitingFor();
+            reply["waitingFor"] = null;
+        }
+        return Ok(reply);
     }
+
+    /// <summary>Empty, or text that still reads as something once the dashboard's cleaning leaves it: only zero-width marks would show as a blank row.</summary>
+    private static bool ValidWaitingFor(JsonNode report) =>
+        report is JsonValue value && value.TryGetValue<string>(out var text) && text.Length <= RelayLimits.MaxWaitingTextLength
+        && (text.Length == 0 || !string.IsNullOrWhiteSpace(DashboardText.Safe(text)));
 
     private static RelayReply SendDirect(AggregateContext context)
     {

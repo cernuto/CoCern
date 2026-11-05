@@ -130,6 +130,10 @@ public sealed class BoardTask(JsonObject json)
     public const string CompletedAtKey = "completedAt";
     public const string UpdatedAtKey = "updatedAt";
     public const string UpdatedByKey = "updatedBy";
+    /// <summary>When the hub saw this task take a <c>human_decision</c> blocker; <see cref="UpdatedAtKey"/> resets on any evidence update, so it cannot say.</summary>
+    public const string HumanSinceKey = "humanSince";
+    /// <summary>The same for a <c>coordinator_hold</c>, so a hold's age never shortens a later human blocker's time on the list.</summary>
+    public const string HoldSinceKey = "holdSince";
     /// <summary>When the task left the board; only the archived copy holds it.</summary>
     public const string ArchivedAtKey = "archivedAt";
 
@@ -143,7 +147,7 @@ public sealed class BoardTask(JsonObject json)
         (TaskIdKey, null), (VersionKey, null), (ChangeRevisionKey, null), (OwnerKey, null), (LeaseUntilKey, null), (ClaimGenerationKey, null), (ClaimRequestIdKey, null),
         (ResourceIdsKey, null), (WorkflowKey, WorkflowRecord.Shape), (ActionsKey, StateShape.Map(TaskAction.Shape)), (AttemptHistoryKey, TaskAction.Shape),
         (ReportsKey, TaskReport.Shape), (MessagesKey, TaskMessage.Shape), (FactsKey, StateShape.Any), (CompletedAtKey, null), (UpdatedAtKey, null), (UpdatedByKey, null),
-        (ArchivedAtKey, null));
+        (HumanSinceKey, null), (HoldSinceKey, null), (ArchivedAtKey, null));
 
     /// <summary>A new task: version 0, with no actions, conversation, reports or facts yet.</summary>
     public static BoardTask Create(string taskId) => new(new JsonObject
@@ -292,6 +296,21 @@ public sealed class BoardTask(JsonObject json)
     {
         get => Date(json, ArchivedAtKey);
         set => json[ArchivedAtKey] = value.ToString("O");
+    }
+
+    /// <summary>
+    /// Stamps when the task took a blocker that waits on a person, from <paramref name="workflow"/>, its new workflow: the time stays while
+    /// any blocker of that kind stays, and goes with the last one. The hub's alone: a client's <c>patch</c> writes facts, never these.
+    /// </summary>
+    public void StampWaiting(WorkflowRecord workflow, DateTimeOffset now)
+    {
+        void Stamp(string key, string kind)
+        {
+            if (workflow.State != WorkflowStates.Blocked || !workflow.Blockers.Any(blocker => blocker.Kind == kind)) json.Remove(key);
+            else if (json[key] is null) json[key] = now.ToString("O");
+        }
+        Stamp(HumanSinceKey, BlockerKinds.HumanDecision);
+        Stamp(HoldSinceKey, BlockerKinds.CoordinatorHold);
     }
 }
 

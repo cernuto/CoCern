@@ -38,13 +38,7 @@ public static class BoardReadModels
 
     private static DashboardStanding ProjectStanding(string key, string json)
     {
-        // Split the encoded key before decoding: a slash inside either ID is data, not a separator.
-        var address = key.Split('/');
-        var repositoryId = address.Length == 2 ? Uri.UnescapeDataString(address[0]) : "";
-        var boardId = address.Length == 2 ? Uri.UnescapeDataString(address[1]) : "";
-        if (!ManagementId(repositoryId) || !ManagementId(boardId)
-            || AggregateKinds.BoardKey(repositoryId, boardId) != key)
-            (repositoryId, boardId) = ("", "");
+        var (repositoryId, boardId) = BoardAddress(key);
         using var document = JsonDocument.Parse(json, Options);
         var standing = document.RootElement;
         var lines = Values(Property(standing, StandingState.LinesKey)).Select(line => new DashboardStandingLine
@@ -72,7 +66,8 @@ public static class BoardReadModels
                     ? Text(line, StandingLine.TextKey)
                     : $"{Text(grant, StandingGrant.ScopeKey)}: {string.Join(", ", Strings(Property(grant, StandingGrant.TargetsKey)))} until {Text(grant, StandingGrant.ExpiresAtKey)}",
                 ProposedBy = Text(proposal, StandingProposal.ProposedByKey), ProposedAt = Date(proposal, StandingProposal.ProposedAtKey),
-                Replaces = line.ValueKind == JsonValueKind.Object ? lines.Any(x => x.Id == id) : grants.Any(x => x.Id == id)
+                Replaces = line.ValueKind == JsonValueKind.Object ? lines.Any(x => x.Id == id) : grants.Any(x => x.Id == id),
+                SessionId = Text(proposal, StandingProposal.SessionIdKey), ExpiresAt = line.ValueKind == JsonValueKind.Object ? null : Date(grant, StandingGrant.ExpiresAtKey)
             };
         }).ToArray();
         var history = Property(standing, StandingState.HistoryKey) is { ValueKind: JsonValueKind.Array } changes
@@ -89,6 +84,16 @@ public static class BoardReadModels
             RequireResources = Property(Property(standing, StandingState.SettingsKey), StandingSettings.RequireResourcesKey).ValueKind == JsonValueKind.True,
             Lines = lines, Grants = grants, Proposals = proposals, History = history
         };
+    }
+
+    /// <summary>The repository and board a board's grain key names; both empty for an invalid key.</summary>
+    internal static (string RepositoryId, string BoardId) BoardAddress(string key)
+    {
+        // Split the encoded key before decoding: a slash inside either ID is data, not a separator.
+        var address = key.Split('/');
+        var repositoryId = address.Length == 2 ? Uri.UnescapeDataString(address[0]) : "";
+        var boardId = address.Length == 2 ? Uri.UnescapeDataString(address[1]) : "";
+        return ManagementId(repositoryId) && ManagementId(boardId) && AggregateKinds.BoardKey(repositoryId, boardId) == key ? (repositoryId, boardId) : ("", "");
     }
 
     private static bool ManagementId(string id) => !string.IsNullOrWhiteSpace(id)

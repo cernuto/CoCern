@@ -374,6 +374,7 @@ internal static class TaskBoardAggregate
             if (TaskWorkflow.CheckDependencies(board, task.TaskId, incoming) is { } dependency) return Error(dependency);
             var completing = incoming.State == "completed" && (task.Workflow is not { } prior || prior.State != "completed");
             task.SetWorkflow(workflow);
+            task.StampWaiting(incoming, context.Now);
             // A newly named target is asked to tell this board when it closes, so the task never waits on a session that is gone.
             if (incoming.TargetSessionId is { Length: > 0 } target && (priorWorkflow is null || new WorkflowRecord(priorWorkflow).TargetSessionId != target) && context.Key.Length > 0)
                 context.Send(target, new SessionTargetWatch(context.Repository, target, context.Key, Text(args, "boardId", "default")));

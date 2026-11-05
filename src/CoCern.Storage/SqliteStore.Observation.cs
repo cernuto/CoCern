@@ -75,6 +75,7 @@ public sealed partial class SqliteStore : IRelayObservationSource
         else truncated = true;
 
         var persisted = new Dictionary<string, DashboardSession>(StringComparer.Ordinal);
+        var reports = new Dictionary<string, WaitingReport?>(StringComparer.Ordinal);
         // Sessions whose stored record says they were closed. A node's last announcement can still name one (until it announces again, or for
         // as long as its PC stays off), and such a chat is no longer one to show or to message.
         var closed = new HashSet<string>(StringComparer.Ordinal);
@@ -84,11 +85,14 @@ public sealed partial class SqliteStore : IRelayObservationSource
             if (Stopwatch.GetElapsedTime(started) > ObservationBudget) { truncated = true; break; }
             try
             {
-                var session = ProjectSession(payload, isClosed, incarnationId, out var closedId);
+                var session = ProjectSession(payload, isClosed, incarnationId, out var closedId, out var report);
                 if (closedId is not null) { closed.Add(closedId); continue; }
                 if (session is null) { truncated = true; continue; }
                 if (!persisted.TryGetValue(session.SessionId, out var existing) || PreferPersisted(session, existing, chats))
+                {
                     persisted[session.SessionId] = session;
+                    reports[session.SessionId] = report;
+                }
             }
             catch (JsonException) { truncated = true; warnings.Add("Some session metadata could not be observed."); }
         }
@@ -120,7 +124,9 @@ public sealed partial class SqliteStore : IRelayObservationSource
             warnings.Add("The session observation is truncated to its count, time or size limit.");
             warnings.Add("Machine and reachable counts describe the bounded observed inventory; the session total counts persisted sessions.");
         }
-        return new() { SessionCount = sessionCount, Machines = machines.ToArray(), Sessions = sessions.Values.ToArray(), SessionsTruncated = truncated, Interactions = interactions, Warnings = warnings.ToArray() };
+        // A report is shown under the label its session is shown under; one whose session did not make the bounded inventory goes with it.
+        var waiting = reports.Values.OfType<WaitingReport>().Where(report => sessions.ContainsKey(report.SessionId)).Select(report => report with { Label = sessions[report.SessionId].Label }).ToArray();
+        return new() { SessionCount = sessionCount, Machines = machines.ToArray(), Sessions = sessions.Values.ToArray(), SessionsTruncated = truncated, Interactions = interactions, WaitingReports = waiting, Warnings = warnings.ToArray() };
     }
 
     private async Task<bool> ProjectSessionActivityAsync(Dictionary<string, DashboardSession> sessions, DateTimeOffset now, long started, CancellationToken cancellationToken)
@@ -233,11 +239,11 @@ public sealed partial class SqliteStore : IRelayObservationSource
     /// <summary>
     /// The stored session as the dashboard shows it, or null. A closed session (its row marked <paramref name="closed"/>) keeps its record so
     /// its chat is told it expired; it is no longer a session to show, and <paramref name="closedId"/> names it so that an announcement of it
-    /// is left out too.
+    /// is left out too. <paramref name="report"/> is its own report of waiting on Paul, read by name from this same row.
     /// </summary>
-    private static DashboardSession? ProjectSession(string payload, bool closed, string incarnation, out string? closedId)
+    private static DashboardSession? ProjectSession(string payload, bool closed, string incarnation, out string? closedId, out WaitingReport? report)
     {
-        closedId = null;
+        (closedId, report) = (null, null);
         using var envelope = JsonDocument.Parse(payload, new JsonDocumentOptions { MaxDepth = 64 });
         using var document = Document(envelope.RootElement);
         var state = document.RootElement;
@@ -250,6 +256,7 @@ public sealed partial class SqliteStore : IRelayObservationSource
         var hasVersion = bindingVersion.ValueKind == JsonValueKind.Number && bindingVersion.TryGetInt64(out var reportedVersion) && reportedVersion >= 0;
         var binding = Property(state, "binding");
         var hasBinding = binding.ValueKind == JsonValueKind.Object && binding.EnumerateObject().Any();
+        report = WaitingList.Report(id, Text(state, "repositoryId"), Property(state, SessionState.WaitingForKey));
         return new()
         {
             SessionId = id, Label = Text(state, "label"), MachineId = Text(state, "machineId"), RepositoryId = Text(state, "repositoryId"),

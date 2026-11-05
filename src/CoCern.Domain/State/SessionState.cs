@@ -38,6 +38,7 @@ public sealed class SessionState(JsonObject json)
     public const string WorkBoardsKey = "workBoards";
     public const string WorkKey = "work";
     public const string WorkReportedKey = "workReported";
+    public const string WaitingForKey = "waitingFor";
 
     /// <summary>
     /// Every key a session stores. Its tool binding is the client's own, as it reported it; an inbox message holds the keys
@@ -50,13 +51,13 @@ public sealed class SessionState(JsonObject json)
         (OpenedAtKey, null), (ClosedAtKey, null), (ForceClosedByKey, null), (ActiveReportedAtKey, null),
         (InboxKey, StateShape.Map(StateShape.Object(InboxMessage.Keys.Select(key => (key, (StateShape?)null)).ToArray()))), (AckedKey, StateShape.Map(null)),
         (StandingSeenKey, StateShape.Map(null)), (TargetBoardsKey, StateShape.Map(BoardWatches.EntryShape)), (WorkBoardsKey, StateShape.Map(BoardWatches.EntryShape)),
-        (WorkKey, WorkLedger.Shape), (WorkReportedKey, WorkReport.Shape)).With(AttentionQueue.Fields);
+        (WorkKey, WorkLedger.Shape), (WorkReportedKey, WorkReport.Shape), (WaitingForKey, WaitingMark.Shape)).With(AttentionQueue.Fields);
 
-    /// <summary>What a closed session forgets: its secret, its mail and attention, its tool binding, and the boards waiting on it (told as it closes).</summary>
+    /// <summary>What a closed session forgets: its secret, its mail and attention, its tool binding, its report of waiting, and the boards waiting on it (told as it closes).</summary>
     private static readonly string[] ForgottenOnClose =
     [
         SessionTokenKey, InboxKey, AckedKey, AttentionQueue.ItemsKey, AttentionQueue.ClosedKey, AttentionQueue.ArchivedKey, AttentionQueue.RecentKey, StandingSeenKey,
-        BindingKey, TargetBoardsKey, WorkBoardsKey
+        BindingKey, TargetBoardsKey, WorkBoardsKey, WaitingForKey
     ];
 
     /// <summary>Whether a <see cref="SessionOpen"/> ever initialized this session.</summary>
@@ -220,6 +221,46 @@ public sealed class SessionState(JsonObject json)
 
     /// <summary>The session's attention queue, kept beside its inbox at the top of its document.</summary>
     public AttentionQueue Attention => new(json);
+
+    /// <summary>What this chat last reported it waits on Paul for; null when it has none. Expiry is the reader's to check (<see cref="WaitingMark.ExpiresAt"/>).</summary>
+    public WaitingMark? WaitingFor => json[WaitingForKey] is JsonObject mark ? new(mark) : null;
+
+    /// <summary>
+    /// Records a report in the one slot. It lasts <see cref="RelayLimits.WaitingForHours"/> from now, and a mark still active keeps its
+    /// <c>since</c>, so renewals stop at <see cref="RelayLimits.WaitingForMaxHours"/> from it; a report after it lapsed starts again.
+    /// </summary>
+    public WaitingMark ReportWaitingFor(string text, DateTimeOffset now)
+    {
+        var since = WaitingFor is { } current && current.ExpiresAt > now ? current.Since : now;
+        var renewed = now.AddHours(RelayLimits.WaitingForHours);
+        var cap = since.AddHours(RelayLimits.WaitingForMaxHours);
+        var mark = WaitingMark.Create(text, since, renewed < cap ? renewed : cap);
+        json[WaitingForKey] = mark.Json;
+        return mark;
+    }
+
+    public void ClearWaitingFor() => json.Remove(WaitingForKey);
+}
+
+/// <summary>
+/// A chat's own report of what it waits on Paul for: untrusted display text and nothing more. Nothing in authority, Standing, claims or
+/// grants reads it, and it sends no message, wake or attention item.
+/// </summary>
+public sealed class WaitingMark(JsonObject json)
+{
+    public const string TextKey = "text";
+    public const string SinceKey = "since";
+    public const string ExpiresAtKey = "expiresAt";
+
+    public static StateShape Shape { get; } = StateShape.Object((TextKey, null), (SinceKey, null), (ExpiresAtKey, null));
+
+    public static WaitingMark Create(string text, DateTimeOffset since, DateTimeOffset expiresAt) =>
+        new(new JsonObject { [TextKey] = text, [SinceKey] = since.ToString("O"), [ExpiresAtKey] = expiresAt.ToString("O") });
+
+    public JsonObject Json => json;
+    public string Text => JsonFields.Text(json, TextKey);
+    public DateTimeOffset Since => Date(json, SinceKey);
+    public DateTimeOffset ExpiresAt => Date(json, ExpiresAtKey);
 }
 
 /// <summary>A session's unread messages by ID, each as <see cref="InboxMessage"/> writes it.</summary>

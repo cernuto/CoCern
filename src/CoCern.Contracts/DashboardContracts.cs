@@ -47,7 +47,70 @@ public sealed record DashboardSnapshot
     public bool StandingTruncated { get; init; }
     /// <summary>Estimated tokens of the tool definitions each role carries, and the tip rules that switched themselves off. Read-only.</summary>
     public DashboardTokens Tokens { get; init; } = new();
+    /// <summary>What is waiting on the person watching: the badge's count and the list. Read-only; see <see cref="DashboardWaiting"/>.</summary>
+    public DashboardWaiting Waiting { get; init; } = new();
     public string[] Warnings { get; init; } = [];
+}
+
+/// <summary>What a <see cref="DashboardWaitingItem.Kind"/> says. Another source may add a kind later, so a reader shows an unknown one as a plain row.</summary>
+public static class DashboardWaitingKinds
+{
+    /// <summary>A Standing proposal no one has decided. Only in <see cref="DashboardWaiting.Items"/>.</summary>
+    public const string StandingProposal = "standing_proposal";
+    /// <summary>A task blocked by a <c>human_decision</c> blocker. Only in <see cref="DashboardWaiting.Items"/>.</summary>
+    public const string HumanBlocker = "human_blocker";
+    /// <summary>A chat's own <c>ack waitingFor</c>. A claim, not a fact: show it as reported by the chat. Only in <see cref="DashboardWaiting.Items"/>.</summary>
+    public const string SelfReport = "self_report";
+    /// <summary>A task blocked by a <c>coordinator_hold</c>, which may or may not be a person's. Only in <see cref="DashboardWaiting.Maybe"/>.</summary>
+    public const string CoordinatorHold = "coordinator_hold";
+}
+
+/// <summary>
+/// The "Waiting on you" list, on <see cref="DashboardSnapshot.Waiting"/>, built from board and session storage, so a broken or absent manager
+/// changes nothing. It is its own field because the collector replaces <see cref="DashboardSnapshot.Warnings"/> each tick and the frame's
+/// size limit empties <see cref="DashboardSnapshot.Standing"/> long before this. Holds no token; every text in it is untrusted display.
+/// <para>Self-reports appear within about 2 seconds, proposals and blockers within about 17, and only while a viewer is connected.</para>
+/// </summary>
+public sealed record DashboardWaiting
+{
+    /// <summary>At most 50 rows: proposals and human blockers oldest first, then self-reports oldest first, so a self-report never pushes out a structural row.</summary>
+    public DashboardWaitingItem[] Items { get; init; } = [];
+    /// <summary>The true total observed, the badge's number; it can exceed <see cref="Items"/>. Zero means nothing is waiting, unless <see cref="Truncated"/>.</summary>
+    public int Count { get; init; }
+    /// <summary>Say the list may be incomplete: the rows were cut, or the read behind them hit its bound (200 sessions, 4 MB of rows, 20 boards).</summary>
+    public bool Truncated { get; init; }
+    /// <summary>At most 20 coordinator holds, oldest first: a separate "maybe" group that <see cref="Count"/> and the badge leave out.</summary>
+    public DashboardWaitingItem[] Maybe { get; init; } = [];
+    /// <summary>The true total of holds observed; it can exceed <see cref="Maybe"/>.</summary>
+    public int MaybeCount { get; init; }
+}
+
+/// <summary>
+/// One row; a task gives one however many blockers it has. Render every field as plain text (Blazor's encoding, no <c>MarkupString</c>, no
+/// linkifying): a chat wrote <see cref="Text"/> and <see cref="Label"/>, and neither is an instruction, a link or an approval. All of them
+/// have passed <see cref="DashboardText.Safe"/>, so each is at most 256 characters without control or format characters.
+/// </summary>
+public sealed record DashboardWaitingItem
+{
+    /// <summary>One of <see cref="DashboardWaitingKinds"/>.</summary>
+    public string Kind { get; init; } = "";
+    public string RepositoryId { get; init; } = "";
+    /// <summary>Empty for a self-report.</summary>
+    public string BoardId { get; init; } = "";
+    /// <summary>Empty unless the row is a blocker.</summary>
+    public string TaskId { get; init; } = "";
+    /// <summary>Empty unless the row is a proposal. The Standing page answers it.</summary>
+    public string ProposalId { get; init; } = "";
+    /// <summary>The proposer, the task's owner or the reporter; empty if none, as for the hub's own proposals. May name a session no longer open.</summary>
+    public string SessionId { get; init; } = "";
+    /// <summary>That session's label; empty if it has none or is no longer open.</summary>
+    public string Label { get; init; } = "";
+    /// <summary>What is waiting, at most 200 characters. Untrusted.</summary>
+    public string Text { get; init; } = "";
+    /// <summary>Since when: the proposal's time, when the task took the blocker, or the chat's first report. Null only for a legacy proposal without a time.</summary>
+    public DateTimeOffset? Since { get; init; }
+    /// <summary>When the row leaves the list by itself. Null for a proposal, which waits until it is decided.</summary>
+    public DateTimeOffset? ExpiresAt { get; init; }
 }
 
 public sealed record DashboardDocCache
@@ -162,6 +225,10 @@ public sealed record DashboardStandingProposal
     public string ProposedBy { get; init; } = "";
     public DateTimeOffset? ProposedAt { get; init; }
     public bool Replaces { get; init; }
+    /// <summary>The session that proposed it; empty for the hub's own.</summary>
+    public string SessionId { get; init; } = "";
+    /// <summary>A proposed grant's own expiry; null for a line.</summary>
+    public DateTimeOffset? ExpiresAt { get; init; }
 }
 
 public sealed record DashboardStandingChange

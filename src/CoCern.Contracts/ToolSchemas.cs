@@ -25,7 +25,7 @@ internal static class ToolSchemas
             RelayTools.CheckInbox => ["cursor", "limit", "presentStanding"],
             RelayTools.GetStatus => ["managerHistoryBefore", "managerHistoryOnly"],
             RelayTools.ControlRequest => ["targetSessionId", "expectedManagerGeneration", "humanWords"],
-            RelayTools.Ack => ["messageId", "messageIds"],
+            RelayTools.Ack => ["messageId", "messageIds", "waitingFor"],
             RelayTools.ClaimRenew => ["resourceId", "generation", "taskId", "claimGeneration", "leaseSeconds"],
             RelayTools.ClaimRelease => ["resourceId", "generation", "taskId", "claimGeneration", "expectedVersion"],
             RelayTools.StandingPropose => ["line", "grant"],
@@ -51,6 +51,8 @@ internal static class ToolSchemas
             properties["label"] = new { type = "string" };
             properties["machineId"] = new { type = "string" };
         }
+        // ack's description says what waitingFor does, so it is advertised by type; InputSchema gives the rest.
+        if (tool.Name == RelayTools.Ack) properties["waitingFor"] = new { type = "string" };
         // Standing items are advertised by shape only; InputSchema gives their limits.
         if (tool.Name is RelayTools.StandingPropose or RelayTools.StandingPut)
             foreach (var field in properties.Keys.ToArray())
@@ -211,12 +213,13 @@ internal static class ToolSchemas
                 properties["usage"] = UsageSchema(); properties["attention"] = AttentionOptOut(); break;
             case RelayTools.SendMessage:
                 Text("text", "Message text, at most 8 KiB. Supply taskId for shared conversation, otherwise recipientSessionId for private delivery.");
-                Text("replyTo", "Optional ID of the message this replies to.");
+                Text("replyTo", "Optional ID of the message this replies to; acknowledged if in your inbox.");
                 properties["ackMessageIds"] = new { type = "array", items = new { type = "string" }, maxItems = RelayLimits.MaxAcknowledgedMessages, description = "Inbox message IDs this reply handles; acknowledged in the same call." };
                 properties["supersede"] = new { type = "boolean", description = "For repeated status or heartbeats: replaces your earlier unread superseding message to this recipient." };
                 properties["wake"] = new { type = "boolean", description = "false for status/FYI needing no action now: stored and read at the next wake, never wakes the recipient." }; break;
             case RelayTools.Ack:
-                Text("messageId", "One explicitly handled inbox message ID."); properties["messageIds"] = new { type = "array", items = new { type = "string" }, maxItems = RelayLimits.MaxAcknowledgedMessages }; break;
+                Text("messageId", "One explicitly handled inbox message ID."); properties["messageIds"] = new { type = "array", items = new { type = "string" }, maxItems = RelayLimits.MaxAcknowledgedMessages };
+                properties["waitingFor"] = new { type = new[] { "string", "null" }, maxLength = RelayLimits.MaxWaitingTextLength, description = "Optional: the one line this chat waits on Paul for, shown to him as a chat's report. Grants nothing and wakes nobody. Empty clears; left out or null keeps it; blank or longer is refused. Lasts 12 hours from each report, at most 24 from the first." }; break;
             case RelayTools.ContextGet: Text("contextId", "Selected shared context ID; omit for a bounded listing."); break;
             case RelayTools.ContextPut:
                 Text("contextId", "Stable authored shared context record ID."); properties["content"] = new { description = "Bounded explicitly shared context, at most 16 KiB." }; properties["provenance"] = new { description = "Source and authorship evidence for shared context." }; break;

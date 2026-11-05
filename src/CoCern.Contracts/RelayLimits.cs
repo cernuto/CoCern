@@ -243,6 +243,22 @@ public static class RelayLimits
     public const int DefaultAttentionExpiryDays = 7;
     /// <summary>Largest allowed item lifetime, in days.</summary>
     public const int MaxAttentionExpiryDays = 90;
+    /// <summary>Longest <c>ack</c> <c>waitingFor</c>, and longest text a "Waiting on you" row shows.</summary>
+    public const int MaxWaitingTextLength = 200;
+    /// <summary>Hours a chat's <c>waitingFor</c> lasts from its latest report.</summary>
+    public const int WaitingForHours = 12;
+    /// <summary>Hours renewals can carry one <c>waitingFor</c> from when it was first set; it survives a night and still ends.</summary>
+    public const int WaitingForMaxHours = 24;
+    /// <summary>Days a blocked task stays on "Waiting on you" from when it took the blocker, though the task stays blocked.</summary>
+    public const int WaitingBlockerDays = DefaultAttentionExpiryDays;
+    /// <summary>Most rows the dashboard's snapshot carries; <c>Count</c> stays the true total observed.</summary>
+    public const int MaxWaitingItems = 50;
+    /// <summary>Most coordinator holds the snapshot carries in its "maybe" group.</summary>
+    public const int MaxWaitingMaybeItems = 20;
+    /// <summary>Rows an administrator's <c>get_status</c> shows of the list.</summary>
+    public const int WaitingStatusItems = 10;
+    /// <summary>Rows an administrator's <c>get_status</c> shows of the "maybe" group.</summary>
+    public const int WaitingStatusMaybeItems = 5;
     /// <summary>Most times an item that blocks another session may be snoozed.</summary>
     public const int MaxBlockingSnoozes = 2;
     /// <summary>Longest an item that blocks another session may stay snoozed, counted from its first snooze.</summary>

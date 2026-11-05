@@ -41,6 +41,7 @@ internal sealed class ReplyAddOns(Aggregates aggregates, ClaimComposer claims, S
     internal static IReadOnlyList<(string Name, Step Run)> Steps { get; } =
     [
         ("token_status", static (addOns, reply) => addOns.AddTokenStatus(reply)),
+        ("waiting_on_you", static (addOns, reply) => addOns.AddWaitingAsync(reply)),
         ("piggyback", static (addOns, reply) => addOns.PiggybackAsync(reply)),
         ("next_work", static (addOns, reply) => addOns.OfferNextWorkAsync(reply)),
         ("standing", static (addOns, reply) => addOns.DeliverStandingAsync(reply)),
@@ -68,14 +69,39 @@ internal sealed class ReplyAddOns(Aggregates aggregates, ClaimComposer claims, S
         return Task.CompletedTask;
     }
 
+    /// <summary>
+    /// An administrator's <c>get_status</c>, but not a background detail read, shows what waits on Paul in the call's repository, read from
+    /// storage on call, since the collector only runs with a viewer. The gate is the administrator token: a session's role, or being the
+    /// appointed manager, grants nothing, and a worker's reply has no such field. An administrator may name any repository, so the scope is
+    /// the repository the call names (<see cref="WaitingList.Build"/>), not what the caller may access.
+    /// </summary>
+    private async Task AddWaitingAsync(Outgoing reply)
+    {
+        var call = reply.Call;
+        if (!reply.Reply.Ok || call.Tool != RelayTools.GetStatus || !call.Caller.IsAdministrator || call.Controls.StatusDetail || observations is null) return;
+        var repository = Text(call.Args, "repositoryId");
+        var status = reply.Reply;
+        JsonObject With(JsonObject section) { var data = Parse(status); data["waitingOnYou"] = section.DeepClone(); return data; }
+        // The reply keeps room for what it is composed with, and a section that cannot fit gives up rows, not the reply.
+        bool Fits(JsonObject section) => ByteSize(section) <= RelayLimits.CompositionReserveBytes && FitsWire(Ok(With(section), status.Version));
+        JsonObject waiting;
+        try { waiting = await observations.ReadWaitingAsync(repository) is { } sources ? WaitingList.ToStatus(WaitingList.Build(sources, DateTimeOffset.UtcNow, repository), Fits) : new JsonObject { ["unavailable"] = true }; }
+        catch (Exception) { waiting = new JsonObject { ["unavailable"] = true }; }
+        if (Fits(waiting)) reply.Reply = Ok(With(waiting), status.Version);
+    }
+
     /// <summary>Optional claim renewals and inbox acknowledgments riding on another call. Their outcomes never change the committed result.</summary>
     private async Task PiggybackAsync(Outgoing reply)
     {
         if (!reply.Reply.Ok) return;
         var (caller, args, committed) = (reply.Call.Caller, reply.Call.Args, reply.Reply);
-        if (args["renewClaims"] is not JsonArray && args["ackMessageIds"] is not JsonArray) return;
+        // Only a send answers a message. replyTo is validated as an ID on every call and means nothing on any other tool.
+        var answers = reply.Call.Tool == RelayTools.SendMessage ? Text(args, "replyTo") : "";
+        if (args["renewClaims"] is not JsonArray && args["ackMessageIds"] is not JsonArray && answers.Length == 0) return;
         var conveniences = new JsonObject();
-        var authorization = await guard.VerifySessionAsync(caller, args);
+        RelayReply authorization;
+        try { authorization = await guard.VerifySessionAsync(caller, args); }
+        catch (Exception) { authorization = Error(Unavailable); }
         if (args["renewClaims"] is JsonArray renewals)
         {
             var outcomes = new JsonArray();
@@ -90,14 +116,44 @@ internal sealed class ReplyAddOns(Aggregates aggregates, ClaimComposer claims, S
             }
             conveniences["renewals"] = outcomes;
         }
-        if (args["ackMessageIds"] is JsonArray ids)
+        if (args["ackMessageIds"] is JsonArray || answers.Length > 0)
         {
-            var ack = args.DeepClone().AsObject(); ack.Remove("requestId"); ack["messageIds"] = ids.DeepClone();
-            var result = authorization.Ok ? await aggregates.Session(caller, RelayTools.Ack, ack) : authorization;
-            conveniences["ack"] = Outcome(result.Ok, result.Code);
+            // The write has committed: a failed acknowledgment gets its own outcome, never an error for the whole call.
+            try
+            {
+                var result = authorization.Ok ? await AcknowledgeAsync(caller, args, answers) : authorization;
+                conveniences["ack"] = Outcome(result.Ok, result.Code);
+            }
+            catch (Exception) { conveniences["ack"] = Outcome(false, Unavailable); }
         }
         var data = Parse(committed); data["conveniences"] = conveniences;
         reply.Reply = Ok(data, committed.Version);
+    }
+
+    /// <summary>
+    /// Acknowledges a call's <c>ackMessageIds</c> as the <c>ack</c> tool would, then, on a send, the message it answers. The answered message is
+    /// <c>heldOnly</c>, so an ID the sender's inbox does not hold changes nothing and the outcome cannot tell whose it is or whether it exists. It
+    /// carries its own request ID, so a retry replays this answer rather than acting on an inbox that has changed since. That ID holds a control
+    /// character, which the request guard refuses from a client, so no client's own <c>ack</c> can collide with it. It stays out when already
+    /// listed. A list at the ID limit does not keep it out: it is a call of its own, one ID long.
+    /// </summary>
+    private const string HeldAckRequestSuffix = "\u001freply-ack";
+
+    private async Task<RelayReply> AcknowledgeAsync(RelayCaller caller, JsonObject args, string answers)
+    {
+        if (args["ackMessageIds"] is JsonArray ids)
+        {
+            // Piggyback acknowledgments never adopt a different tool's waiting report.
+            var ack = args.DeepClone().AsObject(); ack.Remove("requestId"); ack.Remove("heldOnly"); ack.Remove("waitingFor"); ack["messageIds"] = ids.DeepClone();
+            var result = await aggregates.Session(caller, RelayTools.Ack, ack);
+            if (!result.Ok || answers.Length == 0 || ids.Any(id => id is JsonValue value && value.TryGetValue<string>(out var listed) && listed == answers)) return result;
+        }
+        var held = new JsonObject
+        {
+            ["repositoryId"] = Text(args, "repositoryId"), ["sessionId"] = Text(args, "sessionId"), ["sessionToken"] = Text(args, "sessionToken"),
+            ["requestId"] = Text(args, "requestId") + HeldAckRequestSuffix, ["messageIds"] = new JsonArray(answers), ["heldOnly"] = true
+        };
+        return await aggregates.Session(caller, RelayTools.Ack, held);
     }
 
     /// <summary>A <c>task_update</c> with <c>includeNextWork</c> carries an advisory next-work offer (<see cref="WithNextWorkAsync"/>).</summary>

@@ -212,8 +212,8 @@ internal static class AttentionSources
         return revision;
     }
 
-    /// <summary>A provider rejection ranks first and a coordinator hold last, so the item takes the most urgent blocker's kind.</summary>
-    private static int BlockerRank(string kind) => kind == AttentionWeights.ProviderRejection ? 0 : kind == AttentionWeights.CoordinatorHold ? 2 : 1;
+    /// <summary>A provider rejection ranks first, and a coordinator hold or a human decision last, so the item takes the most urgent blocker's kind.</summary>
+    private static int BlockerRank(string kind) => kind == AttentionWeights.ProviderRejection ? 0 : (kind is AttentionWeights.CoordinatorHold or AttentionWeights.HumanDecision) ? 2 : 1;
 
     private static string BlockerIds(JsonObject? workflow) =>
         string.Join("\n", (workflow?["blockers"] as JsonArray ?? []).OfType<JsonObject>().Select(blocker => Text(blocker, "id")).Order(StringComparer.Ordinal));
