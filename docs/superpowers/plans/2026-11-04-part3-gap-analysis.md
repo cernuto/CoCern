@@ -50,3 +50,11 @@ From the Claude Code hooks reference (https://code.claude.com/docs/en/hooks.md),
 - `UserPromptSubmit` injects both plain stdout and `additionalContext`, under the same cap. Its command hooks time out after 30 seconds by default, and timed-out output is discarded.
 
 The standing yes for the real-client checks covers `PostToolUse` size behaviour; do those before building on it.
+
+### Real-client results, 2026-11-05
+
+Tried on one interactive desktop chat, Claude Code 2.1.317, with `Bash` as the tool.
+
+- **The cap is exactly as documented.** `additionalContext` of 1,000, 9,000 and 10,000 characters reached the model in full. 10,001, 30,000 and 100,000 were replaced by a `persisted-output` notice with the saved file's path and a preview of about 2 KB, so the end of the text is lost. The printed wake's 9,000 limit is safe.
+- **`tool_response` by tool.** `Bash`: `stdout`, `stderr`, `interrupted`, `isImage`, `noOutputExpected`. `Write`: `type`, `filePath`, `content`, `structuredPatch`, `originalFile`, `userModified`. `Edit`: `filePath`, `oldString`, `newString`, `originalFile`, `structuredPatch`, `userModified`, `replaceAll`. Every `PostToolUse` had `tool_use_id`.
+- **Still not tried:** the limit on `asyncRewake` stderr, and `UserPromptSubmit` output size.
