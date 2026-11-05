@@ -351,8 +351,17 @@ public sealed class HubResponseCompactionTests(ITestOutputHelper output)
     [Fact]
     public async Task Semantic_status_recomputes_inbox_pause_and_cancellation_before_matching()
     {
-        await using var host = new RelayHostFixture(disableDispatcher: true);
+        var administratorToken = Guid.NewGuid().ToString("N");
+        await using var host = new RelayHostFixture(disableDispatcher: true, settings: new Dictionary<string, string?>
+        {
+            ["Relay:Clients:1:Token"] = administratorToken,
+            ["Relay:Clients:1:PrincipalId"] = "status-admin",
+            ["Relay:Clients:1:IsAdministrator"] = "true",
+            ["Relay:Clients:1:Repositories:0"] = "repo"
+        });
         using var client = host.AuthorizedClient();
+        using var administrator = host.AuthorizedClient();
+        administrator.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", administratorToken);
         var session = HostData(await host.Call(client, RelayTools.SessionOpen, new { repositoryId = "repo", requestId = "changed-status-open" }));
         var other = HostData(await host.Call(client, RelayTools.SessionOpen, new { repositoryId = "repo", requestId = "changed-status-sender" }));
         var sessionId = session["sessionId"]!.GetValue<string>();
@@ -372,11 +381,11 @@ public sealed class HubResponseCompactionTests(ITestOutputHelper output)
         var mail = await Status(first["statusTag"]!.GetValue<string>());
         Assert.Null(mail["unchanged"]);
         Assert.Equal(1, mail["attention"]!["inbox"]!.GetValue<int>());
-        HostData(await host.Call(client, RelayTools.ControlRequest, new { repositoryId = "repo", requestId = "changed-status-pause", command = "pause" }));
+        HostData(await host.Call(administrator, RelayTools.ControlRequest, new { repositoryId = "repo", requestId = "changed-status-pause", command = "pause" }));
         var paused = await Status(mail["statusTag"]!.GetValue<string>());
         Assert.Null(paused["unchanged"]);
         Assert.True(paused["control"]!["paused"]!.GetValue<bool>());
-        HostData(await host.Call(client, RelayTools.ControlRequest, new { repositoryId = "repo", sessionId, requestId = "changed-status-cancel", command = "cancel", actionId = "fixture-action" }));
+        HostData(await host.Call(administrator, RelayTools.ControlRequest, new { repositoryId = "repo", sessionId, requestId = "changed-status-cancel", command = "cancel", actionId = "fixture-action" }));
         var canceled = await Status(paused["statusTag"]!.GetValue<string>());
         Assert.Null(canceled["unchanged"]);
         Assert.Equal(sessionId + ":fixture-action", Assert.Single(canceled["control"]!["requests"]!.AsArray())!["target"]!.GetValue<string>());
