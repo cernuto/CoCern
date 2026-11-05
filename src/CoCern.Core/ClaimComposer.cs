@@ -24,8 +24,12 @@ internal sealed class ClaimComposer(Aggregates aggregates)
     }
 
     /// <summary>Resolves a resource name (or alias) by the session's machine, as every claim path must, so one name never means two locks.</summary>
-    public Task<RelayReply> ResolveForSession(RelayCaller caller, JsonObject args, JsonObject? session, string resource) =>
-        aggregates.Resolve(caller, Text(args, "repositoryId"), SessionMachine(args, session), resource);
+    public async Task<RelayReply> ResolveForSession(RelayCaller caller, JsonObject args, JsonObject? session, string resource)
+    {
+        if (FileClaimTools.Reserved(resource)) return Error(InvalidArguments);
+        var resolved = await aggregates.Resolve(caller, Text(args, "repositoryId"), SessionMachine(args, session), resource);
+        return resolved.Ok && FileClaimTools.Reserved(Text(Aggregates.Parse(resolved), "resourceId")) ? Error(InvalidArguments) : resolved;
+    }
 
     /// <summary>
     /// Claims the task, then each canonical resource in a stable order. If any resource is busy, the grants this
@@ -222,7 +226,9 @@ internal sealed class ClaimComposer(Aggregates aggregates)
         if (!resolved.Ok) return null;
         var map = Aggregates.Parse(resolved)["resolved"] as JsonObject;
         var declared = new JsonObject();
-        foreach (var name in names) declared[name] = map?[name] is JsonValue canonical && canonical.TryGetValue<string>(out var id) ? id : "";
+        foreach (var name in names)
+            declared[name] = !FileClaimTools.Reserved(name) && map?[name] is JsonValue canonical && canonical.TryGetValue<string>(out var id)
+                && !FileClaimTools.Reserved(id) ? id : "";
         return declared;
     }
 

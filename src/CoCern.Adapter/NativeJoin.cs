@@ -24,6 +24,7 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
     private Task? runtime;
     internal TimeSpan Budget { get; init; } = TimeSpan.FromSeconds(15);
     internal TimeSpan ResumeInterval { get; init; } = TimeSpan.FromSeconds(4);
+    internal Func<string, string, string?> RootProof { get; init; } = (cwd, root) => ProtectedCheckoutRoot.ProveOrNull(cwd, root);
 
     private sealed class Refused(string code) : IOException(code) { internal string Code { get; } = code; }
     private sealed record Intent(string Provider, string NativeId, string Cwd, string? Repository = null);
@@ -153,7 +154,8 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
                 if (handle is null)
                 {
                     var handoff = SessionHandoff.ForFolder(folder, client);
-                    var opened = await handoff.OpenNativeJoinAsync(binding, forwarder, cancel, context.DisplayTitle, evidence.GetProperty("nativePreflight"));
+                    var protectedRoot = await ProtectedRootAsync(context.Cwd, checkout.Root, cancel);
+                    var opened = await handoff.OpenNativeJoinAsync(binding, forwarder, cancel, context.DisplayTitle, evidence.GetProperty("nativePreflight"), protectedRoot);
                     if (!opened.Completed) throw new Refused(opened.Code);
                     handle = binding.CurrentHandle ?? throw new Refused("native_handle_unverified");
                 }
@@ -179,6 +181,13 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
             await Task.Delay(delay, cancel);
             delay = TimeSpan.FromMilliseconds(Math.Min(delay.TotalMilliseconds * 2, 4000));
         }
+    }
+
+    // Eligibility only: a refused or stalled proof means this join gets no protected scope, never that the join fails.
+    private async Task<string?> ProtectedRootAsync(string cwd, string root, CancellationToken ct)
+    {
+        try { return await Task.Run(() => RootProof(cwd, root), ct).WaitAsync(TimeSpan.FromSeconds(3), ct); }
+        catch (TimeoutException) { return null; }
     }
 
     // Reserve before forwarding. A lost reply stays on its original session, even after process restart.
@@ -240,15 +249,28 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
         return (request, false);
     }
 
+    internal async Task<NativeEditClaims> EditClaimsAsync(NativeHookContext context, CancellationToken ct)
+    {
+        var (handle, _) = await EnsureBoundAsync(context, null, ct);
+        await using var binding = await NativeJoinBinding.AcquireAsync(folder, context.Provider, context.NativeId,
+            Environment.MachineName, handle.RepositoryId, context.Cwd, ct, existingOnly: true);
+        if (binding.CurrentHandle?.SessionId != handle.SessionId || !forwarder.MatchesNativeBinding(binding))
+            throw new IOException("The native edit binding changed.");
+        return new NativeEditClaims(binding.Folder, ProtectedCheckoutRoot.Prove(context.Cwd), handle.RepositoryId,
+            handle.SessionId, binding.Generation, this, context);
+    }
+
     internal async Task<AdapterReply> CallAsync(NativeHookContext context, string invocation, string tool, JsonElement args, CancellationToken ct, string? expectedGeneration = null)
     {
         if (invocation is not { Length: > 0 and <= 256 } || invocation.Any(char.IsControl) || args.ValueKind != JsonValueKind.Object ||
             !RelayToolCatalog.TryGet(tool, out var definition) || tool is RelayTools.SessionOpen or RelayTools.SessionBind) return new(false, "native_invocation_invalid");
-        if (args.TryGetProperty("sessionToken", out _) || args.TryGetProperty("sessionId", out _) || args.TryGetProperty("_cocernNative", out _))
+        if (args.TryGetProperty("sessionToken", out _) || args.TryGetProperty("sessionId", out _) || args.TryGetProperty("_cocernNative", out _) || ProtectedCheckoutRoot.NamedIn(args))
             return new(false, "native_invocation_conflict");
         try
         {
-            var admission = definition.IsMutation ? new Invocation(invocation, tool, args) : null;
+            // A scoped confirmation is a fresh read, despite sharing the acquire wire tool; never persist/replay it as a mutation.
+            var fileCheck = tool == RelayTools.ClaimAcquire && args.TryGetProperty("confirmGeneration", out _);
+            var admission = definition.IsMutation && !fileCheck ? new Invocation(invocation, tool, args) : null;
             var (handle, request) = await EnsureBoundAsync(context, admission, ct, expectedGeneration: expectedGeneration);
             var payload = JsonNode.Parse(admission?.LegacyWire == true ? args.GetRawText() : NativeJoinHook.Canonical(args))!.AsObject();
             if (payload.ContainsKey("repositoryId") && (string?)payload["repositoryId"] != handle.RepositoryId) return new(false, "native_repository_conflict");
@@ -257,6 +279,7 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
             { payload["sessionId"] = handle.SessionId; payload["sessionToken"] = handle.SessionToken; }
             if (definition.Audited) { payload["actingSessionId"] = handle.SessionId; payload["actingSessionToken"] = handle.SessionToken; }
             if (definition.IsMutation && request is not null) payload["requestId"] = request;
+            if (fileCheck) payload["requestId"] = invocation;
             var arguments = RelayForwarder.WithOrigin(JsonSerializer.SerializeToElement(payload), background: false);
             if (tool == RelayTools.ControlRequest) arguments = CoordinationTools.WithOwnSession(arguments, handle.SessionId);
             var reply = tool == RelayTools.CheckInbox ? await InboxWait.CheckAsync(modelCalls, arguments, InboxWait.PollInterval, ct) :

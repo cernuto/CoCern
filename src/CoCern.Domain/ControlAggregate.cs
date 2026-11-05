@@ -40,6 +40,7 @@ internal static class ControlAggregate
             Operations.SessionsOpen => OpenSessions(context),
             Operations.ManagerStanding => ManagerSelection.Standing(context),
             Operations.AdminAction => AdminActionLog.Record(context),
+            Operations.NativeFileScope => NativeFileScope(context),
             Operations.AttentionRoute => RouteAttention(context),
             Operations.PeerResolve => PeerDirectory.Resolve(context),
             Operations.PeerList => PeerDirectory.ListPeers(context),
@@ -73,7 +74,7 @@ internal static class ControlAggregate
         // The role given at session_open routes manager-bound attention items; it grants nothing.
         var record = SessionRecord.Opened(id, token, context.Caller.PrincipalId, context.Repository, args).WithInitialFreshness(context.Now);
         state.Enter(record);
-        if (record.NativeId is not null) state.TrackNative(record, Text(args, NativeParticipant.Client));
+        if (record.NativeId is not null) state.TrackNative(record, context.Caller, args);
         context.Send(id, new SessionOpen(record));
         return OpenReply(id, token, args);
     }
@@ -123,6 +124,17 @@ internal static class ControlAggregate
         else if (state.NativeClosing(participant) || state.Entries().Any(row => row.Entry?.NativeId == participant))
             return Error(Unavailable);
         return null;
+    }
+
+    private static RelayReply NativeFileScope(AggregateContext context)
+    {
+        if (!NativeFileScopeQuery.Decode(context.Args).TryGet(out var query, out var malformed)) return Malformed(malformed);
+        var scope = new ControlState(context.State).CurrentNativeFileScope(context.Caller, query.ParticipantId, query.RepositoryId, query.SessionId, query.SessionToken);
+        return scope is null ? Error(SessionDenied) : Ok(new
+        {
+            participantId = scope.ParticipantId, sessionId = scope.SessionId, repositoryId = scope.RepositoryId,
+            machineScope = scope.MachineScope, canonicalWorkingCopyRoot = scope.CanonicalWorkingCopyRoot, nativeGeneration = scope.NativeGeneration
+        });
     }
 
     private static RelayReply OpenReply(string id, string token, JsonObject args) =>

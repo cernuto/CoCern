@@ -12,13 +12,14 @@ public struct RelayCallerSurrogate
     [Id(1)] public bool IsAdministrator;
     [Id(2)] public string[] Repositories;
     [Id(3)] public bool IsInternal;
+    [Id(4)] public string? AuthenticatedMachineId;
 }
 
 [RegisterConverter]
 public sealed class RelayCallerSurrogateConverter : IConverter<RelayCaller, RelayCallerSurrogate>
 {
-    public RelayCaller ConvertFromSurrogate(in RelayCallerSurrogate surrogate) => new(surrogate.PrincipalId, surrogate.IsAdministrator, surrogate.Repositories, surrogate.IsInternal);
-    public RelayCallerSurrogate ConvertToSurrogate(in RelayCaller value) => new() { PrincipalId = value.PrincipalId, IsAdministrator = value.IsAdministrator, Repositories = value.Repositories, IsInternal = value.IsInternal };
+    public RelayCaller ConvertFromSurrogate(in RelayCallerSurrogate surrogate) => new(surrogate.PrincipalId, surrogate.IsAdministrator, surrogate.Repositories, surrogate.IsInternal, surrogate.AuthenticatedMachineId);
+    public RelayCallerSurrogate ConvertToSurrogate(in RelayCaller value) => new() { PrincipalId = value.PrincipalId, IsAdministrator = value.IsAdministrator, Repositories = value.Repositories, IsInternal = value.IsInternal, AuthenticatedMachineId = value.AuthenticatedMachineId };
 }
 
 [GenerateSerializer]

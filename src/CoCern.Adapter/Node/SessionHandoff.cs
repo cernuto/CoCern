@@ -36,7 +36,7 @@ public sealed class SessionHandoff
     internal static SessionHandoff ForFolder(string folder, ChatLocation? client = null) => new(folder, client, TextWriter.Null);
 
     /// <summary>Perform one exact scoped open. No independently supplied reply can become a private native handle.</summary>
-    internal async Task<(bool Completed, string Code)> OpenNativeJoinAsync(NativeJoinBinding binding, RelayForwarder forwarder, CancellationToken ct, string? displayTitle = null, JsonElement? resolution = null)
+    internal async Task<(bool Completed, string Code)> OpenNativeJoinAsync(NativeJoinBinding binding, RelayForwarder forwarder, CancellationToken ct, string? displayTitle = null, JsonElement? resolution = null, string? protectedRoot = null)
     {
         ct.ThrowIfCancellationRequested();
         try
@@ -44,7 +44,7 @@ public sealed class SessionHandoff
             if (!binding.MatchesFolder(_folder) || !binding.MatchesClient(_client) || !forwarder.MatchesNativeBinding(binding))
                 return (false, "native_join_scope_mismatch");
             var arguments = binding.FrozenOpenArguments;
-            var reply = await forwarder.ForwardAsync(CoCern.Contracts.RelayTools.SessionOpen, binding.OpenWireArguments(resolution, NativeTitle(displayTitle)), ct);
+            var reply = await forwarder.ForwardAsync(CoCern.Contracts.RelayTools.SessionOpen, binding.OpenWireArguments(resolution, NativeTitle(displayTitle), protectedRoot), ct);
             if (!reply.Ok)
             {
                 if (reply.Code == CoCern.Contracts.RelayErrorCodes.SessionUnknown && reply.Version is not null &&

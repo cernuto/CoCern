@@ -241,6 +241,7 @@ internal sealed class ChatCalls(RelayForwarder forwarder, SessionHints? hints, S
 
     public async Task<AdapterReply> CallAsync(string tool, JsonElement arguments, CancellationToken cancellationToken)
     {
+        if (ProtectedCheckoutRoot.NamedIn(arguments)) return new(false, "native_invocation_conflict");
         arguments = RelayForwarder.WithOrigin(arguments, background: false);
         var suppliedToken = arguments.ValueKind == JsonValueKind.Object && arguments.TryGetProperty("sessionToken", out _);
         if (tool == RelayTools.SessionOpen) arguments = CoordinationTools.OwnRequestId(arguments, _workspace(), requestScope);

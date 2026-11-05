@@ -110,7 +110,7 @@ internal static class LockAggregate
         // An action already in flight on this lock blocks a new one, even this session's own: its block would be refused after the new action was recorded.
         var busy = holder.Length > 0 && holder != query.SessionId && (live || blockers > 0) || blockers > 0;
         // held: this session's grant is live and free, which action_begin needs for each resource its packet declares.
-        return Ok(new { busy, held = owned && blockers == 0 });
+        return Ok(new { busy, held = owned && blockers == 0, generation = state.Generation, leaseUntil = state.LeaseUntilText });
     }
 
     private static RelayReply Acquire(AggregateContext context)

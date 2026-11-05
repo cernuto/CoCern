@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json;
 using Microsoft.Win32.SafeHandles;
 
 namespace CoCern.Adapter;
@@ -13,6 +14,24 @@ namespace CoCern.Adapter;
 internal static class ProtectedCheckoutRoot
 {
     private const int MaxPathLength = 32768;
+
+    /// <summary>The optional field of the private nativeJoin envelope that carries a proven root. It is never a public argument or part of a reply.</summary>
+    internal const string Field = "protectedRoot";
+
+    /// <summary>Whether public arguments try to name a protected root, directly or inside a nativeJoin of their own. Only the adapter's own open may send one.</summary>
+    internal static bool NamedIn(JsonElement arguments) =>
+        arguments.ValueKind == JsonValueKind.Object && (arguments.TryGetProperty(Field, out _) ||
+            arguments.TryGetProperty("nativeJoin", out var join) && join.ValueKind == JsonValueKind.Object && join.TryGetProperty(Field, out _));
+
+    /// <summary><see cref="Prove(string, string?, bool)"/> for a join that goes ahead either way: a refusal means no protected scope, not a failed join.</summary>
+    /// <param name="cwd">The directory the proof is for.</param>
+    /// <param name="gitRoot">The root Git reported.</param>
+    /// <param name="localityProvable">See <see cref="Physical(string, bool)"/>.</param>
+    internal static string? ProveOrNull(string cwd, string gitRoot, bool localityProvable = true)
+    {
+        try { return Prove(cwd, gitRoot, localityProvable); }
+        catch (IOException) { return null; }
+    }
 
     /// <summary>The proven physical root of the checkout holding <paramref name="cwd"/>. Git runs only after the directory is proven local.</summary>
     internal static string Prove(string cwd)

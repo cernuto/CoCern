@@ -448,4 +448,58 @@ public sealed class NativeJoinCallsTests
         Assert.False(File.Exists(pending));
         stop.Cancel(); await Task.WhenAll(resumed, watching).WaitAsync(TimeSpan.FromSeconds(5));
     }
+
+    // Security boundary: the proven root travels only inside the private open envelope. A model's arguments cannot name it, no reply or file carries it, and a refused proof sends nothing.
+    [Fact]
+    public async Task Protected_root_stays_on_the_private_open_wire_and_is_absent_when_the_proof_refuses()
+    {
+        using var scope = new NativeScope();
+        const string proven = @"C:\proven-root";
+        var sent = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        using var http = new HttpClient(new Handler(async (request, ct) =>
+        {
+            var body = await request.Content!.ReadAsStringAsync(ct);
+            sent.Enqueue(body);
+            using var document = JsonDocument.Parse(body);
+            var args = document.RootElement;
+            if (args.TryGetProperty("nativePreflight", out _)) return Wire(new { repositoryId = "repo" });
+            if (args.TryGetProperty("nativeJoin", out var join))
+            {
+                var id = "s-" + join.GetProperty("nativeId").GetString();
+                return Wire(new { sessionId = id, sessionToken = "token-" + id });
+            }
+            return Wire(new { sessionId = args.GetProperty("sessionId").GetString() });
+        }));
+        var forwarder = new RelayForwarder(http, scope.Options);
+        var status = JsonSerializer.SerializeToElement(new { });
+
+        await using var provable = new NativeJoin(scope.Folder, scope.Options, forwarder) { RootProof = (_, _) => proven };
+        var context = new NativeHookContext("codex", Guid.NewGuid().ToString("D"), scope.Checkout);
+        var reply = await provable.CallAsync(context, "proven", RelayTools.GetStatus, status, default);
+        Assert.True(reply.Ok, reply.Code);
+        using (var opened = JsonDocument.Parse(Assert.Single(sent, body => body.Contains("protectedRoot"))))
+        {
+            Assert.Equal(proven, opened.RootElement.GetProperty("nativeJoin").GetProperty("protectedRoot").GetString());
+            Assert.False(opened.RootElement.TryGetProperty("protectedRoot", out _));
+        }
+        Assert.DoesNotContain("protectedRoot", JsonSerializer.Serialize(reply, AdapterReply.JsonOptions));
+        foreach (var file in Directory.EnumerateFiles(scope.Folder, "*", SearchOption.AllDirectories))
+            Assert.DoesNotContain("protectedRoot", File.ReadAllText(file));
+
+        sent.Clear();
+        await using var refusing = new NativeJoin(scope.Folder, scope.Options, forwarder) { RootProof = (cwd, root) => ProtectedCheckoutRoot.ProveOrNull(cwd, root, localityProvable: false) };
+        reply = await refusing.CallAsync(new("codex", Guid.NewGuid().ToString("D"), scope.Checkout), "refused", RelayTools.GetStatus, status, default);
+        Assert.True(reply.Ok, reply.Code); // A refused proof costs the protected scope, not the join.
+        Assert.Contains(sent, body => body.Contains("nativeJoin"));
+        Assert.DoesNotContain(sent, body => body.Contains("protectedRoot"));
+
+        sent.Clear();
+        JsonElement[] forged = [JsonSerializer.SerializeToElement(new { protectedRoot = proven }), JsonSerializer.SerializeToElement(new { nativeJoin = new { protectedRoot = proven } })];
+        foreach (var arguments in forged)
+        {
+            Assert.Equal("native_invocation_conflict", (await provable.CallAsync(context, "forged", RelayTools.GetStatus, arguments, default)).Code);
+            Assert.Equal("native_invocation_conflict", (await new ChatCalls(forwarder, null, null, "scope", () => null).CallAsync(RelayTools.SessionOpen, arguments, default)).Code);
+        }
+        Assert.Empty(sent);
+    }
 }

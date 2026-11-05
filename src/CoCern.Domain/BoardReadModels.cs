@@ -44,13 +44,13 @@ public static class BoardReadModels
         var lines = Values(Property(standing, StandingState.LinesKey)).Select(line => new DashboardStandingLine
         {
             Id = Text(line, StandingLine.IdKey), Text = Text(line, StandingLine.TextKey), Author = Text(line, StandingLine.AuthorKey), ApprovedBy = Text(line, StandingLine.ApprovedByKey),
-            ApprovedAt = Date(line, StandingLine.ApprovedAtKey)
+            ApprovedAt = Date(line, StandingLine.ApprovedAtKey), Decision = DecisionEvidence(line)
         }).ToArray();
         var grants = Values(Property(standing, StandingState.GrantsKey)).Select(grant => new DashboardStandingGrant
         {
             Id = Text(grant, StandingGrant.IdKey), Scope = Text(grant, StandingGrant.ScopeKey), Targets = Strings(Property(grant, StandingGrant.TargetsKey)),
             ExpiresAt = Date(grant, StandingGrant.ExpiresAtKey), Grantor = Text(grant, StandingGrant.GrantorKey), ProposedBy = Text(grant, StandingGrant.ProposedByKey),
-            GrantedAt = Date(grant, StandingGrant.GrantedAtKey)
+            GrantedAt = Date(grant, StandingGrant.GrantedAtKey), Decision = DecisionEvidence(grant)
         }).ToArray();
         var proposals = Values(Property(standing, StandingState.ProposalsKey)).Select(proposal =>
         {
@@ -67,14 +67,15 @@ public static class BoardReadModels
                     : $"{Text(grant, StandingGrant.ScopeKey)}: {string.Join(", ", Strings(Property(grant, StandingGrant.TargetsKey)))} until {Text(grant, StandingGrant.ExpiresAtKey)}",
                 ProposedBy = Text(proposal, StandingProposal.ProposedByKey), ProposedAt = Date(proposal, StandingProposal.ProposedAtKey),
                 Replaces = line.ValueKind == JsonValueKind.Object ? lines.Any(x => x.Id == id) : grants.Any(x => x.Id == id),
-                SessionId = Text(proposal, StandingProposal.SessionIdKey), ExpiresAt = line.ValueKind == JsonValueKind.Object ? null : Date(grant, StandingGrant.ExpiresAtKey)
+                SessionId = Text(proposal, StandingProposal.SessionIdKey), ExpiresAt = line.ValueKind == JsonValueKind.Object ? null : Date(grant, StandingGrant.ExpiresAtKey),
+                PresentedBy = Text(proposal, StandingProposal.PresentedByKey), PresentedAt = Date(proposal, StandingProposal.PresentedAtKey)
             };
         }).ToArray();
         var history = Property(standing, StandingState.HistoryKey) is { ValueKind: JsonValueKind.Array } changes
             ? changes.EnumerateArray().Reverse().Take(RelayLimits.StandingHistoryEntries).Select(change => new DashboardStandingChange
             {
                 Revision = Long(Property(change, StandingChange.RevisionKey)), By = Text(change, StandingChange.ByKey), At = Date(change, StandingChange.AtKey),
-                Changes = Strings(Property(change, StandingChange.ChangesKey))
+                Changes = Strings(Property(change, StandingChange.ChangesKey)), Decision = DecisionEvidence(change)
             }).ToArray()
             : [];
         return new()
@@ -124,6 +125,29 @@ public static class BoardReadModels
                 LastError = Text(order, OrderRecord.LastErrorKey)
             };
         }).ToArray();
+    }
+
+    private static DashboardDecisionEvidence? DecisionEvidence(JsonElement record)
+    {
+        var decision = Property(record, StandingDecision.Key);
+        if (decision.ValueKind != JsonValueKind.Object) return null;
+        // Unlike labels, these intentionally stored words must survive exactly. Razor encodes them as plain text.
+        static string Exact(JsonElement value, string name) => Property(value, name) is { ValueKind: JsonValueKind.String } item ? item.GetString()! : "";
+        static string Target(JsonElement effect) => Property(effect, "line").ValueKind == JsonValueKind.Object
+            ? Exact(Property(effect, "line"), StandingLine.TextKey)
+            : Exact(Property(effect, "grant"), StandingGrant.IdKey);
+        var effect = Property(decision, StandingDecision.EffectKey);
+        var grant = Property(effect, "grant");
+        return new()
+        {
+            AuditRef = Exact(decision, StandingDecision.AuditRefKey), PrincipalId = Exact(decision, StandingDecision.PrincipalIdKey),
+            SessionId = Exact(decision, StandingDecision.SessionIdKey), At = Date(decision, StandingDecision.AtKey),
+            HumanWords = Exact(decision, StandingDecision.HumanWordsKey), Outcome = Exact(decision, StandingDecision.OutcomeKey),
+            ProposalId = Exact(decision, StandingDecision.ProposalIdKey), Target = Target(effect), Replaces = Target(Property(effect, "replaces")),
+            Scope = Exact(grant, StandingGrant.ScopeKey), Targets = Property(grant, StandingGrant.TargetsKey) is { ValueKind: JsonValueKind.Array } targets
+                ? targets.EnumerateArray().Where(item => item.ValueKind == JsonValueKind.String).Select(item => item.GetString()!).ToArray() : [],
+            ExpiresAt = Date(grant, StandingGrant.ExpiresAtKey)
+        };
     }
 
     private static JsonElement Property(JsonElement value, string name) => value.ValueKind == JsonValueKind.Object && value.TryGetProperty(name, out var result) ? result : default;

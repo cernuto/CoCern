@@ -37,8 +37,15 @@ internal static class NativeJoinHook
     internal static async Task<int> RunDevelopmentAsync(string root, string dotnet, string provider, string folder, TextReader input, TextWriter output, TextWriter error, CancellationToken ct, string? profile = null,
         Action<ProcessStartInfo>? configureProcess = null)
     {
-        var text = await ReadInputAsync(input, ct);
-        if (text is null) return 0;
+        string? text;
+        try { text = await ReadInputAsync(input, ct); }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested && NativeEditHook.Enabled)
+        { await error.WriteLineAsync("CoCern native edit capture could not be verified."); return 2; }
+        if (text is null)
+        {
+            if (NativeEditHook.Enabled) { await error.WriteLineAsync("CoCern native edit capture could not be verified."); return 2; }
+            return 0;
+        }
         var adapter = AdapterDeployment.AdapterPath(root, AdapterDeployment.Read(root));
         var start = new ProcessStartInfo(dotnet) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
         foreach (var argument in new[] { adapter, "--native-hook", provider, "--connection", folder }) start.ArgumentList.Add(argument);
@@ -93,11 +100,13 @@ internal static class NativeJoinHook
         NativeJoin join, NativeRegistration registration, CancellationToken ct)
     {
         if (provider != registration.Provider || !registration.StillCurrent()) return await Refuse();
-        var text = await ReadInputAsync(input, ct);
-        if (text is null) return 0;
+        var requiresEditValidation = NativeEditHook.Enabled;
         try
         {
+            var text = await ReadInputAsync(input, ct);
+            if (text is null) return requiresEditValidation ? await Refuse() : 0;
             using var document = JsonDocument.Parse(text, new JsonDocumentOptions { MaxDepth = 32 });
+            requiresEditValidation = NativeEditHook.RequiresValidation(document.RootElement);
             if (ParseContext(provider, document.RootElement) is not null &&
                 ChatLocators.Text(document.RootElement, "hook_event_name") is "SessionStart" or "PreToolUse")
             {
@@ -108,29 +117,50 @@ internal static class NativeJoinHook
             if (!registration.StillCurrent()) return await Refuse();
             return await RunAsync(provider, new StringReader(text), output, error, join, ct);
         }
-        catch (JsonException) { return 0; }
+        catch (JsonException) { return requiresEditValidation ? await Refuse() : 0; }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested && requiresEditValidation) { return await Refuse(); }
+        catch (Exception failure) when (requiresEditValidation && failure is IOException or ArgumentException or InvalidOperationException)
+        { return await Refuse(); }
 
         async Task<int> Refuse() { await error.WriteLineAsync("CoCern native capture could not be verified."); return 2; }
     }
 
     internal static async Task<int> RunAsync(string provider, TextReader input, TextWriter output, TextWriter error, NativeJoin join, CancellationToken ct)
     {
-        var recognized = false;
+        var editGuardEnabled = NativeEditHook.Enabled;
+        // Until a valid envelope proves this is unrelated, an opted-in edit hook cannot safely abstain on malformed input.
+        var recognized = editGuardEnabled;
+        var blockingEdit = editGuardEnabled;
         try
         {
             var text = await ReadInputAsync(input, ct);
-            if (text is null) return 0;
+            if (text is null)
+            {
+                if (recognized) { await error.WriteLineAsync("CoCern native edit capture could not be verified."); return 2; }
+                return 0;
+            }
             using var document = JsonDocument.Parse(text, new JsonDocumentOptions { MaxDepth = 32 });
             var root = document.RootElement;
+            var eventName = ChatLocators.Text(root, "hook_event_name");
+            var toolName = ChatLocators.Text(root, "tool_name");
+            var edit = editGuardEnabled && eventName == "PreToolUse" && NativeEditHook.IsEdit(toolName);
+            recognized = NativeEditHook.RequiresValidation(root);
+            blockingEdit = recognized;
+            if (recognized && !edit) throw new ArgumentException("Missing native edit tool identity.");
             var capture = ParseContext(provider, root);
-            if (capture is null) return 0;
-            switch (ChatLocators.Text(root, "hook_event_name"))
+            if (capture is null)
+            {
+                if (edit) throw new ArgumentException("Missing native edit context.");
+                return 0;
+            }
+            switch (eventName)
             {
                 case "SessionStart": await join.EnsureAsync(capture, ct); return 0;
                 case "Stop" when provider == "claude":
                     return await StopHook.RunNativeAsync(new StringReader(text), error, join, ct, ownerGone: OwningProcess.WaitUntilGoneAsync);
                 case "PreToolUse":
                     var name = ChatLocators.Text(root, "tool_name");
+                    if (edit) return await NativeEditHook.RunAsync(join, capture, root, error, ct);
                     const string prefix = "mcp__cocern__";
                     if (name is null || !name.StartsWith(prefix, StringComparison.Ordinal)) return 0;
                     recognized = true;
@@ -143,7 +173,11 @@ internal static class NativeJoinHook
                 default: return 0;
             }
         }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested) { return 0; }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            if (blockingEdit) { await error.WriteLineAsync("CoCern native capture could not be verified."); return 2; }
+            return 0;
+        }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or JsonException or InvalidOperationException or FormatException or OverflowException)
         {
             if (recognized) { await error.WriteLineAsync("CoCern native capture could not be verified."); return 2; }
@@ -467,12 +501,16 @@ internal sealed class NativeRegistration
     }
     internal static void RestrictPrivateEnvironment(ProcessStartInfo start)
     {
+        // This noncredential feature switch can only add a refusal gate; it never supplies native identity or grants permission.
+        var fileClaims = start.Environment.TryGetValue("COCERN_FILE_CLAIMS", out var flag)
+            && string.Equals(flag, "true", StringComparison.OrdinalIgnoreCase);
         foreach (var name in start.Environment.Keys.Where(name => name.StartsWith("COCERN_", StringComparison.OrdinalIgnoreCase)).ToArray())
             start.Environment.Remove(name);
         // Explicit private context is the only authority. An old flag-ignoring helper or an
         // accidental backend fallback must fail before default node/profile discovery.
         start.Environment["COCERN_URL"] = "invalid-private-fallback";
         start.Environment["COCERN_TOKEN"] = "invalid-private-fallback";
+        if (fileClaims) start.Environment["COCERN_FILE_CLAIMS"] = "true";
     }
     internal static bool ValidClientArguments(string[] args) =>
         args is ["--native-client", "codex" or "claude", "--connection", var folder, "--profile", var profile] &&

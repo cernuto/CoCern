@@ -30,6 +30,10 @@ internal static class RelayRequestGuard
             // A repeated key would let checks and the operation read different values, so it is refused (building the object throws on one).
             args = JsonNode.Parse(raw)!.AsObject();
             _ = args.Count;
+            // Refuse widened decision envelopes before stripping private or telemetry fields. The hub adds its incarnation later.
+            if (tool.Name == RelayTools.RecordDecision && args.Any(field => field.Key is not
+                ("repositoryId" or "boardId" or "sessionId" or "sessionToken" or "requestId" or "proposalId" or "decision" or "humanWords" or "callOrigin" or "backgroundCall")))
+                return Replies.Error(InvalidArguments);
             // Untrusted telemetry only; never part of native envelopes, replay or aggregate state.
             args.Remove("callOrigin");
             if (args.ContainsKey(CheckedNativeResolution)) return Replies.Error(InvalidArguments);
@@ -96,6 +100,8 @@ internal static class RelayRequestGuard
         args.Remove(NativeParticipant.Request);
         args.Remove(NativeParticipant.ConfirmedExpiry);
         args.Remove(NativeParticipant.Client);
+        args.Remove(NativeParticipant.WorkingCopy);
+        args.Remove(NativeParticipant.ProtectedRoot);
         return null;
     }
 
