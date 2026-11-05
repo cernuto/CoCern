@@ -266,15 +266,46 @@ internal static class SessionAttention
         return status;
     }
 
-    /// <summary>The agent's answer: accept and dismiss close the item; later snoozes it for a number of boundaries or until a time.</summary>
+    /// <summary>
+    /// The agent's answer: accept and dismiss close the item; later snoozes it for a number of boundaries or until a time. <c>itemIds</c> gives every item the same answer in one write, for clearing a backlog.
+    /// The queue is this session's own, so another session's ID is simply not found. Per item, one that can't be answered is reported in <c>results</c> and left as it was, without failing the others.
+    /// </summary>
     public static RelayReply Respond(AggregateContext context)
     {
         var queue = new SessionState(context.State).Attention;
         var args = context.Args;
+        RemoveExpired(queue.Items, context.Now);
+        if (!args.ContainsKey("itemIds")) return RespondTo(queue, Required(args, "itemId"), context);
+        if (args.ContainsKey("itemId") || args["itemIds"] is not JsonArray { Count: > 0 and <= RelayLimits.MaxAttentionItems } requested) return Error(InvalidArguments, new { field = "itemIds" });
+        var ids = new List<string>(requested.Count);
+        foreach (var entry in requested)
+        {
+            if (entry is not JsonValue value || !value.TryGetValue<string>(out var id) || id.Length is 0 or > RelayLimits.MaxIdentifierLength || id.Any(char.IsControl)) return Error(InvalidArguments, new { field = "itemIds" });
+            if (!ids.Contains(id)) ids.Add(id);
+        }
+        // Wrong for every item alike, so the whole call is refused before any item changes.
+        if (!AttentionActions.All.Contains(Text(args, "action"))) return Error(InvalidArguments, new { field = "action" });
+        if (args.ContainsKey("until") && !FutureTime(args, context.Now, out _)) return Error(InvalidArguments, new { field = "until" });
+        var results = new JsonArray();
+        foreach (var id in ids)
+        {
+            var before = queue.Items[id]?.DeepClone();
+            var one = RespondTo(queue, id, context);
+            // A single refused answer leaves its item alone because the call commits nothing. Here the others commit, so this one is put back.
+            if (!one.Ok && before is not null) queue.Items[id] = before;
+            results.Add(one.Ok ? JsonNode.Parse(one.DataJson) : new JsonObject { ["itemId"] = id, ["code"] = one.Code });
+        }
+        return Ok(new JsonObject { ["results"] = results });
+    }
+
+    private static bool FutureTime(JsonObject args, DateTimeOffset now, out DateTimeOffset time) =>
+        DateTimeOffset.TryParse(Text(args, "until"), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out time) && time > now;
+
+    private static RelayReply RespondTo(AttentionQueue queue, string id, AggregateContext context)
+    {
+        var args = context.Args;
         var now = context.Now;
         var items = queue.Items;
-        RemoveExpired(items, now);
-        var id = Required(args, "itemId");
         if (items[id] is not JsonObject stored) return Error(NotFound, new { itemId = id });
         var item = new QueuedItem(stored);
         var action = Text(args, "action");
@@ -289,7 +320,7 @@ internal static class SessionAttention
                 DateTimeOffset? until = null;
                 if (args.ContainsKey("until"))
                 {
-                    if (!DateTimeOffset.TryParse(Text(args, "until"), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var time) || time <= now) return Error(InvalidArguments, new { field = "until" });
+                    if (!FutureTime(args, now, out var time)) return Error(InvalidArguments, new { field = "until" });
                     until = time;
                 }
                 item.ShownAt = null;
