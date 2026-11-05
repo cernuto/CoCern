@@ -1,3 +1,5 @@
+using System.Net;
+using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -6,6 +8,7 @@ using CoCern.Core;
 using CoCern.Domain;
 using CoCern.Domain.State;
 using CoCern.Host;
+using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -294,8 +297,10 @@ public sealed class HubResponseCompactionTests(ITestOutputHelper output)
         var ordinary = HostData(await host.Call(client, RelayTools.GetStatus, new { repositoryId = "repo", sessionId, sessionToken, attentionDetail = true }));
         Assert.Null(ordinary["statusTag"]);
         Assert.NotNull(ordinary["sessionId"]);
-        var invalid = await host.Call(client, RelayTools.GetStatus, new { repositoryId = "repo", sessionId, sessionToken = "wrong", statusTag = tag });
-        Assert.False(invalid.GetProperty("ok").GetBoolean());
+        using var invalid = await client.PostAsJsonAsync("/api/tools/" + RelayTools.GetStatus, new { repositoryId = "repo", sessionId, sessionToken = "wrong", statusTag = tag });
+        Assert.Equal(HttpStatusCode.Forbidden, invalid.StatusCode);
+        var denied = await invalid.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.False(denied.GetProperty("ok").GetBoolean());
     }
 
     [Fact]
@@ -346,7 +351,7 @@ public sealed class HubResponseCompactionTests(ITestOutputHelper output)
     [Fact]
     public async Task Semantic_status_recomputes_inbox_pause_and_cancellation_before_matching()
     {
-        await using var host = new RelayHostFixture();
+        await using var host = new RelayHostFixture(disableDispatcher: true);
         using var client = host.AuthorizedClient();
         var session = HostData(await host.Call(client, RelayTools.SessionOpen, new { repositoryId = "repo", requestId = "changed-status-open" }));
         var other = HostData(await host.Call(client, RelayTools.SessionOpen, new { repositoryId = "repo", requestId = "changed-status-sender" }));
@@ -359,6 +364,11 @@ public sealed class HubResponseCompactionTests(ITestOutputHelper output)
             repositoryId = "repo", sessionId = other["sessionId"]!.GetValue<string>(), sessionToken = other["sessionToken"]!.GetValue<string>(),
             recipientSessionId = sessionId, requestId = "changed-status-mail", text = "fixture update", wake = false
         }));
+        // A send queues delivery; complete that real outbox transition before checking the fresh status.
+        var dispatch = await host.Services.GetRequiredService<Orleans.IGrainFactory>()
+            .GetGrain<ISessionGrain>(other["sessionId"]!.GetValue<string>())
+            .ExecuteAsync(new RelayCaller("test-user", false, ["repo"], true), "__dispatch", "{}");
+        Assert.True(dispatch.Ok, dispatch.Code);
         var mail = await Status(first["statusTag"]!.GetValue<string>());
         Assert.Null(mail["unchanged"]);
         Assert.Equal(1, mail["attention"]!["inbox"]!.GetValue<int>());
