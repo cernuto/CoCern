@@ -141,3 +141,15 @@ Paul confirmed that this alert must cover chats stopped at a permission prompt. 
 - **Contract:** a fourth row kind, `permission_prompt`, set by that chat's own hook into the existing one-slot self-report path with the hook's fixed text, carrying the tool name only when it is available, and never command contents. No new authority.
 - **Codex:** not established. The note needs Codex's hook documentation or a real client before saying anything; a client with no such signal cannot be detected, and the page must not imply that it was checked.
 - **Not to build yet:** this section is findings and contract only; the real-client test comes first.
+
+### Real-client results, 2026-11-05
+
+Tried on one interactive desktop chat, Claude Code 2.1.317, default permission mode, with logging hooks in a throwaway project. This settles the desktop question above; the terminal and Codex remain untested.
+
+- **`Notification` fires on the desktop app.** It fired with `notification_type` `permission_prompt` and `message` "Claude needs your permission to use <tool>". Its fields were `cwd`, `hook_event_name`, `message`, `notification_type`, `prompt_id`, `scratchpad_dir`, `session_id` and `transcript_path`. There is no `tool_name` or `tool_use_id`, so a row from it can't name the tool without reading `message`.
+- **Timing matches the docs.** In all five cases it came 6.0 seconds after `PermissionRequest`. Prompts that ended sooner did not notify in the one case timed (`send_message`, about 5.4 seconds).
+- **`PermissionRequest` fires at once** and has `tool_name` and `tool_input`, but no `tool_use_id`.
+- **`AskUserQuestion` also goes through both events.** `PermissionRequest` carries the questions, and `Notification` arrives 6 seconds later as a `permission_prompt` saying "...to use AskUserQuestion". The type doesn't tell a question from a permission prompt; only `message` does. The answer appears in `PostToolUse` under `tool_input.answers` and `tool_response.answers`, keyed by question text, and that event has `tool_use_id`.
+- **`WaitingHook` gets this wrong for any question left open past 6 seconds, which is the normal case.** The late `Notification` sets `UntilTurnEnd` and rewrites the row to the permission wording, so the question's own `PostToolUse` no longer clears it and the row lasts until the turn ends. The row lingers rather than hides, so a wait is not lost, but this should be fixed before the hook is on by default.
+- **Clearing.** `PostToolUse` or `PostToolUseFailure` follows an approved tool. A failed Bash gave `PostToolUseFailure` with `error`, `is_interrupt` and `tool_use_id`, and no `tool_response`.
+- **Not tried:** a rejected prompt, `PreToolUse` (so its `tool_use_id` matching the later event comes from the docs only), parallel tools, and a terminal session.
