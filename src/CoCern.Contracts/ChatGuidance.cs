@@ -17,16 +17,20 @@ public static class ChatGuidance
 
     private const string AdministratorIntro = "You are an administrator.";
 
-    /// <summary>The line for a refusal with this code on this tool, or null for a code that isn't about what the chat may do.</summary>
+    /// <summary>What a chat is told when it leaves out repositoryId and its adapter can't safely fill it in. Nothing reaches the hub.</summary>
+    public const string MissingRepository = "repositoryId is missing and this adapter can not safely fill it in. Pass the repository ID configured for this project, with its exact spelling and case.";
+
+    /// <summary>The line for a refusal with this code on this tool, or null for a code that isn't about what the chat may do or how it gets its session back.</summary>
     public static string? Refusal(string code, string tool) => code switch
     {
         RelayErrorCodes.AdministratorRequired => AdministratorHint(tool),
         RelayErrorCodes.ManagerRevoked => "This chat is no longer the manager, so it can't act as one. Pass the request to the current manager or to Paul.",
         RelayErrorCodes.SelfAppointment => "A chat can't appoint itself. Ask Paul to name it from the dashboard or from another chat.",
         RelayErrorCodes.HubPcRequired => "This tool answers only on the PC that runs the hub. Ask Paul to run it there.",
-        RelayErrorCodes.RepositoryDenied => "This chat has no access to that repository or record. Ask Paul if it should.",
+        RelayErrorCodes.RepositoryDenied => "repositoryId must be the ID configured for this project, with its exact spelling and case. If it already is, this chat has no access to it or to that record: ask Paul if it should.",
         // The same words for a wrong token, a closed handle and another chat's session, so they don't tell those apart.
-        RelayErrorCodes.SessionDenied => "This session handle was not accepted. Use the one this chat got from session_open.",
+        RelayErrorCodes.SessionDenied => "This session handle was not accepted. Use the one this chat got from session_open. If it is gone, open one replacement session with session_open and tell the Manager. Never use the token of another chat.",
+        RelayErrorCodes.SessionUnknown => "This session no longer exists. Open one replacement session with session_open, with a new requestId, and tell the Manager.",
         RelayErrorCodes.ActionDenied => "Only the session that owns this can do that. Ask it, or ask Paul.",
         _ => null
     };

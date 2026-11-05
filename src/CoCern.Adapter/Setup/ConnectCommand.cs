@@ -6,25 +6,28 @@ namespace CoCern.Adapter.Setup;
 /// <summary>
 /// <c>--connect</c>: on the hub's own PC, adds CoCern to Claude Code, the Claude desktop app (when installed) and Codex, using the hub's
 /// local token file. No join code or node: the adapter talks to the loopback hub directly. An existing <c>cocern</c> entry is left alone,
-/// unless it is this hub's and names an address or certificate other than the hub's current ones, or <c>--role</c> asks for other tools than it
-/// gives (see <see cref="Refresh"/>): then those are updated. An entry that is not this hub's is reported as <see cref="ConnectStates.OtherHub"/>, never as connected.
+/// unless it is this hub's and names an address or certificate other than the hub's current ones, <c>--role</c> asks for other tools than it
+/// gives, or <c>--repository</c> gives it the repository it doesn't name yet (see <see cref="Refresh"/>): then those are updated. An entry that is not this hub's is reported as <see cref="ConnectStates.OtherHub"/>, never as connected.
 /// Exit codes: 0 done, 1 no token file found, 5 a client settings file could not be parsed (nothing is written then).
 /// </summary>
 internal static class ConnectCommand
 {
     private const string DefaultTokenFile = "data/local-client-token";
-    private const string Usage = "Use --connect [--token-file <path>] [--hub <url> [--fingerprint <sha256>]] [--only claude-code|claude-desktop|codex] [--role admin|worker] [--check] [--json].";
+    private const string Usage = "Use --connect [--token-file <path>] [--hub <url> [--fingerprint <sha256>]] [--only claude-code|claude-desktop|codex] [--role admin|worker] [--repository <id>] [--check] [--json].";
 
     /// <summary>The variable that makes a chat's adapter list the administrator tools as well (see <see cref="AdapterOptions"/>).</summary>
     private const string RoleVariable = "COCERN_ROLE";
 
+    /// <summary>The repository a call that leaves its own out gets (see <see cref="AdapterOptions.Repository"/>).</summary>
+    private const string RepositoryVariable = "COCERN_REPOSITORY";
+
     /// <summary>The variables a Connect entry carries; an entry with none of them is a joined PC's node entry, which is never this hub's to change.</summary>
     private static readonly string[] HubVariables = ["COCERN_TOKEN_FILE", "COCERN_TOKEN", "COCERN_URL", "COCERN_FINGERPRINT"];
-    private static readonly string[] ManagedVariables = [.. HubVariables, RoleVariable];
+    private static readonly string[] ManagedVariables = [.. HubVariables, RoleVariable, RepositoryVariable];
 
     public static int Run(IReadOnlyList<string> args, string profile, string? appData, string dotnetPath, string adapterDll, TextWriter output, TextWriter error, TimeProvider? clock = null, string? nativeCacheRoot = null)
     {
-        string? tokenFile = null, hub = null, only = null, fingerprint = null;
+        string? tokenFile = null, hub = null, only = null, fingerprint = null, repository = null;
         bool check = false, json = false;
         bool? admin = null;
         for (var i = 0; i < args.Count; i++)
@@ -36,6 +39,9 @@ internal static class ConnectCommand
                 case "--check" when !check: check = true; break;
                 case "--role" when admin is null && i + 1 < args.Count && args[i + 1] is "admin" or "worker": admin = args[++i] == "admin"; break;
                 case "--json" when !json: json = true; break;
+                case "--repository" when repository is null && i + 1 < args.Count:
+                    repository = AdapterOptions.ParseRepository(args[++i]) ?? throw new AdapterConfigurationException(Usage);
+                    break;
                 case "--fingerprint" when fingerprint is null && i + 1 < args.Count:
                     fingerprint = CertificateFingerprint.Normalize(args[++i])!;
                     if (!CertificateFingerprint.IsValid(fingerprint)) throw new AdapterConfigurationException("--fingerprint must be the hub certificate's SHA-256 fingerprint: 64 hexadecimal characters.");
@@ -63,6 +69,7 @@ internal static class ConnectCommand
         if (hub is not null) environment["COCERN_URL"] = hub;
         if (fingerprint is not null) environment["COCERN_FINGERPRINT"] = fingerprint;
         if (admin == true) environment[RoleVariable] = "admin";
+        if (repository is not null) environment[RepositoryVariable] = repository;
         // Per app: whether its existing entry gives the administrator tools (for the reply) and what this run changes in it (for the detail).
         // Without a current address (an older hub, no --hub) the address and certificate are left as they are; without --role, the tools.
         var seen = new Dictionary<string, (bool Admin, IReadOnlyDictionary<string, string?>? Changes)>(StringComparer.Ordinal);
@@ -73,7 +80,7 @@ internal static class ConnectCommand
         EntryRefresh RefreshFor(string id) => variables =>
         {
             if (BelongsToHub(variables, tokenFile, hub, localHub?.Url)) owned.Add(id); else foreign[id] = NotThisHub(variables);
-            var changes = Refresh(variables, tokenFile, hub, fingerprint, localHub?.Url, admin);
+            var changes = Refresh(variables, tokenFile, hub, fingerprint, localHub?.Url, admin, repository);
             if (owned.Contains(id))
             {
                 var effective = variables.ToDictionary(item => item.Key, item => item.Value, StringComparer.Ordinal);
@@ -158,6 +165,7 @@ internal static class ConnectCommand
                 (false, true) => "now gives its chats the administrator tools",
                 (false, false) => "no longer gives its chats the administrator tools"
             });
+        if (changes.ContainsKey(RepositoryVariable)) parts.Add(check ? "doesn't name its repository" : "now names its repository");
         return $"Its CoCern entry for this hub {string.Join(" and ", parts)}. {(check ? "Connect updates it." : "Restart the app to use it.")}";
     }
 
@@ -174,13 +182,14 @@ internal static class ConnectCommand
     /// <summary>
     /// What an existing <c>cocern</c> entry needs so it reaches this hub again: <c>COCERN_URL</c> set to <paramref name="hub"/> and
     /// <c>COCERN_FINGERPRINT</c> to <paramref name="fingerprint"/> (removed when the hub has none) wherever they differ, when the hub's address is
-    /// known; and, when <paramref name="admin"/> is given, <c>COCERN_ROLE</c> set to <c>admin</c> or removed to match. Null when nothing differs
+    /// known; when <paramref name="admin"/> is given, <c>COCERN_ROLE</c> set to <c>admin</c> or removed to match; and, when <paramref name="repository"/> is given and the entry names none, <c>COCERN_REPOSITORY</c>.
+    /// A repository the entry already names stays, so a refresh never moves where a chat's calls default to. Null when nothing differs
     /// or the entry is not this hub's. The hub's certificate can change (a new one, or a new place for it), and an entry still pinning the old one
     /// stops connecting. A local refresh never claims a supplied non-loopback or invalid origin. An eligible entry counts as this hub's when its token file is in this hub's data folder (beside <paramref name="tokenFile"/>);
     /// without a token file, when its address matches the requested destination, the recorded TLS origin, or the legacy default HTTP origin. A token file anywhere else
     /// is another hub's, and an entry with none of the CoCern variables is a node's; both are left alone, as is everything else in the entry.
     /// </summary>
-    internal static IReadOnlyDictionary<string, string?>? Refresh(IReadOnlyDictionary<string, string> variables, string tokenFile, string? hub, string? fingerprint, string? localUrl, bool? admin = null)
+    internal static IReadOnlyDictionary<string, string?>? Refresh(IReadOnlyDictionary<string, string> variables, string tokenFile, string? hub, string? fingerprint, string? localUrl, bool? admin = null, string? repository = null)
     {
         if (!BelongsToHub(variables, tokenFile, hub, localUrl)) return null;
         var url = variables.GetValueOrDefault("COCERN_URL")?.Trim() is { Length: > 0 } given ? given : HubAddresses.LocalUrl;
@@ -192,6 +201,7 @@ internal static class ConnectCommand
             if (pinned != fingerprint) changes["COCERN_FINGERPRINT"] = fingerprint;
         }
         if (admin is { } wanted && IsAdmin(variables) != wanted) changes[RoleVariable] = wanted ? "admin" : null;
+        if (repository is not null && string.IsNullOrWhiteSpace(variables.GetValueOrDefault(RepositoryVariable))) changes[RepositoryVariable] = repository;
         return changes.Count == 0 ? null : changes;
     }
 

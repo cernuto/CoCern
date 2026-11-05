@@ -159,6 +159,9 @@ public sealed class LocalChatWake : IAsyncDisposable
     /// <summary>This chat's newest session in a repository among its local handles; see <see cref="SessionHandoff.FindOwn"/>.</summary>
     internal SessionHandle? FindOwn(string repository) => handoff.FindOwn(repository);
 
+    /// <summary>The only repository this chat has local sessions in; see <see cref="SessionHandoff.OwnRepository"/>.</summary>
+    internal string? OwnRepository() => handoff.OwnRepository();
+
     public Task RunAsync(CancellationToken ct) => running ??= LoopAsync(ct);
 
     /// <summary>
