@@ -36,6 +36,9 @@ internal sealed class SessionTools(Aggregates aggregates, StandingDelivery stand
         return opened;
     }
 
+    /// <summary>The one line a chat gets about reporting that it waits on Paul.</summary>
+    internal const string WaitingHint = "When you stop for Paul's answer, report it with ack waitingFor; clear it next turn with \"\".";
+
     /// <summary>Records the session in the control directory, initializes its private aggregate, and attaches the requested task packet.</summary>
     private async Task<RelayReply> OpenSessionAsync(RelayCaller caller, JsonObject args)
     {
@@ -68,6 +71,8 @@ internal sealed class SessionTools(Aggregates aggregates, StandingDelivery stand
             var packet = await aggregates.Board(caller, RelayTools.TaskGet, args);
             data["taskPacket"] = packet.Ok ? JsonNode.Parse(packet.DataJson) : JsonSerializer.SerializeToNode(new { code = packet.Code });
         }
+        // In this reply and not the tool's description: it costs once per session, not on every turn, and server instructions have proved not to reach every chat.
+        data["waitingHint"] = WaitingHint;
         await standing.AttachAtOpenAsync(caller, args, data);
         return Ok(data, opened.Version);
     }

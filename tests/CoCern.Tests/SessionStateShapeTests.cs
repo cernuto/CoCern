@@ -64,7 +64,7 @@ public sealed class SessionStateShapeTests
         Assert.True(hub.Session(chat, RelayTools.Ack, new() { ["messageIds"] = new JsonArray(read) }, Now).Ok);
 
         // Its own report of waiting on Paul, in a session that stays open.
-        Assert.True(hub.Session(peer, RelayTools.Ack, new() { ["waitingFor"] = "Which rig?" }, Now).Ok);
+        Assert.True(hub.Session(peer, RelayTools.Ack, new() { ["waitingFor"] = "Which rig?", [RelayLimits.HookWaitingField] = true }, Now).Ok);
 
         // Attention: a blocking item on another board, an item closed without a revision and one with, an archived task, the hub's own
         // offered work and its close after a claim, an offer, a snooze, and an info item closed as seen.
