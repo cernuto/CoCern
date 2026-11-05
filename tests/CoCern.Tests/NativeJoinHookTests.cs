@@ -238,9 +238,15 @@ public sealed class NativeJoinHookTests(ITestOutputHelper output)
         {
             ClaudeWaiter.WritePid(fixture.Folder, Parent, oldWaiter.Id, oldWaiter.StartTime.ToUniversalTime());
             using var error = new StringWriter();
-            var hook = StopHook.RunNativeAsync(new StringReader(StopInput(fixture)), error, fixture.Join, default, fixture.Handler, TimeSpan.FromSeconds(10), read: Clients(oldWaiter.Id, 9002), grace: TimeSpan.FromSeconds(30));
-            await Task.Delay(300);
+            var clients = Clients(oldWaiter.Id, 9002);
+            var checks = 0;
+            Func<int, ProcessFacts?> read = id => { if (id == oldWaiter.Id) Interlocked.Increment(ref checks); return clients(id); };
+            var hook = StopHook.RunNativeAsync(new StringReader(StopInput(fixture)), error, fixture.Join, default, fixture.Handler, TimeSpan.FromSeconds(10), read: read, grace: TimeSpan.FromSeconds(30));
+            // Seen checking the old waiter, not just slow to start: a hook that skips the check ends with 0 while that waiter is still alive.
+            var deadline = DateTime.UtcNow.AddSeconds(15);
+            while (Volatile.Read(ref checks) < 2 && !hook.IsCompleted && DateTime.UtcNow < deadline) await Task.Delay(25);
             Assert.False(hook.IsCompleted);
+            Assert.True(Volatile.Read(ref checks) >= 2);
             oldWaiter.Kill(entireProcessTree: true);
             await oldWaiter.WaitForExitAsync();
             Assert.Equal(2, await hook.WaitAsync(TimeSpan.FromSeconds(20)));
