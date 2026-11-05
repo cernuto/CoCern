@@ -86,8 +86,9 @@ public static class AdapterDeployment
         return manifest;
     }
 
+    // Keep this reader's snapshot open without blocking publication of the next atomic manifest.
     internal static FileStream OpenCurrentManifest(string deploymentRoot) =>
-        new(Path.Combine(deploymentRoot, "current.json"), FileMode.Open, FileAccess.Read, FileShare.Read);
+        new(Path.Combine(deploymentRoot, "current.json"), FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
 
     public static string AdapterPath(string deploymentRoot, AdapterManifest manifest)
     {
