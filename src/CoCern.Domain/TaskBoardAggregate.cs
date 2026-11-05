@@ -54,7 +54,7 @@ internal static class TaskBoardAggregate
             case RelayTools.StandingPropose: return StandingPreferences.Propose(context);
             case Operations.StandingProposeHub: return StandingPreferences.ProposeFromHub(context);
             case RelayTools.TaskGet when taskId.Length == 0 && Text(context.Args, "section") == "standing": return StandingPreferences.View(context.State, context.Now);
-            case RelayTools.TaskGet when taskId.Length == 0: return context.Args.ContainsKey("sinceRevision") ? DeltaPage(board, context.Args) : ListTasks(board, context.Args);
+            case RelayTools.TaskGet when taskId.Length == 0: return context.Args.ContainsKey("sinceRevision") ? DeltaPage(board, context.Args) : ListTasks(board, context);
             case RelayTools.ContextGet: return GetContext(context);
             case RelayTools.ContextPut: return PutContext(context);
             case RelayTools.OrderPut: return StandingOrders.Put(context);
@@ -94,12 +94,27 @@ internal static class TaskBoardAggregate
         };
     }
 
-    private static RelayReply ListTasks(BoardState board, JsonObject args)
+    private static RelayReply ListTasks(BoardState board, AggregateContext context)
     {
-        var page = Page(board.TaskMap.OrderBy(x => x.Key, StringComparer.Ordinal).Select(x => (JsonNode)Summary(new BoardTask(x.Value!.AsObject()))), args);
+        var args = context.Args;
+        var full = args["includeDetails"] is JsonValue details && details.TryGetValue<bool>(out var include) && include;
+        var openOnly = args["openOnly"] is JsonValue open && open.TryGetValue<bool>(out var filter) && filter;
+        var tasks = board.TaskMap.OrderBy(x => x.Key, StringComparer.Ordinal).Select(x => new BoardTask(x.Value!.AsObject()))
+            .Where(task => !openOnly || !TaskArchiving.Archivable(task, context.Now)).ToArray();
+        var tag = openOnly ? ListSnapshot.Tag(new { kind = "openTasks", context.Repository, context.Key, context.Caller.PrincipalId, context.Caller.IsAdministrator }, tasks.Select(task => task.TaskId)) : null;
+        if (tag is not null && !ListSnapshot.Matches(args, tag)) return Error("ListRestartRequired");
+        var rows = tasks.Select(task =>
+        {
+            if (!full && TaskArchiving.Archivable(task, context.Now)) return (JsonNode)new JsonObject { ["taskId"] = task.TaskId, ["state"] = "completed" };
+            var summary = Summary(task);
+            if (!full) summary.Remove("sections");
+            return (JsonNode)summary;
+        }).ToArray();
+        var page = Page(rows, args);
         var data = JsonNode.Parse(page.DataJson)!.AsObject();
         data["boardRevision"] = board.TaskRevision;
-        return Ok(data);
+        if (tag is not null) data["snapshotTag"] = tag;
+        return full && tag is null ? Ok(data) : ListSnapshot.Fit(data, rows, args);
     }
 
     /// <summary>Tasks changed since a checkpoint, paged against a pinned snapshot revision. A concurrent change restarts the read.</summary>

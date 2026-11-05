@@ -54,8 +54,12 @@ internal static class RelayRequestGuard
         foreach (var numeric in IntegerFields) if (args.ContainsKey(numeric) && args[numeric] is null) args.Remove(numeric);
         if (NotWholeNumber(args) is { } numberField) return Replies.Error(InvalidArguments, new { field = numberField });
         if (tool.Name == RelayTools.ContextPut && args["content"] is null) return Replies.Error(InvalidArguments, new { field = "content" });
-        foreach (var flag in new[] { "includeNextWork", "attention", "attentionDetail", "seen", "headersOnly", "presentStanding" })
+        foreach (var flag in new[] { "includeNextWork", "attention", "attentionDetail", "seen", "headersOnly", "presentStanding", "includeStale", "includeDetails", "openOnly" })
             if (args.ContainsKey(flag) && (args[flag] is not JsonValue value || !value.TryGetValue<bool>(out _))) return Replies.Error(InvalidArguments, new { field = flag });
+        if (tool.Name == RelayTools.TaskGet && (args.ContainsKey("openOnly") || args.ContainsKey("includeDetails") || args.ContainsKey("snapshotTag"))
+            && (args.ContainsKey("taskId") || args.ContainsKey("section") || args.ContainsKey("sinceRevision"))) return Replies.Error(InvalidArguments);
+        if (args["snapshotTag"] is { } listTag && (listTag is not JsonValue tagValue || !tagValue.TryGetValue<string>(out var tagText)
+            || tagText.Length > 64 || tagText.Any(char.IsControl))) return Replies.Error(InvalidArguments, new { field = "snapshotTag" });
         // Machine revocation dispatches directly to discovery, outside the control aggregate's argument fence.
         if (tool.Name == RelayTools.ControlRequest && Text(args, "command") == "revoke_machine" && args.ContainsKey("allSessions"))
             return Replies.Error(InvalidArguments, new { field = "allSessions" });
