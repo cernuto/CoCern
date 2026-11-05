@@ -23,11 +23,19 @@ public interface IWakeDispatcher
 public sealed class InboxCoverage
 {
     private readonly Dictionary<string, (string Etag, IReadOnlyList<(string Id, bool Quiet)> Messages)> _known = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, StatusVerdict> _status = new(StringComparer.Ordinal);
 
     internal (string Etag, IReadOnlyList<(string Id, bool Quiet)> Messages)? Known(string route) { lock (_known) return _known.TryGetValue(route, out var known) ? known : null; }
 
     internal void Remember(string route, string etag, IReadOnlyList<(string Id, bool Quiet)> messages) { lock (_known) _known[route] = (etag, messages); }
+
+    internal StatusVerdict? KnownStatus(string route) { lock (_status) return _status.GetValueOrDefault(route); }
+
+    internal void RememberStatus(string route, StatusVerdict verdict) { lock (_status) _status[route] = verdict; }
 }
+
+/// <summary>What one full status read decided, kept under the hub's <c>statusTag</c>. The status itself is not kept. While the hub, having authorized the call and read status again, answers that this tag still holds, the same decision still holds, a refusal included.</summary>
+internal sealed record StatusVerdict(string Tag, bool Permitted, bool UrgentOnly, string? Wake, string? Line);
 
 public sealed class WakeReconciler(WakeConfiguration configuration, WakeState state, RelayForwarder forwarder, IWakeDispatcher dispatcher, TimeProvider? clock = null, InboxCoverage? coverage = null)
 {
@@ -136,11 +144,35 @@ public sealed class WakeReconciler(WakeConfiguration configuration, WakeState st
             }
             return ("coverage-limit", []);
         }
+        // The pass's first read, which is nearly all of this watcher's status traffic, opts in to the hub's unchanged answer. The read just before a reservation stays a full one.
+        JsonElement AttentionArguments(string? tag)
+        {
+            var arguments = new System.Text.Json.Nodes.JsonObject { ["repositoryId"] = route.RepositoryId, ["boardId"] = route.BoardId, ["sessionId"] = session.SessionId, ["sessionToken"] = session.SessionToken, ["attentionDetail"] = true };
+            if (coverage is not null) arguments["statusTag"] = tag ?? "";
+            return JsonSerializer.SerializeToElement(arguments);
+        }
+
         async Task<bool> Permitted(bool readAttention = false)
         {
-            var arguments = readAttention ? JsonSerializer.SerializeToElement(new { repositoryId = route.RepositoryId, boardId = route.BoardId, sessionId = session.SessionId, sessionToken = session.SessionToken, attentionDetail = true }) : Arguments();
+            var known = readAttention ? coverage?.KnownStatus(key) : null;
+            var arguments = readAttention ? AttentionArguments(known?.Tag) : Arguments();
             var status = await forwarder.ForwardAsync("get_status", RelayForwarder.WithOrigin(arguments, background: true), cancellationToken);
+            if (status is { Ok: true, Data: { ValueKind: JsonValueKind.Object } answer } && answer.TryGetProperty("unchanged", out var unchanged) && unchanged.ValueKind == JsonValueKind.True)
+            {
+                // An answer about any other tag says nothing about this session, so it refuses, like every other reply that names no session.
+                if (known is null || StatusTag(answer) != known.Tag) return false;
+                (urgentOnly, attentionWake, attentionLine) = (known.UrgentOnly, known.Wake, known.Line);
+                return known.Permitted;
+            }
             if (readAttention && status.Ok && status.Data is { ValueKind: JsonValueKind.Object } detail) (urgentOnly, attentionWake, attentionLine) = Attention(detail);
+            var permitted = ControlPermits(status);
+            if (readAttention && status.Ok && status.Data is { ValueKind: JsonValueKind.Object } full && StatusTag(full) is { } tag)
+                coverage?.RememberStatus(key, new(tag, permitted, urgentOnly, attentionWake, attentionLine));
+            return permitted;
+        }
+
+        bool ControlPermits(AdapterReply status)
+        {
             if (!status.Ok || status.Data is not { ValueKind: JsonValueKind.Object } data ||
                 !data.TryGetProperty("sessionId", out var identity) || identity.GetString() != session.SessionId ||
                 !data.TryGetProperty("control", out var control) || control.ValueKind != JsonValueKind.Object ||
@@ -154,6 +186,11 @@ public sealed class WakeReconciler(WakeConfiguration configuration, WakeState st
             return true;
         }
     }
+
+    /// <summary>The hub's <c>statusTag</c> in a status reply, or null when it has none this adapter could send back.</summary>
+    internal static string? StatusTag(JsonElement status) =>
+        status.TryGetProperty("statusTag", out var tag) && tag.ValueKind == JsonValueKind.String && tag.GetString() is { Length: > 0 and <= 64 } text && !text.Any(char.IsControl) ? text : null;
+
     /// <summary>Wake candidates for attention items carry this prefix, so they never collide with message IDs.</summary>
     internal const string AttentionWakePrefix = "attention:";
     /// <summary>The line an attention wake adds to the fixed prompt.</summary>
