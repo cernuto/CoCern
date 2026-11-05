@@ -14,11 +14,15 @@ public sealed record AdapterReply(bool Ok, string Code, JsonElement? Data = null
     public static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 }
 
-public sealed class RelayForwarder(HttpClient client, AdapterOptions options)
+/// <param name="callOrigin">Who this forwarder's calls report as their origin (<see cref="CallOrigins"/>). Telemetry only; null reports none.</param>
+public sealed class RelayForwarder(HttpClient client, AdapterOptions options, string? callOrigin = null)
 {
     public const int MaxRequestBytes = RelayLimits.MaxPayloadBytes; // the hub refuses anything larger
     public const int MaxResponseBytes = 128 * 1024;
     private const string ResponseTooLarge = "response_too_large";
+
+    /// <summary>The same transport, reporting another origin.</summary>
+    internal RelayForwarder Tagged(string origin) => new(client, options, origin);
 
     public static HttpClientHandler CreateHandler() => new() { AllowAutoRedirect = false, UseCookies = false };
     /// <summary>The pinned handler when the options carry a certificate fingerprint, otherwise the plain one.</summary>
@@ -59,7 +63,7 @@ public sealed class RelayForwarder(HttpClient client, AdapterOptions options)
 
         using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(options.BaseUri, $"api/tools/{tool}"));
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", options.Token);
-        request.Content = new StringContent(json, Encoding.UTF8, "application/json");
+        request.Content = new StringContent(WithCallOrigin(arguments, json), Encoding.UTF8, "application/json");
         // HttpClient.Timeout stops at the headers under ResponseHeadersRead; this bounds the body read too.
         using var bounded = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         bounded.CancelAfter(client.Timeout);
@@ -103,6 +107,29 @@ public sealed class RelayForwarder(HttpClient client, AdapterOptions options)
             _ => "Can't reach the hub. Check that it is running and try again."
         };
         return new(false, code, JsonSerializer.SerializeToElement(new { message }));
+    }
+
+    /// <summary>
+    /// The body to send: <paramref name="json"/> with this forwarder's origin added and every other byte as it was. The tag never costs a call: a native
+    /// envelope is an exact shape that a hub older than the origin strip refuses with any extra field, and a body the tag would push past the size limit goes without it.
+    /// </summary>
+    private string WithCallOrigin(JsonElement arguments, string json)
+    {
+        if (callOrigin is null || arguments.TryGetProperty("nativeJoin", out _) || arguments.TryGetProperty("nativePreflight", out _)) return json;
+        string tagged;
+        if (arguments.TryGetProperty(CallOrigins.Field, out _))
+        {
+            // The adapter knows who is calling, so a value in the arguments gives way; a second copy of the key would get the call refused.
+            try
+            {
+                var values = System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject();
+                values[CallOrigins.Field] = callOrigin;
+                tagged = values.ToJsonString();
+            }
+            catch (ArgumentException) { return json; } // A repeated key: the hub refuses it as it always has.
+        }
+        else tagged = json[..^1] + (arguments.EnumerateObject().Any() ? "," : "") + JsonSerializer.Serialize(CallOrigins.Field) + ":" + JsonSerializer.Serialize(callOrigin) + "}";
+        return Encoding.UTF8.GetByteCount(tagged) > MaxRequestBytes ? json : tagged;
     }
 
     /// <summary>Stamps reported origin at the adapter boundary; this field grants no permission and changes no call behavior.</summary>
