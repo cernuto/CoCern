@@ -110,10 +110,20 @@ try
     }
     if (args.Length > 0 && args[0] == "--prompt-hook")
     {
-        // A UserPromptSubmit hook: one line on standard output, or nothing; it always exits 0 so it can never block a message.
+        // A UserPromptSubmit hook: a status line and new mail on standard output, or nothing; it always exits 0 so it can never block a message.
         var folder = args.Length == 3 && args[1] == "--data-dir" && !string.IsNullOrWhiteSpace(args[2]) ? args[2]
             : NodeState.ConfiguredFolder(Environment.GetEnvironmentVariable);
-        return await PromptHook.RunAsync(Console.In, Console.Out, folder);
+        // Messages carry any text; the console's code page would turn non-ASCII into '?' before the chat reads it.
+        using var output = new StreamWriter(Console.OpenStandardOutput(), new System.Text.UTF8Encoding(false)) { AutoFlush = true };
+        return await PromptHook.RunAsync(Console.In, output, folder);
+    }
+    if (args.Length > 0 && args[0] == "--post-tool-hook")
+    {
+        // A Claude Code PostToolUse hook: new mail as JSON on standard output, or nothing; it always exits 0 so it can never fail a tool call.
+        var folder = args.Length == 3 && args[1] == "--data-dir" && !string.IsNullOrWhiteSpace(args[2]) ? args[2]
+            : NodeState.ConfiguredFolder(Environment.GetEnvironmentVariable);
+        using var output = new StreamWriter(Console.OpenStandardOutput(), new System.Text.UTF8Encoding(false)) { AutoFlush = true };
+        return await PostToolHook.RunAsync(Console.In, output, folder);
     }
     if (args.Length > 0 && args[0] == "--stop-hook")
     {
