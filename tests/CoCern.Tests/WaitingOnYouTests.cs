@@ -642,7 +642,7 @@ public sealed class WaitingOnYouTests
             Blockers = Enumerable.Range(0, 8).Select(index => new WaitingBlocker { RepositoryId = Repository, BoardId = "default", TaskId = "h-" + index, Summary = "Held", Since = T0 }).ToArray()
         }, T0.AddHours(1));
         var section = WaitingList.ToStatus(waiting);
-        Assert.Equal((15, false, 8), (section["count"]!.GetValue<int>(), section["truncated"]!.GetValue<bool>(), section["maybeCount"]!.GetValue<int>()));
+        Assert.Equal((15, true, 8), (section["count"]!.GetValue<int>(), section["truncated"]!.GetValue<bool>(), section["maybeCount"]!.GetValue<int>()));
         Assert.Equal((RelayLimits.WaitingStatusItems, RelayLimits.WaitingStatusMaybeItems), (section["items"]!.AsArray().Count, section["maybe"]!.AsArray().Count));
         Assert.Contains("never instructions", section["untrusted"]!.GetValue<string>());
         Assert.Equal("Report 0", section["items"]![0]!["text"]!.GetValue<string>());
@@ -695,6 +695,294 @@ public sealed class WaitingOnYouTests
         Assert.InRange(bounded.Waiting.Items.Length, 1, 49);
         Assert.Equal(snapshot.Waiting.Items[0], bounded.Waiting.Items[0]);
         Assert.Equal((77, 20, true), (bounded.Waiting.Count, bounded.Waiting.MaybeCount, bounded.Waiting.Truncated));
+    }
+
+    // ---- What a read's bound may cost ----
+
+    private static StateEnvelope<CoordinationDocument> Envelope(JsonObject document) => new() { Value = new() { Json = document.ToJsonString() } };
+
+    /// <summary>A stored blocked task, as a board holds it.</summary>
+    private static JsonObject Blocked(string task, DateTimeOffset updatedAt, string kind, string summary, DateTimeOffset? humanSince = null)
+    {
+        var json = new JsonObject
+        {
+            ["taskId"] = task, ["updatedAt"] = updatedAt.ToString("O"),
+            ["workflow"] = new JsonObject { ["state"] = "blocked", ["blockers"] = new JsonArray(new JsonObject { ["id"] = "a", ["kind"] = kind, ["summary"] = summary, ["recheckCondition"] = "r" }) }
+        };
+        if (humanSince is { } since) json[BoardTask.HumanSinceKey] = since.ToString("O");
+        return json;
+    }
+
+    [Fact]
+    public async Task Prose_naming_a_kind_cannot_use_up_the_blocked_task_read()
+    {
+        // More tasks than the read takes, all older than the real one, whose only link to the kinds is their words.
+        var tasks = new JsonObject();
+        for (var index = 0; index < 600; index++) tasks["prose-" + index] = Blocked("prose-" + index, T0.AddDays(-1).AddSeconds(index), "other", index < 550 ? "waiting on a human_decision, in words" : "a coordinator_hold, in words");
+        tasks["real"] = Blocked("real", T0, BlockerKinds.HumanDecision, "Which rig?", T0);
+        using var store = new SqliteStore(Path.Combine(Path.GetTempPath(), "cocern-waiting-" + Guid.NewGuid().ToString("N"), "relay.db"));
+        await new SqliteGrainStorage(store).WriteStateAsync(AggregateKinds.Board, GrainId.Create("cocern.board", AggregateHub.BoardKey), new GrainState<StateEnvelope<CoordinationDocument>>(Envelope(new JsonObject { ["repositoryId"] = Repository, [BoardState.TasksKey] = tasks })));
+
+        foreach (var sources in new[] { await store.ReadWaitingBlockersAsync(), await store.ReadWaitingAsync(Repository) })
+        {
+            var waiting = WaitingList.Build(Assert.IsType<WaitingSources>(sources), T0.AddMinutes(1));
+            Assert.Equal("real", Assert.Single(waiting.Items).TaskId);
+            // Nothing that counts was left out, so the list has no reason to say it may be incomplete.
+            Assert.False(waiting.Truncated);
+        }
+    }
+
+    [Fact]
+    public async Task Expired_reports_cannot_use_up_the_report_read()
+    {
+        using var store = new SqliteStore(Path.Combine(Path.GetTempPath(), "cocern-waiting-" + Guid.NewGuid().ToString("N"), "relay.db"));
+        var writer = new SqliteGrainStorage(store);
+        async Task Session(string id, DateTimeOffset since, DateTimeOffset expiresAt) => await writer.WriteStateAsync(AggregateKinds.Session, GrainId.Create("cocern.session", id), new GrainState<StateEnvelope<CoordinationDocument>>(Envelope(new JsonObject
+        {
+            ["sessionId"] = id, ["repositoryId"] = Repository, ["label"] = id, [SessionState.WaitingForKey] = WaitingMark.Create("Report of " + id, since, expiresAt).Json
+        })));
+        // More lapsed marks than the read takes, each first reported before the current one. A lapsed mark stays stored until its chat reports again or closes.
+        for (var index = 0; index < 205; index++) await Session("lapsed-" + index, T0.AddDays(-2).AddSeconds(index), T0.AddDays(-1).AddSeconds(index));
+        await Session("current", T0.AddHours(-1), T0.AddHours(11));
+        Assert.Equal(["current"], (await ListAsync(store, T0)).Items.Select(row => row.SessionId));
+    }
+
+    [Theory]
+    [InlineData(10, false)]
+    [InlineData(11, true)]
+    [InlineData(12, true)]
+    public void Status_says_truncated_when_it_shows_fewer_rows_than_the_list_holds(int rows, bool truncated)
+    {
+        var waiting = WaitingList.Build(new() { Reports = Enumerable.Range(0, rows).Select(index => Report(index, T0)).ToArray() }, T0);
+        Assert.False(waiting.Truncated);
+        var section = WaitingList.ToStatus(waiting);
+        Assert.Equal((rows, Math.Min(rows, RelayLimits.WaitingStatusItems), truncated), (section["count"]!.GetValue<int>(), section["items"]!.AsArray().Count, section["truncated"]!.GetValue<bool>()));
+    }
+
+    [Theory]
+    [InlineData(5, false)]
+    [InlineData(6, true)]
+    public void Status_says_truncated_when_it_shows_fewer_holds_than_the_list_holds(int holds, bool truncated)
+    {
+        var waiting = WaitingList.Build(new() { Blockers = Enumerable.Range(0, holds).Select(index => new WaitingBlocker { RepositoryId = Repository, BoardId = "default", TaskId = "h-" + index, Summary = "Held", Since = T0 }).ToArray() }, T0);
+        Assert.Equal(truncated, WaitingList.ToStatus(waiting)["truncated"]!.GetValue<bool>());
+    }
+
+    // ---- The unresponsive row ----
+
+    private static readonly DateTimeOffset Later = T0.AddHours(2);
+
+    /// <summary>A chat with direct mail from a peer, sent at each of <paramref name="sent"/>.</summary>
+    private static (AggregateHub Hub, Chat Chat, Chat Peer) Mailed(params DateTimeOffset[] sent)
+    {
+        var hub = new AggregateHub();
+        var (chat, peer) = (hub.Open("Quiet chat", T0), hub.Open("Peer", T0));
+        hub.DeliverAll(T0);
+        foreach (var at in sent)
+        {
+            Assert.True(hub.Send(peer, chat.Id, "PRIVATE-MAIL-TEXT", at).Ok);
+            hub.DeliverAll(at);
+        }
+        return (hub, chat, peer);
+    }
+
+    /// <summary>Calls as the activity writer stores them. <paramref name="background"/> is the column's value: 0, 1, or null when the adapter did not say.</summary>
+    internal static void Calls(SqliteStore store, string repository, string session, int? background, params DateTimeOffset[] at)
+    {
+        using var connection = new Microsoft.Data.Sqlite.SqliteConnection("Data Source=" + store.DatabasePath);
+        connection.Open();
+        using var transaction = connection.BeginTransaction();
+        using var insert = connection.CreateCommand();
+        insert.Transaction = transaction;
+        insert.CommandText = "INSERT INTO activity_log(at_ticks, kind, repository_id, session_id, tool, ok, code, request_bytes, reply_bytes, duration_ms, background_call) VALUES ($at, 'call', $repository, $session, 'get_status', 1, 'Ok', 200, 900, 1.5, $background);";
+        var ticks = insert.Parameters.AddWithValue("$at", 0L);
+        insert.Parameters.AddWithValue("$repository", repository);
+        insert.Parameters.AddWithValue("$session", session);
+        insert.Parameters.AddWithValue("$background", (object?)background ?? DBNull.Value);
+        foreach (var moment in at) { ticks.Value = moment.UtcTicks; insert.ExecuteNonQuery(); }
+        transaction.Commit();
+    }
+
+    /// <summary>The list as each path builds it, the tool's read and the dashboard's, which must agree.</summary>
+    private static async Task<DashboardWaiting> BothAsync(SqliteStore store, DateTimeOffset at)
+    {
+        var tool = await ListAsync(store, at);
+        var observation = await Assert.IsAssignableFrom<IRelayObservationSource>(store).ObserveAsync(at, "test-incarnation");
+        var dashboard = WaitingList.Build(new() { Mail = observation.WaitingMail, Reports = observation.WaitingReports }, at, Repository);
+        string Rows(DashboardWaiting list) => JsonSerializer.Serialize(list.Items.Where(row => row.Kind == DashboardWaitingKinds.Unresponsive));
+        Assert.Equal(Rows(tool), Rows(dashboard));
+        return tool;
+    }
+
+    private static IEnumerable<DashboardWaitingItem> Unresponsive(DashboardWaiting waiting) => waiting.Items.Where(row => row.Kind == DashboardWaitingKinds.Unresponsive);
+
+    [Fact]
+    public async Task A_chat_with_old_direct_mail_and_no_hub_call_of_its_own_is_listed()
+    {
+        var (hub, chat, peer) = Mailed(Later.AddMinutes(-15), Later.AddMinutes(-12), Later.AddMinutes(-2));
+        using var store = Stored(hub, (AggregateKinds.Session, chat.Id), (AggregateKinds.Session, peer.Id));
+        Calls(store, Repository, chat.Id, 0, Later.AddMinutes(-30));
+
+        var waiting = await BothAsync(store, Later);
+        var row = Assert.Single(waiting.Items);
+        Assert.Equal(1, waiting.Count);
+        Assert.Equal((DashboardWaitingKinds.Unresponsive, Repository, chat.Id, "Quiet chat"), (row.Kind, row.RepositoryId, row.SessionId, row.Label));
+        Assert.Equal(("", "", ""), (row.BoardId, row.TaskId, row.ProposalId));
+        // The oldest such message; the two-minute-old one neither dates the row nor counts.
+        Assert.Equal(Later.AddMinutes(-15), row.Since);
+        Assert.Null(row.ExpiresAt);
+        // A fixed line with counts: the hub knows of no model turn, so it says what it saw and no more.
+        Assert.Equal("2 unread direct messages; no hub call in over 10 minutes.", row.Text);
+        Assert.DoesNotContain("stuck", row.Text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("PRIVATE-", JsonSerializer.Serialize(waiting));
+        Assert.DoesNotContain("PRIVATE-", JsonSerializer.Serialize(await store.ReadWaitingAsync(Repository)));
+    }
+
+    [Fact]
+    public async Task A_live_watcher_does_not_hide_an_unresponsive_chat()
+    {
+        var (hub, chat, peer) = Mailed(Later.AddMinutes(-15));
+        using var store = Stored(hub, (AggregateKinds.Session, chat.Id), (AggregateKinds.Session, peer.Id));
+        Calls(store, Repository, chat.Id, 0, Later.AddMinutes(-30));
+        // A watcher polling every two seconds right up to now.
+        Calls(store, Repository, chat.Id, 1, Enumerable.Range(0, 1800).Select(index => Later.AddSeconds(-2 * index)).ToArray());
+
+        var observation = await Assert.IsAssignableFrom<IRelayObservationSource>(store).ObserveAsync(Later, "test-incarnation");
+        // This is the value that cannot be used: to it, the chat was active a moment ago.
+        Assert.Equal(Later, Assert.Single(observation.Sessions, session => session.SessionId == chat.Id).LastActivityAt);
+        var row = Assert.Single(Unresponsive(await BothAsync(store, Later)));
+        Assert.Equal(("1 unread direct message; no hub call in over 10 minutes.", Later.AddMinutes(-15)), (row.Text, row.Since));
+    }
+
+    [Theory]
+    // The chat's own call a minute ago answers for it.
+    [InlineData(0, -1, null, 0, false)]
+    // An unmarked call may be a watcher's, so it neither clears a chat seen calling for itself...
+    [InlineData(0, -30, null, -1, true)]
+    // ...nor makes a chat count as recently active: with nothing marked as its own, the hub says nothing rather than guess.
+    [InlineData(null, -30, null, -1, false)]
+    // Past a day without a call of its own, the chat is abandoned.
+    [InlineData(0, -1500, 1, -1, false)]
+    public async Task Only_a_call_marked_as_the_chats_own_counts(int? first, int firstMinutes, int? second, int secondMinutes, bool listed)
+    {
+        var (hub, chat, peer) = Mailed(Later.AddMinutes(-15));
+        using var store = Stored(hub, (AggregateKinds.Session, chat.Id), (AggregateKinds.Session, peer.Id));
+        Calls(store, Repository, chat.Id, first, Later.AddMinutes(firstMinutes));
+        if (secondMinutes != 0) Calls(store, Repository, chat.Id, second, Later.AddMinutes(secondMinutes));
+        Assert.Equal(listed, Unresponsive(await BothAsync(store, Later)).Any());
+    }
+
+    [Fact]
+    public async Task Another_repositorys_call_is_not_the_chats_own()
+    {
+        var (hub, chat, peer) = Mailed(Later.AddMinutes(-15));
+        using var store = Stored(hub, (AggregateKinds.Session, chat.Id), (AggregateKinds.Session, peer.Id));
+        Calls(store, "repo2", chat.Id, 0, Later.AddMinutes(-30));
+        Assert.Empty(Unresponsive(await BothAsync(store, Later)));
+    }
+
+    [Fact]
+    public async Task Only_direct_mail_that_may_wake_counts()
+    {
+        var (hub, chat, peer) = Mailed();
+        var old = Later.AddMinutes(-20);
+        // A status message that never wakes, a board's task notice, and the notice of a message that could not be delivered.
+        Assert.True(hub.Session(peer, RelayTools.SendMessage, new() { ["recipientSessionId"] = chat.Id, ["text"] = "fyi", ["wake"] = false }, old).Ok);
+        Assert.True(hub.Apply(MessageDelivery.TargetKind, chat.Id, MessageDelivery.Operation, new MessageDelivery(InboxMessage.TaskChanged(Repository, "n-1", "ops", "t-9", 2)).ToJson(), AggregateHub.BoardCaller, old).Ok);
+        Assert.True(hub.Send(chat, "nobody", "hello?", old).Ok);
+        hub.DeliverAll(old);
+        // A session can be named on a task's mail and on a notice too, so the sender alone does not make either direct.
+        foreach (var message in new[] { new InboxMessage { MessageId = "on-task", RepositoryId = Repository, Text = "task", SenderSessionId = peer.Id, TaskId = "t-1", SentAt = old }, new InboxMessage { MessageId = "notice", RepositoryId = Repository, Text = "notice", SenderSessionId = peer.Id, Kind = InboxMessage.UndeliveredKind, SentAt = old } })
+            Assert.True(hub.Apply(MessageDelivery.TargetKind, chat.Id, MessageDelivery.Operation, new MessageDelivery(message).ToJson(), AggregateHub.BoardCaller, old).Ok);
+        Assert.Equal(5, hub.Inbox(chat, old).Count);
+        (string, string)[] all = [(AggregateKinds.Session, chat.Id), (AggregateKinds.Session, peer.Id)];
+        using (var store = Stored(hub, all))
+        {
+            Calls(store, Repository, chat.Id, 0, Later.AddMinutes(-30));
+            Assert.Empty(Unresponsive(await BothAsync(store, Later)));
+        }
+        Assert.True(hub.Send(peer, chat.Id, "direct", old).Ok);
+        hub.DeliverAll(old);
+        using (var store = Stored(hub, all))
+        {
+            Calls(store, Repository, chat.Id, 0, Later.AddMinutes(-30));
+            Assert.Equal("1 unread direct message; no hub call in over 10 minutes.", Assert.Single(Unresponsive(await BothAsync(store, Later))).Text);
+        }
+    }
+
+    [Fact]
+    public async Task A_closed_session_is_never_unresponsive()
+    {
+        var (hub, chat, peer) = Mailed(Later.AddMinutes(-15));
+        Assert.True(hub.Close(new() { ["targetSessionId"] = chat.Id, ["force"] = true }, Later.AddMinutes(-14)).Ok);
+        hub.DeliverAll(Later.AddMinutes(-14));
+        using var store = Stored(hub, (AggregateKinds.Session, chat.Id), (AggregateKinds.Session, peer.Id));
+        Calls(store, Repository, chat.Id, 0, Later.AddMinutes(-30));
+        // Closing forgets the inbox; a record marked closed that still held mail must stay out as well, in both reads.
+        var mail = new JsonObject { ["m"] = new InboxMessage { MessageId = "m", RepositoryId = Repository, Text = "kept", SenderSessionId = peer.Id, SentAt = Later.AddMinutes(-15) }.ToJson() };
+        await new SqliteGrainStorage(store).WriteStateAsync(AggregateKinds.Session, GrainId.Create("cocern.session", "closed-with-mail"), new GrainState<StateEnvelope<CoordinationDocument>>(new() { Value = new() { Json = new JsonObject
+        {
+            ["sessionId"] = "closed-with-mail", ["repositoryId"] = Repository, ["label"] = "Closed", ["inbox"] = mail, [ReadModels.ClosedAtKey] = T0.ToString("O")
+        }.ToJsonString() } }));
+        Calls(store, Repository, "closed-with-mail", 0, Later.AddMinutes(-30));
+        Assert.Empty(Unresponsive(await BothAsync(store, Later)));
+    }
+
+    [Fact]
+    public async Task An_unresponsive_chat_in_another_repository_is_not_this_ones()
+    {
+        var (hub, chat, peer) = Mailed(Later.AddMinutes(-15));
+        using var store = Stored(hub, (AggregateKinds.Session, chat.Id), (AggregateKinds.Session, peer.Id));
+        var mail = new JsonObject { ["m"] = new InboxMessage { MessageId = "m", RepositoryId = "repo2", Text = "there", SenderSessionId = "peer-there", SentAt = Later.AddMinutes(-15) }.ToJson() };
+        await new SqliteGrainStorage(store).WriteStateAsync(AggregateKinds.Session, GrainId.Create("cocern.session", "s-there"), new GrainState<StateEnvelope<CoordinationDocument>>(new() { Value = new() { Json = new JsonObject
+        {
+            ["sessionId"] = "s-there", ["repositoryId"] = "repo2", ["label"] = "There", ["inbox"] = mail
+        }.ToJsonString() } }));
+        Calls(store, Repository, chat.Id, 0, Later.AddMinutes(-30));
+        Calls(store, "repo2", "s-there", 0, Later.AddMinutes(-30));
+        var here = Assert.IsType<WaitingSources>(await store.ReadWaitingAsync(Repository));
+        Assert.Equal([chat.Id], here.Mail.Select(mailbox => mailbox.SessionId));
+        Assert.Equal([chat.Id], Unresponsive(WaitingList.Build(here, Later, Repository)).Select(row => row.SessionId));
+        Assert.Equal(["s-there"], Unresponsive(await ListAsync(store, Later, "repo2")).Select(row => row.SessionId));
+    }
+
+    private static WaitingMail Mailbox(DateTimeOffset? lastCall, params DateTimeOffset[] sent) => new() { SessionId = "s", RepositoryId = Repository, Label = "Chat", Sent = sent, LastCallAt = lastCall };
+
+    [Theory]
+    // Mail exactly ten minutes old has not yet waited longer than that, nor has a call exactly ten minutes old.
+    [InlineData(-30, -601, true)]
+    [InlineData(-30, -600, false)]
+    [InlineData(-10, -601, false)]
+    [InlineData(-11, -601, true)]
+    // Exactly a day since its own last call still counts; a moment more does not.
+    [InlineData(-1440, -601, true)]
+    [InlineData(-1441, -601, false)]
+    public void The_row_keeps_to_its_times(int lastCallMinutes, int sentSeconds, bool listed)
+    {
+        var waiting = WaitingList.Build(new() { Mail = [Mailbox(Later.AddMinutes(lastCallMinutes), Later.AddSeconds(sentSeconds))] }, Later);
+        Assert.Equal(listed, waiting.Items.Any());
+        Assert.Equal(listed ? 1 : 0, waiting.Count);
+    }
+
+    [Fact]
+    public void A_chat_with_no_call_of_its_own_on_record_is_not_listed_and_the_row_sorts_between_structure_and_reports()
+    {
+        Assert.Empty(WaitingList.Build(new() { Mail = [Mailbox(null, Later.AddHours(-1))] }, Later).Items);
+        Assert.Empty(WaitingList.Build(new() { Mail = [Mailbox(Later.AddHours(-1))] }, Later).Items);
+        // The builder's own scope holds for this row too, whatever a source hands over.
+        Assert.Empty(WaitingList.Build(new() { Mail = [Mailbox(Later.AddHours(-1), Later.AddHours(-1)) with { RepositoryId = "repo2" }] }, Later, Repository).Items);
+
+        // The hub saw this one, so reports cannot push it out, however old they are; it cannot push out a proposal or a blocker either.
+        var waiting = WaitingList.Build(new()
+        {
+            Reports = Enumerable.Range(0, 60).Select(index => Report(index, Later.AddDays(-1))).ToArray(),
+            Mail = Enumerable.Range(0, 3).Select(index => Mailbox(Later.AddHours(-1), Later.AddHours(-index - 1)) with { SessionId = "s-" + index }).ToArray(),
+            Blockers = [new WaitingBlocker { RepositoryId = Repository, BoardId = "default", TaskId = "t", Human = true, Summary = "Which rig?", Since = Later.AddMinutes(-1) }]
+        }, Later);
+        Assert.Equal(64, waiting.Count);
+        Assert.Equal(RelayLimits.MaxWaitingItems, waiting.Items.Length);
+        Assert.Equal([DashboardWaitingKinds.HumanBlocker, DashboardWaitingKinds.Unresponsive, DashboardWaitingKinds.Unresponsive, DashboardWaitingKinds.Unresponsive, DashboardWaitingKinds.SelfReport], waiting.Items.Take(5).Select(row => row.Kind));
+        Assert.Equal(["s-2", "s-1", "s-0"], waiting.Items.Skip(1).Take(3).Select(row => row.SessionId));
     }
 
     // ---- get_status ----
@@ -839,6 +1127,9 @@ public sealed class WaitingOnYouTests
         {
             var sent = Data(await host.Call(worker, RelayTools.SendMessage, new { repositoryId = Repository, requestId = "send-" + text.Length, sessionId = a.Id, sessionToken = a.Token, recipientSessionId = b.Id, text = "hello", ackMessageIds = new[] { "m-handled" }, waitingFor = text }));
             Assert.True(sent.GetProperty("conveniences").GetProperty("ack").GetProperty("ok").GetBoolean());
+            // The acknowledgment a reply's replyTo implies carries it no further.
+            var answered = Data(await host.Call(worker, RelayTools.SendMessage, new { repositoryId = Repository, requestId = "reply-" + text.Length, sessionId = a.Id, sessionToken = a.Token, recipientSessionId = b.Id, text = "hello", replyTo = "m-answered", waitingFor = text }));
+            Assert.True(answered.GetProperty("conveniences").GetProperty("ack").GetProperty("ok").GetBoolean());
         }
         var source = host.Services.GetRequiredService<IRelayObservationSource>();
         WaitingSources? read = null;
@@ -884,6 +1175,18 @@ public sealed class WaitingOnYouTests
         Assert.All(section.GetProperty("items").EnumerateArray(), row => Assert.Equal(Repository, row.GetProperty("repositoryId").GetString()));
     }
 
+    [Fact]
+    public async Task An_administrators_status_shows_an_unresponsive_chat_and_a_workers_does_not()
+    {
+        var sources = new WaitingSources { Mail = [new WaitingMail { SessionId = "s", RepositoryId = Repository, Label = "Chat", Sent = [DateTimeOffset.UtcNow.AddHours(-1)], LastCallAt = DateTimeOffset.UtcNow.AddHours(-2) }] };
+        await using var host = AdminHost(services => services.AddSingleton<IRelayObservationSource>(new FixedWaiting(() => sources)));
+        using var admin = AdminClient(host);
+        using var worker = host.AuthorizedClient();
+        var row = Assert.Single(Data(await host.Call(admin, RelayTools.GetStatus, new { repositoryId = Repository })).GetProperty("waitingOnYou").GetProperty("items").EnumerateArray());
+        Assert.Equal(("unresponsive", "s", "1 unread direct message; no hub call in over 10 minutes."), (row.GetProperty("kind").GetString(), row.GetProperty("sessionId").GetString(), row.GetProperty("text").GetString()));
+        Assert.False(Data(await host.Call(worker, RelayTools.GetStatus, new { repositoryId = Repository })).TryGetProperty("waitingOnYou", out _));
+    }
+
     // ---- The chat's side ----
 
     [Fact]
@@ -911,5 +1214,65 @@ public sealed class WaitingOnYouTests
         Assert.Contains(BlockerKinds.HumanDecision, kinds.EnumerateArray().Select(kind => kind.GetString()));
         // The rest stay as they were: this adds a kind, and renames or removes none.
         Assert.Equal(["coordinator_hold", "provider_rejection", "human_decision", "tool_unavailable", "resource_busy", "missing_fixture", "prerequisite", "other"], BlockerKinds.All);
+    }
+}
+
+/// <summary>
+/// The unresponsive row's read on real SQLite past a day of a watcher's rows per session. A wall-clock assertion would be flaky, so the
+/// assertion is on the plan, the seek that stays cheap however many background rows a session has, and the times go to the test's output.
+/// </summary>
+public sealed class WaitingOnYouCostTests(Xunit.Abstractions.ITestOutputHelper output)
+{
+    private static readonly DateTimeOffset Now = DateTimeOffset.Parse("2026-11-05T12:00:00Z");
+
+    [Fact]
+    public async Task The_read_stays_cheap_past_a_day_of_watcher_rows()
+    {
+        const int Sessions = 20, PerDay = 43_200;
+        using var store = new SqliteStore(Path.Combine(Path.GetTempPath(), "cocern-waiting-" + Guid.NewGuid().ToString("N"), "relay.db"));
+        var writer = new SqliteGrainStorage(store);
+        var started = System.Diagnostics.Stopwatch.StartNew();
+        for (var index = 0; index < Sessions; index++)
+        {
+            var id = "session-" + index;
+            var mail = new JsonObject { ["m"] = new InboxMessage { MessageId = "m", RepositoryId = "repo", Text = "text", SenderSessionId = "peer", SentAt = Now.AddMinutes(-15) }.ToJson() };
+            await writer.WriteStateAsync(AggregateKinds.Session, GrainId.Create("cocern.session", id), new GrainState<StateEnvelope<CoordinationDocument>>(new() { Value = new() { Json = new JsonObject
+            {
+                ["sessionId"] = id, ["repositoryId"] = "repo", ["label"] = "Chat " + index, ["inbox"] = mail
+            }.ToJsonString() } }));
+            // Its own call 23 hours ago, the farthest a seek has to walk, under a watcher's poll every two seconds since.
+            WaitingOnYouTests.Calls(store, "repo", id, 0, Now.AddHours(-23));
+            WaitingOnYouTests.Calls(store, "repo", id, 1, Enumerable.Range(0, PerDay).Select(second => Now.AddSeconds(-2 * second)).ToArray());
+        }
+        output.WriteLine($"Seeded {Sessions * (PerDay + 1):N0} rows in {started.ElapsedMilliseconds} ms.");
+
+        using (var connection = new Microsoft.Data.Sqlite.SqliteConnection("Data Source=" + store.DatabasePath))
+        {
+            connection.Open();
+            using var plan = connection.CreateCommand();
+            plan.CommandText = "EXPLAIN QUERY PLAN " + SqliteStore.WaitingLastCallQuery;
+            plan.Parameters.AddWithValue("$repository", "repo");
+            plan.Parameters.AddWithValue("$session", "session-0");
+            using var reader = plan.ExecuteReader();
+            var steps = new List<string>();
+            while (reader.Read()) steps.Add(reader.GetString(3));
+            output.WriteLine(string.Join(" | ", steps));
+            Assert.Contains("ix_activity_log_session_foreground", Assert.Single(steps));
+        }
+
+        var times = new List<double>();
+        RelayObservation? observation = null;
+        for (var attempt = 0; attempt < 10; attempt++)
+        {
+            var timer = System.Diagnostics.Stopwatch.StartNew();
+            observation = await store.ReadObservationAsync(Now, "test-incarnation");
+            times.Add(timer.Elapsed.TotalMilliseconds);
+        }
+        output.WriteLine("Observation of " + Sessions + " sessions, ms: " + string.Join(", ", times.Select(time => time.ToString("F1"))));
+        var tool = System.Diagnostics.Stopwatch.StartNew();
+        var sources = Assert.IsType<WaitingSources>(await store.ReadWaitingAsync("repo"));
+        output.WriteLine($"Tool read of {Sessions} sessions: {tool.Elapsed.TotalMilliseconds:F1} ms.");
+        Assert.Equal(Sessions, WaitingList.Build(sources, Now).Count);
+        Assert.Equal(Sessions, WaitingList.Build(new() { Mail = Assert.IsType<RelayObservation>(observation).WaitingMail }, Now).Count);
     }
 }

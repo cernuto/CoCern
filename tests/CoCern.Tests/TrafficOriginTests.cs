@@ -245,6 +245,8 @@ public sealed class TrafficOriginTests
     private static void RemoveOriginColumns(string path)
     {
         using var db = Open(path);
+        // This index belongs to the newer schema being removed for the migration fixture.
+        Scalar(db, "DROP INDEX IF EXISTS ix_activity_log_session_foreground");
         foreach (var (table, column) in new[] { ("activity_log", "background_call"), ("activity_daily", "model_calls"), ("activity_daily", "background_calls"), ("activity_daily", "model_request_bytes"), ("activity_daily", "background_request_bytes"), ("activity_daily", "model_reply_bytes"), ("activity_daily", "background_reply_bytes") })
             if (Convert.ToInt64(Scalar(db, $"SELECT count(*) FROM pragma_table_info('{table}') WHERE name = '{column}'")) > 0)
                 Scalar(db, $"ALTER TABLE {table} DROP COLUMN {column}");

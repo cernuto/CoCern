@@ -82,7 +82,9 @@ public sealed class NodeSupervisorTests(ITestOutputHelper output) : IDisposable
         var requests = new List<string>();
         var starts = 0;
         var announces = 0;
-        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var stoppedAtExpectedEvent = false;
+        // Completion is driven by the lifecycle event below; this is only a finite hang guard.
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         var error = new StringWriter();
         var transport = new NodeTransport
         {
@@ -90,7 +92,7 @@ public sealed class NodeSupervisorTests(ITestOutputHelper output) : IDisposable
             FirstRetry = TimeSpan.FromMilliseconds(10), MaxRetry = TimeSpan.FromMilliseconds(20),
             ProbeFingerprint = (_, _) => throw new InvalidOperationException("An enrolled pinned hub must not be probed again."),
             HubHandler = () => new UpdateWorkerHandler(_ => new(System.Net.HttpStatusCode.ServiceUnavailable)),
-            Trace = value => { if (value == "announced") stop.Cancel(); },
+            Trace = value => { if (value == "announced") { stoppedAtExpectedEvent = true; stop.Cancel(); } },
             CreateHandler = (pin, _) => new UpdateWorkerHandler(request =>
             {
                 Assert.Equal(fingerprint, pin);
@@ -105,7 +107,7 @@ public sealed class NodeSupervisorTests(ITestOutputHelper output) : IDisposable
                     if (scenario == "valid" || scenario == "expired" && credential == newCredential)
                         return new(System.Net.HttpStatusCode.OK) { Content = new StringContent("{\"routes\":[]}") };
                     Assert.Equal(oldCredential, credential);
-                    if (scenario == "conflict" && announces == 2) stop.Cancel();
+                    if (scenario == "conflict" && announces == 2) { stoppedAtExpectedEvent = true; stop.Cancel(); }
                     return new(System.Net.HttpStatusCode.Unauthorized) { Content = new StringContent("{}") };
                 }
                 Assert.Equal("/api/discovery/enroll", path);
@@ -146,6 +148,7 @@ public sealed class NodeSupervisorTests(ITestOutputHelper output) : IDisposable
             Assert.Equal(credentialBefore, File.ReadAllBytes(Path.Combine(NodeFolder, "credential")));
             return;
         }
+        Assert.True(stoppedAtExpectedEvent, "The fixture watchdog fired before the expected lifecycle event. " + error);
         Assert.Equal(0, exit);
         Assert.Equal(1, starts);
         using var reopened = NodeState.OpenExisting(NodeFolder);

@@ -61,6 +61,12 @@ public static class DashboardWaitingKinds
     public const string HumanBlocker = "human_blocker";
     /// <summary>A chat's own <c>ack waitingFor</c>. A claim, not a fact: show it as reported by the chat. Only in <see cref="DashboardWaiting.Items"/>.</summary>
     public const string SelfReport = "self_report";
+    /// <summary>
+    /// A chat holding old unread direct mail that has made no hub call of its own for as long. The hub records no model turn, so a chat busy
+    /// without calling the hub looks the same: it says "no hub call", not that the chat is stuck. Its text is the hub's, with counts only.
+    /// Only in <see cref="DashboardWaiting.Items"/>.
+    /// </summary>
+    public const string Unresponsive = "unresponsive";
     /// <summary>A task blocked by a <c>coordinator_hold</c>, which may or may not be a person's. Only in <see cref="DashboardWaiting.Maybe"/>.</summary>
     public const string CoordinatorHold = "coordinator_hold";
 }
@@ -73,7 +79,7 @@ public static class DashboardWaitingKinds
 /// </summary>
 public sealed record DashboardWaiting
 {
-    /// <summary>At most 50 rows: proposals and human blockers oldest first, then self-reports oldest first, so a self-report never pushes out a structural row.</summary>
+    /// <summary>At most 50 rows: proposals and human blockers oldest first, then unresponsive chats oldest first, then self-reports oldest first, so a self-report never pushes out a row the hub observed.</summary>
     public DashboardWaitingItem[] Items { get; init; } = [];
     /// <summary>The true total observed, the badge's number; it can exceed <see cref="Items"/>. Zero means nothing is waiting, unless <see cref="Truncated"/>.</summary>
     public int Count { get; init; }
@@ -107,9 +113,9 @@ public sealed record DashboardWaitingItem
     public string Label { get; init; } = "";
     /// <summary>What is waiting, at most 200 characters. Untrusted.</summary>
     public string Text { get; init; } = "";
-    /// <summary>Since when: the proposal's time, when the task took the blocker, or the chat's first report. Null only for a legacy proposal without a time.</summary>
+    /// <summary>Since when: the proposal's time, when the task took the blocker, the chat's first report, or an unresponsive chat's oldest such message. Null only for a legacy proposal without a time.</summary>
     public DateTimeOffset? Since { get; init; }
-    /// <summary>When the row leaves the list by itself. Null for a proposal, which waits until it is decided.</summary>
+    /// <summary>When the row leaves the list by itself. Null for a proposal, which waits until it is decided, and for an unresponsive chat, which leaves when its state does.</summary>
     public DateTimeOffset? ExpiresAt { get; init; }
 }
 

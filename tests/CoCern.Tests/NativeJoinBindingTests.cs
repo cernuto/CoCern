@@ -148,7 +148,8 @@ public sealed class NativeJoinBindingTests(NativeJoinBindingTests.ProbeFixture p
     {
         using var fixture = new ScopeFixture();
         var folder = Directory.CreateDirectory(Path.Combine(fixture.Root, "raw-only")).FullName;
-        Assert.Null(LocalWakeConnection.Create(new AdapterOptions("http://127.0.0.1:5271/", "raw-synthetic"), null, folder));
+        // This test isolates binding state; startup status persistence has its own coverage.
+        Assert.Null(LocalWakeConnection.Create(new AdapterOptions("http://127.0.0.1:5271/", "raw-synthetic"), null, folder, report: _ => { }));
         await Assert.ThrowsAnyAsync<IOException>(() => NativeJoinBinding.AcquireAsync(folder, "codex", Chat, "machine", "repo", fixture.Workspace, default));
         Assert.Empty(Directory.EnumerateFiles(folder, "*", SearchOption.AllDirectories));
     }

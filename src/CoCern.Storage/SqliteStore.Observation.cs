@@ -76,6 +76,7 @@ public sealed partial class SqliteStore : IRelayObservationSource
 
         var persisted = new Dictionary<string, DashboardSession>(StringComparer.Ordinal);
         var reports = new Dictionary<string, WaitingReport?>(StringComparer.Ordinal);
+        var mailboxes = new Dictionary<string, WaitingMail?>(StringComparer.Ordinal);
         // Sessions whose stored record says they were closed. A node's last announcement can still name one (until it announces again, or for
         // as long as its PC stays off), and such a chat is no longer one to show or to message.
         var closed = new HashSet<string>(StringComparer.Ordinal);
@@ -85,13 +86,14 @@ public sealed partial class SqliteStore : IRelayObservationSource
             if (Stopwatch.GetElapsedTime(started) > ObservationBudget) { truncated = true; break; }
             try
             {
-                var session = ProjectSession(payload, isClosed, incarnationId, out var closedId, out var report);
+                var session = ProjectSession(payload, isClosed, incarnationId, out var closedId, out var report, out var mailbox);
                 if (closedId is not null) { closed.Add(closedId); continue; }
                 if (session is null) { truncated = true; continue; }
                 if (!persisted.TryGetValue(session.SessionId, out var existing) || PreferPersisted(session, existing, chats))
                 {
                     persisted[session.SessionId] = session;
                     reports[session.SessionId] = report;
+                    mailboxes[session.SessionId] = mailbox;
                 }
             }
             catch (JsonException) { truncated = true; warnings.Add("Some session metadata could not be observed."); }
@@ -116,6 +118,11 @@ public sealed partial class SqliteStore : IRelayObservationSource
         }
         if (!await ProjectSessionActivityAsync(sessions, now, started, cancellationToken))
             return null; // Retain the previous coherent observation and its timestamp rather than erase known last-call times.
+        var quiet = now.AddMinutes(-RelayLimits.DefaultUnresponsiveMinutes);
+        var waitingMail = mailboxes.Values.OfType<WaitingMail>().Where(mail => sessions.ContainsKey(mail.SessionId) && mail.Sent.Any(sent => sent < quiet)).Select(mail => mail with { Label = sessions[mail.SessionId].Label }).ToArray();
+        if (!await ReadWaitingLastCallsAsync(waitingMail, started, cancellationToken)) return null;
+        // Out of time part way: those chats are left unknown, and the list says it may be incomplete.
+        truncated |= waitingMail.Any(mail => mail.LastCallAt is null) && Stopwatch.GetElapsedTime(started) > ObservationBudget;
         var interactions = await ReadInteractionsAsync(sessions, now, started, cancellationToken);
         if (interactions is null) return null;
         truncated |= sessionCount > MaximumSessions;
@@ -126,7 +133,33 @@ public sealed partial class SqliteStore : IRelayObservationSource
         }
         // A report is shown under the label its session is shown under; one whose session did not make the bounded inventory goes with it.
         var waiting = reports.Values.OfType<WaitingReport>().Where(report => sessions.ContainsKey(report.SessionId)).Select(report => report with { Label = sessions[report.SessionId].Label }).ToArray();
-        return new() { SessionCount = sessionCount, Machines = machines.ToArray(), Sessions = sessions.Values.ToArray(), SessionsTruncated = truncated, Interactions = interactions, WaitingReports = waiting, Warnings = warnings.ToArray() };
+        return new() { SessionCount = sessionCount, Machines = machines.ToArray(), Sessions = sessions.Values.ToArray(), SessionsTruncated = truncated, Interactions = interactions, WaitingReports = waiting, WaitingMail = waitingMail, Warnings = warnings.ToArray() };
+    }
+
+    /// <summary>
+    /// Fills in each chat's own last hub call: one index seek, only for sessions already holding old direct mail. False means the writer was busy,
+    /// for the caller to keep its previous observation.
+    /// </summary>
+    private async Task<bool> ReadWaitingLastCallsAsync(WaitingMail[] mailboxes, long started, CancellationToken cancellationToken)
+    {
+        if (mailboxes.Length == 0) return true;
+        if (!await _gate.WaitAsync(0, cancellationToken)) return false;
+        try
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            using var command = Command(WaitingLastCallQuery);
+            var repository = command.Parameters.AddWithValue("$repository", "");
+            var session = command.Parameters.AddWithValue("$session", "");
+            for (var index = 0; index < mailboxes.Length; index++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (Stopwatch.GetElapsedTime(started) > ObservationBudget) return true;
+                (repository.Value, session.Value) = (mailboxes[index].RepositoryId, mailboxes[index].SessionId);
+                if (command.ExecuteScalar() is long ticks) mailboxes[index] = mailboxes[index] with { LastCallAt = new DateTimeOffset(ticks, TimeSpan.Zero) };
+            }
+            return true;
+        }
+        finally { _gate.Release(); }
     }
 
     private async Task<bool> ProjectSessionActivityAsync(Dictionary<string, DashboardSession> sessions, DateTimeOffset now, long started, CancellationToken cancellationToken)
@@ -241,9 +274,9 @@ public sealed partial class SqliteStore : IRelayObservationSource
     /// its chat is told it expired; it is no longer a session to show, and <paramref name="closedId"/> names it so that an announcement of it
     /// is left out too. <paramref name="report"/> is its own report of waiting on Paul, read by name from this same row.
     /// </summary>
-    private static DashboardSession? ProjectSession(string payload, bool closed, string incarnation, out string? closedId, out WaitingReport? report)
+    private static DashboardSession? ProjectSession(string payload, bool closed, string incarnation, out string? closedId, out WaitingReport? report, out WaitingMail? mail)
     {
-        (closedId, report) = (null, null);
+        (closedId, report, mail) = (null, null, null);
         using var envelope = JsonDocument.Parse(payload, new JsonDocumentOptions { MaxDepth = 64 });
         using var document = Document(envelope.RootElement);
         var state = document.RootElement;
@@ -257,6 +290,7 @@ public sealed partial class SqliteStore : IRelayObservationSource
         var binding = Property(state, "binding");
         var hasBinding = binding.ValueKind == JsonValueKind.Object && binding.EnumerateObject().Any();
         report = WaitingList.Report(id, Text(state, "repositoryId"), Property(state, SessionState.WaitingForKey));
+        mail = WaitingList.Mail(id, Text(state, "repositoryId"), inbox);
         return new()
         {
             SessionId = id, Label = Text(state, "label"), MachineId = Text(state, "machineId"), RepositoryId = Text(state, "repositoryId"),

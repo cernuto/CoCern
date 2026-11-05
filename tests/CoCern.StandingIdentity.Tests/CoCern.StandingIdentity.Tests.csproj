@@ -8,8 +8,13 @@
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <ProjectReference Include="../../src/CoCern.Domain/CoCern.Domain.csproj" />
     <RazorComponent Include="../../src/CoCern.Dashboard/Components/StandingView.razor" Link="Components/StandingView.razor" />
+    <RazorComponent Include="../../src/CoCern.Dashboard/Components/WaitingOnYou.razor" Link="Components/WaitingOnYou.razor" />
+    <RazorComponent Include="../../src/CoCern.Dashboard/Components/WaitingBadge.razor" Link="Components/WaitingBadge.razor" />
+    <RazorComponent Include="../../src/CoCern.Dashboard/Components/ManagerControl.razor" Link="Components/ManagerControl.razor" />
     <RazorComponent Include="../../src/CoCern.Dashboard/_Imports.razor" Link="_Imports.razor" />
     <Compile Include="../../src/CoCern.Dashboard/Services/StandingManagementClient.cs" Link="Services/StandingManagementClient.cs" />
+    <Compile Include="../../src/CoCern.Dashboard/Components/ManagerControl.razor.cs" Link="Components/ManagerControl.razor.cs" />
+    <Compile Include="../../src/CoCern.Dashboard/Services/ManagerManagementClient.cs" Link="Services/ManagerManagementClient.cs" />
     <Compile Include="../../src/CoCern.Dashboard/Services/DashboardFormat.cs" Link="Services/DashboardFormat.cs" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="xunit" />
