@@ -1263,7 +1263,7 @@ public sealed class DocCacheTests
         Assert.Equal(RelayLimits.MaxDocQueryLength, properties.GetProperty("query").GetProperty("maxLength").GetInt32());
         Assert.Equal(RelayLimits.MaxDocSearchResults, properties.GetProperty("limit").GetProperty("maximum").GetInt32());
         static int Size(bool administrator) => RelayToolCatalog.ForRole(administrator).Sum(tool => tool.Description.Length + RelayToolCatalog.ForwardingSchema(tool).GetRawText().Length);
-        Assert.True(Size(false) < 20_000 && Size(true) < 22_600, $"worker {Size(false)}, administrator {Size(true)}");
+        Assert.True(Size(false) < 20_000 && Size(true) < 22_650, $"worker {Size(false)}, administrator {Size(true)}");
         // Chunks always fit a reply, with room for its fields.
         Assert.True(RelayLimits.DocChunkTokens * 2 < RelayLimits.MaxDocReplyTokens && RelayLimits.DocChunkChars * 2 < RelayLimits.MaxDocReplyBytes);
     }

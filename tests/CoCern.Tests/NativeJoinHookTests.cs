@@ -207,6 +207,124 @@ public sealed class NativeJoinHookTests(ITestOutputHelper output)
         Assert.DoesNotContain("synthetic-handle-token", error.ToString());
     }
 
+    private static string StopInput(HookFixture fixture) => JsonSerializer.Serialize(new { hook_event_name = "Stop", session_id = Parent, cwd = fixture.Capture.Cwd });
+
+    /// <summary>A real process that stands in for a running waiter: pid files are checked against the live process table.</summary>
+    private static Process StartStandIn() =>
+        Process.Start(OperatingSystem.IsWindows()
+            ? new ProcessStartInfo("cmd.exe", "/c ping -n 120 127.0.0.1") { RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true }
+            : new ProcessStartInfo("sleep", "120") { UseShellExecute = false })!;
+
+    /// <summary>This process runs under client 9001; the waiter runs under <paramref name="waiterClient"/>.</summary>
+    private static Func<int, ProcessFacts?> Clients(int waiterId, int waiterClient)
+    {
+        var t0 = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        return id => id switch
+        {
+            9001 or 9002 => new ProcessFacts(id, 1, "claude", t0),
+            _ when id == Environment.ProcessId => new ProcessFacts(id, 9001, "dotnet", t0.AddHours(1)),
+            _ when id == waiterId => new ProcessFacts(id, waiterClient, "CoCern.Adapter", t0.AddHours(1)),
+            _ => null
+        };
+    }
+
+    [Fact]
+    public async Task A_native_hook_from_a_new_client_arms_once_a_waiter_left_by_another_client_ends()
+    {
+        await using var fixture = new HookFixture();
+        fixture.WakeReady = true;
+        using var oldWaiter = StartStandIn();
+        try
+        {
+            ClaudeWaiter.WritePid(fixture.Folder, Parent, oldWaiter.Id, oldWaiter.StartTime.ToUniversalTime());
+            using var error = new StringWriter();
+            var clients = Clients(oldWaiter.Id, 9002);
+            var checks = 0;
+            Func<int, ProcessFacts?> read = id => { if (id == oldWaiter.Id) Interlocked.Increment(ref checks); return clients(id); };
+            var hook = StopHook.RunNativeAsync(new StringReader(StopInput(fixture)), error, fixture.Join, default, fixture.Handler, TimeSpan.FromSeconds(10), read: read, grace: TimeSpan.FromSeconds(30));
+            // Seen checking the old waiter, not just slow to start: a hook that skips the check ends with 0 while that waiter is still alive.
+            var deadline = DateTime.UtcNow.AddSeconds(15);
+            while (Volatile.Read(ref checks) < 2 && !hook.IsCompleted && DateTime.UtcNow < deadline) await Task.Delay(25);
+            Assert.False(hook.IsCompleted);
+            Assert.True(Volatile.Read(ref checks) >= 2);
+            oldWaiter.Kill(entireProcessTree: true);
+            await oldWaiter.WaitForExitAsync();
+            Assert.Equal(2, await hook.WaitAsync(TimeSpan.FromSeconds(20)));
+            Assert.Contains("m-native", error.ToString());
+        }
+        finally { if (!oldWaiter.HasExited) oldWaiter.Kill(entireProcessTree: true); }
+    }
+
+    [Fact]
+    public async Task A_native_hook_leaves_a_live_waiter_of_its_own_client_alone_and_ends_at_once()
+    {
+        await using var fixture = new HookFixture();
+        fixture.WakeReady = true;
+        using var ownWaiter = StartStandIn();
+        try
+        {
+            ClaudeWaiter.WritePid(fixture.Folder, Parent, ownWaiter.Id, ownWaiter.StartTime.ToUniversalTime());
+            using var error = new StringWriter();
+            Assert.Equal(0, await StopHook.RunNativeAsync(new StringReader(StopInput(fixture)), error, fixture.Join, default, fixture.Handler, TimeSpan.FromSeconds(10), read: Clients(ownWaiter.Id, 9001), grace: TimeSpan.FromSeconds(30)).WaitAsync(TimeSpan.FromSeconds(10)));
+            Assert.Equal("", error.ToString());
+            Assert.True(File.Exists(Path.Combine(fixture.Folder, "waiters", Parent + ".pid")));
+        }
+        finally { if (!ownWaiter.HasExited) ownWaiter.Kill(entireProcessTree: true); }
+    }
+
+    [Fact]
+    public async Task A_native_waiter_follows_its_chat_to_a_replacement_session_and_never_to_a_legacy_handle()
+    {
+        await using var fixture = new HookFixture();
+        fixture.WakeReady = true;
+        // Mail waits only in the replacement's inbox, so a waiter left on the first handle never wakes.
+        fixture.InboxOf = session => session == "s-native-new" ? ["m-new"] : [];
+        await fixture.Join.EnsureAsync(fixture.Capture, default);
+        var location = new ChatLocation("claude", Parent);
+        NodeState.WriteSessionHandle(fixture.Folder, new("s-neighbor", "neighbor", "repo", "Same", DateTimeOffset.UtcNow, location, location));
+        var deliveries = new List<string>();
+        var waiting = ClaudeWaiter.RunNativeAsync(fixture.Join, fixture.Capture, deliveries.Add, TimeSpan.FromSeconds(20), default, fixture.Handler, hubHandler: () => new HookHandler((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound))), interval: TimeSpan.FromMilliseconds(50));
+        var pid = Path.Combine(fixture.Folder, "waiters", Parent + ".pid");
+        var deadline = DateTime.UtcNow.AddSeconds(15);
+        while (!File.Exists(pid) && !waiting.IsCompleted && DateTime.UtcNow < deadline) await Task.Delay(25);
+        Assert.True(File.Exists(pid));
+        // A later Stop hook of this client finds this waiter alive and leaves it running, so only the waiter itself can notice the replacement.
+        await using (var binding = await NativeJoinBinding.AcquireAsync(fixture.Folder, "claude", Parent, Environment.MachineName, "repo", fixture.Capture.Cwd, default))
+        {
+            Assert.True(binding.AdvanceExpired(binding.FrozenOpenArguments));
+            var replacement = new SessionHandle("s-native-new", "synthetic-handle-token", "repo", "fixture", DateTimeOffset.UtcNow, location, location) { NativeBindingKey = binding.OwnershipKey };
+            NodeState.WriteSessionHandle(fixture.Folder, replacement);
+            Assert.True(binding.Complete(replacement));
+        }
+        Assert.Equal("queued", await waiting);
+        Assert.Single(deliveries);
+        Assert.Contains("s-native-new", fixture.OwnHandles);
+        Assert.DoesNotContain("s-neighbor", fixture.OwnHandles);
+    }
+
+    [Fact]
+    public async Task Two_native_wakes_do_not_repeat_a_message()
+    {
+        await using var fixture = new HookFixture();
+        fixture.WakeReady = true;
+        fixture.InboxOf = _ => ["m1"];
+        using var error = new StringWriter();
+        Assert.Equal(2, await StopHook.RunNativeAsync(new StringReader(StopInput(fixture)), error, fixture.Join, default, fixture.Handler, TimeSpan.FromSeconds(4)));
+        Assert.Contains("- m1: UNTRUSTED", error.ToString());
+        Assert.DoesNotContain("Respect existing user authority", error.ToString());
+        fixture.InboxOf = _ => ["m1", "m2"];
+        var deliveries = new List<string>();
+        // A minute later, so the rate limit does not hold the second wake back.
+        Assert.Equal("queued", await ClaudeWaiter.RunNativeAsync(fixture.Join, fixture.Capture, deliveries.Add, TimeSpan.FromSeconds(4), default, fixture.Handler, printInbox: true, clock: new AdvancingClock(DateTimeOffset.UtcNow.AddMinutes(1))));
+        var second = Assert.Single(deliveries);
+        Assert.Contains("- m2: UNTRUSTED", second);
+        Assert.DoesNotContain("- m1:", second);
+        Assert.Contains("1 earlier unacknowledged message is not repeated", second);
+        // The ledger and the seen report used the native session, and never a credential in the text.
+        Assert.All(fixture.OwnHandles, id => Assert.Equal("s-native-hook", id));
+        Assert.DoesNotContain("synthetic-handle-token", second);
+    }
+
     [Theory]
     [InlineData("SessionStart")]
     [InlineData("PreToolUse")]
@@ -820,6 +938,8 @@ public sealed class NativeJoinHookTests(ITestOutputHelper output)
         internal NativeHookContext Capture { get; }
         internal int Requests;
         internal bool WakeReady;
+        /// <summary>A session's inbox while <see cref="WakeReady"/>; unset, every session holds one message.</summary>
+        internal Func<string?, string[]>? InboxOf;
         internal bool OwnReply;
         internal List<string> OwnHandles { get; } = [];
         internal List<JsonElement> Business { get; } = [];
@@ -844,8 +964,9 @@ public sealed class NativeJoinHookTests(ITestOutputHelper output)
                 object reply;
                 if (args.TryGetProperty("nativePreflight", out _)) reply = new { repositoryId = "repo" };
                 else if (args.TryGetProperty("nativeJoin", out _)) reply = new { sessionId = "s-native-hook", sessionToken = "synthetic-handle-token" };
-                else if (WakeReady && args.TryGetProperty("headersOnly", out _)) reply = new { items = new[] { new { messageId = "m-native", repositoryId = "repo" } }, total = 1, nextCursor = (int?)null, truncated = false };
-                else if (request.RequestUri!.AbsolutePath.EndsWith("/get_status", StringComparison.Ordinal)) reply = new { sessionId = "s-native-hook", control = new { paused = false, requests = Array.Empty<object>() } };
+                else if (WakeReady && args.TryGetProperty("headersOnly", out _)) { var inbox = InboxOf?.Invoke(ChatLocators.Text(args, "sessionId")) ?? new[] { "m-native" }; reply = new { items = inbox.Select(id => new { messageId = id, repositoryId = "repo" }), total = inbox.Length, nextCursor = (int?)null, truncated = false }; }
+                else if (WakeReady && request.RequestUri!.AbsolutePath.EndsWith("/check_inbox", StringComparison.Ordinal)) { var inbox = InboxOf?.Invoke(ChatLocators.Text(args, "sessionId")) ?? new[] { "m-native" }; reply = new { items = inbox.Select(id => new { messageId = id, repositoryId = "repo", text = "UNTRUSTED" }), total = inbox.Length, nextCursor = (int?)null, truncated = false }; }
+                else if (request.RequestUri!.AbsolutePath.EndsWith("/get_status", StringComparison.Ordinal)) reply = new { sessionId = ChatLocators.Text(args, "sessionId") ?? "s-native-hook", control = new { paused = false, requests = Array.Empty<object>() } };
                 else { Business.Add(args.Clone()); reply = OwnReply ? new { sessionId = "s-native-hook", sessionToken = "synthetic-handle-token", recipientSessionId = "peer", peer = new { sessionId = "peer-nested" }, _cocernNative = new { hidden = true }, nativeJoin = new { hidden = true } } : (object)new { sent = true }; }
                 return new(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new { ok = true, code = "Ok", dataJson = JsonSerializer.Serialize(reply), version = 1 }), System.Text.Encoding.UTF8, "application/json") };
             });

@@ -48,7 +48,8 @@ public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
             offer_target TEXT,
             request_tokens INTEGER,
             reply_tokens INTEGER,
-            background_call INTEGER
+            background_call INTEGER,
+            call_origin TEXT
         );
         CREATE INDEX IF NOT EXISTS ix_activity_log_at ON activity_log(at_ticks);
         CREATE INDEX IF NOT EXISTS ix_activity_log_repository ON activity_log(repository_id, at_ticks);
@@ -76,7 +77,7 @@ public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
     /// Columns added to <c>activity_log</c> after schema 2 was first written. Schema 2 has not shipped, so they join it rather than a
     /// schema 3; a development database already at 2 gets them here, once, by checking <c>pragma table_info</c>.
     /// </summary>
-    private static readonly (string Column, string Type)[] LateActivityColumns = [("request_tokens", "INTEGER"), ("reply_tokens", "INTEGER"), ("background_call", "INTEGER")];
+    private static readonly (string Column, string Type)[] LateActivityColumns = [("request_tokens", "INTEGER"), ("reply_tokens", "INTEGER"), ("background_call", "INTEGER"), ("call_origin", "TEXT")];
     // Keep the original totals and primary key. Historical totals have zero classified counts, so their origin stays unknown.
     private static readonly string[] OriginDailyColumns = ["model_calls", "background_calls", "model_request_bytes", "background_request_bytes", "model_reply_bytes", "background_reply_bytes"];
 
@@ -84,6 +85,13 @@ public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
     {
         AddColumns("activity_log", LateActivityColumns);
         AddColumns("activity_daily", OriginDailyColumns.Select(column => (column, "INTEGER NOT NULL DEFAULT 0")));
+        using (var origins = Command("""
+            CREATE TABLE IF NOT EXISTS activity_origin_daily (
+                day TEXT NOT NULL, repository_id TEXT NOT NULL, tool TEXT NOT NULL, call_origin TEXT NOT NULL,
+                calls INTEGER NOT NULL, request_bytes INTEGER NOT NULL, reply_bytes INTEGER NOT NULL,
+                PRIMARY KEY (day, repository_id, tool, call_origin)
+            );
+            """, transaction)) origins.ExecuteNonQuery();
         void AddColumns(string table, IEnumerable<(string Column, string Type)> additions)
         {
             var existing = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -205,11 +213,11 @@ public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
             using var transaction = connection.BeginTransaction(deferred: false);
             using var insert = ActivityCommand("""
                 INSERT INTO activity_log(at_ticks, kind, repository_id, session_id, role, tool, ok, code, request_bytes, reply_bytes, duration_ms,
-                    input_tokens, output_tokens, request_id, target, content_hash, workflow_state, offer_target, request_tokens, reply_tokens, background_call)
+                    input_tokens, output_tokens, request_id, target, content_hash, workflow_state, offer_target, request_tokens, reply_tokens, background_call, call_origin)
                 VALUES ($at, $kind, $repository, $session, $role, $tool, $ok, $code, $requestBytes, $replyBytes, $duration,
-                    $input, $output, $request, $target, $hash, $state, $offer, $requestTokens, $replyTokens, $background);
+                    $input, $output, $request, $target, $hash, $state, $offer, $requestTokens, $replyTokens, $background, $origin);
                 """, transaction);
-            string[] names = ["$at", "$kind", "$repository", "$session", "$role", "$tool", "$ok", "$code", "$requestBytes", "$replyBytes", "$duration", "$input", "$output", "$request", "$target", "$hash", "$state", "$offer", "$requestTokens", "$replyTokens", "$background"];
+            string[] names = ["$at", "$kind", "$repository", "$session", "$role", "$tool", "$ok", "$code", "$requestBytes", "$replyBytes", "$duration", "$input", "$output", "$request", "$target", "$hash", "$state", "$offer", "$requestTokens", "$replyTokens", "$background", "$origin"];
             var parameters = names.Select(name => insert.Parameters.Add(new SqliteParameter { ParameterName = name })).ToArray();
             foreach (var item in batch)
             {
@@ -217,7 +225,7 @@ public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
                 [
                     item.Timestamp.UtcTicks, item.Kind, item.RepositoryId, item.SessionId, item.Role, item.Tool, item.Ok ? 1 : 0, item.Code,
                     item.RequestBytes, item.ReplyBytes, item.DurationMilliseconds, item.InputTokens, item.OutputTokens, item.RequestId, item.Target,
-                    item.ContentHash, item.WorkflowState, item.OfferTarget, item.RequestTokens, item.ReplyTokens, item.BackgroundCall is { } background ? (background ? 1 : 0) : null
+                    item.ContentHash, item.WorkflowState, item.OfferTarget, item.RequestTokens, item.ReplyTokens, item.BackgroundCall is { } background ? (background ? 1 : 0) : null, item.CallOrigin
                 ];
                 for (var index = 0; index < values.Length; index++) parameters[index].Value = values[index] ?? DBNull.Value;
                 insert.ExecuteNonQuery();
@@ -266,6 +274,19 @@ public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
             {
                 rollup.Parameters.AddWithValue("$cutoff", cutoff);
                 rollup.ExecuteNonQuery();
+            }
+            using (var origins = ActivityCommand($"""
+                INSERT INTO activity_origin_daily(day, repository_id, tool, call_origin, calls, request_bytes, reply_bytes)
+                SELECT date((at_ticks - {UnixEpochTicks}) / 10000000, 'unixepoch'), repository_id, COALESCE(tool, ''), COALESCE(call_origin, 'unknown'),
+                       COUNT(*), SUM(request_bytes), SUM(reply_bytes)
+                FROM activity_log WHERE at_ticks < $cutoff AND kind = 'call'
+                GROUP BY 1, 2, 3, 4
+                ON CONFLICT(day, repository_id, tool, call_origin) DO UPDATE SET
+                    calls = calls + excluded.calls, request_bytes = request_bytes + excluded.request_bytes, reply_bytes = reply_bytes + excluded.reply_bytes;
+                """, transaction))
+            {
+                origins.Parameters.AddWithValue("$cutoff", cutoff);
+                origins.ExecuteNonQuery();
             }
             int deleted;
             using (var delete = ActivityCommand("DELETE FROM activity_log WHERE at_ticks < $cutoff;", transaction))

@@ -30,6 +30,7 @@ SELECT id, at_ticks, cocern_at(at_ticks) AS at_time, kind, repository_id, sessio
        request_bytes, reply_bytes, duration_ms, input_tokens, output_tokens, request_id, target, workflow_state, offer_target,
        request_tokens, reply_tokens, coalesce(request_tokens, 0) + coalesce(reply_tokens, 0) AS relay_tokens,
        background_call = 1 AS background_call,
+       coalesce(call_origin, 'unknown') AS call_origin,
        CASE WHEN target LIKE 'task:%' THEN url_decode(split_part(target, '/', 2)) END AS board_id,
        CASE WHEN target LIKE 'task:%' THEN url_decode(split_part(target, '/', 3)) END AS task_id,
        CASE WHEN target LIKE 'resource:%' THEN url_decode(split_part(target, '/', 2)) END AS resource_id
@@ -50,6 +51,24 @@ FROM relay.activity_daily d, LATERAL (VALUES
     (NULL::BOOLEAN, d.calls - d.model_calls - d.background_calls, d.request_bytes - d.model_request_bytes - d.background_request_bytes, d.reply_bytes - d.model_reply_bytes - d.background_reply_bytes)
 ) t(background_call, calls, request_bytes, reply_bytes)
 WHERE d.kind = 'call' AND t.calls > 0;
+
+-- Explicit untrusted call paths are a separate dimension from model/background classification.
+-- Old daily totals without a companion row remain unknown; never count both representations twice.
+CREATE VIEW tool_origin_traffic AS
+WITH daily AS (
+    SELECT day, repository_id, tool, sum(calls) AS calls, sum(request_bytes) AS request_bytes, sum(reply_bytes) AS reply_bytes
+    FROM relay.activity_daily WHERE kind = 'call' GROUP BY day, repository_id, tool),
+covered AS (
+    SELECT day, repository_id, tool, sum(calls) AS calls, sum(request_bytes) AS request_bytes, sum(reply_bytes) AS reply_bytes
+    FROM relay.activity_origin_daily GROUP BY day, repository_id, tool)
+SELECT repository_id, at_ticks, tool, call_origin, 1::BIGINT AS calls, request_bytes, reply_bytes FROM tool_calls
+UNION ALL
+SELECT repository_id, cocern_ticks(day), tool, call_origin, calls, request_bytes, reply_bytes FROM relay.activity_origin_daily
+UNION ALL
+SELECT d.repository_id, cocern_ticks(d.day), d.tool, 'unknown',
+       d.calls - coalesce(c.calls, 0), d.request_bytes - coalesce(c.request_bytes, 0), d.reply_bytes - coalesce(c.reply_bytes, 0)
+FROM daily d LEFT JOIN covered c USING (day, repository_id, tool)
+WHERE d.calls > coalesce(c.calls, 0);
 
 -- One row per reply over its token budget: code 'over' (measure-only), 'over:attention' or 'over:nextWork', or 'step1' to 'step3' (compacted).
 CREATE VIEW budget_events AS

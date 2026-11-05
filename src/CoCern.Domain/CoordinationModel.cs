@@ -381,6 +381,7 @@ public static class ServerArguments
     private static readonly Dictionary<string, string[]> ByTool = new(StringComparer.Ordinal)
     {
         [RelayTools.TaskUpdate] = ["archivedDependsOn"],
+        [RelayTools.Ack] = ["heldOnly"],
         [RelayTools.TaskClaim] = ["taskClaimGeneration", "declaredResources", Operations.ResolveDeclaredField, Operations.LockRefusalField, Operations.RestoreClaimForField, Operations.ForgetRequestField, RequestedResources],
         [RelayTools.ActionBegin] = ["binding", "bindingVersion", "declaredResources", Operations.ResolveDeclaredField, Operations.LockRefusalField, Operations.RestoreClaimForField, Operations.ForgetRequestField, RequestedResources],
         [RelayTools.ClaimAcquire] = ["taskClaimGeneration", "declaredResources", Operations.ForgetRequestField, Operations.RestoreClaimForField],

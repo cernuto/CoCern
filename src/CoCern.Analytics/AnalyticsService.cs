@@ -352,6 +352,15 @@ public sealed class AnalyticsService(AnalyticsOptions options) : IAnalyticsQueri
                 foreach (var table in Tables) Run(builder, $"CREATE TABLE relay.{table} AS SELECT * FROM source.{table};");
                 // Older snapshots have no reported origin. Add it to the converted copy only, preserving their unknown totals.
                 Run(builder, "ALTER TABLE relay.activity_log ADD COLUMN IF NOT EXISTS background_call BIGINT;");
+                Run(builder, "ALTER TABLE relay.activity_log ADD COLUMN IF NOT EXISTS call_origin VARCHAR;");
+                using (var origins = builder.CreateCommand())
+                {
+                    origins.CommandText = "SELECT count(*) FROM information_schema.tables WHERE table_catalog = 'source' AND table_name = 'activity_origin_daily';";
+                    var present = System.Convert.ToInt64(origins.ExecuteScalar()) != 0;
+                    Run(builder, present
+                        ? "CREATE TABLE relay.activity_origin_daily AS SELECT * FROM source.activity_origin_daily;"
+                        : "CREATE TABLE relay.activity_origin_daily(day VARCHAR, repository_id VARCHAR, tool VARCHAR, call_origin VARCHAR, calls BIGINT, request_bytes BIGINT, reply_bytes BIGINT);");
+                }
                 foreach (var column in new[] { "model_calls", "background_calls", "model_request_bytes", "background_request_bytes", "model_reply_bytes", "background_reply_bytes" })
                     Run(builder, $"ALTER TABLE relay.activity_daily ADD COLUMN IF NOT EXISTS {column} BIGINT DEFAULT 0;");
                 Run(builder, "DETACH relay; DETACH source;");
