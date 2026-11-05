@@ -35,7 +35,7 @@ public sealed class LockState(JsonObject json)
         // Lease warnings (AttentionSources).
         (WarnedLeaseKey, null), (InterruptedLeaseKey, null), (WarnedTaskKey, StateShape.Object((WarnedBoardIdKey, null), (WarnedTaskIdKey, null))), (AttentionRevisionKey, null))
         // Standing orders (StandingOrders): the boards watching for the lock's release, and the order runs it applied.
-        .With(LockOrderState.Fields);
+        .With(LockOrderState.Fields).With((EventWaitSources.SubscriptionsKey, StateShape.Map(StateShape.Any)), (EventWaitRetirement.Key, StateShape.Map(null)));
 
     /// <summary>The session that holds the claim; empty when the lock is free.</summary>
     public string Holder
