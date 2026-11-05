@@ -650,7 +650,7 @@ public sealed class LocalWakeTests : IDisposable
 
         cache = Path.Combine(root, "open-raw");
         Assert.Null(LocalChatWake.Open(new AdapterOptions("http://127.0.0.1:5271/", Secret), null, registered: false, cache));
-        Assert.Equal(("off", "setup_returned_null"), LocalWakeStatus.Problem(cache));
+        Assert.Equal(("off", "token_file_unconfigured"), LocalWakeStatus.Problem(cache));
         Assert.True(Status(cache).GetProperty("setupReached").GetBoolean());
 
         cache = Path.Combine(root, "open-node");
