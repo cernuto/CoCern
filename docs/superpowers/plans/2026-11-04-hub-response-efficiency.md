@@ -18,6 +18,10 @@ Compact worker and open-only task lists emit a scoped membership `snapshotTag`. 
 
 The validator covers freshly returned session/control/attention data, caller identity and repository privileges, repository, board, hub incarnation, attention-detail and hold selection, effective attention settings and reply version. Pause, cancellation targets, inbox changes, actionable/top/wake changes and time-driven hold, snooze, freshness or expiry changes must invalidate it. Full replies remain the fallback for history, piggyback writes, missing required status fields, uncertainty, or a full response that cannot retain its validator within the existing wire and token limits. Ordinary callers remain unchanged. Caller-side adoption belongs to the Claude worker.
 
+## What the model reads
+
+Counters at the hub see the reply it sends, not what reaches a chat. `ModelReply` in the adapter runs last on the way out of the MCP tool, so nothing the adapter learns from a reply is affected. It writes JSON without HTML-safe escapes, drops the `content` a `context_put` echoes back, and in `check_inbox` drops each item's `repositoryId` and null `replyTo`, whole-second `sentAt`, and a null `nextCursor` or false `truncated`. Replayed over one long chat's own replies (84 `check_inbox`, 5 `context_put`), a script's estimate is 9.9% and 88.7% fewer characters. That is one chat, not a production measurement, and these savings will not appear in `relay_tokens` or `noisiest_tools`. A repeated read of unacknowledged messages still costs their text: 25 of 143 items in that chat were repeats, and leaving them out would risk hiding mail from a chat whose context was compacted.
+
 ## Verification and file boundaries
 
 The production edit set is `ToolSchemas.cs`, `ControlAggregate.cs`, `TaskBoardAggregate.cs`, `DiscoveryGrain.cs`, `RelayRequestGuard.cs` and `ReplyAddOns.cs`. Tests are in `HubResponseCompactionTests.cs` and affected existing suites. The new public event-wait work can add separate schema cases and helpers; it must preserve the existing worker, task and status cases when integrating.

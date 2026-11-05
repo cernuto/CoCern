@@ -220,7 +220,7 @@ public static class CoordinationTools
         {
             var arguments = JsonSerializer.SerializeToElement(request.Params.Arguments ?? new Dictionary<string, JsonElement>());
             var reply = await call(arguments, cancellationToken);
-            var json = JsonSerializer.Serialize(reply, AdapterReply.JsonOptions);
+            var json = ModelReply.Text(ProtocolTool.Name, reply);
             return new CallToolResult { IsError = !reply.Ok, Content = [new TextContentBlock { Text = json }] };
         }
     }
