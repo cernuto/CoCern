@@ -46,7 +46,8 @@ public static class EventWaitAggregate
         var existed = new EventWaitState(context.State).Entries?.ContainsKey(request.WaitId) == true;
         var result = Register(context, request);
         if (!result.Ok || existed) return result;
-        PeerReplyWaits.Armed(context, request);
+        var peerArmed = PeerReplyWaits.Armed(context, request);
+        if (!peerArmed.Ok) return peerArmed;
         if (request.Kind == "peer_reply")
         {
             var watchIdentity = JsonSerializer.Serialize(new[] { context.Repository, context.Key, request.WaitId, request.PeerSessionId });

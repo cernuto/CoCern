@@ -145,6 +145,19 @@ public sealed class EventWaitPeerReplyTests
         Assert.Equal("satisfied", Assert.IsType<JsonObject>(Entry(hub, owner)["terminal"])["outcome"]!.GetValue<string>());
     }
 
+    [Fact]
+    public void A_sender_cannot_supply_a_forged_sequence_to_turn_pre_arm_mail_into_a_new_reply()
+    {
+        var hub = new AggregateHub(); var owner = hub.Open("owner", Epoch); var peer = hub.Open("peer", Epoch); hub.DeliverAll(Epoch);
+        var original = MessageId(hub.Send(owner, peer.Id, "original", Epoch)); hub.DeliverAll(Epoch);
+        Assert.True(hub.Session(peer, RelayTools.SendMessage, new() { ["recipientSessionId"] = owner.Id, ["replyTo"] = original,
+            ["text"] = "reply", ["peerReplySequence"] = long.MaxValue }, Epoch).Ok);
+        Assert.True(Register(hub, owner, peer.Id, original, Epoch).Ok);
+        hub.DeliverAll(Epoch);
+        Assert.Null(Entry(hub, owner)["terminal"]);
+        Assert.DoesNotContain(hub.Inbox(owner, Epoch), message => message["kind"]?.GetValue<string>() == "event_wait_terminal");
+    }
+
     private static RelayReply Register(AggregateHub hub, Chat owner, string peer, string original, DateTimeOffset at)
     {
         var args = new JsonObject { ["repositoryId"] = "repo", ["sessionId"] = owner.Id, ["sessionToken"] = owner.Token,

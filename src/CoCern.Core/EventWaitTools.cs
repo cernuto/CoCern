@@ -68,7 +68,16 @@ internal sealed class EventWaitTools(Aggregates aggregates)
             // it grants nothing: both owner and source validate the binding.
             var watchId = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
                 JsonSerializer.Serialize(new[] { Text(args, "repositoryId"), Text(args, "sessionId"), waitId }))));
-            if (kind != "peer_reply")
+            if (kind == "peer_reply")
+            {
+                // Success follows the source's atomic arm boundary. The durable
+                // ACK may arrive later; accepted mail buffers at the owner.
+                var arm = PeerReplyWaits.CreateArm(Text(args, "repositoryId"), Text(args, "sessionId"), request);
+                var armed = await aggregates.Call(AggregateKinds.Session, arm.PeerSessionId, caller, PeerReplyWaits.ArmOperation,
+                    JsonSerializer.SerializeToNode(arm, Json)!.AsObject());
+                if (!armed.Ok) return armed;
+            }
+            else
             {
                 var watch = new EventWaitSourceWatch(Text(args, "repositoryId"), Text(args, "sessionId"), waitId, watchId, kind,
                     kind == "task_completed" ? AggregateKinds.Board : AggregateKinds.Lock,
