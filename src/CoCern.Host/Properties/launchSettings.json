@@ -16,6 +16,8 @@
         "Relay__Dashboard__ViewerPrincipalIds__0": "PaulC",
         "Relay__Dashboard__OpenOnStart": "true",
         "Relay__Discovery__Enabled": "true",
+        "Relay__Discovery__Repositories__0": "cocern",
+        "Relay__Discovery__Repositories__1": "m3ts-snx",
         "Relay__Network__Enabled": "true",
         "Relay__DocCache__Repositories__0__Id": "cocern",
         "Relay__DocCache__Repositories__0__ClonePath": "../..",
