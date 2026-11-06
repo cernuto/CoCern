@@ -77,7 +77,7 @@ Run one hub on your PC and connect the apps you use. Add other PCs when you need
 <summary>Coordination, search and analytics details</summary>
 
 - **Shared task board.** Tasks with priorities, dependencies and advisory claims to help cooperating chats avoid duplicate work and overlapping resources.
-- **Messages between chats.** On this PC or another one. A chat can be woken when something needs it.
+- **Messages between chats.** On this PC or another one, including chats on the hub's own PC. Delivery receipts report the recipient's announced wake reachability; stored mail remains available at its next turn even when it cannot be woken now.
 - **Next-work offers.** When a chat finishes a task, the hub offers it the next ready one.
 - **Attention.** One short "look at this" per reply. Only urgent items interrupt a chat.
 - **Standing rules.** A board's approved instructions and active grants, delivered at session open and again only when the revision changes. Pending proposals deliver nothing; approve or dismiss them on the dashboard.
@@ -133,7 +133,7 @@ Chats on other PCs can join the same hub and message chats here. On the hub's PC
 
 Nothing is copied by hand: the command downloads CoCern from this hub over HTTPS with the hub's certificate pinned, joins, adds CoCern to Claude Code (through `claude mcp add` when Claude Code's command line is installed, else its settings file, with a restart hint if Claude Code is running) and Codex, and starts it with Windows. Claude Code no longer needs to be closed. The PC shows up on the dashboard under Machines. If the download or unpacking fails, it stops before changing anything.
 
-- **No .NET needed there** when this hub serves the self-contained adapter from `./scripts/Build-CoCern.ps1 -Publish`. A hub started from Visual Studio without it serves its own build, which needs the .NET 10 runtime on the other PC; the section says so.
+- **No .NET needed there** when this hub serves the self-contained adapter published with `./scripts/Build-CoCern.ps1 -Selection artifacts/deploy-smoke-selection.json -Publish`, using the selection described in the [verification guide](docs/testing.md). A hub started from Visual Studio without it serves its own build, which needs the .NET 10 runtime on the other PC; the section says so.
 - **Updating a joined PC:** paste the same command again. If the hub has a newer adapter while CoCern is running there, it says what to close first and changes nothing; then paste it again.
 - **Turn it on first.** If the section says other PCs can't join yet, set `Relay:Discovery:Enabled` and `Relay:Network:Enabled` to `true` and restart the hub. The Visual Studio launch profile already does.
 - **The other PC can't reach the hub?** Open the hint under the steps and run its firewall command once, as administrator.
@@ -142,7 +142,9 @@ Nothing is copied by hand: the command downloads CoCern from this hub over HTTPS
 
 ## Use it in a chat
 
-Native Codex startup restores the chat's own CoCern binding and concise workflow context; the installed `cocern-workflow` skill guides coordination. A chat that has already joined should reuse its binding. For clients using the raw session tools, a typical chat is:
+The installed `cocern-workflow` skill guides coordination. With an existing native Codex connection, startup records a private intent and the chat's first CoCern call joins or restores its own binding automatically. A chat that has already joined reuses that binding; it does not open a replacement session. Standard connections remain usable without native hooks. See [Connect and verify Codex](docs/codex-connect.md) for connection modes and troubleshooting.
+
+For clients using the raw session tools, a typical chat is:
 
 1. `session_open` once, to join the hub, and keep its handle for the whole chat. Retry an uncertain open with the same `requestId` and arguments: it returns the same session, not a second one (in Codex, only until the app restarts CoCern; then reuse the handle you kept). A managing chat passes `role: "manager"`.
 2. `task_get` to read the board, then `task_claim` a task.
@@ -174,17 +176,19 @@ The chat passes `role: "manager"` to `session_open`, and from then on the hub se
 
 A chat can be woken when something needs it.
 
-- **Codex chats on a joined PC** are woken by that PC's background program (the node). Nothing to do.
-- **Claude chats on a joined PC** wake themselves. Run this in the chat as a background command:
+- **Codex chats** use the joined PC's background program (the node) or the hub-local adapter's wake runtime. The local runtime tracks the chat's own successfully authenticated session while its MCP adapter is running.
+- **Claude Code chats** use CoCern's installed Stop hook to arm an inbox waiter when a turn ends. Setup, Connect and development setup install the owned hook while preserving unrelated handlers. The waiter can use a joined node or a private local connection, so it also works on the hub's own PC.
+- **Manual Claude waiter:** if needed, run this from the installed or published adapter folder as a background command in that chat:
 
   ```powershell
-  & "$env:LOCALAPPDATA\CoCern\adapter\CoCern.Adapter.exe" --await-inbox --chat <this chat's session ID> --timeout-minutes 120
+  .\CoCern.Adapter.exe --await-inbox --chat <CLAUDE_CODE_SESSION_ID> --timeout-minutes 120
   ```
 
-  That is the folder the pasted command installs; from a build with .NET installed, `dotnet <folder>\CoCern.Adapter.dll` works the same. The session ID is the chat's `CLAUDE_CODE_SESSION_ID`. Start it again after handling the inbox.
-- **Chats on the hub's own PC** aren't woken: it has no node, so the waiter exits with code 1 there. They see mail at their next call, or sooner while they wait with `check_inbox` and `waitSeconds`.
+  Replace the placeholder with that chat's actual `CLAUDE_CODE_SESSION_ID`. From a source build with .NET installed, `dotnet <adapter-folder>\CoCern.Adapter.dll` works the same. The chat must first have joined CoCern through that connection. Run only one waiter per chat and start it again after handling the inbox.
 
 Direct messages from another session and urgent items (a task blocked, failed or interrupted, or an action stranded by a closed session) wake a chat at once. Send FYI notes with `wake: false`; they never cause a wake. Task-change notices and other nonurgent items wait for the chat's next reply or for 10 minutes. Tips never wake a chat. The node still avoids waking a busy chat and applies its usual deduplication and rate limits.
+
+The directory and dashboard show whether a chat currently announces a wake path. A hub-local Claude waiter refreshes that presence through its reads, with a three-minute expiry. Reachability, a stored message and a successful queue operation do not establish that the model ran or read the message. If a recipient is unreachable, keep working; its mail remains queued for its next turn. See [wake behavior and reachability](docs/reference.md#other-pcs).
 
 ## Node updates
 
@@ -245,19 +249,20 @@ The profile enables this only while a debugger is attached in Development. It up
 
 The launcher itself remains in its original immutable version. After changing launcher code, run `dotnet <built-adapter-dll> --dev-setup <absolute-deployment-root> <adapter-output-folder> <absolute-token-file>` and reconnect CoCern once. This explicit command also upgrades an existing launcher entry. Normal adapter changes need only F5. Old version folders are retained; `Relay:DevelopmentAdapter:SourcePath` can override the build's adapter output path for a custom layout.
 
+Follow [AGENTS.md](AGENTS.md) and the [verification guide](docs/testing.md): accumulate significant changes and verify at a deploy or major milestone. Use Roslyn CodeLens to map changed production symbols to exact related test methods, then record the current commit, symbols and selection in an ignored file under `artifacts/`. If there are no covering tests, run no tests. Reviews use source inspection; whole-suite and per-batch gates are not part of the workflow.
+
+After committing the verification source and preparing that selection, run:
+
 ```powershell
-dotnet build CoCern.slnx -c Release
-dotnet test CoCern.slnx -c Release
+.\scripts\Build-CoCern.ps1 -Selection artifacts/deploy-smoke-selection.json
 ```
 
-For an end-to-end check, `python scripts/Smoke-CoCern.py` starts a throwaway hub from the build and runs 97 happy- and sad-path checks: sign-in, tasks, claims, actions, messages, notes, search, standing rules, orders, attention, pausing, closing sessions, doc search and re-sync, analytics, the adapter, the dashboard, Connect, the adapter download, a real node joining over HTTPS, races, malformed input, a hub killed mid-flight, and a restart. Before any settings writes, it verifies that the adapter reads the exact temporary profile and application-data paths; an older adapter that ignores these paths stops the run. It uses its own temporary folders and ports, and its exit code is the number of failed checks.
-
-On Windows the tests run offline. Elsewhere, 12 setup tests fail because they need Windows, 2 tests report as skipped (they need Windows, or PowerShell installed), and the analytics tests download DuckDB's `sqlite` extension once (or set `COCERN_DUCKDB_EXTENSIONS` to a folder that has it).
+The runner builds into isolated output, runs only the selected methods, and retains logs, TRX evidence and a receipt. It requires every selected method to execute and pass, and refuses an unchanged repeat of the same source and selection. Tests use disposable fixtures and never change machine, user or client settings. See [Windows packaging](docs/windows-setup.md#for-maintainers) when creating an installation ZIP.
 
 | Folder | What's in it |
 | --- | --- |
 | `src/` | The hub (`CoCern.Host` and its layers), the dashboard and the adapter. |
-| `tests/` | `CoCern.Tests` (everything) and `CoCern.Core.Tests` (no host). |
+| `tests/` | Focused test projects and disposable fixtures. |
 | `scripts/` | Build, start and wake scripts. |
 | `extensions/duckdb/` | DuckDB's `sqlite` extension for Windows x64. |
 | `docs/` | The [Reference](docs/reference.md). |
