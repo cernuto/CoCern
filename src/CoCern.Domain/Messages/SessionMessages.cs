@@ -9,6 +9,26 @@ public sealed record NativeExpiryCheck(string RepositoryId, string SessionId, st
     public JsonObject ToJson() => new() { ["repositoryId"] = RepositoryId, ["sessionId"] = SessionId, [NativeParticipant.Id] = ParticipantId };
 }
 
+/// <summary>Private promotion of an authenticated existing session; never initializes or replaces its coordination state.</summary>
+public sealed record NativeSessionAdoption(string RepositoryId, string SessionId, string SessionToken, string ParticipantId, string Generation, string RequestId) : IEffectMessage<NativeSessionAdoption>
+{
+    public override string ToString() => $"NativeSessionAdoption {{ RepositoryId = {RepositoryId}, SessionId = {SessionId} }}";
+    public static string Operation => "__native_session_adopt";
+    public static string TargetKind => AggregateKinds.Session;
+    public static DeliveryClass Delivery => DeliveryClass.Retry;
+    public JsonObject ToJson() => new()
+    {
+        ["repositoryId"] = RepositoryId, ["sessionId"] = SessionId, ["sessionToken"] = SessionToken,
+        [NativeParticipant.Id] = ParticipantId, [NativeParticipant.Generation] = Generation, [NativeParticipant.Request] = RequestId
+    };
+    public static Decoding<NativeSessionAdoption> Decode(JsonObject payload)
+    {
+        var read = new MessageReader(payload);
+        return read.Result(new NativeSessionAdoption(read.Text("repositoryId"), read.Text("sessionId"), read.Text("sessionToken"),
+            read.Text(NativeParticipant.Id), read.Text(NativeParticipant.Generation), read.Text(NativeParticipant.Request)));
+    }
+}
+
 /// <summary>
 /// <see cref="Operations.Open"/>: initializes a session from its record. Sent twice by design, both built by
 /// <see cref="SessionRecord.Opened"/>: the control directory queues it with the record it keeps (with its initial freshness), and

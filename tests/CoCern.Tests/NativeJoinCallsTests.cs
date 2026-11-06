@@ -336,7 +336,7 @@ public sealed class NativeJoinCallsTests
 
     [Theory]
     [InlineData(429)]
-    public async Task Bare_transient_http_failure_keeps_pending_intent_for_recovery(int code)
+    public async Task Bare_transient_http_failure_keeps_pending_intent_until_next_stamped_call(int code)
     {
         using var scope = new NativeScope();
         var context = new NativeHookContext("codex", Guid.NewGuid().ToString("D"), scope.Checkout);
@@ -365,12 +365,104 @@ public sealed class NativeJoinCallsTests
         }
         Assert.Single(Directory.EnumerateFiles(scope.Folder, "*.json", SearchOption.AllDirectories), p => p.Contains("native-pending-"));
         online = true;
-        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        await using var runtime = new NativeJoin(scope.Folder, scope.Options, forwarder) { ResumeInterval = TimeSpan.FromMilliseconds(25) };
-        var resumed = runtime.ResumeAsync(stop.Token);
-        while (NativeJoinBinding.DispatchSnapshot(scope.Folder).Count == 0) await Task.Delay(25, stop.Token);
-        stop.Cancel(); await resumed;
+        await using var runtime = new NativeJoin(scope.Folder, scope.Options, forwarder);
+        await runtime.ResumeAsync(default);
+        Assert.Empty(NativeJoinBinding.DispatchSnapshot(scope.Folder));
+        Assert.Equal(0, opens); Assert.Equal(0, writes);
+        _ = await NativeJoinHook.StampAsync(runtime, context, RelayTools.GetStatus, "recover-first", JsonSerializer.SerializeToElement(new { }), default);
         Assert.Equal(1, opens); Assert.Equal(0, writes);
+    }
+
+    [Fact]
+    public async Task Classic_native_adoption_keeps_identity_metadata_and_inbox_and_refuses_forged_stale_or_conflicting_proof()
+    {
+        using var scope = new NativeScope(RelayHostFixture.Token);
+        await using var host = new RelayHostFixture(remoteAddress: System.Net.IPAddress.Loopback, settings: new Dictionary<string,string?>
+        {
+            ["Relay:DocCache:Enabled"] = "true", ["Relay:DocCache:SyncMinutes"] = "0",
+            ["Relay:DocCache:Repositories:0:Id"] = "repo", ["Relay:DocCache:Repositories:0:ClonePath"] = scope.Checkout,
+            ["Relay:DocCache:Repositories:0:Fetch"] = "false"
+        });
+        using var http = host.CreateClient();
+        var forwarder = new RelayForwarder(http, scope.Options);
+        var binding = new { roslyn = "retained-solution", visualStudio = "retained-ide" };
+        var opened = await forwarder.ForwardAsync(RelayTools.SessionOpen, JsonSerializer.SerializeToElement(new
+        {
+            repositoryId = "repo", machineId = Environment.MachineName, label = "[FC] Floor Controller", role = "worker", binding,
+            requestId = Guid.NewGuid().ToString("N")
+        }), default);
+        Assert.True(opened.Ok, opened.Code);
+        var original = opened.Data!.Value;
+        var session = original.GetProperty("sessionId").GetString()!;
+        var token = original.GetProperty("sessionToken").GetString()!;
+        var capture = new NativeHookContext("codex", Guid.NewGuid().ToString("D"), scope.Checkout, "New generic native label");
+        var location = new ChatLocation("codex", capture.NativeId);
+        var classic = new SessionHandle(session, token, "repo", "[FC] Floor Controller", DateTimeOffset.UtcNow, location, location);
+        NodeState.WriteSessionHandle(scope.Folder, classic);
+        var sent = await forwarder.ForwardAsync(RelayTools.SendMessage, JsonSerializer.SerializeToElement(new
+        { repositoryId = "repo", sessionId = session, sessionToken = token, recipientSessionId = session, text = "keep this inbox", requestId = Guid.NewGuid().ToString("N") }), default);
+        Assert.True(sent.Ok, sent.Code);
+        AdapterReply beforeInbox = default!;
+        for (var delivery = 0; delivery < 100; delivery++)
+        {
+            beforeInbox = await forwarder.ForwardAsync(RelayTools.CheckInbox,
+                JsonSerializer.SerializeToElement(new { repositoryId = "repo", sessionId = session, sessionToken = token, attention = false }), default);
+            Assert.True(beforeInbox.Ok, beforeInbox.Code);
+            if (beforeInbox.Data!.Value.GetProperty("items").GetArrayLength() > 0) break;
+            await Task.Delay(25);
+        }
+        Assert.Contains(beforeInbox.Data!.Value.GetProperty("items").EnumerateArray(), item => ChatLocators.Text(item, "text") == "keep this inbox");
+        var adoptionAttempts = 0;
+        using var uncertain = new HttpClient(new Handler(async (request, ct) =>
+        {
+            var raw = await request.Content!.ReadAsStringAsync(ct);
+            using var content = JsonDocument.Parse(raw);
+            using var copy = new HttpRequestMessage(request.Method, request.RequestUri)
+            { Content = new StringContent(raw, System.Text.Encoding.UTF8, "application/json") };
+            copy.Headers.Authorization = request.Headers.Authorization;
+            var response = await http.SendAsync(copy, ct);
+            if (content.RootElement.TryGetProperty("nativeJoin", out _) && ++adoptionAttempts == 1)
+            {
+                response.Dispose();
+                throw new HttpRequestException("Synthetic lost authenticated adoption reply.");
+            }
+            return response;
+        }));
+        await using var join = new NativeJoin(scope.Folder, scope.Options, new RelayForwarder(uncertain, scope.Options));
+        var result = await join.CallAsync(capture, "adopt-first", RelayTools.GetStatus, JsonSerializer.SerializeToElement(new { attention = false }), default);
+        Assert.True(result.Ok, result.Code);
+        Assert.True(adoptionAttempts >= 2); // The committed adoption is retried with the same private proof and identity.
+        Assert.Equal(session, result.Data!.Value.GetProperty("sessionId").GetString());
+        Assert.True(JsonElement.DeepEquals(JsonSerializer.SerializeToElement(binding), result.Data.Value.GetProperty("binding")));
+        var adopted = Assert.Single(NativeJoinBinding.DispatchSnapshot(scope.Folder));
+        Assert.Equal(classic.SessionId, adopted.SessionId);
+        Assert.Equal(classic.SessionToken, adopted.SessionToken);
+        Assert.Equal(classic.Label, adopted.Label);
+        Assert.Equal(classic.OpenedAt, adopted.OpenedAt);
+        var inbox = await join.CallAsync(capture, "adopt-inbox", RelayTools.CheckInbox, JsonSerializer.SerializeToElement(new { attention = false }), default);
+        Assert.True(inbox.Ok, inbox.Code);
+        Assert.Contains(inbox.Data!.Value.GetProperty("items").EnumerateArray(), item => ChatLocators.Text(item, "text") == "keep this inbox");
+
+        await using var other = await NativeJoinBinding.AcquireAsync(scope.Folder, "codex", Guid.NewGuid().ToString("D"), Environment.MachineName, "repo", scope.Checkout, default);
+        var wire = System.Text.Json.Nodes.JsonNode.Parse(other.OpenWireArguments(null).GetRawText())!.AsObject();
+        foreach (var proof in new[]
+        {
+            new { sessionId = session, sessionToken = "forged-token" },
+            new { sessionId = Guid.NewGuid().ToString("N"), sessionToken = token },
+            new { sessionId = session, sessionToken = token } // Correct credential, different native participant.
+        })
+        {
+            wire["nativeJoin"]!["adopt"] = JsonSerializer.SerializeToNode(proof);
+            var refused = await forwarder.ForwardAsync(RelayTools.SessionOpen, JsonSerializer.SerializeToElement(wire), default);
+            Assert.False(refused.Ok);
+            Assert.Equal(RelayErrorCodes.SessionDenied, refused.Code);
+        }
+        var workers = await forwarder.ForwardAsync(RelayTools.WorkerList, JsonSerializer.SerializeToElement(new { repositoryId = "repo", includeStale = true }), default);
+        Assert.True(workers.Ok, workers.Code);
+        var worker = Assert.Single(workers.Data!.Value.GetProperty("items").EnumerateArray());
+        Assert.Equal(session, worker.GetProperty("sessionId").GetString());
+        Assert.Equal(classic.Label, worker.GetProperty("label").GetString());
+        Assert.Equal("worker", worker.GetProperty("role").GetString());
     }
 
     [Fact]
@@ -405,7 +497,7 @@ public sealed class NativeJoinCallsTests
     }
 
     [Fact]
-    public async Task Persisted_intent_recovers_without_model_call_and_dispatches_exact_chat_without_node()
+    public async Task Persisted_intent_waits_for_stamped_call_then_dispatches_exact_chat_without_node()
     {
         using var scope = new NativeScope();
         var context = new NativeHookContext("codex", Guid.NewGuid().ToString("D"), scope.Checkout);
@@ -426,7 +518,7 @@ public sealed class NativeJoinCallsTests
         await using (var startup = new NativeJoin(scope.Folder, scope.Options, new RelayForwarder(http, scope.Options)))
         {
             using var deadline = new CancellationTokenSource();
-            var registering = startup.EnsureAsync(context, deadline.Token);
+            var registering = NativeJoinHook.StampAsync(startup, context, RelayTools.GetStatus, "offline-first", JsonSerializer.SerializeToElement(new { }), deadline.Token);
             await attempted.Task.WaitAsync(TimeSpan.FromSeconds(5));
             deadline.Cancel(); await Assert.ThrowsAnyAsync<OperationCanceledException>(() => registering);
         }
@@ -437,6 +529,10 @@ public sealed class NativeJoinCallsTests
         await using var runtime = new NativeJoin(scope.Folder, scope.Options, new RelayForwarder(http, scope.Options));
         using var stop = new CancellationTokenSource();
         var resumed = runtime.ResumeAsync(stop.Token);
+        await resumed;
+        Assert.Empty(NativeJoinBinding.DispatchSnapshot(scope.Folder));
+        Assert.True(File.Exists(pending));
+        _ = await NativeJoinHook.StampAsync(runtime, context, RelayTools.GetStatus, "online-first", JsonSerializer.SerializeToElement(new { }), default);
         var actual = new TaskCompletionSource<WakeTarget>(TaskCreationOptions.RunContinuationsAsynchronously);
         var poll = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var reconciled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);

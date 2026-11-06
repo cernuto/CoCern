@@ -84,20 +84,165 @@ public sealed class NativeJoinHookTests(ITestOutputHelper output)
     }
 
     [Fact]
-    public async Task Session_start_joins_without_emitting_a_model_handle()
+    public async Task Session_start_stays_pending_until_first_CoCern_call_and_midlife_join_needs_no_resume()
     {
         await using var fixture = new HookFixture();
         using var output = new StringWriter(); using var error = new StringWriter();
+        var configured = NativeJoinHook.ReadConnection(fixture.Folder, name => name == "COCERN_REPOSITORY" ? "repo" : null)!;
+        Assert.Equal("repo", configured.Repository);
+        Assert.Equal(fixture.Options.BaseUri, configured.BaseUri);
+        Assert.Equal(fixture.Options.Token, configured.Token);
+        Assert.Equal("repo", NativeRegistration.ClientOptions(configured, _ => null).Repository);
+        var privateStart = new ProcessStartInfo();
+        privateStart.Environment["COCERN_REPOSITORY"] = "repo";
+        privateStart.Environment["COCERN_TOKEN"] = "untrusted-ambient";
+        NativeRegistration.RestrictPrivateEnvironment(privateStart);
+        Assert.Equal("repo", privateStart.Environment["COCERN_REPOSITORY"]);
+        Assert.Equal("invalid-private-fallback", privateStart.Environment["COCERN_TOKEN"]);
         var input = JsonSerializer.Serialize(new { hook_event_name = "SessionStart", session_id = Parent, cwd = fixture.Capture.Cwd });
         Assert.Equal(0, await NativeJoinHook.RunAsync("claude", new StringReader(input), output, error, fixture.Join, default));
-        Assert.True(fixture.Requests > 0);
+        Assert.Equal(0, fixture.Requests);
+        Assert.Equal(0, fixture.NativeJoins);
+        Assert.Empty(NativeJoinBinding.DispatchSnapshot(fixture.Folder));
+        Assert.Equal(fixture.Capture.Cwd, fixture.Join.LatestPendingWorkspace("claude"));
         Assert.Empty(output.ToString()); Assert.Empty(error.ToString());
+        for (var i = 0; i < 3; i++)
+        {
+            var ephemeral = JsonSerializer.Serialize(new { hook_event_name = "SessionStart", session_id = Guid.NewGuid().ToString("D"), cwd = fixture.Capture.Cwd });
+            Assert.Equal(0, await NativeJoinHook.RunAsync("claude", new StringReader(ephemeral), output, error, fixture.Join, default));
+        }
+        Assert.Single(Directory.EnumerateFiles(fixture.Folder, "native-startup-intent-claude-*.json"));
+        Assert.Empty(Directory.EnumerateDirectories(fixture.Folder, "native-pending-*"));
+        await fixture.Join.ResumeAsync(default);
+        Assert.Equal(0, fixture.Requests);
+        var stop = JsonSerializer.Serialize(new { hook_event_name = "Stop", session_id = Parent, cwd = fixture.Capture.Cwd });
+        Assert.Equal(0, await StopHook.RunNativeAsync(new StringReader(stop), error, fixture.Join, default, fixture.Handler));
+        Assert.Equal(0, fixture.Requests);
+
+        var business = JsonSerializer.SerializeToElement(new { recipientSessionId = "peer", text = "hello" });
+        var stamped = await NativeJoinHook.StampAsync(fixture.Join, fixture.Capture, RelayTools.SendMessage, "lazy-first", business, default);
+        Assert.Equal(1, fixture.NativeJoins);
+        Assert.Empty(fixture.Business);
+        Assert.True((await NativeJoinHook.InvokeAsync(fixture.Join, "claude", RelayTools.SendMessage, stamped, default)).Ok);
+        Assert.Single(fixture.Business);
+        Assert.Single(NativeJoinBinding.DispatchSnapshot(fixture.Folder));
+
+        // Hooks installed into an existing chat need no fabricated SessionStart or manual resume.
+        await using var midlife = new HookFixture();
+        var first = await NativeJoinHook.StampAsync(midlife.Join, midlife.Capture, RelayTools.SendMessage, "midlife-first", business, default);
+        Assert.Equal(1, midlife.NativeJoins);
+        Assert.True((await NativeJoinHook.InvokeAsync(midlife.Join, "claude", RelayTools.SendMessage, first, default)).Ok);
+        Assert.Single(midlife.Business);
+    }
+
+    [Fact]
+    public async Task Codex_repository_denial_reports_mapping_guidance_without_verifying_or_allocating_a_session()
+    {
+        await using var fixture = new HookFixture { DenyPreflight = true };
+        var profile = Directory.CreateDirectory(Path.Combine(fixture.Folder, "owned-codex-profile")).FullName;
+        var candidate = ClientSettings.StageNativeCandidate(fixture.Folder, "codex", "fixture-helper", clientProfile: profile)!;
+        var registration = NativeRegistration.Read(candidate, "codex", fixture.Folder, profile)!;
+        var initial = new CoCern.Contracts.Dashboard.DashboardCodexReadiness
+        { State = "awaiting_call", Summary = "Ready for first call", NextAction = "Use CoCern", HooksInstalled = true, SkillInstalled = true };
+        Task<AdapterReply> Preflight(JsonElement args, CancellationToken ct) => fixture.Forwarder.ForwardAsync(RelayTools.SessionOpen, args, ct);
+        // Refresh diagnoses the hub before a hook has fired, without creating a session or receipt.
+        var beforeStartup = await NativeStartupEvidence.VerifyAsync(registration, initial, fixture.Capture.Cwd, "repo", Preflight);
+        Assert.Equal(RelayErrorCodes.RepositoryDenied, beforeStartup.Detail);
+        Assert.Contains("Repository mapping", beforeStartup.Summary, StringComparison.Ordinal);
+        Assert.False(beforeStartup.StartupObserved);
+        Assert.False(beforeStartup.SessionVerified);
+        Assert.False(beforeStartup.WakeReady);
+        Assert.Equal(0, fixture.NativeJoins);
+        Assert.Equal(1, fixture.Requests);
+        Assert.False(File.Exists(Path.Combine(fixture.Folder, "native-codex-startup.json")));
+        foreach (var code in new[] { "native_private_connection_required", "native_handle_conflict" })
+        {
+            NativeStartupEvidence.RecordRefusal(registration, code);
+            var refused = NativeStartupEvidence.Verify(registration, initial);
+            Assert.Equal(code, refused.Detail);
+            Assert.False(refused.SessionVerified);
+            Assert.False(refused.WakeReady);
+            Assert.DoesNotContain("resume", refused.NextAction, StringComparison.OrdinalIgnoreCase);
+        }
+        var input = JsonSerializer.Serialize(new { hook_event_name = "PreToolUse", session_id = Parent, cwd = fixture.Capture.Cwd,
+            tool_name = "mcp__cocern__send_message", tool_use_id = "mapped-first", tool_input = new { recipientSessionId = "peer", text = "hello" } });
+        using var output = new StringWriter(); using var error = new StringWriter();
+
+        Assert.Equal(2, await NativeJoinHook.RunAsync("codex", new StringReader(input), output, error, fixture.Join, default, registration));
+        Assert.Equal(2, fixture.Requests);
+        Assert.Equal(0, fixture.NativeJoins);
+        Assert.Contains(RelayErrorCodes.RepositoryDenied, error.ToString(), StringComparison.Ordinal);
+        Assert.Empty(output.ToString());
+        Assert.DoesNotContain("synthetic", error.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain(fixture.Capture.Cwd, error.ToString(), StringComparison.Ordinal);
+        NodeState.WritePrivately(Path.Combine(fixture.Folder, "native-codex-startup.json"), Encoding.UTF8.GetBytes("{malformed old success receipt"));
+        var readiness = NativeStartupEvidence.Verify(registration, initial);
+        Assert.Equal("error", readiness.State);
+        Assert.Equal(RelayErrorCodes.RepositoryDenied, readiness.Detail);
+        Assert.True(readiness.StartupObserved);
+        Assert.True(readiness.HooksInstalled);
+        Assert.False(readiness.SessionVerified);
+        Assert.False(readiness.WakeReady);
+        Assert.Null(readiness.SessionId);
+        Assert.Null(readiness.RepositoryId);
+        var rejectedPath = Path.Combine(fixture.Folder, "native-codex-startup-error.json");
+        Assert.True(NodeState.IsPrivateFile(rejectedPath));
+        using var rejected = JsonDocument.Parse(File.ReadAllBytes(rejectedPath));
+        Assert.Equal(new[] { "Definition", "Code", "CapturedAt" }, rejected.RootElement.EnumerateObject().Select(property => property.Name));
+
+        fixture.DenyPreflight = false;
+        var mapped = await NativeStartupEvidence.VerifyAsync(registration, initial, fixture.Capture.Cwd, "REPO", Preflight);
+        Assert.Equal("awaiting_call", mapped.State);
+        Assert.False(mapped.StartupObserved);
+        Assert.False(mapped.SessionVerified);
+        Assert.False(mapped.WakeReady);
+        Assert.Equal(0, fixture.NativeJoins);
+        var diagnosticTime = DateTimeOffset.UtcNow.AddSeconds(-1);
+        using (var diagnostics = new ConnectionTraceStore(Path.Combine(fixture.Folder, "connection-diagnostics"), persistAutomatically: false))
+        {
+            diagnostics.Record(new CoCern.Contracts.Dashboard.ConnectionDiagnosticEvent
+            {
+                CorrelationId = "cc-" + Guid.NewGuid().ToString("N"), Tool = "unknown", Source = "adapter", Stage = "native_registration",
+                StartedAt = diagnosticTime, DurationMs = 15000, Outcome = "error", ErrorCode = "native_registration_unverified"
+            });
+            diagnostics.Flush();
+            var unloaded = await NativeStartupEvidence.VerifyAsync(registration, initial, fixture.Capture.Cwd, "repo", Preflight);
+            Assert.Equal("native_registration_unverified", unloaded.Detail);
+            Assert.False(unloaded.SessionVerified);
+            Assert.False(unloaded.WakeReady);
+            Assert.Equal(0, fixture.NativeJoins);
+            // A newer private startup/stamp receipt is not evidence that the MCP catalog loaded.
+            NodeState.WritePrivately(Path.Combine(fixture.Folder, "native-codex-startup.json"), JsonSerializer.SerializeToUtf8Bytes(new
+            {
+                Definition = registration.Definition, Profile = registration.Profile, NativeId = Parent, Workspace = fixture.Capture.Cwd,
+                RepositoryId = "repo", SessionId = "s-native-hook", Generation = "unloaded-fixture", CapturedAt = DateTimeOffset.UtcNow
+            }));
+            Assert.Equal("native_registration_unverified", (await NativeStartupEvidence.VerifyAsync(registration, initial, fixture.Capture.Cwd, "repo", Preflight)).Detail);
+            File.Delete(Path.Combine(fixture.Folder, "native-codex-startup.json"));
+            diagnostics.Record(new CoCern.Contracts.Dashboard.ConnectionDiagnosticEvent
+            {
+                CorrelationId = "cc-" + Guid.NewGuid().ToString("N"), Tool = "unknown", Source = "adapter", Stage = "mcp_list_tools",
+                StartedAt = diagnosticTime.AddMilliseconds(1), DurationMs = 1, Outcome = "ok"
+            });
+            diagnostics.Flush();
+            Assert.Equal("awaiting_call", (await NativeStartupEvidence.VerifyAsync(registration, initial, fixture.Capture.Cwd, "repo", Preflight)).State);
+        }
+        output.GetStringBuilder().Clear();
+        error.GetStringBuilder().Clear();
+        Assert.Equal(0, await NativeJoinHook.RunAsync("codex", new StringReader(input), output, error, fixture.Join, default, registration));
+        Assert.Equal(1, fixture.NativeJoins);
+        Assert.Empty(error.ToString());
+        Assert.Contains("updatedInput", output.ToString(), StringComparison.Ordinal);
+        using var succeeded = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(fixture.Folder, "native-codex-startup.json")));
+        Assert.True(succeeded.RootElement.GetProperty("CapturedAt").GetDateTimeOffset() >= rejected.RootElement.GetProperty("CapturedAt").GetDateTimeOffset());
+        Assert.NotEqual(RelayErrorCodes.RepositoryDenied, NativeStartupEvidence.Verify(registration, initial).Detail);
     }
 
     [Fact]
     public async Task Owned_Stop_path_delivers_from_the_scoped_native_waiter()
     {
         await using var fixture = new HookFixture();
+        _ = await NativeJoinHook.StampAsync(fixture.Join, fixture.Capture, RelayTools.GetStatus, "before-stop", JsonSerializer.SerializeToElement(new { }), default);
         var input = JsonSerializer.Serialize(new { hook_event_name = "Stop", session_id = Parent, cwd = fixture.Capture.Cwd });
         using var error = new StringWriter();
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(8));
@@ -146,6 +291,7 @@ public sealed class NativeJoinHookTests(ITestOutputHelper output)
     public async Task Two_native_wakes_do_not_repeat_a_message()
     {
         await using var fixture = new HookFixture();
+        _ = await NativeJoinHook.StampAsync(fixture.Join, fixture.Capture, RelayTools.GetStatus, "before-wakes", JsonSerializer.SerializeToElement(new { }), default);
         fixture.WakeReady = true;
         fixture.InboxOf = _ => ["m1"];
         using var error = new StringWriter();
@@ -337,6 +483,8 @@ public sealed class NativeJoinHookTests(ITestOutputHelper output)
         internal HookHandler Handler { get; }
         internal NativeHookContext Capture { get; }
         internal int Requests;
+        internal int NativeJoins;
+        internal bool DenyPreflight;
         internal bool WakeReady;
         /// <summary>A session's inbox while <see cref="WakeReady"/>; unset, every session holds one message.</summary>
         internal Func<string?, string[]>? InboxOf;
@@ -360,10 +508,12 @@ public sealed class NativeJoinHookTests(ITestOutputHelper output)
                 Requests++;
                 using var doc = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(ct));
                 var args = doc.RootElement;
+                if (DenyPreflight && args.TryGetProperty("nativePreflight", out _))
+                    return new(HttpStatusCode.Forbidden) { Content = new StringContent(JsonSerializer.Serialize(new { ok = false, code = RelayErrorCodes.RepositoryDenied, dataJson = "{}", version = 1 }), Encoding.UTF8, "application/json") };
                 if (ChatLocators.Text(args, "sessionId") is { } own) { OwnHandles.Add(own); Assert.Equal("synthetic-handle-token", ChatLocators.Text(args, "sessionToken")); }
                 object reply;
                 if (args.TryGetProperty("nativePreflight", out _)) reply = new { repositoryId = "repo" };
-                else if (args.TryGetProperty("nativeJoin", out _)) reply = new { sessionId = "s-native-hook", sessionToken = "synthetic-handle-token" };
+                else if (args.TryGetProperty("nativeJoin", out _)) { NativeJoins++; reply = new { sessionId = "s-native-hook", sessionToken = "synthetic-handle-token" }; }
                 else if (WakeReady && args.TryGetProperty("headersOnly", out _)) { var inbox = InboxOf?.Invoke(ChatLocators.Text(args, "sessionId")) ?? new[] { "m-native" }; reply = new { items = inbox.Select(id => new { messageId = id, repositoryId = "repo" }), total = inbox.Length, nextCursor = (int?)null, truncated = false }; }
                 else if (WakeReady && request.RequestUri!.AbsolutePath.EndsWith("/check_inbox", StringComparison.Ordinal)) { var inbox = InboxOf?.Invoke(ChatLocators.Text(args, "sessionId")) ?? new[] { "m-native" }; reply = new { items = inbox.Select(id => new { messageId = id, repositoryId = "repo", text = "UNTRUSTED" }), total = inbox.Length, nextCursor = (int?)null, truncated = false }; }
                 else if (request.RequestUri!.AbsolutePath.EndsWith("/get_status", StringComparison.Ordinal)) reply = new { sessionId = ChatLocators.Text(args, "sessionId") ?? "s-native-hook", control = new { paused = false, requests = Array.Empty<object>() } };

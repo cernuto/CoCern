@@ -1,4 +1,3 @@
-using System.Net;
 using System.Text.Json;
 using CoCern.Contracts;
 using CoCern.Core;
@@ -58,11 +57,12 @@ public static class RelayEndpoints
         return app;
     }
 
-    /// <summary>The API reference describes every route, so only this PC may read it; a connection without an IP (in-process, pipes) is local.</summary>
+    /// <summary>The API reference describes every route, so only this PC may read it; without a network listener, in-process or pipe connections are local too.</summary>
     private static void UseLocalApiReference(this WebApplication app) => app.Use((context, next) =>
     {
         if ((context.Request.Path.StartsWithSegments("/openapi") || context.Request.Path.StartsWithSegments("/scalar"))
-            && context.Connection.RemoteIpAddress is { } address && !IPAddress.IsLoopback(address))
+            && !HubLocalRequest.IsLocal(context)
+            && !(context.Connection.RemoteIpAddress is null && context.RequestServices.GetService<HubListener>()?.Https is null))
         {
             context.Response.StatusCode = StatusCodes.Status404NotFound;
             return Task.CompletedTask;

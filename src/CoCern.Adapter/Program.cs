@@ -215,8 +215,8 @@ try
     if (args.Any(NativeRegistration.HasPrivateOptionName))
     {
         registration = NativeRegistration.FromClientArguments(args) ?? throw new AdapterConfigurationException(NativeRegistration.Refusal);
-        if (await registration.AcceptAsync(CancellationToken.None) is null) throw new AdapterConfigurationException(NativeRegistration.Refusal);
     }
+    await using var registrationGate = registration is null ? null : new NativeRegistrationGate(registration);
     var options = registration is null ? AdapterOptions.FromEnvironment() : NativeRegistration.ClientOptions(registration.Connection);
     // First, so a status file that never appears means this adapter never got past reading its options.
     LocalWakeStatus.Report(LocalWakeCodes.Starting);
@@ -239,13 +239,26 @@ try
         };
     }).WithStdioServerTransport().WithCoCernWorkflow().WithTools(registration is null
         ? CoordinationTools.Create(forwarder, options.Admin, hints, SessionHandoff.For(options), options.ChatOnly, options.ExportedChat, localWake: localWake, diagnostics: options.Diagnostics, eventWaits: options.EventWaits, repository: options.Repository)
-        : CoordinationTools.CreateNative(forwarder, native!, registration.Provider, options.Admin, options.Diagnostics));
+        : CoordinationTools.CreateNative(forwarder, native!, registrationGate!, options.Admin, options.Diagnostics));
     using var host = builder.Build();
     var lifetime = host.Services.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping;
-    _ = localWake?.RunAsync(lifetime);
-    _ = native?.ResumeAsync(lifetime);
-    await host.RunAsync();
+    using var backgroundStopping = CancellationTokenSource.CreateLinkedTokenSource(lifetime);
+    var background = ResumeBackgroundAsync(backgroundStopping.Token);
+    try { await host.RunAsync(); }
+    finally { await backgroundStopping.CancelAsync(); await background; }
     return 0;
+
+    async Task ResumeBackgroundAsync(CancellationToken ct)
+    {
+        try
+        {
+            if (registrationGate is not null && !await registrationGate.WaitForRegistrationAsync(ct)) return;
+            var wakeRuntime = localWake?.RunAsync(ct) ?? Task.CompletedTask;
+            var nativeRuntime = native?.ResumeAsync(ct) ?? Task.CompletedTask;
+            await Task.WhenAll(wakeRuntime, nativeRuntime);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+    }
 }
 catch (AdapterConfigurationException exception)
 {

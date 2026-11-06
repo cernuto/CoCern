@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Net;
 using System.Text.Json;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
@@ -17,7 +16,7 @@ internal sealed class DashboardConnect(IConfiguration configuration, IHostEnviro
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(20);
     private static readonly JsonSerializerOptions Web = new(JsonSerializerDefaults.Web);
 
-    public static bool OnThisPc(HttpContext context) => context.Connection.RemoteIpAddress is { } remote && IPAddress.IsLoopback(remote);
+    public static bool OnThisPc(HttpContext context) => HubLocalRequest.IsLocal(context);
 
     /// <summary>
     /// Each app's state. With <paramref name="admin"/> given (the page's administrator tools box was changed), an entry for this hub that gives

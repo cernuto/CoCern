@@ -122,6 +122,10 @@
 .connect-permissions .admin-tools { margin-top: 6px; }
 .connect-permissions .table-footnote { margin-bottom: 0; }
 .connect-page { display: grid; gap: 16px; min-width: 0; }
+.connect-download { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; margin: 0; font-size: .83rem; }
+.connect-download a { color: var(--primary); font-weight: 600; text-underline-offset: 3px; }
+.connect-download span { color: var(--muted-foreground); font-size: .78rem; }
+.connect-download a:focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; border-radius: 2px; }
 .connect-option { display: block; min-width: 0; box-shadow: none; }
 .connect-option > summary { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 4px 16px; padding: 18px 22px; cursor: pointer; list-style: none; border-radius: inherit; }
 .connect-option > summary::-webkit-details-marker { display: none; }

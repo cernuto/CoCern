@@ -32,6 +32,8 @@ internal sealed class ClientPlan
     public static ClientPlan Unchanged(string path) => new(path, null, true, false);
     public static ClientPlan Write(string path, byte[] content, bool existed, bool refreshes = false) => new(path, content, existed, refreshes);
 
+    internal ReadOnlySpan<byte> PlannedContent => _content;
+
     public ClientChange Apply(TimeProvider clock)
     {
         if (_content is null) return ClientChange.Unchanged;
@@ -72,7 +74,7 @@ internal static class ClientSettings
     internal static string? StageNativeCandidate(string folder, string provider, string command, string? developmentRoot = null, string? clientProfile = null)
     {
         try { return StageNativeCandidateCore(folder, provider, command, developmentRoot, clientProfile); }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException or InvalidOperationException)
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException or InvalidOperationException or System.Security.SecurityException or AdapterConfigurationException)
         { return null; }
     }
 
@@ -143,7 +145,7 @@ internal static class ClientSettings
                 return StageNativeCandidate(connection.Folder, provider,
                     provider == "codex" ? CodexNativeSetup.HookCommandLine(dotnet, adapter) : SetupEnvironment.AdapterCommandLine(dotnet, adapter), developmentRoot, clientProfile);
         }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException or AdapterConfigurationException)
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException or AdapterConfigurationException or System.Security.SecurityException or InvalidOperationException)
         { /* Raw setup remains usable when the optional private candidate cannot be staged. */ }
         return null;
     }
@@ -266,6 +268,89 @@ internal static class ClientSettings
         return result == text ? ClientPlan.Unchanged(path) : ClientPlan.Write(path, [.. original.AsSpan(0, Bom(original)), .. Encoding.UTF8.GetBytes(result)], existed: true, refreshes: true);
     }
 
+    internal static bool HasNativeCodexLaunch(string path)
+    {
+        var original = ReadAll(path);
+        if (original is null) return false;
+        var text = Strict.GetString(original, Bom(original), original.Length - Bom(original));
+        var reader = new TomlReader(text);
+        if (!reader.HasCoCern()) return false;
+        return reader.Assignments.Where(item => item.Table.SequenceEqual(new[] { Table, Name }) && item.Key.SequenceEqual(new[] { "args" }))
+            .Any(item => ParseArgumentArray(text[item.ValueStart..item.ValueEnd])?.Contains("--native-client", StringComparer.Ordinal) == true);
+    }
+
+    // Maintenance may replace a literal immutable package path only after the private candidate
+    // authenticates that exact native connection. Development launchers use their own update path.
+    internal static (string Dotnet, string Image)? ReadNativeCodexImage(string path, string folder, string profile)
+    {
+        var original = ReadAll(path);
+        if (original is null) return null;
+        var text = Strict.GetString(original, Bom(original), original.Length - Bom(original));
+        var reader = new TomlReader(text);
+        if (!reader.HasCoCern()) return null;
+        var entries = reader.Assignments.Where(item => item.Table.SequenceEqual(new[] { Table, Name })).ToArray();
+        var commands = entries.Where(item => item.Key.SequenceEqual(new[] { "command" })).ToArray();
+        var arguments = entries.Where(item => item.Key.SequenceEqual(new[] { "args" })).ToArray();
+        if (commands.Length != 1 || arguments.Length != 1 ||
+            TomlInline.String(text, commands[0].ValueStart, commands[0].ValueEnd) is not { } command || !NativeCommandAvailable(command, null)) return null;
+        var args = ParseArgumentArray(text[arguments[0].ValueStart..arguments[0].ValueEnd]);
+        if (args is not { Length: 6 or 7 } || !args[^6..].SequenceEqual(new[] { "--native-client", "codex", "--connection", folder, "--profile", profile })) return null;
+        if (args.Length == 6 && Path.IsPathFullyQualified(command) && Path.GetFileName(command).Equals("CoCern.Adapter.exe", StringComparison.OrdinalIgnoreCase))
+            return ("dotnet", Path.ChangeExtension(command, ".dll"));
+        if (args.Length == 7 && Path.GetFileNameWithoutExtension(command).Equals("dotnet", StringComparison.OrdinalIgnoreCase) &&
+            Path.IsPathFullyQualified(args[0]) && Path.GetFileName(args[0]).Equals("CoCern.Adapter.dll", StringComparison.OrdinalIgnoreCase))
+            return (command, args[0]);
+        return null;
+    }
+
+    internal static bool IsStandardCodexLaunchAvailable(string path)
+    {
+        try
+        {
+            var original = ReadAll(path);
+            if (original is null) return false;
+            var text = Strict.GetString(original, Bom(original), original.Length - Bom(original));
+            var reader = new TomlReader(text);
+            if (!reader.HasCoCern()) return false;
+            var entries = reader.Assignments.Where(item => item.Table.SequenceEqual(new[] { Table, Name })).ToArray();
+            var commands = entries.Where(item => item.Key.SequenceEqual(new[] { "command" })).ToArray();
+            var arguments = entries.Where(item => item.Key.SequenceEqual(new[] { "args" })).ToArray();
+            if (commands.Length != 1 || arguments.Length != 1 ||
+                TomlInline.String(text, commands[0].ValueStart, commands[0].ValueEnd) is not { } command ||
+                ParseArgumentArray(text[arguments[0].ValueStart..arguments[0].ValueEnd]) is not { } args ||
+                args.Any(NativeRegistration.HasPrivateOptionName) || !NativeCommandAvailable(command, null)) return false;
+            if (!string.Equals(Path.GetFileNameWithoutExtension(command), "dotnet", StringComparison.OrdinalIgnoreCase))
+                return args.Length == 0 && Path.IsPathFullyQualified(command) && Path.GetFileName(command) == "CoCern.Adapter.exe";
+            if (args is { Length: 1 }) return Path.IsPathFullyQualified(args[0]) && Path.GetFileName(args[0]) == "CoCern.Adapter.dll" && File.Exists(args[0]);
+            if (args is not { Length: 3 } || args[1] != "--dev-launch" || !Path.IsPathFullyQualified(args[2]) || !IsDeployedLauncher(args[0], args[2])) return false;
+            var manifest = Development.AdapterDeployment.Read(args[2]);
+            return File.Exists(Development.AdapterDeployment.AdapterPath(args[2], manifest));
+        }
+        catch (Exception error) when (error is ClientSettingsException or IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or System.Security.SecurityException) { return false; }
+    }
+
+    /// <summary>Repair an already-owned standard launch, preserving native launches, environment, permissions and unrelated TOML bytes.</summary>
+    internal static ClientPlan PlanOwnedStandardCodexLaunch(string path, string dotnet, string adapter)
+    {
+        var original = ReadAll(path) ?? throw Malformed(path, "its owned connection is missing");
+        var text = Strict.GetString(original, Bom(original), original.Length - Bom(original));
+        var reader = new TomlReader(text);
+        if (!reader.HasCoCern()) throw Malformed(path, "its owned connection is missing");
+        var entries = reader.Assignments.Where(item => item.Table.SequenceEqual(new[] { Table, Name })).ToArray();
+        var commands = entries.Where(item => item.Key.SequenceEqual(new[] { "command" })).ToArray();
+        var arguments = entries.Where(item => item.Key.SequenceEqual(new[] { "args" })).ToArray();
+        if (commands.Length != 1 || arguments.Length != 1 || TomlInline.String(text, commands[0].ValueStart, commands[0].ValueEnd) is null ||
+            ParseArgumentArray(text[arguments[0].ValueStart..arguments[0].ValueEnd]) is not { } args)
+            throw Malformed(path, "its owned launch is not a supported command and args table");
+        if (args.Any(NativeRegistration.HasPrivateOptionName) || IsStandardCodexLaunchAvailable(path)) return ClientPlan.Unchanged(path);
+        var launch = SetupEnvironment.AdapterLaunch(dotnet, adapter);
+        var result = text;
+        foreach (var edit in new[] { (Line: commands[0], Text: TomlString(launch.Command)),
+            (Line: arguments[0], Text: "[" + string.Join(", ", launch.Arguments.Select(TomlString)) + "]") }.OrderByDescending(item => item.Line.ValueStart))
+            result = result[..edit.Line.ValueStart] + edit.Text + result[edit.Line.ValueEnd..];
+        return result == text ? ClientPlan.Unchanged(path) : ClientPlan.Write(path, [.. original.AsSpan(0, Bom(original)), .. Encoding.UTF8.GetBytes(result)], existed: true, refreshes: true);
+    }
+
     internal static bool IsNativeCodex(string path, string folder, string profile, string? executableSearchPath = null)
     {
         var original = ReadAll(path);
@@ -285,6 +370,20 @@ internal static class ClientSettings
         if (!string.Equals(Path.GetFileNameWithoutExtension(command), "dotnet", StringComparison.OrdinalIgnoreCase)) return false;
         return args is { Length: 7 or 9 } && args[^6..].SequenceEqual(new[] { "--native-client", "codex", "--connection", folder, "--profile", profile }) &&
             (args.Length == 7 ? SamePath(args[0], typeof(ClientSettings).Assembly.Location) : args[1] == "--dev-launch" && IsDeployedLauncher(args[0], args[2]));
+    }
+
+    internal static bool UsesCurrentNativeCodexImage(string path, string folder, string profile)
+    {
+        if (!IsNativeCodex(path, folder, profile)) return false;
+        var original = ReadAll(path)!;
+        var text = Strict.GetString(original, Bom(original), original.Length - Bom(original));
+        var reader = new TomlReader(text);
+        if (!reader.HasCoCern()) return false;
+        var arguments = reader.Assignments.Single(item => item.Table.SequenceEqual(new[] { Table, Name }) && item.Key.SequenceEqual(new[] { "args" }));
+        var args = ParseArgumentArray(text[arguments.ValueStart..arguments.ValueEnd])!;
+        if (args.Length != 9) return true; // IsNativeCodex already requires this assembly's apphost or DLL.
+        var manifest = Development.AdapterDeployment.Read(args[2]);
+        return SamePath(Development.AdapterDeployment.AdapterPath(args[2], manifest), typeof(ClientSettings).Assembly.Location);
     }
 
     private static bool NativeCommandAvailable(string command, string? executableSearchPath)

@@ -36,7 +36,7 @@ The hub coordinates agent work; it does not execute their tools, models or build
 1. Extract the self-contained **CoCern Windows package** supplied by your maintainer. Keep its files together; the small `.exe` launchers use the shared runtime files beside them. No SDK or .NET installation is needed.
 2. Run **CoCern.Setup.exe** and choose **Host a hub on this PC**, **Join another hub**, or **Check or repair this installation**. Join uses the address, fingerprint and join code shown by the hub's Connect page. Repair inspects the current installation before changing only CoCern-owned setup.
 3. Open `http://127.0.0.1:5271/dashboard/` on the hub's PC. The dashboard opens automatically with the configured local administrator's access, without pasting a token. The Visual Studio profile also opens it at startup.
-4. Open **Connect** and connect each app you use. Restart that app. For Codex, complete its native setup, review the hooks in Codex, then start or resume a chat and refresh the readiness checks. See [Connect and verify Codex](docs/codex-connect.md).
+4. Open **Connect** and connect each app you use, then open or resume a chat. Codex uses the standard MCP connection and the packaged workflow skill; native hook approval is not a prerequisite for a new connection. Existing native-mode choices are preserved. See [Connect and verify Codex](docs/codex-connect.md).
 
 New chats in those apps have CoCern's tools. The hub creates its token, database and certificate on first start in `data/`; you do not copy those credentials into a chat.
 
@@ -118,7 +118,7 @@ On the dashboard's **Connect** page, one button adds CoCern to each of these on 
 
 Restart the app afterwards. Each settings file is backed up first. An app that already has CoCern keeps its entry, unless that entry points at this hub's old address or certificate: then **Connect** updates it. The page works only in a browser on the hub's PC. Tick **Administrator tools** above the list to give an app's chats the administrator tools too; changing it shows which apps to connect again.
 
-**Codex: connect and verify.** Its guided setup installs native startup hooks and the CoCern workflow skill. Review the hooks in Codex, then start or resume a chat in an authorized checkout. The Connect page separates installed configuration from observed startup, verified session and wake readiness, and shows the next step when something is missing. [Walk through the checks](docs/codex-connect.md).
+**Codex: connect and verify.** Normal setup keeps the standard connector usable and installs the CoCern workflow skill. Repair preserves the selected mode and disabled hooks. Native integration is staged separately; an existing native startup observation is labeled as startup verification rather than proof that tool calls succeeded. [Walk through the checks](docs/codex-connect.md).
 
 The ChatGPT chat app can't use a hub on your PC: it can only reach CoCern at a public HTTPS address, which is not set up.
 

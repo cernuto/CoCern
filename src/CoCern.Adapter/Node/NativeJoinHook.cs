@@ -15,20 +15,27 @@ internal static class NativeJoinHook
 {
     internal const int MaximumInputBytes = 1024 * 1024;
 
-    internal static AdapterOptions? ReadConnection(string folder)
+    internal static AdapterOptions? ReadConnection(string folder, Func<string, string?>? environment = null)
     {
         try
         {
             if (!Path.IsPathFullyQualified(folder)) return null;
             folder = Path.GetFullPath(folder);
+            var repository = AdapterOptions.ParseRepository((environment ?? Environment.GetEnvironmentVariable)("COCERN_REPOSITORY"));
             for (DirectoryInfo? directory = new(folder); directory is not null; directory = directory.Parent)
                 if (directory.Exists && directory.Attributes.HasFlag(FileAttributes.ReparsePoint)) return null;
             if (NodeState.HasIdentityFiles(folder))
             {
                 if (NodeState.NativeCredentialIdentity(folder) is null || NodeState.ReadEnrollment(folder) is not { } node) return null;
-                return new(node.Hub.AbsoluteUri, node.Credential, signalR: true) { PinnedFingerprint = node.Fingerprint, NodeFolder = folder };
+                return new(node.Hub.AbsoluteUri, node.Credential, signalR: true) { PinnedFingerprint = node.Fingerprint, NodeFolder = folder, Repository = repository };
             }
-            return LocalWakeConnection.NativeCredentialIdentity(folder) is not null ? LocalWakeConnection.Read(folder)?.Options : null;
+            if (LocalWakeConnection.NativeCredentialIdentity(folder) is null || LocalWakeConnection.Read(folder)?.Options is not { } local) return null;
+            return new(local.BaseUri.AbsoluteUri, local.Token, local.Admin, local.SignalR)
+            {
+                PinnedFingerprint = local.PinnedFingerprint, NodeFolder = local.NodeFolder,
+                Repository = repository ?? local.Repository, ChatOnly = local.ChatOnly, Diagnostics = local.Diagnostics,
+                EventWaits = local.EventWaits, ClientChat = local.ClientChat, ExportedChat = local.ExportedChat
+            };
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or AdapterConfigurationException) { return null; }
     }
@@ -110,9 +117,10 @@ internal static class NativeJoinHook
             if (ParseContext(provider, document.RootElement) is not null &&
                 ChatLocators.Text(document.RootElement, "hook_event_name") is "SessionStart" or "PreToolUse")
             {
-                // Opportunistic startup/reconnect answer. An already initialized backend has no waiting listener.
+                // A hook can precede discovery or follow a backend restart. Drain the bounded set of waiting
+                // backends within the existing hook budget; every backend must authenticate its own nonce.
                 // Only the endpoint consumes a successful exchange as registration proof; no answering chat ID is retained.
-                await registration.AnswerAsync(ct, TimeSpan.FromMilliseconds(250));
+                await registration.AnswerPendingAsync(ct, TimeSpan.FromMilliseconds(250));
             }
             if (!registration.StillCurrent()) return await Refuse();
             return await RunAsync(provider, new StringReader(text), output, error, join, ct, registration);
@@ -156,11 +164,11 @@ internal static class NativeJoinHook
             switch (eventName)
             {
                 case "SessionStart":
-                    var handle = await join.EnsureAsync(capture, ct);
+                    await join.RecordPendingAsync(capture, ct);
                     if (provider == "codex" && registration is not null)
                     {
-                        await NativeStartupEvidence.RecordAsync(registration, join, capture, handle, ct);
-                        await output.WriteLineAsync(JsonSerializer.Serialize(new { hookSpecificOutput = new { hookEventName = "SessionStart", additionalContext = NativeStartupEvidence.WorkflowContext(handle) } }));
+                        const string pendingContext = "CoCern is available. Your first CoCern tool call joins this chat automatically using its private connection; do not open a replacement session. Check the inbox before coordinated work and read the task scope before accepting it.";
+                        await output.WriteLineAsync(JsonSerializer.Serialize(new { hookSpecificOutput = new { hookEventName = "SessionStart", additionalContext = pendingContext } }));
                     }
                     return 0;
                 case "Stop" when provider == "claude":
@@ -175,10 +183,19 @@ internal static class NativeJoinHook
                     if (ChatLocators.Text(root, "tool_use_id") is not { } invocation || !ValidInvocation(tool, invocation) ||
                         !root.TryGetProperty("tool_input", out var arguments)) throw new ArgumentException("Invalid native invocation.");
                     var updated = await StampAsync(join, capture, tool, invocation, arguments, ct);
+                    if (provider == "codex" && registration is not null)
+                        await NativeStartupEvidence.RecordStampedAsync(registration, join, capture, updated, ct);
                     await output.WriteLineAsync(WrapOutput(provider, updated).GetRawText());
                     return 0;
                 default: return 0;
             }
+        }
+        catch (NativeJoin.Refused refused) when (provider == "codex" && registration is not null &&
+            refused.Code is RelayErrorCodes.RepositoryDenied or "native_private_connection_required" or "native_handle_conflict" or "native_join_handle_conflict")
+        {
+            NativeStartupEvidence.RecordRefusal(registration, refused.Code);
+            await error.WriteLineAsync("CoCern refused native startup: " + refused.Code + ". Check Connect for the next action.");
+            return recognized ? 2 : 0;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -516,6 +533,7 @@ internal sealed class NativeRegistration
         start.Environment.TryGetValue("COCERN_ROLE", out var role);
         start.Environment.TryGetValue("COCERN_PROFILE", out var profile);
         start.Environment.TryGetValue("COCERN_EVENT_WAITS", out var eventWaits);
+        start.Environment.TryGetValue("COCERN_REPOSITORY", out var repository);
         foreach (var name in start.Environment.Keys.Where(name => name.StartsWith("COCERN_", StringComparison.OrdinalIgnoreCase)).ToArray())
             start.Environment.Remove(name);
         // Explicit private context is the only authority. An old flag-ignoring helper or an
@@ -528,6 +546,9 @@ internal sealed class NativeRegistration
         if (string.Equals(profile, "chat", StringComparison.OrdinalIgnoreCase)) start.Environment["COCERN_PROFILE"] = "chat";
         if (string.Equals(profile, "diagnostics", StringComparison.OrdinalIgnoreCase)) start.Environment["COCERN_PROFILE"] = "diagnostics";
         if (string.Equals(eventWaits, "true", StringComparison.OrdinalIgnoreCase)) start.Environment["COCERN_EVENT_WAITS"] = "true";
+        // A configured repository is only a mapping hint. The hub still applies MayAccess
+        // and validates any known clone origin; it supplies neither credentials nor identity.
+        if (repository is not null) start.Environment["COCERN_REPOSITORY"] = repository;
     }
 
     internal static AdapterOptions ClientOptions(AdapterOptions connection, Func<string, string?>? environment = null)
@@ -537,6 +558,7 @@ internal sealed class NativeRegistration
             admin: string.Equals(environment("COCERN_ROLE"), "admin", StringComparison.OrdinalIgnoreCase), signalR: connection.SignalR)
         {
             PinnedFingerprint = connection.PinnedFingerprint, NodeFolder = connection.NodeFolder,
+            Repository = AdapterOptions.ParseRepository(environment("COCERN_REPOSITORY")) ?? connection.Repository,
             ChatOnly = string.Equals(environment("COCERN_PROFILE"), "chat", StringComparison.OrdinalIgnoreCase),
             Diagnostics = string.Equals(environment("COCERN_PROFILE"), "diagnostics", StringComparison.OrdinalIgnoreCase),
             EventWaits = string.Equals(environment("COCERN_EVENT_WAITS"), "true", StringComparison.OrdinalIgnoreCase)
@@ -599,12 +621,12 @@ internal sealed class NativeRegistration
 
     internal bool StillCurrent() => Read(path, Provider, Folder, Profile) is { } current && current.Definition == Definition && current.scope == scope;
 
-    internal async Task<NativeRegistration?> AcceptAsync(CancellationToken ct, TimeSpan? budget = null)
+    internal async Task<NativeRegistration?> AcceptAsync(CancellationToken ct, TimeSpan? budget = null, bool deferUntilHook = false)
     {
         ct.ThrowIfCancellationRequested();
         var limit = budget ?? MaximumWait;
         if (limit <= TimeSpan.Zero || limit > MaximumWait || !StillCurrent()) return null;
-        var trace = ConnectionTrace.Begin("unknown", "adapter");
+        var trace = deferUntilHook ? null : ConnectionTrace.Begin("unknown", "adapter");
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         var accepted = false;
         using var waiting = CancellationTokenSource.CreateLinkedTokenSource(ct); waiting.CancelAfter(limit);
@@ -613,6 +635,7 @@ internal sealed class NativeRegistration
             await using var pipe = new NamedPipeServerStream(PipeName, PipeDirection.InOut, MaximumInstances, PipeTransmissionMode.Byte,
                 PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly, MaximumFrameBytes, MaximumFrameBytes);
             await pipe.WaitForConnectionAsync(waiting.Token);
+            trace ??= ConnectionTrace.Begin("unknown", "adapter");
             var nonce = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32));
             var deadline = DateTimeOffset.UtcNow.Add(limit).ToUnixTimeMilliseconds();
             await WriteFrameAsync(pipe, Frame(nonce, deadline, "challenge"), waiting.Token);
@@ -626,10 +649,14 @@ internal sealed class NativeRegistration
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException or InvalidOperationException or FormatException) { return null; }
         finally
         {
-            var failure = accepted ? null : ct.IsCancellationRequested ? "cancelled" : "native_registration_unverified";
-            ConnectionTrace.Stage("native_registration", started, accepted ? "ok" : ct.IsCancellationRequested ? "cancelled" : "error", failure);
-            trace.Complete(accepted, failure);
-            trace.Dispose();
+            // An idle deferred listener is healthy pending work, not a failed MCP attachment.
+            if (trace is not null)
+            {
+                var failure = accepted ? null : ct.IsCancellationRequested ? "cancelled" : "native_registration_unverified";
+                ConnectionTrace.Stage("native_registration", started, accepted ? "ok" : ct.IsCancellationRequested ? "cancelled" : "error", failure);
+                trace.Complete(accepted, failure);
+                trace.Dispose();
+            }
         }
     }
 
@@ -651,6 +678,23 @@ internal sealed class NativeRegistration
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested) { return false; }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException or InvalidOperationException or FormatException) { return false; }
+    }
+
+    internal async Task<bool> AnswerPendingAsync(CancellationToken ct, TimeSpan budget)
+    {
+        ct.ThrowIfCancellationRequested();
+        if (budget <= TimeSpan.Zero || budget > MaximumWait || !StillCurrent()) return false;
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var answered = false;
+        // The simultaneous pipe limit is not the number of waiting backends. Retired listeners free slots for others.
+        for (var instance = 0; instance < 32; instance++)
+        {
+            var remaining = budget - System.Diagnostics.Stopwatch.GetElapsedTime(started);
+            if (remaining <= TimeSpan.Zero) break;
+            // Successful listeners retire, so the next connection reaches another backend, never a shared acceptance flag.
+            if (await AnswerAsync(ct, remaining)) answered = true;
+        }
+        return answered;
     }
 
     private JsonElement Frame(string nonce, long deadline, string purpose)

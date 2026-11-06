@@ -24,6 +24,7 @@ public sealed class ConnectTests : IDisposable
     public ConnectTests()
     {
         Directory.CreateDirectory(Path.GetDirectoryName(Adapter)!);
+        File.WriteAllBytes(Adapter, []);
         Directory.CreateDirectory(Path.GetDirectoryName(Token)!);
         NodeState.WritePrivately(Token, System.Text.Encoding.UTF8.GetBytes("secret"));
     }
@@ -115,9 +116,52 @@ public sealed class ConnectTests : IDisposable
         Assert.Equal(Token, claude["env"]!["COCERN_TOKEN_FILE"]!.GetValue<string>());
         Assert.Equal(Adapter, claude["args"]![0]!.GetValue<string>());
         Assert.Contains($"env = {{ COCERN_TOKEN_FILE = '{Token}' }}", File.ReadAllText(Path.Combine(Profile, ".codex", "config.toml")));
+        Assert.DoesNotContain("--native-client", File.ReadAllText(Path.Combine(Profile, ".codex", "config.toml")));
+        Assert.False(File.Exists(Path.Combine(Profile, ".codex", "hooks.json")));
+        using var status = JsonDocument.Parse(Connect("--check", "--json", "--only", "codex").Output);
+        var readiness = status.RootElement.GetProperty("clients")[0].GetProperty("readiness");
+        Assert.Equal("standard", readiness.GetProperty("state").GetString());
+        Assert.Equal("Standard connection configured", readiness.GetProperty("summary").GetString());
+        Assert.Equal("Open or resume a chat to use CoCern.", readiness.GetProperty("nextAction").GetString());
+        Assert.True(readiness.GetProperty("skillInstalled").GetBoolean());
+        Assert.False(readiness.GetProperty("hooksInstalled").GetBoolean());
         // The desktop app is not installed here, so it is not offered.
         Assert.DoesNotContain("desktop", output);
         Assert.Contains("already connected", Connect().Output);
+    }
+
+    [Fact]
+    public void Connect_repairs_owned_standard_launch_and_preserves_choices_when_optional_setup_is_unavailable()
+    {
+        var config = Path.Combine(Profile, ".codex", "config.toml");
+        ClientSettings.PlanCodex(config, "removed-dotnet", Path.Combine(root, "removed-adapter.dll"), new Dictionary<string, string>
+            { ["COCERN_TOKEN_FILE"] = Token, ["COCERN_ROLE"] = "admin", ["COCERN_PROFILE"] = "diagnostics" }).Apply(TimeProvider.System);
+        var stale = File.ReadAllBytes(config);
+        using var preview = JsonDocument.Parse(Connect("--only", "codex", "--check", "--json").Output);
+        Assert.Equal(ConnectStates.Outdated, preview.RootElement.GetProperty("clients")[0].GetProperty("state").GetString());
+        Assert.Equal("setup_required", preview.RootElement.GetProperty("clients")[0].GetProperty("readiness").GetProperty("state").GetString());
+        Assert.Equal(stale, File.ReadAllBytes(config));
+        Assert.Equal(0, Connect("--only", "codex").Code);
+        Assert.True(ClientSettings.IsStandardCodexLaunchAvailable(config));
+        Assert.Contains("COCERN_ROLE = 'admin'", File.ReadAllText(config));
+        Assert.Contains("COCERN_PROFILE = 'diagnostics'", File.ReadAllText(config));
+        var original = File.ReadAllBytes(config);
+        var hooks = Path.Combine(Profile, ".codex", "hooks.json");
+        const string disabled = "{\"disableAllHooks\":true,\"hooks\":{\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"retained --native-hook codex\",\"disabled\":true}]}]}}";
+        File.WriteAllText(hooks, disabled);
+        File.WriteAllText(CodexNativeSetup.SkillPath(Profile), "user-owned workflow changes");
+        var blockedCache = Path.Combine(root, "blocked-cache"); File.WriteAllText(blockedCache, "not a directory");
+        using var output = new StringWriter(); using var error = new StringWriter();
+        var code = ConnectCommand.Run(["--only", "codex", "--json"], Profile, AppData, "dotnet", Adapter, output, error, nativeCacheRoot: blockedCache);
+        Assert.Equal(0, code);
+        Assert.Equal(original, File.ReadAllBytes(config));
+        Assert.Equal(disabled, File.ReadAllText(hooks));
+        Assert.Equal("user-owned workflow changes", File.ReadAllText(CodexNativeSetup.SkillPath(Profile)));
+        Assert.Equal("secret", File.ReadAllText(Token));
+        using var status = JsonDocument.Parse(output.ToString());
+        var readiness = status.RootElement.GetProperty("clients")[0].GetProperty("readiness");
+        Assert.Equal("standard", readiness.GetProperty("state").GetString());
+        Assert.False(readiness.GetProperty("skillInstalled").GetBoolean());
     }
 
     [Fact]

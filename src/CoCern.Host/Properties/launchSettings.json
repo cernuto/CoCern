@@ -23,6 +23,10 @@
         "Relay__DocCache__Repositories__0__ClonePath": "../..",
         "Relay__DocCache__Repositories__0__Branch": "main",
         "Relay__DocCache__Repositories__0__Fetch": "false",
+        "Relay__DocCache__Repositories__1__Id": "m3ts-snx",
+        "Relay__DocCache__Repositories__1__ClonePath": "../../../M3TS-SNX",
+        "Relay__DocCache__Repositories__1__Branch": "master",
+        "Relay__DocCache__Repositories__1__Fetch": "false",
         "Relay__DocCache__Roots__0": "../../.."
       }
     }

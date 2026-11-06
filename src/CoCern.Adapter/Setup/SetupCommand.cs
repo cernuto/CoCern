@@ -270,8 +270,11 @@ internal static class SetupCommand
             {
                 var command = SetupEnvironment.AdapterCommandLine(env.DotnetPath, env.AdapterDll);
                 if (RepairCommand.OwnsCodexNode(CodexNativeSetup.Profile(env.Profile), folder, env.DotnetPath, env.AdapterDll))
-                    CodexNativeSetup.Prepare(env.Profile, CodexNativeSetup.Profile(env.Profile), env.DotnetPath, env.AdapterDll, nodeEnvironment, env.Clock);
-                else env.Out.WriteLine("Codex has another connection; its native setup was retained.");
+                {
+                    ClientSettings.PlanOwnedStandardCodexLaunch(Path.Combine(CodexNativeSetup.Profile(env.Profile), "config.toml"), env.DotnetPath, env.AdapterDll).Apply(env.Clock);
+                    CodexNativeSetup.PrepareStandard(env.Profile, CodexNativeSetup.Profile(env.Profile), env.DotnetPath, env.AdapterDll, nodeEnvironment, env.Clock);
+                }
+                else env.Out.WriteLine("Codex has another connection; its settings were retained.");
                 ClientSettings.StageNativeCandidate(folder, "claude", command, clientProfile: Path.Combine(env.Profile, ".claude"));
             }
             LogonStart.Register(env.DotnetPath, env.AdapterDll, options.DataDir is null ? null : folder, env.RunKey);

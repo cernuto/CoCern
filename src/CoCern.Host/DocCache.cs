@@ -409,8 +409,8 @@ internal sealed class DocSyncRunner(DocCacheSettings settings, DocRepositoryRegi
     private readonly ConcurrentDictionary<string, byte> localNoted = new(StringComparer.Ordinal);
     private const int RememberedRequests = 64;
 
-    public Task<string?> ResolveNativeAsync(CoCern.Domain.RelayCaller caller, string? checkout, string? common, string? origin) =>
-        registry.ResolveNativeAsync(caller, checkout, common, origin);
+    public Task<string?> ResolveNativeAsync(CoCern.Domain.RelayCaller caller, string? checkout, string? common, string? origin, string? repositoryId = null) =>
+        registry.ResolveNativeAsync(caller, checkout, common, origin, repositoryId);
 
     /// <summary>
     /// <c>doc_sync</c>: a retry with the same requestId (per repository) gets the first run's outcome (even while it runs), never a second

@@ -89,7 +89,7 @@ public static class RelayHostBuilderExtensions
                 analytics: queries is null ? null : new AnalyticsTool(queries, services.GetRequiredService<IConfiguration>().GetValue("Relay:Analytics:AllowAdHocSql", true), services.GetRequiredService<ILoggerFactory>().CreateLogger<AnalyticsTool>()),
                 anomaly: queries is null ? null : services.GetRequiredService<AnomalyOptions>(),
                 orders: services.GetRequiredService<OrderOptions>(),
-                docs: services.GetService<DocCacheTool>(),
+                docs: (IDocCacheTools?)services.GetService<DocCacheTool>() ?? DocCacheTool.OffWithNativeResolution(services.GetRequiredService<DocRepositoryRegistry>().ResolveNativeAsync),
                 tokens: counter,
                 tokenOptions: services.GetRequiredService<TokenOptions>(),
                 feedback: services.GetRequiredService<FeedbackOptions>() is { Enabled: true } feedback ? new FeedbackRules(feedback, counter, services.GetService<IFeedbackRuleStore>()) : null,
@@ -182,9 +182,9 @@ public static class RelayHostBuilderExtensions
 
     /// <summary>
     /// The doc cache, on by default. Like analytics, its parts resolve only when <c>Relay:DocCache:Enabled</c> is on: otherwise the
-    /// tool and the document source resolve to null, the sync service returns at once without building its runner, git never runs,
+    /// tool and the document source resolve to null, the sync service returns at once without building its runner,
     /// and the document grains keep the default idle time. On with no repositories configured and no roots, git never runs either, and the
-    /// tools answer NoRepositoriesConfigured.
+    /// tools answer NoRepositoriesConfigured. Native repository resolution remains available and may read a registered clone's identity.
     /// </summary>
     private static void AddDocCache(this IServiceCollection services)
     {

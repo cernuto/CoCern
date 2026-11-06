@@ -19,6 +19,7 @@ public static class StopHook
             using var document = System.Text.Json.JsonDocument.Parse(text, new System.Text.Json.JsonDocumentOptions { MaxDepth = 32 });
             var capture = NativeJoinHook.ParseContext("claude", document.RootElement);
             if (capture is null || ChatLocators.Text(document.RootElement, "hook_event_name") != "Stop") return 0;
+            if (!await join.HasEstablishedAsync(capture, ct)) return 0;
             return await RunAsync(new StringReader(text), error, join.PrivateFolder, ct,
                 (_, _, deliver, limit, cancel) => ClaudeWaiter.RunNativeAsync(join, capture, deliver, timeout ?? limit, cancel, handler, printInbox: true, origin: CallOrigins.ClaudeStop), ownerGone: ownerGone,
                 // The waiter's pid file is named by the captured chat, which may not be this event's session_id.

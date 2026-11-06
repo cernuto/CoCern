@@ -33,6 +33,7 @@ public sealed class NativeJoinSetupTests : IDisposable
 
     [Theory]
     [InlineData("claude")]
+    [InlineData("codex")]
     public void Staging_is_private_inactive_and_keeps_raw_entries_and_unknown_disabled_hooks(string provider)
     {
         var connection = Connection();
@@ -109,67 +110,98 @@ public sealed class NativeJoinSetupTests : IDisposable
     {
         var (registration, _) = Registration();
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var first = registration.AcceptAsync(timeout.Token, TimeSpan.FromSeconds(2));
-        var second = registration.AcceptAsync(timeout.Token, TimeSpan.FromSeconds(2));
-        await using var one = new NamedPipeClientStream(".", registration.PipeName, PipeDirection.InOut, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
-        await using var two = new NamedPipeClientStream(".", registration.PipeName, PipeDirection.InOut, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
-        await one.ConnectAsync(timeout.Token); await two.ConnectAsync(timeout.Token);
-        var challengeOne = await ReadFrame(one, timeout.Token); var challengeTwo = await ReadFrame(two, timeout.Token);
-        Assert.NotEqual(challengeOne.GetProperty("nonce").GetString(), challengeTwo.GetProperty("nonce").GetString());
-        await WriteFrame(one, challengeTwo, timeout.Token); await WriteFrame(two, challengeOne, timeout.Token);
-        Assert.Null(await first); Assert.Null(await second);
+        using var diagnostics = new ConnectionTraceStore();
+        using var capture = ConnectionTrace.Capture(diagnostics);
+        await using (var idle = new NativeRegistrationGate(registration, TimeSpan.FromMilliseconds(20)))
+        {
+            var waitingForFirstHook = idle.WaitForRegistrationAsync(timeout.Token);
+            await Task.Delay(60, timeout.Token);
+            Assert.False(waitingForFirstHook.IsCompleted);
+            Assert.DoesNotContain(diagnostics.Read().Events, item => item.ErrorCode == "native_registration_unverified");
+        }
+        await using var first = new NativeRegistrationGate(registration, TimeSpan.FromSeconds(1));
+        await using var second = new NativeRegistrationGate(registration, TimeSpan.FromSeconds(1));
+        var firstAccepted = first.WaitForRegistrationAsync(timeout.Token);
+        var secondAccepted = second.WaitForRegistrationAsync(timeout.Token);
+        JsonElement challengeOne;
+        await using (var one = new NamedPipeClientStream(".", registration.PipeName, PipeDirection.InOut, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly))
+        await using (var two = new NamedPipeClientStream(".", registration.PipeName, PipeDirection.InOut, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly))
+        {
+            await one.ConnectAsync(timeout.Token); await two.ConnectAsync(timeout.Token);
+            challengeOne = await ReadFrame(one, timeout.Token); var challengeTwo = await ReadFrame(two, timeout.Token);
+            Assert.NotEqual(challengeOne.GetProperty("nonce").GetString(), challengeTwo.GetProperty("nonce").GetString());
+            await WriteFrame(one, challengeTwo, timeout.Token); await WriteFrame(two, challengeOne, timeout.Token);
+            Assert.Equal(0, await one.ReadAsync(new byte[1], timeout.Token));
+            Assert.Equal(0, await two.ReadAsync(new byte[1], timeout.Token));
+        }
+        Assert.False(firstAccepted.IsCompleted); Assert.False(secondAccepted.IsCompleted);
+        await using (var abandoned = new NamedPipeClientStream(".", registration.PipeName, PipeDirection.InOut, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly))
+        {
+            await abandoned.ConnectAsync(timeout.Token);
+            var fresh = await ReadFrame(abandoned, timeout.Token);
+            Assert.NotEqual(challengeOne.GetProperty("nonce").GetString(), fresh.GetProperty("nonce").GetString());
+            Assert.Equal(0, await abandoned.ReadAsync(new byte[1], timeout.Token)); // Expiry rearms instead of ending the backend.
+        }
+        await using var third = new NativeRegistrationGate(registration);
+        await using var fourth = new NativeRegistrationGate(registration);
+        await using var fifth = new NativeRegistrationGate(registration);
+        await Task.Delay(120, timeout.Token); // Saturate the four slots and settle the fifth listener's bounded backoff.
+        Assert.True(await registration.AnswerPendingAsync(timeout.Token, TimeSpan.FromMilliseconds(250)));
+        Assert.True(await firstAccepted); Assert.True(await secondAccepted);
+        Assert.True(await third.WaitForRegistrationAsync(timeout.Token)); Assert.True(await fourth.WaitForRegistrationAsync(timeout.Token));
+        Assert.True(await fifth.WaitForRegistrationAsync(timeout.Token));
+        await using var later = new NativeRegistrationGate(registration);
+        var laterAccepted = later.WaitForRegistrationAsync(timeout.Token);
+        Assert.False(laterAccepted.IsCompleted); // Another backend's success never authorizes a new instance.
+        Assert.True(await registration.AnswerPendingAsync(timeout.Token, TimeSpan.FromMilliseconds(250)));
+        Assert.True(await laterAccepted);
     }
 
     [Fact]
-    public async Task Wiring_backend_selects_native_discovery_only_after_a_real_fake_helper_exchange_and_keeps_call_MAC_required()
+    public async Task Wiring_backend_exposes_inert_discovery_before_helper_and_keeps_registration_and_call_MAC_required()
     {
         await using var relay = new WiringRelayCounter();
         var (registration, args) = WiringCandidate(relay.Origin);
         await using var child = WiringStart(args);
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-        var helper = registration.AnswerAsync(timeout.Token);
-        try
-        {
-            var initialized = await WiringRpc(child, 1, "initialize", new { protocolVersion = "2025-06-18", capabilities = new { }, clientInfo = new { name = "owned-wiring-fixture", version = "1" } }, timeout.Token);
-            Assert.True(await helper);
-            Assert.Contains("Your native client supplies this chat's current connection context", initialized.GetProperty("result").GetProperty("instructions").GetString());
-            await child.Process.StandardInput.WriteLineAsync("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}");
-            var listed = await WiringRpc(child, 2, "tools/list", new { }, timeout.Token);
-            var tools = listed.GetProperty("result").GetProperty("tools").EnumerateArray().ToArray();
-            Assert.Equal(new[] { "ack", "chat_directory", "check_inbox", "peers", "send_message" }, tools.Select(tool => tool.GetProperty("name").GetString()).Order());
-            foreach (var tool in tools)
-                foreach (var own in new[] { "sessionId", "sessionToken", "repositoryId", "requestId", "_cocernNative" })
-                    Assert.False(tool.GetProperty("inputSchema").GetProperty("properties").TryGetProperty(own, out _));
-            var send = tools.Single(tool => tool.GetProperty("name").GetString() == "send_message");
-            Assert.True(send.GetProperty("inputSchema").GetProperty("properties").TryGetProperty("recipientSessionId", out _));
-            foreach (var arguments in new object[] { new { }, new { _cocernNative = new { mac = "forged", invocation = "forged" } } })
-            {
-                var result = await WiringRpc(child, 3, "tools/call", new { name = "check_inbox", arguments }, timeout.Token);
-                Assert.True(result.TryGetProperty("error", out _) || result.GetProperty("result").TryGetProperty("isError", out var failed) && failed.GetBoolean());
-            }
-            Assert.Equal(0, relay.Count); Assert.Equal(0, relay.BusinessRequests); Assert.Equal(0, relay.HintAttempts);
-        }
-        finally
-        {
-            timeout.Cancel();
-            try { await helper; } catch (OperationCanceledException) { }
-        }
+        var initialized = await WiringRpc(child, 1, "initialize", new { protocolVersion = "2025-06-18", capabilities = new { }, clientInfo = new { name = "owned-wiring-fixture", version = "1" } }, timeout.Token);
+        Assert.Contains("Your native client supplies this chat's current connection context", initialized.GetProperty("result").GetProperty("instructions").GetString());
+        await child.Process.StandardInput.WriteLineAsync("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}");
+        var listed = await WiringRpc(child, 2, "tools/list", new { }, timeout.Token);
+        var tools = listed.GetProperty("result").GetProperty("tools").EnumerateArray().ToArray();
+        Assert.Equal(new[] { "ack", "chat_directory", "check_inbox", "peers", "send_message" }, tools.Select(tool => tool.GetProperty("name").GetString()).Order());
+        foreach (var tool in tools)
+            foreach (var own in new[] { "sessionId", "sessionToken", "repositoryId", "requestId", "_cocernNative" })
+                Assert.False(tool.GetProperty("inputSchema").GetProperty("properties").TryGetProperty(own, out _));
+        var send = tools.Single(tool => tool.GetProperty("name").GetString() == "send_message");
+        Assert.True(send.GetProperty("inputSchema").GetProperty("properties").TryGetProperty("recipientSessionId", out _));
+        var unregistered = await WiringRpc(child, 3, "tools/call", new { name = "check_inbox", arguments = new { } }, timeout.Token);
+        Assert.Contains("native_registration_unverified", unregistered.GetRawText());
+        Assert.Equal(0, relay.Count); Assert.Equal(0, relay.BusinessRequests); Assert.Equal(0, relay.HintAttempts);
+        Assert.True(await registration.AnswerPendingAsync(timeout.Token, TimeSpan.FromMilliseconds(250)));
+        var unsigned = await WiringRpc(child, 4, "tools/call", new { name = "check_inbox", arguments = new { } }, timeout.Token);
+        Assert.Contains("native_stamp_required", unsigned.GetRawText());
+        var forged = await WiringRpc(child, 5, "tools/call", new { name = "check_inbox", arguments = new { _cocernNative = new { mac = "forged", invocation = "forged" } } }, timeout.Token);
+        Assert.Contains("native_stamp_invalid", forged.GetRawText());
+        var candidate = Path.Combine(registration.Folder, "native-client-codex.candidate.json");
+        var changed = JsonNode.Parse(File.ReadAllBytes(candidate))!.AsObject(); changed["definition"] = new string('0', 64);
+        NodeState.WritePrivately(candidate, JsonSerializer.SerializeToUtf8Bytes(changed));
+        var stale = await WiringRpc(child, 6, "tools/call", new { name = "check_inbox", arguments = new { } }, timeout.Token);
+        Assert.Contains("native_registration_unverified", stale.GetRawText());
+        Assert.Equal(0, relay.Count); Assert.Equal(0, relay.BusinessRequests); Assert.Equal(0, relay.HintAttempts);
     }
 
-    [Theory]
-    [InlineData("no-helper")]
-    public async Task Wiring_private_backend_refuses_unverified_scope_without_raw_fallback_or_relay(string refusal)
+    [Fact]
+    public async Task Wiring_private_backend_closes_without_helper_or_raw_fallback_or_relay()
     {
         await using var relay = new WiringRelayCounter();
         var (_, args) = WiringCandidate(relay.Origin);
-        if (refusal == "wrong-profile") args[^1] = Directory.CreateDirectory(Path.Combine(root, "another-profile")).FullName;
-        if (refusal == "changed-credential") NodeState.WritePrivately(Token, Encoding.UTF8.GetBytes("different-synthetic-token"));
         await using var child = WiringStart(args);
         child.Process.StandardInput.Close();
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(refusal == "no-helper" ? 25 : 10));
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         await child.Process.WaitForExitAsync(timeout.Token);
-        Assert.Equal(1, child.Process.ExitCode);
-        Assert.Equal("Native client registration could not be verified.", (await child.Error).Trim());
+        Assert.Equal(0, child.Process.ExitCode);
+        Assert.Empty((await child.Error).Trim());
         Assert.Empty(await child.Process.StandardOutput.ReadToEndAsync(timeout.Token));
         Assert.Equal(0, relay.Count); Assert.Equal(0, relay.BusinessRequests); Assert.Equal(0, relay.HintAttempts);
         Assert.Equal("unchanged", File.ReadAllText(child.Sentinel));

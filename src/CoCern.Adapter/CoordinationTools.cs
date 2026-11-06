@@ -11,9 +11,9 @@ namespace CoCern.Adapter;
 
 public static class CoordinationTools
 {
-    internal static IEnumerable<McpServerTool> CreateNative(RelayForwarder forwarder, NativeJoin join, string provider, bool admin, bool diagnostics = false) =>
+    internal static IEnumerable<McpServerTool> CreateNative(RelayForwarder forwarder, NativeJoin join, NativeRegistrationGate registration, bool admin, bool diagnostics = false) =>
         NativeSurface(admin, chatOnly: true, diagnostics)
-            .Select(tool => new ForwardedTool(tool, (args, ct) => NativeJoinHook.InvokeAsync(join, provider, tool.Name, args, ct), native: true, report: forwarder.ReportConnectionDiagnostics));
+            .Select(tool => new ForwardedTool(tool, (args, ct) => registration.InvokeAsync(join, tool.Name, args, ct), native: true));
 
     /// <summary>
     /// What a hub-proven chat gets: no session tools, and <c>peers</c>, which no raw surface lists. It keeps <c>chat_directory</c> until a name can

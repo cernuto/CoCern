@@ -44,15 +44,18 @@ public sealed class SessionHandoff
             if (!binding.MatchesFolder(_folder) || !binding.MatchesClient(_client) || !forwarder.MatchesNativeBinding(binding))
                 return (false, "native_join_scope_mismatch");
             var arguments = binding.FrozenOpenArguments;
-            var reply = await forwarder.ForwardAsync(CoCern.Contracts.RelayTools.SessionOpen, binding.OpenWireArguments(resolution, NativeTitle(displayTitle), protectedRoot), ct);
+            var adoption = binding.AdoptionHandle();
+            var wire = System.Text.Json.Nodes.JsonNode.Parse(binding.OpenWireArguments(resolution, NativeTitle(displayTitle), protectedRoot).GetRawText())!.AsObject();
+            if (adoption is not null) wire["nativeJoin"]!["adopt"] = JsonSerializer.SerializeToNode(new { sessionId = adoption.SessionId, sessionToken = adoption.SessionToken });
+            var reply = await forwarder.ForwardAsync(CoCern.Contracts.RelayTools.SessionOpen, JsonSerializer.SerializeToElement(wire), ct);
             if (!reply.Ok)
             {
-                if (reply.Code == CoCern.Contracts.RelayErrorCodes.SessionUnknown && reply.Version is not null &&
+                if (adoption is null && reply.Code == CoCern.Contracts.RelayErrorCodes.SessionUnknown && reply.Version is not null &&
                     forwarder.MatchesNativeBinding(binding) && binding.AdvanceExpired(arguments)) return (false, "native_generation_advanced");
                 return (false, reply.Code);
             }
             if (!forwarder.MatchesNativeBinding(binding)) return (false, "native_join_scope_mismatch");
-            return CompleteNativeJoin(binding, arguments, reply, displayTitle) ? (true, reply.Code) : (false, "native_join_handle_conflict");
+            return CompleteNativeJoin(binding, arguments, reply, displayTitle, adoption) ? (true, reply.Code) : (false, "native_join_handle_conflict");
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or JsonException)
         { return (false, "native_join_scope_mismatch"); }
@@ -62,7 +65,7 @@ public sealed class SessionHandoff
         displayTitle?.Trim() is { Length: > 0 and <= NodeState.MaxIdentifierLength } title && !title.Any(char.IsControl) ? title : null;
 
     /// <summary>Only the immediately preceding transport call can reach this completion boundary.</summary>
-    private bool CompleteNativeJoin(NativeJoinBinding binding, JsonElement arguments, AdapterReply reply, string? displayTitle)
+    private bool CompleteNativeJoin(NativeJoinBinding binding, JsonElement arguments, AdapterReply reply, string? displayTitle, SessionHandle? adoption)
     {
         try
         {
@@ -71,12 +74,19 @@ public sealed class SessionHandoff
                 arguments.ValueKind != JsonValueKind.Object || arguments.GetRawText() != binding.FrozenOpenArguments.GetRawText() ||
                 ChatLocators.Text(data, "sessionId") is not { } id || !NodeState.IsFileId(id) ||
                 ChatLocators.Text(data, "sessionToken") is not { Length: > 0 and <= 8192 } token || token.Any(char.IsControl)) return false;
+            if (adoption is not null && (adoption.SessionId != id || adoption.SessionToken != token)) return false;
             using var owner = Acquire(id);
             if (owner is null) return false;
             var path = NodeState.SessionHandlePath(_folder, id);
             if (File.Exists(path))
             {
                 var previous = binding.OwnedHandle(id);
+                if (previous is null && adoption is not null && NodeState.IsPrivateFile(path) && NodeState.ReadSessionHandle(path) == adoption)
+                {
+                    var adoptedClient = new ChatLocation(binding.Provider, binding.NativeId);
+                    previous = adoption with { RepositoryId = binding.RepositoryId, Client = adoptedClient, Chat = adoptedClient, NativeBindingKey = binding.OwnershipKey };
+                    NodeState.WriteSessionHandle(_folder, previous);
+                }
                 if (previous is null || previous.SessionToken != token) return false;
                 return binding.Complete(previous);
             }

@@ -43,6 +43,7 @@ internal static class SessionAggregate
             case EventWaitSources.SourceSignalOperation:
                 return EventWaitSources.Handle(context);
             case Operations.Open: return Initialize(context);
+            case "__native_session_adopt": return AdoptNative(context);
             case NativeExpiryCheck.Operation:
                 var check = new SessionState(context.State);
                 return context.Caller.IsInternal && check.SessionId == context.Key && check.PrincipalId == context.Caller.PrincipalId
@@ -110,6 +111,26 @@ internal static class SessionAggregate
         state.FreshUntil ??= context.Now.Add(ControlAggregate.InitialFreshness);
         state.Availability ??= "unknown";
         return Ok(new { initialized = true });
+    }
+
+    private static RelayReply AdoptNative(AggregateContext context)
+    {
+        if (!context.Caller.IsInternal || !NativeSessionAdoption.Decode(context.Args).TryGet(out var adoption, out _)) return Error(SessionDenied);
+        var state = new SessionState(context.State);
+        if (!state.Opened || state.SessionId != adoption.SessionId || Text(context.State, "repositoryId") != adoption.RepositoryId || !Authenticates(context, state))
+            return Error(SessionDenied);
+        if (state.Closed) return Flag(context.Args, "nativeAdoptionProbe") ? Error(SessionUnknown) : Ok(new { adopted = false, expired = true });
+        if (state.NativeId.Length > 0 && (state.NativeId != adoption.ParticipantId || Text(context.State, NativeParticipant.Generation) != adoption.Generation ||
+            Text(context.State, NativeParticipant.Request) != adoption.RequestId)) return Error(SessionDenied);
+        if (adoption.ParticipantId.Length == 0 || adoption.Generation.Length == 0 || adoption.RequestId.Length == 0) return Error(SessionDenied);
+        if (!Flag(context.Args, "nativeAdoptionProbe"))
+        {
+            context.State[NativeParticipant.Id] = adoption.ParticipantId;
+            context.State[NativeParticipant.Generation] = adoption.Generation;
+            context.State[NativeParticipant.Request] = adoption.RequestId;
+        }
+        return Ok(new { adopted = true, sessionId = state.SessionId, sessionToken = state.SessionToken,
+            bindingVersion = state.BindingVersion ?? 0, binding = state.Binding?.DeepClone(), label = state.Label });
     }
 
     /// <summary>

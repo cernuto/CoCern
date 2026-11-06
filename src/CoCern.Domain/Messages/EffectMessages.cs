@@ -16,7 +16,7 @@ public static class EffectMessages
     public static IReadOnlyDictionary<string, Kind> ByOperation { get; } = new[]
     {
         Of<OrderWatch>(), Of<OrderRelease>(), Of<OrderFire>(), Of<OrderFailed>(), Of<OrderWatchFailed>(),
-        Of<SessionOpen>(), Of<SessionExpire>(), Of<SessionRestore>(), Of<SessionExpired>(), Of<SessionClosed>(), Of<ActionWorkReport>(), Of<SessionOwnership>(),
+        Of<SessionOpen>(), Of<NativeSessionAdoption>(), Of<SessionExpire>(), Of<SessionRestore>(), Of<SessionExpired>(), Of<SessionClosed>(), Of<ActionWorkReport>(), Of<SessionOwnership>(),
         Of<SessionRegistration>(), Of<SessionActivity>(), Of<ActionBlock>(), Of<ActionUnblock>(), Of<MessageDelivery>(), Of<SessionTargetWatch>(), Of<AttentionRaise>(),
         Of<AttentionClose>(), Of<AttentionRoute>()
     }.ToFrozenDictionary(kind => kind.Operation, StringComparer.Ordinal);
