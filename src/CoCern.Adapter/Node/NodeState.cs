@@ -241,6 +241,37 @@ public sealed class NodeState : IDisposable
         return readable;
     }
 
+    /// <summary>Restore an owned existing local credential's permissions without rewriting or rotating it.</summary>
+    internal static void ProtectOwnedFile(string path)
+    {
+        if (!Path.IsPathFullyQualified(path) || path.StartsWith("\\\\", StringComparison.Ordinal) || !File.Exists(path))
+            throw new IOException("native_token_permissions");
+        path = Path.GetFullPath(path);
+        for (FileSystemInfo? item = new FileInfo(path); item is not null; item = item is FileInfo file ? file.Directory : ((DirectoryInfo)item).Parent)
+            if ((item.Attributes & FileAttributes.ReparsePoint) != 0) throw new IOException("native_token_permissions");
+        // Keep the file open without write/delete sharing while changing only its access rules.
+        using var guard = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        if (guard.Length is < 1 or > 16384) throw new IOException("native_token_permissions");
+        if (OperatingSystem.IsWindows())
+        {
+            var info = new FileInfo(path);
+            var security = info.GetAccessControl(AccessControlSections.Owner | AccessControlSections.Access);
+            var user = WindowsIdentity.GetCurrent().User!;
+            if (!user.Equals(security.GetOwner(typeof(SecurityIdentifier)))) throw new IOException("native_token_permissions");
+            if (IsPrivateFile(path)) return;
+            var restricted = new FileSecurity();
+            restricted.SetAccessRuleProtection(true, false);
+            restricted.AddAccessRule(new FileSystemAccessRule(user, FileSystemRights.FullControl, AccessControlType.Allow));
+            info.SetAccessControl(restricted);
+        }
+        else
+        {
+            // Do not infer ownership from chmod permission (a privileged process can change another owner's file).
+            if (!IsPrivateFile(path)) throw new IOException("native_token_permissions");
+        }
+        if (!IsPrivateFile(path)) throw new IOException("native_token_permissions");
+    }
+
     internal static bool HasIdentityFiles(string folder) => File.Exists(Path.Combine(folder, StateFile)) || File.Exists(Path.Combine(folder, CredentialFile));
 
     internal static string? NativeCredentialIdentity(string folder)

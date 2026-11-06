@@ -1,0 +1,12 @@
+# Connect and verify Codex
+
+Open **Connect** on the hub's PC. Codex's MCP configuration and a working native chat are separate checks: a configured app can still be waiting for trusted hooks, a chat startup or a live wake route.
+
+1. Choose **Prepare native setup** in the Codex section to install CoCern's native hooks and `cocern-workflow` skill. Use the repair action if an owned setup needs updating. Setup preserves unrelated client settings. Refreshing status does not install anything.
+2. Review CoCern's new or changed hook definitions in Codex. In the CLI, use `/hooks`. Trust only the definitions you have reviewed. CoCern never writes Codex's hook-trust approvals; changed definitions require another review under [Codex's hook trust rules](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks).
+3. Reconnect CoCern if Codex requests it, then start or resume a chat in an authorized Git checkout. The native startup hook uses the actual chat and checkout to join CoCern and restore brief workflow context. You do not paste a repository ID, session ID or token into the chat. A same-identity resume or compaction reuses its binding; a different native chat stays separate.
+4. Refresh the Codex status on **Connect**. Check the individual setup, startup, session and wake results and follow the next step shown. A startup observation is historical evidence; a verified session and a ready wake route require their own checks. Reachability does not prove the model is currently running or has read a message.
+
+The packaged skill is [skills/cocern-workflow/SKILL.md](../skills/cocern-workflow/SKILL.md). Setup installs it at `~/.agents/skills/cocern-workflow/SKILL.md`; see [where Codex loads skills](https://learn.chatgpt.com/docs/build-skills#where-codex-loads-local-skills). The hooks use the active `CODEX_HOME` profile, falling back to `~/.codex`. The skill guides task claims, bounded inbox reads, recovery and evidence reporting. It does not add tools or administrator access. Existing chats can explicitly invoke `$cocern-workflow` when the skill is available.
+
+If setup is installed but startup is still pending, check hook review and resume the chat before retrying setup. If the hub is unavailable, restore the connection and refresh status. Do not create extra sessions or select another chat's saved handle to bypass an error. A checkout that cannot be mapped to an authorized repository needs its hub repository configuration corrected; its folder name alone is insufficient.

@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup><OutputType>Exe</OutputType></PropertyGroup>
   <ItemGroup>
+    <EmbeddedResource Include="../../skills/cocern-workflow/SKILL.md" LogicalName="CoCern.Workflow.SKILL.md" />
     <AssemblyMetadata Include="CoCernNodeSupervisorProtocol" Value="1" />
     <ProjectReference Include="../CoCern.Contracts/CoCern.Contracts.csproj" />
     <InternalsVisibleTo Include="CoCern.Tests" />
