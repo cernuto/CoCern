@@ -3,6 +3,7 @@ using ModelContextProtocol.Protocol;
 using CoCern.Contracts;
 using CoCern.Core;
 using CoCern.Domain;
+using CoCern.Adapter;
 
 namespace CoCern.Host;
 
@@ -19,7 +20,8 @@ public static class ToolResults
     {
         Name = tool.Name,
         Description = tool.Description,
-        InputSchema = RelayToolCatalog.InputSchema(tool)
+        InputSchema = RelayToolCatalog.InputSchema(tool),
+        OutputSchema = McpReadResults.OutputSchema(tool.Name)
     });
 
     public static RelayReply Failure(string code) => new(false, code, "{}", 0);

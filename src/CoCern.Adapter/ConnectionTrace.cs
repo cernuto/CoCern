@@ -16,6 +16,7 @@ public static class ConnectionTrace
     private static readonly AsyncLocal<Scope?> current = new();
     private static readonly AsyncLocal<ConnectionTraceStore?> capture = new();
     private static ConnectionTraceStore? processStore;
+    private static McpProtocolDiagnostics? protocolDiagnostics;
     private static int exitRegistered;
     internal static bool ReportingEnabled => processStore?.DirectoryPath is not null;
     internal static string? CurrentId => current.Value?.CorrelationId;
@@ -49,9 +50,10 @@ public static class ConnectionTrace
             CoCern.Adapter.Node.NodeState.HasIdentityFiles(CoCern.Adapter.Node.NodeState.DefaultFolder))
             supplied = CoCern.Adapter.Node.NodeState.DefaultFolder;
         processStore = new(configured ?? (supplied is null ? null : Path.Combine(supplied, "connection-diagnostics")));
+        protocolDiagnostics ??= new(RecordProtocol, arguments.Contains("--dev-launch", StringComparer.Ordinal) ? "launcher" : "adapter");
         if (Interlocked.Exchange(ref exitRegistered, 1) == 0) AppDomain.CurrentDomain.ProcessExit += (_, _) =>
         {
-            try { processStore?.Dispose(); }
+            try { protocolDiagnostics?.Dispose(); processStore?.Dispose(); }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or System.Security.SecurityException) { }
         };
     }
@@ -68,7 +70,10 @@ public static class ConnectionTrace
         var parent = current.Value;
         var id = parent?.CorrelationId;
         if (id is null && metadata?[MetaKey] is JsonValue value && value.TryGetValue<string>(out var incoming) && ConnectionTraceStore.ValidId(incoming)) id = incoming;
-        var scope = new Scope(id ?? "cc-" + Guid.NewGuid().ToString("N"), tool is { Length: > 0 and <= 64 } && RelayToolCatalog.TryGet(tool, out _) ? tool : "unknown", source,
+        id ??= McpProtocolDiagnostics.CurrentId;
+        id ??= "cc-" + Guid.NewGuid().ToString("N");
+        McpProtocolDiagnostics.Bind(id);
+        var scope = new Scope(id, tool is { Length: > 0 and <= 64 } && RelayToolCatalog.TryGet(tool, out _) ? tool : "unknown", source,
             parent, capture.Value ?? processStore, totalStage);
         current.Value = scope;
         if (metadata?[MetaEventsKey] is JsonArray rows && rows.Count <= 24)
@@ -96,6 +101,7 @@ public static class ConnectionTrace
     internal static void Stage(string stage, long started, string outcome = "ok", string? code = null) =>
         current.Value?.Record(stage, Stopwatch.GetElapsedTime(started).TotalMilliseconds, outcome, code);
     internal static void Duration(string stage, double milliseconds) => current.Value?.Record(stage, milliseconds);
+    private static void RecordProtocol(ConnectionDiagnosticEvent item) => (capture.Value ?? processStore)?.Record(item);
 
     internal sealed class Scope(string id, string tool, string source, Scope? parent, ConnectionTraceStore? sink, string totalStage) : IDisposable
     {
@@ -138,7 +144,7 @@ public static class ConnectionTrace
     internal static string? SafeCode(string? code) => code switch
     {
         null => null,
-        "hub_timeout" or "hub_unavailable" or "hub_identity_changed" or "unauthorized" or "forbidden" or "rate_limited" or "hub_error" or "redirect_rejected" or "request_too_large" or "response_too_large" or "invalid_arguments" or "invalid_hub_reply" or "cancelled" or "backend_unavailable" or "native_registration_unverified" => code,
+        "hub_timeout" or "hub_unavailable" or "hub_identity_changed" or "unauthorized" or "forbidden" or "rate_limited" or "hub_error" or "redirect_rejected" or "request_too_large" or "response_too_large" or "invalid_arguments" or "invalid_hub_reply" or "cancelled" or "backend_unavailable" or "native_registration_unverified" or "protocol_error" => code,
         _ => "tool_error"
     };
     private sealed class Restore(Action restore) : IDisposable { public void Dispose() => restore(); }

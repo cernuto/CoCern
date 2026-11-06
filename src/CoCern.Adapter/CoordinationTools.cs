@@ -193,6 +193,7 @@ public static class CoordinationTools
                 Name = tool.Name,
                 // Argument guidance shared by every tool lives once in the server instructions, not in each definition.
                 Description = tool.Description,
+                OutputSchema = McpReadResults.OutputSchema(tool.Name),
                 InputSchema = tool.Name == RelayTools.CheckInbox ? With(RelayToolCatalog.ForwardingSchema(tool), "waitSeconds", InboxWait.Schema)
                     : ConditionalRead.Applies(tool.Name) ? With(RelayToolCatalog.ForwardingSchema(tool), "ifNoneMatch", ConditionalRead.Schema)
                     : RelayToolCatalog.ForwardingSchema(tool)
@@ -228,9 +229,9 @@ public static class CoordinationTools
                 var arguments = JsonSerializer.SerializeToElement(request.Params.Arguments ?? new Dictionary<string, JsonElement>());
                 var reply = await call(arguments, cancellationToken);
                 if (!reply.Ok && reply.ConnectionTraceId is null) reply = reply with { ConnectionTraceId = trace.CorrelationId };
+                var result = McpReadResults.FromAdapter(ProtocolTool.Name, reply);
                 trace.Complete(reply.Ok, reply.Ok ? null : reply.Code);
-                var json = ModelReply.Text(ProtocolTool.Name, reply);
-                return new CallToolResult { IsError = !reply.Ok, Content = [new TextContentBlock { Text = json }] };
+                return result;
             }
             catch (OperationCanceledException) { trace.Complete(false, "cancelled"); throw; }
             catch { trace.Complete(false, "tool_error"); throw; }

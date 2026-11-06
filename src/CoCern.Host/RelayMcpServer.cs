@@ -4,6 +4,7 @@ using ModelContextProtocol.Protocol;
 using CoCern.Contracts;
 using CoCern.Core;
 using CoCern.Domain;
+using CoCern.Adapter;
 
 namespace CoCern.Host;
 
@@ -12,8 +13,11 @@ internal static class RelayMcpServer
 {
     public static IServiceCollection AddRelayMcp(this IServiceCollection services)
     {
+        services.AddHttpContextAccessor();
+        services.AddHostedService<Dashboard.McpProtocolDiagnosticsService>();
         services.AddMcpServer(options => options.ServerInfo = new() { Name = "CoCern", Version = "1.0.0" })
             .WithHttpTransport(options => options.SessionMode = HttpServerSessionMode.Stateless)
+            .WithCoCernWorkflow()
             .WithListToolsHandler((request, _) =>
             {
                 var context = HttpContextOf(request.Server.Services!);
@@ -22,8 +26,9 @@ internal static class RelayMcpServer
             .WithCallToolHandler(async (request, cancellationToken) =>
             {
                 var context = HttpContextOf(request.Server.Services!);
+                McpProtocolDiagnostics.Bind(request.Params?.Meta);
                 var reply = await CallAsync(context, request.Params, cancellationToken);
-                return new CallToolResult { IsError = !reply.Ok, Content = [new TextContentBlock { Text = JsonSerializer.Serialize(reply, ToolResults.JsonOptions) }] };
+                return McpReadResults.FromHost(request.Params?.Name ?? "", reply.Ok, reply.Code, reply.DataJson, reply.Version);
             });
         return services;
     }

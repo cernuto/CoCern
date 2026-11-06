@@ -66,6 +66,10 @@
         "queue" => "Waiting for adapter", "drain" => "Waiting for earlier calls", "backend_start" => "Starting adapter",
         "native_registration" => "Native startup handshake", "hub_to_headers" => "Hub response preparation",
         "http_headers" => "Waiting for hub response", "http_body" => "Reading response", "hub_execution" => "Hub execution",
-        "transport_total" => "HTTP request total", "total" => "Measured total", _ => stage.Replace('_', ' ')
+        "transport_total" => "HTTP request total", "total" => "Measured total",
+        "mcp_initialize" => "MCP initialization", "mcp_list_tools" => "MCP tool discovery", "mcp_call_tool" => "MCP tool call",
+        "mcp_list_resources" => "MCP resource discovery", "mcp_list_resource_templates" => "MCP resource templates",
+        "mcp_read_resource" => "MCP resource read", "mcp_list_prompts" => "MCP prompt discovery", "mcp_get_prompt" => "MCP prompt read",
+        "mcp_ping" => "MCP ping", _ => stage.Replace('_', ' ')
     };
 }

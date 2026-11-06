@@ -611,6 +611,14 @@ Noisiest tools groups each tool by its reported adapter path: model-facing, back
 
 REST replies are `{ "ok": true, "code": "...", "dataJson": "{...}", "version": 1 }`; `dataJson` is a JSON string, so parse it again. Errors: 400 invalid or refused (bad arguments, or a refusal such as `ResourceUnknown` or `ClaimRequired`), 401 no valid token, 403 denied, 404 unknown tool or `NotFound`, 409 a conflict to resolve by reading again (such as `VersionConflict` or `Busy`), 413 too large. The `code` says exactly which. The stdio adapter returns the parsed `data` instead.
 
+### MCP results and workflow context
+
+`get_status` and `check_inbox` advertise output schemas and return structured results alongside their existing JSON text. Small replies include authorized, projected `data` directly. Larger replies use an explicit structured reference to the data in the original text content instead of duplicating it. Check the representation discriminator before consuming the data. Existing core data-byte/token budgets, inbox cursors, canonical part offsets and attention offers are preserved. The structured representation is derived from the adapter's final model projection, including native privacy filtering.
+
+MCP clients can explicitly read the static `cocern://workflow` Markdown resource or select the no-argument `cocern_workflow` prompt. Both reuse the same bundled document as the installed workflow skill. Fetching this context performs no session registration, message read, work acceptance or claim operation. It grants no authority. The authenticated HTTP endpoint and private native initialization rules still apply; Codex startup hooks and the skill remain the automatic Codex path.
+
+Connection help's diagnostics include MCP initialization, tool/resource/prompt discovery and invocation spans from the SDK, joined to the existing connection correlation IDs when available. The bounded local log exports fixed phase names, measured durations, outcomes and recognized tool names. It does not export SDK request/session IDs, resource URIs, arbitrary operation suffixes, arguments or exception text. No cloud telemetry exporter or extra package is required.
+
 Tokens work only over HTTPS or real loopback, and the hub ignores forwarded headers. Plain HTTP on loopback keeps traffic on this PC but cannot prove the listener is the hub. If another local process takes its port while the hub is down, that process could receive a local app's token. To avoid that tradeoff, explicitly configure local HTTPS (`Relay:Local:HttpsPort`) with the hub's fingerprint. Connections between PCs still use HTTPS and never fall back to plain HTTP after a failure. Behind a local reverse proxy every caller looks local, so don't put one in front of the hub.
 
 ## Architecture

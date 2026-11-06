@@ -1,8 +1,10 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using CoCern.Adapter;
 using CoCern.Contracts;
 using CoCern.Contracts.Dashboard;
@@ -14,6 +16,42 @@ namespace CoCern.Tests;
 
 public sealed class ConnectionDiagnosticsTests
 {
+    [Fact]
+    public void Protocol_spans_share_call_correlation_and_export_only_allowlisted_fields()
+    {
+        using var store = new ConnectionTraceStore();
+        var ownContext = new AsyncLocal<bool> { Value = true };
+        using var listener = new McpProtocolDiagnostics(store.Record, "adapter", () => ownContext.Value);
+        using var source = new ActivitySource(McpProtocolDiagnostics.SourceName);
+        using var capture = ConnectionTrace.Capture(store);
+        const string secret = "private-token-and-message-text";
+        var id = "cc-" + Guid.NewGuid().ToString("N");
+        using (var activity = source.StartActivity("tools/call " + secret, ActivityKind.Server))
+        {
+            Assert.NotNull(activity);
+            activity.SetTag("gen_ai.tool.name", RelayTools.GetStatus);
+            activity.SetTag("jsonrpc.request.id", secret);
+            activity.SetTag("arguments", secret);
+            activity.SetStatus(ActivityStatusCode.Error, secret);
+            using var call = ConnectionTrace.Begin(RelayTools.GetStatus, "adapter", new JsonObject { [ConnectionTrace.MetaKey] = id });
+            call.Complete(false, "hub_unavailable");
+        }
+        using (var activity = source.StartActivity("resources/read", ActivityKind.Server))
+        {
+            Assert.NotNull(activity);
+            activity.SetTag("mcp.resource.uri", "cocern://" + secret);
+            activity.SetTag("gen_ai.tool.name", secret);
+            activity.SetTag("error.type", "System.OperationCanceledException");
+            activity.SetStatus(ActivityStatusCode.Error, secret);
+        }
+        var rows = store.Read().Events;
+        Assert.Equal(3, rows.Length);
+        Assert.All(rows.Where(row => row.Tool == RelayTools.GetStatus), row => Assert.Equal(id, row.CorrelationId));
+        Assert.Contains(rows, row => row.Stage == "mcp_call_tool" && row.Outcome == "error" && row.CorrelationId == id);
+        Assert.Contains(rows, row => row.Stage == "mcp_read_resource" && row.Tool == "unknown" && row.Outcome == "cancelled");
+        Assert.DoesNotContain(secret, JsonSerializer.Serialize(rows));
+    }
+
     [Fact]
     public async Task Transport_phases_share_a_correlation_without_recording_arguments_credentials_or_reply()
     {

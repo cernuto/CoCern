@@ -116,9 +116,10 @@ public sealed class ConnectionTraceStore(string? directory = null, bool persistA
         item is not null && ValidId(item.CorrelationId) && item.Tool is { Length: > 0 and <= 64 } &&
         (item.Tool == "unknown" || RelayToolCatalog.TryGet(item.Tool, out _)) &&
         item.Source is "launcher" or "adapter" or "hub" &&
-        item.Stage is "queue" or "drain" or "backend_start" or "native_registration" or "http_headers" or "http_body" or "hub_to_headers" or "hub_execution" or "transport_total" or "total" &&
+        item.Stage is "queue" or "drain" or "backend_start" or "native_registration" or "http_headers" or "http_body" or "hub_to_headers" or "hub_execution" or "transport_total" or "total" or
+            "mcp_initialize" or "mcp_list_tools" or "mcp_call_tool" or "mcp_list_resources" or "mcp_list_resource_templates" or "mcp_read_resource" or "mcp_list_prompts" or "mcp_get_prompt" or "mcp_ping" &&
         item.Outcome is "ok" or "error" or "cancelled" &&
-        item.ErrorCode is null or "hub_timeout" or "hub_unavailable" or "hub_identity_changed" or "unauthorized" or "forbidden" or "rate_limited" or "hub_error" or "redirect_rejected" or "request_too_large" or "response_too_large" or "invalid_arguments" or "invalid_hub_reply" or "cancelled" or "backend_unavailable" or "native_registration_unverified" or "tool_error" &&
+        item.ErrorCode is null or "hub_timeout" or "hub_unavailable" or "hub_identity_changed" or "unauthorized" or "forbidden" or "rate_limited" or "hub_error" or "redirect_rejected" or "request_too_large" or "response_too_large" or "invalid_arguments" or "invalid_hub_reply" or "cancelled" or "backend_unavailable" or "native_registration_unverified" or "tool_error" or "protocol_error" &&
         double.IsFinite(item.DurationMs) && item.DurationMs is >= 0 and <= 300000 &&
         item.StartedAt >= DateTimeOffset.UtcNow.AddDays(-1) && item.StartedAt <= DateTimeOffset.UtcNow.AddMinutes(1);
 

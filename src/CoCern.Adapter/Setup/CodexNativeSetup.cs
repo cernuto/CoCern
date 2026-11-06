@@ -13,12 +13,7 @@ internal static class CodexNativeSetup
     internal static string Profile(string home) =>
         Path.GetFullPath(Path.GetFullPath(home) == Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) && Environment.GetEnvironmentVariable("CODEX_HOME") is { Length: > 0 } configured ? configured : Path.Combine(home, ".codex"));
     internal static string SkillPath(string home) => Path.Combine(home, ".agents", "skills", "cocern-workflow", "SKILL.md");
-    internal static string SkillText()
-    {
-        using var stream = typeof(CodexNativeSetup).Assembly.GetManifestResourceStream("CoCern.Workflow.SKILL.md") ?? throw new IOException("The CoCern workflow skill is unavailable.");
-        using var reader = new StreamReader(stream, Encoding.UTF8);
-        return reader.ReadToEnd();
-    }
+    internal static string SkillText() => WorkflowGuidance.SkillDocument;
 
     internal static string? DevelopmentRoot(string adapter)
     {

@@ -98,8 +98,8 @@ internal static class DevelopmentLauncher
             options.ServerInstructions = nativeContext is null
                 ? "CoCern development endpoint. Follow the current server guidance included in the session_open tool description; tool metadata refreshes when the development adapter changes."
                 : connections.Instructions ?? throw new AdapterConfigurationException(NativeRegistration.Refusal);
-            options.Capabilities = new() { Tools = new() { ListChanged = true } };
-        }).WithStdioServerTransport()
+            options.Capabilities = new() { Tools = new() { ListChanged = true }, Resources = new(), Prompts = new() };
+        }).WithStdioServerTransport().WithCoCernWorkflow()
             .WithListToolsHandler(async (request, token) =>
             {
                 upstream = request.Server;

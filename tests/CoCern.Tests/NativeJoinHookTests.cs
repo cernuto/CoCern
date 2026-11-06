@@ -199,6 +199,17 @@ public sealed class NativeJoinHookTests(ITestOutputHelper output)
         foreach (var field in new[] { "sessionId", "sessionToken", "_cocernNative", "nativeJoin" }) Assert.False(reply.Data.Value.TryGetProperty(field, out _));
         Assert.Equal("peer", reply.Data.Value.GetProperty("recipientSessionId").GetString());
         Assert.Equal("peer-nested", reply.Data.Value.GetProperty("peer").GetProperty("sessionId").GetString());
+        // Structured presentation must use this already projected reply, never the underlying private native response.
+        var structured = McpReadResults.FromAdapter(RelayTools.GetStatus, reply).StructuredContent!.Value.GetProperty("data");
+        foreach (var field in new[] { "sessionId", "sessionToken", "_cocernNative", "nativeJoin" }) Assert.False(structured.TryGetProperty(field, out _));
+        Assert.Equal("peer", structured.GetProperty("recipientSessionId").GetString());
+        Assert.Equal("peer-nested", structured.GetProperty("peer").GetProperty("sessionId").GetString());
+        const string supportId = "cc-0123456789abcdef0123456789abcdef";
+        var refused = McpReadResults.FromAdapter(RelayTools.GetStatus, new(false, "native_stamp_required") { ConnectionTraceId = supportId });
+        Assert.Equal(JsonValueKind.Null, refused.StructuredContent!.Value.GetProperty("data").ValueKind);
+        Assert.Equal(supportId, refused.StructuredContent.Value.GetProperty("connectionTrace").GetString());
+        var schema = McpReadResults.OutputSchema(RelayTools.GetStatus)!.Value;
+        foreach (var property in refused.StructuredContent.Value.EnumerateObject()) Assert.True(schema.GetProperty("properties").TryGetProperty(property.Name, out _));
     }
 
     [Fact]
