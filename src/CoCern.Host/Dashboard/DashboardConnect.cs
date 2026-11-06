@@ -104,8 +104,9 @@ internal sealed class DashboardConnect(IConfiguration configuration, IHostEnviro
     /// <summary>The adapter Connect runs on this PC: <c>Relay:Connect:AdapterPath</c> when set, else the first build of <see cref="Candidates"/> that exists.</summary>
     internal string? AdapterDll() => LocalAdapter(configuration["Relay:Connect:AdapterPath"], AppContext.BaseDirectory);
 
-    /// <summary>The adapter this hub serves to other PCs as <c>/join/adapter.zip</c>; see <see cref="ServedAdapter(string?, string)"/>.</summary>
-    internal AdapterBuild? ServedAdapter() => ServedAdapter(configuration["Relay:Connect:AdapterPath"], AppContext.BaseDirectory);
+    /// <summary>The adapter this hub distributes, optionally separate from the installed helper Connect verifies on this PC.</summary>
+    internal AdapterBuild? ServedAdapter() => ServedAdapter(
+        configuration["Relay:Connect:DistributionAdapterPath"] is { Length: > 0 } distribution ? distribution : configuration["Relay:Connect:AdapterPath"], AppContext.BaseDirectory);
 
     /// <summary>
     /// The published adapter if there is one (it outlives rebuilds), else the build output in the hub's checkout. <paramref name="hubFolder"/> is where

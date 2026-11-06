@@ -465,7 +465,8 @@ Set them in `appsettings.json`, as environment variables (`Relay__Clients__0__To
 | `Relay:Dashboard:OpenOnStart` | `false` | Open the dashboard in the default browser when the hub starts, already signed in with that start's one-time link. The Visual Studio launch profile turns it on. |
 | `Relay:Dashboard:SessionHours` | 8 | Hours a dashboard sign-in lasts in that browser session (1 to 168). The deadline is fixed at sign-in; use doesn't extend it. |
 | `Relay:Dashboard:RememberDays` | 7 | Days a sign-in lasts, across browser restarts, when "Remember this browser" is ticked (1 to 30, and at least `SessionHours`). |
-| `Relay:Connect:AdapterPath` | found | The adapter the Connect page uses, and the folder `/join/adapter.zip` serves. Default: `artifacts/adapter`, else the build output, looked for only inside this checkout or beside a published hub. Other PCs get a self-contained `artifacts/adapter` whenever there is one. |
+| `Relay:Connect:AdapterPath` | found | The installed adapter the Connect page runs and verifies on this PC. Default: `artifacts/adapter`, else the build output, looked for only inside this checkout or beside a published hub. It also selects the download unless `DistributionAdapterPath` is set. |
+| `Relay:Connect:DistributionAdapterPath` | | Optional adapter to serve through `/join/adapter.zip` and offer for node updates, independently of the local installed helper. This lets a hub distribute a newer self-contained package while Connect verifies the helper whose native hooks are already approved. Without it, the existing `AdapterPath` and self-contained discovery preferences apply. |
 
 ### Features
 

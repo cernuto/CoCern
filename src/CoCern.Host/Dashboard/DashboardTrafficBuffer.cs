@@ -14,8 +14,8 @@ public sealed class DashboardTrafficBuffer
     private readonly Queue<DashboardTrafficEvent> events = new();
     private long sequence;
 
-    public void Request(string name, string? sessionId, string correlationId) => Add(new() { Kind = "request", Name = name, SessionId = SafeSessionId(sessionId), CorrelationId = correlationId });
-    public void Response(string name, string? sessionId, string correlationId, string code, double duration) => Add(new() { Kind = "response", Name = name, SessionId = SafeSessionId(sessionId), CorrelationId = correlationId, Code = SafeCode(code), DurationMilliseconds = Math.Max(0, duration) });
+    public void Request(string name, string? sessionId, string correlationId, string? principalId = null) => Add(new() { Kind = "request", Name = name, SessionId = SafeSessionId(sessionId), PrincipalId = SafePrincipalId(principalId), CorrelationId = correlationId });
+    public void Response(string name, string? sessionId, string correlationId, string code, double duration, string? principalId = null) => Add(new() { Kind = "response", Name = name, SessionId = SafeSessionId(sessionId), PrincipalId = SafePrincipalId(principalId), CorrelationId = correlationId, Code = SafeCode(code), DurationMilliseconds = Math.Max(0, duration) });
     public void Push(string sessionId) => Add(new() { Kind = "push", Name = HubEvents.CoordinationChanged, SessionId = SafeSessionId(sessionId) });
 
     private void Add(DashboardTrafficEvent value)
@@ -30,5 +30,11 @@ public sealed class DashboardTrafficBuffer
 
     public DashboardTrafficEvent[] Snapshot() { lock (gate) return events.ToArray(); }
     private static string? SafeSessionId(string? value) => Guid.TryParseExact(value, "N", out _) ? value : null;
+    private static string? SafePrincipalId(string? value)
+    {
+        if (value is null) return null;
+        var safe = DashboardText.Safe(value).Trim();
+        return safe.Length == 0 ? null : safe;
+    }
     private static string? SafeCode(string value) => value.Length is > 0 and <= 64 && value.All(char.IsAsciiLetterOrDigit) ? value : null;
 }

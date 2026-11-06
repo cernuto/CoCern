@@ -49,7 +49,7 @@ public sealed class DashboardTests
         (await browser.PostAsJsonAsync("/dashboard/api/login", new { token = RelayHostFixture.Token })).EnsureSuccessStatusCode();
         await using var viewer = await StartViewerAsync(host, browser);
         using var agent = host.AuthorizedClient();
-        var openedReply = await host.Call(agent, "session_open", new { repositoryId = "repo", requestId = "traffic-open" });
+        var openedReply = await host.Call(agent, "session_open", new { repositoryId = "repo", requestId = "traffic-open", principalId = "PRIVATE-SPOOFED-PRINCIPAL" });
         using var opened = JsonDocument.Parse(openedReply.GetProperty("dataJson").GetString()!);
         var sessionId = opened.RootElement.GetProperty("sessionId").GetString()!;
         var denied = await agent.PostAsJsonAsync("/api/tools/get_status", new { repositoryId = "forbidden", sessionId = "PRIVATE-FAKE-SESSION", sessionToken = "PRIVATE-TOKEN", text = "PRIVATE-MESSAGE" });
@@ -69,6 +69,7 @@ public sealed class DashboardTests
         Assert.NotNull(calls[0].CorrelationId);
         Assert.Equal(calls[0].CorrelationId, calls[1].CorrelationId);
         Assert.NotNull(calls[1].DurationMilliseconds);
+        Assert.All(calls, item => { Assert.Null(item.SessionId); Assert.Equal("test-user", item.PrincipalId); });
         Assert.Contains(snapshot.Traffic, item => item.Kind == "push" && item.Name == "coordination.changed" && item.SessionId == sessionId);
         Assert.DoesNotContain("PRIVATE-", JsonSerializer.Serialize(snapshot.Traffic));
         Assert.Contains(snapshot.Logs, item => item.Category == "Tool" && item.Message == "get_status failed (RepositoryDenied).");

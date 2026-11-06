@@ -496,6 +496,8 @@ public sealed record DashboardTrafficEvent
     public string Kind { get; init; } = "";
     public string Name { get; init; } = "";
     public string? SessionId { get; init; }
+    /// <summary>Authenticated caller identity, independent of whether the call supplied a chat session.</summary>
+    public string? PrincipalId { get; init; }
     public string? Code { get; init; }
     public string? CorrelationId { get; init; }
     public double? DurationMilliseconds { get; init; }

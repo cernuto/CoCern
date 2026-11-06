@@ -15,17 +15,17 @@ public sealed class DashboardRelayApplication(RelayApplication application, Dash
         var sessionId = arguments.ValueKind == JsonValueKind.Object && arguments.TryGetProperty("sessionId", out var session) && session.ValueKind == JsonValueKind.String ? session.GetString() : null;
         var correlationId = Guid.NewGuid().ToString("N");
         var started = Stopwatch.GetTimestamp();
-        traffic.Request(tool, sessionId, correlationId);
+        traffic.Request(tool, sessionId, correlationId, caller.PrincipalId);
         try
         {
             var result = await application.ExecuteAsync(caller, tool, arguments, cancellationToken);
-            traffic.Response(tool, sessionId, correlationId, result.Code, Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+            traffic.Response(tool, sessionId, correlationId, result.Code, Stopwatch.GetElapsedTime(started).TotalMilliseconds, caller.PrincipalId);
             if (!result.Ok) logs.ToolFailure(tool, result.Code, FailureField(result));
             return result;
         }
         catch (Exception)
         {
-            traffic.Response(tool, sessionId, correlationId, cancellationToken.IsCancellationRequested ? "Canceled" : "Unavailable", Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+            traffic.Response(tool, sessionId, correlationId, cancellationToken.IsCancellationRequested ? "Canceled" : "Unavailable", Stopwatch.GetElapsedTime(started).TotalMilliseconds, caller.PrincipalId);
             if (!cancellationToken.IsCancellationRequested) logs.ToolFailure(tool, RelayErrorCodes.Unavailable);
             throw;
         }

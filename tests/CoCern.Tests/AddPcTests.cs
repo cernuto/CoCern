@@ -236,6 +236,19 @@ public sealed class AddPcTests : IDisposable
         // A CoCern.slnx planted above the checkout changes nothing: the nearest one is the checkout.
         File.WriteAllText(Path.Combine(above, "CoCern.slnx"), "");
         Assert.Equal(debug, DashboardConnect.LocalAdapter(null, hub));
+
+        // A newer downloadable package must not replace the installed helper used to verify approved native setup.
+        var distribution = FakeAdapter(Path.Combine(checkout, "distribution"), selfContained: true);
+        var settings = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Relay:Connect:AdapterPath"] = debug,
+            ["Relay:Connect:DistributionAdapterPath"] = distribution
+        }).Build();
+        var connect = new DashboardConnect(settings, null!, null!);
+        Assert.Equal(debug, connect.AdapterDll());
+        Assert.Equal(new AdapterBuild(distribution, SelfContained: true), connect.ServedAdapter());
+        settings["Relay:Connect:DistributionAdapterPath"] = null;
+        Assert.Equal(new AdapterBuild(debug, SelfContained: false), connect.ServedAdapter());
     }
 
     [Fact]

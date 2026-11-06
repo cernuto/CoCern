@@ -118,6 +118,18 @@ public sealed class CodexNativeSetupTests
             Assert.Contains("COCERN_ROLE = \"admin\"", updated);
             Assert.Contains("COCERN_PROFILE = \"diagnostics\"", updated);
             Assert.Equal("synthetic-apphost-token", File.ReadAllText(token));
+            Directory.CreateDirectory(Path.GetDirectoryName(launcher)!);
+            File.WriteAllBytes(launcher, []);
+            var sdk = Path.Combine(root, "sdk folder");
+            Directory.CreateDirectory(sdk);
+            File.WriteAllBytes(Path.Combine(sdk, OperatingSystem.IsWindows() ? "dotnet.exe" : "dotnet"), []);
+            var searchPath = OperatingSystem.IsWindows() ? '"' + sdk + '"' : sdk;
+            Assert.True(ClientSettings.IsNativeCodex(configuration, native[3], native[5], searchPath));
+            Assert.False(ClientSettings.IsNativeCodex(configuration, native[3], native[5], ""));
+            Assert.False(ClientSettings.IsNativeCodex(configuration, native[3], native[5], "."));
+            Assert.False(ClientSettings.IsNativeCodex(configuration, Path.Combine(root, "another-connection"), native[5], searchPath));
+            ClientSettings.PlanDevelopmentCodex(configuration, Path.Combine(root, "missing", "dotnet.exe"), launcher, deployment, token, replaceLauncher: true).Apply(TimeProvider.System);
+            Assert.False(ClientSettings.IsNativeCodex(configuration, native[3], native[5], searchPath));
         }
         finally { Directory.Delete(root, recursive: true); }
     }

@@ -148,9 +148,11 @@
     }
 
     private DashboardTrafficEvent? PairedEvent(DashboardTrafficEvent entry) => entry.CorrelationId is null ? null : _window.FirstOrDefault(candidate => candidate.Sequence != entry.Sequence && candidate.CorrelationId == entry.CorrelationId);
-    private string ClientLabel(string? id, bool full = false)
+    private string ClientLabel(DashboardTrafficEvent entry, bool full = false)
     {
-        if (string.IsNullOrWhiteSpace(id)) return "Unknown client";
+        var id = entry.SessionId;
+        if (string.IsNullOrWhiteSpace(id))
+            return string.IsNullOrWhiteSpace(entry.PrincipalId) ? "Unknown client" : full ? $"API client · {entry.PrincipalId} (no chat session)" : $"API · {entry.PrincipalId}";
         var session = Sessions.FirstOrDefault(candidate => candidate.SessionId == id);
         var identity = full ? id : id[..Math.Min(8, id.Length)];
         if (session is null) return $"Session #{identity}";
@@ -158,12 +160,12 @@
         if (!full) return $"{(string.IsNullOrWhiteSpace(machine) ? "Session" : machine)} #{identity}";
         return $"{session.Label}{(string.IsNullOrWhiteSpace(machine) ? "" : $" · {machine}")} #{identity}";
     }
-    private string TrafficSource(DashboardTrafficEvent entry) => entry.Kind.ToLowerInvariant() switch { "request" => ClientLabel(entry.SessionId), "response" or "push" => "Hub", _ => "Unknown" };
-    private string TrafficDestination(DashboardTrafficEvent entry) => entry.Kind.ToLowerInvariant() switch { "request" => "Hub", "response" or "push" => ClientLabel(entry.SessionId), _ => "Unknown" };
+    private string TrafficSource(DashboardTrafficEvent entry) => entry.Kind.ToLowerInvariant() switch { "request" => ClientLabel(entry), "response" or "push" => "Hub", _ => "Unknown" };
+    private string TrafficDestination(DashboardTrafficEvent entry) => entry.Kind.ToLowerInvariant() switch { "request" => "Hub", "response" or "push" => ClientLabel(entry), _ => "Unknown" };
     private string EndpointTitle(DashboardTrafficEvent entry, bool source) => entry.Kind.ToLowerInvariant() switch
     {
-        "request" => source ? ClientLabel(entry.SessionId, true) : "Hub",
-        "response" or "push" => source ? "Hub" : ClientLabel(entry.SessionId, true),
+        "request" => source ? ClientLabel(entry, true) : "Hub",
+        "response" or "push" => source ? "Hub" : ClientLabel(entry, true),
         _ => "Unknown"
     };
     private static bool IsError(DashboardTrafficEvent entry) => entry.Kind.Equals("response", StringComparison.OrdinalIgnoreCase) && entry.Code is { Length: > 0 } code && !code.Equals("Ok", StringComparison.OrdinalIgnoreCase);

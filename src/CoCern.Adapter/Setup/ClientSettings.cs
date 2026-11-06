@@ -266,7 +266,7 @@ internal static class ClientSettings
         return result == text ? ClientPlan.Unchanged(path) : ClientPlan.Write(path, [.. original.AsSpan(0, Bom(original)), .. Encoding.UTF8.GetBytes(result)], existed: true, refreshes: true);
     }
 
-    internal static bool IsNativeCodex(string path, string folder, string profile)
+    internal static bool IsNativeCodex(string path, string folder, string profile, string? executableSearchPath = null)
     {
         var original = ReadAll(path);
         if (original is null) return false;
@@ -277,7 +277,7 @@ internal static class ClientSettings
         var arguments = entries.Where(item => item.Key.SequenceEqual(new[] { "args" })).ToArray();
         var commands = entries.Where(item => item.Key.SequenceEqual(new[] { "command" })).ToArray();
         if (arguments.Length != 1 || commands.Length != 1 || TomlInline.String(text, commands[0].ValueStart, commands[0].ValueEnd) is not { } command ||
-            !File.Exists(command)) return false;
+            !NativeCommandAvailable(command, executableSearchPath)) return false;
         var argument = arguments[0];
         var args = ParseArgumentArray(text[argument.ValueStart..argument.ValueEnd]);
         if (SamePath(command, Path.Combine(Path.GetDirectoryName(typeof(ClientSettings).Assembly.Location)!, "CoCern.Adapter.exe")))
@@ -285,6 +285,22 @@ internal static class ClientSettings
         if (!string.Equals(Path.GetFileNameWithoutExtension(command), "dotnet", StringComparison.OrdinalIgnoreCase)) return false;
         return args is { Length: 7 or 9 } && args[^6..].SequenceEqual(new[] { "--native-client", "codex", "--connection", folder, "--profile", profile }) &&
             (args.Length == 7 ? SamePath(args[0], typeof(ClientSettings).Assembly.Location) : args[1] == "--dev-launch" && IsDeployedLauncher(args[0], args[2]));
+    }
+
+    private static bool NativeCommandAvailable(string command, string? executableSearchPath)
+    {
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        // Debug/apphost launchers can deliberately name the SDK host through PATH. A bare command is not a file path.
+        if (!command.Equals("dotnet", comparison) && !(OperatingSystem.IsWindows() && command.Equals("dotnet.exe", comparison)))
+            return File.Exists(command);
+        var executable = OperatingSystem.IsWindows() ? "dotnet.exe" : "dotnet";
+        foreach (var entry in (executableSearchPath ?? Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
+        {
+            var directory = OperatingSystem.IsWindows() ? entry.Trim().Trim('"') : entry;
+            // Do not turn an empty/relative PATH entry into a probe of this process's working directory.
+            if (Path.IsPathFullyQualified(directory) && File.Exists(Path.Combine(directory, executable))) return true;
+        }
+        return false;
     }
 
     internal static string[]? ParseArgumentArray(string raw)
