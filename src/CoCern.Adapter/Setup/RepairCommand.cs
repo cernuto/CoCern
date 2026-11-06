@@ -179,6 +179,19 @@ internal static class RepairCommand
         if (codexLaunchNeeded) plans.Add((codexLaunch!, "Update Codex's owned standard adapter executable without changing its permissions or environment."));
         _ = ClientSettings.PlanClaudeCode(Path.Combine(env.Profile, ".claude.json"), env.DotnetPath, env.AdapterDll, nodeEnvironment, variables => Capture(variables, false));
         var native = codexOwned ? CodexNativeSetup.InspectStandard(env.Profile, codexProfile, nodeEnvironment) : null;
+        if (codexOwned)
+        {
+            try
+            {
+                var evidence = NativeActivation.CollectPermissionEvidence(folder, codexProfile, "codex", env.Clock.GetUtcNow());
+                var activation = ClientSettings.PlanNativePromotion(folder, codexProfile, env.DotnetPath, env.AdapterDll,
+                    NativeActivation.Choice.ActivateOwnedNative, evidence, env.Clock.GetUtcNow());
+                checks.Add(new() { Id = "native-activation-preview", Name = "Native activation preview", State = "warning", Repairable = false,
+                    Detail = activation.Refusal is { } reason ? "Preview refused: " + reason + ". No settings were changed." : "An owned native activation plan is available for explicit review; it has not been applied or verified." });
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or JsonException or InvalidOperationException or ClientSettingsException or System.Security.SecurityException)
+            { checks.Add(new() { Id = "native-activation-preview", Name = "Native activation preview", State = "warning", Detail = "The activation preview could not safely inspect this profile; no settings were changed." }); }
+        }
         checks.Add(new() { Id = "codex", Name = "Codex connection", State = codexLaunchNeeded ? "needs_repair" : codexLaunchUnavailable ? "warning" : codexOwned ? "passed" : "warning", Repairable = codexLaunchNeeded,
             Detail = codexLaunchNeeded ? "The owned standard adapter launch needs an update." : codexLaunchUnavailable ? "The adapter executable is unavailable. Repair CoCern from its installed package." : codexOwned ? "Configuration belongs to this enrollment." : "Missing or another connection; choose Connect/Join to configure it explicitly." });
         checks.Add(new() { Id = "claude", Name = "Claude Code connection", State = claudeOwned ? "passed" : "warning", Detail = claudeOwned ? "Configuration belongs to this enrollment." : "Missing or another connection; unrelated settings are preserved." });

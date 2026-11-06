@@ -248,14 +248,18 @@ internal static class StandingOrders
                 if (board.Task(taskId) is not { } task) return "unknown task " + taskId;
                 // The next-work checks apply, except the target-session match: an order never works around a provider rejection, and
                 // offers only work the session could claim now.
-                if (TaskWorkflow.OfferProblem(board, task, step.SessionId, context.Now) is { } problem) return "task " + taskId + " " + problem;
+                if (TaskWorkflow.OfferProblem(board, task, step.SessionId, context.Now, deferGoal: true) is { } problem) return "task " + taskId + " " + problem;
                 var item = new AttentionContent
                 {
                     Kind = AttentionKinds.NextWork, TaskId = taskId, Subject = id, Priority = AttentionWeights.PriorityLevel(task.Workflow!.Priority),
                     Note = "order " + id + ": " + on + " " + target + "; claim it with task_claim", Revision = revision, Refs = triggerTask.Length > 0 ? [triggerTask] : null
                 };
                 // Each order raise names its order and run; if the session refuses it, the dispatcher reports a failed run.
-                AttentionSources.Emit(context, step.SessionId, item, id, revision);
+                var reference = task.Workflow?.Packet?.AuthorityRef ?? "";
+                var goalId = reference.StartsWith(StandingPreferences.GrantPrefix, StringComparison.Ordinal) ? reference[StandingPreferences.GrantPrefix.Length..] : "";
+                if (Text(task.Json, "goalAuthorityRef").Length > 0 || goalId.Length > 0 && ((board.Json["goalBindings"] as JsonObject)?[goalId] is not null || board.Standing?.Grant(goalId)?.Json["approvedGoal"] is not null || board.Tasks.Any(root => Text(root.Json, "goalAuthorityRef") == reference)))
+                    GoalOrderDelivery.Queue(context, step.SessionId, item, id, revision);
+                else AttentionSources.Emit(context, step.SessionId, item, id, revision);
                 return null;
             }
             case OrderActions.Notify:

@@ -126,6 +126,22 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
                 ApplyInternal(candidate, effectCaller, OrderFailed.Operation, new OrderFailed(JsonFields.Text(payload, "repositoryId"), JsonFields.Text(payload, "boardId", "default"),
                     JsonFields.Text(payload, Operations.OrderIdField), JsonFields.Number(payload, Operations.OrderRunField),
                     "session " + effect.TargetKey + " refused the " + JsonFields.Text(payload, "kind") + " item (" + result.Code + ")").ToJson(), now, ordersEnabled: true);
+            if (failure == EffectDelivery.Failure.DropAsDeferredOrderFailure)
+            {
+                var finalRaise = effect.Operation == AttentionRaise.Operation;
+                var boardKey = JsonFields.Text(payload, finalRaise ? "__goalOrderBoardKey" : "boardKey");
+                var targetSession = finalRaise ? effect.TargetKey : JsonFields.Text(payload, "targetSession");
+                var failed = new OrderFailed(JsonFields.Text(payload, "repositoryId"), JsonFields.Text(payload, "boardId", "default"), JsonFields.Text(payload, Operations.OrderIdField), JsonFields.Number(payload, finalRaise ? Operations.OrderRunField : "run"),
+                    "session " + targetSession + " refused the goal order offer (" + result.Code + ")");
+                if (Kind == AggregateKinds.Board && boardKey == this.GetPrimaryKeyString())
+                    ApplyInternal(candidate, effectCaller, OrderFailed.Operation, failed.ToJson(), now, ordersEnabled: true);
+                else
+                {
+                    var first = candidate.Effects.Count;
+                    candidate.Effects.Add(new DurableEffect(effect.Id + ":order-failed", AggregateKinds.Board, boardKey, OrderFailed.Operation, failed.ToJson().ToJsonString(), now));
+                    CoordinationStateMachine.StampEffects(candidate.Effects, first, effectCaller);
+                }
+            }
             if (failure == EffectDelivery.Failure.Retry)
             {
                 // A malformed one is marked reported in the same commit, so it is logged and counted once however often it is retried.

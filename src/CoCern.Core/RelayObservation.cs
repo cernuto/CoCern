@@ -13,6 +13,8 @@ public interface IRelayObservationSource
     /// <summary>Repository-scoped pending questions, oldest first. Null means busy; reservations are made only by the board.</summary>
     Task<IReadOnlyList<StandingPresentation>?> ReadPendingStandingAsync(string repositoryId, string principalId, string sessionId, string requestCorrelation, CancellationToken cancellationToken = default) =>
         Task.FromResult<IReadOnlyList<StandingPresentation>?>(Array.Empty<StandingPresentation>());
+    Task<IReadOnlyList<StandingPresentation>?> ReadPendingStandingForParticipantAsync(string repositoryId, string principalId, string sessionId, string requestCorrelation, VerifiedNativeParticipant? participant, CancellationToken cancellationToken = default) =>
+        ReadPendingStandingAsync(repositoryId, principalId, sessionId, requestCorrelation, cancellationToken);
     /// <summary>Blocked tasks in every repository that "Waiting on you" may list, bounded, for the dashboard's 15-second read. Null means collection was busy.</summary>
     Task<WaitingSources?> ReadWaitingBlockersAsync(CancellationToken cancellationToken = default) => Task.FromResult<WaitingSources?>(new());
     /// <summary>

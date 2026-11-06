@@ -399,6 +399,10 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
             !RelayToolCatalog.TryGet(tool, out var definition) || tool is RelayTools.SessionOpen or RelayTools.SessionBind) return new(false, "native_invocation_invalid");
         if (args.TryGetProperty("sessionToken", out _) || args.TryGetProperty("sessionId", out _) || args.TryGetProperty("_cocernNative", out _) || ProtectedCheckoutRoot.NamedIn(args))
             return new(false, "native_invocation_conflict");
+        var cleaned = JsonNode.Parse(args.GetRawText())!.AsObject();
+        cleaned.Remove("actingSessionId");
+        cleaned.Remove("actingSessionToken");
+        args = JsonSerializer.SerializeToElement(cleaned);
         try
         {
             // A scoped confirmation is a fresh read, despite sharing the acquire wire tool; never persist/replay it as a mutation.
@@ -410,7 +414,7 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
             payload["repositoryId"] = handle.RepositoryId;
             if (definition.RequiresSession || tool == RelayTools.GetStatus)
             { payload["sessionId"] = handle.SessionId; payload["sessionToken"] = handle.SessionToken; }
-            if (definition.Audited) { payload["actingSessionId"] = handle.SessionId; payload["actingSessionToken"] = handle.SessionToken; }
+            payload["actingSessionId"] = handle.SessionId; payload["actingSessionToken"] = handle.SessionToken;
             if (definition.IsMutation && request is not null) payload["requestId"] = request;
             if (fileCheck) payload["requestId"] = invocation;
             var arguments = RelayForwarder.WithOrigin(JsonSerializer.SerializeToElement(payload), background: false);

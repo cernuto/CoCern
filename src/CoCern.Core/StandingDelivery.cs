@@ -56,9 +56,9 @@ internal sealed class StandingDelivery(Aggregates aggregates)
         try
         {
             var seen = session["standingSeen"] is JsonObject boards ? Number(boards, Text(args, "boardId", "default")) : 0;
-            if (await ReadAsync(caller, args) is not { } standing || Number(standing, "revision") <= seen) return committed;
+            if (await ReadAsync(caller, args) is not { } standing || Number(standing, "revision") <= seen && standing["goals"] is null) return committed;
             var data = Aggregates.Parse(committed);
-            if (Attach(data, standing)) await MarkStandingSeenAsync(caller, args, Number(standing, "revision"));
+            if (Attach(data, standing) && Number(standing, "revision") > seen) await MarkStandingSeenAsync(caller, args, Number(standing, "revision"));
             return Ok(data, committed.Version);
         }
         catch (Exception) { return committed; }
@@ -79,12 +79,8 @@ internal sealed class StandingDelivery(Aggregates aggregates)
     /// <summary>The board's delivered standing, read at most once per <see cref="RelayLimits.StandingCacheSeconds"/>; a write through this hub clears it at once.</summary>
     private async Task<JsonObject?> ReadAsync(RelayCaller caller, JsonObject args)
     {
-        var key = Aggregates.BoardKey(args);
-        var now = Environment.TickCount64;
-        if (cache.TryGetValue(key, out var cached) && cached.Json is not null && now - cached.At < RelayLimits.StandingCacheSeconds * 1000L) return JsonNode.Parse(cached.Json)!.AsObject();
         var read = await aggregates.Board(caller, StandingRead.Operation, new StandingRead(Text(args, "repositoryId"), Text(args, "boardId", "default")).ToJson());
         if (!read.Ok) return null;
-        CacheStanding(key, now, read.Version, read.DataJson);
         return Aggregates.Parse(read);
     }
 

@@ -60,6 +60,15 @@ public sealed class RelayApplication : IRelayApplication
         addOns = new(aggregates, claims, standing, guard, tokenStatus, attentionOptions, search, telemetry, counter, tokenOptions ?? new(), observations);
     }
 
+    /// <summary>Reads the open target session's tool settings for an authenticated administrator.</summary>
+    public Task<RelayReply> ReadSessionToolSettingsAsync(RelayCaller caller, string repositoryId, string sessionId)
+    {
+        if (!caller.IsAdministrator || !caller.MayAccess(repositoryId) || string.IsNullOrWhiteSpace(sessionId) || sessionId.Length > RelayLimits.MaxIdentifierLength)
+            return Task.FromResult(Error(SessionDenied));
+        return aggregates.Call(AggregateKinds.Session, sessionId, caller with { IsInternal = true, ActingParticipant = null, GoalParticipants = null },
+            SessionToolSettings.ReadOperation, new JsonObject { ["repositoryId"] = repositoryId });
+    }
+
     /// <summary>Runs one public tool call and, when a sink is configured, records it once. Recording never changes or fails the call.</summary>
     public async Task<RelayReply> ExecuteAsync(RelayCaller caller, string tool, JsonElement arguments, CancellationToken cancellationToken = default)
     {
@@ -107,7 +116,8 @@ public sealed class RelayApplication : IRelayApplication
                 ? await new FileClaimTools(aggregates, guard).RunAsync(call)
                 : await router.RouteAsync(call, trace, cancellationToken);
             var routed = await actions.AfterAsync(call, result);
-            return tool == RelayTools.SessionOpen ? routed : await addOns.ApplyAsync(call, routed, trace);
+            var withSettings = await router.WithToolSettingsAsync(call, routed);
+            return tool == RelayTools.SessionOpen ? BoundWire(withSettings) : await addOns.ApplyAsync(call, withSettings, trace);
         }
         catch (ArgumentException) { return Error(InvalidArguments); }
         catch (InvalidOperationException) { return Error(InvalidArguments); }

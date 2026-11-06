@@ -131,8 +131,45 @@ internal static class ClientSettings
         return path;
     }
 
-    // No installed provider/profile handshake has been demonstrated. Candidate presence is never an activation receipt.
-    internal static ClientPlan PlanNativePromotion(string path, string folder, string provider) => ClientPlan.Unchanged(path);
+    internal static NativeActivation.PlanResult PlanNativePromotion(string folder, string profile, string dotnet, string adapter,
+        NativeActivation.Choice choice, NativeActivation.PermissionEvidence? evidence, DateTimeOffset now) =>
+        NativeActivation.PlanPromotion(folder, profile, dotnet, adapter, choice, evidence, now);
+
+    internal static bool ExactOwnedLaunch(string path, string folder, string profile, string provider, string dotnet, string adapter, bool native)
+    {
+        try
+        {
+            var bytes = ReadAll(path);
+            if (bytes is null) return false;
+            var launch = SetupEnvironment.AdapterLaunch(dotnet, adapter);
+            var expected = launch.Arguments.Concat(native ? new[] { "--native-client", provider, "--connection", folder, "--profile", profile } : []).ToArray();
+            bool EnvironmentOwned(IReadOnlyDictionary<string, string> env) => env.TryGetValue("COCERN_NODE_DIR", out var selected) &&
+                Path.IsPathFullyQualified(selected) && SamePath(selected, folder) && RepairCommand.OwnsNodeEntry(env, folder) &&
+                !env.Keys.Any(key => key.StartsWith("COCERN_", StringComparison.OrdinalIgnoreCase) && key != "COCERN_NODE_DIR");
+            if (provider == "claude")
+            {
+                using var parsed = JsonDocument.Parse(bytes, new JsonDocumentOptions { MaxDepth = 32 });
+                if (!NativeJoinHook.Unique(parsed.RootElement)) return false;
+                var root = ParseClaudeJson(path, bytes);
+                if (root["mcpServers"]?[Name] is not JsonObject entry || Variables(entry) is not { } env || !EnvironmentOwned(env) ||
+                    JsonText(entry["command"]) != launch.Command || entry["args"] is not JsonArray args) return false;
+                return args.Count == expected.Length && args.Select(JsonText).SequenceEqual(expected);
+            }
+            if (provider != "codex") return false;
+            var text = Strict.GetString(bytes, Bom(bytes), bytes.Length - Bom(bytes));
+            var reader = new TomlReader(text);
+            if (!reader.HasCoCern()) return false;
+            var entries = reader.Assignments.Where(item => item.Table.SequenceEqual(new[] { Table, Name })).ToArray();
+            var commands = entries.Where(item => item.Key.SequenceEqual(new[] { "command" })).ToArray();
+            var arguments = entries.Where(item => item.Key.SequenceEqual(new[] { "args" })).ToArray();
+            if (commands.Length != 1 || arguments.Length != 1 || TomlInline.String(text, commands[0].ValueStart, commands[0].ValueEnd) != launch.Command ||
+                ParseArgumentArray(text[arguments[0].ValueStart..arguments[0].ValueEnd]) is not { } values || !values.SequenceEqual(expected)) return false;
+            var owned = false;
+            _ = PlanCodex(path, dotnet, adapter, refresh: env => { owned = EnvironmentOwned(env); return null; });
+            return owned;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or JsonException or InvalidOperationException or ClientSettingsException or System.Security.SecurityException) { return false; }
+    }
 
     internal static string? StageLocalNativeCandidate(string provider, string dotnet, string adapter, IReadOnlyDictionary<string, string> environment, string? cacheRoot = null,
         string? developmentRoot = null, string? clientProfile = null)

@@ -21,7 +21,7 @@ public sealed record AdapterReply(bool Ok, string Code, JsonElement? Data = null
 }
 
 /// <param name="callOrigin">Who this forwarder's calls report as their origin (<see cref="CallOrigins"/>). Telemetry only; null reports none.</param>
-public sealed class RelayForwarder(HttpClient client, AdapterOptions options, string? callOrigin = null, bool nativeSurface = false)
+public sealed class RelayForwarder(HttpClient client, AdapterOptions options, string? callOrigin = null, bool nativeSurface = false, ToolSurface? surface = null)
 {
     private readonly ConnectionDiagnosticsReporter diagnosticReporter = new(client, options);
     internal void ReportConnectionDiagnostics(IReadOnlyList<ConnectionDiagnosticEvent> events) => diagnosticReporter.Report(events);
@@ -30,10 +30,10 @@ public sealed class RelayForwarder(HttpClient client, AdapterOptions options, st
     private const string ResponseTooLarge = "response_too_large";
 
     /// <summary>The same transport, reporting another origin.</summary>
-    internal RelayForwarder Tagged(string origin) => new(client, options, origin, nativeSurface);
+    internal RelayForwarder Tagged(string origin) => new(client, options, origin, nativeSurface, surface);
 
     /// <summary>The same transport for a verified native chat's own calls, which may also forward the one tool only that surface lists.</summary>
-    internal RelayForwarder ForNativeCalls(string origin) => new(client, options, origin, nativeSurface: true);
+    internal RelayForwarder ForNativeCalls(string origin) => new(client, options, origin, nativeSurface: true, surface: surface);
 
     public static HttpClientHandler CreateHandler() => new() { AllowAutoRedirect = false, UseCookies = false };
     /// <summary>The pinned handler when the options carry a certificate fingerprint, otherwise the plain one.</summary>
@@ -45,16 +45,31 @@ public sealed class RelayForwarder(HttpClient client, AdapterOptions options, st
     public Task<AdapterReply> ForwardAsync(string tool, JsonElement arguments, CancellationToken cancellationToken = default)
     {
         if (cancellationToken.IsCancellationRequested) return Task.FromCanceled<AdapterReply>(cancellationToken);
-        return nativeSurface && tool == RelayTools.Peers || CoordinationTools.IsAllowed(tool, options.Admin, options.ChatOnly, options.Diagnostics, options.EventWaits)
+        return (callOrigin == CallOrigins.Mcp && tool != RelayTools.SessionOpen && surface?.Allows(tool) is { } dynamicAllowed ? dynamicAllowed :
+            nativeSurface && tool == RelayTools.Peers || CoordinationTools.IsAllowed(tool, options.Admin, options.ChatOnly, options.Diagnostics, options.EventWaits))
             ? SendAsync(tool, arguments, cancellationToken)
             : Task.FromResult(new AdapterReply(false, "unknown_tool", ChatGuidance.ToolOff(tool) is { } hint ? JsonSerializer.SerializeToElement(new Dictionary<string, string> { [ChatGuidance.HintField] = hint }) : null));
     }
+
+    // Internal own-session read for discovering a replacement hub selection, even under legacy chat narrowing.
+    internal Task<AdapterReply> ReadOwnSettingsAsync(JsonElement arguments, CancellationToken cancellationToken) =>
+        SendAsync(RelayTools.GetStatus, arguments, cancellationToken);
 
     /// <summary>A <c>session_open</c> reply with its startup line narrowed to the tools this adapter lists (<see cref="ChatGuidance.NarrowStartHint"/>). A reply without one stays as it is.</summary>
     internal AdapterReply WithOwnStartHint(AdapterReply reply)
     {
         if (reply.Data is not { ValueKind: JsonValueKind.Object } data || !data.TryGetProperty(ChatGuidance.StartHintField, out var line) || line.ValueKind != JsonValueKind.String) return reply;
-        var narrowed = ChatGuidance.NarrowStartHint(line.GetString()!, options.Admin, options.ChatOnly);
+        var admin = options.Admin;
+        var chatOnly = options.ChatOnly;
+        if (data.TryGetProperty("toolSettings", out var settings) && settings.ValueKind == JsonValueKind.Object &&
+            settings.TryGetProperty("profile", out var selected) && selected.ValueKind == JsonValueKind.String &&
+            data.TryGetProperty("toolSettingsAdministrator", out var ceiling) && ceiling.ValueKind is JsonValueKind.True or JsonValueKind.False)
+        {
+            var profile = selected.GetString();
+            admin = profile == "admin" && ceiling.GetBoolean();
+            chatOnly = profile == "chat";
+        }
+        var narrowed = ChatGuidance.NarrowStartHint(line.GetString()!, admin, chatOnly);
         if (narrowed == line.GetString()) return reply;
         var node = System.Text.Json.Nodes.JsonNode.Parse(data.GetRawText())!.AsObject();
         node[ChatGuidance.StartHintField] = narrowed;

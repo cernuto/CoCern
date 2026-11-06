@@ -390,10 +390,29 @@ internal static class CodexNativeSetup
         var folder = ConnectionFolder(environment, cacheRoot);
         if (folder is null) return initial;
         var registration = NativeRegistration.Read(Path.Combine(folder, "native-client-codex.candidate.json"), "codex", folder, profile);
-        if (registration is null) return File.Exists(Path.Combine(folder, "native-client-codex.candidate.json"))
-            ? initial with { State = "error", Summary = "The configured native connection could not be verified", Detail = "native_private_connection_required",
-                NextAction = "Check this connection's diagnostics and installed adapter version. Keep its existing enrollment and hook trust; repair the owned package if needed, then refresh Connect." }
-            : initial;
+        if (registration is null)
+        {
+            var candidatePath = Path.Combine(folder, "native-client-codex.candidate.json");
+            if (!File.Exists(candidatePath)) return initial with { Detail = "native_candidate_missing",
+                NextAction = "The native candidate is missing. Keep using the standard connection; prepare an owned candidate before requesting native verification." };
+            // An old but otherwise valid candidate is distinct from malformed or foreign metadata.
+            // It proves no client permission and is never itself an activation receipt.
+            try
+            {
+                if (NodeState.IsPrivateFile(candidatePath) && new FileInfo(candidatePath).Length <= 65536)
+                {
+                    using var old = JsonDocument.Parse(File.ReadAllBytes(candidatePath));
+                    var version = ChatLocators.Text(old.RootElement, "helperVersion");
+                    if (Guid.TryParseExact(version, "D", out _) && version != typeof(NativeRegistration).Assembly.ManifestModule.ModuleVersionId.ToString("D") &&
+                        NativeRegistration.Read(candidatePath, "codex", folder, profile, version) is not null)
+                        return initial with { State = "setup_required", Summary = "Native candidate uses an older helper", Detail = "native_helper_outdated",
+                            NextAction = "Use the owned native helper update for this profile, then obtain fresh installed-client permission evidence before activation." };
+                }
+            }
+            catch (Exception error) when (OptionalSetupError(error)) { }
+            return initial with { State = "error", Summary = "The configured native connection could not be verified", Detail = "native_private_connection_required",
+                NextAction = "Check this connection's diagnostics and installed adapter version. Keep its existing enrollment and hook trust; repair the owned package if needed, then refresh Connect." };
+        }
         using var candidate = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(folder, "native-client-codex.candidate.json")));
         var hooks = ReadHooks(Path.Combine(profile, "hooks.json"));
         var expected = MergeHooks(new JsonObject(), candidate.RootElement.GetProperty("hooks"), profile);

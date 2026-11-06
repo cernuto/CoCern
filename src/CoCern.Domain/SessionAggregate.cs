@@ -43,6 +43,8 @@ internal static class SessionAggregate
             case EventWaitSources.SourceSignalOperation:
                 return EventWaitSources.Handle(context);
             case Operations.Open: return Initialize(context);
+            case SessionToolSettings.SetOperation: return SessionToolSettings.Set(context);
+            case SessionToolSettings.ReadOperation: return SessionToolSettings.ReadForAdministrator(context);
             case "__native_session_adopt": return AdoptNative(context);
             case NativeExpiryCheck.Operation:
                 var check = new SessionState(context.State);
@@ -130,7 +132,8 @@ internal static class SessionAggregate
             context.State[NativeParticipant.Request] = adoption.RequestId;
         }
         return Ok(new { adopted = true, sessionId = state.SessionId, sessionToken = state.SessionToken,
-            bindingVersion = state.BindingVersion ?? 0, binding = state.Binding?.DeepClone(), label = state.Label });
+            bindingVersion = state.BindingVersion ?? 0, binding = state.Binding?.DeepClone(), label = state.Label,
+            toolSettings = SessionToolSettings.Read(context.State) });
     }
 
     /// <summary>
@@ -369,6 +372,7 @@ internal static class SessionAggregate
             ["availability"] = current ? state.Availability ?? "" : "unknown",
             ["observedAt"] = state.ObservedAt?.ToString("O") ?? ""
         };
+        description["toolSettings"] = SessionToolSettings.Read(context.State);
         // The role reported at session_open labels this session's activity; only the hub's internal verification sees it.
         if (verified && state.Role is { Length: > 0 } role) description["role"] = role;
         if (verified && state.NativeId is { Length: > 0 } participant) description[NativeParticipant.Id] = participant;

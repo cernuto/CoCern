@@ -12,6 +12,10 @@ internal sealed class AggregateContext(JsonObject state, RelayCaller caller, str
     public string Operation { get; } = operation;
     public JsonObject Args { get; } = args;
     public DateTimeOffset Now { get; } = now;
+    /// <summary>Native identity verified by the hub, never supplied by the public request.</summary>
+    public VerifiedNativeParticipant? ActingParticipant { get; init; } = caller.IsInternal ? caller.ActingParticipant : null;
+    /// <summary>Peer identities resolved by the hub for a goal decision.</summary>
+    public IReadOnlyList<VerifiedNativeParticipant>? GoalParticipants { get; init; } = caller.IsInternal ? caller.GoalParticipants : null;
     public List<DurableEffect> Effects { get; } = [];
     /// <summary>The aggregate's own key, such as a lock's resource ID.</summary>
     public string Key { get; init; } = "";

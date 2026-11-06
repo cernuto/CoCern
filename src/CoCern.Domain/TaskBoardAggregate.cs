@@ -54,6 +54,7 @@ internal static class TaskBoardAggregate
         {
             case Operations.NextWork: return TaskWorkflow.NextWork(context);
             case Operations.Standing: return StandingPreferences.Read(context);
+            case GoalOrderDelivery.BoardOperation: return GoalOrderDelivery.CheckBoard(context);
             case Operations.PresentStanding: return StandingPreferences.Present(context);
             case RelayTools.StandingPut: return StandingPreferences.Put(context);
             case RelayTools.StandingPropose: return StandingPreferences.Propose(context);
@@ -308,15 +309,18 @@ internal static class TaskBoardAggregate
     /// What a retry gets instead of its stored reply: a begun action returns as it stands now, and a claim replays only while this session
     /// still holds the same claim on a task it may still run.
     /// </summary>
-    internal static RelayReply? ReplayRefusal(JsonObject state, string operation, JsonObject args, JsonObject stored, DateTimeOffset now)
+    internal static RelayReply? ReplayRefusal(JsonObject state, string operation, JsonObject args, JsonObject stored, DateTimeOffset now, VerifiedNativeParticipant? participant)
     {
         var board = new BoardState(state);
         var (session, task) = (Text(args, "sessionId"), board.Task(Text(args, "taskId")));
         if (operation == RelayTools.ActionBegin && task?.Action(Text(args, "actionId")) is { } action)
+        {
+            if (task.Workflow is { } workflow && GoalAuthority.Problem(board, workflow, participant, session, now) is { } goal) return Error(GrantInvalid, new { reason = goal }, task.Version);
             return Ok(new { action = action.Json, replayAllowed = false, existing = true }, task.Version);
+        }
         if (operation is not (RelayTools.ClaimAcquire or RelayTools.ClaimRenew or RelayTools.TaskClaim) || task is null) return null;
         if (task.Owner != session || task.ClaimGeneration != Number(stored, "claimGeneration")) return Error(StaleClaim);
-        return operation == RelayTools.TaskClaim ? TaskWorkflow.ExecutionRefusal(board, task, session, now) : null;
+        return operation == RelayTools.TaskClaim ? TaskWorkflow.ExecutionRefusal(board, task, session, now, participant) : null;
     }
 
     private static RelayReply Claim(AggregateContext context, BoardTask task)
@@ -325,7 +329,7 @@ internal static class TaskBoardAggregate
         var board = new BoardState(context.State);
         var session = context.SessionId;
         var version = task.Version;
-        if (TaskWorkflow.ExecutionRefusal(board, task, session, context.Now) is { } refusal) return refusal;
+        if (TaskWorkflow.ExecutionRefusal(board, task, session, context.Now, context.ActingParticipant) is { } refusal) return refusal;
         // The claim must take every resource the packet declares, so no work runs while another session holds one.
         if (TaskWorkflow.DeclaredResourcesNeeded(task, args) is { } needed) return needed;
         if (TaskWorkflow.ResourceRefusal(board, task, args, Strings(args["resourceIds"])) is { } resources) return resources;
@@ -387,12 +391,22 @@ internal static class TaskBoardAggregate
             if (context.Operation != RelayTools.TaskUpdate || args["workflow"] is not JsonObject workflow) return Error(InvalidWorkflow);
             if (TaskWorkflow.Validate(workflow, task.Workflow, TaskActions.HasUnresolved(task)) is { } invalid) return Error(invalid);
             var incoming = new WorkflowRecord(workflow);
+            var incomingRef = incoming.Packet?.AuthorityRef ?? "";
+            var pinnedRef = Text(task.Json, "goalAuthorityRef");
+            if (pinnedRef.Length > 0 && incomingRef != pinnedRef) return Error(GrantInvalid, new { reason = "immutable goal binding" });
+            var goalId = pinnedRef.StartsWith(StandingPreferences.GrantPrefix, StringComparison.Ordinal) ? pinnedRef[StandingPreferences.GrantPrefix.Length..] : "";
+            var goal = (board.Json["goalBindings"] as JsonObject)?[goalId] as JsonObject;
+            var isRoot = goal is not null && Text(goal, "rootTaskId") == task.TaskId;
+            if (isRoot && incoming.Packet?.Goal != Text(goal!, "purpose")) return Error(GrantInvalid, new { reason = "immutable goal" });
+            if (isRoot && incoming.State == "completed" && task.Workflow?.State != "completed" && (context.ActingParticipant is not { } owner || owner.SessionId != context.SessionId || owner.RepositoryId != context.Repository || owner.ParticipantId != Text(goal!, "ownerParticipantId"))) return Error(SessionDenied);
+            if (GoalAuthority.Problem(board, incoming, context.ActingParticipant, context.SessionId, context.Now) is { } goalProblem) return Error(GrantInvalid, new { reason = goalProblem });
             if (incoming.State == "ready" && board.RequiresResources && !incoming.DeclaresResources) return Error(InvalidWorkflow, new { required = "packet.resources" });
             // A packet whose authorityRef names a standing grant is ready only while that grant exists, covers it and has not expired.
             if (incoming.State == "ready" && TaskWorkflow.GrantRefusal(board, incoming, context.Now) is { } grant) return grant;
             // The hub passes the dependencies it found in the archive table (archivedDependsOn); they count as completed from now on.
             TaskArchiving.Remember(board, Strings(args["archivedDependsOn"]).Intersect(incoming.DependsOn, StringComparer.Ordinal), context.Now);
             if (TaskWorkflow.CheckDependencies(board, task.TaskId, incoming) is { } dependency) return Error(dependency);
+            if (incomingRef.StartsWith(StandingPreferences.GrantPrefix, StringComparison.Ordinal) && (board.Json["goalBindings"] as JsonObject)?[incomingRef[StandingPreferences.GrantPrefix.Length..]] is not null) task.Json["goalAuthorityRef"] = incomingRef;
             var completing = incoming.State == "completed" && (task.Workflow is not { } prior || prior.State != "completed");
             task.SetWorkflow(workflow);
             task.StampWaiting(incoming, context.Now);

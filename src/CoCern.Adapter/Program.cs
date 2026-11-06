@@ -5,6 +5,8 @@ using CoCern.Adapter;
 using CoCern.Adapter.Node;
 using CoCern.Adapter.Setup;
 using CoCern.Contracts;
+using ModelContextProtocol.Protocol;
+using ModelContextProtocol.Server;
 
 [assembly: System.Reflection.AssemblyMetadata(NativeRegistration.ProtocolMetadata, NativeRegistration.ProtocolVersion)]
 
@@ -13,6 +15,8 @@ try
     CoCern.Adapter.ConnectionTrace.EnableForProcess();
     if (args.Length > 0 && args[0] == "--repair")
         return await RepairCommand.RunAsync(args[1..], SetupEnvironment.Create(), CancellationToken.None);
+    if (args.Length > 0 && args[0] == "--native-activation")
+        return NativeActivationCommand.Run(args, SetupEnvironment.Host().Dotnet, typeof(AdapterOptions).Assembly.Location, TimeProvider.System, Console.Out, Console.Error);
     if (args is ["--setup-local-node", "--hub-data", var localHubData, "--data-dir", var localNodeFolder])
         return await LocalNodeSetup.RunAsync(localHubData, localNodeFolder, SetupEnvironment.Create(), CancellationToken.None);
     if (args is ["--dev-setup", var deploymentRoot, var sourceDirectory, var developmentTokenFile])
@@ -224,22 +228,29 @@ try
     using var http = new HttpClient(RelayForwarder.CreateHandler(options)) { Timeout = TimeSpan.FromSeconds(60) };
     await using var hints = new SessionHints(options);
     await using var localWake = await LocalChatWake.OpenAsync(options, Environment.GetEnvironmentVariable("COCERN_TOKEN_FILE"), registration);
-    var forwarder = new RelayForwarder(http, options);
+    var toolCollection = new McpServerPrimitiveCollection<McpServerTool>();
+    var toolSurface = new ToolSurface(toolCollection, native: registration is not null);
+    var forwarder = new RelayForwarder(http, options, surface: toolSurface);
     await using var native = (registration?.Folder ?? options.NodeFolder ?? localWake?.Connection.Folder) is { } privateFolder ? new NativeJoin(privateFolder, options, forwarder) : null;
+    var initialTools = registration is null
+        ? CoordinationTools.Create(forwarder, options.Admin, hints, SessionHandoff.For(options), options.ChatOnly, options.ExportedChat, localWake: localWake, diagnostics: options.Diagnostics, eventWaits: options.EventWaits, repository: options.Repository, surface: toolSurface)
+        : CoordinationTools.CreateNative(forwarder, native!, registrationGate!, options.Admin, options.Diagnostics, options.ChatOnly, toolSurface);
+    foreach (var tool in initialTools) toolCollection.Add(tool);
     var builder = Host.CreateApplicationBuilder(registration is null ? args : []);
     // Library request/exception logging can contain handles. Emit only our fixed stderr hints.
     builder.Logging.ClearProviders();
     builder.Services.AddMcpServer(server =>
     {
         server.ServerInstructions = registration is null ? AdapterInstructions.Server : AdapterInstructions.Native;
+        server.ToolCollection = toolCollection;
+        server.Capabilities ??= new ServerCapabilities();
+        server.Capabilities.Tools = new ToolsCapability { ListChanged = true };
         if (registration is not null) server.ServerInfo = new()
         {
             Name = NativeRegistration.PrivateServerName,
             Version = typeof(NativeRegistration).Assembly.ManifestModule.ModuleVersionId.ToString("D")
         };
-    }).WithStdioServerTransport().WithCoCernWorkflow().WithTools(registration is null
-        ? CoordinationTools.Create(forwarder, options.Admin, hints, SessionHandoff.For(options), options.ChatOnly, options.ExportedChat, localWake: localWake, diagnostics: options.Diagnostics, eventWaits: options.EventWaits, repository: options.Repository)
-        : CoordinationTools.CreateNative(forwarder, native!, registrationGate!, options.Admin, options.Diagnostics));
+    }).WithStdioServerTransport().WithCoCernWorkflow();
     using var host = builder.Build();
     var lifetime = host.Services.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping;
     using var backgroundStopping = CancellationTokenSource.CreateLinkedTokenSource(lifetime);

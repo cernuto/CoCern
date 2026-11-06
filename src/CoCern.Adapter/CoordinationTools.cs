@@ -11,18 +11,28 @@ namespace CoCern.Adapter;
 
 public static class CoordinationTools
 {
-    internal static IEnumerable<McpServerTool> CreateNative(RelayForwarder forwarder, NativeJoin join, NativeRegistrationGate registration, bool admin, bool diagnostics = false) =>
-        NativeSurface(admin, chatOnly: true, diagnostics)
-            .Select(tool => new ForwardedTool(tool, (args, ct) => registration.InvokeAsync(join, tool.Name, args, ct), native: true));
+    internal static IEnumerable<McpServerTool> CreateNative(RelayForwarder forwarder, NativeJoin join, NativeRegistrationGate registration, bool admin, bool diagnostics = false, bool chatOnly = false, ToolSurface? surface = null)
+    {
+        IEnumerable<McpServerTool> Build(string? profile, bool ceiling) => NativeSurface(profile is null ? admin && ceiling : ceiling, profile is null && chatOnly, profile is null && diagnostics, profile is not null)
+            .Where(tool => SessionToolProfiles.Allows(profile, tool.Name, ceiling))
+            .Select(tool => new ForwardedTool(tool, async (args, ct) =>
+            {
+                var reply = await registration.InvokeAsync(join, tool.Name, args, ct);
+                if (reply.Ok) surface?.Observe(reply);
+                return ToolSurface.StripRouting(surface is null ? reply : ToolSurface.WithRefreshGuidance(reply));
+            }, native: true));
+        surface?.Configure(Build);
+        return Build(null, admin);
+    }
 
     /// <summary>
     /// What a hub-proven chat gets: no session tools, and <c>peers</c>, which no raw surface lists. It keeps <c>chat_directory</c> until a name can
     /// address a message, because <c>send_message</c> still takes a recipient's session ID and <c>peers</c> shows none outside a choice.
     /// </summary>
-    private static IEnumerable<RelayTool> NativeSurface(bool admin, bool chatOnly, bool diagnostics)
+    private static IEnumerable<RelayTool> NativeSurface(bool admin, bool chatOnly, bool diagnostics, bool eventWaits = false)
     {
         RelayToolCatalog.TryGet(RelayTools.Peers, out var peers);
-        return Surface(admin, chatOnly, diagnostics).Where(tool => tool.Name is not (RelayTools.SessionOpen or RelayTools.SessionBind)).Append(peers);
+        return Surface(admin, chatOnly, diagnostics, eventWaits).Where(tool => tool.Name is not (RelayTools.SessionOpen or RelayTools.SessionBind)).Append(peers);
     }
 
     /// <summary>The chat profile: what a chat needs to find peers and exchange messages, and nothing it would carry unused in every turn.</summary>
@@ -44,11 +54,15 @@ public static class CoordinationTools
     }
 
     /// <param name="chat">The chat ID the client exported to this process (<see cref="AdapterOptions.ExportedChat"/>), if any; it keeps the chat's request IDs its own across adapter restarts.</param>
-    public static IEnumerable<McpServerTool> Create(RelayForwarder forwarder, bool admin, SessionHints? hints = null, SessionHandoff? handoff = null, bool chatOnly = false, ChatLocation? chat = null, LocalChatWake? localWake = null, bool diagnostics = false, bool eventWaits = false, string? repository = null)
+    public static IEnumerable<McpServerTool> Create(RelayForwarder forwarder, bool admin, SessionHints? hints = null, SessionHandoff? handoff = null, bool chatOnly = false, ChatLocation? chat = null, LocalChatWake? localWake = null, bool diagnostics = false, bool eventWaits = false, string? repository = null, ToolSurface? surface = null)
     {
         // One per adapter, so every tool sees the session this chat opened.
-        var calls = new ChatCalls(forwarder, hints, handoff, RequestScope(chat), localWake: localWake, repository: repository);
-        return Surface(admin, chatOnly, diagnostics, eventWaits).Select(tool => new ForwardedTool(tool, calls, forwarder.ReportConnectionDiagnostics));
+        var calls = new ChatCalls(forwarder, hints, handoff, RequestScope(chat), localWake: localWake, repository: repository, surface: surface);
+        IEnumerable<McpServerTool> Build(string? profile, bool ceiling) => Surface(profile is null ? admin && ceiling : ceiling, profile is null && chatOnly, profile is null && diagnostics, profile is null ? eventWaits : true)
+            .Where(tool => SessionToolProfiles.Allows(profile, tool.Name, ceiling))
+            .Select(tool => new ForwardedTool(tool, calls, forwarder.ReportConnectionDiagnostics));
+        surface?.Configure(Build);
+        return Build(null, admin);
     }
 
     private static IEnumerable<RelayTool> Surface(bool admin, bool chatOnly, bool diagnostics, bool eventWaits = false) => RelayToolCatalog.ForRole(admin, eventWaits).Where(tool => (!chatOnly || ChatTools.Contains(tool.Name)) && (!diagnostics || InDiagnostics(tool)));
@@ -245,7 +259,7 @@ public static class CoordinationTools
 /// <c>close_sessions</c> and on any call that needs a session and leaves it out) and what it takes from their replies (the chat's current session,
 /// the node's session handle, the optional hints).
 /// </summary>
-internal sealed class ChatCalls(RelayForwarder forwarder, SessionHints? hints, SessionHandoff? handoff, string requestScope, Func<string?>? workspace = null, LocalChatWake? localWake = null, string? wakeStatusRoot = null, string? repository = null)
+internal sealed class ChatCalls(RelayForwarder forwarder, SessionHints? hints, SessionHandoff? handoff, string requestScope, Func<string?>? workspace = null, LocalChatWake? localWake = null, string? wakeStatusRoot = null, string? repository = null, ToolSurface? surface = null)
 {
     private readonly Func<string?> _workspace = workspace ?? (() => CoordinationTools.Workspace);
     private readonly RelayForwarder _forwarder = forwarder.Tagged(CallOrigins.Mcp);
@@ -265,6 +279,25 @@ internal sealed class ChatCalls(RelayForwarder forwarder, SessionHints? hints, S
         arguments = RelayForwarder.WithOrigin(arguments, background: false);
         if (!TryWithRepository(tool, ref arguments))
             return new(false, RelayErrorCodes.InvalidArguments, JsonSerializer.SerializeToElement(new { field = "repositoryId", hint = ChatGuidance.MissingRepository }));
+        if (surface is not null && CurrentSession is not null && tool is not (RelayTools.SessionOpen or RelayTools.GetStatus) && surface.ShouldPoll())
+        {
+            var repositoryId = ChatLocators.Text(arguments, "repositoryId");
+            (string Id, string Token) own = default;
+            if (repositoryId is { Length: > 0 })
+            {
+                lock (_handleLock)
+                {
+                    if (!_own.TryGetValue(repositoryId, out own) && (handoff?.FindOwn(repositoryId) ?? localWake?.FindOwn(repositoryId)) is { } found)
+                        own = (found.SessionId, found.SessionToken);
+                }
+            }
+            if (own.Id is { Length: > 0 } && own.Token is { Length: > 0 } && own.Id == CurrentSession)
+            {
+                var statusArgs = JsonSerializer.SerializeToElement(new { repositoryId, sessionId = own.Id, sessionToken = own.Token });
+                var status = await _forwarder.ReadOwnSettingsAsync(RelayForwarder.WithOrigin(statusArgs, background: true), cancellationToken);
+                if (status.Ok) surface.Observe(status, own.Id);
+            }
+        }
         var suppliedToken = arguments.ValueKind == JsonValueKind.Object && arguments.TryGetProperty("sessionToken", out _);
         if (tool == RelayTools.SessionOpen) arguments = CoordinationTools.OwnRequestId(arguments, _workspace(), requestScope);
         else if (tool == RelayTools.ControlRequest) arguments = CoordinationTools.WithOwnSession(arguments, CurrentSession);
@@ -277,6 +310,7 @@ internal sealed class ChatCalls(RelayForwarder forwarder, SessionHints? hints, S
             : await ConditionalRead.ForwardAsync(_forwarder, tool, arguments, cancellationToken, value => originalReply = value);
         if (!reply.Ok) return reply;
         Learn(tool, arguments, reply, suppliedToken);
+        if (CurrentSession is { } ownSession) surface?.Observe(reply, ownSession);
         localWake?.Observe(tool, arguments, originalReply ?? reply);
         if (tool == RelayTools.SessionOpen) handoff?.Record(arguments, reply);
         else
@@ -291,6 +325,8 @@ internal sealed class ChatCalls(RelayForwarder forwarder, SessionHints? hints, S
             if (tool == RelayTools.CheckInbox) hints.ResetHint();
         }
         if (tool == RelayTools.SessionOpen) reply = _forwarder.WithOwnStartHint(reply);
+        if (surface is not null && tool is RelayTools.SessionOpen or RelayTools.GetStatus) reply = ToolSurface.WithRefreshGuidance(reply);
+        reply = ToolSurface.StripRouting(reply);
         return tool is RelayTools.SessionOpen or RelayTools.GetStatus ? LocalWakeStatus.AddTo(reply, wakeStatusRoot) : reply;
     }
 
@@ -317,25 +353,31 @@ internal sealed class ChatCalls(RelayForwarder forwarder, SessionHints? hints, S
     }
 
     /// <summary>
-    /// An administrative call says which chat is making it, so the hub can attribute it and refuse a former manager. This is the chat's own handle in
-    /// that repository, kept beside the fields the tool itself uses (<c>sessionId</c> names a cancel's target). None known: the token speaks alone.
+    /// Bind every joined call to this chat's own handle, without changing operation target fields. Public acting fields never supply proof.
     /// </summary>
     private JsonElement WithActingSession(string tool, JsonElement arguments)
     {
-        if (!RelayToolCatalog.TryGet(tool, out var definition) || !definition.Audited || arguments.ValueKind != JsonValueKind.Object || arguments.TryGetProperty("actingSessionId", out _) ||
-            ChatLocators.Text(arguments, "repositoryId") is not { Length: > 0 } repository) return arguments;
-        (string Id, string Token) own;
+        if (arguments.ValueKind != JsonValueKind.Object) return arguments;
+        var node = JsonNode.Parse(arguments.GetRawText())!.AsObject();
+        node.Remove("actingSessionId");
+        node.Remove("actingSessionToken");
+        if (tool == RelayTools.SessionOpen || ChatLocators.Text(arguments, "repositoryId") is not { Length: > 0 } repository)
+            return JsonSerializer.SerializeToElement(node);
+        (string Id, string Token) own = default;
         lock (_handleLock)
         {
-            if (!_own.TryGetValue(repository, out own))
+            var request = ChatLocators.Text(arguments, "requestId");
+            var bound = request is { Length: > 0 } && _implicitRequests.TryGetValue((repository, tool, request), out own);
+            if (!bound && !_own.TryGetValue(repository, out own))
             {
-                if ((handoff?.FindOwn(repository) ?? localWake?.FindOwn(repository)) is not { } found) return arguments;
-                own = (found.SessionId, found.SessionToken);
+                if ((handoff?.FindOwn(repository) ?? localWake?.FindOwn(repository)) is { } found) own = (found.SessionId, found.SessionToken);
             }
         }
-        var node = JsonNode.Parse(arguments.GetRawText())!.AsObject();
-        node["actingSessionId"] = own.Id;
-        node["actingSessionToken"] = own.Token;
+        if (own.Id is { Length: > 0 } && own.Token is { Length: > 0 })
+        {
+            node["actingSessionId"] = own.Id;
+            node["actingSessionToken"] = own.Token;
+        }
         return JsonSerializer.SerializeToElement(node);
     }
 
@@ -390,6 +432,12 @@ internal sealed class ChatCalls(RelayForwarder forwarder, SessionHints? hints, S
         {
             if (token is { Length: > 0 } && ChatLocators.Text(arguments, "repositoryId") is { Length: > 0 } repository)
             {
+                if (!opened)
+                {
+                    var known = _own.TryGetValue(repository, out var remembered) ? remembered :
+                        (handoff?.FindOwn(repository) ?? localWake?.FindOwn(repository)) is { } found ? (found.SessionId, found.SessionToken) : default;
+                    if (known != (session, token)) return;
+                }
                 // A late implicit reply from A must not undo a newer authenticated switch to B.
                 if (!opened && !suppliedToken && _own.TryGetValue(repository, out var current) && current != (session, token)) return;
                 _own[repository] = (session, token);

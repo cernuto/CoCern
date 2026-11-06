@@ -47,11 +47,38 @@ public static class CoordinationStateMachine
             state["repositoryId"] = repository;
         }
 
+        if (operation == GoalPresentationCandidate)
+        {
+            if (kind != AggregateKinds.Board) return Error(InvalidArguments);
+            var candidate = GoalPresentationCandidates.ReadPending(state, Text(arguments, "boardId", "default"), Text(arguments, "proposalId"), caller.PrincipalId, Text(arguments, "sessionId"), Text(arguments, "presentationRequest"), caller.ActingParticipant);
+            return Ok(new JsonObject { ["candidate"] = candidate is null ? null : JsonNode.Parse(candidate.SummaryJson) });
+        }
+        if (operation == GoalExecutionProbe)
+        {
+            if (kind != AggregateKinds.Board) return Error(InvalidArguments);
+            var board = new State.BoardState(state);
+            if (board.Task(Text(arguments, "taskId")) is not { } task) return Error(NotFound);
+            if (task.Workflow is { } workflow && GoalAuthority.Problem(board, workflow, caller.ActingParticipant, Text(arguments, "sessionId"), now) is { } problem) return Error(GrantInvalid, new { reason = problem }, task.Version);
+            return Ok(new { current = true }, task.Version);
+        }
+        if (operation == GoalDecisionReplayProbe)
+        {
+            if (kind != AggregateKinds.Board || caller.ActingParticipant is not { } actor || actor.SessionId != Text(arguments, "sessionId") || actor.RepositoryId != repository || Text(arguments, "decision") != "approveGoal") return Error(SessionDenied);
+            var probeRequest = Text(arguments, "requestId");
+            if (probeRequest.Length == 0) return Error(RequestIdRequired);
+            var probeKey = RequestKey(caller.PrincipalId, actor.SessionId, RelayTools.RecordDecision, probeRequest);
+            if (ObjectAt(state, ReadModels.RequestsKey)[probeKey] is JsonObject recorded)
+            {
+                var replay = Replay(kind, state, RelayTools.RecordDecision, arguments, recorded, Fingerprint(RelayTools.RecordDecision, arguments), now, caller.ActingParticipant);
+                return replay.Ok ? Ok(new JsonObject { ["found"] = true, ["receipt"] = JsonNode.Parse(replay.DataJson), ["code"] = replay.Code, ["version"] = replay.Version }) : replay;
+            }
+            return Retention.IsBuried(state, probeKey, now) ? Error(RequestExpired, new { readCurrentState = true }) : Ok(new { found = false });
+        }
         var requestId = Text(arguments, "requestId");
         var requests = ObjectAt(state, ReadModels.RequestsKey);
         var requestKey = RequestKey(caller.PrincipalId, Text(arguments, "sessionId"), operation, requestId);
         var fingerprint = Fingerprint(operation, arguments);
-        if (requestId.Length > 0 && requests[requestKey] is JsonObject prior) return Replay(kind, state, operation, arguments, prior, fingerprint, now);
+        if (requestId.Length > 0 && requests[requestKey] is JsonObject prior) return Replay(kind, state, operation, arguments, prior, fingerprint, now, caller.IsInternal ? caller.ActingParticipant : null);
         // Its stored reply was evicted to make room before its window ended: refuse rather than run the write twice.
         if (requestId.Length > 0 && IsMutation(operation) && Retention.IsBuried(state, requestKey, now)) return Error(RequestExpired, new { readCurrentState = true });
 
@@ -103,7 +130,11 @@ public static class CoordinationStateMachine
     }
 
     /// <summary>A retried request returns its original reply, unless its grant has since gone stale or its task may no longer run (the claim gate).</summary>
-    private static RelayReply Replay(string kind, JsonObject state, string operation, JsonObject arguments, JsonObject prior, string fingerprint, DateTimeOffset now)
+    public const string GoalDecisionReplayProbe = "__goal_decision_replay_probe";
+    public const string GoalExecutionProbe = "__goal_execution_probe";
+    public const string GoalPresentationCandidate = "__goal_presentation_candidate";
+
+    private static RelayReply Replay(string kind, JsonObject state, string operation, JsonObject arguments, JsonObject prior, string fingerprint, DateTimeOffset now, VerifiedNativeParticipant? participant)
     {
         if (Text(prior, "fingerprint") != fingerprint && Text(prior, "fingerprint") != LegacyFingerprint(arguments)) return Error(RequestConflict);
         var stored = JsonNode.Parse(Text(prior, "json")) as JsonObject ?? new JsonObject();
@@ -111,7 +142,7 @@ public static class CoordinationStateMachine
         if (operation is RelayTools.ClaimAcquire or RelayTools.ClaimRenew or RelayTools.TaskClaim && Date(stored, "leaseUntil") <= now) return Error(StaleClaim);
         var refusal = kind switch
         {
-            AggregateKinds.Board => TaskBoardAggregate.ReplayRefusal(state, operation, arguments, stored, now),
+            AggregateKinds.Board => TaskBoardAggregate.ReplayRefusal(state, operation, arguments, stored, now, participant),
             AggregateKinds.Lock => LockAggregate.ReplayRefusal(state, operation, arguments, stored),
             _ => null
         };

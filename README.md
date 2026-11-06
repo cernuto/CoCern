@@ -251,6 +251,8 @@ The launcher itself remains in its original immutable version. After changing la
 
 Follow [AGENTS.md](AGENTS.md) and the [verification guide](docs/testing.md): accumulate significant changes and verify at a deploy or major milestone. Use Roslyn CodeLens to map changed production symbols to exact related test methods, then record the current commit, symbols and selection in an ignored file under `artifacts/`. If there are no covering tests, run no tests. Reviews use source inspection; whole-suite and per-batch gates are not part of the workflow.
 
+The current source-only follow-up adds [bounded goal approvals](docs/chat-decisions.md), [per-chat tool settings](docs/session-tool-settings.md), and [explicit native/file-claim preparation and recovery](docs/native-activation.md). Builds, tests, installation changes and live acceptance remain deferred until authorized; see the [implementation plan](docs/superpowers/plans/2026-11-06-remaining-source-work.md).
+
 After committing the verification source and preparing that selection, run:
 
 ```powershell

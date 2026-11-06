@@ -24,6 +24,7 @@ Admin tools need a token with `IsAdministrator`. A session's `role` grants nothi
 | --- | --- | --- |
 | `session_open` | worker | Open a session for this chat; returns its private handle and the board's standing. |
 | `session_bind` | worker | Record this session's IDE tool bindings. Optional `label` renames the session (to match its chat's title) and `machineId` reports its PC, once (a later one is ignored); a bind that leaves out `binding` or `availability`, or sends `null`, keeps the current one. |
+| `session_tool_settings_set` | admin | Set an exact open chat's tool profile under its settings revision, recording the direct human words. A profile never upgrades credential authority. See [per-chat settings](session-tool-settings.md). |
 | `worker_list` | worker | List reported worker state and freshness; use `chat_directory` to find a chat to message. |
 | `get_status` | worker | Repository and session status, including blockers and uncertain actions. A session-wide stop is included on the bounded cancellation page whenever present. An administrator's also has [`waitingOnYou`](#waiting-on-you). |
 | `task_get` | worker | One task, or the board. |
@@ -41,6 +42,7 @@ Admin tools need a token with `IsAdministrator`. A session's `role` grants nothi
 | `search` | worker | Search tasks, notes and your inbox. |
 | `attention_respond` | worker | Accept, dismiss or postpone an attention offer. |
 | `standing_propose` | worker | Propose a standing line or grant. |
+| `record_decision` | worker | Record the direct answer to the exact offered Standing question, or approve a bounded goal through its separate verified-native form. See [chat decisions](chat-decisions.md). |
 | `doc_search`, `doc_section` | worker | Search docs by section; read one section. |
 | `standing_put` | admin | Write standing lines, grants and board settings. |
 | `order_put`, `order_remove` | admin | Add or remove a standing order. |
@@ -131,6 +133,8 @@ Add `workflow` to `task_update`:
 - `task_claim` and `action_begin` refuse a task with an unfinished dependency: `DependenciesIncomplete` (409), listing them in `dependsOn`.
 - `packet.resources` must be claimed. A `task_claim` that leaves out a registered resource gets `ResourcesRequired` with `missing`; aliases resolve by your session's machine. `action_begin` refuses too (`Busy` or `ClaimRequired`) unless your session still holds each one. An unregistered name in `packet.resources` has no lock to take, so it is refused only with the board setting `requireResources` (`unregistered`). A claim's own names must be [registered](#resources).
 - `authorityRef: "grant:<id>"` makes `ready` check that [grant](#standing) (`GrantInvalid` if missing, expired or out of scope). `task_claim` and `action_begin` check it again.
+
+The source also supports bounded chat-approved goals: `record_decision` with `decision: "approveGoal"` freezes an existing root task, exact version and purpose, finite expiry, owner and verified participant membership. Descendant workflows reference the same immutable grant. Approval receipts are historical evidence; they do not authorize another execution after expiry, removal or root completion. See [goal approval and delivery](chat-decisions.md). These additions have not been tested or deployed in the current source-only milestone.
 
 ### Resources
 

@@ -1,0 +1,80 @@
+@using System.Text.Json
+@inject HttpClient Http
+
+<section aria-label="Session tool access">
+    <h3>Tool access</h3>
+    @if (_settings is not null)
+    {
+        <p>Selected profile: @(_settings.Profile ?? "Default (connection settings)") · Revision @_settings.Revision</p>
+        <p>The tools actually available also depend on the chat's connection credentials and, until a profile is selected here, its connection settings. A profile does not grant additional credential permissions. The chat may need to reconnect to see changes.</p>
+        <label for="session-profile">Profile</label>
+        <select id="session-profile" @bind="_profile" disabled="@_busy">
+            <option value="worker">Worker</option>
+            <option value="chat">Chat</option>
+            <option value="diagnostics">Diagnostics</option>
+            <option value="admin">Admin</option>
+        </select>
+        <label for="session-profile-words">Your exact words authorizing this change</label>
+        <textarea id="session-profile-words" @bind="_words" @bind:event="oninput" maxlength="1024" disabled="@_busy"></textarea>
+        <BbButton Type="ButtonType.Button" Disabled="@(_busy || string.IsNullOrWhiteSpace(_words))" OnClick="SaveAsync">Save</BbButton>
+    }
+    @if (_message is not null) { <p role="status">@_message</p> }
+</section>
+
+@code {
+    [Parameter, EditorRequired] public DashboardSession Session { get; set; } = default!;
+    private DashboardSessionToolSettingsResult? _settings;
+    private string _profile = "worker";
+    private string _words = "";
+    private string? _message;
+    private bool _busy;
+
+    protected override async Task OnInitializedAsync() => await RefreshAsync();
+
+    private async Task RefreshAsync()
+    {
+        try
+        {
+            _settings = await SessionToolSettingsClient.ReadAsync(Http, Session.RepositoryId, Session.SessionId);
+            if (_settings?.Ok == true) _profile = _settings.Profile ?? "worker";
+            else { _settings = null; _message = "Tool access could not be loaded for this session. Reload the page and check your access."; }
+        }
+        catch (Exception error) when (error is HttpRequestException or TaskCanceledException or JsonException)
+        {
+            _settings = null;
+            _message = "Tool access could not be loaded. Reload the page and try again.";
+        }
+    }
+
+    private async Task SaveAsync()
+    {
+        if (_busy || _settings is null || string.IsNullOrWhiteSpace(_words)) return;
+        _busy = true;
+        try
+        {
+            var result = await SessionToolSettingsClient.SaveAsync(Http, new DashboardSessionToolSettingsRequest
+            {
+                RepositoryId = Session.RepositoryId, SessionId = Session.SessionId, Profile = _profile,
+                ExpectedVersion = _settings.Revision, HumanWords = _words
+            });
+            if (result?.Ok == true)
+            {
+                _settings = result;
+                _words = "";
+                _message = "Saved. The chat may need to reconnect to see the change.";
+            }
+            else if (result?.Code == "VersionConflict")
+            {
+                await RefreshAsync();
+                if (_settings is not null) _message = "The profile changed elsewhere. The current settings are shown; review them and save again if you still want this change.";
+            }
+            else _message = "The change was refused. Check your administrator access and that this session is still open.";
+        }
+        catch (Exception error) when (error is HttpRequestException or TaskCanceledException or JsonException)
+        {
+            _message = "The hub did not confirm the change. Reload the current settings before trying again.";
+            _settings = null;
+        }
+        finally { _busy = false; }
+    }
+}

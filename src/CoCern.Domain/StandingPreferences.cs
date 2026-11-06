@@ -18,20 +18,34 @@ namespace CoCern.Domain;
 internal static partial class StandingPreferences
 {
     /// <summary>The immutable terms eligible for this authenticated presenter, or null when already reserved.</summary>
-    public static JsonObject? PendingPresentation(JsonObject document, string boardId, string proposalId, string principal, string session, string request)
+    public static JsonObject? PendingPresentation(JsonObject document, string boardId, string proposalId, string principal, string session, string request, JsonObject? boardDocument = null, VerifiedNativeParticipant? presenter = null)
     {
         var standing = new StandingState(document);
         var proposal = standing.Proposal(proposalId);
-        // Goal-linked proposals need the verified owner integration in Task 3; labels and roles are never a substitute.
-        if (proposal is null || proposal.Json["goalTaskId"] is not null || session.Length == 0 || principal.Length == 0) return null;
+        if (proposal is null || session.Length == 0 || principal.Length == 0) return null;
+        var linked = proposal.Json["goalTaskId"] is not null;
+        if (linked && !IsCurrentGoalOwner(boardDocument, proposal, presenter, session)) return null;
         var effect = PresentationEffect(standing, proposal, boardId);
         if (effect is null) return null;
         if (proposal.PresentedBy.Length == 0) return effect;
         // A marker from a future revision cannot be interpreted or silently reassigned by an older reader.
         if (proposal.PresentedRevision < 0 || proposal.PresentedRevision > standing.Revision || proposal.PresentedEffect is null) return null;
         if (!JsonNode.DeepEquals(effect, proposal.PresentedEffect)) return effect;
+        // The same verified participant may recover the question in its replacement session.
+        if (linked && proposal.PresentedBy != session) return effect;
         return request.Length > 0 && proposal.PresentedBy == session && proposal.PresentedPrincipal == principal && proposal.PresentedRequest == request
             ? proposal.PresentedEffect.DeepClone().AsObject() : null;
+    }
+
+    private static bool IsCurrentGoalOwner(JsonObject? boardDocument, StandingProposal proposal, VerifiedNativeParticipant? presenter, string session)
+    {
+        if (boardDocument is null || presenter is null || session.Length == 0 || presenter.SessionId != session || presenter.ParticipantId.Length == 0) return false;
+        var board = new BoardState(boardDocument);
+        var root = board.Task(Text(proposal.Json, "goalTaskId"));
+        var reference = root is null ? "" : Text(root.Json, "goalAuthorityRef");
+        return presenter.RepositoryId == board.RepositoryId && reference.StartsWith(GrantPrefix, StringComparison.Ordinal)
+            && (boardDocument["goalBindings"] as JsonObject)?[reference[GrantPrefix.Length..]] is JsonObject goal
+            && Text(goal, "rootTaskId") == root!.TaskId && Text(goal, "ownerParticipantId") == presenter.ParticipantId;
     }
 
     /// <summary>Atomically reserves exactly the terms the hub proved fit; never records a decision or changes effective Standing.</summary>
@@ -45,10 +59,10 @@ internal static partial class StandingPreferences
         var request = presentation.PresentationRequest;
         if (standing is null) return Ok(new { presented = false });
         var expected = JsonNode.Parse(presentation.ExpectedEffectJson)!.AsObject();
-        var effect = PendingPresentation(standing.Json, presentation.BoardId ?? "default", id, context.Caller.PrincipalId, presentation.SessionId, request);
+        var effect = PendingPresentation(standing.Json, presentation.BoardId ?? "default", id, context.Caller.PrincipalId, presentation.SessionId, request, context.State, context.ActingParticipant);
         if (effect is null || !JsonNode.DeepEquals(effect, expected) || ByteSize(effect) > RelayLimits.MaxAttentionOfferBytes) return Ok(new { presented = false }, standing.Revision);
         var proposal = standing.Proposal(id)!;
-        if (!JsonNode.DeepEquals(proposal.PresentedEffect, effect))
+        if (!JsonNode.DeepEquals(proposal.PresentedEffect, effect) || proposal.Json["goalTaskId"] is not null && proposal.PresentedBy != context.SessionId)
             proposal.MarkPresented(context.Caller.PrincipalId, context.SessionId, request, context.Now, standing.Revision, effect);
         return Ok(new JsonObject { ["attention"] = effect }, standing.Revision);
     }
@@ -56,6 +70,7 @@ internal static partial class StandingPreferences
     private static JsonObject? PresentationEffect(StandingState standing, StandingProposal proposal, string boardId)
     {
         var effect = new JsonObject { ["id"] = proposal.Id, ["k"] = AttentionKinds.StandingProposal, ["b"] = boardId };
+        if (proposal.Json["goalTaskId"] is JsonNode goalTaskId) effect["goalTaskId"] = goalTaskId.DeepClone();
         if (proposal.Line is { } line && proposal.Grant is null)
         {
             var id = line.Id(proposal.Id);
@@ -195,6 +210,12 @@ internal static partial class StandingPreferences
             return Error(CapacityExceeded, new { maxPerSession = RelayLimits.MaxStandingProposalsPerSession });
         var id = "p-" + Guid.NewGuid().ToString("N")[..12];
         var proposal = StandingProposal.BySession(id, context.Caller.PrincipalId, context.SessionId, context.Now);
+        if (args.ContainsKey("goalTaskId"))
+        {
+            if (!Identifier(args["goalTaskId"], out var goalId) || board.Task(goalId) is not { } root || root.Workflow is not { } goalWorkflow || goalWorkflow.Packet is not { } goalPacket || !goalPacket.AuthorityRef.StartsWith(GrantPrefix, StringComparison.Ordinal) || (board.Json["goalBindings"] as JsonObject)?[goalPacket.AuthorityRef[GrantPrefix.Length..]] is not JsonObject binding || Text(binding, "rootTaskId") != goalId) return Invalid("goalTaskId");
+            if (GoalAuthority.Problem(board, goalWorkflow, context.ActingParticipant, context.SessionId, context.Now) is { } reason) return Error(GrantInvalid, new { reason });
+            proposal.Json["goalTaskId"] = goalId;
+        }
         if (args.ContainsKey("line"))
         {
             if (ReadLine(args["line"], idRequired: false, out var lineId, out var text) is { } field) return Invalid("line." + field);
@@ -256,14 +277,46 @@ internal static partial class StandingPreferences
     }
 
     /// <summary>The standing a chat receives: lines and active grants without provenance, and settings when any are set.</summary>
-    public static JsonObject Delivered(JsonObject board, DateTimeOffset now) => DeliveredStanding(new BoardState(board).Standing ?? new StandingState(new JsonObject()), now);
+    public static JsonObject Delivered(JsonObject document, DateTimeOffset now, VerifiedNativeParticipant? recipient = null)
+    {
+        var board = new BoardState(document);
+        var standing = board.Standing ?? new StandingState(new JsonObject());
+        var delivered = DeliveredStanding(standing, now);
+        var bindings = document["goalBindings"] as JsonObject;
+        if (delivered["grants"] is JsonArray ordinary)
+            for (var index = ordinary.Count - 1; index >= 0; index--)
+                if (ordinary[index] is JsonObject item && (bindings?[Text(item, "id")] is not null || board.Tasks.Any(task => Text(task.Json, "goalAuthorityRef") == GrantPrefix + Text(item, "id")))) ordinary.RemoveAt(index);
+        var goals = new JsonArray();
+        foreach (var grant in standing.GrantRecords.Where(grant => grant.Json["approvedGoal"] is JsonObject))
+        {
+            var id = grant.Id();
+            var binding = (document["goalBindings"] as JsonObject)?[id] as JsonObject;
+            var root = binding is null ? null : board.Task(Text(binding, "rootTaskId"));
+            var member = binding is not null && recipient is not null && recipient.RepositoryId == board.RepositoryId && recipient.SessionId.Length > 0 && recipient.ParticipantId.Length > 0
+                && (Flag(binding, "repositoryWide") || Strings(binding["members"]).Contains(recipient.ParticipantId, StringComparer.Ordinal));
+            var owner = member && recipient!.ParticipantId == Text(binding!, "ownerParticipantId");
+            var problem = root?.Workflow is { } workflow ? GoalAuthority.Problem(board, workflow, recipient, recipient?.SessionId ?? "", now) : "root";
+            var summary = binding is not null ? GoalAuthority.PublicGoal(binding) : grant.Json["approvedGoal"]!.DeepClone().AsObject();
+            summary["isMember"] = member; summary["isOwner"] = owner; summary["active"] = member && problem is null;
+            goals.Add(summary);
+        }
+        if (goals.Count > 0) delivered["goals"] = goals;
+        return delivered;
+    }
 
     private static JsonObject DeliveredStanding(StandingState standing, DateTimeOffset now)
     {
         var lines = standing.LineRecords.Select(line => (JsonNode)new JsonObject { ["id"] = line.Id(), ["text"] = line.Text });
-        var grants = standing.GrantRecords.Where(grant => grant.ExpiresAt > now)
+        var grants = standing.GrantRecords.Where(grant => grant.ExpiresAt > now && grant.Json["approvedGoal"] is null)
             .Select(grant => (JsonNode)new JsonObject { ["id"] = grant.Id(), ["scope"] = grant.Scope, ["targets"] = grant.Targets?.DeepClone(), ["expiresAt"] = grant.ExpiresAtText });
         var delivered = new JsonObject { ["revision"] = standing.Revision, ["lines"] = new JsonArray(lines.ToArray()), ["grants"] = new JsonArray(grants.ToArray()) };
+        var goals = standing.GrantRecords.Where(grant => grant.Json["approvedGoal"] is JsonObject).Select(grant =>
+        {
+            var summary = grant.Json["approvedGoal"]!.DeepClone().AsObject();
+            summary["isMember"] = false; summary["isOwner"] = false; summary["active"] = false;
+            return (JsonNode)summary;
+        }).ToArray();
+        if (goals.Length > 0) delivered["goals"] = new JsonArray(goals);
         if (standing.SettingsNode is JsonObject { Count: > 0 } settings) delivered["settings"] = settings.DeepClone();
         return delivered;
     }
@@ -272,7 +325,7 @@ internal static partial class StandingPreferences
     public static RelayReply Read(AggregateContext context)
     {
         if (!StandingRead.Decode(context.Args).TryGet(out _, out var malformed)) return Malformed(malformed);
-        var delivered = Delivered(context.State, context.Now);
+        var delivered = Delivered(context.State, context.Now, context.ActingParticipant);
         return Ok(delivered, Number(delivered, "revision"));
     }
 

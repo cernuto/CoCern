@@ -18,6 +18,7 @@ namespace CoCern.Core;
 internal sealed record RelayCall(RelayCaller Caller, string Tool, RelayTool Definition, JsonObject Args, CallControls Controls, JsonObject? Session = null)
 {
     internal VerifiedNativeParticipant? NativeParticipant { get; init; }
+    internal JsonObject? ActorSession { get; init; }
     /// <summary>On an administrative call, the chat that proved it is making it; null when it proved nothing and only its token speaks.</summary>
     internal string? ActingSessionId { get; init; }
     /// <summary>The manager generation that chat holds, read when it proved itself; null for any other chat. Attribution, never authority.</summary>
@@ -56,7 +57,7 @@ internal sealed class CallGuard(Aggregates aggregates, string incarnation, Func<
         args["hubIncarnation"] = incarnation;
         // Read from the raw arguments: the guard above already dropped the adapter's report from what the tool sees.
         var origin = arguments.ValueKind == JsonValueKind.Object && arguments.TryGetProperty("callOrigin", out var reported) && reported.ValueKind == JsonValueKind.String ? reported.GetString() : null;
-        call = new(caller with { IsInternal = true }, tool, definition, args, controls) { CallOrigin = origin is "mcp" or "claude-stop" or "claude-waiter" or "wake-watcher" or "node" ? origin : null };
+        call = new(caller with { IsInternal = true, ActingParticipant = null, GoalParticipants = null }, tool, definition, args, controls) { CallOrigin = origin is "mcp" or "claude-stop" or "claude-waiter" or "wake-watcher" or "node" ? origin : null };
         return true;
     }
 
@@ -68,40 +69,67 @@ internal sealed class CallGuard(Aggregates aggregates, string incarnation, Func<
     public async Task<(RelayCall Call, RelayReply? Refusal)> VerifyAsync(RelayCall call, CallTrace? trace)
     {
         var (caller, tool, args) = (call.Caller, call.Tool, call.Args);
-        if (call.Definition.RequiresSession || tool == RelayTools.GetStatus && Text(args, "sessionId").Length > 0)
+        var actorId = call.Controls.ActingSessionId ?? "";
+        var actorToken = call.Controls.ActingSessionToken ?? "";
+        if ((actorId.Length == 0) != (actorToken.Length == 0)) return (call, Error(SessionDenied));
+        var direct = call.Definition.RequiresSession || tool == RelayTools.GetStatus && Text(args, "sessionId").Length > 0 ||
+            tool != RelayTools.SessionOpen && Text(args, "sessionToken").Length > 0;
+        if (direct && actorId.Length > 0 && (Text(args, "sessionId") != actorId || Text(args, "sessionToken") != actorToken))
+            return (call, Error(SessionDenied));
+        if (direct || actorId.Length > 0)
         {
-            var verified = await VerifySessionAsync(caller, args);
+            var proof = direct ? args : new JsonObject { ["repositoryId"] = Text(args, "repositoryId"), ["sessionId"] = actorId,
+                ["sessionToken"] = actorToken, ["hubIncarnation"] = Text(args, "hubIncarnation") };
+            var verified = await VerifySessionAsync(caller, proof);
             if (!verified.Ok) return (call, verified);
             var session = Aggregates.Parse(verified);
             var participant = Text(session, NativeParticipant.Id);
             session.Remove(NativeParticipant.Id);
-            call = call with { Session = session, NativeParticipant = participant.Length == 0 ? null :
-                new VerifiedNativeParticipant(participant, Text(args, "sessionId"), Text(args, "repositoryId")) };
-            // A background status read (the prompt hook, a wake watcher) is not the session's own turn, so it carries no role.
-            if (trace is not null) { trace.SessionId = Text(args, "sessionId"); trace.Role = call.Controls.StatusDetail && tool == RelayTools.GetStatus ? null : Text(session, "role"); }
+            var sessionId = Text(proof, "sessionId");
+            var repository = Text(proof, "repositoryId");
+            VerifiedNativeParticipant? native = null;
+            if (participant.Length > 0)
+            {
+                var current = await aggregates.Request(AggregateKinds.ControlKey, caller,
+                    new NativeCurrentQuery(repository, sessionId, Text(proof, "sessionToken"), participant));
+                if (current.Ok)
+                {
+                    var result = Aggregates.Parse(current);
+                    if (Text(result, "participantId") == participant && Text(result, "sessionId") == sessionId && Text(result, "repositoryId") == repository)
+                        native = new(participant, sessionId, repository);
+                }
+            }
+            call = call with { Session = direct ? session : null, ActorSession = session, ActingSessionId = sessionId, NativeParticipant = native, Caller = caller with { ActingParticipant = native } };
+            if (ProfileRefusal(call, session) is { } profileRefusal) return (call, profileRefusal);
+            if (trace is not null) { trace.SessionId = sessionId; trace.Role = call.Controls.StatusDetail && tool == RelayTools.GetStatus ? null : Text(session, "role"); }
         }
         if (tool is RelayTools.TaskClaim or RelayTools.ClaimAcquire or RelayTools.ActionBegin && await PausedAsync(caller, args) is { } paused) return (call, paused);
-        return call.Definition.Audited && caller.IsAdministrator && call.Controls.ActingSessionId is { Length: > 0 } acting ? await ActingAsync(call, acting) : (call, null);
+        return call.Definition.Audited && caller.IsAdministrator && actorId.Length > 0 ? await ActingAsync(call, actorId) : (call, null);
+    }
+
+    private static RelayReply? ProfileRefusal(RelayCall call, JsonObject session)
+    {
+        if (session["toolSettings"] is not JsonObject settings ||
+            settings["profile"] is not null && (settings["profile"] is not JsonValue node || !node.TryGetValue<string>(out _)))
+            return Error(SessionDenied);
+        var profile = settings["profile"] is JsonValue value && value.TryGetValue<string>(out var selected) ? selected : null;
+        return SessionToolProfiles.Allows(profile, call.Tool, call.Caller.IsAdministrator) ? null :
+            Error("SessionToolProfileDenied", new { profile, guidance = "This chat's hub-selected tool profile does not include this operation. Ask an administrator to update its session tool settings." });
     }
 
     /// <summary>
-    /// An administrative call that names the chat making it. The proof is checked like any session handle, and a wrong one refuses. A former manager is
-    /// then refused, delayed or not: appointing someone else ended what it may present as itself. A chat whose session has closed goes on as its token
-    /// alone unless it was that manager, since an adapter can outlive its handle and a closed handle must not stop a pause. This never adds authority: the token already decided, and the aggregates check it again.
+    /// A proven administrative actor is checked against the current manager seat. This attribution never grants authority;
+    /// the credential and aggregates still enforce their own authorization.
     /// </summary>
     private async Task<(RelayCall Call, RelayReply? Refusal)> ActingAsync(RelayCall call, string acting)
     {
         var args = call.Args;
         var repository = Text(args, "repositoryId");
-        var proof = new JsonObject { ["repositoryId"] = repository, ["sessionId"] = acting, ["sessionToken"] = call.Controls.ActingSessionToken ?? "", ["hubIncarnation"] = Text(args, "hubIncarnation") };
-        var verified = await VerifySessionAsync(call.Caller, proof);
-        if (!verified.Ok && verified.Code != SessionUnknown) return (call, verified);
-        var proven = verified.Ok ? call with { ActingSessionId = acting } : call;
+        var proven = call;
         var standing = await aggregates.Request(AggregateKinds.ControlKey, call.Caller, new ManagerStandingQuery(repository, acting));
         if (!standing.Ok) return (proven, standing);
         var seat = Aggregates.Parse(standing);
         if (IsTrue(seat, "revoked")) return (proven, Error(ManagerRevoked, new { currentGeneration = Number(seat, "generation") }));
-        if (!verified.Ok) return (call, null);
         if (call.Tool == RelayTools.ControlRequest) args[ServerArguments.ActingSession] = acting;
         return (proven with { ManagerGeneration = IsTrue(seat, "manager") ? Number(seat, "generation") : null }, null);
     }

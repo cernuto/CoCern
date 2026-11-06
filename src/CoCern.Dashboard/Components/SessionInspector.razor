@@ -32,6 +32,7 @@
             <div><dt title="Most recent recorded successful tool call, including background polling. This does not indicate whether a model is running.">Last relay call</dt><dd title="@DashboardFormat.Timestamp(Session.LastActivityAt)">@DashboardFormat.Ago(Session.LastActivityAt, Now)</dd></div>
         </dl>
         <div class="inspector-counts"><BbCard><strong>@DashboardFormat.Count(Session.UnreadMessages)</strong><span>Unread messages</span></BbCard><BbCard><strong>@DashboardFormat.Count(Session.PendingEffects)</strong><span>Pending effects</span></BbCard></div>
+        <SessionToolSettingsControl @key="(typeof(SessionToolSettingsControl), Session.SessionId)" Session="@Session" />
         <CloseSessionControl @key="Session.SessionId" Session="@Session" />
         <details class="session-identifiers"><summary>Session ID</summary><p>@Session.SessionId</p></details>
         <div class="inspector-events"><h3>Recent log</h3>

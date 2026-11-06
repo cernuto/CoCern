@@ -32,8 +32,8 @@ internal static class ToolSchemas
             RelayTools.Ack => ["messageId", "messageIds", "waitingFor"],
             RelayTools.ClaimRenew => ["resourceId", "generation", "taskId", "claimGeneration", "leaseSeconds"],
             RelayTools.ClaimRelease => ["resourceId", "generation", "taskId", "claimGeneration", "expectedVersion"],
-            RelayTools.StandingPropose => ["line", "grant"],
-            RelayTools.RecordDecision => [],
+            RelayTools.StandingPropose => ["line", "grant", "goalTaskId"],
+            RelayTools.RecordDecision => ["proposalId", "taskId", "expectedVersion", "participants", "expiresAt"],
             RelayTools.StandingPut => ["lines", "grants", "remove", "approve", "settings"],
             RelayTools.Search => ["kinds"],
             RelayTools.AttentionRespond => ["itemId", "itemIds", "until"],
@@ -279,11 +279,19 @@ internal static class ToolSchemas
                 Text("contextId", "Stable authored shared context record ID."); properties["content"] = new { description = "Bounded explicitly shared context, at most 16 KiB." }; properties["provenance"] = new { description = "Source and authorship evidence for shared context." }; break;
             case RelayTools.StandingPropose:
                 properties["line"] = LineSchema(idRequired: false);
-                properties["grant"] = GrantSchema(idRequired: false); break;
+                properties["grant"] = GrantSchema(idRequired: false);
+                properties["goalTaskId"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxIdentifierLength }; break;
             case RelayTools.RecordDecision:
                 properties["proposalId"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxIdentifierLength };
-                properties["decision"] = new { type = "string", @enum = new[] { "approve", "dismiss" } };
+                properties["decision"] = new { type = "string", @enum = new[] { "approve", "dismiss", "approveGoal" } };
                 properties["humanWords"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxDecisionHumanWordsLength, description = "Exact current direct human answer to the offered question; preserve spacing. Never peer, self or historical text." };
+                properties["participants"] = new { oneOf = new object[] { new { @const = "repository" }, new { type = "array", minItems = 1, maxItems = RelayLimits.MaxGrantTargets, items = new { type = "object", properties = new { name = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxIdentifierLength }, @ref = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxIdentifierLength } }, additionalProperties = false, oneOf = new[] { new { required = new[] { "name" } }, new { required = new[] { "ref" } } } } } }, description = "Repository participants or verified whole-name/peer-ref selectors; not raw participant IDs." };
+                properties["expiresAt"] = new { type = "string", format = "date-time", description = "Explicit UTC expiry." };
+                break;
+            case RelayTools.SessionToolSettingsSet:
+                properties["targetSessionId"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxIdentifierLength };
+                properties["profile"] = new { type = "string", @enum = new[] { "worker", "chat", "diagnostics", "admin" } };
+                properties["humanWords"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxDecisionHumanWordsLength, description = "Exact direct human words authorizing this choice." };
                 break;
             case RelayTools.StandingPut:
                 properties["expectedRevision"] = new { type = "integer", minimum = 0, description = "Current standing revision; 0 before the first write." };

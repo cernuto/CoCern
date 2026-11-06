@@ -33,7 +33,7 @@ public sealed class BoardState(JsonObject json)
     public static StateShape Shape { get; } = CommonState.Shape.With(
         (TasksKey, StateShape.Map(BoardTask.Shape)), (TaskRevisionKey, null), (ContextKey, StateShape.Map(ContextNote.Shape)), (ArchivedTasksKey, StateShape.Map(null)),
         (ArchiveFloorKey, null), (StandingKey, StandingState.Shape), (OrdersKey, OrdersState.Shape),
-        (EventWaitSources.SubscriptionsKey, StateShape.Map(StateShape.Any)), (EventWaitRetirement.Key, StateShape.Map(null)));
+        (EventWaitSources.SubscriptionsKey, StateShape.Map(StateShape.Any)), (EventWaitRetirement.Key, StateShape.Map(null)), ("goalBindings", StateShape.Map(StateShape.Any)));
 
     public JsonObject Json => json;
 
@@ -148,7 +148,7 @@ public sealed class BoardTask(JsonObject json)
         (TaskIdKey, null), (VersionKey, null), (ChangeRevisionKey, null), (OwnerKey, null), (LeaseUntilKey, null), (ClaimGenerationKey, null), (ClaimRequestIdKey, null),
         (ResourceIdsKey, null), (WorkflowKey, WorkflowRecord.Shape), (ActionsKey, StateShape.Map(TaskAction.Shape)), (AttemptHistoryKey, TaskAction.Shape),
         (ReportsKey, TaskReport.Shape), (MessagesKey, TaskMessage.Shape), (FactsKey, StateShape.Any), (CompletedAtKey, null), (UpdatedAtKey, null), (UpdatedByKey, null),
-        (HumanSinceKey, null), (HoldSinceKey, null), (ArchivedAtKey, null));
+        (HumanSinceKey, null), (HoldSinceKey, null), (ArchivedAtKey, null), ("goalAuthorityRef", null));
 
     /// <summary>A new task: version 0, with no actions, conversation, reports or facts yet.</summary>
     public static BoardTask Create(string taskId) => new(new JsonObject
@@ -845,7 +845,7 @@ public sealed class StandingGrant(JsonObject json)
     public const string ProposedByKey = "proposedBy";
 
     public static StateShape Shape { get; } = StateShape.Object(
-        (IdKey, null), (ScopeKey, null), (TargetsKey, null), (ExpiresAtKey, null), (GrantorKey, null), (GrantedAtKey, null), (ProposedByKey, null), (StandingDecision.Key, StandingDecision.Shape));
+        (IdKey, null), (ScopeKey, null), (TargetsKey, null), (ExpiresAtKey, null), (GrantorKey, null), (GrantedAtKey, null), (ProposedByKey, null), (StandingDecision.Key, StandingDecision.Shape), ("approvedGoal", StateShape.Any));
 
     /// <summary>The grant a proposal carries, normalized: its scope, targets and expiry, and the ID it would be written under when it names one.</summary>
     public static StateShape ProposedShape { get; } = StateShape.Object((IdKey, null), (ScopeKey, null), (TargetsKey, null), (ExpiresAtKey, null));
@@ -911,7 +911,7 @@ public sealed class StandingProposal(JsonObject json)
 
     public static StateShape Shape { get; } = StateShape.Object(
         (IdKey, null), (ProposedByKey, null), (SessionIdKey, null), (ProposedAtKey, null), (HubKey, null), (LineKey, StandingLine.ProposedShape), (GrantKey, StandingGrant.ProposedShape),
-        (PresentedByKey, null), (PresentedPrincipalKey, null), (PresentedAtKey, null), (PresentedRequestKey, null), (PresentedRevisionKey, null), (PresentedEffectKey, null));
+        (PresentedByKey, null), (PresentedPrincipalKey, null), (PresentedAtKey, null), (PresentedRequestKey, null), (PresentedRevisionKey, null), (PresentedEffectKey, null), ("goalTaskId", null));
 
     /// <summary>A session's proposal; its line or grant is added next.</summary>
     public static StandingProposal BySession(string id, string proposedBy, string sessionId, DateTimeOffset proposedAt) =>
