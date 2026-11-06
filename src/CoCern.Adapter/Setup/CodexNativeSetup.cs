@@ -43,13 +43,13 @@ internal static class CodexNativeSetup
         else
         {
             var folder = ConnectionFolder(environment, cacheRoot);
-            candidate = folder is null ? null : ClientSettings.StageNativeCandidate(folder, "codex", SetupEnvironment.AdapterCommandLine(dotnet, adapter), development, profile);
+            candidate = folder is null ? null : ClientSettings.StageNativeCandidate(folder, "codex", HookCommandLine(dotnet, adapter), development, profile);
         }
         candidate = candidate
             ?? throw new ClientSettingsException("CoCern could not prepare its private native connection. Your existing app settings were preserved.");
         using var data = JsonDocument.Parse(File.ReadAllBytes(candidate));
         var hooksPath = Path.Combine(profile, "hooks.json");
-        var hooks = MergeHooks(ReadHooks(hooksPath), data.RootElement.GetProperty("hooks"));
+        var hooks = MergeHooks(ReadHooks(hooksPath), data.RootElement.GetProperty("hooks"), profile);
         var hookBytes = JsonSerializer.SerializeToUtf8Bytes(hooks, new JsonSerializerOptions { WriteIndented = true });
         var skill = SkillPath(home);
         var text = SkillText();
@@ -69,6 +69,18 @@ internal static class CodexNativeSetup
         return Inspect(home, profile, environment, cacheRoot);
     }
 
+    internal static string HookCommandLine(string dotnet, string adapter)
+    {
+        if (!OperatingSystem.IsWindows()) return SetupEnvironment.AdapterCommandLine(dotnet, adapter);
+        // Codex runs Windows hooks in the chat's PowerShell, where a quoted path needs the call operator.
+        var (command, arguments) = SetupEnvironment.AdapterLaunch(dotnet, adapter);
+        return "& " + string.Join(' ', arguments.Prepend(command).Select(QuoteHookArgument));
+    }
+
+    internal static string QuoteHookArgument(string argument) => OperatingSystem.IsWindows()
+        ? "'" + argument.Replace("'", "''", StringComparison.Ordinal) + "'"
+        : LogonStart.Quote(argument);
+
     internal static JsonObject ReadHooks(string path)
     {
         if (!File.Exists(path)) return new();
@@ -82,7 +94,7 @@ internal static class CodexNativeSetup
         catch (JsonException) { throw new ClientSettingsException("Codex hooks.json could not be read safely. Fix or move it, then prepare again."); }
     }
 
-    internal static JsonObject MergeHooks(JsonObject document, JsonElement desired)
+    internal static JsonObject MergeHooks(JsonObject document, JsonElement desired, string? profile = null)
     {
         if (document["hooks"] is not (null or JsonObject)) throw new ClientSettingsException("Codex hooks.json has an unsupported hooks value.");
         var hooks = document["hooks"] as JsonObject ?? new JsonObject();
@@ -94,12 +106,14 @@ internal static class CodexNativeSetup
             var desiredCommand = desired.GetProperty(eventName)[0].GetProperty("hooks")[0].GetProperty("command").GetString()!;
             var profileIndex = desiredCommand.IndexOf(" --profile ", StringComparison.Ordinal);
             var profileArgument = profileIndex < 0 ? null : desiredCommand[profileIndex..].Split(" --development-root ", StringSplitOptions.None)[0];
+            var legacyProfileArgument = profile is null ? null : " --profile " + LogonStart.Quote(profile);
             for (var i = entries.Count - 1; i >= 0; i--)
                 if (entries[i] is JsonObject entry && entry["hooks"] is JsonArray handlers)
                 {
                     for (var j = handlers.Count - 1; j >= 0; j--)
                         if (handlers[j] is JsonObject handler && (string?)handler["command"] is { } command && profileArgument is not null &&
-                            command.Contains(" --native-hook codex --connection ", StringComparison.Ordinal) && command.Contains(profileArgument, StringComparison.Ordinal)) handlers.RemoveAt(j);
+                            command.Contains(" --native-hook codex --connection ", StringComparison.Ordinal) &&
+                            (command.Contains(profileArgument, StringComparison.Ordinal) || legacyProfileArgument is not null && command.Contains(legacyProfileArgument, StringComparison.Ordinal))) handlers.RemoveAt(j);
                     if (handlers.Count == 0) entries.RemoveAt(i);
                 }
             foreach (var handler in desired.GetProperty(eventName).EnumerateArray())
@@ -123,7 +137,7 @@ internal static class CodexNativeSetup
         if (registration is null) return initial;
         using var candidate = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(folder, "native-client-codex.candidate.json")));
         var hooks = ReadHooks(Path.Combine(profile, "hooks.json"));
-        var expected = MergeHooks(new JsonObject(), candidate.RootElement.GetProperty("hooks"));
+        var expected = MergeHooks(new JsonObject(), candidate.RootElement.GetProperty("hooks"), profile);
         var installed = hooks["hooks"] as JsonObject;
         var desired = expected["hooks"]!.AsObject();
         bool Matches(string name) => installed?[name] is JsonArray entries && desired[name] is JsonArray targets && targets.All(target => entries.Any(entry => JsonNode.DeepEquals(entry, target)));

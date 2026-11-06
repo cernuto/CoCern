@@ -88,6 +88,7 @@ internal static class ClientSettings
         var scope = NodeState.HasIdentityFiles(folder) ? NodeState.NativeCredentialIdentity(folder) : LocalWakeConnection.NativeCredentialIdentity(folder);
         if (scope is null) return null;
         var path = Path.Combine(folder, "native-client-" + provider + ".candidate.json");
+        string Quote(string argument) => provider == "codex" ? CodexNativeSetup.QuoteHookArgument(argument) : LogonStart.Quote(argument);
         string? stableInvocation = null;
         if (File.Exists(path))
         {
@@ -101,11 +102,11 @@ internal static class ClientSettings
                 ChatLocators.Text(previous.RootElement, "helperVersion") is { } previousVersion &&
                 NativeRegistration.Read(path, provider, folder, clientProfile, previousVersion) is not null &&
                 previous.RootElement.GetProperty("hooks").GetProperty("SessionStart")[0].GetProperty("hooks")[0].GetProperty("command").GetString() is { } prior &&
-                prior.EndsWith(" --development-root " + LogonStart.Quote(Path.GetFullPath(developmentRoot)), StringComparison.Ordinal)) stableInvocation = prior;
+                prior.EndsWith(" --development-root " + Quote(Path.GetFullPath(developmentRoot)), StringComparison.Ordinal)) stableInvocation = prior;
         }
-        var invocation = command + " --native-hook " + provider + " --connection " + LogonStart.Quote(folder) +
-            (clientProfile is null ? "" : " --profile " + LogonStart.Quote(clientProfile)) +
-            (developmentRoot is null ? "" : " --development-root " + LogonStart.Quote(Path.GetFullPath(developmentRoot)));
+        var invocation = command + " --native-hook " + provider + " --connection " + Quote(folder) +
+            (clientProfile is null ? "" : " --profile " + Quote(clientProfile)) +
+            (developmentRoot is null ? "" : " --development-root " + Quote(Path.GetFullPath(developmentRoot)));
         invocation = stableInvocation ?? invocation;
         JsonObject Handler(bool stop = false) => stop
             ? new() { ["type"] = "command", ["command"] = invocation, ["asyncRewake"] = true, ["timeout"] = StopHookTimeoutSeconds }
@@ -139,7 +140,8 @@ internal static class ClientSettings
             var options = AdapterOptions.FromEnvironment(key => environment.GetValueOrDefault(key));
             // A setup command is not an adapter: it leaves no status file, and prints no wake lines over its own output.
             if (LocalWakeConnection.Create(options, environment.GetValueOrDefault("COCERN_TOKEN_FILE"), cacheRoot, _ => { }) is { } connection)
-                return StageNativeCandidate(connection.Folder, provider, SetupEnvironment.AdapterCommandLine(dotnet, adapter), developmentRoot, clientProfile);
+                return StageNativeCandidate(connection.Folder, provider,
+                    provider == "codex" ? CodexNativeSetup.HookCommandLine(dotnet, adapter) : SetupEnvironment.AdapterCommandLine(dotnet, adapter), developmentRoot, clientProfile);
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException or AdapterConfigurationException)
         { /* Raw setup remains usable when the optional private candidate cannot be staged. */ }

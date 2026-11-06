@@ -287,12 +287,17 @@ public sealed class NativeJoinSetupTests : IDisposable
                     Interlocked.Increment(ref count); // Count every relay connection, retaining no request data or headers.
                     using var stream = client.GetStream();
                     var firstLine = new byte[4096]; var length = 0;
-                    while (length < firstLine.Length)
+                    try
                     {
-                        var read = await stream.ReadAsync(firstLine.AsMemory(length, 1), stopping.Token);
-                        if (read == 0) break;
-                        if (firstLine[length++] == '\n') break;
+                        while (length < firstLine.Length)
+                        {
+                            var read = await stream.ReadAsync(firstLine.AsMemory(length, 1), stopping.Token);
+                            if (read == 0) break;
+                            if (firstLine[length++] == '\n') break;
+                        }
                     }
+                    catch (IOException error) when (error.InnerException is SocketException { SocketErrorCode: SocketError.ConnectionReset })
+                    { /* A killed fixture child can reset its socket; the accepted connection remains counted. */ }
                     var parts = Encoding.ASCII.GetString(firstLine, 0, length).Split(' ');
                     if (parts.Length >= 2 && parts[1].Split('?')[0] == "/hubs/coordination/negotiate") Interlocked.Increment(ref hintAttempts);
                 }

@@ -10,6 +10,53 @@ namespace CoCern.Tests;
 public sealed class CodexNativeSetupTests
 {
     [Fact]
+    public async Task Windows_native_hooks_parse_as_literal_PowerShell_invocations()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        const string dotnet = @"C:\CoCern tools\O'Brien\dotnet.exe";
+        const string adapter = @"C:\CoCern $data\$(Get-Item unused)`helper\CoCern.Adapter.dll";
+        const string connection = @"C:\connections\O'Brien $data\$(Get-Item unused)`connection";
+        var command = CodexNativeSetup.HookCommandLine(dotnet, adapter) + " " + CodexNativeSetup.QuoteHookArgument(connection);
+        var start = new System.Diagnostics.ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "WindowsPowerShell", "v1.0", "powershell.exe"))
+        {
+            UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true,
+            RedirectStandardOutput = true, RedirectStandardError = true
+        };
+        start.ArgumentList.Add("-NoProfile");
+        start.ArgumentList.Add("-Command");
+        start.ArgumentList.Add("""
+            $tokens = $null; $errors = $null
+            $ast = [System.Management.Automation.Language.Parser]::ParseInput([Console]::In.ReadToEnd(), [ref]$tokens, [ref]$errors)
+            if ($errors.Count -ne 0) { exit 1 }
+            $command = $ast.EndBlock.Statements[0].PipelineElements[0]
+            if ($command.InvocationOperator -ne 'Ampersand') { exit 2 }
+            $values = @($command.CommandElements | ForEach-Object {
+                if ($_ -isnot [System.Management.Automation.Language.StringConstantExpressionAst] -or $_.StringConstantType -ne 'SingleQuoted') { exit 3 }
+                $_.Value
+            })
+            ConvertTo-Json -InputObject $values -Compress
+            """);
+        using var process = System.Diagnostics.Process.Start(start)!;
+        await process.StandardInput.WriteAsync(command);
+        process.StandardInput.Close();
+        var output = process.StandardOutput.ReadToEndAsync();
+        var error = process.StandardError.ReadToEndAsync();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var exited = true;
+        try { await process.WaitForExitAsync(timeout.Token); }
+        catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+        {
+            exited = false;
+            try { process.Kill(entireProcessTree: true); }
+            catch (InvalidOperationException) { }
+            await process.WaitForExitAsync();
+        }
+        Assert.True(exited, "PowerShell parsing did not finish.");
+        Assert.True(process.ExitCode == 0, await error);
+        Assert.Equal(new[] { dotnet, adapter, connection }, JsonSerializer.Deserialize<string[]>(await output));
+    }
+
+    [Fact]
     public void Explicit_native_setup_restores_owned_token_privacy_without_rotating_its_bytes()
     {
         var root = Path.Combine(Path.GetTempPath(), "cocern-native-permissions-" + Guid.NewGuid().ToString("N"));
@@ -79,10 +126,10 @@ public sealed class CodexNativeSetupTests
     public void Native_hook_repair_preserves_unrelated_handlers_and_is_idempotent()
     {
         const string oldCommand = "dotnet old.dll --native-hook codex --connection \"private\" --profile \"profile\"";
-        const string command = "dotnet current.dll --native-hook codex --connection \"private\" --profile \"profile\"";
+        const string command = "& 'dotnet' 'current.dll' --native-hook codex --connection 'private' --profile 'profile'";
         var existing = JsonNode.Parse(JsonSerializer.Serialize(new { description = "My hooks", hooks = new
         {
-            SessionStart = new[] { new { hooks = new[] { new { type = "command", command = oldCommand }, new { type = "command", command = "my-startup-helper" } } } },
+            SessionStart = new[] { new { hooks = new[] { new { type = "command", command = oldCommand }, new { type = "command", command = "my-startup-helper --profile \"profile\"" }, new { type = "command", command = "dotnet other.dll --native-hook codex --connection \"private\" --profile \"other-profile\"" } } } },
             Stop = new[] { new { hooks = new[] { new { type = "command", command = "my-stop-helper" } } } }
         } }))!.AsObject();
         var desired = JsonSerializer.SerializeToElement(new
@@ -90,12 +137,13 @@ public sealed class CodexNativeSetupTests
             SessionStart = new[] { new { hooks = new[] { new { type = "command", command, timeout = 20 } } } },
             PreToolUse = new[] { new { matcher = "^mcp__cocern__.*$", hooks = new[] { new { type = "command", command, timeout = 20 } } } }
         });
-        var first = CodexNativeSetup.MergeHooks(existing, desired).ToJsonString();
+        var first = CodexNativeSetup.MergeHooks(existing, desired, "profile").ToJsonString();
         Assert.Contains("my-startup-helper", first);
         Assert.Contains("my-stop-helper", first);
         Assert.Contains("My hooks", first);
+        Assert.Contains("other.dll", first);
         Assert.DoesNotContain("old.dll", first);
-        var second = CodexNativeSetup.MergeHooks(JsonNode.Parse(first)!.AsObject(), desired).ToJsonString();
+        var second = CodexNativeSetup.MergeHooks(JsonNode.Parse(first)!.AsObject(), desired, "profile").ToJsonString();
         Assert.Equal(first, second);
     }
 
