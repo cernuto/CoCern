@@ -22,6 +22,11 @@ internal sealed record RelayCall(RelayCaller Caller, string Tool, RelayTool Defi
     internal string? ActingSessionId { get; init; }
     /// <summary>The manager generation that chat holds, read when it proved itself; null for any other chat. Attribution, never authority.</summary>
     internal long? ManagerGeneration { get; init; }
+    /// <summary>
+    /// Who the adapter says made the call (<c>mcp</c>, <c>claude-stop</c>, <c>claude-waiter</c>, <c>wake-watcher</c>, <c>node</c>); null when unreported or
+    /// not one of those. A report, never authority: it tells a chat's own waiter apart from the chat, so the directory can hear the waiter as presence.
+    /// </summary>
+    internal string? CallOrigin { get; init; }
 }
 
 /// <summary>
@@ -49,7 +54,9 @@ internal sealed class CallGuard(Aggregates aggregates, string incarnation, Func<
             trace.BackgroundCall = controls.BackgroundCall;
         }
         args["hubIncarnation"] = incarnation;
-        call = new(caller with { IsInternal = true }, tool, definition, args, controls);
+        // Read from the raw arguments: the guard above already dropped the adapter's report from what the tool sees.
+        var origin = arguments.ValueKind == JsonValueKind.Object && arguments.TryGetProperty("callOrigin", out var reported) && reported.ValueKind == JsonValueKind.String ? reported.GetString() : null;
+        call = new(caller with { IsInternal = true }, tool, definition, args, controls) { CallOrigin = origin is "mcp" or "claude-stop" or "claude-waiter" or "wake-watcher" or "node" ? origin : null };
         return true;
     }
 

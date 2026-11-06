@@ -68,17 +68,42 @@ internal sealed class LocalWakeConnection
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException) { return null; }
     }
 
-    /// <summary>A native Stop hook may use one matching local connection; ambiguous hubs are never guessed.</summary>
+    /// <summary>
+    /// The local connection a Claude Stop hook waits on. A chat's handle normally sits in one folder. The same hub session sits in two when
+    /// the chat's connection was re-created under another address or pin (a pinned HTTPS folder beside the plain HTTP one, as on the hub's
+    /// own PC): that is one session, not two hubs, and the folder that recorded it last is the live connection. A chat that opened a newer
+    /// session elsewhere is followed to that session, as <see cref="NodeState.ChooseForChat"/> follows it within a folder. Only handles for
+    /// different sessions with nothing to choose between them are ambiguous, and then nothing is guessed: a waiter on the wrong hub would
+    /// wait forever. Giving up here left the chat with no waiter at all, unreachable until a human prompted it (the Manager on 2026-11-06).
+    /// </summary>
     public static string? FindForClaude(string chatId, string? cacheRoot = null)
     {
         var root = cacheRoot ?? DefaultRoot;
         if (!ChatLocators.IsUuid(chatId) || !Directory.Exists(root)) return null;
         try
         {
-            var matches = Directory.EnumerateDirectories(root).Take(128).Where(folder => Read(folder) is not null && ClaudeWaiter.FindHandle(folder, chatId) is not null).Take(2).ToArray();
-            return matches.Length == 1 ? matches[0] : null;
+            var matches = Directory.EnumerateDirectories(root).Take(128)
+                .Where(folder => Read(folder) is not null)
+                .Select(folder => (Folder: folder, Handle: ClaudeWaiter.FindHandle(folder, chatId)))
+                .Where(match => match.Handle is not null)
+                .Select(match => (match.Folder, Handle: match.Handle!, Written: HandleWrittenAt(match.Folder, match.Handle!.SessionId)))
+                .OrderByDescending(match => match.Handle.OpenedAt).ThenByDescending(match => match.Written).ThenBy(match => match.Folder, StringComparer.Ordinal)
+                .ToArray();
+            if (matches.Length == 0) return null;
+            var newest = matches[0];
+            if (matches.Length == 1 || matches.All(match => match.Handle.SessionId == newest.Handle.SessionId)) return newest.Folder;
+            var tied = matches.Any(match => match.Handle.SessionId != newest.Handle.SessionId &&
+                match.Handle.OpenedAt == newest.Handle.OpenedAt && match.Written == newest.Written);
+            return tied ? null : newest.Folder;
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException) { return null; }
+    }
+
+    /// <summary>When a folder last recorded the chat's session; a record that cannot be stamped sorts last.</summary>
+    private static DateTimeOffset HandleWrittenAt(string folder, string sessionId)
+    {
+        try { return new DateTimeOffset(File.GetLastWriteTimeUtc(NodeState.SessionHandlePath(folder, sessionId)), TimeSpan.Zero); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException) { return DateTimeOffset.MinValue; }
     }
 
     private static string Key(string hub, string tokenFile) => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(hub + "\n" + (OperatingSystem.IsWindows() ? Path.GetFullPath(tokenFile).ToUpperInvariant() : Path.GetFullPath(tokenFile)))));
