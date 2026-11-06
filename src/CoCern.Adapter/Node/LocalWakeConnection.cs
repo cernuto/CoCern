@@ -9,6 +9,8 @@ internal sealed class LocalWakeConnection
 {
     internal const string FileName = "connection.json";
     internal static string DefaultRoot => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CoCern", "local-wake");
+    internal static string FolderFor(AdapterOptions options, string tokenFile, string? cacheRoot = null) =>
+        Path.Combine(cacheRoot ?? DefaultRoot, Key(options.BaseUri.AbsoluteUri, tokenFile));
     public required string Folder { get; init; }
     public required AdapterOptions Options { get; init; }
 

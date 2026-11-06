@@ -212,7 +212,7 @@ try
         registration = NativeRegistration.FromClientArguments(args) ?? throw new AdapterConfigurationException(NativeRegistration.Refusal);
         if (await registration.AcceptAsync(CancellationToken.None) is null) throw new AdapterConfigurationException(NativeRegistration.Refusal);
     }
-    var options = registration?.Connection ?? AdapterOptions.FromEnvironment();
+    var options = registration is null ? AdapterOptions.FromEnvironment() : NativeRegistration.ClientOptions(registration.Connection);
     // First, so a status file that never appears means this adapter never got past reading its options.
     LocalWakeStatus.Report(LocalWakeCodes.Starting);
     // On node credentials the hub certificate is pinned; with explicit settings this is the plain handler, as before.

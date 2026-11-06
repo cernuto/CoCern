@@ -77,6 +77,73 @@ public sealed class AddPcTests : IDisposable
         Assert.Contains("-LocalPort 5273", status.FirewallCommand);
     }
 
+    [SkippableFact]
+    public async Task Reinstall_stops_only_its_adapters_and_stops_the_supervisor_first()
+    {
+        Skip.IfNot(OperatingSystem.IsWindows());
+        var result = await RunStopFixtureAsync("""
+            $script:items=@(
+                (Item 20 'dotnet.exe' 'C:\dotnet\dotnet.exe' ('"C:\dotnet\dotnet.exe" "'+$install+'\CoCern.Adapter.dll"')),
+                (Item 10 'CoCern.Adapter.exe' ($install+'\CoCern.Adapter.exe') ('"'+$install+'\CoCern.Adapter.exe" --node --data-dir "'+$node+'"')),
+                (Item 30 'CoCern.Adapter.exe' ($node+'\updates\versions\image\CoCern.Adapter.exe') ('"'+$node+'\updates\versions\image\CoCern.Adapter.exe" --node-worker --data-dir "'+$node+'"')),
+                (Item 40 'CoCern.Adapter.exe' ($install+'-other\CoCern.Adapter.exe') ('"'+$install+'-other\CoCern.Adapter.exe"')),
+                (Item 50 'dotnet.exe' 'C:\dotnet\dotnet.exe' 'dotnet "C:\other\CoCern.Adapter.dll"'),
+                (Item 60 'dotnet.exe' 'C:\dotnet\dotnet.exe' ('dotnet "'+$install+'\Other.dll"')))
+            CoCernStopAdapters $install $node
+            if($script:stopped[0] -ne 10 -or (($script:stopped | Sort-Object) -join ',') -ne '10,20,30'){throw 'Wrong adapter selection or stop order.'}
+            if(($script:items.ProcessId -join ',') -ne '40,50,60'){throw 'An unrelated process was changed.'}
+            'fixture-passed'
+            """);
+        Assert.Contains("fixture-passed", result);
+        var command = DashboardAddPc.Command("https://fixture/", JoinCode, Fingerprint);
+        Assert.True(command.IndexOf("Expand-Archive", StringComparison.Ordinal) < command.IndexOf("CoCernStopAdapters $d", StringComparison.Ordinal));
+        Assert.True(command.IndexOf("CoCernStopAdapters $d", StringComparison.Ordinal) < command.IndexOf("Rename-Item -LiteralPath $d", StringComparison.Ordinal));
+    }
+
+    [SkippableFact]
+    public async Task Reinstall_refuses_a_reused_process_id_before_terminating_anything()
+    {
+        Skip.IfNot(OperatingSystem.IsWindows());
+        var result = await RunStopFixtureAsync("""
+            $script:items=@((Item 10 'CoCern.Adapter.exe' ($install+'\CoCern.Adapter.exe') ('"'+$install+'\CoCern.Adapter.exe" --node')))
+            $script:replace=$true
+            $refused=$false
+            try{CoCernStopAdapters $install $node}catch{$refused=$true}
+            if(-not $refused -or $script:stopped.Count){throw 'A reused process ID was terminated.'}
+            'fixture-passed'
+            """);
+        Assert.Contains("fixture-passed", result);
+    }
+
+    private async Task<string> RunStopFixtureAsync(string scenario)
+    {
+        var fixture = Path.Combine(root, "stop-fixture.ps1");
+        var directory = root.Replace("'", "''");
+        var generated = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(DashboardAddPc.Command("https://fixture/", JoinCode, Fingerprint)));
+        var script = "$ErrorActionPreference='Stop'\nAdd-Type -IgnoreWarnings -WarningAction SilentlyContinue '" + DashboardAddPc.PinSource + "'\n" +
+            DashboardAddPc.StopAdaptersSource + "\n$install='" + directory + "\\owned adapter'\n$node='" + directory + "\\node'\n" + """
+            $script:stopped=@()
+            $script:replace=$false
+            function Item($id,$name,$image,$command){[pscustomobject]@{ProcessId=$id;Name=$name;ExecutablePath=$image;CommandLine=$command;CreationDate='original'}}
+            function Get-CimInstance($ClassName,$Filter,$ErrorAction){if($Filter -match '^ProcessId = ([0-9]+)$'){$id=[int]$matches[1];foreach($item in $script:items){if($item.ProcessId -eq $id){if($script:replace){$changed=Item $id $item.Name $item.ExecutablePath 'replacement-process';$changed.CreationDate='replacement';$changed}else{$item}}}}else{$script:items}}
+            function Invoke-CimMethod($InputObject,$MethodName,$ErrorAction){if($MethodName -eq 'GetOwnerSid'){return [pscustomobject]@{ReturnValue=0;Sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value}};if($MethodName -ne 'Terminate'){throw 'Unexpected process operation.'};$script:stopped+= [int]$InputObject.ProcessId;$script:items=@($script:items | Where-Object ProcessId -ne $InputObject.ProcessId);[pscustomobject]@{ReturnValue=0}}
+            function Start-Sleep{throw 'The fixture must never wait on a real process.'}
+            """ + "\n$cocernTokens=$null;$cocernParseErrors=$null;$null=[System.Management.Automation.Language.Parser]::ParseInput([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + generated + "')),[ref]$cocernTokens,[ref]$cocernParseErrors);if($cocernParseErrors.Count){throw 'The generated connect command has a syntax error.'}\n" + scenario;
+        await File.WriteAllTextAsync(fixture, script);
+        var start = new ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "WindowsPowerShell", "v1.0", "powershell.exe"))
+        { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+        foreach (var argument in new[] { "-NoProfile", "-NonInteractive", "-Command", $"& ([scriptblock]::Create([IO.File]::ReadAllText('{fixture.Replace("'", "''")}')))" }) start.ArgumentList.Add(argument);
+        using var process = Process.Start(start)!;
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var output = process.StandardOutput.ReadToEndAsync(timeout.Token);
+        var error = process.StandardError.ReadToEndAsync(timeout.Token);
+        try { await process.WaitForExitAsync(timeout.Token); }
+        catch { process.Kill(); throw; }
+        var text = await output;
+        Assert.True(process.ExitCode == 0, await error + text);
+        return text;
+    }
+
     private RelayHostFixture ZipHost(bool discovery, string adapterPath, IPAddress? remote = null) => new(remoteAddress: remote, settings: new Dictionary<string, string?>
     {
         ["Relay:Discovery:Enabled"] = discovery ? "true" : "false", ["Relay:Connect:AdapterPath"] = adapterPath

@@ -115,7 +115,7 @@ internal static class NativeJoinHook
                 await registration.AnswerAsync(ct, TimeSpan.FromMilliseconds(250));
             }
             if (!registration.StillCurrent()) return await Refuse();
-            return await RunAsync(provider, new StringReader(text), output, error, join, ct);
+            return await RunAsync(provider, new StringReader(text), output, error, join, ct, registration);
         }
         catch (JsonException) { return requiresEditValidation ? await Refuse() : 0; }
         catch (OperationCanceledException) when (ct.IsCancellationRequested && requiresEditValidation) { return await Refuse(); }
@@ -125,7 +125,7 @@ internal static class NativeJoinHook
         async Task<int> Refuse() { await error.WriteLineAsync("CoCern native capture could not be verified."); return 2; }
     }
 
-    internal static async Task<int> RunAsync(string provider, TextReader input, TextWriter output, TextWriter error, NativeJoin join, CancellationToken ct)
+    internal static async Task<int> RunAsync(string provider, TextReader input, TextWriter output, TextWriter error, NativeJoin join, CancellationToken ct, NativeRegistration? registration = null)
     {
         var editGuardEnabled = NativeEditHook.Enabled;
         // Until a valid envelope proves this is unrelated, an opted-in edit hook cannot safely abstain on malformed input.
@@ -155,7 +155,14 @@ internal static class NativeJoinHook
             }
             switch (eventName)
             {
-                case "SessionStart": await join.EnsureAsync(capture, ct); return 0;
+                case "SessionStart":
+                    var handle = await join.EnsureAsync(capture, ct);
+                    if (provider == "codex" && registration is not null)
+                    {
+                        await NativeStartupEvidence.RecordAsync(registration, join, capture, handle, ct);
+                        await output.WriteLineAsync(JsonSerializer.Serialize(new { hookSpecificOutput = new { hookEventName = "SessionStart", additionalContext = NativeStartupEvidence.WorkflowContext(handle) } }));
+                    }
+                    return 0;
                 case "Stop" when provider == "claude":
                     return await StopHook.RunNativeAsync(new StringReader(text), error, join, ct, ownerGone: OwningProcess.WaitUntilGoneAsync);
                 case "PreToolUse":
@@ -176,11 +183,13 @@ internal static class NativeJoinHook
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
             if (blockingEdit) { await error.WriteLineAsync("CoCern native capture could not be verified."); return 2; }
+            if (provider == "codex" && registration is not null) await output.WriteLineAsync("{\"systemMessage\":\"CoCern startup is unverified. Check Connect before coordinated work; do not create a replacement session.\"}");
             return 0;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or JsonException or InvalidOperationException or FormatException or OverflowException)
         {
             if (recognized) { await error.WriteLineAsync("CoCern native capture could not be verified."); return 2; }
+            if (provider == "codex" && registration is not null) await output.WriteLineAsync("{\"systemMessage\":\"CoCern startup is unverified. Check Connect before coordinated work; do not create a replacement session.\"}");
             return 0;
         }
     }
@@ -504,6 +513,9 @@ internal sealed class NativeRegistration
         // This noncredential feature switch can only add a refusal gate; it never supplies native identity or grants permission.
         var fileClaims = start.Environment.TryGetValue("COCERN_FILE_CLAIMS", out var flag)
             && string.Equals(flag, "true", StringComparison.OrdinalIgnoreCase);
+        start.Environment.TryGetValue("COCERN_ROLE", out var role);
+        start.Environment.TryGetValue("COCERN_PROFILE", out var profile);
+        start.Environment.TryGetValue("COCERN_EVENT_WAITS", out var eventWaits);
         foreach (var name in start.Environment.Keys.Where(name => name.StartsWith("COCERN_", StringComparison.OrdinalIgnoreCase)).ToArray())
             start.Environment.Remove(name);
         // Explicit private context is the only authority. An old flag-ignoring helper or an
@@ -511,6 +523,24 @@ internal sealed class NativeRegistration
         start.Environment["COCERN_URL"] = "invalid-private-fallback";
         start.Environment["COCERN_TOKEN"] = "invalid-private-fallback";
         if (fileClaims) start.Environment["COCERN_FILE_CLAIMS"] = "true";
+        // Catalog preferences do not supply identity or credentials; retain the app's explicit tool choices.
+        if (string.Equals(role, "admin", StringComparison.OrdinalIgnoreCase)) start.Environment["COCERN_ROLE"] = "admin";
+        if (string.Equals(profile, "chat", StringComparison.OrdinalIgnoreCase)) start.Environment["COCERN_PROFILE"] = "chat";
+        if (string.Equals(profile, "diagnostics", StringComparison.OrdinalIgnoreCase)) start.Environment["COCERN_PROFILE"] = "diagnostics";
+        if (string.Equals(eventWaits, "true", StringComparison.OrdinalIgnoreCase)) start.Environment["COCERN_EVENT_WAITS"] = "true";
+    }
+
+    internal static AdapterOptions ClientOptions(AdapterOptions connection, Func<string, string?>? environment = null)
+    {
+        environment ??= Environment.GetEnvironmentVariable;
+        return new(connection.BaseUri.AbsoluteUri, connection.Token,
+            admin: string.Equals(environment("COCERN_ROLE"), "admin", StringComparison.OrdinalIgnoreCase), signalR: connection.SignalR)
+        {
+            PinnedFingerprint = connection.PinnedFingerprint, NodeFolder = connection.NodeFolder,
+            ChatOnly = string.Equals(environment("COCERN_PROFILE"), "chat", StringComparison.OrdinalIgnoreCase),
+            Diagnostics = string.Equals(environment("COCERN_PROFILE"), "diagnostics", StringComparison.OrdinalIgnoreCase),
+            EventWaits = string.Equals(environment("COCERN_EVENT_WAITS"), "true", StringComparison.OrdinalIgnoreCase)
+        };
     }
     internal static bool ValidClientArguments(string[] args) =>
         args is ["--native-client", "codex" or "claude", "--connection", var folder, "--profile", var profile] &&

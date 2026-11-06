@@ -88,6 +88,7 @@ internal static class ClientSettings
         var scope = NodeState.HasIdentityFiles(folder) ? NodeState.NativeCredentialIdentity(folder) : LocalWakeConnection.NativeCredentialIdentity(folder);
         if (scope is null) return null;
         var path = Path.Combine(folder, "native-client-" + provider + ".candidate.json");
+        string? stableInvocation = null;
         if (File.Exists(path))
         {
             if (!NodeState.IsPrivateFile(path) || new FileInfo(path).Length > 65536) return null;
@@ -95,10 +96,17 @@ internal static class ClientSettings
             if (ChatLocators.Text(previous.RootElement, "kind") != "cocern-native-candidate-v1" || ChatLocators.Text(previous.RootElement, "provider") != provider ||
                 ChatLocators.Text(previous.RootElement, "state") != "inactive") return null;
             if (ChatLocators.Text(previous.RootElement, "profile") is { } previousProfile && previousProfile != clientProfile) return null;
+            // An owned development hook follows current.json, so its trusted command need not change for each immutable build.
+            if (developmentRoot is not null && clientProfile is not null &&
+                ChatLocators.Text(previous.RootElement, "helperVersion") is { } previousVersion &&
+                NativeRegistration.Read(path, provider, folder, clientProfile, previousVersion) is not null &&
+                previous.RootElement.GetProperty("hooks").GetProperty("SessionStart")[0].GetProperty("hooks")[0].GetProperty("command").GetString() is { } prior &&
+                prior.EndsWith(" --development-root " + LogonStart.Quote(Path.GetFullPath(developmentRoot)), StringComparison.Ordinal)) stableInvocation = prior;
         }
         var invocation = command + " --native-hook " + provider + " --connection " + LogonStart.Quote(folder) +
             (clientProfile is null ? "" : " --profile " + LogonStart.Quote(clientProfile)) +
             (developmentRoot is null ? "" : " --development-root " + LogonStart.Quote(Path.GetFullPath(developmentRoot)));
+        invocation = stableInvocation ?? invocation;
         JsonObject Handler(bool stop = false) => stop
             ? new() { ["type"] = "command", ["command"] = invocation, ["asyncRewake"] = true, ["timeout"] = StopHookTimeoutSeconds }
             : new() { ["type"] = "command", ["command"] = invocation, ["timeout"] = 20 };
@@ -123,7 +131,7 @@ internal static class ClientSettings
     // No installed provider/profile handshake has been demonstrated. Candidate presence is never an activation receipt.
     internal static ClientPlan PlanNativePromotion(string path, string folder, string provider) => ClientPlan.Unchanged(path);
 
-    internal static void StageLocalNativeCandidate(string provider, string dotnet, string adapter, IReadOnlyDictionary<string, string> environment, string? cacheRoot = null,
+    internal static string? StageLocalNativeCandidate(string provider, string dotnet, string adapter, IReadOnlyDictionary<string, string> environment, string? cacheRoot = null,
         string? developmentRoot = null, string? clientProfile = null)
     {
         try
@@ -131,10 +139,11 @@ internal static class ClientSettings
             var options = AdapterOptions.FromEnvironment(key => environment.GetValueOrDefault(key));
             // A setup command is not an adapter: it leaves no status file, and prints no wake lines over its own output.
             if (LocalWakeConnection.Create(options, environment.GetValueOrDefault("COCERN_TOKEN_FILE"), cacheRoot, _ => { }) is { } connection)
-                StageNativeCandidate(connection.Folder, provider, SetupEnvironment.AdapterCommandLine(dotnet, adapter), developmentRoot, clientProfile);
+                return StageNativeCandidate(connection.Folder, provider, SetupEnvironment.AdapterCommandLine(dotnet, adapter), developmentRoot, clientProfile);
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException or AdapterConfigurationException)
         { /* Raw setup remains usable when the optional private candidate cannot be staged. */ }
+        return null;
     }
 
     internal static void StageDevelopmentNativeCandidate(string configurationPath, string provider, string dotnet, string launcher, string developmentRoot, string? cacheRoot)
@@ -176,14 +185,15 @@ internal static class ClientSettings
             throw Malformed(path, "its CoCern launch entry is not a supported command and args table");
         // Our canonical launcher entry is stable: updating current.json is enough to restart its backend, without rewriting config each build.
         var rawArguments = text[arguments[0].ValueStart..arguments[0].ValueEnd];
-        var suffix = $", '--dev-launch', {TomlString(deploymentRoot)}]";
-        if (!replaceLauncher && rawArguments.StartsWith('[') && rawArguments.EndsWith(suffix, StringComparison.Ordinal)
-            && TomlInline.String(rawArguments, 1, rawArguments.Length - suffix.Length) is { } existingLauncher && IsDeployedLauncher(existingLauncher, deploymentRoot))
+        var parsedArguments = ParseArgumentArray(rawArguments);
+        var nativeSuffix = parsedArguments is { Length: >= 7 } && NativeRegistration.ValidClientArguments(parsedArguments[^6..]) ? parsedArguments[^6..] : [];
+        if (!replaceLauncher && parsedArguments is { Length: 3 or 9 } && parsedArguments[1] == "--dev-launch" && SamePath(parsedArguments[2], deploymentRoot)
+            && (parsedArguments.Length == 3 || nativeSuffix.Length == 6) && IsDeployedLauncher(parsedArguments[0], deploymentRoot))
             return ClientPlan.Unchanged(path);
         var edits = new[]
         {
             (Line: command[0], Text: TomlString(dotnetPath)),
-            (Line: arguments[0], Text: $"[{TomlString(launcherDll)}, '--dev-launch', {TomlString(deploymentRoot)}]")
+            (Line: arguments[0], Text: "[" + string.Join(", ", new[] { launcherDll, "--dev-launch", deploymentRoot }.Concat(nativeSuffix).Select(TomlString)) + "]")
         };
         var result = text;
         foreach (var edit in edits.OrderByDescending(x => x.Line.ValueStart)) result = result[..edit.Line.ValueStart] + edit.Text + result[edit.Line.ValueEnd..];
@@ -230,6 +240,74 @@ internal static class ClientSettings
 
     /// <param name="environment">Variables for the adapter, such as <c>COCERN_TOKEN_FILE</c> on the hub's own PC; none for an enrolled node.</param>
     /// <param name="refresh">How to change the variables of a <c>cocern</c> entry the file already has; without one, such an entry is left as it is.</param>
+    internal static ClientPlan PlanNativeCodex(string path, string dotnet, string adapter, string folder, string profile, string? developmentRoot)
+    {
+        var original = ReadAll(path) ?? throw Malformed(path, "no CoCern connection was found");
+        var text = Strict.GetString(original, Bom(original), original.Length - Bom(original));
+        var reader = new TomlReader(text);
+        if (!reader.HasCoCern()) throw Malformed(path, "no CoCern connection was found");
+        var assignments = reader.Assignments.Where(item => item.Table.SequenceEqual(new[] { Table, Name })).ToArray();
+        var commands = assignments.Where(item => item.Key.SequenceEqual(new[] { "command" })).ToArray();
+        var argumentEntries = assignments.Where(item => item.Key.SequenceEqual(new[] { "args" })).ToArray();
+        if (commands.Length != 1 || argumentEntries.Length != 1) throw Malformed(path, "its CoCern command and args must each occur once");
+        var command = commands[0]; var arguments = argumentEntries[0];
+        var existingArguments = ParseArgumentArray(text[arguments.ValueStart..arguments.ValueEnd]);
+        var launcher = developmentRoot is not null && existingArguments is { Length: 3 or 9 } && existingArguments[1] == "--dev-launch" &&
+            SamePath(existingArguments[2], developmentRoot) && IsDeployedLauncher(existingArguments[0], developmentRoot) &&
+            (existingArguments.Length == 3 || NativeRegistration.ValidClientArguments(existingArguments[^6..])) ? existingArguments[0] : adapter;
+        var values = new List<string> { launcher };
+        if (developmentRoot is not null) values.AddRange(["--dev-launch", developmentRoot]);
+        values.AddRange(["--native-client", "codex", "--connection", folder, "--profile", profile]);
+        var result = text;
+        foreach (var edit in new[] { (Line: command, Text: TomlString(dotnet)), (Line: arguments, Text: "[" + string.Join(", ", values.Select(TomlString)) + "]") }.OrderByDescending(item => item.Line.ValueStart))
+            result = result[..edit.Line.ValueStart] + edit.Text + result[edit.Line.ValueEnd..];
+        return result == text ? ClientPlan.Unchanged(path) : ClientPlan.Write(path, [.. original.AsSpan(0, Bom(original)), .. Encoding.UTF8.GetBytes(result)], existed: true, refreshes: true);
+    }
+
+    internal static bool IsNativeCodex(string path, string folder, string profile)
+    {
+        var original = ReadAll(path);
+        if (original is null) return false;
+        var text = Strict.GetString(original, Bom(original), original.Length - Bom(original));
+        var reader = new TomlReader(text);
+        if (!reader.HasCoCern()) return false;
+        var entries = reader.Assignments.Where(item => item.Table.SequenceEqual(new[] { Table, Name })).ToArray();
+        var arguments = entries.Where(item => item.Key.SequenceEqual(new[] { "args" })).ToArray();
+        var commands = entries.Where(item => item.Key.SequenceEqual(new[] { "command" })).ToArray();
+        if (arguments.Length != 1 || commands.Length != 1 || TomlInline.String(text, commands[0].ValueStart, commands[0].ValueEnd) is not { } command ||
+            !File.Exists(command) || !string.Equals(Path.GetFileNameWithoutExtension(command), "dotnet", StringComparison.OrdinalIgnoreCase)) return false;
+        var argument = arguments[0];
+        var args = ParseArgumentArray(text[argument.ValueStart..argument.ValueEnd]);
+        return args is { Length: 7 or 9 } && args[^6..].SequenceEqual(new[] { "--native-client", "codex", "--connection", folder, "--profile", profile }) &&
+            (args.Length == 7 ? SamePath(args[0], typeof(ClientSettings).Assembly.Location) : args[1] == "--dev-launch" && IsDeployedLauncher(args[0], args[2]));
+    }
+
+    internal static string[]? ParseArgumentArray(string raw)
+    {
+        raw = raw.Trim();
+        if (!raw.StartsWith('[') || !raw.EndsWith(']')) return null;
+        var values = new List<string>();
+        var start = 1;
+        while (start < raw.Length - 1)
+        {
+            while (start < raw.Length - 1 && char.IsWhiteSpace(raw[start])) start++;
+            if (start == raw.Length - 1) break;
+            var quote = raw[start];
+            if (quote is not ('\'' or '"')) return null;
+            var end = start + 1;
+            while (end < raw.Length - 1)
+            {
+                if (raw[end] == '\\' && quote == '"') { end += 2; continue; }
+                if (raw[end++] == quote) break;
+            }
+            if (end > raw.Length - 1 || TomlInline.String(raw, start, end) is not { } value) return null;
+            values.Add(value); start = end;
+            while (start < raw.Length - 1 && char.IsWhiteSpace(raw[start])) start++;
+            if (start < raw.Length - 1 && raw[start++] != ',') return null;
+        }
+        return values.ToArray();
+    }
+
     public static ClientPlan PlanCodex(string path, string dotnetPath, string adapterDll, IReadOnlyDictionary<string, string>? environment = null, EntryRefresh? refresh = null)
     {
         var original = ReadAll(path);

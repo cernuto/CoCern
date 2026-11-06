@@ -3,7 +3,7 @@
 @inject IJSRuntime JavaScript
 
 <BbCard role="region" Class="surface connect-view" aria-labelledby="add-pc-heading">
-    <div class="section-heading"><div><h2 id="add-pc-heading">Add another PC</h2><p>Its chats can then message chats here. Do this once per PC.</p></div></div>
+    <div class="section-heading"><div><h2 id="add-pc-heading">Add another PC</h2><p>Its chats can then message chats here. Use this to join or update a PC.</p></div></div>
     @if (_status is null)
     {
         <p class="empty-copy">Getting the details…</p>
@@ -23,6 +23,7 @@
                 <strong>On the other PC, open PowerShell and paste this.</strong>
                 <div class="copy-field"><code>@First.Command</code><BbButton Type="ButtonType.Button" Variant="ButtonVariant.Outline" Class="copy-button" OnClick="() => CopyAsync(First.Command, First.Url)">@Label(First.Url)</BbButton></div>
                 <small>It downloads CoCern from this hub, joins it, and adds CoCern to Claude Code and Codex there; the PC then shows up under Machines.</small>
+                <small class="installer-stop-note">@UpdateNotice</small>
             </li>
         </ol>
         <details class="join-help">
@@ -45,6 +46,7 @@
 
 @code {
     private const string FirewallKey = "firewall";
+    private const string UpdateNotice = "Running adapters for this CoCern installation are stopped before setup. If an open chat loses its CoCern tools, restart that chat to reconnect.";
     private DashboardAddPcStatus? _status;
     private string? _copied;
 

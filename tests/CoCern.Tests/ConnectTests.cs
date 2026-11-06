@@ -2,6 +2,7 @@ using System.Net;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using CoCern.Adapter.Setup;
+using CoCern.Adapter.Node;
 using CoCern.Contracts.Dashboard;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
@@ -24,7 +25,7 @@ public sealed class ConnectTests : IDisposable
     {
         Directory.CreateDirectory(Path.GetDirectoryName(Adapter)!);
         Directory.CreateDirectory(Path.GetDirectoryName(Token)!);
-        File.WriteAllText(Token, "secret");
+        NodeState.WritePrivately(Token, System.Text.Encoding.UTF8.GetBytes("secret"));
     }
 
     public void Dispose() { try { Directory.Delete(root, true); } catch (IOException) { } catch (UnauthorizedAccessException) { } }
@@ -106,8 +107,8 @@ public sealed class ConnectTests : IDisposable
     [Fact]
     public void Connect_finds_the_hub_token_and_adds_cocern_to_claude_code_and_codex_once()
     {
-        var (code, output, _) = Connect();
-        Assert.Equal(0, code);
+        var (code, output, error) = Connect();
+        Assert.True(code == 0, error);
         Assert.Contains("Claude Code: connected", output);
         Assert.Contains("Codex: connected", output);
         var claude = JsonNode.Parse(File.ReadAllText(Path.Combine(Profile, ".claude.json")))!["mcpServers"]!["cocern"]!;

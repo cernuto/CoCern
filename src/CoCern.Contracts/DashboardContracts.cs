@@ -433,6 +433,25 @@ public sealed record DashboardConnectClient
     public string? Detail { get; init; }
     /// <summary>Whether the app's CoCern entry gives its chats the administrator tools; null when it has no entry, the entry is not this hub's, or it could not be read.</summary>
     public bool? Admin { get; init; }
+    /// <summary>Native Codex setup and observed readiness; configuration alone does not imply a ready session.</summary>
+    public DashboardCodexReadiness? Readiness { get; init; }
+}
+
+/// <summary>Credential-free evidence for the guided native Codex connection.</summary>
+public sealed record DashboardCodexReadiness
+{
+    public string State { get; init; } = "setup_required";
+    public string Summary { get; init; } = "";
+    public string NextAction { get; init; } = "";
+    public bool HooksInstalled { get; init; }
+    public bool SkillInstalled { get; init; }
+    public bool StartupObserved { get; init; }
+    public bool SessionVerified { get; init; }
+    public bool WakeReady { get; init; }
+    public DateTimeOffset? CapturedAt { get; init; }
+    public string? SessionId { get; init; }
+    public string? RepositoryId { get; init; }
+    public string? Detail { get; init; }
 }
 
 /// <summary>

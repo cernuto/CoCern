@@ -91,10 +91,11 @@ internal static class ConnectCommand
             return changes;
         };
 
+        var codexProfile = CodexNativeSetup.Profile(profile);
         var clients = new List<(string Id, string Name, Func<ClientPlan> Plan)>
         {
             (ConnectClients.ClaudeCode, "Claude Code", () => ClientSettings.PlanClaudeCode(Path.Combine(profile, ".claude.json"), dotnetPath, adapterDll, environment, RefreshFor(ConnectClients.ClaudeCode))),
-            (ConnectClients.Codex, "Codex", () => ClientSettings.PlanCodex(Path.Combine(profile, ".codex", "config.toml"), dotnetPath, adapterDll, environment, RefreshFor(ConnectClients.Codex)))
+            (ConnectClients.Codex, "Codex", () => ClientSettings.PlanCodex(Path.Combine(codexProfile, "config.toml"), dotnetPath, adapterDll, environment, RefreshFor(ConnectClients.Codex)))
         };
         // The desktop app is offered only where it is installed; its config file may not exist yet.
         if (appData is not null && Directory.Exists(Path.Combine(appData, "Claude")))
@@ -116,10 +117,10 @@ internal static class ConnectCommand
                     plan.Apply(clock ?? TimeProvider.System);
                 }
                 if (!check) hook?.Apply(clock ?? TimeProvider.System);
-                if (!check && client.Id != ConnectClients.ClaudeDesktop && (!plan.IsUnchanged || owned.Contains(client.Id)))
+                if (!check && client.Id == ConnectClients.ClaudeCode && (!plan.IsUnchanged || owned.Contains(client.Id)))
                     ClientSettings.StageLocalNativeCandidate(client.Id == ConnectClients.Codex ? "codex" : "claude", dotnetPath, adapterDll,
                         nativeEnvironments.GetValueOrDefault(client.Id) ?? environment, nativeCacheRoot,
-                        clientProfile: Path.Combine(profile, client.Id == ConnectClients.Codex ? ".codex" : ".claude"));
+                        clientProfile: client.Id == ConnectClients.Codex ? codexProfile : Path.Combine(profile, ".claude"));
                 var entry = seen.TryGetValue(client.Id, out var found) ? found : ((bool Admin, IReadOnlyDictionary<string, string?>? Changes)?)null;
                 var changes = plan.Refreshes ? entry?.Changes : null;
                 bool? gives = state switch
@@ -129,7 +130,16 @@ internal static class ConnectCommand
                     ConnectStates.Available or ConnectStates.OtherHub => null,
                     _ => entry?.Admin
                 };
-                results.Add(new() { Id = client.Id, Name = client.Name, State = state, Detail = foreign.GetValueOrDefault(client.Id) ?? (changes is null ? null : Detail(check, changes)), Admin = gives });
+                DashboardCodexReadiness? readiness = null;
+                if (client.Id == ConnectClients.Codex && state is not (ConnectStates.Available or ConnectStates.OtherHub))
+                {
+                    var nativeEnvironment = nativeEnvironments.GetValueOrDefault(client.Id) ?? environment;
+                    readiness = check ? CodexNativeSetup.Inspect(profile, codexProfile, nativeEnvironment, nativeCacheRoot)
+                        : CodexNativeSetup.Prepare(profile, codexProfile, dotnetPath, adapterDll, nativeEnvironment, clock ?? TimeProvider.System, nativeCacheRoot);
+                }
+                else if (client.Id == ConnectClients.Codex && state == ConnectStates.Available)
+                    readiness = new() { State = "setup_required", Summary = "Connect Codex to get started", NextAction = "Prepare native setup to connect this app and install the startup hooks and workflow skill." };
+                results.Add(new() { Id = client.Id, Name = client.Name, State = state, Detail = foreign.GetValueOrDefault(client.Id) ?? (changes is null ? null : Detail(check, changes)), Admin = gives, Readiness = readiness });
             }
             catch (Exception exception) when (exception is ClientSettingsException or IOException or UnauthorizedAccessException)
             {

@@ -99,10 +99,30 @@
 .connect-view .connect-item small { color: var(--muted-foreground); line-height: 1.5; overflow-wrap: anywhere; font-size: .78rem; }
 .connect-view .provider-token { width: 34px; height: 34px; border-radius: 8px; font-size: .9rem; background: var(--muted); color: var(--primary); border: 1px solid var(--border); }
 .connect-view .connection-state { white-space: normal; text-align: center; }
+.connect-view .codex-readiness { grid-column: 2 / -1; min-width: 0; margin-top: 2px; padding: 18px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--muted); }
+.codex-readiness-heading { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: baseline; justify-content: space-between; }
+.codex-readiness-heading h3 { margin: 0; font-size: .92rem; font-weight: 650; }
+.codex-readiness-heading > span { color: var(--muted-foreground); font-size: .75rem; }
+.codex-readiness-summary { margin: 10px 0 18px; font-size: .83rem; line-height: 1.6; }
+.codex-readiness-steps { list-style: none; display: grid; gap: 16px; padding: 0; margin: 0; }
+.codex-readiness-steps > li { display: grid; grid-template-columns: 26px minmax(0, 1fr); gap: 10px; align-items: start; }
+.codex-readiness-steps .readiness-marker { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; border: 1px solid var(--border); border-radius: 50%; background: var(--card); color: var(--primary); font-size: .75rem; font-weight: 650; }
+.connect-view .codex-readiness-steps strong { display: block; font-size: .8rem; }
+.connect-view .codex-readiness-steps small { display: block; margin-top: 3px; line-height: 1.65; }
+.codex-next-action { margin: 18px 0 0; padding-top: 14px; border-top: 1px solid var(--border); font-size: .8rem; line-height: 1.65; overflow-wrap: anywhere; }
+.codex-readiness-detail { margin: 10px 0 0; color: var(--muted-foreground); font-size: .78rem; line-height: 1.65; overflow-wrap: anywhere; }
+.codex-readiness-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+.codex-readiness-actions > button { min-height: 38px; white-space: normal; }
+.codex-readiness-footnote { margin: 12px 0 0; color: var(--muted-foreground); font-size: .73rem; line-height: 1.65; }
+.codex-verified-session { display: grid; gap: 10px; margin: 16px 0 0; font-size: .75rem; }
+.codex-verified-session > div { min-width: 0; }
+.codex-verified-session dt { color: var(--muted-foreground); }
+.codex-verified-session dd { margin: 3px 0 0; overflow-wrap: anywhere; }
 .connect-view .join-steps { margin: 0; padding-left: 22px; }
 .connect-view .join-steps > li { padding-left: 5px; }
 .connect-view .join-steps strong { font-size: .85rem; }
 .connect-view .join-steps small { color: var(--muted-foreground); line-height: 1.65; font-size: .78rem; }
+.connect-view .installer-stop-note { display: block; margin-top: 8px; }
 .connect-view .copy-field { display: flex; align-items: flex-start; gap: 10px; padding: 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--muted); margin-block: 12px; min-width: 0; }
 .connect-view .copy-field code { min-width: 0; flex: 1; overflow-wrap: anywhere; white-space: pre-wrap; font-size: .78rem; background: transparent; padding: 0; }
 .connect-view .copy-field button { flex-shrink: 0; }
@@ -182,6 +202,7 @@
     .standing-view .close-sessions-actions > button { flex: 1 1 180px; white-space: normal; }
     .connect-view .connect-item { grid-template-columns: 34px minmax(0,1fr); }
     .connect-view .connect-item > button, .connect-view .connection-state { grid-column: 2; justify-self: start; }
+    .connect-view .codex-readiness { grid-column: 1 / -1; padding: 14px; }
     .connect-view .copy-field { flex-direction: column; }
     .connect-view .copy-field button { align-self: flex-end; }
     .document-inventory .document-repository { padding-inline: 12px; }
