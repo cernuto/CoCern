@@ -33,14 +33,16 @@ The hub coordinates agent work; it does not execute their tools, models or build
 
 ## Get started
 
-1. Install the .NET SDK named in `global.json`.
-2. Start the hub:
-   - **Visual Studio:** open `CoCern.slnx`, set **CoCern.Host** as the startup project, and press F5.
-   - **PowerShell:** `./scripts/Build-CoCern.ps1 -Publish`, then `./scripts/Start-CoCern.ps1`.
+1. Extract the self-contained **CoCern Windows package** supplied by your maintainer. Keep its files together; the small `.exe` launchers use the shared runtime files beside them. No SDK or .NET installation is needed.
+2. Run **CoCern.Setup.exe** and choose **Host a hub on this PC**, **Join another hub**, or **Check or repair this installation**. Join uses the address, fingerprint and join code shown by the hub's Connect page. Repair inspects the current installation before changing only CoCern-owned setup.
 3. Open `http://127.0.0.1:5271/dashboard/` on the hub's PC. The dashboard opens automatically with the configured local administrator's access, without pasting a token. The Visual Studio profile also opens it at startup.
 4. Open **Connect** and connect each app you use. Restart that app. For Codex, complete its native setup, review the hooks in Codex, then start or resume a chat and refresh the readiness checks. See [Connect and verify Codex](docs/codex-connect.md).
 
 New chats in those apps have CoCern's tools. The hub creates its token, database and certificate on first start in `data/`; you do not copy those credentials into a chat.
+
+The installed package keeps its database, enrollment and credentials outside replaceable binaries under `%LOCALAPPDATA%\CoCern`. See [Windows setup and repair](docs/windows-setup.md) for command-line options and package verification.
+
+**Building from source:** install the SDK named in `global.json`, open `CoCern.slnx` in Visual Studio and run **CoCern.Host**, or build it into isolated output and start it with `scripts/Start-CoCern.ps1 -HostDll <built-host-dll>`. Maintainers create the end-user Windows ZIP with `scripts/Publish-CoCern.ps1`. `scripts/Build-CoCern.ps1` is the repository's selected-test verification runner; its required selection file is not an end-user installation step.
 
 ## A closer look
 

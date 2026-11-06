@@ -84,13 +84,19 @@ else
         <main id="main" class="dashboard-main" tabindex="-1">
             <div class="page-heading">
                 <div><h1>@PageTitle</h1>@if (PageDescription is { } description) { <p>@description</p> }</div>
-                <span class="last-observed" title="@DashboardFormat.Timestamp(Connection.Snapshot?.ObservedAt)">Updated @DashboardFormat.Ago(Connection.Snapshot?.ObservedAt, _now).ToLowerInvariant()</span>
+                @if (View != "connect")
+                {
+                    <span class="last-observed" title="@DashboardFormat.Timestamp(Connection.Snapshot?.ObservedAt)">Updated @DashboardFormat.Ago(Connection.Snapshot?.ObservedAt, _now).ToLowerInvariant()</span>
+                }
             </div>
             @if (!string.IsNullOrWhiteSpace(Connection.Notice))
             {
                 <BbAlert Class="connection-notice" role="status"><BbAlertDescription>@Connection.Notice</BbAlertDescription></BbAlert>
             }
-            <ManagerControl Compact="@(View != "manager")" Sessions="@(Connection.Snapshot?.Sessions ?? [])" DefaultRepositoryId="@(Connection.Snapshot?.Sessions.FirstOrDefault()?.RepositoryId)" />
+            @if (View != "connect")
+            {
+                <ManagerControl Compact="@(View != "manager")" Sessions="@(Connection.Snapshot?.Sessions ?? [])" DefaultRepositoryId="@(Connection.Snapshot?.Sessions.FirstOrDefault()?.RepositoryId)" />
+            }
             @if (Connection.Snapshot is { } snapshot)
             {
                 @if (View == "overview")
@@ -121,8 +127,7 @@ else
                         <TestEffortView Snapshot="@snapshot" />
                         break;
                     case "connect":
-                        <ConnectView />
-                        <AddPcView />
+                        <ConnectPage />
                         break;
                     case "documents":
                         <DocCacheView Cache="@snapshot.DocCache" Now="@_now" />

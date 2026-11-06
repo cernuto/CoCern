@@ -32,6 +32,8 @@ public sealed record WakeRuntime(AdapterOptions Options, string StatePath, strin
     public WakeLimits Limits { get; init; } = WakeLimits.Default;
     /// <summary>A state the caller already owns (and disposes); null opens <see cref="StatePath"/> for the run.</summary>
     internal WakeState? State { get; init; }
+    /// <summary>Private observation after the authenticated reconciliation, never a substitute for a session probe.</summary>
+    internal Action<WakeTarget, string>? Reconciled { get; init; }
 }
 
 /// <summary>Tells a running watcher that its targets may have changed. Pulses never queue up: one pending pulse is enough.</summary>
@@ -154,6 +156,7 @@ public static class WakeWatcher
                     {
                         if (runtime.TryEnterDispatch is not null && dispatch is null) continue;
                         status = await new WakeReconciler(settings, state, forwarder, target.Dispatcher, clock, coverage).ReconcileAsync(target.Route, target.Session, lifetime.Token);
+                        runtime.Reconciled?.Invoke(target, status);
                     }
                     if (!lastStatus.TryGetValue(routeKey, out var previous) || previous != status || status == "queued")
                         Console.Error.WriteLine(status == WakeReconciler.SessionRejected

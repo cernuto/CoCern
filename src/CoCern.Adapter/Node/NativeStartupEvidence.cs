@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Diagnostics;
 using CoCern.Contracts;
 using CoCern.Contracts.Dashboard;
 
@@ -8,7 +9,52 @@ namespace CoCern.Adapter.Node;
 internal static class NativeStartupEvidence
 {
     private sealed record Receipt(string Definition, string Profile, string NativeId, string Workspace, string RepositoryId, string SessionId, string Generation, DateTimeOffset CapturedAt);
+    private sealed record WakeReceipt(string SessionId, string Generation, int ProcessId, DateTime StartedAt, DateTimeOffset VerifiedAt);
     private static string PathFor(NativeRegistration registration) => Path.Combine(registration.Folder, "native-codex-startup.json");
+    private static string? WakePath(string folder, SessionHandle handle) => handle.NativeBindingKey is { Length: 64 } key && key.All(Uri.IsHexDigit)
+        ? Path.Combine(folder, "native-wake-" + key + ".json") : null;
+
+    // Written only after the exclusive watcher has completed an authenticated poll, never merely because its task was started.
+    internal static void RecordLocalWake(string folder, SessionHandle handle, string status)
+    {
+        if (status is not ("empty" or "queued")) { ClearLocalWake(folder, handle); return; }
+        try
+        {
+            if (WakePath(folder, handle) is not { } path || NativeJoinBinding.DispatchGeneration(folder, handle) is not { } generation) return;
+            using var process = Process.GetCurrentProcess();
+            NodeState.WritePrivately(path, JsonSerializer.SerializeToUtf8Bytes(new WakeReceipt(handle.SessionId, generation,
+                process.Id, process.StartTime.ToUniversalTime(), DateTimeOffset.UtcNow)));
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception) { }
+    }
+
+    internal static void ClearLocalWake(string folder, SessionHandle handle)
+    {
+        try
+        {
+            if (WakePath(folder, handle) is not { } path || !NodeState.IsPrivateFile(path) || new FileInfo(path).Length > 2048) return;
+            var saved = JsonSerializer.Deserialize<WakeReceipt>(File.ReadAllBytes(path));
+            using var process = Process.GetCurrentProcess();
+            if (saved is not null && saved.ProcessId == process.Id && saved.StartedAt == process.StartTime.ToUniversalTime()) File.Delete(path);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception) { }
+    }
+
+    internal static bool HasLiveLocalWake(NativeJoinBinding binding, SessionHandle handle)
+    {
+        try
+        {
+            if (File.Exists(Path.Combine(binding.Folder, "stop")) || WakePath(binding.Folder, handle) is not { } path ||
+                !NodeState.IsPrivateFile(path) || new FileInfo(path).Length > 2048) return false;
+            var saved = JsonSerializer.Deserialize<WakeReceipt>(File.ReadAllBytes(path));
+            // A healthy hinted watcher polls at least once a minute; a stale poll cannot establish readiness.
+            if (saved is null || saved.SessionId != handle.SessionId || saved.Generation != binding.Generation ||
+                saved.VerifiedAt > DateTimeOffset.UtcNow.AddSeconds(5) || saved.VerifiedAt < DateTimeOffset.UtcNow.AddSeconds(-90)) return false;
+            using var process = Process.GetProcessById(saved.ProcessId);
+            return !process.HasExited && process.StartTime.ToUniversalTime() == saved.StartedAt;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception) { return false; }
+    }
 
     internal static async Task RecordAsync(NativeRegistration registration, NativeJoin join, NativeHookContext context, SessionHandle handle, CancellationToken ct)
     {
@@ -53,6 +99,8 @@ internal static class NativeStartupEvidence
                 return initial with { State = "error", Summary = "The saved Codex session is not currently verified", NextAction = "Resume the Codex chat in its repository, then refresh. CoCern will recover its own session." };
             initial = initial with { SessionVerified = true, SessionId = handle.SessionId, RepositoryId = handle.RepositoryId,
                 State = "joined", Summary = "Codex session verified", NextAction = "Keep the CoCern agent running on this PC, then refresh to check its wake route." };
+            if (registration.Connection.NodeFolder is null && HasLiveLocalWake(binding, handle))
+                return initial with { State = "ready", Summary = "Codex is ready", NextAction = "Use CoCern from this chat. Its native startup will restore the workflow when you resume or compact.", WakeReady = true };
             var directory = await forwarder.ForwardAsync(RelayTools.ChatDirectory, JsonSerializer.SerializeToElement(new
             { repositoryId = handle.RepositoryId, sessionId = handle.SessionId, sessionToken = handle.SessionToken, backgroundCall = true }), timeout.Token);
             if (HasReachableRoute(directory, handle))

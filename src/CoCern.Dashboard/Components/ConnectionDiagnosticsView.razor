@@ -1,0 +1,71 @@
+@using System.Net.Http.Json
+@inject HttpClient Http
+
+<BbCard role="region" Class="surface connection-diagnostics" aria-labelledby="connection-diagnostics-heading">
+    <div class="section-heading"><div><h2 id="connection-diagnostics-heading">Connection diagnostics</h2><p>See where CoCern requests spent their time and which stage failed.</p></div></div>
+    @if (_snapshot is null)
+    {
+        <p class="empty-copy" role="status">Reading recent connection traces…</p>
+    }
+    else if (_snapshot.Unavailable is { } unavailable)
+    {
+        <p class="empty-copy" role="status">@unavailable</p>
+    }
+    else
+    {
+        @if (!string.IsNullOrWhiteSpace(_snapshot.Note)) { <p class="connection-trace-note">@_snapshot.Note</p> }
+        @if (_snapshot.Events.Length == 0)
+        {
+            <p class="empty-copy">No connection traces yet. Use a CoCern tool, then refresh.</p>
+        }
+        @foreach (var trace in _snapshot.Events.GroupBy(item => item.CorrelationId).OrderByDescending(group => group.Max(item => item.StartedAt)).Take(20))
+        {
+            var events = trace.OrderBy(item => item.StartedAt).ToArray();
+            var total = events.Where(item => item.Stage == "total").OrderBy(item => item.Source == "launcher" ? 0 : 1).ThenBy(item => item.StartedAt).FirstOrDefault();
+            var failed = events.Any(item => item.Outcome is not ("ok" or "passed" or "success"));
+            <details class="connection-trace" @key="trace.Key">
+                <summary><strong>@(events[0].Tool == "unknown" ? "Adapter connection" : events[0].Tool)</strong><span>@(total is null ? "Partial trace" : Duration(total.DurationMs))</span><BbBadge Variant="@(failed ? BadgeVariant.Secondary : BadgeVariant.SoftSuccess)">@(failed ? "Needs attention" : "Recorded")</BbBadge></summary>
+                <p class="connection-trace-identity">Support ID <code>@trace.Key</code> · @events[0].StartedAt.ToLocalTime().ToString("g") (local time)</p>
+                <div class="connection-trace-stages">
+                    @foreach (var item in events)
+                    {
+                        <div><span>@StageLabel(item.Stage)<small>@item.Source</small></span><strong>@Duration(item.DurationMs)</strong><span>@item.Outcome@if (item.ErrorCode is { Length: > 0 } errorCode) { <small>@errorCode</small> }</span></div>
+                    }
+                </div>
+            </details>
+        }
+    }
+    <div class="installation-actions">
+        <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Outline" Disabled="@_busy" OnClick="ReadConnectionTracesAsync">@(_busy ? "Reading…" : "Refresh traces")</BbButton>
+        @if (_snapshot is { Unavailable: null, Events.Length: > 0 })
+        {
+            <a class="connection-export" href="api/connect/diagnostics?download=true" download="cocern-connection-diagnostics.json">Download diagnostics</a>
+        }
+    </div>
+    <p class="table-footnote">Stages can overlap; totals are measured separately. Time before the client sends a request is not measured. Exports contain timing metadata, without credentials or message contents.</p>
+</BbCard>
+
+@code {
+    private ConnectionDiagnosticsSnapshot? _snapshot;
+    private bool _busy;
+
+    protected override Task OnInitializedAsync() => ReadConnectionTracesAsync();
+
+    private async Task ReadConnectionTracesAsync()
+    {
+        _busy = true;
+        try { _snapshot = await Http.GetFromJsonAsync<ConnectionDiagnosticsSnapshot>("api/connect/diagnostics") ?? new() { Unavailable = "The hub returned no connection diagnostics." }; }
+        catch (Exception error) when (error is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException)
+        { _snapshot = new() { Unavailable = "Connection diagnostics could not be read. Keep the hub running and try again." }; }
+        finally { _busy = false; }
+    }
+
+    private static string Duration(double milliseconds) => milliseconds >= 1000 ? $"{milliseconds / 1000:0.00} s" : $"{milliseconds:0.0} ms";
+    private static string StageLabel(string stage) => stage switch
+    {
+        "queue" => "Waiting for adapter", "drain" => "Waiting for earlier calls", "backend_start" => "Starting adapter",
+        "native_registration" => "Native startup handshake", "hub_to_headers" => "Hub response preparation",
+        "http_headers" => "Waiting for hub response", "http_body" => "Reading response", "hub_execution" => "Hub execution",
+        "transport_total" => "HTTP request total", "total" => "Measured total", _ => stage.Replace('_', ' ')
+    };
+}

@@ -28,7 +28,12 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
     /// <summary>Dispatch observation only. No ID-only credential lookup, file creation or adoption.</summary>
     internal static IReadOnlyList<SessionHandle> DispatchSnapshot(string folder) => DispatchRecords(folder).Select(item => item.Handle).ToArray();
 
-    private sealed record DispatchRecord(string Path, SessionHandle Handle);
+    internal static string? DispatchGeneration(string folder, SessionHandle handle) =>
+        // The handle carries a generation-specific ownership digest, not the stable binding record's filename.
+        handle.NativeBindingKey is not null ? DispatchRecords(folder)
+            .FirstOrDefault(record => record.Handle == handle)?.Generation : null;
+
+    private sealed record DispatchRecord(string Path, SessionHandle Handle, string Generation);
 
     private static IReadOnlyList<DispatchRecord> DispatchRecords(string folder, string? exact = null)
     {
@@ -64,7 +69,7 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
                     var key = Digest("cocern-native-binding-v1", folder, identity, provider, nativeId, machine, repo, workspace);
                     if (Path.GetFileName(path) != key + ".json" || Text(record["scope"]) != key) continue;
                     var snapshot = new NativeJoinBinding(folder, provider, nativeId, repo, workspace, identity, key, args, Text(id), reader);
-                    if (snapshot.CurrentHandle is { } current && current.SessionId == Text(id)) result.Add(new(path, current));
+                    if (snapshot.CurrentHandle is { } current && current.SessionId == Text(id)) result.Add(new(path, current, snapshot.Generation));
                 }
                 catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or JsonException or KeyNotFoundException or FormatException) { }
             }

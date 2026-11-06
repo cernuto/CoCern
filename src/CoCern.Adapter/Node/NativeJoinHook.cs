@@ -604,6 +604,9 @@ internal sealed class NativeRegistration
         ct.ThrowIfCancellationRequested();
         var limit = budget ?? MaximumWait;
         if (limit <= TimeSpan.Zero || limit > MaximumWait || !StillCurrent()) return null;
+        var trace = ConnectionTrace.Begin("unknown", "adapter");
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var accepted = false;
         using var waiting = CancellationTokenSource.CreateLinkedTokenSource(ct); waiting.CancelAfter(limit);
         try
         {
@@ -616,10 +619,18 @@ internal sealed class NativeRegistration
             var response = await ReadFrameAsync(pipe, waiting.Token);
             if (!Valid(response, "response", nonce, deadline) || !StillCurrent()) return null;
             await WriteFrameAsync(pipe, Frame(nonce, deadline, "ack"), waiting.Token);
+            accepted = true;
             return this; // Registration context only: no native/session ID is captured or retained.
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested) { return null; }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException or InvalidOperationException or FormatException) { return null; }
+        finally
+        {
+            var failure = accepted ? null : ct.IsCancellationRequested ? "cancelled" : "native_registration_unverified";
+            ConnectionTrace.Stage("native_registration", started, accepted ? "ok" : ct.IsCancellationRequested ? "cancelled" : "error", failure);
+            trace.Complete(accepted, failure);
+            trace.Dispose();
+        }
     }
 
     internal async Task<bool> AnswerAsync(CancellationToken ct, TimeSpan? budget = null)

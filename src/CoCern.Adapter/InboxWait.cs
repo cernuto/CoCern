@@ -7,7 +7,7 @@ namespace CoCern.Adapter;
 /// <summary>
 /// <c>check_inbox</c> with <c>waitSeconds</c>: the adapter re-reads the inbox until mail, an eligible attention wake, or the end of the wait.
 /// A chat that is mid-turn cannot be woken, so without this it polls, and every poll is a model call that re-reads its whole context.
-/// The option never reaches the hub. Internal polls send <c>attention: false</c>; only the read returned for an attention wake takes an offer.
+/// The option never reaches the hub. Internal polls never consume offers or mark mail seen; one final ordinary read supplies the model-visible page.
 /// </summary>
 public static class InboxWait
 {
@@ -17,9 +17,10 @@ public static class InboxWait
     private static readonly TimeSpan MinimumDelay = TimeSpan.FromMilliseconds(20);
     /// <summary>How far past the wait one poll may run: <see cref="MaxSeconds"/> plus this stays under Codex's 60 seconds.</summary>
     internal static readonly TimeSpan PollMargin = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan FinalReadBudget = TimeSpan.FromSeconds(2);
 
     /// <summary>The property added to the advertised <c>check_inbox</c> schema.</summary>
-    public static object Schema => new { type = "integer", minimum = 1, maximum = MaxSeconds, description = "Wait up to this many seconds for mail or an eligible attention wake instead of polling; attention:false opts out of attention wakes." };
+    public static object Schema => new { type = "integer", minimum = 1, maximum = MaxSeconds, description = "Wait for mail or eligible attention instead of polling. The final read returns a current offer or pendingWork.reason; attention:false opts out of attention wakes." };
 
     /// <summary>A number, or a quoted one (models send both); anything else waits for nothing rather than failing the read.</summary>
     internal static int WaitSeconds(JsonElement wait) => wait.ValueKind switch
@@ -35,6 +36,9 @@ public static class InboxWait
             return await forwarder.ForwardAsync(RelayTools.CheckInbox, arguments, cancellationToken);
         var forwarded = JsonNode.Parse(arguments.GetRawText())!.AsObject();
         forwarded.Remove("waitSeconds");
+        // The ordinary result is shown to the model. Respect an explicit seen choice or a background reader's report.
+        if (!forwarded.ContainsKey("seen") && (!forwarded.TryGetPropertyValue("backgroundCall", out var origin) || origin is not JsonValue originValue || !originValue.TryGetValue<bool>(out var background) || !background))
+            forwarded["seen"] = true;
         var offeredRequest = JsonSerializer.SerializeToElement(forwarded);
         JsonObject? attentionRequest = null;
         if ((!arguments.TryGetProperty("attention", out var attention) || attention.ValueKind != JsonValueKind.False) &&
@@ -47,11 +51,11 @@ public static class InboxWait
                 if (forwarded.TryGetPropertyValue(key, out var value)) status[key] = value?.DeepClone();
             attentionRequest = status;
         }
-        // Most polls are discarded unseen, so none of them takes an attention offer. The poll that returns
-        // reaches the model, so the hub closes the info items of the messages on its page (seen); an empty poll lists none.
+        // Polls remain internal even when they discover mail. Only the final ordinary read may mark the returned page seen.
         forwarded["attention"] = false;
         forwarded["backgroundCall"] = true;
-        forwarded["seen"] = true;
+        forwarded["seen"] = false;
+        forwarded.Remove("seenMessageIds");
         var request = JsonSerializer.SerializeToElement(forwarded);
         var duration = TimeSpan.FromSeconds(Math.Clamp(WaitSeconds(wait), 0, MaxSeconds));
         // A monotonic clock, and no read for a remainder shorter than a timer tick: the wall clock and the delay timer disagree by a
@@ -68,8 +72,10 @@ public static class InboxWait
             try
             {
                 reply = await forwarder.ForwardAsync(RelayTools.CheckInbox, request, poll.Token);
-                if (!reply.Ok && poll.IsCancellationRequested && !cancellationToken.IsCancellationRequested) return last ?? reply;
-                if (!reply.Ok || HasMail(reply) || duration - elapsed.Elapsed < MinimumDelay) return reply;
+                if (!reply.Ok && poll.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+                    return last is null ? reply : Unverified(last, "inbox_wait_timeout", stale: true);
+                if (!reply.Ok) return reply;
+                if (HasMail(reply) || duration - elapsed.Elapsed < MinimumDelay) return await FinishAsync(reply);
                 last = reply;
                 if (attentionRequest is { } statusRequest)
                 {
@@ -77,16 +83,40 @@ public static class InboxWait
                     var status = await forwarder.ForwardAsync(RelayTools.GetStatus, JsonSerializer.SerializeToElement(statusRequest), poll.Token);
                     if (status.Ok && status.Data is { ValueKind: JsonValueKind.Object } data)
                     {
-                        if (WakeReconciler.Attention(data).Wake is not null) return await forwarder.ForwardAsync(RelayTools.CheckInbox, offeredRequest, poll.Token);
+                        if (WakeReconciler.Attention(data).Wake is not null) return await FinishAsync(reply);
                         if (WakeReconciler.StatusTag(data) is { } tag) statusRequest["statusTag"] = tag;
                     }
                 }
             }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return last ?? new(false, "hub_timeout"); }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            { return last is null ? new(false, "hub_timeout") : Unverified(last, "inbox_wait_timeout", stale: true); }
             var remaining = duration - elapsed.Elapsed;
-            if (remaining < MinimumDelay) return reply;
+            if (remaining < MinimumDelay) return await FinishAsync(reply);
             await Task.Delay(remaining < pollInterval ? remaining : pollInterval, cancellationToken);
         }
+
+        async Task<AdapterReply> FinishAsync(AdapterReply polled)
+        {
+            using var completion = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            // Fifty seconds waiting + five seconds poll margin + two seconds completion stays below the client's sixty-second timeout.
+            completion.CancelAfter(FinalReadBudget);
+            try
+            {
+                var final = await forwarder.ForwardAsync(RelayTools.CheckInbox, offeredRequest, completion.Token);
+                return final.Ok ? final : Unverified(polled, final.Code);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            { return Unverified(polled, "hub_timeout"); }
+        }
+    }
+
+    private static AdapterReply Unverified(AdapterReply reply, string code, bool stale = false)
+    {
+        if (!reply.Ok || reply.Data is not { ValueKind: JsonValueKind.Object } data) return reply;
+        var result = JsonNode.Parse(data.GetRawText())!.AsObject();
+        result["pendingWork"] = new JsonObject { ["reason"] = "unavailable", ["code"] = code, ["retry"] = RelayTools.CheckInbox };
+        if (stale) result["inboxStale"] = true;
+        return reply with { Data = JsonSerializer.SerializeToElement(result) };
     }
 
     private static bool HasMail(AdapterReply reply) =>

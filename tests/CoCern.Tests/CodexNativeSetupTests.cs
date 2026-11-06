@@ -55,6 +55,24 @@ public sealed class CodexNativeSetupTests
         var worker = NativeRegistration.ClientOptions(connection, _ => null);
         Assert.False(worker.Admin);
         Assert.False(worker.Diagnostics);
+        var root = Path.Combine(Path.GetTempPath(), "cocern-native-apphost-refresh-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var configuration = Path.Combine(root, "config.toml"); var token = Path.Combine(root, "token");
+            var native = new[] { "--native-client", "codex", "--connection", Path.Combine(root, "connection"), "--profile", Path.Combine(root, "profile") };
+            NodeState.WritePrivately(token, "synthetic-apphost-token"u8.ToArray());
+            File.WriteAllText(configuration, $"[mcp_servers.cocern]\ncommand = {JsonSerializer.Serialize(Path.Combine(root, "CoCern.Adapter.exe"))}\nargs = {JsonSerializer.Serialize(native)}\nenv = {{ COCERN_TOKEN_FILE = {JsonSerializer.Serialize(token)}, COCERN_ROLE = \"admin\", COCERN_PROFILE = \"diagnostics\" }}\n");
+            var deployment = Path.Combine(root, "deployment"); var launcher = Path.Combine(deployment, "versions", new string('a', 64), "CoCern.Adapter.dll");
+            ClientSettings.PlanDevelopmentCodex(configuration, "dotnet", launcher, deployment, token, replaceLauncher: true).Apply(TimeProvider.System);
+            var updated = File.ReadAllText(configuration);
+            var arguments = updated.Split('\n').Single(line => line.StartsWith("args = ", StringComparison.Ordinal))[7..].Trim();
+            Assert.Equal(new[] { launcher, "--dev-launch", deployment }.Concat(native), ClientSettings.ParseArgumentArray(arguments));
+            Assert.Contains("COCERN_ROLE = \"admin\"", updated);
+            Assert.Contains("COCERN_PROFILE = \"diagnostics\"", updated);
+            Assert.Equal("synthetic-apphost-token", File.ReadAllText(token));
+        }
+        finally { Directory.Delete(root, recursive: true); }
     }
 
     [Fact]

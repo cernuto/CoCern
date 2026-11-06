@@ -223,6 +223,8 @@ internal sealed class ReplyAddOns(Aggregates aggregates, ClaimComposer claims, S
         var offers = reply.Reply.Ok && call.Session is not null && controls.OfferWanted && attention.Enabled && IsBoundary(call.Tool);
         reply.DeferredAttention = offers && controls.ModelVisible && controls.PresentStanding;
         if (offers && !reply.DeferredAttention) reply.Reply = await WithAttentionAsync(call.Caller, call.Args, call.Tool, reply.Reply);
+        else if (reply.Reply.Ok && call.Session is not null && call.Tool == RelayTools.CheckInbox && !reply.DeferredAttention && controls.BackgroundCall != true)
+            reply.Reply = WithoutOffer(reply.Reply, call.Tool, new JsonObject { ["reason"] = "disabled" });
         reply.RanBoundary = offers && !reply.DeferredAttention;
         // A page reported as seen is marked from the reply as sent, after compaction, so a message cut from the page stays unseen.
         reply.MarkSeen = reply.Reply.Ok && call.Session is not null && attention.Enabled && call.Tool == RelayTools.CheckInbox && (offers || controls.PageSeen || controls.SeenIds.Length > 0);
@@ -366,7 +368,7 @@ internal sealed class ReplyAddOns(Aggregates aggregates, ClaimComposer claims, S
             var onPage = tool == RelayTools.CheckInbox && data["items"] is JsonArray page
                 ? page.OfType<JsonObject>().Select(message => Text(message, "messageId")).Where(id => id.Length > 0).ToArray() : null;
             data["attention"] = new string('x', RelayLimits.MaxAttentionOfferBytes);
-            if (!FitsWire(Ok(data, long.MaxValue))) return committed;
+            if (!FitsWire(Ok(data, long.MaxValue))) return WithoutOffer(committed, tool, new JsonObject { ["reason"] = "reply_budget" });
             var request = new AttentionOffer(Text(args, "repositoryId"), Text(args, "sessionId"), Text(args, "sessionToken"))
             {
                 FocusTaskId = Text(args, "taskId"), FocusBoardId = Text(args, "boardId", "default"), SnoozeBoundaries = attention.SnoozeBoundaries,
@@ -375,12 +377,24 @@ internal sealed class ReplyAddOns(Aggregates aggregates, ClaimComposer claims, S
             var offerArgs = request.ToJson();
             if (urgentOnly) offerArgs["urgentOnly"] = true;
             var offer = await aggregates.Session(caller, AttentionOffer.Operation, offerArgs);
-            if (!offer.Ok || Parse(offer)["attention"] is not JsonObject item) return committed;
+            if (!offer.Ok) return WithoutOffer(committed, tool, new JsonObject { ["reason"] = "unavailable", ["code"] = offer.Code });
+            var offered = Parse(offer);
+            if (offered["attention"] is not JsonObject item)
+                return WithoutOffer(committed, tool, offered["pendingWork"] as JsonObject ?? new JsonObject { ["reason"] = "no_eligible_offer", ["actionable"] = offered["actionable"]?.DeepClone() });
             data["attention"] = item.DeepClone();
+            data.Remove("pendingWork");
             telemetry?.RecordOutcome(args, Text(item, "k"), "shown", Text(item, "id"));
             return Ok(data, committed.Version);
         }
-        catch (Exception) { return committed; }
+        catch (Exception) { return WithoutOffer(committed, tool, new JsonObject { ["reason"] = "unavailable" }); }
+    }
+
+    private static RelayReply WithoutOffer(RelayReply committed, string tool, JsonObject pending)
+    {
+        if (tool != RelayTools.CheckInbox || !committed.Ok) return committed;
+        var data = Parse(committed);
+        data["pendingWork"] = pending.DeepClone();
+        return Ok(data, committed.Version);
     }
 
     /// <summary>Closes the info items of messages an adapter reader showed the model without an offer. Advisory: the read stands either way.</summary>

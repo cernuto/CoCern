@@ -60,13 +60,24 @@ public sealed class LocalChatWake : IAsyncDisposable
     }
 
     /// <summary>The adapter's way in to local wake: says why there is none, and leaves <see cref="TryCreate"/> to say why setup itself refused.</summary>
-    internal static LocalChatWake? Open(AdapterOptions options, string? tokenFile, bool registered, string? cacheRoot = null, Action<string>? report = null)
+    internal static LocalChatWake? Open(AdapterOptions options, string? tokenFile, NativeRegistration? registration, string? cacheRoot = null, Action<string>? report = null,
+        Func<LocalWakeConnection, LocalChatWake>? create = null)
     {
         report ??= code => LocalWakeStatus.Report(code, cacheRoot);
         string? last = null;
         void Record(string code) { last = code; report(code); }
-        if (registered) { Record(LocalWakeCodes.NativeRegistration); return null; }
         if (options.NodeFolder is not null) { Record(LocalWakeCodes.NodeConnection); return null; }
+        if (registration is not null)
+        {
+            // A registered local client already owns an exact private connection. Do not depend on an inherited token-file variable,
+            // create another cache folder, or let an enrolled node adopt this local credential's native generations.
+            var identity = NativeJoinBinding.CredentialDigest("local", options.BaseUri.AbsoluteUri, options.PinnedFingerprint, options.Token);
+            if (!registration.StillCurrent() || LocalWakeConnection.NativeCredentialIdentity(registration.Folder) != identity ||
+                LocalWakeConnection.Read(registration.Folder) is not { } connection)
+            { Record(LocalWakeCodes.CredentialMismatch); return null; }
+            Record(LocalWakeCodes.ConnectionReady);
+            return create is null ? new(connection) : create(connection);
+        }
         Record(LocalWakeCodes.SetupReached);
         LocalChatWake? wake;
         try { wake = TryCreate(options, tokenFile, cacheRoot, Record); }
@@ -76,11 +87,12 @@ public sealed class LocalChatWake : IAsyncDisposable
     }
 
     /// <summary>Three startup attempts for transient file I/O only, before the adapter starts serving calls.</summary>
-    internal static Task<LocalChatWake?> OpenAsync(AdapterOptions options, string? tokenFile, bool registered, string? cacheRoot = null, CancellationToken ct = default) =>
+    internal static Task<LocalChatWake?> OpenAsync(AdapterOptions options, string? tokenFile, NativeRegistration? registration, string? cacheRoot = null, CancellationToken ct = default,
+        Func<LocalWakeConnection, LocalChatWake>? create = null) =>
         RetryStartupAsync(() =>
         {
             string? reason = null;
-            var wake = Open(options, tokenFile, registered, cacheRoot, code => { reason = code; LocalWakeStatus.Report(code, cacheRoot); });
+            var wake = Open(options, tokenFile, registration, cacheRoot, code => { reason = code; LocalWakeStatus.Report(code, cacheRoot); }, create);
             return (wake, reason);
         }, Task.Delay, ct);
 
@@ -298,7 +310,11 @@ public sealed class LocalChatWake : IAsyncDisposable
             var path = Path.Combine(Connection.Folder, "wake-" + thread + ".db");
             using var state = new WakeState(path); // Exclusive per-native-chat state also prevents duplicate MCP processes from dispatching twice.
             var options = handle.NativeBindingKey is null ? Connection.Options : NativeJoin.BackgroundOptions(Connection.Options);
-            var runtime = new WakeRuntime(options, path, Path.Combine(Connection.Folder, "stop"), Connection.Options.BaseUri.AbsoluteUri) { State = state, HubHandler = transport.HubHandler, Interval = transport.WakeInterval };
+            var runtime = new WakeRuntime(options, path, Path.Combine(Connection.Folder, "stop"), Connection.Options.BaseUri.AbsoluteUri)
+            {
+                State = state, HubHandler = transport.HubHandler, Interval = transport.WakeInterval,
+                Reconciled = (_, status) => NativeStartupEvidence.RecordLocalWake(Connection.Folder, handle, status)
+            };
             var route = new WakeRoute(handle.RepositoryId, "default", NodeState.SessionHandlePath(Connection.Folder, handle.SessionId), thread, Environment.MachineName);
             await watch(runtime, new(route, new(handle.SessionId, handle.SessionToken), NativeJoinBinding.ForDispatch(Connection.Folder, handle, transport.CodexDispatcher(codex))), ct);
         }
@@ -311,6 +327,7 @@ public sealed class LocalChatWake : IAsyncDisposable
         }
         // Anything else would fault this task and then the loop that awaits it.
         catch (Exception) { Volatile.Write(ref watchFailure, LocalWakeCodes.WatcherFailed); }
+        finally { NativeStartupEvidence.ClearLocalWake(Connection.Folder, handle); }
     }
 
     private bool OwnsNative(SessionHandle handle) => Connection.Options.ExportedChat is not { } client ||

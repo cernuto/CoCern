@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text;
 using System.Text.Json.Nodes;
 using CoCern.Contracts;
 using CoCern.Domain.Messages;
@@ -183,6 +184,7 @@ internal static class SessionAttention
         var queue = new SessionState(context.State).Attention;
         var now = context.Now;
         var items = queue.Items;
+        var expired = AttentionScheduler.Items(items).Count(item => item.IsExpired(now));
         RemoveExpired(items, now);
         // An idle chat is one with no boundary for a while; see Status.
         queue.BoundaryAt = now;
@@ -219,9 +221,21 @@ internal static class SessionAttention
         // A requested Standing question reserves the ordinary slot without marking a tip shown and then replacing it.
         var urgentOnly = context.Args["urgentOnly"] is JsonValue urgent && urgent.TryGetValue<bool>(out var only) && only;
         var picked = AttentionScheduler.Pick(urgentOnly ? offerable.Where(item => AttentionWeights.Wakes(item.Tier)) : offerable, now);
-        if (picked is null) return Ok(new JsonObject { ["actionable"] = actionable });
+        if (picked is null)
+        {
+            var reason = actionable > 0 && offerable.Length == 0 ? "focused_task"
+                : urgentOnly && offerable.Length > 0 ? "standing_review"
+                : offer.PageMessageIds is { Count: > 0 } && sittingOut.Count > 0 ? "on_inbox_page"
+                : sittingOut.Count > 0 ? "snoozed"
+                : expired > 0 && items.Count == 0 ? "expired" : null;
+            return Ok(new JsonObject { ["actionable"] = actionable, ["pendingWork"] = PendingWork(AttentionScheduler.Items(items), now, actionable, reason) });
+        }
+        var shown = OfferJson(picked, offerable.Length - 1);
+        // Never mark an offer shown if its complete structured scope cannot ride the reply.
+        if (Encoding.UTF8.GetByteCount(shown.ToJsonString()) > RelayLimits.MaxAttentionOfferBytes)
+            return Ok(new JsonObject { ["actionable"] = actionable, ["pendingWork"] = PendingWork(AttentionScheduler.Items(items), now, actionable, "reply_budget") });
         new QueuedItem(items[picked.Id]!.AsObject()).ShownAt = now;
-        return Ok(new JsonObject { ["attention"] = OfferJson(picked, offerable.Length - 1), ["actionable"] = actionable });
+        return Ok(new JsonObject { ["attention"] = shown, ["actionable"] = actionable });
     }
 
     /// <summary>
@@ -235,9 +249,11 @@ internal static class SessionAttention
     public static JsonObject Status(SessionState state, JsonObject args, DateTimeOffset now, bool detail)
     {
         var queue = state.Attention;
-        var eligible = AttentionScheduler.Eligible(AttentionScheduler.Items(queue.StoredItems ?? new JsonObject()).Where(item => item.Kind != AttentionKinds.StandingProposal), now).ToArray();
+        var items = AttentionScheduler.Items(queue.StoredItems ?? new JsonObject()).ToArray();
+        var eligible = AttentionScheduler.Eligible(items.Where(item => item.Kind != AttentionKinds.StandingProposal), now).ToArray();
         var status = new JsonObject { ["actionable"] = eligible.Length };
         if (!detail) return status;
+        status["pendingWork"] = PendingWork(items, now, eligible.Length);
         var urgent = eligible.Where(item => AttentionWeights.Wakes(item.Tier)).ToArray();
         status["urgent"] = urgent.Length;
         status["inbox"] = state.UnreadCount;
@@ -247,6 +263,20 @@ internal static class SessionAttention
             if (top.TaskId.Length > 0) shown["t"] = top.TaskId;
             if (top.BoardId != "default") shown["b"] = top.BoardId;
             status["top"] = shown;
+            var current = OfferJson(top, eligible.Length - 1);
+            if (Encoding.UTF8.GetByteCount(current.ToJsonString()) <= RelayLimits.MaxAttentionOfferBytes)
+            {
+                status["offer"] = current;
+                status["preview"] = true;
+            }
+            else
+            {
+                var pending = PendingWork(items, now, eligible.Length, "reply_budget");
+                pending["detailFetchRequired"] = true;
+                pending["nextRead"] = top.TaskId.Length > 0 ? RelayTools.TaskGet : RelayTools.CheckInbox;
+                if (top.TaskId.Length > 0) { pending["taskId"] = top.TaskId; pending["boardId"] = top.BoardId; }
+                status["pendingWork"] = pending;
+            }
         }
         var hold = TimeSpan.FromMinutes(Math.Clamp(Number(args, "maxHoldMinutes", RelayLimits.DefaultAttentionMaxHoldMinutes), 1, RelayLimits.MaxAttentionMaxHoldMinutes));
         var boundary = queue.BoundaryAt;
@@ -293,7 +323,13 @@ internal static class SessionAttention
             var one = RespondTo(queue, id, context);
             // A single refused answer leaves its item alone because the call commits nothing. Here the others commit, so this one is put back.
             if (!one.Ok && before is not null) queue.Items[id] = before;
-            results.Add(one.Ok ? JsonNode.Parse(one.DataJson) : new JsonObject { ["itemId"] = id, ["code"] = one.Code });
+            if (one.Ok) results.Add(JsonNode.Parse(one.DataJson));
+            else
+            {
+                var failure = new JsonObject { ["itemId"] = id, ["code"] = one.Code };
+                if (JsonNode.Parse(one.DataJson)?["pendingWork"] is JsonObject pending) failure["pendingWork"] = pending.DeepClone();
+                results.Add(failure);
+            }
         }
         return Ok(new JsonObject { ["results"] = results });
     }
@@ -306,7 +342,12 @@ internal static class SessionAttention
         var args = context.Args;
         var now = context.Now;
         var items = queue.Items;
-        if (items[id] is not JsonObject stored) return Error(NotFound, new { itemId = id });
+        if (items[id] is not JsonObject stored) return Error(NotFound, new
+        {
+            itemId = id,
+            pendingWork = new { reason = "expired_or_resolved", retry = RelayTools.CheckInbox },
+            hint = "This offer is no longer current. Read check_inbox or get_status with attentionDetail:true for current scope; do not guess another item ID."
+        });
         var item = new QueuedItem(stored);
         var action = Text(args, "action");
         switch (action)
@@ -368,7 +409,7 @@ internal static class SessionAttention
 
     private static void EndSnooze(QueuedItem item) { item.SnoozeBoundaries = 0; item.SnoozeUntil = null; }
 
-    /// <summary>The compact offer a boundary reply carries: ID, kind, task, board when not default, text with refs, and how many more wait.</summary>
+    /// <summary>A compact offer summary plus its complete advisory scope, retained separately from the abbreviated display text.</summary>
     private static JsonObject OfferJson(AttentionItem item, int more)
     {
         var offer = new JsonObject { ["id"] = item.Id, ["k"] = item.Kind };
@@ -379,7 +420,25 @@ internal static class SessionAttention
         if (item.Refs.Count > 0) text += " refs " + string.Join(",", item.Refs);
         offer["x"] = Cap(text);
         offer["more"] = Math.Max(0, more);
+        offer["scope"] = new JsonObject
+        {
+            ["boardId"] = item.BoardId, ["taskId"] = item.TaskId, ["subject"] = item.Subject,
+            ["note"] = item.Note, ["refs"] = new JsonArray(item.Refs.Select(reference => (JsonNode?)JsonValue.Create(reference)).ToArray()),
+            ["blocking"] = item.Blocking, ["blockerKind"] = item.Blocker, ["priority"] = item.Priority,
+            ["createdAt"] = item.CreatedAt.ToString("O"), ["expiresAt"] = item.ExpiresAt.ToString("O")
+        };
         return offer;
+    }
+
+    private static JsonObject PendingWork(IEnumerable<AttentionItem> items, DateTimeOffset now, int actionable, string? reason = null)
+    {
+        var all = items.ToArray();
+        var pending = all.Where(item => !item.IsExpired(now)).ToArray();
+        reason ??= actionable > 0 ? "available"
+            : pending.Length == 0 ? all.Any(item => item.IsExpired(now)) ? "expired" : "no_pending_work"
+            : pending.All(item => item.Kind == AttentionKinds.StandingProposal) ? "standing_review"
+            : pending.Any(item => item.IsSnoozed(now)) ? "snoozed" : "no_eligible_offer";
+        return new JsonObject { ["reason"] = reason, ["actionable"] = actionable, ["pending"] = pending.Length };
     }
 
     private static void RemoveExpired(JsonObject items, DateTimeOffset now)

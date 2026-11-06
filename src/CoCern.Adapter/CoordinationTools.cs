@@ -13,7 +13,7 @@ public static class CoordinationTools
 {
     internal static IEnumerable<McpServerTool> CreateNative(RelayForwarder forwarder, NativeJoin join, string provider, bool admin, bool diagnostics = false) =>
         NativeSurface(admin, chatOnly: true, diagnostics)
-            .Select(tool => new ForwardedTool(tool, (args, ct) => NativeJoinHook.InvokeAsync(join, provider, tool.Name, args, ct), native: true));
+            .Select(tool => new ForwardedTool(tool, (args, ct) => NativeJoinHook.InvokeAsync(join, provider, tool.Name, args, ct), native: true, report: forwarder.ReportConnectionDiagnostics));
 
     /// <summary>
     /// What a hub-proven chat gets: no session tools, and <c>peers</c>, which no raw surface lists. It keeps <c>chat_directory</c> until a name can
@@ -48,7 +48,7 @@ public static class CoordinationTools
     {
         // One per adapter, so every tool sees the session this chat opened.
         var calls = new ChatCalls(forwarder, hints, handoff, RequestScope(chat), localWake: localWake, repository: repository);
-        return Surface(admin, chatOnly, diagnostics, eventWaits).Select(tool => new ForwardedTool(tool, calls));
+        return Surface(admin, chatOnly, diagnostics, eventWaits).Select(tool => new ForwardedTool(tool, calls, forwarder.ReportConnectionDiagnostics));
     }
 
     private static IEnumerable<RelayTool> Surface(bool admin, bool chatOnly, bool diagnostics, bool eventWaits = false) => RelayToolCatalog.ForRole(admin, eventWaits).Where(tool => (!chatOnly || ChatTools.Contains(tool.Name)) && (!diagnostics || InDiagnostics(tool)));
@@ -179,11 +179,15 @@ public static class CoordinationTools
     private sealed class ForwardedTool : McpServerTool
     {
         private readonly Func<JsonElement, CancellationToken, Task<AdapterReply>> call;
-        public ForwardedTool(RelayTool tool, ChatCalls calls) : this(tool, (args, ct) => calls.CallAsync(tool.Name, args, ct)) { }
+        private readonly Action<IReadOnlyList<CoCern.Contracts.Dashboard.ConnectionDiagnosticEvent>>? report;
+        public ForwardedTool(RelayTool tool, ChatCalls calls, Action<IReadOnlyList<CoCern.Contracts.Dashboard.ConnectionDiagnosticEvent>>? report = null)
+            : this(tool, (args, ct) => calls.CallAsync(tool.Name, args, ct), report: report) { }
 
-        public ForwardedTool(RelayTool tool, Func<JsonElement, CancellationToken, Task<AdapterReply>> call, bool native = false)
+        public ForwardedTool(RelayTool tool, Func<JsonElement, CancellationToken, Task<AdapterReply>> call, bool native = false,
+            Action<IReadOnlyList<CoCern.Contracts.Dashboard.ConnectionDiagnosticEvent>>? report = null)
         {
             this.call = call;
+            this.report = report;
             ProtocolTool = new Tool
             {
                 Name = tool.Name,
@@ -218,10 +222,19 @@ public static class CoordinationTools
 
         public override async ValueTask<CallToolResult> InvokeAsync(RequestContext<CallToolRequestParams> request, CancellationToken cancellationToken = default)
         {
-            var arguments = JsonSerializer.SerializeToElement(request.Params.Arguments ?? new Dictionary<string, JsonElement>());
-            var reply = await call(arguments, cancellationToken);
-            var json = ModelReply.Text(ProtocolTool.Name, reply);
-            return new CallToolResult { IsError = !reply.Ok, Content = [new TextContentBlock { Text = json }] };
+            var trace = ConnectionTrace.Begin(ProtocolTool.Name, "adapter", request.Params.Meta);
+            try
+            {
+                var arguments = JsonSerializer.SerializeToElement(request.Params.Arguments ?? new Dictionary<string, JsonElement>());
+                var reply = await call(arguments, cancellationToken);
+                if (!reply.Ok && reply.ConnectionTraceId is null) reply = reply with { ConnectionTraceId = trace.CorrelationId };
+                trace.Complete(reply.Ok, reply.Ok ? null : reply.Code);
+                var json = ModelReply.Text(ProtocolTool.Name, reply);
+                return new CallToolResult { IsError = !reply.Ok, Content = [new TextContentBlock { Text = json }] };
+            }
+            catch (OperationCanceledException) { trace.Complete(false, "cancelled"); throw; }
+            catch { trace.Complete(false, "tool_error"); throw; }
+            finally { trace.Dispose(); report?.Invoke(trace.Events); }
         }
     }
 }

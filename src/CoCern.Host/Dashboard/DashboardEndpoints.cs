@@ -22,6 +22,7 @@ public static class DashboardEndpoints
         services.AddSingleton<DashboardSecurity>();
         services.AddSingleton<DashboardSignInLink>();
         services.AddSingleton<DashboardConnect>();
+        services.AddSingleton<DashboardConnectionDiagnostics>();
         services.AddSingleton<HubListener>();
         services.AddSingleton<DashboardAddPc>();
         services.AddSingleton<DashboardLogBuffer>();
@@ -110,6 +111,22 @@ public static class DashboardEndpoints
         api.MapGet("/connect", async (HttpContext context, DashboardConnect connect) =>
             DashboardConnect.OnThisPc(context) ? Results.Ok(await connect.StatusAsync(DashboardConnect.AdminChoice(context), context.RequestAborted)) : Results.Ok(new DashboardConnectStatus { Unavailable = "Open the dashboard on the hub's PC to connect its apps." }))
             .RequireAuthorization(DashboardSecurity.Policy);
+        api.MapGet("/connect/repair", async (HttpContext context, DashboardConnect connect) =>
+            Results.Ok(DashboardConnect.OnThisPc(context) ? await connect.RepairAsync(true, context.RequestAborted) : new DashboardRepairStatus { Unavailable = "Open the dashboard on the hub's PC to check its installation." }))
+            .RequireAuthorization(DashboardSecurity.Policy);
+        api.MapPost("/connect/repair", async (HttpContext context, DashboardConnect connect) =>
+        {
+            if (!DashboardConnect.OnThisPc(context) || !DashboardSecurity.SameOrigin(context)) return Results.StatusCode(403);
+            return Results.Ok(await connect.RepairAsync(false, context.RequestAborted));
+        }).RequireAuthorization(DashboardSecurity.Policy);
+        api.MapGet("/connect/diagnostics", (HttpContext context, DashboardConnectionDiagnostics diagnostics) =>
+        {
+            if (!DashboardConnect.OnThisPc(context)) return Results.StatusCode(403);
+            var snapshot = diagnostics.Read();
+            return context.Request.Query["download"].ToString() == "true"
+                ? Results.File(JsonSerializer.SerializeToUtf8Bytes(snapshot, new JsonSerializerOptions(JsonSerializerDefaults.Web)), "application/json", "cocern-connection-diagnostics.json")
+                : Results.Ok(snapshot);
+        }).RequireAuthorization(DashboardSecurity.Policy);
         // It shows the join code, so only a viewer on this PC sees it.
         api.MapGet("/add-pc", (HttpContext context, DashboardAddPc addPc) =>
             Results.Ok(DashboardConnect.OnThisPc(context) ? addPc.Status() : new DashboardAddPcStatus { Unavailable = "Open the dashboard on the hub's PC to see how another PC joins." }))
