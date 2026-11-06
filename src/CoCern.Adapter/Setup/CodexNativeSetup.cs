@@ -31,12 +31,21 @@ internal static class CodexNativeSetup
     internal static DashboardCodexReadiness Prepare(string home, string profile, string dotnet, string adapter,
         IReadOnlyDictionary<string, string> environment, TimeProvider clock, string? cacheRoot = null)
     {
-        if (!environment.TryGetValue("COCERN_TOKEN_FILE", out var tokenFile)) throw new ClientSettingsException("CoCern's owned local token file is missing (native_token_permissions).");
-        try { NodeState.ProtectOwnedFile(tokenFile); }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or System.Security.SecurityException)
-        { throw new ClientSettingsException("CoCern could not protect its owned local token file (native_token_permissions). Run the hub as the file's owner, then prepare again. Its contents were preserved."); }
         var development = DevelopmentRoot(adapter);
-        var candidate = ClientSettings.StageLocalNativeCandidate("codex", dotnet, adapter, environment, cacheRoot, development, profile)
+        string? candidate;
+        if (environment.TryGetValue("COCERN_TOKEN_FILE", out var tokenFile))
+        {
+            try { NodeState.ProtectOwnedFile(tokenFile); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or System.Security.SecurityException)
+            { throw new ClientSettingsException("CoCern could not protect its owned local token file (native_token_permissions). Run the hub as the file's owner, then prepare again. Its contents were preserved."); }
+            candidate = ClientSettings.StageLocalNativeCandidate("codex", dotnet, adapter, environment, cacheRoot, development, profile);
+        }
+        else
+        {
+            var folder = ConnectionFolder(environment, cacheRoot);
+            candidate = folder is null ? null : ClientSettings.StageNativeCandidate(folder, "codex", SetupEnvironment.AdapterCommandLine(dotnet, adapter), development, profile);
+        }
+        candidate = candidate
             ?? throw new ClientSettingsException("CoCern could not prepare its private native connection. Your existing app settings were preserved.");
         using var data = JsonDocument.Parse(File.ReadAllBytes(candidate));
         var hooksPath = Path.Combine(profile, "hooks.json");
@@ -108,9 +117,8 @@ internal static class CodexNativeSetup
         var initial = new DashboardCodexReadiness { State = "setup_required", Summary = "Native setup is needed", NextAction = "Prepare native setup to install the startup hooks and CoCern workflow skill." };
         var skill = SkillPath(home);
         initial = initial with { SkillInstalled = File.Exists(skill) && new FileInfo(skill).Length < 65536 && File.ReadAllText(skill) == SkillText() };
-        if (!environment.TryGetValue("COCERN_TOKEN_FILE", out var tokenFile)) return initial;
-        var options = AdapterOptions.FromEnvironment(key => environment.GetValueOrDefault(key));
-        var folder = LocalWakeConnection.FolderFor(options, tokenFile, cacheRoot);
+        var folder = ConnectionFolder(environment, cacheRoot);
+        if (folder is null) return initial;
         var registration = NativeRegistration.Read(Path.Combine(folder, "native-client-codex.candidate.json"), "codex", folder, profile);
         if (registration is null) return initial;
         using var candidate = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(folder, "native-client-codex.candidate.json")));
@@ -123,5 +131,18 @@ internal static class CodexNativeSetup
         initial = initial with { HooksInstalled = Matches("SessionStart") && Matches("PreToolUse") && nativeLaunch };
         if (!initial.HooksInstalled || !initial.SkillInstalled) return initial;
         return NativeStartupEvidence.Verify(registration, initial with { State = "awaiting_startup", Summary = "Awaiting a trusted Codex startup", NextAction = "Review the CoCern hooks in Codex, then restart or resume a chat in a registered repository. Refresh to verify." });
+    }
+
+    internal static string? ConnectionFolder(IReadOnlyDictionary<string, string> environment, string? cacheRoot = null)
+    {
+        if (environment.TryGetValue("COCERN_TOKEN_FILE", out var tokenFile))
+        {
+            var options = AdapterOptions.FromEnvironment(key => environment.GetValueOrDefault(key));
+            return LocalWakeConnection.FolderFor(options, tokenFile, cacheRoot);
+        }
+        if (environment.TryGetValue("COCERN_NODE_DIR", out var folder) && Path.IsPathFullyQualified(folder) &&
+            NodeState.NativeCredentialIdentity(folder) is not null && NativeJoinHook.ReadConnection(folder) is not null)
+            return Path.GetFullPath(folder);
+        return null;
     }
 }

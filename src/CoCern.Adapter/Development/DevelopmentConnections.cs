@@ -41,7 +41,10 @@ internal sealed class DevelopmentConnections(string root, Func<AdapterManifest, 
     public async ValueTask<T> UseAsync<T>(Func<IDevelopmentBackend, CancellationToken, ValueTask<T>> operation, CancellationToken cancellationToken = default)
     {
         IDevelopmentBackend selected;
-        await gate.WaitAsync(cancellationToken);
+        var queueAt = System.Diagnostics.Stopwatch.GetTimestamp();
+        try { await gate.WaitAsync(cancellationToken); }
+        catch { ConnectionTrace.Stage("queue", queueAt, "cancelled", "cancelled"); throw; }
+        ConnectionTrace.Stage("queue", queueAt);
         try
         {
             ObjectDisposedException.ThrowIf(disposed, this);
@@ -66,10 +69,17 @@ internal sealed class DevelopmentConnections(string root, Func<AdapterManifest, 
             Task pending;
             lock (calls) pending = drained.Task;
             // New calls queue at gate, while existing operations finish exactly once on their original backend.
-            await pending.WaitAsync(cancellationToken);
+            var drainAt = System.Diagnostics.Stopwatch.GetTimestamp();
+            try { await pending.WaitAsync(cancellationToken); }
+            catch { ConnectionTrace.Stage("drain", drainAt, "cancelled", "cancelled"); throw; }
+            ConnectionTrace.Stage("drain", drainAt);
             using var startup = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             startup.CancelAfter(TimeSpan.FromSeconds(15));
-            var replacement = await connect(desired, startup.Token);
+            var startAt = System.Diagnostics.Stopwatch.GetTimestamp();
+            IDevelopmentBackend replacement;
+            try { replacement = await connect(desired, startup.Token); }
+            catch { ConnectionTrace.Stage("backend_start", startAt, "error", "backend_unavailable"); throw; }
+            ConnectionTrace.Stage("backend_start", startAt);
             var previous = backend;
             (backend, active) = (replacement, desired);
             metadataChanged = true;

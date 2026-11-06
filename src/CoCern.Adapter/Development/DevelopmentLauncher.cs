@@ -64,6 +64,8 @@ internal static class DevelopmentLauncher
                 foreach (var argument in nativeContext) start.ArgumentList.Add(argument);
                 NativeRegistration.RestrictPrivateEnvironment(start);
             }
+            if (Environment.GetEnvironmentVariable("COCERN_CONNECTION_DIAGNOSTICS_DIR") is { } diagnosticsDirectory)
+                start.Environment["COCERN_CONNECTION_DIAGNOSTICS_DIR"] = diagnosticsDirectory;
             start.Environment["COCERN_DEVELOPMENT_GENERATION"] = manifest.Generation;
             var process = Process.Start(start) ?? throw new IOException("The development backend could not start.");
             var stopError = new CancellationTokenSource();
@@ -81,7 +83,12 @@ internal static class DevelopmentLauncher
             }
             catch { await StopBackendAsync(process, stopError, error); throw; }
         }, Console.Error.WriteLine);
-        await connections.RefreshAsync(cancellationToken);
+        using (var startupTrace = ConnectionTrace.Begin("unknown", "launcher"))
+        {
+            try { await connections.RefreshAsync(cancellationToken); }
+            catch (OperationCanceledException) { startupTrace.Complete(false, "cancelled"); throw; }
+            catch { startupTrace.Complete(false, "backend_unavailable"); throw; }
+        }
         var builder = Host.CreateApplicationBuilder();
         builder.Logging.ClearProviders();
         McpServer? upstream = null;
@@ -93,15 +100,18 @@ internal static class DevelopmentLauncher
                 : connections.Instructions ?? throw new AdapterConfigurationException(NativeRegistration.Refusal);
             options.Capabilities = new() { Tools = new() { ListChanged = true } };
         }).WithStdioServerTransport()
-            .WithListToolsHandler((request, token) =>
+            .WithListToolsHandler(async (request, token) =>
             {
                 upstream = request.Server;
-                return connections.UseAsync(async (backend, ct) => AdvertiseGuidance(await backend.ListToolsAsync(request.Params ?? new(), ct), backend.Instructions), token);
+                using var trace = ConnectionTrace.Begin("unknown", "launcher");
+                try { return await connections.UseAsync(async (backend, ct) => AdvertiseGuidance(await backend.ListToolsAsync(request.Params ?? new(), ct), backend.Instructions), token); }
+                catch (OperationCanceledException) { trace.Complete(false, "cancelled"); throw; }
+                catch { trace.Complete(false, "backend_unavailable"); throw; }
             })
             .WithCallToolHandler((request, token) =>
             {
                 upstream = request.Server;
-                return connections.UseAsync((backend, ct) => backend.CallToolAsync(request.Params!, ct), token);
+                return ForwardMeasuredAsync(connections, request.Params!, token);
             });
         using var host = builder.Build();
         using var stopping = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, host.Services.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping);
@@ -113,6 +123,20 @@ internal static class DevelopmentLauncher
             await watching;
         }
         return 0;
+    }
+
+    private static async ValueTask<CallToolResult> ForwardMeasuredAsync(DevelopmentConnections connections, CallToolRequestParams request, CancellationToken token)
+    {
+        using var trace = ConnectionTrace.Begin(request.Name, "launcher");
+        try
+        {
+            var result = await connections.UseAsync((backend, ct) => backend.CallToolAsync(new CallToolRequestParams
+            { Name = request.Name, Arguments = request.Arguments, Meta = ConnectionTrace.Metadata(request.Meta) }, ct), token);
+            trace.Complete(result.IsError != true, result.IsError == true ? "tool_error" : null);
+            return result;
+        }
+        catch (OperationCanceledException) { trace.Complete(false, "cancelled"); throw; }
+        catch { trace.Complete(false, "backend_unavailable"); throw; }
     }
 
     private static string PrivateImageVersion(Stream image)

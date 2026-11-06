@@ -27,7 +27,7 @@ internal static class ToolSchemas
             RelayTools.ActionReport => ["outcome", "attention", "presentStanding"],
             RelayTools.SendMessage => ["text", "recipientSessionId", "taskId", "replyTo", "ackMessageIds", "supersede", "wake"],
             RelayTools.CheckInbox => ["cursor", "limit", "presentStanding"],
-            RelayTools.GetStatus => ["managerHistoryBefore", "managerHistoryOnly", "statusTag"],
+            RelayTools.GetStatus => ["managerHistoryBefore", "managerHistoryOnly", "statusTag", "attentionDetail"],
             RelayTools.ControlRequest => ["targetSessionId", "expectedManagerGeneration", "humanWords"],
             RelayTools.Ack => ["messageId", "messageIds", "waitingFor"],
             RelayTools.ClaimRenew => ["resourceId", "generation", "taskId", "claimGeneration", "leaseSeconds"],
@@ -76,7 +76,7 @@ internal static class ToolSchemas
         // Attention answers are advertised by type; InputSchema gives the ID bound and the until format.
         if (tool.Name == RelayTools.AttentionRespond)
         {
-            properties["itemId"] = new { type = "string" };
+            properties["itemId"] = new { type = "string", description = "ID from a current offer or get_status attentionDetail preview. Inspect scope first; never guess an ID." };
             properties["itemIds"] = new { type = "array", items = new { type = "string" } };
             properties["action"] = new { type = "string", @enum = AttentionActions.All };
             properties["until"] = new { type = "string", description = "Optional ISO time for later." };
@@ -155,6 +155,7 @@ internal static class ToolSchemas
             properties["managerHistoryBefore"] = new { type = "integer" };
             properties["managerHistoryOnly"] = new { type = "boolean" };
             properties["statusTag"] = new { type = "string" };
+            properties["attentionDetail"] = new { type = "boolean", description = "Read-only pending-work details and full current offer preview; never reserves or accepts work." };
         }
         // A read, so it leaves out requestId; its description says what the two fields do.
         if (tool.Name == RelayTools.Peers)
@@ -210,6 +211,7 @@ internal static class ToolSchemas
                 properties["expiresAt"] = new { type = "string", format = "date-time", description = "Absolute deadline, at most one hour ahead; reuse unchanged on retry." };
                 break;
             case RelayTools.GetStatus:
+                properties["attentionDetail"] = new { type = "boolean", description = "Read-only pending-work details and full current offer preview; never reserves or accepts work." };
                 properties["statusTag"] = new { type = "string", maxLength = 64, description = "Opt in with an empty string; echo the returned tag for freshly authorized unchanged status. Missing tags mean full reads." };
                 properties["managerHistoryBefore"] = new { type = "integer", minimum = 0, description = "Administrator-only: read manager selections older than this generation." };
                 properties["managerHistoryOnly"] = new { type = "boolean", description = "Reserve this read for the visible manager summary and administrator history, omitting cancellation requests. Administrators also get the action log. Use when ordinary status omits manager or manager.historyReadRequired is true. Retain the incoming cursor for history continuation." }; break;
@@ -296,7 +298,7 @@ internal static class ToolSchemas
                 properties["status"] = new { type = "string", maxLength = RelayLimits.MaxSearchStatusLength, description = "Only hits with this status, such as ready, blocked or completed." };
                 properties["limit"] = new { type = "integer", minimum = 1, maximum = RelayLimits.MaxSearchResults, description = $"Most hits; default {RelayLimits.DefaultSearchResults}." }; break;
             case RelayTools.AttentionRespond:
-                properties["itemId"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxIdentifierLength, description = "Attention item ID from an offer." };
+                properties["itemId"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxIdentifierLength, description = "ID from a current attention offer or get_status attentionDetail preview. Inspect scope first; never guess an ID." };
                 properties["itemIds"] = new { type = "array", minItems = 1, maxItems = RelayLimits.MaxAttentionItems, uniqueItems = true, items = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxIdentifierLength }, description = "Instead of itemId: answer these the same way; results has one row each." };
                 properties["action"] = new { type = "string", @enum = AttentionActions.All, description = "later hides the item for a few replies, or until a time; accept and dismiss close it." };
                 properties["until"] = new { type = "string", format = "date-time", description = "Optional future time when a later item returns." }; break;

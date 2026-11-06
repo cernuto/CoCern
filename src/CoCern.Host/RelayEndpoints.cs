@@ -33,6 +33,7 @@ public static class RelayEndpoints
         app.UseRateLimiter();
         app.UseAuthentication();
         app.UseAuthorization();
+        app.UseMiddleware<ConnectionTimingMiddleware>();
         app.UseBoundedToolBodies();
         return app;
     }
@@ -47,6 +48,7 @@ public static class RelayEndpoints
         app.MapDiscoveryEndpoints();
         app.MapJoinEndpoints();
         app.MapRelayDashboard();
+        app.MapConnectionDiagnostics();
         app.MapFallbackToFile("/dashboard/{*path:nonfile}", "dashboard/index.html");
         app.MapHub<CoordinationHub>("/" + HubEvents.Path).RequireAuthorization();
         app.MapMcp("/mcp").RequireAuthorization();

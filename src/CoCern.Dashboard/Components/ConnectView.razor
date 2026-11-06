@@ -11,7 +11,7 @@
 else
 {
     <BbCard role="region" Class="surface connect-view" aria-labelledby="connect-heading">
-        <div class="section-heading"><div><h2 id="connect-heading">Apps on this PC</h2><p>Add CoCern to your apps, then verify a native Codex session is ready.</p></div></div>
+        <div class="section-heading"><div><h2 id="connect-heading">Apps on this PC</h2><p>Choose an app to connect to CoCern.</p></div></div>
         @if (_status is null)
         {
             <p class="empty-copy">Looking for apps…</p>
@@ -23,10 +23,6 @@ else
         }
         else
         {
-            <label class="admin-tools" for="connect-admin-tools">
-                <BbCheckbox Id="connect-admin-tools" Checked="@_admin" Disabled="@(_busy is not null)" CheckedChanged="@(value => ChooseAdminAsync(new ChangeEventArgs { Value = value }))" />
-                <span><strong>Administrator tools</strong><small>Chats in these apps can also set standing rules, add orders, run analytics, pause work and close sessions. Leave it off unless you trust every chat in them.</small></span>
-            </label>
             <ul class="connect-list">
                 @foreach (var client in _status.Clients)
                 {
@@ -35,20 +31,31 @@ else
                         <div><strong>@client.Name</strong><small>@Describe(client)</small></div>
                         @if (client.Id == ConnectClients.Codex && client.State != ConnectStates.OtherHub)
                         {
-                            <BbBadge Variant="@(IsReady(client.Readiness) ? BadgeVariant.SoftSuccess : BadgeVariant.Secondary)" Class="connection-state">@(IsReady(client.Readiness) ? "Ready" : client.State is ConnectStates.Connected or ConnectStates.Added ? "Configured" : "Setup required")</BbBadge>
-                            <section class="codex-readiness" aria-labelledby="codex-readiness-heading" aria-busy="@(_busy is not null)">
-                                <div class="codex-readiness-heading"><h3 id="codex-readiness-heading">Connect and verify</h3><span class="muted">Codex</span></div>
-                                <p class="codex-readiness-summary" role="status">@(client.Readiness?.Summary is { Length: > 0 } summary ? summary : "The tool connection is one part of setup. Install the native hooks and workflow skill to start sessions automatically.")</p>
+                            <BbBadge Variant="@(IsReady(client.Readiness) ? BadgeVariant.SoftSuccess : BadgeVariant.Secondary)" Class="connection-state">@CodexStatus(client.Readiness)</BbBadge>
+                            <section class="codex-readiness" aria-label="Codex connection" aria-busy="@(_busy is not null)">
+                                @if (!IsReady(client.Readiness))
+                                {
+                                    <p class="codex-next-step" role="status">@CodexNextStep(client.Readiness)</p>
+                                    <div class="codex-readiness-actions">
+                                        @if (NativeInstalled(client.Readiness))
+                                        {
+                                            <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Default" Disabled="@(_busy is not null)" OnClick="RefreshReadinessAsync">@(_busy == "refresh" ? "Checking…" : "Check connection")</BbButton>
+                                        }
+                                        else
+                                        {
+                                            <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Default" Disabled="@(_busy is not null)" OnClick="() => ConnectAsync(client.Id)">@(_busy == client.Id ? "Setting up…" : "Set up Codex")</BbButton>
+                                        }
+                                    </div>
+                                }
+                                <details class="codex-setup-details">
+                                    <summary>Setup details</summary>
+                                    <p class="codex-readiness-summary">@(client.Readiness?.Summary ?? "Codex setup has not been verified yet.")</p>
                                 <ol class="codex-readiness-steps">
                                     <li><span class="readiness-marker" aria-hidden="true">@(client.Readiness is { HooksInstalled: true, SkillInstalled: true } ? "✓" : "1")</span><div><strong>Install native setup</strong><small>@(client.Readiness is { HooksInstalled: true, SkillInstalled: true } ? "Native hooks and the CoCern workflow skill are installed." : "Adds session startup hooks and the workflow skill while keeping your other settings.")</small></div></li>
                                     <li><span class="readiness-marker" aria-hidden="true">@(client.Readiness?.StartupObserved == true ? "✓" : "2")</span><div><strong>Review hooks and start a session</strong><small>@(client.Readiness?.StartupObserved == true ? "A real Codex startup was received." : "In Codex, review and trust the CoCern hooks, then start or resume a chat in your repository. CoCern cannot approve this review for you.")</small></div></li>
                                     <li><span class="readiness-marker" aria-hidden="true">@(client.Readiness?.SessionVerified == true ? "✓" : "3")</span><div><strong>Verify the session</strong><small>@(client.Readiness?.SessionVerified == true ? "The native session and repository were verified with the hub." : "CoCern verifies the captured chat identity and resolves the repository automatically.")</small></div></li>
                                     <li><span class="readiness-marker" aria-hidden="true">@(client.Readiness?.WakeReady == true ? "✓" : "4")</span><div><strong>Check the wake route</strong><small>@(client.Readiness?.WakeReady == true ? "The session can receive CoCern wake notifications." : "Keep Codex and the local CoCern node running so the session can receive attention.")</small></div></li>
                                 </ol>
-                                @if (client.Readiness?.NextAction is { Length: > 0 } nextAction)
-                                {
-                                    <p class="codex-next-action"><strong>Next:</strong> @nextAction</p>
-                                }
                                 @if (client.Readiness?.Detail is { Length: > 0 } detail)
                                 {
                                     <p class="codex-readiness-detail">@detail</p>
@@ -62,10 +69,17 @@ else
                                     <dl class="codex-verified-session"><div><dt>Repository</dt><dd>@(verified.RepositoryId ?? "Verified")</dd></div><div><dt>Session</dt><dd>@(verified.SessionId ?? "Verified")</dd></div></dl>
                                 }
                                 <div class="codex-readiness-actions">
-                                    <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Default" Disabled="@(_busy is not null)" OnClick="() => ConnectAsync(client.Id)">@(_busy == client.Id ? "Preparing…" : client.Readiness is { HooksInstalled: true, SkillInstalled: true } ? "Repair native setup" : "Set up Codex")</BbButton>
-                                    <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Outline" Disabled="@(_busy is not null)" OnClick="RefreshReadinessAsync">@(_busy == "refresh" ? "Checking…" : "Refresh readiness")</BbButton>
+                                    @if (NativeInstalled(client.Readiness))
+                                    {
+                                        <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Outline" Disabled="@(_busy is not null)" OnClick="() => ConnectAsync(client.Id)">@(_busy == client.Id ? "Repairing…" : "Repair native setup")</BbButton>
+                                    }
+                                    @if (IsReady(client.Readiness) || !NativeInstalled(client.Readiness))
+                                    {
+                                        <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Outline" Disabled="@(_busy is not null)" OnClick="RefreshReadinessAsync">@(_busy == "refresh" ? "Checking…" : "Check connection")</BbButton>
+                                    }
                                 </div>
-                                <p class="codex-readiness-footnote">A configured tool entry does not mean a session is ready. Refresh checks readiness without changing your settings.</p>
+                                <p class="codex-readiness-footnote">Checks are read-only. Hook approval stays in Codex.</p>
+                                </details>
                             </section>
                         }
                         else if (client.State is ConnectStates.Connected or ConnectStates.Added)
@@ -79,8 +93,15 @@ else
                     </li>
                 }
             </ul>
+            <details class="connect-permissions">
+                <summary>App permissions</summary>
+                <label class="admin-tools" for="connect-admin-tools">
+                    <BbCheckbox Id="connect-admin-tools" Checked="@_admin" Disabled="@(_busy is not null)" CheckedChanged="@(value => ChooseAdminAsync(new ChangeEventArgs { Value = value }))" />
+                    <span><strong>Administrator tools</strong><small>Allow connected chats to manage rules, orders and other sessions. Enable only for apps whose chats you trust.</small></span>
+                </label>
+                <p class="table-footnote">Existing permissions are kept unless you change this choice.</p>
+            </details>
         }
-        <p class="table-footnote">ChatGPT: Codex is ChatGPT's coding agent and uses this connection. The ChatGPT chat app can only reach CoCern at a public HTTPS address.</p>
     </BbCard>
 }
 
@@ -118,6 +139,19 @@ else
     }
 
     private static bool IsReady(DashboardCodexReadiness? readiness) => readiness is { HooksInstalled: true, SkillInstalled: true, StartupObserved: true, SessionVerified: true, WakeReady: true };
+
+    private static bool NativeInstalled(DashboardCodexReadiness? readiness) => readiness is { HooksInstalled: true, SkillInstalled: true };
+
+    private static string CodexStatus(DashboardCodexReadiness? readiness) => readiness?.State == "error" ? "Needs attention" : IsReady(readiness) ? "Ready" : !NativeInstalled(readiness) ? "Setup required" : readiness?.StartupObserved != true ? "Finish in Codex" : "Needs verification";
+
+    private static string CodexNextStep(DashboardCodexReadiness? readiness) => readiness switch
+    {
+        { State: "error", NextAction: { Length: > 0 } action } => action,
+        _ when !NativeInstalled(readiness) => "Set up automatic sessions for Codex, then finish the hook review in Codex.",
+        { StartupObserved: false } => "Review the CoCern hooks in Codex, then start or resume a chat in your repository.",
+        { NextAction: { Length: > 0 } action } => action,
+        _ => "Start or resume a Codex chat, then check the connection."
+    };
 
     private static bool NeedsSetup(DashboardConnectClient client) => client.State == ConnectStates.Available || client.Id == ConnectClients.Codex && client.State != ConnectStates.OtherHub && !IsReady(client.Readiness);
 

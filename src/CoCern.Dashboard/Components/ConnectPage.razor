@@ -1,0 +1,28 @@
+<div class="connect-page">
+    <ConnectView @key="_installationRevision" />
+    <details class="surface connect-option">
+        <summary @onclick="OpenAddPc"><strong>Add another PC</strong><span>Connect chats on another machine.</span></summary>
+        @if (_addPcOpened)
+        {
+            <AddPcView />
+        }
+    </details>
+    <details class="surface connect-option">
+        <summary @onclick="OpenConnectionHelp"><strong>Connection help</strong><span>Check installation, repair setup or view request timings.</span></summary>
+        @if (_connectionHelpOpened)
+        {
+            <InstallationRepairView OnRepaired="InstallationRepaired" />
+            <ConnectionDiagnosticsView />
+        }
+    </details>
+</div>
+
+@code {
+    private int _installationRevision;
+    private bool _addPcOpened;
+    private bool _connectionHelpOpened;
+
+    private void OpenAddPc() => _addPcOpened = true;
+    private void OpenConnectionHelp() => _connectionHelpOpened = true;
+    private void InstallationRepaired() => _installationRevision++;
+}

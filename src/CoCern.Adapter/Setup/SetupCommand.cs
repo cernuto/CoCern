@@ -225,16 +225,17 @@ internal static class SetupCommand
 {
     public const int MalformedClientFileExitCode = 5;
 
-    public static async Task<int> RunAsync(SetupOptions options, SetupEnvironment env, CancellationToken ct)
+    public static async Task<int> RunAsync(SetupOptions options, SetupEnvironment env, CancellationToken ct, bool rememberJoinCode = true)
     {
         var folder = NormalizeFolder(options.DataDir);
+        var nodeEnvironment = new Dictionary<string, string> { ["COCERN_NODE_DIR"] = folder };
         // Planned once now only to refuse a file we cannot edit before enrolling; each file is planned again from its fresh bytes just before it is written.
         // Claude Code's file is the exception when its own command line is on this PC: that registers the entry, and the file is only read if the command line fails.
         var planners = new List<(Func<ClientPlan> Plan, bool ClaudeCode)>();
         if (!options.SkipClientConfig)
         {
-            planners.Add((() => ClientSettings.PlanCodex(Path.Combine(env.Profile, ".codex", "config.toml"), env.DotnetPath, env.AdapterDll), false));
-            planners.Add((() => ClientSettings.PlanClaudeCode(Path.Combine(env.Profile, ".claude.json"), env.DotnetPath, env.AdapterDll), true));
+            planners.Add((() => ClientSettings.PlanCodex(Path.Combine(CodexNativeSetup.Profile(env.Profile), "config.toml"), env.DotnetPath, env.AdapterDll, nodeEnvironment), false));
+            planners.Add((() => ClientSettings.PlanClaudeCode(Path.Combine(env.Profile, ".claude.json"), env.DotnetPath, env.AdapterDll, nodeEnvironment), true));
             // The Stop hook is on by default: it is how an idle Claude Code chat wakes for a message (Codex chats are woken by the node instead).
             // The prompt hook is opt-in: a status line and new mail with each human message, at no tool call for the model. The same opt-in adds Claude Code's post-tool hook, which
             // brings new mail during a turn, and its waiting hooks, which report a chat stopped at a client prompt on "Waiting on you". They stay off by default until they have been tried on a
@@ -249,7 +250,7 @@ internal static class SetupCommand
         try { foreach (var (planner, claudeCode) in planners) if (!claudeCode || env.ClaudeCli is null) planner(); }
         catch (ClientSettingsException exception) { env.Error.WriteLine(exception.Message); return MalformedClientFileExitCode; }
 
-        var enrolled = await EnrollAsync(options, env, folder, ct);
+        var enrolled = await EnrollAsync(options, env, folder, ct, rememberJoinCode);
         if (enrolled.Code != 0) return enrolled.Code;
 
         try
@@ -268,7 +269,9 @@ internal static class SetupCommand
             if (!options.SkipClientConfig)
             {
                 var command = SetupEnvironment.AdapterCommandLine(env.DotnetPath, env.AdapterDll);
-                ClientSettings.StageNativeCandidate(folder, "codex", command, clientProfile: Path.Combine(env.Profile, ".codex"));
+                if (RepairCommand.OwnsCodexNode(CodexNativeSetup.Profile(env.Profile), folder, env.DotnetPath, env.AdapterDll))
+                    CodexNativeSetup.Prepare(env.Profile, CodexNativeSetup.Profile(env.Profile), env.DotnetPath, env.AdapterDll, nodeEnvironment, env.Clock);
+                else env.Out.WriteLine("Codex has another connection; its native setup was retained.");
                 ClientSettings.StageNativeCandidate(folder, "claude", command, clientProfile: Path.Combine(env.Profile, ".claude"));
             }
             LogonStart.Register(env.DotnetPath, env.AdapterDll, options.DataDir is null ? null : folder, env.RunKey);
@@ -308,7 +311,7 @@ internal static class SetupCommand
         return full.Length > (Path.GetPathRoot(full)?.Length ?? 0) ? full.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) : full;
     }
 
-    private static async Task<(int Code, string MachineId, string Hub)> EnrollAsync(SetupOptions options, SetupEnvironment env, string folder, CancellationToken ct)
+    private static async Task<(int Code, string MachineId, string Hub)> EnrollAsync(SetupOptions options, SetupEnvironment env, string folder, CancellationToken ct, bool rememberJoinCode)
     {
         NodeState state;
         try { state = NodeState.Open(folder); }
@@ -323,7 +326,7 @@ internal static class SetupCommand
         using (state)
         {
             env.Transport.SingleCycle = true;
-            if (options.JoinCode is not null) { env.Transport.JoinCode = options.JoinCode; state.SaveJoinCode(options.JoinCode); }
+            if (options.JoinCode is not null) { env.Transport.JoinCode = options.JoinCode; if (rememberJoinCode) state.SaveJoinCode(options.JoinCode); }
             if (options.Fingerprint is not null) env.Transport.ExpectedFingerprint = options.Fingerprint;
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeout.CancelAfter(env.EnrollTimeout);

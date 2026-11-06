@@ -438,15 +438,49 @@ public sealed class NativeJoinCallsTests
         using var stop = new CancellationTokenSource();
         var resumed = runtime.ResumeAsync(stop.Token);
         var actual = new TaskCompletionSource<WakeTarget>(TaskCreationOptions.RunContinuationsAsynchronously);
-        await using var wake = new LocalChatWake(LocalWakeConnection.Read(scope.Folder)!, new NodeTransport { CodexExecutable = () => "fixture-codex", Locators = [] },
-            async (_, target, ct) => { actual.TrySetResult(target); try { await Task.Delay(Timeout.Infinite, ct); } catch (OperationCanceledException) { } });
+        var poll = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var reconciled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var profile = Directory.CreateDirectory(Path.Combine(scope.Root, "profile")).FullName;
+        var candidate = CoCern.Adapter.Setup.ClientSettings.StageNativeCandidate(scope.Folder, "codex", "fixture-helper", clientProfile: profile)!;
+        var registration = NativeRegistration.Read(candidate, "codex", scope.Folder, profile)!;
+        await using var wake = await LocalChatWake.OpenAsync(scope.Options, tokenFile: null, registration, cacheRoot: Path.Combine(scope.Root, "cache"),
+            create: connection => new LocalChatWake(connection, new NodeTransport { CodexExecutable = () => "fixture-codex", Locators = [] },
+                async (runtime, target, ct) =>
+                {
+                    actual.TrySetResult(target);
+                    try
+                    {
+                        await poll.Task.WaitAsync(ct);
+                        runtime.Reconciled!(target, "empty");
+                        reconciled.TrySetResult();
+                        await Task.Delay(Timeout.Infinite, ct);
+                    }
+                    catch (OperationCanceledException) { }
+                }));
+        Assert.NotNull(wake);
+        Assert.Equal(scope.Folder, wake.Connection.Folder);
+        Assert.Null(await LocalChatWake.OpenAsync(new AdapterOptions(scope.Options.BaseUri.AbsoluteUri, scope.Options.Token) { NodeFolder = scope.Folder }, null, registration,
+            cacheRoot: Path.Combine(scope.Root, "cache")));
         var watching = wake.RunAsync(stop.Token);
         var captured = await actual.Task.WaitAsync(TimeSpan.FromSeconds(10));
         Assert.Equal(context.NativeId, captured.Route.ThreadId);
         Assert.Equal("s-offline", captured.Session.SessionId);
         Assert.Equal("fixture-token", captured.Session.SessionToken);
         Assert.False(File.Exists(pending));
+        var handle = Assert.Single(NativeJoinBinding.DispatchSnapshot(scope.Folder));
+        await using (var binding = await NativeJoinBinding.AcquireAsync(scope.Folder, "codex", context.NativeId, Environment.MachineName,
+            "repo", scope.Checkout, default, existingOnly: true))
+            Assert.False(NativeStartupEvidence.HasLiveLocalWake(binding, handle));
+        poll.TrySetResult();
+        var receipt = Path.Combine(scope.Folder, "native-wake-" + handle.NativeBindingKey + ".json");
+        await reconciled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await using (var binding = await NativeJoinBinding.AcquireAsync(scope.Folder, "codex", context.NativeId, Environment.MachineName,
+            "repo", scope.Checkout, default, existingOnly: true))
+            Assert.True(NativeStartupEvidence.HasLiveLocalWake(binding, handle));
+        Assert.DoesNotContain(scope.Options.Token, File.ReadAllText(receipt));
+        Assert.DoesNotContain(captured.Session.SessionToken, File.ReadAllText(receipt));
         stop.Cancel(); await Task.WhenAll(resumed, watching).WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.False(File.Exists(receipt));
     }
 
     // Security boundary: the proven root travels only inside the private open envelope. A model's arguments cannot name it, no reply or file carries it, and a refused proof sends nothing.

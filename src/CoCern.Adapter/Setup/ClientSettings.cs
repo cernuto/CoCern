@@ -186,7 +186,7 @@ internal static class ClientSettings
         // Our canonical launcher entry is stable: updating current.json is enough to restart its backend, without rewriting config each build.
         var rawArguments = text[arguments[0].ValueStart..arguments[0].ValueEnd];
         var parsedArguments = ParseArgumentArray(rawArguments);
-        var nativeSuffix = parsedArguments is { Length: >= 7 } && NativeRegistration.ValidClientArguments(parsedArguments[^6..]) ? parsedArguments[^6..] : [];
+        var nativeSuffix = parsedArguments is { Length: >= 6 } && NativeRegistration.ValidClientArguments(parsedArguments[^6..]) ? parsedArguments[^6..] : [];
         if (!replaceLauncher && parsedArguments is { Length: 3 or 9 } && parsedArguments[1] == "--dev-launch" && SamePath(parsedArguments[2], deploymentRoot)
             && (parsedArguments.Length == 3 || nativeSuffix.Length == 6) && IsDeployedLauncher(parsedArguments[0], deploymentRoot))
             return ClientPlan.Unchanged(path);
@@ -255,11 +255,11 @@ internal static class ClientSettings
         var launcher = developmentRoot is not null && existingArguments is { Length: 3 or 9 } && existingArguments[1] == "--dev-launch" &&
             SamePath(existingArguments[2], developmentRoot) && IsDeployedLauncher(existingArguments[0], developmentRoot) &&
             (existingArguments.Length == 3 || NativeRegistration.ValidClientArguments(existingArguments[^6..])) ? existingArguments[0] : adapter;
-        var values = new List<string> { launcher };
-        if (developmentRoot is not null) values.AddRange(["--dev-launch", developmentRoot]);
+        var launch = developmentRoot is null ? SetupEnvironment.AdapterLaunch(dotnet, adapter) : (dotnet, (IReadOnlyList<string>)new[] { launcher, "--dev-launch", developmentRoot });
+        var values = new List<string>(launch.Item2);
         values.AddRange(["--native-client", "codex", "--connection", folder, "--profile", profile]);
         var result = text;
-        foreach (var edit in new[] { (Line: command, Text: TomlString(dotnet)), (Line: arguments, Text: "[" + string.Join(", ", values.Select(TomlString)) + "]") }.OrderByDescending(item => item.Line.ValueStart))
+        foreach (var edit in new[] { (Line: command, Text: TomlString(launch.Item1)), (Line: arguments, Text: "[" + string.Join(", ", values.Select(TomlString)) + "]") }.OrderByDescending(item => item.Line.ValueStart))
             result = result[..edit.Line.ValueStart] + edit.Text + result[edit.Line.ValueEnd..];
         return result == text ? ClientPlan.Unchanged(path) : ClientPlan.Write(path, [.. original.AsSpan(0, Bom(original)), .. Encoding.UTF8.GetBytes(result)], existed: true, refreshes: true);
     }
@@ -275,9 +275,12 @@ internal static class ClientSettings
         var arguments = entries.Where(item => item.Key.SequenceEqual(new[] { "args" })).ToArray();
         var commands = entries.Where(item => item.Key.SequenceEqual(new[] { "command" })).ToArray();
         if (arguments.Length != 1 || commands.Length != 1 || TomlInline.String(text, commands[0].ValueStart, commands[0].ValueEnd) is not { } command ||
-            !File.Exists(command) || !string.Equals(Path.GetFileNameWithoutExtension(command), "dotnet", StringComparison.OrdinalIgnoreCase)) return false;
+            !File.Exists(command)) return false;
         var argument = arguments[0];
         var args = ParseArgumentArray(text[argument.ValueStart..argument.ValueEnd]);
+        if (SamePath(command, Path.Combine(Path.GetDirectoryName(typeof(ClientSettings).Assembly.Location)!, "CoCern.Adapter.exe")))
+            return args is { Length: 6 } && args.SequenceEqual(new[] { "--native-client", "codex", "--connection", folder, "--profile", profile });
+        if (!string.Equals(Path.GetFileNameWithoutExtension(command), "dotnet", StringComparison.OrdinalIgnoreCase)) return false;
         return args is { Length: 7 or 9 } && args[^6..].SequenceEqual(new[] { "--native-client", "codex", "--connection", folder, "--profile", profile }) &&
             (args.Length == 7 ? SamePath(args[0], typeof(ClientSettings).Assembly.Location) : args[1] == "--dev-launch" && IsDeployedLauncher(args[0], args[2]));
     }
@@ -327,6 +330,23 @@ internal static class ClientSettings
         var eol = text.Contains("\r\n") ? "\r\n" : text.Contains('\n') ? "\n" : Environment.NewLine;
         var separator = text.Length == 0 ? "" : (text.EndsWith('\n') ? "" : eol) + eol;
         return ClientPlan.Write(path, [.. original, .. Encoding.UTF8.GetBytes(separator + Entry(dotnetPath, adapterDll, environment, eol))], existed: true);
+    }
+
+    /// <summary>Update only an already-authorized JSON client's executable fields, retaining its environment and permissions.</summary>
+    internal static ClientPlan PlanOwnedJsonLaunch(string path, string dotnet, string adapter)
+    {
+        if (DevelopmentRoot(path) is not null) return ClientPlan.Unchanged(path);
+        var bytes = ReadAll(path) ?? throw Malformed(path, "its owned connection is missing");
+        var document = JsonNode.Parse(bytes)?.AsObject() ?? throw Malformed(path, "its owned connection is invalid");
+        if (document["mcpServers"] is not JsonObject servers || servers[Name] is not JsonObject entry) throw Malformed(path, "its owned connection is missing");
+        var launch = SetupEnvironment.AdapterLaunch(dotnet, adapter);
+        var previous = entry["args"] is JsonArray array ? array.Select(value => value?.GetValue<string>() ?? "").ToArray() : [];
+        var native = previous is { Length: >= 6 } && NativeRegistration.ValidClientArguments(previous[^6..]) ? previous[^6..] : [];
+        if (previous.Any(NativeRegistration.HasPrivateOptionName) && native.Length == 0) throw Malformed(path, "its private native launch context could not be verified");
+        var arguments = new JsonArray(launch.Arguments.Concat(native).Select(value => (JsonNode)JsonValue.Create(value)!).ToArray());
+        if ((string?)entry["command"] == launch.Command && JsonNode.DeepEquals(entry["args"], arguments)) return ClientPlan.Unchanged(path);
+        entry["command"] = launch.Command; entry["args"] = arguments;
+        return ClientPlan.Write(path, JsonSerializer.SerializeToUtf8Bytes(document, new JsonSerializerOptions { WriteIndented = true }), existed: true, refreshes: true);
     }
 
     public static ClientPlan PlanClaudeCode(string path, string dotnetPath, string adapterDll, IReadOnlyDictionary<string, string>? environment = null, EntryRefresh? refresh = null) =>

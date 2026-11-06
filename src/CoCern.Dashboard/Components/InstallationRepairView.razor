@@ -1,0 +1,77 @@
+@using System.Net.Http.Json
+@inject HttpClient Http
+
+<BbCard role="region" Class="surface installation-health" aria-labelledby="installation-health-heading">
+    <div class="section-heading"><div><h2 id="installation-health-heading">Installation health</h2><p>Check this PC's connection and see what an owned repair will change.</p></div></div>
+    @if (_status is null)
+    {
+        <p class="empty-copy" role="status">Checking the installation…</p>
+    }
+    else if (_status.Unavailable is { } unavailable)
+    {
+        <p class="empty-copy" role="status">@unavailable</p>
+    }
+    else
+    {
+        <ul class="installation-checks">
+            @foreach (var check in _status.Checks)
+            {
+                <li @key="check.Id"><div><strong>@check.Name</strong><p>@check.Detail</p></div><BbBadge Variant="@(check.State == "passed" ? BadgeVariant.SoftSuccess : BadgeVariant.Secondary)">@CheckLabel(check.State)</BbBadge></li>
+            }
+        </ul>
+        @if (_status.PlannedChanges.Length > 0)
+        {
+            <div class="installation-change-preview"><h3>Repair will change</h3><ul>@foreach (var change in _status.PlannedChanges) { <li>@change</li> }</ul></div>
+        }
+        @if (_status.AppliedChanges.Length > 0)
+        {
+            <div class="installation-change-result" role="status"><h3>Changes applied</h3><ul>@foreach (var change in _status.AppliedChanges) { <li>@change</li> }</ul></div>
+        }
+        @if (!string.IsNullOrWhiteSpace(_status.NextAction))
+        {
+            <p class="installation-next-action"><strong>Next:</strong> @_status.NextAction</p>
+        }
+    }
+    <div class="installation-actions">
+        <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Outline" Disabled="@_busy" OnClick="CheckInstallationAsync">@(_busy && !_repairing ? "Checking…" : "Check installation")</BbButton>
+        <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Default" Disabled="@(_busy || _status?.Unavailable is not null || _status?.PlannedChanges.Length is not > 0)" OnClick="RepairInstallationAsync">@(_repairing ? "Repairing…" : "Repair owned setup")</BbButton>
+    </div>
+    <p class="table-footnote">Checking is read-only. Repair preserves credentials, sessions, existing app permissions and unrelated settings. Hook review stays in Codex.</p>
+</BbCard>
+
+@code {
+    [Parameter] public EventCallback OnRepaired { get; set; }
+    private DashboardRepairStatus? _status;
+    private bool _busy;
+    private bool _repairing;
+
+    protected override Task OnInitializedAsync() => CheckInstallationAsync();
+
+    private async Task CheckInstallationAsync()
+    {
+        _busy = true;
+        try { _status = await Http.GetFromJsonAsync<DashboardRepairStatus>("api/connect/repair") ?? new() { Unavailable = "The hub returned no installation checks." }; }
+        catch (Exception error) when (error is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException)
+        { _status = new() { Unavailable = "The installation check did not finish. Keep the hub running and try again." }; }
+        finally { _busy = false; }
+    }
+
+    private async Task RepairInstallationAsync()
+    {
+        _busy = _repairing = true;
+        try
+        {
+            using var reply = await Http.PostAsync("api/connect/repair", null);
+            _status = reply.IsSuccessStatusCode
+                ? await reply.Content.ReadFromJsonAsync<DashboardRepairStatus>() ?? new() { Unavailable = "The hub returned no repair status. Check installation before retrying." }
+                : new() { Unavailable = "Repair is available only from an authenticated browser on the hub's PC." };
+            if (_status.RepairPerformed) await OnRepaired.InvokeAsync();
+        }
+        catch (Exception error) when (error is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException)
+        { _status = new() { Unavailable = "The repair result is unavailable. Check installation before retrying." }; }
+        finally { _busy = _repairing = false; }
+    }
+
+    private static string CheckLabel(string state) => state switch
+    { "passed" => "Passed", "needs_repair" => "Needs repair", "warning" => "Action needed", _ => "Unavailable" };
+}

@@ -1,4 +1,6 @@
 using System.Collections.Frozen;
+using System.Diagnostics;
+using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Reflection;
@@ -6,17 +8,23 @@ using System.Text;
 using System.Text.Json;
 using CoCern.Adapter.Node;
 using CoCern.Contracts;
+using CoCern.Contracts.Dashboard;
 
 namespace CoCern.Adapter;
 
 public sealed record AdapterReply(bool Ok, string Code, JsonElement? Data = null, long? Version = null)
 {
     public static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    [System.Text.Json.Serialization.JsonPropertyName("connectionTrace")]
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? ConnectionTraceId { get; init; }
 }
 
 /// <param name="callOrigin">Who this forwarder's calls report as their origin (<see cref="CallOrigins"/>). Telemetry only; null reports none.</param>
 public sealed class RelayForwarder(HttpClient client, AdapterOptions options, string? callOrigin = null, bool nativeSurface = false)
 {
+    private readonly ConnectionDiagnosticsReporter diagnosticReporter = new(client, options);
+    internal void ReportConnectionDiagnostics(IReadOnlyList<ConnectionDiagnosticEvent> events) => diagnosticReporter.Report(events);
     public const int MaxRequestBytes = RelayLimits.MaxPayloadBytes; // the hub refuses anything larger
     public const int MaxResponseBytes = 128 * 1024;
     private const string ResponseTooLarge = "response_too_large";
@@ -72,19 +80,45 @@ public sealed class RelayForwarder(HttpClient client, AdapterOptions options, st
 
     private async Task<AdapterReply> SendAsync(string tool, JsonElement arguments, CancellationToken cancellationToken)
     {
+        var trace = ConnectionTrace.Begin(tool, "adapter", totalStage: ConnectionTrace.CurrentId is null ? "total" : "transport_total");
+        try
+        {
+            var reply = await SendCoreAsync(tool, arguments, cancellationToken);
+            trace.Complete(reply.Ok, reply.Ok ? null : reply.Code);
+            return reply.Ok ? reply : reply with { ConnectionTraceId = trace.CorrelationId };
+        }
+        catch (OperationCanceledException) { trace.Complete(false, "cancelled"); throw; }
+        catch { trace.Complete(false, "hub_unavailable"); throw; }
+        finally
+        {
+            trace.Dispose();
+            if (trace.IsRoot) diagnosticReporter.Report(trace.Events);
+        }
+    }
+
+    private async Task<AdapterReply> SendCoreAsync(string tool, JsonElement arguments, CancellationToken cancellationToken)
+    {
         if (arguments.ValueKind != JsonValueKind.Object) return new(false, "invalid_arguments");
         var json = arguments.GetRawText();
         if (Encoding.UTF8.GetByteCount(json) > MaxRequestBytes) return new(false, "request_too_large");
 
         using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(options.BaseUri, $"api/tools/{tool}"));
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", options.Token);
+        request.Headers.TryAddWithoutValidation(ConnectionTrace.Header, ConnectionTrace.CurrentId);
         request.Content = new StringContent(WithCallOrigin(arguments, json), Encoding.UTF8, "application/json");
         // HttpClient.Timeout stops at the headers under ResponseHeadersRead; this bounds the body read too.
         using var bounded = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         bounded.CancelAfter(client.Timeout);
+        var headersAt = Stopwatch.GetTimestamp();
+        var headersRead = false;
         try
         {
             using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, bounded.Token);
+            headersRead = true;
+            ConnectionTrace.Stage("http_headers", headersAt);
+            if (response.Headers.TryGetValues(ConnectionTrace.HubTimingHeader, out var timings) &&
+                double.TryParse(timings.FirstOrDefault(), NumberStyles.Float, CultureInfo.InvariantCulture, out var hubMs) &&
+                double.IsFinite(hubMs) && hubMs is >= 0 and <= 300000) ConnectionTrace.Duration("hub_to_headers", hubMs);
             if ((int)response.StatusCode is >= 300 and < 400) return new(false, "redirect_rejected");
             var failureKind = DomainFailureKind(response.StatusCode);
             if (!response.IsSuccessStatusCode && failureKind is null)
@@ -96,7 +130,7 @@ public sealed class RelayForwarder(HttpClient client, AdapterOptions options, st
                 // anything else stays a generic transport code.
                 try
                 {
-                    var failure = await ReadEnvelopeAsync(response, bounded.Token);
+                    var failure = await ReadMeasuredEnvelopeAsync(response, bounded.Token);
                     // Only the reader's own size error passes; a parsed hub envelope always carries a version.
                     if (failure is { Code: ResponseTooLarge, Version: null }) return failure;
                     return !failure.Ok && KnownCodes.Contains(failure.Code) && RelayErrorCodes.Classify(failure.Code) == kind ? failure : new(false, TransportCode(response.StatusCode));
@@ -104,13 +138,34 @@ public sealed class RelayForwarder(HttpClient client, AdapterOptions options, st
                 catch (JsonException) { return new(false, TransportCode(response.StatusCode)); }
                 catch (InvalidOperationException) { return new(false, TransportCode(response.StatusCode)); }
             }
-            return await ReadEnvelopeAsync(response, bounded.Token);
+            return await ReadMeasuredEnvelopeAsync(response, bounded.Token);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return new(false, "hub_timeout"); }
         catch (HttpRequestException) { return ConnectionFailure(request.Options.TryGetValue(PinnedCertificate.IdentityMismatch, out var mismatch) && mismatch ? "hub_identity_changed" : "hub_unavailable"); }
         catch (IOException) { return ConnectionFailure(request.Options.TryGetValue(PinnedCertificate.IdentityMismatch, out var mismatch) && mismatch ? "hub_identity_changed" : "hub_unavailable"); }
         catch (JsonException) { return new(false, "invalid_hub_reply"); }
         catch (InvalidOperationException) { return new(false, "invalid_hub_reply"); }
+        finally
+        {
+            if (!headersRead) ConnectionTrace.Stage("http_headers", headersAt, cancellationToken.IsCancellationRequested ? "cancelled" : "error",
+                cancellationToken.IsCancellationRequested ? "cancelled" : bounded.IsCancellationRequested ? "hub_timeout" : "hub_unavailable");
+        }
+    }
+
+    private static async Task<AdapterReply> ReadMeasuredEnvelopeAsync(HttpResponseMessage response, CancellationToken ct)
+    {
+        var started = Stopwatch.GetTimestamp();
+        try
+        {
+            var result = await ReadEnvelopeAsync(response, ct);
+            ConnectionTrace.Stage("http_body", started, result.Ok ? "ok" : "error", result.Ok ? null : result.Code);
+            return result;
+        }
+        catch
+        {
+            ConnectionTrace.Stage("http_body", started, "error", ct.IsCancellationRequested ? "hub_timeout" : "invalid_hub_reply");
+            throw;
+        }
     }
 
     private static AdapterReply ConnectionFailure(string code)

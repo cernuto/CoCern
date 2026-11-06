@@ -28,6 +28,10 @@ internal sealed class DashboardConnect(IConfiguration configuration, IHostEnviro
     /// <summary>Connects one app; with <paramref name="admin"/> given, its entry gives the administrator tools or not to match.</summary>
     public Task<DashboardConnectStatus> ConnectAsync(string client, bool? admin, CancellationToken cancellationToken) => RunAsync(["--only", client, .. Role(admin)], cancellationToken);
 
+    /// <summary>Preview or apply repairs to this user's owned installation; read-only previews never change settings.</summary>
+    public Task<DashboardRepairStatus> RepairAsync(bool check, CancellationToken cancellationToken) =>
+        RunAdapterAsync("--repair", check ? ["--check"] : [], message => new DashboardRepairStatus { Unavailable = message }, cancellationToken);
+
     private static string[] Role(bool? admin) => admin is { } wanted ? ["--role", wanted ? "admin" : "worker"] : [];
 
     /// <summary>The page's <c>admin</c> query value: <c>true</c> or <c>false</c>, else absent (leave the tools as they are).</summary>
@@ -35,34 +39,53 @@ internal sealed class DashboardConnect(IConfiguration configuration, IHostEnviro
 
     private async Task<DashboardConnectStatus> RunAsync(string[] arguments, CancellationToken cancellationToken)
     {
-        if (AdapterDll() is not { } adapter) return new() { Unavailable = "The CoCern adapter was not found. Build the solution (or run Build-CoCern.ps1 -Publish), then reload." };
-        if (TokenFile() is not { } tokenFile) return new() { Unavailable = "CoCern isn't ready on this PC. Start the hub, then try Connect again." };
+        var result = await RunAdapterAsync("--connect", arguments, message => new DashboardConnectStatus { Unavailable = message }, cancellationToken);
+        return result with { Clients = result.Clients.Select(PageState).ToArray() };
+    }
+
+    private async Task<T> RunAdapterAsync<T>(string command, string[] arguments, Func<string, T> unavailable, CancellationToken cancellationToken)
+    {
+        if (AdapterDll() is not { } adapter) return unavailable("The CoCern adapter was not found. Run the CoCern installer and choose Repair, then reload.");
+        if (TokenFile() is not { } tokenFile) return unavailable("CoCern isn't ready on this PC. Start the hub, then try again.");
         var hubArguments = HubArguments(server.Features.Get<IServerAddressesFeature>()?.Addresses ?? [], listener?.Local);
-        if (hubArguments is null) return new() { Unavailable = "This hub has no connection available on this PC." };
-        var start = new ProcessStartInfo(DotnetHost()) { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true };
-        foreach (var argument in new[] { adapter, "--connect", "--json", "--token-file", tokenFile }.Concat(hubArguments).Concat(RepositoryArguments()).Concat(arguments)) start.ArgumentList.Add(argument);
-        using var process = Process.Start(start) ?? throw new InvalidOperationException("The adapter could not start.");
+        if (hubArguments is null) return unavailable("This hub has no connection available on this PC.");
+        var start = AdapterProcess(adapter, new[] { command, "--json", "--token-file", tokenFile }.Concat(hubArguments).Concat(RepositoryArguments()).Concat(arguments));
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(Timeout);
+        Process? process = null;
         try
         {
+            process = Process.Start(start) ?? throw new InvalidOperationException("The adapter could not start.");
             // Both streams are drained together: an adapter writing a long error would otherwise block on a full pipe until the timeout.
             var errors = process.StandardError.ReadToEndAsync(timeout.Token);
             var output = await process.StandardOutput.ReadToEndAsync(timeout.Token);
             await process.WaitForExitAsync(timeout.Token);
-            var failure = await errors;
+            _ = await errors;
             if (output.Trim().Length == 0 && process.ExitCode != 0)
-                return new() { Unavailable = "The adapter failed: " + (failure.Split('\n', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.Trim() is { Length: > 0 } line ? line[..Math.Min(line.Length, 300)] : $"exit code {process.ExitCode}") };
+                return unavailable("The adapter could not complete the check. Run the CoCern installer and choose Repair.");
             using var reply = JsonDocument.Parse(output.Trim() is { Length: > 0 } text ? text : "{}");
-            if (reply.RootElement.TryGetProperty("error", out var error))
-                return new() { Unavailable = error.ValueKind == JsonValueKind.String ? error.GetString() : "The adapter failed." };
-            return new() { Clients = reply.RootElement.TryGetProperty("clients", out var clients) ? (clients.Deserialize<DashboardConnectClient[]>(Web) ?? []).Select(PageState).ToArray() : [] };
+            if (reply.RootElement.TryGetProperty("error", out _)) return unavailable("The adapter reported a setup problem. Run the CoCern installer and choose Repair.");
+            return reply.RootElement.Deserialize<T>(Web) ?? unavailable("The adapter returned no installation status. Try checking again.");
         }
-        catch (Exception exception) when (exception is OperationCanceledException or JsonException)
+        catch (Exception exception) when (exception is OperationCanceledException or JsonException or InvalidOperationException or System.ComponentModel.Win32Exception or IOException)
         {
-            try { process.Kill(); } catch (InvalidOperationException) { }
-            return new() { Unavailable = "The adapter did not answer. Try again." };
+            try { process?.Kill(); } catch (Exception failure) when (failure is InvalidOperationException or System.ComponentModel.Win32Exception) { }
+            return unavailable("The adapter did not complete the check. Check again before retrying a repair.");
         }
+        finally { process?.Dispose(); }
+    }
+
+    /// <summary>A published apphost uses its bundled runtime; framework-dependent DLLs retain the existing dotnet fallback.</summary>
+    internal static ProcessStartInfo AdapterProcess(string adapter, IEnumerable<string> arguments)
+    {
+        var dll = Path.GetExtension(adapter).Equals(".dll", StringComparison.OrdinalIgnoreCase);
+        var executable = dll ? Path.Combine(Path.GetDirectoryName(adapter)!, Path.GetFileNameWithoutExtension(adapter) + (OperatingSystem.IsWindows() ? ".exe" : "")) : adapter;
+        var useExecutable = File.Exists(executable);
+        var start = new ProcessStartInfo(useExecutable ? executable : DotnetHost())
+        { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true };
+        if (!useExecutable) start.ArgumentList.Add(adapter);
+        foreach (var argument in arguments) start.ArgumentList.Add(argument);
+        return start;
     }
 
     /// <summary>
