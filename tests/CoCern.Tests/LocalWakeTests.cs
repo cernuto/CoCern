@@ -81,20 +81,43 @@ public sealed class LocalWakeTests : IDisposable
     }
 
     [Fact]
-    public void Stop_hook_finds_one_local_hub_and_refuses_ambiguous_hubs_or_tampered_metadata()
+    public void Stop_hook_follows_the_latest_record_of_one_session_and_refuses_tied_different_sessions_or_tampered_metadata()
     {
+        var cache = Path.Combine(root, "cache");
         var first = Connection();
         var chat = Guid.NewGuid().ToString();
-        var handle = new SessionHandle("claude-session", "session-token", "repo", "Claude", DateTimeOffset.UtcNow, Client: new("claude", chat));
+        var opened = DateTimeOffset.UtcNow;
+        var handle = new SessionHandle("claude-session", "session-token", "repo", "Claude", opened, Client: new("claude", chat));
         NodeState.WriteSessionHandle(first.Folder, handle);
-        Assert.Equal(first.Folder, LocalWakeConnection.FindForClaude(chat, Path.Combine(root, "cache")));
+        Assert.Equal(first.Folder, LocalWakeConnection.FindForClaude(chat, cache));
+        // The same hub session re-recorded through a second connection (another address or pin) is one session: the latest record is the live connection.
         var second = Connection(new AdapterOptions("http://127.0.0.1:5272/", Secret));
-        NodeState.WriteSessionHandle(second.Folder, handle);
-        Assert.Null(LocalWakeConnection.FindForClaude(chat, Path.Combine(root, "cache")));
-        var path = Path.Combine(second.Folder, "connection.json");
-        File.WriteAllText(path, File.ReadAllText(path).Replace("5272", "5273"));
-        Assert.Null(LocalWakeConnection.Read(second.Folder));
-        Assert.Equal(first.Folder, LocalWakeConnection.FindForClaude(chat, Path.Combine(root, "cache")));
+        NodeState.WriteSessionHandle(second.Folder, handle with { OpenedAt = opened.AddSeconds(1) });
+        Assert.Equal(second.Folder, LocalWakeConnection.FindForClaude(chat, cache));
+        // Duplicate records may sort before an equally recent different session: inspect every tied candidate, not just the next one.
+        var third = Connection(new AdapterOptions("http://127.0.0.1:5274/", Secret));
+        var fourth = Connection(new AdapterOptions("http://127.0.0.1:5275/", Secret));
+        File.Delete(NodeState.SessionHandlePath(second.Folder, "claude-session"));
+        var tiedFolders = new[] { second.Folder, third.Folder, fourth.Folder }.Order(StringComparer.Ordinal).ToArray();
+        var stamp = DateTime.UtcNow.AddMinutes(-1);
+        for (var i = 0; i < tiedFolders.Length; i++)
+        {
+            var session = i < 2 ? "claude-session" : "other-session";
+            NodeState.WriteSessionHandle(tiedFolders[i], handle with { SessionId = session, OpenedAt = opened.AddSeconds(1) });
+            File.SetLastWriteTimeUtc(NodeState.SessionHandlePath(tiedFolders[i], session), stamp);
+        }
+        Assert.Null(LocalWakeConnection.FindForClaude(chat, cache));
+        // The chat moving on to a newer session is followed there.
+        File.SetLastWriteTimeUtc(NodeState.SessionHandlePath(tiedFolders[2], "other-session"), stamp.AddSeconds(5));
+        Assert.Equal(tiedFolders[2], LocalWakeConnection.FindForClaude(chat, cache));
+        // Tampered connection metadata takes that folder out of the running.
+        foreach (var folder in tiedFolders)
+        {
+            var path = Path.Combine(folder, "connection.json");
+            File.WriteAllText(path, File.ReadAllText(path).Replace("127.0.0.1", "127.0.0.2"));
+            Assert.Null(LocalWakeConnection.Read(folder));
+        }
+        Assert.Equal(first.Folder, LocalWakeConnection.FindForClaude(chat, cache));
     }
 
     [Fact]

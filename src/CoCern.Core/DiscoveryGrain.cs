@@ -208,7 +208,10 @@ public sealed class MachineDirectory(IGrainFactory grains, TimeProvider? clock =
             foreach (var worker in workers)
                 if (Field(worker, "sessionId") is { Length: > 0 } id && seen.Add((repository, id)))
                 {
-                    var item = new JsonObject { ["repositoryId"] = repository, ["relaySessionId"] = id, ["label"] = Field(worker, "label") ?? "", ["reachable"] = false };
+                    // No node announces a hub-local Claude chat; its own waiter's reads register it as waiting, and that waiter is its wake route.
+                    var waiting = Field(worker, "availability") == ToolRouter.WaitingAvailability && worker["stale"]?.GetValue<bool>() != true;
+                    var item = new JsonObject { ["repositoryId"] = repository, ["relaySessionId"] = id, ["label"] = Field(worker, "label") ?? "", ["reachable"] = waiting };
+                    if (waiting) item["provider"] = ChatProviders.Claude;
                     if (Field(worker, "machineId") is { Length: > 0 } machineId) item["machineId"] = machineId;
                     items.Add(item);
                 }

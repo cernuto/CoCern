@@ -25,7 +25,40 @@ internal sealed class MessageTools(Aggregates aggregates, IMachineDirectory dire
         if (!standing.Ok) return standing;
         var seat = Aggregates.Parse(standing);
         if (IsTrue(seat, "manager")) args[ServerArguments.ManagerOrigin] = Number(seat, "generation");
-        return Text(args, "taskId").Length > 0 ? await aggregates.Board(caller, RelayTools.SendMessage, args) : await aggregates.Session(caller, RelayTools.SendMessage, args);
+        if (Text(args, "taskId").Length > 0) return await aggregates.Board(caller, RelayTools.SendMessage, args);
+        var sent = await aggregates.Session(caller, RelayTools.SendMessage, args);
+        return sent.Ok && Text(args, "recipientSessionId") is { Length: > 0 } recipient ? await WithRouteAsync(sent, Text(args, "repositoryId"), recipient) : sent;
+    }
+
+    /// <summary>What a receipt says when the recipient cannot be woken now.</summary>
+    internal const string NoRouteNote = "The recipient has no live wake route now: the message is stored and read at its next turn or inbox check. Keep working and do not wait or poll for a reply.";
+
+    /// <summary>
+    /// Whether the recipient can be woken now, said with the message's receipt as <c>recipientReachable</c>. A sender reads <c>delivery: pending</c>
+    /// as "on its way" and waits for the answer; when the recipient has no live wake route the message is read at its next turn, which may be
+    /// hours away, so the receipt says so and says not to wait (FC polled the Manager for a round trip all afternoon on 2026-11-06). The
+    /// directory is read after the message is stored, so a slow or unavailable directory changes nothing about delivery and reads as unknown.
+    /// </summary>
+    private async Task<RelayReply> WithRouteAsync(RelayReply sent, string repository, string recipient)
+    {
+        bool? reachable = null;
+        using var lookup = new CancellationTokenSource(TimeSpan.FromSeconds(1));
+        try
+        {
+            var listed = await directory.DirectoryAsync([repository], lookup.Token).WaitAsync(lookup.Token);
+            if (listed.Ok && Aggregates.Parse(listed) is { } routes && routes["items"] is JsonArray items)
+            {
+                var row = items.OfType<JsonObject>().FirstOrDefault(item => Text(item, "relaySessionId") == recipient);
+                reachable = row is not null && IsTrue(row, "reachable") ? true : IsTrue(routes, "truncated") ? null : false;
+            }
+        }
+        // This lookup is advisory and follows the committed send; cancellation or failure cannot discard its receipt.
+        catch (Exception) { return sent; }
+        if (reachable is null) return sent;
+        var data = Aggregates.Parse(sent);
+        data["recipientReachable"] = reachable;
+        if (reachable == false) data["note"] = NoRouteNote;
+        return Ok(data, sent.Version);
     }
 
     /// <summary>The chats on every PC, for the call's repository.</summary>
