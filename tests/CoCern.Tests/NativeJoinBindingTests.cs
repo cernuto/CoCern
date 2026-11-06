@@ -105,6 +105,50 @@ public sealed class NativeJoinBindingTests(NativeJoinBindingTests.ProbeFixture p
     }
 
     [Fact]
+    public async Task Private_classic_adoption_retries_keep_the_exact_handle_and_never_fall_back_after_it_disappears()
+    {
+        using var fixture = new ScopeFixture();
+        var session = Guid.NewGuid().ToString("N");
+        var location = new ChatLocation("codex", Chat);
+        var classic = new SessionHandle(session, "synthetic-session-token", "repo", "Retained FC label", DateTimeOffset.UtcNow, location, location);
+        NodeState.WriteSessionHandle(fixture.Folder, classic);
+        await using var binding = await fixture.Acquire();
+        var calls = 0;
+        using var handler = new CallbackHandler(async (request, ct) =>
+        {
+            calls++;
+            using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(ct));
+            var proof = body.RootElement.GetProperty("nativeJoin").GetProperty("adopt");
+            Assert.Equal(classic.SessionId, proof.GetProperty("sessionId").GetString());
+            Assert.True(classic.SessionToken == proof.GetProperty("sessionToken").GetString());
+            Assert.DoesNotContain(classic.SessionToken, binding.FrozenOpenArguments.GetRawText());
+            return Reply(calls == 1 ? OpenReply(session) with { Ok = false, Code = "Unavailable" } : OpenReply(session));
+        });
+        using var http = new HttpClient(handler);
+        var forwarder = new RelayForwarder(http, fixture.Options);
+        var handoff = SessionHandoff.ForFolder(fixture.Folder, location);
+        Assert.False((await handoff.OpenNativeJoinAsync(binding, forwarder, default)).Completed);
+        Assert.Null(binding.CurrentHandle);
+        var intentPath = Path.ChangeExtension(binding.StatePath, ".adopt");
+        Assert.True(NodeState.IsPrivateFile(intentPath));
+        Assert.DoesNotContain(classic.SessionToken, File.ReadAllText(intentPath));
+        File.Delete(NodeState.SessionHandlePath(fixture.Folder, session));
+        Assert.False((await handoff.OpenNativeJoinAsync(binding, forwarder, default)).Completed);
+        Assert.Equal(1, calls); // The durable private intent forbids falling through to a new allocating request.
+        NodeState.WriteSessionHandle(fixture.Folder, classic);
+        Assert.True((await handoff.OpenNativeJoinAsync(binding, forwarder, default, "Generic native title")).Completed);
+        Assert.Equal(2, calls);
+        var adopted = binding.CurrentHandle!;
+        Assert.Equal(classic.SessionId, adopted.SessionId);
+        Assert.Equal(classic.SessionToken, adopted.SessionToken);
+        Assert.Equal(classic.Label, adopted.Label);
+        Assert.Equal(classic.OpenedAt, adopted.OpenedAt);
+        Assert.Equal(binding.OwnershipKey, adopted.NativeBindingKey);
+        Assert.DoesNotContain(classic.SessionToken, File.ReadAllText(binding.StatePath));
+        Assert.False(File.Exists(intentPath));
+    }
+
+    [Fact]
     public async Task Only_the_exact_authenticated_open_can_complete_and_reopen_its_private_handle()
     {
         using var fixture = new ScopeFixture();

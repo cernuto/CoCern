@@ -55,6 +55,7 @@ internal static class ControlAggregate
         var participant = Text(args, NativeParticipant.Id);
         var state = new ControlState(context.State);
         if (participant.Length == 0) Required(args, "requestId");
+        else if (Flag(args, NativeParticipant.Adoption)) return AdoptNative(context, state, participant);
         else if (ResumeNative(context, state, participant) is { } resume) return resume;
         if (state.SessionCount >= RelayLimits.MaxRecords) DropStaleSessions(context, state);
         // Every session was seen within StaleSessionHours, or still answers for an unresolved action: refused for now. The first clears as
@@ -77,6 +78,38 @@ internal static class ControlAggregate
         if (record.NativeId is not null) state.TrackNative(record, context.Caller, args);
         context.Send(id, new SessionOpen(record));
         return OpenReply(id, token, args);
+    }
+
+    // The session's own authenticated probe precedes this reservation; serialization prevents two participants adopting one row.
+    private static RelayReply AdoptNative(AggregateContext context, ControlState state, string participant)
+    {
+        var args = context.Args;
+        var id = Text(args, "sessionId");
+        if (!context.Caller.IsInternal || state.Entry(id) is not { } entry || entry.SessionId != id ||
+            entry.PrincipalId != context.Caller.PrincipalId || entry.RepositoryId != context.Repository ||
+            !SecretEquals(entry.Token, Text(args, "sessionToken"))) return Error(SessionDenied);
+        var generation = Required(args, NativeParticipant.Generation);
+        var request = Required(args, NativeParticipant.Request);
+        if (state.AwaitingAnswer(id, context.Now) || state.NativeClosing(participant)) return Error(Unavailable);
+        if (entry.NativeId.Length > 0)
+        {
+            if (entry.NativeId != participant || entry.NativeGeneration != generation || entry.NativeRequest != request ||
+                state.CurrentNativeSession(participant, context.Repository)?.SessionId != id) return Error(SessionDenied);
+        }
+        else
+        {
+            var reserved = state.NativeJoin(participant);
+            if (reserved is not null && (Flag(reserved, "expired") || Text(reserved, "sessionId") != id ||
+                Text(reserved, "generation") != generation || Text(reserved, "requestId") != request) ||
+                state.Entries().Any(row => row.Id != id && row.Entry?.NativeId == participant)) return Error(RequestConflict);
+            if (reserved is null && !state.CanTrackNative(participant)) return Error(CapacityExceeded);
+            entry.AdoptNative(participant, generation, request);
+            // A delayed classic restore can re-enter the same row before the durable adoption effect lands; retain its exact reservation.
+            if (reserved is null) state.TrackNative(SessionRecord.Opened(id, entry.Token, entry.PrincipalId, entry.RepositoryId, args), context.Caller, args);
+        }
+        // A failed direct confirmation can be retried without an allocating open; this exact effect also survives a hub restart.
+        context.Send(id, new NativeSessionAdoption(context.Repository, id, entry.Token, participant, generation, request));
+        return OpenReply(id, entry.Token, args);
     }
 
     // A null answer permits exactly one new initialization in the same serialized directory operation.

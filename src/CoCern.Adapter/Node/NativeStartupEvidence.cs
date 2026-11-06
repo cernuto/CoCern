@@ -9,8 +9,24 @@ namespace CoCern.Adapter.Node;
 internal static class NativeStartupEvidence
 {
     private sealed record Receipt(string Definition, string Profile, string NativeId, string Workspace, string RepositoryId, string SessionId, string Generation, DateTimeOffset CapturedAt);
+    private sealed record Rejection(string Definition, string Code, DateTimeOffset CapturedAt);
     private sealed record WakeReceipt(string SessionId, string Generation, int ProcessId, DateTime StartedAt, DateTimeOffset VerifiedAt);
     private static string PathFor(NativeRegistration registration) => Path.Combine(registration.Folder, "native-codex-startup.json");
+    private static string RejectionPathFor(NativeRegistration registration) => Path.Combine(registration.Folder, "native-codex-startup-error.json");
+    internal const string RepositoryDeniedContext = "Repository mapping missing or not authorized (RepositoryDenied). Ask the hub administrator to check the repository ID, Git origin and your connection's repository authorization, then refresh Connect. The first CoCern call joins this same chat automatically; do not create a replacement session.";
+    private static bool TerminalRefusal(string code) => code is RelayErrorCodes.RepositoryDenied or "native_private_connection_required" or "native_handle_conflict" or "native_join_handle_conflict";
+    private static string RefusalSummary(string code) => code switch
+    {
+        RelayErrorCodes.RepositoryDenied => "Repository mapping missing or not authorized",
+        "native_private_connection_required" => "The native connection could not be verified",
+        _ => "The saved chat identity conflicts with native startup"
+    };
+    private static string RefusalAction(string code) => code switch
+    {
+        RelayErrorCodes.RepositoryDenied => RepositoryDeniedContext,
+        "native_private_connection_required" => "Check this connection's diagnostics and private enrollment. Repair the owned connection from its installed package if needed; keep the existing credentials and hook trust. Then refresh Connect.",
+        _ => "Check this chat's connection diagnostics for the conflicting saved identity. Keep the existing session and enrollment; do not open a replacement session or copy another chat's handle."
+    };
     private static string? WakePath(string folder, SessionHandle handle) => handle.NativeBindingKey is { Length: 64 } key && key.All(Uri.IsHexDigit)
         ? Path.Combine(folder, "native-wake-" + key + ".json") : null;
 
@@ -66,23 +82,119 @@ internal static class NativeStartupEvidence
             binding.NativeId, binding.Workspace, handle.RepositoryId, handle.SessionId, binding.Generation, DateTimeOffset.UtcNow)));
     }
 
-    internal static DashboardCodexReadiness Verify(NativeRegistration registration, DashboardCodexReadiness initial)
+    // A genuine PreToolUse has already generated this stamp. Evidence is best-effort and may never join or repair a session.
+    internal static async Task RecordStampedAsync(NativeRegistration registration, NativeJoin join, NativeHookContext context, JsonElement updated, CancellationToken ct)
     {
-        try { return VerifyAsync(registration, initial).GetAwaiter().GetResult(); }
+        try
+        {
+            if (registration.Provider != "codex" || context.Provider != "codex" || !registration.StillCurrent() ||
+                !Guid.TryParse(context.NativeId, out var nativeId) || !updated.TryGetProperty("_cocernNative", out var stamp) ||
+                ChatLocators.Text(stamp, "provider") != context.Provider || ChatLocators.Text(stamp, "nativeId") != nativeId.ToString("D") ||
+                ChatLocators.Text(stamp, "repositoryId") is not { } repository || ChatLocators.Text(stamp, "cwd") is not { } workspace ||
+                ChatLocators.Text(stamp, "generation") is not { } generation) return;
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(TimeSpan.FromMilliseconds(250));
+            await using var binding = await NativeJoinBinding.AcquireAsync(join.PrivateFolder, "codex", nativeId.ToString("D"), Environment.MachineName,
+                repository, workspace, timeout.Token, existingOnly: true,
+                authenticate: candidate => candidate.Generation == generation && candidate.CurrentHandle is not null);
+            if (binding.Generation != generation || binding.CurrentHandle is not { } handle || !registration.StillCurrent()) return;
+            NodeState.WritePrivately(PathFor(registration), JsonSerializer.SerializeToUtf8Bytes(new Receipt(registration.Definition, registration.Profile,
+                binding.NativeId, binding.Workspace, handle.RepositoryId, handle.SessionId, binding.Generation, DateTimeOffset.UtcNow)));
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException or InvalidOperationException or OperationCanceledException or System.Security.SecurityException) { }
+    }
+
+    internal static void RecordRepositoryDenied(NativeRegistration registration) => RecordRefusal(registration, RelayErrorCodes.RepositoryDenied);
+
+    internal static void RecordRefusal(NativeRegistration registration, string code)
+    {
+        try
+        {
+            if (registration.Provider != "codex" || !TerminalRefusal(code) || !registration.StillCurrent()) return;
+            // Definition binds the exact profile, credential scope and helper version; retain no checkout or input data.
+            NodeState.WritePrivately(RejectionPathFor(registration), JsonSerializer.SerializeToUtf8Bytes(
+                new Rejection(registration.Definition, code, DateTimeOffset.UtcNow)));
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or System.Security.SecurityException) { }
+    }
+
+    private static Rejection? ReadRejection(NativeRegistration registration, DateTimeOffset? succeededAt)
+    {
+        try
+        {
+            var path = RejectionPathFor(registration);
+            if (!File.Exists(path) || !NodeState.IsPrivateFile(path) || new FileInfo(path).Length > 2048 || !registration.StillCurrent()) return null;
+            var saved = JsonSerializer.Deserialize<Rejection>(File.ReadAllBytes(path));
+            return saved is not null && saved.Definition == registration.Definition && TerminalRefusal(saved.Code) &&
+                saved.CapturedAt <= DateTimeOffset.UtcNow.AddMinutes(1) && saved.CapturedAt >= DateTimeOffset.UtcNow.AddDays(-1) &&
+                (succeededAt is null || saved.CapturedAt > succeededAt) ? saved : null;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException or InvalidOperationException or System.Security.SecurityException) { return null; }
+    }
+
+    internal static DashboardCodexReadiness Verify(NativeRegistration registration, DashboardCodexReadiness initial,
+        string? checkout = null, string? repositoryId = null, Func<JsonElement, CancellationToken, Task<AdapterReply>>? preflight = null)
+    {
+        try { return VerifyAsync(registration, initial, checkout, repositoryId, preflight).GetAwaiter().GetResult(); }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException or InvalidOperationException or OperationCanceledException or HttpRequestException)
         {
             return initial with { State = "error", Summary = "Codex readiness could not be verified", NextAction = "Check that CoCern is running, then refresh. Your saved session was preserved." };
         }
     }
 
-    private static async Task<DashboardCodexReadiness> VerifyAsync(NativeRegistration registration, DashboardCodexReadiness initial)
+    internal static async Task<DashboardCodexReadiness> VerifyAsync(NativeRegistration registration, DashboardCodexReadiness initial,
+        string? checkout = null, string? repositoryId = null, Func<JsonElement, CancellationToken, Task<AdapterReply>>? preflight = null)
     {
         var path = PathFor(registration);
-        if (!File.Exists(path)) return initial;
-        if (!NodeState.IsPrivateFile(path) || new FileInfo(path).Length > 16384) return initial;
-        var saved = JsonSerializer.Deserialize<Receipt>(File.ReadAllBytes(path));
-        if (saved is null || saved.Definition != registration.Definition || saved.Profile != registration.Profile ||
-            saved.CapturedAt > DateTimeOffset.UtcNow.AddMinutes(1) || saved.CapturedAt < DateTimeOffset.UtcNow.AddDays(-7)) return initial;
+        Receipt? saved = null;
+        try
+        {
+            if (File.Exists(path) && NodeState.IsPrivateFile(path) && new FileInfo(path).Length <= 16384)
+            {
+                saved = JsonSerializer.Deserialize<Receipt>(File.ReadAllBytes(path));
+                if (saved is not null && (saved.Definition != registration.Definition || saved.Profile != registration.Profile ||
+                    saved.CapturedAt > DateTimeOffset.UtcNow.AddMinutes(1) || saved.CapturedAt < DateTimeOffset.UtcNow.AddDays(-7))) saved = null;
+            }
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException or InvalidOperationException or System.Security.SecurityException) { saved = null; }
+        var mapped = false;
+        if (checkout is not null)
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            using var http = new HttpClient(RelayForwarder.CreateHandler(registration.Connection)) { Timeout = TimeSpan.FromSeconds(3) };
+            var forwarder = new RelayForwarder(http, registration.Connection);
+            await using var join = new NativeJoin(registration.Folder, registration.Connection, forwarder);
+            var workspace = join.LatestPendingWorkspace() ?? saved?.Workspace ?? checkout;
+            JsonElement evidence;
+            try { evidence = await Task.Run(() => NativeCheckout.Inspect(workspace).Preflight(registration.Connection.BaseUri.IsLoopback, repositoryId), timeout.Token).WaitAsync(timeout.Token); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException)
+            {
+                return initial with { State = "error", Summary = "The configured checkout could not be checked", Detail = "native_checkout_unavailable",
+                    NextAction = "Check that the configured repository checkout is available on this PC, then refresh Connect. No chat resume or hook review is needed for this check." };
+            }
+            var reply = preflight is null ? await forwarder.ForwardAsync(RelayTools.SessionOpen, evidence, timeout.Token) : await preflight(evidence, timeout.Token);
+            if (!reply.Ok)
+            {
+                var code = TerminalRefusal(reply.Code) ? reply.Code : reply.Code is "hub_timeout" or "hub_unavailable" or "hub_identity_changed" or "unauthorized" or "forbidden" ? reply.Code : "native_preflight_failed";
+                return initial with { State = "error", Summary = TerminalRefusal(code) ? RefusalSummary(code) : "The repository preflight could not reach an authorized hub", Detail = code,
+                    NextAction = TerminalRefusal(code) ? RefusalAction(code) : "Check this connection's hub address, certificate pin and enrollment diagnostics, then refresh Connect. Your saved session and hook trust were preserved.",
+                    SessionVerified = false, WakeReady = false, SessionId = null, RepositoryId = null };
+            }
+            if (reply.Code != "Ok" || reply.Version is null || reply.Data is not { } data || ChatLocators.Text(data, "repositoryId") is not { Length: > 0 } resolved ||
+                AdapterOptions.ParseRepository(resolved) != resolved || repositoryId is not null && !string.Equals(repositoryId, resolved, StringComparison.OrdinalIgnoreCase))
+                return initial with { State = "error", Summary = "The hub returned an invalid repository preflight", Detail = "invalid_hub_reply",
+                    NextAction = "Check the hub's connection diagnostics, then refresh. No session was opened by this check." };
+            mapped = true;
+        }
+        if (ReadRejection(registration, saved?.CapturedAt) is { } rejected && !(mapped && rejected.Code == RelayErrorCodes.RepositoryDenied))
+            return initial with { State = "error", Summary = RefusalSummary(rejected.Code), Detail = rejected.Code,
+                NextAction = RefusalAction(rejected.Code), StartupObserved = true, CapturedAt = rejected.CapturedAt,
+                SessionVerified = false, WakeReady = false, SessionId = null, RepositoryId = null };
+        if (LatestCatalogFailure(registration) is { } failure)
+            return initial with { State = "error", Summary = "The latest native MCP connection failed to load", Detail = failure.ErrorCode,
+                NextAction = "Reconnect the CoCern MCP server in Codex, then refresh. Check this connection's diagnostics if it still fails; its saved session and hook trust were preserved.",
+                SessionVerified = false, WakeReady = false, SessionId = null, CapturedAt = failure.StartedAt };
+        if (saved is null) return initial;
         initial = initial with { StartupObserved = true, CapturedAt = saved.CapturedAt };
         try
         {
@@ -113,6 +225,17 @@ internal static class NativeStartupEvidence
                 ? initial with { NextAction = "The live wake route could not be checked. Keep the agent running and refresh." }
                 : initial with { State = "error", Summary = "The native startup was observed, but its session is unverified", NextAction = "Check that CoCern is running, then refresh. Your saved session was preserved." };
         }
+    }
+
+    private static ConnectionDiagnosticEvent? LatestCatalogFailure(NativeRegistration registration)
+    {
+        using var store = new ConnectionTraceStore(Path.Combine(registration.Folder, "connection-diagnostics"));
+        var events = store.Read().Events;
+        var failure = events.Where(item => item.Stage is "native_registration" or "backend_start" && item.Outcome == "error" &&
+            item.ErrorCode is "native_registration_unverified" or "backend_unavailable" && item.StartedAt >= DateTimeOffset.UtcNow.AddMinutes(-10))
+            .OrderByDescending(item => item.StartedAt).FirstOrDefault();
+        if (failure is null) return null;
+        return events.Any(item => item.Stage is "mcp_initialize" or "mcp_list_tools" && item.Outcome == "ok" && item.StartedAt >= failure.StartedAt) ? null : failure;
     }
 
     internal static bool HasReachableRoute(AdapterReply directory, SessionHandle handle) =>

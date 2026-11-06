@@ -10,6 +10,7 @@ namespace CoCern.Adapter.Node;
 /// <summary>A private, connection-scoped opening attempt. Never serialize a lease into a relay reply.</summary>
 internal sealed class NativeJoinBinding : IAsyncDisposable
 {
+    internal sealed class MissingEstablishedBinding() : IOException("An established native binding is not present.");
     internal string Folder { get; }
     internal string Provider { get; }
     internal string NativeId { get; }
@@ -236,9 +237,9 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
         workspace = await (resolveCheckout ?? ResolveCheckoutAsync)(workspace, ct); // Trusted provider event, never a tool stamp.
         var identity = ConnectionIdentity(folder);
         var directory = Path.Combine(folder, NodeState.SessionsFolder, "native");
-        RejectLink(Path.GetDirectoryName(directory)!); RejectLink(directory);
+        RejectLink(Path.GetDirectoryName(directory)!, allowMissing: true); RejectLink(directory, allowMissing: true);
         if (!Directory.Exists(directory))
-            throw Failure("The established native binding is missing or exceeds the lookup bound.");
+            throw new MissingEstablishedBinding();
         var paths = Directory.EnumerateFiles(directory, "*.json").Take(2049).ToArray();
         if (paths.Length > 2048) throw Failure("The established native binding lookup exceeds its bound.");
         var repositories = new List<string>();
@@ -272,6 +273,7 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
                 held.Add(await AcquireAsync(folder, provider, nativeId, machineId, repository, workspace, ct,
                     existingOnly: true, resolveCheckout: (_, _) => Task.FromResult(workspace)));
             var matches = held.Where(binding => binding.CurrentHandle is not null).ToArray();
+            if (matches.Length == 0) throw new MissingEstablishedBinding();
             if (matches.Length != 1) throw Failure("One established native binding is required.");
             var selected = matches[0]; held.Remove(selected);
             return selected;
@@ -298,6 +300,8 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
         next["requestId"] = Guid.NewGuid().ToString("N");
         next["nativeJoin"]!["generation"] = Guid.NewGuid().ToString("N");
         var frozen = JsonSerializer.SerializeToElement(next);
+        var adoptionPath = Path.ChangeExtension(StatePath, ".adopt");
+        if (File.Exists(adoptionPath)) { RequirePrivate(adoptionPath, 1024); File.Delete(adoptionPath); }
         Write(StatePath, BindingKey, frozen, null);
         arguments = frozen;
         resolution = null;
@@ -314,6 +318,8 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
         if (saved is null || saved.SessionToken != handle.SessionToken) return false;
         Write(StatePath, BindingKey, arguments, handle.SessionId, resolution);
         currentSessionId = handle.SessionId;
+        try { File.Delete(Path.ChangeExtension(StatePath, ".adopt")); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { } // A confirmed reference already preserves identity; expiry clears a retained sidecar.
         return true;
     }
 
@@ -326,6 +332,49 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
         var handle = NodeState.ReadSessionHandle(path);
         return handle is not null && handle.NativeBindingKey == OwnershipKey && handle.RepositoryId == RepositoryId &&
             MatchesClient(handle.Client) && MatchesClient(handle.Chat) && !handle.Unmapped ? handle : null;
+    }
+
+    // Only a private cache entry for this exact genuine provider chat may be offered for adoption.
+    // Freeze its ID separately from the opening proof, so a lost reply or a missing file cannot turn a retry into a fresh allocation.
+    internal SessionHandle? AdoptionHandle()
+    {
+        CheckLease();
+        if (currentSessionId is not null) return null;
+        var intentPath = Path.ChangeExtension(StatePath, ".adopt");
+        string? selected = null;
+        if (File.Exists(intentPath))
+        {
+            RequirePrivate(intentPath, 1024);
+            try
+            {
+                using var intent = JsonDocument.Parse(File.ReadAllBytes(intentPath));
+                var value = Object(intent.RootElement, "version", "sessionId");
+                if (value["version"].GetInt32() != 1 || !NodeState.IsFileId(selected = Text(value["sessionId"])))
+                    throw Failure("The private native adoption intent is invalid.");
+            }
+            catch (Exception error) when (error is JsonException or InvalidOperationException or KeyNotFoundException or FormatException)
+            { throw Failure("The private native adoption intent is invalid."); }
+        }
+        var directory = Path.Combine(Folder, NodeState.SessionsFolder);
+        RejectLink(directory);
+        var paths = Directory.Exists(directory) ? Directory.EnumerateFiles(directory, "*.json").Take(2049).ToArray() : [];
+        if (paths.Length > 2048) throw Failure("The classic handle lookup exceeds its bound.");
+        var matches = new List<SessionHandle>();
+        foreach (var path in paths)
+        {
+            RequirePrivate(path, 64 * 1024);
+            var handle = NodeState.ReadSessionHandle(path);
+            if (handle is null || !string.Equals(handle.RepositoryId, RepositoryId, StringComparison.OrdinalIgnoreCase) || handle.Unmapped || !MatchesClient(handle.Chat) ||
+                handle.Client is not null && !MatchesClient(handle.Client)) continue;
+            if (handle.NativeBindingKey is not null && handle.NativeBindingKey != OwnershipKey) continue; // Prior native generations are not classic adoption candidates.
+            matches.Add(handle);
+        }
+        if (matches.Count > 1 || selected is not null && (matches.Count != 1 || matches[0].SessionId != selected))
+            throw Failure("The classic adoption handle is missing or ambiguous.");
+        if (matches.Count == 0) return null;
+        var result = matches[0];
+        if (selected is null) NodeState.WritePrivately(intentPath, JsonSerializer.SerializeToUtf8Bytes(new { version = 1, sessionId = result.SessionId }));
+        return result;
     }
 
     private void CheckLease()
@@ -366,8 +415,16 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
         CheckLease();
         if (evidence is { } offered)
         {
+            var same = resolution is not { } previous || JsonElement.DeepEquals(previous, offered);
+            if (!same && resolution is { } saved && !saved.TryGetProperty("repositoryId", out _) && offered.TryGetProperty("repositoryId", out var addedRepository) &&
+                string.Equals(addedRepository.GetString(), RepositoryId, StringComparison.OrdinalIgnoreCase))
+            {
+                var original = System.Text.Json.Nodes.JsonNode.Parse(offered.GetRawText())!.AsObject();
+                original.Remove("repositoryId");
+                same = JsonElement.DeepEquals(saved, JsonSerializer.SerializeToElement(original));
+            }
             if (!CoCern.Contracts.NativeGitOrigin.ValidCheckoutEvidence(offered) ||
-                resolution is { } previous && !JsonElement.DeepEquals(previous, offered))
+                offered.TryGetProperty("repositoryId", out var repository) && !string.Equals(repository.GetString(), RepositoryId, StringComparison.OrdinalIgnoreCase) || !same)
                 throw Failure("The private native opening evidence changed.");
             if (resolution is null)
             {
@@ -490,6 +547,7 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
             if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0) throw Failure("Linked private native binding paths are not supported.");
         }
         catch (FileNotFoundException) when (allowMissing) { }
+        catch (DirectoryNotFoundException) when (allowMissing) { }
     }
     private static void RequirePrivate(string path, int maximum)
     {

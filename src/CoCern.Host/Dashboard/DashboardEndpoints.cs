@@ -272,7 +272,7 @@ public static class DashboardEndpoints
             if (json.RootElement.TryGetProperty("link", out var code) && code.ValueKind == JsonValueKind.String)
             {
                 // A logged link signs in only from this PC, so a copy of the log elsewhere is no use.
-                if (context.Connection.RemoteIpAddress is not { } remote || !System.Net.IPAddress.IsLoopback(remote)) return Results.StatusCode(403);
+                if (!HubLocalRequest.IsLocal(context)) return Results.StatusCode(403);
                 if (!link.Redeem(code.GetString(), now)) return Results.Unauthorized();
                 principal = security.LocalViewer(now, expires);
                 link.Issue(now);

@@ -5,6 +5,7 @@ using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using CoCern.Host;
 using CoCern.Host.Dashboard;
 using Xunit;
 
@@ -22,14 +23,24 @@ public sealed partial class DashboardSignInLinkTests
     {
         var log = new CapturedLog();
         await using var host = new RelayHostFixture(remoteAddress: IPAddress.Loopback, settings: Viewer, configureServices: services => services.AddSingleton<Serilog.Core.ILogEventSink>(log));
-        using var browser = Browser(host);
+        var localPort = 5273;
+        using var browser = new HttpClient(host.Server.CreateHandler(context => context.Connection.LocalPort = localPort)) { BaseAddress = new Uri("https://localhost") };
+        browser.DefaultRequestHeaders.Add("Origin", "https://localhost");
+        host.Services.GetRequiredService<HubListener>().Https = (5273, new string('a', 64));
         var first = await log.CodeAsync();
+        Assert.Equal(HttpStatusCode.Forbidden, (await browser.PostAsJsonAsync("/dashboard/api/login", new { link = first })).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await browser.GetAsync("/openapi/v1.json")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await browser.GetAsync("/scalar")).StatusCode);
+        localPort = 5272;
+        Assert.Equal(HttpStatusCode.OK, (await browser.GetAsync("/openapi/v1.json")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await browser.GetAsync("/scalar")).StatusCode);
         var signedIn = await browser.PostAsJsonAsync("/dashboard/api/login", new { link = first.ToLowerInvariant() });
         Assert.Equal(HttpStatusCode.OK, signedIn.StatusCode);
         Assert.Contains("test-user", await signedIn.Content.ReadAsStringAsync());
         Assert.Equal(HttpStatusCode.Unauthorized, (await browser.PostAsJsonAsync("/dashboard/api/login", new { link = first })).StatusCode);
         var next = await log.CodeAsync(other: first);
         Assert.NotEqual(first, next);
+        localPort = 5271;
         Assert.Equal(HttpStatusCode.OK, (await browser.PostAsJsonAsync("/dashboard/api/login", new { link = next })).StatusCode);
     }
 

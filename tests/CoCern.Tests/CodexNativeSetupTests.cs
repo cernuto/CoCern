@@ -10,6 +10,151 @@ namespace CoCern.Tests;
 public sealed class CodexNativeSetupTests
 {
     [Fact]
+    public async Task Explicit_native_refresh_updates_literal_package_paths_without_approving_trust_or_changing_disabled_choices()
+    {
+        using var fixture = new NativeRefreshFixture();
+        var configBefore = File.ReadAllBytes(fixture.Config); var hooksBefore = File.ReadAllBytes(fixture.Hooks); var candidateBefore = File.ReadAllBytes(fixture.Candidate);
+        var enrollmentBefore = Directory.EnumerateFiles(fixture.Node).Where(path => path != fixture.Candidate).ToDictionary(path => path, File.ReadAllBytes);
+        using var output = new StringWriter();
+        var environment = fixture.Environment(output);
+        Assert.Equal(0, await RepairCommand.RunAsync(["--refresh-native", "--check", "--json", "--data-dir", fixture.Node], environment, CancellationToken.None));
+        Assert.Equal(configBefore, File.ReadAllBytes(fixture.Config)); Assert.Equal(hooksBefore, File.ReadAllBytes(fixture.Hooks)); Assert.Equal(candidateBefore, File.ReadAllBytes(fixture.Candidate));
+        Assert.DoesNotContain(Directory.EnumerateFiles(fixture.Root, "*", SearchOption.AllDirectories), path => path.Contains(".cocern-backup-", StringComparison.Ordinal));
+        Assert.Contains("Modified hook definitions require Codex review", output.ToString());
+        // A reader that denies writing must block the entire update before any file or backup changes.
+        using (var reader = new FileStream(fixture.Hooks, FileMode.Open, FileAccess.Read, FileShare.Read))
+            Assert.Throws<ClientSettingsException>(() => CodexNativeSetup.RefreshEnrolledNative(fixture.Node, fixture.Profile, "dotnet", fixture.Adapter, TimeProvider.System, check: false));
+        Assert.Equal(configBefore, File.ReadAllBytes(fixture.Config)); Assert.Equal(hooksBefore, File.ReadAllBytes(fixture.Hooks)); Assert.Equal(candidateBefore, File.ReadAllBytes(fixture.Candidate));
+        Assert.DoesNotContain(Directory.EnumerateFiles(fixture.Root, "*", SearchOption.AllDirectories), path => path.Contains(".cocern-backup-", StringComparison.Ordinal));
+        output.GetStringBuilder().Clear();
+        Assert.Equal(0, await RepairCommand.RunAsync(["--refresh-native", "--json", "--data-dir", fixture.Node], environment, CancellationToken.None));
+        Assert.DoesNotContain(fixture.OldImage.Replace("\\", "\\\\", StringComparison.Ordinal), File.ReadAllText(fixture.Config));
+        Assert.Equal(fixture.OldImageBytes, File.ReadAllBytes(fixture.OldImage));
+        Assert.NotNull(NativeRegistration.Read(fixture.Candidate, "codex", fixture.Node, fixture.Profile));
+        var hooks = JsonNode.Parse(File.ReadAllBytes(fixture.Hooks))!.AsObject();
+        Assert.True((bool)hooks["disableAllHooks"]!);
+        Assert.True((bool)hooks["hooks"]!["SessionStart"]![0]!["disabled"]!);
+        Assert.True((bool)hooks["hooks"]!["SessionStart"]![0]!["hooks"]![0]!["disabled"]!);
+        Assert.Equal("unrelated-helper", (string?)hooks["hooks"]!["SessionStart"]![0]!["hooks"]![1]!["command"]);
+        Assert.Contains("COCERN_ROLE = 'admin'", File.ReadAllText(fixture.Config)); Assert.Contains("COCERN_PROFILE = 'diagnostics'", File.ReadAllText(fixture.Config));
+        Assert.Equal("custom workflow guidance", File.ReadAllText(CodexNativeSetup.SkillPath(fixture.Root)));
+        foreach (var (path, bytes) in enrollmentBefore) Assert.Equal(bytes, File.ReadAllBytes(path));
+        Assert.DoesNotContain(Directory.EnumerateFiles(fixture.Node), path => Path.GetFileName(path).Contains("startup", StringComparison.OrdinalIgnoreCase));
+        var readiness = CodexNativeSetup.Inspect(fixture.Root, fixture.Profile, new Dictionary<string, string> { ["COCERN_NODE_DIR"] = fixture.Node });
+        Assert.False(readiness.StartupObserved); Assert.False(readiness.SessionVerified); Assert.False(readiness.WakeReady);
+        Assert.False(CodexNativeSetup.RefreshEnrolledNative(fixture.Node, fixture.Profile, "dotnet", fixture.Adapter, TimeProvider.System, check: true));
+        Assert.Contains("does not approve trust", output.ToString());
+    }
+
+    [Fact]
+    public void Native_refresh_refuses_a_standard_entry_or_a_candidate_that_does_not_match_its_old_image_without_mutation()
+    {
+        using var fixture = new NativeRefreshFixture();
+        var validCandidate = File.ReadAllBytes(fixture.Candidate);
+        var original = JsonNode.Parse(validCandidate)!.AsObject();
+        original["helperVersion"] = Guid.NewGuid().ToString("D"); original.Remove("definition");
+        original["definition"] = NativeCheckout.Hash(NativeJoinHook.Canonical(JsonSerializer.SerializeToElement(original)));
+        NodeState.WritePrivately(fixture.Candidate, JsonSerializer.SerializeToUtf8Bytes(original));
+        var candidateBefore = File.ReadAllBytes(fixture.Candidate); var configBefore = File.ReadAllBytes(fixture.Config); var hooksBefore = File.ReadAllBytes(fixture.Hooks);
+        Assert.Throws<ClientSettingsException>(() => CodexNativeSetup.RefreshEnrolledNative(fixture.Node, fixture.Profile, "dotnet", fixture.Adapter, TimeProvider.System, check: false));
+        Assert.Equal(candidateBefore, File.ReadAllBytes(fixture.Candidate)); Assert.Equal(configBefore, File.ReadAllBytes(fixture.Config)); Assert.Equal(hooksBefore, File.ReadAllBytes(fixture.Hooks));
+        NodeState.WritePrivately(fixture.Candidate, validCandidate); candidateBefore = validCandidate;
+        File.Delete(fixture.Config);
+        ClientSettings.PlanCodex(fixture.Config, "dotnet", fixture.Adapter, new Dictionary<string, string> { ["COCERN_NODE_DIR"] = fixture.Node }).Apply(TimeProvider.System);
+        configBefore = File.ReadAllBytes(fixture.Config);
+        Assert.Throws<ClientSettingsException>(() => CodexNativeSetup.RefreshEnrolledNative(fixture.Node, fixture.Profile, "dotnet", fixture.Adapter, TimeProvider.System, check: false));
+        Assert.Equal(configBefore, File.ReadAllBytes(fixture.Config)); Assert.Equal(candidateBefore, File.ReadAllBytes(fixture.Candidate)); Assert.Equal(hooksBefore, File.ReadAllBytes(fixture.Hooks));
+    }
+
+    private sealed class NativeRefreshFixture : IDisposable
+    {
+        internal readonly string Root = Path.Combine(Path.GetTempPath(), "cocern-native-refresh-" + Guid.NewGuid().ToString("N"));
+        internal readonly string Node, Profile, Config, Hooks, Candidate, OldImage;
+        internal readonly string Adapter = typeof(AdapterOptions).Assembly.Location;
+        internal readonly byte[] OldImageBytes;
+        internal NativeRefreshFixture()
+        {
+            Node = Path.Combine(Root, "node"); Profile = Path.Combine(Root, ".codex"); Config = Path.Combine(Profile, "config.toml"); Hooks = Path.Combine(Profile, "hooks.json");
+            using (var state = NodeState.Open(Node)) { state.SetHub("http://127.0.0.1:5271/", null); state.SaveCredential(new string('a', 64)); }
+            OldImage = Path.Combine(Root, "old-package", "CoCern.Adapter.dll"); Directory.CreateDirectory(Path.GetDirectoryName(OldImage)!); File.Copy(Adapter, OldImage); OldImageBytes = File.ReadAllBytes(OldImage);
+            ClientSettings.PlanCodex(Config, "dotnet", OldImage, new Dictionary<string, string> { ["COCERN_NODE_DIR"] = Node, ["COCERN_ROLE"] = "admin", ["COCERN_PROFILE"] = "diagnostics" }).Apply(TimeProvider.System);
+            Candidate = ClientSettings.StageNativeCandidate(Node, "codex", CodexNativeSetup.HookCommandLine("dotnet", OldImage), clientProfile: Profile)!;
+            ClientSettings.PlanNativeCodex(Config, "dotnet", OldImage, Node, Profile, null).Apply(TimeProvider.System);
+            var candidate = JsonNode.Parse(File.ReadAllBytes(Candidate))!.AsObject();
+            var hooks = new JsonObject { ["disableAllHooks"] = true, ["hooks"] = candidate["hooks"]!.DeepClone() };
+            hooks["hooks"]!["SessionStart"]![0]!["disabled"] = true;
+            hooks["hooks"]!["SessionStart"]![0]!["hooks"]![0]!["disabled"] = true;
+            hooks["hooks"]!["SessionStart"]![0]!["hooks"]!.AsArray().Add(new JsonObject { ["type"] = "command", ["command"] = "unrelated-helper" });
+            File.WriteAllText(Hooks, hooks.ToJsonString());
+            var skill = CodexNativeSetup.SkillPath(Root); Directory.CreateDirectory(Path.GetDirectoryName(skill)!); File.WriteAllText(skill, "custom workflow guidance");
+            foreach (var backup in Directory.EnumerateFiles(Root, "*.cocern-backup-*", SearchOption.AllDirectories)) File.Delete(backup);
+        }
+        internal SetupEnvironment Environment(TextWriter output) => new()
+        {
+            Profile = Root, DotnetPath = "dotnet", AdapterDll = Adapter, Out = output, Error = TextWriter.Null,
+            RunKey = new NativeRefreshRunKey(), Transport = new NodeTransport(), StartNode = (_, _, _) => throw new InvalidOperationException("Native helper maintenance must not start a node.")
+        };
+        public void Dispose() => Directory.Delete(Root, recursive: true);
+    }
+
+    private sealed class NativeRefreshRunKey : IRunKey
+    {
+        public string? Get(string name) => throw new InvalidOperationException("Native helper maintenance must not read startup settings.");
+        public void Set(string name, string value) => throw new InvalidOperationException("Native helper maintenance must not change startup settings.");
+    }
+
+    [Fact]
+    public void Standard_preparation_refreshes_only_the_configured_current_native_helper_metadata_and_preserves_disabled_hooks()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "cocern-native-update-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var profile = Path.Combine(root, ".codex"); var config = Path.Combine(profile, "config.toml");
+            var token = Path.Combine(root, "token"); var cache = Path.Combine(root, "cache");
+            NodeState.WritePrivately(token, "synthetic-native-update-token"u8.ToArray());
+            var environment = new Dictionary<string, string> { ["COCERN_TOKEN_FILE"] = token, ["COCERN_URL"] = "http://127.0.0.1:5271/", ["COCERN_ROLE"] = "admin", ["COCERN_PROFILE"] = "diagnostics" };
+            var adapter = typeof(AdapterOptions).Assembly.Location;
+            ClientSettings.PlanCodex(config, "dotnet", adapter, environment).Apply(TimeProvider.System);
+            var candidatePath = ClientSettings.StageLocalNativeCandidate("codex", "dotnet", adapter, environment, cache, clientProfile: profile)!;
+            var folder = Path.GetDirectoryName(candidatePath)!;
+            var candidate = JsonNode.Parse(File.ReadAllBytes(candidatePath))!.AsObject();
+            var oldVersion = Guid.NewGuid().ToString("D"); candidate["helperVersion"] = oldVersion; candidate.Remove("definition");
+            candidate["definition"] = NativeCheckout.Hash(NativeJoinHook.Canonical(JsonSerializer.SerializeToElement(candidate)));
+            NodeState.WritePrivately(candidatePath, JsonSerializer.SerializeToUtf8Bytes(candidate));
+            Assert.NotNull(NativeRegistration.Read(candidatePath, "codex", folder, profile, oldVersion));
+            var originalCandidate = File.ReadAllBytes(candidatePath);
+            var hooks = Path.Combine(profile, "hooks.json");
+            const string disabled = "{\"disableAllHooks\":true,\"hooks\":{\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"retained --native-hook codex\",\"disabled\":true}]}]}}";
+            File.WriteAllText(hooks, disabled);
+            var retained = Path.Combine(root, "retained", "CoCern.Adapter.dll"); Directory.CreateDirectory(Path.GetDirectoryName(retained)!); File.WriteAllBytes(retained, []);
+            ClientSettings.PlanNativeCodex(config, "dotnet", retained, folder, profile, null).Apply(TimeProvider.System);
+            var retainedConfig = File.ReadAllBytes(config);
+            Assert.True(ClientSettings.PlanOwnedStandardCodexLaunch(config, "dotnet", adapter).IsUnchanged);
+            CodexNativeSetup.PrepareStandard(root, profile, "dotnet", adapter, environment, TimeProvider.System, cache);
+            Assert.Equal(retainedConfig, File.ReadAllBytes(config));
+            Assert.Equal(originalCandidate, File.ReadAllBytes(candidatePath));
+
+            ClientSettings.PlanNativeCodex(config, "dotnet", adapter, folder, profile, null).Apply(TimeProvider.System);
+            var currentConfig = File.ReadAllBytes(config);
+            Assert.True(CodexNativeSetup.NeedsCurrentNativeCandidateRefresh(profile, environment, cache));
+            var readiness = CodexNativeSetup.PrepareStandard(root, profile, "dotnet", adapter, environment, TimeProvider.System, cache);
+            Assert.Equal(currentConfig, File.ReadAllBytes(config));
+            Assert.Equal(disabled, File.ReadAllText(hooks));
+            Assert.Equal("synthetic-native-update-token", File.ReadAllText(token));
+            Assert.NotNull(NativeRegistration.Read(candidatePath, "codex", folder, profile));
+            var updated = JsonNode.Parse(File.ReadAllBytes(candidatePath))!.AsObject();
+            candidate.Remove("helperVersion"); candidate.Remove("definition"); updated.Remove("helperVersion"); updated.Remove("definition");
+            Assert.True(JsonNode.DeepEquals(candidate, updated));
+            Assert.NotEqual("standard", readiness.State);
+            Assert.False(readiness.StartupObserved);
+            Assert.False(readiness.SessionVerified);
+            Assert.False(readiness.WakeReady);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
     public async Task Windows_native_hooks_parse_as_literal_PowerShell_invocations()
     {
         if (!OperatingSystem.IsWindows()) return;

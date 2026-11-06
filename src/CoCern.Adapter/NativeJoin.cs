@@ -21,13 +21,12 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
     internal static AdapterOptions BackgroundOptions(AdapterOptions connection) => new(connection.BaseUri.AbsoluteUri, connection.Token, signalR: connection.SignalR)
         { PinnedFingerprint = connection.PinnedFingerprint };
     private readonly ConcurrentDictionary<string, (string Session, SessionHints Keeper)> hints = new();
-    private Task? runtime;
     internal TimeSpan Budget { get; init; } = TimeSpan.FromSeconds(15);
-    internal TimeSpan ResumeInterval { get; init; } = TimeSpan.FromSeconds(4);
     internal Func<string, string, string?> RootProof { get; init; } = (cwd, root) => ProtectedCheckoutRoot.ProveOrNull(cwd, root);
 
-    private sealed class Refused(string code) : IOException(code) { internal string Code { get; } = code; }
+    internal sealed class Refused(string code) : IOException(code) { internal string Code { get; } = code; }
     private sealed record Intent(string Provider, string NativeId, string Cwd, string? Repository = null);
+    private sealed record StartupIntent(string Scope, string Provider, string NativeId, string Cwd, DateTimeOffset CapturedAt);
     private sealed record Invocation(string Id, string Tool, JsonElement Args)
     {
         internal bool LegacyWire { get; set; }
@@ -45,6 +44,7 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
     }
 
     private string IntentDir(string scope) => Path.Combine(folder, "native-pending-" + scope);
+    private string StartupIntentPath(string scope, string provider) => Path.Combine(folder, "native-startup-intent-" + provider + "-" + scope + ".json");
     private static void SafeDirectory(string path, bool create)
     {
         for (DirectoryInfo? p = new(path); p is not null; p = p.Parent)
@@ -55,11 +55,102 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
     internal async Task<SessionHandle> EnsureAsync(NativeHookContext context, CancellationToken ct) =>
         (await EnsureBoundAsync(context, null, ct)).Handle;
 
+    // SessionStart is a local intent, not a request to create an idle directory entry.
+    internal async Task RecordPendingAsync(NativeHookContext context, CancellationToken ct)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct, stopping.Token);
+        timeout.CancelAfter(Budget);
+        var cancel = timeout.Token;
+        if (context.Provider is not ("claude" or "codex") || context.NativeId is not { Length: 32 or 36 } ||
+            !Guid.TryParseExact(context.NativeId, context.NativeId.Length == 32 ? "N" : "D", out var id)) throw new Refused("native_capture_required");
+        var checkout = await Task.Run(() => NativeCheckout.Inspect(context.Cwd), cancel).WaitAsync(cancel);
+        var scope = CredentialScope();
+        SafeDirectory(folder, false);
+        var path = StartupIntentPath(scope, context.Provider);
+        await using var membership = await NativeJoinBinding.LockAsync(Path.ChangeExtension(path, ".lock"), cancel);
+        if (CredentialScope() != scope) throw new Refused("native_private_connection_required");
+        if (File.Exists(path))
+        {
+            if (!NodeState.IsPrivateFile(path) || new FileInfo(path).Length > 65536 ||
+                JsonSerializer.Deserialize<StartupIntent>(File.ReadAllBytes(path)) is not { } saved || saved.Scope != scope || saved.Provider != context.Provider)
+                throw new IOException("The pending native intent cannot be verified.");
+        }
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(new StartupIntent(scope, context.Provider, id.ToString("D"), checkout.Root, DateTimeOffset.UtcNow));
+        if (bytes.Length > 65536) throw new Refused("native_capture_required");
+        NodeState.WritePrivately(path, bytes);
+    }
+
+    // Read-only diagnostic hint from this connection's private, bounded pending-intent store.
+    // It authorizes neither a repository nor a native join, and never probes the hub.
+    internal string? LatestPendingWorkspace(string provider = "codex")
+    {
+        try
+        {
+            if (provider is not ("codex" or "claude")) return null;
+            var scope = CredentialScope();
+            SafeDirectory(folder, false);
+            var startup = StartupIntentPath(scope, provider);
+            if (File.Exists(startup))
+            {
+                if (!NodeState.IsPrivateFile(startup) || new FileInfo(startup).Length > 65536) return null;
+                var capture = JsonSerializer.Deserialize<StartupIntent>(File.ReadAllBytes(startup));
+                if (capture is null || capture.Scope != scope || capture.Provider != provider || !Guid.TryParseExact(capture.NativeId, "D", out _) ||
+                    capture.Cwd is not { Length: > 0 and <= 32768 } || !Path.IsPathFullyQualified(capture.Cwd) || capture.Cwd.Any(char.IsControl) ||
+                    capture.CapturedAt < DateTimeOffset.UtcNow.AddDays(-1) || capture.CapturedAt > DateTimeOffset.UtcNow.AddMinutes(5)) return null;
+                return CredentialScope() == scope ? capture.Cwd : null;
+            }
+            // Compatibility with an older helper's pending intent, still scoped and read-only.
+            var directory = IntentDir(scope);
+            SafeDirectory(directory, false);
+            if (!Directory.Exists(directory)) return null;
+            var paths = Directory.EnumerateFiles(directory, "*.json").Take(513).ToArray();
+            if (paths.Length > 512) return null;
+            foreach (var path in paths.OrderByDescending(File.GetLastWriteTimeUtc))
+            {
+                if (!NodeState.IsPrivateFile(path) || new FileInfo(path).Length > 65536 ||
+                    File.GetLastWriteTimeUtc(path) < DateTime.UtcNow.AddDays(-1)) continue;
+                var intent = JsonSerializer.Deserialize<Intent>(File.ReadAllBytes(path));
+                if (intent is null || intent.Provider != provider || !Guid.TryParseExact(intent.NativeId, "D", out _) ||
+                    intent.Cwd is not { Length: > 0 and <= 32768 } || !Path.IsPathFullyQualified(intent.Cwd) || intent.Cwd.Any(char.IsControl) ||
+                    Path.GetFileName(path) != NativeCheckout.Hash(JsonSerializer.Serialize(intent with { Repository = null })) + ".json") continue;
+                return CredentialScope() == scope ? intent.Cwd : null;
+            }
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or JsonException) { }
+        return null;
+    }
+
+    // Stop/background hooks may observe an already joined chat, never create one.
+    internal async Task<bool> HasEstablishedAsync(NativeHookContext context, CancellationToken ct)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct, stopping.Token);
+        timeout.CancelAfter(Budget);
+        var cancel = timeout.Token;
+        try
+        {
+            if (context.Provider is not ("claude" or "codex") || !Guid.TryParse(context.NativeId, out var id)) return false;
+            var workspace = await Task.Run(() => NativeCheckout.Inspect(context.Cwd).Root, cancel).WaitAsync(cancel);
+            var scope = CredentialScope();
+            var directory = IntentDir(scope);
+            SafeDirectory(directory, false);
+            var name = NativeCheckout.Hash(JsonSerializer.Serialize(new Intent(context.Provider, id.ToString("D"), workspace)));
+            var stripe = Path.Combine(directory, name[..2] + ".lock");
+            if (!Directory.Exists(directory) || !File.Exists(stripe)) return false;
+            await using var membership = await NativeJoinBinding.LockAsync(stripe, cancel, existingOnly: true);
+            if (CredentialScope() != scope) return false;
+            await using var binding = await NativeJoinBinding.AcquireEstablishedAsync(folder, context.Provider, id.ToString("D"),
+                Environment.MachineName, workspace, cancel, resolveCheckout: (_, _) => Task.FromResult(workspace));
+            return binding.CurrentHandle is not null;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or JsonException or OperationCanceledException) { return false; }
+    }
+
     internal async Task<JsonElement> WithEstablishedSigningBindingAsync(NativeHookContext context, Func<NativeJoinBinding, JsonElement> sign,
         CancellationToken ct, Func<string, CancellationToken, Task<string>>? resolveCheckout = null)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct, stopping.Token);
-        timeout.CancelAfter(TimeSpan.FromSeconds(15));
+        timeout.CancelAfter(Budget);
         var cancel = timeout.Token;
         try
         {
@@ -71,18 +162,31 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
                 : await resolveCheckout(context.Cwd, cancel);
             var scope = CredentialScope();
             var directory = IntentDir(scope);
-            SafeDirectory(directory, false);
+            SafeDirectory(directory, true);
             var intent = new Intent(context.Provider, id.ToString("D"), workspace);
             var name = NativeCheckout.Hash(JsonSerializer.Serialize(intent));
-            // The same fence excludes SessionStart/open and repository remapping for this capture.
-            // Retain it through the complete candidate lookup AND MAC issuance, without relay work.
-            await using var membership = await NativeJoinBinding.LockAsync(Path.Combine(directory, name[..2] + ".lock"), cancel, existingOnly: true);
-            if (CredentialScope() != scope) throw new Refused("native_private_connection_required");
             Func<string, CancellationToken, Task<string>>? knownCheckout = resolveCheckout is null ? null : (_, _) => Task.FromResult(workspace);
-            await using var binding = await NativeJoinBinding.AcquireEstablishedAsync(folder, context.Provider, id.ToString("D"),
-                Environment.MachineName, workspace, cancel, resolveCheckout: knownCheckout);
-            cancel.ThrowIfCancellationRequested();
-            return sign(binding);
+            for (var mayJoin = true; ; mayJoin = false)
+            {
+                try
+                {
+                    // The stripe stays held through established lookup and MAC issuance. Missing
+                    // state alone permits the genuine hook to join; corrupt or ambiguous state does not.
+                    await using var membership = await NativeJoinBinding.LockAsync(Path.Combine(directory, name[..2] + ".lock"), cancel);
+                    if (CredentialScope() != scope) throw new Refused("native_private_connection_required");
+                    await using var binding = await NativeJoinBinding.AcquireEstablishedAsync(folder, context.Provider, id.ToString("D"),
+                        Environment.MachineName, workspace, cancel, resolveCheckout: knownCheckout);
+                    cancel.ThrowIfCancellationRequested();
+                    return sign(binding);
+                }
+                catch (NativeJoinBinding.MissingEstablishedBinding) when (mayJoin)
+                {
+                    // Release the stripe before EnsureBound takes the same lease. The outer deadline
+                    // covers initial lookup, a single bounded join and the final signing lookup.
+                    if (CredentialScope() != scope) throw new Refused("native_private_connection_required");
+                    await EnsureBoundAsync(context, null, cancel);
+                }
+            }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw new OperationCanceledException(ct); }
         catch (OperationCanceledException) when (!stopping.IsCancellationRequested) { throw new Refused("native_binding_busy"); }
@@ -97,7 +201,7 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
         if (context.Provider is not ("claude" or "codex") || context.NativeId is not { Length: 32 or 36 } ||
             !Guid.TryParseExact(context.NativeId, context.NativeId.Length == 32 ? "N" : "D", out var id)) throw new Refused("native_capture_required");
         var checkout = await Task.Run(() => NativeCheckout.Inspect(context.Cwd), cancel).WaitAsync(cancel);
-        var evidence = checkout.Preflight(options.BaseUri.IsLoopback);
+        var evidence = checkout.Preflight(options.BaseUri.IsLoopback, options.Repository);
         var intent = new Intent(context.Provider, id.ToString("D"), checkout.Root);
         var scope = CredentialScope();
         var directory = IntentDir(scope);
@@ -323,45 +427,13 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
         { return new(false, "native_private_checkout_required"); }
     }
 
-    internal Task ResumeAsync(CancellationToken ct) => runtime ??= ResumeLoopAsync(ct);
-
-    private async Task ResumeLoopAsync(CancellationToken ct)
-    {
-        using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(ct, stopping.Token);
-        var cancel = lifetime.Token;
-        try
-        {
-            while (!cancel.IsCancellationRequested)
-            {
-                try
-                {
-                    var directory = IntentDir(CredentialScope());
-                    SafeDirectory(directory, false);
-                    if (Directory.Exists(directory))
-                    foreach (var file in Directory.EnumerateFiles(directory, "*.json").Take(512))
-                    {
-                        try
-                        {
-                            if (!NodeState.IsPrivateFile(file) || new FileInfo(file).Length > 65536) continue;
-                            var intent = JsonSerializer.Deserialize<Intent>(File.ReadAllBytes(file));
-                            if (intent is null || Path.GetFileName(file) != NativeCheckout.Hash(JsonSerializer.Serialize(intent with { Repository = null })) + ".json") continue;
-                            await EnsureBoundAsync(new(intent.Provider, intent.NativeId, intent.Cwd), null, cancel, retry: false);
-                        }
-                        catch (OperationCanceledException) when (!cancel.IsCancellationRequested) { }
-                        catch (Exception error) when (error is IOException or ArgumentException or UnauthorizedAccessException or JsonException) { }
-                    }
-                }
-                catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
-                await Task.Delay(ResumeInterval, cancel);
-            }
-        }
-        catch (OperationCanceledException) when (cancel.IsCancellationRequested) { }
-    }
+    // Discovery/background startup must never turn a pending hook intent into a session.
+    // The next genuine CoCern PreToolUse owns recovery, under its normal bounded deadline.
+    internal Task ResumeAsync(CancellationToken ct) => Task.CompletedTask;
 
     public async ValueTask DisposeAsync()
     {
         await stopping.CancelAsync();
-        if (runtime is not null) await runtime;
         foreach (var entry in hints.Values) await entry.Keeper.DisposeAsync();
         stopping.Dispose();
     }

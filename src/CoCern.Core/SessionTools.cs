@@ -18,12 +18,12 @@ internal sealed class SessionTools(Aggregates aggregates, StandingDelivery stand
 {
     public async Task<RelayReply> OpenAsync(RelayCaller caller, JsonObject args, CallTrace? trace)
     {
-        Task<string?> Resolve(JsonObject evidence) => docs.ResolveNativeAsync(caller, (string?)evidence["checkout"], (string?)evidence["common"], (string?)evidence["origin"]);
+        Task<string?> Resolve(JsonObject evidence) => docs.ResolveNativeAsync(caller, (string?)evidence["checkout"], (string?)evidence["common"], (string?)evidence["origin"], (string?)evidence["repositoryId"]);
         if (args["nativePreflight"] is JsonObject evidence)
         {
             var repo = await Resolve(evidence);
             return repo is not null && caller.MayAccess(repo) ? Ok(new { repositoryId = repo }) :
-                Error(RepositoryDenied, new { guidance = "Configure one accessible repository matching this checkout or its Git origin." });
+                Error(RepositoryDenied, new { guidance = "Select an authorized repository for this connection. If the hub has its clone, its Git origin must match; otherwise configure the repository ID on the adapter." });
         }
         // Fresh authorization and mapping on this allocating request, after the caller obtained the exclusive lease.
         if (args.Remove(RelayRequestGuard.CheckedNativeResolution, out var checkedEvidence) &&
@@ -42,6 +42,7 @@ internal sealed class SessionTools(Aggregates aggregates, StandingDelivery stand
     /// <summary>Records the session in the control directory, initializes its private aggregate, and attaches the requested task packet.</summary>
     private async Task<RelayReply> OpenSessionAsync(RelayCaller caller, JsonObject args)
     {
+        if (Flag(args, NativeParticipant.Adoption)) return await AdoptNativeAsync(caller, args);
         var opened = await aggregates.Control(caller, RelayTools.SessionOpen, args);
         if (opened.Code == Unavailable && Text(args, NativeParticipant.Id) is { Length: > 0 } participant
             && Text(Aggregates.Parse(opened), "nativeCheck") is { Length: > 0 } pending)
@@ -73,9 +74,30 @@ internal sealed class SessionTools(Aggregates aggregates, StandingDelivery stand
         }
         // In this reply and not the tool's description: it costs once per session, not on every turn, and server instructions have proved not to reach every chat.
         data["waitingHint"] = WaitingHint;
-        data[ChatGuidance.StartHintField] = ChatGuidance.StartHint(caller.IsAdministrator, searchOn, analyticsOn, docs: !ReferenceEquals(docs, DocCacheTool.Off));
+        data[ChatGuidance.StartHintField] = ChatGuidance.StartHint(caller.IsAdministrator, searchOn, analyticsOn, docs: DocCacheTool.IsEnabled(docs));
         await standing.AttachAtOpenAsync(caller, args, data);
         return Ok(data, opened.Version);
+    }
+
+    private async Task<RelayReply> AdoptNativeAsync(RelayCaller caller, JsonObject args)
+    {
+        // The session aggregate checks its exact principal/repository/secret and rejects closed or differently owned sessions before any directory mutation.
+        var proof = new NativeSessionAdoption(Text(args, "repositoryId"), Text(args, "sessionId"), Text(args, "sessionToken"),
+            Text(args, NativeParticipant.Id), Text(args, NativeParticipant.Generation), Text(args, NativeParticipant.Request));
+        var probe = proof.ToJson();
+        probe["nativeAdoptionProbe"] = true;
+        var verified = await aggregates.Session(caller, NativeSessionAdoption.Operation, probe);
+        if (!verified.Ok) return verified;
+        var reserved = await aggregates.Control(caller, RelayTools.SessionOpen, args);
+        if (!reserved.Ok) return reserved;
+        var confirmed = await aggregates.Session(caller, NativeSessionAdoption.Operation, proof.ToJson());
+        if (!confirmed.Ok) return confirmed;
+        var data = Aggregates.Parse(confirmed);
+        if (!Flag(data, "adopted")) return Error(SessionUnknown);
+        data.Remove("adopted");
+        data["waitingHint"] = WaitingHint;
+        data[ChatGuidance.StartHintField] = ChatGuidance.StartHint(caller.IsAdministrator, searchOn, analyticsOn, docs: DocCacheTool.IsEnabled(docs));
+        return Ok(data, confirmed.Version);
     }
 
     /// <summary>

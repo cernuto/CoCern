@@ -308,6 +308,12 @@ public sealed class DirectoryEntry(JsonObject json)
     internal string NativeId => Text(json, NativeParticipant.Id);
     internal string NativeGeneration => Text(json, NativeParticipant.Generation);
     internal string NativeRequest => Text(json, NativeParticipant.Request);
+    internal void AdoptNative(string participant, string generation, string request)
+    {
+        json[NativeParticipant.Id] = participant;
+        json[NativeParticipant.Generation] = generation;
+        json[NativeParticipant.Request] = request;
+    }
     internal string Token => Text(json, SessionTokenKey);
     public string PrincipalId => Text(json, PrincipalIdKey);
     public string RepositoryId => Text(json, RepositoryIdKey);

@@ -13,7 +13,7 @@ namespace CoCern.Core;
 /// <summary>The doc cache tools as the hub calls them; a hub with the cache off gets <see cref="DocCacheTool.Off"/>.</summary>
 public interface IDocCacheTools
 {
-    Task<string?> ResolveNativeAsync(RelayCaller caller, string? checkout, string? common, string? origin) => Task.FromResult<string?>(null);
+    Task<string?> ResolveNativeAsync(RelayCaller caller, string? checkout, string? common, string? origin, string? repositoryId = null) => Task.FromResult<string?>(null);
     Task<RelayReply> SearchAsync(JsonObject args);
     Task<RelayReply> SectionAsync(JsonObject args);
     Task<RelayReply> SyncAsync(JsonObject args, CancellationToken cancellationToken);
@@ -34,8 +34,8 @@ public sealed class DocCacheTool(IGrainFactory grains, ITokenCounter tokens, IDo
 
     private bool Known(string repository) => repositories.Contains(repository, StringComparer.Ordinal);
 
-    public Task<string?> ResolveNativeAsync(RelayCaller caller, string? checkout, string? common, string? origin) =>
-        sync.ResolveNativeAsync(caller, checkout, common, origin);
+    public Task<string?> ResolveNativeAsync(RelayCaller caller, string? checkout, string? common, string? origin, string? repositoryId = null) =>
+        sync.ResolveNativeAsync(caller, checkout, common, origin, repositoryId);
 
     public Task<string?> LearnAsync(string repositoryId, string workspace) => sync.LearnAsync(repositoryId, workspace);
 
@@ -172,8 +172,15 @@ public sealed class DocCacheTool(IGrainFactory grains, ITokenCounter tokens, IDo
     /// <summary>Every doc cache tool on a hub with <c>Relay:DocCache:Enabled</c> off.</summary>
     public static readonly IDocCacheTools Off = new TurnedOff();
 
-    private sealed class TurnedOff : IDocCacheTools
+    /// <summary>Native repository resolution is independent of document indexing; document operations remain disabled.</summary>
+    public static IDocCacheTools OffWithNativeResolution(Func<RelayCaller, string?, string?, string?, string?, Task<string?>> resolve) => new TurnedOff(resolve);
+
+    public static bool IsEnabled(IDocCacheTools tools) => tools is not TurnedOff;
+
+    private sealed class TurnedOff(Func<RelayCaller, string?, string?, string?, string?, Task<string?>>? resolve = null) : IDocCacheTools
     {
+        public Task<string?> ResolveNativeAsync(RelayCaller caller, string? checkout, string? common, string? origin, string? repositoryId = null) =>
+            resolve?.Invoke(caller, checkout, common, origin, repositoryId) ?? Task.FromResult<string?>(null);
         private static Task<RelayReply> Unavailable() =>
             Task.FromResult(Replies.Error(RelayErrorCodes.DocCacheUnavailable, new { message = "The doc cache is turned off on this hub (Relay:DocCache:Enabled)." }));
         public Task<RelayReply> SearchAsync(JsonObject args) => Unavailable();

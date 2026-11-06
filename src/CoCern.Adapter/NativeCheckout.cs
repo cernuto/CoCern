@@ -16,16 +16,21 @@ internal sealed record NativeCheckout(string Root, string? Common, string? Origi
         return new(root, common is not null && Path.IsPathFullyQualified(common) ? Path.TrimEndingDirectorySeparator(Path.GetFullPath(common)) : null, origin);
     }
 
-    internal JsonElement Preflight(bool local)
+    internal JsonElement Preflight(bool local, string? repositoryId = null)
     {
         var evidence = new Dictionary<string,string>();
+        if (!string.IsNullOrEmpty(repositoryId))
+        {
+            if (!CoCern.Contracts.NativeGitOrigin.ValidRepositoryHint(repositoryId)) throw new IOException("The configured repository ID is invalid.");
+            evidence["repositoryId"] = repositoryId;
+        }
         if (local)
         {
             evidence["checkout"] = Hash(Root);
             if (Common is not null) evidence["common"] = Hash(Common);
         }
         if (Origin is not null) evidence["origin"] = Origin;
-        if (evidence.Count == 0) throw new IOException("The remote checkout needs a supported Git origin.");
+        // No remote identity is still a valid preflight: the hub may have exactly one authorized clone-less repository.
         return JsonSerializer.SerializeToElement(new { nativePreflight = evidence });
     }
 

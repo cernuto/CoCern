@@ -27,6 +27,8 @@ public static class NativeParticipant
     public static int JoinFields(JsonObject args) => args.ContainsKey(DisplayLabel) ? 5 : 4;
     public const string WorkingCopy = "nativeWorkingCopy";
     public const string ProtectedRoot = "nativeProtectedRoot";
+    /// <summary>Hub-only marker; the proof itself uses the ordinary redacted session credential fields.</summary>
+    public const string Adoption = "nativeAdoption";
 
     // Replace the adapter's exact frozen proof with hub-only arguments before tracing, replay or persistence.
     public static bool Admit(RelayCaller caller, JsonObject args)
@@ -36,7 +38,8 @@ public static class NativeParticipant
         {
             if (args.ContainsKey(DisplayLabel) && !String(args, DisplayLabel, out _)) return false;
             var hasProtectedRoot = join.ContainsKey("protectedRoot");
-            if (join.Count != (hasProtectedRoot ? 6 : 5) || !String(join, "provider", out var provider) || provider is not ("claude" or "codex")
+            var hasAdoption = join.ContainsKey("adopt");
+            if (join.Count != 5 + (hasProtectedRoot ? 1 : 0) + (hasAdoption ? 1 : 0) || !String(join, "provider", out var provider) || provider is not ("claude" or "codex")
                 || !String(join, "nativeId", out var native) || !CanonicalGuid(native, "D")
                 || !String(join, "workspace", out var workspace) || workspace.Length > 32767 || workspace.Any(char.IsControl)
                 || !(workspace.StartsWith('/') || workspace.StartsWith(@"\\", StringComparison.Ordinal)
@@ -47,6 +50,10 @@ public static class NativeParticipant
                 || !String(args, "machineId", out var machine) || !String(args, "repositoryId", out var repository)) return false;
             string? protectedRoot = null;
             if (hasProtectedRoot && (!String(join, "protectedRoot", out protectedRoot) || !ValidProtectedRoot(protectedRoot))) return false;
+            string? adoptionId = null, adoptionToken = null;
+            if (hasAdoption && (join["adopt"] is not JsonObject adoption || adoption.Count != 2 ||
+                !String(adoption, "sessionId", out adoptionId) || !CanonicalGuid(adoptionId, "N") ||
+                !String(adoption, "sessionToken", out adoptionToken) || adoptionToken.Length is 0 or > 8192 || adoptionToken.Any(char.IsControl))) return false;
             Span<byte> secret = stackalloc byte[32];
             if (!Convert.TryFromBase64String(encoded, secret, out var length) || length != secret.Length || Convert.ToBase64String(secret) != encoded) return false;
             using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
@@ -71,6 +78,12 @@ public static class NativeParticipant
             args[Client] = provider;
             args[WorkingCopy] = workspace;
             if (protectedRoot is not null) args[ProtectedRoot] = protectedRoot;
+            if (adoptionId is not null)
+            {
+                args[Adoption] = true;
+                args["sessionId"] = adoptionId;
+                args["sessionToken"] = adoptionToken;
+            }
             return true;
         }
         catch (ArgumentException) { return false; } // Repeated nested JSON keys.

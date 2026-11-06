@@ -107,14 +107,23 @@ internal static class ConnectCommand
             try
             {
                 var plan = client.Plan();
+                var launch = client.Id == ConnectClients.Codex && owned.Contains(client.Id)
+                    ? ClientSettings.PlanOwnedStandardCodexLaunch(Path.Combine(codexProfile, "config.toml"), dotnetPath, adapterDll) : null;
+                var launchOutdated = launch is { IsUnchanged: false };
+                var launchUnavailable = launch is not null && !ClientSettings.HasNativeCodexLaunch(Path.Combine(codexProfile, "config.toml")) &&
+                    !ClientSettings.IsStandardCodexLaunchAvailable(Path.Combine(codexProfile, "config.toml"));
                 var hook = client.Id == ConnectClients.ClaudeCode && (!plan.IsUnchanged || owned.Contains(client.Id))
                     ? ClientSettings.PlanConnectStopHook(Path.Combine(profile, ".claude", "settings.json"), Path.Combine(profile, ".claude.json"), dotnetPath, adapterDll)
                     : null;
                 // An entry that is not this hub's is never changed, so its plan is always unchanged: it is checked first, or it would read as connected.
                 var state = foreign.ContainsKey(client.Id) ? ConnectStates.OtherHub : plan.IsUnchanged ? ConnectStates.Connected : plan.Refreshes ? check ? ConnectStates.Outdated : ConnectStates.Updated : check ? ConnectStates.Available : ConnectStates.Added;
+                if (state == ConnectStates.Connected && launchUnavailable)
+                    state = check ? ConnectStates.Outdated : launchOutdated ? ConnectStates.Updated : ConnectStates.Error;
+                if (state == ConnectStates.Error) code = 1;
                 if (state is ConnectStates.Added or ConnectStates.Updated)
                 {
                     plan.Apply(clock ?? TimeProvider.System);
+                    if (launchOutdated) ClientSettings.PlanOwnedStandardCodexLaunch(Path.Combine(codexProfile, "config.toml"), dotnetPath, adapterDll).Apply(clock ?? TimeProvider.System);
                 }
                 if (!check) hook?.Apply(clock ?? TimeProvider.System);
                 if (!check && client.Id == ConnectClients.ClaudeCode && (!plan.IsUnchanged || owned.Contains(client.Id)))
@@ -134,12 +143,18 @@ internal static class ConnectCommand
                 if (client.Id == ConnectClients.Codex && state is not (ConnectStates.Available or ConnectStates.OtherHub))
                 {
                     var nativeEnvironment = nativeEnvironments.GetValueOrDefault(client.Id) ?? environment;
-                    readiness = check ? CodexNativeSetup.Inspect(profile, codexProfile, nativeEnvironment, nativeCacheRoot)
-                        : CodexNativeSetup.Prepare(profile, codexProfile, dotnetPath, adapterDll, nativeEnvironment, clock ?? TimeProvider.System, nativeCacheRoot);
+                    readiness = check ? CodexNativeSetup.InspectStandard(profile, codexProfile, nativeEnvironment, nativeCacheRoot, Directory.GetCurrentDirectory())
+                        : CodexNativeSetup.PrepareStandard(profile, codexProfile, dotnetPath, adapterDll, nativeEnvironment, clock ?? TimeProvider.System, nativeCacheRoot);
                 }
                 else if (client.Id == ConnectClients.Codex && state == ConnectStates.Available)
-                    readiness = new() { State = "setup_required", Summary = "Connect Codex to get started", NextAction = "Prepare native setup to connect this app and install the startup hooks and workflow skill." };
-                results.Add(new() { Id = client.Id, Name = client.Name, State = state, Detail = foreign.GetValueOrDefault(client.Id) ?? (changes is null ? null : Detail(check, changes)), Admin = gives, Readiness = readiness });
+                    readiness = new() { State = "setup_required", Summary = "Connect Codex to get started", NextAction = "Connect this app, then open or resume a chat to use CoCern." };
+                if (!check && client.Id == ConnectClients.Codex && state != ConnectStates.OtherHub &&
+                    !ClientSettings.HasNativeCodexLaunch(Path.Combine(codexProfile, "config.toml")) && !ClientSettings.IsStandardCodexLaunchAvailable(Path.Combine(codexProfile, "config.toml")))
+                { state = ConnectStates.Error; code = 1; }
+                var detail = foreign.GetValueOrDefault(client.Id) ?? (changes is null ? null : Detail(check, changes));
+                if (state == ConnectStates.Error) detail = "The adapter executable is unavailable. Repair CoCern from its installed package.";
+                else if (detail is null && launchOutdated) detail = check ? "The owned adapter launch needs an update; existing tool permissions are retained." : "Updated the owned adapter launch; existing tool permissions were retained.";
+                results.Add(new() { Id = client.Id, Name = client.Name, State = state, Detail = detail, Admin = gives, Readiness = readiness });
             }
             catch (Exception exception) when (exception is ClientSettingsException or IOException or UnauthorizedAccessException)
             {
