@@ -171,6 +171,7 @@ The chat passes `role: "manager"` to `session_open`, and from then on the hub se
 - **Set it when the chat joins.** A session keeps the role it opened with. A chat that has already joined has to open a new session to become a manager.
 - **The role doesn't add tools or authority.** It only decides who gets those items. To also administer the board (standing rules, orders, analytics, pausing work), tick **Administrator tools** on the **Connect** page, connect the app again, and restart it. The setting covers every chat in that app.
 - **The name does nothing.** Calling a chat "CoCern Manager" changes only its label. The role is self-declared, and the hub doesn't limit a board to one manager.
+- **Recorded managers are per repository.** Separately from the role, each repository keeps its own list of recorded managers (up to 8), shown on the dashboard's **Manager** page. Adding a manager never removes the others, and nothing done in one repository changes another's. A chat with administrator tools can add or remove itself in its own repository on its own word; adding or removing any other chat, or all of them, needs your exact words, from the dashboard or passed on by a chat. Being recorded grants no tools or authority: it marks the chat's messages and administrative actions as the manager's.
 
 ## Wake-ups
 

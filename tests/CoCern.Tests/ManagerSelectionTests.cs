@@ -70,7 +70,7 @@ public sealed class ManagerSelectionTests
         var accepted = Seed(); var exact = " " + new string('x', 198) + " ";
         Assert.True(Apply(accepted, Decision("appoint_manager", "a", 0, exact)).Ok);
         Assert.Equal(exact, Manager(accepted)["history"]![0]!["humanWords"]!.GetValue<string>());
-        Assert.Equal(exact, accepted.State(AggregateKinds.Control, AggregateKinds.ControlKey)["manager"]!["humanWords"]!.GetValue<string>());
+        Assert.Equal(exact, accepted.State(AggregateKinds.Control, AggregateKinds.ControlKey)[ControlState.ManagerSeatsKey]!["repo"]![ManagerSeat.ManagersKey]![0]!["humanWords"]!.GetValue<string>());
     }
 
     [Fact]
@@ -100,6 +100,44 @@ public sealed class ManagerSelectionTests
         Assert.Null(manager["nextHistoryBefore"]); Assert.False(manager["historyTruncated"]!.GetValue<bool>());
         foreach (var marker in new[] { "principal-a", "selection-admin", "private quotation", "\"repo\"", "\"a\"" }) Assert.DoesNotContain(marker, outsider.DataJson);
         var own = AggregateHub.Data(Status(hub, Worker))["manager"]!; Assert.NotNull(own["current"]); Assert.Empty(own["history"]!.AsArray());
+
+        // Each repository holds its own managers: an appointment in another repository neither replaces nor revokes this one's, and adding
+        // a second manager here keeps the first. (Paul's appointment of a cocern chat revoked the m3ts-snx Manager on 2026-11-09.)
+        var hubCaller = new RelayCaller("hub", true, ["repo", "other", "m3ts-snx", "cocern"], true);
+        JsonNode Standing(AggregateHub on, string repository, string session) =>
+            AggregateHub.Data(on.Apply(AggregateKinds.Control, AggregateKinds.ControlKey, Operations.ManagerStanding, new ManagerStandingQuery(repository, session).ToJson(), hubCaller, Now));
+        Add(hub, "b", "other"); Add(hub, "c");
+        var elsewhere = Decision("appoint_manager", "b", 0, "Paul selected b", "decide-other"); elsewhere["repositoryId"] = "other";
+        Assert.True(Apply(hub, elsewhere, new RelayCaller("selection-admin", true, ["other"])).Ok);
+        Assert.True(Apply(hub, Decision("appoint_manager", "c", 1, "Paul selected c too", "decide-c")).Ok);
+        Assert.Equal(new[] { "c", "a" }, Manager(hub)["managers"]!.AsArray().Select(item => item!["sessionId"]!.GetValue<string>()).ToArray());
+        Assert.Equal(2, Manager(hub)["generation"]!.GetValue<long>());
+        foreach (var (repository, session, generation) in new[] { ("repo", "a", 2L), ("repo", "c", 2L), ("other", "b", 1L) })
+        {
+            var seat = Standing(hub, repository, session);
+            Assert.True(seat["manager"]!.GetValue<bool>()); Assert.False(seat["revoked"]!.GetValue<bool>()); Assert.Equal(generation, seat["generation"]!.GetValue<long>());
+        }
+        Assert.False(Standing(hub, "other", "a")["manager"]!.GetValue<bool>());
+
+        // A document from the hub-wide seat, as the live hub held it: generation 2's cocern appointment displaced and revoked m3ts-snx's manager.
+        var legacy = new AggregateHub(); Add(legacy, "51498ecb", "m3ts-snx"); Add(legacy, "cf5989d6", "cocern");
+        Mutate(legacy, json =>
+        {
+            json[ControlState.ManagerGenerationKey] = 2;
+            json[ControlState.ManagerKey] = new JsonObject { ["sessionId"] = "cf5989d6", ["principalId"] = "principal-cf5989d6", ["repositoryId"] = "cocern", ["generation"] = 2, ["assignedBy"] = "paul", ["assignedAt"] = Now.ToString("O"), ["requestId"] = "r2", ["humanWords"] = "Paul named it" };
+            json[ControlState.ManagerHistoryKey] = new JsonArray(
+                JsonSerializer.SerializeToNode(new ManagerSelectionHistory(1, "appoint_manager", null, "51498ecb", "m3ts-snx", "paul", "r1", Now, "Paul named it")),
+                JsonSerializer.SerializeToNode(new ManagerSelectionHistory(2, "appoint_manager", "51498ecb", "cf5989d6", "cocern", "paul", "r2", Now, "Paul named it")));
+            json[ControlState.ManagerRevokedKey] = new JsonObject { ["51498ecb"] = 2 };
+        });
+        var snx = Standing(legacy, "m3ts-snx", "51498ecb");
+        Assert.True(snx["manager"]!.GetValue<bool>()); Assert.False(snx["revoked"]!.GetValue<bool>()); Assert.Equal(1, snx["generation"]!.GetValue<long>());
+        Assert.True(Standing(legacy, "cocern", "cf5989d6")["manager"]!.GetValue<bool>());
+        // The first change stores the migrated seats and touches only its own repository.
+        var removal = new JsonObject { ["repositoryId"] = "cocern", ["requestId"] = "remove-cocern", ["command"] = "clear_manager", ["targetSessionId"] = "cf5989d6", ["expectedManagerGeneration"] = 2, ["humanWords"] = "Paul removed it" };
+        Assert.True(Apply(legacy, removal, new RelayCaller("selection-admin", true, ["cocern"])).Ok);
+        Assert.True(Standing(legacy, "cocern", "cf5989d6")["revoked"]!.GetValue<bool>());
+        Assert.True(Standing(legacy, "m3ts-snx", "51498ecb")["manager"]!.GetValue<bool>());
     }
 
     /// <summary>The log lives in a hub-wide document but reads one selected repository, with that repository's own numbers, cursor and counts.</summary>

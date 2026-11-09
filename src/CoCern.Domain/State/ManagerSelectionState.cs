@@ -35,6 +35,56 @@ public sealed class ManagerAssignment(JsonObject json)
     }
 }
 
+/// <summary>
+/// One repository's manager seats: the repository's own generation, the chats holding a seat there (at most
+/// <see cref="CoCern.Contracts.RelayLimits.MaxManagersPerRepository"/>), and the former managers this repository, and no other, refuses.
+/// </summary>
+public sealed class ManagerSeat(JsonObject json)
+{
+    public const string GenerationKey = "generation";
+    public const string ManagersKey = "managers";
+    public const string RevokedKey = "revoked";
+
+    public static StateShape Shape { get; } = StateShape.Object((GenerationKey, null), (ManagersKey, ManagerAssignment.Shape), (RevokedKey, StateShape.Map(null)));
+
+    /// <summary>The repository's selection generation: it moves on every add and every removal there, and nowhere else.</summary>
+    public long Generation
+    {
+        get => Number(json, GenerationKey);
+        internal set => json[GenerationKey] = value;
+    }
+
+    /// <summary>The chats holding a seat, in the order added.</summary>
+    public IReadOnlyList<ManagerAssignment> Managers => json[ManagersKey] is JsonArray list ? list.OfType<JsonObject>().Select(item => new ManagerAssignment(item)).ToArray() : [];
+
+    internal void Add(ManagerAssignment manager) => ArrayAt(json, ManagersKey).Add(manager.ToJson());
+
+    internal void Remove(string sessionId)
+    {
+        if (json[ManagersKey] is JsonArray list && list.OfType<JsonObject>().FirstOrDefault(item => Text(item, "sessionId") == sessionId) is { } held) list.Remove(held);
+    }
+
+    /// <summary>Whether a session or native participant ID held a seat here and was removed by someone else. Private; IDs here never leave the hub.</summary>
+    internal bool Revoked(string id) => id.Length > 0 && json[RevokedKey] is JsonObject revoked && revoked.ContainsKey(id);
+
+    /// <summary>Remembers <paramref name="manager"/>'s session and native participant as revoked here at <paramref name="generation"/>; past the bound the oldest goes.</summary>
+    internal void Revoke(ManagerAssignment manager, long generation)
+    {
+        var revoked = ObjectAt(json, RevokedKey);
+        revoked[manager.SessionId] = generation;
+        if (manager.NativeId.Length > 0) revoked[manager.NativeId] = generation;
+        while (revoked.Count > CoCern.Contracts.RelayLimits.ManagerRevokedEntries) revoked.Remove(revoked.OrderBy(entry => Number(revoked, entry.Key)).First().Key);
+    }
+
+    /// <summary>A chat added here again is no longer a former manager here.</summary>
+    internal void Restore(DirectoryEntry target)
+    {
+        if (json[RevokedKey] is not JsonObject revoked) return;
+        revoked.Remove(target.SessionId);
+        if (target.NativeId.Length > 0) revoked.Remove(target.NativeId);
+    }
+}
+
 internal static class ManagerSelectionHistoryState
 {
     internal static StateShape Shape { get; } = StateShape.Object(

@@ -528,13 +528,13 @@ internal static class ControlAggregate
             if (context.Args["managerHistoryOnly"] is not JsonValue mode || !mode.TryGetValue(out historyOnly)) return Error(InvalidArguments);
             if (historyOnly && !context.Caller.IsAdministrator)
             {
-                var summary = ManagerSelection.VisibleSummary(state, context.Caller, context.Now);
+                var summary = ManagerSelection.VisibleSummary(state, context.Caller, context.Repository, context.Now);
                 return Ok(new { paused = state.Paused, cancellations = state.CancellationCount, requests = Array.Empty<object>(), requestsOmitted = true, manager = summary });
             }
         }
         var requests = !historyOnly && sessionId.Length > 0 ? state.CancellationsOf(sessionId).Take(RelayLimits.MaxPageSize).Select(x => new { target = x.Target, request = x.Request }).ToArray() : [];
         RelayReply Reply(CoCern.Contracts.ManagerSelectionStatus manager) => Ok(new { paused = state.Paused, cancellations = state.CancellationCount, requests, requestsOmitted = historyOnly, manager });
-        var selection = ManagerSelection.Status(state, context.Caller, context.Now, before);
+        var selection = ManagerSelection.Status(state, context.Caller, context.Repository, context.Now, before);
         var fitted = ManagerSelection.Fit(selection, candidate => FitsWire(Reply(candidate), RelayLimits.AggregateReplyBytes), before);
         var augmented = Reply(fitted);
         if (historyOnly)

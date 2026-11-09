@@ -29,9 +29,9 @@ public static class RelayErrorCodes
     public const string RepositoryDenied = "RepositoryDenied";
     public const string SessionDenied = "SessionDenied";
     public const string AdministratorRequired = "AdministratorRequired";
-    /// <summary>The chat presenting this administrative call was the recorded manager and has been replaced or revoked. The caller's token is not the question.</summary>
+    /// <summary>The chat presenting this administrative call was a recorded manager of the call's repository and someone else removed it there. The caller's token is not the question.</summary>
     public const string ManagerRevoked = "ManagerRevoked";
-    /// <summary>A chat tried to record its own appointment. Paul names the manager from the dashboard or through another chat.</summary>
+    /// <summary>No longer sent: a chat may now add or remove itself as a manager of its own repository. Kept so older clients still read the code.</summary>
     public const string SelfAppointment = "SelfAppointment";
     /// <summary>The caller is an administrator, but this tool answers only a connection from the hub's own PC.</summary>
     public const string HubPcRequired = "HubPcRequired";

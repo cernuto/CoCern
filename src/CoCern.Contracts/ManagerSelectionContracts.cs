@@ -9,7 +9,11 @@ public sealed record ManagerSelectionSummary(
     [property: JsonPropertyName("generation")] long Generation,
     [property: JsonPropertyName("available")] bool Available);
 
-/// <summary>One administrator's recorded selection decision, not an action audit.</summary>
+/// <summary>
+/// One recorded selection decision in one repository, not an action audit: an add (<see cref="SessionId"/>, with <see cref="PreviousSessionId"/> when the
+/// same chat moved from an earlier session) or a removal (<see cref="PreviousSessionId"/> only). A chat's own add or removal without Paul's words records
+/// a fixed marker as <see cref="HumanWords"/> and its verified session as <see cref="RecordedBySessionId"/>.
+/// </summary>
 public sealed record ManagerSelectionHistory(
     [property: JsonPropertyName("generation")] long Generation,
     [property: JsonPropertyName("command")] string Command,
@@ -22,13 +26,18 @@ public sealed record ManagerSelectionHistory(
     [property: JsonPropertyName("humanWords")] string HumanWords,
     [property: JsonPropertyName("recordedBySessionId")] string? RecordedBySessionId = null);
 
+/// <summary>
+/// One repository's managers: its own generation, every chat holding one of its seats (<see cref="Managers"/>, most recent first), and
+/// <see cref="Current"/>, kept for older readers: the most recently added manager that is available, else the most recent one.
+/// </summary>
 public sealed record ManagerSelectionStatus(
     [property: JsonPropertyName("generation")] long Generation,
     [property: JsonPropertyName("current")] ManagerSelectionSummary? Current,
     [property: JsonPropertyName("history")] ManagerSelectionHistory[] History,
     [property: JsonPropertyName("nextHistoryBefore")] long? NextHistoryBefore,
     [property: JsonPropertyName("historyTruncated")] bool HistoryTruncated,
-    [property: JsonPropertyName("historyReadRequired")] bool HistoryReadRequired = false);
+    [property: JsonPropertyName("historyReadRequired")] bool HistoryReadRequired = false,
+    [property: JsonPropertyName("managers")] ManagerSelectionSummary[]? Managers = null);
 
 /// <summary>
 /// One administrative call as the hub saw it. The actor is the authenticated principal; the session and generation appear only when the hub verified them.

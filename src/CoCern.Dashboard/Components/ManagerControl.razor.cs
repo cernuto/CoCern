@@ -184,7 +184,14 @@ public partial class ManagerControl : ComponentBase
         SetMessage(text.Length > 0 ? text : null);
     }
 
-    public async Task DecideAsync(string command)
+    /// <summary>Every manager of the loaded repository, most recent first; an older hub's reply names only its current one.</summary>
+    public ManagerSelectionSummary[] Managers => Selection?.Managers ?? (Selection?.Current is { } only ? [only] : []);
+
+    /// <summary>
+    /// Records one decision with the exact human words entered: <c>appoint_manager</c> adds the chosen chat; <c>clear_manager</c> removes
+    /// <paramref name="removeSessionId"/>, the one listed manager whose Remove was chosen, or every manager of the repository when it is null.
+    /// </summary>
+    public async Task DecideAsync(string command, string? removeSessionId = null)
     {
         if (DecisionBusy || UnconfirmedDecision is not null) return;
         if (Selection is null || loadedRepository != RepositoryId)
@@ -210,7 +217,11 @@ public partial class ManagerControl : ComponentBase
         {
             SetMessage("Choose an exact session and its repository."); return;
         }
-        UnconfirmedDecision = new(RepositoryId, Guid.NewGuid().ToString("N"), command, command == "appoint_manager" ? TargetSessionId : null, Selection.Generation, HumanWords);
+        if (command == "clear_manager" && removeSessionId is not null && !Managers.Any(manager => manager.SessionId == removeSessionId))
+        {
+            SetMessage("That chat is not a manager of this repository. Refresh selection and choose again."); return;
+        }
+        UnconfirmedDecision = new(RepositoryId, Guid.NewGuid().ToString("N"), command, command == "appoint_manager" ? TargetSessionId : removeSessionId, Selection.Generation, HumanWords);
         await RetryDecisionAsync();
     }
 
@@ -360,6 +371,7 @@ public partial class ManagerControl : ComponentBase
         RelayErrorCodes.RepositoryDenied => $"The chat belongs to another repository than the one shown. Choose it from the list, or enter its own repository. ({code})",
         RelayErrorCodes.SelfAppointment => $"A chat can't appoint itself. Appoint it from the dashboard or through another chat. ({code})",
         RelayErrorCodes.AdministratorRequired => $"This dashboard account isn't an administrator, so it can't change the manager. ({code})",
+        RelayErrorCodes.CapacityExceeded => $"This repository already has {RelayLimits.MaxManagersPerRepository} managers. Remove one before adding another. ({code})",
         RelayErrorCodes.InvalidArguments => $"The hub refused the request as malformed. Check the session ID, repository and human answer. ({code})",
         _ => code
     };

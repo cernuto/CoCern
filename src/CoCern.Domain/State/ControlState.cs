@@ -31,6 +31,8 @@ public sealed class ControlState(JsonObject json)
     public const string ManagerKey = "manager";
     public const string ManagerHistoryKey = "managerHistory";
     public const string ManagerRevokedKey = "managerRevoked";
+    /// <summary>Each repository's own manager seats (<see cref="ManagerSeat"/>), by repository ID. Its absence marks a document from before seats were per repository.</summary>
+    public const string ManagerSeatsKey = "managerSeats";
     public const string AdminActionsKey = "adminActions";
     public const string AdminActionSeqsKey = "adminActionSeqs";
 
@@ -41,7 +43,7 @@ public sealed class ControlState(JsonObject json)
         (ResourcesKey, StateShape.Map(RegisteredResource.Shape)), (AliasesKey, StateShape.Map(null)),
         (PausedKey, null), (CancellationsKey, StateShape.Map(Cancellation.Shape)),
         (ManagerGenerationKey, null), (ManagerKey, ManagerAssignment.Shape), (ManagerHistoryKey, ManagerSelectionHistoryState.Shape),
-        (ManagerRevokedKey, StateShape.Map(null)), (AdminActionsKey, ManagerSelectionHistoryState.AdminActionShape), (AdminActionSeqsKey, StateShape.Map(null)));
+        (ManagerRevokedKey, StateShape.Map(null)), (ManagerSeatsKey, StateShape.Map(ManagerSeat.Shape)), (AdminActionsKey, ManagerSelectionHistoryState.AdminActionShape), (AdminActionSeqsKey, StateShape.Map(null)));
 
     private JsonObject Sessions => ObjectAt(json, SessionsKey);
 
@@ -210,40 +212,104 @@ public sealed class ControlState(JsonObject json)
         set => json[PausedKey] = value;
     }
 
-    /// <summary>The hub-wide selection generation; old documents start at zero.</summary>
-    public long ManagerGeneration
-    {
-        get => Number(json, ManagerGenerationKey);
-        set => json[ManagerGenerationKey] = value;
-    }
+    /// <summary>The one hub-wide generation of a document from before seats were per repository. Read only, by the migration into each repository's seat.</summary>
+    public long ManagerGeneration => Number(json, ManagerGenerationKey);
 
-    /// <summary>Private selection provenance. Clearing preserves the generation and history.</summary>
-    public ManagerAssignment? Manager
-    {
-        get => json[ManagerKey] is JsonObject assignment ? new(assignment) : null;
-        set => json[ManagerKey] = value?.ToJson();
-    }
+    /// <summary>The one hub-wide assignment of a document from before seats were per repository. Read only, by the migration into its repository's seat.</summary>
+    public ManagerAssignment? Manager => json[ManagerKey] is JsonObject assignment ? new(assignment) : null;
 
+    /// <summary>Selection decisions across repositories, oldest first. Each names its repository and carries that repository's generation.</summary>
     public JsonArray ManagerHistory => ArrayAt(json, ManagerHistoryKey);
 
-    /// <summary>Whether a session or native participant ID was a manager and has since been replaced or revoked. Private; IDs here never leave the hub.</summary>
-    internal bool ManagerRevoked(string id) => id.Length > 0 && json[ManagerRevokedKey] is JsonObject revoked && revoked.ContainsKey(id);
+    private JsonObject? migratedSeats;
 
-    /// <summary>Remembers <paramref name="manager"/>'s session and native participant as revoked at <paramref name="generation"/>; past the bound the oldest goes.</summary>
-    internal void RevokeManager(ManagerAssignment manager, long generation)
+    /// <summary>The seats of <paramref name="repositoryId"/>, to read: a repository with none reads as no managers at generation 0. Reading never writes.</summary>
+    public ManagerSeat Seat(string repositoryId) => new(Seats()[repositoryId] as JsonObject ?? new JsonObject());
+
+    /// <summary>The seats of <paramref name="repositoryId"/>, to change. An older document's migrated seats are stored first, so the change lands on them.</summary>
+    internal ManagerSeat SeatForChange(string repositoryId)
     {
-        var revoked = ObjectAt(json, ManagerRevokedKey);
-        revoked[manager.SessionId] = generation;
-        if (manager.NativeId.Length > 0) revoked[manager.NativeId] = generation;
-        while (revoked.Count > RelayLimits.ManagerRevokedEntries) revoked.Remove(revoked.OrderBy(entry => entry.Value!.GetValue<long>()).First().Key);
+        if (json[ManagerSeatsKey] is not JsonObject seats) json[ManagerSeatsKey] = seats = Seats();
+        return new(ObjectAt(seats, repositoryId));
     }
 
-    /// <summary>A newly appointed chat is no longer a former manager.</summary>
-    internal void RestoreManager(DirectoryEntry target)
+    private JsonObject Seats() => json[ManagerSeatsKey] as JsonObject ?? (migratedSeats ??= MigrateSeats());
+
+    /// <summary>
+    /// Each repository's seat, rebuilt from a document that kept one hub-wide seat (<see cref="Manager"/>, <see cref="ManagerGeneration"/>, the history
+    /// and the hub-wide revocations). The history is replayed per repository, each seat taking the generation of its repository's last decision: an
+    /// appointment seats its chat in its own repository, and a clear empties the repository it was made in and also unseats the chat it cleared in that
+    /// chat's own repository. An appointment in one repository no longer displaces another repository's manager, so the revocation such a displacement
+    /// recorded is dropped; every other recorded revocation stays, in the repository whose seat it ended. One older than the kept history cannot be
+    /// placed, so it stays in every repository known here. The hub-wide assignment, which carries what the history does not, is its repository's seat.
+    /// </summary>
+    private JsonObject MigrateSeats()
     {
-        if (json[ManagerRevokedKey] is not JsonObject revoked) return;
-        revoked.Remove(target.SessionId);
-        if (target.NativeId.Length > 0) revoked.Remove(target.NativeId);
+        var seats = new JsonObject();
+        var heldIn = new Dictionary<string, string>(StringComparer.Ordinal);
+        var revocationRepository = new Dictionary<long, string?>();
+        var decisions = (json[ManagerHistoryKey] as JsonArray ?? new JsonArray()).OfType<JsonObject>()
+            .Select(decision => (Generation: Number(decision, "generation"), Command: Text(decision, "command"), Session: Text(decision, "sessionId"),
+                Previous: Text(decision, "previousSessionId"), Repository: Text(decision, "repositoryId"), Decision: decision))
+            .Where(decision => decision.Generation > 0 && decision.Repository.Length > 0).OrderBy(decision => decision.Generation).ToArray();
+        foreach (var decision in decisions)
+        {
+            var seat = ObjectAt(seats, decision.Repository);
+            var previousRepository = decision.Previous.Length > 0 && heldIn.TryGetValue(decision.Previous, out var held) ? held : null;
+            var managers = new JsonArray();
+            if (decision.Command == "appoint_manager" && decision.Session.Length > 0)
+            {
+                managers.Add(Restored(decision.Decision, decision.Session, decision.Repository, decision.Generation));
+                heldIn[decision.Session] = decision.Repository;
+                // Displacing another repository's manager was the hub-wide seat's doing, never a decision about that repository.
+                revocationRepository[decision.Generation] = previousRepository is null || previousRepository == decision.Repository ? decision.Repository : null;
+            }
+            else
+            {
+                if (previousRepository is not null && previousRepository != decision.Repository && seats[previousRepository] is JsonObject other)
+                {
+                    var cleared = new ManagerSeat(other);
+                    cleared.Remove(decision.Previous);
+                    cleared.Generation = decision.Generation;
+                }
+                revocationRepository[decision.Generation] = previousRepository ?? decision.Repository;
+            }
+            seat[ManagerSeat.GenerationKey] = decision.Generation;
+            seat[ManagerSeat.ManagersKey] = managers;
+        }
+        if (Manager is { } legacy && legacy.SessionId.Length > 0 && legacy.RepositoryId.Length > 0)
+        {
+            var seat = ObjectAt(seats, legacy.RepositoryId);
+            seat[ManagerSeat.ManagersKey] = new JsonArray(legacy.ToJson());
+            if (Number(seat, ManagerSeat.GenerationKey) < ManagerGeneration) seat[ManagerSeat.GenerationKey] = ManagerGeneration;
+        }
+        if (json[ManagerRevokedKey] is JsonObject revoked)
+        {
+            var known = seats.Select(seat => seat.Key).ToArray();
+            foreach (var (id, value) in revoked)
+            {
+                if (id.Length == 0 || !long.TryParse(value?.ToString(), out var generation)) continue;
+                string[] repositories = revocationRepository.TryGetValue(generation, out var repository) ? repository is null ? [] : [repository] : known;
+                foreach (var each in repositories) ObjectAt(ObjectAt(seats, each), ManagerSeat.RevokedKey)[id] = generation;
+            }
+        }
+        return seats;
+    }
+
+    // The history never named the principal. Only the directory's own entry for that session supplies it; without one the seat is held but never available.
+    private JsonObject Restored(JsonObject decision, string sessionId, string repositoryId, long generation)
+    {
+        var assignment = new JsonObject
+        {
+            ["sessionId"] = sessionId, ["principalId"] = "", ["repositoryId"] = repositoryId, ["generation"] = generation, ["assignedBy"] = Text(decision, "actorPrincipalId"),
+            ["assignedAt"] = Text(decision, "at"), ["requestId"] = Text(decision, "requestId"), ["humanWords"] = Text(decision, "humanWords")
+        };
+        if (Entry(sessionId) is { } entry && entry.SessionId == sessionId && entry.RepositoryId == repositoryId)
+        {
+            assignment["principalId"] = entry.PrincipalId;
+            if (entry.NativeId.Length > 0) assignment["nativeId"] = entry.NativeId;
+        }
+        return assignment;
     }
 
     /// <summary>The administrative action log, oldest first (see <c>AdminActionLog</c>).</summary>

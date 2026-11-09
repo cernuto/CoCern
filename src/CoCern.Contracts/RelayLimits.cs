@@ -85,9 +85,14 @@ public static class RelayLimits
 
     public const int MaxIdentifierLength = 256;
     public const int MaxManagerHumanWordsLength = 200;
+    /// <summary>Manager selection decisions kept per repository; only a repository's own decisions push its entries out.</summary>
     public const int ManagerSelectionHistoryEntries = 20;
+    /// <summary>The control document's ceiling on selection decisions across repositories.</summary>
+    public const int ManagerSelectionHistoryTotalEntries = 160;
     public const int ManagerSelectionHistoryPageEntries = 2;
-    /// <summary>Former managers the hub still refuses to take administrative calls from; past this the oldest revocation is forgotten.</summary>
+    /// <summary>Chats one repository may hold as managers at once; adding one more is refused with <c>CapacityExceeded</c>.</summary>
+    public const int MaxManagersPerRepository = 8;
+    /// <summary>Former managers a repository still refuses to take administrative calls from; past this the oldest revocation there is forgotten.</summary>
     public const int ManagerRevokedEntries = 64;
     /// <summary>Administrative actions kept per repository; the count dropped is reported beside them. Only a repository's own actions push its entries out.</summary>
     public const int AdminActionEntries = 100;

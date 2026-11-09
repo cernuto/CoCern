@@ -43,13 +43,14 @@ public static class DashboardManagerManagement
         if (body is null || !Identity(body.RepositoryId) || !Identity(body.RequestId) || body.Command is not ("appoint_manager" or "clear_manager")
             || body.ExpectedManagerGeneration is null or < 0 || string.IsNullOrWhiteSpace(body.HumanWords)
             || body.HumanWords.Length > RelayLimits.MaxManagerHumanWordsLength || body.HumanWords.Any(UnsafeCharacter)
-            || (body.Command == "appoint_manager" ? !Identity(body.TargetSessionId) : body.TargetSessionId is not null)) return Invalid();
+            || (body.Command == "appoint_manager" || body.TargetSessionId is not null) && !Identity(body.TargetSessionId)) return Invalid();
         var args = new JsonObject
         {
             ["repositoryId"] = body.RepositoryId, ["requestId"] = body.RequestId, ["command"] = body.Command,
             ["expectedManagerGeneration"] = body.ExpectedManagerGeneration, ["humanWords"] = body.HumanWords
         };
-        if (body.Command == "appoint_manager") args["targetSessionId"] = body.TargetSessionId;
+        // clear_manager with a session removes that one manager; without one it removes them all. Either way Paul's words travel with it.
+        if (body.TargetSessionId is not null) args["targetSessionId"] = body.TargetSessionId;
         var reply = await application.ExecuteAsync(new(principal, true, [body.RepositoryId]), RelayTools.ControlRequest, JsonSerializer.SerializeToElement(args), context.RequestAborted);
         // A stale write is never resubmitted. Return a fresh redacted view with the original domain code.
         if (reply.Code == RelayErrorCodes.VersionConflict)

@@ -127,7 +127,7 @@ internal sealed class CallGuard(Aggregates aggregates, string incarnation, Func<
     }
 
     /// <summary>
-    /// A proven administrative actor is checked against the current manager seat. This attribution never grants authority;
+    /// A proven administrative actor is checked against the call repository's manager seats, and no other repository's. This attribution never grants authority;
     /// the credential and aggregates still enforce their own authorization. A handle that closed or expired (<paramref name="proven"/> false)
     /// still meets the revocation fence, but proves nothing: it is not stamped as the acting session and gets no manager generation.
     /// </summary>

@@ -130,8 +130,9 @@ public sealed class AdminToolsHostTests : IDisposable
     }
 
     /// <summary>
-    /// Who speaks as the manager is the hub's to say. No client argument marks a message, a chat can't seat itself, a wrong proof is refused, and a
-    /// handoff ends what the old manager may present as itself. Each refused call by an administrator is in the log, with no credential in it.
+    /// Who speaks as a manager is the hub's to say. No client argument marks a message, a chat seats itself only on its own verified proof and never
+    /// another chat without Paul's words, a wrong proof is refused, and removal by someone else ends what that manager may present as itself.
+    /// Each refused call by an administrator is in the log, with no credential in it.
     /// </summary>
     [Fact]
     public async Task Manager_marks_and_refusals_come_from_the_hub_alone()
@@ -168,16 +169,23 @@ public sealed class AdminToolsHostTests : IDisposable
             Post(admin, RelayTools.ControlRequest, new { repositoryId = "repo", requestId = request, command = "appoint_manager", targetSessionId = target, expectedManagerGeneration = generation, humanWords = "Paul named this chat", actingSessionId = actingId, actingSessionToken = actingToken });
 
         Assert.False((await SendAsync(worker, named, "before-any")).TryGetProperty("managerGeneration", out _));
-        Assert.Equal(RelayErrorCodes.SelfAppointment, (await AppointAsync("self", first.Id, 0, first.Id, first.Token)).Code);
         Assert.Equal(RelayErrorCodes.SessionDenied, (await AppointAsync("wrong-proof", second.Id, 0, first.Id, "not-the-token")).Code);
-
-        Assert.Equal("Ok", (await AppointAsync("seat-first", first.Id, 0)).Code);
+        // A chat adds itself on its own verified proof, without Paul's words; it may not add another chat that way.
+        Task<(HttpStatusCode Status, string Code, JsonElement Data, string Raw)> OwnWordAsync(string request, string command, string target, long generation, (string Id, string Token) acting) =>
+            Post(admin, RelayTools.ControlRequest, new { repositoryId = "repo", requestId = request, command, targetSessionId = target, expectedManagerGeneration = generation, actingSessionId = acting.Id, actingSessionToken = acting.Token });
+        Assert.Equal(RelayErrorCodes.InvalidArguments, (await OwnWordAsync("other-unworded", "appoint_manager", second.Id, 0, first)).Code);
+        Assert.Equal("Ok", (await OwnWordAsync("self", "appoint_manager", first.Id, 0, first)).Code);
         Assert.Equal(1, (await SendAsync(admin, first, "as-manager")).GetProperty("managerGeneration").GetInt64());
         Assert.False((await SendAsync(worker, named, "not-manager")).TryGetProperty("managerGeneration", out _));
 
+        // Adding a second manager keeps the first; removing one by Paul's words revokes it in this repository.
         Assert.Equal("Ok", (await AppointAsync("seat-second", second.Id, 1)).Code);
         Assert.Equal(RelayErrorCodes.VersionConflict, (await AppointAsync("late-handoff", named.Id, 1)).Code);
+        Assert.Equal(2, (await SendAsync(admin, first, "still-manager")).GetProperty("managerGeneration").GetInt64());
+        Assert.Equal(RelayErrorCodes.InvalidArguments, (await OwnWordAsync("remove-other-unworded", "clear_manager", first.Id, 2, second)).Code);
+        Assert.Equal("Ok", (await Post(admin, RelayTools.ControlRequest, new { repositoryId = "repo", requestId = "remove-first", command = "clear_manager", targetSessionId = first.Id, expectedManagerGeneration = 2, humanWords = "Paul removed this chat" })).Code);
         Assert.False((await SendAsync(admin, first, "after-handoff")).TryGetProperty("managerGeneration", out _));
+        Assert.Equal(3, (await SendAsync(admin, second, "second-still-manager")).GetProperty("managerGeneration").GetInt64());
         var stale = await Post(admin, RelayTools.ControlRequest, new { repositoryId = "repo", requestId = "delayed", command = "close_sessions", targetSessionId = named.Id, actingSessionId = first.Id, actingSessionToken = first.Token });
         Assert.Equal(RelayErrorCodes.ManagerRevoked, stale.Code);
 

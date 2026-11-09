@@ -48,23 +48,30 @@ else
     </div>
     <section class="standing-section" aria-labelledby="manager-selection-heading">
         <h3 id="manager-selection-heading">Manager selection</h3>
-        <p class="close-sessions-note">There is one manager seat for the whole hub. Appointing a chat replaces the current manager in every repository.</p>
+        <p class="close-sessions-note">Each repository has its own managers, and a repository can have several at once. Adding a manager never removes the others, and nothing here changes another repository's managers. A manager chat can add or remove itself; adding or removing any other chat needs your words.</p>
         @if (Selection is null)
         {
             <p>Enter a repository and refresh selection.</p>
         }
         else
         {
-            @if (Selection.Current is not { } current)
+            @if (Managers.Length == 0)
             {
-                <p>No manager is currently appointed in CoCern.</p>
-                <p class="close-sessions-note">A chat's name does not appoint it. Choose the exact chat below to record a manager selection.</p>
+                <p>No manager is currently appointed in this repository.</p>
+                <p class="close-sessions-note">A chat's name does not appoint it. Choose the exact chat below to add it as a manager.</p>
             }
             else
             {
-                <p><strong>@(current.Available ? "Current manager" : "Manager unavailable")</strong></p>
-                <p>@(Sessions.FirstOrDefault(session => session.SessionId == current.SessionId && session.RepositoryId == current.RepositoryId)?.Label ?? "Session label unavailable")</p>
-                <p>Session @current.SessionId · Repository @current.RepositoryId</p>
+                <ul class="standing-records" aria-label="Current managers">
+                    @foreach (var manager in Managers)
+                    {
+                        <li @key="manager.SessionId">
+                            <p><strong>@(manager.Available ? "Manager" : "Manager unavailable")</strong> · @(Sessions.FirstOrDefault(session => session.SessionId == manager.SessionId && session.RepositoryId == manager.RepositoryId)?.Label ?? "Session label unavailable")</p>
+                            <p>Session @manager.SessionId · Repository @manager.RepositoryId · Added at generation @manager.Generation</p>
+                            <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Destructive" Class="admin-destructive" OnClick='() => DecideAsync("clear_manager", manager.SessionId)' Disabled="@(DecisionBusy || UnconfirmedDecision is not null)" AriaLabel="@($"Remove manager {manager.SessionId}")">Remove</BbButton>
+                        </li>
+                    }
+                </ul>
             }
             <p>Generation @Selection.Generation</p>
         }
@@ -88,7 +95,7 @@ else
         {
             <p>Target: Session @TargetSessionId · Repository @RepositoryId</p>
         }
-        <p>Enter the direct human answer authorizing this exact selection or clearing it. Selection records a choice; it grants no new powers.</p>
+        <p>Enter the direct human answer authorizing this exact addition or removal. Selection records a choice; it grants no new powers.</p>
         @if (HumanWords.Length > 200) { <p id="manager-words-error" role="alert">The human answer exceeds 200 characters. Shorten it explicitly; the text has been kept in full.</p> }
         else if (HumanWords.Any(UnsafeCharacter)) { <p id="manager-words-error" role="alert">Enter one line. Edit the answer to remove line breaks or control characters.</p> }
         <div class="close-sessions-repository">
@@ -96,13 +103,13 @@ else
             <BbTextarea Id="manager-human-words" rows="3" AriaInvalid="@(HumanWords.Length > 200 || HumanWords.Any(UnsafeCharacter))" AriaDescribedBy="manager-words-error" Value="@HumanWords" ValueChanged="@(value => HumanWords = value ?? string.Empty)" UpdateTiming="UpdateTiming.Immediate" Disabled="@(DecisionBusy || UnconfirmedDecision is not null)" />
         </div>
         <div class="close-sessions-actions">
-            <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Outline" Class="close-sessions-secondary" OnClick='() => DecideAsync("appoint_manager")' Disabled="@(DecisionBusy || UnconfirmedDecision is not null)">Appoint or replace manager</BbButton>
-            <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Destructive" Class="admin-destructive" OnClick='() => DecideAsync("clear_manager")' Disabled="@(DecisionBusy || UnconfirmedDecision is not null)">Revoke manager</BbButton>
+            <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Outline" Class="close-sessions-secondary" OnClick='() => DecideAsync("appoint_manager")' Disabled="@(DecisionBusy || UnconfirmedDecision is not null)">Add manager</BbButton>
+            <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Destructive" Class="admin-destructive" OnClick='() => DecideAsync("clear_manager")' Disabled="@(DecisionBusy || UnconfirmedDecision is not null)">Remove all managers</BbButton>
         </div>
         @if (Message is not null) { <p role="status">@Message</p> }
         @if (UnconfirmedDecision is not null)
         {
-            <p>Unconfirmed request @UnconfirmedDecision.RequestId · Generation @UnconfirmedDecision.ExpectedManagerGeneration</p>
+            <p>Unconfirmed request @UnconfirmedDecision.RequestId · @(UnconfirmedDecision.Command == "appoint_manager" ? "Add" : UnconfirmedDecision.TargetSessionId is null ? "Remove all" : "Remove")@(UnconfirmedDecision.TargetSessionId is { } decided ? " session " + decided : "") · Generation @UnconfirmedDecision.ExpectedManagerGeneration</p>
             <blockquote class="standing-record-text">@UnconfirmedDecision.HumanWords</blockquote>
             <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Outline" Class="close-sessions-secondary" OnClick="RetryDecisionAsync" Disabled="@DecisionBusy">Retry decision</BbButton>
             <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Outline" Class="close-sessions-secondary" OnClick="NewDecision" Disabled="@DecisionBusy">Start a new decision</BbButton>
@@ -114,7 +121,7 @@ else
             @foreach (var decision in RecentSelections)
             {
                 <li @key="decision.Generation">
-                    <p>Generation @decision.Generation · @decision.Command · @decision.RepositoryId · Session @(decision.SessionId ?? "None")</p>
+                    <p>Generation @decision.Generation · @(decision.SessionId is not null ? "Added" : "Removed") · @decision.RepositoryId · Session @(decision.SessionId ?? decision.PreviousSessionId ?? "None")@(decision.SessionId is not null && decision.PreviousSessionId is { } moved ? " (replacing session " + moved + ")" : "")</p>
                     <blockquote class="standing-record-text">@decision.HumanWords</blockquote>
                     <p>By @decision.ActorPrincipalId at <time datetime="@decision.At.ToString("O")">@DashboardFormat.Timestamp(decision.At)</time> · Request @decision.RequestId@(decision.RecordedBySessionId is { } recorder ? " · Recorded by chat " + recorder : "")</p>
                 </li>
