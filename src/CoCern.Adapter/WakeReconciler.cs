@@ -119,7 +119,7 @@ public sealed class WakeReconciler(WakeConfiguration configuration, WakeState st
             for (var page = 0; page < 20; page++)
             {
                 var reply = await forwarder.ForwardAsync("check_inbox", RelayForwarder.WithOrigin(InboxArguments(cursor, page == 0 ? known?.Etag : null), background: true), cancellationToken);
-                if (RejectedSession(reply)) return (SessionRejected, []);
+                if (Rejection(reply) is { } rejected) return (rejected, []);
                 if (!reply.Ok || reply.Data is not { ValueKind: JsonValueKind.Object } data) return ("inbox-unavailable", []);
                 if (page == 0 && known is { } remembered && data.TryGetProperty("unchanged", out var unchanged) && unchanged.ValueKind == JsonValueKind.True &&
                     data.TryGetProperty("etag", out var same) && same.ValueKind == JsonValueKind.String && same.GetString() == remembered.Etag) return (null, remembered.Messages);
@@ -160,7 +160,7 @@ public sealed class WakeReconciler(WakeConfiguration configuration, WakeState st
             var known = readAttention ? coverage?.KnownStatus(key) : null;
             var arguments = readAttention ? AttentionArguments(known?.Tag) : Arguments();
             var status = await forwarder.ForwardAsync("get_status", RelayForwarder.WithOrigin(arguments, background: true), cancellationToken);
-            if (RejectedSession(status)) { sessionProblem = SessionRejected; return false; }
+            if (Rejection(status) is { } rejected) { sessionProblem = rejected; return false; }
             if (status is { Ok: true, Data: { ValueKind: JsonValueKind.Object } answer } && answer.TryGetProperty("unchanged", out var unchanged) && unchanged.ValueKind == JsonValueKind.True)
             {
                 // An answer about any other tag says nothing about this session, so it refuses, like every other reply that names no session.
@@ -192,7 +192,12 @@ public sealed class WakeReconciler(WakeConfiguration configuration, WakeState st
     }
 
     internal const string SessionRejected = "session-rejected";
-    private static bool RejectedSession(AdapterReply reply) => !reply.Ok && reply.Code is RelayErrorCodes.SessionDenied or RelayErrorCodes.SessionUnknown;
+    /// <summary>A rejection the hub itself answered with <c>SessionUnknown</c>: that session has ended, so its private binding may stop being polled.</summary>
+    internal const string SessionGone = "session-unknown";
+    internal static bool IsRejection(string status) => status is SessionRejected or SessionGone;
+    private static string? Rejection(AdapterReply reply) => reply.Ok ? null :
+        reply.Code == RelayErrorCodes.SessionUnknown && reply.Version is not null ? SessionGone :
+        reply.Code is RelayErrorCodes.SessionDenied or RelayErrorCodes.SessionUnknown ? SessionRejected : null;
 
     /// <summary>The hub's <c>statusTag</c> in a status reply, or null when it has none this adapter could send back.</summary>
     internal static string? StatusTag(JsonElement status) =>

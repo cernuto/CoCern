@@ -34,7 +34,71 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
         handle.NativeBindingKey is not null ? DispatchRecords(folder)
             .FirstOrDefault(record => record.Handle == handle)?.Generation : null;
 
-    private sealed record DispatchRecord(string Path, SessionHandle Handle, string Generation);
+    private sealed record DispatchRecord(string Path, SessionHandle Handle, string Generation, DateTime Confirmed);
+
+    /// <summary>
+    /// A native chat that ran in more than one checkout has one binding per checkout. Only one of them may be dispatched, or no fence would pass:
+    /// the one confirmed most recently (its state file last written by an authenticated open, or touched by <see cref="Confirm"/> after a live
+    /// probe), then the newest current session, then the binding's file name. The others stay on disk unchanged and come back if they are confirmed again.
+    /// </summary>
+    private static List<DispatchRecord> Latest(IEnumerable<DispatchRecord> records) =>
+        records.GroupBy(record => record.Handle.Chat).Select(group => group.OrderByDescending(record => record.Confirmed)
+            .ThenByDescending(record => record.Handle.OpenedAt).ThenBy(record => record.Path, StringComparer.Ordinal).First()).ToList();
+
+    /// <summary>The session the hub answered <c>SessionUnknown</c> for, as marked beside this binding's state; null when none is marked or the mark cannot be trusted.</summary>
+    private static string? UnknownSession(string statePath)
+    {
+        try
+        {
+            var path = Path.ChangeExtension(statePath, UnknownExtension);
+            if (!File.Exists(path)) return null;
+            RequirePrivate(path, 1024);
+            using var document = JsonDocument.Parse(File.ReadAllBytes(path), new JsonDocumentOptions { MaxDepth = 2 });
+            var value = Object(document.RootElement, "version", "sessionId");
+            return value["version"].GetInt32() == 1 && NodeState.IsFileId(Text(value["sessionId"])) ? Text(value["sessionId"]) : null;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or JsonException or KeyNotFoundException or FormatException) { return null; }
+    }
+
+    private const string UnknownExtension = ".unknown";
+
+    /// <summary>
+    /// Records that the hub answered <c>SessionUnknown</c> for this exact dispatched native session, so it is no longer dispatched or polled, here or after
+    /// a restart. Only the binding's state is consulted; nothing is deleted, and the mark applies to that one session ID only: the chat's own next open
+    /// (<see cref="Complete"/>, <see cref="Supersede"/>, <see cref="AdvanceExpired"/>) or a live probe (<see cref="Confirm"/>) clears it.
+    /// </summary>
+    internal static void MarkSessionUnknown(string folder, SessionHandle handle)
+    {
+        if (handle.NativeBindingKey is null) return;
+        try
+        {
+            if (DispatchRecords(folder).FirstOrDefault(record => record.Handle == handle) is not { } record) return;
+            // Under the same reader fence as observation: a writer mid-join holds the lease, and this mark then waits for a later answer.
+            using var reader = new FileStream(Path.ChangeExtension(record.Path, ".lock"), FileMode.Open, FileAccess.Read, FileShare.Read);
+            if (DispatchRecords(folder, record.Path).SingleOrDefault()?.Handle != handle) return;
+            NodeState.WritePrivately(Path.ChangeExtension(record.Path, UnknownExtension), JsonSerializer.SerializeToUtf8Bytes(new { version = 1, sessionId = handle.SessionId }));
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException) { }
+    }
+
+    private void ClearUnknown()
+    {
+        try { File.Delete(Path.ChangeExtension(StatePath, UnknownExtension)); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { } // A stale mark names an older session and no longer matches.
+    }
+
+    /// <summary>
+    /// The authenticated probe found this binding's current session live: this is the checkout the chat uses now. Its state's write time moves forward,
+    /// so it outranks the chat's other bindings (<see cref="Latest"/>), and any SessionUnknown mark is cleared. Nothing in the frozen state changes.
+    /// </summary>
+    internal void Confirm()
+    {
+        CheckLease();
+        if (currentSessionId is null) return;
+        try { File.SetLastWriteTimeUtc(StatePath, DateTime.UtcNow); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { } // Selection then falls back to the session's age.
+        ClearUnknown();
+    }
 
     private static IReadOnlyList<DispatchRecord> DispatchRecords(string folder, string? exact = null)
     {
@@ -70,13 +134,15 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
                     var key = Digest("cocern-native-binding-v1", folder, identity, provider, nativeId, machine, repo, workspace);
                     if (Path.GetFileName(path) != key + ".json" || Text(record["scope"]) != key) continue;
                     var snapshot = new NativeJoinBinding(folder, provider, nativeId, repo, workspace, identity, key, args, Text(id), reader);
-                    if (snapshot.CurrentHandle is { } current && current.SessionId == Text(id)) result.Add(new(path, current, snapshot.Generation));
+                    // A session the hub already answered SessionUnknown for is neither dispatched nor polled again until the chat reopens it.
+                    if (snapshot.CurrentHandle is { } current && current.SessionId == Text(id) && UnknownSession(path) != current.SessionId)
+                        result.Add(new(path, current, snapshot.Generation, File.GetLastWriteTimeUtc(path)));
                 }
                 catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or JsonException or KeyNotFoundException or FormatException) { }
             }
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException) { }
-        return result;
+        return exact is null ? Latest(result) : result;
     }
 
     // Only native dispatchers require a live binding. Legacy routes keep their existing checks.
@@ -306,6 +372,7 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
         arguments = frozen;
         resolution = null;
         currentSessionId = null;
+        ClearUnknown();
         return true;
     }
 
@@ -318,6 +385,7 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
         if (saved is null || saved.SessionToken != handle.SessionToken) return false;
         Write(StatePath, BindingKey, arguments, handle.SessionId, resolution);
         currentSessionId = handle.SessionId;
+        ClearUnknown(); // The hub just answered this exact open with this session.
         try { File.Delete(Path.ChangeExtension(StatePath, ".adopt")); }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException) { } // A confirmed reference already preserves identity; expiry clears a retained sidecar.
         return true;
@@ -336,6 +404,7 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
         catch (IOException) { } // An unverifiable old file is not this binding's to remove; leave it unreferenced.
         Write(StatePath, BindingKey, arguments, handle.SessionId, resolution);
         currentSessionId = handle.SessionId;
+        ClearUnknown();
         if (retirePrevious && retired is not null)
         {
             try { File.Delete(NodeState.SessionHandlePath(Folder, previousSessionId)); }

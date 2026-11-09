@@ -159,12 +159,12 @@ public static class WakeWatcher
                         runtime.Reconciled?.Invoke(target, status);
                     }
                     if (!lastStatus.TryGetValue(routeKey, out var previous) || previous != status || status == "queued")
-                        Console.Error.WriteLine(status == WakeReconciler.SessionRejected
+                        Console.Error.WriteLine(WakeReconciler.IsRejection(status)
                             ? $"CoCern wake route {i + 1}: session rejected; waiting for this chat's replacement session handle. Reopen its CoCern session from that chat."
                             : $"CoCern wake route {i + 1}: {status}.");
                     lastStatus[routeKey] = status;
                     settled &= status is "empty" or "queued";
-                    if (status == WakeReconciler.SessionRejected)
+                    if (WakeReconciler.IsRejection(status))
                     {
                         rejected[target.Session.SessionId] = (target.Route.RepositoryId, target.Session);
                         if (watches.Remove(target.Session.SessionId, out var refusedWatch)) await refusedWatch.Connection.DisposeAsync();

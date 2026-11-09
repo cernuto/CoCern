@@ -23,8 +23,10 @@ internal sealed class ToolRouter(Aggregates aggregates, ClaimComposer claims, Se
     public async Task<RelayReply> RouteAsync(RelayCall call, CallTrace? trace, CancellationToken cancellationToken)
     {
         var reply = await DispatchAsync(call, trace, cancellationToken);
+        // A Codex watcher with attention on reads only get_status each pass, never check_inbox, so its status read counts too. Either read registers
+        // only for the session the guard just verified as a current native participant; the origin label alone registers nothing.
         if (reply.Ok && call.Session is not null && (call.CallOrigin is "claude-stop" or "claude-waiter" ||
-            call.CallOrigin == "wake-watcher" && call.Tool == RelayTools.CheckInbox && call.NativeParticipant is not null && call.Controls.BackgroundCall == true)) RegisterWaiter(call);
+            call.CallOrigin == "wake-watcher" && call.Tool is RelayTools.CheckInbox or RelayTools.GetStatus && call.NativeParticipant is not null && call.Controls.BackgroundCall == true)) RegisterWaiter(call);
         return reply;
     }
 

@@ -254,6 +254,8 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
                     else if (!probe.Ok) throw new Refused(probe.Code);
                     else if (probe.Version is null || !SessionHandoff.IsSessionReply(RelayTools.GetStatus, JsonSerializer.SerializeToElement(new { sessionId = handle.SessionId }), probe))
                         throw new Refused("native_handle_unverified");
+                    // Verified live from this checkout: this binding, not one the chat used in another checkout, is the one to dispatch.
+                    if (handle is not null) binding.Confirm();
                 }
                 if (handle is null)
                 {

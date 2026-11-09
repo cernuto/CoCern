@@ -189,10 +189,29 @@ public sealed class NativeJoinBindingTests(NativeJoinBindingTests.ProbeFixture p
             Assert.False(File.Exists(NodeState.SessionHandlePath(fixture.Folder, session)));
             session = replacement;
         }
-        await using var reopened = await fixture.Acquire();
-        Assert.Equal(session, reopened.CurrentHandle!.SessionId);
-        Assert.True(reopened.CurrentHandle.SessionToken == "synthetic-session-token");
-        Assert.Single(Directory.EnumerateFiles(Path.Combine(fixture.Folder, "sessions"), "*.json"));
+        await using (var reopened = await fixture.Acquire())
+        {
+            Assert.Equal(session, reopened.CurrentHandle!.SessionId);
+            Assert.True(reopened.CurrentHandle.SessionToken == "synthetic-session-token");
+            Assert.Single(Directory.EnumerateFiles(Path.Combine(fixture.Folder, "sessions"), "*.json"));
+        }
+        // Regression: the same chat later joined from a linked worktree. One binding per checkout used to drop the whole thread from dispatch;
+        // now the one confirmed last is dispatched and the older checkout's binding stays on disk unchanged.
+        var main = Assert.Single(NativeJoinBinding.DispatchSnapshot(fixture.Folder));
+        var mainState = File.ReadAllBytes(statePath);
+        var linked = fixture.CreateWorktree();
+        var moved = Guid.NewGuid().ToString("N");
+        var later = SessionHandoff.ForFolder(fixture.Folder, new("codex", Chat));
+        await using (var worktree = await fixture.Acquire(linked)) Assert.True(await Open(later, worktree, fixture.Options, OpenReply(moved)));
+        var latest = Assert.Single(NativeJoinBinding.DispatchSnapshot(fixture.Folder));
+        Assert.Equal(moved, latest.SessionId);
+        Assert.True(mainState.SequenceEqual(File.ReadAllBytes(statePath)));
+        // The hub answered SessionUnknown for that session: it is no longer dispatched (nor polled after a restart), and the chat's other binding is.
+        NativeJoinBinding.MarkSessionUnknown(fixture.Folder, latest);
+        Assert.Equal(main, Assert.Single(NativeJoinBinding.DispatchSnapshot(fixture.Folder)));
+        // The chat's own authenticated open of that session clears the mark and makes it the latest again.
+        await using (var worktree = await fixture.Acquire(linked)) Assert.True(await Open(later, worktree, fixture.Options, OpenReply(moved)));
+        Assert.Equal(latest, Assert.Single(NativeJoinBinding.DispatchSnapshot(fixture.Folder)));
     }
 
     [Fact]

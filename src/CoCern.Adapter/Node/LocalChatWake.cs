@@ -268,6 +268,8 @@ public sealed class LocalChatWake : IAsyncDisposable
                     chats.Read(_ => true); // The existing bounded locator verifies native identity before a Codex route is used.
                     StartRearm(lifetime.Token);
                     settled = rearming is null or { IsCompleted: true };
+                    // The snapshot holds at most one native binding per chat: of a thread that ran in several checkouts, the one confirmed most recently. So a
+                    // native thread is one target, a legacy handle never joins a thread that has a native binding, and a group that still mixes them is skipped.
                     var native = NativeJoinBinding.DispatchSnapshot(Connection.Folder).Where(x => x.Chat is { Provider: ChatProviders.Codex }).ToArray();
                     var targets = native.Concat(NodeState.ReadSessionHandles(Connection.Folder).Where(x => observed.ContainsKey(x.SessionId) && OwnsNative(x) &&
                         x.Chat is { Provider: ChatProviders.Codex } && !native.Any(n => n.Chat == x.Chat))).GroupBy(x => x.Chat!.ThreadId)
@@ -313,7 +315,12 @@ public sealed class LocalChatWake : IAsyncDisposable
             var runtime = new WakeRuntime(options, path, Path.Combine(Connection.Folder, "stop"), Connection.Options.BaseUri.AbsoluteUri)
             {
                 State = state, HubHandler = transport.HubHandler, Interval = transport.WakeInterval,
-                Reconciled = (_, status) => NativeStartupEvidence.RecordLocalWake(Connection.Folder, handle, status)
+                Reconciled = (_, status) =>
+                {
+                    NativeStartupEvidence.RecordLocalWake(Connection.Folder, handle, status);
+                    // The hub answered that this native session has ended: stop dispatching it here and after a restart, until the chat reopens it.
+                    if (status == WakeReconciler.SessionGone && handle.NativeBindingKey is not null) { NativeJoinBinding.MarkSessionUnknown(Connection.Folder, handle); changed.Writer.TryWrite(true); }
+                }
             };
             var route = new WakeRoute(handle.RepositoryId, "default", NodeState.SessionHandlePath(Connection.Folder, handle.SessionId), thread, Environment.MachineName);
             await watch(runtime, new(route, new(handle.SessionId, handle.SessionToken), NativeJoinBinding.ForDispatch(Connection.Folder, handle, transport.CodexDispatcher(codex))), ct);
