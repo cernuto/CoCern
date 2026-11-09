@@ -39,7 +39,7 @@ public sealed class ControlState(JsonObject json)
     /// <summary>Every key the directory stores: its entries by session ID, close fences by session ID, resources by ID, aliases by machine and name, and cancellations by session and action.</summary>
     public static StateShape Shape { get; } = CommonState.Shape.With(
         (SessionsKey, StateShape.Map(DirectoryEntry.Shape)), (ClosingKey, StateShape.Map(StateShape.Object((FenceSeqKey, null), (FenceAtKey, null), (NativeParticipant.Id, null), (DuplicateCloseKey, null)))), (CloseSeqKey, null),
-        (NativeJoinsKey, StateShape.Map(StateShape.Object(("sessionId", null), ("generation", null), ("requestId", null), ("expired", null), ("client", null), ("workingCopy", null), ("machineScope", null), ("protectedRoot", null), ("retired", StateShape.Map(null))))),
+        (NativeJoinsKey, StateShape.Map(StateShape.Object(("sessionId", null), ("generation", null), ("requestId", null), ("expired", null), ("client", null), ("workingCopy", null), ("machineScope", null), ("protectedRoot", null), ("previousRoots", StateShape.Map(null)), ("retired", StateShape.Map(null))))),
         (ResourcesKey, StateShape.Map(RegisteredResource.Shape)), (AliasesKey, StateShape.Map(null)),
         (PausedKey, null), (CancellationsKey, StateShape.Map(Cancellation.Shape)),
         (ManagerGenerationKey, null), (ManagerKey, ManagerAssignment.Shape), (ManagerHistoryKey, ManagerSelectionHistoryState.Shape),
@@ -63,11 +63,44 @@ public sealed class ControlState(JsonObject json)
         // Display only. It stays here, off the row, so worker listings do not change.
         var client = Text(admitted, NativeParticipant.Client);
         if (client.Length > 0) join["client"] = client;
+        // A new session holds no claims under an earlier root.
+        join.Remove("previousRoots");
+        Locate(join, caller, admitted);
+        join.Remove("expired");
+    }
+
+    private const int MaxPreviousRoots = 8;
+
+    /// <summary>
+    /// The participant's own verified proof reopened its live session, perhaps from another checkout of the same repository (a worktree move):
+    /// its working copy, machine provenance and protected root become this open's, exactly as a new join would record them. The session, its
+    /// generation and its continuity are unchanged.
+    /// </summary>
+    internal void RelocateNative(string participant, RelayCaller caller, JsonObject admitted)
+    {
+        if (NativeJoin(participant) is not { } join) return;
+        // Claims the session took under its earlier root on this same machine must still settle (release, renew) after the move. Bounded, newest last.
+        var machine = caller.AuthenticatedMachineId ?? "";
+        var root = machine.Length > 0 ? Text(admitted, NativeParticipant.ProtectedRoot) : "";
+        var earlier = Text(join, "protectedRoot");
+        if (Text(join, "machineScope") != machine) join.Remove("previousRoots");
+        else if (earlier.Length > 0 && earlier != root)
+        {
+            var previous = ObjectAt(join, "previousRoots");
+            previous.Remove(earlier);
+            previous[earlier] = true;
+            while (previous.Count > MaxPreviousRoots) previous.Remove(previous.First().Key);
+        }
+        if (root.Length > 0) (join["previousRoots"] as JsonObject)?.Remove(root);
+        Locate(join, caller, admitted);
+    }
+
+    private static void Locate(JsonObject join, RelayCaller caller, JsonObject admitted)
+    {
         join["workingCopy"] = Text(admitted, NativeParticipant.WorkingCopy);
         // A reported machineId is only a label. Only authentication supplies protected machine provenance.
         join["machineScope"] = caller.AuthenticatedMachineId;
         join["protectedRoot"] = caller.AuthenticatedMachineId is { Length: > 0 } ? admitted[NativeParticipant.ProtectedRoot]?.DeepClone() : null;
-        join.Remove("expired");
     }
 
     /// <summary>The client this participant joined with, as its proof named it; empty when none is recorded.</summary>
@@ -122,7 +155,8 @@ public sealed class ControlState(JsonObject json)
             || Entry(sessionId) is not { } entry || entry.PrincipalId != caller.PrincipalId || !SecretEquals(entry.Token, token)
             || NativeJoin(participantId) is not { } join || Text(join, "machineScope") != machine
             || Text(join, "workingCopy").Length == 0 || !NativeParticipant.ValidProtectedRoot(Text(join, "protectedRoot"))) return null;
-        return new(participantId, sessionId, repositoryId, machine, Text(join, "protectedRoot"), Text(join, "generation"));
+        var previous = (join["previousRoots"] as JsonObject)?.Select(pair => pair.Key).Where(NativeParticipant.ValidProtectedRoot) ?? [];
+        return new(participantId, sessionId, repositoryId, machine, Text(join, "protectedRoot"), Text(join, "generation"), string.Join('|', previous));
     }
 
     internal bool NativeClosing(string participant) => json[ClosingKey] is JsonObject closing

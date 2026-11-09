@@ -16,13 +16,25 @@ public sealed class NativeFileScopeTests
     [Fact]
     public void Protected_scope_requires_the_exact_current_private_session_and_authenticated_machine()
     {
-        var (state, query) = Open(Machine, @"C:\physical\repo");
+        var (state, query, proof) = Open(Machine, @"C:\physical\repo");
         var granted = Read(state, query, Machine);
         Assert.True(granted.Ok, granted.Code);
         var scope = JsonNode.Parse(granted.DataJson)!;
         Assert.Equal("authenticated-machine", scope["machineScope"]!.GetValue<string>());
         Assert.Equal(@"C:\physical\repo", scope["canonicalWorkingCopyRoot"]!.GetValue<string>());
         Assert.DoesNotContain(query.SessionToken, granted.DataJson);
+
+        // The same chat rejoins from another worktree of the repository: its unchanged proof is the same participant and reaches the same
+        // live session, and the file scope follows the checkout it works in now.
+        var moved = proof.DeepClone().AsObject();
+        moved["nativeJoin"]![NativeParticipant.CurrentWorkspace] = @"C:\physical\repo-worktree";
+        moved["nativeJoin"]!["protectedRoot"] = @"C:\physical\repo-worktree";
+        Assert.True(NativeParticipant.Admit(Machine, moved));
+        Assert.Equal(query.ParticipantId, moved[NativeParticipant.Id]!.GetValue<string>());
+        var rejoined = CoordinationStateMachine.Apply(state, AggregateKinds.Control, AggregateKinds.ControlKey, Machine, RelayTools.SessionOpen, moved, Now);
+        Assert.True(rejoined.Ok, rejoined.Code);
+        Assert.Equal(query.SessionId, JsonNode.Parse(rejoined.DataJson)!["sessionId"]!.GetValue<string>());
+        Assert.Equal(@"C:\physical\repo-worktree", JsonNode.Parse(Read(state, query, Machine).DataJson)!["canonicalWorkingCopyRoot"]!.GetValue<string>());
 
         Assert.False(Read(state, query with { SessionToken = "wrong" }, Machine).Ok);
         Assert.False(Read(state, query with { RepositoryId = "other" }, Machine).Ok);
@@ -53,14 +65,15 @@ public sealed class NativeFileScopeTests
         Assert.Equal("authenticated-machine", CoordinationStateMachine.TakeEffectCaller(payload).AuthenticatedMachineId);
         Assert.Null(CoordinationStateMachine.TakeEffectCaller(payload).AuthenticatedMachineId);
 
-        var (legacy, legacyQuery) = Open(Machine, null);
+        var (legacy, legacyQuery, _) = Open(Machine, null);
         Assert.False(Read(legacy, legacyQuery, Machine).Ok);
         var local = Machine with { AuthenticatedMachineId = null };
-        var (unproven, unprovenQuery) = Open(local, @"C:\physical\repo");
+        var (unproven, unprovenQuery, _) = Open(local, @"C:\physical\repo");
         Assert.False(Read(unproven, unprovenQuery, local).Ok);
     }
 
-    private static (StateEnvelope<CoordinationDocument> State, NativeFileScopeQuery Query) Open(RelayCaller caller, string? protectedRoot)
+    /// <returns>The opened state, the file-scope query for its session, and a copy of the adapter's proof before admission.</returns>
+    private static (StateEnvelope<CoordinationDocument> State, NativeFileScopeQuery Query, JsonObject Proof) Open(RelayCaller caller, string? protectedRoot)
     {
         var join = new JsonObject
         {
@@ -69,13 +82,14 @@ public sealed class NativeFileScopeTests
         };
         if (protectedRoot is not null) join["protectedRoot"] = protectedRoot;
         var arguments = new JsonObject { ["repositoryId"] = "repo", ["machineId"] = "untrusted-label", ["requestId"] = Guid.NewGuid().ToString("N"), ["nativeJoin"] = join };
+        var proof = arguments.DeepClone().AsObject();
         Assert.True(NativeParticipant.Admit(caller, arguments));
         var state = new StateEnvelope<CoordinationDocument> { Value = new() { Json = "{}" } };
         var reply = CoordinationStateMachine.Apply(state, AggregateKinds.Control, AggregateKinds.ControlKey, caller, RelayTools.SessionOpen, arguments, Now);
         Assert.True(reply.Ok, reply.Code);
         Assert.DoesNotContain(@"C:\physical\repo", reply.DataJson);
         var opened = JsonNode.Parse(reply.DataJson)!;
-        return (state, new NativeFileScopeQuery("repo", opened["sessionId"]!.GetValue<string>(), opened["sessionToken"]!.GetValue<string>(), arguments[NativeParticipant.Id]!.GetValue<string>()));
+        return (state, new NativeFileScopeQuery("repo", opened["sessionId"]!.GetValue<string>(), opened["sessionToken"]!.GetValue<string>(), arguments[NativeParticipant.Id]!.GetValue<string>()), proof);
     }
 
     private static RelayReply Read(StateEnvelope<CoordinationDocument> state, NativeFileScopeQuery query, RelayCaller caller) =>

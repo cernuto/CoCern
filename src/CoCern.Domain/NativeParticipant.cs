@@ -10,7 +10,15 @@ namespace CoCern.Domain;
 public sealed record VerifiedNativeParticipant(string ParticipantId, string SessionId, string RepositoryId);
 
 /// <summary>A current native join's authenticated machine and adapter-proven checkout. Consumers must revalidate at file use.</summary>
-public sealed record VerifiedNativeFileScope(string ParticipantId, string SessionId, string RepositoryId, string MachineScope, string CanonicalWorkingCopyRoot, string NativeGeneration);
+/// <param name="PreviousRoots">
+/// Earlier protected roots of this join on the same machine, oldest first, joined by <c>|</c> (never part of a root). Only a release or renewal
+/// of a claim the session already holds may use them, so a chat that moved to another checkout can still settle claims taken before the move.
+/// </param>
+public sealed record VerifiedNativeFileScope(string ParticipantId, string SessionId, string RepositoryId, string MachineScope, string CanonicalWorkingCopyRoot, string NativeGeneration,
+    string PreviousRoots = "")
+{
+    public IEnumerable<string> EarlierRoots => PreviousRoots.Split('|', StringSplitOptions.RemoveEmptyEntries);
+}
 
 public static class NativeParticipant
 {
@@ -26,6 +34,11 @@ public static class NativeParticipant
     /// <summary>How many top-level fields a join carries: repository, machine, request and proof, and the optional display label.</summary>
     public static int JoinFields(JsonObject args) => args.ContainsKey(DisplayLabel) ? 5 : 4;
     public const string WorkingCopy = "nativeWorkingCopy";
+    /// <summary>
+    /// The checkout a native chat works in now, when it moved from the one its frozen proof names (another worktree or clone of the same repository).
+    /// Outside the identity hash, like the protected root: the participant, and so the chat's session, stays the same; it only updates the join's working copy.
+    /// </summary>
+    public const string CurrentWorkspace = "currentWorkspace";
     public const string ProtectedRoot = "nativeProtectedRoot";
     /// <summary>Hub-only marker; the proof itself uses the ordinary redacted session credential fields.</summary>
     public const string Adoption = "nativeAdoption";
@@ -39,17 +52,18 @@ public static class NativeParticipant
             if (args.ContainsKey(DisplayLabel) && !String(args, DisplayLabel, out _)) return false;
             var hasProtectedRoot = join.ContainsKey("protectedRoot");
             var hasAdoption = join.ContainsKey("adopt");
-            if (join.Count != 5 + (hasProtectedRoot ? 1 : 0) + (hasAdoption ? 1 : 0) || !String(join, "provider", out var provider) || provider is not ("claude" or "codex")
+            var hasCurrent = join.ContainsKey(CurrentWorkspace);
+            if (join.Count != 5 + (hasProtectedRoot ? 1 : 0) + (hasAdoption ? 1 : 0) + (hasCurrent ? 1 : 0) || !String(join, "provider", out var provider) || provider is not ("claude" or "codex")
                 || !String(join, "nativeId", out var native) || !CanonicalGuid(native, "D")
-                || !String(join, "workspace", out var workspace) || workspace.Length > 32767 || workspace.Any(char.IsControl)
-                || !(workspace.StartsWith('/') || workspace.StartsWith(@"\\", StringComparison.Ordinal)
-                    || workspace.Length >= 3 && char.IsAsciiLetter(workspace[0]) && workspace[1] == ':' && workspace[2] is '\\' or '/')
+                || !String(join, "workspace", out var workspace) || !ValidWorkspace(workspace)
                 || !String(join, "bindingSecret", out var encoded) || encoded.Length != 44
                 || !String(join, "generation", out var generation) || !CanonicalGuid(generation, "N")
                 || !String(args, "requestId", out var request) || !CanonicalGuid(request, "N")
                 || !String(args, "machineId", out var machine) || !String(args, "repositoryId", out var repository)) return false;
             string? protectedRoot = null;
             if (hasProtectedRoot && (!String(join, "protectedRoot", out protectedRoot) || !ValidProtectedRoot(protectedRoot))) return false;
+            string? current = null;
+            if (hasCurrent && (!String(join, CurrentWorkspace, out current) || !ValidWorkspace(current))) return false;
             string? adoptionId = null, adoptionToken = null;
             if (hasAdoption && (join["adopt"] is not JsonObject adoption || adoption.Count != 2 ||
                 !String(adoption, "sessionId", out adoptionId) || !CanonicalGuid(adoptionId, "N") ||
@@ -76,7 +90,7 @@ public static class NativeParticipant
             args[Generation] = generation;
             args[Request] = request;
             args[Client] = provider;
-            args[WorkingCopy] = workspace;
+            args[WorkingCopy] = current ?? workspace;
             if (protectedRoot is not null) args[ProtectedRoot] = protectedRoot;
             if (adoptionId is not null)
             {
@@ -96,6 +110,11 @@ public static class NativeParticipant
         && !root.Any(character => char.IsControl(character) || character is '/' or '"' or '<' or '>' or '|' or '?' or '*')
         && !root.AsSpan(3).Contains(':')
         && (root.Length == 3 || !root[3..].Split('\\').Any(part => part is "" or "." or ".."));
+
+    // An absolute path's representation only; the hub never interprets a remote machine's path.
+    private static bool ValidWorkspace(string workspace) => workspace.Length <= 32767 && !workspace.Any(char.IsControl)
+        && (workspace.StartsWith('/') || workspace.StartsWith(@"\\", StringComparison.Ordinal)
+            || workspace.Length >= 3 && char.IsAsciiLetter(workspace[0]) && workspace[1] == ':' && workspace[2] is '\\' or '/');
 
     private static bool String(JsonObject json, string key, out string text)
     {

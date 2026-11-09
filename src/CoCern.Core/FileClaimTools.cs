@@ -48,6 +48,18 @@ internal sealed class FileClaimTools(Aggregates aggregates, CallGuard guard)
             claim.Remove("filePath");
             claim["resourceId"] = file.ResourceId;
             reply = await aggregates.Call(AggregateKinds.Lock, file.ResourceId, call.Caller, call.Tool, claim);
+            // A chat that moved to another checkout still settles claims it took before the move: a release or renewal the current root does not hold
+            // tries this machine's earlier roots, newest first. The lock grants nothing new: it acts only on a claim this session holds at this generation.
+            if (reply.Code == StaleClaim && call.Tool is RelayTools.ClaimRelease or RelayTools.ClaimRenew)
+                foreach (var earlier in scope.EarlierRoots.Reverse())
+                {
+                    if (!FileClaimScope.TryCreate(scope.RepositoryId, scope.MachineScope, earlier.ToLowerInvariant(), path.ToLowerInvariant(), out var moved)) continue;
+                    claim["resourceId"] = moved.ResourceId;
+                    var settled = await aggregates.Call(AggregateKinds.Lock, moved.ResourceId, call.Caller, call.Tool, claim);
+                    if (settled.Code == StaleClaim) continue;
+                    (reply, file) = (settled, moved);
+                    break;
+                }
             if (reply.Ok)
             {
                 var data = Aggregates.Parse(reply);

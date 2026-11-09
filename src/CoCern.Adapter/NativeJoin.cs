@@ -32,7 +32,8 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
         internal bool LegacyWire { get; set; }
     }
     // The forwarder reports untyped gateway errors as hub_error; only retry registration, never the user's tool.
-    private static bool Transient(string code) => code is "hub_timeout" or "hub_unavailable" or "Unavailable" or "hub_error" or "rate_limited" or "native_generation_advanced";
+    private static bool Transient(string code) => code is "hub_timeout" or "hub_unavailable" or "Unavailable" or "hub_error" or "rate_limited" or "native_generation_advanced"
+        or NativeJoinBinding.LegacyBindingBusy;
 
     private string CredentialScope()
     {
@@ -131,16 +132,24 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
             if (context.Provider is not ("claude" or "codex") || !Guid.TryParse(context.NativeId, out var id)) return false;
             var workspace = await Task.Run(() => NativeCheckout.Inspect(context.Cwd).Root, cancel).WaitAsync(cancel);
             var scope = CredentialScope();
+            var chat = new ChatLocation(context.Provider, id.ToString("D"));
+            // The chat's binding in any checkout (it may have moved since its last join), or an older per-checkout binding not yet adopted.
+            bool Dispatched() => NativeJoinBinding.DispatchSnapshot(folder).Any(handle => handle.Chat == chat);
             var directory = IntentDir(scope);
             SafeDirectory(directory, false);
             var name = NativeCheckout.Hash(JsonSerializer.Serialize(new Intent(context.Provider, id.ToString("D"), workspace)));
             var stripe = Path.Combine(directory, name[..2] + ".lock");
-            if (!Directory.Exists(directory) || !File.Exists(stripe)) return false;
+            if (!Directory.Exists(directory) || !File.Exists(stripe)) return Dispatched();
             await using var membership = await NativeJoinBinding.LockAsync(stripe, cancel, existingOnly: true);
             if (CredentialScope() != scope) return false;
-            await using var binding = await NativeJoinBinding.AcquireEstablishedAsync(folder, context.Provider, id.ToString("D"),
-                Environment.MachineName, workspace, cancel, resolveCheckout: (_, _) => Task.FromResult(workspace));
-            return binding.CurrentHandle is not null;
+            try
+            {
+                await using var binding = await NativeJoinBinding.AcquireEstablishedAsync(folder, context.Provider, id.ToString("D"),
+                    Environment.MachineName, workspace, cancel, resolveCheckout: (_, _) => Task.FromResult(workspace));
+                return binding.CurrentHandle is not null;
+            }
+            // Not established in this checkout, or established in several repositories: any one dispatched binding of the chat keeps its waiter.
+            catch (IOException) { return Dispatched(); }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or JsonException or OperationCanceledException) { return false; }
@@ -254,10 +263,12 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
                     else if (!probe.Ok) throw new Refused(probe.Code);
                     else if (probe.Version is null || !SessionHandoff.IsSessionReply(RelayTools.GetStatus, JsonSerializer.SerializeToElement(new { sessionId = handle.SessionId }), probe))
                         throw new Refused("native_handle_unverified");
-                    // Verified live from this checkout: this binding, not one the chat used in another checkout, is the one to dispatch.
+                    // Verified live: this binding, not an older one the chat used in another checkout, is the one to dispatch.
                     if (handle is not null) binding.Confirm();
                 }
-                if (handle is null)
+                // A chat that moved to another checkout of this repository keeps its binding and its session. The same frozen open tells the hub,
+                // with this checkout's evidence (checked again by the hub) and protected root, and the hub answers with the chat's live session.
+                if (handle is null || binding.Moved)
                 {
                     var handoff = SessionHandoff.ForFolder(folder, client);
                     var protectedRoot = await ProtectedRootAsync(context.Cwd, checkout.Root, cancel);
@@ -324,7 +335,7 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
         catch (Refused error) { return error.Code; }
     }
 
-    private static string FenceDirectory(NativeJoinBinding binding) => Path.Combine(Path.GetDirectoryName(binding.StatePath)!, "calls-" + binding.BindingKey);
+    private static string FenceDirectory(NativeJoinBinding binding) => binding.CallsDirectory;
 
     private static string FencePath(NativeJoinBinding binding, string id) => Path.Combine(FenceDirectory(binding), NativeCheckout.Hash(binding.BindingKey + ":" + id) + ".json");
 

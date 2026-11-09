@@ -48,6 +48,14 @@ public sealed class SessionHandoff
             var wire = System.Text.Json.Nodes.JsonNode.Parse(binding.OpenWireArguments(resolution, NativeTitle(displayTitle), protectedRoot).GetRawText())!.AsObject();
             if (adoption is not null) wire["nativeJoin"]!["adopt"] = JsonSerializer.SerializeToNode(new { sessionId = adoption.SessionId, sessionToken = adoption.SessionToken });
             var reply = await forwarder.ForwardAsync(CoCern.Contracts.RelayTools.SessionOpen, JsonSerializer.SerializeToElement(wire), ct);
+            // A hub from before per-chat sessions refuses the moved chat's current checkout as an unknown field. Once, without it: the same proof
+            // still reaches the chat's session there, and the binding records that this checkout was not recorded by the hub.
+            if (!reply.Ok && reply.Code == CoCern.Contracts.RelayErrorCodes.InvalidArguments &&
+                wire["nativeJoin"] is System.Text.Json.Nodes.JsonObject join && join.Remove(NativeJoinBinding.CurrentWorkspaceField))
+            {
+                binding.CheckoutNotRecorded();
+                reply = await forwarder.ForwardAsync(CoCern.Contracts.RelayTools.SessionOpen, JsonSerializer.SerializeToElement(wire), ct);
+            }
             if (!reply.Ok)
             {
                 if (adoption is null && reply.Code == CoCern.Contracts.RelayErrorCodes.SessionUnknown && reply.Version is not null &&

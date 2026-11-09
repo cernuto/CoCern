@@ -372,7 +372,7 @@ public sealed class NativeJoinHookTests(ITestOutputHelper output)
         forged["_cocernNative"]!["nativeId"] = Child;
         reply = await NativeJoinHook.InvokeAsync(fixture.Join, "claude", RelayTools.SendMessage, JsonSerializer.SerializeToElement(forged), default, clock);
         Assert.False(reply.Ok); Assert.Equal(0, fixture.Requests);
-        Assert.Single(Directory.EnumerateFiles(Path.Combine(fixture.Join.PrivateFolder, NodeState.SessionsFolder, "native"), "*.json"));
+        Assert.Single(Directory.EnumerateFiles(Path.Combine(fixture.Join.PrivateFolder, NodeState.SessionsFolder, "native-chats"), "*.json"));
     }
 
     [Fact]

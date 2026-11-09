@@ -172,7 +172,7 @@ internal sealed class CallGuard(Aggregates aggregates, string incarnation, Func<
         var generation = Text(scope, "nativeGeneration");
         if (Text(scope, "participantId") != participant || Text(scope, "sessionId") != session || Text(scope, "repositoryId") != repository
             || Text(scope, "machineScope") != machine || root.Length == 0 || generation.Length == 0) return null;
-        return new(participant, session, repository, machine, root, generation);
+        return new(participant, session, repository, machine, root, generation, Text(scope, "previousWorkingCopyRoots"));
     }
 
     private async Task<RelayReply?> PausedAsync(RelayCaller caller, JsonObject args)

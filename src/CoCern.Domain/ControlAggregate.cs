@@ -143,8 +143,12 @@ internal static class ControlAggregate
                 return Ok(new { nativePending = true });
             }
             if (state.CurrentNativeSession(participant, context.Repository) is not null && state.Entry(currentId) is { } entry)
-                return generation == currentGeneration && entry.PrincipalId == context.Caller.PrincipalId
-                    ? OpenReply(currentId, entry.Token, args) : Error(RequestConflict);
+            {
+                if (generation != currentGeneration || entry.PrincipalId != context.Caller.PrincipalId) return Error(RequestConflict);
+                // The chat's own proof rejoins its live session, from wherever it works now: one session per chat and repository, across checkouts.
+                state.RelocateNative(participant, context.Caller, args);
+                return OpenReply(currentId, entry.Token, args);
+            }
             if (state.Entry(currentId) is not null) return Error(Unavailable);
             if (Text(args, NativeParticipant.ConfirmedExpiry) == currentId)
             {
@@ -169,7 +173,8 @@ internal static class ControlAggregate
         return scope is null ? Error(SessionDenied) : Ok(new
         {
             participantId = scope.ParticipantId, sessionId = scope.SessionId, repositoryId = scope.RepositoryId,
-            machineScope = scope.MachineScope, canonicalWorkingCopyRoot = scope.CanonicalWorkingCopyRoot, nativeGeneration = scope.NativeGeneration
+            machineScope = scope.MachineScope, canonicalWorkingCopyRoot = scope.CanonicalWorkingCopyRoot, nativeGeneration = scope.NativeGeneration,
+            previousWorkingCopyRoots = scope.PreviousRoots
         });
     }
 

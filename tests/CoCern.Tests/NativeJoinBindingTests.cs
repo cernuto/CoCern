@@ -38,30 +38,101 @@ public sealed class NativeJoinBindingTests(NativeJoinBindingTests.ProbeFixture p
         Assert.Equal(request, reopened.OpenRequestId);
         Assert.True(arguments == reopened.FrozenOpenArguments.GetRawText(), "Frozen open arguments changed.");
         Assert.Single(Directory.EnumerateFiles(Path.GetDirectoryName(reopened.StatePath)!, "*.json"));
+
+        // Migration: a chat that ran in two checkouts before bindings were per chat has one per-checkout (version 1) binding and session in each.
+        // Its next join adopts the one dispatch would choose (the latest confirmed, with the hub's SessionUnknown mark), keeping its secret and session;
+        // both older files stay byte for byte where older adapters read them, and the one not chosen is no longer dispatched.
+        const string LegacyChat = "22222222-3333-4444-8555-666666666666";
+        const string Probe = "33333333-4444-4555-8666-777777777777";
+        var location = new ChatLocation("codex", LegacyChat);
+        string folder, main, linked;
+        await using (var probe = await NativeJoinBinding.AcquireAsync(fixture.Folder, "codex", Probe, "machine", "repo", fixture.Workspace, default)) (folder, main) = (probe.Folder, probe.Workspace);
+        await using (var probe = await NativeJoinBinding.AcquireAsync(fixture.Folder, "codex", Probe, "machine", "repo", fixture.CreateWorktree(), default)) linked = probe.Workspace;
+        var identity = LocalWakeConnection.NativeCredentialIdentity(folder)!;
+        var native = Directory.CreateDirectory(Path.Combine(folder, NodeState.SessionsFolder, "native")).FullName;
+        (string Key, string Session, string Secret) Legacy(string workspace, DateTime confirmed)
+        {
+            var (secret, generation, request, session) = (Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)), Guid.NewGuid().ToString("N"), Guid.NewGuid().ToString("N"), Guid.NewGuid().ToString("N"));
+            var key = Digest("cocern-native-binding-v1", folder, identity, "codex", LegacyChat, "machine", "repo", workspace);
+            NodeState.WriteSessionHandle(folder, new SessionHandle(session, "synthetic-session-token", "repo", "legacy", DateTimeOffset.UtcNow, location, location)
+                { NativeBindingKey = Digest("cocern-native-owner-v1", key, secret, generation, request) });
+            var path = Path.Combine(native, key + ".json");
+            NodeState.WritePrivately(path, JsonSerializer.SerializeToUtf8Bytes(new { version = 1, scope = key, currentSessionId = session, openArguments = new { repositoryId = "repo", machineId = "machine",
+                requestId = request, nativeJoin = new { provider = "codex", nativeId = LegacyChat, workspace, bindingSecret = secret, generation } } }));
+            NodeState.CreatePrivateFile(Path.ChangeExtension(path, ".lock")).Dispose();
+            File.SetLastWriteTimeUtc(path, confirmed);
+            return (key, session, secret);
+        }
+        SessionHandle Dispatched() => Assert.Single(NativeJoinBinding.DispatchSnapshot(folder), handle => handle.Chat == location);
+        bool Undispatched() => !NativeJoinBinding.DispatchSnapshot(folder).Any(handle => handle.Chat == location);
+        var older = Legacy(main, DateTime.UtcNow.AddHours(-2));
+        var latest = Legacy(linked, DateTime.UtcNow.AddHours(-1));
+        Assert.Equal(latest.Session, Dispatched().SessionId);
+        NativeJoinBinding.MarkSessionUnknown(folder, Dispatched());
+        Assert.Equal(older.Session, Dispatched().SessionId);
+        NativeJoinBinding.MarkSessionUnknown(folder, Dispatched());
+        Assert.True(Undispatched());
+        var legacyFiles = Directory.EnumerateFiles(native, "*.json").ToDictionary(path => path, File.ReadAllBytes);
+        string adoptedPath;
+        await using (var adopted = await NativeJoinBinding.AcquireAsync(fixture.Folder, "codex", LegacyChat, "machine", "repo", main, default))
+        {
+            adoptedPath = adopted.StatePath;
+            Assert.Equal(latest.Key, adopted.BindingKey);
+            Assert.True(adopted.Secret == latest.Secret, "The adopted binding minted a new identity.");
+            Assert.Equal(latest.Session, adopted.CurrentHandle!.SessionId);
+            Assert.True(adopted.Moved); // The hub last recorded the worktree; this join is from the main checkout.
+            Assert.NotEqual(native, Path.GetDirectoryName(adoptedPath));
+            Assert.True(File.Exists(Path.ChangeExtension(adoptedPath, ".unknown")));
+        }
+        // Older adapters only read the per-checkout folder: it still holds exactly the two version 1 files, unchanged.
+        Assert.Equal(legacyFiles.Keys.Order(), Directory.EnumerateFiles(native, "*.json").Order());
+        Assert.All(legacyFiles, pair => Assert.True(pair.Value.SequenceEqual(File.ReadAllBytes(pair.Key))));
+        // The mark came with the adopted session; the binding not chosen stays inert even without its own mark.
+        File.Delete(Path.ChangeExtension(Path.Combine(native, older.Key + ".json"), ".unknown"));
+        Assert.True(Undispatched());
+        // The chat's own open of the adopted session clears the mark: the one session is dispatched again.
+        await using (var adopted = await NativeJoinBinding.AcquireAsync(fixture.Folder, "codex", LegacyChat, "machine", "repo", main, default))
+        {
+            Assert.Equal(adoptedPath, adopted.StatePath);
+            Assert.True(await Open(SessionHandoff.ForFolder(fixture.Folder, location), adopted, fixture.Options, OpenReply(latest.Session)));
+        }
+        Assert.Equal(latest.Session, Dispatched().SessionId);
+    }
+
+    private static string Digest(params string[] fields)
+    {
+        using var bytes = new MemoryStream();
+        using (var writer = new BinaryWriter(bytes, Encoding.UTF8, leaveOpen: true))
+            foreach (var field in fields) { var encoded = Encoding.UTF8.GetBytes(field); writer.Write(encoded.Length); writer.Write(encoded); }
+        return Convert.ToHexStringLower(SHA256.HashData(bytes.ToArray()));
     }
 
     [Fact]
-    public async Task Unrelated_chats_and_checkouts_do_not_share_a_binding()
+    public async Task Unrelated_chats_never_share_a_binding_and_another_checkout_of_the_repository_does()
     {
         using var fixture = new ScopeFixture();
-        string original;
-        await using (var binding = await fixture.Acquire()) original = binding.BindingKey;
+        string original, statePath;
+        await using (var binding = await fixture.Acquire()) (original, statePath) = (binding.BindingKey, binding.StatePath);
         var variants = new[]
         {
-            ("claude", Chat, "machine", "repo", fixture.Workspace),
-            ("codex", "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", "machine", "repo", fixture.Workspace),
-            ("codex", Chat, "other-machine", "repo", fixture.Workspace),
-            ("codex", Chat, "machine", "other-repo", fixture.Workspace),
-            ("codex", Chat, "machine", "repo", fixture.CreateWorktree())
+            ("claude", Chat, "machine", "repo"),
+            ("codex", "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", "machine", "repo"),
+            ("codex", Chat, "other-machine", "repo"),
+            ("codex", Chat, "machine", "other-repo")
         };
-        foreach (var (provider, id, machine, repo, workspace) in variants)
+        foreach (var (provider, id, machine, repo) in variants)
         {
-            await using var binding = await NativeJoinBinding.AcquireAsync(fixture.Folder, provider, id, machine, repo, workspace, default);
+            await using var binding = await NativeJoinBinding.AcquireAsync(fixture.Folder, provider, id, machine, repo, fixture.Workspace, default);
             Assert.NotEqual(original, binding.BindingKey);
         }
         var anotherFolder = fixture.Connection("another-cache");
-        await using var other = await NativeJoinBinding.AcquireAsync(anotherFolder, "codex", Chat, "machine", "repo", fixture.Workspace, default);
-        Assert.NotEqual(original, other.BindingKey);
+        await using (var other = await NativeJoinBinding.AcquireAsync(anotherFolder, "codex", Chat, "machine", "repo", fixture.Workspace, default))
+            Assert.NotEqual(original, other.BindingKey);
+        // A worktree of the same repository is the same chat's one binding: same identity and state, the move pending until the hub hears it.
+        await using var moved = await fixture.Acquire(fixture.CreateWorktree());
+        Assert.Equal(original, moved.BindingKey);
+        Assert.Equal(statePath, moved.StatePath);
+        Assert.True(moved.Moved);
     }
 
     [Fact]
@@ -195,23 +266,27 @@ public sealed class NativeJoinBindingTests(NativeJoinBindingTests.ProbeFixture p
             Assert.True(reopened.CurrentHandle.SessionToken == "synthetic-session-token");
             Assert.Single(Directory.EnumerateFiles(Path.Combine(fixture.Folder, "sessions"), "*.json"));
         }
-        // Regression: the same chat later joined from a linked worktree. One binding per checkout used to drop the whole thread from dispatch;
-        // now the one confirmed last is dispatched and the older checkout's binding stays on disk unchanged.
+        // Regression: the same chat later works in a linked worktree. It used to get a new binding and a new session per checkout; now it keeps its
+        // one binding and session: the unchanged frozen proof reports the move, the hub answers with the same session, and the move is saved with it.
         var main = Assert.Single(NativeJoinBinding.DispatchSnapshot(fixture.Folder));
-        var mainState = File.ReadAllBytes(statePath);
         var linked = fixture.CreateWorktree();
-        var moved = Guid.NewGuid().ToString("N");
         var later = SessionHandoff.ForFolder(fixture.Folder, new("codex", Chat));
-        await using (var worktree = await fixture.Acquire(linked)) Assert.True(await Open(later, worktree, fixture.Options, OpenReply(moved)));
-        var latest = Assert.Single(NativeJoinBinding.DispatchSnapshot(fixture.Folder));
-        Assert.Equal(moved, latest.SessionId);
-        Assert.True(mainState.SequenceEqual(File.ReadAllBytes(statePath)));
-        // The hub answered SessionUnknown for that session: it is no longer dispatched (nor polled after a restart), and the chat's other binding is.
-        NativeJoinBinding.MarkSessionUnknown(fixture.Folder, latest);
+        await using (var worktree = await fixture.Acquire(linked))
+        {
+            Assert.Equal(statePath, worktree.StatePath);
+            Assert.True(worktree.Moved);
+            Assert.True(await Open(later, worktree, fixture.Options, OpenReply(session)));
+            Assert.False(worktree.Moved);
+            Assert.Equal(session, worktree.CurrentHandle!.SessionId);
+        }
+        await using (var reopened = await fixture.Acquire(linked)) Assert.False(reopened.Moved);
         Assert.Equal(main, Assert.Single(NativeJoinBinding.DispatchSnapshot(fixture.Folder)));
-        // The chat's own authenticated open of that session clears the mark and makes it the latest again.
-        await using (var worktree = await fixture.Acquire(linked)) Assert.True(await Open(later, worktree, fixture.Options, OpenReply(moved)));
-        Assert.Equal(latest, Assert.Single(NativeJoinBinding.DispatchSnapshot(fixture.Folder)));
+        // The hub answered SessionUnknown for that session: it is no longer dispatched (nor polled after a restart).
+        NativeJoinBinding.MarkSessionUnknown(fixture.Folder, main);
+        Assert.Empty(NativeJoinBinding.DispatchSnapshot(fixture.Folder));
+        // The chat's own authenticated open of that session clears the mark.
+        await using (var worktree = await fixture.Acquire(linked)) Assert.True(await Open(later, worktree, fixture.Options, OpenReply(session)));
+        Assert.Equal(main, Assert.Single(NativeJoinBinding.DispatchSnapshot(fixture.Folder)));
     }
 
     [Fact]
@@ -338,13 +413,15 @@ public sealed class NativeJoinBindingTests(NativeJoinBindingTests.ProbeFixture p
     {
         using var a = new ScopeFixture();
         using var b = new ScopeFixture();
-        string key;
-        await using (var expected = await b.Acquire()) key = expected.BindingKey;
+        string key, workspace;
+        await using (var expected = await b.Acquire()) (key, workspace) = (expected.BindingKey, expected.Workspace);
         var overrides = new Dictionary<string, string> { [selector] = selector == "GIT_DIR" ? Path.Combine(a.Workspace, ".git") : a.Workspace };
         using var process = probe.Start(b, "once", overrides);
         Assert.Equal("attempting", await Line(process));
         using var output = JsonDocument.Parse((await Line(process))!);
         Assert.Equal(key, output.RootElement.GetProperty("key").GetString());
+        // The key no longer names the checkout; the verified checkout must still be the event's own.
+        Assert.Equal(workspace, output.RootElement.GetProperty("workspace").GetString());
         await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
         Assert.Equal(0, process.ExitCode);
     }
@@ -368,7 +445,15 @@ public sealed class NativeJoinBindingTests(NativeJoinBindingTests.ProbeFixture p
             calls++;
             Assert.Equal(new Uri(options.BaseUri, "api/tools/session_open"), request.RequestUri);
             Assert.True(request.Headers.Authorization?.Parameter == options.Token);
-            Assert.True(await request.Content!.ReadAsStringAsync(ct) == binding.FrozenOpenArguments.GetRawText(), "The transport did not send the exact frozen opening attempt.");
+            var body = await request.Content!.ReadAsStringAsync(ct);
+            var sent = JsonNode.Parse(body)!.AsObject();
+            // A moved chat's current checkout rides beside the unchanged frozen proof, never inside it.
+            if (sent["nativeJoin"]!.AsObject().Remove(NativeJoinBinding.CurrentWorkspaceField, out var current))
+            {
+                Assert.Equal(binding.Workspace, (string?)current);
+                Assert.True(JsonNode.DeepEquals(sent, JsonNode.Parse(binding.FrozenOpenArguments.GetRawText())), "The transport changed the frozen opening attempt.");
+            }
+            else Assert.True(body == binding.FrozenOpenArguments.GetRawText(), "The transport did not send the exact frozen opening attempt.");
             return Reply(reply);
         });
         using var client = new HttpClient(handler);
@@ -481,7 +566,7 @@ public sealed class NativeJoinBindingTests(NativeJoinBindingTests.ProbeFixture p
                         try {
                             var raw = args[2] == "discovery" ? CoordinationTools.GitTopLevel(args[1]) : null;
                             await using var lease = await NativeJoinBinding.AcquireAsync(args[0], "codex", "11111111-2222-4333-8444-555555555555", "machine", "repo", args[1], cancel.Token);
-                            Console.WriteLine(JsonSerializer.Serialize(new { raw, key=lease.BindingKey, digest=Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(lease.Secret))), generation=lease.Generation, request=lease.OpenRequestId, arguments=Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(lease.FrozenOpenArguments.GetRawText()))) }));
+                            Console.WriteLine(JsonSerializer.Serialize(new { raw, key=lease.BindingKey, workspace=lease.Workspace, digest=Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(lease.Secret))), generation=lease.Generation, request=lease.OpenRequestId, arguments=Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(lease.FrozenOpenArguments.GetRawText()))) }));
                             if(args[2] == "hold") await Console.In.ReadLineAsync();
                             return 0;
                         } catch(OperationCanceledException) { Console.WriteLine("cancelled"); return 0; }
