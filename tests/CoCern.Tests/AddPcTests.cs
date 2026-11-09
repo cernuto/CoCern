@@ -96,7 +96,8 @@ public sealed class AddPcTests : IDisposable
             """);
         Assert.Contains("fixture-passed", result);
         var command = DashboardAddPc.Command("https://fixture/", JoinCode, Fingerprint);
-        Assert.True(command.IndexOf("Expand-Archive", StringComparison.Ordinal) < command.IndexOf("CoCernStopAdapters $d", StringComparison.Ordinal));
+        Assert.DoesNotContain("Expand-Archive", command);
+        Assert.True(command.IndexOf("ZipFile]::ExtractToDirectory", StringComparison.Ordinal) is > 0 and var unpack && unpack < command.IndexOf("CoCernStopAdapters $d", StringComparison.Ordinal));
         Assert.True(command.IndexOf("CoCernStopAdapters $d", StringComparison.Ordinal) < command.IndexOf("Rename-Item -LiteralPath $d", StringComparison.Ordinal));
     }
 

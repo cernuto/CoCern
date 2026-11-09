@@ -73,7 +73,10 @@ internal sealed class DashboardAddPc(IConfiguration configuration, IServiceProvi
     /// One line that works pasted into Windows PowerShell 5.1 or PowerShell 7. It runs in its own script block, so its variables and its
     /// <c>$ErrorActionPreference='Stop'</c> do not stay in that window, and any failure (a download refused by the pin, a full disk) stops it before
     /// anything is unpacked or run. It pins this hub's certificate for the download only, downloads <c>/join/adapter.zip</c> to a temp file of its own
-    /// (always deleted), and unpacks it into a fresh folder beside <c>%LOCALAPPDATA%\CoCern\adapter</c>. When that adapter folder already holds the
+    /// (always deleted), and unpacks it into a fresh folder beside <c>%LOCALAPPDATA%\CoCern\adapter</c>. It unpacks with .NET's
+    /// <c>ZipFile.ExtractToDirectory</c>, present in Windows PowerShell 5.1 and PowerShell 7 alike and refusing entries that would land outside the
+    /// folder, rather than the <c>Expand-Archive</c> cmdlet, whose module can be missing or fail to load (and whose name was once mangled to
+    /// <c>Expand-Archi…</c> on its way to a PowerShell window, stopping the join). When that adapter folder already holds the
     /// same files (pasting again on a PC that joined) it and its adapters are left alone; otherwise it is swapped whole, never unpacked over.
     /// Running adapters belonging to this installation are stopped before replacement (the node supervisor first). Unverifiable identity or a failed stop
     /// refuses replacement; if the fresh folder then fails to move in, the old one is moved back. Copies an interrupted run left beside the adapter folder are removed
@@ -94,7 +97,7 @@ internal sealed class DashboardAddPc(IConfiguration configuration, IServiceProvi
             $n=CoCernContained $r "$r\adapter-$i"
             $o=CoCernContained $r "$r\adapter-old-$i"
             Get-ChildItem -LiteralPath $r -Directory -Filter 'adapter-*' -ErrorAction Ignore | ForEach-Object { $p=CoCernContained $r $_.FullName; Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction Ignore }
-            try{[{{{PinType}}}]::Install('{{{fingerprint}}}');try{(New-Object Net.WebClient).DownloadFile('{{{url}}}join/adapter.zip',$z)}finally{[{{{PinType}}}]::Restore()};Expand-Archive -LiteralPath $z -DestinationPath $n}finally{Remove-Item -LiteralPath $z -Force -ErrorAction Ignore}
+            try{[{{{PinType}}}]::Install('{{{fingerprint}}}');try{(New-Object Net.WebClient).DownloadFile('{{{url}}}join/adapter.zip',$z)}finally{[{{{PinType}}}]::Restore()};Add-Type -AssemblyName System.IO.Compression.FileSystem;[IO.Compression.ZipFile]::ExtractToDirectory($z,$n)}finally{Remove-Item -LiteralPath $z -Force -ErrorAction Ignore}
             if(-not((Test-Path -LiteralPath "$n\CoCern.Adapter.exe" -PathType Leaf) -or (Test-Path -LiteralPath "$n\CoCern.Adapter.dll" -PathType Leaf))){Remove-Item -LiteralPath $n -Recurse -Force -ErrorAction Ignore;throw 'The downloaded CoCern adapter is incomplete; the installed adapter was left running.'}
             function CoCernFiles($p){$l=(Get-Item -LiteralPath $p).FullName.Length;Get-ChildItem -LiteralPath $p -Recurse -File | ForEach-Object {$_.FullName.Substring($l)+'|'+(Get-FileHash -LiteralPath $_.FullName).Hash} | Sort-Object}
             $exists=Test-Path -LiteralPath $d
