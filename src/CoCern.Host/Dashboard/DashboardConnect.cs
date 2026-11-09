@@ -108,22 +108,32 @@ internal sealed class DashboardConnect(IConfiguration configuration, IHostEnviro
         configuration["Relay:Connect:DistributionAdapterPath"] is { Length: > 0 } distribution ? distribution : configuration["Relay:Connect:AdapterPath"], AppContext.BaseDirectory);
 
     /// <summary>
-    /// The published adapter if there is one (it outlives rebuilds), else the build output in the hub's checkout. <paramref name="hubFolder"/> is where
+    /// The newest adapter build: the published one or the build output in the hub's checkout, whichever was written last, so a published copy that
+    /// outlived later rebuilds is not used. <paramref name="hubFolder"/> is where
     /// the running hub's own files are, so the search starts from code this hub already runs, never from the working directory.
     /// </summary>
     internal static string? LocalAdapter(string? configured, string hubFolder) =>
-        configured is { Length: > 0 } ? (File.Exists(configured) ? Path.GetFullPath(configured) : null) : Candidates(hubFolder).FirstOrDefault(File.Exists);
+        configured is { Length: > 0 } ? (File.Exists(configured) ? Path.GetFullPath(configured) : null) : Newest(Candidates(hubFolder).Where(File.Exists)).FirstOrDefault();
 
     /// <summary>
-    /// What other PCs download. A self-contained build comes first, because the pasted command may run on a PC with no .NET; without one it is the same
-    /// build Connect uses here, and <see cref="AdapterBuild.SelfContained"/> tells the Add another PC page to say so. A configured path is served as it is.
+    /// What other PCs download: the newest build found, so a published copy that rebuilds have overtaken is never served (it outlives rebuilds, and a
+    /// hub started without the development adapter, or in the moment before that service sets its path, would otherwise hand other PCs and their nodes
+    /// a stale adapter). Among builds as new as the newest, a self-contained one comes first, because the pasted command may run on a PC with no .NET;
+    /// <see cref="AdapterBuild.SelfContained"/> tells the Add another PC page when the served build needs it. A configured path is served as it is.
     /// </summary>
     internal static AdapterBuild? ServedAdapter(string? configured, string hubFolder)
     {
         if (configured is { Length: > 0 }) return File.Exists(configured) ? AdapterBuild.At(Path.GetFullPath(configured)) : null;
-        var builds = Candidates(hubFolder).Where(File.Exists).Select(AdapterBuild.At).ToArray();
-        return builds.FirstOrDefault(build => build.SelfContained) ?? builds.FirstOrDefault();
+        var builds = Newest(Candidates(hubFolder).Where(File.Exists)).Select(AdapterBuild.At).ToArray();
+        if (builds.Length == 0) return null;
+        var newest = File.GetLastWriteTimeUtc(builds[0].Dll);
+        return builds.FirstOrDefault(build => build.SelfContained && File.GetLastWriteTimeUtc(build.Dll) >= newest) ?? builds[0];
     }
+
+    /// <summary>The adapter builds newest first by their dll's write time, keeping <see cref="Candidates"/> order between equals.</summary>
+    private static IEnumerable<string> Newest(IEnumerable<string> dlls) =>
+        dlls.Select((dll, order) => (Dll: dll, Order: order, Written: File.GetLastWriteTimeUtc(dll)))
+            .OrderByDescending(build => build.Written).ThenBy(build => build.Order).Select(build => build.Dll);
 
     /// <summary>
     /// Where an adapter build may be: beside the published host (<c>Build-CoCern.ps1 -Publish</c> writes the host to <c>artifacts/host</c> and the adapter to

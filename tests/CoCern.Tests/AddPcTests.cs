@@ -234,6 +234,16 @@ public sealed class AddPcTests : IDisposable
         Assert.Equal(debug, DashboardConnect.LocalAdapter(null, hub));
         Assert.Equal(new AdapterBuild(debug, SelfContained: false), DashboardConnect.ServedAdapter(null, hub));
 
+        // A published self-contained copy is served only while it is as new as the build output; once a rebuild overtakes it, the newer build is.
+        var published = FakeAdapter(Path.Combine(checkout, "artifacts", "adapter"), selfContained: true);
+        File.SetLastWriteTimeUtc(debug, DateTime.UtcNow.AddMinutes(-10));
+        File.SetLastWriteTimeUtc(published, DateTime.UtcNow.AddMinutes(-5));
+        Assert.Equal(new AdapterBuild(published, SelfContained: true), DashboardConnect.ServedAdapter(null, hub));
+        File.SetLastWriteTimeUtc(debug, DateTime.UtcNow);
+        Assert.Equal(new AdapterBuild(debug, SelfContained: false), DashboardConnect.ServedAdapter(null, hub));
+        Assert.Equal(debug, DashboardConnect.LocalAdapter(null, hub));
+        Directory.Delete(Path.Combine(checkout, "artifacts"), recursive: true);
+
         // A CoCern.slnx planted above the checkout changes nothing: the nearest one is the checkout.
         File.WriteAllText(Path.Combine(above, "CoCern.slnx"), "");
         Assert.Equal(debug, DashboardConnect.LocalAdapter(null, hub));
