@@ -125,6 +125,11 @@ public sealed class SessionLifecycleTests
         Assert.True(hub.Deliver(restore, T0.AddMinutes(3)).Ok);
         Assert.False(hub.Directory().ContainsKey(target.Id));
         Assert.Equal(RelayErrorCodes.SessionUnknown, hub.Verify(target, T0.AddMinutes(3)).Code);
+        // A handle whose session has no record here (a coordination reset dropped it) is told to reopen too, while a wrong secret for a
+        // session that is open is still refused.
+        Assert.Equal(RelayErrorCodes.SessionUnknown, hub.Verify(new Chat(Guid.NewGuid().ToString("N"), "any-token"), T0.AddMinutes(3)).Code);
+        var open = hub.Open("open", T0.AddMinutes(3));
+        Assert.Equal(RelayErrorCodes.SessionDenied, hub.Verify(open with { Token = "not-the-token" }, T0.AddMinutes(3)).Code);
     }
 
     /// <summary>

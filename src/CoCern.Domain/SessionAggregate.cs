@@ -59,6 +59,9 @@ internal static class SessionAggregate
             case Operations.AttentionClaimed: return SessionAttention.Claimed(context);
         }
         var state = new SessionState(context.State);
+        // No record here (a coordination reset dropped it, or a close overtook its open): there is no secret or owner to check, and the
+        // random session ID was never a secret, so the chat is told to reopen rather than given a denial no retry can change.
+        if (!state.Opened) return Error(SessionUnknown, new { expired = true, reopen = RelayTools.SessionOpen });
         if (state.Closed) return state.PrincipalId == context.Caller.PrincipalId ? Error(SessionUnknown, new { expired = true, reopen = RelayTools.SessionOpen }) : Error(SessionDenied);
         if (!Authenticates(context, state)) return Error(SessionDenied);
         return context.Operation switch
