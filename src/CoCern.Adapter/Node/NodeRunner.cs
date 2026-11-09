@@ -112,14 +112,28 @@ public sealed class NodeRunner : IAsyncDisposable
 
     /// <summary>
     /// The refusal to report from startup: the newer of the last staging refusal this node recorded and the journal's last failed activation (a candidate
-    /// the supervisor started and rolled back). Unreadable evidence reports nothing rather than stopping the node.
+    /// the supervisor started and rolled back). The journal keeps that failure after a later release installs, so it counts only while the build the
+    /// node runs was installed before it failed; once a newer build is running, the old failure is history, not news. Unreadable evidence reports
+    /// nothing rather than stopping the node.
     /// </summary>
     private static NodeUpdateRefusal? StartupRefusal(string updateRoot)
     {
         var staged = NodeUpdateState.ReadRefusal(updateRoot);
         var journal = NodeUpdateState.ReadPrimary(updateRoot);
-        var activation = journal is { LastFailedReleaseId: { } release, LastFailedAtUtc: { } at } ? new NodeUpdateRefusal(release, NodeUpdateRefusals.ActivationFailed, at) : null;
+        var activation = journal is { LastFailedReleaseId: { } release, LastFailedAtUtc: { } at } && !InstalledAfter(updateRoot, journal.Current.ContentId, at)
+            ? new NodeUpdateRefusal(release, NodeUpdateRefusals.ActivationFailed, at) : null;
         return activation is null ? staged : staged is null || activation.AtUtc > staged.AtUtc ? activation : staged;
+    }
+
+    /// <summary>Whether the stored image <paramref name="contentId"/> was installed after <paramref name="failedAt"/>; unknown counts as not.</summary>
+    private static bool InstalledAfter(string updateRoot, string contentId, DateTimeOffset failedAt)
+    {
+        try
+        {
+            var folder = Path.Combine(updateRoot, "versions", contentId);
+            return Directory.Exists(folder) && Directory.GetCreationTimeUtc(folder) > failedAt.UtcDateTime;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException) { return false; }
     }
 
     private static bool SingletonBusy(string nodeFolder)
