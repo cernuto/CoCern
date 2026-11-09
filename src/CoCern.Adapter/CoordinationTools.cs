@@ -11,9 +11,13 @@ namespace CoCern.Adapter;
 
 public static class CoordinationTools
 {
-    internal static IEnumerable<McpServerTool> CreateNative(RelayForwarder forwarder, NativeJoin join, NativeRegistrationGate registration, bool admin, bool diagnostics = false, bool chatOnly = false, ToolSurface? surface = null)
+    /// <summary>
+    /// A native chat keeps the chat narrowing until the hub selects a profile for it; an explicit hub profile then replaces that narrowing
+    /// (<see cref="ToolSurface.Observe"/> rebuilds with the selected profile).
+    /// </summary>
+    internal static IEnumerable<McpServerTool> CreateNative(RelayForwarder forwarder, NativeJoin join, NativeRegistrationGate registration, bool admin, bool diagnostics = false, ToolSurface? surface = null)
     {
-        IEnumerable<McpServerTool> Build(string? profile, bool ceiling) => NativeSurface(profile is null ? admin && ceiling : ceiling, profile is null && chatOnly, profile is null && diagnostics, profile is not null)
+        IEnumerable<McpServerTool> Build(string? profile, bool ceiling) => NativeSurface(profile is null ? admin && ceiling : ceiling, chatOnly: profile is null, profile is null && diagnostics, profile is not null)
             .Where(tool => SessionToolProfiles.Allows(profile, tool.Name, ceiling))
             .Select(tool => new ForwardedTool(tool, async (args, ct) =>
             {

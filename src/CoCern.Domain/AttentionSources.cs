@@ -239,6 +239,9 @@ internal static class AttentionSources
     internal static void ToManagers(AggregateContext context, AttentionContent item) =>
         context.Send(AggregateKinds.ControlKey, AttentionRoute.Raising(ManagerRole, new AttentionRaise(context.Repository, CallBoard(context) is { } board ? item with { BoardId = board } : item), context.SessionId));
 
+    /// <summary>The route role prefix naming a goal owner's private native participant ID, resolved at the control directory.</summary>
+    internal const string GoalOwnerRole = "goal-owner:";
+
     private static string? GoalOwner(AggregateContext context, string? taskId)
     {
         if (taskId is null || new BoardState(context.State).Task(taskId) is not { } task) return null;
@@ -250,13 +253,15 @@ internal static class AttentionSources
     private static void ToGoalOwnerOrManagers(AggregateContext context, AttentionContent item)
     {
         if (GoalOwner(context, item.TaskId) is not { Length: > 0 } owner) { ToManagers(context, item); return; }
-        context.Send(AggregateKinds.ControlKey, AttentionRoute.Raising("goal-owner:" + owner, new AttentionRaise(context.Repository, CallBoard(context) is { } board ? item with { BoardId = board } : item), ""));
+        // The control directory falls back to the managers when the owner has no current native session; the caller is excluded only then.
+        context.Send(AggregateKinds.ControlKey, AttentionRoute.Raising(GoalOwnerRole + owner, new AttentionRaise(context.Repository, CallBoard(context) is { } board ? item with { BoardId = board } : item), context.SessionId));
     }
 
     private static void ToGoalOwnerOrManagers(AggregateContext context, AttentionSelection close)
     {
         if (GoalOwner(context, close.TaskId) is not { Length: > 0 } owner) { ToManagers(context, close); return; }
-        context.Send(AggregateKinds.ControlKey, AttentionRoute.Closing("goal-owner:" + owner, new AttentionClose(context.Repository, CallBoard(context) is { } board ? close with { BoardId = board } : close)));
+        // The control directory closes at the owner's current session and at every manager, whichever the raise reached.
+        context.Send(AggregateKinds.ControlKey, AttentionRoute.Closing(GoalOwnerRole + owner, new AttentionClose(context.Repository, CallBoard(context) is { } board ? close with { BoardId = board } : close)));
     }
 
     /// <summary>Closes the items <paramref name="close"/> names at every manager session in the repository, on the call's board when it names one.</summary>

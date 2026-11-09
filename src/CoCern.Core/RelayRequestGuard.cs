@@ -31,9 +31,17 @@ internal static class RelayRequestGuard
             args = JsonNode.Parse(raw)!.AsObject();
             _ = args.Count;
             // Refuse widened decision envelopes before stripping private or telemetry fields. The hub adds its incarnation later.
-            if (tool.Name == RelayTools.RecordDecision && args.Any(field => field.Key is not
-                ("repositoryId" or "boardId" or "sessionId" or "sessionToken" or "requestId" or "proposalId" or "decision" or "humanWords" or "callOrigin" or "backgroundCall")))
-                return Replies.Error(InvalidArguments);
+            // Adapters attach acting proof to every joined call; a goal approval also carries its task, version, participants and expiry,
+            // which StandingPreferences.ApproveGoal fences again. Anything else still widens the envelope.
+            if (tool.Name == RelayTools.RecordDecision)
+            {
+                var goal = args["decision"] is JsonValue decisionValue && decisionValue.TryGetValue<string>(out var decision) && decision == "approveGoal";
+                if (args.Any(field => field.Key is not
+                    ("repositoryId" or "boardId" or "sessionId" or "sessionToken" or "requestId" or "proposalId" or "decision" or "humanWords" or "callOrigin" or "backgroundCall"
+                        or "actingSessionId" or "actingSessionToken") &&
+                    !(goal && field.Key is "taskId" or "expectedVersion" or "participants" or "expiresAt")))
+                    return Replies.Error(InvalidArguments);
+            }
             // Untrusted telemetry only; never part of native envelopes, replay or aggregate state.
             args.Remove("callOrigin");
             if (args.ContainsKey(CheckedNativeResolution)) return Replies.Error(InvalidArguments);

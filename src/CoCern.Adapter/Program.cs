@@ -234,7 +234,7 @@ try
     await using var native = (registration?.Folder ?? options.NodeFolder ?? localWake?.Connection.Folder) is { } privateFolder ? new NativeJoin(privateFolder, options, forwarder) : null;
     var initialTools = registration is null
         ? CoordinationTools.Create(forwarder, options.Admin, hints, SessionHandoff.For(options), options.ChatOnly, options.ExportedChat, localWake: localWake, diagnostics: options.Diagnostics, eventWaits: options.EventWaits, repository: options.Repository, surface: toolSurface)
-        : CoordinationTools.CreateNative(forwarder, native!, registrationGate!, options.Admin, options.Diagnostics, options.ChatOnly, toolSurface);
+        : CoordinationTools.CreateNative(forwarder, native!, registrationGate!, options.Admin, options.Diagnostics, toolSurface);
     foreach (var tool in initialTools) toolCollection.Add(tool);
     var builder = Host.CreateApplicationBuilder(registration is null ? args : []);
     // Library request/exception logging can contain handles. Emit only our fixed stderr hints.

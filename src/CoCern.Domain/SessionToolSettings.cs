@@ -47,8 +47,9 @@ public static class SessionToolSettings
         if (expected != current) return Error(CoCern.Contracts.RelayErrorCodes.VersionConflict, new { currentVersion = current });
         if (current == long.MaxValue) return Error(CapacityExceeded);
         var audit = context.State["toolProfileAudit"] as JsonArray;
-        if (audit is { Count: >= MaxAuditEntries }) return Error(CapacityExceeded);
         audit ??= new JsonArray();
+        // The audit keeps the newest entries: the oldest give way rather than freeze the session's settings at the cap.
+        while (audit.Count >= MaxAuditEntries) audit.RemoveAt(0);
         audit.Add(new JsonObject { ["revision"] = current + 1, ["profile"] = profile, ["humanWords"] = words,
             ["administrator"] = context.Caller.PrincipalId, ["at"] = context.Now.ToString("O") });
         context.State["toolProfile"] = profile;

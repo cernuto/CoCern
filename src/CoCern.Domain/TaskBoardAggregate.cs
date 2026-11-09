@@ -398,8 +398,18 @@ internal static class TaskBoardAggregate
             var goal = (board.Json["goalBindings"] as JsonObject)?[goalId] as JsonObject;
             var isRoot = goal is not null && Text(goal, "rootTaskId") == task.TaskId;
             if (isRoot && incoming.Packet?.Goal != Text(goal!, "purpose")) return Error(GrantInvalid, new { reason = "immutable goal" });
-            if (isRoot && incoming.State == "completed" && task.Workflow?.State != "completed" && (context.ActingParticipant is not { } owner || owner.SessionId != context.SessionId || owner.RepositoryId != context.Repository || owner.ParticipantId != Text(goal!, "ownerParticipantId"))) return Error(SessionDenied);
-            if (GoalAuthority.Problem(board, incoming, context.ActingParticipant, context.SessionId, context.Now) is { } goalProblem) return Error(GrantInvalid, new { reason = goalProblem });
+            var goalProblem = GoalAuthority.Problem(board, incoming, context.ActingParticipant, context.SessionId, context.Now);
+            // The goal no longer grants anything (expired, revoked, root completed, binding gone): only the caller's membership is not the problem.
+            var goalEnded = goalProblem is not null and not "participant";
+            if (isRoot && incoming.State == "completed" && task.Workflow?.State != "completed" && !goalEnded && !context.Caller.IsAdministrator
+                && (context.ActingParticipant is not { } owner || owner.SessionId != context.SessionId || owner.RepositoryId != context.Repository || owner.ParticipantId != Text(goal!, "ownerParticipantId"))) return Error(SessionDenied);
+            // Winding a goal-bound task down (blocked or completed under its unchanged binding) uses none of the goal's authority, so it stays
+            // possible once the goal ended, for an administrator's recovery, and for the session holding the claim. Reopening a completed root
+            // is not winding down: it would make an ended goal live again. Ready (work under the goal) always needs the goal's authority.
+            var windingDown = pinnedRef.Length > 0 && incoming.State is "blocked" or "completed"
+                && !(isRoot && task.Workflow?.State == "completed" && incoming.State != "completed")
+                && (goalEnded || context.Caller.IsAdministrator || task.Owner.Length > 0 && task.Owner == context.SessionId);
+            if (goalProblem is not null && !windingDown) return Error(GrantInvalid, new { reason = goalProblem });
             if (incoming.State == "ready" && board.RequiresResources && !incoming.DeclaresResources) return Error(InvalidWorkflow, new { required = "packet.resources" });
             // A packet whose authorityRef names a standing grant is ready only while that grant exists, covers it and has not expired.
             if (incoming.State == "ready" && TaskWorkflow.GrantRefusal(board, incoming, context.Now) is { } grant) return grant;

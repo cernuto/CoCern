@@ -296,11 +296,14 @@ internal static partial class StandingPreferences
                 && (Flag(binding, "repositoryWide") || Strings(binding["members"]).Contains(recipient.ParticipantId, StringComparer.Ordinal));
             var owner = member && recipient!.ParticipantId == Text(binding!, "ownerParticipantId");
             var problem = root?.Workflow is { } workflow ? GoalAuthority.Problem(board, workflow, recipient, recipient?.SessionId ?? "", now) : "root";
+            // Only live goals are delivered: an expired, revoked or completed one grants nothing and would only grow every reply.
+            if (problem is not null and not "participant") continue;
             var summary = binding is not null ? GoalAuthority.PublicGoal(binding) : grant.Json["approvedGoal"]!.DeepClone().AsObject();
             summary["isMember"] = member; summary["isOwner"] = owner; summary["active"] = member && problem is null;
             goals.Add(summary);
         }
         if (goals.Count > 0) delivered["goals"] = goals;
+        else delivered.Remove("goals");
         return delivered;
     }
 
@@ -310,7 +313,7 @@ internal static partial class StandingPreferences
         var grants = standing.GrantRecords.Where(grant => grant.ExpiresAt > now && grant.Json["approvedGoal"] is null)
             .Select(grant => (JsonNode)new JsonObject { ["id"] = grant.Id(), ["scope"] = grant.Scope, ["targets"] = grant.Targets?.DeepClone(), ["expiresAt"] = grant.ExpiresAtText });
         var delivered = new JsonObject { ["revision"] = standing.Revision, ["lines"] = new JsonArray(lines.ToArray()), ["grants"] = new JsonArray(grants.ToArray()) };
-        var goals = standing.GrantRecords.Where(grant => grant.Json["approvedGoal"] is JsonObject).Select(grant =>
+        var goals = standing.GrantRecords.Where(grant => grant.ExpiresAt > now && grant.Json["approvedGoal"] is JsonObject).Select(grant =>
         {
             var summary = grant.Json["approvedGoal"]!.DeepClone().AsObject();
             summary["isMember"] = false; summary["isOwner"] = false; summary["active"] = false;

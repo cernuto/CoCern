@@ -18,12 +18,27 @@ public static class GoalOrderDelivery
 
     internal static void Queue(AggregateContext context, string session, AttentionContent item, string orderId, long run)
     {
-        var boardId = Text(context.Args, "boardId", "default");
+        var boardId = BoardIdOf(context);
         var raise = new AttentionRaise(context.Repository, item with { BoardId = boardId }, orderId, run);
         var payload = new JsonObject { ["repositoryId"] = context.Repository, ["boardId"] = boardId, ["boardKey"] = context.Key, ["targetSession"] = session, ["orderId"] = orderId, ["run"] = run, ["taskId"] = item.TaskId, ["raise"] = raise.ToJson() };
         var identity = new JsonArray(context.Key, orderId, run, session, item.TaskId).ToJsonString();
         payload["requestId"] = "goal-order-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(identity)));
         context.Emit(AggregateKinds.Control, AggregateKinds.ControlKey, VerifyOperation, payload);
+    }
+
+    /// <summary>
+    /// The board the order ran on, read from its aggregate key (<see cref="AggregateKinds.BoardKey"/>), not from the trigger's arguments: an
+    /// internal trigger need not name its board, and a wrong one would mislabel the offer and lose its failure accounting.
+    /// </summary>
+    private static string BoardIdOf(AggregateContext context)
+    {
+        var prefix = Uri.EscapeDataString(context.Repository) + "/";
+        if (context.Key.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            var boardId = Uri.UnescapeDataString(context.Key[prefix.Length..]);
+            if (boardId.Length > 0 && AggregateKinds.BoardKey(context.Repository, boardId) == context.Key) return boardId;
+        }
+        return Text(context.Args, "boardId", AggregateKinds.DefaultBoard);
     }
 
     private static void Failed(AggregateContext context, string reason)

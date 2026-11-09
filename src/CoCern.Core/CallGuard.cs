@@ -76,13 +76,22 @@ internal sealed class CallGuard(Aggregates aggregates, string incarnation, Func<
             tool != RelayTools.SessionOpen && Text(args, "sessionToken").Length > 0;
         if (direct && actorId.Length > 0 && (Text(args, "sessionId") != actorId || Text(args, "sessionToken") != actorToken))
             return (call, Error(SessionDenied));
+        var actorProven = false;
+        RelayReply? verified = null;
+        var proof = direct ? args : new JsonObject { ["repositoryId"] = Text(args, "repositoryId"), ["sessionId"] = actorId,
+            ["sessionToken"] = actorToken, ["hubIncarnation"] = Text(args, "hubIncarnation") };
         if (direct || actorId.Length > 0)
         {
-            var proof = direct ? args : new JsonObject { ["repositoryId"] = Text(args, "repositoryId"), ["sessionId"] = actorId,
-                ["sessionToken"] = actorToken, ["hubIncarnation"] = Text(args, "hubIncarnation") };
-            var verified = await VerifySessionAsync(caller, proof);
-            if (!verified.Ok) return (call, verified);
-            var session = Aggregates.Parse(verified);
+            verified = await VerifySessionAsync(caller, proof);
+            // The call's own session must verify. An acting handle the adapter merely remembered may have closed or expired since: that is
+            // SessionUnknown, not a forgery (a wrong token or another principal is SessionDenied), so the call goes on as if it proved nothing,
+            // with no acting participant, and whatever needs one still refuses on its own.
+            if (!verified.Ok && (direct || verified.Code != SessionUnknown)) return (call, verified);
+            actorProven = verified.Ok;
+        }
+        if (actorProven)
+        {
+            var session = Aggregates.Parse(verified!);
             var participant = Text(session, NativeParticipant.Id);
             session.Remove(NativeParticipant.Id);
             var sessionId = Text(proof, "sessionId");
@@ -104,7 +113,7 @@ internal sealed class CallGuard(Aggregates aggregates, string incarnation, Func<
             if (trace is not null) { trace.SessionId = sessionId; trace.Role = call.Controls.StatusDetail && tool == RelayTools.GetStatus ? null : Text(session, "role"); }
         }
         if (tool is RelayTools.TaskClaim or RelayTools.ClaimAcquire or RelayTools.ActionBegin && await PausedAsync(caller, args) is { } paused) return (call, paused);
-        return call.Definition.Audited && caller.IsAdministrator && actorId.Length > 0 ? await ActingAsync(call, actorId) : (call, null);
+        return call.Definition.Audited && caller.IsAdministrator && actorId.Length > 0 ? await ActingAsync(call, actorId, actorProven) : (call, null);
     }
 
     private static RelayReply? ProfileRefusal(RelayCall call, JsonObject session)
@@ -119,19 +128,20 @@ internal sealed class CallGuard(Aggregates aggregates, string incarnation, Func<
 
     /// <summary>
     /// A proven administrative actor is checked against the current manager seat. This attribution never grants authority;
-    /// the credential and aggregates still enforce their own authorization.
+    /// the credential and aggregates still enforce their own authorization. A handle that closed or expired (<paramref name="proven"/> false)
+    /// still meets the revocation fence, but proves nothing: it is not stamped as the acting session and gets no manager generation.
     /// </summary>
-    private async Task<(RelayCall Call, RelayReply? Refusal)> ActingAsync(RelayCall call, string acting)
+    private async Task<(RelayCall Call, RelayReply? Refusal)> ActingAsync(RelayCall call, string acting, bool proven)
     {
         var args = call.Args;
         var repository = Text(args, "repositoryId");
-        var proven = call;
         var standing = await aggregates.Request(AggregateKinds.ControlKey, call.Caller, new ManagerStandingQuery(repository, acting));
-        if (!standing.Ok) return (proven, standing);
+        if (!standing.Ok) return (call, standing);
         var seat = Aggregates.Parse(standing);
-        if (IsTrue(seat, "revoked")) return (proven, Error(ManagerRevoked, new { currentGeneration = Number(seat, "generation") }));
+        if (IsTrue(seat, "revoked")) return (call, Error(ManagerRevoked, new { currentGeneration = Number(seat, "generation") }));
+        if (!proven) return (call, null);
         if (call.Tool == RelayTools.ControlRequest) args[ServerArguments.ActingSession] = acting;
-        return (proven with { ManagerGeneration = IsTrue(seat, "manager") ? Number(seat, "generation") : null }, null);
+        return (call with { ManagerGeneration = IsTrue(seat, "manager") ? Number(seat, "generation") : null }, null);
     }
 
     /// <summary>The session's own check of its handle: its record when the handle is valid, else the refusal (<c>SessionDenied</c> without one).</summary>

@@ -23,7 +23,7 @@ internal static partial class StandingPreferences
         var all = args["participants"] is JsonValue value && value.TryGetValue<string>(out var mode) && mode == "repository";
         var members = context.GoalParticipants;
         if (!all && (args["participants"] is not JsonArray selectors || selectors.Count == 0 || members is null || members.Count != selectors.Count || members.Count > RelayLimits.MaxGrantTargets)) return Invalid("participants");
-        if (!all && (members!.Any(member => member.RepositoryId != context.Repository || member.ParticipantId.Length == 0) || members.Select(member => member.ParticipantId).Distinct(StringComparer.Ordinal).Count() != members.Count || !members.Any(member => member.ParticipantId == actor.ParticipantId))) return Invalid("participants");
+        if (!all && members is not null && (members.Any(member => member.RepositoryId != context.Repository || member.ParticipantId.Length == 0) || members.Select(member => member.ParticipantId).Distinct(StringComparer.Ordinal).Count() != members.Count || !members.Any(member => member.ParticipantId == actor.ParticipantId))) return Invalid("participants");
         if (all && members is not null) return Invalid("participants");
         var expiryText = Text(args, "expiresAt");
         if (!(expiryText.EndsWith("Z", StringComparison.OrdinalIgnoreCase) || expiryText.EndsWith("+00:00", StringComparison.Ordinal)) || !DateTimeOffset.TryParse(expiryText, CultureInfo.InvariantCulture, DateTimeStyles.None, out var expires) || expires.Offset != TimeSpan.Zero || expires <= context.Now) return Invalid("expiresAt");
@@ -32,6 +32,7 @@ internal static partial class StandingPreferences
         if (!ExpectedVersionMatches(args, task.Version)) return VersionConflict(task.Version);
         if (task.Workflow is not { } workflow || workflow.State == "completed" || workflow.Packet is not { } packet || string.IsNullOrWhiteSpace(packet.Goal) || packet.AuthorityRef.StartsWith(GrantPrefix, StringComparison.Ordinal) || task.Json["goalAuthorityRef"] is not null) return Error(InvalidWorkflow);
         var bindings = board.Json["goalBindings"] as JsonObject;
+        if ((bindings?.Count ?? 0) >= RelayLimits.MaxRecords) GoalAuthority.PruneEnded(board, context.Now);
         if ((bindings?.Count ?? 0) >= RelayLimits.MaxRecords) return Error(CapacityExceeded);
         var current = board.Standing ?? new StandingState(new JsonObject());
         var next = new StandingState(current.Json.DeepClone().AsObject());
@@ -90,6 +91,25 @@ internal static class GoalAuthority
         if (actor is null || actor.SessionId != session || session.Length == 0 || actor.RepositoryId != board.RepositoryId || actor.ParticipantId.Length == 0) return "participant";
         if (!Flag(goal, "repositoryWide") && !Strings(goal["members"]).Contains(actor.ParticipantId, StringComparer.Ordinal)) return "participant";
         return null;
+    }
+
+    /// <summary>
+    /// Drops the private bindings of goals that can never grant again (grant gone, expired or replaced, root missing or completed) once no
+    /// unfinished task still names them. A task still pinned to a dropped binding stays refused (<c>binding_unavailable</c>), and grant IDs
+    /// are never reused, so pruning frees capacity without reviving or widening any goal.
+    /// </summary>
+    public static void PruneEnded(BoardState board, DateTimeOffset now)
+    {
+        if (board.Json["goalBindings"] is not JsonObject bindings) return;
+        foreach (var (id, node) in bindings.ToArray())
+        {
+            if (node is not JsonObject goal) continue;
+            var grant = board.Standing?.Grant(id);
+            var root = board.Task(Text(goal, "rootTaskId"));
+            var ended = grant is null || grant.ExpiresAt <= now || !JsonNode.DeepEquals(grant.Json["approvedGoal"], PublicGoal(goal)) || root?.Workflow is not { } workflow || workflow.State == "completed";
+            var reference = StandingPreferences.GrantPrefix + id;
+            if (ended && !board.Tasks.Any(task => Text(task.Json, "goalAuthorityRef") == reference && task.Workflow?.State != "completed")) bindings.Remove(id);
+        }
     }
 }
 
