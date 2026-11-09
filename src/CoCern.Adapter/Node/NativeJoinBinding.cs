@@ -323,6 +323,27 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
         return true;
     }
 
+    // Only SessionHandoff's authenticated-open boundary calls this, after the unchanged frozen open was answered with a session
+    // other than the referenced one. The frozen arguments stay; only the reference moves, and only this binding's own dead handle is retired.
+    internal bool Supersede(SessionHandle handle, string previousSessionId, bool retirePrevious)
+    {
+        CheckLease();
+        if (currentSessionId is null || currentSessionId != previousSessionId || previousSessionId == handle.SessionId) return false;
+        var saved = OwnedHandle(handle.SessionId);
+        if (saved is null || saved.SessionToken != handle.SessionToken) return false;
+        SessionHandle? retired = null;
+        try { retired = OwnedHandle(previousSessionId); }
+        catch (IOException) { } // An unverifiable old file is not this binding's to remove; leave it unreferenced.
+        Write(StatePath, BindingKey, arguments, handle.SessionId, resolution);
+        currentSessionId = handle.SessionId;
+        if (retirePrevious && retired is not null)
+        {
+            try { File.Delete(NodeState.SessionHandlePath(Folder, previousSessionId)); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { } // The reference already moved; an unreferenced native handle is inert.
+        }
+        return true;
+    }
+
     internal SessionHandle? OwnedHandle(string sessionId)
     {
         CheckLease();

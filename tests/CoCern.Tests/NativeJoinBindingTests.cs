@@ -173,6 +173,21 @@ public sealed class NativeJoinBindingTests(NativeJoinBindingTests.ProbeFixture p
             Assert.True(NodeState.IsPrivateFile(NodeState.SessionHandlePath(fixture.Folder, session)));
             Assert.False(File.ReadAllText(statePath).Contains("synthetic-session-token", StringComparison.Ordinal));
             Assert.False(JsonSerializer.Serialize(binding.CurrentHandle).Contains("nativeBindingKey", StringComparison.OrdinalIgnoreCase));
+            // A returned session whose handle another binding owns is still a conflict and leaves the reference alone.
+            var foreign = Guid.NewGuid().ToString("N");
+            NodeState.WriteSessionHandle(fixture.Folder, binding.CurrentHandle! with { SessionId = foreign, NativeBindingKey = new string('0', 64) });
+            Assert.False(await Open(handoff, binding, fixture.Options, OpenReply(foreign)));
+            Assert.Equal(session, binding.CurrentHandleReference);
+            File.Delete(NodeState.SessionHandlePath(fixture.Folder, foreign));
+            // The hub lost its replay record (a coordination reset): the same frozen open now returns a new session. The binding moves and the dead handle retires.
+            var arguments = binding.FrozenOpenArguments.GetRawText();
+            var replacement = Guid.NewGuid().ToString("N");
+            Assert.True(await Open(handoff, binding, fixture.Options, OpenReply(replacement)));
+            Assert.Equal(replacement, binding.CurrentHandle!.SessionId);
+            Assert.Equal(binding.OwnershipKey, binding.CurrentHandle.NativeBindingKey);
+            Assert.True(arguments == binding.FrozenOpenArguments.GetRawText(), "A superseded session changed the frozen opening attempt.");
+            Assert.False(File.Exists(NodeState.SessionHandlePath(fixture.Folder, session)));
+            session = replacement;
         }
         await using var reopened = await fixture.Acquire();
         Assert.Equal(session, reopened.CurrentHandle!.SessionId);

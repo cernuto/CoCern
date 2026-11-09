@@ -75,6 +75,10 @@ public sealed class SessionHandoff
                 ChatLocators.Text(data, "sessionId") is not { } id || !NodeState.IsFileId(id) ||
                 ChatLocators.Text(data, "sessionToken") is not { Length: > 0 and <= 8192 } token || token.Any(char.IsControl)) return false;
             if (adoption is not null && (adoption.SessionId != id || adoption.SessionToken != token)) return false;
+            // The unchanged authenticated frozen open answered with another session: the hub no longer holds the referenced one
+            // (its request replay record is gone too), so that reference has ended and the binding moves to the session it was given.
+            var previousId = binding.CurrentHandleReference;
+            var superseding = adoption is null && previousId is not null && previousId != id;
             using var owner = Acquire(id);
             if (owner is null) return false;
             var path = NodeState.SessionHandlePath(_folder, id);
@@ -88,18 +92,26 @@ public sealed class SessionHandoff
                     NodeState.WriteSessionHandle(_folder, previous);
                 }
                 if (previous is null || previous.SessionToken != token) return false;
-                return binding.Complete(previous);
+                // An owned handle for the returned ID with this token is an interrupted earlier move; finish it.
+                return superseding ? Supersede(binding, previous, previousId!) : binding.Complete(previous);
             }
-            if (binding.CurrentHandleReference is not null && binding.CurrentHandleReference != id) return false;
+            if (previousId is not null && previousId != id && !superseding) return false;
             var client = new ChatLocation(binding.Provider, binding.NativeId);
             // A native title is only display text and never augments the frozen proof.
             var label = NativeTitle(displayTitle) ?? (binding.Provider == CoCern.Contracts.ChatProviders.Codex ? "Codex" : "Claude");
             var handle = new SessionHandle(id, token, binding.RepositoryId, label,
                 DateTimeOffset.UtcNow, client, client) { NativeBindingKey = binding.OwnershipKey };
             NodeState.WriteSessionHandle(_folder, handle);
-            return binding.Complete(handle);
+            return superseding ? Supersede(binding, handle, previousId!) : binding.Complete(handle);
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or JsonException) { return false; }
+    }
+
+    /// <summary>Moves the binding off its ended session. The dead handle is retired only under its own restore lock; a busy one is left in place, unreferenced.</summary>
+    private bool Supersede(NativeJoinBinding binding, SessionHandle handle, string previousId)
+    {
+        using var retired = Acquire(previousId);
+        return binding.Supersede(handle, previousId, retirePrevious: retired is not null);
     }
 
     /// <summary>Restores an established handle only after its authenticated tool call succeeded; never opens a replacement session.</summary>
