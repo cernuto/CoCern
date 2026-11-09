@@ -94,7 +94,8 @@ public interface IMachineDirectory
     /// <summary>Records the machine's announced chats. The machine ID always comes from <paramref name="machine"/>, never from the announcement.</summary>
     Task<RelayReply> AnnounceAsync(MachineIdentity machine, JsonObject announcement, CancellationToken ct);
 
-    Task<RelayReply> DirectoryAsync(IReadOnlyList<string> repositories, CancellationToken ct);
+    /// <param name="hubIncarnation">This hub's incarnation, so a hub-local chat's waiting presence reads as current; without it every presence reads as stale.</param>
+    Task<RelayReply> DirectoryAsync(IReadOnlyList<string> repositories, CancellationToken ct, string? hubIncarnation = null);
 
     /// <summary>Which of <paramref name="sessionIds"/> the machine's principal opened in <paramref name="repository"/>, read from the control session directory; null when it cannot be read now.</summary>
     Task<IReadOnlySet<string>?> OwnedSessionsAsync(MachineIdentity machine, string repository, IReadOnlyCollection<string> sessionIds, CancellationToken ct);
@@ -181,7 +182,7 @@ public sealed class MachineDirectory(IGrainFactory grains, TimeProvider? clock =
     /// Open registered chats in <paramref name="repositories"/>, enriched by announced native routes. Registration alone never implies
     /// reachability. An unavailable source leaves the other source visible, with the result marked incomplete.
     /// </summary>
-    public async Task<RelayReply> DirectoryAsync(IReadOnlyList<string> repositories, CancellationToken ct)
+    public async Task<RelayReply> DirectoryAsync(IReadOnlyList<string> repositories, CancellationToken ct, string? hubIncarnation = null)
     {
         RelayReply reply;
         JsonObject? announced = null;
@@ -199,7 +200,7 @@ public sealed class MachineDirectory(IGrainFactory grains, TimeProvider? clock =
         foreach (var repository in repositories.Distinct(StringComparer.Ordinal))
         {
             ct.ThrowIfCancellationRequested();
-            var (workers, complete, available) = await DirectoryWorkersAsync(repository, ct);
+            var (workers, complete, available) = await DirectoryWorkersAsync(repository, hubIncarnation, ct);
             anySource |= available;
             incomplete |= !complete;
             var open = workers.Select(item => Field(item, "sessionId")).OfType<string>().ToHashSet(StringComparer.Ordinal);
@@ -225,7 +226,7 @@ public sealed class MachineDirectory(IGrainFactory grains, TimeProvider? clock =
     }
 
     /// <summary>Read the existing bounded worker pages; only a complete listing can prove an announced session has closed.</summary>
-    private async Task<(List<JsonObject> Workers, bool Complete, bool Available)> DirectoryWorkersAsync(string repository, CancellationToken ct)
+    private async Task<(List<JsonObject> Workers, bool Complete, bool Available)> DirectoryWorkersAsync(string repository, string? hubIncarnation, CancellationToken ct)
     {
         var workers = new List<JsonObject>();
         var cursor = 0;
@@ -235,7 +236,10 @@ public sealed class MachineDirectory(IGrainFactory grains, TimeProvider? clock =
             while (cursor < RelayLimits.MaxRecords)
             {
                 ct.ThrowIfCancellationRequested();
+                // worker_list judges presence stale when it is from another incarnation than the one in its arguments; CallGuard stamps it on
+                // public calls, and this internal read must give it too or a hub-local waiter's fresh "waiting" presence reads as stale.
                 var args = new JsonObject { ["repositoryId"] = repository, ["cursor"] = cursor, ["limit"] = RelayLimits.MaxPageSize, ["includeStale"] = true };
+                if (!string.IsNullOrEmpty(hubIncarnation)) args["hubIncarnation"] = hubIncarnation;
                 var found = await grains.GetGrain<IControlGrain>(AggregateKinds.ControlKey).ExecuteAsync(new RelayCaller(Internal.PrincipalId, false, [repository], true), RelayTools.WorkerList, args.ToJsonString());
                 if (!found.Ok || JsonNode.Parse(found.DataJson) is not JsonObject data || data["items"] is not JsonArray page) break;
                 available = true;

@@ -53,8 +53,8 @@ public sealed class RelayApplication : IRelayApplication
         router = new(aggregates, claims,
             new SessionTools(aggregates, standing, attentionOptions, anomaly, docTools, searchOn: search is not null, analyticsOn: analytics is not null && !ReferenceEquals(analytics, AnalyticsTool.Off)),
             new StatusTools(aggregates, standing, attentionOptions, orders, telemetry),
-            new MessageTools(aggregates, machineDirectory, attentionOptions, telemetry),
-            new PeerTools(aggregates, machineDirectory),
+            new MessageTools(aggregates, machineDirectory, attentionOptions, telemetry, incarnation),
+            new PeerTools(aggregates, machineDirectory, incarnation),
             new SearchTools(search, analytics ?? AnalyticsTool.Off),
             docTools, admin ?? AdminTools.Off);
         addOns = new(aggregates, claims, standing, guard, tokenStatus, attentionOptions, search, telemetry, counter, tokenOptions ?? new(), observations);

@@ -12,7 +12,7 @@ namespace CoCern.Core;
 /// <c>peers</c>, for native chats: this repository's chats, or the one a name or a choice's ref means. Every public reply is built field by field
 /// from an allow-list, so no participant ID, generation or request can reach one. Raw clients keep <c>worker_list</c> and <c>chat_directory</c>.
 /// </summary>
-internal sealed class PeerTools(Aggregates aggregates, IMachineDirectory directory)
+internal sealed class PeerTools(Aggregates aggregates, IMachineDirectory directory, string? hubIncarnation = null)
 {
     private const string NativeOnly = "peers answers native chats only; use chat_directory.";
 
@@ -43,7 +43,7 @@ internal sealed class PeerTools(Aggregates aggregates, IMachineDirectory directo
     /// <summary>The session IDs with a live announced wake route now. An unavailable directory reads as none, which <c>state</c> reports as unconfirmed.</summary>
     private async Task<IReadOnlySet<string>> ReachableAsync(string repository, CancellationToken cancellationToken)
     {
-        var reply = await directory.DirectoryAsync([repository], cancellationToken);
+        var reply = await directory.DirectoryAsync([repository], cancellationToken, hubIncarnation);
         if (!reply.Ok || Aggregates.Parse(reply)["items"] is not JsonArray items) return new HashSet<string>();
         return items.OfType<JsonObject>().Where(item => IsTrue(item, "reachable")).Select(item => Text(item, "relaySessionId")).Where(id => id.Length > 0).ToHashSet(StringComparer.Ordinal);
     }

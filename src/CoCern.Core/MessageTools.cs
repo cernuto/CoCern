@@ -12,7 +12,7 @@ namespace CoCern.Core;
 /// Reaching other chats and answering the hub: <c>send_message</c>, the directory of chats and PCs (<c>chat_directory</c>, and
 /// <c>control_request</c>'s <c>revoke_machine</c>), and <c>attention_respond</c>, a chat's answer to an attention offer.
 /// </summary>
-internal sealed class MessageTools(Aggregates aggregates, IMachineDirectory directory, AttentionOptions attention, CallTelemetry? telemetry)
+internal sealed class MessageTools(Aggregates aggregates, IMachineDirectory directory, AttentionOptions attention, CallTelemetry? telemetry, string? hubIncarnation = null)
 {
     /// <summary>
     /// The directory first answers whether the caller may reach the repository, as a small read, and whether the session the guard just verified holds
@@ -45,7 +45,7 @@ internal sealed class MessageTools(Aggregates aggregates, IMachineDirectory dire
         using var lookup = new CancellationTokenSource(TimeSpan.FromSeconds(1));
         try
         {
-            var listed = await directory.DirectoryAsync([repository], lookup.Token).WaitAsync(lookup.Token);
+            var listed = await directory.DirectoryAsync([repository], lookup.Token, hubIncarnation).WaitAsync(lookup.Token);
             if (listed.Ok && Aggregates.Parse(listed) is { } routes && routes["items"] is JsonArray items)
             {
                 var row = items.OfType<JsonObject>().FirstOrDefault(item => Text(item, "relaySessionId") == recipient);
@@ -62,7 +62,7 @@ internal sealed class MessageTools(Aggregates aggregates, IMachineDirectory dire
     }
 
     /// <summary>The chats on every PC, for the call's repository.</summary>
-    public Task<RelayReply> DirectoryAsync(JsonObject args) => directory.DirectoryAsync([Text(args, "repositoryId")], CancellationToken.None);
+    public Task<RelayReply> DirectoryAsync(JsonObject args) => directory.DirectoryAsync([Text(args, "repositoryId")], CancellationToken.None, hubIncarnation);
 
     /// <summary>Revoking a machine is a discovery concern, not a control-aggregate one: it needs the machine ID and is refused for non-administrators by the discovery grain.</summary>
     public Task<RelayReply> RevokeMachineAsync(RelayCaller caller, JsonObject args) =>
