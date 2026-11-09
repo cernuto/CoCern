@@ -13,7 +13,7 @@ namespace CoCern.Core;
 /// </summary>
 internal static class EffectDelivery
 {
-    public enum Failure { Retry, Drop, DropAsFailedOrderRun, DropAndCount }
+    public enum Failure { Retry, Drop, DropAsFailedOrderRun, DropAndCount, DropAsDeferredOrderFailure }
 
     /// <summary>With attention off, items are neither stored nor routed; with standing orders off, order effects are dropped.</summary>
     public static bool Dropped(DurableEffect effect, AttentionOptions? attention, bool ordersOn) =>
@@ -46,6 +46,15 @@ internal static class EffectDelivery
         // The hub blocks each lock itself when an action begins; the board's own copy refused as busy or unclaimed never runs, and would otherwise retry forever.
         if (effect.Operation == ActionBlock.Operation && ActionBlock.SettledBy.Contains(code)) return Failure.Drop;
         if (IsTransient(code)) return Failure.Retry;
+        if (ordersOn && (effect.Operation is GoalOrderDelivery.VerifyOperation or GoalOrderDelivery.BoardOperation or GoalOrderDelivery.DeliverOperation)
+            && (sourceKind is AggregateKinds.Board or AggregateKinds.Control)
+            && JsonFields.Text(payload, "boardKey") is { Length: > 0 } deferredBoard && deferredBoard == Aggregates.BoardKey(payload)
+            && JsonFields.Text(payload, "orderId").Length > 0 && JsonFields.Number(payload, "run") > 0)
+            return Failure.DropAsDeferredOrderFailure;
+        if (ordersOn && sourceKind == AggregateKinds.Control && effect.TargetKind == AggregateKinds.Session && effect.Operation == AttentionRaise.Operation
+            && JsonFields.Text(payload, "__goalOrderBoardKey") is { Length: > 0 } boardKey && boardKey == Aggregates.BoardKey(payload)
+            && JsonFields.Text(payload, AttentionRaise.OrderIdKey).Length > 0 && JsonFields.Number(payload, AttentionRaise.OrderRunKey) > 0)
+            return Failure.DropAsDeferredOrderFailure;
         var delivery = EffectMessages.DeliveryOf(effect.Operation)
             ?? (Operations.IsAttention(effect.Operation) || Operations.IsOrder(effect.Operation) ? DeliveryClass.Advisory : DeliveryClass.Retry);
         return delivery switch

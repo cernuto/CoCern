@@ -18,27 +18,30 @@ public sealed partial class SqliteStore
     // effect; page through those candidates until the domain finds eligible terms, so they cannot hide a later board.
     private const string PendingStandingQuery = """
         WITH boards AS (
-            SELECT grain_key, json_extract(json_extract(payload, '$.Value.Json'), '$.standing') AS standing
+            SELECT grain_key, json_extract(payload, '$.Value.Json') AS board_json, json_extract(json_extract(payload, '$.Value.Json'), '$.standing') AS standing
             FROM grain_state
             WHERE state_name='board' AND grain_type='cocern.board' AND json_valid(payload)
                 AND substr(grain_key, 1, length($prefix)) = $prefix
         ), pending AS (
-            SELECT grain_key, standing, proposal.key AS proposal_id, json_extract(proposal.value, '$.proposedAt') AS proposed_at
+            SELECT grain_key, board_json, standing, proposal.key AS proposal_id, json_extract(proposal.value, '$.proposedAt') AS proposed_at
             FROM boards, json_each(CASE WHEN json_valid(standing) THEN standing ELSE '{}' END, '$.proposals') AS proposal
             WHERE length(standing) <= $maximum AND proposal.type = 'object'
-                AND json_extract(proposal.value, '$.goalTaskId') IS NULL
                 AND (coalesce(json_extract(proposal.value, '$.presentedBy'), '') = ''
                     OR (coalesce(json_extract(proposal.value, '$.presentedRevision'), 0) BETWEEN 0 AND coalesce(json_extract(standing, '$.revision'), 0)
-                        AND (json_extract(proposal.value, '$.presentedRevision') != coalesce(json_extract(standing, '$.revision'), 0)
+                        AND (json_extract(proposal.value, '$.goalTaskId') IS NOT NULL
+                            OR json_extract(proposal.value, '$.presentedRevision') != coalesce(json_extract(standing, '$.revision'), 0)
                             OR ($request != '' AND json_extract(proposal.value, '$.presentedBy') = $session
                                 AND json_extract(proposal.value, '$.presentedPrincipal') = $principal
                                 AND json_extract(proposal.value, '$.presentedRequest') = $request))))
         )
-        SELECT grain_key, standing, proposal_id FROM pending
+        SELECT grain_key, standing, proposal_id, board_json FROM pending
         ORDER BY proposed_at, grain_key, proposal_id LIMIT $limit OFFSET $offset;
         """;
 
-    public async Task<IReadOnlyList<StandingPresentation>?> ReadPendingStandingAsync(string repositoryId, string principalId, string sessionId, string requestCorrelation, CancellationToken cancellationToken = default)
+    public Task<IReadOnlyList<StandingPresentation>?> ReadPendingStandingAsync(string repositoryId, string principalId, string sessionId, string requestCorrelation, CancellationToken cancellationToken = default) =>
+        ReadPendingStandingForParticipantAsync(repositoryId, principalId, sessionId, requestCorrelation, null, cancellationToken);
+
+    public async Task<IReadOnlyList<StandingPresentation>?> ReadPendingStandingForParticipantAsync(string repositoryId, string principalId, string sessionId, string requestCorrelation, VerifiedNativeParticipant? participant, CancellationToken cancellationToken = default)
     {
         // A human-active boundary must serialize with ordinary session writes, not lose its one opportunity to a busy snapshot.
         await _gate.WaitAsync(cancellationToken);
@@ -66,8 +69,8 @@ public sealed partial class SqliteStore
                     try
                     {
                         var board = Uri.UnescapeDataString(reader.GetString(0)[prefix.Length..]);
-                        var standing = JsonNode.Parse(reader.GetString(1))!.AsObject();
-                        var candidate = StandingPresentation.ReadPending(standing, board, reader.GetString(2), principalId, sessionId, requestCorrelation);
+                        var document = JsonNode.Parse(reader.GetString(3))!.AsObject();
+                        var candidate = GoalPresentationCandidates.ReadPending(document, board, reader.GetString(2), principalId, sessionId, requestCorrelation, participant);
                         if (candidate is not null && Encoding.UTF8.GetByteCount(candidate.SummaryJson) <= RelayLimits.MaxAttentionOfferBytes) result.Add(candidate);
                     }
                     catch (Exception exception) when (exception is JsonException or InvalidOperationException or FormatException) { }

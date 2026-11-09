@@ -45,6 +45,19 @@ public sealed record PeerList(string RepositoryId, string CallerParticipantId, s
     }
 }
 
+/// <summary>Internal authenticated lookup of one current native session.</summary>
+public sealed record NativeCurrentQuery(string RepositoryId, string SessionId, string SessionToken, string ParticipantId) : IInternalRequest<NativeCurrentQuery>
+{
+    public static string Operation => Operations.NativeCurrent;
+    public static string TargetKind => AggregateKinds.Control;
+    public JsonObject ToJson() => new() { ["repositoryId"] = RepositoryId, ["sessionId"] = SessionId, ["sessionToken"] = SessionToken, ["participantId"] = ParticipantId };
+    public static Decoding<NativeCurrentQuery> Decode(JsonObject payload)
+    {
+        var read = new MessageReader(payload);
+        return read.Result(new NativeCurrentQuery(read.Text("repositoryId"), read.Text("sessionId"), read.Text("sessionToken"), read.Text("participantId")));
+    }
+}
+
 /// <summary>
 /// One chat as the directory tells the hub about it. <see cref="SessionId"/> is the row's current session: the hub joins it to wake routes, and
 /// it is a choice's <c>ref</c>. This record holds no participant ID, so no projection of it can show one.

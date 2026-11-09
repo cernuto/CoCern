@@ -90,6 +90,12 @@ internal sealed class ClaimComposer(Aggregates aggregates)
             grant.Remove("previousClaimFor");
             grant["resourceId"] = resource; grants.Add(grant);
         }
+        var authority = await aggregates.Board(caller, CoordinationStateMachine.GoalExecutionProbe, args);
+        if (!authority.Ok)
+        {
+            await RollBackClaimAsync(caller, args, acquired, held, task);
+            return authority;
+        }
         var data = Aggregates.Parse(task); data["grants"] = grants; data["complete"] = true;
         return Ok(data, task.Version);
     }
@@ -209,6 +215,14 @@ internal sealed class ClaimComposer(Aggregates aggregates)
         }
         var current = await aggregates.Board(caller, RelayTools.TaskGet, args);
         if (!current.Ok || current.Version != result.Version) return Error(ActionChanged, new { actionId, replayAllowed = false });
+        var authority = await aggregates.Board(caller, CoordinationStateMachine.GoalExecutionProbe, args);
+        if (!authority.Ok)
+        {
+            foreach (var placed in resources)
+                try { await aggregates.Call(ActionUnblock.TargetKind, placed, caller, ActionUnblock.Operation, new ActionUnblock(repository, actionId, actionKey, sessionId).ToJson()); }
+                catch (Exception exception) when (exception is not OperationCanceledException) { }
+            return Error(ActionPending, new { actionId, replayAllowed = false, reason = authority.Code, next = "report this action with outcome canceled, then retry" });
+        }
         return result;
     }
 

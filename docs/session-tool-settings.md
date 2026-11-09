@@ -1,0 +1,13 @@
+# Per-chat tool settings
+
+The source supports hub-owned tool profiles for an individual open chat. This work has not been built, tested or deployed; existing running installations retain their current behavior until an authorized deployment.
+
+An authenticated administrator can use `session_tool_settings_set` with the exact `repositoryId`, `targetSessionId`, selected `profile`, current `expectedVersion` and exact direct `humanWords`. The profiles are `worker`, `chat`, `diagnostics` and `admin`. A revision conflict requires rereading the setting and reviewing the change; it is never automatically retried with a newer version. The session retains the original words, administrator principal, timestamp and revision in its bounded audit.
+
+The dashboard's selected-session inspector provides the same read and explicit save operation. Reads require administrator access to the exact repository/session, expose no target credential and do not make an idle chat appear active. Save uses the existing authenticated, same-origin dashboard boundary and ordinary tool routing.
+
+A profile narrows the tools available under the connection's existing credential. Selecting `admin` never upgrades a worker credential, and a reported manager role supplies no authority. The hub checks the verified acting chat on every session-originated operation. Operation targets remain separate from that actor. Settlement and own-status access remain available so changing a profile cannot strand a claim or action.
+
+Until an explicit hub setting is selected, an existing adapter retains its configured narrowing. Standard and native adapters attach their own exact private acting-session proof after joining; public arguments cannot choose another actor. Standalone legacy calls without a session remain governed by their credential and do not inherit a chat's profile or native identity.
+
+Adapters consume authenticated profile/revision metadata from real replies. The MCP tool collection advertises changes; a client that retains its old list must reconnect. Native adapters never manufacture a signed status invocation. A shared native MCP backend advertises the bounded union of observed sessions' tools, while the hub authorizes each individual call against its own chat. An idle client learns a change at its next actual invocation or reconnect. Runtime client refresh support is not claimed here.

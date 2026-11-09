@@ -66,6 +66,10 @@ internal sealed class SessionTools(Aggregates aggregates, StandingDelivery stand
         // The session closed before this open reached it: a close overtook it, or this retry replays the handle of a session closed since.
         // The chat opens a new one, as after any SessionUnknown.
         if (Aggregates.Parse(initialized)["expired"]?.GetValue<bool>() == true) return Error(SessionUnknown, new { expired = true, reopen = RelayTools.SessionOpen });
+        var settingsArgs = new JsonObject { ["sessionId"] = record.SessionId, ["sessionToken"] = record.SessionToken, ["repositoryId"] = record.RepositoryId };
+        var settings = await aggregates.Session(caller, RelayTools.GetStatus, settingsArgs);
+        if (!settings.Ok) return settings;
+        data["toolSettings"] = Aggregates.Parse(settings)["toolSettings"]?.DeepClone();
         // The queued initialization remains a retryable durable effect and deduplicates at its recipient.
         if (Text(args, "taskId").Length > 0)
         {

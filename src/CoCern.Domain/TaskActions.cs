@@ -139,6 +139,7 @@ internal static class TaskActions
         var actions = task.Actions;
         TaskAction? previousAttempt = null;
         if (id.Length > MaxActionIdLength) return Error(InvalidArguments);
+        if (task.Workflow is { } goalWorkflow && GoalAuthority.Problem(board, goalWorkflow, context.ActingParticipant, session, context.Now) is { } goalProblem) return Error(GrantInvalid, new { reason = goalProblem }, version);
         if (task.Action(id) is { } prior)
         {
             if (prior.InputFingerprint != fingerprint) return Error(ActionConflict);
@@ -148,7 +149,7 @@ internal static class TaskActions
             if (Number(args, "attempt") != prior.Attempt + 1) return Error(AttemptConflict);
             previousAttempt = prior;
         }
-        if (TaskWorkflow.ExecutionRefusal(board, task, session, context.Now) is { } refusal) return refusal;
+        if (TaskWorkflow.ExecutionRefusal(board, task, session, context.Now, context.ActingParticipant) is { } refusal) return refusal;
         if (previousAttempt is not null) task.AttemptHistory.Add(previousAttempt.Json.DeepClone());
         if (task.Owner != session || task.LeaseUntil <= context.Now) return Error(ClaimRequired);
         // The task's claim must cover the packet's declared resources (it may have changed since the claim); the hub checks they are held.

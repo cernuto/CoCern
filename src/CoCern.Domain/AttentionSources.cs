@@ -41,13 +41,13 @@ internal static class AttentionSources
         if (now == "blocked" && (was != "blocked" || BlockerIds(prior) != BlockerIds(workflow)))
         {
             var first = (workflow!["blockers"] as JsonArray ?? []).OfType<JsonObject>().OrderBy(blocker => BlockerRank(Text(blocker, "kind"))).FirstOrDefault();
-            ToManagers(context, Item(AttentionKinds.Blocked) with
+            ToGoalOwnerOrManagers(context, Item(AttentionKinds.Blocked) with
             {
                 Blocker = first is null ? null : Text(first, "kind"), Note = first is null ? null : Text(first, "summary"), Blocking = Blocking(),
                 Refs = dependents.Value.Select(other => Text(other, "taskId")).ToArray()
             });
         }
-        else if (was == "blocked" && now != "blocked") ToManagers(context, Kinds(Item(AttentionKinds.Blocked), AttentionKinds.Blocked));
+        else if (was == "blocked" && now != "blocked") ToGoalOwnerOrManagers(context, Kinds(Item(AttentionKinds.Blocked), AttentionKinds.Blocked));
 
         if (failedActions.Count > 0 || abandonedActions.Count > 0 || replacedActions.Count > 0)
         {
@@ -55,20 +55,20 @@ internal static class AttentionSources
             var actions = ObjectAt(task, "actions");
             string[] Still(string status) => actions.Where(x => x.Value is JsonObject action && Text(action, "status") == status).Select(x => x.Key).Order(StringComparer.Ordinal).ToArray();
             (failedActions, abandonedActions) = (Still("failed"), Still(TaskActions.Abandoned));
-            if (failedActions.Count == 0 && abandonedActions.Count == 0) ToManagers(context, Kinds(Item(AttentionKinds.Failed), AttentionKinds.Failed));
+            if (failedActions.Count == 0 && abandonedActions.Count == 0) ToGoalOwnerOrManagers(context, Kinds(Item(AttentionKinds.Failed), AttentionKinds.Failed));
         }
         if (failedActions.Count > 0 || abandonedActions.Count > 0)
         {
             var parts = new List<string>();
             if (failedActions.Count > 0) parts.Add("action " + string.Join(", ", failedActions) + " failed");
             if (abandonedActions.Count > 0) parts.Add("action " + string.Join(", ", abandonedActions) + " abandoned by recovery; its external effects are unknown");
-            ToManagers(context, Item(AttentionKinds.Failed) with { Note = string.Join("; ", parts), Blocking = Blocking() });
+            ToGoalOwnerOrManagers(context, Item(AttentionKinds.Failed) with { Note = string.Join("; ", parts), Blocking = Blocking() });
         }
 
         if (now == "completed" && was != "completed")
         {
-            ToManagers(context, Kinds(Item(AttentionKinds.Blocked), AttentionKinds.Blocked, AttentionKinds.Failed));
-            ToManagers(context, Item(AttentionKinds.ReviewReady) with { Note = "completed with " + ((workflow!["criteria"] as JsonArray)?.Count ?? 0) + " criteria passed; review the evidence" });
+            ToGoalOwnerOrManagers(context, Kinds(Item(AttentionKinds.Blocked), AttentionKinds.Blocked, AttentionKinds.Failed));
+            ToGoalOwnerOrManagers(context, Item(AttentionKinds.ReviewReady) with { Note = "completed with " + ((workflow!["criteria"] as JsonArray)?.Count ?? 0) + " criteria passed; review the evidence" });
             // Related work and duplicate warnings were raised to the claimer; the task is closed now.
             if (Text(task, "owner") is { Length: > 0 } owner)
                 Emit(context, owner, new AttentionSelection { Subject = taskId, Kinds = [AttentionKinds.RelatedWork, AttentionKinds.DuplicateWarning], Revision = revision });
@@ -82,7 +82,7 @@ internal static class AttentionSources
                 });
             }
         }
-        else if (was == "completed" && now != "completed") ToManagers(context, Kinds(Item(AttentionKinds.ReviewReady), AttentionKinds.ReviewReady));
+        else if (was == "completed" && now != "completed") ToGoalOwnerOrManagers(context, Kinds(Item(AttentionKinds.ReviewReady), AttentionKinds.ReviewReady));
     }
 
     /// <summary>
@@ -120,7 +120,7 @@ internal static class AttentionSources
     /// the action is reported or recovered (<see cref="OnStrandedSettled"/>).
     /// </summary>
     public static void OnStranded(AggregateContext context, BoardTask task, TaskAction action, string session, long revision) =>
-        ToManagers(context, new AttentionContent
+        ToGoalOwnerOrManagers(context, new AttentionContent
         {
             Kind = AttentionKinds.Stranded, TaskId = task.TaskId, Subject = action.ActionId, Priority = AttentionWeights.PriorityLevel(task.Workflow?.Priority ?? 0),
             Note = "action " + action.ActionId + " (attempt " + action.Attempt + ") was left unresolved when session " + session + " closed; recover it with action_report and recover: true",
@@ -131,7 +131,7 @@ internal static class AttentionSources
     public static void OnStrandedSettled(AggregateContext context, string taskId, IEnumerable<string> actionIds, long revision)
     {
         foreach (var actionId in actionIds)
-            ToManagers(context, new AttentionSelection { TaskId = taskId, Subject = actionId, Kinds = [AttentionKinds.Stranded], Revision = revision });
+            ToGoalOwnerOrManagers(context, new AttentionSelection { TaskId = taskId, Subject = actionId, Kinds = [AttentionKinds.Stranded], Revision = revision });
     }
 
     /// <summary>
@@ -238,6 +238,31 @@ internal static class AttentionSources
     /// </summary>
     internal static void ToManagers(AggregateContext context, AttentionContent item) =>
         context.Send(AggregateKinds.ControlKey, AttentionRoute.Raising(ManagerRole, new AttentionRaise(context.Repository, CallBoard(context) is { } board ? item with { BoardId = board } : item), context.SessionId));
+
+    /// <summary>The route role prefix naming a goal owner's private native participant ID, resolved at the control directory.</summary>
+    internal const string GoalOwnerRole = "goal-owner:";
+
+    private static string? GoalOwner(AggregateContext context, string? taskId)
+    {
+        if (taskId is null || new BoardState(context.State).Task(taskId) is not { } task) return null;
+        var reference = Text(task.Json, "goalAuthorityRef");
+        if (!reference.StartsWith(StandingPreferences.GrantPrefix, StringComparison.Ordinal)) return null;
+        return (context.State["goalBindings"] as JsonObject)?[reference[StandingPreferences.GrantPrefix.Length..]] is JsonObject goal ? Text(goal, "ownerParticipantId") : null;
+    }
+
+    private static void ToGoalOwnerOrManagers(AggregateContext context, AttentionContent item)
+    {
+        if (GoalOwner(context, item.TaskId) is not { Length: > 0 } owner) { ToManagers(context, item); return; }
+        // The control directory falls back to the managers when the owner has no current native session; the caller is excluded only then.
+        context.Send(AggregateKinds.ControlKey, AttentionRoute.Raising(GoalOwnerRole + owner, new AttentionRaise(context.Repository, CallBoard(context) is { } board ? item with { BoardId = board } : item), context.SessionId));
+    }
+
+    private static void ToGoalOwnerOrManagers(AggregateContext context, AttentionSelection close)
+    {
+        if (GoalOwner(context, close.TaskId) is not { Length: > 0 } owner) { ToManagers(context, close); return; }
+        // The control directory closes at the owner's current session and at every manager, whichever the raise reached.
+        context.Send(AggregateKinds.ControlKey, AttentionRoute.Closing(GoalOwnerRole + owner, new AttentionClose(context.Repository, CallBoard(context) is { } board ? close with { BoardId = board } : close)));
+    }
 
     /// <summary>Closes the items <paramref name="close"/> names at every manager session in the repository, on the call's board when it names one.</summary>
     internal static void ToManagers(AggregateContext context, AttentionSelection close) =>

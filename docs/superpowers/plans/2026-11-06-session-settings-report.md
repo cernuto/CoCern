@@ -1,0 +1,27 @@
+# Session tool settings source report
+
+The source changes add durable session profile choices, tool schemas, and adapter catalog refresh. Hub dispatch/enforcement integration and runtime behavior remain unverified.
+
+## Changes
+
+- `SessionToolSettings.Set` serializes a profile change in the target session aggregate. It requires a non-internal authenticated administrator, an open session, matching authorized repository, exact expected revision, a recognized profile, and nonblank original human words of at most 1024 characters. Each change retains the administrator principal, exact words, profile, timestamp, and revision in the session audit. The audit has a hard 1000-entry limit and refuses further writes rather than discarding evidence.
+- `SessionState.Shape` declares the stored fields. `SessionAggregate.Describe` returns current profile and revision on authenticated own status and verified reads. Native adoption includes the same information. `SessionTools.OpenSessionAsync` reads the initialized session's actual settings into the open reply, including on replay.
+- `SessionToolProfiles.Allows` implements the profile and credential intersection. A null selection retains legacy narrowing; invalid explicit selections fail closed. The chat profile includes own status and session binding for recovery.
+- `ToolSurface` updates an MCP SDK primitive collection on authenticated settings and administrator ceiling. Standard calls observe open/status replies and perform a bounded own status read on activity at most once per 30 seconds. Native calls observe metadata only on real signed replies; no native invocation is synthesized. Native catalog is the deterministic union of observed sessions, with a 1024-session bound; the hub must enforce the specific session's profile. `CoordinationTools.CreateNative` offers worker tools by default and accepts explicit legacy chat/diagnostics narrowing.
+- `RelayToolCatalog` and `ToolSchemas` describe the administrator settings mutation and both disjoint `record_decision` forms, including the bounded goal participant selectors. `Program` wires the mutable collection and advertises tools list changes. `RelayForwarder` respects the collection after an explicit hub selection, while keeping startup narrowing beforehand. A settings reply explains that a client retaining its old list may need reconnection.
+- Standard and native adapters attach the exact own acting session ID and token to joined calls, except session opening, while preserving operation targets. Public acting fields are stripped. Native input is authenticated as signed before stripping, and stripped before replay admission. Standard observation and handle learning are limited to the adapter's own opened or durable handle.
+
+## Required integration
+
+- Route `session_tool_settings_set` to `aggregates.Call(AggregateKinds.Session, targetSessionId, caller, SessionToolSettings.SetOperation, args)`. The mutation needs the normal request replay and audit handling. Ensure the actual credential-derived administrator reaches the aggregate without being transformed into an internal caller.
+- Enforce `SessionToolProfiles.Allows(profile, toolName, caller.IsAdministrator)` against the settings from the authenticated session verification on every session call. Never take this value from client arguments. Preserve bootstrap and settlement access as needed without weakening authorization.
+- The router now returns authenticated metadata as `{ toolSettingsSessionId, toolSettingsAdministrator, toolSettings: { profile, revision, explicit } }` on session open and successful verified own-session replies. The adapter consumes and removes the two private routing fields before returning MCP content. The aggregate also returns `toolSettings` in open and status replies.
+- The hub must verify the acting proof on every session-originated call and apply its profile. A call that carries both direct session and acting proofs must not use a mismatched identity to bypass the actor's profile. Unbound raw calls remain credential-scoped bootstrap/legacy calls; a session profile does not revoke a standalone credential.
+
+## Static review and limits
+
+Roslyn compiler diagnostics reported no errors in the Contracts or Adapter projects at the last check. Concurrent integration work produced errors in Domain and Core that were reported to the integration owner. No tests, builds, packages, deployments, process restarts, live client changes, or live experiments were performed. Visual Studio remains on the unrelated M3TS-SNX solution; Roslyn targeted CoCern.
+
+The native surface is shared by its MCP server: if one server serves more than one authenticated chat, its list is the union of observed sessions, not a grant to each session. Hub per-call enforcement is mandatory. Updates to an idle client are not pushed by this source alone; a later call or reconnect is needed. The installed SDK documentation describes list-change notifications on collection changes, including session broadcasts for older stdio clients. Actual client refresh acceptance requires authorized runtime checks. Pending integration and those checks mean this feature is not accepted or deployed.
+
+Future authorized checks should cover version conflicts, unauthorized and cross-repository writes, exact audit evidence and capacity, reconnect persistence, adapter legacy replacement, administrator credential ceiling, standard and native catalog changes, client list-change handling, stale catalog refusals, and multiple native chats.

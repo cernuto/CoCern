@@ -13,6 +13,7 @@ internal static partial class StandingPreferences
     public static RelayReply RecordDecision(AggregateContext context)
     {
         var args = context.Args;
+        if (Text(args, "decision") == "approveGoal") return ApproveGoal(context);
         if (args.Any(field => field.Key is not ("repositoryId" or "boardId" or "sessionId" or "sessionToken" or "requestId" or "hubIncarnation" or "proposalId" or "decision" or "humanWords")))
             return Error(InvalidArguments);
         if (!Identifier(args["proposalId"], out var id)) return Invalid("proposalId");
@@ -26,6 +27,7 @@ internal static partial class StandingPreferences
         var board = new BoardState(context.State);
         var current = board.Standing;
         if (current?.Proposal(id) is not { } proposal) return Error(NotFound, new { proposalId = id });
+        if (proposal.Json["goalTaskId"] is not null && !IsCurrentGoalOwner(context.State, proposal, context.ActingParticipant, context.SessionId)) return Error(SessionDenied);
         if (proposal.PresentedBy != context.SessionId || proposal.PresentedPrincipal != context.Caller.PrincipalId
             || proposal.PresentedEffect is null || proposal.PresentedRevision > current.Revision) return Error(SessionDenied);
         // Pending proposals do not advance the effective revision, so always compare the terms too. An error commits no stale marker.

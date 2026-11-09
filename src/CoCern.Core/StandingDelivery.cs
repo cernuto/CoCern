@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json.Nodes;
 using CoCern.Contracts;
 using CoCern.Domain;
@@ -20,6 +22,13 @@ internal sealed class StandingDelivery(Aggregates aggregates)
     /// </summary>
     private readonly ConcurrentDictionary<string, (long At, long Revision, string? Json)> cache = new(StringComparer.Ordinal);
 
+    /// <summary>
+    /// Per board and session, a fingerprint of the live goal summaries last delivered. A goal's liveness and the recipient's flags change
+    /// without a standing revision (expiry, root completion, owner reconnect), so they take part in the unchanged check alongside the
+    /// revision. Kept in memory: losing it (a restart, or the bound reached) only delivers the goals once more.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, string> goalsSeen = new(StringComparer.Ordinal);
+
     /// <summary>A standing write through this hub: the next read goes to the board.</summary>
     public void Wrote(JsonObject args, long revision) => CacheStanding(Aggregates.BoardKey(args), 0, revision, null);
 
@@ -32,6 +41,7 @@ internal sealed class StandingDelivery(Aggregates aggregates)
             {
                 var session = args.DeepClone().AsObject(); session["sessionId"] = Text(data, "sessionId"); session["sessionToken"] = Text(data, "sessionToken");
                 await MarkStandingSeenAsync(caller, session, Number(standing, "revision"));
+                RememberGoals(session, GoalsFingerprint(standing));
             }
         }
         catch (Exception) { /* Standing is a convenience; the session is open either way. */ }
@@ -56,9 +66,16 @@ internal sealed class StandingDelivery(Aggregates aggregates)
         try
         {
             var seen = session["standingSeen"] is JsonObject boards ? Number(boards, Text(args, "boardId", "default")) : 0;
-            if (await ReadAsync(caller, args) is not { } standing || Number(standing, "revision") <= seen) return committed;
+            if (await ReadAsync(caller, args) is not { } standing) return committed;
+            var goals = GoalsFingerprint(standing);
+            var goalsChanged = goals != (goalsSeen.TryGetValue(GoalsKey(args), out var last) ? last : "");
+            if (Number(standing, "revision") <= seen && !goalsChanged) return committed;
             var data = Aggregates.Parse(committed);
-            if (Attach(data, standing)) await MarkStandingSeenAsync(caller, args, Number(standing, "revision"));
+            if (Attach(data, standing))
+            {
+                if (Number(standing, "revision") > seen) await MarkStandingSeenAsync(caller, args, Number(standing, "revision"));
+                RememberGoals(args, goals);
+            }
             return Ok(data, committed.Version);
         }
         catch (Exception) { return committed; }
@@ -84,8 +101,24 @@ internal sealed class StandingDelivery(Aggregates aggregates)
         if (cache.TryGetValue(key, out var cached) && cached.Json is not null && now - cached.At < RelayLimits.StandingCacheSeconds * 1000L) return JsonNode.Parse(cached.Json)!.AsObject();
         var read = await aggregates.Board(caller, StandingRead.Operation, new StandingRead(Text(args, "repositoryId"), Text(args, "boardId", "default")).ToJson());
         if (!read.Ok) return null;
-        CacheStanding(key, now, read.Version, read.DataJson);
-        return Aggregates.Parse(read);
+        var standing = Aggregates.Parse(read);
+        // Goal summaries carry the reader's own membership flags, so only a read without live goals is the same for every session and shared.
+        if (standing["goals"] is null) CacheStanding(key, now, read.Version, read.DataJson);
+        return standing;
+    }
+
+    /// <summary>A fingerprint of the delivered live goals, or empty when there are none.</summary>
+    private static string GoalsFingerprint(JsonObject standing) =>
+        standing["goals"] is JsonArray { Count: > 0 } goals ? Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(goals.ToJsonString()))) : "";
+
+    private static string GoalsKey(JsonObject args) => Aggregates.BoardKey(args) + "|" + Text(args, "sessionId");
+
+    private void RememberGoals(JsonObject args, string fingerprint)
+    {
+        var key = GoalsKey(args);
+        if (fingerprint.Length == 0) { goalsSeen.TryRemove(key, out _); return; }
+        if (goalsSeen.Count >= RelayLimits.StandingCacheBoards && !goalsSeen.ContainsKey(key)) goalsSeen.Clear();
+        goalsSeen[key] = fingerprint;
     }
 
     private void CacheStanding(string key, long at, long revision, string? json)

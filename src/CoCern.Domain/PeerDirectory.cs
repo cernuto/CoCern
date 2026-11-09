@@ -18,6 +18,13 @@ internal static class PeerDirectory
         internal PeerRow Row(string caller) => new(SessionId, Name, Client, Entry.MachineId, ParticipantId.Length > 0, ParticipantId.Length > 0 && ParticipantId == caller);
     }
 
+    public static RelayReply Current(AggregateContext context)
+    {
+        if (!NativeCurrentQuery.Decode(context.Args).TryGet(out var query, out var malformed)) return Malformed(malformed);
+        var current = new ControlState(context.State).CurrentNativeActor(context.Caller, query.ParticipantId, query.RepositoryId, query.SessionId, query.SessionToken);
+        return current is null ? Error(SessionDenied) : Ok(new { participantId = current.ParticipantId, sessionId = current.SessionId, repositoryId = current.RepositoryId });
+    }
+
     public static RelayReply Resolve(AggregateContext context)
     {
         if (!PeerResolve.Decode(context.Args).TryGet(out var query, out var malformed)) return Malformed(malformed);

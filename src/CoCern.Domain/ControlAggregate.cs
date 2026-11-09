@@ -41,7 +41,10 @@ internal static class ControlAggregate
             Operations.ManagerStanding => ManagerSelection.Standing(context),
             Operations.AdminAction => AdminActionLog.Record(context),
             Operations.NativeFileScope => NativeFileScope(context),
+            Operations.NativeCurrent => PeerDirectory.Current(context),
             Operations.AttentionRoute => RouteAttention(context),
+            GoalOrderDelivery.VerifyOperation => GoalOrderDelivery.Verify(context),
+            GoalOrderDelivery.DeliverOperation => GoalOrderDelivery.Deliver(context),
             Operations.PeerResolve => PeerDirectory.Resolve(context),
             Operations.PeerList => PeerDirectory.ListPeers(context),
             RelayTools.ControlRequest => Control(context),
@@ -554,6 +557,21 @@ internal static class ControlAggregate
     {
         if (!AttentionRoute.Decode(context.Args).TryGet(out var route, out var malformed)) return Malformed(malformed);
         var role = route.Role;
+        // Goal routes carry a private native participant ID, resolved at delivery rather than a stale session ID. A raise the owner cannot
+        // receive now (no current native session) goes to the managers instead, so it is never lost; a close reaches the owner and every
+        // manager, since the item may have been raised to either (before the goal's approval, or while the owner was away).
+        var ownerRouted = 0;
+        if (role.StartsWith(AttentionSources.GoalOwnerRole, StringComparison.Ordinal))
+        {
+            var target = new ControlState(context.State).CurrentNativeSession(role[AttentionSources.GoalOwnerRole.Length..], context.Repository);
+            if (target is not null)
+            {
+                if (route.Raise is { } goalRaise) { context.Send(target.SessionId, goalRaise with { RepositoryId = context.Repository }); return Ok(new { routed = 1 }); }
+                context.Send(target.SessionId, route.Close! with { RepositoryId = context.Repository });
+                ownerRouted = 1;
+            }
+            role = AttentionSources.ManagerRole;
+        }
         // A raise goes to recently active managers only; a close reaches every manager, or an idle one would keep a stale item until it expires.
         var closing = route.Close is not null;
         var targets = ObjectAt(context.State, "sessions").Select(x => x.Value).OfType<JsonObject>()
@@ -565,7 +583,7 @@ internal static class ControlAggregate
             if (route.Raise is { } raise) context.Send(target, raise with { RepositoryId = context.Repository });
             else context.Send(target, route.Close! with { RepositoryId = context.Repository });
         }
-        return Ok(new { routed = targets.Length });
+        return Ok(new { routed = targets.Length + ownerRouted });
     }
 
     private static DateTimeOffset Max(DateTimeOffset first, DateTimeOffset second) => first > second ? first : second;

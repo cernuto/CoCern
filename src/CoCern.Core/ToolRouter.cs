@@ -23,21 +23,55 @@ internal sealed class ToolRouter(Aggregates aggregates, ClaimComposer claims, Se
     public async Task<RelayReply> RouteAsync(RelayCall call, CallTrace? trace, CancellationToken cancellationToken)
     {
         var reply = await DispatchAsync(call, trace, cancellationToken);
-        if (reply.Ok && call.Session is not null && call.CallOrigin is "claude-stop" or "claude-waiter") RegisterWaiter(call);
+        if (reply.Ok && call.Session is not null && (call.CallOrigin is "claude-stop" or "claude-waiter" ||
+            call.CallOrigin == "wake-watcher" && call.Tool == RelayTools.CheckInbox && call.NativeParticipant is not null && call.Controls.BackgroundCall == true)) RegisterWaiter(call);
         return reply;
     }
 
+    /// <summary>Fresh authenticated metadata is added after replay, never stored as a historical permission or accepted from tool input.</summary>
+    internal async Task<RelayReply> WithToolSettingsAsync(RelayCall call, RelayReply reply)
+    {
+        if (!reply.Ok) return reply;
+        if (call.ActorSession is null && call.Tool != RelayTools.SessionOpen) return reply;
+        if (JsonNode.Parse(reply.DataJson) is not JsonObject data) return reply;
+        var own = call.ActorSession;
+        var sessionId = own is not null ? call.ActingSessionId ?? "" : "";
+        if (own is not null && sessionId.Length > 0)
+        {
+            var proof = call.Controls.ActingSessionId == sessionId ? call.Controls.ActingSessionToken ?? "" : Text(call.Args, "sessionToken");
+            var fresh = await aggregates.Session(call.Caller, SessionVerify.Operation,
+                new SessionVerify(Text(call.Args, "repositoryId"), sessionId, proof, Text(call.Args, "hubIncarnation")).ToJson());
+            if (!fresh.Ok) return reply;
+            own = Aggregates.Parse(fresh);
+        }
+        if (call.Tool == RelayTools.SessionOpen && Text(data, "sessionId") is { Length: > 0 } opened && Text(data, "sessionToken") is { Length: > 0 } token)
+        {
+            var verified = await aggregates.Session(call.Caller, SessionVerify.Operation,
+                new SessionVerify(Text(call.Args, "repositoryId"), opened, token, Text(call.Args, "hubIncarnation")).ToJson());
+            if (!verified.Ok) return reply;
+            own = Aggregates.Parse(verified);
+            sessionId = opened;
+        }
+        if (own?["toolSettings"] is not JsonObject settings || sessionId.Length == 0) return reply;
+        data["toolSettings"] = settings.DeepClone();
+        data["toolSettingsSessionId"] = sessionId;
+        data["toolSettingsAdministrator"] = call.Caller.IsAdministrator;
+        var enriched = reply with { DataJson = data.ToJsonString() };
+        // Metadata is advisory. If even normal wire trimming cannot fit it, preserve the
+        // original result; never let a profile refresh invalidate an already committed reply.
+        return FitsWire(BoundWire(enriched)) ? enriched : reply;
+    }
+
     /// <summary>
-    /// A Claude chat's waiter (its Stop hook, or the background <c>--await-inbox</c> command) reads the hub as the chat, so each read is the chat
-    /// saying it is idle and can be woken. The directory hears that as presence, <c>waiting</c> until shortly after the next read is due. On the
-    /// hub's own PC no node announces the chat, so this is the only thing that makes it reachable in <c>chat_directory</c>; a waiter that stops
-    /// goes stale and the chat reads unreachable again. Advisory: a refused or failed registration changes nothing about the read.
+    /// A chat's waiter, or a verified native Codex watcher's background read, announces its direct wake path. The directory hears that as
+    /// expiring presence, <c>waiting</c>. This is advisory reachability, not proof the model is idle or that it ran. A watcher that stops
+    /// goes stale. A reported origin grants no identity or permission; the normal authenticated session checks still apply.
     /// </summary>
     private void RegisterWaiter(RelayCall call)
     {
         var now = DateTimeOffset.UtcNow;
         var presence = new SessionPresence { HubIncarnation = Text(call.Args, "hubIncarnation"), ObservedAt = now, FreshUntil = now + WaiterFreshness, Availability = WaitingAvailability };
-        var registration = new SessionRegistration(Text(call.Args, "repositoryId"), Text(call.Args, "sessionId"), presence).ToJson();
+        var registration = new SessionRegistration(Text(call.Args, "repositoryId"), call.ActingSessionId ?? "", presence).ToJson();
         Advisory.Run(() => aggregates.Control(call.Caller, Operations.Register, registration));
     }
 
@@ -47,6 +81,8 @@ internal sealed class ToolRouter(Aggregates aggregates, ClaimComposer claims, Se
         return tool switch
         {
             RelayTools.SessionOpen => sessions.OpenAsync(caller, args, trace),
+            RelayTools.SessionToolSettingsSet => aggregates.Call(AggregateKinds.Session, Text(args, "targetSessionId"), caller, SessionToolSettings.SetOperation, args),
+            RelayTools.RecordDecision when Text(args, "decision") == "approveGoal" => new GoalTools(aggregates, peers).ApproveAsync(call),
             RelayTools.EventWait => new EventWaitTools(aggregates).RunAsync(caller, args),
             RelayTools.GetStatus => status.StatusAsync(caller, args, call.Controls.StatusDetail),
             RelayTools.TaskClaim => claims.ClaimTaskAsync(caller, args, session),

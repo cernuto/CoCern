@@ -87,8 +87,14 @@ internal sealed class ReplyAddOns(Aggregates aggregates, ClaimComposer claims, S
         var full = Ok(data, reply.Reply.Version);
         // Never send a validator for a full reply that a later fit step would have to truncate.
         if (!FitsWire(full) || counter is not null && tokenSettings.Enforces(call.Tool) && counter.Count(full.DataJson) > call.Definition.TokenBudget) return Task.CompletedTask;
-        reply.Reply = string.Equals(controls.StatusTag, tag, StringComparison.Ordinal)
-            ? Ok(new { unchanged = true, statusTag = tag }, reply.Reply.Version) : full;
+        if (string.Equals(controls.StatusTag, tag, StringComparison.Ordinal))
+        {
+            var unchanged = new JsonObject { ["unchanged"] = true, ["statusTag"] = tag };
+            foreach (var key in new[] { "toolSettings", "toolSettingsSessionId", "toolSettingsAdministrator" })
+                if (data[key] is { } value) unchanged[key] = value.DeepClone();
+            reply.Reply = Ok(unchanged, reply.Reply.Version);
+        }
+        else reply.Reply = full;
         return Task.CompletedTask;
     }
 
@@ -269,10 +275,13 @@ internal sealed class ReplyAddOns(Aggregates aggregates, ClaimComposer claims, S
             if (!await HasUrgentAsync(call))
             {
                 var correlation = Text(call.Args, "requestId") is { Length: > 0 } request ? call.Tool + ":" + request : "";
-                var candidates = observations is null ? null : await observations.ReadPendingStandingAsync(Text(call.Args, "repositoryId"), call.Caller.PrincipalId, Text(call.Args, "sessionId"), correlation);
+                var candidates = observations is null ? null : await observations.ReadPendingStandingForParticipantAsync(Text(call.Args, "repositoryId"), call.Caller.PrincipalId, Text(call.Args, "sessionId"), correlation, call.Caller.ActingParticipant);
                 foreach (var candidate in candidates ?? Array.Empty<StandingPresentation>())
                 {
                     var effect = JsonNode.Parse(candidate.SummaryJson)!.AsObject();
+                    var candidateArgs = new JsonObject { ["repositoryId"] = Text(call.Args, "repositoryId"), ["boardId"] = candidate.BoardId, ["sessionId"] = Text(call.Args, "sessionId"), ["proposalId"] = candidate.ProposalId, ["presentationRequest"] = correlation };
+                    var liveCandidate = await aggregates.Board(call.Caller, CoordinationStateMachine.GoalPresentationCandidate, candidateArgs);
+                    if (!liveCandidate.Ok || !JsonNode.DeepEquals(Parse(liveCandidate)["candidate"], effect)) continue;
                     var data = Parse(committed); data["attention"] = effect.DeepClone();
                     // Compact before reserving, and require the entire escaped effect to survive every actual reply budget.
                     var prepared = Bound(call.Definition, call.Args, Ok(data, committed.Version), null);

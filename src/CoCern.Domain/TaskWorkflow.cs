@@ -37,11 +37,12 @@ internal static class TaskWorkflow
     /// allows it (<see cref="AllowsExecution"/>), every <c>dependsOn</c> task is completed, and a grant named in <c>authorityRef</c> is still
     /// valid. Dependencies and grants are read exactly as offers read them (<see cref="IsOfferable"/>), so the two cannot drift.
     /// </summary>
-    public static RelayReply? ExecutionRefusal(BoardState board, BoardTask task, string session, DateTimeOffset now)
+    public static RelayReply? ExecutionRefusal(BoardState board, BoardTask task, string session, DateTimeOffset now, VerifiedNativeParticipant? participant = null)
     {
         if (!AllowsExecution(task, session)) return NotReady(task);
         if (task.Workflow is not { } workflow) return null;
         if (UnfinishedDependencies(board, workflow) is { Length: > 0 } unfinished) return Error(DependenciesIncomplete, new { dependsOn = unfinished }, task.Version);
+        if (GoalAuthority.Problem(board, workflow, participant, session, now) is { } goalProblem) return Error(GrantInvalid, new { authorityRef = workflow.Packet?.AuthorityRef, reason = goalProblem }, task.Version);
         return GrantRefusal(board, workflow, now) is { } refusal ? refusal with { Version = task.Version } : null;
     }
 
@@ -194,7 +195,7 @@ internal static class TaskWorkflow
         var busy = new HashSet<string>(read.BusyResources ?? [], StringComparer.Ordinal);
         var limit = (int)Math.Clamp(read.Limit, 0, RelayLimits.NextWorkCandidates);
         var ranked = board.TaskMap.Select(x => new BoardTask(x.Value!.AsObject()))
-            .Where(task => task.TaskId != current && IsOfferable(board, task, session, now))
+            .Where(task => task.TaskId != current && IsOfferable(board, task, session, now, context.ActingParticipant))
             .OrderByDescending(task => task.Workflow!.Priority)
             .ThenBy(task => busy.Count > 0 && task.Workflow!.Resources.Any(busy.Contains))
             .ThenBy(task => task.TaskId, StringComparer.Ordinal)
@@ -215,7 +216,7 @@ internal static class TaskWorkflow
     /// Why a standing order may not offer this task to <paramref name="session"/>, or null: the next-work checks of <see cref="IsOfferable"/>
     /// except the target-session match, each with a reason for the order log.
     /// </summary>
-    public static string? OfferProblem(BoardState board, BoardTask task, string session, DateTimeOffset now)
+    public static string? OfferProblem(BoardState board, BoardTask task, string session, DateTimeOffset now, VerifiedNativeParticipant? participant = null, bool deferGoal = false)
     {
         if (task.Workflow is not { } workflow) return "has no workflow";
         if (workflow.Blockers.Any(blocker => blocker.Kind == AttentionWeights.ProviderRejection)) return "has a provider_rejection blocker";
@@ -225,10 +226,11 @@ internal static class TaskWorkflow
         if (task.Owner is { Length: > 0 } owner && owner != session && task.LeaseUntil > now) return "is claimed by another session";
         if (!DependenciesDone(board, workflow)) return "has dependencies not completed";
         if (StandingPreferences.GrantProblem(board, workflow, now) is { } grant) return "names a grant that is " + (grant == "scope" ? "out of scope" : grant);
+        if (!deferGoal && GoalAuthority.Problem(board, workflow, participant, session, now) is { } goal) return "names a goal that is " + goal;
         return null;
     }
 
-    private static bool IsOfferable(BoardState board, BoardTask task, string session, DateTimeOffset now) =>
+    private static bool IsOfferable(BoardState board, BoardTask task, string session, DateTimeOffset now, VerifiedNativeParticipant? participant) =>
         task.Workflow is { } workflow
         && workflow.State == "ready"
         && Validate(workflow.Json, null, TaskActions.HasUnresolved(task)) is null
@@ -236,5 +238,6 @@ internal static class TaskWorkflow
         && TargetsSession(workflow, session)
         && (task.Owner.Length == 0 || task.Owner == session || task.LeaseUntil <= now)
         && DependenciesDone(board, workflow)
-        && StandingPreferences.GrantProblem(board, workflow, now) is null;
+        && StandingPreferences.GrantProblem(board, workflow, now) is null
+        && GoalAuthority.Problem(board, workflow, participant, session, now) is null;
 }

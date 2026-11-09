@@ -15,6 +15,11 @@ public sealed record StandingPresentation(string BoardId, string ProposalId, str
 /// <summary>An authenticated principal. <see cref="IsInternal"/> marks calls the hub itself composes; only those may run "__" operations.</summary>
 public sealed record RelayCaller(string PrincipalId, bool IsAdministrator, string[] Repositories, bool IsInternal = false, string? AuthenticatedMachineId = null)
 {
+    /// <summary>Fresh hub-verified native identity for this call; never accepted from tool arguments or authentication settings.</summary>
+    public VerifiedNativeParticipant? ActingParticipant { get; init; }
+    /// <summary>Authoritatively resolved members of a goal approval. Null is reserved for explicit repository membership.</summary>
+    public IReadOnlyList<VerifiedNativeParticipant>? GoalParticipants { get; init; }
+
     public bool MayAccess(string repository) =>
         repository.Length > 0 && (IsAdministrator || Repositories.Contains(repository, StringComparer.OrdinalIgnoreCase));
 }
@@ -368,13 +373,16 @@ public static class Operations
     public static bool IsInternal(string operation) => operation.StartsWith("__", StringComparison.Ordinal);
 
     /// <summary>Internal operations that only read: never deduplicated by requestId, never committed for themselves.</summary>
-    public static bool IsRead(string operation) => operation is Verify or Resolve or ResolveAll or NextWork or ClaimState or SessionOwners or SessionsOpen or PeerResolve or PeerList or ManagerStanding or Standing or Orders or EventWaitAggregate.ReadOperation or NativeFileScope;
+    public static bool IsRead(string operation) => operation is Verify or Resolve or ResolveAll or NextWork or ClaimState or SessionOwners or SessionsOpen or PeerResolve or PeerList or ManagerStanding or Standing or Orders or EventWaitAggregate.ReadOperation or NativeFileScope or NativeCurrent or SessionToolSettings.ReadOperation
+        or CoordinationStateMachine.GoalDecisionReplayProbe or CoordinationStateMachine.GoalExecutionProbe or CoordinationStateMachine.GoalPresentationCandidate;
 
     /// <summary>Private, uncached read of one authenticated current native join's protected file scope.</summary>
     public const string NativeFileScope = "__native_file_scope";
+    public const string NativeCurrent = "__native_current";
 
     /// <summary>Order effects run only while standing orders are on; a target that refuses one is not asked again.</summary>
-    public static bool IsOrder(string operation) => operation is OrderFire or OrderWatch or OrderRelease or OrderFailed or OrderWatchFailed;
+    public static bool IsOrder(string operation) => operation is OrderFire or OrderWatch or OrderRelease or OrderFailed or OrderWatchFailed
+        or GoalOrderDelivery.VerifyOperation or GoalOrderDelivery.BoardOperation or GoalOrderDelivery.DeliverOperation;
 
     /// <summary>Attention effects are advisory: a target that refuses one is not asked again.</summary>
     public static bool IsAttention(string operation) => operation is AttentionRaise or AttentionClose or AttentionRoute;

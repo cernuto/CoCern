@@ -1,0 +1,16 @@
+# Session tool settings dashboard source report
+
+The selected session inspector now offers a profile selection, the current revision, direct human authorization words, and an explicit Save. It explains the connection credential ceiling and possible need to reconnect. A revision conflict reloads the current settings and requires a fresh explicit Save; it does not retry the mutation.
+
+## Source and authority
+
+- `DashboardSessionToolSettingsRequest` and `DashboardSessionToolSettingsResult` in `src/CoCern.Contracts/DashboardSessionToolSettings.cs` carry only the requested repository, session, profile, revision, words, and result.
+- `DashboardEndpoints.MapRelayDashboard` maps authenticated GET and POST `/dashboard/api/sessions/tool-settings` to `DashboardSessionToolSettings.ReadAsync` and `SaveAsync`. Cookie validation admits configured administrator viewers; the signed-in principal provides authority, not a displayed session role. Both use secure transport, and the POST also requires the existing same-origin protection and a bounded body. The repository is resolved through `RepositoryCatalog`.
+- The read calls `RelayApplication.ReadSessionToolSettingsAsync`, which uses the aggregate's administrator read operation for the exact open session and matching repository. It returns profile and revision only; no target token, participant identifier, or audit payload is exposed. The write calls the normal `IRelayApplication.ExecuteAsync` settings tool with the exact selected target, expected revision, and unmodified words. The domain records the audit and checks administrator, repository, target, revision, and open state.
+- `SessionToolSettingsClient` and `SessionToolSettingsControl` load and save these settings; `SessionInspector` keys the control to the selected session. A default profile is labeled as connection settings because the hub cannot infer a legacy client's effective restrictions from the selected profile alone.
+
+## Static evidence and pending checks
+
+Roslyn CodeLens targeted `CoCern.slnx`; Visual Studio was connected to the unrelated M3TS-SNX solution and was left unchanged. Roslyn resolved the new `SessionToolSettingsControl.RefreshAsync` generated member, and compiler diagnostics reported no errors in the dashboard, host, or contracts projects at the checks. `git diff --check` returned clean. No tests, builds, packages, deployments, restarts, live requests, client changes, or browser checks were run. Rendered layout, accessibility and behavior, authentication and conflict paths, client refresh/reconnect, and runtime integration remain unverified until authorized. The generated Razor member was visible to Roslyn; a future build and browser check are still required to validate the actual rendered UI.
+
+Root's final semantic pass subsequently generated the inspector's new key expression and exposed its nested-quote parser error. The markup has been corrected to a stable type/session tuple key. Roslyn still holds the old generated BuildRenderTree and its three parser diagnostics; no build or semantic recompilation was invoked to refresh it. See the final verification handoff. Earlier clean snapshots do not establish that the current rendered inspector is accepted.

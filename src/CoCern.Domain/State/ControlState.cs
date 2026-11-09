@@ -105,6 +105,14 @@ public sealed class ControlState(JsonObject json)
             && !NativeClosing(participantId) ? new(participantId, id, repositoryId) : null;
     }
 
+    internal VerifiedNativeParticipant? CurrentNativeActor(RelayCaller caller, string participantId, string repositoryId, string sessionId, string token)
+    {
+        if (!caller.IsInternal || !caller.MayAccess(repositoryId) || CurrentNativeSession(participantId, repositoryId) is not { } current
+            || current.SessionId != sessionId || Entry(sessionId) is not { } entry || entry.PrincipalId != caller.PrincipalId
+            || !SecretEquals(entry.Token, token)) return null;
+        return current;
+    }
+
     internal VerifiedNativeFileScope? CurrentNativeFileScope(RelayCaller caller, string participantId, string repositoryId, string sessionId, string token)
     {
         if (caller.AuthenticatedMachineId is not { Length: > 0 } machine || !caller.MayAccess(repositoryId)

@@ -339,6 +339,11 @@ internal static class NativeJoinHook
                 now = (clock ?? TimeProvider.System).GetUtcNow().ToUnixTimeSeconds();
                 if (expires <= now || expires > now + 120) return new(false, "native_stamp_expired");
                 ownSession = binding.CurrentHandle!.SessionId;
+                // The stamp authenticates the original input, but only the verified binding may supply acting proof.
+                var cleanBusiness = JsonNode.Parse(business.GetRawText())!.AsObject();
+                cleanBusiness.Remove("actingSessionId");
+                cleanBusiness.Remove("actingSessionToken");
+                business = JsonSerializer.SerializeToElement(cleanBusiness);
                 if (await NativeJoin.AdmitStampedInvocationAsync(binding, tool, invocation, business, expires, now, ct, writeReadCache, retryDelay) is { } refusal) return new(false, refusal);
                 now = (clock ?? TimeProvider.System).GetUtcNow().ToUnixTimeSeconds();
                 if (expires <= now || expires > now + 120) return new(false, "native_stamp_expired");
