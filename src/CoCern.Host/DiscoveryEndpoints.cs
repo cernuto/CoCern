@@ -268,7 +268,8 @@ internal static partial class DiscoveryEndpoints
         // A package problem never fails an authorized announcement; cancellation remains the caller's cancellation.
         try
         {
-            if (connect.ServedAdapter() is { } adapter)
+            // Nodes get the newest self-contained build, which can differ from the join package; with none, no release is offered.
+            if (connect.NodeAdapter() is { } adapter)
             {
                 await using var lease = await cache.ReleaseAsync(adapter.Folder, context.RequestAborted);
                 if (lease is not null) data["nodeRelease"] = JsonSerializer.SerializeToNode(lease.Release, new JsonSerializerOptions(JsonSerializerDefaults.Web));

@@ -58,9 +58,11 @@ internal static class JoinEndpoints
 }
 
 /// <summary>
-/// One host-owned cache serves setup and enrolled-node releases. Archive names identify exact SHA-256 bytes, and only archives built by this process
-/// are trusted. Metadata comes from the completed ZIP; source-content hashes avoid needless rebuilds without trusting file times. Current, previous
-/// and leased archives survive pruning. Every returned stream owns its pruning reference until disposal, including aborted HTTP responses.
+/// One host-owned cache serves setup and enrolled-node releases, which may come from different adapter folders (the join package and the newest
+/// self-contained node build). Archive names identify exact SHA-256 bytes, and only archives built by this process are trusted. Metadata comes from the
+/// completed ZIP; source-content hashes, remembered per source folder, avoid needless rebuilds without trusting file times, so serving two folders in turn
+/// rebuilds neither. Each remembered folder's current and previous archives, and leased archives, survive pruning. Every returned stream owns its pruning
+/// reference until disposal, including aborted HTTP responses.
 /// </summary>
 internal sealed class AdapterZipCache(string folder, Action? archiveBuilt = null)
 {
@@ -69,10 +71,19 @@ internal sealed class AdapterZipCache(string folder, Action? archiveBuilt = null
     private readonly SemaphoreSlim building = new(1, 1);
     private readonly object sync = new();
     private readonly Dictionary<string, Entry> built = new(StringComparer.Ordinal);
-    private string? sourceStamp;
-    private string? sourceId;
-    private string? current;
-    private string? previous;
+    /// <summary>Per source folder (full path): its memoized content stamp and its current and previous archives. Guarded by <c>sync</c>.</summary>
+    private readonly Dictionary<string, Source> sources = new(StringComparer.OrdinalIgnoreCase);
+    private long uses;
+    /// <summary>Folders remembered at once; the least recently served is forgotten first, and its archives become prunable.</summary>
+    private const int RememberedSources = 4;
+
+    private sealed class Source
+    {
+        public string? Stamp { get; set; }
+        public string? Current { get; set; }
+        public string? Previous { get; set; }
+        public long Used { get; set; }
+    }
 
     private sealed class Entry(string id, long bytes, NodeRelease? release)
     {
@@ -136,18 +147,32 @@ internal sealed class AdapterZipCache(string folder, Action? archiveBuilt = null
     // Only the serial builder accesses the source index. Full content hashing also detects same-length, same-mtime dependency changes.
     private async Task<Entry> GetAsync(string adapterFolder, CancellationToken ct)
     {
-        var stamp = await Task.Run(() => Stamp(adapterFolder, ct), ct);
-        if (stamp == sourceStamp && sourceId is { } id)
+        var folder = Path.GetFullPath(adapterFolder);
+        var stamp = await Task.Run(() => Stamp(folder, ct), ct);
+        Entry? existing = null;
+        lock (sync)
         {
-            Entry? existing;
-            lock (sync) built.TryGetValue(id, out existing);
-            if (existing is not null)
+            if (sources.TryGetValue(folder, out var source) && source.Stamp == stamp && source.Current is { } id)
             {
-                await using var checkedContent = await OpenVerifiedAsync(existing, ct);
-                if (checkedContent is not null) return existing;
+                source.Used = ++uses;
+                built.TryGetValue(id, out existing);
             }
         }
-        return await BuildAsync(adapterFolder, stamp, ct);
+        if (existing is not null)
+        {
+            await using var checkedContent = await OpenVerifiedAsync(existing, ct);
+            if (checkedContent is not null) return existing;
+        }
+        return await BuildAsync(folder, stamp, ct);
+    }
+
+    /// <summary>The remembered state of <paramref name="folder"/>, created when new; forgets the least recently served folder beyond the limit. Call under <c>sync</c>.</summary>
+    private Source Track(string folder)
+    {
+        if (!sources.TryGetValue(folder, out var source)) sources[folder] = source = new Source();
+        source.Used = ++uses;
+        while (sources.Count > RememberedSources) sources.Remove(sources.Where(pair => pair.Value != source).MinBy(pair => pair.Value.Used).Key);
+        return source;
     }
 
     /// <summary>
@@ -217,11 +242,14 @@ internal sealed class AdapterZipCache(string folder, Action? archiveBuilt = null
                     File.Move(part, ZipPath(entry.Id), overwrite: true);
                     entry = existing;
                 }
-                if (current != entry.Id) { previous = current; current = entry.Id; }
+                var source = Track(adapterFolder);
+                if (source.Current != entry.Id) { source.Previous = source.Current; source.Current = entry.Id; }
+                source.Stamp = null;
                 Prune();
             }
             // A publication changed while copying: serve the truthful completed snapshot, but do not memoize it under the new source.
-            if (await Task.Run(() => Stamp(adapterFolder, cancellationToken), cancellationToken) == stamp) { sourceStamp = stamp; sourceId = entry.Id; }
+            if (await Task.Run(() => Stamp(adapterFolder, cancellationToken), cancellationToken) == stamp)
+                lock (sync) if (sources.TryGetValue(adapterFolder, out var source) && source.Current == entry.Id) source.Stamp = stamp;
             return entry;
         }
         finally { TryDelete(part); }
@@ -234,7 +262,8 @@ internal sealed class AdapterZipCache(string folder, Action? archiveBuilt = null
 
     private void Prune()
     {
-        foreach (var old in built.Values.Where(e => e.Id != current && e.Id != previous && e.References == 0).ToArray()) built.Remove(old.Id);
+        var kept = sources.Values.SelectMany(source => new[] { source.Current, source.Previous }).OfType<string>().ToHashSet(StringComparer.Ordinal);
+        foreach (var old in built.Values.Where(e => !kept.Contains(e.Id) && e.References == 0).ToArray()) built.Remove(old.Id);
         foreach (var file in Directory.EnumerateFiles(Folder, "*.zip"))
             if (!built.ContainsKey(Path.GetFileNameWithoutExtension(file))) TryDelete(file);
     }

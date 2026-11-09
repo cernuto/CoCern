@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 using CoCern.Contracts.Dashboard;
 using CoCern.Contracts;
+using CoCern.Host.Development;
 
 namespace CoCern.Host.Dashboard;
 
@@ -108,6 +109,29 @@ internal sealed class DashboardConnect(IConfiguration configuration, IHostEnviro
         configuration["Relay:Connect:DistributionAdapterPath"] is { Length: > 0 } distribution ? distribution : configuration["Relay:Connect:AdapterPath"], AppContext.BaseDirectory);
 
     /// <summary>
+    /// The adapter offered to enrolled nodes as their update (<c>nodeRelease</c>): the newest self-contained build the hub can find, never a framework-dependent
+    /// one, because a node runs self-contained with no known .NET host and refuses those. See <see cref="NodeAdapter(string?, string?, string)"/>.
+    /// The pasted join command keeps <see cref="ServedAdapter()"/>.
+    /// </summary>
+    internal AdapterBuild? NodeAdapter() => NodeAdapter(configuration["Relay:Connect:DistributionAdapterPath"], configuration["Relay:Connect:AdapterPath"], AppContext.BaseDirectory);
+
+    /// <summary>
+    /// The newest self-contained build, by its dll's write time as <see cref="ServedAdapter(string?, string)"/> orders them, among the configured distribution
+    /// and adapter paths, the hub's own node adapter publish (<see cref="NodeAdapterBuilds"/>) and <see cref="Candidates"/>; null when none is self-contained,
+    /// so nodes are offered nothing rather than a release every one of them refuses. Configured paths are administrator settings; everything else is inside the
+    /// hub's checkout or beside its published host.
+    /// </summary>
+    internal static AdapterBuild? NodeAdapter(string? distribution, string? configured, string hubFolder)
+    {
+        var dlls = new List<string>();
+        foreach (var path in new[] { distribution, configured })
+            if (path is { Length: > 0 } && File.Exists(path)) dlls.Add(Path.GetFullPath(path));
+        if (CheckoutRoot(hubFolder) is { } checkout && NodeAdapterBuilds.CurrentDll(checkout) is { } published) dlls.Add(published);
+        dlls.AddRange(Candidates(hubFolder).Where(File.Exists));
+        return Newest(dlls.Distinct(StringComparer.OrdinalIgnoreCase)).Select(AdapterBuild.At).FirstOrDefault(build => build.SelfContained);
+    }
+
+    /// <summary>
     /// The newest adapter build: the published one or the build output in the hub's checkout, whichever was written last, so a published copy that
     /// outlived later rebuilds is not used. <paramref name="hubFolder"/> is where
     /// the running hub's own files are, so the search starts from code this hub already runs, never from the working directory.
@@ -149,6 +173,9 @@ internal sealed class DashboardConnect(IConfiguration configuration, IHostEnviro
         yield return Path.Combine(root, "artifacts", "adapter", "CoCern.Adapter.dll");
         foreach (var build in new[] { "Debug", "Release" }) yield return Path.Combine(root, "src", "CoCern.Adapter", "bin", build, "net10.0", "CoCern.Adapter.dll");
     }
+
+    /// <summary>The CoCern checkout the hub at <paramref name="hubFolder"/> runs from, when it runs from one.</summary>
+    internal static string? CheckoutRoot(string hubFolder) => CheckoutRoot(new DirectoryInfo(Path.TrimEndingDirectorySeparator(Path.GetFullPath(hubFolder))));
 
     private static string? CheckoutRoot(DirectoryInfo hub)
     {

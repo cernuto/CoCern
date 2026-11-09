@@ -202,20 +202,32 @@ public static class NodePackage
     /// PinnedOriginHandler around NodeTransport's pinned, no-redirect handler. HttpClient cannot expose
     /// or repair an unsafe handler after it has forwarded a credential. This method never owns that client.
     /// </summary>
-    public static async Task<StagedNode?> StageAsync(NodeRelease release, Uri enrolledHub, HttpClient pinnedClient, string machineCredential, string updateRoot, NodeHostCapabilities host, CancellationToken ct)
+    public static async Task<StagedNode?> StageAsync(NodeRelease release, Uri enrolledHub, HttpClient pinnedClient, string machineCredential, string updateRoot, NodeHostCapabilities host, CancellationToken ct) =>
+        (await StageWithReasonAsync(release, enrolledHub, pinnedClient, machineCredential, updateRoot, host, ct)).Staged;
+
+    /// <summary>
+    /// <see cref="StageAsync"/>, and when it refuses, which check refused: one of the fixed <see cref="NodeUpdateRefusals"/> codes, never a path or message,
+    /// so the node can keep it in its journal folder and report it to its hub.
+    /// </summary>
+    internal static async Task<(StagedNode? Staged, string? Refusal)> StageWithReasonAsync(NodeRelease release, Uri enrolledHub, HttpClient pinnedClient, string machineCredential, string updateRoot, NodeHostCapabilities host, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
         string? scratch = null;
         string? root = null;
+        // The step in progress, reported when an exception ends staging.
+        var step = NodeUpdateRefusals.DownloadFailed;
         try
         {
-            if (!ValidRelease(release) || !Compatible(release.Package, host) || !ValidHub(enrolledHub) || string.IsNullOrWhiteSpace(machineCredential) || machineCredential.Length > 16384 || machineCredential.Any(char.IsControl)) return Rejected();
+            if (!ValidRelease(release)) return Rejected(NodeUpdateRefusals.InvalidRelease);
+            if (Incompatibility(release.Package, host) is { } incompatible) return Rejected(incompatible);
+            if (!ValidHub(enrolledHub) || string.IsNullOrWhiteSpace(machineCredential) || machineCredential.Length > 16384 || machineCredential.Any(char.IsControl)) return Rejected(NodeUpdateRefusals.InvalidRequest);
             root = UpdateRoot(updateRoot);
             PrivateDirectory(root);
             using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(enrolledHub, "/join/adapter.zip?release=" + release.ReleaseId));
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", machineCredential);
             using var response = await pinnedClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
-            if (response.StatusCode != HttpStatusCode.OK || response.Content.Headers.ContentLength is { } length && length != release.ZipBytes) return Rejected();
+            if (response.StatusCode != HttpStatusCode.OK) return Rejected(NodeUpdateRefusals.DownloadRefused);
+            if (response.Content.Headers.ContentLength is { } length && length != release.ZipBytes) return Rejected(NodeUpdateRefusals.SizeMismatch);
 
             scratch = Path.Combine(root, ".staging-" + Guid.NewGuid().ToString("N"));
             PrivateDirectory(scratch, requireNew: true);
@@ -224,12 +236,17 @@ public static class NodePackage
             {
                 await using var input = await response.Content.ReadAsStreamAsync(ct);
                 await using var destination = PrivateFile(zipPath);
+                // Reading more than ZipBytes throws in the bounded copy; a short or altered transfer is refused below.
+                step = NodeUpdateRefusals.SizeMismatch;
                 var bytes = await CopyBoundedAsync(input, destination, release.ZipBytes, hash, ct);
-                if (bytes != release.ZipBytes || Convert.ToHexString(hash.GetHashAndReset()) != release.ZipSha256) throw new InvalidDataException();
+                if (bytes != release.ZipBytes) return Rejected(NodeUpdateRefusals.SizeMismatch);
+                if (Convert.ToHexString(hash.GetHashAndReset()) != release.ZipSha256) return Rejected(NodeUpdateRefusals.HashMismatch);
+                step = NodeUpdateRefusals.StoreFailed;
                 destination.Flush(flushToDisk: true);
             }
 
             // No archive entry is opened or extracted before the complete transfer's length and SHA-256 agree.
+            step = NodeUpdateRefusals.ArchiveInvalid;
             var content = Path.Combine(scratch, "content");
             PrivateDirectory(content, requireNew: true);
             using (var zip = File.OpenRead(zipPath))
@@ -255,7 +272,9 @@ public static class NodePackage
             }
             ct.ThrowIfCancellationRequested();
             var metadata = NodePackageMetadataReader.Read(content);
-            if (!SameMetadata(metadata, release.Package) || DllHash(content) != release.AdapterDllSha256) return Rejected();
+            if (!SameMetadata(metadata, release.Package)) return Rejected(NodeUpdateRefusals.MetadataMismatch);
+            if (DllHash(content) != release.AdapterDllSha256) return Rejected(NodeUpdateRefusals.DllHashMismatch);
+            step = NodeUpdateRefusals.StoreFailed;
             var id = AdapterDeployment.ContentHash(content);
             ct.ThrowIfCancellationRequested();
             var image = new NodeImage(id, release.Package, release.AdapterDllSha256, release.ReleaseId);
@@ -264,7 +283,7 @@ public static class NodePackage
             var final = Contained(versions, id);
             if (Directory.Exists(final))
             {
-                if (!ValidateImage(final, image, ct)) return Rejected();
+                if (!ValidateImage(final, image, ct)) return Rejected(NodeUpdateRefusals.StoreFailed);
             }
             else
             {
@@ -273,14 +292,14 @@ public static class NodePackage
                 try { Directory.Move(content, final); }
                 catch (IOException) when (Directory.Exists(final))
                 {
-                    if (!ValidateImage(final, image, ct)) return Rejected();
+                    if (!ValidateImage(final, image, ct)) return Rejected(NodeUpdateRefusals.StoreFailed);
                 }
             }
             ct.ThrowIfCancellationRequested();
-            return new(release, image, final);
+            return (new(release, image, final), null);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-        catch (Exception exception) when (Unavailable(exception)) { ct.ThrowIfCancellationRequested(); return Rejected(); }
+        catch (Exception exception) when (Unavailable(exception)) { ct.ThrowIfCancellationRequested(); return Rejected(step); }
         finally
         {
             if (scratch is not null && root is not null) RemoveScratch(root, scratch);
@@ -365,12 +384,18 @@ public static class NodePackage
         return names.Contains("Microsoft.NETCore.App");
     }
 
-    private static bool Compatible(NodePackageMetadata package, NodeHostCapabilities host)
+    private static bool Compatible(NodePackageMetadata package, NodeHostCapabilities host) => Incompatibility(package, host) is null;
+
+    /// <summary>Why this PC cannot run <paramref name="package"/>, as a <see cref="NodeUpdateRefusals"/> code; null when it can.</summary>
+    private static string? Incompatibility(NodePackageMetadata package, NodeHostCapabilities host)
     {
-        if (!ValidMetadata(package) || host is null || host.WindowsRid is not ("win-x64" or "win-arm64") || package.Rid != "any" && package.Rid != host.WindowsRid) return false;
-        if (package.SelfContained) return true;
-        if (!KnownDotnet(host.DotnetPath) || host.InstalledFrameworks is null) return false;
-        return package.Frameworks.All(required => host.InstalledFrameworks.Any(installed => installed is not null && installed.Name == required.Name && Version.TryParse(installed.Version, out var actual) && Version.TryParse(required.Version, out var minimum) && actual.Major == minimum.Major && actual.Minor == minimum.Minor && actual.Build >= minimum.Build && actual.Revision == -1));
+        if (!ValidMetadata(package)) return NodeUpdateRefusals.InvalidRelease;
+        if (host is null || host.WindowsRid is not ("win-x64" or "win-arm64") || package.Rid != "any" && package.Rid != host.WindowsRid) return NodeUpdateRefusals.UnsupportedRid;
+        if (package.SelfContained) return null;
+        // A framework-dependent package needs a known installed dotnet host; a self-contained node has none, so it only takes self-contained releases.
+        if (!KnownDotnet(host.DotnetPath) || host.InstalledFrameworks is null) return NodeUpdateRefusals.NoDotnetHost;
+        return package.Frameworks.All(required => host.InstalledFrameworks.Any(installed => installed is not null && installed.Name == required.Name && Version.TryParse(installed.Version, out var actual) && Version.TryParse(required.Version, out var minimum) && actual.Major == minimum.Major && actual.Minor == minimum.Minor && actual.Build >= minimum.Build && actual.Revision == -1))
+            ? null : NodeUpdateRefusals.MissingRuntime;
     }
 
     internal static bool KnownDotnet(string? path) => path is not null && Path.IsPathFullyQualified(path) && Path.GetFileName(path).Equals("dotnet.exe", StringComparison.OrdinalIgnoreCase) && File.Exists(path);
@@ -379,7 +404,7 @@ public static class NodePackage
     private static bool ValidHub(Uri hub) => hub is { IsAbsoluteUri: true } && hub.UserInfo.Length == 0 && hub.Query.Length == 0 && hub.Fragment.Length == 0 && (hub.Scheme == Uri.UriSchemeHttps || hub.Scheme == Uri.UriSchemeHttp && hub.IsLoopback);
     internal static bool SameMetadata(NodePackageMetadata? left, NodePackageMetadata right) => left is not null && ValidMetadata(right) && left.Schema == right.Schema && left.ProductVersion == right.ProductVersion && left.TargetFramework == right.TargetFramework && left.Rid == right.Rid && left.SelfContained == right.SelfContained && left.SupervisorProtocol == right.SupervisorProtocol && left.Frameworks.OrderBy(f => f.Name, StringComparer.Ordinal).ThenBy(f => f.Version, StringComparer.Ordinal).Select(f => (f.Name, f.Version)).SequenceEqual(right.Frameworks.OrderBy(f => f.Name, StringComparer.Ordinal).ThenBy(f => f.Version, StringComparer.Ordinal).Select(f => (f.Name, f.Version)));
     private static string DllHash(string folder) { using var stream = File.OpenRead(Path.Combine(folder, "CoCern.Adapter.dll")); return Convert.ToHexString(SHA256.HashData(stream)); }
-    private static StagedNode? Rejected() { Console.Error.WriteLine("node-update:package-unavailable"); return null; }
+    private static (StagedNode? Staged, string? Refusal) Rejected(string reason) { Console.Error.WriteLine("node-update:package-unavailable:" + reason); return (null, reason); }
     private static bool Unavailable(Exception exception) => exception is IOException or InvalidDataException or UnauthorizedAccessException or ArgumentException or NotSupportedException or InvalidOperationException or OverflowException or HttpRequestException or OperationCanceledException or JsonException or System.Security.SecurityException;
 
     private static async Task<long> CopyBoundedAsync(Stream source, Stream destination, long limit, IncrementalHash? hash, CancellationToken ct)

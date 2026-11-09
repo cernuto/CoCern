@@ -4,7 +4,10 @@ using CoCern.Host.Dashboard;
 
 namespace CoCern.Host.Development;
 
-/// <summary>The opt-in Visual Studio profile publishes an adapter snapshot after the hub is ready.</summary>
+/// <summary>
+/// The opt-in Visual Studio profile publishes an adapter snapshot after the hub is ready, then (unless <c>Relay:DevelopmentAdapter:PublishNodeAdapter</c>
+/// is false) keeps a self-contained node adapter for that source in <c>artifacts/node-adapter</c>; see <see cref="NodeAdapterBuilds"/>.
+/// </summary>
 internal sealed class DevelopmentAdapterService(IConfiguration configuration, IHostEnvironment environment, IHostApplicationLifetime lifetime, ILogger<DevelopmentAdapterService> logger) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -15,7 +18,10 @@ internal sealed class DevelopmentAdapterService(IConfiguration configuration, IH
         try
         {
             await ready.Task.WaitAsync(stoppingToken);
-            await Task.Run(() => Deploy(), stoppingToken);
+            var version = await Task.Run(() => Deploy(), stoppingToken);
+            // In the background of this service only: hub startup never waits for it, and stopping the hub stops the publish.
+            if (configuration.GetValue("Relay:DevelopmentAdapter:PublishNodeAdapter", true) && DashboardConnect.CheckoutRoot(AppContext.BaseDirectory) is { } checkout)
+                await new NodeAdapterPublisher(logger).PublishAsync(checkout, version, stoppingToken);
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException)
@@ -25,7 +31,8 @@ internal sealed class DevelopmentAdapterService(IConfiguration configuration, IH
         }
     }
 
-    private void Deploy()
+    /// <summary>Deploys the development adapter and returns its version (the content hash of the build output it copied).</summary>
+    private string Deploy()
     {
         string Full(string key, string fallback) => Path.GetFullPath(configuration[key] ?? fallback, environment.ContentRootPath);
         var builtSource = typeof(DevelopmentAdapterService).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyMetadataAttribute), false)
@@ -50,5 +57,6 @@ internal sealed class DevelopmentAdapterService(IConfiguration configuration, IH
             Path.GetFullPath(tokenFile, environment.ContentRootPath));
         logger.LogInformation("Development adapter deployed: {Version}; requested fresh MCP generation {Generation}. Codex launch entry changed: {Changed}; Claude Code launch entry changed: {ClaudeChanged}.",
             manifest.Version[..12], manifest.Generation, changed, claudeChanged);
+        return manifest.Version;
     }
 }

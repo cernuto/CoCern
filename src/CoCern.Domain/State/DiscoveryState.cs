@@ -90,7 +90,8 @@ public sealed class EnrolledMachine(JsonObject json)
 
     public static StateShape Shape { get; } = StateShape.Object(
         (NameKey, null), (CredentialHashKey, null), (EnrolledAtKey, null), (LastSeenKey, null), (ClientsKey, null), (ChatsKey, AnnouncedChat.Shape),
-        (NodeBuildKey, StateShape.Object(("productVersion", null), ("contentId", null), ("adapterDllSha256", null), ("processId", null))));
+        (NodeBuildKey, StateShape.Object(("productVersion", null), ("contentId", null), ("adapterDllSha256", null), ("processId", null),
+            ("lastRefusal", StateShape.Object(("releaseId", null), ("reason", null), ("atUtc", null))))));
 
     public string Name
     {

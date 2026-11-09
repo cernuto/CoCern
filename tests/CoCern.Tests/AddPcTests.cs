@@ -242,7 +242,14 @@ public sealed class AddPcTests : IDisposable
         File.SetLastWriteTimeUtc(debug, DateTime.UtcNow);
         Assert.Equal(new AdapterBuild(debug, SelfContained: false), DashboardConnect.ServedAdapter(null, hub));
         Assert.Equal(debug, DashboardConnect.LocalAdapter(null, hub));
+        // Nodes are never offered the framework-dependent build output: the newest self-contained build, which the hub's own node publish overtakes.
+        Assert.Equal(new AdapterBuild(published, SelfContained: true), DashboardConnect.NodeAdapter(null, debug, hub));
+        var version = new string('c', 64);
+        var node = FakeAdapter(Path.Combine(checkout, "artifacts", "node-adapter", "versions", version), selfContained: true);
+        File.WriteAllText(Path.Combine(checkout, "artifacts", "node-adapter", "current.json"), "{\"version\":\"" + version + "\"}");
+        Assert.Equal(new AdapterBuild(node, SelfContained: true), DashboardConnect.NodeAdapter(null, debug, hub));
         Directory.Delete(Path.Combine(checkout, "artifacts"), recursive: true);
+        Assert.Null(DashboardConnect.NodeAdapter(null, debug, hub));
 
         // A CoCern.slnx planted above the checkout changes nothing: the nearest one is the checkout.
         File.WriteAllText(Path.Combine(above, "CoCern.slnx"), "");

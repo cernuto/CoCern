@@ -149,7 +149,22 @@ public static class DiscoveryStateMachine
             dll.Length != 64 || dll.Any(c => !char.IsAsciiHexDigit(c)) ||
             build["processId"] is not JsonValue pid || !pid.TryGetValue<int>(out var processId) || processId <= 0)
             throw new ArgumentException("nodeBuild contains invalid build observations.");
-        return new(version, content, dll, processId);
+        return new(version, content, dll, processId, ReadRefusal(build["lastRefusal"]));
+    }
+
+    /// <summary>
+    /// The release a node last refused, when it sent one that is well formed: a release ID, a fixed reason code and a time. Anything else is dropped
+    /// rather than failing the announcement, so an older or newer node never loses its chats over this report; nothing free-form is stored.
+    /// </summary>
+    private static NodeUpdateRefusal? ReadRefusal(JsonNode? value)
+    {
+        if (value is not JsonObject refusal) return null;
+        var release = refusal["releaseId"] is JsonValue id && id.TryGetValue<string>(out var text) ? text : null;
+        var reason = refusal["reason"] is JsonValue code && code.TryGetValue<string>(out var word) ? word : null;
+        var at = refusal["atUtc"] is JsonValue when && when.TryGetValue<string>(out var stamp) &&
+            DateTimeOffset.TryParse(stamp, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var parsed) ? parsed : (DateTimeOffset?)null;
+        if (release is not { Length: 64 } || release.Any(c => !(char.IsAsciiDigit(c) || c is >= 'A' and <= 'F')) || !NodeUpdateRefusals.IsCode(reason) || at is null) return null;
+        return new(release, reason!, at.Value.ToUniversalTime());
     }
 
     /// <summary>The announced chats in the given repositories. Private thread IDs, credential hashes and credentials never leave the aggregate.</summary>
@@ -164,7 +179,11 @@ public static class DiscoveryStateMachine
             {
                 var provider = chat.Provider;
                 var reachable = ReadModels.IsReachable(provider, chat.Wakeable, chat.WaiterRunning, lastSeen, now);
-                var nodeBuild = machine.NodeBuild is { } build ? new { productVersion = build.ProductVersion, contentId = build.ContentId, adapterDllSha256 = build.AdapterDllSha256, processId = build.ProcessId } : null;
+                var nodeBuild = machine.NodeBuild is { } build ? new
+                {
+                    productVersion = build.ProductVersion, contentId = build.ContentId, adapterDllSha256 = build.AdapterDllSha256, processId = build.ProcessId,
+                    lastRefusal = build.LastRefusal is { } refusal ? new { releaseId = refusal.ReleaseId, reason = refusal.Reason, atUtc = refusal.AtUtc } : null
+                } : null;
                 items.Add(new { label = chat.Label, provider, machineName = machine.Name, relaySessionId = chat.RelaySessionId, repositoryId = chat.RepositoryId, reachable, nodeBuild });
             }
         }

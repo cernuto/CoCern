@@ -26,12 +26,22 @@ internal sealed class NodeUpdateCoordinator(NodeUpdateContext context) : INodeUp
             var root = Path.Combine(context.NodeFolder, "updates");
             var journal = NodeUpdateState.Read(root).Record;
             if (journal?.Current.ReleaseId == offered.ReleaseId) return null;
-            var staged = await NodePackage.StageAsync(offered, context.EnrolledHub, context.PinnedHttp, context.MachineCredential, root, context.Host, ct)
-                ?? throw new InvalidDataException("node-update:stage-rejected");
+            var (staged, refusal) = await NodePackage.StageWithReasonAsync(offered, context.EnrolledHub, context.PinnedHttp, context.MachineCredential, root, context.Host, ct);
+            if (staged is null) throw Refused(refusal ?? NodeUpdateRefusals.Unavailable);
             return staged.Image.ContentId == journal?.Current.ContentId ? null : staged;
         }
         finally { owner.Release(); }
     }
+    /// <summary>The refusal NodeRunner records: the message stays the fixed staging code, and the reason travels as data for the node's journal and announcement.</summary>
+    internal static InvalidDataException Refused(string reason)
+    {
+        var exception = new InvalidDataException("node-update:stage-rejected");
+        exception.Data[RefusalKey] = reason;
+        return exception;
+    }
+
+    internal const string RefusalKey = "CoCern.NodeUpdateRefusal";
+
     public Task PrepareAsync(StagedNode staged, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();

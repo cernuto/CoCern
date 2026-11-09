@@ -29,7 +29,8 @@ public sealed class NodeReleaseTests : IDisposable
     [Fact]
     public async Task Enrolled_nonadmin_gets_package_truth_and_exact_verified_bytes()
     {
-        var folder = Package();
+        // Nodes are offered only self-contained builds: they run without a known .NET host and refuse framework-dependent ones.
+        var folder = Package(selfContained: true);
         await using var host = Host(folder);
         using var machine = Client(host, await Enroll(host));
         using var announce = await machine.PostAsJsonAsync("/api/discovery/announce", new { machineName = "PC", chats = Array.Empty<object>() });
@@ -41,6 +42,7 @@ public sealed class NodeReleaseTests : IDisposable
         Assert.Equal(1, release.Schema);
         Assert.Equal(1, release.Package.Schema);
         Assert.Equal(1, release.Package.SupervisorProtocol);
+        Assert.True(release.Package.SelfContained);
         Assert.Equal(release.ZipSha256, release.ReleaseId);
         Assert.Matches("^[A-F0-9]{64}$", release.ReleaseId);
         using var download = await machine.GetAsync("/join/adapter.zip?release=" + release.ReleaseId);
@@ -147,7 +149,7 @@ public sealed class NodeReleaseTests : IDisposable
     }
 
     private string CacheFolder => Path.Combine(root, "cache");
-    private string Package(string? protocol = "1", Platform platform = Platform.AnyCpu)
+    private string Package(string? protocol = "1", Platform platform = Platform.AnyCpu, bool selfContained = false)
     {
         var folder = Path.Combine(root, "package-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(folder);
@@ -155,6 +157,15 @@ public sealed class NodeReleaseTests : IDisposable
         var compilation = CSharpCompilation.Create("CoCern.Adapter", [CSharpSyntaxTree.ParseText(source)], [MetadataReference.CreateFromFile(typeof(object).Assembly.Location)], new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, platform: platform));
         var emitted = compilation.Emit(Path.Combine(folder, "CoCern.Adapter.dll"));
         Assert.True(emitted.Success, string.Join(Environment.NewLine, emitted.Diagnostics));
+        if (selfContained)
+        {
+            // A win-x64 self-contained publish as the metadata reader sees it: the runtime it carries, and x64 PE images for the apphost and runtime.
+            File.WriteAllText(Path.Combine(folder, "CoCern.Adapter.deps.json"), "{\"runtimeTarget\":{\"name\":\".NETCoreApp,Version=v10.0/win-x64\"}}");
+            File.WriteAllText(Path.Combine(folder, "CoCern.Adapter.runtimeconfig.json"), "{\"runtimeOptions\":{\"tfm\":\"net10.0\",\"includedFrameworks\":[{\"name\":\"Microsoft.NETCore.App\",\"version\":\"10.0.0\"}]}}");
+            var native = CSharpCompilation.Create("Native", [CSharpSyntaxTree.ParseText("public static class Native { }")], [MetadataReference.CreateFromFile(typeof(object).Assembly.Location)], new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, platform: Platform.X64));
+            foreach (var file in new[] { "CoCern.Adapter.exe", "coreclr.dll", "hostfxr.dll" }) Assert.True(native.Emit(Path.Combine(folder, file)).Success);
+            return folder;
+        }
         File.WriteAllText(Path.Combine(folder, "CoCern.Adapter.deps.json"), "{\"runtimeTarget\":{\"name\":\".NETCoreApp,Version=v10.0\"}}");
         File.WriteAllText(Path.Combine(folder, "CoCern.Adapter.runtimeconfig.json"), "{\"runtimeOptions\":{\"tfm\":\"net10.0\",\"frameworks\":[{\"name\":\"Microsoft.NETCore.App\",\"version\":\"10.0.0\"}]}}");
         return folder;

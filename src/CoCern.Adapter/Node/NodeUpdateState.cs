@@ -88,6 +88,32 @@ public static class NodeUpdateState
         var ready = ReadHandoff<NodeReady>(updateRoot, "ready.json");
         return ready is not null && ValidReady(ready) ? ready : null;
     }
+    /// <summary>
+    /// The last release this node refused or failed to stage, kept in <c>updates/refusal.json</c> beside the journal rather than in <c>state.json</c>: the journal
+    /// reader disallows unknown members, so a supervisor or rolled-back worker from before this field would read a journal carrying it as corrupt and stop.
+    /// Only the worker writes it, and nothing in it decides what runs.
+    /// </summary>
+    internal static void WriteRefusal(string updateRoot, NodeUpdateRefusal refusal)
+    {
+        var root = NodePackage.ValidatedUpdateRoot(updateRoot, create: false);
+        if (!ValidRefusal(refusal)) throw new InvalidDataException("node-refusal-invalid");
+        AtomicWrite(root, RefusalFile, refusal);
+    }
+    internal static NodeUpdateRefusal? ReadRefusal(string updateRoot)
+    {
+        var refusal = ReadHandoff<NodeUpdateRefusal>(updateRoot, RefusalFile);
+        return refusal is not null && ValidRefusal(refusal) ? refusal : null;
+    }
+    internal static void ClearRefusal(string updateRoot)
+    {
+        var root = NodePackage.ValidatedUpdateRoot(updateRoot, create: false);
+        var path = Path.Combine(root, RefusalFile);
+        if (!File.Exists(path)) return;
+        NodePackage.ValidatePrivateFile(path);
+        File.Delete(path);
+    }
+    internal static bool ValidRefusal(NodeUpdateRefusal? refusal) => refusal is { ReleaseId: { Length: 64 } id } && id.All(c => char.IsAsciiDigit(c) || c is >= 'A' and <= 'F') && NodeUpdateRefusals.IsCode(refusal.Reason);
+    private const string RefusalFile = "refusal.json";
     private static bool ValidReady(NodeReady ready) => ready.ActivationNonce != Guid.Empty && ready.ProcessId > 0 && ready.ContentId is { Length: 64 } id && id.All(c => char.IsAsciiDigit(c) || c is >= 'a' and <= 'f');
     private static T? ReadHandoff<T>(string updateRoot, string name) where T : class
     {

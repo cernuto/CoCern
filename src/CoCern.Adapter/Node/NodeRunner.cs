@@ -105,9 +105,21 @@ public sealed class NodeRunner : IAsyncDisposable
             {
                 readiness = new(nonce, image.ContentId, Environment.ProcessId, startupContext?.LaunchId is { } launch && launch != Guid.Empty ? launch : null);
             }
-            var observation = new NodeBuildObservation(image.Package.ProductVersion, image.ContentId, image.AdapterDllSha256, Environment.ProcessId);
+            var observation = new NodeBuildObservation(image.Package.ProductVersion, image.ContentId, image.AdapterDllSha256, Environment.ProcessId, StartupRefusal(Path.Combine(nodeFolder, "updates")));
             return await RunAsync(state, null, transport, error, ct, readiness, workerStartup: true, workerImage: image.ContentId, startupContext: startupContext, nodeBuild: observation);
         }
+    }
+
+    /// <summary>
+    /// The refusal to report from startup: the newer of the last staging refusal this node recorded and the journal's last failed activation (a candidate
+    /// the supervisor started and rolled back). Unreadable evidence reports nothing rather than stopping the node.
+    /// </summary>
+    private static NodeUpdateRefusal? StartupRefusal(string updateRoot)
+    {
+        var staged = NodeUpdateState.ReadRefusal(updateRoot);
+        var journal = NodeUpdateState.ReadPrimary(updateRoot);
+        var activation = journal is { LastFailedReleaseId: { } release, LastFailedAtUtc: { } at } ? new NodeUpdateRefusal(release, NodeUpdateRefusals.ActivationFailed, at) : null;
+        return activation is null ? staged : staged is null || activation.AtUtc > staged.AtUtc ? activation : staged;
     }
 
     private static bool SingletonBusy(string nodeFolder)
@@ -165,6 +177,8 @@ public sealed class NodeRunner : IAsyncDisposable
     private readonly NodeReady? _activationReady;
     private readonly string? _workerImage;
     private readonly NodeBuildObservation? _nodeBuild;
+    /// <summary>The last release this node refused, sent with <see cref="_nodeBuild"/> in every announcement so the hub can show why a node did not update.</summary>
+    private NodeUpdateRefusal? _lastRefusal;
     private readonly bool _pendingCandidate;
     private int _activationGateHeld;
     private bool _workerStartup;
@@ -177,6 +191,7 @@ public sealed class NodeRunner : IAsyncDisposable
         _activationReady = readiness;
         _workerImage = workerImage;
         _nodeBuild = nodeBuild;
+        _lastRefusal = nodeBuild?.LastRefusal;
         _workerStartup = workerStartup;
         _ordinaryStartup = startupContext?.OrdinaryStartup == true;
         var journal = (workerImage is not null || transport.CreateUpdater is not null && transport.UpdateHost is not null) ? NodeUpdateState.Read(Path.Combine(state.Folder, "updates")).Record : null;
@@ -472,12 +487,19 @@ public sealed class NodeRunner : IAsyncDisposable
                 _updateTask = null;
                 StagedNode? staged;
                 try { staged = await completed; }
-                catch { RecordUpdateFailure(_stagingRelease); throw; }
+                catch (Exception exception) { RecordUpdateFailure(_stagingRelease); RecordRefusal(_stagingRelease, exception); throw; }
                 if (staged is not null)
                 {
                     if (!await _dispatchGate.TryDrainAsync(TimeSpan.FromSeconds(30), ct)) return false;
                     try { await _updater!.PrepareAsync(staged, ct); }
-                    catch { RecordUpdateFailure(staged.Release.ReleaseId); _dispatchGate.Resume(); throw; }
+                    catch (Exception exception)
+                    {
+                        RecordUpdateFailure(staged.Release.ReleaseId);
+                        if (exception is not OperationCanceledException) RecordRefusal(staged.Release.ReleaseId, NodeUpdateRefusals.PrepareFailed);
+                        _dispatchGate.Resume();
+                        throw;
+                    }
+                    ClearRefusal();
                     return true;
                 }
             }
@@ -507,7 +529,7 @@ public sealed class NodeRunner : IAsyncDisposable
         {
             try { await pending; }
             catch (OperationCanceledException) { }
-            catch (Exception) { RecordUpdateFailure(_stagingRelease); }
+            catch (Exception exception) { RecordUpdateFailure(_stagingRelease); RecordRefusal(_stagingRelease, exception); }
         }
         _updateTask = null;
         _stagingRelease = null;
@@ -525,6 +547,36 @@ public sealed class NodeRunner : IAsyncDisposable
         if (_failedReleases.ContainsKey(release)) return;
         if (_failedReleases.Count >= FailureHistoryLimit) { _nextUpdate = _transport.Clock.GetUtcNow() + TimeSpan.FromMinutes(15); return; }
         _failedReleases.Add(release, _transport.Clock.GetUtcNow());
+    }
+
+    /// <summary>Keeps why staging <paramref name="release"/> failed; cancellation is not a refusal.</summary>
+    private void RecordRefusal(string? release, Exception exception)
+    {
+        if (exception is OperationCanceledException) return;
+        RecordRefusal(release, exception.Data[NodeUpdateCoordinator.RefusalKey] as string ?? NodeUpdateRefusals.Unavailable);
+    }
+
+    /// <summary>
+    /// Remembers the refusal for the next announcements and keeps it in <c>updates/refusal.json</c> so a restarted worker still reports it. The reason is a
+    /// fixed code; a journal folder that cannot take it only loses the record, never the node.
+    /// </summary>
+    private void RecordRefusal(string? release, string reason)
+    {
+        if (release is null || !NodeUpdateRefusals.IsCode(reason)) return;
+        var refusal = new NodeUpdateRefusal(release, reason, _transport.Clock.GetUtcNow());
+        if (!NodeUpdateState.ValidRefusal(refusal)) return;
+        _lastRefusal = refusal;
+        _error.WriteLine("node-update:refused:" + reason);
+        try { NodeUpdateState.WriteRefusal(Path.Combine(_state.Folder, "updates"), refusal); }
+        catch (Exception exception) when (exception is IOException or InvalidDataException or UnauthorizedAccessException or ArgumentException or NotSupportedException or System.Security.SecurityException) { }
+    }
+
+    /// <summary>A staged release was handed to the supervisor, so an earlier refusal no longer explains this node's build.</summary>
+    private void ClearRefusal()
+    {
+        _lastRefusal = null;
+        try { NodeUpdateState.ClearRefusal(Path.Combine(_state.Folder, "updates")); }
+        catch (Exception exception) when (exception is IOException or InvalidDataException or UnauthorizedAccessException or ArgumentException or NotSupportedException or System.Security.SecurityException) { }
     }
 
     private void PruneUpdateFailures()
@@ -644,7 +696,7 @@ public sealed class NodeRunner : IAsyncDisposable
     private Task<HttpResponseMessage> PostAnnounceAsync(JsonArray chats, CancellationToken ct) => PostAsync("api/discovery/announce", new JsonObject
     {
         ["machineName"] = _transport.MachineName,
-        ["nodeBuild"] = JsonSerializer.SerializeToNode(_nodeBuild, new JsonSerializerOptions(JsonSerializerDefaults.Web)),
+        ["nodeBuild"] = JsonSerializer.SerializeToNode(_nodeBuild is null ? null : _nodeBuild with { LastRefusal = _lastRefusal }, new JsonSerializerOptions(JsonSerializerDefaults.Web)),
         ["clients"] = new JsonArray(_transport.Clients().Select(x => (JsonNode)JsonValue.Create(x)!).ToArray()),
         ["chats"] = chats.DeepClone()
     }, _credential, ct);

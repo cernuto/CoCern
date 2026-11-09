@@ -195,6 +195,10 @@ The directory and dashboard show whether a chat currently announces a wake path.
 
 After an authorized installation of a compatible bootstrap, the node verifies builds offered by its own hub and updates between wakes. **Updated** means the new node has started and authenticated. **Update deferred** means waking continues on the current node until it can safely restart. **Old node retained** means an unavailable, incompatible or failed update leaves the previous verified node selected. **Bootstrap needed** means an older installation needs one authorized install and restart before automatic updates are available.
 
+Nodes run self-contained, with no .NET host they can rely on, so the hub offers them only a self-contained build: the newest one it finds by write time among `Relay:Connect:DistributionAdapterPath`, `Relay:Connect:AdapterPath`, `artifacts/node-adapter` and `artifacts/adapter`. If it finds none, it offers nothing. This choice is separate from the package the **Add another PC** command downloads. A hub started from the Visual Studio profile keeps `artifacts/node-adapter` current by itself (see [Development](#development)). Any other hub needs `./scripts/Build-CoCern.ps1 -Publish` before its nodes can update.
+
+When a node refuses or fails a release, it keeps the release ID, a short reason code (for example `no-dotnet-host`, `hash-mismatch` or `activation-failed`) and the time in `updates/refusal.json` in its data folder. It reports them as `nodeBuild.lastRefusal`, which `chat_directory` shows. The record clears once a later release is handed over for activation.
+
 Node updates keep the existing credentials, data folder and Windows sign-in entry. They do not rewrite MCP client settings or hooks. A node's `nodeBuild` observation in `chat_directory` describes its running package and process; it does not prove an installed MCP adapter or a chat's loaded tool descriptions changed. The host, the build the hub serves, the running node and an installed MCP adapter can all differ. A missing observation remains unknown.
 
 ## The dashboard
@@ -249,6 +253,13 @@ Starting the `CoCern.Host` Visual Studio debug profile snapshots the adapter fro
 The profile enables this only while a debugger is attached in Development. It updates an existing Codex CoCern entry only when its token-file path matches this hub, preserves credentials and other settings, and backs up the configuration. After the first migration, reconnect CoCern in Codex once to load the launcher; later F5 starts refresh the backend automatically. Stopping the debugger leaves the launcher available for the next start and keeps loaded adapters outside the build output.
 
 The launcher itself remains in its original immutable version. After changing launcher code, run `dotnet <built-adapter-dll> --dev-setup <absolute-deployment-root> <adapter-output-folder> <absolute-token-file>` and reconnect CoCern once. This explicit command also upgrades an existing launcher entry. Normal adapter changes need only F5. Old version folders are retained; `Relay:DevelopmentAdapter:SourcePath` can override the build's adapter output path for a custom layout.
+
+About 30 seconds after a debug start that deployed new adapter binaries, the hub also publishes a self-contained node adapter, so enrolled nodes can update. It runs the same `dotnet publish` as `Build-CoCern.ps1 -Publish` (Release, win-x64, self-contained). The build gets its own `--artifacts-path`, so Visual Studio's `bin` and `obj` folders are never touched. The output goes to a new folder, `artifacts/node-adapter/versions/<version>`, and `current.json` is then switched to it in one rename.
+- Each adapter version is published only once, and one publish runs at a time.
+- A restart within the 30 seconds skips the publish, and stopping the hub stops it.
+- Hub startup never waits for it.
+- A failure is logged without its text; the build output is in `artifacts/node-adapter/logs`.
+- Set `Relay:DevelopmentAdapter:PublishNodeAdapter` to `false` to turn it off.
 
 Follow [AGENTS.md](AGENTS.md) and the [verification guide](docs/testing.md): accumulate significant changes and verify at a deploy or major milestone. Use Roslyn CodeLens to map changed production symbols to exact related test methods, then record the current commit, symbols and selection in an ignored file under `artifacts/`. If there are no covering tests, run no tests. Reviews use source inspection; whole-suite and per-batch gates are not part of the workflow.
 
