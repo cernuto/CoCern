@@ -21,12 +21,16 @@ public sealed class NativeJoinCallsTests
         var allocations = new Dictionary<string, (string Id, string Token)>();
         var replies = new List<string>();
         var drop = true;
+        var denyPreflight = false;
         using var http = new HttpClient(new Handler(async (request, ct) =>
         {
             Assert.Equal(scope.Options.Token, request.Headers.Authorization?.Parameter);
             using var doc = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(ct));
             var args = doc.RootElement;
-            if (args.TryGetProperty("nativePreflight", out _)) return Wire(new { repositoryId = "repo" });
+            if (args.TryGetProperty("nativePreflight", out _))
+                return denyPreflight
+                    ? new(System.Net.HttpStatusCode.Forbidden) { Content = new StringContent(JsonSerializer.Serialize(new { ok = false, code = RelayErrorCodes.RepositoryDenied, dataJson = "{}", version = 1 }), System.Text.Encoding.UTF8, "application/json") }
+                    : Wire(new { repositoryId = "repo" });
             if (args.TryGetProperty("nativeJoin", out _))
             {
                 var attempt = args.GetProperty("requestId").GetString()!;
@@ -48,6 +52,16 @@ public sealed class NativeJoinCallsTests
         Assert.Single(allocations);
         Assert.Contains("s-captured", replies);
         Assert.Equal(context.NativeId, Assert.Single(NativeJoinBinding.DispatchSnapshot(scope.Folder)).Chat!.ThreadId);
+
+        // Regression (Dev1, 2026-11-09): a restarted backend whose preflight the hub refuses (a process-wide repository hint that names another
+        // repository) still serves a chat that already has a binding. The repository comes from the binding; the session is probed, not reopened.
+        denyPreflight = true;
+        await using var restarted = new NativeJoin(scope.Folder, scope.Options, new RelayForwarder(http, scope.Options));
+        Assert.True((await restarted.CallAsync(context, "tool-2", RelayTools.GetStatus, JsonSerializer.SerializeToElement(new { }), default)).Ok);
+        Assert.Single(allocations);
+        // A chat with no binding still needs the hub's preflight, and its refusal stands.
+        var stranger = context with { NativeId = Guid.NewGuid().ToString("D") };
+        Assert.Equal(RelayErrorCodes.RepositoryDenied, (await restarted.CallAsync(stranger, "tool-3", RelayTools.GetStatus, JsonSerializer.SerializeToElement(new { }), default)).Code);
     }
 
     private static HttpResponseMessage Wire(object data, bool ok = true, string code = "Ok") => new(System.Net.HttpStatusCode.OK)

@@ -541,6 +541,54 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
         finally { foreach (var binding in held) await binding.DisposeAsync(); }
     }
 
+    /// <summary>
+    /// The repository this chat is already bound to for <paramref name="checkout"/>, read from this connection's own private bindings: its per-chat
+    /// binding, or an older per-checkout one not adopted yet (the join that follows adopts it). A binding last used in this checkout counts first;
+    /// otherwise one made in another checkout whose frozen evidence names the same Git common directory or origin as <paramref name="evidence"/>,
+    /// a worktree or clone of the same repository (a move). Null when there is none, or when more than one repository qualifies: the join then
+    /// asks the hub's preflight, as for a new chat.
+    /// <para>This only finds which of the chat's own bindings to use; it grants nothing. A binding is written only after the hub resolved and
+    /// authorized its repository for this credential, its session is probed before use, and any open it makes carries this checkout's evidence,
+    /// which the hub resolves again (<c>CheckedNativeResolution</c>) and must find to be this same repository.</para>
+    /// </summary>
+    internal static string? KnownRepository(string folder, string provider, string nativeId, string machineId, string checkout, JsonElement evidence)
+    {
+        try
+        {
+            if (provider is not ("claude" or "codex") || !TryNativeId(nativeId, out var id)) return null;
+            nativeId = id.ToString("D");
+            var sessions = Path.Combine(folder, NodeState.SessionsFolder);
+            if (!Directory.Exists(Path.Combine(sessions, CheckoutFolder)) && !Directory.Exists(Path.Combine(sessions, ChatFolder))) return null;
+            folder = CanonicalDirectory(folder);
+            var identity = ConnectionIdentity(folder);
+            sessions = Path.Combine(folder, NodeState.SessionsFolder);
+            RejectLink(sessions);
+            // Bindings record the canonical checkout; the caller's Git top-level may spell it differently.
+            var spellings = new HashSet<string>(StringComparer.Ordinal) { checkout };
+            try { spellings.Add(CanonicalDirectory(checkout)); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException) { }
+            static string? Field(JsonElement value, string name) =>
+                value.ValueKind == JsonValueKind.Object && value.TryGetProperty(name, out var field) && field.ValueKind == JsonValueKind.String ? field.GetString() : null;
+            bool SameRepository(JsonElement saved, string name) => Field(saved, name) is { } frozen && Field(evidence, name) == frozen;
+            var here = new HashSet<string>(StringComparer.Ordinal);
+            var related = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var path in StateFiles(sessions, ChatFolder).Concat(StateFiles(sessions, CheckoutFolder)))
+            {
+                // Scope fields and frozen evidence only, read as the dispatch observation reads them; another credential's files never parse here.
+                if (TryPeek(path, folder, identity) is not { } state || state.Provider != provider || state.NativeId != nativeId || state.Machine != machineId) continue;
+                var anchor = Field(state.Arguments.GetProperty("nativeJoin"), "workspace");
+                if (spellings.Contains(state.Workspace) || state.Unrecorded is { } skipped && spellings.Contains(skipped) || anchor is not null && spellings.Contains(anchor))
+                    here.Add(state.Repository);
+                else if (state.Resolution is { } saved && (SameRepository(saved, "common") || SameRepository(saved, "origin")))
+                    related.Add(state.Repository);
+            }
+            var known = here.Count > 0 ? here : related;
+            return known.Count == 1 && known.Single() is var repository && CoCern.Contracts.NativeGitOrigin.ValidRepositoryHint(repository) ? repository : null;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or JsonException or KeyNotFoundException)
+        { return null; }
+    }
+
     internal bool MatchesFolder(string folder) => CanonicalDirectory(folder) == Folder;
     internal bool MatchesClient(ChatLocation? client) => client is not null && client.Provider == Provider &&
         TryNativeId(client.ThreadId, out var id) && id.ToString("D") == NativeId;

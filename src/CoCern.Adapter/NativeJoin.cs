@@ -239,11 +239,36 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
                     if (Directory.EnumerateFiles(directory, "*.json").Take(512).Count() >= 512) throw new Refused("native_pending_capacity");
                     NodeState.WritePrivately(path, JsonSerializer.SerializeToUtf8Bytes(intent));
                 }
-                var resolution = await forwarder.ForwardAsync(RelayTools.SessionOpen, evidence, cancel);
-                if (!resolution.Ok) throw new Refused(resolution.Code);
-                if (resolution.Code != "Ok" || resolution.Version is null || resolution.Data is not { } data ||
-                    ChatLocators.Text(data, "repositoryId") is not { Length: > 0 and <= RelayLimits.MaxIdentifierLength } repo || repo.Any(char.IsControl))
-                    throw new Refused("invalid_hub_reply");
+                // A chat that already has a binding (for this checkout, or for another checkout of the same repository) keeps that binding's
+                // repository: a process-wide repository hint or a preflight refusal never strands a working chat. Any open it makes still
+                // carries this checkout's evidence, naming that repository, which the hub resolves and authorizes again (CheckedNativeResolution).
+                // Only a chat with no binding here asks the hub's preflight which repository its checkout is.
+                string repo;
+                var opening = evidence;
+                if (NativeJoinBinding.KnownRepository(folder, intent.Provider, intent.NativeId, Environment.MachineName, checkout.Root,
+                    evidence.GetProperty("nativePreflight")) is { } known)
+                {
+                    repo = known;
+                    opening = checkout.Preflight(options.BaseUri.IsLoopback, known);
+                }
+                else
+                {
+                    var resolution = await forwarder.ForwardAsync(RelayTools.SessionOpen, evidence, cancel);
+                    // A process-wide repository hint (COCERN_REPOSITORY, e.g. one Connect wrote for another repository) confines the hub to that
+                    // repository's clone, so a checkout of a different repository is refused. The checkout's own evidence is the truth for a native
+                    // chat: ask once more without the hint, and open with that evidence. The hub still resolves it and checks the credential's access.
+                    if (!resolution.Ok && resolution.Code == RelayErrorCodes.RepositoryDenied && options.Repository is not null)
+                    {
+                        var bare = checkout.Preflight(options.BaseUri.IsLoopback, null);
+                        var retried = await forwarder.ForwardAsync(RelayTools.SessionOpen, bare, cancel);
+                        if (retried.Ok) (resolution, opening) = (retried, bare);
+                    }
+                    if (!resolution.Ok) throw new Refused(resolution.Code);
+                    if (resolution.Code != "Ok" || resolution.Version is null || resolution.Data is not { } data ||
+                        ChatLocators.Text(data, "repositoryId") is not { Length: > 0 and <= RelayLimits.MaxIdentifierLength } resolved || resolved.Any(char.IsControl))
+                        throw new Refused("invalid_hub_reply");
+                    repo = resolved;
+                }
                 if (intent.Repository is not null && intent.Repository != repo) throw new Refused("native_repository_changed");
                 if (intent.Repository is null)
                 {
@@ -272,7 +297,7 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
                 {
                     var handoff = SessionHandoff.ForFolder(folder, client);
                     var protectedRoot = await ProtectedRootAsync(context.Cwd, checkout.Root, cancel);
-                    var opened = await handoff.OpenNativeJoinAsync(binding, forwarder, cancel, context.DisplayTitle, evidence.GetProperty("nativePreflight"), protectedRoot);
+                    var opened = await handoff.OpenNativeJoinAsync(binding, forwarder, cancel, context.DisplayTitle, opening.GetProperty("nativePreflight"), protectedRoot);
                     if (!opened.Completed) throw new Refused(opened.Code);
                     handle = binding.CurrentHandle ?? throw new Refused("native_handle_unverified");
                 }
