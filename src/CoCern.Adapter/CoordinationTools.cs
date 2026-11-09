@@ -12,15 +12,17 @@ namespace CoCern.Adapter;
 public static class CoordinationTools
 {
     /// <summary>
-    /// A native chat keeps the chat narrowing until the hub selects a profile for it; an explicit hub profile then replaces that narrowing
-    /// (<see cref="ToolSurface.Observe"/> rebuilds with the selected profile). Codex lists tools once and ignores <c>tools/list_changed</c>, so a
-    /// backend starts from the selections the hub last gave this registration (<see cref="ToolSurface.Restore"/>), and the first hub answer
-    /// for each session replaces what was remembered.
+    /// A native chat with no hub selection gets the worker catalog (the diagnostics catalog when the adapter was started for diagnostics): every
+    /// tool its credential allows except administrator-only ones, so a working chat can read and claim tasks without anyone choosing a profile for
+    /// each new session. An explicit hub profile replaces that default (<see cref="ToolSurface.Observe"/> rebuilds with it), and <c>admin</c> must be
+    /// selected explicitly. Codex lists tools once and ignores <c>tools/list_changed</c>, so a backend starts from the selections the hub last gave
+    /// this registration (<see cref="ToolSurface.Restore"/>), and the first hub answer for each session replaces what was remembered. The hub still
+    /// enforces the credential and any profile on every call; the default grants nothing.
     /// </summary>
     internal static IEnumerable<McpServerTool> CreateNative(RelayForwarder forwarder, NativeJoin join, NativeRegistrationGate registration, bool admin, bool diagnostics = false, ToolSurface? surface = null)
     {
-        IEnumerable<McpServerTool> Build(string? profile, bool ceiling) => NativeSurface(profile is null ? admin && ceiling : ceiling, chatOnly: profile is null, profile is null && diagnostics, profile is not null)
-            .Where(tool => SessionToolProfiles.Allows(profile, tool.Name, ceiling))
+        IEnumerable<McpServerTool> Build(string? profile, bool ceiling) => NativeSurface(ceiling, chatOnly: false, profile is null && diagnostics, profile is not null)
+            .Where(tool => SessionToolProfiles.Allows(profile ?? (diagnostics ? "diagnostics" : "worker"), tool.Name, ceiling))
             .Select(tool => new ForwardedTool(tool, async (args, ct) =>
             {
                 var reply = await registration.InvokeAsync(join, tool.Name, args, ct);
