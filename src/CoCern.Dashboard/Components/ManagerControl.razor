@@ -48,6 +48,7 @@ else
     </div>
     <section class="standing-section" aria-labelledby="manager-selection-heading">
         <h3 id="manager-selection-heading">Manager selection</h3>
+        <p class="close-sessions-note">There is one manager seat for the whole hub. Appointing a chat replaces the current manager in every repository.</p>
         @if (Selection is null)
         {
             <p>Enter a repository and refresh selection.</p>
@@ -69,7 +70,7 @@ else
         }
         <div class="close-sessions-repository">
             <label for="manager-target">Observed session</label>
-            <BbNativeSelect TValue="string" Id="manager-target" Value="@TargetSessionId" ValueChanged="@(value => SelectTarget(new ChangeEventArgs { Value = value ?? string.Empty }))" Disabled="@(DecisionBusy || UnconfirmedDecision is not null)">
+            <BbNativeSelect TValue="string" Id="manager-target" Value="@TargetSessionId" ValueChanged="@(value => ChooseTargetAsync(value ?? string.Empty))" Disabled="@(DecisionBusy || UnconfirmedDecision is not null)">
                 <option value="">Choose a session</option>
                 @foreach (var session in Sessions)
                 {
@@ -79,9 +80,9 @@ else
         </div>
         <div class="close-sessions-repository">
             <label for="manager-target-id">Exact session ID</label>
-            <BbInput Type="InputType.Text" Id="manager-target-id" Value="@TargetSessionId" ValueChanged="@(value => TargetSessionId = value ?? string.Empty)" UpdateTiming="UpdateTiming.Immediate" Disabled="@(DecisionBusy || UnconfirmedDecision is not null)" />
+            <BbInput Type="InputType.Text" Id="manager-target-id" Value="@TargetSessionId" ValueChanged="@(value => ChooseTargetAsync(value ?? string.Empty))" UpdateTiming="UpdateTiming.Immediate" Disabled="@(DecisionBusy || UnconfirmedDecision is not null)" />
         </div>
-        <p class="close-sessions-note">If the chat is missing from the list, enter its exact ID and repository.</p>
+        <p class="close-sessions-note">An exact ID of a listed chat switches to its repository. If the chat is missing from the list, enter its exact ID and repository.</p>
         @if (TargetSessionId.Length > CoCern.Contracts.RelayLimits.MaxIdentifierLength) { <p role="alert">The exact session ID exceeds 256 characters.</p> }
         @if (!string.IsNullOrWhiteSpace(TargetSessionId))
         {

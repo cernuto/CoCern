@@ -22,14 +22,16 @@ public partial class ManagerControl : ComponentBase
             value = RepositoryIds.Match(value, Sessions.Select(session => session.RepositoryId)) ?? value;
             if (repositoryId == value) return;
             repositoryId = value;
+            var wordsCleared = HumanWords.Length > 0;
             HumanWords = "";
             InvalidateSelection();
             dispatchRevision++;
             Paused = null;
             DispatchMessage = null;
-            SetMessage(null);
+            SetMessage(wordsCleared ? WordsCleared : null);
         }
     }
+    // Human words authorize one exact selection, so a new target or repository clears them, and says so.
     public string TargetSessionId
     {
         get => targetSessionId;
@@ -37,7 +39,9 @@ public partial class ManagerControl : ComponentBase
         {
             if (targetSessionId == value) return;
             targetSessionId = value;
+            if (HumanWords.Length == 0) return;
             HumanWords = "";
+            SetMessage(WordsCleared);
         }
     }
     public string HumanWords { get; set; } = "";
@@ -57,6 +61,7 @@ public partial class ManagerControl : ComponentBase
     private string? loadedRepository;
     private bool repositoryTouched;
     private const string RepositoryRequired = "Enter a repository to refresh selection or control dispatch.";
+    private const string WordsCleared = "The human answer was cleared because the chosen chat or repository changed. Enter it again for this exact selection.";
     private long? nextHistoryBefore;
     // Reads update each field only while no newer operation has superseded that field.
     private long selectionRevision;
@@ -93,7 +98,7 @@ public partial class ManagerControl : ComponentBase
                 if (dispatchRevision == dispatchAtStart && result.Paused is { } paused) Paused = paused;
                 if (messageRevision == messageAtStart) SetMessage(null);
             }
-            else if (messageRevision == messageAtStart) SetMessage(result.Code);
+            else if (messageRevision == messageAtStart) SetMessage(Describe(result.Code));
         }
         catch (Exception error) when (Uncertain(error))
         {
@@ -119,7 +124,7 @@ public partial class ManagerControl : ComponentBase
                 RecentSelections = RecentSelections.Concat(page.History).DistinctBy(item => item.Generation).OrderByDescending(item => item.Generation).ToArray();
                 nextHistoryBefore = page.NextHistoryBefore;
             }
-            else if (!result.Ok && messageRevision == messageAtStart) SetMessage(result.Code);
+            else if (!result.Ok && messageRevision == messageAtStart) SetMessage(Describe(result.Code));
         }
         catch (Exception error) when (Uncertain(error))
         {
@@ -146,7 +151,7 @@ public partial class ManagerControl : ComponentBase
                 nextActionsBefore = page.NextBefore;
                 ActionsDropped = page.Dropped;
             }
-            else if (!result.Ok && messageRevision == messageAtStart) SetMessage(result.Code);
+            else if (!result.Ok && messageRevision == messageAtStart) SetMessage(Describe(result.Code));
         }
         catch (Exception error) when (Uncertain(error))
         {
@@ -156,12 +161,27 @@ public partial class ManagerControl : ComponentBase
         finally { ReadBusy = false; }
     }
 
-    public void SelectTarget(ChangeEventArgs change)
+    // A known chat brings its repository, and that repository's selection is read at once so Appoint works without a manual Refresh.
+    public async Task ChooseTargetAsync(string sessionId)
     {
-        if (UnconfirmedDecision is not null) return;
-        TargetSessionId = change.Value?.ToString() ?? "";
-        if (Sessions.FirstOrDefault(session => session.SessionId == TargetSessionId) is { } target)
-            RepositoryId = target.RepositoryId;
+        if (DecisionBusy || UnconfirmedDecision is not null) return;
+        var hadWords = HumanWords.Length > 0;
+        TargetSessionId = sessionId;
+        if (Sessions.FirstOrDefault(session => session.SessionId == sessionId) is not { } target || string.IsNullOrWhiteSpace(target.RepositoryId)) return;
+        var before = RepositoryId;
+        RepositoryId = target.RepositoryId;
+        var repository = RepositoryId;
+        if (repository == before && loadedRepository == repository) return;
+        await RefreshAsync();
+        if (RepositoryId != repository || TargetSessionId != sessionId) return;
+        string?[] notes =
+        [
+            Message,
+            repository != before ? $"Switched to repository {repository}, where this chat belongs." : null,
+            hadWords && HumanWords.Length == 0 ? WordsCleared : null
+        ];
+        var text = string.Join(" ", notes.Where(note => !string.IsNullOrEmpty(note)).Distinct());
+        SetMessage(text.Length > 0 ? text : null);
     }
 
     public async Task DecideAsync(string command)
@@ -169,7 +189,17 @@ public partial class ManagerControl : ComponentBase
         if (DecisionBusy || UnconfirmedDecision is not null) return;
         if (Selection is null || loadedRepository != RepositoryId)
         {
-            SetMessage("Refresh selection for this repository before deciding."); return;
+            // Never submit a generation the user has not seen: read it, show it, and ask for the click again.
+            if (string.IsNullOrWhiteSpace(RepositoryId)) { SetMessage(RepositoryRequired); return; }
+            if (ReadBusy) { SetMessage("The current selection is still being read. Choose the action again in a moment."); return; }
+            var repository = RepositoryId;
+            await RefreshAsync();
+            if (RepositoryId != repository) return;
+            if (Selection is not null && loadedRepository == repository)
+                SetMessage("The current selection was just read. Review it, then choose the action again to confirm.");
+            else if (Message is null)
+                SetMessage("Could not read the current selection. Try Refresh selection.");
+            return;
         }
         if (command is not ("appoint_manager" or "clear_manager")) return;
         if (string.IsNullOrWhiteSpace(HumanWords) || HumanWords.Length > 200 || HumanWords.Any(UnsafeCharacter))
@@ -212,7 +242,7 @@ public partial class ManagerControl : ComponentBase
                 ? result.Manager is null
                     ? "Selection changed. The current selection could not be read. Use Refresh selection before making a new decision."
                     : "Selection changed. The current selection is shown; review it before making a new decision."
-                : result.Code);
+                : Describe(result.Code));
         }
         catch (Exception error) when (Uncertain(error))
         {
@@ -251,7 +281,7 @@ public partial class ManagerControl : ComponentBase
             var result = await ManagerManagementClient.DispatchAsync(ManagerHttp, decision);
             UnconfirmedDispatch = null;
             dispatchRevision++;
-            if (!result.Ok) { DispatchMessage = result.Code; return; }
+            if (!result.Ok) { DispatchMessage = Describe(result.Code); return; }
             DispatchMessage = decision.Command switch
             {
                 "stop" => "Stop recorded. Cancellation requested from known chats. Running tool outcomes remain unknown.",
@@ -322,5 +352,16 @@ public partial class ManagerControl : ComponentBase
     private static bool UnsafeCharacter(char ch) => char.IsControl(ch) || ch is '\u2028' or '\u2029';
 
     private void SetMessage(string? message) { messageRevision++; Message = message; }
+
+    // One plain line per refusal; the raw code stays in parentheses for diagnosis.
+    private static string Describe(string code) => code switch
+    {
+        RelayErrorCodes.SessionUnknown => $"The hub does not know this chat as live: it is not connected, is being closed, or has had no activity for {RelayLimits.StaleSessionHours} hours. Reopen or reconnect it, then refresh. ({code})",
+        RelayErrorCodes.RepositoryDenied => $"The chat belongs to another repository than the one shown. Choose it from the list, or enter its own repository. ({code})",
+        RelayErrorCodes.SelfAppointment => $"A chat can't appoint itself. Appoint it from the dashboard or through another chat. ({code})",
+        RelayErrorCodes.AdministratorRequired => $"This dashboard account isn't an administrator, so it can't change the manager. ({code})",
+        RelayErrorCodes.InvalidArguments => $"The hub refused the request as malformed. Check the session ID, repository and human answer. ({code})",
+        _ => code
+    };
     private static bool Uncertain(Exception error) => error is HttpRequestException or OperationCanceledException or System.Text.Json.JsonException;
 }
