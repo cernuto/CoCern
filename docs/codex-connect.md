@@ -24,4 +24,16 @@ Connect refresh runs a read-only repository preflight before requesting any chat
 
 A classic chat can retain its existing session when its own private handle matches the exact provider, native thread ID and repository. The hub verifies that private proof before adopting it, retaining the label, task targets, IDE bindings and inbox. Forged, stale or conflicting proof creates no replacement session. No handle or credential is included in hook output.
 
+## One session per native chat
+
+A native chat keeps one hub session for its whole life, keyed by its provider, its own chat ID, this PC and the repository, not by the folder it runs in. Moving the chat to another worktree or clone of the same repository keeps that session, its inbox, tasks and label: its next call reopens the same session with the new checkout's evidence, which the hub checks again, and the hub records the new working copy and protected root. Claims the session took under up to 8 earlier checkouts on the same PC can still be released and renewed after the move.
+
+The adapter keeps these per-chat bindings privately under `sessions/native-chats` in its connection folder. Older per-checkout bindings (`sessions/native`) are adopted on the chat's first call: the one the chat used last becomes its binding, and the others stay as they are but are no longer used. If another, older adapter still holds that file, the call is refused as retryable rather than giving the chat a second session.
+
+When the hub no longer knows a chat's saved session (for example after its data was reset, or the session closed), the chat's next CoCern call verifies that exact handle, gets `SessionUnknown`, and opens a new session for the same chat. Wake watchers stop watching the session that is gone. The adapter never resumes a nearby session by name or repository.
+
+## Repository hint and native chats
+
+`COCERN_REPOSITORY` sets a default for standard calls. A native chat goes by its checkout instead: a chat that already has a binding keeps that binding's repository, and a new chat whose preflight the hub refuses under the hint (`RepositoryDenied`) asks once more without it. Either way the hub resolves the checkout's evidence again and checks the credential's access, so the hint never grants anything and never strands a chat working in another repository.
+
 If the hub is unavailable, restore the connection. A checkout that cannot be mapped to an authorized repository needs its hub configuration corrected; its folder name alone is insufficient.

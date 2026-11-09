@@ -1,6 +1,6 @@
 # Per-chat tool settings
 
-The source supports hub-owned tool profiles for an individual open chat. This work has not been built, tested or deployed; existing running installations retain their current behavior until an authorized deployment.
+The hub owns a tool profile for each individual open chat. This is on `main` and running: FC's chat was set to `worker` this way on 9 November 2026.
 
 An authenticated administrator can use `session_tool_settings_set` with the exact `repositoryId`, `targetSessionId`, selected `profile`, current `expectedVersion` and exact direct `humanWords`. The profiles are `worker`, `chat`, `diagnostics` and `admin`. A revision conflict requires rereading the setting and reviewing the change; it is never automatically retried with a newer version. The session retains the original words, administrator principal, timestamp and revision in its bounded audit.
 
@@ -10,4 +10,6 @@ A profile narrows the tools available under the connection's existing credential
 
 Until an explicit hub setting is selected, a standard adapter retains its configured narrowing, and a native chat (Codex or Claude joined through its native hook) gets the `worker` catalog: every tool its credential allows except administrator-only ones, so it can read and claim tasks without a profile being chosen for each new session. `admin` must be selected explicitly. Standard and native adapters attach their own exact private acting-session proof after joining; public arguments cannot choose another actor. Standalone legacy calls without a session remain governed by their credential and do not inherit a chat's profile or native identity.
 
-Adapters consume authenticated profile/revision metadata from real replies. The MCP tool collection advertises changes; a client that retains its old list must reconnect. Native adapters never manufacture a signed status invocation. A shared native MCP backend advertises the bounded union of observed sessions' tools, while the hub authorizes each individual call against its own chat. An idle client learns a change at its next actual invocation or reconnect. Runtime client refresh support is not claimed here.
+Adapters consume authenticated profile/revision metadata from real replies. The MCP tool collection advertises changes; a client that retains its old list must reconnect. Native adapters never manufacture a signed status invocation. A shared native MCP backend advertises the bounded union of observed sessions' tools, while the hub authorizes each individual call against its own chat. An idle client learns a change at its next actual invocation or reconnect.
+
+Codex ignores `tools/list_changed` and reads the catalog only when it starts a backend. So a native adapter remembers the profile the hub selected for each session of its registration, in that registration's private folder, and a restarted backend lists that catalog from its first `tools/list`, before any call. With nothing remembered, or no profile selected, the default above stands. The memory only chooses what is listed; the hub still checks every call.

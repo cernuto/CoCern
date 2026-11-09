@@ -133,7 +133,7 @@ Chats on other PCs can join the same hub and message chats here. On the hub's PC
 
 Nothing is copied by hand: the command downloads CoCern from this hub over HTTPS with the hub's certificate pinned, joins, adds CoCern to Claude Code (through `claude mcp add` when Claude Code's command line is installed, else its settings file, with a restart hint if Claude Code is running) and Codex, and starts it with Windows. Claude Code no longer needs to be closed. The PC shows up on the dashboard under Machines. If the download or unpacking fails, it stops before changing anything.
 
-- **No .NET needed there** when this hub serves the self-contained adapter published with `./scripts/Build-CoCern.ps1 -Selection artifacts/deploy-smoke-selection.json -Publish`, using the selection described in the [verification guide](docs/testing.md). A hub started from Visual Studio without it serves its own build, which needs the .NET 10 runtime on the other PC; the section says so.
+- **No .NET needed there** when this hub serves the self-contained adapter published with `./scripts/Build-CoCern.ps1 -Selection artifacts/deploy-smoke-selection.json -Publish`, using the selection described in the [verification guide](docs/testing.md). A hub started from Visual Studio without it serves its own build, which needs the .NET 10 runtime on the other PC; the section says so. The hub serves the newest adapter build it finds, so an older published copy is never served once a rebuild has overtaken it.
 - **Updating a joined PC:** paste the same command again. If the hub has a newer adapter while CoCern is running there, it says what to close first and changes nothing; then paste it again.
 - **Turn it on first.** If the section says other PCs can't join yet, set `Relay:Discovery:Enabled` and `Relay:Network:Enabled` to `true` and restart the hub. The Visual Studio launch profile already does.
 - **The other PC can't reach the hub?** Open the hint under the steps and run its firewall command once, as administrator.
@@ -142,7 +142,7 @@ Nothing is copied by hand: the command downloads CoCern from this hub over HTTPS
 
 ## Use it in a chat
 
-The installed `cocern-workflow` skill guides coordination. With an existing native Codex connection, startup records a private intent and the chat's first CoCern call joins or restores its own binding automatically. A chat that has already joined reuses that binding; it does not open a replacement session. Standard connections remain usable without native hooks. See [Connect and verify Codex](docs/codex-connect.md) for connection modes and troubleshooting.
+The installed `cocern-workflow` skill guides coordination. With an existing native Codex connection, startup records a private intent and the chat's first CoCern call joins or restores its own binding automatically. A chat that has already joined reuses that binding; it does not open a replacement session. The binding belongs to the chat, not the folder, so moving it to another worktree or clone of the same repository keeps its session, and a chat whose session the hub has lost gets a new one at its next call. Standard connections remain usable without native hooks. See [Connect and verify Codex](docs/codex-connect.md) for connection modes and troubleshooting.
 
 For clients using the raw session tools, a typical chat is:
 
@@ -197,7 +197,7 @@ After an authorized installation of a compatible bootstrap, the node verifies bu
 
 Nodes run self-contained, with no .NET host they can rely on, so the hub offers them only a self-contained build: the newest one it finds by write time among `Relay:Connect:DistributionAdapterPath`, `Relay:Connect:AdapterPath`, `artifacts/node-adapter` and `artifacts/adapter`. If it finds none, it offers nothing. This choice is separate from the package the **Add another PC** command downloads. A hub started from the Visual Studio profile keeps `artifacts/node-adapter` current by itself (see [Development](#development)). Any other hub needs `./scripts/Build-CoCern.ps1 -Publish` before its nodes can update.
 
-When a node refuses or fails a release, it keeps the release ID, a short reason code (for example `no-dotnet-host`, `hash-mismatch` or `activation-failed`) and the time in `updates/refusal.json` in its data folder. It reports them as `nodeBuild.lastRefusal`, which `chat_directory` shows. The record clears once a later release is handed over for activation.
+When a node refuses or fails a release, it keeps the release ID, a short reason code (for example `no-dotnet-host`, `hash-mismatch` or `activation-failed`) and the time in `updates/refusal.json` in its data folder. It reports them as `nodeBuild.lastRefusal`, which `chat_directory` shows. The record clears once a later release is handed over for activation, and an `activation-failed` record is no longer reported once a build installed after that failure is running.
 
 Node updates keep the existing credentials, data folder and Windows sign-in entry. They do not rewrite MCP client settings or hooks. A node's `nodeBuild` observation in `chat_directory` describes its running package and process; it does not prove an installed MCP adapter or a chat's loaded tool descriptions changed. The host, the build the hub serves, the running node and an installed MCP adapter can all differ. A missing observation remains unknown.
 
@@ -263,7 +263,7 @@ About 30 seconds after a debug start that deployed new adapter binaries, the hub
 
 Follow [AGENTS.md](AGENTS.md) and the [verification guide](docs/testing.md): accumulate significant changes and verify at a deploy or major milestone. Use Roslyn CodeLens to map changed production symbols to exact related test methods, then record the current commit, symbols and selection in an ignored file under `artifacts/`. If there are no covering tests, run no tests. Reviews use source inspection; whole-suite and per-batch gates are not part of the workflow.
 
-The current source-only follow-up adds [bounded goal approvals](docs/chat-decisions.md), [per-chat tool settings](docs/session-tool-settings.md), and [explicit native/file-claim preparation and recovery](docs/native-activation.md). Builds, tests, installation changes and live acceptance remain deferred until authorized; see the [implementation plan](docs/superpowers/plans/2026-11-06-remaining-source-work.md).
+[Bounded goal approvals](docs/chat-decisions.md) and [per-chat tool settings](docs/session-tool-settings.md) are on `main` and run on the hub. [Explicit native/file-claim preparation and recovery](docs/native-activation.md) is still source only: its activation, installation changes and live acceptance wait until authorized; see the [implementation plan](docs/superpowers/plans/2026-11-06-remaining-source-work.md).
 
 After committing the verification source and preparing that selection, run:
 
