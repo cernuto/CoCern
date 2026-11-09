@@ -182,8 +182,11 @@ public sealed record SessionRegistration(string RepositoryId, string SessionId, 
     {
         var read = new MessageReader(payload);
         var (repository, session) = (read.Text("repositoryId"), read.Text("sessionId"));
-        // The version orders registrations, and the times are what the directory judges freshness by.
-        read.Number("bindingVersion", minimum: 0); read.Date("observedAt"); read.Date("freshUntil");
+        // The version orders registrations that carry a binding or label, and the times are what the directory judges freshness by. A chat
+        // waiter's presence (ToolRouter.RegisterWaiter) carries only times and availability and has no version to give: without one it is
+        // never stale, and it cannot replace a binding or label.
+        if (payload[SessionPresence.BindingKey] is not null || payload[SessionPresence.LabelKey] is not null) read.Number(SessionPresence.BindingVersionKey, minimum: 0);
+        read.Date("observedAt"); read.Date("freshUntil");
         return read.Result(new SessionRegistration(repository, session, SessionPresence.Read(read)));
     }
 }
