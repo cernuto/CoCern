@@ -229,7 +229,7 @@ try
     await using var hints = new SessionHints(options);
     await using var localWake = await LocalChatWake.OpenAsync(options, Environment.GetEnvironmentVariable("COCERN_TOKEN_FILE"), registration);
     var toolCollection = new McpServerPrimitiveCollection<McpServerTool>();
-    var toolSurface = new ToolSurface(toolCollection, native: registration is not null);
+    var toolSurface = new ToolSurface(toolCollection, native: registration is not null, memoryPath: registration?.ToolSurfacePath);
     var forwarder = new RelayForwarder(http, options, surface: toolSurface);
     await using var native = (registration?.Folder ?? options.NodeFolder ?? localWake?.Connection.Folder) is { } privateFolder ? new NativeJoin(privateFolder, options, forwarder) : null;
     var initialTools = registration is null

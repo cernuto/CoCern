@@ -579,6 +579,13 @@ internal sealed class NativeRegistration
         ? Read(Path.Combine(args[3], "native-client-" + args[1] + ".candidate.json"), args[1], args[3], args[5], helperVersion) : null;
 
     internal AdapterOptions Connection => options;
+
+    /// <summary>
+    /// Where this registration's backends remember the hub's tool selections (<see cref="ToolSurface"/>): beside the candidate, scoped to the
+    /// provider, credential and client profile but not to the helper build, so an adapter update keeps it and a new credential starts empty.
+    /// </summary>
+    internal string ToolSurfacePath => Path.Combine(Folder, "native-tool-surface-" + Provider + "-" +
+        NativeCheckout.Hash(JsonSerializer.Serialize(new[] { "cocern-native-tool-surface-v1", Provider, scope, profileKey }))[..32] + ".json");
     internal const int MaximumFrameBytes = 2048;
     internal const int MaximumInstances = 4;
     internal static TimeSpan MaximumWait => TimeSpan.FromSeconds(15);

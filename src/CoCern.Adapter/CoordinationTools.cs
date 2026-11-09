@@ -13,7 +13,9 @@ public static class CoordinationTools
 {
     /// <summary>
     /// A native chat keeps the chat narrowing until the hub selects a profile for it; an explicit hub profile then replaces that narrowing
-    /// (<see cref="ToolSurface.Observe"/> rebuilds with the selected profile).
+    /// (<see cref="ToolSurface.Observe"/> rebuilds with the selected profile). Codex lists tools once and ignores <c>tools/list_changed</c>, so a
+    /// backend starts from the selections the hub last gave this registration (<see cref="ToolSurface.Restore"/>), and the first hub answer
+    /// for each session replaces what was remembered.
     /// </summary>
     internal static IEnumerable<McpServerTool> CreateNative(RelayForwarder forwarder, NativeJoin join, NativeRegistrationGate registration, bool admin, bool diagnostics = false, ToolSurface? surface = null)
     {
@@ -26,7 +28,7 @@ public static class CoordinationTools
                 return ToolSurface.StripRouting(surface is null ? reply : ToolSurface.WithRefreshGuidance(reply));
             }, native: true));
         surface?.Configure(Build);
-        return Build(null, admin);
+        return surface?.Restore() ?? Build(null, admin);
     }
 
     /// <summary>

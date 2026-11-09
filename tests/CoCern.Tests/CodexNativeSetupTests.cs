@@ -275,6 +275,34 @@ public sealed class CodexNativeSetupTests
             Assert.False(ClientSettings.IsNativeCodex(configuration, Path.Combine(root, "another-connection"), native[5], searchPath));
             ClientSettings.PlanDevelopmentCodex(configuration, Path.Combine(root, "missing", "dotnet.exe"), launcher, deployment, token, replaceLauncher: true).Apply(TimeProvider.System);
             Assert.False(ClientSettings.IsNativeCodex(configuration, native[3], native[5], searchPath));
+
+            // Codex lists tools once: a native backend must start from the hub's last selection, not the chat default, and the hub's
+            // next answer replaces the remembered one even at a lower revision. Regression: a restarted Codex chat kept only five chat tools.
+            var memory = Path.Combine(root, "native-tool-surface.json");
+            static IEnumerable<ModelContextProtocol.Server.McpServerTool> Catalog(string? profile, bool ceiling) =>
+                (profile is null ? new[] { "check_inbox", "send_message" } : profile == "chat" ? ["check_inbox", "get_status"] : ["check_inbox", "get_status", "task_claim"])
+                    .Select(name => ModelContextProtocol.Server.McpServerTool.Create(() => "", new ModelContextProtocol.Server.McpServerToolCreateOptions { Name = name }));
+            static AdapterReply Settings(string? profile, long revision) => new(true, "Ok", JsonSerializer.SerializeToElement(new
+            { toolSettingsSessionId = "session-a", toolSettingsAdministrator = false, toolSettings = new { profile, revision } }));
+            static string[] Names(ModelContextProtocol.Server.McpServerPrimitiveCollection<ModelContextProtocol.Server.McpServerTool> listed) =>
+                listed.Select(tool => tool.ProtocolTool.Name).Order(StringComparer.Ordinal).ToArray();
+            var firstTools = new ModelContextProtocol.Server.McpServerPrimitiveCollection<ModelContextProtocol.Server.McpServerTool>();
+            var first = new ToolSurface(firstTools, native: true, memoryPath: memory);
+            first.Configure(Catalog);
+            Assert.Null(first.Restore());
+            foreach (var tool in Catalog(null, false)) firstTools.Add(tool);
+            first.Observe(Settings("worker", 3));
+            Assert.Equal(["check_inbox", "get_status", "task_claim"], Names(firstTools));
+            Assert.True(first.Allows("task_claim"));
+            var restartedTools = new ModelContextProtocol.Server.McpServerPrimitiveCollection<ModelContextProtocol.Server.McpServerTool>();
+            var restarted = new ToolSurface(restartedTools, native: true, memoryPath: memory);
+            restarted.Configure(Catalog);
+            foreach (var tool in restarted.Restore() ?? []) restartedTools.Add(tool);
+            Assert.Equal(["check_inbox", "get_status", "task_claim"], Names(restartedTools));
+            Assert.True(restarted.Allows("task_claim"));
+            restarted.Observe(Settings("chat", 1));
+            Assert.Equal(["check_inbox", "get_status"], Names(restartedTools));
+            Assert.False(restarted.Allows("task_claim"));
         }
         finally { Directory.Delete(root, recursive: true); }
     }
