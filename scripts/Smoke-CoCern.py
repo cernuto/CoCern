@@ -35,7 +35,7 @@ REPO = "smoke"
 
 def newest(relative):
     """The newest of the Debug and Release builds, so the check runs whatever was built last."""
-    builds = [ROOT / "src" / relative.split("/")[0] / "bin" / config / "net10.0" / relative.split("/")[1] for config in ("Debug", "Release")]
+    builds = [ROOT / "src" / relative.split("/")[0] / "bin" / config / "net11.0" / relative.split("/")[1] for config in ("Debug", "Release")]
     builds = [path for path in builds if path.is_file()]
     if not builds:
         raise SystemExit(f"Build CoCern first (dotnet build CoCern.slnx): {relative} was not found.")

@@ -383,7 +383,7 @@ public sealed record DashboardAddPcStatus
     public string? AdapterFolder { get; init; }
     public DashboardHubAddress[] Addresses { get; init; } = [];
     public string? FirewallCommand { get; init; }
-    /// <summary>The adapter this hub serves is a framework-dependent build, so the other PC needs the .NET 10 runtime; <see cref="Warning"/> then says what to do.</summary>
+    /// <summary>The adapter this hub serves is a framework-dependent build, so the other PC needs the .NET 11 runtime; <see cref="Warning"/> then says what to do.</summary>
     public bool NeedsDotnet { get; init; }
     /// <summary>Something to read before pasting the command, shown as a warning on the page; null when there is nothing.</summary>
     public string? Warning { get; init; }

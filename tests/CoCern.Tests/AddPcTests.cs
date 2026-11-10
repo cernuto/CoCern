@@ -208,8 +208,8 @@ public sealed class AddPcTests : IDisposable
         var dll = Path.Combine(folder, "CoCern.Adapter.dll");
         File.WriteAllText(dll, "");
         File.WriteAllText(Path.Combine(folder, "CoCern.Adapter.runtimeconfig.json"), selfContained
-            ? """{ "runtimeOptions": { "tfm": "net10.0", "includedFrameworks": [ { "name": "Microsoft.NETCore.App", "version": "10.0.14" } ] } }"""
-            : """{ "runtimeOptions": { "tfm": "net10.0", "frameworks": [ { "name": "Microsoft.NETCore.App", "version": "10.0.0" } ] } }""");
+            ? """{ "runtimeOptions": { "tfm": "net11.0", "includedFrameworks": [ { "name": "Microsoft.NETCore.App", "version": "11.0.0" } ] } }"""
+            : """{ "runtimeOptions": { "tfm": "net11.0", "frameworks": [ { "name": "Microsoft.NETCore.App", "version": "11.0.0" } ] } }""");
         if (selfContained)
             foreach (var file in new[] { "CoCern.Adapter.exe", "coreclr.dll" }) File.WriteAllText(Path.Combine(folder, file), "");
         return dll;
@@ -221,16 +221,16 @@ public sealed class AddPcTests : IDisposable
         // "above" stands for a folder any local user can write to, such as C:\.
         var above = Path.Combine(root, "above");
         var checkout = Path.Combine(above, "CoCern");
-        var hub = Path.Combine(checkout, "src", "CoCern.Host", "bin", "Debug", "net10.0");
+        var hub = Path.Combine(checkout, "src", "CoCern.Host", "bin", "Debug", "net11.0");
         Directory.CreateDirectory(hub);
         FakeAdapter(Path.Combine(above, "artifacts", "adapter"), selfContained: true);
-        FakeAdapter(Path.Combine(above, "src", "CoCern.Adapter", "bin", "Debug", "net10.0"), selfContained: true);
+        FakeAdapter(Path.Combine(above, "src", "CoCern.Adapter", "bin", "Debug", "net11.0"), selfContained: true);
         Assert.Null(DashboardConnect.LocalAdapter(null, hub));
         Assert.Null(DashboardConnect.ServedAdapter(null, hub));
 
         File.WriteAllText(Path.Combine(checkout, "CoCern.slnx"), "<Solution />");
         Assert.Null(DashboardConnect.LocalAdapter(null, hub));
-        var debug = FakeAdapter(Path.Combine(checkout, "src", "CoCern.Adapter", "bin", "Debug", "net10.0"), selfContained: false);
+        var debug = FakeAdapter(Path.Combine(checkout, "src", "CoCern.Adapter", "bin", "Debug", "net11.0"), selfContained: false);
         Assert.Equal(debug, DashboardConnect.LocalAdapter(null, hub));
         Assert.Equal(new AdapterBuild(debug, SelfContained: false), DashboardConnect.ServedAdapter(null, hub));
 

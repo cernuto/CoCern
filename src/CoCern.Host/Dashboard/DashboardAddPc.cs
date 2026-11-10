@@ -122,7 +122,7 @@ internal sealed class DashboardAddPc(IConfiguration configuration, IServiceProvi
         """);
 
     /// <summary>Shown above the command when the adapter this hub serves is framework-dependent (a Visual Studio or <c>dotnet build</c> output).</summary>
-    internal const string NeedsDotnetWarning ="This hub serves an adapter build that needs the .NET 10 runtime on the other PC. Install it there first, or run ./scripts/Build-CoCern.ps1 -Publish on this PC for one that doesn't, then reload.";
+    internal const string NeedsDotnetWarning ="This hub serves an adapter build that needs the .NET 11 runtime on the other PC. Install it there first, or run ./scripts/Build-CoCern.ps1 -Publish on this PC for one that doesn't, then reload.";
 
     /// <summary>The non-blank lines of <paramref name="text"/>, trimmed and joined by <paramref name="separator"/>.</summary>
     private static string OneLine(string separator, string text) =>

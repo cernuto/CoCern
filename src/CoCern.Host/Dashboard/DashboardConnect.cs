@@ -171,7 +171,7 @@ internal sealed class DashboardConnect(IConfiguration configuration, IHostEnviro
         if (hub.Parent is { Parent: not null } published) yield return Path.Combine(published.FullName, "adapter", "CoCern.Adapter.dll");
         if (CheckoutRoot(hub) is not { } root) yield break;
         yield return Path.Combine(root, "artifacts", "adapter", "CoCern.Adapter.dll");
-        foreach (var build in new[] { "Debug", "Release" }) yield return Path.Combine(root, "src", "CoCern.Adapter", "bin", build, "net10.0", "CoCern.Adapter.dll");
+        foreach (var build in new[] { "Debug", "Release" }) yield return Path.Combine(root, "src", "CoCern.Adapter", "bin", build, "net11.0", "CoCern.Adapter.dll");
     }
 
     /// <summary>The CoCern checkout the hub at <paramref name="hubFolder"/> runs from, when it runs from one.</summary>

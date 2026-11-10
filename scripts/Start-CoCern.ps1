@@ -3,7 +3,7 @@ param(
     [string]$RepositoryId = 'cocern',
     [string]$Url = 'http://127.0.0.1:5271',
     [string]$DataDirectory = (Join-Path $PSScriptRoot '..\data'),
-    [string]$HostDll = (Join-Path $PSScriptRoot '..\src\CoCern.Host\bin\Debug\net10.0\CoCern.Host.dll'),
+    [string]$HostDll = (Join-Path $PSScriptRoot '..\src\CoCern.Host\bin\Debug\net11.0\CoCern.Host.dll'),
     # Leave the doc cache without the checkout this script runs from.
     [switch]$NoDocs
 )

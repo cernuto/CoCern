@@ -7,7 +7,7 @@
 <p align="center">Coordinate Claude and Codex across chats and PCs. Follow the work from one live dashboard.</p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/.NET-10-512BD4?logo=dotnet&amp;logoColor=white" alt="Built with .NET 10">
+  <img src="https://img.shields.io/badge/.NET-11-512BD4?logo=dotnet&amp;logoColor=white" alt="Built with .NET 11">
   <img src="https://img.shields.io/badge/Actor_runtime-Microsoft_Orleans-367CF5" alt="Microsoft Orleans actor runtime">
   <img src="https://img.shields.io/badge/Protocol-MCP-16344A" alt="Model Context Protocol">
   <img src="https://img.shields.io/badge/Storage-SQLite-003B57?logo=sqlite&amp;logoColor=white" alt="SQLite storage">
@@ -133,7 +133,7 @@ Chats on other PCs can join the same hub and message chats here. On the hub's PC
 
 Nothing is copied by hand: the command downloads CoCern from this hub over HTTPS with the hub's certificate pinned, joins, adds CoCern to Claude Code (through `claude mcp add` when Claude Code's command line is installed, else its settings file, with a restart hint if Claude Code is running) and Codex, and starts it with Windows. Claude Code no longer needs to be closed. The PC shows up on the dashboard under Machines. If the download or unpacking fails, it stops before changing anything.
 
-- **No .NET needed there** when this hub serves the self-contained adapter published with `./scripts/Build-CoCern.ps1 -Selection artifacts/deploy-smoke-selection.json -Publish`, using the selection described in the [verification guide](docs/testing.md). A hub started from Visual Studio without it serves its own build, which needs the .NET 10 runtime on the other PC; the section says so. The hub serves the newest adapter build it finds, so an older published copy is never served once a rebuild has overtaken it.
+- **No .NET needed there** when this hub serves the self-contained adapter published with `./scripts/Build-CoCern.ps1 -Selection artifacts/deploy-smoke-selection.json -Publish`, using the selection described in the [verification guide](docs/testing.md). A hub started from Visual Studio without it serves its own build, which needs the .NET 11 runtime on the other PC; the section says so. The hub serves the newest adapter build it finds, so an older published copy is never served once a rebuild has overtaken it.
 - **Updating a joined PC:** paste the same command again. If the hub has a newer adapter while CoCern is running there, it says what to close first and changes nothing; then paste it again.
 - **Turn it on first.** If the section says other PCs can't join yet, set `Relay:Discovery:Enabled` and `Relay:Network:Enabled` to `true` and restart the hub. The Visual Studio launch profile already does.
 - **The other PC can't reach the hub?** Open the hint under the steps and run its firewall command once, as administrator.
@@ -283,4 +283,4 @@ The runner builds into isolated output, runs only the selected methods, and reta
 | `extensions/duckdb/` | DuckDB's `sqlite` extension for Windows x64. |
 | `docs/` | The [Reference](docs/reference.md). |
 
-Built with .NET 10, Microsoft Orleans, SQLite (FTS5), DuckDB, Lucene.Net, Microsoft.ML.Tokenizers, YamlDotNet and MCP.
+Built with .NET 11, Microsoft Orleans, SQLite (FTS5), DuckDB, Lucene.Net, Microsoft.ML.Tokenizers, YamlDotNet and MCP.
