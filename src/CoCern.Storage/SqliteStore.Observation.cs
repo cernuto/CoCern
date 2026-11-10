@@ -14,6 +14,8 @@ public sealed partial class SqliteStore : IRelayObservationSource
     private const int MaximumStateBytes = 1024 * 1024;
     private const int MaximumSampleBytes = 4 * MaximumStateBytes;
     private static readonly TimeSpan ObservationBudget = TimeSpan.FromMilliseconds(100);
+    /// <summary>The discovery payload the last observation copied, under its row's key and etag. Read and written only while holding <c>_gate</c>.</summary>
+    private (string? Etag, string? Payload, int Bytes) _observedDiscovery;
 
     public async Task<RelayObservation?> ReadObservationAsync(DateTimeOffset now, string incarnationId, CancellationToken cancellationToken = default)
     {
@@ -32,16 +34,28 @@ public sealed partial class SqliteStore : IRelayObservationSource
             ObjectDisposedException.ThrowIf(_disposed, this);
             using (var count = Command($"SELECT COUNT(*) FROM grain_state WHERE state_name='session' AND grain_type='cocern.session'{OpenSessionsOnly};"))
                 sessionCount = Convert.ToInt32(count.ExecuteScalar());
-            using var command = Command("SELECT CASE WHEN length(CAST(payload AS BLOB)) <= $maximum THEN payload ELSE NULL END, length(CAST(payload AS BLOB)) FROM grain_state WHERE state_name='discovery' AND grain_type='cocern.discovery' ORDER BY grain_key LIMIT 1;");
-            command.Parameters.AddWithValue("$maximum", MaximumStateBytes);
-            using var reader = command.ExecuteReader();
-            if (reader.Read())
+            // The discovery row holds every machine (up to 1 MB) and changes only when it is committed, so its payload is copied again only when its etag moved.
+            string? etag;
+            using (var version = Command("SELECT grain_key, etag FROM grain_state WHERE state_name='discovery' AND grain_type='cocern.discovery' ORDER BY grain_key LIMIT 1;"))
+            using (var row = version.ExecuteReader())
+                etag = row.Read() ? row.GetString(0) + "\0" + row.GetString(1) : null;
+            if (etag is not null && etag == _observedDiscovery.Etag)
+                (discoveryPayload, bytes) = (_observedDiscovery.Payload, _observedDiscovery.Bytes);
+            else if (etag is not null)
             {
-                if (reader.IsDBNull(0)) { truncated = true; warnings.Add("Discovery metadata exceeded the bounded observation size."); }
-                else
+                using var command = Command("SELECT CASE WHEN length(CAST(payload AS BLOB)) <= $maximum THEN payload ELSE NULL END, length(CAST(payload AS BLOB)), grain_key, etag FROM grain_state WHERE state_name='discovery' AND grain_type='cocern.discovery' ORDER BY grain_key LIMIT 1;");
+                command.Parameters.AddWithValue("$maximum", MaximumStateBytes);
+                using var reader = command.ExecuteReader();
+                if (reader.Read())
                 {
-                    bytes = reader.GetInt32(1);
-                    discoveryPayload = reader.GetString(0);
+                    if (reader.IsDBNull(0)) { truncated = true; warnings.Add("Discovery metadata exceeded the bounded observation size."); }
+                    else
+                    {
+                        bytes = reader.GetInt32(1);
+                        discoveryPayload = reader.GetString(0);
+                        // Remembered under the etag of this same row read, so it always names exactly this payload.
+                        _observedDiscovery = (reader.GetString(2) + "\0" + reader.GetString(3), discoveryPayload, bytes);
+                    }
                 }
             }
         }
@@ -316,7 +330,8 @@ public sealed partial class SqliteStore : IRelayObservationSource
             var machine = property.Value;
             var id = Safe(property.Name);
             var name = Text(machine, EnrolledMachine.NameKey);
-            var lastSeen = Date(machine, EnrolledMachine.LastSeenKey);
+            // The discovery grain writes an unchanged machine's last-seen time only every few minutes; the time it holds in memory is used when fresher.
+            var lastSeen = DiscoveryContacts.Freshest(property.Name, Date(machine, EnrolledMachine.LastSeenKey));
             var announced = Property(machine, EnrolledMachine.ChatsKey);
             var count = announced.ValueKind == JsonValueKind.Array ? announced.GetArrayLength() : 0;
             machines.Add(new() { MachineId = id, Name = name, LastSeenAt = lastSeen, Reachable = ReadModels.IsLive(lastSeen, now), SessionCount = count });

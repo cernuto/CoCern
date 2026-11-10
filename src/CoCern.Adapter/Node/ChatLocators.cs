@@ -225,6 +225,7 @@ public abstract class TranscriptLocator(int maxLineBytes, Func<string, Stream>? 
             yield return new(path, id, info.LastWriteTimeUtc, info.Length);
         }
     }
+
 }
 
 /// <summary>
@@ -236,6 +237,9 @@ public sealed class CodexChatLocator(string root, int maxLineBytes = ChatLocator
 {
     public override string Provider => ChatProviders.Codex;
 
+    // Every date folder is searched: a thread's rollout stays in the folder of the day it started while a resumed thread keeps writing to it, so a
+    // session opened today can be in a rollout from any earlier day. Each file's own write time narrows the search; a directory listing's copy of it
+    // is not used, as NTFS updates that only when the writer closes the file, and Codex keeps its rollout open.
     protected override IEnumerable<Transcript> Transcripts() =>
         Describe(ChatLocators.Files(root, "rollout-*.jsonl", SearchOption.AllDirectories), stem => stem.Length >= 36 && ChatLocators.IsUuid(stem[^36..]) ? stem[^36..] : null);
 
@@ -322,6 +326,34 @@ internal sealed class NodeChats(string nodeFolder, IReadOnlyList<IChatLocator> l
 
     public JsonArray Read(Func<string, bool> allowed)
     {
+        var (handles, waiters) = Refresh(allowed);
+        var codex = codexFound?.Invoke() ?? true;
+        // Never prune, scan, or choose between private generations using legacy timestamps.
+        var native = NativeJoinBinding.DispatchSnapshot(nodeFolder).Where(h => allowed(h.RepositoryId)).ToArray();
+        var routable = native.Concat(Current(handles).Where(h => h.Chat is null || !native.Any(n => n.Chat == h.Chat)))
+            .GroupBy(h => h.Chat is null ? h.SessionId : h.Chat.Provider + ":" + h.Chat.ThreadId)
+            .Where(group => group.Count() == 1).Select(group => group.Single()).Take(MaxChats);
+        return Fit(new JsonArray(routable.Select(handle => (JsonNode)new JsonObject
+        {
+            ["provider"] = handle.Chat?.Provider ?? ChatProviders.Unknown, ["threadId"] = handle.Chat?.ThreadId ?? "unmapped", ["relaySessionId"] = handle.SessionId,
+            ["repositoryId"] = handle.RepositoryId, ["label"] = handle.Label, ["wakeable"] = handle.Chat is { } chat && (chat.Provider != ChatProviders.Codex || codex),
+            ["waiterRunning"] = handle.Chat is { Provider: ChatProviders.Claude } claude && waiters.Contains(claude.ThreadId), ["openedAt"] = handle.OpenedAt.ToString("O")
+        }).ToArray()));
+    }
+
+    /// <summary>
+    /// What <see cref="Read"/> does to the handles on disk (prunes, locates, records outcomes, and deletes a chat's older handles), without the native
+    /// observation or the announcement: for a caller that takes its own observation. True while a handle is still being located.
+    /// </summary>
+    internal bool Locate(Func<string, bool> allowed)
+    {
+        var (handles, _) = Refresh(allowed);
+        foreach (var _ in Current(handles)) { }
+        return handles.Any(x => x is { Chat: null, Unmapped: false });
+    }
+
+    private (SessionHandle[] Handles, HashSet<string> Waiters) Refresh(Func<string, bool> allowed)
+    {
         var now = clock.GetUtcNow();
         var waiters = ClaudeWaiter.Running(nodeFolder);
         var handles = Prune(NodeState.ReadSessionHandles(nodeFolder), now, waiters).Where(x => allowed(x.RepositoryId)).OrderByDescending(x => x.OpenedAt).Take(MaxChats).ToArray();
@@ -341,18 +373,7 @@ internal sealed class NodeChats(string nodeFolder, IReadOnlyList<IChatLocator> l
                 else if (located.Length == 1) handles[i] = Persist(handle with { Chat = located[0] });
             }
         }
-        var codex = codexFound?.Invoke() ?? true;
-        // Never prune, scan, or choose between private generations using legacy timestamps.
-        var native = NativeJoinBinding.DispatchSnapshot(nodeFolder).Where(h => allowed(h.RepositoryId)).ToArray();
-        var routable = native.Concat(Current(handles).Where(h => h.Chat is null || !native.Any(n => n.Chat == h.Chat)))
-            .GroupBy(h => h.Chat is null ? h.SessionId : h.Chat.Provider + ":" + h.Chat.ThreadId)
-            .Where(group => group.Count() == 1).Select(group => group.Single()).Take(MaxChats);
-        return Fit(new JsonArray(routable.Select(handle => (JsonNode)new JsonObject
-        {
-            ["provider"] = handle.Chat?.Provider ?? ChatProviders.Unknown, ["threadId"] = handle.Chat?.ThreadId ?? "unmapped", ["relaySessionId"] = handle.SessionId,
-            ["repositoryId"] = handle.RepositoryId, ["label"] = handle.Label, ["wakeable"] = handle.Chat is { } chat && (chat.Provider != ChatProviders.Codex || codex),
-            ["waiterRunning"] = handle.Chat is { Provider: ChatProviders.Claude } claude && waiters.Contains(claude.ThreadId), ["openedAt"] = handle.OpenedAt.ToString("O")
-        }).ToArray()));
+        return (handles, waiters);
     }
 
     /// <summary>

@@ -20,12 +20,17 @@ public interface IDiscoveryGrain : IGrainWithStringKey
 
 /// <summary>
 /// Orleans adapter for the discovery aggregate. It owns activation and persistence; every rule is applied by <see cref="DiscoveryStateMachine"/>
-/// against a working copy that replaces the persisted state only after a successful write. It uses no outbox, leases or dispatch.
+/// against a working copy that replaces the persisted state only after a successful write, except an announce that only moves a machine's last-seen
+/// time, which is held in memory between writes (see <see cref="ExecuteAsync"/>). It uses no outbox, leases or dispatch.
 /// </summary>
 [GrainType("cocern.discovery")]
 public sealed class DiscoveryGrain([PersistentState("discovery", "relay")] IPersistentState<StateEnvelope<CoordinationDocument>> persistent) : Grain, IDiscoveryGrain
 {
     private bool uncertainCommit;
+    /// <summary>When each machine's announce was last written. In memory only: a fresh activation writes each machine's first announce.</summary>
+    private readonly Dictionary<string, DateTimeOffset> contactWritten = new(StringComparer.Ordinal);
+    /// <summary>The in-memory state holds last-seen times not yet written.</summary>
+    private bool contactPending;
 
     public async Task<RelayReply> ExecuteAsync(RelayCaller caller, string operation, string argumentsJson)
     {
@@ -35,9 +40,38 @@ public sealed class DiscoveryGrain([PersistentState("discovery", "relay")] IPers
         catch (JsonException) { return Replies.Error(RelayErrorCodes.InvalidArguments); }
         if (!caller.IsInternal) return Replies.Error(RelayErrorCodes.InternalOnly);
         var candidate = Clone(persistent.State);
-        var reply = DiscoveryStateMachine.Apply(candidate, caller, operation, args, DateTimeOffset.UtcNow);
+        var now = DateTimeOffset.UtcNow;
+        var reply = DiscoveryStateMachine.Apply(candidate, caller, operation, args, now, out var contactOnly);
         if (!reply.Ok || operation is DiscoveryOperations.Validate or DiscoveryOperations.Directory) return reply;
-        return await CommitAsync(candidate) ? reply : Replies.Error(RelayErrorCodes.StorageFailure);
+        var announcer = operation == DiscoveryOperations.Announce && args["machineId"] is JsonValue id && id.TryGetValue<string>(out var machineId) ? machineId : null;
+        if (announcer is not null)
+        {
+            DiscoveryContacts.Record(announcer, now);
+            // Nodes announce every 30 s, and each write rewrote the whole document (every machine) only to move one last-seen time. An announce that
+            // changes nothing else is kept in memory, where Directory's reachability reads it, and written at most every PersistEvery per machine or
+            // with the next real change. After a restart the stored time is at most that old, and the next announce (within 30 s) is fresh again.
+            if (contactOnly && contactWritten.TryGetValue(announcer, out var written) && now - written < DiscoveryContacts.PersistEvery)
+            {
+                persistent.State = candidate;
+                contactPending = true;
+                return reply;
+            }
+        }
+        if (!await CommitAsync(candidate)) return Replies.Error(RelayErrorCodes.StorageFailure);
+        contactPending = false;
+        if (announcer is not null) contactWritten[announcer] = now;
+        return reply;
+    }
+
+    /// <summary>Writes last-seen times still held only in memory, best effort, when the grain deactivates (an idle timeout or a graceful shutdown).</summary>
+    public override async Task OnDeactivateAsync(DeactivationReason reason, CancellationToken cancellationToken)
+    {
+        if (contactPending && !uncertainCommit)
+        {
+            try { await persistent.WriteStateAsync(); contactPending = false; }
+            catch (Exception) { /* the next activation's first announce from each machine writes it */ }
+        }
+        await base.OnDeactivateAsync(reason, cancellationToken);
     }
 
     private async Task<bool> CommitAsync(StateEnvelope<CoordinationDocument> candidate)

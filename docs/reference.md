@@ -43,7 +43,7 @@ Admin tools need a token with `IsAdministrator`. A session's `role` grants nothi
 | `attention_respond` | worker | Accept, dismiss or postpone an attention offer. |
 | `standing_propose` | worker | Propose a standing line or grant. |
 | `record_decision` | worker | Record the direct answer to the exact offered Standing question, or approve a bounded goal through its separate verified-native form. See [chat decisions](chat-decisions.md). |
-| `doc_search`, `doc_section` | worker | Search docs by section; read one section. |
+| `doc_search`, `doc_section` | worker | Search docs by section, in any repository you may access; read one section. |
 | `standing_put` | admin | Write standing lines, grants and board settings. |
 | `order_put`, `order_remove` | admin | Add or remove a standing order. |
 | `control_request` | admin | Pause or resume dispatch, request cancellation, register a [resource](#resources), close [sessions](#calls) in bulk, revoke a PC, or add and remove a repository's [managers](#manager-seats). It never stops work already running. |
@@ -231,7 +231,7 @@ A board's approved instructions (lines) and active permissions (grants). Approve
 
 ## Documents
 
-`doc_search` searches a repository's committed docs by section instead of reading whole files. Nothing is searchable until a repository is configured; the start script adds the checkout it runs from as `cocern` (`-NoDocs` skips this). The Visual Studio profile adds it too, and makes the folder holding the checkout a root, so the repositories beside it are found as well.
+`doc_search` searches a repository's committed docs by section instead of reading whole files, so a chat can read another repository's docs without its checkout. For your own working tree Grep is fresher, since only commits are indexed. Nothing is searchable until a repository is configured; the start script adds the checkout it runs from as `cocern` (`-NoDocs` skips this). The Visual Studio profile adds it too, and makes the folder holding the checkout a root, so the repositories beside it are found as well.
 
 | File | Split into |
 | --- | --- |
@@ -245,8 +245,10 @@ Also skipped: files over 256 KB (8 MB for OpenAPI), symlinks, malformed files, a
 
 | Tool | What it does |
 | --- | --- |
-| `doc_search` | Up to 5 sections (`limit` up to 10), each with `path`, `anchor`, `heading`, `snippet`, `score`, `tokens` and `commit`. Optional `spec` and `path`. Takes over 10 seconds: returns what it has with `partial: true`. |
+| `doc_search` | Up to 5 sections (`limit` up to 10), each with `path`, `anchor`, `heading`, `snippet`, `score`, `tokens` and `commit`. Optional `spec` and `path`. Takes over 10 seconds: returns what it has with `partial: true`. Without `query`: `repositories`, the ones with docs you may read. |
 | `doc_section` | One section by `path` and `anchor`. A long one comes in parts: call again with `next`. |
+
+**Another repository.** `doc_search` and `doc_section` take an optional `repository`, the repository to read instead of `repositoryId`'s. A native chat's `repositoryId` is always its own, so this is how it reads elsewhere. The hub checks it like any `repositoryId`: the credential must have that repository (an administrator's has every one), else `RepositoryDenied`. The call carries no session proof and runs as the credential alone. No other tool can leave the chat's repository.
 | `doc_sync` | Sync now; needs a `requestId`. `branch` changes the branch followed. |
 
 Replies stay under 2,000 tokens; hits that don't fit are counted in `more`. Errors: `NoRepositoriesConfigured`, `DocCacheUnavailable` (off, or not a configured repository).
@@ -489,6 +491,8 @@ Set them in `appsettings.json`, as environment variables (`Relay__Clients__0__To
 | `Relay:Connect:AdapterPath` | found | The installed adapter the Connect page runs and verifies on this PC. Default: `artifacts/adapter`, else the build output, looked for only inside this checkout or beside a published hub. It also selects the download unless `DistributionAdapterPath` is set. |
 | `Relay:Connect:DistributionAdapterPath` | | Optional adapter to serve through `/join/adapter.zip`, independently of the local installed helper. This lets a hub distribute a newer self-contained package while Connect verifies the helper whose native hooks are already approved. Without it, `AdapterPath` is served when set; otherwise the newest build found by `CoCern.Adapter.dll` write time, a self-contained one first among equally new builds, so a published copy that later rebuilds have overtaken is never served. Node updates consider it too, when it is self-contained, alongside the other self-contained builds (see [Node updates](#node-updates)). |
 | `Relay:DevelopmentAdapter:PublishNodeAdapter` | `true` | With the Visual Studio profile's development adapter on, publish a self-contained node adapter to `artifacts/node-adapter` after each changed deployment, so nodes can update. |
+| `Relay:DevelopmentAdapter:PruneVersions` | `true` | About two minutes after a debug start, remove old folders from `artifacts/development-adapter/versions` and `artifacts/node-adapter/versions`. Kept: the current version, versions named in client settings or hooks, the newest, and the last 24 hours' development versions. A folder in use is never removed. |
+| `Relay:DevelopmentAdapter:KeepVersions` | 5 | Newest development adapter versions kept by pruning (at least 1). Node adapter versions keep the current one and the 2 newest others. |
 
 ### Features
 

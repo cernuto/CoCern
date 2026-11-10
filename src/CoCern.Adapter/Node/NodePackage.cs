@@ -173,12 +173,78 @@ public static class NodePackage
         return root;
     }
 
-    internal static bool ValidateStoredImage(string updateRoot, NodeImage? image)
+    /// <summary>
+    /// Whether the stored <paramref name="image"/> is intact. <paramref name="full"/> rehashes every byte and rechecks every entry's links and ACL; it is
+    /// what startup, a handoff request, a promotion and every launch use. Without it, a full validation this process already did stands while the image
+    /// folder's metadata listing is unchanged and that validation is under <see cref="RevalidateAfter"/> old: the journal is read on every announce and
+    /// wake pass, and rehashing its Current and Previous images each time read about 226 MB per announce.
+    /// </summary>
+    internal static bool ValidateStoredImage(string updateRoot, NodeImage? image, bool full = true)
     {
         if (!ValidImageDescriptor(image)) return false;
         var versions = Path.Combine(updateRoot, "versions");
         ValidatePrivacy(new DirectoryInfo(versions));
-        return ValidateImage(Contained(versions, image!.ContentId), image, default);
+        var folder = Contained(versions, image!.ContentId);
+        return full ? ValidateImageAndRemember(folder, image, default) : ValidateImageCached(folder, image);
+    }
+
+    private static readonly TimeSpan RevalidateAfter = TimeSpan.FromHours(1);
+    private static readonly Lock ValidatedGate = new();
+    /// <summary>Image folders this process fully validated, by canonical path: the image, the folder's metadata listing then, and when. Guarded by <see cref="ValidatedGate"/>.</summary>
+    private static readonly Dictionary<string, (NodeImage Image, string Listing, long At)> Validated = new(StringComparer.OrdinalIgnoreCase);
+
+    private static bool ValidateImageCached(string folder, NodeImage image)
+    {
+        // The folder's own owner and ACL are read every time; they are one call, and the listing cannot see them.
+        ValidatePrivacy(new DirectoryInfo(folder));
+        var listing = ImageListing(folder);
+        lock (ValidatedGate)
+        {
+            if (listing is not null && Validated.TryGetValue(folder, out var known) && known.Listing == listing && SameImage(known.Image, image) &&
+                Stopwatch.GetElapsedTime(known.At) < RevalidateAfter) return true;
+        }
+        return ValidateImageAndRemember(folder, image, default, listing);
+    }
+
+    /// <summary>The full <see cref="ValidateImage"/>, remembered only when the folder's listing was the same before and after it.</summary>
+    private static bool ValidateImageAndRemember(string folder, NodeImage image, CancellationToken ct, string? before = null)
+    {
+        before ??= ImageListing(folder);
+        bool valid;
+        try { valid = ValidateImage(folder, image, ct); }
+        catch { Forget(folder); throw; }
+        var after = valid ? ImageListing(folder) : null;
+        lock (ValidatedGate)
+        {
+            if (valid && before is not null && before == after) Validated[folder] = (image, before, Stopwatch.GetTimestamp());
+            else Validated.Remove(folder);
+        }
+        return valid;
+    }
+
+    private static void Forget(string folder) { lock (ValidatedGate) Validated.Remove(folder); }
+
+    private static bool SameImage(NodeImage left, NodeImage right) =>
+        left.ContentId == right.ContentId && left.AdapterDllSha256 == right.AdapterDllSha256 && SameMetadata(left.Package, right.Package);
+
+    /// <summary>
+    /// A digest of the image folder's metadata, no file opened: every entry's relative path, attributes, length, write and creation time, and the folder's own
+    /// times. Null when any entry is a link, so the caller falls back to the full check, which refuses it.
+    /// </summary>
+    private static string? ImageListing(string folder)
+    {
+        var root = new DirectoryInfo(folder);
+        if (!root.Exists || (root.Attributes & FileAttributes.ReparsePoint) != 0) return null;
+        var text = new StringBuilder().Append(root.LastWriteTimeUtc.Ticks).Append('\0').Append(root.CreationTimeUtc.Ticks).Append('\n');
+        var options = new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = 0, IgnoreInaccessible = false };
+        var count = 0;
+        foreach (var entry in root.EnumerateFileSystemInfos("*", options).OrderBy(entry => entry.FullName, StringComparer.Ordinal))
+        {
+            if (++count > EntryLimit || (entry.Attributes & FileAttributes.ReparsePoint) != 0) return null;
+            text.Append(Path.GetRelativePath(folder, entry.FullName)).Append('\0').Append((int)entry.Attributes).Append('\0').Append(entry is FileInfo file ? file.Length : -1)
+                .Append('\0').Append(entry.LastWriteTimeUtc.Ticks).Append('\0').Append(entry.CreationTimeUtc.Ticks).Append('\n');
+        }
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text.ToString())));
     }
 
     internal static bool ValidImageDescriptor(NodeImage? image) => image is not null && LowerHash(image.ContentId) && UpperHash(image.AdapterDllSha256) && (image.ReleaseId is null || UpperHash(image.ReleaseId)) && ValidMetadata(image.Package);
@@ -317,7 +383,8 @@ public static class NodePackage
             ValidatePrivacy(new DirectoryInfo(root));
             ValidatePrivacy(new DirectoryInfo(versions));
             var path = Contained(versions, image.ContentId);
-            if (!ValidateImage(path, image, default)) return null;
+            // Every launch rehashes the image in full; it also refreshes what the cheaper journal reads remember.
+            if (!ValidateImageAndRemember(path, image, default)) return null;
             var arguments = new List<string>();
             var file = image.Package.SelfContained ? Path.Combine(path, "CoCern.Adapter.exe") : host.DotnetPath!;
             if (!image.Package.SelfContained) arguments.Add(Path.Combine(path, "CoCern.Adapter.dll"));
@@ -598,6 +665,58 @@ public static class NodePackage
             if (Directory.Exists(scratch)) Remove(scratch);
         }
         catch (Exception exception) when (Unavailable(exception)) { Console.Error.WriteLine("node-update:staging-retained"); }
+    }
+
+    /// <summary>
+    /// Deletes stored images nothing needs: every <c>versions</c> folder named by a content ID that is not in <paramref name="keep"/> and was created more
+    /// than a day before <paramref name="utcNow"/>, plus <c>.deleting-*</c> leftovers of an earlier pass and <c>.staging-*</c> scratch older than a day.
+    /// A folder is first renamed to a <c>.deleting-&lt;guid&gt;</c> sibling, which fails while any file in it is in use (a running worker's image), so
+    /// nothing in use is ever deleted in part; only then is it removed. Links are never followed: a linked version folder is left alone, and a link inside
+    /// a renamed folder is removed as a link. Any failure leaves that folder for a later pass and is reported by a fixed code only.
+    /// </summary>
+    internal static void PruneVersions(string updateRoot, IReadOnlySet<string> keep, DateTime utcNow)
+    {
+        var root = ValidatedUpdateRoot(updateRoot, create: false);
+        var cutoff = utcNow - TimeSpan.FromDays(1);
+        var versions = Path.Combine(root, "versions");
+        if (Directory.Exists(versions))
+        {
+            RejectLinks(versions);
+            ValidatePrivacy(new DirectoryInfo(versions));
+            foreach (var entry in new DirectoryInfo(versions).EnumerateDirectories().ToArray())
+            {
+                var leftover = entry.Name.StartsWith(".deleting-", StringComparison.Ordinal);
+                if (!leftover && (!LowerHash(entry.Name) || keep.Contains(entry.Name) || entry.CreationTimeUtc > cutoff)) continue;
+                try
+                {
+                    // Contained refuses a path outside versions and any link on the way to it.
+                    var folder = Contained(versions, entry.Name);
+                    if (!leftover)
+                    {
+                        var doomed = Contained(versions, ".deleting-" + Guid.NewGuid().ToString("N"));
+                        Directory.Move(folder, doomed);
+                        Forget(folder);
+                        folder = doomed;
+                    }
+                    RemoveTree(folder);
+                }
+                catch (Exception exception) when (Unavailable(exception)) { Console.Error.WriteLine("node-update:prune-retained"); }
+            }
+        }
+        foreach (var scratch in new DirectoryInfo(root).EnumerateDirectories(".staging-*").ToArray())
+            if (scratch.CreationTimeUtc < cutoff && (scratch.Attributes & FileAttributes.ReparsePoint) == 0) RemoveScratch(root, scratch.FullName);
+    }
+
+    /// <summary>Removes a folder this process renamed out of use. A link inside it is deleted as a link, never followed.</summary>
+    private static void RemoveTree(string directory)
+    {
+        foreach (var entry in new DirectoryInfo(directory).EnumerateFileSystemInfos().ToArray())
+        {
+            if ((entry.Attributes & FileAttributes.ReparsePoint) == 0 && entry is DirectoryInfo child) { RemoveTree(child.FullName); continue; }
+            if ((entry.Attributes & FileAttributes.ReadOnly) != 0) entry.Attributes &= ~FileAttributes.ReadOnly;
+            entry.Delete();
+        }
+        Directory.Delete(directory);
     }
 
     private static void SafeName(string name)

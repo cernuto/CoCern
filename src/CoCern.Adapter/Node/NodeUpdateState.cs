@@ -143,6 +143,40 @@ public static class NodeUpdateState
         MaxDepth = 16
     };
 
+    /// <summary>
+    /// Deletes stored images and staging scratch nothing needs (see <see cref="NodePackage.PruneVersions"/>). Kept: <paramref name="running"/>, and every image
+    /// either journal file names as Current, Previous or Pending, the requested candidate and the ready image. When a journal file exists but cannot be read,
+    /// nothing is known to be unused and nothing is deleted. Never throws; a failure is reported by a fixed code.
+    /// </summary>
+    internal static void PruneVersions(string updateRoot, string? running)
+    {
+        try
+        {
+            var root = NodePackage.ValidatedUpdateRoot(updateRoot, create: false);
+            var keep = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (running is not null) keep.Add(running);
+            var records = 0;
+            foreach (var name in new[] { "state.json", "committed.json" })
+            {
+                var record = ReadRecord(root, name, out var exists);
+                if (exists && record is null) { Console.Error.WriteLine("node-update:prune-skipped"); return; }
+                if (record is null) continue;
+                records++;
+                foreach (var image in new[] { record.Current, record.Previous, record.Pending }) if (image is not null) keep.Add(image.ContentId);
+            }
+            if (records == 0) return;
+            foreach (var name in new[] { "request.json", "ready.json" })
+            {
+                if (!File.Exists(Path.Combine(root, name))) continue;
+                var id = name == "request.json" ? ReadHandoff<NodeUpdateRequest>(root, name)?.Candidate?.ContentId : ReadHandoff<NodeReady>(root, name)?.ContentId;
+                if (id is null) { Console.Error.WriteLine("node-update:prune-skipped"); return; }
+                keep.Add(id);
+            }
+            NodePackage.PruneVersions(root, keep, DateTime.UtcNow);
+        }
+        catch (Exception exception) when (InvalidJournal(exception)) { Console.Error.WriteLine("node-update:prune-retained"); }
+    }
+
     internal static NodeUpdateRecord? ReadPrimary(string updateRoot)
     {
         try { return ReadRecord(NodePackage.ValidatedUpdateRoot(updateRoot, create: false), "state.json", out _); }
@@ -168,7 +202,8 @@ public static class NodeUpdateState
         try
         {
             var root = NodePackage.ValidatedUpdateRoot(updateRoot, create: true);
-            if (!Valid(root, record)) throw new InvalidDataException();
+            // A promotion or rollback rehashes the images it records; only reads use remembered validations.
+            if (!Valid(root, record, full: true)) throw new InvalidDataException();
             var existing = Read(root);
             if (existing.Status == NodeUpdateReadStatus.Corrupt) throw new InvalidDataException();
             // Pending is bounded recovery evidence on read; a new activation still needs all candidate bytes.
@@ -208,15 +243,17 @@ public static class NodeUpdateState
                 if (file.ReadByte() != -1) return null;
             }
             var record = JsonSerializer.Deserialize<NodeUpdateRecord>(bytes, Json);
-            return record is not null && Valid(root, record) ? record : null;
+            // Read on every announce and wake pass: an image this process fully validated stands while its folder listing is unchanged (see
+            // NodePackage.ValidateStoredImage). Launch, startup, handoff and Write still validate in full.
+            return record is not null && Valid(root, record, full: false) ? record : null;
         }
         catch (Exception exception) when (InvalidJournal(exception)) { return null; }
     }
 
-    private static bool Valid(string root, NodeUpdateRecord? record)
+    private static bool Valid(string root, NodeUpdateRecord? record, bool full)
     {
-        if (record is null || record.Schema != 1 || !Enum.IsDefined(record.Phase) || !NodePackage.ValidateStoredImage(root, record.Current)) return false;
-        if (record.Previous is not null && !NodePackage.ValidateStoredImage(root, record.Previous)) return false;
+        if (record is null || record.Schema != 1 || !Enum.IsDefined(record.Phase) || !NodePackage.ValidateStoredImage(root, record.Current, full)) return false;
+        if (record.Previous is not null && !NodePackage.ValidateStoredImage(root, record.Previous, full)) return false;
         if (record.Phase == NodeUpdatePhase.Committed)
         {
             if (record.Pending is not null || record.ActivationNonce is not null) return false;

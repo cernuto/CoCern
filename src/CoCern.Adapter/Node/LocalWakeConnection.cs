@@ -54,18 +54,48 @@ internal sealed class LocalWakeConnection
     }
 
     /// <summary>Revalidate this exact token-file-backed connection; never discover a global folder or copy its credential.</summary>
+    /// <remarks>
+    /// Native bindings ask this many times a pass. A verified answer is reused, in this process only, while <c>connection.json</c> and the token file it
+    /// names keep their length, write time and creation time, and for at most <see cref="IdentityMilliseconds"/>; any change reads both again.
+    /// </remarks>
     internal static string? NativeCredentialIdentity(string folder)
     {
         try
         {
             var path = Path.Combine(folder, FileName);
-            if (!NodeState.IsPrivateFile(path) || new FileInfo(path).Length > 16384 || Read(folder) is not { } connection) return null;
+            var connectionStamp = Stamp(path);
+            if (connectionStamp is null) return null;
+            var now = Environment.TickCount64;
+            if (Identities.TryGetValue(path, out var known) && known.Connection == connectionStamp && Stamp(known.TokenFile) == known.Token &&
+                now - known.CheckedAt is >= 0 and < IdentityMilliseconds) return known.Identity;
+            if (!NodeState.IsPrivateFile(path) || new FileInfo(path).Length > 16384) return null;
             using var document = JsonDocument.Parse(File.ReadAllBytes(path));
             var tokenFile = ChatLocators.Text(document.RootElement, "tokenFile");
-            if (tokenFile is null || !NodeState.IsPrivateFile(tokenFile)) return null;
-            return NativeJoinBinding.CredentialDigest("local", connection.Options.BaseUri.AbsoluteUri, connection.Options.PinnedFingerprint, connection.Options.Token);
+            // Stamped before it is read, so a token replaced during the reads below can never be remembered under its new stamp.
+            var tokenStamp = tokenFile is null ? null : Stamp(tokenFile);
+            if (Read(folder) is not { } connection || tokenFile is null || !NodeState.IsPrivateFile(tokenFile)) return null;
+            var identity = NativeJoinBinding.CredentialDigest("local", connection.Options.BaseUri.AbsoluteUri, connection.Options.PinnedFingerprint, connection.Options.Token);
+            if (tokenStamp is not null && Stamp(tokenFile) == tokenStamp && Stamp(path) == connectionStamp)
+            {
+                if (Identities.Count >= MaxIdentities) Identities.Clear();
+                Identities[path] = new(connectionStamp, tokenFile, tokenStamp, now, identity);
+            }
+            return identity;
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException) { return null; }
+    }
+
+    /// <summary>A file's length, write time and creation time, or null when it is missing.</summary>
+    private sealed record FileStamp(long Length, DateTime Written, DateTime Created);
+    private sealed record IdentityCheck(FileStamp Connection, string TokenFile, FileStamp Token, long CheckedAt, string Identity);
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, IdentityCheck> Identities = new(StringComparer.Ordinal);
+    private const int MaxIdentities = 64;
+    private const long IdentityMilliseconds = 30_000;
+
+    private static FileStamp? Stamp(string path)
+    {
+        var info = new FileInfo(path);
+        return info.Exists && (info.Attributes & FileAttributes.ReparsePoint) == 0 ? new(info.Length, info.LastWriteTimeUtc, info.CreationTimeUtc) : null;
     }
 
     /// <summary>

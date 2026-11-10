@@ -224,11 +224,45 @@ public sealed class NodeState : IDisposable
     /// <summary>New native recovery requires the same current-user-only protection as our private writers.</summary>
     internal static bool IsPrivateFile(string path)
     {
-        if (!File.Exists(path) || (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0) return false;
+        FileInfo info;
+        try { info = new FileInfo(path); }
+        catch (Exception error) when (error is ArgumentException or PathTooLongException or NotSupportedException) { return false; } // As File.Exists answers for such a path.
+        return IsPrivateFile(info);
+    }
+
+    /// <summary>One remembered access-list verdict: the file's size and times when it was read, and when.</summary>
+    private sealed record PrivateFileCheck(long Length, DateTime Written, DateTime Created, long CheckedAt, bool Private);
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, PrivateFileCheck> PrivateFileChecks = new(StringComparer.Ordinal);
+    /// <summary>How many verdicts this process remembers; the set starts over when full.</summary>
+    private const int MaxPrivateFileChecks = 1024;
+    /// <summary>How long a remembered verdict stands even while the file looks unchanged: a changed access list moves none of its times.</summary>
+    private const long PrivateFileCheckMilliseconds = 30_000;
+
+    /// <summary>
+    /// <see cref="IsPrivateFile(string)"/> on a fresh <paramref name="info"/>, whose one metadata read the caller may share. Reading a file's access list
+    /// opens it, so on Windows a verdict is remembered per path, in this process only, while the file's length, write time and creation time are unchanged
+    /// and for at most <see cref="PrivateFileCheckMilliseconds"/>: a replaced or rewritten file is read again at once.
+    /// </summary>
+    internal static bool IsPrivateFile(FileInfo info)
+    {
+        if (!info.Exists || (info.Attributes & FileAttributes.ReparsePoint) != 0) return false;
+        var path = info.FullName;
         if (!OperatingSystem.IsWindows())
             return (File.GetUnixFileMode(path) & (UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute |
                 UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute)) == 0;
-        var security = new FileInfo(path).GetAccessControl(AccessControlSections.Access);
+        var (length, written, created, now) = (info.Length, info.LastWriteTimeUtc, info.CreationTimeUtc, Environment.TickCount64);
+        if (PrivateFileChecks.TryGetValue(path, out var known) && known.Length == length && known.Written == written && known.Created == created &&
+            now - known.CheckedAt is >= 0 and < PrivateFileCheckMilliseconds) return known.Private;
+        var result = HasPrivateAccessList(info);
+        if (PrivateFileChecks.Count >= MaxPrivateFileChecks) PrivateFileChecks.Clear();
+        PrivateFileChecks[path] = new(length, written, created, now, result);
+        return result;
+    }
+
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static bool HasPrivateAccessList(FileInfo info)
+    {
+        var security = info.GetAccessControl(AccessControlSections.Access);
         if (!security.AreAccessRulesProtected) return false;
         var user = WindowsIdentity.GetCurrent().User!;
         var readable = false;

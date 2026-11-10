@@ -15,6 +15,8 @@ public interface IDocCacheTools
 {
     Task<string?> ResolveNativeAsync(RelayCaller caller, string? checkout, string? common, string? origin, string? repositoryId = null) => Task.FromResult<string?>(null);
     Task<RelayReply> SearchAsync(JsonObject args);
+    /// <summary><c>doc_search</c> without a query: the repositories with docs that <paramref name="caller"/> may read.</summary>
+    Task<RelayReply> ListAsync(RelayCaller caller);
     Task<RelayReply> SectionAsync(JsonObject args);
     Task<RelayReply> SyncAsync(JsonObject args, CancellationToken cancellationToken);
 
@@ -41,6 +43,9 @@ public sealed class DocCacheTool(IGrainFactory grains, ITokenCounter tokens, IDo
 
     /// <summary>How long one search waits for its documents; tests shorten it.</summary>
     internal TimeSpan SearchTimeout { get; set; } = TimeSpan.FromSeconds(RelayLimits.DocSearchTimeoutSeconds);
+
+    public Task<RelayReply> ListAsync(RelayCaller caller) =>
+        Task.FromResult(Ok(new { repositories = repositories.Where(caller.MayAccess).Order(StringComparer.OrdinalIgnoreCase).ToArray() }));
 
     public async Task<RelayReply> SearchAsync(JsonObject args)
     {
@@ -184,6 +189,7 @@ public sealed class DocCacheTool(IGrainFactory grains, ITokenCounter tokens, IDo
         private static Task<RelayReply> Unavailable() =>
             Task.FromResult(Replies.Error(RelayErrorCodes.DocCacheUnavailable, new { message = "The doc cache is turned off on this hub (Relay:DocCache:Enabled)." }));
         public Task<RelayReply> SearchAsync(JsonObject args) => Unavailable();
+        public Task<RelayReply> ListAsync(RelayCaller caller) => Unavailable();
         public Task<RelayReply> SectionAsync(JsonObject args) => Unavailable();
         public Task<RelayReply> SyncAsync(JsonObject args, CancellationToken cancellationToken) => Unavailable();
     }

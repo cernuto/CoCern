@@ -450,9 +450,20 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
             var payload = JsonNode.Parse(admission?.LegacyWire == true ? args.GetRawText() : NativeJoinHook.Canonical(args))!.AsObject();
             if (payload.ContainsKey("repositoryId") && (string?)payload["repositoryId"] != handle.RepositoryId) return new(false, "native_repository_conflict");
             payload["repositoryId"] = handle.RepositoryId;
+            // doc_search and doc_section alone may read another repository's docs, named in repository; nothing else leaves the bound one.
+            // Such a read carries no acting proof (that proves a session in the bound repository): the hub authorizes it by this node's
+            // credential and its repositories, as for any client without a session.
+            var elsewhere = false;
+            // A malformed value stays for the hub to refuse, never read silently as the bound repository.
+            if (tool is RelayTools.DocSearch or RelayTools.DocSection && payload["repository"] is JsonValue named && named.TryGetValue<string>(out var other) && !string.IsNullOrWhiteSpace(other))
+            {
+                elsewhere = !string.Equals(other, handle.RepositoryId, StringComparison.OrdinalIgnoreCase);
+                if (elsewhere) payload["repositoryId"] = other;
+                payload.Remove("repository");
+            }
             if (definition.RequiresSession || tool == RelayTools.GetStatus)
             { payload["sessionId"] = handle.SessionId; payload["sessionToken"] = handle.SessionToken; }
-            payload["actingSessionId"] = handle.SessionId; payload["actingSessionToken"] = handle.SessionToken;
+            if (!elsewhere) { payload["actingSessionId"] = handle.SessionId; payload["actingSessionToken"] = handle.SessionToken; }
             if (definition.IsMutation && request is not null) payload["requestId"] = request;
             if (fileCheck) payload["requestId"] = invocation;
             var arguments = RelayForwarder.WithOrigin(JsonSerializer.SerializeToElement(payload), background: false);

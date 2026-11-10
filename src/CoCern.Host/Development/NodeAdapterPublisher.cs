@@ -52,13 +52,17 @@ internal static class NodeAdapterBuilds
     }
 }
 
-/// <summary>Runs one debounced node adapter publish; see <see cref="NodeAdapterBuilds"/>. Every failure is logged without its text and never stops the hub.</summary>
-internal sealed class NodeAdapterPublisher(ILogger logger)
+/// <summary>
+/// Runs one debounced node adapter publish; see <see cref="NodeAdapterBuilds"/>. Every failure is logged without its text and never stops the hub.
+/// With <paramref name="prune"/> (<c>Relay:DevelopmentAdapter:PruneVersions</c>), a publish also removes old versions and leftovers; see <see cref="Prune"/>.
+/// </summary>
+internal sealed class NodeAdapterPublisher(ILogger logger, bool prune = true)
 {
     private static readonly TimeSpan Debounce = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan Timeout = TimeSpan.FromMinutes(10);
-    private static readonly TimeSpan Stale = TimeSpan.FromHours(2);
-    private const int KeptVersions = 3;
+    private static readonly TimeSpan Stale = TimeSpan.FromDays(1);
+    /// <summary>Versions kept besides the one <c>current.json</c> names.</summary>
+    private const int KeptOthers = 2;
 
     /// <summary>
     /// Environment the hub's own process carries that a child build must not see: its configuration (which can hold tokens), the debugger's startup
@@ -87,7 +91,7 @@ internal sealed class NodeAdapterPublisher(ILogger logger)
             // One publish at a time across hub processes; a hub that finds it held leaves this version to the next start.
             using var owner = TryLock(Path.Combine(root, "publish.lock"));
             if (owner is null) { logger.LogInformation("Node adapter publish skipped: another publish is running."); return; }
-            RemoveStale(root);
+            if (prune) Report(logger, Delete(root, Detach(root, current: null)));
             var id = version[..12] + "-" + Guid.NewGuid().ToString("N")[..8];
             work = Path.Combine(root, "work", id);
             output = Path.Combine(root, "versions", ".staging-" + id);
@@ -109,7 +113,7 @@ internal sealed class NodeAdapterPublisher(ILogger logger)
             if (!Directory.Exists(final)) Directory.Move(output, final);
             output = null;
             NodeAdapterBuilds.WriteCurrent(root, version);
-            PruneVersions(root, version);
+            if (prune) Report(logger, Delete(root, Detach(root, version)));
             logger.LogInformation("Node adapter published: {Version} in {Seconds}s. Enrolled nodes are offered it on their next announcement.", version[..12], (int)started.Elapsed.TotalSeconds);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
@@ -188,22 +192,78 @@ internal sealed class NodeAdapterPublisher(ILogger logger)
         catch (IOException) { return null; }
     }
 
-    /// <summary>Work and staging folders a stopped hub left behind; anything recent may still belong to a running publish.</summary>
-    private static void RemoveStale(string root)
+    private sealed record Detached(List<string> Versions, List<string> Work, int InUse);
+
+    /// <summary>
+    /// The hub-start pass. It takes the publish lock (a running publish cleans up for itself when it finishes) only while renaming, then deletes
+    /// outside it. With no valid <c>current.json</c>, no version is removed; stale work and staging folders still are.
+    /// </summary>
+    public static void Prune(string checkoutRoot, ILogger logger)
     {
-        var cutoff = DateTime.UtcNow - Stale;
-        var candidates = new List<DirectoryInfo>();
-        if (Directory.Exists(Path.Combine(root, "work"))) candidates.AddRange(new DirectoryInfo(Path.Combine(root, "work")).EnumerateDirectories());
-        candidates.AddRange(new DirectoryInfo(Path.Combine(root, "versions")).EnumerateDirectories(".staging-*"));
-        foreach (var folder in candidates.Where(folder => folder.LastWriteTimeUtc < cutoff)) TryDelete(folder.FullName);
+        var root = NodeAdapterBuilds.Root(checkoutRoot);
+        if (!Directory.Exists(Path.Combine(root, "versions"))) return;
+        Detached detached;
+        using (var owner = TryLock(Path.Combine(root, "publish.lock")))
+        {
+            if (owner is null) return;
+            var current = NodeAdapterBuilds.CurrentDll(checkoutRoot) is { } dll ? Path.GetFileName(Path.GetDirectoryName(dll)) : null;
+            detached = Detach(root, current);
+        }
+        Report(logger, Delete(root, detached));
     }
 
-    /// <summary>Keeps the current version and the newest others; the hub's zip cache serves archives, not these folders, so a node mid-download is unaffected.</summary>
-    private static void PruneVersions(string root, string current)
+    /// <summary>
+    /// With the publish lock held, renames for deletion: <c>work</c> build folders and <c>versions/.staging-*</c> leftovers older than a day, and,
+    /// when <paramref name="current"/> names a version, every version folder except it and the 2 newest others by creation time. A folder in use
+    /// fails the rename and stays (see <see cref="VersionFolders"/>); the hub's zip cache serves archives, not these folders.
+    /// </summary>
+    private static Detached Detach(string root, string? current)
     {
-        var versions = new DirectoryInfo(Path.Combine(root, "versions")).EnumerateDirectories().Where(folder => NodeAdapterBuilds.IsVersion(folder.Name) && folder.Name != current)
-            .OrderByDescending(folder => folder.CreationTimeUtc).Skip(KeptVersions - 1);
-        foreach (var folder in versions) TryDelete(folder.FullName);
+        var detached = new Detached([], [], 0);
+        var cutoff = DateTime.UtcNow - Stale;
+        var inUse = 0;
+        try
+        {
+            if (VersionFolders.Open(Path.Combine(root, "work")) is { } work)
+            {
+                var children = VersionFolders.Children(work);
+                var stale = children.Where(folder => !folder.Name.StartsWith(VersionFolders.DeletingPrefix, StringComparison.Ordinal) && VersionFolders.Newest(folder) < cutoff);
+                detached.Work.AddRange(VersionFolders.DetachAll(work, stale, out var busy));
+                detached.Work.AddRange(VersionFolders.Leftovers(children));
+                inUse += busy;
+            }
+            if (VersionFolders.Open(Path.Combine(root, "versions")) is { } versions)
+            {
+                var children = VersionFolders.Children(versions);
+                var candidates = children.Where(folder => folder.Name.StartsWith(VersionFolders.StagingPrefix, StringComparison.Ordinal) && VersionFolders.Newest(folder) < cutoff).ToList();
+                if (NodeAdapterBuilds.IsVersion(current))
+                    candidates.AddRange(children.Where(folder => NodeAdapterBuilds.IsVersion(folder.Name) && folder.Name != current).OrderByDescending(folder => folder.CreationTimeUtc).Skip(KeptOthers));
+                detached.Versions.AddRange(VersionFolders.DetachAll(versions, candidates, out var busy));
+                detached.Versions.AddRange(VersionFolders.Leftovers(children));
+                inUse += busy;
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { }
+        return detached with { InUse = inUse };
+    }
+
+    private static (int Removed, int InUse, int Failed) Delete(string root, Detached detached)
+    {
+        var (removed, failed) = (0, 0);
+        foreach (var (folder, paths) in new[] { ("versions", detached.Versions), ("work", detached.Work) })
+        {
+            if (paths.Count == 0 || VersionFolders.Open(Path.Combine(root, folder)) is not { } parent) continue;
+            var (folderRemoved, folderFailed) = VersionFolders.DeleteAll(parent, paths);
+            removed += folderRemoved;
+            failed += folderFailed;
+        }
+        return (removed, detached.InUse, failed);
+    }
+
+    private static void Report(ILogger logger, (int Removed, int InUse, int Failed) result)
+    {
+        if (result.Removed + result.InUse + result.Failed > 0)
+            logger.LogInformation("Node adapter versions pruned: {Removed} removed, {InUse} in use and kept, {Failed} could not be deleted yet.", result.Removed, result.InUse, result.Failed);
     }
 
     private static void TryDelete(string folder)

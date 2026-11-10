@@ -39,7 +39,8 @@ internal static class ToolSchemas
             RelayTools.AttentionRespond => ["itemId", "itemIds", "until"],
             RelayTools.AnalyticsQuery => ["params", "sql", "reports", "ifNoneMatch", "includeDetails"],
             RelayTools.OrderPut => ["expiresAt", "expectedRevision"],
-            RelayTools.DocSearch => ["spec", "path"],
+            RelayTools.DocSearch => ["query", "repository", "spec", "path"],
+            RelayTools.DocSection => ["repository"],
             RelayTools.DocSync => ["branch"],
             RelayTools.ConnectApp => ["admin"],
             _ => []
@@ -107,14 +108,15 @@ internal static class ToolSchemas
                 properties["expectedRevision"] = new { type = "integer" };
             }
         }
-        // Doc tools act by the client token, scoped by its repositories: no session handle, and fields by type only. The two reads leave out
-        // requestId; doc_sync is a mutation (it can change the followed branch) and keeps it. doc_search leaves out limit (default 5);
-        // InputSchema gives it and every length bound.
+        // Doc tools act by the client token, scoped by its repositories: no session handle. The two reads leave out requestId; doc_sync is
+        // a mutation (it can change the followed branch) and keeps it. Fields carry short descriptions, since a client that defers tools
+        // shows the model little else. doc_search leaves out limit (default 5); InputSchema gives it and every length bound.
         if (tool.Name is RelayTools.DocSearch or RelayTools.DocSection or RelayTools.DocSync)
         {
             if (!tool.IsMutation) properties.Remove("requestId");
             properties.Remove("sessionId"); properties.Remove("sessionToken");
-            foreach (var field in properties.Keys.Where(field => field is not ("repositoryId" or "requestId")).ToArray()) properties[field] = new { type = "string" };
+            foreach (var field in properties.Keys.Where(field => field is not ("repositoryId" or "requestId")).ToArray())
+                properties[field] = new { type = "string", description = CompactDoc(tool.Name, field) };
         }
         // Administrator-only tools are listed only beside every worker tool, which already describes the envelope, so they advertise it by
         // type only. Without a session they leave out the session token; control_request keeps sessionId, the session a cancel targets.
@@ -352,11 +354,13 @@ internal static class ToolSchemas
             case RelayTools.OrderRemove:
                 properties["orderId"] = OrderId(); break;
             case RelayTools.DocSearch:
-                properties["query"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxDocQueryLength, description = "Words to find; search syntax is read as plain words." };
+                properties["query"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxDocQueryLength, description = "Words to find, read as plain words. Omit to list the repositories with docs you may read." };
+                properties["repository"] = DocRepository();
                 properties["spec"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxDocSpecLength, description = "Only documents of this spec." };
                 properties["path"] = DocPath("Only this document.");
                 properties["limit"] = new { type = "integer", minimum = 1, maximum = RelayLimits.MaxDocSearchResults, description = $"Most sections; default {RelayLimits.DefaultDocSearchResults}." }; break;
             case RelayTools.DocSection:
+                properties["repository"] = DocRepository();
                 properties["path"] = DocPath("Document path from a doc_search hit.");
                 properties["anchor"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxDocAnchorLength, description = "Section anchor from a hit, or the next anchor of a long section." }; break;
             case RelayTools.DocSync:
@@ -435,6 +439,19 @@ internal static class ToolSchemas
     };
 
     private static object DocPath(string description) => new { type = "string", minLength = 1, maxLength = RelayLimits.MaxDocPathLength, description };
+
+    private static object DocRepository() => new { type = "string", minLength = 1, maxLength = RelayLimits.MaxIdentifierLength, description = "Read this repository's docs instead of repositoryId's; only one you may access." };
+
+    /// <summary>The short field descriptions the forwarding doc tools advertise.</summary>
+    private static string CompactDoc(string tool, string field) => field switch
+    {
+        "query" => "Words to find; omit to list repositories.",
+        "repository" => "Another repository's docs; default yours.",
+        "spec" => "Only documents of this spec.",
+        "path" => tool == RelayTools.DocSection ? "Path from a doc_search hit." : "Only this document.",
+        "anchor" => "Anchor from a hit, or its next.",
+        _ => "Branch to follow; default the configured one."
+    };
 
     private static object OrderId() => new { type = "string", minLength = 1, maxLength = RelayLimits.MaxStandingIdLength, description = "Standing order ID on this board." };
 

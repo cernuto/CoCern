@@ -85,6 +85,21 @@ internal static class RelayRequestGuard
         // Machine revocation dispatches directly to discovery, outside the control aggregate's argument fence.
         if (tool.Name == RelayTools.ControlRequest && Text(args, "command") == "revoke_machine" && args.ContainsKey("allSessions"))
             return Replies.Error(InvalidArguments, new { field = "allSessions" });
+        // A doc read may name another repository to read with repository: a native chat cannot change its repositoryId. That repository is
+        // authorized below exactly like a repositoryId. Acting proof is dropped, since it proves a session in its own repository and a doc
+        // read needs none; the call then speaks for the credential alone, as any client without a session does.
+        if (tool.Name is RelayTools.DocSearch or RelayTools.DocSection && args["repository"] is { } named)
+        {
+            if (named is not JsonValue namedValue || !namedValue.TryGetValue<string>(out var other) || string.IsNullOrWhiteSpace(other))
+                return Replies.Error(InvalidArguments, new { field = "repository" });
+            if (!string.Equals(other, Text(args, "repositoryId"), StringComparison.OrdinalIgnoreCase))
+            {
+                args["repositoryId"] = other;
+                args.Remove("actingSessionId");
+                args.Remove("actingSessionToken");
+            }
+            args.Remove("repository");
+        }
         var suppliedRepository = Text(args, "repositoryId");
         var repository = canonicalRepository is null
             ? RepositoryIds.Match(suppliedRepository, caller.Repositories) ?? (caller.IsAdministrator ? suppliedRepository : null)
@@ -176,7 +191,7 @@ internal static class RelayRequestGuard
 
     /// <summary>
     /// The first invalid doc cache argument, or null: a nonempty query, spec, path, anchor and branch within their lengths (each required
-    /// one present), and an integer limit. A path never starts with <c>/</c> or holds <c>..</c>, and a branch is checked again before git sees it.
+    /// one present; doc_search without a query lists repositories), and an integer limit. A path never starts with <c>/</c> or holds <c>..</c>, and a branch is checked again before git sees it.
     /// </summary>
     private static string? DocProblem(string tool, JsonObject args)
     {
@@ -187,7 +202,7 @@ internal static class RelayRequestGuard
         }
         var problem = tool switch
         {
-            RelayTools.DocSearch => Field("query", RelayLimits.MaxDocQueryLength, true) ?? Field("spec", RelayLimits.MaxDocSpecLength, false) ?? Field("path", RelayLimits.MaxDocPathLength, false),
+            RelayTools.DocSearch => Field("query", RelayLimits.MaxDocQueryLength, false) ?? Field("spec", RelayLimits.MaxDocSpecLength, false) ?? Field("path", RelayLimits.MaxDocPathLength, false),
             RelayTools.DocSection => Field("path", RelayLimits.MaxDocPathLength, true) ?? Field("anchor", RelayLimits.MaxDocAnchorLength, true),
             _ => Field("branch", RelayLimits.MaxDocBranchLength, false)
         };

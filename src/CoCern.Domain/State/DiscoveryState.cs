@@ -118,6 +118,14 @@ public sealed class EnrolledMachine(JsonObject json)
     /// <summary>The last announcing node process, when observed; old or missing announcements remain unknown.</summary>
     public NodeBuildObservation? NodeBuild => json[NodeBuildKey]?.Deserialize<NodeBuildObservation>(new JsonSerializerOptions(JsonSerializerDefaults.Web));
 
+    /// <summary>A copy of the machine's record without its last-seen time, to tell an announcement that changed something from one that only says it is alive.</summary>
+    public JsonObject WithoutLastSeen()
+    {
+        var copy = json.DeepClone().AsObject();
+        copy.Remove(LastSeenKey);
+        return copy;
+    }
+
     /// <summary>Takes an announcement: the machine's name, that it was seen at <paramref name="now"/>, and the clients and chats it runs now.</summary>
     public void Announced(string name, DateTimeOffset now, IEnumerable<string> clients, IEnumerable<AnnouncedChat> chats, NodeBuildObservation? nodeBuild = null)
     {

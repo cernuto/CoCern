@@ -167,7 +167,7 @@ internal static class NativeJoinHook
                     await join.RecordPendingAsync(capture, ct);
                     if (provider == "codex" && registration is not null)
                     {
-                        const string pendingContext = "CoCern is available. Your first CoCern tool call joins this chat automatically using its private connection; do not open a replacement session. Check the inbox before coordinated work and read the task scope before accepting it.";
+                        const string pendingContext = "CoCern is available. Your first CoCern tool call joins this chat automatically using its private connection; do not open a replacement session. Check the inbox before coordinated work and read the task scope before accepting it. doc_search reads another repository's committed docs without its checkout.";
                         await output.WriteLineAsync(JsonSerializer.Serialize(new { hookSpecificOutput = new { hookEventName = "SessionStart", additionalContext = pendingContext } }));
                     }
                     return 0;
@@ -587,7 +587,12 @@ internal sealed class NativeRegistration
     internal string ToolSurfacePath => Path.Combine(Folder, "native-tool-surface-" + Provider + "-" +
         NativeCheckout.Hash(JsonSerializer.Serialize(new[] { "cocern-native-tool-surface-v1", Provider, scope, profileKey }))[..32] + ".json");
     internal const int MaximumFrameBytes = 2048;
-    internal const int MaximumInstances = 4;
+    /// <summary>
+    /// Waiting backends of one registration may each hold an instance, up to the most one hook drains (<see cref="AnswerPendingAsync"/>), so a backend
+    /// past the limit is rare and backs off rather than racing for a freed slot. Every backend sharing a pipe name runs the same build (the name
+    /// derives from the candidate, which names the helper's build), so all agree on this value.
+    /// </summary>
+    internal const int MaximumInstances = 32;
     internal static TimeSpan MaximumWait => TimeSpan.FromSeconds(15);
     internal string Provider { get; }
     internal string Folder { get; }
@@ -633,19 +638,53 @@ internal sealed class NativeRegistration
 
     internal bool StillCurrent() => Read(path, Provider, Folder, Profile) is { } current && current.Definition == Definition && current.scope == scope;
 
-    internal async Task<NativeRegistration?> AcceptAsync(CancellationToken ct, TimeSpan? budget = null, bool deferUntilHook = false)
+    private sealed record CurrentCheck(long Length, DateTime Written, DateTime Created, long CheckedAt);
+    private CurrentCheck? lastCurrent;
+    private const long CurrentCheckMilliseconds = 5_000;
+
+    /// <summary>
+    /// <see cref="StillCurrent"/> for a waiting listener's own pacing only, never for acceptance or a call: a positive answer is reused, in this process,
+    /// while the candidate file keeps its length, write time and creation time, for at most <see cref="CurrentCheckMilliseconds"/>.
+    /// </summary>
+    internal bool StillCurrentForListening()
+    {
+        FileInfo info;
+        try { info = new FileInfo(path); if (!info.Exists) { lastCurrent = null; return false; } }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { return StillCurrent(); }
+        var now = Environment.TickCount64;
+        if (lastCurrent is { } known && known.Length == info.Length && known.Written == info.LastWriteTimeUtc && known.Created == info.CreationTimeUtc &&
+            now - known.CheckedAt is >= 0 and < CurrentCheckMilliseconds) return true;
+        var current = StillCurrent();
+        lastCurrent = current ? new(info.Length, info.LastWriteTimeUtc, info.CreationTimeUtc, now) : null;
+        return current;
+    }
+
+    /// <summary>Whether a pipe could not be created because every instance of its name is in use (ERROR_PIPE_BUSY).</summary>
+    internal static bool AllInstancesBusy(IOException error) => (error.HResult & 0xffff) == 231;
+
+    internal Task<NativeRegistration?> AcceptAsync(CancellationToken ct, TimeSpan? budget = null, bool deferUntilHook = false) => AcceptAsync(ct, budget, deferUntilHook, null);
+
+    /// <param name="busy">Called when every pipe instance is in use, so nothing waited; null when the caller does not care why an attempt failed.</param>
+    internal async Task<NativeRegistration?> AcceptAsync(CancellationToken ct, TimeSpan? budget, bool deferUntilHook, Action? busy)
     {
         ct.ThrowIfCancellationRequested();
         var limit = budget ?? MaximumWait;
-        if (limit <= TimeSpan.Zero || limit > MaximumWait || !StillCurrent()) return null;
+        // A listener's pre-check only decides whether to wait; the answer it accepts below is always checked in full.
+        if (limit <= TimeSpan.Zero || limit > MaximumWait || !(deferUntilHook ? StillCurrentForListening() : StillCurrent())) return null;
         var trace = deferUntilHook ? null : ConnectionTrace.Begin("unknown", "adapter");
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
         var accepted = false;
         using var waiting = CancellationTokenSource.CreateLinkedTokenSource(ct); waiting.CancelAfter(limit);
         try
         {
-            await using var pipe = new NamedPipeServerStream(PipeName, PipeDirection.InOut, MaximumInstances, PipeTransmissionMode.Byte,
-                PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly, MaximumFrameBytes, MaximumFrameBytes);
+            NamedPipeServerStream created;
+            try
+            {
+                created = new NamedPipeServerStream(PipeName, PipeDirection.InOut, MaximumInstances, PipeTransmissionMode.Byte,
+                    PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly, MaximumFrameBytes, MaximumFrameBytes);
+            }
+            catch (IOException error) when (AllInstancesBusy(error)) { busy?.Invoke(); return null; }
+            await using var pipe = created;
             await pipe.WaitForConnectionAsync(waiting.Token);
             trace ??= ConnectionTrace.Begin("unknown", "adapter");
             var nonce = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32));

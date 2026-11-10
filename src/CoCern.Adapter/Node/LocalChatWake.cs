@@ -180,7 +180,7 @@ public sealed class LocalChatWake : IAsyncDisposable
     /// <c>observed</c> lives in memory, so after a backend swap an idle chat has no watcher until it next calls the hub. This re-arms only the chats this owner armed
     /// (<see cref="ArmedChats"/>), located and active within <see cref="RearmWindow"/>, each only after one session-authenticated background read succeeds: the same rule
     /// as <see cref="Observe"/>, and the read neither touches the handle nor writes anything. A chat merely touched, located or armed by another owner is left alone, since
-    /// an unexpected turn in a thread someone left is the worse failure. It keeps trying on <see cref="RearmRetry"/> while a chat it armed may yet qualify: not located yet, or a refusal that passes; the window ends that. Old and new backends of one owner may overlap; the exclusive state file in <see cref="WatchAsync"/> lets one dispatch.
+    /// an unexpected turn in a thread someone left is the worse failure. It keeps trying on <see cref="RearmRetry"/> while a chat it armed may yet qualify: not located yet, or a refusal that passes; the window ends that. Old and new backends of one owner may overlap; the exclusive state file (<see cref="OpenState"/>) lets one dispatch.
     /// </summary>
     internal async Task RearmAsync(CancellationToken ct)
     {
@@ -254,63 +254,178 @@ public sealed class LocalChatWake : IAsyncDisposable
         }, CancellationToken.None);
     }
 
+    /// <summary>The pass interval while the sessions folder is watched for changes and nothing is being located: a change starts a pass at once.</summary>
+    internal static readonly TimeSpan QuietPass = TimeSpan.FromSeconds(30);
+    /// <summary>The pass interval otherwise: while a session is still being located (its transcript line may land after the reply), or without a change signal.</summary>
+    internal static readonly TimeSpan BusyPass = TimeSpan.FromSeconds(4);
+    /// <summary>The first retry of a chat whose watcher another adapter holds; each further miss doubles it up to <see cref="HeldRetryLimit"/>, each jittered.</summary>
+    internal static readonly TimeSpan HeldRetryFirst = TimeSpan.FromSeconds(5);
+    internal static readonly TimeSpan HeldRetryLimit = TimeSpan.FromSeconds(60);
+
+    /// <summary>When to try a chat again whose watcher another adapter holds, after <paramref name="misses"/> attempts in a row: ±20% around a doubling delay.</summary>
+    internal static TimeSpan HeldRetry(int misses)
+    {
+        var delay = Math.Min(HeldRetryLimit.TotalMilliseconds, HeldRetryFirst.TotalMilliseconds * Math.Pow(2, Math.Clamp(misses - 1, 0, 8)));
+        return TimeSpan.FromMilliseconds(delay * (0.8 + 0.4 * Random.Shared.NextDouble()));
+    }
+
+    private volatile bool sessionsWatchFailed;
+
+    /// <summary>
+    /// Starts a pass as soon as a session handle or native binding changes on disk, from this or any other process, so the loop can wait
+    /// <see cref="QuietPass"/> between passes without waking a chat any later. Null when the folder cannot be watched; the loop then keeps <see cref="BusyPass"/>.
+    /// </summary>
+    private FileSystemWatcher? WatchSessions()
+    {
+        FileSystemWatcher? watcher = null;
+        try
+        {
+            // Events name paths under the watched spelling, so the comparison below uses the same one.
+            var folder = Path.TrimEndingDirectorySeparator(Path.GetFullPath(Connection.Folder));
+            var sessions = Path.Combine(folder, NodeState.SessionsFolder);
+            watcher = new FileSystemWatcher(folder)
+            {
+                IncludeSubdirectories = true, InternalBufferSize = 64 * 1024,
+                NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite | NotifyFilters.Size
+            };
+            // Handles sit in sessions\, bindings in sessions\native and sessions\native-chats. Wake databases, call fences and status files are not passes' business.
+            bool Relevant(string? path)
+            {
+                if (path is null || Path.GetDirectoryName(path) is not { } directory) return false;
+                var extension = Path.GetExtension(path);
+                if (!extension.Equals(".json", StringComparison.OrdinalIgnoreCase) && !extension.Equals(".unknown", StringComparison.OrdinalIgnoreCase)) return false;
+                var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+                return string.Equals(directory, sessions, comparison) || string.Equals(Path.GetDirectoryName(directory), sessions, comparison) &&
+                    Path.GetFileName(directory) is { } name && (name.Equals("native", comparison) || name.Equals("native-chats", comparison));
+            }
+            void Changed(object? _, FileSystemEventArgs change) { if (Relevant(change.FullPath) || change is RenamedEventArgs renamed && Relevant(renamed.OldFullPath)) changed.Writer.TryWrite(true); }
+            watcher.Created += Changed; watcher.Changed += Changed; watcher.Deleted += Changed; watcher.Renamed += (sender, change) => Changed(sender, change);
+            // A lost notification (a full buffer) or a watcher that stopped: pass now, and keep the short interval from here on.
+            watcher.Error += (_, _) => { sessionsWatchFailed = true; changed.Writer.TryWrite(true); };
+            watcher.EnableRaisingEvents = true;
+            return watcher;
+        }
+        catch (Exception error) when (error is IOException or ArgumentException or UnauthorizedAccessException or PlatformNotSupportedException) { watcher?.Dispose(); return null; }
+    }
+
     private async Task LoopAsync(CancellationToken ct)
     {
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(ct, stopping.Token);
+        var ending = lifetime.Token;
         var active = new Dictionary<string, (string Session, CancellationTokenSource Stop, Task Task)>();
+        // Chats whose watcher another adapter holds: when to try again (Environment.TickCount64), and how many tries in a row have missed. Not retried every pass.
+        var held = new Dictionary<string, (long Due, int Misses)>(StringComparer.Ordinal);
+        using var sessionsWatch = WatchSessions();
         try
         {
             while (!lifetime.IsCancellationRequested)
             {
                 var settled = true;
+                var busy = true;
                 try
                 {
-                    chats.Read(_ => true); // The existing bounded locator verifies native identity before a Codex route is used.
+                    // The existing bounded locator verifies native identity before a Codex route is used. A handle still being located keeps passes short.
+                    var locating = chats.Locate(_ => true);
                     StartRearm(lifetime.Token);
                     settled = rearming is null or { IsCompleted: true };
-                    // The snapshot holds at most one native binding per chat: of a thread that ran in several checkouts, the one confirmed most recently. So a
-                    // native thread is one target, a legacy handle never joins a thread that has a native binding, and a group that still mixes them is skipped.
-                    var native = NativeJoinBinding.DispatchSnapshot(Connection.Folder).Where(x => x.Chat is { Provider: ChatProviders.Codex }).ToArray();
+                    // One observation per pass, shared by every target below. The snapshot holds at most one native binding per chat: of a thread that ran in
+                    // several checkouts, the one confirmed most recently. So a native thread is one target, a legacy handle never joins a thread that has a
+                    // native binding, and a group that still mixes them is skipped.
+                    var snapshot = NativeJoinBinding.DispatchSnapshot(Connection.Folder);
+                    var native = snapshot.Where(x => x.Chat is { Provider: ChatProviders.Codex }).ToArray();
                     var targets = native.Concat(NodeState.ReadSessionHandles(Connection.Folder).Where(x => observed.ContainsKey(x.SessionId) && OwnsNative(x) &&
                         x.Chat is { Provider: ChatProviders.Codex } && !native.Any(n => n.Chat == x.Chat))).GroupBy(x => x.Chat!.ThreadId)
                         .Where(group => group.Count() == 1 || group.All(x => x.NativeBindingKey is null)).SelectMany(group => group).ToArray();
+                    var ended = false;
                     foreach (var gone in active.Keys.Where(key => !targets.Any(x => x.Chat!.ThreadId == key && x.SessionId == active[key].Session) || active[key].Task.IsCompleted).ToArray())
-                    { var previous = active[gone]; previous.Stop.Cancel(); await previous.Task; previous.Stop.Dispose(); active.Remove(gone); }
+                    { var previous = active[gone]; ended |= previous.Task.IsCompleted; previous.Stop.Cancel(); await previous.Task; previous.Stop.Dispose(); active.Remove(gone); }
+                    foreach (var gone in held.Keys.Where(thread => !targets.Any(x => x.Chat!.ThreadId == thread)).ToArray()) held.Remove(gone);
                     var noCodex = false;
+                    var looked = false;
+                    string? codex = null;
+                    var now = Environment.TickCount64;
                     foreach (var handle in targets)
                     {
                         var thread = handle.Chat!.ThreadId;
-                        if (active.ContainsKey(thread)) continue;
-                        if (transport.CodexExecutable() is not { } codex) { noCodex = true; continue; }
+                        if (active.ContainsKey(thread) || held.TryGetValue(thread, out var wait) && now < wait.Due) continue;
+                        if (!looked) { codex = transport.CodexExecutable(); looked = true; }
+                        if (codex is null) { noCodex = true; continue; }
+                        // The exclusive state is taken before anything else is read: a chat another adapter watches costs one failed open, not an observation.
+                        if (OpenState(thread, out var elsewhere) is not { } state)
+                        {
+                            if (!elsewhere) { ended = true; continue; } // Not held elsewhere: the next pass tries again, as it always has.
+                            var misses = held.TryGetValue(thread, out var before) ? before.Misses + 1 : 1;
+                            held[thread] = (now + (long)HeldRetry(misses).TotalMilliseconds, misses);
+                            continue;
+                        }
+                        held.Remove(thread);
                         var stop = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
-                        active[thread] = (handle.SessionId, stop, WatchAsync(handle, codex, stop.Token));
+                        var task = WatchAsync(handle, codex, state, snapshot, stop.Token);
+                        active[thread] = (handle.SessionId, stop, task);
+                        // A watcher that ends is restarted by a pass soon after, as often as the short interval allows and no more.
+                        _ = task.ContinueWith(_ => Task.Delay(BusyPass, ending).ContinueWith(_ => changed.Writer.TryWrite(true), TaskScheduler.Default),
+                            CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
                     }
                     var live = active.Values.Count(value => !value.Task.IsCompleted);
                     Report(PassReason(targets, noCodex, live));
                     LocalWakeStatus.Counts(observed.Count, live, statusRoot);
+                    busy = locating || ended || noCodex;
                 }
                 // One bad pass used to end this loop for the life of the adapter, with nothing to show for it.
                 catch (Exception error) when (error is not OperationCanceledException || !lifetime.IsCancellationRequested) { Report(LocalWakeCodes.LoopFailed); }
                 if (settled) firstPass.TrySetResult();
-                using var wait = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
-                wait.CancelAfter(TimeSpan.FromSeconds(4));
-                try { await changed.Reader.ReadAsync(wait.Token); } catch (OperationCanceledException) when (!lifetime.IsCancellationRequested) { }
+                using var waiting = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
+                waiting.CancelAfter(NextPass(busy || sessionsWatch is null || sessionsWatchFailed, held.Values.Select(x => x.Due)));
+                try { await changed.Reader.ReadAsync(waiting.Token); } catch (OperationCanceledException) when (!lifetime.IsCancellationRequested) { }
             }
         }
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
         finally { firstPass.TrySetResult(); if (rearming is not null) await rearming; foreach (var value in active.Values) value.Stop.Cancel(); await Task.WhenAll(active.Values.Select(value => value.Task)); foreach (var value in active.Values) value.Stop.Dispose(); }
     }
 
-    private async Task WatchAsync(SessionHandle handle, string codex, CancellationToken ct)
+    /// <summary>How long the loop waits for a change before its next pass: the interval, cut short by a due re-arm attempt or a held chat's retry.</summary>
+    /// <param name="retries">When held chats are next tried, in <see cref="Environment.TickCount64"/> milliseconds.</param>
+    private TimeSpan NextPass(bool busy, IEnumerable<long> retries)
     {
+        var next = busy ? BusyPass : QuietPass;
+        var tick = Environment.TickCount64;
+        foreach (var due in retries)
+            if (due > tick && TimeSpan.FromMilliseconds(due - tick) < next) next = TimeSpan.FromMilliseconds(due - tick);
+        if (rearmAt is { } rearm && transport.Clock.GetUtcNow() is var now && rearm > now && rearm - now < next) next = rearm - now;
+        return next < TimeSpan.FromMilliseconds(50) ? TimeSpan.FromMilliseconds(50) : next;
+    }
+
+    /// <summary>
+    /// The chat's exclusive watcher state, which also keeps duplicate MCP processes from dispatching twice; null when it cannot be had now.
+    /// <paramref name="elsewhere"/> then says another live adapter holds it (retried after a backoff); otherwise the failure is reported and the next pass tries again.
+    /// </summary>
+    private WakeState? OpenState(string thread, out bool elsewhere)
+    {
+        elsewhere = false;
+        try { return new WakeState(Path.Combine(Connection.Folder, "wake-" + thread + ".db")); }
+        catch (IOException) { elsewhere = true; Report(LocalWakeCodes.WatcherLockHeld); return null; }
+        catch (Exception error) when (error is UnauthorizedAccessException or Microsoft.Data.Sqlite.SqliteException)
+        {
+            Volatile.Write(ref watchFailure, LocalWakeCodes.WatcherUnavailable);
+            Console.Error.WriteLine("CoCern local wake is temporarily unavailable; the adapter will retry.");
+            return null;
+        }
+        catch (Exception) { Volatile.Write(ref watchFailure, LocalWakeCodes.WatcherFailed); return null; }
+    }
+
+    /// <param name="state">The chat's exclusive state, already held; disposed when the watch ends.</param>
+    /// <param name="snapshot">The pass's own observation, which <paramref name="handle"/> came from.</param>
+    private async Task WatchAsync(SessionHandle handle, string codex, WakeState state, IReadOnlyList<SessionHandle> snapshot, CancellationToken ct)
+    {
+        using var owned = state;
         try
         {
             var latest = NodeState.ReadSessionHandle(NodeState.SessionHandlePath(Connection.Folder, handle.SessionId));
+            // A native handle is checked against the pass's observation; every dispatch is fenced against the binding again (NativeJoinBinding.ForDispatch).
             if (latest is null || latest.Chat != handle.Chat || latest.RepositoryId != handle.RepositoryId || latest.SessionToken != handle.SessionToken ||
-                (handle.NativeBindingKey is null ? !OwnsNative(latest) : !NativeJoinBinding.DispatchSnapshot(Connection.Folder).Contains(handle))) { Report(LocalWakeCodes.WatcherHandleChanged); return; }
+                (handle.NativeBindingKey is null ? !OwnsNative(latest) : !snapshot.Contains(handle))) { Report(LocalWakeCodes.WatcherHandleChanged); return; }
             var thread = handle.Chat!.ThreadId;
             var path = Path.Combine(Connection.Folder, "wake-" + thread + ".db");
-            using var state = new WakeState(path); // Exclusive per-native-chat state also prevents duplicate MCP processes from dispatching twice.
             var options = handle.NativeBindingKey is null ? Connection.Options : NativeJoin.BackgroundOptions(Connection.Options);
             var runtime = new WakeRuntime(options, path, Path.Combine(Connection.Folder, "stop"), Connection.Options.BaseUri.AbsoluteUri)
             {
@@ -326,7 +441,7 @@ public sealed class LocalChatWake : IAsyncDisposable
             await watch(runtime, new(route, new(handle.SessionId, handle.SessionToken), NativeJoinBinding.ForDispatch(Connection.Folder, handle, transport.CodexDispatcher(codex))), ct);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
-        catch (IOException) { Report(LocalWakeCodes.WatcherLockHeld); /* Another live adapter owns the native chat; retry after it releases the state. */ }
+        catch (IOException) { Report(LocalWakeCodes.WatcherLockHeld); /* Reported as before; the exclusive state itself is taken in OpenState. A later pass retries. */ }
         catch (Exception error) when (error is UnauthorizedAccessException or HttpRequestException or Microsoft.Data.Sqlite.SqliteException)
         {
             Volatile.Write(ref watchFailure, LocalWakeCodes.WatcherUnavailable);

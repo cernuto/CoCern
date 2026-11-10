@@ -16,6 +16,8 @@ public sealed class DashboardCollector : BackgroundService
     private readonly DashboardSecurity security;
     private readonly RelayApplication application;
     private readonly DocCacheActivity? docCache;
+    private DateTimeOffset nextObservationAt;
+    private static readonly TimeSpan ObservationEvery = TimeSpan.FromSeconds(5);
     private DateTimeOffset nextDatabaseAt;
     private DateTimeOffset nextStandingAt;
     private DateTimeOffset nextWaitingBlockersAt;
@@ -85,24 +87,33 @@ public sealed class DashboardCollector : BackgroundService
     private async Task<DashboardSnapshot> CollectAsync(DashboardSnapshot previous, CancellationToken cancellationToken)
     {
         var now = DateTimeOffset.UtcNow;
-        DashboardSnapshot snapshot;
-        try
+        DashboardSnapshot snapshot = previous;
+        // The inventory read copies the discovery row and up to 200 session rows, so it runs every ObservationEvery rather than every 2 s tick; logs,
+        // traffic, the waiting list and tokens still refresh each tick. A busy or failed read is retried on the next tick.
+        if (now >= nextObservationAt)
         {
-            var observation = await source.ReadObservationAsync(now, application.IncarnationId, cancellationToken);
-            if (observation is not null) (waitingReports, waitingMail, waitingReportsTruncated) = (observation.WaitingReports, observation.WaitingMail, observation.SessionsTruncated);
-            snapshot = observation is null
-                ? previous with { Warnings = [.. previous.Warnings.Where(warning => warning != "Observation is busy; the previous observation is retained."), "Observation is busy; the previous observation is retained."] }
-                : previous with
+            try
+            {
+                var observation = await source.ReadObservationAsync(now, application.IncarnationId, cancellationToken);
+                if (observation is not null)
                 {
-                    ObservedAt = now, Machines = observation.Machines, Sessions = observation.Sessions, SessionsTruncated = observation.SessionsTruncated, Interactions = observation.Interactions, Warnings = observation.Warnings,
-                    Host = previous.Host with { MachineCount = observation.Machines.Length, SessionCount = observation.SessionCount, ReachableCount = observation.Sessions.Count(session => session.Reachable) }
-                };
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
-        catch (Exception)
-        {
-            logs.CollectionFailed();
-            snapshot = previous with { Warnings = ["Observation is unavailable; the previous observation is retained."] };
+                    nextObservationAt = now + ObservationEvery;
+                    (waitingReports, waitingMail, waitingReportsTruncated) = (observation.WaitingReports, observation.WaitingMail, observation.SessionsTruncated);
+                }
+                snapshot = observation is null
+                    ? previous with { Warnings = [.. previous.Warnings.Where(warning => warning != "Observation is busy; the previous observation is retained."), "Observation is busy; the previous observation is retained."] }
+                    : previous with
+                    {
+                        ObservedAt = now, Machines = observation.Machines, Sessions = observation.Sessions, SessionsTruncated = observation.SessionsTruncated, Interactions = observation.Interactions, Warnings = observation.Warnings,
+                        Host = previous.Host with { MachineCount = observation.Machines.Length, SessionCount = observation.SessionCount, ReachableCount = observation.Sessions.Count(session => session.Reachable) }
+                    };
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+            catch (Exception)
+            {
+                logs.CollectionFailed();
+                snapshot = previous with { Warnings = ["Observation is unavailable; the previous observation is retained."] };
+            }
         }
         if (now >= nextDatabaseAt)
         {

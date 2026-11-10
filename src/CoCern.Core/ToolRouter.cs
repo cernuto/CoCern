@@ -101,6 +101,7 @@ internal sealed class ToolRouter(Aggregates aggregates, ClaimComposer claims, Se
             RelayTools.SessionBind or RelayTools.Ack => aggregates.Session(caller, tool, args),
             RelayTools.AttentionRespond => messages.RespondToAttentionAsync(caller, args),
             RelayTools.OrderPut or RelayTools.OrderRemove => status.OrderAsync(caller, tool, args),
+            RelayTools.DocSearch when args["query"] is null => docs.ListAsync(caller),
             RelayTools.DocSearch => docs.SearchAsync(args),
             RelayTools.DocSection => docs.SectionAsync(args),
             // Administrator only, checked first, so a worker learns nothing about the hub's doc cache settings.

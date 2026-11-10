@@ -48,6 +48,8 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
     private JsonElement? resolution;
     private FileStream? owner, adoptedFence;
     private string? currentSessionId;
+    /// <summary>A dispatch observation's short-lived read-only copy, whose connection identity its observation checked once for every record.</summary>
+    private bool identityVerified;
     private const int MaxStateBytes = 16 * 1024;
     private const int StateVersion = 2;
     /// <summary>The retryable refusal when a chat's older binding is held by another (older) adapter: adopting it later keeps one identity.</summary>
@@ -143,7 +145,7 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
             var reads = (exact is null ? StateFiles(sessions, CheckoutFolder).Concat(StateFiles(sessions, ChatFolder)) : [exact])
                 .Select(path => ReadRecord(folder, identity, path)).OfType<StoredRecord>().ToList();
             // An older per-checkout binding is inert once its chat has any binding for that repository, with a session or not.
-            var adopted = exact is null ? ChatScopes(folder, identity, sessions) : [];
+            var adopted = exact is null ? ChatScopes(folder, identity, sessions, reads) : [];
             // A session the hub already answered SessionUnknown for is neither dispatched nor polled again until the chat reopens it.
             result.AddRange(reads.Where(read => !read.Unknown && (read.Record.PerChat || !adopted.Contains(Scope(read.State)))).Select(read => read.Record));
         }
@@ -161,12 +163,17 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
 
     private static (string Provider, string NativeId, string Machine, string Repository) Scope(State state) => (state.Provider, state.NativeId, state.Machine, state.Repository);
 
-    /// <summary>Every chat and repository that has a per-chat binding here, whether or not it holds a session now. Read without the writer fence: only scope fields are used.</summary>
-    private static HashSet<(string Provider, string NativeId, string Machine, string Repository)> ChatScopes(string folder, string identity, string sessions)
+    /// <summary>
+    /// Every chat and repository that has a per-chat binding here, whether or not it holds a session now. Read without the writer fence: only scope fields are used.
+    /// A binding <paramref name="known"/> already read and verified in this observation is not read a second time.
+    /// </summary>
+    private static HashSet<(string Provider, string NativeId, string Machine, string Repository)> ChatScopes(string folder, string identity, string sessions, IReadOnlyList<StoredRecord> known)
     {
         var scopes = new HashSet<(string, string, string, string)>();
+        var read = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var record in known.Where(record => record.Record.PerChat)) { scopes.Add(Scope(record.State)); read.Add(record.Record.Path); }
         foreach (var path in StateFiles(sessions, ChatFolder))
-            if (TryPeek(path, folder, identity) is { } state) scopes.Add(Scope(state));
+            if (!read.Contains(path) && TryPeek(path, folder, identity) is { } state) scopes.Add(Scope(state));
         return scopes;
     }
 
@@ -198,7 +205,8 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
             RequirePrivate(path, MaxStateBytes);
             var state = ParseState(File.ReadAllBytes(path), path, folder, identity);
             if (state.Current is not { } id) return null;
-            var snapshot = new NativeJoinBinding(folder, state, identity, reader);
+            // The caller verified the connection's identity once for this whole observation; the snapshot is dropped when this returns.
+            var snapshot = new NativeJoinBinding(folder, state, identity, reader) { identityVerified = true };
             if (snapshot.CurrentHandle is not { } current || current.SessionId != id) return null;
             return new(new(path, current, snapshot.Generation, File.GetLastWriteTimeUtc(path), state.Version == StateVersion), state, UnknownSession(path) == current.SessionId);
         }
@@ -712,7 +720,7 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
     private void CheckLease()
     {
         ObjectDisposedException.ThrowIf(owner is null, this);
-        if (ConnectionIdentity(Folder) != credentialIdentity) throw Failure("The private connection changed while joining.");
+        if (!identityVerified && ConnectionIdentity(Folder) != credentialIdentity) throw Failure("The private connection changed while joining.");
     }
 
     internal static async Task<FileStream> LockAsync(string path, CancellationToken ct, bool existingOnly = false)
@@ -888,8 +896,11 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
     }
     private static void RequirePrivate(string path, int maximum)
     {
-        RejectLink(path);
-        if (new FileInfo(path).Length > maximum || !NodeState.IsPrivateFile(path)) throw Failure("The native binding file is not private or exceeds its bound.");
+        // One metadata read serves the link, bound and access-list checks (the last remembered while the file is unchanged; see NodeState.IsPrivateFile).
+        var info = new FileInfo(path);
+        if (!info.Exists) { RejectLink(path); throw new FileNotFoundException("The native binding file is missing."); } // The same refusal a missing file always gave.
+        if ((info.Attributes & FileAttributes.ReparsePoint) != 0) throw Failure("Linked private native binding paths are not supported.");
+        if (info.Length > maximum || !NodeState.IsPrivateFile(info)) throw Failure("The native binding file is not private or exceeds its bound.");
     }
     private static string ConnectionIdentity(string folder) =>
         (NodeState.HasIdentityFiles(folder) ? NodeState.NativeCredentialIdentity(folder) : LocalWakeConnection.NativeCredentialIdentity(folder)) ??

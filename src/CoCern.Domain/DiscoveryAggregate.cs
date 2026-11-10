@@ -29,13 +29,44 @@ public static class DiscoveryLimits
 }
 
 /// <summary>
+/// The last-seen times the discovery grain holds in memory but has not written yet (it writes an announce that changes nothing else at most every
+/// <see cref="PersistEvery"/> per machine), so a reader of the stored row, such as the dashboard, still sees a live machine as live. A stored time newer
+/// than the remembered one wins, and a remembered one is used only within <see cref="PersistEvery"/> plus a minute of the stored one.
+/// </summary>
+public static class DiscoveryContacts
+{
+    public static readonly TimeSpan PersistEvery = TimeSpan.FromMinutes(5);
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTimeOffset> Seen = new(StringComparer.Ordinal);
+
+    public static void Record(string machineId, DateTimeOffset at)
+    {
+        // Bounded by the machine table; a table that somehow outgrew it starts over, which only costs readers up to PersistEvery of staleness.
+        if (Seen.Count > 4 * DiscoveryLimits.MaxMachines) Seen.Clear();
+        Seen.AddOrUpdate(machineId, at, (_, current) => at > current ? at : current);
+    }
+
+    /// <summary>The fresher of <paramref name="stored"/> and the remembered unwritten time for <paramref name="machineId"/>.</summary>
+    public static DateTimeOffset? Freshest(string machineId, DateTimeOffset? stored) =>
+        stored is { } persisted && Seen.TryGetValue(machineId, out var remembered) && remembered > persisted && remembered - persisted <= PersistEvery + TimeSpan.FromMinutes(1)
+            ? remembered : stored;
+}
+
+/// <summary>
 /// The machine-scoped discovery aggregate: enrolled machines, their hashed credentials, the chats each announced and a deny list.
 /// It decides identity and wiring only. Its document is <see cref="DiscoveryState"/>; the envelope changes only when a mutation succeeds.
 /// </summary>
 public static class DiscoveryStateMachine
 {
-    public static RelayReply Apply(StateEnvelope<CoordinationDocument> envelope, RelayCaller caller, string operation, JsonObject args, DateTimeOffset now)
+    public static RelayReply Apply(StateEnvelope<CoordinationDocument> envelope, RelayCaller caller, string operation, JsonObject args, DateTimeOffset now) =>
+        Apply(envelope, caller, operation, args, now, out _);
+
+    /// <param name="contactOnly">
+    /// True when the operation was an announce that changed nothing but the machine's last-seen time: same name, clients, chats and node build. The caller
+    /// may then keep the new time in memory without writing the whole document; see <c>DiscoveryGrain</c>.
+    /// </param>
+    public static RelayReply Apply(StateEnvelope<CoordinationDocument> envelope, RelayCaller caller, string operation, JsonObject args, DateTimeOffset now, out bool contactOnly)
     {
+        contactOnly = false;
         if (ByteSize(args) > RelayLimits.MaxPayloadBytes) return Error(PayloadTooLarge);
         if (!caller.IsInternal) return Error(InternalOnly);
         var json = JsonNode.Parse(envelope.Value.Json)!.AsObject();
@@ -47,7 +78,7 @@ public static class DiscoveryStateMachine
             {
                 DiscoveryOperations.Enroll => Enroll(state, args, now),
                 DiscoveryOperations.Validate => Validate(state, args),
-                DiscoveryOperations.Announce => Announce(state, args, now),
+                DiscoveryOperations.Announce => Announce(state, args, now, out contactOnly),
                 DiscoveryOperations.Directory => Directory(state, args, now),
                 DiscoveryOperations.Revoke => Revoke(state, caller, args),
                 _ => Error(UnknownTool)
@@ -113,8 +144,9 @@ public static class DiscoveryStateMachine
     private static DateTimeOffset OpenedAt(JsonObject chat) =>
         chat["openedAt"] is JsonValue value && value.TryGetValue<string>(out var text) && DateTimeOffset.TryParse(text, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var at) ? at : DateTimeOffset.MinValue;
 
-    private static RelayReply Announce(DiscoveryState state, JsonObject args, DateTimeOffset now)
+    private static RelayReply Announce(DiscoveryState state, JsonObject args, DateTimeOffset now, out bool contactOnly)
     {
+        contactOnly = false;
         var id = Required(args, "machineId");
         var name = Required(args, "machineName");
         var clients = StringList(args["clients"]).Select(x => x.Length is > 0 and <= RelayLimits.MaxIdentifierLength ? x : throw new ArgumentException("clients entries must be 1 to 256 characters.")).ToArray();
@@ -133,7 +165,9 @@ public static class DiscoveryStateMachine
         var chats = parsed.GroupBy(x => x.Chat.Provider == UnmappedProvider ? "unmapped:" + x.Order : x.Chat.Provider.ToLowerInvariant() + "/" + x.Chat.ThreadId.ToLowerInvariant())
             .Select(group => group.OrderByDescending(x => x.OpenedAt).ThenBy(x => x.Order).First()).OrderBy(x => x.Order).Select(x => x.Chat).ToArray();
         if (state.Machine(id) is not { } machine) return Error(NotFound);
+        var before = machine.WithoutLastSeen();
         machine.Announced(name, now, clients, chats, nodeBuild);
+        contactOnly = JsonNode.DeepEquals(before, machine.WithoutLastSeen());
         var routes = chats.Where(x => x.Wakeable).Select(x => new { provider = x.Provider, threadId = x.ThreadId, relaySessionId = x.RelaySessionId, repositoryId = x.RepositoryId }).ToArray();
         return Ok(new { routes });
     }

@@ -60,8 +60,8 @@ internal static class JoinEndpoints
 /// <summary>
 /// One host-owned cache serves setup and enrolled-node releases, which may come from different adapter folders (the join package and the newest
 /// self-contained node build). Archive names identify exact SHA-256 bytes, and only archives built by this process are trusted. Metadata comes from the
-/// completed ZIP; source-content hashes, remembered per source folder, avoid needless rebuilds without trusting file times, so serving two folders in turn
-/// rebuilds neither. Each remembered folder's current and previous archives, and leased archives, survive pruning. Every returned stream owns its pruning
+/// completed ZIP; source-content hashes, remembered per source folder, avoid needless rebuilds, so serving two folders in turn rebuilds neither. Between
+/// full hashes, at most <see cref="FullCheckAfterMilliseconds"/> apart, file metadata stands in for content (see <see cref="GetAsync"/>). Each remembered folder's current and previous archives, and leased archives, survive pruning. Every returned stream owns its pruning
 /// reference until disposal, including aborted HTTP responses.
 /// </summary>
 internal sealed class AdapterZipCache(string folder, Action? archiveBuilt = null)
@@ -77,9 +77,18 @@ internal sealed class AdapterZipCache(string folder, Action? archiveBuilt = null
     /// <summary>Folders remembered at once; the least recently served is forgotten first, and its archives become prunable.</summary>
     private const int RememberedSources = 4;
 
+    /// <summary>
+    /// How long a cheap check (a folder listing, or an archive's length and write time) may stand in for a full SHA-256 before the content is hashed again.
+    /// Nodes announce every 30 seconds and every announce asks for the release; hashing the whole build and archive each time read about 220 MB per announce.
+    /// </summary>
+    private const long FullCheckAfterMilliseconds = 5 * 60 * 1000;
+
     private sealed class Source
     {
         public string? Stamp { get; set; }
+        /// <summary>The metadata listing seen when <see cref="Stamp"/> was last confirmed by a full content hash, at <see cref="ContentCheckedAt"/>.</summary>
+        public string? Listing { get; set; }
+        public long ContentCheckedAt { get; set; }
         public string? Current { get; set; }
         public string? Previous { get; set; }
         public long Used { get; set; }
@@ -91,6 +100,9 @@ internal sealed class AdapterZipCache(string folder, Action? archiveBuilt = null
         public long Bytes { get; } = bytes;
         public NodeRelease? Release { get; } = release;
         public int References { get; set; }
+        /// <summary>The archive's last write time when its bytes last hashed to <see cref="Id"/>, at <see cref="VerifiedAt"/>. Guarded by <c>sync</c>.</summary>
+        public DateTime VerifiedWrite { get; set; }
+        public long VerifiedAt { get; set; }
     }
 
     public string Folder { get; } = Path.GetFullPath(folder);
@@ -103,11 +115,7 @@ internal sealed class AdapterZipCache(string folder, Action? archiveBuilt = null
     public async Task<Stream> OpenAsync(string adapterFolder, CancellationToken cancellationToken)
     {
         await building.WaitAsync(cancellationToken);
-        try
-        {
-            var entry = await GetAsync(adapterFolder, cancellationToken);
-            return await OpenVerifiedAsync(entry, cancellationToken) ?? throw new IOException("The adapter zip changed right after it was built.");
-        }
+        try { return (await GetAsync(adapterFolder, cancellationToken)).Content; }
         finally { building.Release(); }
     }
 
@@ -116,10 +124,10 @@ internal sealed class AdapterZipCache(string folder, Action? archiveBuilt = null
         await building.WaitAsync(ct);
         try
         {
-            var entry = await GetAsync(adapterFolder, ct);
-            if (entry.Release is null) return null;
-            var content = await OpenVerifiedAsync(entry, ct);
-            return content is null ? null : new AdapterReleaseLease(entry.Release, content);
+            // The stream GetAsync verified is the one leased: no second verification of the same archive.
+            var (entry, content) = await GetAsync(adapterFolder, ct);
+            if (entry.Release is null) { await content.DisposeAsync(); return null; }
+            return new AdapterReleaseLease(entry.Release, content);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException) { return null; }
         finally { building.Release(); }
@@ -144,26 +152,45 @@ internal sealed class AdapterZipCache(string folder, Action? archiveBuilt = null
 
     private string ZipPath(string id) => Path.Combine(Folder, $"{id}.zip");
 
-    // Only the serial builder accesses the source index. Full content hashing also detects same-length, same-mtime dependency changes.
-    private async Task<Entry> GetAsync(string adapterFolder, CancellationToken ct)
+    /// <summary>
+    /// The archive for <paramref name="adapterFolder"/>, opened and verified. Only the serial builder accesses the source index. A metadata listing (every
+    /// entry's relative path, length, write and creation time, with the link checks) decides whether the folder changed; when it is unchanged and the
+    /// content was hashed within <see cref="FullCheckAfterMilliseconds"/>, the remembered archive is served without rehashing the build. A changed listing,
+    /// or that time running out, hashes the full content, which still catches a same-length, same-time dependency change within that window.
+    /// </summary>
+    private async Task<(Entry Entry, Stream Content)> GetAsync(string adapterFolder, CancellationToken ct)
     {
         var folder = Path.GetFullPath(adapterFolder);
-        var stamp = await Task.Run(() => Stamp(folder, ct), ct);
+        var listing = await Task.Run(() => Listing(folder, ct), ct);
         Entry? existing = null;
         lock (sync)
         {
-            if (sources.TryGetValue(folder, out var source) && source.Stamp == stamp && source.Current is { } id)
+            if (sources.TryGetValue(folder, out var source) && source.Stamp is not null && source.Current is { } id && source.Listing == listing &&
+                Environment.TickCount64 - source.ContentCheckedAt < FullCheckAfterMilliseconds)
             {
                 source.Used = ++uses;
                 built.TryGetValue(id, out existing);
             }
         }
-        if (existing is not null)
+        string? stamp = null;
+        if (existing is null)
         {
-            await using var checkedContent = await OpenVerifiedAsync(existing, ct);
-            if (checkedContent is not null) return existing;
+            stamp = await Task.Run(() => Stamp(folder, ct), ct);
+            lock (sync)
+            {
+                if (sources.TryGetValue(folder, out var source) && source.Stamp == stamp && source.Current is { } id)
+                {
+                    source.Used = ++uses;
+                    // The listing was taken before the content hash, so a change after it shows as a different listing next time.
+                    (source.Listing, source.ContentCheckedAt) = (listing, Environment.TickCount64);
+                    built.TryGetValue(id, out existing);
+                }
+            }
         }
-        return await BuildAsync(folder, stamp, ct);
+        if (existing is not null && await OpenVerifiedAsync(existing, ct) is { } content) return (existing, content);
+        stamp ??= await Task.Run(() => Stamp(folder, ct), ct);
+        var entry = await BuildAsync(folder, listing, stamp, ct);
+        return (entry, await OpenVerifiedAsync(entry, ct) ?? throw new IOException("The adapter zip changed right after it was built."));
     }
 
     /// <summary>The remembered state of <paramref name="folder"/>, created when new; forgets the least recently served folder beyond the limit. Call under <c>sync</c>.</summary>
@@ -176,8 +203,10 @@ internal sealed class AdapterZipCache(string folder, Action? archiveBuilt = null
     }
 
     /// <summary>
-    /// The cached zip for <paramref name="stamp"/> when this process built it and its bytes still hash the same, else null. The hash is checked on the open
-    /// handle that is then served, and that handle shares no writes, so what was checked is what goes out.
+    /// The cached zip when this process built it and its bytes still hash the same, else null. The open handle that is then served shares no writes, so
+    /// what was checked is what goes out. Its length and write time, read from that handle, stand in for the SHA-256 while they match the last full hash
+    /// and that hash is under <see cref="FullCheckAfterMilliseconds"/> old; anything else hashes the archive again. Nodes verify length, SHA-256 and the
+    /// adapter DLL hash of every download themselves.
     /// </summary>
     private async Task<Stream?> OpenVerifiedAsync(Entry entry, CancellationToken cancellationToken)
     {
@@ -191,10 +220,21 @@ internal sealed class AdapterZipCache(string folder, Action? archiveBuilt = null
         }
         try
         {
-            if (stream.Length == entry.Bytes && Convert.ToHexString(await SHA256.HashDataAsync(stream, cancellationToken)) == entry.Id)
+            if (stream.Length == entry.Bytes)
             {
-                stream.Position = 0;
-                return new OwnedStream(stream, () => Release(entry));
+                var written = File.GetLastWriteTimeUtc(stream.SafeFileHandle);
+                bool trusted;
+                lock (sync) trusted = entry.VerifiedWrite == written && Environment.TickCount64 - entry.VerifiedAt < FullCheckAfterMilliseconds;
+                if (!trusted && Convert.ToHexString(await SHA256.HashDataAsync(stream, cancellationToken)) == entry.Id)
+                {
+                    trusted = true;
+                    lock (sync) (entry.VerifiedWrite, entry.VerifiedAt) = (written, Environment.TickCount64);
+                }
+                if (trusted)
+                {
+                    stream.Position = 0;
+                    return new OwnedStream(stream, () => Release(entry));
+                }
             }
         }
         catch { await stream.DisposeAsync(); Release(entry); throw; }
@@ -202,7 +242,7 @@ internal sealed class AdapterZipCache(string folder, Action? archiveBuilt = null
         return null;
     }
 
-    private async Task<Entry> BuildAsync(string adapterFolder, string stamp, CancellationToken cancellationToken)
+    private async Task<Entry> BuildAsync(string adapterFolder, string listing, string stamp, CancellationToken cancellationToken)
     {
         CreatePrivateFolder(Folder);
         // Only the serial builder touches part files; a lease disposed on Unix must never unlink an active build.
@@ -218,6 +258,8 @@ internal sealed class AdapterZipCache(string folder, Action? archiveBuilt = null
                 using var written = File.OpenRead(part);
                 var id = Convert.ToHexString(SHA256.HashData(written));
                 var bytes = written.Length;
+                // Read on the handle just hashed, which shares no writes; the move into place keeps it.
+                var writtenAt = File.GetLastWriteTimeUtc(written.SafeFileHandle);
                 written.Position = 0;
                 using var zip = new ZipArchive(written, ZipArchiveMode.Read, leaveOpen: true);
                 NodeRelease? release = null;
@@ -227,7 +269,7 @@ internal sealed class AdapterZipCache(string folder, Action? archiveBuilt = null
                     release = new(1, id, package, bytes, id, Convert.ToHexString(SHA256.HashData(dllContent)));
                 }
                 cancellationToken.ThrowIfCancellationRequested();
-                return new Entry(id, bytes, release);
+                return new Entry(id, bytes, release) { VerifiedWrite = writtenAt, VerifiedAt = Environment.TickCount64 };
             }, cancellationToken);
             lock (sync)
             {
@@ -240,16 +282,25 @@ internal sealed class AdapterZipCache(string folder, Action? archiveBuilt = null
                 else
                 {
                     File.Move(part, ZipPath(entry.Id), overwrite: true);
+                    // The file now in place is the one just hashed to this same digest.
+                    (existing.VerifiedWrite, existing.VerifiedAt) = (entry.VerifiedWrite, entry.VerifiedAt);
                     entry = existing;
                 }
                 var source = Track(adapterFolder);
                 if (source.Current != entry.Id) { source.Previous = source.Current; source.Current = entry.Id; }
-                source.Stamp = null;
+                (source.Stamp, source.Listing) = (null, null);
                 Prune();
             }
             // A publication changed while copying: serve the truthful completed snapshot, but do not memoize it under the new source.
-            if (await Task.Run(() => Stamp(adapterFolder, cancellationToken), cancellationToken) == stamp)
-                lock (sync) if (sources.TryGetValue(adapterFolder, out var source) && source.Current == entry.Id) source.Stamp = stamp;
+            var (afterListing, afterStamp) = await Task.Run(() => (Listing(adapterFolder, cancellationToken), Stamp(adapterFolder, cancellationToken)), cancellationToken);
+            if (afterStamp == stamp)
+                lock (sync)
+                    if (sources.TryGetValue(adapterFolder, out var source) && source.Current == entry.Id)
+                    {
+                        source.Stamp = stamp;
+                        // Only an unchanged listing may later stand in for this hash; otherwise the next request hashes again.
+                        (source.Listing, source.ContentCheckedAt) = (afterListing == listing ? listing : null, Environment.TickCount64);
+                    }
             return entry;
         }
         finally { TryDelete(part); }
@@ -284,6 +335,25 @@ internal sealed class AdapterZipCache(string folder, Action? archiveBuilt = null
     private static void TryDelete(string path)
     {
         try { File.Delete(path); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+    }
+
+    /// <summary>
+    /// A digest of the folder's metadata only: every entry's relative path, length, last write and creation time, with no file opened. Links are refused as
+    /// in <see cref="Stamp"/>. Any added, removed, resized, rewritten or replaced file changes it.
+    /// </summary>
+    private static string Listing(string folder, CancellationToken ct)
+    {
+        if ((File.GetAttributes(folder) & FileAttributes.ReparsePoint) != 0) throw new IOException("Package links are unsupported.");
+        var text = new StringBuilder();
+        var options = new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = 0, IgnoreInaccessible = false };
+        foreach (var entry in new DirectoryInfo(folder).EnumerateFileSystemInfos("*", options).OrderBy(entry => entry.FullName, StringComparer.OrdinalIgnoreCase))
+        {
+            ct.ThrowIfCancellationRequested();
+            if ((entry.Attributes & FileAttributes.ReparsePoint) != 0) throw new IOException("Package links are unsupported.");
+            text.Append(Path.GetRelativePath(folder, entry.FullName)).Append('\0').Append(entry is FileInfo file ? file.Length : -1).Append('\0')
+                .Append(entry.LastWriteTimeUtc.Ticks).Append('\0').Append(entry.CreationTimeUtc.Ticks).Append('\n');
+        }
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text.ToString())));
     }
 
     private static string Stamp(string folder, CancellationToken ct)

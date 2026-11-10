@@ -56,6 +56,7 @@ public static class ChatGuidance
             List<string> running = [RelayTools.GetStatus, RelayTools.ChatDirectory];
             if (analytics) running.Add(RelayTools.AnalyticsQuery);
             running.Add(RelayTools.HubDiagnose);
+            if (docs) running.Add(RelayTools.DocSearch);
             return Line(AdministratorIntro, running, "Approvals, grants and pushes to main still need a yes from Paul.");
         }
         List<string> working = [RelayTools.TaskGet, RelayTools.TaskUpdate, RelayTools.SendMessage];
@@ -67,14 +68,27 @@ public static class ChatGuidance
     /// <summary>
     /// The startup line as a chat's adapter passes it on. The hub knows the credential and the adapter knows which tools it lists, so the adapter
     /// only narrows the line: the chat profile lists messaging alone, and an administrator's token behind an adapter that hides the administrator
-    /// tools gets the worker line, with only the tools every hub has. It never widens a line the hub sent.
+    /// tools gets the worker line, with only the tools every hub has plus doc_search when the hub line lists it (a worker tool). It never
+    /// widens a line the hub sent.
     /// </summary>
     public static string NarrowStartHint(string hubLine, bool administrator, bool chatOnly) =>
         chatOnly ? Line("You are a chat-only session.", [RelayTools.SendMessage, RelayTools.CheckInbox, RelayTools.ChatDirectory], "Task, search and analytics tools are off for this chat; ask Paul to allow them.")
-        : !administrator && hubLine.StartsWith(AdministratorIntro, StringComparison.Ordinal) ? StartHint(false, false, false, false)
+        : !administrator && hubLine.StartsWith(AdministratorIntro, StringComparison.Ordinal) ? StartHint(false, false, false, Lists(hubLine, RelayTools.DocSearch))
         : hubLine;
 
-    private static string Line(string role, IEnumerable<string> tools, string note) => $"{role} Worth using: {string.Join(", ", tools)}. {note}";
+    /// <summary>Whether a startup line lists <paramref name="tool"/> among the tools worth using.</summary>
+    private static bool Lists(string line, string tool)
+    {
+        var start = line.IndexOf(WorthUsing, StringComparison.Ordinal);
+        if (start < 0) return false;
+        start += WorthUsing.Length;
+        var end = line.IndexOf(". ", start, StringComparison.Ordinal);
+        return line[start..(end < 0 ? line.Length : end)].Split(", ").Contains(tool, StringComparer.Ordinal);
+    }
+
+    private const string WorthUsing = " Worth using: ";
+
+    private static string Line(string role, IEnumerable<string> tools, string note) => $"{role}{WorthUsing}{string.Join(", ", tools)}. {note}";
 
     private static string AdministratorHint(string tool) => tool switch
     {

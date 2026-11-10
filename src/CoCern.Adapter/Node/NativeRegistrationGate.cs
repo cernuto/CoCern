@@ -20,23 +20,27 @@ internal sealed class NativeRegistrationGate : IAsyncDisposable
         listening = ListenAsync(budget);
     }
 
+    /// <summary>How long a listener waits, jittered, when every pipe instance of its registration is in use: none frees until a hook drains them or one expires.</summary>
+    internal static TimeSpan BusyRetry() => TimeSpan.FromMilliseconds(1000 + Random.Shared.Next(4000));
+
     private async Task ListenAsync(TimeSpan budget)
     {
         var retryDelay = TimeSpan.FromMilliseconds(10);
         try
         {
-            while (!stopping.IsCancellationRequested && registration.StillCurrent())
+            // The loop's own check paces waiting only; acceptance below re-reads the registration in full.
+            while (!stopping.IsCancellationRequested && registration.StillCurrentForListening())
             {
                 var started = System.Diagnostics.Stopwatch.GetTimestamp();
-                if (await registration.AcceptAsync(stopping.Token, budget, deferUntilHook: true) is not null && registration.StillCurrent())
+                var busy = false;
+                if (await registration.AcceptAsync(stopping.Token, budget, deferUntilHook: true, () => busy = true) is not null && registration.StillCurrent())
                 {
                     if (!stopping.IsCancellationRequested) accepted.TrySetResult(true);
                     return;
                 }
                 // A disconnected, malformed or expired challenge is never authority. Rearm with a fresh nonce.
-                // Back off immediate failures (including all four pipe slots being occupied) instead of spinning.
-                // Keep a waiting fifth backend inside the genuine helper's 250ms drain window after a slot is freed.
-                retryDelay = System.Diagnostics.Stopwatch.GetElapsedTime(started) >= TimeSpan.FromMilliseconds(100)
+                // Back off immediate failures instead of spinning; all pipe instances in use waits seconds, since no slot frees sooner than a hook's drain.
+                retryDelay = busy ? BusyRetry() : System.Diagnostics.Stopwatch.GetElapsedTime(started) >= TimeSpan.FromMilliseconds(100)
                     ? TimeSpan.FromMilliseconds(50) : TimeSpan.FromMilliseconds(Math.Min(50, retryDelay.TotalMilliseconds * 2));
                 await Task.Delay(retryDelay, stopping.Token);
             }

@@ -41,7 +41,9 @@ internal sealed class NodeTransport
     /// <summary>The Codex executable wakes run; null when none is installed, so Codex chats are announced unwakeable.</summary>
     public Func<string?> CodexExecutable { get; init; } = CodexLocator.Find;
     /// <summary>How a wake reaches a Codex chat, given the executable; tests replace it so no real <c>codex.exe</c> ever runs.</summary>
-    public Func<string, IWakeDispatcher> CodexDispatcher { get; init; } = executable => new CodexWakeDispatcher(executable, new CodexActivity(CodexActivity.DefaultSessionsRoot), queue: new CodexQueue(CodexQueue.DefaultHome));
+    /// <remarks>One <see cref="CodexActivity"/> serves every pass, so each rollout is followed from where the last pass stopped instead of from byte 0.</remarks>
+    public Func<string, IWakeDispatcher> CodexDispatcher { get; init; } = executable => new CodexWakeDispatcher(executable, SharedCodexActivity.Value, queue: new CodexQueue(CodexQueue.DefaultHome));
+    private static readonly Lazy<CodexActivity> SharedCodexActivity = new(() => new CodexActivity(CodexActivity.DefaultSessionsRoot));
     /// <summary>The wake watcher's fallback pass when no hint arrives; unset leaves <see cref="WakeRuntime.Interval"/>'s default, which lengthens while hints work.</summary>
     public TimeSpan? WakeInterval { get; init; }
     /// <summary>Fixed event names for tests (enrolled, announced, watching, hint, unauthorized, waking, wake-target); never carries data.</summary>
@@ -195,6 +197,11 @@ public sealed class NodeRunner : IAsyncDisposable
     private NodeUpdateRefusal? _lastRefusal;
     private readonly bool _pendingCandidate;
     private int _activationGateHeld;
+    /// <summary>When stored images are next pruned (a worker only): shortly after startup, and again once this worker's activation commits.</summary>
+    private DateTimeOffset? _pruneAt;
+    private int _pruneRequested;
+    private Task _pruneTask = Task.CompletedTask;
+    private static readonly TimeSpan PruneDelay = TimeSpan.FromMinutes(2);
     private bool _workerStartup;
     private readonly bool _ordinaryStartup;
 
@@ -211,6 +218,7 @@ public sealed class NodeRunner : IAsyncDisposable
         var journal = (workerImage is not null || transport.CreateUpdater is not null && transport.UpdateHost is not null) ? NodeUpdateState.Read(Path.Combine(state.Folder, "updates")).Record : null;
         _pendingCandidate = readiness is not null && journal?.Current.ContentId != workerImage;
         _activationGateHeld = _pendingCandidate ? 1 : 0;
+        if (workerImage is not null) _pruneAt = transport.Clock.GetUtcNow() + PruneDelay;
         if (journal?.LastFailedReleaseId is { } failed && journal.LastFailedAtUtc is { } at) _failedReleases[failed] = at;
         if (startupContext?.FailedReleaseId is { } refused && startupContext.FailedAtUtc is { } failedAt)
         {
@@ -478,6 +486,7 @@ public sealed class NodeRunner : IAsyncDisposable
             EnsureHints();
             EnsureWaking();
             if (await TryUpdateAsync(accepted, ct)) { _exitCode = 75; return Next.Exit; }
+            SchedulePrune();
         }
         finally { response.Dispose(); }
         return Next.Wait;
@@ -599,13 +608,28 @@ public sealed class NodeRunner : IAsyncDisposable
         foreach (var release in _failedReleases.Where(pair => now - pair.Value >= TimeSpan.FromMinutes(15)).Select(pair => pair.Key).ToArray()) _failedReleases.Remove(release);
     }
 
+    /// <summary>
+    /// Prunes stored images on a background task, off the announce and wake paths: once <see cref="PruneDelay"/> after a worker starts, and again after its
+    /// activation commits. Never while staging runs or a prune is still going; the images it may keep are decided from the journal at that moment.
+    /// </summary>
+    private void SchedulePrune()
+    {
+        if (_workerImage is not { } running || !_pruneTask.IsCompleted || _updateTask is not null) return;
+        var now = _transport.Clock.GetUtcNow();
+        if (Interlocked.Exchange(ref _pruneRequested, 0) == 1 && (_pruneAt is null || _pruneAt > now)) _pruneAt = now;
+        if (_pruneAt is not { } due || now < due) return;
+        _pruneAt = null;
+        var root = Path.Combine(_state.Folder, "updates");
+        _pruneTask = Task.Run(() => NodeUpdateState.PruneVersions(root, running));
+    }
+
     private bool ObserveCommitAndHandoff()
     {
         if (_workerImage is null) return true; // Setup/test callers without a private-worker lifecycle retain their contract.
         var root = Path.Combine(_state.Folder, "updates");
         var record = NodeUpdateState.ReadPrimary(root);
         if (record is not { Phase: NodeUpdatePhase.Committed } || record.Current.ContentId != _workerImage) return false;
-        if (Interlocked.Exchange(ref _activationGateHeld, 0) == 1) _dispatchGate.Resume();
+        if (Interlocked.Exchange(ref _activationGateHeld, 0) == 1) { _dispatchGate.Resume(); Volatile.Write(ref _pruneRequested, 1); }
         if (File.Exists(Path.Combine(root, "request.json")) || Directory.Exists(Path.Combine(root, "request.json"))) return false;
         var ready = Path.Combine(root, "ready.json");
         return !File.Exists(ready) && !Directory.Exists(ready) || _activationReady is not null && NodeUpdateState.ReadReady(root) == _activationReady;
@@ -866,6 +890,8 @@ public sealed class NodeRunner : IAsyncDisposable
         catch (Exception) { /* the hint channel never decides the exit code */ }
         try { await _wakeTask; }
         catch (Exception) { /* waking never decides the exit code */ }
+        try { await _pruneTask; }
+        catch (Exception) { /* pruning never decides the exit code */ }
         _wakeStop?.Dispose();
         if (_hints is { } hints) { _hints = null; await hints.DisposeAsync(); }
         _http?.Dispose();
