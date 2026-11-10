@@ -35,7 +35,9 @@ try {
         $taskStart.CreateNoWindow=$true
         $taskStart.RedirectStandardOutput=$true
         $taskStart.RedirectStandardError=$true
-        foreach($taskArgument in $Arguments){$taskStart.ArgumentList.Add($taskArgument)}
+        # Windows PowerShell 5.1 runs on .NET Framework, which has no ArgumentList: quote each argument for CommandLineToArgvW instead.
+        if($null -ne $taskStart.ArgumentList){foreach($taskArgument in $Arguments){$taskStart.ArgumentList.Add($taskArgument)}}
+        else{$taskStart.Arguments=($Arguments | ForEach-Object { if($_ -eq '' -or $_ -match '[\s"]'){'"'+(($_ -replace '(\\*)"','$1$1\"') -replace '(\\+)$','$1$1')+'"'}else{$_} }) -join ' '}
         $taskProcess=[Diagnostics.Process]::new()
         $taskProcess.StartInfo=$taskStart
         try {
@@ -44,7 +46,7 @@ try {
             $taskStderr=$taskProcess.StandardError.ReadToEndAsync()
             $taskRemaining=[Math]::Max(1,[Math]::Min([int]::MaxValue,($taskDeadline-[DateTimeOffset]::UtcNow).TotalMilliseconds))
             $taskTimedOut=!$taskProcess.WaitForExit([int]$taskRemaining)
-            if($taskTimedOut){$taskProcess.Kill($true);$taskProcess.WaitForExit()}
+            if($taskTimedOut){if($PSVersionTable.PSEdition -eq 'Core'){$taskProcess.Kill($true)}else{& taskkill.exe /PID $taskProcess.Id /T /F | Out-Null};$taskProcess.WaitForExit()}
             [IO.File]::WriteAllText((Join-Path $taskOutput ($Name+'.stdout.log')),$taskStdout.GetAwaiter().GetResult())
             [IO.File]::WriteAllText((Join-Path $taskOutput ($Name+'.stderr.log')),$taskStderr.GetAwaiter().GetResult())
             if($taskTimedOut -or $taskProcess.ExitCode -ne 0){throw ($Name+' failed or timed out; inspect the retained logs.')}
