@@ -111,11 +111,14 @@ internal sealed class AdapterZipCache(string folder, Action? archiveBuilt = null
     public static string DefaultFolder(IConfiguration configuration, IHostEnvironment environment) =>
         Path.Combine(Path.GetDirectoryName(Path.GetFullPath(RelayHostBuilderExtensions.DatabasePath(configuration, environment)))!, "adapter-zip");
 
-    /// <summary>The zip of <paramref name="adapterFolder"/>, opened for reading after its hash was checked; the caller disposes it.</summary>
+    /// <summary>
+    /// The zip of <paramref name="adapterFolder"/>, opened for reading after its whole content hashed to its name; the caller disposes it. This is the
+    /// anonymous setup download, which no client checks against a hash, and it is rare, so it never takes the length-and-write-time shortcut.
+    /// </summary>
     public async Task<Stream> OpenAsync(string adapterFolder, CancellationToken cancellationToken)
     {
         await building.WaitAsync(cancellationToken);
-        try { return (await GetAsync(adapterFolder, cancellationToken)).Content; }
+        try { return (await GetAsync(adapterFolder, cancellationToken, fullHash: true)).Content; }
         finally { building.Release(); }
     }
 
@@ -158,7 +161,8 @@ internal sealed class AdapterZipCache(string folder, Action? archiveBuilt = null
     /// content was hashed within <see cref="FullCheckAfterMilliseconds"/>, the remembered archive is served without rehashing the build. A changed listing,
     /// or that time running out, hashes the full content, which still catches a same-length, same-time dependency change within that window.
     /// </summary>
-    private async Task<(Entry Entry, Stream Content)> GetAsync(string adapterFolder, CancellationToken ct)
+    /// <param name="fullHash">Hash the archive in full before serving it (<see cref="OpenVerifiedAsync"/>).</param>
+    private async Task<(Entry Entry, Stream Content)> GetAsync(string adapterFolder, CancellationToken ct, bool fullHash = false)
     {
         var folder = Path.GetFullPath(adapterFolder);
         var listing = await Task.Run(() => Listing(folder, ct), ct);
@@ -187,10 +191,10 @@ internal sealed class AdapterZipCache(string folder, Action? archiveBuilt = null
                 }
             }
         }
-        if (existing is not null && await OpenVerifiedAsync(existing, ct) is { } content) return (existing, content);
+        if (existing is not null && await OpenVerifiedAsync(existing, ct, fullHash) is { } content) return (existing, content);
         stamp ??= await Task.Run(() => Stamp(folder, ct), ct);
         var entry = await BuildAsync(folder, listing, stamp, ct);
-        return (entry, await OpenVerifiedAsync(entry, ct) ?? throw new IOException("The adapter zip changed right after it was built."));
+        return (entry, await OpenVerifiedAsync(entry, ct, fullHash) ?? throw new IOException("The adapter zip changed right after it was built."));
     }
 
     /// <summary>The remembered state of <paramref name="folder"/>, created when new; forgets the least recently served folder beyond the limit. Call under <c>sync</c>.</summary>
@@ -206,9 +210,10 @@ internal sealed class AdapterZipCache(string folder, Action? archiveBuilt = null
     /// The cached zip when this process built it and its bytes still hash the same, else null. The open handle that is then served shares no writes, so
     /// what was checked is what goes out. Its length and write time, read from that handle, stand in for the SHA-256 while they match the last full hash
     /// and that hash is under <see cref="FullCheckAfterMilliseconds"/> old; anything else hashes the archive again. Nodes verify length, SHA-256 and the
-    /// adapter DLL hash of every download themselves.
+    /// adapter DLL hash of every download themselves, so only their release path may take that shortcut.
     /// </summary>
-    private async Task<Stream?> OpenVerifiedAsync(Entry entry, CancellationToken cancellationToken)
+    /// <param name="fullHash">Always hash the archive (the setup download, which nothing checks after it leaves).</param>
+    private async Task<Stream?> OpenVerifiedAsync(Entry entry, CancellationToken cancellationToken, bool fullHash = false)
     {
         FileStream stream;
         lock (sync)
@@ -224,7 +229,7 @@ internal sealed class AdapterZipCache(string folder, Action? archiveBuilt = null
             {
                 var written = File.GetLastWriteTimeUtc(stream.SafeFileHandle);
                 bool trusted;
-                lock (sync) trusted = entry.VerifiedWrite == written && Environment.TickCount64 - entry.VerifiedAt < FullCheckAfterMilliseconds;
+                lock (sync) trusted = !fullHash && entry.VerifiedWrite == written && Environment.TickCount64 - entry.VerifiedAt < FullCheckAfterMilliseconds;
                 if (!trusted && Convert.ToHexString(await SHA256.HashDataAsync(stream, cancellationToken)) == entry.Id)
                 {
                     trusted = true;

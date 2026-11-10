@@ -636,6 +636,7 @@ internal sealed class NativeRegistration
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException or InvalidOperationException) { return null; }
     }
 
+    /// <summary>The registration re-read and re-verified in full (outside <see cref="NodeState.Observe{T}"/>, no remembered verdict serves): for acceptance and for every call.</summary>
     internal bool StillCurrent() => Read(path, Provider, Folder, Profile) is { } current && current.Definition == Definition && current.scope == scope;
 
     private sealed record CurrentCheck(long Length, DateTime Written, DateTime Created, long CheckedAt);
@@ -654,7 +655,8 @@ internal sealed class NativeRegistration
         var now = Environment.TickCount64;
         if (lastCurrent is { } known && known.Length == info.Length && known.Written == info.LastWriteTimeUtc && known.Created == info.CreationTimeUtc &&
             now - known.CheckedAt is >= 0 and < CurrentCheckMilliseconds) return true;
-        var current = StillCurrent();
+        // Pacing only, so remembered private-file and identity verdicts may serve; acceptance and every call use StillCurrent, which reads in full.
+        var current = NodeState.Observe(StillCurrent);
         lastCurrent = current ? new(info.Length, info.LastWriteTimeUtc, info.CreationTimeUtc, now) : null;
         return current;
     }

@@ -44,7 +44,7 @@ internal static class RelayRequestGuard
             }
             // Untrusted telemetry only; never part of native envelopes, replay or aggregate state.
             args.Remove("callOrigin");
-            if (args.ContainsKey(CheckedNativeResolution)) return Replies.Error(InvalidArguments);
+            if (args.ContainsKey(CheckedNativeResolution) || args.ContainsKey(ActingRepository)) return Replies.Error(InvalidArguments);
             // A preflight cannot be combined with any allocating or caller-controlled envelope.
             if (args.ContainsKey("nativePreflight"))
             {
@@ -86,24 +86,28 @@ internal static class RelayRequestGuard
         if (tool.Name == RelayTools.ControlRequest && Text(args, "command") == "revoke_machine" && args.ContainsKey("allSessions"))
             return Replies.Error(InvalidArguments, new { field = "allSessions" });
         // A doc read may name another repository to read with repository: a native chat cannot change its repositoryId. That repository is
-        // authorized below exactly like a repositoryId. Acting proof is dropped, since it proves a session in its own repository and a doc
-        // read needs none; the call then speaks for the credential alone, as any client without a session does.
+        // authorized below exactly like a repositoryId. Acting proof proves a session in its own repository, so it stays with that repository
+        // (ActingRepository): the guard verifies it there and applies the session's tool profile (CallGuard.VerifyAsync), and the read itself
+        // then speaks for the credential alone, as any client without a session does. Only these two reads ever leave the bound repository.
         if (tool.Name is RelayTools.DocSearch or RelayTools.DocSection && args["repository"] is { } named)
         {
             if (named is not JsonValue namedValue || !namedValue.TryGetValue<string>(out var other) || string.IsNullOrWhiteSpace(other))
                 return Replies.Error(InvalidArguments, new { field = "repository" });
             if (!string.Equals(other, Text(args, "repositoryId"), StringComparison.OrdinalIgnoreCase))
             {
+                if (Text(args, "actingSessionId").Length > 0 || Text(args, "actingSessionToken").Length > 0)
+                {
+                    if (Canonical(Text(args, "repositoryId")) is not { } own || !caller.MayAccess(own)) return Replies.Error(RepositoryDenied);
+                    args[ActingRepository] = own;
+                }
                 args["repositoryId"] = other;
-                args.Remove("actingSessionId");
-                args.Remove("actingSessionToken");
             }
             args.Remove("repository");
         }
-        var suppliedRepository = Text(args, "repositoryId");
-        var repository = canonicalRepository is null
-            ? RepositoryIds.Match(suppliedRepository, caller.Repositories) ?? (caller.IsAdministrator ? suppliedRepository : null)
-            : canonicalRepository(suppliedRepository);
+        string? Canonical(string supplied) => canonicalRepository is null
+            ? RepositoryIds.Match(supplied, caller.Repositories) ?? (caller.IsAdministrator ? supplied : null)
+            : canonicalRepository(supplied);
+        var repository = Canonical(Text(args, "repositoryId"));
         if (repository is null || !caller.MayAccess(repository)) return Replies.Error(RepositoryDenied);
         args["repositoryId"] = repository;
         if (tool.IsMutation && Text(args, "requestId").Length == 0) return Replies.Error(RequestIdRequired);
@@ -153,6 +157,12 @@ internal static class RelayRequestGuard
 
     /// <summary>Within their length, and (when present) not blank and free of control characters, which would break logs and displays.</summary>
     internal const string CheckedNativeResolution = "__checkedNativeResolution";
+
+    /// <summary>
+    /// Hub-set only (a client copy is refused): on a doc read of another repository, the acting session's own repository, where its proof is verified
+    /// and its tool profile applied. <see cref="CallControls.Take"/> takes it out with the proof.
+    /// </summary>
+    internal const string ActingRepository = "__actingRepositoryId";
 
     private static bool IdentifiersFit(JsonObject args)
     {
@@ -230,9 +240,9 @@ internal static class RelayRequestGuard
 /// </summary>
 internal sealed record CallControls(bool OfferWanted, bool StatusDetail, bool PageSeen, string[] SeenIds, string? KnownEtag, JsonObject? Usage, bool ModelVisible, bool? BackgroundCall,
     bool HeadersOnly = false, string? KnownInboxEtag = null, bool PresentStanding = false, string? StatusTag = null, long? StatusHoldMinutes = null,
-    string? ActingSessionId = null, string? ActingSessionToken = null)
+    string? ActingSessionId = null, string? ActingSessionToken = null, string? ActingRepositoryId = null)
 {
-    private static readonly string[] Fields = ["usage", "attention", "attentionDetail", "attentionStatus", "maxHoldMinutes", "seen", "seenMessageIds", "knownEtag", "backgroundCall", "headersOnly", "knownInboxEtag", "presentStanding", "statusTag", "actingSessionId", "actingSessionToken"];
+    private static readonly string[] Fields = ["usage", "attention", "attentionDetail", "attentionStatus", "maxHoldMinutes", "seen", "seenMessageIds", "knownEtag", "backgroundCall", "headersOnly", "knownInboxEtag", "presentStanding", "statusTag", "actingSessionId", "actingSessionToken", RelayRequestGuard.ActingRepository];
 
     public static CallControls Take(JsonObject args)
     {
@@ -259,7 +269,9 @@ internal sealed record CallControls(bool OfferWanted, bool StatusDetail, bool Pa
             StatusHoldMinutes: args["maxHoldMinutes"] is not null ? Number(args, "maxHoldMinutes") : null,
             // A chat's proof that it is the one making an administrative call. Taken out here, so no aggregate, replay fingerprint or log ever holds it.
             ActingSessionId: JsonFields.Text(args, "actingSessionId") is { Length: > 0 } acting ? acting : null,
-            ActingSessionToken: JsonFields.Text(args, "actingSessionToken") is { Length: > 0 } proof ? proof : null);
+            ActingSessionToken: JsonFields.Text(args, "actingSessionToken") is { Length: > 0 } proof ? proof : null,
+            // Set by RelayRequestGuard alone: a doc read of another repository, whose acting proof is verified in the session's own repository.
+            ActingRepositoryId: JsonFields.Text(args, RelayRequestGuard.ActingRepository) is { Length: > 0 } own ? own : null);
         foreach (var field in Fields) args.Remove(field);
         return controls;
     }

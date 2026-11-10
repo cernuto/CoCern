@@ -55,8 +55,31 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
     /// <summary>The retryable refusal when a chat's older binding is held by another (older) adapter: adopting it later keeps one identity.</summary>
     internal const string LegacyBindingBusy = "native_legacy_binding_busy";
 
-    /// <summary>Dispatch observation only. No ID-only credential lookup, file creation or adoption.</summary>
-    internal static IReadOnlyList<SessionHandle> DispatchSnapshot(string folder) => DispatchRecords(folder).Select(item => item.Handle).ToArray();
+    /// <summary>
+    /// Dispatch observation only. No ID-only credential lookup, file creation or adoption. Being read-only, it may reuse remembered private-file and
+    /// connection-identity verdicts (<see cref="NodeState.Observe{T}"/>); what is actually dispatched is read again in full (<see cref="FencedDispatcher.TryAcquire"/>).
+    /// </summary>
+    internal static IReadOnlyList<SessionHandle> DispatchSnapshot(string folder) => DispatchSnapshot(folder, out _);
+
+    /// <inheritdoc cref="DispatchSnapshot(string)"/>
+    /// <param name="joining">
+    /// The native chat IDs (UUID "D" form) of bindings left out because a join holds their writer lease right now, so the next observation should come
+    /// soon; <see cref="AnyChat"/> when such a binding's chat could not be read either.
+    /// </param>
+    internal static IReadOnlyList<SessionHandle> DispatchSnapshot(string folder, out IReadOnlySet<string> joining)
+    {
+        var busy = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var handles = NodeState.Observe(() => DispatchRecords(folder, busy: busy).Select(item => item.Handle).ToArray());
+        joining = busy;
+        return handles;
+    }
+
+    /// <summary>In <c>joining</c>: a busy binding whose chat is unknown.</summary>
+    internal const string AnyChat = "*";
+
+    /// <summary>Whether <paramref name="thread"/> names a chat in a snapshot's <c>joining</c> set; <paramref name="anyChat"/> also counts <see cref="AnyChat"/>.</summary>
+    internal static bool IsJoining(IReadOnlySet<string> joining, string thread, bool anyChat) =>
+        joining.Count > 0 && (anyChat && joining.Contains(AnyChat) || TryNativeId(thread, out var id) && joining.Contains(id.ToString("D")));
 
     internal static string? DispatchGeneration(string folder, SessionHandle handle) =>
         // The handle carries a generation-specific ownership digest, not the stable binding record's filename.
@@ -131,7 +154,8 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
         ClearUnknown();
     }
 
-    private static IReadOnlyList<DispatchRecord> DispatchRecords(string folder, string? exact = null)
+    /// <param name="busy">When given, collects the native chat IDs of bindings skipped because a writer held their lease (<see cref="DispatchSnapshot(string, out IReadOnlySet{string})"/>).</param>
+    private static IReadOnlyList<DispatchRecord> DispatchRecords(string folder, string? exact = null, ISet<string>? busy = null)
     {
         var result = new List<DispatchRecord>();
         try
@@ -142,8 +166,13 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
             var identity = ConnectionIdentity(folder);
             sessions = Path.Combine(folder, NodeState.SessionsFolder);
             RejectLink(sessions);
-            var reads = (exact is null ? StateFiles(sessions, CheckoutFolder).Concat(StateFiles(sessions, ChatFolder)) : [exact])
-                .Select(path => ReadRecord(folder, identity, path)).OfType<StoredRecord>().ToList();
+            var reads = new List<StoredRecord>();
+            foreach (var path in exact is null ? StateFiles(sessions, CheckoutFolder).Concat(StateFiles(sessions, ChatFolder)) : [exact])
+            {
+                if (ReadRecord(folder, identity, path, out var held) is { } read) reads.Add(read);
+                // A join holds this lease now; its chat comes from the scope fields alone, which need no fence.
+                else if (held && busy is not null) busy.Add(TryPeek(path, folder, identity)?.NativeId ?? AnyChat);
+            }
             // An older per-checkout binding is inert once its chat has any binding for that repository, with a session or not.
             var adopted = exact is null ? ChatScopes(folder, identity, sessions, reads) : [];
             // A session the hub already answered SessionUnknown for is neither dispatched nor polled again until the chat reopens it.
@@ -194,8 +223,10 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
     private sealed record StoredRecord(DispatchRecord Record, State State, bool Unknown);
 
     /// <summary>One binding's state with a verified current handle, read under its writer fence; null when it is busy, foreign, invalid or holds no session.</summary>
-    private static StoredRecord? ReadRecord(string folder, string identity, string path)
+    /// <param name="busy">True when it was null because a writer (a join in progress) holds the lease: a sharing violation, not a refusal.</param>
+    private static StoredRecord? ReadRecord(string folder, string identity, string path, out bool busy)
     {
+        busy = false;
         try
         {
             // Read under the existing writer fence. A busy/replaced record is retried by the next observation.
@@ -205,11 +236,13 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
             RequirePrivate(path, MaxStateBytes);
             var state = ParseState(File.ReadAllBytes(path), path, folder, identity);
             if (state.Current is not { } id) return null;
-            // The caller verified the connection's identity once for this whole observation; the snapshot is dropped when this returns.
-            var snapshot = new NativeJoinBinding(folder, state, identity, reader) { identityVerified = true };
+            // A read-only observation verified the connection's identity once for all its records, and drops this snapshot when it returns. Anything
+            // that acts on the record (a dispatch fence) checks the identity again at each step, as every binding does.
+            var snapshot = new NativeJoinBinding(folder, state, identity, reader) { identityVerified = NodeState.Observing };
             if (snapshot.CurrentHandle is not { } current || current.SessionId != id) return null;
             return new(new(path, current, snapshot.Generation, File.GetLastWriteTimeUtc(path), state.Version == StateVersion), state, UnknownSession(path) == current.SessionId);
         }
+        catch (IOException error) when ((error.HResult & 0xffff) is 32 or 33) { busy = true; return null; }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or JsonException or KeyNotFoundException or FormatException) { return null; }
     }
 
@@ -294,7 +327,7 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
         var candidates = new List<StoredRecord>();
         foreach (var path in StateFiles(sessions, CheckoutFolder))
         {
-            if (ReadRecord(folder, identity, path) is { } read) { if (Scope(read.State) == scope) candidates.Add(read); }
+            if (ReadRecord(folder, identity, path, out _) is { } read) { if (Scope(read.State) == scope) candidates.Add(read); }
             else if (TryPeek(path, folder, identity) is { } busy && Scope(busy) == scope && busy.Current is not null && Held(Path.ChangeExtension(path, ".lock")))
                 throw new NativeJoin.Refused(LegacyBindingBusy);
         }
@@ -896,7 +929,7 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
     }
     private static void RequirePrivate(string path, int maximum)
     {
-        // One metadata read serves the link, bound and access-list checks (the last remembered while the file is unchanged; see NodeState.IsPrivateFile).
+        // One metadata read serves the link, bound and access-list checks (the last remembered, within a read-only observation, while the file is unchanged; see NodeState.IsPrivateFile).
         var info = new FileInfo(path);
         if (!info.Exists) { RejectLink(path); throw new FileNotFoundException("The native binding file is missing."); } // The same refusal a missing file always gave.
         if ((info.Attributes & FileAttributes.ReparsePoint) != 0) throw Failure("Linked private native binding paths are not supported.");

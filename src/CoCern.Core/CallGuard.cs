@@ -76,6 +76,18 @@ internal sealed class CallGuard(Aggregates aggregates, string incarnation, Func<
             tool != RelayTools.SessionOpen && Text(args, "sessionToken").Length > 0;
         if (direct && actorId.Length > 0 && (Text(args, "sessionId") != actorId || Text(args, "sessionToken") != actorToken))
             return (call, Error(SessionDenied));
+        // A doc read of another repository (RelayRequestGuard): the acting proof is verified in the session's own repository, where it was made,
+        // and the session's tool profile applies to the read as to any. The read still speaks for the credential alone in the repository it names
+        // (already authorized by caller.MayAccess): no session, participant or attribution of the other repository is attached to it.
+        if (call.Controls.ActingRepositoryId is { } own)
+        {
+            if (direct || actorId.Length == 0) return (call, Error(SessionDenied));
+            var ownSession = await VerifySessionAsync(caller, new JsonObject { ["repositoryId"] = own, ["sessionId"] = actorId,
+                ["sessionToken"] = actorToken, ["hubIncarnation"] = Text(args, "hubIncarnation") });
+            // A remembered handle that closed or expired proves nothing, as below; a wrong token or another principal is refused.
+            if (!ownSession.Ok) return ownSession.Code == SessionUnknown ? (call, null) : (call, ownSession);
+            return (call, ProfileRefusal(call, Aggregates.Parse(ownSession)));
+        }
         var actorProven = false;
         RelayReply? verified = null;
         var proof = direct ? args : new JsonObject { ["repositoryId"] = Text(args, "repositoryId"), ["sessionId"] = actorId,

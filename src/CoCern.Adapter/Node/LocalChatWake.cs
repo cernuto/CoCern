@@ -331,15 +331,19 @@ public sealed class LocalChatWake : IAsyncDisposable
                     // One observation per pass, shared by every target below. The snapshot holds at most one native binding per chat: of a thread that ran in
                     // several checkouts, the one confirmed most recently. So a native thread is one target, a legacy handle never joins a thread that has a
                     // native binding, and a group that still mixes them is skipped.
-                    var snapshot = NativeJoinBinding.DispatchSnapshot(Connection.Folder);
+                    // A binding a join holds right now is left out of the snapshot. Its chat is neither started nor stopped this pass (a join that confirms a
+                    // live session touches the state while it holds the lease), and the next pass comes at the short interval, once the join has let go.
+                    var snapshot = NativeJoinBinding.DispatchSnapshot(Connection.Folder, out var joining);
                     var native = snapshot.Where(x => x.Chat is { Provider: ChatProviders.Codex }).ToArray();
                     var targets = native.Concat(NodeState.ReadSessionHandles(Connection.Folder).Where(x => observed.ContainsKey(x.SessionId) && OwnsNative(x) &&
                         x.Chat is { Provider: ChatProviders.Codex } && !native.Any(n => n.Chat == x.Chat))).GroupBy(x => x.Chat!.ThreadId)
-                        .Where(group => group.Count() == 1 || group.All(x => x.NativeBindingKey is null)).SelectMany(group => group).ToArray();
+                        .Where(group => group.Count() == 1 || group.All(x => x.NativeBindingKey is null)).SelectMany(group => group)
+                        .Where(x => !NativeJoinBinding.IsJoining(joining, x.Chat!.ThreadId, anyChat: false)).ToArray();
                     var ended = false;
-                    foreach (var gone in active.Keys.Where(key => !targets.Any(x => x.Chat!.ThreadId == key && x.SessionId == active[key].Session) || active[key].Task.IsCompleted).ToArray())
+                    foreach (var gone in active.Keys.Where(key => active[key].Task.IsCompleted ||
+                        !targets.Any(x => x.Chat!.ThreadId == key && x.SessionId == active[key].Session) && !NativeJoinBinding.IsJoining(joining, key, anyChat: true)).ToArray())
                     { var previous = active[gone]; ended |= previous.Task.IsCompleted; previous.Stop.Cancel(); await previous.Task; previous.Stop.Dispose(); active.Remove(gone); }
-                    foreach (var gone in held.Keys.Where(thread => !targets.Any(x => x.Chat!.ThreadId == thread)).ToArray()) held.Remove(gone);
+                    foreach (var gone in held.Keys.Where(thread => !targets.Any(x => x.Chat!.ThreadId == thread) && !NativeJoinBinding.IsJoining(joining, thread, anyChat: true)).ToArray()) held.Remove(gone);
                     var noCodex = false;
                     var looked = false;
                     string? codex = null;
@@ -369,7 +373,7 @@ public sealed class LocalChatWake : IAsyncDisposable
                     var live = active.Values.Count(value => !value.Task.IsCompleted);
                     Report(PassReason(targets, noCodex, live));
                     LocalWakeStatus.Counts(observed.Count, live, statusRoot);
-                    busy = locating || ended || noCodex;
+                    busy = locating || ended || noCodex || joining.Count > 0;
                 }
                 // One bad pass used to end this loop for the life of the adapter, with nothing to show for it.
                 catch (Exception error) when (error is not OperationCanceledException || !lifetime.IsCancellationRequested) { Report(LocalWakeCodes.LoopFailed); }

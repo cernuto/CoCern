@@ -82,17 +82,34 @@ internal static partial class VersionFolders
         return (removed, failed);
     }
 
-    /// <summary>Deletes a tree without following links: a link inside is removed itself, never entered.</summary>
+    /// <summary>
+    /// Deletes a tree without following or changing links. The folder and each entry are judged by attributes read fresh right before acting, never the
+    /// listing's: a link (the renamed folder itself included) is removed as itself and never entered, and only a plain file's read-only flag is cleared.
+    /// </summary>
     private static void RemoveTree(DirectoryInfo folder)
     {
-        if (IsLink(folder)) { folder.Delete(); return; }
-        foreach (var entry in folder.EnumerateFileSystemInfos("*", new EnumerationOptions { AttributesToSkip = 0, IgnoreInaccessible = false, RecurseSubdirectories = false }).ToList())
+        var attributes = File.GetAttributes(folder.FullName);
+        if ((attributes & FileAttributes.ReparsePoint) != 0) { DeleteLink(folder.FullName, attributes); return; }
+        if ((attributes & FileAttributes.Directory) == 0) throw new IOException("A detached version is no longer a folder.");
+        foreach (var entry in folder.EnumerateFileSystemInfos("*", new EnumerationOptions { AttributesToSkip = 0, IgnoreInaccessible = false, RecurseSubdirectories = false })
+            .Select(entry => entry.FullName).ToList())
         {
-            if (entry is DirectoryInfo child) { RemoveTree(child); continue; }
-            if (!IsLink(entry) && (entry.Attributes & FileAttributes.ReadOnly) != 0) entry.Attributes &= ~FileAttributes.ReadOnly;
-            entry.Delete();
+            var current = File.GetAttributes(entry);
+            if ((current & FileAttributes.ReparsePoint) != 0) DeleteLink(entry, current);
+            else if ((current & FileAttributes.Directory) != 0) RemoveTree(new DirectoryInfo(entry));
+            else
+            {
+                if ((current & FileAttributes.ReadOnly) != 0) File.SetAttributes(entry, current & ~FileAttributes.ReadOnly);
+                File.Delete(entry);
+            }
         }
-        folder.Delete();
+        Directory.Delete(folder.FullName);
+    }
+
+    /// <summary>Deletes a link itself, as the kind of entry it is; its target is never touched, and its attributes are left as they are.</summary>
+    private static void DeleteLink(string path, FileAttributes attributes)
+    {
+        if ((attributes & FileAttributes.Directory) != 0) Directory.Delete(path); else File.Delete(path);
     }
 
     private static bool IsChild(DirectoryInfo versions, string path) =>

@@ -707,16 +707,34 @@ public static class NodePackage
             if (scratch.CreationTimeUtc < cutoff && (scratch.Attributes & FileAttributes.ReparsePoint) == 0) RemoveScratch(root, scratch.FullName);
     }
 
-    /// <summary>Removes a folder this process renamed out of use. A link inside it is deleted as a link, never followed.</summary>
+    /// <summary>
+    /// Removes a folder this process renamed out of use. Links are never followed or changed: the folder and each entry are judged by attributes read
+    /// fresh right before acting (never the listing's), a link (the renamed folder itself included) is deleted as itself, and only a plain file's
+    /// read-only flag is ever cleared.
+    /// </summary>
     private static void RemoveTree(string directory)
     {
-        foreach (var entry in new DirectoryInfo(directory).EnumerateFileSystemInfos().ToArray())
+        var attributes = File.GetAttributes(directory);
+        if ((attributes & FileAttributes.ReparsePoint) != 0) { DeleteLink(directory, attributes); return; }
+        if ((attributes & FileAttributes.Directory) == 0) throw new IOException("node-update:prune-not-folder");
+        foreach (var entry in new DirectoryInfo(directory).EnumerateFileSystemInfos().Select(entry => entry.FullName).ToArray())
         {
-            if ((entry.Attributes & FileAttributes.ReparsePoint) == 0 && entry is DirectoryInfo child) { RemoveTree(child.FullName); continue; }
-            if ((entry.Attributes & FileAttributes.ReadOnly) != 0) entry.Attributes &= ~FileAttributes.ReadOnly;
-            entry.Delete();
+            var current = File.GetAttributes(entry);
+            if ((current & FileAttributes.ReparsePoint) != 0) DeleteLink(entry, current);
+            else if ((current & FileAttributes.Directory) != 0) RemoveTree(entry);
+            else
+            {
+                if ((current & FileAttributes.ReadOnly) != 0) File.SetAttributes(entry, current & ~FileAttributes.ReadOnly);
+                File.Delete(entry);
+            }
         }
         Directory.Delete(directory);
+    }
+
+    /// <summary>Deletes a link itself, as the kind of entry it is; its target is never touched, and its attributes are left as they are.</summary>
+    private static void DeleteLink(string path, FileAttributes attributes)
+    {
+        if ((attributes & FileAttributes.Directory) != 0) Directory.Delete(path); else File.Delete(path);
     }
 
     private static void SafeName(string name)

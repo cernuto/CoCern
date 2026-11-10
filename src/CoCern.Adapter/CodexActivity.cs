@@ -75,6 +75,9 @@ public sealed class CodexActivity(string sessionsRoot)
             candidates.AddRange(Directory.EnumerateFiles(sessionsRoot, pattern, SearchOption.AllDirectories).Select(path => new FileInfo(path)));
             searchedAt = now;
         }
+        // A listing reports each file's directory entry, whose write time and length NTFS updates late for a file Codex keeps open mid-turn; read the
+        // file's own metadata before choosing by it or judging it stale.
+        foreach (var candidate in candidates) candidate.Refresh();
         var rollout = candidates.OrderByDescending(file => file.LastWriteTimeUtc).FirstOrDefault();
         lock (Gate)
         {

@@ -238,12 +238,31 @@ public sealed class NodeState : IDisposable
     /// <summary>How long a remembered verdict stands even while the file looks unchanged: a changed access list moves none of its times.</summary>
     private const long PrivateFileCheckMilliseconds = 30_000;
 
+    [ThreadStatic] private static int observing;
+
+    /// <summary>
+    /// Whether this thread is inside <see cref="Observe{T}"/>: a read-only observation (a dispatch snapshot, a listener's pacing) that may reuse remembered
+    /// private-file and connection-identity verdicts. Everything else, and so everything that acts on what it reads, checks in full.
+    /// </summary>
+    internal static bool Observing => observing > 0;
+
+    /// <summary>Runs a synchronous, read-only observation that may reuse remembered verdicts (<see cref="Observing"/>). Never wrap anything that dispatches, queues, writes or sends with it.</summary>
+    internal static T Observe<T>(Func<T> read)
+    {
+        observing++;
+        try { return read(); }
+        finally { observing--; }
+    }
+
     /// <summary>
     /// <see cref="IsPrivateFile(string)"/> on a fresh <paramref name="info"/>, whose one metadata read the caller may share. Reading a file's access list
-    /// opens it, so on Windows a verdict is remembered per path, in this process only, while the file's length, write time and creation time are unchanged
-    /// and for at most <see cref="PrivateFileCheckMilliseconds"/>: a replaced or rewritten file is read again at once.
+    /// opens it, so on Windows a read-only observation (<see cref="Observing"/>) may reuse a verdict remembered per path, in this process only, while the
+    /// file's length, write time and creation time are unchanged and for at most <see cref="PrivateFileCheckMilliseconds"/>. Any other caller reads the
+    /// access list every time (and refreshes what is remembered).
     /// </summary>
-    internal static bool IsPrivateFile(FileInfo info)
+    internal static bool IsPrivateFile(FileInfo info) => IsPrivateFile(info, Observing);
+
+    private static bool IsPrivateFile(FileInfo info, bool remembered)
     {
         if (!info.Exists || (info.Attributes & FileAttributes.ReparsePoint) != 0) return false;
         var path = info.FullName;
@@ -251,7 +270,7 @@ public sealed class NodeState : IDisposable
             return (File.GetUnixFileMode(path) & (UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute |
                 UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute)) == 0;
         var (length, written, created, now) = (info.Length, info.LastWriteTimeUtc, info.CreationTimeUtc, Environment.TickCount64);
-        if (PrivateFileChecks.TryGetValue(path, out var known) && known.Length == length && known.Written == written && known.Created == created &&
+        if (remembered && PrivateFileChecks.TryGetValue(path, out var known) && known.Length == length && known.Written == written && known.Created == created &&
             now - known.CheckedAt is >= 0 and < PrivateFileCheckMilliseconds) return known.Private;
         var result = HasPrivateAccessList(info);
         if (PrivateFileChecks.Count >= MaxPrivateFileChecks) PrivateFileChecks.Clear();
@@ -292,18 +311,20 @@ public sealed class NodeState : IDisposable
             var security = info.GetAccessControl(AccessControlSections.Owner | AccessControlSections.Access);
             var user = WindowsIdentity.GetCurrent().User!;
             if (!user.Equals(security.GetOwner(typeof(SecurityIdentifier)))) throw new IOException("native_token_permissions");
-            if (IsPrivateFile(path)) return;
+            // Always the access list itself: a widened list moves none of the times a remembered verdict is keyed by.
+            if (IsPrivateFile(new FileInfo(path), remembered: false)) return;
             var restricted = new FileSecurity();
             restricted.SetAccessRuleProtection(true, false);
             restricted.AddAccessRule(new FileSystemAccessRule(user, FileSystemRights.FullControl, AccessControlType.Allow));
             info.SetAccessControl(restricted);
+            PrivateFileChecks.TryRemove(path, out _);
         }
         else
         {
             // Do not infer ownership from chmod permission (a privileged process can change another owner's file).
-            if (!IsPrivateFile(path)) throw new IOException("native_token_permissions");
+            if (!IsPrivateFile(new FileInfo(path), remembered: false)) throw new IOException("native_token_permissions");
         }
-        if (!IsPrivateFile(path)) throw new IOException("native_token_permissions");
+        if (!IsPrivateFile(new FileInfo(path), remembered: false)) throw new IOException("native_token_permissions");
     }
 
     internal static bool HasIdentityFiles(string folder) => File.Exists(Path.Combine(folder, StateFile)) || File.Exists(Path.Combine(folder, CredentialFile));

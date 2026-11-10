@@ -55,8 +55,9 @@ internal sealed class LocalWakeConnection
 
     /// <summary>Revalidate this exact token-file-backed connection; never discover a global folder or copy its credential.</summary>
     /// <remarks>
-    /// Native bindings ask this many times a pass. A verified answer is reused, in this process only, while <c>connection.json</c> and the token file it
-    /// names keep their length, write time and creation time, and for at most <see cref="IdentityMilliseconds"/>; any change reads both again.
+    /// Native bindings ask this many times a pass. Within a read-only observation (<see cref="NodeState.Observing"/>) a verified answer is reused, in this
+    /// process only, while <c>connection.json</c> and the token file it names keep their length, write time and creation time, and for at most
+    /// <see cref="IdentityMilliseconds"/>; any change reads both again. Every other caller reads both in full.
     /// </remarks>
     internal static string? NativeCredentialIdentity(string folder)
     {
@@ -66,7 +67,8 @@ internal sealed class LocalWakeConnection
             var connectionStamp = Stamp(path);
             if (connectionStamp is null) return null;
             var now = Environment.TickCount64;
-            if (Identities.TryGetValue(path, out var known) && known.Connection == connectionStamp && Stamp(known.TokenFile) == known.Token &&
+            // Only a read-only observation reuses a verdict; anything that acts on the identity reads both files again.
+            if (NodeState.Observing && Identities.TryGetValue(path, out var known) && known.Connection == connectionStamp && Stamp(known.TokenFile) == known.Token &&
                 now - known.CheckedAt is >= 0 and < IdentityMilliseconds) return known.Identity;
             if (!NodeState.IsPrivateFile(path) || new FileInfo(path).Length > 16384) return null;
             using var document = JsonDocument.Parse(File.ReadAllBytes(path));
