@@ -242,7 +242,8 @@ public sealed class NativeJoinCallsTests
         await using (var lockOwner = await NativeJoinBinding.AcquireAsync(node.Folder, "codex", context.NativeId, Environment.MachineName, "repo", scope.Checkout, default))
         {
             joining = join.EnsureAsync(context, default);
-            await preflight.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            // The held binding already names its repository, so the join skips the hub preflight and waits on the lock.
+            await Task.WhenAny(joining, preflight.Task, Task.Delay(TimeSpan.FromSeconds(1)));
             Assert.Equal(0, opens); Assert.False(joining.IsCompleted);
             statePath = lockOwner.StatePath;
         }

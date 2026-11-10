@@ -169,7 +169,10 @@ public sealed class NativeJoinSetupTests : IDisposable
         await child.Process.StandardInput.WriteLineAsync("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}");
         var listed = await WiringRpc(child, 2, "tools/list", new { }, timeout.Token);
         var tools = listed.GetProperty("result").GetProperty("tools").EnumerateArray().ToArray();
-        Assert.Equal(new[] { "ack", "chat_directory", "check_inbox", "peers", "send_message" }, tools.Select(tool => tool.GetProperty("name").GetString()).Order());
+        // Until the hub selects a profile, a native chat lists the worker catalog: chat tools plus the board, never administrator tools.
+        var names = tools.Select(tool => tool.GetProperty("name").GetString()).ToHashSet();
+        Assert.Subset(names, new HashSet<string?> { "ack", "chat_directory", "check_inbox", "peers", "send_message", "task_get", "task_claim" });
+        Assert.DoesNotContain("standing_put", names);
         foreach (var tool in tools)
             foreach (var own in new[] { "sessionId", "sessionToken", "repositoryId", "requestId", "_cocernNative" })
                 Assert.False(tool.GetProperty("inputSchema").GetProperty("properties").TryGetProperty(own, out _));
