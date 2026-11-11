@@ -1,13 +1,13 @@
 <section class="surface session-graph" aria-labelledby="session-graph-heading">
     <div class="section-heading"><h2 id="session-graph-heading">Session interactions</h2><BbBadge Variant="BadgeVariant.Secondary">@Sessions.Length sessions</BbBadge></div>
-    <p class="graph-intro">Arrows show successful direct sends in the retained last 24 hours. Select a session to inspect it, or a connection for its call details.</p>
+    <p class="graph-intro">Follow messages between sessions over the retained last 24 hours. Select a station or connection to inspect it.</p>
     <div class="graph-controls">
         <div class="search-field"><BbInput Type="InputType.Search" AriaLabel="Find sessions in the map" Placeholder="Find by label, ID or repository" @bind-Value:get="Query" @bind-Value:set="value => Query = value ?? string.Empty" UpdateTiming="UpdateTiming.Immediate" /></div>
         <div class="graph-limit"><label for="graph-session-limit">Show</label><BbNativeSelect Id="graph-session-limit" TValue="int" @bind-Value="VisibleLimit"><option value="12">12 sessions</option><option value="24">24 sessions</option><option value="200">All map sessions</option></BbNativeSelect></div>
         <div class="graph-focus"><BbCheckbox Id="graph-focus-selected" @bind-Checked="FocusSelected" Disabled="@(SelectedId is null)" /><label for="graph-focus-selected">Focus selected</label></div>
     </div>
     <p class="graph-view-summary" role="status">Showing @_nodes.Length of @_matchingSessionCount matching sessions · @_sessions.Count in map inventory</p>
-    <div class="graph-key"><span><i class="graph-key-node"></i>Durable session</span><span><i class="graph-key-edge"></i>Direct send</span><span>@_visibleEdges.Length connections between shown sessions</span></div>
+    <div class="graph-key"><span><i class="graph-key-node" aria-hidden="true"></i>Session</span><span><i class="graph-key-spoke" aria-hidden="true"></i>Hub spoke</span><span><i class="graph-key-edge" aria-hidden="true"></i>Direct send</span><span><i class="graph-key-pulse" aria-hidden="true"></i>Newly observed send</span><span>@_visibleEdges.Length connections</span></div>
     @if (_nodes.Length < _matchingSessionCount)
     {
         <p class="graph-subset-note">The selected session stays visible when it matches these filters; remaining places prioritize sessions with the most retained sends and receives. Search covers all @_sessions.Count map sessions. Increase Show to see more, or use Session list for the full available inventory.</p>
@@ -18,26 +18,94 @@
     }
     else
     {
-        <div class="graph-viewport" tabindex="0" role="region" aria-label="Scrollable session interaction map">
-            <svg class="graph-canvas" viewBox="@($"0 0 900 {_height}")" width="900" height="@_height" aria-label="Sessions and directed direct-message calls">
+        <div class="@($"graph-viewport {(_size > 920 ? "graph-expanded-inventory" : "")}")" tabindex="0" role="region" aria-label="Scrollable session interaction map">
+            <svg class="graph-canvas" viewBox="@($"0 0 {_size} {_size}")" width="@_size" height="@_size" style="@($"--graph-size: {_size}px")" aria-label="Sessions and directed direct-message calls">
                 <defs><marker id="session-message-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" /></marker></defs>
+                <g class="graph-contours" aria-hidden="true">
+                    @foreach (var radius in new[] { 105, 165, 225 })
+                    {
+                        <circle cx="@(_size / 2)" cy="@(_size / 2)" r="@radius" />
+                    }
+                </g>
+                <g class="graph-spokes" aria-hidden="true">
+                    @foreach (var node in _nodes)
+                    {
+                        <path @key="node.Session.SessionId" class="graph-spoke" d="@SpokePath(node)" />
+                        <path class="@($"graph-spoke-wear {(NodeIsRecent(node) ? "recent" : "")}")" d="@SpokePath(node)" style="@SpokeWear(node)" />
+                    }
+                </g>
                 @foreach (var item in _visibleEdges)
                 {
-                    <path @key="item.Key" class="graph-edge @EdgeClass(item.Edge)" d="@item.Path" marker-end="url(#session-message-arrow)" />
+                    <path @key="item.Key" class="graph-edge @EdgeClass(item.Edge)" style="@EdgeWeight(item.Edge)" d="@item.Path" marker-end="url(#session-message-arrow)" />
                     <path class="graph-edge-hit" d="@item.Path" @onclick="() => SelectEdge(item.Edge)"><title>@EdgeTitle(item.Edge)</title></path>
                 }
+                <g class="graph-pulses" aria-hidden="true">
+                    @foreach (var pulse in _pulses)
+                    {
+                        <g @key="pulse.Id">
+                        @if (_nodes.FirstOrDefault(node => node.Session.SessionId == pulse.SourceId) is { } sender)
+                        {
+                            <circle class="graph-pulse graph-pulse-inbound" r="4" style="@($"offset-path: path('{SpokePath(sender, inward: true)}')")" />
+                        }
+                        @if (_nodes.FirstOrDefault(node => node.Session.SessionId == pulse.TargetId) is { } recipient)
+                        {
+                            <circle class="graph-pulse graph-pulse-outbound" r="4" style="@($"offset-path: path('{SpokePath(recipient)}')")" />
+                        }
+                        </g>
+                    }
+                </g>
+                <foreignObject x="@(_size / 2 - 90)" y="@(_size / 2 - 62)" width="180" height="124">
+                    <div class="graph-hub" role="img" aria-label="CoCern message hub"><strong>CoCern</strong><span>Message hub</span></div>
+                </foreignObject>
                 @foreach (var node in _nodes)
                 {
-                    <foreignObject @key="node.Session.SessionId" x="@(node.X - 120)" y="@(node.Y - 46)" width="240" height="92">
+                    <foreignObject @key="node.Session.SessionId" x="@(node.X - 100)" y="@(node.Y - 44)" width="200" height="162">
                         <div class="graph-node-shell">
-                            <BbButton Variant="ButtonVariant.Outline" Class="@($"graph-node {(SelectedId == node.Session.SessionId ? "selected" : "")}")" aria-pressed="@(SelectedId == node.Session.SessionId ? "true" : "false")" title="@(Label(node.Session) + " · " + node.Session.SessionId)" OnClick="() => OnSelect.InvokeAsync(node.Session.SessionId)">
-                                <strong>@Label(node.Session)</strong><span>#@ShortId(node.Session.SessionId)</span><small>@NodeCounts(node.Session.SessionId)</small>
+                            <BbButton Variant="ButtonVariant.Ghost" Class="@NodeClass(node)" aria-pressed="@(SelectedId == node.Session.SessionId ? "true" : "false")" title="@NodeTitle(node.Session)" OnClick="() => SelectNode(node.Session.SessionId)">
+                                <span class="graph-orb" aria-hidden="true">@Initials(node.Session)
+                                    @if (node.Session.UnreadMessages is > 0)
+                                    {
+                                        <span class="graph-unread">@node.Session.UnreadMessages</span>
+                                    }
+                                </span>
+                                <strong>@Label(node.Session)</strong><span class="graph-node-id">#@ShortId(node.Session.SessionId)</span><small>@NodeCounts(node.Session.SessionId)</small>
                             </BbButton>
                         </div>
                     </foreignObject>
                 }
             </svg>
         </div>
+        <div class="graph-mobile-stations" role="group" aria-label="Sessions in the interaction map">
+            <div class="graph-hub graph-mobile-hub" role="img" aria-label="CoCern message hub"><strong>CoCern</strong><span>Message hub</span></div>
+            @foreach (var node in _nodes)
+            {
+                <BbButton @key="node.Session.SessionId" Variant="ButtonVariant.Ghost" Class="@NodeClass(node)" aria-pressed="@(SelectedId == node.Session.SessionId ? "true" : "false")" title="@NodeTitle(node.Session)" OnClick="() => SelectNode(node.Session.SessionId)">
+                    <span class="graph-orb" aria-hidden="true">@Initials(node.Session)
+                        @if (node.Session.UnreadMessages is > 0)
+                        {
+                            <span class="graph-unread">@node.Session.UnreadMessages</span>
+                        }
+                    </span>
+                    <strong>@Label(node.Session)</strong><span class="graph-node-id">#@ShortId(node.Session.SessionId)</span><small>@NodeCounts(node.Session.SessionId)</small>
+                </BbButton>
+            }
+        </div>
+        @if (_nodes.FirstOrDefault(node => node.Session.SessionId == _focusedId) is { } focused)
+        {
+            <div class="graph-current"><strong>@Label(focused.Session)</strong><span>@NodeCounts(focused.Session.SessionId)</span><span class="graph-route-status">@(focused.Session.Reachable ? "Direct chat route available" : "No current direct chat route")</span></div>
+        }
+        @if (_visibleEdges.Length > 0)
+        {
+            <div class="graph-recent">
+                <div class="graph-recent-heading"><h3>Recent connections</h3><span>Latest successful send on each route</span></div>
+                @foreach (var item in _visibleEdges.OrderByDescending(item => item.Edge.LastInteractionAt).ThenBy(item => item.Key, StringComparer.Ordinal).Take(6))
+                {
+                    <BbButton @key="item.Key" Variant="ButtonVariant.Ghost" Class="@($"graph-recent-row {(IsRecent(item.Key) ? "recent" : "")}")" OnClick="() => SelectEdge(item.Edge)">
+                        <span class="graph-feed-dot" aria-hidden="true"></span><span class="graph-feed-route">@SessionLabel(item.Edge.SourceSessionId) <span aria-label="to">→</span> @SessionLabel(item.Edge.TargetSessionId)</span><span class="graph-feed-count">@item.Edge.CallCount sends</span><time datetime="@item.Edge.LastInteractionAt.ToString("O")" title="@DashboardFormat.Timestamp(item.Edge.LastInteractionAt)">@DashboardFormat.Ago(item.Edge.LastInteractionAt, Now)</time>
+                    </BbButton>
+                }
+            </div>
+        }
     }
     @if (Interactions.ObservedAt is null)
     {
@@ -64,7 +132,7 @@
             }
         </div></details>
     }
-    <p class="graph-footnote">Metadata only; private message content is never shown. Task-thread sends are excluded because their retained metadata identifies the task rather than the recipient. Counts describe recorded successful calls, including retries, and do not indicate whether a model is running.</p>
+    <p class="graph-footnote">Spokes connect each session to the CoCern hub. A new send pulses inward from its sender, then outward to its recipient; this does not confirm delivery or a running model. Metadata only; private message content is never shown. Task-thread sends are excluded because their retained metadata identifies the task rather than the recipient. Counts include retries.</p>
     @if (Interactions.Truncated || Truncated || Sessions.Length > 200)
     {
         <p class="limit-note">This map is partial. At most 200 sessions, 300 connections and the newest 4,000 retained direct-send records are shown; collection and frame size limits may shorten it further. Counts are lower bounds.</p>
@@ -87,9 +155,14 @@
     private int _visibleLimit = 12;
     private int _matchingSessionCount;
     private string? _selectedEdgeKey;
-    private int _height = 360;
+    private int _size = 920;
+    private string? _focusedId;
     private Node[] _nodes = [];
     private EdgeView[] _visibleEdges = [];
+    private DateTimeOffset? _observedAt;
+    private Dictionary<string, DateTimeOffset> _observedEdges = new(StringComparer.Ordinal);
+    private readonly List<SendPulse> _pulses = [];
+    private long _nextPulseId;
     private Dictionary<string, DashboardSession> _sessions = new(StringComparer.Ordinal);
     private Dictionary<string, (int Sent, int Received)> _counts = new(StringComparer.Ordinal);
     private string Query { get => _query; set { _query = value; BuildLayout(); } }
@@ -99,6 +172,7 @@
 
     protected override void OnParametersSet()
     {
+        ObserveSends();
         _sessions = Sessions.Take(200).DistinctBy(session => session.SessionId).ToDictionary(session => session.SessionId, StringComparer.Ordinal);
         _counts = new(StringComparer.Ordinal);
         foreach (var edge in Interactions.Edges.Take(300))
@@ -124,36 +198,106 @@
             && (string.IsNullOrWhiteSpace(_query) || session.Label.Contains(_query, StringComparison.OrdinalIgnoreCase) || session.SessionId.Contains(_query, StringComparison.OrdinalIgnoreCase) || session.RepositoryId.Contains(_query, StringComparison.OrdinalIgnoreCase)))
             .OrderBy(session => session.SessionId != SelectedId).ThenBy(session => session.SessionId, StringComparer.Ordinal).ToArray();
         _matchingSessionCount = matching.Length;
-        _nodes = matching.OrderBy(session => session.SessionId != SelectedId)
+        var visible = matching.OrderBy(session => session.SessionId != SelectedId)
             .ThenByDescending(session => (long)_counts.GetValueOrDefault(session.SessionId).Sent + _counts.GetValueOrDefault(session.SessionId).Received)
-            .ThenBy(session => session.SessionId, StringComparer.Ordinal).Take(_visibleLimit)
-            .OrderBy(session => session.SessionId != SelectedId).ThenBy(session => session.SessionId, StringComparer.Ordinal)
-            .Select((session, index) => new Node(session, 150 + index % 3 * 300, 90 + index / 3 * 135)).ToArray();
-        _height = Math.Max(360, ((_nodes.Length + 2) / 3) * 135 + 45);
+            .ThenBy(session => session.SessionId, StringComparer.Ordinal).Take(_visibleLimit).ToArray();
+        // Keep the focused session and station order stable as retained counts change.
+        _focusedId = visible.FirstOrDefault(session => session.SessionId == SelectedId)?.SessionId
+            ?? visible.FirstOrDefault(session => session.SessionId == _focusedId)?.SessionId
+            ?? visible.FirstOrDefault()?.SessionId;
+        var satellites = visible.OrderBy(session => session.SessionId, StringComparer.Ordinal).ToArray();
+        var placed = new List<(DashboardSession Session, int Ring, int Slot, int Count)>();
+        var offset = 0;
+        for (var ring = 0; offset < satellites.Length; ring++)
+        {
+            var count = Math.Min(12 + ring * 6, satellites.Length - offset);
+            for (var slot = 0; slot < count; slot++) placed.Add((satellites[offset + slot], ring, slot, count));
+            offset += count;
+        }
+        var outerRadius = placed.Count == 0 ? 320 : 320 + placed[^1].Ring * 180;
+        _size = Math.Max(920, (outerRadius + 140) * 2);
+        var nodes = new List<Node>();
+        foreach (var station in placed)
+        {
+            var angle = -Math.PI / 2 + station.Slot * 2 * Math.PI / station.Count;
+            var radius = 320 + station.Ring * 180;
+            nodes.Add(new(station.Session, _size / 2 + (int)Math.Round(Math.Cos(angle) * radius), _size / 2 + (int)Math.Round(Math.Sin(angle) * radius)));
+        }
+        _nodes = nodes.ToArray();
         var positions = _nodes.ToDictionary(node => node.Session.SessionId, StringComparer.Ordinal);
         _visibleEdges = Interactions.Edges.Take(300).Where(edge => positions.ContainsKey(edge.SourceSessionId) && positions.ContainsKey(edge.TargetSessionId))
             .Select(edge => new EdgeView(edge, EdgeKey(edge), EdgePath(positions[edge.SourceSessionId], positions[edge.TargetSessionId]))).ToArray();
     }
 
+    private void ObserveSends()
+    {
+        _pulses.RemoveAll(pulse => pulse.ExpiresAt <= Now);
+        if (Interactions.ObservedAt is not { } sampled || (_observedAt is { } previous && sampled <= previous)) return;
+        var edges = Interactions.Edges.Take(300).ToArray();
+        // The first sample is history. Later snapshots only animate a newer successful send.
+        if (_observedAt is { } baseline)
+        {
+            foreach (var edge in edges.OrderBy(edge => edge.LastInteractionAt))
+            {
+                var key = EdgeKey(edge);
+                var since = _observedEdges.TryGetValue(key, out var last) ? last : baseline;
+                if (edge.LastInteractionAt <= since || edge.LastInteractionAt > sampled) continue;
+                _pulses.Add(new(++_nextPulseId, key, edge.SourceSessionId, edge.TargetSessionId, Now.AddSeconds(4)));
+            }
+        }
+        if (_pulses.Count > 8) _pulses.RemoveRange(0, _pulses.Count - 8);
+        _observedEdges = edges.GroupBy(EdgeKey, StringComparer.Ordinal).ToDictionary(group => group.Key, group => group.Max(edge => edge.LastInteractionAt), StringComparer.Ordinal);
+        _observedAt = sampled;
+    }
+
+    private async Task SelectNode(string id) { _selectedEdgeKey = null; await OnSelect.InvokeAsync(id); }
     private async Task SelectEdge(DashboardInteractionEdge edge) { _selectedEdgeKey = EdgeKey(edge); await OnSelect.InvokeAsync(edge.SourceSessionId); }
-    private string EdgeClass(DashboardInteractionEdge edge) => EdgeKey(edge) == _selectedEdgeKey ? "chosen" : edge.SourceSessionId == SelectedId || edge.TargetSessionId == SelectedId ? "connected" : SelectedId is not null ? "unrelated" : "";
+    private bool IsRecent(string key) => _pulses.Any(pulse => pulse.EdgeKey == key);
+    private string EdgeClass(DashboardInteractionEdge edge) => EdgeKey(edge) == _selectedEdgeKey ? "chosen" : IsRecent(EdgeKey(edge)) ? "recent" : edge.SourceSessionId == _focusedId || edge.TargetSessionId == _focusedId ? "connected" : "unrelated";
+    private static string EdgeWeight(DashboardInteractionEdge edge) => FormattableString.Invariant($"--edge-weight: {1 + Math.Min(1.8, Math.Log2(1d + Math.Max(0, edge.CallCount)) / 5):0.##}");
+    private bool NodeIsRecent(Node node) => _pulses.Any(pulse => pulse.SourceId == node.Session.SessionId || pulse.TargetId == node.Session.SessionId);
+    private string NodeClass(Node node) => $"graph-node {(SelectedId == node.Session.SessionId ? "selected" : "")} {(NodeIsRecent(node) ? "recent" : "")}";
+    private string SpokeWear(Node node)
+    {
+        var counts = _counts.GetValueOrDefault(node.Session.SessionId);
+        var used = Math.Min(1, Math.Log2(1d + counts.Sent + counts.Received) / 12);
+        return FormattableString.Invariant($"--spoke-use: {used:0.###}");
+    }
+    private string SpokePath(Node node, bool inward = false)
+    {
+        double center = _size / 2, dx = node.X - center, dy = node.Y - center;
+        var length = Math.Sqrt(dx * dx + dy * dy);
+        var hubX = center + dx / length * 60; var hubY = center + dy / length * 60;
+        var stationX = node.X - dx / length * 36; var stationY = node.Y - dy / length * 36;
+        return inward
+            ? FormattableString.Invariant($"M {stationX} {stationY} L {hubX} {hubY}")
+            : FormattableString.Invariant($"M {hubX} {hubY} L {stationX} {stationY}");
+    }
+    private string NodeTitle(DashboardSession session) => $"{Label(session)} · {session.SessionId} · {NodeCounts(session.SessionId)} · {(session.Reachable ? "Direct chat route available" : "No current direct chat route")}{(session.UnreadMessages is > 0 ? $" · {session.UnreadMessages} unread messages" : "")}";
     private string SessionLabel(string id) => _sessions.TryGetValue(id, out var session) ? $"{Label(session)} (#{ShortId(id)})" : $"#{ShortId(id)}";
     private string EdgeTitle(DashboardInteractionEdge edge) => $"{SessionLabel(edge.SourceSessionId)} → {SessionLabel(edge.TargetSessionId)}: {edge.CallCount} successful {(edge.CallCount == 1 ? "send" : "sends")}; {Duration(edge)} mean hub call";
     private string NodeCounts(string id) { var counts = _counts.GetValueOrDefault(id); return $"{counts.Sent} sent · {counts.Received} received"; }
     private static string Label(DashboardSession session) => string.IsNullOrWhiteSpace(session.Label) ? "Unnamed session" : session.Label;
     private static string ShortId(string id) => id[..Math.Min(8, id.Length)];
+    private static string Initials(DashboardSession session)
+    {
+        var words = Label(session).Split([' ', '-', '_', '[', ']'], StringSplitOptions.RemoveEmptyEntries);
+        return string.Concat(words.Take(2).Select(word => char.ToUpperInvariant(word[0])));
+    }
     private static string EdgeKey(DashboardInteractionEdge edge) => edge.SourceSessionId + "\0" + edge.TargetSessionId;
     private static string Duration(DashboardInteractionEdge edge) => edge.MeanHubDurationMilliseconds is { } duration ? $"{duration.ToString("0.##", CultureInfo.CurrentCulture)} ms ({edge.MeasuredCallCount} measured)" : "Not measured";
     private static string EdgePath(Node source, Node target)
     {
-        if (source == target) return FormattableString.Invariant($"M {source.X - 45} {source.Y - 38} C {source.X - 110} {source.Y - 105}, {source.X + 110} {source.Y - 105}, {source.X + 45} {source.Y - 38}");
+        const int sourceRadius = 36;
+        if (source == target) return FormattableString.Invariant($"M {source.X - 22} {source.Y - sourceRadius + 8} C {source.X - 95} {source.Y - 110}, {source.X + 95} {source.Y - 110}, {source.X + 22} {source.Y - sourceRadius + 8}");
         double dx = target.X - source.X, dy = target.Y - source.Y;
-        var scale = Math.Min(dx == 0 ? double.PositiveInfinity : 116 / Math.Abs(dx), dy == 0 ? double.PositiveInfinity : 40 / Math.Abs(dy));
-        var sx = source.X + dx * scale; var sy = source.Y + dy * scale;
-        var tx = target.X - dx * scale; var ty = target.Y - dy * scale;
         var length = Math.Sqrt(dx * dx + dy * dy);
-        return FormattableString.Invariant($"M {sx} {sy} Q {(sx + tx) / 2 - dy / length * 45} {(sy + ty) / 2 + dx / length * 45}, {tx} {ty}");
+        const int targetRadius = 36;
+        var sx = source.X + dx / length * sourceRadius; var sy = source.Y + dy / length * sourceRadius;
+        var tx = target.X - dx / length * targetRadius; var ty = target.Y - dy / length * targetRadius;
+        return FormattableString.Invariant($"M {sx} {sy} Q {(sx + tx) / 2 - dy / length * 32} {(sy + ty) / 2 + dx / length * 32}, {tx} {ty}");
     }
     private sealed record Node(DashboardSession Session, int X, int Y);
     private sealed record EdgeView(DashboardInteractionEdge Edge, string Key, string Path);
+    private sealed record SendPulse(long Id, string EdgeKey, string SourceId, string TargetId, DateTimeOffset ExpiresAt);
 }
