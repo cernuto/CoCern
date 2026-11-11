@@ -40,7 +40,34 @@ public sealed record WakeRuntime(AdapterOptions Options, string StatePath, strin
 public sealed class WakeNudge
 {
     internal readonly Channel<bool> Changes = Channel.CreateBounded<bool>(new BoundedChannelOptions(1) { FullMode = BoundedChannelFullMode.DropWrite });
-    public void Pulse() => Changes.Writer.TryWrite(true);
+    private readonly object _gate = new();
+    private readonly HashSet<string> _sessions = new(StringComparer.Ordinal);
+    private bool _all;
+
+    public void Pulse() => Pulse(null);
+
+    /// <summary>A session hint dirties only that route; a target-list change dirties the whole inventory.</summary>
+    internal void Pulse(string? sessionId)
+    {
+        lock (_gate)
+        {
+            if (sessionId is null) _all = true;
+            else _sessions.Add(sessionId);
+        }
+        Changes.Writer.TryWrite(true);
+    }
+
+    /// <summary>Null requests a full pass. Session IDs survive channel coalescing, including hints for different routes.</summary>
+    internal HashSet<string>? Take()
+    {
+        lock (_gate)
+        {
+            var pending = _all ? null : new HashSet<string>(_sessions, StringComparer.Ordinal);
+            _all = false;
+            _sessions.Clear();
+            return pending;
+        }
+    }
 }
 
 /// <summary>
@@ -111,7 +138,8 @@ public static class WakeWatcher
         var forwarder = new RelayForwarder(http, options, runtime.CallOrigin);
         // The reconciler reads only the relay URL and stop file from its configuration.
         var settings = new WakeConfiguration(runtime.RelayUrl, "", "", runtime.StatePath, runtime.StopFile, []);
-        var changed = runtime.Nudge?.Changes ?? Channel.CreateBounded<bool>(new BoundedChannelOptions(1) { FullMode = BoundedChannelFullMode.DropWrite });
+        var changes = runtime.Nudge ?? new WakeNudge();
+        var changed = changes.Changes;
         var watches = new Dictionary<string, Watch>(StringComparer.Ordinal);
         // Rejection applies only to this exact private handle, not every future handle for the same chat or session ID.
         var rejected = new Dictionary<string, (string Repository, WakeSession Session)>(StringComparer.Ordinal);
@@ -120,12 +148,17 @@ public static class WakeWatcher
         var stopMonitor = MonitorStop();
         var lastStatus = new Dictionary<string, string>();
         var coverage = new InboxCoverage();
+        HashSet<string>? dirty = null;
+        var timer = clock ?? TimeProvider.System;
+        var fullPassAt = timer.GetTimestamp();
+        var fallback = runtime.FallbackWait(false);
         try
         {
             while (!lifetime.IsCancellationRequested && !File.Exists(runtime.StopFile))
             {
                 var current = (await targets(lifetime.Token)).DistinctBy(x => x.Session.SessionId, StringComparer.Ordinal).ToArray();
-                var live = current.Select(x => x.Session.SessionId).ToHashSet(StringComparer.Ordinal);
+                var reconcileAll = dirty is null || timer.GetElapsedTime(fullPassAt) >= fallback;
+                HashSet<string> live = [with(capacity: current.Length, comparer: StringComparer.Ordinal), .. current.Select(x => x.Session.SessionId)];
                 foreach (var gone in rejected.Keys.Where(id => !live.Contains(id)).ToArray()) rejected.Remove(gone);
                 foreach (var gone in watches.Keys.Where(x => !live.Contains(x)).ToArray())
                 {
@@ -151,6 +184,11 @@ public static class WakeWatcher
                         rejected.Remove(target.Session.SessionId);
                         lastStatus.Remove(routeKey);
                     }
+                    // Healthy, settled routes need no read for another session's hint. New/replaced routes and failed subscriptions
+                    // still reconcile immediately; the full-pass deadline is independent of how often hints arrive.
+                    if (!reconcileAll && !dirty!.Contains(target.Session.SessionId)
+                        && watches.TryGetValue(target.Session.SessionId, out var quietWatch) && quietWatch.Listening
+                        && lastStatus.TryGetValue(routeKey, out var quietStatus) && quietStatus is "empty" or "queued") continue;
                     string status;
                     using (var dispatch = runtime.TryEnterDispatch?.Invoke())
                     {
@@ -171,7 +209,7 @@ public static class WakeWatcher
                         continue;
                     }
                     if (exitWhenQueued && status == "queued") return status;
-                    if (!watches.TryGetValue(target.Session.SessionId, out var watch)) watches[target.Session.SessionId] = watch = Watch.Create(options, runtime.HubHandler, target, changed, lifetime.Token);
+                    if (!watches.TryGetValue(target.Session.SessionId, out var watch)) watches[target.Session.SessionId] = watch = Watch.Create(options, runtime.HubHandler, target, changes, lifetime.Token);
                     watch.Target = target;
                     // A connection that started but never joined the session's group is retried too.
                     if (watch.Connection.State == HubConnectionState.Disconnected || (watch.Connection.State == HubConnectionState.Connected && !watch.Subscribed))
@@ -189,13 +227,17 @@ public static class WakeWatcher
                 using var wait = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
                 // The longer wait only while a hint is sure to bring the next wake: every target's channel joined, and none waiting out a retry no hint
                 // will announce (a rate limit, a busy chat, a hub error).
-                wait.CancelAfter(runtime.FallbackWait(settled && current.All(target => watches.TryGetValue(target.Session.SessionId, out var known) && known.Listening)));
+                if (reconcileAll) fullPassAt = timer.GetTimestamp();
+                fallback = runtime.FallbackWait(settled && current.All(target => watches.TryGetValue(target.Session.SessionId, out var known) && known.Listening));
+                var remaining = fallback - timer.GetElapsedTime(fullPassAt);
+                wait.CancelAfter(remaining > TimeSpan.Zero ? remaining : TimeSpan.FromMilliseconds(1));
                 try
                 {
                     await changed.Reader.ReadAsync(wait.Token);
                     await HintCoalescer.WaitAsync(changed.Reader, HintQuiet, HintCoalesceLimit, lifetime.Token);
+                    dirty = changes.Take();
                 }
-                catch (OperationCanceledException) when (!lifetime.IsCancellationRequested) { }
+                catch (OperationCanceledException) when (!lifetime.IsCancellationRequested) { dirty = null; }
             }
         }
         // A stop file or wait timeout ends the run; only the caller's own cancellation propagates.
@@ -237,18 +279,18 @@ public static class WakeWatcher
             Volatile.Write(ref _joined, generation);
         }
 
-        public static Watch Create(AdapterOptions options, Func<HttpMessageHandler>? hubHandler, WakeTarget target, Channel<bool> changed, CancellationToken lifetime)
+        public static Watch Create(AdapterOptions options, Func<HttpMessageHandler>? hubHandler, WakeTarget target, WakeNudge changes, CancellationToken lifetime)
         {
             var watch = new Watch(RelayHubConnection.Create(options, hubHandler), target);
             var sessionId = target.Session.SessionId;
             watch.Connection.On<JsonElement>(HubEvents.CoordinationChanged, hint =>
             {
                 if (hint.ValueKind == JsonValueKind.Object && hint.TryGetProperty("sessionId", out var session) && session.ValueKind == JsonValueKind.String && session.GetString() == sessionId)
-                    changed.Writer.TryWrite(true);
+                    changes.Pulse(sessionId);
             });
             // A lost channel also ends a long wait, so the short fallback takes over at once rather than after it.
-            watch.Connection.Reconnecting += _ => { Interlocked.Increment(ref watch._generation); changed.Writer.TryWrite(true); return Task.CompletedTask; };
-            watch.Connection.Closed += _ => { Interlocked.Increment(ref watch._generation); changed.Writer.TryWrite(true); return Task.CompletedTask; };
+            watch.Connection.Reconnecting += _ => { Interlocked.Increment(ref watch._generation); changes.Pulse(sessionId); return Task.CompletedTask; };
+            watch.Connection.Closed += _ => { Interlocked.Increment(ref watch._generation); changes.Pulse(sessionId); return Task.CompletedTask; };
             watch.Connection.Reconnected += async _ =>
             {
                 Interlocked.Increment(ref watch._generation);
@@ -257,7 +299,7 @@ public static class WakeWatcher
                     using var reconnectTimeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime);
                     reconnectTimeout.CancelAfter(TimeSpan.FromSeconds(5));
                     await watch.SubscribeAsync(reconnectTimeout.Token);
-                    changed.Writer.TryWrite(true);
+                    changes.Pulse(sessionId);
                 }
                 catch (Exception) { Console.Error.WriteLine("CoCern wake hints unavailable; fallback reconciliation remains active."); }
             };

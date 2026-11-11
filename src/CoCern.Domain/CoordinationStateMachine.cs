@@ -111,6 +111,7 @@ public static class CoordinationStateMachine
         // Reject before committing if essential authorization or fencing metadata alone cannot fit.
         if (!FitsWire(result, RelayLimits.AggregateReplyBytes)) return Error(PayloadTooLarge);
         if (envelope.Effects.Count + context.Effects.Count > RelayLimits.MaxRecords) return Error(CapacityExceeded);
+        if (IsMutation(operation)) Retention.PruneExpired(state, now);
         if (requestId.Length > 0 && IsMutation(operation))
         {
             // Bounded by age, then by count: a full map drops expired replays, then its oldest, and remembers those as tombstones.

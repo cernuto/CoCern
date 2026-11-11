@@ -10,13 +10,37 @@ namespace CoCern.Domain;
 
 /// <summary>
 /// Bounded, age-based memory for the per-aggregate maps that guard against retries: stored request replies, acknowledged messages and
-/// resolved actions. Each entry records when it was written. A map is pruned only when it reaches <see cref="RelayLimits.MaxRecords"/>:
-/// entries past the retry window go first, then the oldest, down to <see cref="RelayLimits.RetainedEntriesAfterPrune"/>. Entries written
-/// before retention existed carry no time and count as past the window.
+/// resolved actions. Successful mutations prune expired entries at most hourly. Capacity pressure also removes the oldest entries,
+/// down to <see cref="RelayLimits.RetainedEntriesAfterPrune"/>, retaining tombstones for requests evicted within their retry window.
 /// </summary>
 internal static class Retention
 {
     public static readonly TimeSpan Window = TimeSpan.FromHours(RelayLimits.RequestReplayRetentionHours);
+    private static readonly TimeSpan MaintenanceInterval = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// Age cleanup on a successful mutation, independent of capacity. Reads and cached retries do not scan or commit housekeeping.
+    /// Undated legacy entries remain protected until the existing capacity path can replace their replies with fresh tombstones.
+    /// </summary>
+    public static void PruneExpired(JsonObject state, DateTimeOffset now)
+    {
+        var checkedAt = WrittenAt(state["retentionCheckedAt"]);
+        if (checkedAt <= now && now - checkedAt < MaintenanceInterval) return;
+        var cutoff = now - Window;
+        foreach (var key in new[] { ReadModels.RequestsKey, "acked", "resolvedActions" })
+        {
+            if (state[key] is not JsonObject map) continue;
+            List<(string Key, JsonNode? Value, DateTimeOffset At)> entries = [with(capacity: map.Count)];
+            foreach (var entry in map) entries.Add((entry.Key, entry.Value, WrittenAt(entry.Value)));
+            if (!entries.Any(entry => entry.At != DateTimeOffset.MinValue && entry.At <= cutoff)) continue;
+            // Rebuild once: individual removals repeatedly shift JsonObject's ordered storage.
+            map.Clear();
+            foreach (var entry in entries.Where(entry => entry.At == DateTimeOffset.MinValue || entry.At > cutoff))
+                map[entry.Key] = entry.Value;
+        }
+        Bury(state, [], now);
+        state["retentionCheckedAt"] = Stamp(now);
+    }
 
     /// <summary>The value a timestamped entry stores: the time as round-trip text.</summary>
     public static JsonNode Stamp(DateTimeOffset now) => JsonValue.Create(now.ToString("O", CultureInfo.InvariantCulture))!;
@@ -76,7 +100,7 @@ internal static class Retention
         if (evicted.Count == 0 && state[ReadModels.RequestTombstonesKey] is null) return;
         var tombstones = JsonFields.ObjectAt(state, ReadModels.RequestTombstonesKey);
         foreach (var (key, at) in evicted) tombstones[Hash(key)] = at.ToUnixTimeSeconds();
-        // Called only when the replay map was pruned, so this scan is amortized the same way.
+        // Called on capacity pruning or hourly mutation housekeeping, never on ordinary status reads.
         var cutoff = now - Window;
         var keep = tombstones.Where(entry => WrittenAt(entry.Value) > cutoff).Select(entry => (entry.Key, entry.Value)).ToList();
         if (keep.Count > RelayLimits.MaxRequestTombstones) keep = keep.OrderBy(entry => WrittenAt(entry.Value)).Skip(keep.Count - RelayLimits.RequestTombstonesAfterPrune).ToList();

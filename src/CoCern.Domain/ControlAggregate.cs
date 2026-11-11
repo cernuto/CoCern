@@ -539,7 +539,13 @@ internal static class ControlAggregate
         }
         var requests = !historyOnly && sessionId.Length > 0 ? state.CancellationsOf(sessionId).Take(RelayLimits.MaxPageSize).Select(x => new { target = x.Target, request = x.Request }).ToArray() : [];
         RelayReply Reply(CoCern.Contracts.ManagerSelectionStatus manager) => Ok(new { paused = state.Paused, cancellations = state.CancellationCount, requests, requestsOmitted = historyOnly, manager });
-        var selection = ManagerSelection.Status(state, context.Caller, context.Repository, context.Now, before);
+        // Conditional detail reads are background projections: current seats and controls remain visible, while explicit history
+        // reads still take the full administrator path. History otherwise prevents the composed reply from receiving a validator.
+        var summaryOnly = Flag(context.Args, "managerSummaryOnly")
+            && !context.Args.ContainsKey("managerHistoryBefore") && !context.Args.ContainsKey("managerHistoryOnly")
+            && !context.Args.ContainsKey("managerActionsBefore");
+        var selection = summaryOnly ? ManagerSelection.VisibleSummary(state, context.Caller, context.Repository, context.Now)
+            : ManagerSelection.Status(state, context.Caller, context.Repository, context.Now, before);
         var fitted = ManagerSelection.Fit(selection, candidate => FitsWire(Reply(candidate), RelayLimits.AggregateReplyBytes), before);
         var augmented = Reply(fitted);
         if (historyOnly)

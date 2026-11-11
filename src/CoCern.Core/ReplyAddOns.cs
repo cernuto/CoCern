@@ -70,7 +70,7 @@ internal sealed class ReplyAddOns(Aggregates aggregates, ClaimComposer claims, S
         var controls = call.Controls;
         if (!reply.Reply.Ok || call.Tool != RelayTools.GetStatus || controls.StatusTag is null || call.Session is null
             || controls.PageSeen || controls.SeenIds.Length > 0 || controls.Usage is not null || controls.PresentStanding
-            || new[] { "managerHistoryBefore", "managerHistoryOnly", "renewClaims", "ackMessageIds" }.Any(call.Args.ContainsKey)) return Task.CompletedTask;
+            || new[] { "managerHistoryBefore", "managerHistoryOnly", "managerActionsBefore", "renewClaims", "ackMessageIds" }.Any(call.Args.ContainsKey)) return Task.CompletedTask;
         var data = Parse(reply.Reply);
         if (Text(data, "sessionId") != Text(call.Args, "sessionId") || data["control"] is not JsonObject control
             || control["paused"] is not JsonValue paused || !paused.TryGetValue<bool>(out _) || control["requests"] is not JsonArray

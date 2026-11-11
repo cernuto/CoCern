@@ -67,7 +67,10 @@ public static class TokenMeter
                     if (text.Contains("\"attention\":{", StringComparison.Ordinal) || text.Contains("\"nextWork\":", StringComparison.Ordinal))
                     {
                         var parsed = JsonNode.Parse(text);
-                        if (parsed?["attention"] is JsonObject offer && tokens.Count(offer.ToJsonString()) is var attention && attention > RelayLimits.AttentionOfferTokens) events.Add(Over("over:attention", attention));
+                        // get_status carries an attention summary, with an optional nested preview. Boundary replies carry the offer
+                        // itself. Summary counts and pending-work metadata are not part of an offer's token budget.
+                        var offer = call.Tool == RelayTools.GetStatus ? parsed?["attention"]?["offer"] as JsonObject : parsed?["attention"] as JsonObject;
+                        if (offer is not null && tokens.Count(offer.ToJsonString()) is var attention && attention > RelayLimits.AttentionOfferTokens) events.Add(Over("over:attention", attention));
                         if (parsed?["nextWork"]?["offer"] is JsonObject work && tokens.Count(work.ToJsonString()) is var next && next > RelayLimits.NextWorkOfferTokens) events.Add(Over("over:nextWork", next));
                     }
                 }

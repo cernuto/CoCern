@@ -1,14 +1,99 @@
 using System.Net;
+using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
 using CoCern.Adapter;
 using CoCern.Contracts;
+using CoCern.Core;
+using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 
 namespace CoCern.Tests;
 
 public sealed class WakeTests
 {
+    [Fact]
+    public async Task Session_hints_avoid_other_routes_preserve_coalesced_sessions_and_do_not_postpone_full_recovery()
+    {
+        await using var host = new RelayHostFixture();
+        using var client = host.AuthorizedClient();
+        using var fixture = new Fixture();
+        async Task<WakeSession> Open(string request)
+        {
+            var reply = await host.Call(client, RelayTools.SessionOpen, new { repositoryId = "repo", requestId = request });
+            Assert.True(reply.GetProperty("ok").GetBoolean(), reply.GetRawText());
+            using var data = JsonDocument.Parse(reply.GetProperty("dataJson").GetString()!);
+            return new(data.RootElement.GetProperty("sessionId").GetString()!, data.RootElement.GetProperty("sessionToken").GetString()!);
+        }
+        var first = await Open("targeted-first");
+        var second = await Open("targeted-second");
+        WakeTarget[] targets = [new(fixture.Route, first, fixture.Dispatcher), new(fixture.Route with { ThreadId = "00000000-0000-0000-0000-000000000002" }, second, fixture.Dispatcher)];
+        var calls = new ConcurrentDictionary<string, int>();
+        var initial = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var primed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var firstHint = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var completedHintPass = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondHint = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var recovery = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var nudge = new WakeNudge();
+        var clock = new PollClock();
+        var observeNextPass = 0;
+        var runtime = fixture.Runtime(nudge) with
+        {
+            Options = new AdapterOptions("https://localhost", RelayHostFixture.Token, signalR: true), RelayUrl = "https://localhost",
+            State = fixture.State, HubHandler = host.Server.CreateHandler, Interval = TimeSpan.FromSeconds(30),
+            Reconciled = (target, status) =>
+            {
+                Assert.Equal("empty", status);
+                calls.AddOrUpdate(target.Session.SessionId, 1, (_, count) => count + 1);
+                if (calls.GetValueOrDefault(first.SessionId) >= 1 && calls.GetValueOrDefault(second.SessionId) >= 1) initial.TrySetResult(true);
+                if (calls.GetValueOrDefault(first.SessionId) >= 2 && calls.GetValueOrDefault(second.SessionId) >= 2) primed.TrySetResult(true);
+                if (target.Session == first && calls[first.SessionId] >= 3) { Volatile.Write(ref observeNextPass, 1); firstHint.TrySetResult(true); }
+                if (target.Session == second && calls[second.SessionId] >= 3) secondHint.TrySetResult(true);
+                if (target.Session == second && calls[second.SessionId] >= 4) recovery.TrySetResult(true);
+            }
+        };
+        Task<IReadOnlyList<WakeTarget>> Targets(CancellationToken _)
+        {
+            if (Volatile.Read(ref observeNextPass) == 1) completedHintPass.TrySetResult(calls.GetValueOrDefault(second.SessionId));
+            return Task.FromResult<IReadOnlyList<WakeTarget>>(targets);
+        }
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var watcher = WakeWatcher.RunAsync(runtime, Targets, false, null, stop.Token, host.Server.CreateHandler(), clock);
+        try
+        {
+            await initial.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            nudge.Pulse(); // A complete pass after initial subscription establishes both healthy routes.
+            await primed.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            var notifier = host.Services.GetRequiredService<ICoordinationNotifier>();
+            await notifier.NotifyAsync(first.SessionId, "targeted-hint");
+            await firstHint.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            nudge.Pulse(first.SessionId);
+            Assert.Equal(2, await completedHintPass.Task.WaitAsync(TimeSpan.FromSeconds(10)));
+
+            await notifier.NotifyAsync(first.SessionId, "coalesced-first");
+            await notifier.NotifyAsync(second.SessionId, "coalesced-second");
+            await secondHint.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            clock.Advance(TimeSpan.FromMinutes(1));
+            nudge.Pulse(first.SessionId); // A hint cannot move the overdue full-pass deadline.
+            await recovery.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.Empty(fixture.Dispatcher.Prompts);
+        }
+        finally
+        {
+            stop.Cancel();
+            try { await watcher; } catch (OperationCanceledException) when (stop.IsCancellationRequested) { }
+        }
+    }
+
+    private sealed class PollClock : TimeProvider
+    {
+        private long _timestamp;
+        public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+        public override long GetTimestamp() => Interlocked.Read(ref _timestamp);
+        public void Advance(TimeSpan elapsed) => Interlocked.Add(ref _timestamp, elapsed.Ticks);
+    }
+
     [Fact]
     public async Task Distinct_messages_wake_once_and_unacknowledged_messages_stay_suppressed()
     {

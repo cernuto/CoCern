@@ -209,7 +209,7 @@ public sealed class HubResponseCompactionTests(ITestOutputHelper output)
     [Fact]
     public async Task Semantic_status_does_not_reuse_another_sessions_or_selections_tag()
     {
-        await using var host = new RelayHostFixture();
+        await using var host = new RelayHostFixture(settings: new Dictionary<string, string?> { ["Relay:Clients:0:IsAdministrator"] = "true" });
         using var client = host.AuthorizedClient();
         var first = HostData(await host.Call(client, RelayTools.SessionOpen, new { repositoryId = "repo", requestId = "first-status-open" }));
         var second = HostData(await host.Call(client, RelayTools.SessionOpen, new { repositoryId = "repo", requestId = "second-status-open" }));
@@ -223,6 +223,28 @@ public sealed class HubResponseCompactionTests(ITestOutputHelper output)
         var tag = full["statusTag"]!.GetValue<string>();
         Assert.Null((await Status(second, tag, 5))["unchanged"]);
         Assert.Null((await Status(first, tag, 6))["unchanged"]);
+
+        // The live hub's administrator watchers repeatedly returned full replies once a manager had been appointed.
+        HostData(await host.Call(client, RelayTools.ControlRequest, new
+        {
+            repositoryId = "repo", sessionId = first["sessionId"]!.GetValue<string>(), sessionToken = first["sessionToken"]!.GetValue<string>(),
+            requestId = "status-manager", command = "appoint_manager", targetSessionId = first["sessionId"]!.GetValue<string>(),
+            expectedManagerGeneration = 0, humanWords = "Appoint this fixture session."
+        }));
+        var summary = await Status(first, "", 5);
+        Assert.Equal(first["sessionId"]!.GetValue<string>(), summary["control"]!["manager"]!["current"]!["sessionId"]!.GetValue<string>());
+        Assert.Empty(summary["control"]!["manager"]!["history"]!.AsArray());
+        var managerTag = summary["statusTag"]!.GetValue<string>();
+        var compact = await Status(first, managerTag, 5);
+        Assert.True(compact["unchanged"]!.GetValue<bool>());
+        MeasureSavings("administrator background status", compact, summary);
+        var history = HostData(await host.Call(client, RelayTools.GetStatus, new
+        {
+            repositoryId = "repo", sessionId = first["sessionId"]!.GetValue<string>(), sessionToken = first["sessionToken"]!.GetValue<string>(),
+            attentionDetail = true, statusTag = managerTag, managerHistoryOnly = true
+        }));
+        Assert.Null(history["unchanged"]);
+        Assert.NotEmpty(history["control"]!["manager"]!["history"]!.AsArray());
     }
 
     [Theory]

@@ -18,14 +18,18 @@ internal sealed class StatusTools(Aggregates aggregates, StandingDelivery standi
     /// Control status, and with a session its own status. With attention on, the session part carries the count of actionable items;
     /// the adapter's <c>attentionDetail</c> adds the top item, the wake candidate, the inbox count and the board's standing revision.
     /// </summary>
-    public async Task<RelayReply> StatusAsync(RelayCaller caller, JsonObject args, bool detail)
+    public async Task<RelayReply> StatusAsync(RelayCaller caller, JsonObject args, bool detail, bool conditional = false)
     {
-        if (Text(args, "sessionId").Length == 0) return await WithOrdersAsync(caller, args, await aggregates.Control(caller, RelayTools.GetStatus, args));
+        var controlArgs = args.DeepClone().AsObject();
+        // Transport controls were removed before dispatch. Always overwrite this projection flag rather than trusting a raw field.
+        controlArgs["managerSummaryOnly"] = detail && conditional
+            && !new[] { "managerHistoryBefore", "managerHistoryOnly", "managerActionsBefore" }.Any(args.ContainsKey);
+        if (Text(args, "sessionId").Length == 0) return await WithOrdersAsync(caller, args, await aggregates.Control(caller, RelayTools.GetStatus, controlArgs));
         var read = args.DeepClone().AsObject();
         if (attention.Enabled) { read["attentionStatus"] = detail ? "detail" : "count"; read["maxHoldMinutes"] = attention.MaxHoldMinutes; }
         var result = await aggregates.Session(caller, RelayTools.GetStatus, read);
         if (!result.Ok) return result;
-        var control = await aggregates.Control(caller, RelayTools.GetStatus, args);
+        var control = await aggregates.Control(caller, RelayTools.GetStatus, controlArgs);
         if (!control.Ok) return control;
         var data = Aggregates.Parse(result); data["control"] = JsonNode.Parse(control.DataJson);
         if (detail && attention.Enabled && data["attention"] is JsonObject summary)

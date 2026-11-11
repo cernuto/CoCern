@@ -88,6 +88,40 @@ public sealed class CoordinationTests
     }
 
     [Fact]
+    public void Successful_mutations_clean_old_retry_state_below_capacity_and_keep_recent_and_legacy_fences()
+    {
+        var state = new StateEnvelope<CoordinationDocument>();
+        var old = new JsonObject { ["requestId"] = "old", ["taskId"] = "old-task", ["expectedVersion"] = 0 };
+        Assert.True(Call(state, "board", RelayTools.TaskUpdate, old, seconds: -90_000).Ok);
+        var persisted = JsonNode.Parse(state.Value.Json)!.AsObject();
+        var requests = persisted["requests"]!.AsObject();
+        var oldKey = requests.First().Key;
+        var legacy = requests.First().Value!.DeepClone().AsObject();
+        legacy.Remove("at");
+        requests["legacy-unknown-age"] = legacy;
+        persisted["acked"] = new JsonObject { ["old-ack"] = Now.AddHours(-25).ToString("O"), ["recent-ack"] = Now.AddMinutes(-30).ToString("O"), ["legacy-ack"] = true };
+        persisted["requestTombstones"] = new JsonObject { ["old-fence"] = Now.AddHours(-25).ToUnixTimeSeconds(), ["recent-fence"] = Now.AddMinutes(-30).ToUnixTimeSeconds() };
+        state.Value = new() { Json = persisted.ToJsonString() };
+
+        Assert.True(Call(state, "board", RelayTools.TaskGet, new() { ["taskId"] = "old-task" }).Ok);
+        Assert.NotNull(JsonNode.Parse(state.Value.Json)!["requests"]![oldKey]);
+        var fresh = new JsonObject { ["requestId"] = "fresh", ["taskId"] = "fresh-task", ["expectedVersion"] = 0 };
+        var accepted = Call(state, "board", RelayTools.TaskUpdate, fresh);
+        Assert.True(accepted.Ok, accepted.Code);
+        var cleaned = JsonNode.Parse(state.Value.Json)!;
+        Assert.Null(cleaned["requests"]![oldKey]);
+        Assert.NotNull(cleaned["requests"]!["legacy-unknown-age"]);
+        Assert.Null(cleaned["acked"]!["old-ack"]);
+        Assert.NotNull(cleaned["acked"]!["recent-ack"]);
+        Assert.True(cleaned["acked"]!["legacy-ack"]!.GetValue<bool>());
+        Assert.Null(cleaned["requestTombstones"]!["old-fence"]);
+        Assert.NotNull(cleaned["requestTombstones"]!["recent-fence"]);
+        var beforeRetry = state.Value.Json;
+        Assert.Equal(accepted, Call(state, "board", RelayTools.TaskUpdate, fresh));
+        Assert.Equal(beforeRetry, state.Value.Json);
+    }
+
+    [Fact]
     public void Terminal_outcome_preserves_cleanup_hold_and_separate_retries_have_attempt_numbers()
     {
         var state = new StateEnvelope<CoordinationDocument>();
