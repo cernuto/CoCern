@@ -340,14 +340,17 @@ public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
             // calls; inbox reads count bursts of a session's first-page reads, so one adapter wait polling every 2 seconds is one read.
             long Bursts(string filter)
             {
+                var gap = TimeSpan.FromSeconds(RelayLimits.ActivityTurnGapSeconds).Ticks;
+                // Only the preceding gap can join a call in this window to an earlier burst.
                 using var command = Query($"""
                     SELECT COUNT(*) FROM (
                         SELECT at_ticks, LAG(at_ticks) OVER (PARTITION BY session_id ORDER BY at_ticks, id) AS previous
                         FROM activity_log
-                        WHERE repository_id = $repository AND kind = 'call' AND session_id IS NOT NULL AND at_ticks < $to AND {filter})
+                        WHERE repository_id = $repository AND kind = 'call' AND session_id IS NOT NULL AND at_ticks >= $scanFrom AND at_ticks < $to AND {filter})
                     WHERE at_ticks >= $from AND (previous IS NULL OR at_ticks - previous >= $gap);
                     """);
-                command.Parameters.AddWithValue("$gap", TimeSpan.FromSeconds(RelayLimits.ActivityTurnGapSeconds).Ticks);
+                command.Parameters.AddWithValue("$gap", gap);
+                command.Parameters.AddWithValue("$scanFrom", Math.Max(0, from.UtcTicks - gap));
                 return Convert.ToInt64(command.ExecuteScalar() ?? 0L);
             }
             var inboxReads = Bursts("ok = 1 AND target LIKE 'inbox:%'");

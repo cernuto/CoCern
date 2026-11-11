@@ -155,7 +155,11 @@ public sealed class DocSearchIndex : IDisposable
             var inBody = content.ToDictionary(term => term, term => Holders(searcher.IndexReader, DocQuery.Body, term), StringComparer.Ordinal);
             // A document grain took its own top 4 × limit chunks; so does each file here.
             var collector = new PerPathCollector(Math.Max(limit, 1) * 4, matches.ContainsKey);
-            searcher.Search(parsed, collector);
+            // Let Lucene skip excluded paths before collecting chunks, without changing the query's scores.
+            if (matches.Count < docs.Count)
+                searcher.Search(parsed, new Lucene.Net.Queries.TermsFilter(PathField, matches.Keys.Select(key => new BytesRef(key)).ToArray()), collector);
+            else
+                searcher.Search(parsed, collector);
             var hits = new List<DocHit>();
             foreach (var (file, best) in collector.Best)
             {
