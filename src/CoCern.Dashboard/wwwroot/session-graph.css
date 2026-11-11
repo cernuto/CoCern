@@ -50,10 +50,10 @@
 .graph-spoke { stroke: var(--muted-foreground); stroke-width: 1; opacity: .3; }
 .graph-spoke-wear { stroke: var(--map-amber); stroke-width: calc(1px + var(--spoke-use, 0) * 1.2px); opacity: calc(var(--spoke-use, 0) * .6); }
 .graph-spoke-wear.recent { stroke: var(--map-cyan); opacity: .9; }
-.graph-edge { fill: none; stroke: var(--muted-foreground); stroke-width: calc(var(--edge-weight, 1.2) * .5); opacity: .2; pointer-events: none; }
-.graph-edge.unrelated { opacity: .04; }
-.graph-edge.connected { stroke: var(--muted-foreground); opacity: .12; }
-.graph-edge.recent { stroke: var(--map-cyan); opacity: .22; }
+.graph-edge { fill: none; stroke: var(--muted-foreground); stroke-width: calc(var(--edge-weight, 1.2) * .5); opacity: .3; pointer-events: none; }
+.graph-edge.unrelated { opacity: .06; }
+.graph-edge.connected { stroke: var(--muted-foreground); opacity: .2; }
+.graph-edge.recent { stroke: var(--map-cyan); opacity: .34; }
 .graph-edge.chosen { stroke: var(--map-amber); stroke-width: 3; opacity: 1; }
 .graph-pulses { pointer-events: none; }
 .graph-pulse { fill: var(--map-cyan); opacity: 0; offset-rotate: 0deg; animation: graph-spoke-flight .6s linear both; filter: drop-shadow(0 0 4px color-mix(in srgb, var(--map-cyan) 60%, transparent)); }
