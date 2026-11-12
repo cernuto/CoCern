@@ -44,7 +44,7 @@ public sealed class DocCacheTests(ITestOutputHelper output)
         await SyncAsync(host);
         await host.Services.GetRequiredService<DocSyncRunner>().SyncAsync("repo2", null, CancellationToken.None);
         var commit = git.Head();
-        var tools = Assert.IsType<DocCacheTool>(host.Services.GetRequiredService<IDocCacheTools>());
+        var tools = host.Services.GetRequiredService<DocCacheTool>();
         var search = await tools.SearchAsync(new JsonObject { ["repositoryId"] = "repo", ["query"] = "needlevalue" });
         Assert.True(search.Ok, search.Code);
         using var searchJson = JsonDocument.Parse(search.DataJson);
