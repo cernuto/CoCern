@@ -99,7 +99,7 @@ internal sealed class ToolRouter(Aggregates aggregates, ClaimComposer claims, Se
             RelayTools.Search => searches.SearchAsync(args, cancellationToken),
             RelayTools.AnalyticsQuery => searches.AnalyticsAsync(caller, args, cancellationToken),
             RelayTools.CheckInbox => aggregates.Session(caller, tool, InboxArguments(args, call.Controls)),
-            RelayTools.SessionBind or RelayTools.Ack => aggregates.Session(caller, tool, args),
+            RelayTools.SessionBind or RelayTools.SessionLabelSet or RelayTools.Ack => aggregates.Session(caller, tool, args),
             RelayTools.AttentionRespond => messages.RespondToAttentionAsync(caller, args),
             RelayTools.OrderPut or RelayTools.OrderRemove => status.OrderAsync(caller, tool, args),
             RelayTools.DocSearch when args["query"] is null => docs.ListAsync(caller),

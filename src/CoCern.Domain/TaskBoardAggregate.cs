@@ -286,7 +286,12 @@ internal static class TaskBoardAggregate
         var recentData = Recent(task);
         var recent = Ok(recentData, task.Version);
         // A task already smaller than its navigation metadata needs no projection at all.
-        return FitsWire(recent, maximumBytes) && ByteSize(recentData) <= ByteSize(brief) ? recent : result;
+        var selected = FitsWire(recent, maximumBytes) && ByteSize(recentData) <= ByteSize(brief) ? recent : result;
+        return selected with
+        {
+            ProjectionSourceBytes = System.Text.Encoding.UTF8.GetByteCount(recent.DataJson),
+            ProjectionReplyBytes = System.Text.Encoding.UTF8.GetByteCount(selected.DataJson)
+        };
     }
 
     /// <summary>

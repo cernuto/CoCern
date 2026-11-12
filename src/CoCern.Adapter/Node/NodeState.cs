@@ -375,6 +375,7 @@ public sealed class NodeState : IDisposable
         var folder = Path.Combine(nodeFolder, SessionsFolder);
         Directory.CreateDirectory(folder);
         var json = new JsonObject { ["sessionId"] = handle.SessionId, ["sessionToken"] = handle.SessionToken, ["repositoryId"] = handle.RepositoryId, ["label"] = handle.Label, ["openedAt"] = handle.OpenedAt.ToString("O") };
+        if (handle.LabelVersion > 0) json["labelVersion"] = handle.LabelVersion;
         if (handle.Client is { } client) json["client"] = new JsonObject { ["provider"] = client.Provider, ["chatId"] = client.ThreadId };
         if (handle.Chat is { } chat) json["chat"] = new JsonObject { ["provider"] = chat.Provider, ["threadId"] = chat.ThreadId };
         else if (handle.Unmapped) json["unmapped"] = true;
@@ -402,9 +403,10 @@ public sealed class NodeState : IDisposable
             // Chat IDs are only ever UUIDs; anything else is ignored (a bad claim falls back to transcripts, a bad outcome is located again).
             var nativeBindingKey = Text(root, "nativeBindingKey");
             if (root.ContainsKey("nativeBindingKey") && (nativeBindingKey is not { Length: 64 } || !nativeBindingKey.All(Uri.IsHexDigit))) return null;
+            var labelVersion = root["labelVersion"] is JsonValue labelValue && labelValue.TryGetValue<long>(out var version) && version >= 0 ? version : 0;
             return new(sessionId, sessionToken, repositoryId, label, openedAt, Location(root["client"], "chatId"), Location(root["chat"], "threadId"),
                 root["unmapped"] is JsonValue unmapped && unmapped.TryGetValue<bool>(out var value) && value)
-            { NativeBindingKey = nativeBindingKey?.ToLowerInvariant() };
+            { NativeBindingKey = nativeBindingKey?.ToLowerInvariant(), LabelVersion = labelVersion };
         }
         catch (Exception exception) when (exception is JsonException or IOException or UnauthorizedAccessException or InvalidOperationException or FormatException) { return null; }
     }

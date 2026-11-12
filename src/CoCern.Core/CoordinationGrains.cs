@@ -65,8 +65,21 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
         var reply = ApplyInternal(candidate, caller, operation, args, Now, services.GetService<OrderOptions>() is { Enabled: true });
         if (reply.Ok && ValidateCandidate(candidate, operation) is { } invalid) return invalid;
         // A read that emitted an effect (a verify's hourly activity report) commits it, or the effect would be lost.
-        if (!reply.Ok || !CoordinationStateMachine.RequiresCommit(Kind, operation, priorTaskRevision, candidate) && candidate.Effects.Count == firstNewEffect) return reply;
-        return await CommitAsync(candidate) ? reply : Replies.Error(RelayErrorCodes.StorageFailure);
+        if (!reply.Ok || !CoordinationStateMachine.RequiresCommit(Kind, operation, priorTaskRevision, candidate) && candidate.Effects.Count == firstNewEffect) return MeasureRead(reply, args);
+        return await CommitAsync(candidate) ? MeasureRead(reply, args) : Replies.Error(RelayErrorCodes.StorageFailure);
+    }
+
+    private RelayReply MeasureRead(RelayReply reply, JsonObject args)
+    {
+        if (!reply.Ok || reply.ProjectionSourceBytes is not { } sourceBytes || reply.ProjectionReplyBytes is not { } replyBytes) return reply;
+        try
+        {
+            if (args["repositoryId"] is JsonValue value && value.TryGetValue<string>(out var repository))
+                services.GetService<ReadEfficiencyMeasurements>()?.Record(repository, ReadEfficiencyMeasurements.TaskBrief,
+                    sourceBytes, replyBytes, null, null, Now);
+        }
+        catch (Exception) { /* Optional size-only observations never change the task read or its authority. */ }
+        return reply;
     }
 
     /// <summary>Delivers due outbox effects (optionally one work item, operation or action) and removes each only after its target accepted it.</summary>

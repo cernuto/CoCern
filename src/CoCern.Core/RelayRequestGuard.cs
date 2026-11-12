@@ -118,6 +118,10 @@ internal static class RelayRequestGuard
         args["repositoryId"] = repository;
         if (tool.IsMutation && Text(args, "requestId").Length == 0) return Replies.Error(RequestIdRequired);
         if (!IdentifiersFit(args)) return Replies.Error(InvalidArguments);
+        if (tool.Name == RelayTools.SessionLabelSet &&
+            (args["label"] is not JsonValue labelValue || !labelValue.TryGetValue<string>(out var label) || string.IsNullOrWhiteSpace(label) ||
+             args.Any(field => field.Key is not ("repositoryId" or "sessionId" or "sessionToken" or "requestId" or "label" or "actingSessionId" or "actingSessionToken" or "backgroundCall"))))
+            return Replies.Error(InvalidArguments);
         // replyTo names a message: a bounded single-line identifier, never free text.
         if (args["replyTo"] is { } replyTo && (replyTo is not JsonValue replyValue || !replyValue.TryGetValue<string>(out var replyId) || replyId.Length > RelayLimits.MaxIdentifierLength || replyId.Any(char.IsControl)))
             return Replies.Error(InvalidArguments, new { field = "replyTo" });

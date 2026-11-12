@@ -24,6 +24,7 @@ Admin tools need a token with `IsAdministrator`. A session's `role` grants nothi
 | --- | --- | --- |
 | `session_open` | worker | Open a session for this chat; returns its private handle and the board's standing. |
 | `session_bind` | worker | Record this session's IDE tool bindings. Optional `label` renames the session (to match its chat's title) and `machineId` reports its PC, once (a later one is ignored); a bind that leaves out `binding` or `availability`, or sends `null`, keeps the current one. |
+| `session_label_set` | worker | Name your own chat with `label` (1–256 characters, one line). Updates the directory and dashboard; cannot target another chat. |
 | `session_tool_settings_set` | admin | Set an exact open chat's tool profile under its settings revision, recording the direct human words. A profile never upgrades credential authority. See [per-chat settings](session-tool-settings.md). |
 | `worker_list` | worker | List reported worker state and freshness; use `chat_directory` to find a chat to message. |
 | `get_status` | worker | Repository and session status, including blockers and uncertain actions. A session-wide stop is included on the bounded cancellation page whenever present. An administrator's also has [`waitingOnYou`](#waiting-on-you). |
@@ -646,6 +647,14 @@ Then give those chats `COCERN_TOKEN_FILE=data/worker-token`, or run `--connect -
 **OAuth (optional).** For remote clients with their own identity provider: `Relay:OAuth:Authority` (HTTPS issuer), `Relay:OAuth:Audience`, `Relay:OAuth:RequiredScopes:N` (default `relay`), `Relay:OAuth:Resource` (the public HTTPS `/mcp` address; publishes `/.well-known/oauth-protected-resource/mcp`) and `Relay:OAuth:Principals:N` (`Subject`, `PrincipalId`, `IsAdministrator`, `Repositories`). The hub doesn't issue tokens. This is how the ChatGPT chat app would connect; it has not been tested.
 
 ## Dashboard
+
+### Live retained context and efficiency
+
+**Retained context** lists and searches saved collections by repository or task. Open an entry to read its exact generation, version and part. Live collection updates never replace text you already opened. Access is rechecked on every read, including for inactive repositories.
+
+**Efficiency** shows the latest hour of traffic, watcher cadence and task-brief/excerpt savings. Savings compare matching source/reply pairs since hub startup: task JSON bytes and document text bytes. Missing values stay unknown; token estimates are not model billing.
+
+Both pages refresh while open, at most every five seconds, and pause on stale connections. The saved November 10 baseline is hub-wide. Repository-only selections, short history and incomplete activity do not show percentage changes. **Analytics** remains hourly.
 
 The BlazorBlueprint dashboard provides Overview, Sessions, Analytics, Database, Logs, Standing, Manager, Documents and Connect through a responsive sidebar. Dashboard data endpoints require the existing viewer cookie and policy. A same-origin browser on a genuine loopback address can obtain that cookie automatically through `POST /dashboard/api/login-local`, using the configured local viewer; remote clients, non-loopback hostnames and forwarded requests retain explicit sign-in.
 

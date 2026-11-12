@@ -1,0 +1,73 @@
+@inherits LiveDashboardView
+
+<section class="efficiency-view" aria-labelledby="efficiency-heading" aria-busy="@Loading">
+    <div class="efficiency-toolbar"><div><h2 id="efficiency-heading">Live efficiency</h2><p class="muted">A rolling hour of calls and same-source reply measurements.</p></div><label for="efficiency-repository">Scope<BbNativeSelect TValue="string" Id="efficiency-repository" Value="@_repository" ValueChanged="RepositoryChangedAsync"><option value="">Hub-wide</option>@foreach (var repository in Repositories) { <option value="@repository">@repository</option> }</BbNativeSelect></label></div>
+    <div class="freshness-strip" role="status"><strong>@FreshnessLabel</strong><span>@FreshnessDescription</span>@if (_data is { } sample) { <span>Collected @Stamp(sample.CollectedAt)</span> }@if (Loading) { <span>Reading…</span> }</div>
+    @if (Error is { } error) { <p class="read-problem" role="alert">@error</p> }
+    @if (RepositoryInventoryError is { } inventoryError) { <p class="read-problem" role="status">@inventoryError</p> }
+    @if (RepositoryInventoryAt is not null) { <p class="muted">Authorized repository list collected @Stamp(RepositoryInventoryAt).@(RepositoryInventoryTruncated ? " The repository list is limited; a previously authorized selection remains available." : "")</p> }
+    @if (_data is null)
+    {
+        <section class="surface efficiency-section empty-state" role="status"><h3>@(Loading ? "Loading live measurements…" : "Waiting for a live sample")</h3><p>Fresh hub updates load this view automatically.</p></section>
+    }
+    else if (_data.Unavailable is { Length: > 0 } unavailable)
+    {
+        <section class="surface efficiency-section empty-state" role="status"><h3>Live measurements unavailable</h3><p>@unavailable</p><p>Collected @Stamp(_data.CollectedAt).</p></section>
+    }
+    else
+    {
+        var data = _data;
+        <div class="window-strip"><p><strong>@(string.IsNullOrEmpty(data.RepositoryId) ? "Hub-wide" : data.RepositoryId)</strong> scope. @Stamp(data.WindowStart) to @Stamp(data.WindowEnd).</p><p>@Number(data.ActivitySamples) activity samples. Unknown means no measurement; 0 is a measured zero.</p></div>
+        @if (data.Truncated || data.DroppedActivityEvents > 0) { <p class="read-problem" role="status">This window is incomplete.@(data.Truncated ? " The bounded query reached its limit." : "") @(data.DroppedActivityEvents > 0 ? $"{Number(data.DroppedActivityEvents)} activity events were dropped." : "")</p> }
+        <section class="surface efficiency-section" aria-labelledby="reply-savings-heading">
+            <header><h3 id="reply-savings-heading">Task brief and excerpt savings</h3><p>Measured UTF-8 bytes compare normal task JSON with the task brief, or document source text with its excerpt, from the same source version during actual reads. Add-ons and transport envelopes are excluded. Token values are relay estimates; billing is outside this report.</p></header>
+            <div class="efficiency-scroll"><table class="metrics-table"><thead><tr><th scope="col">Read</th><th scope="col">Samples</th><th scope="col">Reference bytes</th><th scope="col">Reply bytes</th><th scope="col">Saved bytes</th><th scope="col">Estimated reference tokens</th><th scope="col">Estimated reply tokens</th><th scope="col">Estimated saved tokens</th></tr></thead><tbody>
+                @foreach (var row in SavingsRows(data))
+                {
+                    <tr><th scope="row">@row.Name<small>@Reduction(row.Savings)</small></th><td>@Number(row.Savings.Samples)<small>@Number(row.Savings.TokenSamples) token samples</small></td><td>@Bytes(row.Savings.SourceBytes)</td><td>@Bytes(row.Savings.ReplyBytes)</td><td>@Bytes(row.Savings.SavedBytes)</td><td>@Number(row.Savings.EstimatedSourceTokens)</td><td>@Number(row.Savings.EstimatedReplyTokens)</td><td>@Number(row.Savings.EstimatedSavedTokens)</td></tr>
+                }
+            </tbody></table></div>
+            @foreach (var row in SavingsRows(data))
+            {
+                <p class="measurement-note"><strong>@row.Name:</strong> @if (row.Savings.Samples == 0) { <span>No same-source reads have been measured in this window.</span> } else { <span>Samples from @Stamp(row.Savings.FirstSampleAt) to @Stamp(row.Savings.LastSampleAt).</span> } Collection started @Stamp(row.Savings.CollectionStartedAt).</p>
+            }
+        </section>
+        <section class="surface efficiency-section" aria-labelledby="watcher-heading">
+            <header><h3 id="watcher-heading">Watcher polling</h3><p>Each observed session contributes the rolling hour to the session-hour denominator. Cadence uses measured gaps between calls within a session.</p></header>
+            <div class="efficiency-scroll"><table class="metrics-table"><thead><tr><th scope="col">Caller</th><th scope="col">Calls</th><th scope="col">Sessions</th><th scope="col">Session-hours</th><th scope="col">Calls / session-hour</th><th scope="col">Mean reply bytes</th><th scope="col">Median reply bytes</th><th scope="col">Median gap</th><th scope="col">95th percentile gap</th><th scope="col">Gap samples</th></tr></thead><tbody>
+                @foreach (var row in PollingRows(data))
+                {
+                    <tr><th scope="row">@row.Name</th><td>@Number(row.Metrics.Calls)</td><td>@row.Metrics.Sessions</td><td>@Rate(row.Metrics.ObservedSessionHours)</td><td>@Rate(row.Metrics.CallsPerSessionHour)</td><td>@Rate(row.Metrics.MeanReplyBytes)</td><td>@Rate(row.Metrics.MedianReplyBytes)</td><td>@Seconds(row.Metrics.MedianGapSeconds)</td><td>@Seconds(row.Metrics.P95GapSeconds)</td><td>@Number(row.Metrics.GapSamples)</td></tr>
+                }
+            </tbody></table></div>
+            @foreach (var row in PollingRows(data)) { <p class="measurement-note"><strong>@row.Name:</strong> first call @Stamp(row.Metrics.FirstCallAt); last call @Stamp(row.Metrics.LastCallAt). Replies @Bytes(row.Metrics.ReplyBytes); estimated reply tokens @Number(row.Metrics.EstimatedReplyTokens) from @Number(row.Metrics.ReplyTokenSamples) token samples.</p> }
+        </section>
+        <section class="surface efficiency-section" aria-labelledby="baseline-heading">
+            <header><h3 id="baseline-heading">Saved baseline comparison</h3><p>Compare normalized polling rates alongside workload counts. Fewer retained history rows do not establish fewer calls.</p></header>
+            @if (data.Baseline is { } baseline)
+            {
+                <p class="baseline-provenance">Captured @Stamp(baseline.CapturedAt); scope @baseline.Scope; duration @baseline.DurationSeconds seconds.</p>
+                @if (data.BaselineComparable && string.IsNullOrEmpty(_repository))
+                {
+                    <div class="efficiency-scroll"><table class="metrics-table"><thead><tr><th scope="col">Caller</th><th scope="col">Current calls / session-hour</th><th scope="col">Baseline calls / session-hour</th><th scope="col">Rate change</th><th scope="col">Current calls / sessions</th><th scope="col">Baseline calls / sessions</th><th scope="col">Current / baseline session-hours</th></tr></thead><tbody>@foreach (var row in ComparisonRows(data, baseline)) { <tr><th scope="row">@row.Name</th><td>@Rate(row.Current.CallsPerSessionHour)</td><td>@Rate(row.Baseline.CallsPerSessionHour)</td><td>@RateChange(row.Current.CallsPerSessionHour, row.Baseline.CallsPerSessionHour)</td><td>@Number(row.Current.Calls) / @row.Current.Sessions</td><td>@Number(row.Baseline.Calls) / @row.Baseline.Sessions</td><td>@Rate(row.Current.ObservedSessionHours) / @Rate(row.Baseline.ObservedSessionHours)</td></tr> }</tbody></table></div>
+                }
+                else { <p class="comparison-unavailable" role="status">@(string.IsNullOrEmpty(_repository) ? data.BaselineComparisonUnavailable ?? "Comparable normalized rates are unavailable." : "The saved baseline is hub-wide. A repository-specific comparison is unavailable.")</p> }
+                <p class="measurement-note">Baseline background workload: @Number(baseline.BackgroundCalls) calls; @Bytes(baseline.BackgroundWireBytes) wire bytes.</p>
+                <details class="baseline-evidence"><summary>Baseline evidence</summary><p>SHA-256 <code>@baseline.EvidenceSha256</code></p></details>
+            }
+            else { <p class="empty-state" role="status">@(data.BaselineComparisonUnavailable ?? "The saved baseline is unavailable.")</p> }
+        </section>
+        <section class="surface efficiency-section" aria-labelledby="activity-heading"><header><h3 id="activity-heading">Current activity</h3><p>Measured call and byte totals within the selected rolling window.</p></header><dl class="activity-totals"><div><dt>Calls</dt><dd>@Number(data.Calls)</dd></div><div><dt>Background calls</dt><dd>@Number(data.BackgroundCalls)</dd></div><div><dt>Request bytes</dt><dd>@Bytes(data.RequestBytes)</dd></div><div><dt>Reply bytes</dt><dd>@Bytes(data.ReplyBytes)</dd></div><div><dt>Estimated request tokens</dt><dd>@Number(data.EstimatedRequestTokens)</dd></div><div><dt>Estimated reply tokens</dt><dd>@Number(data.EstimatedReplyTokens)<small>@Number(data.ReplyTokenSamples) samples</small></dd></div></dl></section>
+        <section class="surface efficiency-section" aria-labelledby="storage-heading">
+            <header><h3 id="storage-heading">Hub-wide storage</h3><p>Database footprint and retained rows, collected @Stamp(Snapshot.Database.ObservedAt). Storage counts have hub-wide scope for every repository selection.</p></header>
+            <dl class="activity-totals"><div><dt>Database bytes</dt><dd>@Bytes(Snapshot.Database.SizeBytes)</dd></div><div><dt>Archived tasks</dt><dd>@Number(Snapshot.Database.ArchivedTasks)</dd></div><div><dt>Provider</dt><dd>@Snapshot.Database.Provider</dd></div></dl>
+            @if (Snapshot.Database.Warning is { } databaseWarning) { <p class="measurement-note">@databaseWarning</p> }
+            @if (Snapshot.Database.Truncated) { <p class="measurement-note">The table inventory is limited.</p> }
+            @if (Snapshot.Database.Tables.Length > 0)
+            {
+                <details class="storage-details"><summary>Retained table counts</summary><div class="efficiency-scroll"><table class="metrics-table"><thead><tr><th scope="col">Table</th><th scope="col">Rows</th><th scope="col">Count basis</th><th scope="col">Bytes</th></tr></thead><tbody>@foreach (var table in Snapshot.Database.Tables) { <tr><th scope="row">@table.Name</th><td>@Number(table.RowCount)</td><td>@table.CountKind</td><td>@Bytes(table.SizeBytes)</td></tr> }</tbody></table></div></details>
+            }
+        </section>
+        @if (data.Notes.Length > 0) { <aside class="measurement-notes" aria-label="Measurement notes"><ul>@foreach (var note in data.Notes) { <li>@note</li> }</ul></aside> }
+    }
+</section>

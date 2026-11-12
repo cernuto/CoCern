@@ -1,5 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
   <ItemGroup>
+    <EmbeddedResource Include="Dashboard/Baselines/database-efficiency-20261110.json" LogicalName="CoCern.Host.Dashboard.Baselines.database-efficiency-20261110.json" />
     <!-- The host must include the RCL's asset manifest; the standalone WASM reference only exports its own root assets. -->
     <PackageReference Include="BlazorBlueprint.Components" />
     <AssemblyMetadata Include="CoCern.DevelopmentAdapterSource" Value="$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)/../CoCern.Adapter/bin/$(Configuration)/$(TargetFramework)'))" />

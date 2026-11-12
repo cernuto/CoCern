@@ -399,6 +399,26 @@ public sealed class NodeTests : IDisposable
         Assert.DoesNotContain(sessionToken, handle.ToString());
         Assert.DoesNotContain(sessionToken, error.ToString());
         Assert.DoesNotContain(credential, error.ToString());
+
+        // An idempotent open still returns its original title after later renames; it must not reset the node's label replay fence.
+        var forwarder = new RelayForwarder(http, options);
+        var firstLabel = JsonSerializer.SerializeToElement(new { repositoryId = "repo", sessionId, sessionToken, requestId = "label-first", label = "First title" });
+        var firstRename = await forwarder.ForwardAsync(RelayTools.SessionLabelSet, firstLabel);
+        Assert.True(firstRename.Ok, firstRename.Code);
+        handoff.Rename(firstLabel, firstRename.Version);
+        var currentLabel = JsonSerializer.SerializeToElement(new { repositoryId = "repo", sessionId, sessionToken, requestId = "label-current", label = "Current title" });
+        var currentRename = await forwarder.ForwardAsync(RelayTools.SessionLabelSet, currentLabel);
+        Assert.True(currentRename.Ok, currentRename.Code);
+        handoff.Rename(currentLabel, currentRename.Version);
+        var replayedOpen = await forwarder.ForwardAsync(RelayTools.SessionOpen, arguments);
+        Assert.True(replayedOpen.Ok, replayedOpen.Code);
+        handoff.Record(arguments, replayedOpen);
+        var current = NodeState.ReadSessionHandle(path)!;
+        Assert.Equal(("Current title", currentRename.Version, handle.OpenedAt, handle.Client), (current.Label, (long?)current.LabelVersion, current.OpenedAt, current.Client));
+        var replayedRename = await forwarder.ForwardAsync(RelayTools.SessionLabelSet, firstLabel);
+        Assert.True(replayedRename.Ok, replayedRename.Code);
+        handoff.Rename(firstLabel, replayedRename.Version);
+        Assert.Equal(current, NodeState.ReadSessionHandle(path));
     }
 
     [Fact]

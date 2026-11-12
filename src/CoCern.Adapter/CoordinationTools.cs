@@ -34,7 +34,7 @@ public static class CoordinationTools
     }
 
     /// <summary>
-    /// What a hub-proven chat gets: no session tools, and <c>peers</c>, which no raw surface lists. It keeps <c>chat_directory</c> until a name can
+    /// What a hub-proven chat gets: no session lifecycle/binding tools, and <c>peers</c>, which no raw surface lists. It keeps <c>chat_directory</c> until a name can
     /// address a message, because <c>send_message</c> still takes a recipient's session ID and <c>peers</c> shows none outside a choice.
     /// </summary>
     private static IEnumerable<RelayTool> NativeSurface(bool admin, bool chatOnly, bool diagnostics, bool eventWaits = false)
@@ -44,7 +44,7 @@ public static class CoordinationTools
     }
 
     /// <summary>The chat profile: what a chat needs to find peers and exchange messages, and nothing it would carry unused in every turn.</summary>
-    private static readonly HashSet<string> ChatTools = [RelayTools.SessionOpen, RelayTools.SendMessage, RelayTools.CheckInbox, RelayTools.Ack, RelayTools.ChatDirectory];
+    private static readonly HashSet<string> ChatTools = [RelayTools.SessionOpen, RelayTools.SessionLabelSet, RelayTools.SendMessage, RelayTools.CheckInbox, RelayTools.Ack, RelayTools.ChatDirectory];
 
     public static IReadOnlyList<string> NamesForRole(bool admin, bool chatOnly = false, bool diagnostics = false, bool eventWaits = false) => Surface(admin, chatOnly, diagnostics, eventWaits).Select(tool => tool.Name).ToArray();
     public static bool IsAllowed(string name, bool admin, bool chatOnly = false, bool diagnostics = false, bool eventWaits = false) =>
@@ -325,7 +325,7 @@ internal sealed class ChatCalls(RelayForwarder forwarder, SessionHints? hints, S
         {
             handoff?.Touch(arguments);
             // A rename reaches the node's handle too, so the node announces the name the hub now holds.
-            if (tool == RelayTools.SessionBind) handoff?.Rename(arguments);
+            if (tool is RelayTools.SessionBind or RelayTools.SessionLabelSet) handoff?.Rename(arguments, reply.Version);
         }
         if (hints is not null)
         {

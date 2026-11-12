@@ -1,0 +1,29 @@
+{
+  "capturedAt": "2026-11-11T05:51:44.544165+00:00",
+  "durationSeconds": 3600,
+  "scope": "hub-wide",
+  "evidenceSha256": "FCDA50C6ADEEDD7C8DFDD53BD980A8A5A3EDBFCAD87A63CB45E91B8673EE53A1",
+  "comparisonEvidenceSha256": "F5549D499D86C9333352D865046ABA75FDAA0A07DC8ADF50ABCEA71D21AB0E58",
+  "watcher": {
+    "calls": 1019,
+    "sessions": 17,
+    "observedSessionHours": 17,
+    "callsPerSessionHour": 59.94117647058823,
+    "requestBytes": 282770,
+    "replyBytes": 1338716,
+    "meanReplyBytes": 1313.75,
+    "medianReplyBytes": 1240
+  },
+  "nodeWatcher": {
+    "calls": 114,
+    "sessions": 6,
+    "observedSessionHours": 6,
+    "callsPerSessionHour": 19.0,
+    "requestBytes": 22566,
+    "replyBytes": 392256,
+    "meanReplyBytes": 3440.84,
+    "medianReplyBytes": 4506.0
+  },
+  "backgroundCalls": 1586,
+  "backgroundWireBytes": 2800366
+}

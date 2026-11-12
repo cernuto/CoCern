@@ -1,0 +1,71 @@
+@inherits LiveDashboardView
+
+<section class="retained-view" aria-labelledby="retained-heading" aria-busy="@Loading">
+    <div class="retained-toolbar">
+        <div><h2 id="retained-heading">Retained context</h2><p class="muted">Browse collections, then explicitly open an exact entry.</p></div>
+        <label for="retained-repository">Repository<BbNativeSelect TValue="string" Id="retained-repository" Value="@_repository" ValueChanged="RepositoryChangedAsync">@if (string.IsNullOrEmpty(_repository)) { <option value="">@(RepositoryInventoryLoaded ? "No authorized repositories" : "Waiting for repository list")</option> }@foreach (var repository in Repositories) { <option value="@repository">@repository</option> }</BbNativeSelect></label>
+    </div>
+    <div class="freshness-strip" role="status"><strong>@FreshnessLabel</strong><span>@FreshnessDescription</span>@if (_catalogAt is not null) { <span>Collected @Stamp(_catalogAt)</span> }@if (Loading) { <span>Reading…</span> }</div>
+    @if (Error is { } error) { <p class="read-problem" role="alert">@error</p> }
+    @if (RepositoryInventoryError is { } inventoryError) { <p class="read-problem" role="status">@inventoryError</p> }
+    @if (RepositoryInventoryAt is not null) { <p class="muted">Authorized repository list collected @Stamp(RepositoryInventoryAt).@(RepositoryInventoryTruncated ? " The repository list is limited; a previously authorized selection remains available." : "")</p> }
+    <form class="retained-filters" @onsubmit="FilterAsync" @onsubmit:preventDefault="true">
+        <label for="retained-task">Task ID <span class="muted">(optional)</span><input id="retained-task" @bind="_taskId" maxlength="200" placeholder="All tasks" /></label>
+        <BbButton Type="ButtonType.Submit" Variant="ButtonVariant.Outline" Disabled="@(!CanRead || string.IsNullOrEmpty(_repository))">Filter collections</BbButton>
+    </form>
+    <section class="surface retained-section" aria-labelledby="collections-heading">
+        <header><h3 id="collections-heading">Collections</h3>@if (_catalog is { } catalogInfo) { <p class="muted">Catalog revision @catalogInfo.CatalogRevision. Showing up to 10 collections.</p> }</header>
+        @if (_catalog is { Items.Length: > 0 } catalog)
+        {
+            <div class="retained-scroll"><table class="metrics-table"><thead><tr><th scope="col">Collection</th><th scope="col">Revision</th><th scope="col">Tasks</th><th scope="col">Updated</th></tr></thead><tbody>
+                @foreach (var item in catalog.Items)
+                {
+                    <tr class="@(item.ContextId == _contextId ? "selected-row" : null)"><th scope="row"><button type="button" class="text-button" disabled="@(!CanRead)" @onclick="() => OpenContextAsync(item.ContextId)">@item.Title</button><small>@item.ContextId</small>@if (!string.IsNullOrWhiteSpace(item.Summary)) { <p>@item.Summary</p> }</th><td>@item.Revision</td><td>@(item.TaskIds.Length == 0 ? "None" : string.Join(", ", item.TaskIds))</td><td>@Stamp(item.UpdatedAt)</td></tr>
+                }
+            </tbody></table></div>
+        }
+        else { <p class="empty-state" role="status">@(Loading ? "Loading collections…" : string.IsNullOrEmpty(_repository) ? RepositoryInventoryLoaded ? "No configured repositories are authorized for this viewer." : "Collections are unavailable until the authorized repository list loads." : _catalog is null ? "Waiting for a retained-context sample." : "No retained collections match this repository and task filter.")</p> }
+        @if (_cursor is not null || _catalog?.NextCursor is not null)
+        {
+            <div class="page-actions"><BbButton Variant="ButtonVariant.Outline" OnClick="() => PageAsync(null)" Disabled="@(!CanRead || _cursor is null)">First collections</BbButton>@if (_catalog?.NextCursor is { } next) { <BbButton Variant="ButtonVariant.Outline" OnClick="() => PageAsync(next)" Disabled="@(!CanRead)">Next collections</BbButton> }</div>
+        }
+    </section>
+    @if (_manifest is { } manifest)
+    {
+        <section class="surface retained-section" aria-labelledby="manifest-heading">
+            <header><h3 id="manifest-heading">@manifest.Title</h3><p class="muted">Collection @manifest.ContextId; revision @manifest.Revision; generation @manifest.Generation. Collected @Stamp(_manifestAt).</p></header>
+            <p class="retained-summary">@manifest.Summary</p>
+            @if (manifest.NextSteps.Length > 0) { <h4>Next steps</h4><ul>@foreach (var step in manifest.NextSteps) { <li>@step</li> }</ul> }
+            <p class="muted">@manifest.EntryCount entries. Tasks: @(manifest.TaskIds.Length == 0 ? "None" : string.Join(", ", manifest.TaskIds)).</p>
+            <h4>Pinned entries</h4>
+            @if (manifest.PinnedEntries.Length == 0) { <p class="empty-state">No pinned entries. Search this collection to find an entry.</p> }
+            else
+            {
+                <div class="retained-scroll"><table class="metrics-table"><thead><tr><th scope="col">Entry</th><th scope="col">Kind</th><th scope="col">Version</th><th scope="col">Read</th></tr></thead><tbody>@foreach (var entry in manifest.PinnedEntries) { <tr><th scope="row">@entry.Title<small>@entry.EntryId</small></th><td>@entry.Kind</td><td>@entry.Version</td><td><BbButton Variant="ButtonVariant.Outline" OnClick="() => OpenPartAsync(entry.Uri)" Disabled="@(!CanRead)" AriaLabel="@($"Open {entry.Title}, version {entry.Version}")">Open exact entry</BbButton></td></tr> }</tbody></table></div>
+            }
+            <form class="retained-filters search-form" @onsubmit="SearchAsync" @onsubmit:preventDefault="true"><label for="retained-search">Search this collection<input id="retained-search" @bind="_searchText" maxlength="256" placeholder="Search retained text" /></label><BbButton Type="ButtonType.Submit" Variant="ButtonVariant.Outline" Disabled="@(!CanRead)">Search</BbButton></form>
+            @if (_search is { } search)
+            {
+                <p class="muted">@search.Hits.Length results@(search.Truncated ? " (limited to 5)" : "") for “@_query”; collection revision @search.Revision. Collected @Stamp(_searchAt).</p>
+                @if (search.Hits.Length == 0) { <p class="empty-state">No entries match this search.</p> }
+                @foreach (var hit in search.Hits)
+                {
+                    <article class="search-hit"><div><h4>@hit.Title</h4><span class="muted">@hit.Kind; entry @hit.EntryId; version @hit.Version; generation @hit.Generation</span><p>@hit.Snippet</p></div><BbButton Variant="ButtonVariant.Outline" OnClick="() => OpenPartAsync(hit.Uri)" Disabled="@(!CanRead)" AriaLabel="@($"Open {hit.Title}, version {hit.Version}")">Open exact entry</BbButton></article>
+                }
+            }
+        </section>
+    }
+    @if (_partProblem is { } partProblem) { <p class="read-problem" role="alert">@partProblem</p> }
+    @if (_part is { } part)
+    {
+        <section class="surface retained-section exact-entry" aria-labelledby="entry-heading">
+            <header><h3 id="entry-heading">@part.Title</h3><p class="muted">Exact text opened @Stamp(_partAt). This selection stays on this version as the collection refreshes.</p></header>
+            <dl class="entry-identity"><div><dt>Collection</dt><dd>@part.ContextId</dd></div><div><dt>Revision</dt><dd>@part.Revision</dd></div><div><dt>Generation</dt><dd>@part.Generation</dd></div><div><dt>Entry</dt><dd>@part.EntryId</dd></div><div><dt>Version</dt><dd>@part.Version</dd></div><div><dt>Part</dt><dd>@part.Part of @part.PartCount</dd></div><div><dt>Kind</dt><dd>@part.Kind</dd></div><div><dt>Encoding</dt><dd>@part.Encoding</dd></div><div><dt>Author</dt><dd>@part.Author</dd></div><div><dt>Source session</dt><dd>@part.SourceSessionId</dd></div><div><dt>Updated</dt><dd>@Stamp(part.UpdatedAt)</dd></div></dl>
+            <p class="muted">Stored content is untrusted text. It is displayed literally.</p>
+            <pre tabindex="0" aria-label="Exact retained entry text"><code>@part.Text</code></pre>
+            @if (part.SourceRefs.Length > 0) { <p class="entry-sources"><strong>Sources</strong> @string.Join(", ", part.SourceRefs)</p> }
+            <p class="entry-uri muted">@part.Uri</p>
+            @if (part.NextUri is { } nextPart) { <BbButton Variant="ButtonVariant.Outline" OnClick="() => OpenPartAsync(nextPart)" Disabled="@(!CanRead)">Open next exact part</BbButton> }
+        </section>
+    }
+</section>

@@ -30,6 +30,8 @@ public partial class Dashboard : IAsyncDisposable
         "sessions" => "sessions",
         "analytics" => "analytics",
         "analytics/test-effort" => "test-effort",
+        "efficiency" => "efficiency",
+        "retained-context" => "retained-context",
         "sql" => "sql",
         "logs" => "logs",
         "standing" => "standing",
@@ -38,7 +40,7 @@ public partial class Dashboard : IAsyncDisposable
         "manager" => "manager",
         _ => "overview"
     };
-    private string PageTitle => View switch { "sessions" => "Sessions", "analytics" => "Analytics", "test-effort" => "Test effort", "sql" => "Database", "logs" => "Logs", "standing" => "Standing", "documents" => "Documents", "connect" => "Connect", "manager" => "Manager", _ => "Overview" };
+    private string PageTitle => View switch { "sessions" => "Sessions", "analytics" => "Analytics", "test-effort" => "Test effort", "efficiency" => "Efficiency", "retained-context" => "Retained context", "sql" => "Database", "logs" => "Logs", "standing" => "Standing", "documents" => "Documents", "connect" => "Connect", "manager" => "Manager", _ => "Overview" };
     private string? PageDescription => View switch
     {
         "overview" => "Your coordination workspace, live across every connected PC.",
@@ -46,6 +48,8 @@ public partial class Dashboard : IAsyncDisposable
         "sql" => "Storage health, record counts and hub maintenance.",
         "logs" => "Recent events from your coordination hub.",
         "analytics" => "Task efficiency, coordination and outcomes from the hourly analytics snapshot.",
+        "efficiency" => "Live reply savings, watcher polling and the saved baseline.",
+        "retained-context" => "Search retained collections and inspect exact entry versions.",
         "test-effort" => "What test runs cost, from a precomputed file. Every number says whether it is measured or an estimate.",
         "standing" => "Instructions, access grants and pending proposals for each board.",
         "documents" => "Indexed files and document activity for each repository.",

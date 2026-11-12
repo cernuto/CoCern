@@ -13,7 +13,7 @@ public static class SessionToolProfiles
             "admin" => true,
             "worker" => !tool.AdministratorOnly,
             "diagnostics" => !tool.AdministratorOnly || name is RelayTools.AnalyticsQuery or RelayTools.HubDiagnose,
-            "chat" => name is RelayTools.SessionOpen or RelayTools.SessionBind or RelayTools.GetStatus or RelayTools.SendMessage or RelayTools.CheckInbox or RelayTools.Ack or RelayTools.ChatDirectory or RelayTools.Peers
+            "chat" => name is RelayTools.SessionOpen or RelayTools.SessionBind or RelayTools.SessionLabelSet or RelayTools.GetStatus or RelayTools.SendMessage or RelayTools.CheckInbox or RelayTools.Ack or RelayTools.ChatDirectory or RelayTools.Peers
                 or RelayTools.ClaimRenew or RelayTools.ClaimRelease or RelayTools.ActionReport,
             _ => false
         };

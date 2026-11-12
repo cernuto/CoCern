@@ -136,7 +136,7 @@ public sealed class LocalChatWake : IAsyncDisposable
                 if (session is null || !NodeState.IsFileId(session)) { Report(LocalWakeCodes.ObserveBadSessionId); return; }
                 var handle = NodeState.ReadSessionHandle(NodeState.SessionHandlePath(Connection.Folder, session));
                 if (handle is null || handle.RepositoryId != ChatLocators.Text(arguments, "repositoryId") || handle.SessionToken != ChatLocators.Text(arguments, "sessionToken")) { ObserveProblem(LocalWakeCodes.ObserveHandleMismatch); return; }
-                if (tool == RelayTools.SessionBind) handoff.Rename(arguments);
+                if (tool is RelayTools.SessionBind or RelayTools.SessionLabelSet) handoff.Rename(arguments, reply.Version);
             }
             var current = NodeState.ReadSessionHandle(NodeState.SessionHandlePath(Connection.Folder, session));
             if (current is null) { ObserveProblem(LocalWakeCodes.ObserveHandleMismatch); return; }

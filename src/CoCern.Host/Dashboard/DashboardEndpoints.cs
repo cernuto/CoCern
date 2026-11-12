@@ -20,6 +20,9 @@ public static class DashboardEndpoints
     {
         services.AddSingleton<DashboardAuthenticationSettings>();
         services.AddSingleton<DashboardSecurity>();
+        services.AddSingleton<DashboardRetainedContext>();
+        services.AddSingleton<ReadEfficiencyMeasurements>();
+        services.AddSingleton<DashboardEfficiency>();
         services.AddSingleton<DashboardSignInLink>();
         services.AddSingleton<DashboardConnect>();
         services.AddSingleton<DashboardConnectionDiagnostics>();
@@ -137,6 +140,8 @@ public static class DashboardEndpoints
             return ConnectClients.All.Contains(client) ? Results.Ok(await connect.ConnectAsync(client, DashboardConnect.AdminChoice(context), context.RequestAborted)) : Results.NotFound();
         }).RequireAuthorization(DashboardSecurity.Policy);
         api.MapGet("/snapshot", (DashboardCollector collector) => Results.Ok(collector.Current)).RequireAuthorization(DashboardSecurity.Policy);
+        api.MapDashboardRetainedContext();
+        api.MapGet("/efficiency", (HttpContext context, DashboardEfficiency efficiency) => efficiency.GetAsync(context)).RequireAuthorization(DashboardSecurity.Policy);
         api.MapGet("/database/reset", DashboardDatabaseManagement.ReadAsync).RequireAuthorization(DashboardSecurity.Policy);
         api.MapPost("/database/reset", DashboardDatabaseManagement.ScheduleAsync).RequireAuthorization(DashboardSecurity.Policy);
         api.MapGet("/analytics", (HttpContext context, DashboardAnalytics analytics) => analytics.GetAsync(context)).RequireAuthorization(DashboardSecurity.Policy);

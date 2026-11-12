@@ -21,6 +21,46 @@ namespace CoCern.Tests;
 public sealed class SessionRenameTests
 {
     [Fact]
+    public async Task The_label_tool_only_renames_its_authenticated_session_and_old_replays_cannot_undo_it()
+    {
+        using var host = await StartAsync();
+        try
+        {
+            var application = host.Services.GetRequiredService<RelayApplication>();
+            var factory = host.Services.GetRequiredService<IGrainFactory>();
+            var caller = new RelayCaller("alice", false, ["repo"]);
+            async Task<RelayReply> Call(string tool, object args) => await application.ExecuteAsync(caller, tool, JsonSerializer.SerializeToElement(args));
+            async Task<(string Id, string Token)> Open(string requestId, string label)
+            {
+                var data = JsonNode.Parse((await Call(RelayTools.SessionOpen, new { repositoryId = "repo", requestId, label })).DataJson)!;
+                return (data["sessionId"]!.GetValue<string>(), data["sessionToken"]!.GetValue<string>());
+            }
+            var own = await Open("label-own", "Original");
+            var peer = await Open("label-peer", "Peer");
+            async Task<string> Listed((string Id, string Token) session)
+            {
+                Assert.True((await factory.GetGrain<ISessionGrain>(session.Id).ExecuteAsync(caller with { IsInternal = true }, "__dispatch", "{}")).Ok);
+                var workers = JsonNode.Parse((await Call(RelayTools.WorkerList, new { repositoryId = "repo" })).DataJson)!["items"]!.AsArray();
+                return workers.Single(worker => worker!["sessionId"]!.GetValue<string>() == session.Id)!["label"]!.GetValue<string>();
+            }
+            var first = new { repositoryId = "repo", requestId = "label-first", sessionId = own.Id, sessionToken = own.Token, label = "First title" };
+            var renamed = await Call(RelayTools.SessionLabelSet, first);
+            Assert.True(renamed.Ok, renamed.Code);
+            Assert.Equal("First title", await Listed(own));
+            Assert.Equal(RelayErrorCodes.SessionDenied, (await Call(RelayTools.SessionLabelSet, new { repositoryId = "repo", requestId = "label-wrong-token", sessionId = own.Id, sessionToken = peer.Token, label = "Hijacked" })).Code);
+            Assert.Equal(RelayErrorCodes.SessionDenied, (await Call(RelayTools.SessionLabelSet, new { repositoryId = "repo", requestId = "label-wrong-actor", sessionId = peer.Id, sessionToken = peer.Token, actingSessionId = own.Id, actingSessionToken = own.Token, label = "Hijacked" })).Code);
+            Assert.Equal(RelayErrorCodes.InvalidArguments, (await Call(RelayTools.SessionLabelSet, new { repositoryId = "repo", requestId = "label-target", sessionId = own.Id, sessionToken = own.Token, targetSessionId = peer.Id, label = "Hijacked" })).Code);
+            Assert.Equal(RelayErrorCodes.SessionDenied, (await application.ExecuteAsync(caller with { PrincipalId = "bob" }, RelayTools.SessionLabelSet, JsonSerializer.SerializeToElement(first))).Code);
+            Assert.Equal(RelayErrorCodes.InvalidArguments, (await Call(RelayTools.SessionLabelSet, new { repositoryId = "repo", requestId = "label-invalid", sessionId = own.Id, sessionToken = own.Token, label = "bad\nlabel" })).Code);
+            Assert.True((await Call(RelayTools.SessionLabelSet, new { repositoryId = "repo", requestId = "label-second", sessionId = own.Id, sessionToken = own.Token, label = "Current title" })).Ok);
+            Assert.Equal(renamed.DataJson, (await Call(RelayTools.SessionLabelSet, first)).DataJson);
+            Assert.Equal("Current title", await Listed(own));
+            Assert.Equal("Peer", await Listed(peer));
+        }
+        finally { await host.StopAsync(); }
+    }
+
+    [Fact]
     public async Task The_owner_renames_its_session_with_session_bind_and_the_directory_follows()
     {
         using var host = await StartAsync();

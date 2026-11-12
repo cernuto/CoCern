@@ -11,12 +11,14 @@ public sealed record SessionHandle(string SessionId, string SessionToken, string
 {
     // Private cache ownership only; never populated from ordinary open/bind arguments or serialized in public metadata.
     internal string? NativeBindingKey { get; init; }
+    // Presence version of the last label persisted locally; a replayed older rename cannot undo it.
+    internal long LabelVersion { get; init; }
     public override string ToString() => $"SessionHandle {{ SessionId = {SessionId}, RepositoryId = {RepositoryId}, Client = {Client}, Chat = {Chat}, Unmapped = {Unmapped} }}";
 }
 
 /// <summary>
 /// Runs in the stdio adapter on node credentials: after each successful <c>session_open</c> it hands the new session to the node by writing its
-/// handle file, and after a rename through <c>session_bind</c> it updates that file's label.
+/// handle file, and after a rename through <c>session_bind</c> or <c>session_label_set</c> it updates that file's label.
 /// </summary>
 public sealed class SessionHandoff
 {
@@ -174,14 +176,7 @@ public sealed class SessionHandoff
     }
 
     internal void RecordLocal(JsonElement arguments, AdapterReply reply)
-    {
-        if (!reply.Ok || reply.Data is not { ValueKind: JsonValueKind.Object } data || ChatLocators.Text(data, "sessionId") is not { } session || !NodeState.IsFileId(session)) return;
-        using var owner = Acquire(session);
-        if (owner is null) { Report?.Invoke(LocalWakeCodes.RecordLockBusy); return; }
-        var previous = NodeState.ReadSessionHandle(NodeState.SessionHandlePath(_folder, session));
-        if (previous is null) Record(arguments, reply);
-        else if (previous.RepositoryId == ChatLocators.Text(arguments, "repositoryId") && previous.SessionToken == ChatLocators.Text(data, "sessionToken") && OwnsNative(previous)) Touch(arguments);
-    }
+        => Record(arguments, reply);
 
     private bool OwnsNative(SessionHandle handle) => _client is null ||
         ((handle.Client is null || handle.Client == _client) && (handle.Chat is null || handle.Chat == _client));
@@ -228,10 +223,23 @@ public sealed class SessionHandoff
     public void Record(JsonElement arguments, AdapterReply reply)
     {
         if (!reply.Ok || reply.Data is not { ValueKind: JsonValueKind.Object } data ||
-            ChatLocators.Text(data, "sessionId") is not { } sessionId || ChatLocators.Text(data, "sessionToken") is not { Length: > 0 } sessionToken ||
+            ChatLocators.Text(data, "sessionId") is not { } sessionId || !NodeState.IsFileId(sessionId) || ChatLocators.Text(data, "sessionToken") is not { Length: > 0 } sessionToken ||
             ChatLocators.Text(arguments, "repositoryId") is not { Length: > 0 and <= NodeState.MaxIdentifierLength } repositoryId) return;
         var label = Label(arguments) ?? DefaultLabel;
-        try { NodeState.WriteSessionHandle(_folder, new SessionHandle(sessionId, sessionToken, repositoryId, label, DateTimeOffset.UtcNow, _client)); }
+        try
+        {
+            using var owner = Acquire(sessionId);
+            if (owner is null) { Report?.Invoke(LocalWakeCodes.RecordLockBusy); return; }
+            var previous = NodeState.ReadSessionHandle(NodeState.SessionHandlePath(_folder, sessionId));
+            if (previous is not null)
+            {
+                // A replayed open carries the original title, not a later authenticated rename. Keep the exact owned handle and its version.
+                if (previous.RepositoryId == repositoryId && previous.SessionToken == sessionToken && OwnsNative(previous))
+                    Touch(JsonSerializer.SerializeToElement(new { sessionId }));
+                return;
+            }
+            NodeState.WriteSessionHandle(_folder, new SessionHandle(sessionId, sessionToken, repositoryId, label, DateTimeOffset.UtcNow, _client));
+        }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
             _error.WriteLine("CoCern could not hand this chat's session to the node, so other PCs will not see it.");
@@ -239,18 +247,21 @@ public sealed class SessionHandoff
     }
 
     /// <summary>
-    /// After a successful <c>session_bind</c> that gave a <c>label</c>, writes that name into the session's handle, so the node announces the name
+    /// After an authenticated label update, writes that name into the session's handle, so the node announces the name
     /// the hub now holds instead of the one the session opened with. Everything else in the handle (its token, the node's outcome) is kept as read.
     /// Only a handle this PC already has is renamed. Best effort: a failure is reported without details and never fails the call that renamed the session.
     /// </summary>
-    public void Rename(JsonElement arguments)
+    public void Rename(JsonElement arguments, long? bindingVersion = null)
     {
         if (arguments.ValueKind != JsonValueKind.Object || ChatLocators.Text(arguments, "sessionId") is not { Length: > 0 } sessionId || !NodeState.IsFileId(sessionId) ||
             Label(arguments) is not { } label) return;
         try
         {
-            if (NodeState.ReadSessionHandle(NodeState.SessionHandlePath(_folder, sessionId)) is not { } handle || handle.Label == label) return;
-            NodeState.WriteSessionHandle(_folder, handle with { Label = label });
+            using var owner = Acquire(sessionId);
+            if (owner is null || NodeState.ReadSessionHandle(NodeState.SessionHandlePath(_folder, sessionId)) is not { } handle ||
+                handle.RepositoryId != ChatLocators.Text(arguments, "repositoryId") || handle.SessionToken != ChatLocators.Text(arguments, "sessionToken") ||
+                bindingVersion is { } version && version < handle.LabelVersion || handle.Label == label && (bindingVersion ?? 0) <= handle.LabelVersion) return;
+            NodeState.WriteSessionHandle(_folder, handle with { Label = label, LabelVersion = bindingVersion ?? handle.LabelVersion });
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {

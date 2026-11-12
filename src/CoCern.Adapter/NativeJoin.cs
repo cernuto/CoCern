@@ -289,7 +289,12 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
                     else if (probe.Version is null || !SessionHandoff.IsSessionReply(RelayTools.GetStatus, JsonSerializer.SerializeToElement(new { sessionId = handle.SessionId }), probe))
                         throw new Refused("native_handle_unverified");
                     // Verified live: this binding, not an older one the chat used in another checkout, is the one to dispatch.
-                    if (handle is not null) binding.Confirm();
+                    if (handle is not null)
+                    {
+                        binding.Confirm();
+                        RefreshLabel(binding, probe);
+                        handle = binding.CurrentHandle!;
+                    }
                 }
                 // A chat that moved to another checkout of this repository keeps its binding and its session. The same frozen open tells the hub,
                 // with this checkout's evidence (checked again by the hub) and protected root, and the hub answers with the chat's live session.
@@ -463,6 +468,8 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
             if (tool == RelayTools.ControlRequest) arguments = CoordinationTools.WithOwnSession(arguments, handle.SessionId);
             var reply = tool == RelayTools.CheckInbox ? await InboxWait.CheckAsync(modelCalls, arguments, InboxWait.PollInterval, ct) :
                 await ConditionalRead.ForwardAsync(modelCalls, tool, arguments, ct);
+            if (reply.Ok && tool == RelayTools.SessionLabelSet)
+                await RecordLabelAsync(context, handle, reply, expectedGeneration, ct);
             if (reply.Ok && options.SignalR && tool == RelayTools.CheckInbox)
                 foreach (var entry in hints.Values.Where(entry => entry.Session == handle.SessionId)) entry.Keeper.ResetHint();
             return reply;
@@ -471,6 +478,28 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
         catch (OperationCanceledException) when (!ct.IsCancellationRequested) { return new(false, "native_join_pending"); }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException or InvalidOperationException)
         { return new(false, "native_private_checkout_required"); }
+    }
+
+    private void RefreshLabel(NativeJoinBinding binding, AdapterReply reply)
+    {
+        if (!reply.Ok || !forwarder.MatchesNativeBinding(binding) || binding.CurrentHandle is not { } own ||
+            reply.Data is not { ValueKind: JsonValueKind.Object } data || ChatLocators.Text(data, "label") is not { Length: > 0 } label ||
+            !data.TryGetProperty("bindingVersion", out var version) || !version.TryGetInt64(out var bindingVersion)) return;
+        SessionHandoff.ForFolder(folder, new(binding.Provider, binding.NativeId)).Rename(JsonSerializer.SerializeToElement(new
+        { repositoryId = own.RepositoryId, sessionId = own.SessionId, sessionToken = own.SessionToken, label }), bindingVersion);
+    }
+
+    private async Task RecordLabelAsync(NativeHookContext context, SessionHandle expected, AdapterReply reply, string? generation, CancellationToken ct)
+    {
+        try
+        {
+            await using var binding = await NativeJoinBinding.AcquireAsync(folder, context.Provider, context.NativeId,
+                Environment.MachineName, expected.RepositoryId, context.Cwd, ct, existingOnly: true);
+            if ((generation is null || binding.Generation == generation) && binding.CurrentHandle is { } own &&
+                own.SessionId == expected.SessionId && own.SessionToken == expected.SessionToken) RefreshLabel(binding, reply);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or OperationCanceledException)
+        { /* The successful hub mutation stands; the next authenticated probe repairs this private display cache. */ }
     }
 
     // Discovery/background startup must never turn a pending hook intent into a session.

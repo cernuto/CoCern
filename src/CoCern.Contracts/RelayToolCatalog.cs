@@ -10,6 +10,7 @@ public static class RelayTools
     public const string SessionContextSearch = "session_context_search";
     public const string SessionOpen = "session_open";
     public const string SessionBind = "session_bind";
+    public const string SessionLabelSet = "session_label_set";
     public const string SessionToolSettingsSet = "session_tool_settings_set";
     public const string WorkerList = "worker_list";
     public const string GetStatus = "get_status";
@@ -73,6 +74,7 @@ public static class RelayToolCatalog
         new(RelayTools.SessionContextSearch, "Search one retained context with plain words; returns bounded snippets and versioned resource links. Recheck current task and evidence.", false, false, true, ["contextId", "query"], TokenBudget: SessionContextLimits.ReplyTokens),
         new(RelayTools.SessionOpen, "Open this chat's one session; optional role, taskId, binding. Retry an uncertain open with the same requestId and arguments.", false, true, false, []),
         new(RelayTools.SessionBind, "Report Roslyn/Visual Studio bindings under expectedVersion; optional label renames the session, machineId reports its PC.", false, true, true, ["expectedVersion"]),
+        new(RelayTools.SessionLabelSet, "Set this chat's display label to its current title. Only the authenticated session is renamed; labels grant no authority.", false, true, true, ["label"]),
         new(RelayTools.SessionToolSettingsSet, "Set a session tool profile with administrator credentials, exact direct human words and expectedVersion. Profiles grant no authority.", true, true, false, ["targetSessionId", "profile", "expectedVersion", "humanWords"]),
         new(RelayTools.WorkerList, "Read reported worker state/freshness; heartbeat is not proof of execution. Use chat_directory for recipient IDs.", false, false, false, []),
         new(RelayTools.GetStatus, "Read bounded repository and session coordination status, including blockers and uncertain actions.", false, false, false, []),
@@ -160,7 +162,7 @@ public static class RelayToolCatalog
 
     /// <summary>A compact forwarding schema: repositoryId is required, as is action_report's unconditional attempt; the hub enforces the rest.</summary>
     public static JsonElement ForwardingSchema(RelayTool tool) => Schema(ToolSchemas.ForwardingProperties(tool),
-        tool.Name == RelayTools.ActionReport ? ["repositoryId", "attempt"] : ["repositoryId"]);
+        tool.Name == RelayTools.ActionReport ? ["repositoryId", "attempt"] : tool.Name == RelayTools.SessionLabelSet ? ["repositoryId", "label"] : ["repositoryId"]);
 
     private static JsonElement Schema(Dictionary<string, object> properties, List<string> required) =>
         JsonSerializer.SerializeToElement(new { type = "object", properties, required, additionalProperties = true });

@@ -30,7 +30,8 @@ public interface IDocCacheTools
 /// boundary. Replies fit <see cref="RelayLimits.MaxDocReplyTokens"/> tokens and <see cref="RelayLimits.MaxDocReplyBytes"/> bytes; what does
 /// not fit is reported as a count. <paramref name="repositories"/> is read on every call, so a live view sees repositories found later.
 /// </summary>
-public sealed class DocCacheTool(IGrainFactory grains, ITokenCounter tokens, IDocSync sync, IReadOnlyCollection<string> repositories) : IDocCacheTools
+public sealed class DocCacheTool(IGrainFactory grains, ITokenCounter tokens, IDocSync sync, IReadOnlyCollection<string> repositories,
+    ReadEfficiencyMeasurements? measurements = null) : IDocCacheTools
 {
     private const int CommitLength = 12;
 
@@ -141,7 +142,14 @@ public sealed class DocCacheTool(IGrainFactory grains, ITokenCounter tokens, IDo
             reply = Prefix(first[..length], length);
         }
         var result = reply ?? Page("");
-        return Fits(result) ? Ok(result) : Error(PayloadTooLarge, new { field = "sourceMetadata", detailFetchRequired = true });
+        if (!Fits(result)) return Error(PayloadTooLarge, new { field = "sourceMetadata", detailFetchRequired = true });
+        if (focused && section.SourceBytes is { } bytes)
+        {
+            var returnedText = result["text"]!.GetValue<string>();
+            measurements?.Record(repository, ReadEfficiencyMeasurements.FocusedDocument, bytes, Encoding.UTF8.GetByteCount(returnedText),
+                section.SourceTokens, tokens.Count(returnedText), DateTimeOffset.UtcNow);
+        }
+        return Ok(result);
     }
 
     public async Task<RelayReply> SyncAsync(JsonObject args, CancellationToken cancellationToken)

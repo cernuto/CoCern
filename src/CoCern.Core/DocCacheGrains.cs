@@ -52,7 +52,8 @@ public sealed record DocHit(
 public sealed record DocSectionChunks(
     [property: Id(0)] string Path, [property: Id(1)] string Anchor, [property: Id(2)] string Heading, [property: Id(3)] string Commit,
     [property: Id(4)] int Tokens, [property: Id(5)] int FirstChunk, [property: Id(6)] string[] Chunks, [property: Id(7)] int[] ChunkTokens,
-    [property: Id(8)] int FirstOffset = 0);
+    [property: Id(8)] int FirstOffset = 0,
+    [property: Id(9)] long? SourceBytes = null, [property: Id(10)] int? SourceTokens = null);
 
 /// <summary>A search over the directory's documents. <see cref="NotSearched"/> documents failed to load or did not load before the search timeout.</summary>
 [GenerateSerializer, Immutable]
@@ -184,6 +185,8 @@ public sealed class DocumentGrain(IDocSource source, ITokenCounter tokens, DocCa
     private string? requestedCommit;
     private string? contentHash;
     private string commit = "";
+    private long? sourceBytes;
+    private int? sourceTokens;
     private int indexRuns, reads;
 
     public override Task OnActivateAsync(CancellationToken cancellationToken)
@@ -220,7 +223,7 @@ public sealed class DocumentGrain(IDocSource source, ITokenCounter tokens, DocCa
             if (offset >= chunks[0].Text.Length) return null;
             chunks[0] = (chunks[0].Text[offset..], tokens.Count(chunks[0].Text[offset..]));
         }
-        return new(doc.Path, section.Anchor, section.HeadingPath, commit, section.Tokens, first, chunks.Select(chunk => chunk.Text).ToArray(), chunks.Select(chunk => chunk.Tokens).ToArray(), offset);
+        return new(doc.Path, section.Anchor, section.HeadingPath, commit, section.Tokens, first, chunks.Select(chunk => chunk.Text).ToArray(), chunks.Select(chunk => chunk.Tokens).ToArray(), offset, sourceBytes, sourceTokens);
     }
 
     public Task<bool> ReplaceAsync(DocRef doc, string markdown)
@@ -283,6 +286,9 @@ public sealed class DocumentGrain(IDocSource source, ITokenCounter tokens, DocCa
     private void Index(string path, string content, string hash)
     {
         sections = DocFormats.Build(path, content, tokens, out _) ?? [];
+        // Counts name the exact loaded source version. Only these aggregate sizes travel with a section; its full text stays here.
+        sourceBytes = System.Text.Encoding.UTF8.GetByteCount(content);
+        sourceTokens = tokens.Count(content);
         byAnchor = sections.Select((section, index) => (section.Anchor, index)).ToDictionary(item => item.Anchor, item => item.index, StringComparer.Ordinal);
         contentHash = hash;
         indexRuns++;

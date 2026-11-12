@@ -2,6 +2,7 @@ using System.Net;
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
+using CoCern.Domain;
 using Microsoft.AspNetCore.Authentication.Cookies;
 
 namespace CoCern.Host.Dashboard;
@@ -45,15 +46,19 @@ public sealed class DashboardSecurity(IConfiguration configuration, IHostEnviron
             new Claim(ExpiryClaim, expiresAt.UtcTicks.ToString(System.Globalization.CultureInfo.InvariantCulture))
         ], Scheme));
 
-    public bool IsValid(ClaimsPrincipal? principal, DateTimeOffset now)
+    public bool IsValid(ClaimsPrincipal? principal, DateTimeOffset now) => Caller(principal, now) is not null;
+
+    /// <summary>Rechecks the exact viewer enrollment before a repository-scoped dashboard read.</summary>
+    public RelayCaller? Caller(ClaimsPrincipal? principal, DateTimeOffset now)
     {
         if (principal?.Identity is not { IsAuthenticated: true, AuthenticationType: Scheme }
             || !principal.HasClaim(Policy, "true")
-            || !long.TryParse(principal.FindFirstValue(ExpiryClaim), out var expires) || expires <= now.UtcTicks) return false;
+            || !long.TryParse(principal.FindFirstValue(ExpiryClaim), out var expires) || expires <= now.UtcTicks) return null;
         var id = principal.FindFirstValue(ClaimTypes.NameIdentifier);
         var fingerprint = principal.FindFirstValue(EnrollmentClaim);
-        return CurrentClients().Any(enrollment => enrollment.Client.PrincipalId == id && Allowed(enrollment.Client)
+        var match = CurrentClients().FirstOrDefault(enrollment => enrollment.Client.PrincipalId == id && Allowed(enrollment.Client)
             && enrollment.Fingerprint == fingerprint);
+        return match is null ? null : new RelayCaller(match.Client.PrincipalId, match.Client.IsAdministrator, match.Client.Repositories);
     }
 
     private Enrollment[] CurrentClients()

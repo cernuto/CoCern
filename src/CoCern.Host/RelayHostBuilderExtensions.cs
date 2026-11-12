@@ -203,7 +203,7 @@ public static class RelayHostBuilderExtensions
             provider.GetRequiredService<Orleans.IGrainFactory>(), provider.GetRequiredService<ITokenCounter>(), provider.GetRequiredService<ILogger<DocSyncRunner>>()));
         services.AddSingleton<IDocSync>(provider => provider.GetRequiredService<DocSyncRunner>());
         services.AddSingleton(provider => provider.GetRequiredService<DocCacheSettings>() is { Enabled: true }
-            ? new DocCacheTool(provider.GetRequiredService<Orleans.IGrainFactory>(), provider.GetRequiredService<ITokenCounter>(), provider.GetRequiredService<IDocSync>(), provider.GetRequiredService<DocRepositoryRegistry>().Ids)
+            ? new DocCacheTool(provider.GetRequiredService<Orleans.IGrainFactory>(), provider.GetRequiredService<ITokenCounter>(), provider.GetRequiredService<IDocSync>(), provider.GetRequiredService<DocRepositoryRegistry>().Ids, provider.GetService<ReadEfficiencyMeasurements>())
             : null!);
         services.AddHostedService<SpecSyncService>();
         // Idle deactivation is the cache's eviction: an unused document grain drops its sections, and an unused search index its index,

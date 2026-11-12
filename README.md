@@ -146,6 +146,8 @@ Nothing is copied by hand: the command downloads CoCern from this hub over HTTPS
 
 The installed `cocern-workflow` skill guides coordination. With an existing native Codex connection, startup records a private intent and the chat's first CoCern call joins or restores its own binding automatically. A chat that has already joined reuses that binding; it does not open a replacement session. The binding belongs to the chat, not the folder, so moving it to another worktree or clone of the same repository keeps its session, and a chat whose session the hub has lost gets a new one at its next call. Standard connections remain usable without native hooks. See [Connect and verify Codex](docs/codex-connect.md) for connection modes and troubleshooting.
 
+Use `session_label_set` with `label` to name your own chat in the directory and dashboard. It works in native and standard connections, including the chat profile. Reconnect after an adapter update to load the new tool; explicit tool selections must include it.
+
 For clients using the raw session tools, a typical chat is:
 
 1. `session_open` once, to join the hub, and keep its handle for the whole chat. Retry an uncertain open with the same `requestId` and arguments: it returns the same session, not a second one (in Codex, only until the app restarts CoCern; then reuse the handle you kept). A managing chat passes `role: "manager"`.
@@ -212,6 +214,8 @@ The **Database** page can schedule a full coordination reset for the next hub re
 | Page | Shows |
 | --- | --- |
 | Overview | Machines and sessions, live traffic and recent logs. |
+| Efficiency | Live traffic, watcher cadence, task-brief/excerpt savings and the saved baseline. |
+| Retained context | Browse and search saved collections, then open exact entry versions. |
 | Sessions | Each session in detail. **Close idle sessions** closes eligible idle chats; the automatic idle limit is 24 hours by default, unread mail can hold a chat for up to 7 days, and unresolved actions normally keep it open. Closing by label skips chats active in about the last 70 minutes. **Close session** closes one, optionally forcing it past unresolved actions. |
 | Analytics | Twelve reports for one repository from the hourly snapshot, this period against the one before (1–14 days), with Top 10 / Show all and an origin filter. A **Test effort** card opens a page of test minutes, pointless runs, tests added and deleted and costly tests, each marked measured or estimate. |
 | Database | Allocated size, table row counts and a cancellable reset for the next restart. |
@@ -224,6 +228,8 @@ The **Database** page can schedule a full coordination reset for the next hub re
 The interaction map displays message metadata rather than private message bodies. Connection readiness preflights do not join a chat; its session is managed through its client. Standing proposals never expire from age or session closure; dismiss obsolete proposals manually. Without approved instructions or active grants, standing adds no instruction or grant content to replies. Expired grants remain visible but inactive, and a grant's scoped authority never overrides client permissions.
 
 Analytics uses a cached hourly snapshot, not realtime data; its timestamp records snapshot completion. Conditional HTTP reads reuse cached data only for the exact repository and day selection. Retained workflow history can be incomplete, and unknown durations are excluded rather than treated as zero. See the [analytics reference](docs/reference.md#analytics) for batch reads and usage coverage.
+
+Efficiency and Retained context refresh while open, at most every five seconds, and pause when disconnected. Savings are measured from matching source/reply pairs since hub startup; missing values stay unknown. The saved baseline covers the whole hub, so incomplete data and repository-only selections are not compared. Analytics remains hourly. These figures do not measure model billing.
 
 ## Settings
 

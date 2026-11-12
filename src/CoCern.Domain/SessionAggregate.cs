@@ -71,6 +71,7 @@ internal static class SessionAggregate
             Operations.Verify => Verify(context, state),
             RelayTools.GetStatus => Describe(context, state, Text(context.Args, "hubIncarnation"), verified: false),
             RelayTools.SessionBind => Bind(context, state),
+            RelayTools.SessionLabelSet => SetLabel(context, state),
             RelayTools.CheckInbox => ReadInbox(state, context.Args),
             RelayTools.Ack => Acknowledge(context, state),
             RelayTools.SendMessage => SendDirect(context),
@@ -367,7 +368,7 @@ internal static class SessionAggregate
     private static RelayReply Describe(AggregateContext context, SessionState state, string hubIncarnation, bool verified)
     {
         var current = state.FreshUntil > context.Now && state.HubIncarnation == hubIncarnation;
-        var description = !verified && Flag(context.Args, "statusSummaryOnly") ? new JsonObject { ["sessionId"] = state.SessionId } : new JsonObject
+        var description = !verified && Flag(context.Args, "statusSummaryOnly") ? new JsonObject { ["sessionId"] = state.SessionId, ["bindingVersion"] = state.BindingVersion ?? 0 } : new JsonObject
         {
             ["sessionId"] = state.SessionId,
             ["bindingVersion"] = state.BindingVersion ?? 0,
@@ -376,6 +377,7 @@ internal static class SessionAggregate
             ["observedAt"] = state.ObservedAt?.ToString("O") ?? ""
         };
         description["toolSettings"] = SessionToolSettings.Read(context.State);
+        description["label"] = state.Label;
         // The role reported at session_open labels this session's activity; only the hub's internal verification sees it.
         if (verified && state.Role is { Length: > 0 } role) description["role"] = role;
         if (verified && state.NativeId is { Length: > 0 } participant) description[NativeParticipant.Id] = participant;
@@ -405,6 +407,18 @@ internal static class SessionAggregate
         if (!seen.Holds(board) && seen.Count >= RelayLimits.MaxStandingBoardsPerSession) return Ok(new { recorded = false });
         if (revision > seen.Of(board)) seen.Set(board, revision);
         return Ok(new { recorded = true });
+    }
+
+    private static RelayReply SetLabel(AggregateContext context, SessionState state)
+    {
+        var label = Required(context.Args, "label").Trim();
+        if (label.Length == 0 || label.Any(char.IsControl)) return Error(InvalidArguments);
+        state.Label = label;
+        // The presence version fences reordered registrations, including a bind queued before this rename.
+        var version = (state.BindingVersion ?? 0) + 1;
+        state.BindingVersion = version;
+        context.Send(AggregateKinds.ControlKey, new SessionRegistration(context.Repository, state.SessionId, state.Record.Presence));
+        return Ok(new { label, bindingVersion = version }, version);
     }
 
     /// <summary>

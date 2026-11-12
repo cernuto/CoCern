@@ -25,7 +25,14 @@ public sealed record RelayCaller(string PrincipalId, bool IsAdministrator, strin
 }
 
 /// <summary>Every operation's outcome. <see cref="DataJson"/> is the structured payload; <see cref="Version"/> is the record version it observed or produced.</summary>
-public sealed record RelayReply(bool Ok, string Code, string DataJson, long Version = 0);
+public sealed record RelayReply(bool Ok, string Code, string DataJson, long Version = 0)
+{
+    // In-process projection measurements only. Transport surrogates and replay JSON deliberately omit them.
+    [System.Text.Json.Serialization.JsonIgnore]
+    public long? ProjectionSourceBytes { get; init; }
+    [System.Text.Json.Serialization.JsonIgnore]
+    public long? ProjectionReplyBytes { get; init; }
+}
 
 /// <summary>An operation another aggregate must apply. Persisted with its source until delivered (transactional outbox).</summary>
 /// <summary>
