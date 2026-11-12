@@ -22,6 +22,7 @@ public sealed class SessionContextGrain([PersistentState("session_context", "rel
 {
     protected override string Kind => AggregateKinds.SessionContext;
     private SessionContextIndex? index;
+    private readonly IActivitySink? activity = services.GetService(typeof(IActivitySink)) as IActivitySink;
 
     public override async Task<RelayReply> ExecuteAsync(RelayCaller caller, string operation, string argumentsJson)
     {
@@ -81,8 +82,24 @@ public sealed class SessionContextGrain([PersistentState("session_context", "rel
             if (index is null)
             {
                 var staged = new SessionContextIndex(tokens);
-                try { staged.Apply(state); index = staged; }
+                var started = System.Diagnostics.Stopwatch.GetTimestamp();
+                var rebuilt = false;
+                try { staged.Apply(state); index = staged; rebuilt = true; }
                 catch { staged.Dispose(); throw; }
+                finally
+                {
+                    try
+                    {
+                        activity?.Record(new ActivityEvent
+                        {
+                            Timestamp = DateTimeOffset.UtcNow, Kind = ActivityEvent.Call, Tool = "session_context_index_rebuild",
+                            RepositoryId = state.RepositoryId, Ok = rebuilt, Code = rebuilt ? "Ok" : SessionContextLimits.SearchUnavailable,
+                            CallOrigin = "internal", BackgroundCall = false,
+                            DurationMilliseconds = System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds
+                        });
+                    }
+                    catch { /* Telemetry never changes the observed search. */ }
+                }
             }
             else index.Apply(state);
             return Task.FromResult(Ok(index.Search(state, Text(args, "query"), (int)Math.Clamp(Number(args, "limit", SessionContextLimits.SearchHits), 1, SessionContextLimits.SearchHits)), state.Revision));
