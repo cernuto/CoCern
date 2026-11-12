@@ -133,7 +133,7 @@ public sealed class SessionContextTests
         var budgetPatch = Patch("budget");
         budgetPatch["upserts"]![0]!["text"] = new string('A', 1600);
         budgetPatch["upserts"]![0]!["sourceRefs"] = new JsonArray(Enumerable.Range(0, 8).Select(n => (JsonNode?)JsonValue.Create("ref-" + n + new string('A', 600))).ToArray());
-        Assert.True((await Call(http, RelayTools.SessionContextPut, Envelope(session, new JsonObject { ["contextId"] = "framing-budget", ["expectedVersion"] = 0, ["requestId"] = "framing-create", ["patch"] = budgetPatch }))).Ok);
+        Assert.True((await Call(http, RelayTools.SessionContextPut, Envelope(session, new JsonObject { ["contextId"] = "framing-budget", ["expectedVersion"] = 0, ["requestId"] = "framing-create", ["patch"] = budgetPatch.DeepClone() }))).Ok);
         var budgetPart = Data(await service.RunAsync(caller, RelayTools.SessionContextGet, new JsonObject { ["repositoryId"] = "repo", ["contextId"] = "framing-budget", ["entryId"] = "evidence" }));
         Assert.Equal(1, budgetPart["partCount"]!.GetValue<int>());
         var gap = SessionContextLimits.ReplyBytes - 20 - Encoding.UTF8.GetByteCount(budgetPart.ToJsonString());
@@ -141,7 +141,7 @@ public sealed class SessionContextTests
         var nearLimit = new string('A', 1600 + gap);
         Assert.True(new O200kTokenCounter().Count(nearLimit) <= SessionContextLimits.PartTokens);
         budgetPatch["upserts"]![0]!["text"] = nearLimit;
-        Assert.Equal(SessionContextLimits.BudgetExceeded, (await Call(http, RelayTools.SessionContextPut, Envelope(session, new JsonObject { ["contextId"] = "framing-budget", ["expectedVersion"] = 1, ["requestId"] = "framing-overflow", ["patch"] = budgetPatch }))).Code);
+        Assert.Equal(SessionContextLimits.BudgetExceeded, (await Call(http, RelayTools.SessionContextPut, Envelope(session, new JsonObject { ["contextId"] = "framing-budget", ["expectedVersion"] = 1, ["requestId"] = "framing-overflow", ["patch"] = budgetPatch.DeepClone() }))).Code);
         Assert.True((await service.ReadResourceAsync(caller, budgetPart["uri"]!.GetValue<string>())).Ok);
 
         // Clearing the provider, rather than the domain's forget operation, also removes its catalog projection atomically.
