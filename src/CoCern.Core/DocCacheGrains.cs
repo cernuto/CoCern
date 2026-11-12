@@ -29,6 +29,11 @@ public sealed record DocHit(
     [property: Id(4)] float Score, [property: Id(5)] int Tokens, [property: Id(6)] string Commit, [property: Id(7)] bool HeadingMatch,
     [property: Id(8)] float Coverage)
 {
+    /// <summary>The exact chunk/offset from which the source excerpt begins; the ordinary section anchor stays unchanged.</summary>
+    [Id(9)] public string? ExcerptAnchor { get; init; }
+    [Id(10)] public int ExcerptOffset { get; init; }
+    [Id(11)] public bool SnippetClipped { get; init; }
+
     /// <summary>
     /// Best first by <see cref="Score"/>, then a heading match. Every document of a repository shares one index (<see cref="DocSearchIndex"/>),
     /// so BM25 scores compare across documents; the coverage scaling keeps a hit that misses a rare query term (such as the path) below one
@@ -244,7 +249,13 @@ public sealed class DocumentGrain(IDocSource source, ITokenCounter tokens, DocCa
     /// </summary>
     private async Task EnsureLoadedAsync(DocRef doc)
     {
-        if (loadedFor == doc.Hash) return;
+        if (loadedFor == doc.Hash)
+        {
+            // A new commit can retain this file's exact content. Report that commit without re-reading/re-indexing it, but never
+            // relabel fallback content from a different hash as the directory's unavailable commit.
+            if (contentHash == doc.Hash) commit = doc.Commit;
+            return;
+        }
         reads++;
         Observe();
         var content = await source.ReadAsync(doc.RepositoryId, doc.Path, doc.Commit);

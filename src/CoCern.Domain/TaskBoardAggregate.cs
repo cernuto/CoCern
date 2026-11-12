@@ -61,6 +61,7 @@ internal static class TaskBoardAggregate
             case RelayTools.RecordDecision: return StandingPreferences.RecordDecision(context);
             case Operations.StandingProposeHub: return StandingPreferences.ProposeFromHub(context);
             case RelayTools.TaskGet when taskId.Length == 0 && Text(context.Args, "section") == "standing": return StandingPreferences.View(context.State, context.Now);
+            case RelayTools.TaskGet when taskId.Length == 0 && Text(context.Args, "section") == "brief": return Error(InvalidArguments, new { required = "taskId" });
             case RelayTools.TaskGet when taskId.Length == 0: return context.Args.ContainsKey("sinceRevision") ? DeltaPage(board, context.Args) : ListTasks(board, context);
             case RelayTools.ContextGet: return GetContext(context);
             case RelayTools.ContextPut: return PutContext(context);
@@ -195,6 +196,7 @@ internal static class TaskBoardAggregate
     {
         var version = task.Version;
         var section = Text(args, "section");
+        if (section == "brief") return Brief(args, task);
         if (section == BoardTask.WorkflowKey) return task.Workflow is { } workflow ? Ok(workflow.Json, version) : Error(NotFound);
         if (ListSections.Contains(section)) return Page(task.Section(section).Select(x => x!), args) with { Version = version };
         if (section == BoardTask.ActionsKey) return Page(task.Actions.Select(x => x.Value!), args) with { Version = version };
@@ -208,6 +210,83 @@ internal static class TaskBoardAggregate
         var recent = Recent(task);
         if (ByteSize(recent) > RelayLimits.MaxPayloadBytes) return Ok(Summary(task), version);
         return Ok(recent, version);
+    }
+
+    /// <summary>
+    /// Current task context without copied history. Required groups fit whole or name the exact section still needed before acting;
+    /// no packet, criterion, action fence or code string is shortened to make a brief appear complete.
+    /// </summary>
+    internal static RelayReply Brief(JsonObject args, BoardTask task)
+    {
+        const int maximumBytes = 4_096;
+        var sections = new[] { BoardTask.WorkflowKey, BoardTask.FactsKey, BoardTask.ActionsKey, BoardTask.MessagesKey, BoardTask.ReportsKey, BoardTask.AttemptHistoryKey };
+        // One common reference: add the exact name from sections or detailFetchRequired instead of repeating the identity six times.
+        var refs = new JsonObject
+        {
+            ["tool"] = RelayTools.TaskGet, ["repositoryId"] = Text(args, "repositoryId"), ["boardId"] = Text(args, "boardId", "default"), ["taskId"] = task.TaskId
+        };
+        var needed = new JsonArray();
+        var brief = new JsonObject
+        {
+            ["brief"] = true, ["complete"] = true, ["taskId"] = task.TaskId, ["version"] = task.Version, ["changeRevision"] = task.ChangeRevision,
+            ["owner"] = task.Json[BoardTask.OwnerKey]?.DeepClone(), ["claimGeneration"] = task.ClaimGeneration,
+            ["leaseUntil"] = task.Json[BoardTask.LeaseUntilKey]?.DeepClone(), ["resourceIds"] = task.ResourceIds?.DeepClone(),
+            ["sections"] = new JsonArray(sections.Select(section => (JsonNode?)JsonValue.Create(section)).ToArray()),
+            ["refs"] = refs, ["detailFetchRequired"] = needed
+        };
+        foreach (var key in new[] { BoardTask.UpdatedAtKey, BoardTask.UpdatedByKey, BoardTask.ArchivedAtKey })
+            if (task.Json[key] is { } value) brief[key] = value.DeepClone();
+        bool Fits() => FitsWire(Ok(brief, task.Version), maximumBytes);
+        bool Include(string key, JsonNode value)
+        {
+            brief[key] = value;
+            if (Fits()) return true;
+            brief.Remove(key);
+            return false;
+        }
+        void Need(string section)
+        {
+            if (!needed.Any(value => value?.GetValue<string>() == section)) needed.Add(section);
+            brief["complete"] = false;
+        }
+
+        if (task.Workflow is { } workflow && !Include(BoardTask.WorkflowKey, workflow.Json.DeepClone()))
+        {
+            brief["workflowState"] = workflow.State;
+            Need(BoardTask.WorkflowKey);
+        }
+        var unresolved = new JsonArray();
+        foreach (var entry in task.Actions)
+        {
+            if (entry.Value is not JsonObject record || !TaskActions.IsUnresolved(new TaskAction(record))) continue;
+            var copy = record.DeepClone().AsObject();
+            copy["actionId"] = entry.Key;
+            unresolved.Add(copy);
+        }
+        brief["unresolvedActionCount"] = unresolved.Count;
+        if (!Include("unresolvedActions", unresolved)) Need(BoardTask.ActionsKey);
+
+        var facts = task.FactsIfAny;
+        var titleIncluded = facts?[BoardTask.TitleFact] is { } title && Include("facts", new JsonObject { [BoardTask.TitleFact] = title.DeepClone() });
+        if (facts is { Count: > 0 } && (!titleIncluded || facts.Count > 1)) Need(BoardTask.FactsKey);
+        brief["factCount"] = facts?.Count ?? 0;
+        brief["actionCount"] = task.Actions.Count;
+        foreach (var section in ListSections) brief[section + "Total"] = task.Section(section).Count;
+        // Count/refusal markers can tip an otherwise exact-fit group over the cap. Remove groups atomically, never their text.
+        if (!Fits() && brief.Remove("facts")) Need(BoardTask.FactsKey);
+        if (!Fits() && brief.Remove("unresolvedActions") && brief["unresolvedActionCount"]!.GetValue<int>() > 0) Need(BoardTask.ActionsKey);
+        if (!Fits() && brief.Remove(BoardTask.WorkflowKey))
+        {
+            brief["workflowState"] = task.Workflow!.State;
+            Need(BoardTask.WorkflowKey);
+        }
+        // Extremely long required IDs/resources can outweigh the brief budget themselves. Refuse this projection rather than clip them.
+        if (!Fits()) return Error(PayloadTooLarge, new { taskId = task.TaskId, version = task.Version, readFullTask = true }, task.Version);
+        var result = Ok(brief, task.Version);
+        var recentData = Recent(task);
+        var recent = Ok(recentData, task.Version);
+        // A task already smaller than its navigation metadata needs no projection at all.
+        return FitsWire(recent, maximumBytes) && ByteSize(recentData) <= ByteSize(brief) ? recent : result;
     }
 
     /// <summary>

@@ -4,6 +4,7 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -17,6 +18,7 @@ using CoCern.Contracts;
 using CoCern.Core;
 using CoCern.Host;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace CoCern.Tests;
 
@@ -25,8 +27,90 @@ namespace CoCern.Tests;
 public sealed class DocCacheCollection;
 
 [Collection(nameof(DocCacheTests))]
-public sealed class DocCacheTests
+public sealed class DocCacheTests(ITestOutputHelper output)
 {
+    [Fact]
+    public async Task Focused_document_reads_preserve_exact_code_and_pin_changed_budget_continuations_to_the_source_commit()
+    {
+        var source = "# Exact\n\n" + string.Concat(Enumerable.Range(0, 64).Select(index => $"Rule {index}: retain exact identifiers, versions and source evidence before proceeding.\n"))
+            + "\n```csharp\npublic static string Read(string[] values)\n{\n\tvar needlevalue = values[0] + \"🧭\";\n\treturn needlevalue;\n}\n```\n";
+        using var git = GitRepositories.Create(new() { ["docs/exact.md"] = source });
+        using var other = GitRepositories.Create(new() { ["docs/exact.md"] = source.Replace("needlevalue", "foreignvalue", StringComparison.Ordinal) });
+        await using var host = DocHost(git, settings: new()
+        {
+            ["Relay:DocCache:Repositories:1:Id"] = "repo2", ["Relay:DocCache:Repositories:1:ClonePath"] = other.Clone
+        });
+        using var worker = host.AuthorizedClient();
+        await SyncAsync(host);
+        await host.Services.GetRequiredService<DocSyncRunner>().SyncAsync("repo2", null, CancellationToken.None);
+        var commit = git.Head();
+        var tools = Assert.IsType<DocCacheTool>(host.Services.GetRequiredService<IDocCacheTools>());
+        var search = await tools.SearchAsync(new JsonObject { ["repositoryId"] = "repo", ["query"] = "needlevalue" });
+        Assert.True(search.Ok, search.Code);
+        using var searchJson = JsonDocument.Parse(search.DataJson);
+        var hit = Assert.Single(searchJson.RootElement.GetProperty("hits").EnumerateArray());
+        var snippet = hit.GetProperty("snippet").GetString()!;
+        Assert.Contains(snippet, source, StringComparison.Ordinal);
+        Assert.Contains("needlevalue", snippet, StringComparison.Ordinal);
+        Assert.Equal(commit, hit.GetProperty("sourceCommit").GetString());
+        Assert.True(hit.GetProperty("snippetClipped").GetBoolean());
+        var excerpt = Data(await Tool(worker, "doc_section", new
+        {
+            repositoryId = "repo", path = "docs/exact.md", anchor = hit.GetProperty("excerptAnchor").GetString(), expectedCommit = commit, maxTokens = 512
+        }));
+        Assert.StartsWith(excerpt.GetProperty("text").GetString()!, source[source.IndexOf(snippet, StringComparison.Ordinal)..], StringComparison.Ordinal);
+
+        // The core call maps the exact reader to this regression; HTTP continuations below also exercise its authenticated transport.
+        var full = await tools.SectionAsync(new JsonObject { ["repositoryId"] = "repo", ["path"] = "docs/exact.md", ["anchor"] = "exact" });
+        Assert.True(full.Ok, full.Code);
+        var arguments = new JsonObject { ["repositoryId"] = "repo", ["path"] = "docs/exact.md", ["anchor"] = "exact", ["maxTokens"] = 64, ["expectedCommit"] = commit };
+        var collected = new StringBuilder();
+        JsonObject? firstNext = null;
+        var focusedTokens = 0;
+        for (var page = 0; page < 100; page++)
+        {
+            var result = await Tool(worker, "doc_section", arguments);
+            Assert.Equal((HttpStatusCode.OK, "Ok"), Status(result));
+            var data = Data(result);
+            var text = data.GetProperty("text").GetString()!;
+            Assert.Equal(commit, data.GetProperty("sourceCommit").GetString());
+            Assert.True(Tokens.Count(text) <= arguments["maxTokens"]!.GetValue<int>());
+            Assert.True(Tokens.Count(data.GetRawText()) <= RelayLimits.MaxDocReplyTokens);
+            collected.Append(text);
+            if (page == 0) focusedTokens = Tokens.Count(data.GetRawText());
+            if (!data.TryGetProperty("nextRead", out var next)) break;
+            firstNext ??= JsonNode.Parse(next.GetRawText())!.AsObject();
+            arguments = JsonNode.Parse(next.GetRawText())!.AsObject();
+            arguments["repositoryId"] = "repo";
+            arguments["maxTokens"] = page % 2 == 0 ? 512 : 96;
+        }
+        Assert.Equal(source, collected.ToString());
+        Assert.NotNull(firstNext);
+        output.WriteLine($"Exact doc page: full={Encoding.UTF8.GetByteCount(full.DataJson)} bytes/{Tokens.Count(full.DataJson)} tokens; focused64={focusedTokens} complete reply tokens (same fixture).");
+        Assert.True(focusedTokens < Tokens.Count(full.DataJson));
+
+        // A native caller's home repository remains repo; the public target travels with the pinned continuation.
+        using var admin = Admin(host);
+        var cross = Data(await Tool(admin, "doc_section", new { repositoryId = "repo", repository = "repo2", path = "docs/exact.md", anchor = "exact", maxTokens = 64 }));
+        var crossNext = JsonNode.Parse(cross.GetProperty("nextRead").GetRawText())!.AsObject();
+        Assert.Equal("repo2", crossNext["repository"]!.GetValue<string>());
+        crossNext["repositoryId"] = "repo";
+        var crossContinued = Data(await Tool(admin, "doc_section", crossNext));
+        Assert.Equal(other.Head(), crossContinued.GetProperty("sourceCommit").GetString());
+
+        // A content-preserving commit updates provenance without re-reading the cached file; a changed source refuses an old cursor.
+        git.Commit(new() { ["docs/other.md"] = "# Other\n\nA new committed file.\n" });
+        await SyncAsync(host);
+        var unchanged = Data(await Tool(worker, "doc_section", new { repositoryId = "repo", path = "docs/exact.md", anchor = "exact", expectedCommit = git.Head(), maxTokens = 64 }));
+        Assert.Equal(git.Head(), unchanged.GetProperty("sourceCommit").GetString());
+        git.Commit(new() { ["docs/exact.md"] = source.Replace("needlevalue", "changedvalue", StringComparison.Ordinal) });
+        await SyncAsync(host);
+        firstNext!["repositoryId"] = "repo";
+        Assert.Equal((HttpStatusCode.Conflict, "VersionConflict"), Status(await Tool(worker, "doc_section", firstNext)));
+        firstNext["repositoryId"] = "other";
+        firstNext["repository"] = "other";
+        Assert.Equal((HttpStatusCode.Forbidden, "RepositoryDenied"), Status(await Tool(worker, "doc_section", firstNext)));
+    }
 
     private static JsonElement DirectoryObservation(RelayHostFixture host, string repository) => JsonSerializer.SerializeToElement(
         Assert.Single(host.Services.GetRequiredService<DocCacheActivity>().Snapshot(DateTimeOffset.UtcNow).Grains, row => row.Kind == "Directory" && row.Repository == repository));

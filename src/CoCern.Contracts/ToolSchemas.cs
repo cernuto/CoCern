@@ -40,7 +40,7 @@ internal static class ToolSchemas
             RelayTools.AnalyticsQuery => ["params", "sql", "reports", "ifNoneMatch", "includeDetails"],
             RelayTools.OrderPut => ["expiresAt", "expectedRevision"],
             RelayTools.DocSearch => ["query", "repository", "spec", "path"],
-            RelayTools.DocSection => ["repository"],
+            RelayTools.DocSection => ["repository", "maxTokens", "expectedCommit"],
             RelayTools.DocSync => ["branch"],
             RelayTools.ConnectApp => ["admin"],
             _ => []
@@ -115,7 +115,7 @@ internal static class ToolSchemas
         {
             if (!tool.IsMutation) properties.Remove("requestId");
             properties.Remove("sessionId"); properties.Remove("sessionToken");
-            foreach (var field in properties.Keys.Where(field => field is not ("repositoryId" or "requestId")).ToArray())
+            foreach (var field in properties.Keys.Where(field => field is not ("repositoryId" or "requestId" or "maxTokens" or "expectedCommit")).ToArray())
                 properties[field] = new { type = "string", description = CompactDoc(tool.Name, field) };
         }
         // Administrator-only tools are listed only beside every worker tool, which already describes the envelope, so they advertise it by
@@ -229,7 +229,7 @@ internal static class ToolSchemas
                 Object("binding", "Reported configured Roslyn/Visual Studio binding; update under expectedVersion. Left out or null, the current binding stays."); Text("label", "New display label for this session, such as its chat's title."); Text("availability", "Reported current worker availability."); Integer("freshnessSeconds", "Freshness duration, at most 600 seconds."); break;
             case RelayTools.TaskGet:
                 properties["taskId"] = new { type = "string", maxLength = RelayLimits.MaxIdentifierLength, description = "Omit for a bounded board list or delta." };
-                properties["section"] = new { type = "string", @enum = new[] { "facts", "messages", "reports", "actions", "workflow", "standing" }, description = "standing needs no taskId." };
+                properties["section"] = new { type = "string", @enum = new[] { "brief", "facts", "messages", "reports", "actions", "attemptHistory", "workflow", "standing" }, description = "brief first; follow detailFetchRequired refs before accepting. standing needs no taskId." };
                 Integer("sinceRevision", "Board delta checkpoint; omit taskId. Save snapshotRevision only after all pages.");
                 Integer("snapshotRevision", "Pinned revision from the first delta page; a concurrent change returns DeltaRestartRequired.");
                 properties["cursor"] = new { type = "integer", minimum = 0, description = "Continuation from a bounded list; keep the same sinceRevision and snapshotRevision." };
@@ -362,7 +362,9 @@ internal static class ToolSchemas
             case RelayTools.DocSection:
                 properties["repository"] = DocRepository();
                 properties["path"] = DocPath("Document path from a doc_search hit.");
-                properties["anchor"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxDocAnchorLength, description = "Section anchor from a hit, or the next anchor of a long section." }; break;
+                properties["anchor"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxDocAnchorLength, description = "Exact section/excerpt anchor from a hit or nextRead." };
+                properties["maxTokens"] = new { type = "integer", minimum = 64, maximum = 2000, @default = 2000, description = "Source-text token budget; prefer 512 and follow nextRead. Reply metadata has its own bound." };
+                properties["expectedCommit"] = new { type = "string", minLength = 1, maxLength = 256, pattern = "^[^\\u0000-\\u001F\\u007F-\\u009F]+$", description = "Exact sourceCommit to pin this read; a mismatch returns VersionConflict." }; break;
             case RelayTools.DocSync:
                 properties["branch"] = new { type = "string", minLength = 1, maxLength = RelayLimits.MaxDocBranchLength, description = "Branch to follow from now on; default the configured one." }; break;
             case RelayTools.ConnectApp:
@@ -449,7 +451,7 @@ internal static class ToolSchemas
         "repository" => "Another repository's docs; default yours.",
         "spec" => "Only documents of this spec.",
         "path" => tool == RelayTools.DocSection ? "Path from a doc_search hit." : "Only this document.",
-        "anchor" => "Anchor from a hit, or its next.",
+        "anchor" => "Exact section/excerpt anchor from a hit or nextRead.",
         _ => "Branch to follow; default the configured one."
     };
 

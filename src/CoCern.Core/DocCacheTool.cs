@@ -55,7 +55,7 @@ public sealed class DocCacheTool(IGrainFactory grains, ITokenCounter tokens, IDo
         var outcome = await Directory(repository).SearchAsync(Text(args, "query"), Optional(args, "spec"), Optional(args, "path"), limit, SearchTimeout);
         if (outcome.PathUnknown) return Error(NotFound, new { field = "path" });
         var items = new JsonArray();
-        var reply = new JsonObject { ["hits"] = items };
+        var reply = new JsonObject { ["repository"] = repository, ["hits"] = items };
         if (outcome.NotSearched > 0) { reply["partial"] = true; reply["notSearched"] = outcome.NotSearched; }
         for (var index = 0; index < outcome.Hits.Length; index++)
         {
@@ -63,7 +63,8 @@ public sealed class DocCacheTool(IGrainFactory grains, ITokenCounter tokens, IDo
             items.Add(new JsonObject
             {
                 ["path"] = hit.Path, ["anchor"] = hit.Anchor, ["heading"] = hit.Heading, ["snippet"] = hit.Snippet,
-                ["score"] = Math.Round(hit.Score, 2), ["tokens"] = hit.Tokens, ["commit"] = Short(hit.Commit)
+                ["score"] = Math.Round(hit.Score, 2), ["tokens"] = hit.Tokens, ["commit"] = Short(hit.Commit),
+                ["sourceCommit"] = hit.Commit, ["excerptAnchor"] = hit.ExcerptAnchor ?? hit.Anchor, ["snippetClipped"] = hit.SnippetClipped
             });
             if (Fits(reply)) continue;
             items.RemoveAt(items.Count - 1);
@@ -82,36 +83,65 @@ public sealed class DocCacheTool(IGrainFactory grains, ITokenCounter tokens, IDo
     {
         var repository = Text(args, "repositoryId");
         if (!Known(repository)) return NotConfigured(repositories.Count);
+        var sourceLimit = RelayLimits.MaxDocReplyTokens;
+        if (args.ContainsKey("maxTokens") && (args["maxTokens"] is not JsonValue budget || !budget.TryGetValue<int>(out sourceLimit)
+            || sourceLimit < 64 || sourceLimit > RelayLimits.MaxDocReplyTokens)) return Error(InvalidArguments, new { field = "maxTokens" });
+        string? expectedCommit = null;
+        if (args.ContainsKey("expectedCommit") && (args["expectedCommit"] is not JsonValue pin || !pin.TryGetValue<string>(out expectedCommit)
+            || expectedCommit is not { Length: >= 1 and <= 256 } || expectedCommit.Any(char.IsControl))) return Error(InvalidArguments, new { field = "expectedCommit" });
         if (await Directory(repository).SectionAsync(Text(args, "path"), Text(args, "anchor")) is not { } section) return Error(NotFound, new { field = "anchor" });
-        var reply = new JsonObject
+        if (expectedCommit is not null && !string.Equals(expectedCommit, section.Commit, StringComparison.Ordinal))
+            return Error(RelayErrorCodes.VersionConflict, new { field = "expectedCommit", sourceCommit = section.Commit, readCurrentState = true });
+        var focused = args.ContainsKey("maxTokens") || expectedCommit is not null;
+        JsonObject Page(string text, int nextChunk = 0, int nextOffset = 0, int moreTokens = 0)
         {
-            ["path"] = section.Path, ["anchor"] = section.Anchor, ["heading"] = section.Heading, ["commit"] = Short(section.Commit), ["tokens"] = section.Tokens, ["text"] = ""
-        };
+            var page = new JsonObject
+            {
+                ["path"] = section.Path, ["anchor"] = section.Anchor, ["heading"] = section.Heading, ["commit"] = Short(section.Commit),
+                ["sourceCommit"] = section.Commit, ["tokens"] = section.Tokens, ["text"] = text
+            };
+            if (focused)
+            {
+                page["textTokens"] = tokens.Count(text);
+                page["clipped"] = section.FirstChunk > 1 || section.FirstOffset > 0 || nextChunk > 0;
+            }
+            if (nextChunk > 0)
+            {
+                var next = Anchor(section.Anchor, nextChunk, nextOffset);
+                page["next"] = next;
+                page["moreTokens"] = moreTokens;
+                if (focused) page["nextRead"] = new JsonObject
+                {
+                    ["repository"] = repository, ["path"] = section.Path, ["anchor"] = next, ["expectedCommit"] = section.Commit, ["maxTokens"] = sourceLimit
+                };
+            }
+            return page;
+        }
         var text = new StringBuilder();
         var taken = 0;
+        JsonObject? reply = null;
         while (taken < section.Chunks.Length)
         {
-            reply["text"] = text.ToString() + section.Chunks[taken];
-            if (!Fits(reply)) break;
+            var candidate = text.ToString() + section.Chunks[taken];
+            var more = taken + 1 < section.Chunks.Length;
+            var page = Page(candidate, more ? section.FirstChunk + taken + 1 : 0, 0, more ? section.ChunkTokens.Skip(taken + 1).Sum() : 0);
+            if (tokens.Count(candidate) > sourceLimit || !Fits(page)) break;
             text.Append(section.Chunks[taken]);
+            reply = page;
             taken++;
         }
-        reply["text"] = text.ToString();
-        if (taken == 0)
+        if (taken == 0 && section.Chunks.Length > 0)
         {
-            // Even the first chunk is over the budget (very long tokens or heavy JSON escaping): send the longest start that fits.
+            // Cut the exact source only at a character boundary. Complete continuation metadata participates in every budget check.
             var first = section.Chunks[0];
-            var length = LongestFit(reply, first);
-            reply["text"] = first[..length];
-            reply["next"] = Anchor(section.Anchor, section.FirstChunk, section.FirstOffset + length);
-            reply["moreTokens"] = tokens.Count(first[length..]) + section.ChunkTokens.Skip(1).Sum();
+            JsonObject Prefix(string prefix, int length) => Page(prefix, section.FirstChunk, section.FirstOffset + length,
+                tokens.Count(first[length..]) + section.ChunkTokens.Skip(1).Sum());
+            var length = LongestFit(first, sourceLimit, Prefix);
+            if (length == 0) return Error(PayloadTooLarge, new { field = "sourceMetadata", detailFetchRequired = true });
+            reply = Prefix(first[..length], length);
         }
-        else if (taken < section.Chunks.Length)
-        {
-            reply["next"] = Anchor(section.Anchor, section.FirstChunk + taken, 0);
-            reply["moreTokens"] = section.ChunkTokens.Skip(taken).Sum();
-        }
-        return Ok(reply);
+        var result = reply ?? Page("");
+        return Fits(result) ? Ok(result) : Error(PayloadTooLarge, new { field = "sourceMetadata", detailFetchRequired = true });
     }
 
     public async Task<RelayReply> SyncAsync(JsonObject args, CancellationToken cancellationToken)
@@ -136,18 +166,26 @@ public sealed class DocCacheTool(IGrainFactory grains, ITokenCounter tokens, IDo
         }
     }
 
-    /// <summary>The longest start of <paramref name="chunk"/> that fits the reply, at least one character and never half a surrogate pair.</summary>
-    private int LongestFit(JsonObject reply, string chunk)
+    /// <summary>An exact source prefix fitting both the source-text budget and complete reply, never half a surrogate pair.</summary>
+    private int LongestFit(string chunk, int sourceLimit, Func<string, int, JsonObject> page)
     {
-        int low = 1, high = chunk.Length - 1;
+        int low = 0, high = chunk.Length - 1;
         while (low < high)
         {
             var middle = (low + high + 1) / 2;
-            reply["text"] = chunk[..middle];
-            if (Fits(reply)) low = middle; else high = middle - 1;
+            var prefix = chunk[..middle];
+            if (tokens.Count(prefix) <= sourceLimit && Fits(page(prefix, middle))) low = middle; else high = middle - 1;
         }
-        if (low < chunk.Length && low > 1 && char.IsHighSurrogate(chunk[low - 1])) low--;
-        return low;
+        // BPE counts are not strictly monotonic: shortening a fitting prefix to keep a surrogate pair intact can increase its count.
+        // Recheck the final source and fully composed page instead of assuming the binary-search decision still holds.
+        while (low > 0)
+        {
+            if (char.IsHighSurrogate(chunk[low - 1])) { low--; continue; }
+            var prefix = chunk[..low];
+            if (tokens.Count(prefix) <= sourceLimit && Fits(page(prefix, low))) return low;
+            low--;
+        }
+        return 0;
     }
 
     private static string Anchor(string anchor, int chunk, int offset) =>

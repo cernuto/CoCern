@@ -127,6 +127,8 @@ Successful aggregate mutations perform age-based replay, acknowledgment, and res
 
 **Reading tasks.** Use `task_get` with `taskId` for one task, optionally selecting a `section`. Leave out `taskId`, `section` and `sinceRevision` to use board-list options `openOnly`, `includeDetails` and `snapshotTag`. Do not send these list-only options with a task, section or delta read, even with `false` values. A rejected combination identifies the conflicting field and explains the accepted modes. `boardId` defaults to `default` when omitted.
 
+For one task, start with `taskId` and `section: "brief"`. A brief keeps current identity, versions, ownership, claim resources, workflow and unresolved actions, while replacing history with counts and section references. Required groups are included whole or omitted with `complete: false` and exact section names in `detailFetchRequired`; read those sections before accepting the task. Add the required `section` to the common `refs` arguments. Goals, criteria, action fences and code are never paraphrased or shortened. If the existing default task reply is already smaller, the brief read returns it unchanged. Default reads and exact section reads remain available for live and archived tasks.
+
 **Reporting actions.** Every `action_report` names the positive `attempt` returned by `action_begin` or the action read from `task_get`, including recovery and restoration reports. Do not guess the attempt or replay a report under a replacement session. On `VersionConflict`, reread the task and reconcile the prior request before submitting a changed mutation with a new request ID.
 
 ### Workflow
@@ -255,13 +257,13 @@ Also skipped: files over 256 KB (8 MB for OpenAPI), symlinks, malformed files, a
 
 | Tool | What it does |
 | --- | --- |
-| `doc_search` | Up to 5 sections (`limit` up to 10), each with `path`, `anchor`, `heading`, `snippet`, `score`, `tokens` and `commit`. Optional `spec` and `path`. Takes over 10 seconds: returns what it has with `partial: true`. Without `query`: `repositories`, the ones with docs you may read. |
-| `doc_section` | One section by `path` and `anchor`. A long one comes in parts: call again with `next`. |
+| `doc_search` | Up to 5 sections (`limit` up to 10), each with exact `path`, `anchor`, `heading`, a focused source `snippet`, `score`, `tokens`, short `commit` and full `sourceCommit`. `excerptAnchor` locates the snippet; `snippetClipped` marks an excerpt. The reply names its effective `repository`. Optional `spec` and `path`. Takes over 10 seconds: returns what it has with `partial: true`. Without `query`: `repositories`, the ones with docs you may read. |
+| `doc_section` | Exact section text by `path` and `anchor`. Prefer `maxTokens: 512` for a focused page; the source-text budget accepts 64 to 2,000 and defaults to 2,000. Pin `expectedCommit` to a hit's full `sourceCommit`; a changed commit returns `VersionConflict`. A long read returns `next`; focused reads also return complete pinned `nextRead` arguments. |
 
 **Another repository.** `doc_search` and `doc_section` take an optional `repository`, the repository to read instead of `repositoryId`'s. A native chat's `repositoryId` is always its own, so this is how it reads elsewhere. The hub checks it like any `repositoryId`: the credential must have that repository (an administrator's has every one), else `RepositoryDenied`. The call carries no session proof and runs as the credential alone. No other tool can leave the chat's repository.
 | `doc_sync` | Sync now; needs a `requestId`. `branch` changes the branch followed. |
 
-Replies stay under 2,000 tokens; hits that don't fit are counted in `more`. Errors: `NoRepositoriesConfigured`, `DocCacheUnavailable` (off, or not a configured repository).
+Reply data stays under 2,000 tokens, including metadata; hits that don't fit are counted in `more`. `maxTokens` limits source text separately, so a 64-token source page also carries provenance and continuation metadata. Search snippets preserve original whitespace and code without inserted match markers. Follow `nextRead` with its repository, commit pin and anchor to keep exact source across pages; the text budget may change between pages. The original section anchor and legacy `next` remain available. Errors: `NoRepositoriesConfigured`, `DocCacheUnavailable` (off, or not a configured repository).
 
 ## Monitoring
 

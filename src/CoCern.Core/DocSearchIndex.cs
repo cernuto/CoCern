@@ -146,7 +146,7 @@ public sealed class DocSearchIndex : IDisposable
             if (matches.Count == 0 || DocQuery.Parse(analyzer, query) is not { } parsed) return new([], matches);
             var queryTerms = DocQuery.Terms(analyzer, query);
             var content = queryTerms.Where(term => !DocQuery.IsStopTerm(term)).ToArray();
-            var highlighter = new Highlighter(new SimpleHTMLFormatter("[", "]"), new QueryScorer(parsed, DocQuery.Body)) { TextFragmenter = new SimpleFragmenter(RelayLimits.MaxDocSnippetChars / 2) };
+            var highlighter = new Highlighter(new SimpleHTMLFormatter("", ""), new QueryScorer(parsed, DocQuery.Body)) { TextFragmenter = new SimpleFragmenter(RelayLimits.MaxDocSnippetChars / 2) };
             var weights = content.ToDictionary(term => term, term => Idf(searcher.IndexReader, term), StringComparer.Ordinal);
             var total = weights.Values.Sum();
             // Which chunks hold each query term, read once per query from the index instead of analyzing every candidate chunk's text again.
@@ -169,18 +169,23 @@ public sealed class DocSearchIndex : IDisposable
                 {
                     var stored = searcher.Doc(doc);
                     var section = indexed.Sections[indexed.ByAnchor[stored.Get(AnchorField)]];
-                    var body = BodyOf(section, stored.GetField(PartField).GetInt32Value() ?? 0);
+                    var part = stored.GetField(PartField).GetInt32Value() ?? 0;
+                    var body = BodyOf(section, part);
                     var coverage = total <= 0 ? 1f : (float)(weights.Where(weight => inHeading[weight.Key].Get(doc) || inBody[weight.Key].Get(doc)).Sum(weight => weight.Value) / total);
                     // The body rides in Snippet until the hits are chosen, so only returned hits are highlighted.
                     candidates.Add(new(file, section.Anchor, section.HeadingPath, body, score * (CoverageFloor + (1 - CoverageFloor) * coverage * coverage),
-                        section.Tokens, indexed.Commit, queryTerms.Any(term => inHeading[term].Get(doc)), coverage));
+                        section.Tokens, indexed.Commit, queryTerms.Any(term => inHeading[term].Get(doc)), coverage)
+                    {
+                        ExcerptAnchor = section.Anchor + DocumentGrain.ChunkSeparator + (part + 1).ToString(System.Globalization.CultureInfo.InvariantCulture),
+                        ExcerptOffset = part == 0 ? Math.Min(section.HeadingLength, section.Chunks[0].Text.Length) : 0
+                    });
                 }
                 // One hit per section: its best chunk.
                 var own = DocHit.Ranked(candidates).DistinctBy(hit => hit.Anchor).Take(limit).ToArray();
                 matches[file] = own.Length;
                 hits.AddRange(own);
             }
-            return new(DocHit.Ranked(hits).Take(limit).Select(hit => hit with { Snippet = Snippet(highlighter, hit.Snippet) }).ToArray(), matches);
+            return new(DocHit.Ranked(hits).Take(limit).Select(hit => Snippet(highlighter, hit)).ToArray(), matches);
         }
         finally { searchers.Release(searcher); }
     }
@@ -208,15 +213,34 @@ public sealed class DocSearchIndex : IDisposable
     private static string BodyOf(DocSection section, int part) =>
         part == 0 ? section.Chunks[0].Text[Math.Min(section.HeadingLength, section.Chunks[0].Text.Length)..] : section.Chunks[part].Text;
 
-    /// <summary>The lines around the best matches, matches in brackets, on one line; the start of the chunk when only the heading matched.</summary>
-    private string Snippet(Highlighter highlighter, string body)
+    /// <summary>One query-relevant, contiguous source span. Never rewrite whitespace or inject match markers into code.</summary>
+    private DocHit Snippet(Highlighter highlighter, DocHit hit)
     {
-        string text;
-        try { text = string.Join(" … ", highlighter.GetBestFragments(analyzer, DocQuery.Body, body, 2)); }
-        catch (InvalidTokenOffsetsException) { text = ""; }
-        if (text.Length == 0) text = body;
-        text = string.Join(' ', text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
-        return text.Length <= RelayLimits.MaxDocSnippetChars ? text : text[..RelayLimits.MaxDocSnippetChars].TrimEnd() + "…";
+        var body = hit.Snippet;
+        if (body.Length == 0) return hit with { ExcerptAnchor = hit.Anchor, ExcerptOffset = 0, SnippetClipped = false };
+        string? fragment;
+        try { fragment = highlighter.GetBestFragment(analyzer, DocQuery.Body, body); }
+        catch (InvalidTokenOffsetsException) { fragment = null; }
+        var start = fragment is { Length: > 0 } ? body.IndexOf(fragment, StringComparison.Ordinal) : 0;
+        if (start < 0) { start = 0; fragment = null; }
+        var length = Math.Min(fragment?.Length ?? RelayLimits.MaxDocSnippetChars / 2, RelayLimits.MaxDocSnippetChars);
+        var end = Math.Min(body.Length, start + length);
+        // Include complete adjacent lines where they fit, retaining the exact source bytes represented by the string.
+        var lineStart = start == 0 ? 0 : body.LastIndexOf('\n', start - 1) + 1;
+        if (end - lineStart <= RelayLimits.MaxDocSnippetChars) start = lineStart;
+        var lineEnd = body.IndexOf('\n', end);
+        if (lineEnd >= 0 && lineEnd + 1 - start <= RelayLimits.MaxDocSnippetChars) end = lineEnd + 1;
+        if (start > 0 && start < body.Length && char.IsLowSurrogate(body[start]) && char.IsHighSurrogate(body[start - 1])) start--;
+        end = Math.Min(end, start + RelayLimits.MaxDocSnippetChars);
+        if (end > start && end < body.Length && char.IsHighSurrogate(body[end - 1]) && char.IsLowSurrogate(body[end])) end--;
+        var offset = hit.ExcerptOffset + start;
+        return hit with
+        {
+            Snippet = body[start..end],
+            ExcerptAnchor = hit.ExcerptAnchor + (offset > 0 ? DocumentGrain.OffsetSeparator + offset.ToString(System.Globalization.CultureInfo.InvariantCulture) : ""),
+            ExcerptOffset = offset,
+            SnippetClipped = offset > 0 || end < body.Length || hit.Tokens > tokens.Count(body)
+        };
     }
 
     public void Dispose()
