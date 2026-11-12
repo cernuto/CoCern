@@ -4,7 +4,7 @@
 
 **Intent:** Let a CoCern session save useful working knowledge outside the LLM's prompt, find it with the existing Lucene grain pattern, and hand it to another authorized session through bounded tools and MCP Resources.
 
-**Status (2026-11-12):** Implemented and verified on `codex/retained-session-context`; deployment remains separate. See [implementation evidence and decisions](../../reviews/2026-11-12-retained-session-context.md).
+**Status (2026-11-12):** Implemented, verified and merged into `main`; feature history pushed and cleanup completed. Deployment remains separate. See [implementation evidence and decisions](../../reviews/2026-11-12-retained-session-context.md).
 
 ## Decisions and scope
 

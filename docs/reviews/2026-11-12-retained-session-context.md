@@ -1,6 +1,6 @@
 # Retained searchable session context implementation
 
-Implemented on `codex/retained-session-context` from `55da931a37d4b126a617d77fe058a1a083c2f47c` (`codex/model-visible-context`). The last application-source change is `1665bdf5dc1b72e2f3f6cc87a6b92fa6645b9fd0`. The repository's current running services, installed adapters and M3TS-SNX Visual Studio session were left untouched. Deployment and the live database migration have not been performed.
+Implemented on `codex/retained-session-context` from `55da931a37d4b126a617d77fe058a1a083c2f47c` (`codex/model-visible-context`), then merged into `main` under Paul's explicit instruction. The last application-source change is `1665bdf5dc1b72e2f3f6cc87a6b92fa6645b9fd0`. The repository's current running services, installed adapters and M3TS-SNX Visual Studio session were left untouched. Deployment and the live database migration have not been performed.
 
 ## Result
 
@@ -70,6 +70,10 @@ These preserve the execution ledger's decisions in order, including their practi
 8. Verify runtime behavior here while leaving pre-existing Roslyn SDK/generator issues unchanged. Cost: runtime evidence comes from isolated binaries, and unrelated semantic-tool limitations remain.
 9. Use the illustrative serialized payload comparison plus functional recovery assertions instead of claiming a model-executed continued-task benchmark. Cost: no empirical production/model-efficiency or accuracy conclusion can yet be drawn.
 
-## Handover
+## Integration and cleanup (2026-11-12)
 
-The feature, review fixes, targeted verification and recovery guidance are complete. The branch has not been merged, pushed or deployed. A deployment would apply schema version 3 through the established backup/migration path. Review the current task/control state before any later deployment; retained context itself grants no authority.
+Paul explicitly requested merging to `main`, pushing and cleaning up. After fetching `origin`, `main` fast-forwarded from `b35f19cbc62737e94132f19d4510c3c633fc8cc7` to `dca92b59ac26102e5d200a50fbbbc94c8c0ece7f`, including the already reviewed model-visible-context predecessor. The full tree was exactly the verified feature tree, `b86d3280538f03d380d3b84211da405ed504eb5d`; no merge edits or conflicts occurred. No tests were repeated on identical source under the repository's verification rules. The non-force push succeeded, and `git ls-remote` independently confirmed GitHub's `refs/heads/main` at `dca92b5` before cleanup.
+
+Deleted the fully merged local branches `codex/retained-session-context` and `codex/model-visible-context`; neither had a remote feature branch. The original workspace remains on `main`, and no additional worktree existed. Removed six owned isolated build directories totaling 6,119,809,534 bytes after validating their resolved absolute paths and rejecting reparse points. Compact receipts, TRX, logs and token-measurement evidence remain; unrelated artifacts and running-service outputs were preserved. This integration record changes documentation only.
+
+The feature, review fixes, targeted verification and recovery guidance are complete. Nothing was deployed. A deployment would apply schema version 3 through the established backup/migration path. Review the current task/control state before any later deployment; retained context itself grants no authority.

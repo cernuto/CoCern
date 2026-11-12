@@ -8,7 +8,7 @@
 
 **Tech Stack:** Existing C#/.NET, Orleans, SQLite, Lucene.NET, Microsoft.ML.Tokenizers and the current MCP SDK; no new dependencies.
 
-**Implementation status (2026-11-12):** Completed on `codex/retained-session-context`. Source review fixes and the three selected security/replay/data-loss methods are verified across the milestone runs; the final isolated solution build has zero errors. [Implementation evidence and decisions](../../reviews/2026-11-12-retained-session-context.md) records exact revisions, transport coverage, the illustrative token sample and plan adaptations. Deployment has not been performed.
+**Implementation status (2026-11-12):** Completed and merged into `main`; the feature history was pushed and the completed branches and temporary build outputs were cleaned up. Source review fixes and the three selected security/replay/data-loss methods are verified across the milestone runs; the final isolated solution build has zero errors. [Implementation evidence and decisions](../../reviews/2026-11-12-retained-session-context.md) records exact revisions, transport coverage, the illustrative token sample, plan adaptations and integration. Deployment has not been performed.
 
 **Spec:** [Retained searchable session context design](../specs/2026-11-11-retained-session-context-design.md). Read it before implementing. It records proposed defaults and the exact bounds; the implementation plan adds the source map and execution order.
 
