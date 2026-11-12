@@ -1,0 +1,37 @@
+Implemented Paul's request for model-visible context optimization on `codex/model-visible-context`, starting from `b35f19c`. Production source is verified through `4a60de4b151812548a8f9868ab4277c137dc121a`; the later documentation commit records the results. Selection is deterministic and uses the existing tokenizer and document index.
+
+For one task, `task_get` now accepts `section: "brief"`. The projection retains exact identity, version/revision, ownership, claim generation, lease, resources, workflow and unresolved-action records. History becomes counts and exact section references. Required workflow/action groups fit whole or are omitted with `complete: false` and exact names in `detailFetchRequired`; callers must read those sections before accepting. One common `refs` envelope avoids repeating repository/board/task identity for every section. A 4 KiB serialized wire budget bounds the projection, and an inflation guard returns the unchanged default task reply when it is already smaller. Default, section and archived reads retain exact detail access. Goals, criteria, action records and code are not paraphrased or shortened.
+
+Document search returns a contiguous query-focused span from the stored source, preserving code, whitespace and Unicode instead of adding match brackets or flattening lines. Hits retain path, section anchor and score, and add full `sourceCommit`, `excerptAnchor` and `snippetClipped`; the reply names its effective repository. A reader can open the excerpt directly or use the original section anchor.
+
+`doc_section` accepts an optional source-text `maxTokens` budget from 64 to 2,000; 512 is recommended for a focused read. The default remains 2,000. Complete reply data, including metadata, must still fit the existing 2,000-token cap. `expectedCommit` pins the exact file source version; mismatch returns `VersionConflict`. Focused continuation arguments carry repository, path, anchor, full commit pin and budget, and callers may change the source budget between pages without gaps or repeats. The file's source commit may remain unchanged when another file advances the repository head. Legacy `next` remains available.
+
+Review caught and corrected two provenance issues: cross-repository continuations must carry their target, and repeated missing-commit fallback reads must retain the actual fallback commit. The document cache now records the requested commit separately from the actual commit read, preventing an identical cached request from relabeling fallback data with an unavailable original commit. Final prefix fitting rechecks tokenizer and complete-page budgets after protecting surrogate boundaries.
+
+Catalog descriptions and always-visible Native/classic guidance are shorter. The guidance retains complete claims, configured Roslyn/Visual Studio use, private native context, uncertain-operation retries, original-session recovery, untrusted-content handling, waiting reports and Standing presentation/decision rules. Tool-specific argument modes, required attempts, role ceilings and cancellation behavior remain intact. Schema changes are additive: `brief`, the already-supported `attemptHistory` section, `maxTokens` and `expectedCommit`. The cancellation control description and implementation were preserved.
+
+Measurements use the actual `CoCern.Host.O200kTokenCounter` (`o200k_base`), including a read-only assembly comparison against the existing baseline bundle whose catalog/schema/instruction source matches `b35f19c`:
+
+| Measurement | Before/default | After/focused |
+| --- | ---: | ---: |
+| Task fixture reply data | 2,170 tokens / 9,134 bytes | 516 tokens / 1,663 bytes |
+| Document fixture reply data | 1,158 tokens / 5,726 bytes | 208 tokens, with a 64-token source budget |
+| All 36 catalog descriptions | 892 tokens | 841 tokens |
+| Native guidance | 328 tokens | 266 tokens |
+| Classic guidance | 524 tokens | 437 tokens |
+
+The fixture task reduction is 76.2%; the focused document page reduction is 82.0%. Fetching every page still incurs continuation metadata, so focused reads are most useful when the task needs only part of a document. Search provenance adds metadata; there is no blanket search-response reduction claim.
+
+The new read parameters also cost schema tokens. Canonical `name`/`description`/`inputSchema` JSON for all 36 tools increased from 17,182 to 17,239 tokens for full schemas and from 5,973 to 6,036 for forwarding schemas. Description/guidance savings should therefore not be reported as a reduction of every complete catalog. Client profiles, additional SDK metadata, repeated instruction presentation and provider tokenization vary. These are fixture/context estimates, not measured model-provider billing or production task-quality gains.
+
+Both required C# connections were checked. Roslyn has CoCern loaded; Visual Studio remained on M3TS-SNX. Changed Core, Contracts and test code had no reported compiler errors. Domain/Adapter retain the known older-Roslyn C# 15 collection-expression diagnostic, alongside generator-version degradation. Actual isolated .NET 11 solution builds passed using `scripts/Build-CoCern.ps1`.
+
+Three unique selected regression methods have passing evidence, with no skipped or unselected methods:
+
+- `TaskBriefTests.Brief_preserves_current_authority_fences_and_requires_exact_oversized_sections` covers the changed brief/read path through `CoordinationStateMachine.Apply`: exact workflow/code, claims/resources/restoration, repository denial, oversized required-section retrieval and the inflation guard.
+- `DocCacheTests.Focused_document_reads_preserve_exact_code_and_pin_changed_budget_continuations_to_the_source_commit` covers `DocCacheTool.SearchAsync`/`SectionAsync`, exact snippet/code reconstruction, changing page budgets, cross-repository pinned continuations, per-file commit retention, stale-pin conflicts and wrong-repository refusal.
+- `SessionReliabilityContractTests.Action_reports_advertise_the_required_attempt_and_safe_recovery_guidance` covers the shared full/forwarding schema paths and retains exact required attempt and authorized recovery constraints.
+
+Roslyn test lookup/change impact supplied the selection. The initial run passed the brief and schema methods; the new document fixture first assumed an unregistered interface, then incorrectly treated repository HEAD as an unchanged file's source version. Both fixture assumptions were corrected from source evidence. Only the affected document method reran. Its final passing receipt is `artifacts/smoke/4a60de4b1518-8C956ADA21DB/receipt.json`; the unchanged brief/schema paths retain their passing evidence from `artifacts/smoke/6b34173e55e5-A8538416B29C/results/`. The cache fallback correction was independently source-reviewed; Roslyn found no dedicated existing fallback regression, and no extra test matrix was added.
+
+Compact local evidence is under ignored `artifacts/model-visible-context/`: selections, attempt history, aggregate receipt, source hashes, Roslyn diagnostics, before/after public tool text, tokenizer measurements and the small measurement helper source. Build logs and TRX remain beside the smoke receipts; temporary binaries are removed after verification. The two unrelated retained-session-context planning files were preserved without staging or edits. No deployment, live hub/adapter restart, persistent client configuration change or manual production SQL mutation is included.
