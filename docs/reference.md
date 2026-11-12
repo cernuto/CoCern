@@ -648,15 +648,15 @@ Then give those chats `COCERN_TOKEN_FILE=data/worker-token`, or run `--connect -
 
 ## Dashboard
 
+Dashboard reads require a viewer cookie. A same-origin browser on a genuine loopback address can sign in through `POST /dashboard/api/login-local`; remote and forwarded requests require explicit sign-in.
+
 ### Live retained context and efficiency
 
-**Retained context** lists and searches saved collections by repository or task. Open an entry to read its exact generation, version and part. Live collection updates never replace text you already opened. Access is rechecked on every read, including for inactive repositories.
+**Retained context** lists and searches saved collections by repository or task. Entries show their exact generation, version and part. Updates keep opened text pinned; every read rechecks access.
 
-**Efficiency** shows the latest hour of traffic, watcher cadence and task-brief/excerpt savings. Savings compare matching source/reply pairs since hub startup: task JSON bytes and document text bytes. Missing values stay unknown; token estimates are not model billing.
+**Efficiency** shows the latest hour of traffic, watcher polling and reply savings. Measurements compare task JSON or document section text with the returned brief or excerpt. Samples start at hub startup; missing values stay unknown.
 
-Both pages refresh while open, at most every five seconds, and pause on stale connections. The saved November 10 baseline is hub-wide. Repository-only selections, short history and incomplete activity do not show percentage changes. **Analytics** remains hourly.
-
-The BlazorBlueprint dashboard provides Overview, Sessions, Analytics, Database, Logs, Standing, Manager, Documents and Connect through a responsive sidebar. Dashboard data endpoints require the existing viewer cookie and policy. A same-origin browser on a genuine loopback address can obtain that cookie automatically through `POST /dashboard/api/login-local`, using the configured local viewer; remote clients, non-loopback hostnames and forwarded requests retain explicit sign-in.
+Both pages refresh while open, at most every five seconds, and pause when disconnected. Comparisons with the saved November 10 baseline require a complete hour of hub-wide activity. Token estimates do not measure model billing. **Analytics** remains hourly.
 
 **Database reset:** `GET /dashboard/api/database/reset` reads the pending flag. `POST` accepts `{ "confirmation": "RESET ALL COORDINATION DATA", "cancel": false }` to schedule a full coordination reset, or `{ "confirmation": "", "cancel": true }` to cancel it. Both require a dashboard viewer on the hub's PC, and writes require the same origin. Scheduling preserves live data until restart. On startup, after acquiring exclusive database ownership and before grains or activity writers start, one transaction removes coordination state, due work, search/archive rows, activity and feedback history and consumes the pending flag. It preserves hub identity and discovery enrollment/revocation, including the credential-retention clock, but clears announced chats and client/build observations. Credential files are untouched. A failure before commit rolls the reset back; cancellation before restart prevents it. After commit and disposal of the transaction, SQLite VACUUM and a truncating WAL checkpoint reclaim unused space. A separate durable compaction marker makes a failed or interrupted compaction retry on the next startup without repeating the data wipe. The Database page reports allocated size, which includes space reserved for reuse between resets.
 

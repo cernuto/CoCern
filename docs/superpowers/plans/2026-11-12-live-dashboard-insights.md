@@ -38,3 +38,10 @@ The prior conversation supplies the feature scope and explicit implementation au
 - Paul authorized README simplification followed by merge, push and cleanup. New README/reference text now focuses on features, freshness, own-chat naming and comparison limits.
 - Label source review found a genuine classic-handoff open replay resetting local label/version; the shared owned-session lock now preserves matching cached state and the existing private-handle regression includes that sequence.
 - A fresh short activity history also suppresses baseline changes until a full hour is represented; unavailable activity retains the prior good display instead of rendering unknown counts as zero.
+
+## Verification results
+
+- Isolated builds at `3570902` and `d42d186` succeeded; eight exact Roslyn-selected methods passed. Receipts and the aggregate browser record are in `artifacts/live-dashboard-insights/verification-summary.json`. No unrelated tests ran.
+- The built-in browser confirmed automatic refresh, same-section excerpt measurement, watcher fixtures, short-history comparison limits, exact retained text pinned through a new revision, search, inactive repositories and the renamed chat. These are disposable preview fixtures, not production savings.
+- Source review found and resolved repository inventory, incomplete baseline comparisons, classic label replay and section-size measurement issues. README and reference text were simplified.
+- Paul’s merge/push/cleanup request supersedes the branch skill’s choice menu; repository rules supersede its suite reruns. The running deployed host and real database remain unchanged.

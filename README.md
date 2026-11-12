@@ -146,7 +146,7 @@ Nothing is copied by hand: the command downloads CoCern from this hub over HTTPS
 
 The installed `cocern-workflow` skill guides coordination. With an existing native Codex connection, startup records a private intent and the chat's first CoCern call joins or restores its own binding automatically. A chat that has already joined reuses that binding; it does not open a replacement session. The binding belongs to the chat, not the folder, so moving it to another worktree or clone of the same repository keeps its session, and a chat whose session the hub has lost gets a new one at its next call. Standard connections remain usable without native hooks. See [Connect and verify Codex](docs/codex-connect.md) for connection modes and troubleshooting.
 
-Use `session_label_set` with `label` to name your own chat in the directory and dashboard. It works in native and standard connections, including the chat profile. Reconnect after an adapter update to load the new tool; explicit tool selections must include it.
+Use `session_label_set` with `label` to name your chat in the directory and dashboard. Reconnect after updating the adapter to load the tool, and include it in any explicit tool selection.
 
 For clients using the raw session tools, a typical chat is:
 
@@ -229,7 +229,7 @@ The interaction map displays message metadata rather than private message bodies
 
 Analytics uses a cached hourly snapshot, not realtime data; its timestamp records snapshot completion. Conditional HTTP reads reuse cached data only for the exact repository and day selection. Retained workflow history can be incomplete, and unknown durations are excluded rather than treated as zero. See the [analytics reference](docs/reference.md#analytics) for batch reads and usage coverage.
 
-Efficiency and Retained context refresh while open, at most every five seconds, and pause when disconnected. Savings are measured from matching source/reply pairs since hub startup; missing values stay unknown. The saved baseline covers the whole hub, so incomplete data and repository-only selections are not compared. Analytics remains hourly. These figures do not measure model billing.
+Efficiency and Retained context refresh while open, at most every five seconds. Savings use matching source/reply measurements since hub startup; missing data stays unknown. Baseline comparisons require a complete hour of hub-wide activity. Analytics remains hourly. Token estimates do not measure model billing.
 
 ## Settings
 
