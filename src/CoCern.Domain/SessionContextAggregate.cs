@@ -21,6 +21,7 @@ internal static class SessionContextAggregate
         if (context.Args["expectedVersion"] is null || Number(context.Args, "expectedVersion") != state.Revision) return VersionConflict(state.Revision);
         if (state.Json["deleted"]?.GetValue<bool>() == true) return Error(RelayErrorCodes.NotFound);
         var revision = checked(state.Revision + 1);
+        if (state.Revision == 0) context.State["generation"] = Guid.NewGuid().ToString("N");
         var forget = context.Args["forget"]?.GetValue<bool>() == true;
         if (forget)
         {

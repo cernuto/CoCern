@@ -52,7 +52,7 @@ SQLite stores the authoritative collection state and a small discovery projectio
 
 A collection contains `contextId`, canonical `repositoryId`, `revision`, `title`, `summary`, `nextSteps`, `taskIds`, `pinnedEntryIds`, timestamps, deletion state and entries. Each entry has `entryId`, `version`, `kind`, `title`, `text`, optional `sourceRefs`, and hub-recorded author/session/time provenance. Entry kinds are `finding`, `decision`, `open_question`, `evidence` and `handoff`. The collection summary and next steps are explicitly authored, not generated on the server.
 
-Entry versions use the collection's monotonically increasing revision at the last change. Deleting and recreating an entry ID never reuses its earlier version. A deleted collection keeps a minimal replay/deletion tombstone and cannot be recreated under the same context ID; no retained body remains in the live state, search index or discovery catalog. Existing replay receipts retain only small result metadata, not copied entry bodies.
+Entry versions use the collection's monotonically increasing revision at the last change. Deleting and recreating an entry ID never reuses its earlier version. Each created collection also receives a random persisted generation; exact entry URIs and pinned tool reads include it, so reset or generic storage clearing cannot make an old reference resolve to new content when numeric revisions restart. A deleted collection keeps a minimal replay/deletion tombstone and cannot be recreated under the same context ID; no retained body remains in the live state, search index or discovery catalog. Existing replay receipts retain only small result metadata, not copied entry bodies.
 
 Proposed first-release bounds:
 
@@ -95,7 +95,7 @@ Add three worker tools. Keep existing `context_get` / `context_put`, `search`, `
 
 `session_context_get` supports existing adapter-style `ifNoneMatch` for the exact read selection. Discovery uses an opaque cursor tied to the repository, filter, catalog revision and hub incarnation. A changed catalog or selection returns a restart result; an interrupted page is not an authoritative completed snapshot. Explicit entry reads carry `entryVersion` and `part`; an omitted version means current and the response supplies the exact version to retain for continuation.
 
-Part boundaries are deterministic for the entry version and fixed tokenizer/chunker version. Replies name `part`, `partCount` and `nextUri` when another part exists. A read of a replaced/deleted version returns `ContextVersionUnavailable` or not-found; it never substitutes new text under an old versioned URI. The first release retains current versions only, not an unbounded version archive.
+Part boundaries are deterministic for the entry version and fixed tokenizer/chunker version. Replies name `generation`, `part`, `partCount` and `nextUri` when another part exists; pinned tool reads send that generation as `contextGeneration` alongside `entryVersion`. A read of a replaced/deleted version or wrong generation returns `ContextVersionUnavailable` or not-found; it never substitutes new text under an old versioned URI. The first release retains current versions only, not an unbounded version archive.
 
 Reads do not create contexts, join chats, claim tasks, acknowledge messages or grant work authority. Tool profile selection follows existing worker/diagnostics/admin availability. The deliberately small `chat` profile remains unchanged; a chat needing retained-context tools uses an existing permitted worker profile.
 
@@ -105,7 +105,7 @@ Expose `text/markdown` resources with these URI templates:
 
 ```text
 cocern://repositories/{repositoryId}/session-context/{contextId}/manifest
-cocern://repositories/{repositoryId}/session-context/{contextId}/entries/{entryId}/versions/{entryVersion}/parts/{part}
+cocern://repositories/{repositoryId}/session-context/{contextId}/generations/{generation}/entries/{entryId}/versions/{entryVersion}/parts/{part}
 ```
 
 Manifests contain the current summary, next steps, revision and pinned entry references. Entry resources contain one bounded part and provenance. IDs and path segments must be parsed canonically and validated; no filesystem paths, credentials or private native participant IDs are included.

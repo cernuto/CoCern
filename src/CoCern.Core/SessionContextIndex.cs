@@ -78,7 +78,8 @@ public sealed class SessionContextIndex : IDisposable
             {
                 ["entryId"] = id, ["version"] = Number(entry, "version"), ["kind"] = Text(entry, "kind"), ["title"] = Text(entry, "title"),
                 ["snippet"] = snippet, ["sourceRefs"] = entry["sourceRefs"]?.DeepClone(),
-                ["uri"] = SessionContextResourceUri.PartUri(state.RepositoryId, state.ContextId, id, Number(entry, "version"), int.Parse(doc.Get("part"), CultureInfo.InvariantCulture))
+                ["generation"] = state.Generation,
+                ["uri"] = SessionContextResourceUri.PartUri(state.RepositoryId, state.ContextId, id, Number(entry, "version"), int.Parse(doc.Get("part"), CultureInfo.InvariantCulture), state.Generation)
             });
             if (!Fits(result, SessionContextLimits.ReplyTokens, tokens)) { hits.RemoveAt(hits.Count - 1); result["truncated"] = true; break; }
             if (hits.Count >= limit) break;
@@ -116,6 +117,12 @@ public sealed class SessionContextIndex : IDisposable
     {
         var json = data.ToJsonString();
         return Encoding.UTF8.GetByteCount(json) <= SessionContextLimits.ReplyBytes && tokens.Count(json) <= budget;
+    }
+
+    public static bool FitsResource(JsonObject data, ITokenCounter tokens)
+    {
+        var text = SessionContextResourceReply.Markdown(data.ToJsonString());
+        return Encoding.UTF8.GetByteCount(text) <= SessionContextLimits.ReplyBytes && tokens.Count(text) <= SessionContextLimits.ReplyTokens;
     }
 
     public void Dispose() { writer.Dispose(); analyzer.Dispose(); directory.Dispose(); }

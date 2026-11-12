@@ -58,7 +58,7 @@ The following are proposed new types and paths, not claims that these symbols ex
 
 **Files:** Create the three Contracts files and the Domain state/read-model files above; update the catalog/schema/error-code integration points and `CoordinationModel.cs`.
 
-**Interfaces produced:** `SessionContextResourceUri.TryParse(string uri, out SessionContextResourceAddress address)`, `ManifestUri(string repositoryId, string contextId)` and `PartUri(string repositoryId, string contextId, string entryId, long entryVersion, int part)`; the DTOs above; `SessionContextReadModels.Catalog(JsonObject state)` and `SessionContextReadModels.Manifest(JsonObject state)`.
+**Interfaces produced:** `SessionContextResourceUri.TryParse(string uri, out SessionContextResourceAddress address)`, `ManifestUri(string repositoryId, string contextId)` and `PartUri(string repositoryId, string contextId, string entryId, long entryVersion, int part, string generation)`; the DTOs above; the Domain catalog and manifest read models. The persisted generation addition is the final-review reset/recreation fence recorded in the implementation ledger.
 
 - [ ] Define `AggregateKinds.SessionContext` and its collision-safe key helper. Add the three public tool names, input schemas and new bounded error codes: `ContextBudgetExceeded`, `ContextVersionUnavailable`, `ContextListRestartRequired` and `ContextSearchUnavailable`, reusing existing not-found/version/replay refusal codes where equivalent.
 - [ ] Define the current-entry model and collection revision. Entry versions equal the revision that last changed the entry; a removed ID reused later receives a new revision. Specify minimal collection-deletion tombstones and body-free replay receipts.

@@ -1,15 +1,19 @@
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text;
 using CoCern.Contracts;
 using CoCern.Core;
 using CoCern.Domain;
+using CoCern.Domain.State;
 using CoCern.Host;
 using CoCern.Storage;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
+using Orleans;
+using Orleans.Runtime;
 using Xunit;
 
 namespace CoCern.Tests;
@@ -124,6 +128,41 @@ public sealed class SessionContextTests
         Assert.True((await Call(http, RelayTools.SessionContextPut, forget)).Ok);
         recreate["expectedVersion"] = 5; recreate["requestId"] = "reuse-forgotten-id";
         Assert.Equal(RelayErrorCodes.NotFound, (await Call(http, RelayTools.SessionContextPut, recreate)).Code);
+
+        // Regression fence: the complete MCP resource frame must fit before a save can commit.
+        var budgetPatch = Patch("budget");
+        budgetPatch["upserts"]![0]!["text"] = new string('A', 1600);
+        budgetPatch["upserts"]![0]!["sourceRefs"] = new JsonArray(Enumerable.Range(0, 8).Select(n => (JsonNode?)JsonValue.Create("ref-" + n + new string('A', 600))).ToArray());
+        Assert.True((await Call(http, RelayTools.SessionContextPut, Envelope(session, new JsonObject { ["contextId"] = "framing-budget", ["expectedVersion"] = 0, ["requestId"] = "framing-create", ["patch"] = budgetPatch }))).Ok);
+        var budgetPart = Data(await service.RunAsync(caller, RelayTools.SessionContextGet, new JsonObject { ["repositoryId"] = "repo", ["contextId"] = "framing-budget", ["entryId"] = "evidence" }));
+        Assert.Equal(1, budgetPart["partCount"]!.GetValue<int>());
+        var gap = SessionContextLimits.ReplyBytes - 20 - Encoding.UTF8.GetByteCount(budgetPart.ToJsonString());
+        Assert.True(gap > 0);
+        var nearLimit = new string('A', 1600 + gap);
+        Assert.True(new O200kTokenCounter().Count(nearLimit) <= SessionContextLimits.PartTokens);
+        budgetPatch["upserts"]![0]!["text"] = nearLimit;
+        Assert.Equal(SessionContextLimits.BudgetExceeded, (await Call(http, RelayTools.SessionContextPut, Envelope(session, new JsonObject { ["contextId"] = "framing-budget", ["expectedVersion"] = 1, ["requestId"] = "framing-overflow", ["patch"] = budgetPatch }))).Code);
+        Assert.True((await service.ReadResourceAsync(caller, budgetPart["uri"]!.GetValue<string>())).Ok);
+
+        // Clearing the provider, rather than the domain's forget operation, also removes its catalog projection atomically.
+        var store = host.Services.GetRequiredService<SqliteStore>();
+        var provider = new SqliteGrainStorage(store);
+        var grainId = GrainId.Create("cocern.session_context", SessionContextState.Key("repo", "framing-budget"));
+        var stored = new GrainState<StateEnvelope<CoordinationDocument>> { State = new() };
+        await provider.ReadStateAsync(AggregateKinds.SessionContext, grainId, stored);
+        Assert.True(stored.RecordExists);
+        await provider.ClearStateAsync(AggregateKinds.SessionContext, grainId, stored);
+        Assert.Empty(Data(await store.ReadSessionContextsAsync("repo", null, null, 10))["items"]!.AsArray());
+
+        // A new collection after a deliberate reset may reuse public IDs, but never an old exact resource address.
+        var database = host.DatabasePath;
+        await store.ScheduleCoordinationResetAsync(false);
+        await host.DisposeAsync();
+        await using var reset = new RelayHostFixture(database);
+        using var afterReset = reset.AuthorizedClient();
+        var newSession = await Open(reset, afterReset, "after-reset");
+        Assert.True((await Call(afterReset, RelayTools.SessionContextPut, Envelope(newSession, new JsonObject { ["contextId"] = "recovery", ["expectedVersion"] = 0, ["requestId"] = "after-reset-create", ["patch"] = Patch("new-incarnation-marker") }))).Ok);
+        Assert.Equal(SessionContextLimits.VersionUnavailable, (await reset.Services.GetRequiredService<SessionContextTools>().ReadResourceAsync(caller, oldUri)).Code);
     }
 
     internal static JsonObject Patch(string marker) => new()

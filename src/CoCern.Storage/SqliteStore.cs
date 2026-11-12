@@ -243,14 +243,16 @@ public sealed partial class SqliteStore : IDueWorkSource, IDisposable, IAsyncDis
             ObjectDisposedException.ThrowIf(_disposed, this);
             using var transaction = _connection.BeginTransaction(deferred: false);
             string? storedEtag = null;
+            string? previousPayload = null;
             long generation = 0;
-            using (var read = KeyCommand("SELECT etag, generation FROM grain_state WHERE state_name=$state AND grain_type=$type AND grain_key=$key;", stateName, grainId, transaction))
+            using (var read = KeyCommand("SELECT etag, generation, payload FROM grain_state WHERE state_name=$state AND grain_type=$type AND grain_key=$key;", stateName, grainId, transaction))
             using (var reader = read.ExecuteReader())
             {
                 if (reader.Read())
                 {
                     storedEtag = reader.GetString(0);
                     generation = reader.GetInt64(1);
+                    previousPayload = reader.IsDBNull(2) ? null : reader.GetString(2);
                 }
             }
             expectedEtag = string.IsNullOrEmpty(expectedEtag) ? null : expectedEtag;
@@ -283,7 +285,7 @@ public sealed partial class SqliteStore : IDueWorkSource, IDisposable, IAsyncDis
             // archived first, so the index update below keeps them although the board no longer holds the tasks.
             if (archived is { Count: > 0 }) WriteArchive(transaction, stateName, grainId, archived);
             var indexedSource = WriteSearch(transaction, stateName, grainId, expectedEtag, payload, search);
-            WriteSessionContextCatalog(transaction, sessionContext);
+            WriteSessionContextCatalog(transaction, sessionContext ?? (stateName == AggregateKinds.SessionContext && payload is null ? ClearedSessionContext(previousPayload) : null));
             ArchiveFault?.Invoke();
             cancellationToken.ThrowIfCancellationRequested();
             transaction.Commit();

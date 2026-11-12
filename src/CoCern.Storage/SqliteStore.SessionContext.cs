@@ -24,10 +24,11 @@ public sealed partial class SqliteStore : ISessionContextCatalog
     private void WriteSessionContextCatalog(SqliteTransaction transaction, SessionContextCatalogProjection? projection)
     {
         if (projection is null) return;
-        using (var current = Command("SELECT revision FROM session_context_catalog WHERE repository_id=$repo AND context_id=$id;", transaction))
+        using (var current = Command("SELECT revision,deleted FROM session_context_catalog WHERE repository_id=$repo AND context_id=$id;", transaction))
         {
             current.Parameters.AddWithValue("$repo", projection.RepositoryId); current.Parameters.AddWithValue("$id", projection.ContextId);
-            if (current.ExecuteScalar() is long revision && revision == projection.Revision) return;
+            using var reader = current.ExecuteReader();
+            if (reader.Read() && reader.GetInt64(0) == projection.Revision && reader.GetInt32(1) == (projection.Deleted ? 1 : 0)) return;
         }
         using var write = Command("""
             INSERT INTO session_context_catalog(repository_id,context_id,revision,title,summary,task_ids,updated_at,deleted)
@@ -44,6 +45,15 @@ public sealed partial class SqliteStore : ISessionContextCatalog
     }
 
     private sealed record ContextCursor(string Repository, string Task, string Incarnation, long Revision, int Offset);
+
+    private static SessionContextCatalogProjection? ClearedSessionContext(string? payload)
+    {
+        if (payload is null) return null;
+        var envelope = JsonSerializer.Deserialize<StateEnvelope<CoordinationDocument>>(payload, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+            ?? throw new InvalidDataException("Invalid retained context state.");
+        var projection = SessionContextReadModels.Catalog(envelope.Value.Json);
+        return projection is null ? null : projection with { Deleted = true, Title = "", Summary = "", TaskIdsJson = "[]" };
+    }
 
     public async Task<RelayReply> ReadSessionContextsAsync(string repositoryId, string? taskId, string? cursor, int limit, CancellationToken cancellationToken = default)
     {

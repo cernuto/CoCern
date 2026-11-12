@@ -13,6 +13,7 @@ public sealed class SessionContextState(JsonObject json)
     public JsonObject Entries => json["entries"] as JsonObject ?? new();
     public string RepositoryId => Text(json, "repositoryId");
     public string ContextId => Text(json, "contextId");
+    public string Generation => Text(json, "generation");
     public static string Key(string repository, string contextId) => $"{repository.Length}:{repository}{contextId}";
     public static bool ValidKind(string kind) => kind is "finding" or "decision" or "open_question" or "evidence" or "handoff";
     public JsonObject Manifest()
@@ -22,11 +23,11 @@ public sealed class SessionContextState(JsonObject json)
             if (Entries[id] is JsonObject entry) pinned.Add(new JsonObject
             {
                 ["entryId"] = id, ["version"] = Number(entry, "version"), ["title"] = Text(entry, "title"), ["kind"] = Text(entry, "kind"),
-                ["uri"] = SessionContextResourceUri.PartUri(RepositoryId, ContextId, id, Number(entry, "version"), 0)
+                ["uri"] = SessionContextResourceUri.PartUri(RepositoryId, ContextId, id, Number(entry, "version"), 0, Generation)
             });
         return new JsonObject
         {
-            ["contextId"] = ContextId, ["revision"] = Revision, ["title"] = Text(json, "title"), ["summary"] = Text(json, "summary"),
+            ["contextId"] = ContextId, ["revision"] = Revision, ["generation"] = Generation, ["title"] = Text(json, "title"), ["summary"] = Text(json, "summary"),
             ["nextSteps"] = json["nextSteps"]?.DeepClone() ?? new JsonArray(), ["taskIds"] = json["taskIds"]?.DeepClone() ?? new JsonArray(),
             ["pinnedEntries"] = pinned, ["entryCount"] = Entries.Count, ["updatedAt"] = json["updatedAt"]?.DeepClone(),
             ["uri"] = SessionContextResourceUri.ManifestUri(RepositoryId, ContextId), ["untrusted"] = "Retained reports, not current authority. Recheck tasks, claims and evidence."

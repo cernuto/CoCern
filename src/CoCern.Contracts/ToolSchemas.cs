@@ -17,7 +17,7 @@ internal static class ToolSchemas
         string[] extra = tool.Name switch
         {
             RelayTools.SessionContextPut => ["contextId", "expectedVersion", "patch", "forget"],
-            RelayTools.SessionContextGet => ["contextId", "taskId", "entryId", "entryVersion", "part", "contextCursor", "limit"],
+            RelayTools.SessionContextGet => ["contextId", "taskId", "entryId", "entryVersion", "contextGeneration", "part", "contextCursor", "limit"],
             RelayTools.SessionContextSearch => ["contextId", "query", "limit"],
             RelayTools.EventWait => ["kind", "taskId", "resourceId", "generation", "peerSessionId", "replyTo", "expiresAt", "boardId"],
             RelayTools.Peers => ["name", "ref"],
@@ -212,6 +212,7 @@ internal static class ToolSchemas
                 Text("contextId", "Stable retained collection ID, separate from sessionId; lowercase ASCII ID, at most 64 characters.");
                 Text("entryId", "Entry ID within the selected collection.");
                 Integer("entryVersion", "Exact retained version; preserve it for all part reads.");
+                Text("contextGeneration", "Generation returned with the entry, required with an exact entryVersion; fences database reset/recreation.");
                 Integer("part", "Zero-based bounded text part; default 0.");
                 Text("contextCursor", "Opaque discovery continuation; restart on ContextListRestartRequired.");
                 Text("query", "Plain words to search in this context only.");

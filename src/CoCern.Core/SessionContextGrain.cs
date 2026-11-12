@@ -44,14 +44,15 @@ public sealed class SessionContextGrain([PersistentState("session_context", "rel
         var manifest = state.Manifest().ToJsonString();
         if (tokens.Count(Text(state.Json, "summary")) > SessionContextLimits.SummaryTokens
             || tokens.Count(state.Json["nextSteps"]?.ToJsonString() ?? "[]") > SessionContextLimits.NextStepTokens
-            || tokens.Count(manifest) > SessionContextLimits.ManifestTokens || Encoding.UTF8.GetByteCount(manifest) > SessionContextLimits.ReplyBytes)
+            || tokens.Count(manifest) > SessionContextLimits.ManifestTokens || !SessionContextIndex.FitsResource(state.Manifest(), tokens))
             return Error(SessionContextLimits.BudgetExceeded, new { maxManifestTokens = SessionContextLimits.ManifestTokens });
         foreach (var item in state.Entries)
         {
             var entry = item.Value!.AsObject();
             var parts = SessionContextIndex.Parts(Text(entry, "text"), tokens).ToArray();
             for (var part = 0; part < parts.Length; part++)
-                if (!SessionContextIndex.Fits(PartData(state, entry, parts, part), SessionContextLimits.ReplyTokens - 250, tokens))
+                if (!SessionContextIndex.Fits(PartData(state, entry, parts, part), SessionContextLimits.ReplyTokens - 250, tokens)
+                    || !SessionContextIndex.FitsResource(PartData(state, entry, parts, part), tokens))
                     return Error(SessionContextLimits.BudgetExceeded, new { entryId = item.Key, part });
         }
         return null;
@@ -100,7 +101,8 @@ public sealed class SessionContextGrain([PersistentState("session_context", "rel
         var entryId = Text(args, "entryId");
         if (state.Entries[entryId] is not JsonObject entry) return Task.FromResult(Error(RelayErrorCodes.NotFound));
         var version = Number(entry, "version");
-        if (args["entryVersion"] is not null && Number(args, "entryVersion") != version) return Task.FromResult(Error(SessionContextLimits.VersionUnavailable));
+        if (args["entryVersion"] is not null && (Number(args, "entryVersion") != version || Text(args, "contextGeneration") != state.Generation))
+            return Task.FromResult(Error(SessionContextLimits.VersionUnavailable));
         var parts = SessionContextIndex.Parts(Text(entry, "text"), tokens).ToArray();
         var part = Number(args, "part");
         if (part < 0 || part >= parts.Length) return Task.FromResult(Error(RelayErrorCodes.NotFound));
@@ -114,8 +116,9 @@ public sealed class SessionContextGrain([PersistentState("session_context", "rel
         var result = (JsonObject)entry.DeepClone();
         result["text"] = parts[(int)part]; result["contextId"] = state.ContextId; result["revision"] = state.Revision;
         result["part"] = part; result["partCount"] = parts.Length; result["encoding"] = tokens.Encoding;
-        result["uri"] = SessionContextResourceUri.PartUri(state.RepositoryId, state.ContextId, entryId, version, (int)part);
-        if (part + 1 < parts.Length) result["nextUri"] = SessionContextResourceUri.PartUri(state.RepositoryId, state.ContextId, entryId, version, (int)part + 1);
+        result["generation"] = state.Generation;
+        result["uri"] = SessionContextResourceUri.PartUri(state.RepositoryId, state.ContextId, entryId, version, (int)part, state.Generation);
+        if (part + 1 < parts.Length) result["nextUri"] = SessionContextResourceUri.PartUri(state.RepositoryId, state.ContextId, entryId, version, (int)part + 1, state.Generation);
         return result;
     }
 
