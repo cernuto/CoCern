@@ -48,9 +48,9 @@ The installed package keeps its database, enrollment and credentials outside rep
 
 ### Follow conversations across agents
 
-![CoCern session interaction map with sample agent sessions and directed message connections](docs/assets/screenshots/session-map.jpg)
+![CoCern interaction map with sessions around a central hub, permanent spokes and curved message connections](docs/assets/screenshots/session-map.jpg)
 
-See which sessions have exchanged direct messages, filter the map, and select a chat to inspect its reported state. The dashboard shows message metadata rather than private message contents; a route or successful send does not prove a model is running or that a message was read.
+Sessions sit around the CoCern hub, with permanent spokes and pulses that travel inward from the sender and outward to the recipient on newly observed sends. Curved lines show retained direct-message connections. Filter the map and select a chat or connection to inspect its metadata. A route or successful send does not prove a model is running or that a message was read.
 
 ### See where coordination time goes
 
