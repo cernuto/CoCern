@@ -20,14 +20,18 @@ public sealed record WakeRuntime(AdapterOptions Options, string StatePath, strin
     public Func<HttpMessageHandler>? HubHandler { get; init; }
     internal static readonly TimeSpan DefaultInterval = TimeSpan.FromSeconds(15);
     internal static readonly TimeSpan DefaultHintedInterval = TimeSpan.FromSeconds(60);
+    internal static readonly TimeSpan DefaultIdleInterval = TimeSpan.FromMinutes(5);
     /// <summary>
     /// The fallback pass when no hint arrives. Unset, it is <see cref="DefaultInterval"/>, lengthened to <see cref="DefaultHintedInterval"/> while
-    /// hints are working; a value set here is used as it is, so a caller that chose a pace keeps it.
+    /// hints are working, or to <see cref="DefaultIdleInterval"/> for a route with no pending work. A value set here is used as it is,
+    /// so a caller that chose a pace keeps it.
     /// </summary>
     public TimeSpan? Interval { get; init; }
     /// <summary>The fallback pass while hints are working, for a caller that wants both set (tests); unset follows <see cref="Interval"/>.</summary>
     public TimeSpan? HintedInterval { get; init; }
-    internal TimeSpan FallbackWait(bool hinted) => hinted ? HintedInterval ?? Interval ?? DefaultHintedInterval : Interval ?? DefaultInterval;
+    internal TimeSpan FallbackWait(bool hinted, bool idle = false) => hinted
+        ? HintedInterval ?? Interval ?? (idle ? DefaultIdleInterval : DefaultHintedInterval)
+        : Interval ?? DefaultInterval;
     /// <summary>How often a route may be woken.</summary>
     public WakeLimits Limits { get; init; } = WakeLimits.Default;
     /// <summary>A state the caller already owns (and disposes); null opens <see cref="StatePath"/> for the run.</summary>
@@ -147,53 +151,76 @@ public static class WakeWatcher
         if (timeout is { } limit) lifetime.CancelAfter(limit);
         var stopMonitor = MonitorStop();
         var lastStatus = new Dictionary<string, string>();
+        var idleRoutes = new HashSet<string>(StringComparer.Ordinal);
+        var lastRead = new Dictionary<string, long>(StringComparer.Ordinal);
         var coverage = new InboxCoverage();
         HashSet<string>? dirty = null;
         var timer = clock ?? TimeProvider.System;
         var fullPassAt = timer.GetTimestamp();
-        var fallback = runtime.FallbackWait(false);
+        // Route retries cannot move the independent full-recovery deadline, nor make idle neighbors poll at their pace.
+        var fullFallback = runtime.FallbackWait(hinted: true, idle: true);
         try
         {
             while (!lifetime.IsCancellationRequested && !File.Exists(runtime.StopFile))
             {
                 var current = (await targets(lifetime.Token)).DistinctBy(x => x.Session.SessionId, StringComparer.Ordinal).ToArray();
-                var reconcileAll = dirty is null || timer.GetElapsedTime(fullPassAt) >= fallback;
+                var reconcileAll = dirty is null || timer.GetElapsedTime(fullPassAt) >= fullFallback;
                 HashSet<string> live = [with(capacity: current.Length, comparer: StringComparer.Ordinal), .. current.Select(x => x.Session.SessionId)];
                 foreach (var gone in rejected.Keys.Where(id => !live.Contains(id)).ToArray()) rejected.Remove(gone);
+                foreach (var gone in lastRead.Keys.Where(id => !live.Contains(id)).ToArray()) lastRead.Remove(gone);
                 foreach (var gone in watches.Keys.Where(x => !live.Contains(x)).ToArray())
                 {
                     var watch = watches[gone];
                     watches.Remove(gone);
                     lastStatus.Remove(WakeState.Key(watch.Target.Route.ThreadId));
+                    idleRoutes.Remove(WakeState.Key(watch.Target.Route.ThreadId));
+                    lastRead.Remove(gone);
                     await watch.Connection.DisposeAsync();
                 }
-                var settled = current.Length > 0;
                 for (var i = 0; i < current.Length && !File.Exists(runtime.StopFile); i++)
                 {
                     var target = current[i];
                     var routeKey = WakeState.Key(target.Route.ThreadId);
                     if (watches.TryGetValue(target.Session.SessionId, out var oldWatch) &&
-                        (oldWatch.Target.Session != target.Session || oldWatch.Target.Route.RepositoryId != target.Route.RepositoryId))
+                        (oldWatch.Target.Session != target.Session || oldWatch.Target.Route != target.Route))
                     {
                         watches.Remove(target.Session.SessionId);
+                        var oldRouteKey = WakeState.Key(oldWatch.Target.Route.ThreadId);
+                        lastStatus.Remove(oldRouteKey);
+                        idleRoutes.Remove(oldRouteKey);
+                        lastStatus.Remove(routeKey);
+                        idleRoutes.Remove(routeKey);
+                        lastRead.Remove(target.Session.SessionId);
                         await oldWatch.Connection.DisposeAsync();
                     }
                     if (rejected.TryGetValue(target.Session.SessionId, out var refused))
                     {
-                        if (refused.Repository == target.Route.RepositoryId && refused.Session == target.Session) { settled = false; continue; }
+                        if (refused.Repository == target.Route.RepositoryId && refused.Session == target.Session) continue;
                         rejected.Remove(target.Session.SessionId);
                         lastStatus.Remove(routeKey);
+                        lastRead.Remove(target.Session.SessionId);
                     }
-                    // Healthy, settled routes need no read for another session's hint. New/replaced routes and failed subscriptions
-                    // still reconcile immediately; the full-pass deadline is independent of how often hints arrive.
+                    // A hint selects its route; a timer selects only due routes. New/replaced handles have no last read and run now.
+                    // Full recovery is independent of both, so a stream of one session's hints cannot postpone its neighbors forever.
                     if (!reconcileAll && !dirty!.Contains(target.Session.SessionId)
-                        && watches.TryGetValue(target.Session.SessionId, out var quietWatch) && quietWatch.Listening
-                        && lastStatus.TryGetValue(routeKey, out var quietStatus) && quietStatus is "empty" or "queued") continue;
+                        && lastRead.TryGetValue(target.Session.SessionId, out var readAt) && timer.GetElapsedTime(readAt) < PollWait(target)) continue;
                     string status;
                     using (var dispatch = runtime.TryEnterDispatch?.Invoke())
                     {
-                        if (runtime.TryEnterDispatch is not null && dispatch is null) continue;
-                        status = await new WakeReconciler(settings, state, forwarder, target.Dispatcher, clock, coverage).ReconcileAsync(target.Route, target.Session, lifetime.Token);
+                        if (runtime.TryEnterDispatch is not null && dispatch is null)
+                        {
+                            lastRead[target.Session.SessionId] = timer.GetTimestamp();
+                            idleRoutes.Remove(routeKey);
+                            lastStatus[routeKey] = "route-changed";
+                            continue;
+                        }
+                        var subscribed = watches.TryGetValue(target.Session.SessionId, out var listening) && listening.Listening;
+                        var reconciler = new WakeReconciler(settings, state, forwarder, target.Dispatcher, clock, coverage);
+                        status = await reconciler.ReconcileAsync(target.Route, target.Session, lifetime.Token);
+                        lastRead[target.Session.SessionId] = timer.GetTimestamp();
+                        // An initial read before joining can race a missed hint; only a read made while listening proves quiet coverage.
+                        if (status == "empty" && reconciler.CanWaitQuietly && subscribed && listening!.Listening) idleRoutes.Add(routeKey);
+                        else idleRoutes.Remove(routeKey);
                         runtime.Reconciled?.Invoke(target, status);
                     }
                     if (!lastStatus.TryGetValue(routeKey, out var previous) || previous != status || status == "queued")
@@ -201,7 +228,6 @@ public static class WakeWatcher
                             ? $"CoCern wake route {i + 1}: session rejected; waiting for this chat's replacement session handle. Reopen its CoCern session from that chat."
                             : $"CoCern wake route {i + 1}: {status}.");
                     lastStatus[routeKey] = status;
-                    settled &= status is "empty" or "queued";
                     if (WakeReconciler.IsRejection(status))
                     {
                         rejected[target.Session.SessionId] = (target.Route.RepositoryId, target.Session);
@@ -225,11 +251,16 @@ public static class WakeWatcher
                     }
                 }
                 using var wait = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
-                // The longer wait only while a hint is sure to bring the next wake: every target's channel joined, and none waiting out a retry no hint
-                // will announce (a rate limit, a busy chat, a hub error).
                 if (reconcileAll) fullPassAt = timer.GetTimestamp();
-                fallback = runtime.FallbackWait(settled && current.All(target => watches.TryGetValue(target.Session.SessionId, out var known) && known.Listening));
-                var remaining = fallback - timer.GetElapsedTime(fullPassAt);
+                var remaining = current.Length == 0 ? runtime.FallbackWait(false) : fullFallback - timer.GetElapsedTime(fullPassAt);
+                foreach (var target in current)
+                {
+                    // A rejected handle makes no more hub calls, but replacements must still be discovered at the short pace.
+                    var until = rejected.ContainsKey(target.Session.SessionId) ? runtime.FallbackWait(false)
+                        : lastRead.TryGetValue(target.Session.SessionId, out var readAt) ? PollWait(target) - timer.GetElapsedTime(readAt)
+                        : runtime.FallbackWait(false);
+                    if (until < remaining) remaining = until;
+                }
                 wait.CancelAfter(remaining > TimeSpan.Zero ? remaining : TimeSpan.FromMilliseconds(1));
                 try
                 {
@@ -237,7 +268,7 @@ public static class WakeWatcher
                     await HintCoalescer.WaitAsync(changed.Reader, HintQuiet, HintCoalesceLimit, lifetime.Token);
                     dirty = changes.Take();
                 }
-                catch (OperationCanceledException) when (!lifetime.IsCancellationRequested) { dirty = null; }
+                catch (OperationCanceledException) when (!lifetime.IsCancellationRequested) { dirty = new(StringComparer.Ordinal); }
             }
         }
         // A stop file or wait timeout ends the run; only the caller's own cancellation propagates.
@@ -250,6 +281,14 @@ public static class WakeWatcher
         }
         cancellationToken.ThrowIfCancellationRequested();
         return File.Exists(runtime.StopFile) ? "stopped" : "timeout";
+
+        TimeSpan PollWait(WakeTarget target)
+        {
+            var routeKey = WakeState.Key(target.Route.ThreadId);
+            var hinted = watches.TryGetValue(target.Session.SessionId, out var watch) && watch.Listening
+                && lastStatus.TryGetValue(routeKey, out var status) && status is "empty" or "queued";
+            return runtime.FallbackWait(hinted, idleRoutes.Contains(routeKey));
+        }
 
         async Task MonitorStop()
         {

@@ -87,6 +87,10 @@ Session hints are coalesced by session ID: a hint reconciles its affected routes
 
 Conditional detail status (`get_status` with `attentionDetail: true` and `statusTag`, initially an empty string) includes the current manager summary without administrator history. An unchanged response can therefore stay compact after managers have been appointed. Explicit `managerHistoryBefore`, `managerHistoryOnly`, or `managerActionsBefore` requests retain the full history path and never receive an unchanged status response. Authorization and current controls are checked before every validator match.
 
+Native verification and prompt hooks use purpose-specific status projections. Both retain fresh authorization, session identity, tool settings and pause/cancellation controls while omitting unused dashboard, history, binding, order and offer-preview content. Prompt hooks also receive attention counts, the compact top-item descriptor and standing revision. These fixed read envelopes reject conditional tags and attached writes; a native probe always returns its session identity.
+
+Wake watchers use per-route recovery intervals: five minutes for an idle route with a working subscription and fresh proof of no inbox or pending attention, 60 seconds for pending attention, and 15 seconds for errors or disconnected channels. A pending route does not force idle neighbors to poll. Targeted hints and reconnection interrupt the wait; an independent full recovery deadline survives hint traffic. Missing idle evidence uses the shorter pace. Explicit caller intervals remain honored, and dispatch still requires a fresh control check.
+
 Successful aggregate mutations perform age-based replay, acknowledgment, and resolved-action cleanup at most once per hour, even below the map's capacity limit. Entries within the 24-hour retry window and active early-eviction tombstones remain protected. Undated legacy entries stay until the existing capacity cleanup can handle them safely. Reads and cached retries do not run or persist this housekeeping, so an idle aggregate is cleaned on its next successful mutation.
 
 **What a chat may do.** The `session_open` reply carries `startHint`: one line with the chat's role and the tools worth using, about 40 tokens once per session. The role comes from the credential, never from the `role` the chat declared. The tools are ones the hub has turned on, and the adapter narrows the line to what it lists; a native chat gets no `session_open` reply, so no line. A refusal about what the chat may do keeps its code and adds `hint`, one fixed line on what's missing and how to get it, such as "Analytics is off for this chat. Ask Paul to allow it." It costs about 15 to 20 tokens, only when a call is refused, and comes with `AdministratorRequired`, `HubPcRequired`, `RepositoryDenied`, `SessionDenied` and `ActionDenied`, and with the adapter's `unknown_tool` for a catalog tool its profile hides. The lines depend only on the code and the tool, so they say nothing about other sessions. A line never grants anything.
@@ -175,7 +179,7 @@ An action whose session closed before it reported is stranded. The board marks i
 
 ### Archive
 
-A completed task with no live claim and no open action leaves its board 30 days after completion (`Relay:Board:ArchiveAfterDays`; `0` means only when the board fills). A board near its 2,048-task limit archives its oldest finished tasks sooner, but never within a day of completion. Archiving closes the task's attention items.
+A completed task with no live claim and no open action leaves its board one day after completion (`Relay:Board:ArchiveAfterDays`; `0` means only when the board fills). Archiving keeps the complete task readable by ID and removes it from hot board state. A board near its 2,048-task limit also archives its oldest finished tasks, never within a day of completion. Archiving closes the task's attention items.
 
 - `task_get` with its `taskId` still reads it (`archived: true`); lists leave it out. Search finds it with status `archived`, and analytics still counts it.
 - A delta from `sinceRevision: 0` gets live tasks only. A later checkpoint also gets each task archived since then, once, as `{ "taskId", "archived": true }`. Checkpoints older than 30 days get `DeltaRestartRequired`.
@@ -490,7 +494,7 @@ Set them in `appsettings.json`, as environment variables (`Relay__Clients__0__To
 | `Relay:SiloPort` | 21111 | Orleans silo port (loopback). Change it and `Relay:ClusterId` for a second hub. |
 | `Relay:GatewayPort` | 0 (off) | An Orleans client gateway (loopback). Leave it off: nothing uses it, and it would let any local process call grains without a token. |
 | `Relay:ClusterId` | `CoCern` | Orleans cluster name. |
-| `Relay:Board:ArchiveAfterDays` | 30 | Days after completion before a task is archived (0 to 3650). |
+| `Relay:Board:ArchiveAfterDays` | 1 | Days after completion before a task is archived (0 to 3650). |
 | `Relay:Sessions:IdleHours` | 24 | Hours without a call after which the hub closes a session, checked every 10 minutes (2 to 720). Never sooner; activity is recorded about hourly, so up to an hour later. A session with unread messages is kept. |
 | `Relay:Dashboard:ViewerPrincipalIds:N` | | Administrator principals that may open the dashboard. The start script and Visual Studio profile set theirs. |
 | `Relay:Dashboard:OpenOnStart` | `false` | Open the dashboard in the default browser when the hub starts, already signed in with that start's one-time link. The Visual Studio launch profile turns it on. |
@@ -506,10 +510,13 @@ Set them in `appsettings.json`, as environment variables (`Relay__Clients__0__To
 
 All on by default except the two for other PCs.
 
+Quiet successful background status reads roll up earlier than ordinary activity. Failures, foreground or unclassified calls, manager reads and records carrying usage, target, workflow or offer metadata keep the ordinary retention period. Daily traffic and origin totals survive; per-session hourly measurements preserve counts, bytes and token samples until ordinary retention expires. Older summarized measurements have UTC-hour precision. Rollup and raw deletion commit together; repeating maintenance cannot count a row twice.
+
 | Setting | Default | What it does |
 | --- | --- | --- |
 | `Relay:Activity:Enabled` | `true` | Log activity. |
-| `Relay:Activity:RetentionDays` | 30 | Days of raw activity rows kept. |
+| `Relay:Activity:RetentionDays` | 30 | Days of ordinary raw activity and hourly background measurements kept. Whole UTC days are rolled up. |
+| `Relay:Activity:BackgroundRetentionDays` | 1 | Raw retention for quiet successful background status reads; 0 disables early rollup. At least the latest 24 hours remain raw. |
 | `Relay:Tokens:Enabled` | `true` | Count tokens. |
 | `Relay:Tokens:Enforce` | `true` | Hold replies to their budget. `false`: only measure. |
 | `Relay:Tokens:EnforceTools:N` | all but doc tools | Enforce only these tools. |

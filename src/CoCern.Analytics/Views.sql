@@ -39,6 +39,26 @@ FROM relay.activity_log;
 -- One row per public tool call.
 CREATE VIEW tool_calls AS SELECT * EXCLUDE (kind) FROM activity WHERE kind = 'call';
 
+-- Weighted measurements for quiet status reads moved out of the raw log early. Detailed workflow/offer/inbox/manager records stay raw.
+-- Older status measurements have UTC-hour precision and expire with ordinary raw retention; traffic byte/origin totals below are permanent.
+CREATE VIEW tool_measurements AS
+SELECT repository_id, at_ticks, session_id, role, tool, background_call, board_id, task_id,
+       1::BIGINT AS calls, request_bytes, reply_bytes, request_tokens, reply_tokens, relay_tokens,
+       CASE WHEN request_tokens IS NOT NULL AND reply_tokens IS NOT NULL THEN relay_tokens ELSE 0 END AS measured_tokens,
+       CASE WHEN request_tokens IS NOT NULL AND reply_tokens IS NOT NULL THEN 1 ELSE 0 END::BIGINT AS measured_calls
+FROM tool_calls
+UNION ALL
+SELECT repository_id, at_ticks, nullif(session_id, ''), nullif(role, ''), tool, true, NULL::VARCHAR, NULL::VARCHAR,
+       calls, request_bytes, reply_bytes,
+       CASE WHEN request_samples > 0 THEN request_tokens END, CASE WHEN reply_samples > 0 THEN reply_tokens END,
+       request_tokens + reply_tokens, measured_tokens, measured_calls
+FROM relay.activity_background_hourly;
+
+CREATE VIEW activity_measurements AS
+SELECT repository_id, at_ticks, kind, tool, code, 1::BIGINT AS calls FROM activity
+UNION ALL
+SELECT repository_id, at_ticks, 'call', tool, 'Ok', calls FROM relay.activity_background_hourly;
+
 -- Traffic totals survive raw retention. Daily timestamps have day precision; unclassified historical totals stay unknown.
 -- Reported origin describes the adapter path, not whether a model actually executed or consumed the reply.
 CREATE VIEW tool_traffic AS
@@ -131,7 +151,7 @@ raw AS (
     SELECT repository_id, min(at_ticks) AS first_workflow_ticks FROM tool_calls
     WHERE ok AND tool = 'task_update' AND workflow_state IS NOT NULL GROUP BY repository_id),
 rolled AS (
-    SELECT repository_id, sum(calls) AS rolled_up_calls FROM relay.activity_daily WHERE kind = 'call' GROUP BY repository_id),
+    SELECT repository_id, sum(calls) AS rolled_up_calls FROM relay.activity_daily WHERE kind = 'call' AND tool IN ('task_update', 'task_claim') GROUP BY repository_id),
 current_state AS (
     SELECT t.repository_id, count(*) FILTER (WHERE NOT t.archived AND (t.task ->> '$.workflow.state') = 'blocked') AS current_blocked_tasks,
            bool_or((t.task ->> '$.workflow.state') IS NOT NULL AND NOT EXISTS (

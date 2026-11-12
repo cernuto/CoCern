@@ -82,6 +82,12 @@ internal static class RelayRequestGuard
         if (args.ContainsKey("statusTag") && (tool.Name != RelayTools.GetStatus || args["statusTag"] is not JsonValue statusValue
             || !statusValue.TryGetValue<string>(out var statusText) || statusText.Length > 64 || statusText.Any(char.IsControl)))
             return Replies.Error(InvalidArguments, new { field = "statusTag" });
+        // Internal readers opt into a smaller read, never a different authority or a write riding on the probe.
+        if (args.ContainsKey("statusProjection") && (tool.Name != RelayTools.GetStatus || Text(args, "sessionId").Length == 0
+            || args["statusProjection"] is not JsonValue projectionValue || !projectionValue.TryGetValue<string>(out var projection)
+            || projection is not ("probe" or "prompt") || args.Any(field => field.Key is not
+                ("repositoryId" or "sessionId" or "sessionToken" or "actingSessionId" or "actingSessionToken" or "backgroundCall" or "statusProjection"))))
+            return Replies.Error(InvalidArguments, new { field = "statusProjection" });
         // Machine revocation dispatches directly to discovery, outside the control aggregate's argument fence.
         if (tool.Name == RelayTools.ControlRequest && Text(args, "command") == "revoke_machine" && args.ContainsKey("allSessions"))
             return Replies.Error(InvalidArguments, new { field = "allSessions" });
@@ -240,16 +246,16 @@ internal static class RelayRequestGuard
 /// </summary>
 internal sealed record CallControls(bool OfferWanted, bool StatusDetail, bool PageSeen, string[] SeenIds, string? KnownEtag, JsonObject? Usage, bool ModelVisible, bool? BackgroundCall,
     bool HeadersOnly = false, string? KnownInboxEtag = null, bool PresentStanding = false, string? StatusTag = null, long? StatusHoldMinutes = null,
-    string? ActingSessionId = null, string? ActingSessionToken = null, string? ActingRepositoryId = null)
+    string? ActingSessionId = null, string? ActingSessionToken = null, string? ActingRepositoryId = null, string? StatusProjection = null)
 {
-    private static readonly string[] Fields = ["usage", "attention", "attentionDetail", "attentionStatus", "maxHoldMinutes", "seen", "seenMessageIds", "knownEtag", "backgroundCall", "headersOnly", "knownInboxEtag", "presentStanding", "statusTag", "actingSessionId", "actingSessionToken", RelayRequestGuard.ActingRepository];
+    private static readonly string[] Fields = ["usage", "attention", "attentionDetail", "attentionStatus", "maxHoldMinutes", "seen", "seenMessageIds", "knownEtag", "backgroundCall", "headersOnly", "knownInboxEtag", "presentStanding", "statusTag", "statusProjection", "actingSessionId", "actingSessionToken", RelayRequestGuard.ActingRepository];
 
     public static CallControls Take(JsonObject args)
     {
         var offerWanted = args["attention"] is not JsonValue optOut || optOut.GetValue<bool>();
         var controls = new CallControls(
             OfferWanted: offerWanted,
-            StatusDetail: args["attentionDetail"] is JsonValue detail && detail.GetValue<bool>(),
+            StatusDetail: args.ContainsKey("statusProjection") || args["attentionDetail"] is JsonValue detail && detail.GetValue<bool>(),
             // A reader that showed the model a reply without an offer reports what it showed, so those info items close.
             PageSeen: args["seen"] is JsonValue seen && seen.GetValue<bool>(),
             SeenIds: args["seenMessageIds"] is JsonArray seenList ? JsonFields.Strings(seenList).ToArray() : [],
@@ -271,7 +277,8 @@ internal sealed record CallControls(bool OfferWanted, bool StatusDetail, bool Pa
             ActingSessionId: JsonFields.Text(args, "actingSessionId") is { Length: > 0 } acting ? acting : null,
             ActingSessionToken: JsonFields.Text(args, "actingSessionToken") is { Length: > 0 } proof ? proof : null,
             // Set by RelayRequestGuard alone: a doc read of another repository, whose acting proof is verified in the session's own repository.
-            ActingRepositoryId: JsonFields.Text(args, RelayRequestGuard.ActingRepository) is { Length: > 0 } own ? own : null);
+            ActingRepositoryId: JsonFields.Text(args, RelayRequestGuard.ActingRepository) is { Length: > 0 } own ? own : null,
+            StatusProjection: args["statusProjection"] is JsonValue projection && projection.TryGetValue<string>(out var purpose) ? purpose : null);
         foreach (var field in Fields) args.Remove(field);
         return controls;
     }

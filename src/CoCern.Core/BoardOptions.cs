@@ -6,7 +6,7 @@ namespace CoCern.Core;
 public sealed record BoardOptions
 {
     /// <summary>
-    /// Days after completion before a finished, idle task moves to the archive (<c>Relay:Board:ArchiveAfterDays</c>, default 30). 0 archives
+    /// Days after completion before a finished, idle task moves to the archive (<c>Relay:Board:ArchiveAfterDays</c>, default 1). 0 archives
     /// only when a board nears its task limit.
     /// </summary>
     public int ArchiveAfterDays { get; init; } = RelayLimits.DefaultArchiveAfterDays;

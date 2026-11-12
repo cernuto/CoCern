@@ -18,15 +18,22 @@ internal sealed class StatusTools(Aggregates aggregates, StandingDelivery standi
     /// Control status, and with a session its own status. With attention on, the session part carries the count of actionable items;
     /// the adapter's <c>attentionDetail</c> adds the top item, the wake candidate, the inbox count and the board's standing revision.
     /// </summary>
-    public async Task<RelayReply> StatusAsync(RelayCaller caller, JsonObject args, bool detail, bool conditional = false)
+    public async Task<RelayReply> StatusAsync(RelayCaller caller, JsonObject args, bool detail, bool conditional = false, string? projection = null)
     {
+        var lean = projection is "probe" or "prompt";
         var controlArgs = args.DeepClone().AsObject();
         // Transport controls were removed before dispatch. Always overwrite this projection flag rather than trusting a raw field.
-        controlArgs["managerSummaryOnly"] = detail && conditional
+        controlArgs["managerSummaryOnly"] = (lean || detail && conditional)
             && !new[] { "managerHistoryBefore", "managerHistoryOnly", "managerActionsBefore" }.Any(args.ContainsKey);
+        controlArgs["controlsOnly"] = lean;
         if (Text(args, "sessionId").Length == 0) return await WithOrdersAsync(caller, args, await aggregates.Control(caller, RelayTools.GetStatus, controlArgs));
         var read = args.DeepClone().AsObject();
-        if (attention.Enabled) { read["attentionStatus"] = detail ? "detail" : "count"; read["maxHoldMinutes"] = attention.MaxHoldMinutes; }
+        read["statusSummaryOnly"] = lean;
+        if (attention.Enabled && projection != "probe")
+        {
+            read["attentionStatus"] = projection == "prompt" ? "summary" : detail ? "detail" : "count";
+            read["maxHoldMinutes"] = attention.MaxHoldMinutes;
+        }
         var result = await aggregates.Session(caller, RelayTools.GetStatus, read);
         if (!result.Ok) return result;
         var control = await aggregates.Control(caller, RelayTools.GetStatus, controlArgs);
@@ -37,7 +44,7 @@ internal sealed class StatusTools(Aggregates aggregates, StandingDelivery standi
             if (await standing.RevisionAsync(caller, args) is { } revision) summary["standing"] = revision;
             if (Text(summary, "wake") is { } wake && wake.StartsWith(AttentionWeights.HoldWakePrefix, StringComparison.Ordinal)) telemetry?.RecordHoldWake(args, wake);
         }
-        return detail ? Ok(data, result.Version) : await WithOrdersAsync(caller, args, Ok(data, result.Version));
+        return lean || detail ? Ok(data, result.Version) : await WithOrdersAsync(caller, args, Ok(data, result.Version));
     }
 
     /// <summary>

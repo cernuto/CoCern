@@ -86,7 +86,7 @@ internal sealed class ToolRouter(Aggregates aggregates, ClaimComposer claims, Se
             RelayTools.SessionToolSettingsSet => aggregates.Call(AggregateKinds.Session, Text(args, "targetSessionId"), caller, SessionToolSettings.SetOperation, args),
             RelayTools.RecordDecision when Text(args, "decision") == "approveGoal" => new GoalTools(aggregates, peers).ApproveAsync(call),
             RelayTools.EventWait => new EventWaitTools(aggregates).RunAsync(caller, args),
-            RelayTools.GetStatus => status.StatusAsync(caller, args, call.Controls.StatusDetail, call.Controls.StatusTag is not null),
+            RelayTools.GetStatus => status.StatusAsync(caller, args, call.Controls.StatusDetail, call.Controls.StatusTag is not null, call.Controls.StatusProjection),
             RelayTools.TaskClaim => claims.ClaimTaskAsync(caller, args, session),
             RelayTools.ClaimRenew or RelayTools.ClaimRelease when Text(args, "taskId").Length > 0 && Text(args, "resourceId").Length == 0 => aggregates.Board(caller, tool, args),
             RelayTools.ClaimAcquire or RelayTools.ClaimRenew or RelayTools.ClaimRelease => claims.ResourceClaimAsync(caller, tool, args, session),

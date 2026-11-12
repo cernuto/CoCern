@@ -246,14 +246,14 @@ internal static class SessionAttention
     /// <c>hold:&lt;ticks of that boundary&gt;</c>: one ID per idle period, so however many items wait, an idle chat gets one wake until
     /// its next boundary. The adapter wakes at most once per ID.
     /// </summary>
-    public static JsonObject Status(SessionState state, JsonObject args, DateTimeOffset now, bool detail)
+    public static JsonObject Status(SessionState state, JsonObject args, DateTimeOffset now, bool detail, bool summaryOnly = false)
     {
         var queue = state.Attention;
         var items = AttentionScheduler.Items(queue.StoredItems ?? new JsonObject()).ToArray();
         var eligible = AttentionScheduler.Eligible(items.Where(item => item.Kind != AttentionKinds.StandingProposal), now).ToArray();
         var status = new JsonObject { ["actionable"] = eligible.Length };
         if (!detail) return status;
-        status["pendingWork"] = PendingWork(items, now, eligible.Length);
+        if (!summaryOnly) status["pendingWork"] = PendingWork(items, now, eligible.Length);
         var urgent = eligible.Where(item => AttentionWeights.Wakes(item.Tier)).ToArray();
         status["urgent"] = urgent.Length;
         status["inbox"] = state.UnreadCount;
@@ -263,6 +263,8 @@ internal static class SessionAttention
             if (top.TaskId.Length > 0) shown["t"] = top.TaskId;
             if (top.BoardId != "default") shown["b"] = top.BoardId;
             status["top"] = shown;
+            // Prompt hooks consume only the descriptor and counts; never construct an offer or its potentially large preview.
+            if (summaryOnly) return status;
             var current = OfferJson(top, eligible.Length - 1);
             if (Encoding.UTF8.GetByteCount(current.ToJsonString()) <= RelayLimits.MaxAttentionOfferBytes)
             {
@@ -278,6 +280,7 @@ internal static class SessionAttention
                 status["pendingWork"] = pending;
             }
         }
+        if (summaryOnly) return status;
         var hold = TimeSpan.FromMinutes(Math.Clamp(Number(args, "maxHoldMinutes", RelayLimits.DefaultAttentionMaxHoldMinutes), 1, RelayLimits.MaxAttentionMaxHoldMinutes));
         var boundary = queue.BoundaryAt;
         DateTimeOffset Waiting(AttentionItem item) => boundary is { } at && at > item.CreatedAt ? at : item.CreatedAt;

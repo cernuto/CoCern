@@ -36,12 +36,16 @@ public sealed class InboxCoverage
 }
 
 /// <summary>What one full status read decided, kept under the hub's <c>statusTag</c>. The status itself is not kept. While the hub, having authorized the call and read status again, answers that this tag still holds, the same decision still holds, a refusal included.</summary>
-internal sealed record StatusVerdict(string Tag, bool Permitted, bool UrgentOnly, string? Wake, string? Line);
+internal sealed record StatusVerdict(string Tag, bool Permitted, bool UrgentOnly, string? Wake, string? Line, bool Idle);
 
 public sealed class WakeReconciler(WakeConfiguration configuration, WakeState state, RelayForwarder forwarder, IWakeDispatcher dispatcher, TimeProvider? clock = null, InboxCoverage? coverage = null)
 {
+    /// <summary>A fresh authorized status proved there is no inbox or pending attention, including snoozed items.</summary>
+    internal bool CanWaitQuietly { get; private set; }
+
     public async Task<string> ReconcileAsync(WakeRoute route, WakeSession session, CancellationToken cancellationToken = default)
     {
+        CanWaitQuietly = false;
         cancellationToken.ThrowIfCancellationRequested();
         if (File.Exists(configuration.StopFile)) return "stopped";
         // The private session inbox is independent of mutable local routing metadata.
@@ -166,12 +170,14 @@ public sealed class WakeReconciler(WakeConfiguration configuration, WakeState st
                 // An answer about any other tag says nothing about this session, so it refuses, like every other reply that names no session.
                 if (known is null || StatusTag(answer) != known.Tag) return false;
                 (urgentOnly, attentionWake, attentionLine) = (known.UrgentOnly, known.Wake, known.Line);
+                CanWaitQuietly = known.Permitted && known.Idle;
                 return known.Permitted;
             }
             if (readAttention && status.Ok && status.Data is { ValueKind: JsonValueKind.Object } detail) (urgentOnly, attentionWake, attentionLine) = Attention(detail);
             var permitted = ControlPermits(status);
+            if (readAttention && permitted && status.Data is { ValueKind: JsonValueKind.Object } observed) CanWaitQuietly = IsIdle(observed);
             if (readAttention && status.Ok && status.Data is { ValueKind: JsonValueKind.Object } full && StatusTag(full) is { } tag)
-                coverage?.RememberStatus(key, new(tag, permitted, urgentOnly, attentionWake, attentionLine));
+                coverage?.RememberStatus(key, new(tag, permitted, urgentOnly, attentionWake, attentionLine, CanWaitQuietly));
             return permitted;
         }
 
@@ -189,6 +195,18 @@ public sealed class WakeReconciler(WakeConfiguration configuration, WakeState st
             }
             return true;
         }
+    }
+
+    private static bool IsIdle(JsonElement status)
+    {
+        static bool Zero(JsonElement block, string name) => block.TryGetProperty(name, out var value)
+            && value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var number) && number == 0;
+        return status.TryGetProperty("attention", out var attention) && attention.ValueKind == JsonValueKind.Object
+            && Zero(attention, "actionable") && Zero(attention, "inbox") && !attention.TryGetProperty("wake", out _)
+            && attention.TryGetProperty("pendingWork", out var pending) && pending.ValueKind == JsonValueKind.Object
+            && Zero(pending, "actionable") && Zero(pending, "pending")
+            && pending.TryGetProperty("reason", out var reason) && reason.ValueKind == JsonValueKind.String
+            && reason.GetString() is "no_pending_work" or "expired";
     }
 
     internal const string SessionRejected = "session-rejected";

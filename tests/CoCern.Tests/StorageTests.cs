@@ -10,6 +10,7 @@ using CoCern.Contracts;
 using CoCern.Core;
 using CoCern.Domain;
 using CoCern.Storage;
+using CoCern.Analytics;
 using Xunit;
 
 namespace CoCern.Tests;
@@ -22,6 +23,96 @@ public sealed class StorageTests : IDisposable
     private static readonly DateTimeOffset Now = new(2026, 10, 29, 12, 0, 0, TimeSpan.Zero);
 
     public StorageTests() => Directory.CreateDirectory(_directory);
+
+    [Fact]
+    public async Task Background_rollup_is_atomic_preserves_measurements_and_keeps_semantic_events()
+    {
+        using var store = new SqliteStore(Database, new ActivityOptions { Enabled = false });
+        using var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = Database, Pooling = false }.ToString());
+        connection.Open();
+        void Run(string sql)
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = sql;
+            command.ExecuteNonQuery();
+        }
+        long Count(string sql)
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = sql;
+            return Convert.ToInt64(command.ExecuteScalar());
+        }
+        void Seed(string session, DateTimeOffset at)
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+                INSERT INTO activity_log(at_ticks,kind,repository_id,session_id,tool,ok,code,request_bytes,reply_bytes,duration_ms,
+                    background_call,call_origin,request_tokens,reply_tokens)
+                VALUES($at,'call','repo',$session,'get_status',1,'Ok',10,20,2,1,'wake-watcher',2,4);
+                """;
+            command.Parameters.AddWithValue("$at", at.UtcTicks);
+            command.Parameters.AddWithValue("$session", session);
+            command.ExecuteNonQuery();
+        }
+        var old = Now.AddDays(-3);
+        Seed("quiet", old); Seed("quiet", old.AddMinutes(1));
+        foreach (var session in new[] { "failed", "foreground", "unknown", "manager", "usage", "target", "offer", "budget" }) Seed(session, old);
+        Seed("recent", Now.AddDays(-1));
+        Seed("expired", Now.AddDays(-31));
+        Run("""
+            UPDATE activity_log SET ok=0,code='SessionDenied' WHERE session_id='failed';
+            UPDATE activity_log SET background_call=0 WHERE session_id='foreground';
+            UPDATE activity_log SET background_call=NULL WHERE session_id='unknown';
+            UPDATE activity_log SET role='manager' WHERE session_id='manager';
+            UPDATE activity_log SET input_tokens=9 WHERE session_id='usage';
+            UPDATE activity_log SET target='inbox:first' WHERE session_id='target';
+            UPDATE activity_log SET offer_target='task:T-1' WHERE session_id='offer';
+            UPDATE activity_log SET kind='budget' WHERE session_id='budget';
+            UPDATE activity_log SET tool='task_update',background_call=0 WHERE session_id='expired';
+            CREATE TRIGGER refuse_origin_rollup BEFORE INSERT ON activity_origin_daily BEGIN SELECT RAISE(ABORT,'fixture failure'); END;
+            """);
+
+        // A failure between summary writes must preserve every raw row and roll back all preceding summaries.
+        await Assert.ThrowsAsync<SqliteException>(() => store.RollUpActivityAsync(Now));
+        Assert.Equal(12, Count("SELECT COUNT(*) FROM activity_log;"));
+        Assert.Equal(0, Count("SELECT COUNT(*) FROM activity_daily;"));
+        Assert.Equal(0, Count("SELECT COUNT(*) FROM activity_background_hourly;"));
+        Run("DROP TRIGGER refuse_origin_rollup;");
+        Assert.Equal(3, await store.RollUpActivityAsync(Now));
+        Assert.Equal(9, Count("SELECT COUNT(*) FROM activity_log;"));
+        Assert.Equal(0, Count("SELECT COUNT(*) FROM activity_log WHERE session_id IN ('quiet','expired');"));
+        Assert.Equal(3, Count("SELECT SUM(calls) FROM activity_daily;"));
+        Assert.Equal(3, Count("SELECT SUM(calls) FROM activity_origin_daily;"));
+        Assert.Equal(90, Count("SELECT SUM(request_bytes+reply_bytes) FROM activity_daily;"));
+        Assert.Equal(1, Count("SELECT COUNT(*) FROM activity_background_hourly;"));
+        Assert.Equal(2, Count("SELECT SUM(calls) FROM activity_background_hourly;"));
+        Assert.Equal(12, Count("SELECT SUM(measured_tokens) FROM activity_background_hourly;"));
+        Assert.Equal(2, Count("SELECT SUM(measured_calls) FROM activity_background_hourly;"));
+        Assert.Equal(40, Count("SELECT SUM(reply_bytes) FROM activity_background_hourly;"));
+        var counters = await store.ReadActivityCountersAsync("repo", old.AddHours(-1), Now);
+        Assert.Equal(10, counters.Calls); // All retained calls, plus two quiet reads; the budget event is not a call.
+        Assert.Equal(0, await store.RollUpActivityAsync(Now));
+        Assert.Equal(3, Count("SELECT SUM(calls) FROM activity_daily;"));
+        // Reconstruct the real DuckDB views from a scrubbed snapshot, so lost sample weights cannot hide behind correct SQLite sums.
+        var snapshot = Path.Combine(_directory, "analytics.db");
+        await store.CreateAnalyticsSnapshotAsync(snapshot);
+        using (var analytics = new AnalyticsService(new AnalyticsOptions { LiveDatabasePath = Database, ExtensionDirectory = AnalyticsTestExtension.InstalledDirectory() }))
+        {
+            await analytics.SwitchSnapshotAsync(snapshot, Now);
+            var tokens = await analytics.RunNamedAsync(NamedQueries.RelayTokens, "repo");
+            var background = Assert.Single(tokens.Rows, row => Equals(row[0], "background"));
+            Assert.Equal(48, Convert.ToInt64(background[1]));
+            Assert.Equal(8, Convert.ToInt64(background[3]));
+            var context = await analytics.RunNamedAsync(NamedQueries.ContextByRole, "repo");
+            var worker = Assert.Single(context.Rows, row => Equals(row[0], ""));
+            Assert.Equal(22.5, Convert.ToDouble(worker[1]));
+            Assert.Equal(8, Convert.ToInt64(worker[3]));
+            var compaction = await analytics.RunNamedAsync(AnalyticsQueryNames.CompactionRateByTool, "repo");
+            Assert.Equal(10, Convert.ToInt64(Assert.Single(compaction.Rows)[3]));
+        }
+        await store.RollUpActivityAsync(Now.AddDays(31));
+        Assert.Equal(0, Count("SELECT COUNT(*) FROM activity_background_hourly;"));
+    }
 
     [Fact]
     public async Task Create_read_and_reopen_preserve_opaque_state_and_due_work()

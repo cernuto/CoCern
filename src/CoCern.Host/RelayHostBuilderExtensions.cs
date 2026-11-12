@@ -128,7 +128,8 @@ public static class RelayHostBuilderExtensions
             var activity = new ActivityOptions
             {
                 Enabled = configuration.GetValue("Relay:Activity:Enabled", true),
-                RetentionDays = configuration.GetValue("Relay:Activity:RetentionDays", 30) is var days and >= 1 ? days : throw new InvalidOperationException("Relay:Activity:RetentionDays must be at least 1.")
+                RetentionDays = configuration.GetValue("Relay:Activity:RetentionDays", 30) is var days and >= 1 ? days : throw new InvalidOperationException("Relay:Activity:RetentionDays must be at least 1."),
+                BackgroundRetentionDays = configuration.GetValue("Relay:Activity:BackgroundRetentionDays", 1) is var backgroundDays and >= 0 ? backgroundDays : throw new InvalidOperationException("Relay:Activity:BackgroundRetentionDays must be nonnegative.")
             };
             var search = new SearchOptions { Enabled = configuration.GetValue("Relay:Search:Enabled", true) };
             return new SqliteStore(DatabasePath(configuration, services.GetRequiredService<IHostEnvironment>()), activity, search)

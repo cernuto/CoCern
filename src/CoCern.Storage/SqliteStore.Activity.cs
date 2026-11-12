@@ -12,6 +12,8 @@ public sealed record ActivityOptions
     public bool Enabled { get; init; } = true;
     /// <summary>Raw <c>activity_log</c> rows older than this are rolled into <c>activity_daily</c> and deleted.</summary>
     public int RetentionDays { get; init; } = 30;
+    /// <summary>Completed UTC days of quiet successful background status reads kept raw; 0 disables early rollup. At least the latest 24 hours remain raw.</summary>
+    public int BackgroundRetentionDays { get; init; } = 1;
     internal int QueueCapacity { get; init; } = RelayLimits.ActivityQueueCapacity;
     internal TimeSpan BatchInterval { get; init; } = TimeSpan.FromMilliseconds(RelayLimits.ActivityBatchMilliseconds);
     internal TimeProvider Clock { get; init; } = TimeProvider.System;
@@ -92,6 +94,15 @@ public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
                 PRIMARY KEY (day, repository_id, tool, call_origin)
             );
             """, transaction)) origins.ExecuteNonQuery();
+        using (var background = Command("""
+            CREATE TABLE IF NOT EXISTS activity_background_hourly (
+                at_ticks INTEGER NOT NULL, repository_id TEXT NOT NULL, session_id TEXT NOT NULL, role TEXT NOT NULL, tool TEXT NOT NULL,
+                calls INTEGER NOT NULL, request_bytes INTEGER NOT NULL, reply_bytes INTEGER NOT NULL, duration_ms REAL NOT NULL,
+                request_tokens INTEGER NOT NULL, reply_tokens INTEGER NOT NULL, request_samples INTEGER NOT NULL, reply_samples INTEGER NOT NULL,
+                measured_tokens INTEGER NOT NULL, measured_calls INTEGER NOT NULL,
+                PRIMARY KEY (at_ticks, repository_id, session_id, role, tool)
+            );
+            """, transaction)) background.ExecuteNonQuery();
         // A session's own last call, however many of a watcher's rows came after it: walking those through ix_activity_log_session_call
         // measured about 75 ms per session over a day of polling. This holds only the rows it is for, so polling adds nothing to it.
         using (var foreground = Command("CREATE INDEX IF NOT EXISTS ix_activity_log_session_foreground ON activity_log(repository_id, session_id, at_ticks DESC) WHERE kind = 'call' AND ok = 1 AND background_call = 0;", transaction))
@@ -248,16 +259,54 @@ public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
         catch (Exception exception) when (exception is SqliteException or ObjectDisposedException) { }
     }
 
-    /// <summary>Rolls raw rows older than the retention period into per-day totals, then deletes them, in one transaction. Returns the rows rolled up.</summary>
+    // Only read-only status traffic without semantic event metadata can leave the detailed log early. Manager reads can delimit turns,
+    // inbox targets delimit reads, and reported usage/workflow/offer records remain under the ordinary retention policy.
+    private const string EarlyBackground = """
+        at_ticks < $backgroundCutoff AND kind = 'call' AND tool = 'get_status' AND ok = 1 AND code = 'Ok' AND background_call = 1
+        AND COALESCE(role, '') <> 'manager' AND input_tokens IS NULL AND output_tokens IS NULL
+        AND target IS NULL AND content_hash IS NULL AND workflow_state IS NULL AND offer_target IS NULL
+        """;
+
+    /// <summary>Rolls expired raw rows into traffic totals and bounded hourly status measurements, then deletes them, atomically.</summary>
     internal async Task<int> RollUpActivityAsync(DateTimeOffset now)
     {
-        var cutoff = now.AddDays(-Math.Max(1, _activityOptions.RetentionDays)).UtcTicks;
+        var day = new DateTimeOffset(now.UtcDateTime.Date, TimeSpan.Zero);
+        var cutoff = day.AddDays(-Math.Max(1, _activityOptions.RetentionDays)).UtcTicks;
+        var backgroundCutoff = _activityOptions.BackgroundRetentionDays <= 0 ? 0L
+            : day.AddDays(-Math.Max(1, _activityOptions.BackgroundRetentionDays)).UtcTicks;
+        var expired = $"at_ticks < MAX($cutoff, $backgroundCutoff) AND (at_ticks < $cutoff OR ({EarlyBackground}))";
         await _activityGate.WaitAsync();
         try
         {
             var connection = _activityConnection ?? throw new ObjectDisposedException(nameof(SqliteStore));
             using var transaction = connection.BeginTransaction(deferred: false);
-            using (var rollup = ActivityCommand($"""
+            SqliteCommand RetentionCommand(string sql)
+            {
+                var command = ActivityCommand(sql, transaction);
+                command.Parameters.AddWithValue("$cutoff", cutoff);
+                command.Parameters.AddWithValue("$backgroundCutoff", backgroundCutoff);
+                return command;
+            }
+            // Hourly session measurements retain weighted token/context/outlier analytics without keeping every status row or index entry.
+            // Their lifetime is the ordinary raw retention period; permanent day-level byte/origin totals remain in the existing tables.
+            using (var hourly = RetentionCommand($"""
+                INSERT INTO activity_background_hourly(at_ticks, repository_id, session_id, role, tool, calls, request_bytes, reply_bytes, duration_ms,
+                    request_tokens, reply_tokens, request_samples, reply_samples, measured_tokens, measured_calls)
+                SELECT at_ticks / 36000000000 * 36000000000, repository_id, COALESCE(session_id, ''), COALESCE(role, ''), tool,
+                    COUNT(*), SUM(request_bytes), SUM(reply_bytes), SUM(duration_ms), COALESCE(SUM(request_tokens), 0), COALESCE(SUM(reply_tokens), 0),
+                    COUNT(request_tokens), COUNT(reply_tokens),
+                    SUM(CASE WHEN request_tokens IS NOT NULL AND reply_tokens IS NOT NULL THEN request_tokens + reply_tokens ELSE 0 END),
+                    SUM(request_tokens IS NOT NULL AND reply_tokens IS NOT NULL)
+                FROM activity_log WHERE {EarlyBackground} AND at_ticks >= $cutoff
+                GROUP BY 1, 2, 3, 4, 5
+                ON CONFLICT(at_ticks, repository_id, session_id, role, tool) DO UPDATE SET
+                    calls = calls + excluded.calls, request_bytes = request_bytes + excluded.request_bytes,
+                    reply_bytes = reply_bytes + excluded.reply_bytes, duration_ms = duration_ms + excluded.duration_ms,
+                    request_tokens = request_tokens + excluded.request_tokens, reply_tokens = reply_tokens + excluded.reply_tokens,
+                    request_samples = request_samples + excluded.request_samples, reply_samples = reply_samples + excluded.reply_samples,
+                    measured_tokens = measured_tokens + excluded.measured_tokens, measured_calls = measured_calls + excluded.measured_calls;
+                """)) hourly.ExecuteNonQuery();
+            using (var rollup = RetentionCommand($"""
                 INSERT INTO activity_daily(day, repository_id, kind, role, tool, calls, errors, request_bytes, reply_bytes, duration_ms, input_tokens, output_tokens,
                     model_calls, background_calls, model_request_bytes, background_request_bytes, model_reply_bytes, background_reply_bytes)
                 SELECT date((at_ticks - {UnixEpochTicks}) / 10000000, 'unixepoch'), repository_id, kind, COALESCE(role, ''), COALESCE(tool, ''),
@@ -265,7 +314,7 @@ public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
                        SUM(CASE WHEN background_call = 0 THEN 1 ELSE 0 END), SUM(CASE WHEN background_call = 1 THEN 1 ELSE 0 END),
                        SUM(CASE WHEN background_call = 0 THEN request_bytes ELSE 0 END), SUM(CASE WHEN background_call = 1 THEN request_bytes ELSE 0 END),
                        SUM(CASE WHEN background_call = 0 THEN reply_bytes ELSE 0 END), SUM(CASE WHEN background_call = 1 THEN reply_bytes ELSE 0 END)
-                FROM activity_log WHERE at_ticks < $cutoff
+                FROM activity_log WHERE {expired}
                 GROUP BY 1, 2, 3, 4, 5
                 ON CONFLICT(day, repository_id, kind, role, tool) DO UPDATE SET
                     calls = calls + excluded.calls, errors = errors + excluded.errors, request_bytes = request_bytes + excluded.request_bytes,
@@ -274,30 +323,28 @@ public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
                     model_calls = model_calls + excluded.model_calls, background_calls = background_calls + excluded.background_calls,
                     model_request_bytes = model_request_bytes + excluded.model_request_bytes, background_request_bytes = background_request_bytes + excluded.background_request_bytes,
                     model_reply_bytes = model_reply_bytes + excluded.model_reply_bytes, background_reply_bytes = background_reply_bytes + excluded.background_reply_bytes;
-                """, transaction))
+                """))
             {
-                rollup.Parameters.AddWithValue("$cutoff", cutoff);
                 rollup.ExecuteNonQuery();
             }
-            using (var origins = ActivityCommand($"""
+            using (var origins = RetentionCommand($"""
                 INSERT INTO activity_origin_daily(day, repository_id, tool, call_origin, calls, request_bytes, reply_bytes)
                 SELECT date((at_ticks - {UnixEpochTicks}) / 10000000, 'unixepoch'), repository_id, COALESCE(tool, ''), COALESCE(call_origin, 'unknown'),
                        COUNT(*), SUM(request_bytes), SUM(reply_bytes)
-                FROM activity_log WHERE at_ticks < $cutoff AND kind = 'call'
+                FROM activity_log WHERE {expired} AND kind = 'call'
                 GROUP BY 1, 2, 3, 4
                 ON CONFLICT(day, repository_id, tool, call_origin) DO UPDATE SET
                     calls = calls + excluded.calls, request_bytes = request_bytes + excluded.request_bytes, reply_bytes = reply_bytes + excluded.reply_bytes;
-                """, transaction))
+                """))
             {
-                origins.Parameters.AddWithValue("$cutoff", cutoff);
                 origins.ExecuteNonQuery();
             }
             int deleted;
-            using (var delete = ActivityCommand("DELETE FROM activity_log WHERE at_ticks < $cutoff;", transaction))
+            using (var delete = RetentionCommand($"DELETE FROM activity_log WHERE {expired};"))
             {
-                delete.Parameters.AddWithValue("$cutoff", cutoff);
                 deleted = delete.ExecuteNonQuery();
             }
+            using (var prune = RetentionCommand("DELETE FROM activity_background_hourly WHERE at_ticks < $cutoff;")) prune.ExecuteNonQuery();
             transaction.Commit();
             return deleted;
         }
@@ -335,6 +382,9 @@ public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
                 reader.Read();
                 calls = reader.GetInt64(0); wakes = reader.GetInt64(1); offers = reader.GetInt64(2);
             }
+            // Quiet status reads carry none of the event metadata used below. Their count survives early retention at hour precision;
+            // at least the current and previous UTC day remain raw, so live 24-hour windows retain exact event-time boundaries.
+            calls += Scalar($"SELECT COALESCE(SUM(calls), 0) FROM activity_background_hourly WHERE {Window};");
 
             // A burst is one session's calls with no gap of ActivityTurnGapSeconds or more. Manager turns count bursts of a manager's
             // calls; inbox reads count bursts of a session's first-page reads, so one adapter wait polling every 2 seconds is one read.

@@ -538,6 +538,8 @@ internal static class ControlAggregate
             }
         }
         var requests = !historyOnly && sessionId.Length > 0 ? state.CancellationsOf(sessionId).Take(RelayLimits.MaxPageSize).Select(x => new { target = x.Target, request = x.Request }).ToArray() : [];
+        // A fixed internal reader still gets fresh pause/cancel state, without manager history or selection projections.
+        if (Flag(context.Args, "controlsOnly")) return Ok(new { paused = state.Paused, cancellations = state.CancellationCount, requests, requestsOmitted = historyOnly });
         RelayReply Reply(CoCern.Contracts.ManagerSelectionStatus manager) => Ok(new { paused = state.Paused, cancellations = state.CancellationCount, requests, requestsOmitted = historyOnly, manager });
         // Conditional detail reads are background projections: current seats and controls remain visible, while explicit history
         // reads still take the full administrator path. History otherwise prevents the composed reply from receiving a validator.

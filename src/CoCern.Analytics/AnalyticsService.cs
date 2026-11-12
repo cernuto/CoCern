@@ -391,6 +391,14 @@ public sealed class AnalyticsService(AnalyticsOptions options) : IAnalyticsQueri
                         ? "CREATE TABLE relay.activity_origin_daily AS SELECT * FROM source.activity_origin_daily;"
                         : "CREATE TABLE relay.activity_origin_daily(day VARCHAR, repository_id VARCHAR, tool VARCHAR, call_origin VARCHAR, calls BIGINT, request_bytes BIGINT, reply_bytes BIGINT);");
                 }
+                using (var hourly = builder.CreateCommand())
+                {
+                    hourly.CommandText = "SELECT count(*) FROM information_schema.tables WHERE table_catalog = 'source' AND table_name = 'activity_background_hourly';";
+                    var present = System.Convert.ToInt64(hourly.ExecuteScalar()) != 0;
+                    Run(builder, present
+                        ? "CREATE TABLE relay.activity_background_hourly AS SELECT * FROM source.activity_background_hourly;"
+                        : "CREATE TABLE relay.activity_background_hourly(at_ticks BIGINT, repository_id VARCHAR, session_id VARCHAR, role VARCHAR, tool VARCHAR, calls BIGINT, request_bytes BIGINT, reply_bytes BIGINT, duration_ms DOUBLE, request_tokens BIGINT, reply_tokens BIGINT, request_samples BIGINT, reply_samples BIGINT, measured_tokens BIGINT, measured_calls BIGINT);");
+                }
                 foreach (var column in new[] { "model_calls", "background_calls", "model_request_bytes", "background_request_bytes", "model_reply_bytes", "background_reply_bytes" })
                     Run(builder, $"ALTER TABLE relay.activity_daily ADD COLUMN IF NOT EXISTS {column} BIGINT DEFAULT 0;");
                 Run(builder, "DETACH relay; DETACH source;");

@@ -232,7 +232,8 @@ Settings go in `appsettings.json`, environment variables (`Relay__Board__Archive
 | `Relay:Discovery:Enabled` | off | Lets other PCs join. |
 | `Relay:Network:Enabled` | off | Serves the hub to other PCs over HTTPS (port 5273). |
 | `Relay:Attention:Enabled` | on | Controls attention offers and their wake policy; off uses legacy inbox waking instead. |
-| `Relay:Board:ArchiveAfterDays` | 30 | Days before a finished task leaves the board. |
+| `Relay:Board:ArchiveAfterDays` | 1 | Days before a finished, idle task moves to the readable archive. |
+| `Relay:Activity:BackgroundRetentionDays` | 1 | Raw days of quiet successful background status traffic before compact rollup; 0 disables early rollup. |
 | `Relay:DocCache:Repositories:N:…` | none (the start script and the Visual Studio profile add this checkout; the profile also makes the folder holding it a root) | Repositories whose docs are searchable. |
 | `Relay:Analytics:Enabled` | on | Hourly analytics snapshots. Works out of the box on Windows x64. |
 

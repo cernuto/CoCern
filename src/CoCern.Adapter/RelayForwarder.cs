@@ -82,7 +82,7 @@ public sealed class RelayForwarder(HttpClient client, AdapterOptions options, st
         ct.ThrowIfCancellationRequested();
         if (!MatchesNativeBinding(binding) || binding.CurrentHandle is not { } own) return Task.FromResult(new AdapterReply(false, "native_handle_unverified"));
         return SendAsync(RelayTools.GetStatus, JsonSerializer.SerializeToElement(new
-        { repositoryId = own.RepositoryId, sessionId = own.SessionId, sessionToken = own.SessionToken, backgroundCall = true }), ct);
+        { repositoryId = own.RepositoryId, sessionId = own.SessionId, sessionToken = own.SessionToken, backgroundCall = true, statusProjection = "probe" }), ct);
     }
 
     // The same fixed read for one local handle a restarted adapter would watch again, including in the compact profile.

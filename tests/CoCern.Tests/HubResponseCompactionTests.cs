@@ -294,6 +294,75 @@ public sealed class HubResponseCompactionTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public async Task Internal_status_projections_keep_fresh_identity_and_controls_without_delivery_side_effects()
+    {
+        await using var host = new RelayHostFixture(disableDispatcher: true,
+            settings: new Dictionary<string, string?> { ["Relay:Clients:0:IsAdministrator"] = "true" });
+        using var client = host.AuthorizedClient();
+        var opened = HostData(await host.Call(client, RelayTools.SessionOpen, new { repositoryId = "repo", requestId = "lean-status-open" }));
+        var sender = HostData(await host.Call(client, RelayTools.SessionOpen, new { repositoryId = "repo", requestId = "lean-status-sender" }));
+        var sessionId = opened["sessionId"]!.GetValue<string>();
+        var sessionToken = opened["sessionToken"]!.GetValue<string>();
+        JsonObject Request(string purpose) => new()
+        {
+            ["repositoryId"] = "repo", ["sessionId"] = sessionId, ["sessionToken"] = sessionToken,
+            ["statusProjection"] = purpose, ["backgroundCall"] = true
+        };
+        async Task<JsonObject> Read(string purpose) => HostData(await host.Call(client, RelayTools.GetStatus, Request(purpose)));
+        Assert.True(RelayToolCatalog.TryGet(RelayTools.GetStatus, out var statusTool));
+        Assert.Null(RelayRequestGuard.Validate(new RelayCaller("test-user", true, ["repo"]), statusTool,
+            JsonSerializer.SerializeToElement(Request("probe")), out _));
+        var combined = Request("probe"); combined["ackMessageIds"] = new JsonArray("unseen-message");
+        Assert.Equal(RelayErrorCodes.InvalidArguments, RelayRequestGuard.Validate(new RelayCaller("test-user", true, ["repo"]), statusTool,
+            JsonSerializer.SerializeToElement(combined), out _)!.Code);
+        combined.Remove("ackMessageIds"); combined["statusTag"] = "";
+        Assert.Equal(RelayErrorCodes.InvalidArguments, RelayRequestGuard.Validate(new RelayCaller("test-user", true, ["repo"]), statusTool,
+            JsonSerializer.SerializeToElement(combined), out _)!.Code);
+
+        HostData(await host.Call(client, RelayTools.SendMessage, new
+        {
+            repositoryId = "repo", sessionId = sender["sessionId"]!.GetValue<string>(), sessionToken = sender["sessionToken"]!.GetValue<string>(),
+            requestId = "lean-status-mail", recipientSessionId = sessionId, text = "Fixture private content."
+        }));
+        var dispatch = await host.Services.GetRequiredService<Orleans.IGrainFactory>().GetGrain<ISessionGrain>(sender["sessionId"]!.GetValue<string>())
+            .ExecuteAsync(new RelayCaller("test-user", false, ["repo"], true), "__dispatch", "{}");
+        Assert.True(dispatch.Ok, dispatch.Code);
+        var full = HostData(await host.Call(client, RelayTools.GetStatus, new { repositoryId = "repo", sessionId, sessionToken, attentionDetail = true }));
+        var probe = await Read("probe");
+        Assert.Equal(sessionId, probe["sessionId"]!.GetValue<string>());
+        Assert.NotNull(probe["toolSettings"]);
+        Assert.Equal(sessionId, probe["toolSettingsSessionId"]!.GetValue<string>());
+        Assert.True(probe["toolSettingsAdministrator"]!.GetValue<bool>());
+        Assert.Null(probe["attention"]);
+        Assert.Null(probe["binding"]);
+        Assert.Null(probe["waitingOnYou"]);
+        Assert.Null(probe["unchanged"]);
+        MeasureSavings("native probe projection", probe, full);
+        var prompt = await Read("prompt");
+        Assert.Equal(1, prompt["attention"]!["inbox"]!.GetValue<int>());
+        Assert.NotNull(prompt["attention"]!["top"]);
+        Assert.NotNull(prompt["attention"]!["standing"]);
+        Assert.Null(prompt["attention"]!["offer"]);
+        Assert.Null(prompt["attention"]!["pendingWork"]);
+        Assert.True(JsonNode.DeepEquals(prompt["attention"], (await Read("prompt"))["attention"]));
+        Assert.True(JsonNode.DeepEquals(full["attention"], HostData(await host.Call(client, RelayTools.GetStatus,
+            new { repositoryId = "repo", sessionId, sessionToken, attentionDetail = true }))["attention"]));
+        MeasureSavings("prompt summary projection", prompt, full);
+
+        HostData(await host.Call(client, RelayTools.ControlRequest, new { repositoryId = "repo", requestId = "lean-status-pause", command = "pause" }));
+        HostData(await host.Call(client, RelayTools.ControlRequest, new { repositoryId = "repo", sessionId, requestId = "lean-status-cancel", command = "cancel", actionId = "fixture-action" }));
+        var changed = await Read("probe");
+        Assert.True(changed["control"]!["paused"]!.GetValue<bool>());
+        Assert.Equal(sessionId + ":fixture-action", Assert.Single(changed["control"]!["requests"]!.AsArray())!["target"]!.GetValue<string>());
+        var forged = Request("probe"); forged["sessionToken"] = "wrong-token";
+        using var denied = await client.PostAsJsonAsync("/api/tools/" + RelayTools.GetStatus, forged);
+        Assert.Equal(HttpStatusCode.Forbidden, denied.StatusCode);
+        forged = Request("prompt"); forged["repositoryId"] = "other";
+        using var foreign = await client.PostAsJsonAsync("/api/tools/" + RelayTools.GetStatus, forged);
+        Assert.Equal(HttpStatusCode.Forbidden, foreign.StatusCode);
+    }
+
+    [Fact]
     public async Task Semantic_status_recomputes_inbox_pause_and_cancellation_before_matching()
     {
         var administratorToken = Guid.NewGuid().ToString("N");

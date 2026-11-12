@@ -76,7 +76,7 @@ public static class PromptHook
         if (NodeState.ReadEnrollment(folder) is not { } enrollment || FindHandle(folder, threadId) is not { } handle) return "";
         var options = new AdapterOptions(enrollment.Hub.AbsoluteUri, enrollment.Credential) { PinnedFingerprint = enrollment.Fingerprint };
         using var http = new HttpClient(handler ?? RelayForwarder.CreateHandler(options), disposeHandler: handler is null);
-        var arguments = new JsonObject { ["repositoryId"] = handle.RepositoryId, ["sessionId"] = handle.SessionId, ["sessionToken"] = handle.SessionToken, ["attentionDetail"] = true };
+        var arguments = new JsonObject { ["repositoryId"] = handle.RepositoryId, ["sessionId"] = handle.SessionId, ["sessionToken"] = handle.SessionToken, ["statusProjection"] = "prompt" };
         var reply = await new RelayForwarder(http, options, CallOrigins.Node).ForwardAsync(RelayTools.GetStatus, RelayForwarder.WithOrigin(JsonSerializer.SerializeToElement(arguments), background: true), cancellationToken);
         if (!reply.Ok || reply.Data is not { ValueKind: JsonValueKind.Object } data || Format(data) is not { } formatted) return "";
         Remember(cache, now, formatted);

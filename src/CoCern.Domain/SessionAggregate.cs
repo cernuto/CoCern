@@ -367,7 +367,7 @@ internal static class SessionAggregate
     private static RelayReply Describe(AggregateContext context, SessionState state, string hubIncarnation, bool verified)
     {
         var current = state.FreshUntil > context.Now && state.HubIncarnation == hubIncarnation;
-        var description = new JsonObject
+        var description = !verified && Flag(context.Args, "statusSummaryOnly") ? new JsonObject { ["sessionId"] = state.SessionId } : new JsonObject
         {
             ["sessionId"] = state.SessionId,
             ["bindingVersion"] = state.BindingVersion ?? 0,
@@ -384,8 +384,8 @@ internal static class SessionAggregate
         // The standing revision this session last received per board, so replies carry standing only when it changed; internal only.
         if (verified && state.StandingSeenCopy is { } seen) description["standingSeen"] = seen;
         // The hub asks for the attention count (and, for the adapter, the top item and wake candidate) with an internal argument.
-        if (!verified && Text(context.Args, "attentionStatus") is "count" or "detail")
-            description["attention"] = SessionAttention.Status(state, context.Args, context.Now, Text(context.Args, "attentionStatus") == "detail");
+        if (!verified && Text(context.Args, "attentionStatus") is "count" or "detail" or "summary")
+            description["attention"] = SessionAttention.Status(state, context.Args, context.Now, Text(context.Args, "attentionStatus") != "count", Text(context.Args, "attentionStatus") == "summary");
         return Ok(description);
     }
 

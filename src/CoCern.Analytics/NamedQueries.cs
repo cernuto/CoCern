@@ -76,12 +76,12 @@ public static class NamedQueries
             {Average("per_task")}
             """,
         // Actual relay traffic includes retries and failures. A total requires BOTH hub token estimates; partial/unknown calls
-        // contribute neither totals nor samples. Raw retention only; daily byte totals cannot recover token measurements.
+        // contribute neither totals nor samples. Quiet background status measurements survive early rollup as weighted hourly totals.
         [RelayTokens] = $"""
             SELECT CASE WHEN background_call THEN 'background' WHEN NOT background_call THEN 'model-facing' ELSE 'unknown' END AS key,
-                   (sum(relay_tokens) FILTER (WHERE at_ticks >= $from))::BIGINT AS cur, (sum(relay_tokens) FILTER (WHERE at_ticks < $from))::BIGINT AS prev,
-                   count(*) FILTER (WHERE at_ticks >= $from) AS cur_n, count(*) FILTER (WHERE at_ticks < $from) AS prev_n
-            FROM tool_calls WHERE {Window} AND request_tokens IS NOT NULL AND reply_tokens IS NOT NULL
+                   (sum(measured_tokens) FILTER (WHERE at_ticks >= $from))::BIGINT AS cur, (sum(measured_tokens) FILTER (WHERE at_ticks < $from))::BIGINT AS prev,
+                   coalesce(sum(measured_calls) FILTER (WHERE at_ticks >= $from), 0)::BIGINT AS cur_n, coalesce(sum(measured_calls) FILTER (WHERE at_ticks < $from), 0)::BIGINT AS prev_n
+            FROM tool_measurements WHERE {Window} AND measured_calls > 0
             GROUP BY background_call ORDER BY coalesce(cur, 0) DESC, key
             """,
         // Percent of tasks touched by any call that have successful reported model usage in that period. Samples are the
@@ -118,7 +118,7 @@ public static class NamedQueries
         // Reply bytes (what enters an agent's context) per session, by role.
         [ContextByRole] = $"""
             WITH per_session AS (
-                SELECT at_ticks >= $from AS in_cur, coalesce(role, '') AS role, session_id, sum(reply_bytes) AS v FROM tool_calls
+                SELECT at_ticks >= $from AS in_cur, coalesce(role, '') AS role, session_id, sum(reply_bytes) AS v FROM tool_measurements
                 WHERE {Window} AND session_id IS NOT NULL GROUP BY ALL)
             SELECT role AS key, avg(v) FILTER (WHERE in_cur) AS cur, avg(v) FILTER (WHERE NOT in_cur) AS prev,
                    count(*) FILTER (WHERE in_cur) AS cur_n, count(*) FILTER (WHERE NOT in_cur) AS prev_n
@@ -214,7 +214,7 @@ public static class NamedQueries
             WITH per_role AS (
                 SELECT at_ticks >= $from AS in_cur, coalesce(role, '') AS role, CAST(sum(relay_tokens) AS DOUBLE) AS tokens,
                        count(DISTINCT board_id || '/' || task_id) AS tasks
-                FROM tool_calls WHERE {Window} AND (request_tokens IS NOT NULL OR reply_tokens IS NOT NULL) GROUP BY ALL)
+                FROM tool_measurements WHERE {Window} AND (request_tokens IS NOT NULL OR reply_tokens IS NOT NULL) GROUP BY ALL)
             SELECT role AS key, max(tokens / nullif(tasks, 0)) FILTER (WHERE in_cur) AS cur, max(tokens / nullif(tasks, 0)) FILTER (WHERE NOT in_cur) AS prev,
                    coalesce(max(tasks) FILTER (WHERE in_cur), 0) AS cur_n, coalesce(max(tasks) FILTER (WHERE NOT in_cur), 0) AS prev_n
             FROM per_role GROUP BY role ORDER BY coalesce(cur, 0) DESC, key
@@ -222,16 +222,16 @@ public static class NamedQueries
         // The share of a tool's replies that were compacted to their token budget.
         [AnalyticsQueryNames.CompactionRateByTool] = $"""
             SELECT tool AS key,
-                   count(*) FILTER (WHERE kind = 'budget' AND code LIKE 'step%' AND at_ticks >= $from) / nullif(count(*) FILTER (WHERE kind = 'call' AND at_ticks >= $from), 0) AS cur,
-                   count(*) FILTER (WHERE kind = 'budget' AND code LIKE 'step%' AND at_ticks < $from) / nullif(count(*) FILTER (WHERE kind = 'call' AND at_ticks < $from), 0) AS prev,
-                   count(*) FILTER (WHERE kind = 'call' AND at_ticks >= $from) AS cur_n, count(*) FILTER (WHERE kind = 'call' AND at_ticks < $from) AS prev_n
-            FROM activity WHERE {Window} AND kind IN ('call', 'budget') AND tool IS NOT NULL GROUP BY tool ORDER BY coalesce(cur, 0) DESC, key
+                   coalesce(sum(calls) FILTER (WHERE kind = 'budget' AND code LIKE 'step%' AND at_ticks >= $from), 0) / nullif(sum(calls) FILTER (WHERE kind = 'call' AND at_ticks >= $from), 0) AS cur,
+                   coalesce(sum(calls) FILTER (WHERE kind = 'budget' AND code LIKE 'step%' AND at_ticks < $from), 0) / nullif(sum(calls) FILTER (WHERE kind = 'call' AND at_ticks < $from), 0) AS prev,
+                   coalesce(sum(calls) FILTER (WHERE kind = 'call' AND at_ticks >= $from), 0)::BIGINT AS cur_n, coalesce(sum(calls) FILTER (WHERE kind = 'call' AND at_ticks < $from), 0)::BIGINT AS prev_n
+            FROM activity_measurements WHERE {Window} AND kind IN ('call', 'budget') AND tool IS NOT NULL GROUP BY tool ORDER BY coalesce(cur, 0) DESC, key
             """,
         // Each session's busiest hour of relay tokens in the current period, against the median session-hour of its role over both periods.
         [AnalyticsQueryNames.SessionTokenOutliers] = $"""
             WITH hours AS (
                 SELECT at_ticks >= $from AS in_cur, coalesce(role, '') AS role, session_id, at_ticks // 36000000000 AS hour, CAST(sum(relay_tokens) AS DOUBLE) AS v
-                FROM tool_calls WHERE {Window} AND session_id IS NOT NULL AND (request_tokens IS NOT NULL OR reply_tokens IS NOT NULL) GROUP BY ALL),
+                FROM tool_measurements WHERE {Window} AND session_id IS NOT NULL AND (request_tokens IS NOT NULL OR reply_tokens IS NOT NULL) GROUP BY ALL),
             medians AS (SELECT role, median(v) AS m, count(*) AS n FROM hours GROUP BY role),
             peaks AS (SELECT role, session_id, max(v) AS v FROM hours WHERE in_cur GROUP BY ALL)
             SELECT p.session_id AS key, p.v AS cur, m.m AS prev, m.n AS cur_n, m.n AS prev_n

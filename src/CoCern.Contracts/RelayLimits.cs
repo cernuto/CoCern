@@ -111,7 +111,7 @@ public static class RelayLimits
     /// <summary>A machine not seen (announced) for this many days may be removed to make room when the machine table is full.</summary>
     public const int MachineExpiryDays = 30;
     /// <summary>Days after completion before a finished task moves to the archive (<c>Relay:Board:ArchiveAfterDays</c>; 0: only when the board fills).</summary>
-    public const int DefaultArchiveAfterDays = 30;
+    public const int DefaultArchiveAfterDays = 1;
     public const int MaxArchiveAfterDays = 3_650;
     /// <summary>A board write with this many tasks archives finished ones, oldest first, down to <see cref="ArchiveLowWater"/>, even if younger than the setting.</summary>
     public const int ArchiveHighWater = MaxRecords * 7 / 8;
