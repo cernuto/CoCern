@@ -93,7 +93,14 @@ public sealed class SessionContextTools(IGrainFactory grains, ISessionContextCat
         foreach (var field in new[] { "contextId", "entryId" })
             if (args.ContainsKey(field) && (args[field] is not JsonValue v || !v.TryGetValue<string>(out var id) || !SessionContextLimits.ValidId(id))) return field;
         foreach (var field in new[] { "entryVersion", "part", "limit" })
-            if (args.ContainsKey(field) && (args[field] is not JsonValue v || !v.TryGetValue<long>(out var n) || n < (field == "part" ? 0 : 1) || field == "part" && n > int.MaxValue)) return field;
+            if (args.ContainsKey(field))
+            {
+                // JsonValue<int> (resource requests) and parsed JSON numbers must use the same whole-number contract.
+                if (args[field] is not JsonValue v || !long.TryParse(v.TryGetValue<string>(out var quoted) ? quoted : v.ToJsonString(),
+                    System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var n)
+                    || n < (field == "part" ? 0 : 1) || field == "part" && n > int.MaxValue) return field;
+                args[field] = n;
+            }
         if (args["contextCursor"] is { } cursor && (cursor is not JsonValue c || !c.TryGetValue<string>(out var text) || text.Length > 2048)) return "contextCursor";
         if (args["contextGeneration"] is { } generation && (generation is not JsonValue g || !g.TryGetValue<string>(out var stamp) || !Guid.TryParseExact(stamp, "N", out _))) return "contextGeneration";
         if (tool == RelayTools.SessionContextPut)
