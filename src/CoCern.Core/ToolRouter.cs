@@ -13,7 +13,7 @@ namespace CoCern.Core;
 /// composes them (<see cref="ClaimComposer"/>, <see cref="SessionTools"/>, <see cref="StatusTools"/>, <see cref="MessageTools"/>,
 /// <see cref="SearchTools"/>). A turned-off feature answers for itself, so no route checks for one.
 /// </summary>
-internal sealed class ToolRouter(Aggregates aggregates, ClaimComposer claims, SessionTools sessions, StatusTools status, MessageTools messages, PeerTools peers, SearchTools searches, IDocCacheTools docs, IAdminTools admin)
+internal sealed class ToolRouter(Aggregates aggregates, ClaimComposer claims, SessionTools sessions, StatusTools status, MessageTools messages, PeerTools peers, SearchTools searches, IDocCacheTools docs, IAdminTools admin, SessionContextTools retained)
 {
     /// <summary>The availability a chat's own waiter registers: idle, and woken by the waiter's next read.</summary>
     internal const string WaitingAvailability = "waiting";
@@ -82,6 +82,7 @@ internal sealed class ToolRouter(Aggregates aggregates, ClaimComposer claims, Se
         var (caller, tool, args, session) = (call.Caller, call.Tool, call.Args, call.Session);
         return tool switch
         {
+            RelayTools.SessionContextPut or RelayTools.SessionContextGet or RelayTools.SessionContextSearch => retained.RunAsync(caller, tool, args, cancellationToken),
             RelayTools.SessionOpen => sessions.OpenAsync(caller, args, trace),
             RelayTools.SessionToolSettingsSet => aggregates.Call(AggregateKinds.Session, Text(args, "targetSessionId"), caller, SessionToolSettings.SetOperation, args),
             RelayTools.RecordDecision when Text(args, "decision") == "approveGoal" => new GoalTools(aggregates, peers).ApproveAsync(call),

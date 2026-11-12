@@ -27,6 +27,32 @@ public sealed class RelayForwarder(HttpClient client, AdapterOptions options, st
     internal void ReportConnectionDiagnostics(IReadOnlyList<ConnectionDiagnosticEvent> events) => diagnosticReporter.Report(events);
     public const int MaxRequestBytes = RelayLimits.MaxPayloadBytes; // the hub refuses anything larger
     public const int MaxResponseBytes = 128 * 1024;
+    public async Task<SessionContextResourceReply> ReadSessionContextResourceAsync(string uri, CancellationToken cancellationToken = default)
+    {
+        if (!SessionContextResourceUri.TryParse(uri, out _)) return new(false, "InvalidArguments", uri);
+        using var bounded = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        bounded.CancelAfter(client.Timeout);
+        using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(options.BaseUri, "api/session-context/resource?uri=" + Uri.EscapeDataString(uri)));
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", options.Token);
+        try
+        {
+            using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, bounded.Token);
+            if ((int)response.StatusCode is >= 300 and < 400) return new(false, "redirect_rejected", uri);
+            if (response.StatusCode is not (HttpStatusCode.OK or HttpStatusCode.BadRequest or HttpStatusCode.Forbidden)) return new(false, "resource_unavailable", uri);
+            await using var stream = await response.Content.ReadAsStreamAsync(bounded.Token);
+            using var body = new MemoryStream();
+            var buffer = new byte[4096];
+            int read;
+            while ((read = await stream.ReadAsync(buffer, bounded.Token)) > 0)
+            {
+                if (body.Length + read > 32 * 1024) return new(false, "response_too_large", uri);
+                body.Write(buffer, 0, read);
+            }
+            return JsonSerializer.Deserialize<SessionContextResourceReply>(body.ToArray(), AdapterReply.JsonOptions) ?? new(false, "resource_unavailable", uri);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception e) when (e is HttpRequestException or IOException or JsonException or OperationCanceledException) { return new(false, "resource_unavailable", uri); }
+    }
     private const string ResponseTooLarge = "response_too_large";
 
     /// <summary>The same transport, reporting another origin.</summary>

@@ -96,10 +96,14 @@ public static class RelayHostBuilderExtensions
                 archive: services.GetService<ITaskArchive>(),
                 observations: services.GetService<IRelayObservationSource>(),
                 admin: services.GetRequiredService<IAdminTools>(),
-                canonicalRepository: services.GetRequiredService<RepositoryCatalog>().Find));
+                canonicalRepository: services.GetRequiredService<RepositoryCatalog>().Find,
+                contextCatalog: services.GetService<ISessionContextCatalog>()));
         }));
         // One shared tokenizer for every token count; it loads its vocabulary on first use.
         builder.Services.AddSingleton<ITokenCounter, O200kTokenCounter>();
+        builder.Services.AddSingleton<SessionContextTools>(services => new(services.GetRequiredService<Orleans.IGrainFactory>(),
+            services.GetService<ISessionContextCatalog>(), services.GetRequiredService<ITokenCounter>(), services.GetRequiredService<RepositoryCatalog>().Find, services.GetService<IActivitySink>()));
+        builder.Services.AddSingleton<ISessionContextCatalog>(services => services.GetRequiredService<CoCern.Storage.SqliteStore>());
         builder.Services.AddDocCache();
         builder.AddRelayOrleans();
         builder.Services.AddRelayDashboard();

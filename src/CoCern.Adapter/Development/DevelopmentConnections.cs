@@ -9,6 +9,8 @@ internal interface IDevelopmentBackend : IAsyncDisposable
     string? Instructions { get; }
     ValueTask<ListToolsResult> ListToolsAsync(ListToolsRequestParams request, CancellationToken cancellationToken);
     ValueTask<CallToolResult> CallToolAsync(CallToolRequestParams request, CancellationToken cancellationToken);
+    ValueTask<ReadResourceResult> ReadResourceAsync(ReadResourceRequestParams request, CancellationToken cancellationToken) =>
+        ValueTask.FromException<ReadResourceResult>(new McpProtocolException("Resource reads unavailable in this backend.", McpErrorCode.InvalidParams));
 }
 
 internal sealed class DevelopmentConnections(string root, Func<AdapterManifest, CancellationToken, Task<IDevelopmentBackend>> connect, Action<string>? report = null) : IAsyncDisposable

@@ -82,6 +82,8 @@ public sealed partial class SqliteStore
             DELETE FROM search_docs;
             DELETE FROM search_index;
             DELETE FROM task_archive;
+            DELETE FROM session_context_catalog;
+            DELETE FROM session_context_catalog_revision;
             DELETE FROM grain_state;
             DELETE FROM activity_log;
             DELETE FROM activity_daily;

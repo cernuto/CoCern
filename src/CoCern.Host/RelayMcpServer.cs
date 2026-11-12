@@ -17,7 +17,8 @@ internal static class RelayMcpServer
         services.AddHostedService<Dashboard.McpProtocolDiagnosticsService>();
         services.AddMcpServer(options => options.ServerInfo = new() { Name = "CoCern", Version = "1.0.0" })
             .WithHttpTransport(options => options.SessionMode = HttpServerSessionMode.Stateless)
-            .WithCoCernWorkflow()
+            .WithCoCernWorkflow(async (uri, services, ct) => SessionContextMcp.ReadResult(await services.GetRequiredService<CoCern.Core.SessionContextTools>()
+                .ReadResourceAsync(RelayAuthentication.Caller(HttpContextOf(services).User), uri, ct)))
             .WithListToolsHandler((request, _) =>
             {
                 var context = HttpContextOf(request.Server.Services!);

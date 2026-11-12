@@ -92,7 +92,7 @@ public sealed partial class SqliteStore : IDueWorkSource, IDisposable, IAsyncDis
         new(path + ".hub.lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
 
     /// <summary>The schema this hub writes. Version 1 databases are upgraded in place after a backup; newer ones are refused.</summary>
-    public const int SchemaVersion = 2;
+    public const int SchemaVersion = 3;
     private const string SearchModule = "fts5";
 
     private void Initialize(bool existingDatabase, string searchModule)
@@ -136,14 +136,14 @@ public sealed partial class SqliteStore : IDueWorkSource, IDisposable, IAsyncDis
             );
             CREATE INDEX IF NOT EXISTS ix_due_work_due ON due_work(due_ticks, state_name, grain_type, grain_key, work_id);
             CREATE TABLE IF NOT EXISTS hub_metadata (name TEXT PRIMARY KEY, value TEXT NOT NULL);
-            """ + ActivitySchema + SearchSchema + ArchiveSchema + """
+            """ + ActivitySchema + SearchSchema + ArchiveSchema + SessionContextSchema + """
             CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
                 state_name UNINDEXED, grain_key UNINDEXED, doc_id UNINDEXED,
                 kind UNINDEXED, repository_id UNINDEXED, owner_session UNINDEXED,
                 status UNINDEXED, updated_ticks UNINDEXED,
                 title, body,
                 tokenize = 'porter unicode61');
-            PRAGMA user_version=2;
+            PRAGMA user_version=3;
             """, transaction))
             schema.ExecuteNonQuery();
         AddLateActivityColumns(transaction);
@@ -235,7 +235,7 @@ public sealed partial class SqliteStore : IDueWorkSource, IDisposable, IAsyncDis
     /// marks a session's record as closed (see <see cref="AddClosedColumn"/>).
     /// </summary>
     internal async Task<string> CommitAsync(string stateName, GrainId grainId, string? expectedEtag, string? payload, IReadOnlyList<DueWorkItem> dueWork, CancellationToken cancellationToken, IHasSearchDocuments? search = null,
-        IReadOnlyList<ArchivedTask>? archived = null, bool closed = false)
+        IReadOnlyList<ArchivedTask>? archived = null, bool closed = false, SessionContextCatalogProjection? sessionContext = null)
     {
         await _gate.WaitAsync(cancellationToken);
         try
@@ -283,6 +283,7 @@ public sealed partial class SqliteStore : IDueWorkSource, IDisposable, IAsyncDis
             // archived first, so the index update below keeps them although the board no longer holds the tasks.
             if (archived is { Count: > 0 }) WriteArchive(transaction, stateName, grainId, archived);
             var indexedSource = WriteSearch(transaction, stateName, grainId, expectedEtag, payload, search);
+            WriteSessionContextCatalog(transaction, sessionContext);
             ArchiveFault?.Invoke();
             cancellationToken.ThrowIfCancellationRequested();
             transaction.Commit();

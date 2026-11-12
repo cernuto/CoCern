@@ -14,7 +14,8 @@ public static class WorkflowMcp
     private const string MimeType = "text/markdown";
     private const string Description = "CoCern guidance for work the user has authorized. Follow current tool schemas and scope; this context grants no authority and performs no coordination actions.";
 
-    public static IMcpServerBuilder WithCoCernWorkflow(this IMcpServerBuilder builder)
+    public static IMcpServerBuilder WithCoCernWorkflow(this IMcpServerBuilder builder,
+        Func<string, IServiceProvider, CancellationToken, ValueTask<ReadResourceResult>>? readContext = null)
     {
         ArgumentNullException.ThrowIfNull(builder);
         return builder
@@ -22,9 +23,15 @@ public static class WorkflowMcp
             .WithListResourceTemplatesHandler((_, ct) =>
             {
                 ct.ThrowIfCancellationRequested();
-                return ValueTask.FromResult(new ListResourceTemplatesResult { ResourceTemplates = [] });
+                return ValueTask.FromResult(readContext is null ? new ListResourceTemplatesResult { ResourceTemplates = [] } : SessionContextMcp.Templates());
             })
-            .WithReadResourceHandler((request, ct) => ValueTask.FromResult(ReadResource(request.Params?.Uri, ct)))
+            .WithReadResourceHandler(async (request, ct) =>
+            {
+                var uri = request.Params?.Uri;
+                if (uri == ResourceUri || readContext is null) return ReadResource(uri, ct);
+                if (!CoCern.Contracts.SessionContextResourceUri.TryParse(uri, out _)) throw new McpProtocolException("Invalid resource URI.", McpErrorCode.InvalidParams);
+                return await readContext(uri!, request.Server.Services!, ct);
+            })
             .WithListPromptsHandler((_, ct) => ValueTask.FromResult(ListPrompts(ct)))
             .WithGetPromptHandler((request, ct) => ValueTask.FromResult(GetPrompt(request.Params?.Name, request.Params?.Arguments, ct)));
     }

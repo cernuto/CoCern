@@ -250,7 +250,7 @@ try
             Name = NativeRegistration.PrivateServerName,
             Version = typeof(NativeRegistration).Assembly.ManifestModule.ModuleVersionId.ToString("D")
         };
-    }).WithStdioServerTransport().WithCoCernWorkflow();
+    }).WithStdioServerTransport().WithCoCernWorkflow(async (uri, _, ct) => SessionContextMcp.ReadResult(await forwarder.ReadSessionContextResourceAsync(uri, ct)));
     using var host = builder.Build();
     var lifetime = host.Services.GetRequiredService<IHostApplicationLifetime>().ApplicationStopping;
     using var backgroundStopping = CancellationTokenSource.CreateLinkedTokenSource(lifetime);

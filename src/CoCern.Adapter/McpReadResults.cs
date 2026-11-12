@@ -54,7 +54,7 @@ public static class McpReadResults
     public static CallToolResult FromAdapter(string tool, AdapterReply reply)
     {
         var text = ModelReply.Text(tool, reply);
-        if (OutputSchema(tool) is null) return Plain(reply.Ok, text);
+        if (OutputSchema(tool) is null) return SessionContextMcp.WithLink(tool, reply.Ok, reply.Data?.GetRawText(), Plain(reply.Ok, text));
         // This is the final model projection. Never rebuild structured data from an earlier native reply.
         var safe = JsonSerializer.Deserialize<AdapterReply>(text, AdapterReply.JsonOptions)!;
         return Present(safe, text, "data", "object");
@@ -63,7 +63,7 @@ public static class McpReadResults
     public static CallToolResult FromHost(string tool, bool ok, string code, string dataJson, long version)
     {
         var text = JsonSerializer.Serialize(new { ok, code, dataJson, version }, AdapterReply.JsonOptions);
-        if (OutputSchema(tool) is null) return Plain(ok, text);
+        if (OutputSchema(tool) is null) return SessionContextMcp.WithLink(tool, ok, dataJson, Plain(ok, text));
         try
         {
             using var document = JsonDocument.Parse(dataJson);

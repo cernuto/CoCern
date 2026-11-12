@@ -91,6 +91,7 @@ public static class CoordinationStateMachine
                 AggregateKinds.Control => ControlAggregate.Handle(context),
                 AggregateKinds.Session => SessionAggregate.Handle(context),
                 AggregateKinds.Board => TaskBoardAggregate.Handle(context),
+                AggregateKinds.SessionContext => SessionContextAggregate.Handle(context),
                 AggregateKinds.Lock => LockAggregate.Handle(context),
                 AggregateKinds.Anomaly => AnomalyMonitor.Handle(context),
                 _ => Error(UnknownAggregate)

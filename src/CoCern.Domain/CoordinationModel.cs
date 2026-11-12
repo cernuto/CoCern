@@ -144,6 +144,7 @@ public sealed class CoordinationDocument
 /// <summary>The four coordination aggregates, plus the anomaly monitor. Each is a single-writer state machine keyed by a string.</summary>
 public static class AggregateKinds
 {
+    public const string SessionContext = "session_context";
     public const string Control = "control";
     public const string Session = "session";
     public const string Board = "board";

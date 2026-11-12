@@ -33,7 +33,7 @@ public sealed class RelayApplication : IRelayApplication
     public string IncarnationId => incarnation;
 
     public RelayApplication(IGrainFactory grains, IMachineDirectory? machines = null, IActivitySink? activity = null, IFullTextSearch? search = null, AttentionOptions? attention = null, IAnalyticsTool? analytics = null, AnomalyOptions? anomaly = null, OrderOptions? orders = null, IDocCacheTools? docs = null,
-        ITokenCounter? tokens = null, TokenOptions? tokenOptions = null, FeedbackRules? feedback = null, ITaskArchive? archive = null, IRelayObservationSource? observations = null, IAdminTools? admin = null, Func<string, string?>? canonicalRepository = null)
+        ITokenCounter? tokens = null, TokenOptions? tokenOptions = null, FeedbackRules? feedback = null, ITaskArchive? archive = null, IRelayObservationSource? observations = null, IAdminTools? admin = null, Func<string, string?>? canonicalRepository = null, ISessionContextCatalog? contextCatalog = null)
     {
         // A turned-off feature answers for itself, so no call site checks for it.
         aggregates = new(grains, archive);
@@ -56,7 +56,7 @@ public sealed class RelayApplication : IRelayApplication
             new MessageTools(aggregates, machineDirectory, attentionOptions, telemetry, incarnation),
             new PeerTools(aggregates, machineDirectory, incarnation),
             new SearchTools(search, analytics ?? AnalyticsTool.Off),
-            docTools, admin ?? AdminTools.Off);
+            docTools, admin ?? AdminTools.Off, new SessionContextTools(grains, contextCatalog, tokens, canonicalRepository));
         addOns = new(aggregates, claims, standing, guard, tokenStatus, attentionOptions, search, telemetry, counter, tokenOptions ?? new(), observations);
     }
 

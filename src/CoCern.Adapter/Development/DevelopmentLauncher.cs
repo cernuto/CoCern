@@ -99,7 +99,8 @@ internal static class DevelopmentLauncher
                 ? "CoCern development endpoint. Follow the current server guidance included in the session_open tool description; tool metadata refreshes when the development adapter changes."
                 : connections.Instructions ?? throw new AdapterConfigurationException(NativeRegistration.Refusal);
             options.Capabilities = new() { Tools = new() { ListChanged = true }, Resources = new(), Prompts = new() };
-        }).WithStdioServerTransport().WithCoCernWorkflow()
+        }).WithStdioServerTransport().WithCoCernWorkflow(async (uri, _, token) =>
+            await connections.UseAsync((backend, ct) => backend.ReadResourceAsync(new ReadResourceRequestParams { Uri = uri }, ct), token))
             .WithListToolsHandler(async (request, token) =>
             {
                 upstream = request.Server;
@@ -227,6 +228,7 @@ internal static class DevelopmentLauncher
         public string? Instructions => client.ServerInstructions;
         public ValueTask<ListToolsResult> ListToolsAsync(ListToolsRequestParams request, CancellationToken cancellationToken) => client.ListToolsAsync(request, cancellationToken);
         public ValueTask<CallToolResult> CallToolAsync(CallToolRequestParams request, CancellationToken cancellationToken) => client.CallToolAsync(request, cancellationToken);
+        public ValueTask<ReadResourceResult> ReadResourceAsync(ReadResourceRequestParams request, CancellationToken cancellationToken) => client.ReadResourceAsync(request, cancellationToken);
         public async ValueTask DisposeAsync()
         {
             if (Interlocked.Exchange(ref disposed, 1) != 0) return;

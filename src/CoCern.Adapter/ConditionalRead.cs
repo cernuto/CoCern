@@ -11,7 +11,7 @@ namespace CoCern.Adapter;
 /// </summary>
 public static class ConditionalRead
 {
-    private static readonly HashSet<string> Reads = [RelayTools.TaskGet, RelayTools.ChatDirectory, RelayTools.WorkerList, RelayTools.GetStatus, RelayTools.ContextGet, RelayTools.Peers];
+    private static readonly HashSet<string> Reads = [RelayTools.TaskGet, RelayTools.ChatDirectory, RelayTools.WorkerList, RelayTools.GetStatus, RelayTools.ContextGet, RelayTools.Peers, RelayTools.SessionContextGet];
 
     public static bool Applies(string tool) => Reads.Contains(tool);
 

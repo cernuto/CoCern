@@ -16,6 +16,9 @@ internal static class ToolSchemas
         var all = Properties(tool.Name);
         string[] extra = tool.Name switch
         {
+            RelayTools.SessionContextPut => ["contextId", "expectedVersion", "patch", "forget"],
+            RelayTools.SessionContextGet => ["contextId", "taskId", "entryId", "entryVersion", "part", "contextCursor", "limit"],
+            RelayTools.SessionContextSearch => ["contextId", "query", "limit"],
             RelayTools.EventWait => ["kind", "taskId", "resourceId", "generation", "peerSessionId", "replyTo", "expiresAt", "boardId"],
             RelayTools.Peers => ["name", "ref"],
             RelayTools.SessionOpen => ["machineId", "label"],
@@ -203,6 +206,18 @@ internal static class ToolSchemas
         Text("machineId", "Reported machine or registered tool-host identity; not a permission grant.");
         switch (tool)
         {
+            case RelayTools.SessionContextPut:
+            case RelayTools.SessionContextGet:
+            case RelayTools.SessionContextSearch:
+                Text("contextId", "Stable retained collection ID, separate from sessionId; lowercase ASCII ID, at most 64 characters.");
+                Text("entryId", "Entry ID within the selected collection.");
+                Integer("entryVersion", "Exact retained version; preserve it for all part reads.");
+                Integer("part", "Zero-based bounded text part; default 0.");
+                Text("contextCursor", "Opaque discovery continuation; restart on ContextListRestartRequired.");
+                Text("query", "Plain words to search in this context only.");
+                Object("patch", "Repository-shared title/summary/nextSteps/taskIds/pinnedEntryIds/upserts/deleteEntryIds. Upserts: entryId,kind,title,text,sourceRefs. At most 8 entry changes and 32 KiB.");
+                properties["forget"] = new { type = "boolean", description = "Delete the collection explicitly, exclusive with patch; expectedVersion required." };
+                break;
             case RelayTools.EventWait:
                 properties["action"] = new { type = "string", @enum = new[] { "register", "cancel", "read" } };
                 properties["waitId"] = new { type = "string", minLength = 1, maxLength = 128 };

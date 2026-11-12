@@ -90,6 +90,8 @@ Run one hub on your PC and connect the apps you use. Add other PCs when you need
 
 ## Keep coordination overhead small
 
+Chats can deliberately save repository-shared findings, decisions and handoffs with `session_context_put`. A fresh chat uses its own connection to discover them with `session_context_get` (optionally by task), reads a compact manifest, then uses `session_context_search` and versioned entry parts for details. The retained collection survives inbox acknowledgment, session closure and hub restart. MCP resource links expose the same bounded content; tool reads work when an app does not show Resources. Saved reports grant no authority, and credentials/private transcripts do not belong in retained context. See [retained session context](docs/reference.md#retained-session-context).
+
 Coordination uses calls and context too. CoCern provides conditional reads, bounded replies and event-driven waiting to keep that overhead small:
 
 | How | What it saves |

@@ -30,6 +30,12 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
     private static readonly TimeSpan RedeliveryDelay = TimeSpan.FromSeconds(5);
     protected abstract string Kind { get; }
     private bool uncertainCommit;
+    protected bool TryGetCommittedDocument(out CoordinationDocument document)
+    {
+        document = persistent.State.Value;
+        return !uncertainCommit;
+    }
+    protected virtual RelayReply? ValidateCandidate(StateEnvelope<CoordinationDocument> candidate, string operation) => null;
 
     /// <summary>The time operations and due work are judged by. The anomaly monitor reads it from its options, so tests can move it.</summary>
     protected virtual DateTimeOffset Now => DateTimeOffset.UtcNow;
@@ -45,7 +51,7 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
     /// </summary>
     private protected virtual Task<bool> RunDueChecksAsync(StateEnvelope<CoordinationDocument> candidate, DateTimeOffset now, string workId) => Task.FromResult(true);
 
-    public async Task<RelayReply> ExecuteAsync(RelayCaller caller, string operation, string argumentsJson)
+    public virtual async Task<RelayReply> ExecuteAsync(RelayCaller caller, string operation, string argumentsJson)
     {
         JsonObject args;
         if (uncertainCommit) return Replies.Error(RelayErrorCodes.StorageFailure);
@@ -57,6 +63,7 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
         var firstNewEffect = candidate.Effects.Count;
         var priorTaskRevision = Kind == AggregateKinds.Board ? CoordinationStateMachine.TaskRevision(candidate) : null;
         var reply = ApplyInternal(candidate, caller, operation, args, Now, services.GetService<OrderOptions>() is { Enabled: true });
+        if (reply.Ok && ValidateCandidate(candidate, operation) is { } invalid) return invalid;
         // A read that emitted an effect (a verify's hourly activity report) commits it, or the effect would be lost.
         if (!reply.Ok || !CoordinationStateMachine.RequiresCommit(Kind, operation, priorTaskRevision, candidate) && candidate.Effects.Count == firstNewEffect) return reply;
         return await CommitAsync(candidate) ? reply : Replies.Error(RelayErrorCodes.StorageFailure);
@@ -272,6 +279,7 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
     internal static IRelayAggregateGrain Aggregate(IGrainFactory factory, string kind, string key) => kind.Replace("cocern.", "", StringComparison.Ordinal) switch
     {
         AggregateKinds.Session => factory.GetGrain<ISessionGrain>(key),
+        AggregateKinds.SessionContext => factory.GetGrain<ISessionContextGrain>(key),
         AggregateKinds.Board => factory.GetGrain<ITaskBoardGrain>(key),
         AggregateKinds.Lock => factory.GetGrain<ILockGrain>(key),
         AggregateKinds.Control => factory.GetGrain<IControlGrain>(key),
