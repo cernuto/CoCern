@@ -185,8 +185,7 @@ public sealed class DocumentGrain(IDocSource source, ITokenCounter tokens, DocCa
     private string? requestedCommit;
     private string? contentHash;
     private string commit = "";
-    private long? sourceBytes;
-    private int? sourceTokens;
+    private Dictionary<string, (long Bytes, int Tokens)> sectionSizes = new(StringComparer.Ordinal);
     private int indexRuns, reads;
 
     public override Task OnActivateAsync(CancellationToken cancellationToken)
@@ -223,7 +222,8 @@ public sealed class DocumentGrain(IDocSource source, ITokenCounter tokens, DocCa
             if (offset >= chunks[0].Text.Length) return null;
             chunks[0] = (chunks[0].Text[offset..], tokens.Count(chunks[0].Text[offset..]));
         }
-        return new(doc.Path, section.Anchor, section.HeadingPath, commit, section.Tokens, first, chunks.Select(chunk => chunk.Text).ToArray(), chunks.Select(chunk => chunk.Tokens).ToArray(), offset, sourceBytes, sourceTokens);
+        var sizes = sectionSizes[section.Anchor];
+        return new(doc.Path, section.Anchor, section.HeadingPath, commit, section.Tokens, first, chunks.Select(chunk => chunk.Text).ToArray(), chunks.Select(chunk => chunk.Tokens).ToArray(), offset, sizes.Bytes, sizes.Tokens);
     }
 
     public Task<bool> ReplaceAsync(DocRef doc, string markdown)
@@ -286,9 +286,12 @@ public sealed class DocumentGrain(IDocSource source, ITokenCounter tokens, DocCa
     private void Index(string path, string content, string hash)
     {
         sections = DocFormats.Build(path, content, tokens, out _) ?? [];
-        // Counts name the exact loaded source version. Only these aggregate sizes travel with a section; its full text stays here.
-        sourceBytes = System.Text.Encoding.UTF8.GetByteCount(content);
-        sourceTokens = tokens.Count(content);
+        // Reference the selected whole section, never unrelated sections elsewhere in the same file.
+        sectionSizes = sections.ToDictionary(section => section.Anchor, section =>
+        {
+            var text = section.Text;
+            return ((long)System.Text.Encoding.UTF8.GetByteCount(text), tokens.Count(text));
+        }, StringComparer.Ordinal);
         byAnchor = sections.Select((section, index) => (section.Anchor, index)).ToDictionary(item => item.Anchor, item => item.index, StringComparer.Ordinal);
         contentHash = hash;
         indexRuns++;

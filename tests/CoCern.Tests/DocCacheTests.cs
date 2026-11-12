@@ -34,8 +34,9 @@ public sealed class DocCacheTests(ITestOutputHelper output)
     {
         var source = "# Exact\n\n" + string.Concat(Enumerable.Range(0, 64).Select(index => $"Rule {index}: retain exact identifiers, versions and source evidence before proceeding.\n"))
             + "\n```csharp\npublic static string Read(string[] values)\n{\n\tvar needlevalue = values[0] + \"🧭\";\n\treturn needlevalue;\n}\n```\n";
-        using var git = GitRepositories.Create(new() { ["docs/exact.md"] = source });
-        using var other = GitRepositories.Create(new() { ["docs/exact.md"] = source.Replace("needlevalue", "foreignvalue", StringComparison.Ordinal) });
+        var unrelated = "# Unrelated\n\n" + new string('x', 4_000) + "\n";
+        using var git = GitRepositories.Create(new() { ["docs/exact.md"] = source + unrelated });
+        using var other = GitRepositories.Create(new() { ["docs/exact.md"] = source.Replace("needlevalue", "foreignvalue", StringComparison.Ordinal) + unrelated });
         await using var host = DocHost(git, settings: new()
         {
             ["Relay:DocCache:Repositories:1:Id"] = "repo2", ["Relay:DocCache:Repositories:1:ClonePath"] = other.Clone
@@ -88,6 +89,11 @@ public sealed class DocCacheTests(ITestOutputHelper output)
         Assert.NotNull(firstNext);
         output.WriteLine($"Exact doc page: full={Encoding.UTF8.GetByteCount(full.DataJson)} bytes/{Tokens.Count(full.DataJson)} tokens; focused64={focusedTokens} complete reply tokens (same fixture).");
         Assert.True(focusedTokens < Tokens.Count(full.DataJson));
+
+        var measured = host.Services.GetRequiredService<ReadEfficiencyMeasurements>()
+            .Read("repo", DateTimeOffset.UtcNow.AddHours(-1), DateTimeOffset.UtcNow).FocusedDocument;
+        Assert.True(measured.Samples > 0);
+        Assert.Equal((long)Encoding.UTF8.GetByteCount(source) * measured.Samples, measured.SourceBytes);
 
         // A native caller's home repository remains repo; the public target travels with the pinned continuation.
         using var admin = Admin(host);
