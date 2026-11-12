@@ -4,9 +4,11 @@
 
 **Intent:** Let a CoCern session save useful working knowledge outside the LLM's prompt, find it with the existing Lucene grain pattern, and hand it to another authorized session through bounded tools and MCP Resources.
 
+**Status (2026-11-12):** Implemented and verified on `codex/retained-session-context`; deployment remains separate. See [implementation evidence and decisions](../../reviews/2026-11-12-retained-session-context.md).
+
 ## Decisions and scope
 
-Paul requested retained searchable session context, reuse of CoCern's Lucene grain pattern, MCP Resources, and a way for a new session to pick up the context. The following choices are proposed implementation defaults, rather than additional requirements attributed to Paul.
+Paul requested retained searchable session context, reuse of CoCern's Lucene grain pattern, MCP Resources, and a way for a new session to pick up the context. The following choices are the implemented first-release defaults, rather than additional requirements attributed to Paul.
 
 - Retained context is deliberately published repository knowledge, with the same repository visibility as existing shared notes. Saving selected findings is explicit; this feature does not ingest complete private chat transcripts or credentials.
 - A stable public `contextId`, separate from every `sessionId`, identifies a collection. The grain is keyed by a collision-safe encoding of canonical repository ID and context ID. A session may contribute to or read several collections.
