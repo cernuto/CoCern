@@ -181,6 +181,7 @@ public sealed class DocumentGrain(IDocSource source, ITokenCounter tokens, DocCa
     private IReadOnlyList<DocSection> sections = [];
     private Dictionary<string, int> byAnchor = new(StringComparer.Ordinal);
     private string? loadedFor;
+    private string? requestedCommit;
     private string? contentHash;
     private string commit = "";
     private int indexRuns, reads;
@@ -230,6 +231,7 @@ public sealed class DocumentGrain(IDocSource source, ITokenCounter tokens, DocCa
         if (changed) Index(doc.Path, markdown, hash);
         commit = doc.Commit;
         loadedFor = doc.Hash;
+        requestedCommit = doc.Commit;
         Observe();
         return Task.FromResult(changed);
     }
@@ -251,9 +253,10 @@ public sealed class DocumentGrain(IDocSource source, ITokenCounter tokens, DocCa
     {
         if (loadedFor == doc.Hash)
         {
-            // A new commit can retain this file's exact content. Report that commit without re-reading/re-indexing it, but never
-            // relabel fallback content from a different hash as the directory's unavailable commit.
-            if (contentHash == doc.Hash) commit = doc.Commit;
+            // A changed reference can name identical content. An identical repeated request must retain the actual read's provenance,
+            // including a fallback to the branch head whose content happens to have the requested hash.
+            if (requestedCommit != doc.Commit && contentHash == doc.Hash) commit = doc.Commit;
+            requestedCommit = doc.Commit;
             return;
         }
         reads++;
@@ -269,6 +272,7 @@ public sealed class DocumentGrain(IDocSource source, ITokenCounter tokens, DocCa
         if (content.Hash != contentHash) Index(doc.Path, content.Text, content.Hash);
         commit = content.Commit;
         loadedFor = doc.Hash;
+        requestedCommit = doc.Commit;
         Observe();
     }
 

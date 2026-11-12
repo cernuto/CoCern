@@ -98,11 +98,13 @@ public sealed class DocCacheTests(ITestOutputHelper output)
         var crossContinued = Data(await Tool(admin, "doc_section", crossNext));
         Assert.Equal(other.Head(), crossContinued.GetProperty("sourceCommit").GetString());
 
-        // A content-preserving commit updates provenance without re-reading the cached file; a changed source refuses an old cursor.
+        // Unchanged files retain their per-file source commit when another file changes; a changed source refuses an old cursor.
         git.Commit(new() { ["docs/other.md"] = "# Other\n\nA new committed file.\n" });
         await SyncAsync(host);
-        var unchanged = Data(await Tool(worker, "doc_section", new { repositoryId = "repo", path = "docs/exact.md", anchor = "exact", expectedCommit = git.Head(), maxTokens = 64 }));
-        Assert.Equal(git.Head(), unchanged.GetProperty("sourceCommit").GetString());
+        var unchangedResult = await Tool(worker, "doc_section", new { repositoryId = "repo", path = "docs/exact.md", anchor = "exact", expectedCommit = commit, maxTokens = 64 });
+        Assert.Equal((HttpStatusCode.OK, "Ok"), Status(unchangedResult));
+        var unchanged = Data(unchangedResult);
+        Assert.Equal(commit, unchanged.GetProperty("sourceCommit").GetString());
         git.Commit(new() { ["docs/exact.md"] = source.Replace("needlevalue", "changedvalue", StringComparison.Ordinal) });
         await SyncAsync(host);
         firstNext!["repositoryId"] = "repo";

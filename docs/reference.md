@@ -265,6 +265,8 @@ Also skipped: files over 256 KB (8 MB for OpenAPI), symlinks, malformed files, a
 
 Reply data stays under 2,000 tokens, including metadata; hits that don't fit are counted in `more`. `maxTokens` limits source text separately, so a 64-token source page also carries provenance and continuation metadata. Search snippets preserve original whitespace and code without inserted match markers. Follow `nextRead` with its repository, commit pin and anchor to keep exact source across pages; the text budget may change between pages. The original section anchor and legacy `next` remain available. Errors: `NoRepositoriesConfigured`, `DocCacheUnavailable` (off, or not a configured repository).
 
+Pins use the file's recorded `sourceCommit`, which can remain unchanged when other files advance the repository head. When a missing original commit requires the existing branch-head fallback, repeated reads retain the actual fallback source commit.
+
 ## Monitoring
 
 ### Activity
