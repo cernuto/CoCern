@@ -66,6 +66,51 @@ public sealed class CodexNativeSetupTests
         Assert.Equal(configBefore, File.ReadAllBytes(fixture.Config)); Assert.Equal(candidateBefore, File.ReadAllBytes(fixture.Candidate)); Assert.Equal(hooksBefore, File.ReadAllBytes(fixture.Hooks));
     }
 
+    [Fact]
+    public void An_exactly_owned_node_entry_admits_only_Codex_s_on_demand_switch_set_to_true_or_false()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "cocern-owned-on-demand-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var node = Path.Combine(root, "node"); var profile = Path.Combine(root, ".codex"); var config = Path.Combine(profile, "config.toml");
+            var claude = Path.Combine(root, ".claude.json"); var adapter = typeof(AdapterOptions).Assembly.Location;
+            Dictionary<string, string> Env(params (string Key, string Value)[] extra)
+            {
+                var env = new Dictionary<string, string> { ["COCERN_NODE_DIR"] = node };
+                foreach (var (key, value) in extra) env[key] = value;
+                return env;
+            }
+            bool Codex(bool native, params (string Key, string Value)[] extra)
+            {
+                if (File.Exists(config)) File.Delete(config);
+                ClientSettings.PlanCodex(config, "dotnet", adapter, Env(extra)).Apply(TimeProvider.System);
+                if (native) ClientSettings.PlanNativeCodex(config, "dotnet", adapter, node, profile, null).Apply(TimeProvider.System);
+                return ClientSettings.ExactOwnedLaunch(config, node, profile, "codex", "dotnet", adapter, native);
+            }
+            bool Claude(params (string Key, string Value)[] extra)
+            {
+                if (File.Exists(claude)) File.Delete(claude);
+                ClientSettings.PlanClaudeCode(claude, "dotnet", adapter, Env(extra)).Apply(TimeProvider.System);
+                return ClientSettings.ExactOwnedLaunch(claude, node, profile, "claude", "dotnet", adapter, native: false);
+            }
+            const string onDemand = "COCERN_ON_DEMAND_TOOLS";
+            Assert.True(Codex(native: false));
+            Assert.True(Codex(native: false, (onDemand, "true")));
+            Assert.True(Codex(native: false, (onDemand, "False")));
+            Assert.True(Codex(native: true, (onDemand, "true")));
+            // The native conversion rewrites only command and args, so the switch survives it.
+            Assert.Contains($"{onDemand} = 'true'", File.ReadAllText(config));
+            Assert.False(Codex(native: false, (onDemand, "yes")));
+            Assert.False(Codex(native: false, ("cocern_on_demand_tools", "true")));
+            Assert.False(Codex(native: false, (onDemand, "true"), ("COCERN_ROLE", "admin")));
+            Assert.False(Codex(native: true, (onDemand, "true"), ("COCERN_ROLE", "admin")));
+            Assert.True(Claude());
+            Assert.False(Claude((onDemand, "true")));
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
     private sealed class NativeRefreshFixture : IDisposable
     {
         internal readonly string Root = Path.Combine(Path.GetTempPath(), "cocern-native-refresh-" + Guid.NewGuid().ToString("N"));

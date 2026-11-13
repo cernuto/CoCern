@@ -22,7 +22,7 @@ internal static class ConnectCommand
     private const string RepositoryVariable = "COCERN_REPOSITORY";
 
     /// <summary>The variable that makes a Codex chat's adapter list only the everyday tools and offer the rest on demand (see <see cref="AdapterOptions.OnDemand"/>).</summary>
-    private const string OnDemandVariable = "COCERN_ON_DEMAND_TOOLS";
+    internal const string OnDemandVariable = "COCERN_ON_DEMAND_TOOLS";
 
     /// <summary>The variables a Connect entry carries; an entry with none of them is a joined PC's node entry, which is never this hub's to change.</summary>
     private static readonly string[] HubVariables = ["COCERN_TOKEN_FILE", "COCERN_TOKEN", "COCERN_URL", "COCERN_FINGERPRINT"];

@@ -143,9 +143,12 @@ internal static class ClientSettings
             if (bytes is null) return false;
             var launch = SetupEnvironment.AdapterLaunch(dotnet, adapter);
             var expected = launch.Arguments.Concat(native ? new[] { "--native-client", provider, "--connection", folder, "--profile", profile } : []).ToArray();
+            // The one other CoCern variable a node entry may carry: Codex's on-demand switch, exactly as Setup writes it, set to true or false.
+            bool OnDemandSetting(KeyValuePair<string, string> item) => provider == "codex" && item.Key == ConnectCommand.OnDemandVariable &&
+                (string.Equals(item.Value, "true", StringComparison.OrdinalIgnoreCase) || string.Equals(item.Value, "false", StringComparison.OrdinalIgnoreCase));
             bool EnvironmentOwned(IReadOnlyDictionary<string, string> env) => env.TryGetValue("COCERN_NODE_DIR", out var selected) &&
                 Path.IsPathFullyQualified(selected) && SamePath(selected, folder) && RepairCommand.OwnsNodeEntry(env, folder) &&
-                !env.Keys.Any(key => key.StartsWith("COCERN_", StringComparison.OrdinalIgnoreCase) && key != "COCERN_NODE_DIR");
+                !env.Any(item => item.Key.StartsWith("COCERN_", StringComparison.OrdinalIgnoreCase) && item.Key != "COCERN_NODE_DIR" && !OnDemandSetting(item));
             if (provider == "claude")
             {
                 using var parsed = JsonDocument.Parse(bytes, new JsonDocumentOptions { MaxDepth = 32 });

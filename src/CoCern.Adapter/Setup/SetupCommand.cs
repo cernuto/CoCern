@@ -229,12 +229,17 @@ internal static class SetupCommand
     {
         var folder = NormalizeFolder(options.DataDir);
         var nodeEnvironment = new Dictionary<string, string> { ["COCERN_NODE_DIR"] = folder };
+        // Codex lists tools once, so its chats list only the everyday tools and reach the rarely used ones through tool_describe and tool_call.
+        // An entry already this node's that sets no value for the switch gets true when setup runs again; a value it already sets is kept (Connect's rule).
+        var codexEnvironment = new Dictionary<string, string>(nodeEnvironment) { [ConnectCommand.OnDemandVariable] = "true" };
+        EntryRefresh codexRefresh = variables => variables.ContainsKey("COCERN_NODE_DIR") && RepairCommand.OwnsNodeEntry(variables, folder) &&
+            string.IsNullOrWhiteSpace(variables.GetValueOrDefault(ConnectCommand.OnDemandVariable)) ? new Dictionary<string, string?> { [ConnectCommand.OnDemandVariable] = "true" } : null;
         // Planned once now only to refuse a file we cannot edit before enrolling; each file is planned again from its fresh bytes just before it is written.
         // Claude Code's file is the exception when its own command line is on this PC: that registers the entry, and the file is only read if the command line fails.
         var planners = new List<(Func<ClientPlan> Plan, bool ClaudeCode)>();
         if (!options.SkipClientConfig)
         {
-            planners.Add((() => ClientSettings.PlanCodex(Path.Combine(CodexNativeSetup.Profile(env.Profile), "config.toml"), env.DotnetPath, env.AdapterDll, nodeEnvironment), false));
+            planners.Add((() => ClientSettings.PlanCodex(Path.Combine(CodexNativeSetup.Profile(env.Profile), "config.toml"), env.DotnetPath, env.AdapterDll, codexEnvironment, codexRefresh), false));
             planners.Add((() => ClientSettings.PlanClaudeCode(Path.Combine(env.Profile, ".claude.json"), env.DotnetPath, env.AdapterDll, nodeEnvironment), true));
             // The Stop hook is on by default: it is how an idle Claude Code chat wakes for a message (Codex chats are woken by the node instead).
             // The prompt hook is opt-in: a status line and new mail with each human message, at no tool call for the model. The same opt-in adds Claude Code's post-tool hook, which
@@ -263,7 +268,7 @@ internal static class SetupCommand
                 plans.Add((claudeJson(), true));
             foreach (var (plan, claudeCode) in plans)
             {
-                env.Out.WriteLine(plan.Apply(env.Clock) switch { ClientChange.Created => $"Created {plan.Path} with the CoCern entry.", ClientChange.Updated => $"Added the CoCern entry to {plan.Path} (backup kept next to it).", _ => $"{plan.Path} already has a CoCern entry; left as it was." });
+                env.Out.WriteLine(plan.Apply(env.Clock) switch { ClientChange.Created => $"Created {plan.Path} with the CoCern entry.", ClientChange.Updated when plan.Refreshes => $"Updated the CoCern entry in {plan.Path} (backup kept next to it).", ClientChange.Updated => $"Added the CoCern entry to {plan.Path} (backup kept next to it).", _ => $"{plan.Path} already has a CoCern entry; left as it was." });
                 if (claudeCode && !plan.IsUnchanged && env.ClaudeCodeRunning()) env.Out.WriteLine("Claude Code appears to be running: restart it to pick up the CoCern entry.");
             }
             if (!options.SkipClientConfig)
