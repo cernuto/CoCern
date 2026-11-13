@@ -100,6 +100,7 @@
 .connect-view .provider-token { width: 34px; height: 34px; border-radius: 8px; font-size: .9rem; background: var(--muted); color: var(--primary); border: 1px solid var(--border); }
 .connect-view .connection-state { white-space: normal; text-align: center; }
 .connect-view .codex-readiness { grid-column: 2 / -1; min-width: 0; padding: 0; }
+.connect-view .connect-item > .installation-checks { grid-column: 2 / -1; min-width: 0; }
 .codex-next-step { margin: 0; font-size: .83rem; line-height: 1.65; overflow-wrap: anywhere; max-width: 65ch; }
 .codex-readiness-summary { margin: 10px 0 18px; font-size: .83rem; line-height: 1.6; }
 .codex-readiness-steps { list-style: none; display: grid; gap: 16px; padding: 0; margin: 0; }
