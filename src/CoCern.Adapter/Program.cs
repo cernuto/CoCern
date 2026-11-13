@@ -273,7 +273,7 @@ try
 }
 catch (AdapterConfigurationException exception)
 {
-    Console.Error.WriteLine(exception.Message);
+    Console.Error.WriteLine(SecretScrub.Clean(exception.Message));
     return 1;
 }
 catch (OperationCanceledException)

@@ -49,7 +49,8 @@ internal sealed class NodeTransport
     /// <summary>Fixed event names for tests (enrolled, announced, watching, hint, unauthorized, waking, wake-target); never carries data.</summary>
     public Action<string>? Trace { get; init; }
     /// <summary>The hub's join code, sent only when enrolling; enrolled PCs never need it again.</summary>
-    public string? JoinCode { get; set; }
+    public string? JoinCode { get => _joinCode; set { _joinCode = value; SecretScrub.Add(value); } }
+    private string? _joinCode;
     /// <summary>The certificate fingerprint the operator read from the hub's log; when set, any other certificate is refused instead of pinned.</summary>
     public string? ExpectedFingerprint { get; set; }
     /// <summary>Setup's one enrollment-and-first-announce: stop with exit 0 right after the first accepted announcement (and exit 1 if cancelled before it).</summary>
@@ -91,7 +92,7 @@ public sealed class NodeRunner : IAsyncDisposable
         using (state)
         {
             try { _ = ResolveHub(state, null); }
-            catch (AdapterConfigurationException exception) { error.WriteLine(exception.Message); return 1; }
+            catch (AdapterConfigurationException exception) { error.WriteLine(SecretScrub.Clean(exception.Message)); return 1; }
             var image = NodeUpdateState.ValidateWorkerStartup(nodeFolder, activationNonce, executingFolder);
             if (image is null || !state.Enrolled || state.TryReadCredential(out _) != CredentialRead.Present) { error.WriteLine("node-update:startup-invalid"); return 1; }
             if (startupContext?.OrdinaryStartup == true)
@@ -236,7 +237,7 @@ public sealed class NodeRunner : IAsyncDisposable
     {
         Uri target;
         try { target = ResolveHub(state, hub); }
-        catch (AdapterConfigurationException exception) { error.WriteLine(exception.Message); return 1; }
+        catch (AdapterConfigurationException exception) { error.WriteLine(SecretScrub.Clean(exception.Message)); return 1; }
         await using var runner = new NodeRunner(state, target, transport, error, readiness, workerStartup, workerImage, startupContext, nodeBuild);
         if (runner._pendingCandidate) await runner._dispatchGate.TryDrainAsync(TimeSpan.Zero, ct);
         try { return await runner.LoopAsync(ct); }

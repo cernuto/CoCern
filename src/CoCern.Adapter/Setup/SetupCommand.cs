@@ -76,7 +76,7 @@ internal sealed class SetupEnvironment
                 dotnetPath = NodePackage.KnownDotnet(knownHost) ? knownHost : null;
             }
             try { _ = NodeRunner.ResolveHub(state, hub); }
-            catch (AdapterConfigurationException exception) { error.WriteLine(exception.Message); return 1; }
+            catch (AdapterConfigurationException exception) { error.WriteLine(SecretScrub.Clean(exception.Message)); return 1; }
             if (!state.Enrolled || state.TryReadCredential(out _) != CredentialRead.Present)
             {
                 var singleCycle = transport.SingleCycle;
@@ -248,7 +248,7 @@ internal static class SetupCommand
             if (promptHook is not null) planners.Add((() => ClientSettings.PlanPromptHook(Path.Combine(env.Profile, ".codex", "hooks.json"), promptHook), false));
         }
         try { foreach (var (planner, claudeCode) in planners) if (!claudeCode || env.ClaudeCli is null) planner(); }
-        catch (ClientSettingsException exception) { env.Error.WriteLine(exception.Message); return MalformedClientFileExitCode; }
+        catch (ClientSettingsException exception) { env.Error.WriteLine(SecretScrub.Clean(exception.Message)); return MalformedClientFileExitCode; }
 
         var enrolled = await EnrollAsync(options, env, folder, ct, rememberJoinCode);
         if (enrolled.Code != 0) return enrolled.Code;
@@ -280,10 +280,10 @@ internal static class SetupCommand
             LogonStart.Register(env.DotnetPath, env.AdapterDll, options.DataDir is null ? null : folder, env.RunKey);
             env.StartNode(env.DotnetPath, env.AdapterDll, options.DataDir is null ? null : folder);
         }
-        catch (ClientSettingsException exception) { env.Error.WriteLine(exception.Message); return MalformedClientFileExitCode; }
+        catch (ClientSettingsException exception) { env.Error.WriteLine(SecretScrub.Clean(exception.Message)); return MalformedClientFileExitCode; }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or Win32Exception or System.Security.SecurityException or AdapterConfigurationException)
         {
-            env.Error.WriteLine($"Setup enrolled this PC but could not finish: {exception.Message}");
+            env.Error.WriteLine($"Setup enrolled this PC but could not finish: {SecretScrub.Clean(exception.Message)}");
             return 1;
         }
         env.Out.WriteLine($"CoCern is set up. Machine ID: {enrolled.MachineId}");
@@ -323,7 +323,7 @@ internal static class SetupCommand
             // A node already runs on this folder (it holds the lock): setup run again on an enrolled PC changes nothing there.
             if (NodeState.ReadIdentity(folder) is { } identity && new Uri(identity.HubUrl).GetLeftPart(UriPartial.Authority).Equals(options.Hub.GetLeftPart(UriPartial.Authority), StringComparison.OrdinalIgnoreCase))
                 return (0, identity.MachineId, identity.HubUrl);
-            env.Error.WriteLine(exception.Message);
+            env.Error.WriteLine(SecretScrub.Clean(exception.Message));
             return (1, "", "");
         }
         using (state)

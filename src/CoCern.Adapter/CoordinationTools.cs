@@ -456,6 +456,7 @@ internal sealed class ChatCalls(RelayForwarder forwarder, SessionHints? hints, S
             }
         }
 
+        SecretScrub.Add(own.Token);
         var node = JsonNode.Parse(arguments.GetRawText())!.AsObject();
         node["sessionId"] = own.Id;
         node["sessionToken"] = own.Token;
@@ -484,6 +485,7 @@ internal sealed class ChatCalls(RelayForwarder forwarder, SessionHints? hints, S
                 }
                 // A late implicit reply from A must not undo a newer authenticated switch to B.
                 if (!opened && !suppliedToken && _own.TryGetValue(repository, out var current) && current != (session, token)) return;
+                SecretScrub.Add(token);
                 _own[repository] = (session, token);
             }
             Volatile.Write(ref _session, session);

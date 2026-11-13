@@ -406,6 +406,9 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
         (credentialIdentity, fileKey, BindingKey, arguments, resolution, currentSessionId, owner) =
             (identity, state.FileKey, state.Key, state.Arguments.Clone(), state.Resolution?.Clone(), state.Current, lease);
         stateFolder = state.Version == StateVersion ? ChatFolder : CheckoutFolder;
+        if (arguments.ValueKind == JsonValueKind.Object && arguments.TryGetProperty("nativeJoin", out var join) && join.ValueKind == JsonValueKind.Object &&
+            join.TryGetProperty("bindingSecret", out var secret) && secret.ValueKind == JsonValueKind.String)
+            SecretScrub.Add(secret.GetString());
     }
 
     /// <summary>

@@ -19,6 +19,7 @@ public sealed class AdapterOptions
 
         BaseUri = uri;
         Token = normalized;
+        SecretScrub.Add(normalized);
         Admin = admin;
         SignalR = signalR;
     }

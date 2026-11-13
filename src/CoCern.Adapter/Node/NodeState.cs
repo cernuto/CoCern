@@ -88,6 +88,7 @@ public sealed class NodeState : IDisposable
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { return CredentialRead.Unreadable; }
         if (text.Length != 64 || !text.All(Uri.IsHexDigit)) return CredentialRead.Missing;
         credential = text;
+        SecretScrub.Add(text);
         return CredentialRead.Present;
     }
 
