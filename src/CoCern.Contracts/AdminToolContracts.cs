@@ -39,8 +39,8 @@ public sealed record HubDiagnosis
     public HubDiagnosisPc[] Pcs { get; init; } = [];
     public bool Truncated { get; init; }
     public int MorePcs { get; init; }
-    /// <summary>A PC's adapter version is not known to the hub yet, which a reader could otherwise take as every PC being current.</summary>
-    public string VersionNote { get; init; } = "PCs do not report an adapter version to this hub yet, so this does not say whether a PC's version is current.";
+    /// <summary>The product version of the adapter release the hub offers nodes for self-update; null when it offers none.</summary>
+    public string? OfferedAdapterVersion { get; init; }
 }
 
 /// <summary>One enrolled PC in <see cref="HubDiagnosis"/>. Its name was announced by the PC and is untrusted text.</summary>
@@ -51,6 +51,10 @@ public sealed record HubDiagnosisPc
     public DateTimeOffset? LastSeenAt { get; init; }
     public bool SeenRecently { get; init; }
     public int SessionCount { get; init; }
+    /// <summary>The product version of the adapter build the PC last announced; null when it has announced none.</summary>
+    public string? AdapterVersion { get; init; }
+    /// <summary>Whether the PC runs the offered release's adapter; null when the PC announced no build or the hub offers no release, never out of date.</summary>
+    public bool? AdapterCurrent { get; init; }
 }
 
 /// <summary><c>add_pc</c>'s reply: the dashboard's Add another PC status as it is, under a note when it holds the join code.</summary>

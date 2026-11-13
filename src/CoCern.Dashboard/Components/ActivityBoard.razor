@@ -24,6 +24,7 @@
                         <BbBadge Variant="BadgeVariant.Secondary">@machine.SessionCount @(machine.SessionCount == 1 ? "session" : "sessions")</BbBadge>
                         @if (!enrolled) { <span class="station-registration" title="No node enrollment is recorded for this machine. This does not indicate whether the PC is online.">No node enrollment</span> }
                         else { <span class="station-registration" title="Freshness of the enrolled node's discovery heartbeat, separate from direct chat routes.">@(machine.Reachable ? "Node heartbeat current" : "No current node heartbeat")</span> }
+                        @if (enrolled) { <span class="station-registration" title="The adapter build this PC last reported, compared with the release the hub offers nodes. Unknown when the PC reported no build or the hub offers no release.">@AdapterNote(machine)</span> }
                     </div>
                     <span class="station-status" title="Whether a session shown here has a direct chat route. MCP calls and inbox communication can still work without one; this does not indicate whether a model is running."><span class="status-dot @(directRoute ? "teal" : "neutral")" aria-hidden="true"></span><span>@(directRoute ? "Direct chat route available" : "No direct chat route")</span></span>
                 </div>
@@ -60,6 +61,12 @@
     [Parameter] public Func<string, bool> IsPulsing { get; set; } = _ => false;
 
     private static bool HasMachineIdentity(string machineId) => !string.IsNullOrWhiteSpace(machineId);
+
+    private static string AdapterNote(DashboardStation machine)
+    {
+        var mark = machine.AdapterCurrent switch { true => "current", false => "out of date", null => "unknown" };
+        return string.IsNullOrWhiteSpace(machine.AdapterVersion) ? $"Adapter {mark}" : $"Adapter {machine.AdapterVersion}, {mark}";
+    }
 
     private static string SessionTokenLetters(DashboardSession session)
     {

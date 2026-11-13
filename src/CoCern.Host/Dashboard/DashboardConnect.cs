@@ -115,6 +115,25 @@ internal sealed class DashboardConnect(IConfiguration configuration, IHostEnviro
     /// </summary>
     internal AdapterBuild? NodeAdapter() => NodeAdapter(configuration["Relay:Connect:DistributionAdapterPath"], configuration["Relay:Connect:AdapterPath"], AppContext.BaseDirectory);
 
+    /// <summary>The release offered to nodes, obtained as the announce endpoint obtains it; null when there is none or it cannot be read.</summary>
+    internal async Task<NodeRelease?> OfferedReleaseAsync(AdapterZipCache cache, CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (NodeAdapter() is not { } adapter) return null;
+            await using var lease = await cache.ReleaseAsync(adapter.Folder, cancellationToken);
+            return lease?.Release;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException) { return null; }
+    }
+
+    /// <summary>
+    /// Whether a PC's announced adapter DLL is the offered release's, ignoring case; null when the PC announced no build or no release is offered, so an
+    /// unknown is never shown as out of date.
+    /// </summary>
+    internal static bool? AdapterCurrent(string? adapterDllSha256, NodeRelease? offered) =>
+        offered is not { AdapterDllSha256.Length: > 0 } release || string.IsNullOrEmpty(adapterDllSha256) ? null : string.Equals(adapterDllSha256, release.AdapterDllSha256, StringComparison.OrdinalIgnoreCase);
+
     /// <summary>
     /// The newest self-contained build, by its dll's write time as <see cref="ServedAdapter(string?, string)"/> orders them, among the configured distribution
     /// and adapter paths, the hub's own node adapter publish (<see cref="NodeAdapterBuilds"/>) and <see cref="Candidates"/>; null when none is self-contained,

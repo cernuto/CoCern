@@ -1,3 +1,4 @@
+using CoCern.Contracts;
 using CoCern.Contracts.Dashboard;
 using CoCern.Core;
 using CoCern.Domain;
@@ -16,6 +17,11 @@ public sealed class DashboardCollector : BackgroundService
     private readonly DashboardSecurity security;
     private readonly RelayApplication application;
     private readonly DocCacheActivity? docCache;
+    private readonly IServiceProvider? services;
+    // The release offered to nodes, which each machine's announced adapter is compared with; refreshed every ReleaseEvery, and null while none is offered.
+    private NodeRelease? offeredRelease;
+    private DateTimeOffset nextReleaseAt;
+    private static readonly TimeSpan ReleaseEvery = TimeSpan.FromMinutes(1);
     private DateTimeOffset nextObservationAt;
     private static readonly TimeSpan ObservationEvery = TimeSpan.FromSeconds(5);
     private DateTimeOffset nextDatabaseAt;
@@ -31,8 +37,9 @@ public sealed class DashboardCollector : BackgroundService
     private bool waitingReportsTruncated;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
-    public DashboardCollector(DashboardLogBuffer logs, DashboardConnections connections, IRelayObservationSource source, DashboardTrafficBuffer traffic, DashboardSecurity security, RelayApplication application, DocCacheActivity? docCache = null)
+    public DashboardCollector(DashboardLogBuffer logs, DashboardConnections connections, IRelayObservationSource source, DashboardTrafficBuffer traffic, DashboardSecurity security, RelayApplication application, DocCacheActivity? docCache = null, IServiceProvider? services = null)
     {
+        this.services = services;
         this.logs = logs;
         this.connections = connections;
         this.source = source;
@@ -84,6 +91,17 @@ public sealed class DashboardCollector : BackgroundService
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
     }
 
+    /// <summary>Marks whether each machine runs the offered release's adapter; with no release or no announced build the mark stays unknown.</summary>
+    private async Task<DashboardMachine[]> MarkAdaptersAsync(DashboardMachine[] machines, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        if (now >= nextReleaseAt && services?.GetService<DashboardConnect>() is { } connect && services.GetService<AdapterZipCache>() is { } cache)
+        {
+            nextReleaseAt = now + ReleaseEvery;
+            offeredRelease = await connect.OfferedReleaseAsync(cache, cancellationToken);
+        }
+        return [.. machines.Select(machine => machine with { AdapterCurrent = DashboardConnect.AdapterCurrent(machine.AdapterDllSha256, offeredRelease) })];
+    }
+
     private async Task<DashboardSnapshot> CollectAsync(DashboardSnapshot previous, CancellationToken cancellationToken)
     {
         var now = DateTimeOffset.UtcNow;
@@ -99,6 +117,7 @@ public sealed class DashboardCollector : BackgroundService
                 {
                     nextObservationAt = now + ObservationEvery;
                     (waitingReports, waitingMail, waitingReportsTruncated) = (observation.WaitingReports, observation.WaitingMail, observation.SessionsTruncated);
+                    observation = observation with { Machines = await MarkAdaptersAsync(observation.Machines, now, cancellationToken) };
                 }
                 snapshot = observation is null
                     ? previous with { Warnings = [.. previous.Warnings.Where(warning => warning != "Observation is busy; the previous observation is retained."), "Observation is busy; the previous observation is retained."] }

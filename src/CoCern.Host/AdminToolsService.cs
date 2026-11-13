@@ -56,8 +56,14 @@ internal sealed class AdminToolsService(IServiceProvider services, Func<string, 
         var certificate = fingerprint is null ? null : HubNetwork.CertificatePath(configuration, services.GetRequiredService<IHostEnvironment>());
         var (snapshotAge, analyticsUnavailable) = AnalyticsAge(now);
         var (observation, sessionsUnavailable) = await ObserveAsync(now, cancellationToken);
+        // Any failure to read the offered release means none is offered, so every PC's adapter-current is unknown rather than out of date.
+        var offered = services.GetService<DashboardConnect>() is { } connect && services.GetService<AdapterZipCache>() is { } cache ? await connect.OfferedReleaseAsync(cache, cancellationToken) : null;
         var pcs = (observation?.Machines ?? []).OrderBy(machine => machine.Reachable).ThenBy(machine => machine.LastSeenAt)
-            .Select(machine => new HubDiagnosisPc { MachineId = machine.MachineId, Name = machine.Name, LastSeenAt = machine.LastSeenAt, SeenRecently = machine.Reachable, SessionCount = machine.SessionCount }).ToArray();
+            .Select(machine => new HubDiagnosisPc
+            {
+                MachineId = machine.MachineId, Name = machine.Name, LastSeenAt = machine.LastSeenAt, SeenRecently = machine.Reachable, SessionCount = machine.SessionCount,
+                AdapterVersion = machine.AdapterVersion, AdapterCurrent = DashboardConnect.AdapterCurrent(machine.AdapterDllSha256, offered)
+            }).ToArray();
         var diagnosis = new HubDiagnosis
         {
             Version = host.Version, StartedAt = host.StartedAt, UptimeMinutes = (long)(now - host.StartedAt).TotalMinutes,
@@ -65,7 +71,8 @@ internal sealed class AdminToolsService(IServiceProvider services, Func<string, 
             CertificateFingerprint = fingerprint, CertificateBackup = BackupState(certificate, fingerprint),
             DiscoveryEnabled = DiscoverySettings.Enabled(configuration), NetworkEnabled = HubNetwork.Enabled(configuration),
             AnalyticsSnapshotAgeMinutes = snapshotAge, AnalyticsUnavailable = analyticsUnavailable,
-            SessionCount = observation?.SessionCount, SessionsUnavailable = sessionsUnavailable, SessionsPartial = observation?.SessionsTruncated == true
+            SessionCount = observation?.SessionCount, SessionsUnavailable = sessionsUnavailable, SessionsPartial = observation?.SessionsTruncated == true,
+            OfferedAdapterVersion = offered?.Package.ProductVersion
         };
         return Ok(Fitted(RelayTools.HubDiagnose, pcs.Length, kept => diagnosis with { Pcs = pcs[..kept], Truncated = kept < pcs.Length, MorePcs = pcs.Length - kept }, services.GetService<ITokenCounter>(), least: 0));
     }

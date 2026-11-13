@@ -284,6 +284,12 @@ public sealed record DashboardMachine
     public bool Reachable { get; init; }
     public DateTimeOffset? LastSeenAt { get; init; }
     public int SessionCount { get; init; }
+    /// <summary>The product version of the adapter build the PC last announced; null when it has announced none.</summary>
+    public string? AdapterVersion { get; init; }
+    /// <summary>The SHA-256 of the adapter DLL the PC last announced; null when it has announced none.</summary>
+    public string? AdapterDllSha256 { get; init; }
+    /// <summary>Whether that DLL is the release the hub offers nodes; null when the PC announced no build or the hub offers no release, never out of date.</summary>
+    public bool? AdapterCurrent { get; init; }
 }
 
 public sealed record DashboardSession

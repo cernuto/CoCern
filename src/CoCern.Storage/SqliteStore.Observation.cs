@@ -334,7 +334,15 @@ public sealed partial class SqliteStore : IRelayObservationSource
             var lastSeen = DiscoveryContacts.Freshest(property.Name, Date(machine, EnrolledMachine.LastSeenKey));
             var announced = Property(machine, EnrolledMachine.ChatsKey);
             var count = announced.ValueKind == JsonValueKind.Array ? announced.GetArrayLength() : 0;
-            machines.Add(new() { MachineId = id, Name = name, LastSeenAt = lastSeen, Reachable = ReadModels.IsLive(lastSeen, now), SessionCount = count });
+            // The build the PC last announced; a machine that never announced one has no object here, and both stay null.
+            var build = Property(machine, EnrolledMachine.NodeBuildKey);
+            var adapterVersion = Text(build, "productVersion");
+            var adapterDll = RawText(build, "adapterDllSha256");
+            machines.Add(new()
+            {
+                MachineId = id, Name = name, LastSeenAt = lastSeen, Reachable = ReadModels.IsLive(lastSeen, now), SessionCount = count,
+                AdapterVersion = adapterVersion.Length > 0 ? adapterVersion : null, AdapterDllSha256 = adapterDll.Length > 0 ? adapterDll : null
+            });
             if (announced.ValueKind != JsonValueKind.Array) continue;
             foreach (var chat in announced.EnumerateArray().Take(64))
             {

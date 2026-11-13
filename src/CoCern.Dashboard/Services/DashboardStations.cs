@@ -2,7 +2,7 @@ using CoCern.Contracts.Dashboard;
 
 namespace CoCern.Dashboard.Services;
 
-internal sealed record DashboardStation(string MachineId, string Name, bool Enrolled, bool Reachable, DashboardSession[] Sessions)
+internal sealed record DashboardStation(string MachineId, string Name, bool Enrolled, bool Reachable, DashboardSession[] Sessions, string? AdapterVersion = null, bool? AdapterCurrent = null)
 {
     public int SessionCount => Sessions.Length;
 }
@@ -38,7 +38,7 @@ internal static class DashboardStations
 
         return enrolled.Values.Concat(reported.Values)
             .Select(station => new DashboardStation(station.MachineId, station.Name, station.Enrolled, station.Reachable,
-                station.Sessions.OrderBy(session => session.SessionId, StringComparer.Ordinal).ToArray()))
+                station.Sessions.OrderBy(session => session.SessionId, StringComparer.Ordinal).ToArray(), station.AdapterVersion, station.AdapterCurrent))
             .OrderBy(station => station.Name, StringComparer.OrdinalIgnoreCase)
             .ThenBy(station => station.MachineId, StringComparer.Ordinal).ToArray();
 
@@ -55,12 +55,16 @@ internal static class DashboardStations
         {
             Enrolled = true;
             Reachable = machine.Reachable;
+            AdapterVersion = machine.AdapterVersion;
+            AdapterCurrent = machine.AdapterCurrent;
         }
 
         public string MachineId { get; } = machineId;
         public string Name { get; } = name;
         public bool Enrolled { get; }
         public bool Reachable { get; }
+        public string? AdapterVersion { get; }
+        public bool? AdapterCurrent { get; }
         public List<DashboardSession> Sessions { get; } = [];
     }
 }
