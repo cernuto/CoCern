@@ -377,6 +377,8 @@ public sealed record DashboardConnectStatus
 {
     public string? Unavailable { get; init; }
     public DashboardConnectClient[] Clients { get; init; } = [];
+    /// <summary>After a connect, the installation checks for the connected app; empty when they could not be read.</summary>
+    public DashboardRepairCheck[] Checks { get; init; } = [];
 }
 
 /// <summary>

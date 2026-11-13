@@ -189,6 +189,7 @@ internal sealed class AdminToolsService(IServiceProvider services, Func<string, 
         catch (Exception) { status = new() { Unavailable = "The adapter could not start." }; }
         if (status.Unavailable is not null || status.Clients.Any(entry => entry.State == ConnectStates.Error))
             lock (gate) { requests.Remove(key); requestOrder.Remove(key); }
-        return Ok(JsonSerializer.SerializeToNode(status, ToolResults.JsonOptions)!);
+        // The installation checks give way before the reply outgrows its budget; this reply is the one a retry replays.
+        return Ok(Fitted(RelayTools.ConnectApp, status.Checks.Length, kept => status with { Checks = status.Checks[..kept] }, services.GetService<ITokenCounter>(), least: 0));
     }
 }

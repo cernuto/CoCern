@@ -101,6 +101,15 @@ else
                         {
                             <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Default" Class="connect-button" Disabled="@(_busy is not null)" OnClick="() => ConnectAsync(client.Id)">@(_busy == client.Id ? "Connecting…" : client.State == ConnectStates.Error ? "Try again" : "Connect")</BbButton>
                         }
+                        @if (_checksFor == client.Id && _status.Checks.Length > 0)
+                        {
+                            <ul class="installation-checks">
+                                @foreach (var check in _status.Checks)
+                                {
+                                    <li @key="check.Id"><div><strong>@check.Name</strong><p>@check.Detail</p></div><BbBadge Variant="@(check.State == "passed" ? BadgeVariant.SoftSuccess : BadgeVariant.Secondary)">@CheckLabel(check.State)</BbBadge></li>
+                                }
+                            </ul>
+                        }
                     </li>
                 }
             </ul>
@@ -120,6 +129,8 @@ else
     [Parameter] public bool Compact { get; set; }
     private DashboardConnectStatus? _status;
     private string? _busy;
+    // The app whose installation checks _status carries: the last one connected here.
+    private string? _checksFor;
     // Starts ticked when every configured app has administrator tools. Preserve each app's role until the user explicitly changes this choice.
     private bool _admin;
     private bool _adminChosen;
@@ -192,11 +203,15 @@ else
             return response.IsSuccessStatusCode ? await response.Content.ReadFromJsonAsync<DashboardConnectStatus>() : new DashboardConnectStatus { Unavailable = "Connecting is only possible from the hub's PC." };
         });
         _busy = null;
-        // Keep the other apps' rows; replace only the one just connected.
+        // Keep the other apps' rows; replace only the one just connected. Its installation checks show under it.
+        _checksFor = id;
         if (result?.Unavailable is null && _status is { Unavailable: null } && result?.Clients is [var changed])
-            _status = _status with { Clients = _status.Clients.Select(client => client.Id == changed.Id ? changed : client).ToArray() };
+            _status = _status with { Clients = _status.Clients.Select(client => client.Id == changed.Id ? changed : client).ToArray(), Checks = result.Checks };
         else _status = result;
     }
+
+    private static string CheckLabel(string state) => state switch
+    { "passed" => "Passed", "needs_repair" => "Needs repair", "warning" => "Action needed", _ => "Unavailable" };
 
     private static async Task<DashboardConnectStatus?> LoadAsync(Func<Task<DashboardConnectStatus?>> load)
     {

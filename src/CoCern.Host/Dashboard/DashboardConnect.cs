@@ -25,8 +25,17 @@ internal sealed class DashboardConnect(IConfiguration configuration, IHostEnviro
     /// </summary>
     public Task<DashboardConnectStatus> StatusAsync(bool? admin, CancellationToken cancellationToken) => RunAsync(["--check", .. Role(admin)], cancellationToken);
 
-    /// <summary>Connects one app; with <paramref name="admin"/> given, its entry gives the administrator tools or not to match.</summary>
-    public Task<DashboardConnectStatus> ConnectAsync(string client, bool? admin, CancellationToken cancellationToken) => RunAsync(["--only", client, .. Role(admin)], cancellationToken);
+    /// <summary>
+    /// Connects one app; with <paramref name="admin"/> given, its entry gives the administrator tools or not to match. After a run that reached the adapter,
+    /// Repair's read-only checks for that app come with it; when those cannot be read, <see cref="DashboardConnectStatus.Checks"/> stays empty.
+    /// </summary>
+    public async Task<DashboardConnectStatus> ConnectAsync(string client, bool? admin, CancellationToken cancellationToken)
+    {
+        var status = await RunAsync(["--only", client, .. Role(admin)], cancellationToken);
+        if (status.Unavailable is not null) return status;
+        var repair = await RepairAsync(check: true, cancellationToken);
+        return repair.Unavailable is null ? status with { Checks = ConnectChecks.For(client, repair.Checks) } : status;
+    }
 
     /// <summary>Preview or apply repairs to this user's owned installation; read-only previews never change settings.</summary>
     public Task<DashboardRepairStatus> RepairAsync(bool check, CancellationToken cancellationToken) =>
