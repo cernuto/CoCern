@@ -19,19 +19,47 @@ public static class CoordinationTools
     /// this registration (<see cref="ToolSurface.Restore"/>), and the first hub answer for each session replaces what was remembered. The hub still
     /// enforces the credential and any profile on every call; the default grants nothing.
     /// </summary>
-    internal static IEnumerable<McpServerTool> CreateNative(RelayForwarder forwarder, NativeJoin join, NativeRegistrationGate registration, bool admin, bool diagnostics = false, ToolSurface? surface = null)
+    internal static IEnumerable<McpServerTool> CreateNative(RelayForwarder forwarder, NativeJoin join, NativeRegistrationGate registration, bool admin, bool diagnostics = false, ToolSurface? surface = null, bool onDemand = false)
     {
-        IEnumerable<McpServerTool> Build(string? profile, bool ceiling) => NativeSurface(ceiling, chatOnly: false, profile is null && diagnostics, profile is not null)
-            .Where(tool => SessionToolProfiles.Allows(profile ?? (diagnostics ? "diagnostics" : "worker"), tool.Name, ceiling))
-            .Select(tool => new ForwardedTool(tool, async (args, ct) =>
-            {
-                var reply = await registration.InvokeAsync(join, tool.Name, args, ct);
-                if (reply.Ok) surface?.Observe(reply);
-                return ToolSurface.StripRouting(surface is null ? reply : ToolSurface.WithRefreshGuidance(reply));
-            }, native: true));
-        surface?.Configure(Build);
+        async Task<AdapterReply> Invoke(string name, JsonElement args, CancellationToken ct)
+        {
+            var reply = await registration.InvokeAsync(join, name, args, ct);
+            if (reply.Ok) surface?.Observe(reply);
+            return ToolSurface.StripRouting(surface is null ? reply : ToolSurface.WithRefreshGuidance(reply));
+        }
+        IEnumerable<RelayTool> Allowed(string? profile, bool ceiling) => NativeSurface(ceiling, chatOnly: false, profile is null && diagnostics, profile is not null)
+            .Where(tool => SessionToolProfiles.Allows(profile ?? (diagnostics ? "diagnostics" : "worker"), tool.Name, ceiling));
+        IEnumerable<McpServerTool> Build(string? profile, bool ceiling) => Listed(Allowed(profile, ceiling), onDemand, surface, native: true,
+            tool => new ForwardedTool(tool, (args, ct) => Invoke(tool.Name, args, ct), native: true), Invoke);
+        surface?.Configure(Build, (profile, ceiling) => OnDemandNames(Allowed(profile, ceiling), onDemand));
         return surface?.Restore() ?? Build(null, admin);
     }
+
+    /// <summary>
+    /// What <paramref name="allowed"/> lists. Without on-demand tools, every allowed tool, as before. With them, only the tools not marked
+    /// <see cref="RelayTool.OnDemand"/>, plus <c>tool_describe</c> and <c>tool_call</c> when at least one allowed tool is. Those two read the on-demand
+    /// tools the surface's current choices allow (<see cref="ToolSurface.OnDemandNames"/>), so a <c>tool_call</c> a client kept from an earlier list
+    /// reaches nothing the current profile hides; before any hub selection, the ones allowed here.
+    /// </summary>
+    private static IEnumerable<McpServerTool> Listed(IEnumerable<RelayTool> allowed, bool onDemand, ToolSurface? surface, bool native, Func<RelayTool, McpServerTool> forward,
+        Func<string, JsonElement, CancellationToken, Task<AdapterReply>> call, Action<IReadOnlyList<CoCern.Contracts.Dashboard.ConnectionDiagnosticEvent>>? report = null)
+    {
+        if (!onDemand) return allowed.Select(forward);
+        var tools = allowed.ToArray();
+        var hidden = tools.Where(tool => tool.OnDemand).ToArray();
+        var listed = tools.Where(tool => !tool.OnDemand).Select(forward);
+        if (hidden.Length == 0) return listed;
+        IReadOnlyList<RelayTool> Available() => surface?.OnDemandNames is { } names
+            ? RelayToolCatalog.All.Where(tool => tool.OnDemand && names.Contains(tool.Name)).ToArray()
+            : hidden;
+        return listed.Append(OnDemandTools.DescribeTool(Available, native)).Append(OnDemandTools.CallTool(Available, call, report));
+    }
+
+    /// <summary>The on-demand names among <paramref name="allowed"/>, for <see cref="ToolSurface.Allows"/>; none without on-demand tools.</summary>
+    private static IReadOnlySet<string> OnDemandNames(IEnumerable<RelayTool> allowed, bool onDemand) =>
+        onDemand ? allowed.Where(tool => tool.OnDemand).Select(tool => tool.Name).ToHashSet(StringComparer.Ordinal) : NoNames;
+
+    private static readonly IReadOnlySet<string> NoNames = new HashSet<string>(StringComparer.Ordinal);
 
     /// <summary>
     /// What a hub-proven chat gets: no session lifecycle/binding tools, and <c>peers</c>, which no raw surface lists. It keeps <c>chat_directory</c> until a name can
@@ -62,14 +90,15 @@ public static class CoordinationTools
     }
 
     /// <param name="chat">The chat ID the client exported to this process (<see cref="AdapterOptions.ExportedChat"/>), if any; it keeps the chat's request IDs its own across adapter restarts.</param>
-    public static IEnumerable<McpServerTool> Create(RelayForwarder forwarder, bool admin, SessionHints? hints = null, SessionHandoff? handoff = null, bool chatOnly = false, ChatLocation? chat = null, LocalChatWake? localWake = null, bool diagnostics = false, bool eventWaits = false, string? repository = null, ToolSurface? surface = null)
+    public static IEnumerable<McpServerTool> Create(RelayForwarder forwarder, bool admin, SessionHints? hints = null, SessionHandoff? handoff = null, bool chatOnly = false, ChatLocation? chat = null, LocalChatWake? localWake = null, bool diagnostics = false, bool eventWaits = false, string? repository = null, ToolSurface? surface = null, bool onDemand = false)
     {
         // One per adapter, so every tool sees the session this chat opened.
         var calls = new ChatCalls(forwarder, hints, handoff, RequestScope(chat), localWake: localWake, repository: repository, surface: surface);
-        IEnumerable<McpServerTool> Build(string? profile, bool ceiling) => Surface(profile is null ? admin && ceiling : ceiling, profile is null && chatOnly, profile is null && diagnostics, profile is null ? eventWaits : true)
-            .Where(tool => SessionToolProfiles.Allows(profile, tool.Name, ceiling))
-            .Select(tool => new ForwardedTool(tool, calls, forwarder.ReportConnectionDiagnostics));
-        surface?.Configure(Build);
+        IEnumerable<RelayTool> Allowed(string? profile, bool ceiling) => Surface(profile is null ? admin && ceiling : ceiling, profile is null && chatOnly, profile is null && diagnostics, profile is null ? eventWaits : true)
+            .Where(tool => SessionToolProfiles.Allows(profile, tool.Name, ceiling));
+        IEnumerable<McpServerTool> Build(string? profile, bool ceiling) => Listed(Allowed(profile, ceiling), onDemand, surface, native: false,
+            tool => new ForwardedTool(tool, calls, forwarder.ReportConnectionDiagnostics), calls.CallAsync, forwarder.ReportConnectionDiagnostics);
+        surface?.Configure(Build, (profile, ceiling) => OnDemandNames(Allowed(profile, ceiling), onDemand));
         return Build(null, admin);
     }
 
@@ -198,6 +227,32 @@ public static class CoordinationTools
 
     private static readonly string Instance = Guid.NewGuid().ToString("N");
 
+    /// <summary>
+    /// The input schema a tool is listed with: the hub's forwarding schema plus the adapter's own option for it, and for a native chat without the
+    /// fields the adapter fills in itself. <c>tool_describe</c> shows the same, so a described tool reads as it would have when listed.
+    /// </summary>
+    internal static JsonElement ListedSchema(RelayTool tool, bool native)
+    {
+        var listed = tool.Name == RelayTools.CheckInbox ? With(RelayToolCatalog.ForwardingSchema(tool), "waitSeconds", InboxWait.Schema)
+            : ConditionalRead.Applies(tool.Name) ? With(RelayToolCatalog.ForwardingSchema(tool), "ifNoneMatch", ConditionalRead.Schema)
+            : RelayToolCatalog.ForwardingSchema(tool);
+        if (!native) return listed;
+        var schema = JsonNode.Parse(listed.GetRawText())!.AsObject();
+        var self = new HashSet<string>(["sessionId", "sessionToken", "repositoryId", "requestId", "_cocernNative"], StringComparer.Ordinal);
+        foreach (var field in self) schema["properties"]!.AsObject().Remove(field);
+        if (schema["required"] is JsonArray required)
+            foreach (var field in required.Where(field => field is not null && self.Contains(field.GetValue<string>())).ToArray()) required.Remove(field);
+        return JsonSerializer.SerializeToElement(schema);
+    }
+
+    /// <summary>A hub schema plus one of the adapter's own options (<see cref="InboxWait"/>, <see cref="ConditionalRead"/>).</summary>
+    private static JsonElement With(JsonElement schema, string property, object definition)
+    {
+        var node = JsonNode.Parse(schema.GetRawText())!.AsObject();
+        node["properties"]!.AsObject()[property] = JsonSerializer.SerializeToNode(definition);
+        return JsonSerializer.SerializeToElement(node);
+    }
+
     private sealed class ForwardedTool : McpServerTool
     {
         private readonly Func<JsonElement, CancellationToken, Task<AdapterReply>> call;
@@ -216,31 +271,12 @@ public static class CoordinationTools
                 // Argument guidance shared by every tool lives once in the server instructions, not in each definition.
                 Description = tool.Description,
                 OutputSchema = McpReadResults.OutputSchema(tool.Name),
-                InputSchema = tool.Name == RelayTools.CheckInbox ? With(RelayToolCatalog.ForwardingSchema(tool), "waitSeconds", InboxWait.Schema)
-                    : ConditionalRead.Applies(tool.Name) ? With(RelayToolCatalog.ForwardingSchema(tool), "ifNoneMatch", ConditionalRead.Schema)
-                    : RelayToolCatalog.ForwardingSchema(tool)
+                InputSchema = ListedSchema(tool, native)
             };
-            if (native)
-            {
-                var schema = JsonNode.Parse(ProtocolTool.InputSchema.GetRawText())!.AsObject();
-                var self = new HashSet<string>(["sessionId", "sessionToken", "repositoryId", "requestId", "_cocernNative"], StringComparer.Ordinal);
-                foreach (var field in self) schema["properties"]!.AsObject().Remove(field);
-                if (schema["required"] is JsonArray required)
-                    foreach (var field in required.Where(field => field is not null && self.Contains(field.GetValue<string>())).ToArray()) required.Remove(field);
-                ProtocolTool.InputSchema = JsonSerializer.SerializeToElement(schema);
-            }
         }
 
         public override Tool ProtocolTool { get; }
 
-
-        /// <summary>A hub schema plus one of the adapter's own options (<see cref="InboxWait"/>, <see cref="ConditionalRead"/>).</summary>
-        private static JsonElement With(JsonElement schema, string property, object definition)
-        {
-            var node = JsonNode.Parse(schema.GetRawText())!.AsObject();
-            node["properties"]!.AsObject()[property] = JsonSerializer.SerializeToNode(definition);
-            return JsonSerializer.SerializeToElement(node);
-        }
         public override IReadOnlyList<object> Metadata => Array.Empty<object>();
 
         public override async ValueTask<CallToolResult> InvokeAsync(RequestContext<CallToolRequestParams> request, CancellationToken cancellationToken = default)

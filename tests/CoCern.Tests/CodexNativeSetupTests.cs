@@ -288,7 +288,7 @@ public sealed class CodexNativeSetupTests
                 listed.Select(tool => tool.ProtocolTool.Name).Order(StringComparer.Ordinal).ToArray();
             var firstTools = new ModelContextProtocol.Server.McpServerPrimitiveCollection<ModelContextProtocol.Server.McpServerTool>();
             var first = new ToolSurface(firstTools, native: true, memoryPath: memory);
-            first.Configure(Catalog);
+            first.Configure(Catalog, (_, _) => new HashSet<string>());
             Assert.Null(first.Restore());
             foreach (var tool in Catalog(null, false)) firstTools.Add(tool);
             first.Observe(Settings("worker", 3));
@@ -296,7 +296,7 @@ public sealed class CodexNativeSetupTests
             Assert.True(first.Allows("task_claim"));
             var restartedTools = new ModelContextProtocol.Server.McpServerPrimitiveCollection<ModelContextProtocol.Server.McpServerTool>();
             var restarted = new ToolSurface(restartedTools, native: true, memoryPath: memory);
-            restarted.Configure(Catalog);
+            restarted.Configure(Catalog, (_, _) => new HashSet<string>());
             foreach (var tool in restarted.Restore() ?? []) restartedTools.Add(tool);
             Assert.Equal(["check_inbox", "get_status", "task_claim"], Names(restartedTools));
             Assert.True(restarted.Allows("task_claim"));

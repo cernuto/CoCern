@@ -33,6 +33,8 @@ public sealed class AdapterOptions
     public bool Diagnostics { get; init; }
     /// <summary>COCERN_EVENT_WAITS=true: explicitly opt in to event_wait discovery and forwarding.</summary>
     public bool EventWaits { get; init; }
+    /// <summary>COCERN_ON_DEMAND_TOOLS=true: leave the rarely used tools (<see cref="RelayTool.OnDemand"/>) out of the list and offer them through <c>tool_describe</c> and <c>tool_call</c>.</summary>
+    public bool OnDemand { get; init; }
     /// <summary>COCERN_REPOSITORY: the repository ID a call gets when it leaves its own out. Only saves a chat from a missing argument; the hub still authorizes every call.</summary>
     public string? Repository { get; init; }
     /// <summary>Set only when the adapter runs on the node's credentials; successful <c>session_open</c> calls are then handed to the node there.</summary>
@@ -71,9 +73,10 @@ public sealed class AdapterOptions
         var chatOnly = string.Equals(environment("COCERN_PROFILE"), "chat", StringComparison.OrdinalIgnoreCase);
         var diagnostics = string.Equals(environment("COCERN_PROFILE"), "diagnostics", StringComparison.OrdinalIgnoreCase);
         var eventWaits = string.Equals(environment("COCERN_EVENT_WAITS"), "true", StringComparison.OrdinalIgnoreCase);
+        var onDemand = string.Equals(environment("COCERN_ON_DEMAND_TOOLS"), "true", StringComparison.OrdinalIgnoreCase);
         var chat = Exported(environment);
         var repository = ParseRepository(environment("COCERN_REPOSITORY"));
-        if (environment("COCERN_URL") is null && environment("COCERN_TOKEN_FILE") is null && environment("COCERN_TOKEN") is null && FromNode(environment, processEnvironment) is { } node) return new(node) { Repository = repository, ChatOnly = chatOnly, Diagnostics = diagnostics, EventWaits = eventWaits, ExportedChat = chat };
+        if (environment("COCERN_URL") is null && environment("COCERN_TOKEN_FILE") is null && environment("COCERN_TOKEN") is null && FromNode(environment, processEnvironment) is { } node) return new(node) { Repository = repository, ChatOnly = chatOnly, Diagnostics = diagnostics, EventWaits = eventWaits, OnDemand = onDemand, ExportedChat = chat };
         string? token;
         var tokenFile = environment("COCERN_TOKEN_FILE");
         if (!string.IsNullOrWhiteSpace(tokenFile))
@@ -91,7 +94,7 @@ public sealed class AdapterOptions
         var fingerprint = ParseFingerprint(url, environment("COCERN_FINGERPRINT"));
         return new AdapterOptions(url, token ?? "",
             string.Equals(environment("COCERN_ROLE"), "admin", StringComparison.OrdinalIgnoreCase),
-            string.Equals(environment("COCERN_SIGNALR"), "true", StringComparison.OrdinalIgnoreCase)) { Repository = repository, ChatOnly = chatOnly, Diagnostics = diagnostics, EventWaits = eventWaits, PinnedFingerprint = fingerprint, ExportedChat = chat };
+            string.Equals(environment("COCERN_SIGNALR"), "true", StringComparison.OrdinalIgnoreCase)) { Repository = repository, ChatOnly = chatOnly, Diagnostics = diagnostics, EventWaits = eventWaits, OnDemand = onDemand, PinnedFingerprint = fingerprint, ExportedChat = chat };
     }
 
     internal static string? ParseRepository(string? value)
@@ -115,7 +118,7 @@ public sealed class AdapterOptions
     /// <summary>A copy of <paramref name="other"/>, so a caller can change one init-only setting.</summary>
     private AdapterOptions(AdapterOptions other) : this(other.BaseUri.AbsoluteUri, other.Token, other.Admin, other.SignalR)
     {
-        PinnedFingerprint = other.PinnedFingerprint; Repository = other.Repository; NodeFolder = other.NodeFolder; ClientChat = other.ClientChat; ChatOnly = other.ChatOnly; Diagnostics = other.Diagnostics; EventWaits = other.EventWaits; ExportedChat = other.ExportedChat;
+        PinnedFingerprint = other.PinnedFingerprint; Repository = other.Repository; NodeFolder = other.NodeFolder; ClientChat = other.ClientChat; ChatOnly = other.ChatOnly; Diagnostics = other.Diagnostics; EventWaits = other.EventWaits; OnDemand = other.OnDemand; ExportedChat = other.ExportedChat;
     }
 
     /// <summary>The chat IDs a client exports to its MCP servers. Only these exact variables are read; Codex exports none (see docs/reference.md#wake-ups).</summary>

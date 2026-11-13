@@ -26,13 +26,20 @@ public sealed class ToolSurface(McpServerPrimitiveCollection<McpServerTool> tool
     private readonly Dictionary<string, DateTimeOffset> observedAt = new(StringComparer.Ordinal);
     private readonly HashSet<string> remembered = new(StringComparer.Ordinal);
     private Func<string?, bool, IEnumerable<McpServerTool>>? build;
+    private Func<string?, bool, IReadOnlySet<string>>? onDemandNames;
+    // The on-demand tools the current choices allow, beside the collection: reached through tool_call, never listed. Null until the first Compose.
+    private IReadOnlySet<string>? onDemand;
     private long nextPoll;
     private bool selected;
     private string? activeSession;
 
     private sealed record RememberedSelection(string Session, long Revision, string? Profile, bool Administrator, DateTimeOffset ObservedAt);
 
-    internal void Configure(Func<string?, bool, IEnumerable<McpServerTool>> factory) { lock (gate) build = factory; }
+    /// <param name="onDemand">For a profile and ceiling, the on-demand tool names the factory left out of its catalog but <c>tool_call</c> may reach; empty without on-demand tools.</param>
+    internal void Configure(Func<string?, bool, IEnumerable<McpServerTool>> factory, Func<string?, bool, IReadOnlySet<string>> onDemand)
+    {
+        lock (gate) { build = factory; onDemandNames = onDemand; }
+    }
     internal static AdapterReply StripRouting(AdapterReply reply)
     {
         if (reply.Data is not { ValueKind: JsonValueKind.Object } data ||
@@ -52,7 +59,13 @@ public sealed class ToolSurface(McpServerPrimitiveCollection<McpServerTool> tool
     }
     internal bool? Allows(string name)
     {
-        lock (gate) return selected ? tools.PrimitiveNames.Contains(name) : null;
+        lock (gate) return selected ? tools.PrimitiveNames.Contains(name) || onDemand?.Contains(name) == true : null;
+    }
+
+    /// <summary>The on-demand tool names the current choices allow, or null before any hub selection was composed (the factory's default stands).</summary>
+    internal IReadOnlySet<string>? OnDemandNames
+    {
+        get { lock (gate) return onDemand; }
     }
     internal bool ShouldPoll()
     {
@@ -144,10 +157,16 @@ public sealed class ToolSurface(McpServerPrimitiveCollection<McpServerTool> tool
 
     private static bool KnownProfile(string? profile) => profile is null or "worker" or "chat" or "diagnostics" or "admin";
 
-    /// <summary>The union of the factory's catalogs for <paramref name="choices"/>, one tool per name. Called under the gate.</summary>
-    private McpServerTool[] Compose(IReadOnlyList<(long Revision, string? Profile, bool Administrator)> choices) =>
-        choices.SelectMany(entry => build!(entry.Profile, entry.Administrator))
+    /// <summary>
+    /// The union of the factory's catalogs for <paramref name="choices"/>, one tool per name, and beside it the union of their on-demand names.
+    /// Called under the gate.
+    /// </summary>
+    private McpServerTool[] Compose(IReadOnlyList<(long Revision, string? Profile, bool Administrator)> choices)
+    {
+        onDemand = choices.SelectMany(entry => onDemandNames!(entry.Profile, entry.Administrator)).ToHashSet(StringComparer.Ordinal);
+        return choices.SelectMany(entry => build!(entry.Profile, entry.Administrator))
             .GroupBy(tool => tool.ProtocolTool.Name, StringComparer.Ordinal).Select(group => group.First()).OrderBy(tool => tool.ProtocolTool.Name, StringComparer.Ordinal).ToArray();
+    }
 
     /// <summary>Writes the native selections the hub answered for, newest first and bounded. Advisory: a failed write leaves the next start on the default. Called under the gate.</summary>
     private void Remember()

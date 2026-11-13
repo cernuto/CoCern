@@ -91,6 +91,33 @@ public sealed class AdapterTests
         Assert.Equal("unknown_tool", (await new RelayForwarder(client, Options()).ForwardAsync("control_request", Parse("{}"))).Code);
     }
 
+    [Fact]
+    public async Task Tool_call_reaches_only_the_on_demand_tools_the_selected_profile_allows()
+    {
+        var requests = new List<string>();
+        using var handler = new StubHandler((request, _) =>
+        {
+            requests.Add(request.RequestUri!.AbsolutePath);
+            return Task.FromResult(Json("{\"ok\":true,\"code\":\"ok\",\"dataJson\":\"{}\"}"));
+        });
+        using var client = new HttpClient(handler);
+        var listed = new ModelContextProtocol.Server.McpServerPrimitiveCollection<ModelContextProtocol.Server.McpServerTool>();
+        var surface = new ToolSurface(listed);
+        var forwarder = new RelayForwarder(client, Options(), surface: surface);
+        foreach (var tool in CoordinationTools.Create(forwarder, admin: false, surface: surface, onDemand: true)) listed.Add(tool);
+        surface.Observe(new AdapterReply(true, "Ok", JsonSerializer.SerializeToElement(new
+        { toolSettingsSessionId = "session-a", toolSettingsAdministrator = false, toolSettings = new { profile = "worker", revision = 1 } })));
+        var call = Assert.IsType<OnDemandTools.CallingTool>(listed.Single(tool => tool.ProtocolTool.Name == OnDemandTools.Call));
+
+        var refused = await call.RunAsync(Parse("{\"name\":\"control_request\",\"arguments\":{\"repositoryId\":\"repo\",\"command\":\"pause\"}}"), default);
+        Assert.Equal("unknown_tool", refused.Code);
+        Assert.Empty(requests);
+
+        var reached = await call.RunAsync(Parse("{\"name\":\"doc_search\",\"arguments\":{\"repositoryId\":\"repo\"}}"), default);
+        Assert.True(reached.Ok);
+        Assert.Equal("/api/tools/doc_search", Assert.Single(requests));
+    }
+
     [Theory]
     [InlineData("http://example.com")]
     [InlineData("https://user:password@example.com")]
