@@ -10,16 +10,19 @@ namespace CoCern.Tests;
 public sealed class ForwarderErrorTests
 {
     [Theory]
-    [InlineData(HttpStatusCode.BadRequest, "hub_error")]
-    [InlineData(HttpStatusCode.Forbidden, "forbidden")]
-    public async Task Unknown_code_success_flag_or_non_envelope_never_leaks(HttpStatusCode status, string expected)
+    [InlineData(HttpStatusCode.BadRequest, "hub_error", "uncertain")]
+    [InlineData(HttpStatusCode.Forbidden, "forbidden", "not_applied")]
+    public async Task Unknown_code_success_flag_or_non_envelope_never_leaks(HttpStatusCode status, string expected, string delivery)
     {
         foreach (var body in new[] { Envelope(false, "private_server_detail", "{\\\"secret\\\":\\\"sensitive\\\"}", 3), Envelope(true, "Ok", "{\\\"secret\\\":\\\"sensitive\\\"}", 3), "sensitive-server-detail" })
         {
             var result = await Forward(status, body);
             Assert.False(result.Ok);
             Assert.Equal(expected, result.Code);
-            Assert.Null(result.Data);
+            // ack is a write, so the adapter's own failure says only whether it reached the hub.
+            var data = result.Data!.Value;
+            Assert.Equal(new[] { "delivery", "hint" },data.EnumerateObject().Select(p => p.Name).Order());
+            Assert.Equal(delivery, data.GetProperty("delivery").GetString());
             Assert.DoesNotContain("sensitive", JsonSerializer.Serialize(result));
         }
     }
