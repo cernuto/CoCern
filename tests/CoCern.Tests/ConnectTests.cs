@@ -115,7 +115,7 @@ public sealed class ConnectTests : IDisposable
         var claude = JsonNode.Parse(File.ReadAllText(Path.Combine(Profile, ".claude.json")))!["mcpServers"]!["cocern"]!;
         Assert.Equal(Token, claude["env"]!["COCERN_TOKEN_FILE"]!.GetValue<string>());
         Assert.Equal(Adapter, claude["args"]![0]!.GetValue<string>());
-        Assert.Contains($"env = {{ COCERN_TOKEN_FILE = '{Token}' }}", File.ReadAllText(Path.Combine(Profile, ".codex", "config.toml")));
+        Assert.Contains($"env = {{ COCERN_TOKEN_FILE = '{Token}', COCERN_ON_DEMAND_TOOLS = 'true' }}", File.ReadAllText(Path.Combine(Profile, ".codex", "config.toml")));
         Assert.DoesNotContain("--native-client", File.ReadAllText(Path.Combine(Profile, ".codex", "config.toml")));
         Assert.False(File.Exists(Path.Combine(Profile, ".codex", "hooks.json")));
         using var status = JsonDocument.Parse(Connect("--check", "--json", "--only", "codex").Output);

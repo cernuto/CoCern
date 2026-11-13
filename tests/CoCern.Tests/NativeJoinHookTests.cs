@@ -83,6 +83,25 @@ public sealed class NativeJoinHookTests(ITestOutputHelper output)
         Assert.Equal(0, fixture.Requests);
     }
 
+    // Security boundary: the PreToolUse hook stamps a tool_call's target and inner arguments, so that stamp must bind exactly those.
+    [Fact]
+    public async Task An_on_demand_stamp_runs_only_its_own_target_with_its_own_arguments()
+    {
+        await using var fixture = new HookFixture();
+        await fixture.Join.EnsureAsync(fixture.Capture, default);
+        var stamped = await NativeJoinHook.StampAsync(fixture.Join, fixture.Capture, RelayTools.DocSearch, "on-demand-1", JsonSerializer.SerializeToElement(new { query = "a" }), default);
+        var otherArguments = JsonNode.Parse(stamped.GetRawText())!.AsObject();
+        otherArguments["query"] = "b";
+        fixture.Requests = 0;
+        Assert.False((await NativeJoinHook.InvokeAsync(fixture.Join, "claude", RelayTools.DocSection, stamped, default)).Ok);
+        Assert.False((await NativeJoinHook.InvokeAsync(fixture.Join, "claude", RelayTools.DocSearch, JsonSerializer.SerializeToElement(otherArguments), default)).Ok);
+        Assert.Empty(fixture.Business);
+        Assert.Equal(0, fixture.Requests);
+        var result = await NativeJoinHook.InvokeAsync(fixture.Join, "claude", RelayTools.DocSearch, stamped, default);
+        Assert.True(result.Ok, result.Code);
+        Assert.Equal("a", fixture.Business.Single().GetProperty("query").GetString());
+    }
+
     [Fact]
     public async Task Session_start_stays_pending_until_first_CoCern_call_and_midlife_join_needs_no_resume()
     {

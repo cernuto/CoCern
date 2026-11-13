@@ -180,6 +180,21 @@ internal static class NativeJoinHook
                     if (name is null || !name.StartsWith(prefix, StringComparison.Ordinal)) return 0;
                     recognized = true;
                     var tool = name[prefix.Length..];
+                    // tool_describe answers in the adapter from the catalog and reaches no hub, so it needs no stamp.
+                    if (tool == OnDemandTools.Describe) return 0;
+                    if (tool == OnDemandTools.Call)
+                    {
+                        // The stamp binds the target and its inner arguments, never the wrapper: the adapter verifies exactly those before running it.
+                        if (ChatLocators.Text(root, "tool_use_id") is not { } callInvocation || !root.TryGetProperty("tool_input", out var wrapper) ||
+                            !OnDemandTools.TryTarget(wrapper, out var target, out var inner) || !RelayToolCatalog.TryGet(target, out var entry) || !entry.OnDemand)
+                            throw new ArgumentException("Invalid native invocation.");
+                        var stamped = await StampAsync(join, capture, target, callInvocation, inner, ct);
+                        if (provider == "codex" && registration is not null)
+                            await NativeStartupEvidence.RecordStampedAsync(registration, join, capture, stamped, ct);
+                        var call = JsonSerializer.SerializeToElement(new JsonObject { ["name"] = target, ["arguments"] = JsonNode.Parse(stamped.GetRawText()) });
+                        await output.WriteLineAsync(WrapOutput(provider, call).GetRawText());
+                        return 0;
+                    }
                     if (ChatLocators.Text(root, "tool_use_id") is not { } invocation || !ValidInvocation(tool, invocation) ||
                         !root.TryGetProperty("tool_input", out var arguments)) throw new ArgumentException("Invalid native invocation.");
                     var updated = await StampAsync(join, capture, tool, invocation, arguments, ct);
@@ -538,6 +553,7 @@ internal sealed class NativeRegistration
         start.Environment.TryGetValue("COCERN_ROLE", out var role);
         start.Environment.TryGetValue("COCERN_PROFILE", out var profile);
         start.Environment.TryGetValue("COCERN_EVENT_WAITS", out var eventWaits);
+        start.Environment.TryGetValue("COCERN_ON_DEMAND_TOOLS", out var onDemand);
         start.Environment.TryGetValue("COCERN_REPOSITORY", out var repository);
         foreach (var name in start.Environment.Keys.Where(name => name.StartsWith("COCERN_", StringComparison.OrdinalIgnoreCase)).ToArray())
             start.Environment.Remove(name);
@@ -551,6 +567,7 @@ internal sealed class NativeRegistration
         if (string.Equals(profile, "chat", StringComparison.OrdinalIgnoreCase)) start.Environment["COCERN_PROFILE"] = "chat";
         if (string.Equals(profile, "diagnostics", StringComparison.OrdinalIgnoreCase)) start.Environment["COCERN_PROFILE"] = "diagnostics";
         if (string.Equals(eventWaits, "true", StringComparison.OrdinalIgnoreCase)) start.Environment["COCERN_EVENT_WAITS"] = "true";
+        if (string.Equals(onDemand, "true", StringComparison.OrdinalIgnoreCase)) start.Environment["COCERN_ON_DEMAND_TOOLS"] = "true";
         // A configured repository is only a mapping hint. The hub still applies MayAccess
         // and validates any known clone origin; it supplies neither credentials nor identity.
         if (repository is not null) start.Environment["COCERN_REPOSITORY"] = repository;
@@ -566,7 +583,8 @@ internal sealed class NativeRegistration
             Repository = AdapterOptions.ParseRepository(environment("COCERN_REPOSITORY")) ?? connection.Repository,
             ChatOnly = string.Equals(environment("COCERN_PROFILE"), "chat", StringComparison.OrdinalIgnoreCase),
             Diagnostics = string.Equals(environment("COCERN_PROFILE"), "diagnostics", StringComparison.OrdinalIgnoreCase),
-            EventWaits = string.Equals(environment("COCERN_EVENT_WAITS"), "true", StringComparison.OrdinalIgnoreCase)
+            EventWaits = string.Equals(environment("COCERN_EVENT_WAITS"), "true", StringComparison.OrdinalIgnoreCase),
+            OnDemand = string.Equals(environment("COCERN_ON_DEMAND_TOOLS"), "true", StringComparison.OrdinalIgnoreCase)
         };
     }
     internal static bool ValidClientArguments(string[] args) =>

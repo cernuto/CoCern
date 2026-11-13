@@ -21,9 +21,12 @@ internal static class ConnectCommand
     /// <summary>The repository a call that leaves its own out gets (see <see cref="AdapterOptions.Repository"/>).</summary>
     private const string RepositoryVariable = "COCERN_REPOSITORY";
 
+    /// <summary>The variable that makes a Codex chat's adapter list only the everyday tools and offer the rest on demand (see <see cref="AdapterOptions.OnDemand"/>).</summary>
+    private const string OnDemandVariable = "COCERN_ON_DEMAND_TOOLS";
+
     /// <summary>The variables a Connect entry carries; an entry with none of them is a joined PC's node entry, which is never this hub's to change.</summary>
     private static readonly string[] HubVariables = ["COCERN_TOKEN_FILE", "COCERN_TOKEN", "COCERN_URL", "COCERN_FINGERPRINT"];
-    private static readonly string[] ManagedVariables = [.. HubVariables, RoleVariable, RepositoryVariable];
+    private static readonly string[] ManagedVariables = [.. HubVariables, RoleVariable, RepositoryVariable, OnDemandVariable];
 
     public static int Run(IReadOnlyList<string> args, string profile, string? appData, string dotnetPath, string adapterDll, TextWriter output, TextWriter error, TimeProvider? clock = null, string? nativeCacheRoot = null)
     {
@@ -70,6 +73,8 @@ internal static class ConnectCommand
         if (fingerprint is not null) environment["COCERN_FINGERPRINT"] = fingerprint;
         if (admin == true) environment[RoleVariable] = "admin";
         if (repository is not null) environment[RepositoryVariable] = repository;
+        // Codex lists tools once, so its chats list only the everyday tools and reach the rarely used ones through tool_describe and tool_call.
+        var codexEnvironment = new Dictionary<string, string>(environment) { [OnDemandVariable] = "true" };
         // Per app: whether its existing entry gives the administrator tools (for the reply) and what this run changes in it (for the detail).
         // Without a current address (an older hub, no --hub) the address and certificate are left as they are; without --role, the tools.
         var seen = new Dictionary<string, (bool Admin, IReadOnlyDictionary<string, string?>? Changes)>(StringComparer.Ordinal);
@@ -80,7 +85,7 @@ internal static class ConnectCommand
         EntryRefresh RefreshFor(string id) => variables =>
         {
             if (BelongsToHub(variables, tokenFile, hub, localHub?.Url)) owned.Add(id); else foreign[id] = NotThisHub(variables);
-            var changes = Refresh(variables, tokenFile, hub, fingerprint, localHub?.Url, admin, repository);
+            var changes = Refresh(variables, tokenFile, hub, fingerprint, localHub?.Url, admin, repository, onDemand: id == ConnectClients.Codex);
             if (owned.Contains(id))
             {
                 var effective = variables.ToDictionary(item => item.Key, item => item.Value, StringComparer.Ordinal);
@@ -95,7 +100,7 @@ internal static class ConnectCommand
         var clients = new List<(string Id, string Name, Func<ClientPlan> Plan)>
         {
             (ConnectClients.ClaudeCode, "Claude Code", () => ClientSettings.PlanClaudeCode(Path.Combine(profile, ".claude.json"), dotnetPath, adapterDll, environment, RefreshFor(ConnectClients.ClaudeCode))),
-            (ConnectClients.Codex, "Codex", () => ClientSettings.PlanCodex(Path.Combine(codexProfile, "config.toml"), dotnetPath, adapterDll, environment, RefreshFor(ConnectClients.Codex)))
+            (ConnectClients.Codex, "Codex", () => ClientSettings.PlanCodex(Path.Combine(codexProfile, "config.toml"), dotnetPath, adapterDll, codexEnvironment, RefreshFor(ConnectClients.Codex)))
         };
         // The desktop app is offered only where it is installed; its config file may not exist yet.
         if (appData is not null && Directory.Exists(Path.Combine(appData, "Claude")))
@@ -142,7 +147,7 @@ internal static class ConnectCommand
                 DashboardCodexReadiness? readiness = null;
                 if (client.Id == ConnectClients.Codex && state is not (ConnectStates.Available or ConnectStates.OtherHub))
                 {
-                    var nativeEnvironment = nativeEnvironments.GetValueOrDefault(client.Id) ?? environment;
+                    var nativeEnvironment = nativeEnvironments.GetValueOrDefault(client.Id) ?? codexEnvironment;
                     readiness = check ? CodexNativeSetup.InspectStandard(profile, codexProfile, nativeEnvironment, nativeCacheRoot, Directory.GetCurrentDirectory())
                         : CodexNativeSetup.PrepareStandard(profile, codexProfile, dotnetPath, adapterDll, nativeEnvironment, clock ?? TimeProvider.System, nativeCacheRoot);
                 }
@@ -191,6 +196,7 @@ internal static class ConnectCommand
                 (false, false) => "no longer gives its chats the administrator tools"
             });
         if (changes.ContainsKey(RepositoryVariable)) parts.Add(check ? "doesn't name its repository" : "now names its repository");
+        if (changes.ContainsKey(OnDemandVariable)) parts.Add(check ? "doesn't offer the rarely used tools on demand" : "now offers the rarely used tools on demand");
         return $"Its CoCern entry for this hub {string.Join(" and ", parts)}. {(check ? "Connect updates it." : "Restart the app to use it.")}";
     }
 
@@ -207,14 +213,15 @@ internal static class ConnectCommand
     /// <summary>
     /// What an existing <c>cocern</c> entry needs so it reaches this hub again: <c>COCERN_URL</c> set to <paramref name="hub"/> and
     /// <c>COCERN_FINGERPRINT</c> to <paramref name="fingerprint"/> (removed when the hub has none) wherever they differ, when the hub's address is
-    /// known; when <paramref name="admin"/> is given, <c>COCERN_ROLE</c> set to <c>admin</c> or removed to match; and, when <paramref name="repository"/> is given and the entry names none, <c>COCERN_REPOSITORY</c>.
-    /// A repository the entry already names stays, so a refresh never moves where a chat's calls default to. Null when nothing differs
+    /// known; when <paramref name="admin"/> is given, <c>COCERN_ROLE</c> set to <c>admin</c> or removed to match; when <paramref name="repository"/> is given and the entry names none, <c>COCERN_REPOSITORY</c>;
+    /// and, when <paramref name="onDemand"/> (Codex's entry) and the entry sets none, <c>COCERN_ON_DEMAND_TOOLS=true</c>.
+    /// A repository the entry already names stays, so a refresh never moves where a chat's calls default to; an on-demand value it already sets stays too. Null when nothing differs
     /// or the entry is not this hub's. The hub's certificate can change (a new one, or a new place for it), and an entry still pinning the old one
     /// stops connecting. A local refresh never claims a supplied non-loopback or invalid origin. An eligible entry counts as this hub's when its token file is in this hub's data folder (beside <paramref name="tokenFile"/>);
     /// without a token file, when its address matches the requested destination, the recorded TLS origin, or the legacy default HTTP origin. A token file anywhere else
     /// is another hub's, and an entry with none of the CoCern variables is a node's; both are left alone, as is everything else in the entry.
     /// </summary>
-    internal static IReadOnlyDictionary<string, string?>? Refresh(IReadOnlyDictionary<string, string> variables, string tokenFile, string? hub, string? fingerprint, string? localUrl, bool? admin = null, string? repository = null)
+    internal static IReadOnlyDictionary<string, string?>? Refresh(IReadOnlyDictionary<string, string> variables, string tokenFile, string? hub, string? fingerprint, string? localUrl, bool? admin = null, string? repository = null, bool onDemand = false)
     {
         if (!BelongsToHub(variables, tokenFile, hub, localUrl)) return null;
         var url = variables.GetValueOrDefault("COCERN_URL")?.Trim() is { Length: > 0 } given ? given : HubAddresses.LocalUrl;
@@ -227,6 +234,7 @@ internal static class ConnectCommand
         }
         if (admin is { } wanted && IsAdmin(variables) != wanted) changes[RoleVariable] = wanted ? "admin" : null;
         if (repository is not null && string.IsNullOrWhiteSpace(variables.GetValueOrDefault(RepositoryVariable))) changes[RepositoryVariable] = repository;
+        if (onDemand && string.IsNullOrWhiteSpace(variables.GetValueOrDefault(OnDemandVariable))) changes[OnDemandVariable] = "true";
         return changes.Count == 0 ? null : changes;
     }
 
