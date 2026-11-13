@@ -104,6 +104,7 @@ Coordination uses calls and context too. CoCern provides conditional reads, boun
 | Doc search returns ranked section snippets and anchors within a 2,000-token budget; `doc_section` reads a chosen section. | Reading files to find one paragraph. |
 | Default reply-budget enforcement can drop optional detail or shorten paged lists with continuation cursors. Required results are preserved; not every oversized reply can be reduced to its budget. | Unnecessary reply detail. |
 | For standard adapters, `COCERN_PROFILE=chat` selects a small messaging-only tool set. Joined chats also have separate hub-side tool profiles. | Tool-catalog overhead. |
+| With `COCERN_ON_DEMAND_TOOLS=true`, which Connect writes for Codex on the hub's PC, the 18 rarely used tools are not listed; a chat finds them with `tool_describe` and runs them with `tool_call`. The listed definitions fall from about 5,000 tokens (worker) or 6,000 (administrator) to about 3,600, and the list no longer changes between the `worker`, `diagnostics` and `admin` profiles. | Tool-catalog overhead, and reconnecting Codex after a profile change. |
 | Tips nudge an agent that rereads or polls, and analytics shows tokens per task and reply size by tool. | Waste you couldn't see. |
 
 Orleans keeps active boards, sessions and claims in memory. Writes persist to local SQLite, activity logging uses a background queue, and analytics queries read a separate snapshot. Reply-budget enforcement can still count tokens on the call path.
@@ -119,6 +120,10 @@ On the dashboard's **Connect** page, one button adds CoCern to each of these on 
 | Codex | The Codex CLI, IDE extension and app. Codex is ChatGPT's coding agent. |
 
 Reconnect the CoCern MCP server, or restart the app, after changing its connection so it loads the new settings. Existing settings files are backed up before modification. **Connect** preserves working entries and can update stale addresses, certificate pins, repository defaults and tool selections for this hub. Connection changes are available only from a browser on the hub's PC. Expand **App permissions** and select **Administrator tools** to request administrator tools for the connection; changing it shows which apps to connect again. Hub-selected per-chat profiles also determine the exposed tools without changing credential authority.
+
+After a connect, the page lists that app's installation checks under it (adapter, enrollment, hub connection and the app's own entry), and `connect_app` returns the same rows as `checks`. A Codex check that cannot pass until a chat starts is shown as a warning that says so.
+
+**Codex: on-demand tools.** Connect on the hub's PC writes `COCERN_ON_DEMAND_TOOLS=true` into Codex's entry. An entry written by an earlier version shows as needing an update until Connect or Repair rewrites it, and a value you set yourself is kept. Codex chats on PCs joined with Setup keep the full list, and Claude entries are not changed. The hub still checks every call against the calling chat. See [per-chat tool settings](docs/session-tool-settings.md).
 
 **Codex: connect and verify.** Normal setup keeps the standard connector usable and installs the CoCern workflow skill. Repair preserves the selected mode and disabled hooks. Native integration is staged separately; an existing native startup observation is labeled as startup verification rather than proof that tool calls succeeded. [Walk through the checks](docs/codex-connect.md).
 
@@ -162,6 +167,8 @@ Clients can also select the `cocern_workflow` MCP prompt or read `cocern://workf
 
 To save tokens, wait for mail with `check_inbox` and `waitSeconds` (up to 50) instead of polling, and pass `ifNoneMatch` with the last `etag` so an unchanged read returns a compact `unchanged` marker and its validator. More in the [Reference](docs/reference.md#calls).
 
+When the adapter cannot complete a write, its reply carries `delivery`. `not_applied` means the hub did not run it: nothing was sent, or the hub's HTTP layer refused it first. `uncertain` means sending began and no usable answer came back, so the hub may have applied it; retry in the same session with the same `requestId` and arguments, or, in a native chat, read the current state before repeating it. Reads carry no such field.
+
 **Administrators** can also set the board's standing rules, add "when this happens, do that" orders, run analytics and pause work. These operations require an administrator credential and a tool profile that permits them. **Administrator tools** in Connect is off by default; enable it only for apps whose chats you trust. New native chats initially use the `worker` profile and need an explicit per-chat `admin` selection to expose administrator tools. The `diagnostics` profile adds analytics without administrator mutation tools, but analytics still requires an administrator credential. See [per-chat tool settings](docs/session-tool-settings.md) and the [Reference](docs/reference.md#tools).
 
 ## Make a chat the manager
@@ -193,6 +200,8 @@ A chat can be woken when something needs it.
 
 With attention enabled (the default), direct messages from another session are eligible for an immediate wake unless sent with `wake: false`. Urgent attention can also wake a chat; blocked work held by a `human_decision` or `coordinator_hold` is not automatically urgent. Task-change notices and other nonurgent items wait for the chat's next reply or the default 10-minute idle hold. Tips never wake a chat. Wake delivery still depends on a working route; the node avoids waking busy chats and applies deduplication and rate limits.
 
+Retries are spread out. The wake watcher's 15-second pace, the node's retry and the hint channel's retry each vary by ±20%, so the adapters on one PC do not all retry at the same moment after a hub restart. A wake route whose status read cannot reach the hub backs off to 30 and then 60 seconds, and returns to 15 at the first read that gets an answer; a busy or paused chat keeps the 15-second pace.
+
 The directory and dashboard show whether a chat currently announces a wake path. A hub-local Claude waiter refreshes that presence through its reads, with a three-minute expiry. Reachability, a stored message and a successful queue operation do not establish that the model ran or read the message. If a recipient is unreachable, keep working; its mail remains queued for its next turn. See [wake behavior and reachability](docs/reference.md#other-pcs).
 
 ## Node updates
@@ -203,7 +212,7 @@ Nodes run self-contained, with no .NET host they can rely on, so the hub offers 
 
 When a node refuses or fails a release, it keeps the release ID, a short reason code (for example `no-dotnet-host`, `hash-mismatch` or `activation-failed`) and the time in `updates/refusal.json` in its data folder. It reports them as `nodeBuild.lastRefusal`, which `chat_directory` shows. The record clears once a later release is handed over for activation, and an `activation-failed` record is no longer reported once a build installed after that failure is running.
 
-Node updates keep the existing credentials, data folder and Windows sign-in entry. They do not rewrite MCP client settings or hooks. A node's `nodeBuild` observation in `chat_directory` describes its running package and process; it does not prove an installed MCP adapter or a chat's loaded tool descriptions changed. The host, the build the hub serves, the running node and an installed MCP adapter can all differ. A missing observation remains unknown.
+Node updates keep the existing credentials, data folder and Windows sign-in entry. They do not rewrite MCP client settings or hooks. `hub_diagnose` and the dashboard's machine list show each PC's reported adapter version and whether it matches the build the hub offers nodes; a PC that has reported none, or a hub offering none, shows as unknown, never as out of date. A node's `nodeBuild` observation in `chat_directory` describes its running package and process; it does not prove an installed MCP adapter or a chat's loaded tool descriptions changed. The host, the build the hub serves, the running node and an installed MCP adapter can all differ. A missing observation remains unknown.
 
 ## The dashboard
 
@@ -253,6 +262,7 @@ Every setting: [Reference](docs/reference.md#settings).
 - **Don't rebuild a folder a hub or chat is running from.** Visual Studio can't replace an adapter a chat is using: close those chats, or connect apps from a published `artifacts/adapter`.
 - **One hub per database.** Don't put `data/` on a shared drive.
 - **Apps connected with an earlier version** may have a stale address or certificate pin. Use **Connect** to update this hub's entry, then reconnect its MCP server. Local loopback HTTP and pinned HTTPS connections are handled separately.
+- **Adapter and node error lines hide known secrets.** A token, join code, machine credential or native binding secret the process holds is replaced with `[secret removed]` where a raw error message is written. The hub's own logs are not covered.
 - **The local bootstrap token is an administrator token.** Hiding administrator tools does not downgrade that credential. Protect the token file and use an appropriately restricted credential for untrusted clients; per-chat profiles do not grant authority beyond their credential. See the [Reference](docs/reference.md#clients-and-tokens).
 
 ## Development
