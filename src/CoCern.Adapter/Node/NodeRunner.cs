@@ -325,7 +325,7 @@ public sealed class NodeRunner : IAsyncDisposable
                 case Next.Exit: return _exitCode;
                 case Next.Again: continue;
                 case Next.Retry:
-                    await Task.Delay(retry, ct);
+                    await Task.Delay(RetryPacing.Jitter(retry), ct);
                     retry = NextRetry(retry, _transport.MaxRetry);
                     break;
                 default:

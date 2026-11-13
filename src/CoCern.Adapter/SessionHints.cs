@@ -109,7 +109,7 @@ public sealed class SessionHints(AdapterOptions options, Action<string>? writeHi
             {
                 var ok = await TryEnsureAsync(ct);
                 _first.TrySetResult(ok);
-                try { await _changed.WaitAsync(ok ? Timeout.InfiniteTimeSpan : delay, ct); }
+                try { await _changed.WaitAsync(ok ? Timeout.InfiniteTimeSpan : RetryPacing.Jitter(delay), ct); }
                 catch (OperationCanceledException) { break; }
                 delay = ok ? _owner.FirstRetry : TimeSpan.FromTicks(Math.Min(delay.Ticks * 2, _owner.MaxRetry.Ticks));
             }

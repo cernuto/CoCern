@@ -43,6 +43,9 @@ public sealed class WakeReconciler(WakeConfiguration configuration, WakeState st
     /// <summary>A fresh authorized status proved there is no inbox or pending attention, including snoozed items.</summary>
     internal bool CanWaitQuietly { get; private set; }
 
+    /// <summary>The status read did not reach the hub (unavailable or timed out), as distinct from a hub that answered with a pause.</summary>
+    internal const string HubUnreachable = "hub-unreachable";
+
     public async Task<string> ReconcileAsync(WakeRoute route, WakeSession session, CancellationToken cancellationToken = default)
     {
         CanWaitQuietly = false;
@@ -165,6 +168,8 @@ public sealed class WakeReconciler(WakeConfiguration configuration, WakeState st
             var arguments = readAttention ? AttentionArguments(known?.Tag) : Arguments();
             var status = await forwarder.ForwardAsync("get_status", RelayForwarder.WithOrigin(arguments, background: true), cancellationToken);
             if (Rejection(status) is { } rejected) { sessionProblem = rejected; return false; }
+            // A read that never reached the hub is a failed read, not a pause: the watcher backs off instead of polling at its usual pace.
+            if (status is { Ok: false, Code: "hub_unavailable" or "hub_timeout" }) { sessionProblem = HubUnreachable; return false; }
             if (status is { Ok: true, Data: { ValueKind: JsonValueKind.Object } answer } && answer.TryGetProperty("unchanged", out var unchanged) && unchanged.ValueKind == JsonValueKind.True)
             {
                 // An answer about any other tag says nothing about this session, so it refuses, like every other reply that names no session.

@@ -266,7 +266,7 @@ public sealed class LocalChatWake : IAsyncDisposable
     internal static TimeSpan HeldRetry(int misses)
     {
         var delay = Math.Min(HeldRetryLimit.TotalMilliseconds, HeldRetryFirst.TotalMilliseconds * Math.Pow(2, Math.Clamp(misses - 1, 0, 8)));
-        return TimeSpan.FromMilliseconds(delay * (0.8 + 0.4 * Random.Shared.NextDouble()));
+        return TimeSpan.FromMilliseconds(delay * RetryPacing.Factor());
     }
 
     private volatile bool sessionsWatchFailed;

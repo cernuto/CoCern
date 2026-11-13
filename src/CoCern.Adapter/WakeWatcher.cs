@@ -151,6 +151,10 @@ public static class WakeWatcher
         if (timeout is { } limit) lifetime.CancelAfter(limit);
         var stopMonitor = MonitorStop();
         var lastStatus = new Dictionary<string, string>();
+        // Each route's jitter factor, drawn once per read so the due time PollWait computes holds still while the watcher waits,
+        // and how many reads in a row did not reach the hub.
+        var pace = new Dictionary<string, double>();
+        var unreachable = new Dictionary<string, int>();
         var idleRoutes = new HashSet<string>(StringComparer.Ordinal);
         var lastRead = new Dictionary<string, long>(StringComparer.Ordinal);
         var coverage = new InboxCoverage();
@@ -211,7 +215,7 @@ public static class WakeWatcher
                         {
                             lastRead[target.Session.SessionId] = timer.GetTimestamp();
                             idleRoutes.Remove(routeKey);
-                            lastStatus[routeKey] = "route-changed";
+                            Record(routeKey, "route-changed");
                             continue;
                         }
                         var subscribed = watches.TryGetValue(target.Session.SessionId, out var listening) && listening.Listening;
@@ -227,7 +231,7 @@ public static class WakeWatcher
                         Console.Error.WriteLine(WakeReconciler.IsRejection(status)
                             ? $"CoCern wake route {i + 1}: session rejected; waiting for this chat's replacement session handle. Reopen its CoCern session from that chat."
                             : $"CoCern wake route {i + 1}: {status}.");
-                    lastStatus[routeKey] = status;
+                    Record(routeKey, status);
                     if (WakeReconciler.IsRejection(status))
                     {
                         rejected[target.Session.SessionId] = (target.Route.RepositoryId, target.Session);
@@ -287,7 +291,20 @@ public static class WakeWatcher
             var routeKey = WakeState.Key(target.Route.ThreadId);
             var hinted = watches.TryGetValue(target.Session.SessionId, out var watch) && watch.Listening
                 && lastStatus.TryGetValue(routeKey, out var status) && status is "empty" or "queued";
-            return runtime.FallbackWait(hinted, idleRoutes.Contains(routeKey));
+            // A hinted route, and a caller's explicit interval, keep their pace exactly.
+            if (hinted || runtime.Interval is not null) return runtime.FallbackWait(hinted, idleRoutes.Contains(routeKey));
+            var wait = lastStatus.GetValueOrDefault(routeKey) == WakeReconciler.HubUnreachable
+                ? RetryPacing.Unreachable(unreachable.GetValueOrDefault(routeKey))
+                : runtime.FallbackWait(false);
+            return wait * pace.GetValueOrDefault(routeKey, 1.0);
+        }
+
+        // Every read's status, with a fresh jitter factor and the count of reads in a row that did not reach the hub.
+        void Record(string routeKey, string status)
+        {
+            lastStatus[routeKey] = status;
+            pace[routeKey] = RetryPacing.Factor();
+            unreachable[routeKey] = status == WakeReconciler.HubUnreachable ? unreachable.GetValueOrDefault(routeKey) + 1 : 0;
         }
 
         async Task MonitorStop()
