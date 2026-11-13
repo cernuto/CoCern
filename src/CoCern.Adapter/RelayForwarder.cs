@@ -6,6 +6,7 @@ using System.Net.Http.Headers;
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using CoCern.Adapter.Node;
 using CoCern.Contracts;
 using CoCern.Contracts.Dashboard;
@@ -139,9 +140,9 @@ public sealed class RelayForwarder(HttpClient client, AdapterOptions options, st
 
     private async Task<AdapterReply> SendCoreAsync(string tool, JsonElement arguments, CancellationToken cancellationToken)
     {
-        if (arguments.ValueKind != JsonValueKind.Object) return new(false, "invalid_arguments");
+        if (arguments.ValueKind != JsonValueKind.Object) return WithDelivery(tool, new(false, "invalid_arguments"), ChatGuidance.NotApplied);
         var json = arguments.GetRawText();
-        if (Encoding.UTF8.GetByteCount(json) > MaxRequestBytes) return new(false, "request_too_large");
+        if (Encoding.UTF8.GetByteCount(json) > MaxRequestBytes) return WithDelivery(tool, new(false, "request_too_large"), ChatGuidance.NotApplied);
 
         using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(options.BaseUri, $"api/tools/{tool}"));
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", options.Token);
@@ -160,10 +161,9 @@ public sealed class RelayForwarder(HttpClient client, AdapterOptions options, st
             if (response.Headers.TryGetValues(ConnectionTrace.HubTimingHeader, out var timings) &&
                 double.TryParse(timings.FirstOrDefault(), NumberStyles.Float, CultureInfo.InvariantCulture, out var hubMs) &&
                 double.IsFinite(hubMs) && hubMs is >= 0 and <= 300000) ConnectionTrace.Duration("hub_to_headers", hubMs);
-            if ((int)response.StatusCode is >= 300 and < 400) return new(false, "redirect_rejected");
+            if ((int)response.StatusCode is >= 300 and < 400) return WithDelivery(tool, new(false, "redirect_rejected"), ChatGuidance.NotApplied);
             var failureKind = DomainFailureKind(response.StatusCode);
-            if (!response.IsSuccessStatusCode && failureKind is null)
-                return response.StatusCode == HttpStatusCode.Unauthorized ? ConnectionFailure("unauthorized") : new(false, TransportCode(response.StatusCode));
+            if (!response.IsSuccessStatusCode && failureKind is null) return TransportFailure(tool, response.StatusCode);
             if (failureKind is { } kind)
             {
                 // A domain failure keeps its code, data and version only when the body is the hub's own envelope for
@@ -173,19 +173,28 @@ public sealed class RelayForwarder(HttpClient client, AdapterOptions options, st
                 {
                     var failure = await ReadMeasuredEnvelopeAsync(response, bounded.Token);
                     // Only the reader's own size error passes; a parsed hub envelope always carries a version.
-                    if (failure is { Code: ResponseTooLarge, Version: null }) return failure;
-                    return !failure.Ok && KnownCodes.Contains(failure.Code) && RelayErrorCodes.Classify(failure.Code) == kind ? failure : new(false, TransportCode(response.StatusCode));
+                    if (failure is { Code: ResponseTooLarge, Version: null }) return WithDelivery(tool, failure, ChatGuidance.Uncertain);
+                    return !failure.Ok && KnownCodes.Contains(failure.Code) && RelayErrorCodes.Classify(failure.Code) == kind ? failure : TransportFailure(tool, response.StatusCode);
                 }
-                catch (JsonException) { return new(false, TransportCode(response.StatusCode)); }
-                catch (InvalidOperationException) { return new(false, TransportCode(response.StatusCode)); }
+                catch (JsonException) { return TransportFailure(tool, response.StatusCode); }
+                catch (InvalidOperationException) { return TransportFailure(tool, response.StatusCode); }
             }
-            return await ReadMeasuredEnvelopeAsync(response, bounded.Token);
+            var reply = await ReadMeasuredEnvelopeAsync(response, bounded.Token);
+            // A parsed hub envelope always carries a version; a failure without one is the reader's own, after the hub had the request.
+            return reply is { Ok: false, Version: null } ? WithDelivery(tool, reply, ChatGuidance.Uncertain) : reply;
         }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return new(false, "hub_timeout"); }
-        catch (HttpRequestException) { return ConnectionFailure(request.Options.TryGetValue(PinnedCertificate.IdentityMismatch, out var mismatch) && mismatch ? "hub_identity_changed" : "hub_unavailable"); }
-        catch (IOException) { return ConnectionFailure(request.Options.TryGetValue(PinnedCertificate.IdentityMismatch, out var mismatch) && mismatch ? "hub_identity_changed" : "hub_unavailable"); }
-        catch (JsonException) { return new(false, "invalid_hub_reply"); }
-        catch (InvalidOperationException) { return new(false, "invalid_hub_reply"); }
+        // A timeout may strike after the request bytes left, even during connect, so it never says not applied.
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return WithDelivery(tool, new(false, "hub_timeout"), ChatGuidance.Uncertain); }
+        catch (HttpRequestException e)
+        {
+            // Only a failure to open the connection proves no request bytes left.
+            var neverSent = !headersRead && e.HttpRequestError is HttpRequestError.ConnectionError or HttpRequestError.NameResolutionError
+                or HttpRequestError.SecureConnectionError or HttpRequestError.ProxyTunnelError;
+            return Unreachable(tool, request, neverSent);
+        }
+        catch (IOException) { return Unreachable(tool, request, neverSent: false); }
+        catch (JsonException) { return WithDelivery(tool, new(false, "invalid_hub_reply"), ChatGuidance.Uncertain); }
+        catch (InvalidOperationException) { return WithDelivery(tool, new(false, "invalid_hub_reply"), ChatGuidance.Uncertain); }
         finally
         {
             if (!headersRead) ConnectionTrace.Stage("http_headers", headersAt, cancellationToken.IsCancellationRequested ? "cancelled" : "error",
@@ -218,6 +227,30 @@ public sealed class RelayForwarder(HttpClient client, AdapterOptions options, st
             _ => "Can't reach the hub. Check that it is running and try again."
         };
         return new(false, code, JsonSerializer.SerializeToElement(new { message }));
+    }
+
+    /// <summary>The hub could not be reached or the connection broke. A changed hub identity fails the handshake, before anything is sent.</summary>
+    private AdapterReply Unreachable(string tool, HttpRequestMessage request, bool neverSent)
+    {
+        var changed = request.Options.TryGetValue(PinnedCertificate.IdentityMismatch, out var mismatch) && mismatch;
+        return WithDelivery(tool, ConnectionFailure(changed ? "hub_identity_changed" : "hub_unavailable"), changed || neverSent ? ChatGuidance.NotApplied : ChatGuidance.Uncertain);
+    }
+
+    /// <summary>A status the hub answered without its own envelope. Only a generic hub error may follow an applied write; the others are refusals.</summary>
+    private AdapterReply TransportFailure(string tool, HttpStatusCode status)
+    {
+        var code = TransportCode(status);
+        return WithDelivery(tool, code == "unauthorized" ? ConnectionFailure(code) : new(false, code), code == "hub_error" ? ChatGuidance.Uncertain : ChatGuidance.NotApplied);
+    }
+
+    /// <summary>Marks a write this adapter failed with whether the hub may have applied it, and the line saying what to do, unless the data already says.</summary>
+    private AdapterReply WithDelivery(string tool, AdapterReply reply, string delivery)
+    {
+        if (!RelayToolCatalog.TryGet(tool, out var entry) || !entry.IsMutation) return reply;
+        var data = reply.Data is { ValueKind: JsonValueKind.Object } existing ? JsonNode.Parse(existing.GetRawText())!.AsObject() : new JsonObject();
+        data[ChatGuidance.DeliveryField] = delivery;
+        if (!data.ContainsKey(ChatGuidance.HintField) && !data.ContainsKey("guidance")) data[ChatGuidance.HintField] = ChatGuidance.Delivery(delivery, nativeSurface);
+        return reply with { Data = JsonSerializer.SerializeToElement(data) };
     }
 
     /// <summary>

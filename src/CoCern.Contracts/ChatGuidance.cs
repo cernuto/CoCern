@@ -15,6 +15,22 @@ public static class ChatGuidance
     /// <summary>The field of the <c>session_open</c> reply that carries the startup line.</summary>
     public const string StartHintField = "startHint";
 
+    /// <summary>The field of a failed write that says whether the hub may have applied it.</summary>
+    public const string DeliveryField = "delivery";
+
+    /// <summary>The write never reached the hub, or the hub refused it before applying anything.</summary>
+    public const string NotApplied = "not_applied";
+
+    /// <summary>The request may have reached the hub, so the write may have been applied.</summary>
+    public const string Uncertain = "uncertain";
+
+    /// <summary>The line for a failed write with this delivery. A native chat has no request ID to replay, so it is told to read first.</summary>
+    public static string Delivery(string delivery, bool native) => delivery == NotApplied
+        ? "The hub did not apply this."
+        : native
+            ? "The hub may have applied this. Read the current state before repeating it."
+            : "The hub may have applied this. Retry in this session with the same requestId and arguments.";
+
     private const string AdministratorIntro = "You are an administrator.";
 
     /// <summary>What a chat is told when it leaves out repositoryId and its adapter can't safely fill it in. Nothing reaches the hub.</summary>

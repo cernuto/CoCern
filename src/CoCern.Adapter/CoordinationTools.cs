@@ -310,7 +310,7 @@ internal sealed class ChatCalls(RelayForwarder forwarder, SessionHints? hints, S
         if (tool == RelayTools.SessionOpen) arguments = CoordinationTools.OwnRequestId(arguments, _workspace(), requestScope);
         else if (tool == RelayTools.ControlRequest) arguments = CoordinationTools.WithOwnSession(arguments, CurrentSession);
         else if (!TryWithOwnHandle(tool, ref arguments))
-            return new(false, "implicit_request_capacity", JsonSerializer.SerializeToElement(new { guidance = "For a new write, supply your own sessionId and sessionToken. Reconcile an uncertain write in its original session." }));
+            return new(false, "implicit_request_capacity", JsonSerializer.SerializeToElement(new { guidance = "For a new write, supply your own sessionId and sessionToken. Reconcile an uncertain write in its original session.", delivery = ChatGuidance.NotApplied }));
         arguments = WithActingSession(tool, arguments);
         AdapterReply? originalReply = null;
         var reply = tool == RelayTools.CheckInbox
