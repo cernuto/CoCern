@@ -21,7 +21,7 @@ public sealed class ForwarderErrorTests
             Assert.Equal(expected, result.Code);
             // ack is a write, so the adapter's own failure says only whether it reached the hub.
             var data = result.Data!.Value;
-            Assert.Equal(new[] { "delivery", "hint" },data.EnumerateObject().Select(p => p.Name).Order());
+            Assert.Equal(new[] { "delivery", "hint" }, data.EnumerateObject().Select(p => p.Name).Order());
             Assert.Equal(delivery, data.GetProperty("delivery").GetString());
             Assert.DoesNotContain("sensitive", JsonSerializer.Serialize(result));
         }

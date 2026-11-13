@@ -104,11 +104,12 @@ public sealed class AdapterTests
         var listed = new ModelContextProtocol.Server.McpServerPrimitiveCollection<ModelContextProtocol.Server.McpServerTool>();
         var surface = new ToolSurface(listed);
         var forwarder = new RelayForwarder(client, Options(), surface: surface);
-        foreach (var tool in CoordinationTools.Create(forwarder, admin: false, surface: surface, onDemand: true)) listed.Add(tool);
+        foreach (var tool in CoordinationTools.Create(forwarder, admin: true, surface: surface, onDemand: true)) listed.Add(tool);
         surface.Observe(new AdapterReply(true, "Ok", JsonSerializer.SerializeToElement(new
-        { toolSettingsSessionId = "session-a", toolSettingsAdministrator = false, toolSettings = new { profile = "worker", revision = 1 } })));
+        { toolSettingsSessionId = "session-a", toolSettingsAdministrator = true, toolSettings = new { profile = "worker", revision = 1 } })));
         var call = Assert.IsType<OnDemandTools.CallingTool>(listed.Single(tool => tool.ProtocolTool.Name == OnDemandTools.Call));
 
+        // The administrator ceiling allows control_request; only the worker profile hides it.
         var refused = await call.RunAsync(Parse("{\"name\":\"control_request\",\"arguments\":{\"repositoryId\":\"repo\",\"command\":\"pause\"}}"), default);
         Assert.Equal("unknown_tool", refused.Code);
         Assert.Empty(requests);

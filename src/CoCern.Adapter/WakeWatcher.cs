@@ -177,6 +177,8 @@ public static class WakeWatcher
                     var watch = watches[gone];
                     watches.Remove(gone);
                     lastStatus.Remove(WakeState.Key(watch.Target.Route.ThreadId));
+                    pace.Remove(WakeState.Key(watch.Target.Route.ThreadId));
+                    unreachable.Remove(WakeState.Key(watch.Target.Route.ThreadId));
                     idleRoutes.Remove(WakeState.Key(watch.Target.Route.ThreadId));
                     lastRead.Remove(gone);
                     await watch.Connection.DisposeAsync();
@@ -191,8 +193,12 @@ public static class WakeWatcher
                         watches.Remove(target.Session.SessionId);
                         var oldRouteKey = WakeState.Key(oldWatch.Target.Route.ThreadId);
                         lastStatus.Remove(oldRouteKey);
+                        pace.Remove(oldRouteKey);
+                        unreachable.Remove(oldRouteKey);
                         idleRoutes.Remove(oldRouteKey);
                         lastStatus.Remove(routeKey);
+                        pace.Remove(routeKey);
+                        unreachable.Remove(routeKey);
                         idleRoutes.Remove(routeKey);
                         lastRead.Remove(target.Session.SessionId);
                         await oldWatch.Connection.DisposeAsync();
@@ -202,6 +208,8 @@ public static class WakeWatcher
                         if (refused.Repository == target.Route.RepositoryId && refused.Session == target.Session) continue;
                         rejected.Remove(target.Session.SessionId);
                         lastStatus.Remove(routeKey);
+                        pace.Remove(routeKey);
+                        unreachable.Remove(routeKey);
                         lastRead.Remove(target.Session.SessionId);
                     }
                     // A hint selects its route; a timer selects only due routes. New/replaced handles have no last read and run now.

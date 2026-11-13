@@ -116,7 +116,12 @@ public sealed class NodeState : IDisposable
 
     internal string? ReadJoinCode()
     {
-        try { return File.ReadAllText(Path.Combine(Folder, JoinCodeFile)).Trim() is { Length: > 0 and <= 256 } code ? code : null; }
+        try
+        {
+            if (File.ReadAllText(Path.Combine(Folder, JoinCodeFile)).Trim() is not { Length: > 0 and <= 256 } code) return null;
+            SecretScrub.Add(code);
+            return code;
+        }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { return null; }
     }
 

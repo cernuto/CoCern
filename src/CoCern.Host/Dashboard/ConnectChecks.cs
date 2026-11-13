@@ -23,7 +23,7 @@ internal static class ConnectChecks
         string[] own = client switch { ConnectClients.ClaudeCode => ClaudeCode, ConnectClients.Codex => Codex, _ => [] };
         return rows.Where(row => Shared.Contains(row.Id) || own.Contains(row.Id))
             .Select(row => client == ConnectClients.Codex && CodexAfterFirstChat.Contains(row.Id) && row.State != Passed
-                ? row with { State = Warning, Detail = BeforeFirstChat + row.Detail }
+                ? row with { State = Warning, Detail = BeforeFirstChat + row.Detail, Repairable = false }
                 : row)
             .ToArray();
     }

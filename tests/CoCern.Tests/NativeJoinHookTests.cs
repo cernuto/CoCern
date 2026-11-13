@@ -83,21 +83,34 @@ public sealed class NativeJoinHookTests(ITestOutputHelper output)
         Assert.Equal(0, fixture.Requests);
     }
 
-    // Security boundary: the PreToolUse hook stamps a tool_call's target and inner arguments, so that stamp must bind exactly those.
+    // Security boundary: the PreToolUse hook stamps a tool_call's target and inner arguments, never the wrapper, and only for an on-demand target.
     [Fact]
-    public async Task An_on_demand_stamp_runs_only_its_own_target_with_its_own_arguments()
+    public async Task The_tool_call_hook_stamps_only_an_on_demand_target_with_its_own_arguments()
     {
         await using var fixture = new HookFixture();
         await fixture.Join.EnsureAsync(fixture.Capture, default);
-        var stamped = await NativeJoinHook.StampAsync(fixture.Join, fixture.Capture, RelayTools.DocSearch, "on-demand-1", JsonSerializer.SerializeToElement(new { query = "a" }), default);
-        var otherArguments = JsonNode.Parse(stamped.GetRawText())!.AsObject();
-        otherArguments["query"] = "b";
+        string Hook(string invocation, object toolInput) => JsonSerializer.Serialize(new { hook_event_name = "PreToolUse", session_id = Parent, cwd = fixture.Capture.Cwd,
+            tool_name = "mcp__cocern__tool_call", tool_use_id = invocation, tool_input = toolInput });
+
+        using (var refusedOutput = new StringWriter())
+        using (var refusedError = new StringWriter())
+        {
+            Assert.Equal(2, await NativeJoinHook.RunAsync("claude", new StringReader(Hook("listed-1", new { name = RelayTools.SendMessage, arguments = new { recipientSessionId = "peer", text = "hello" } })), refusedOutput, refusedError, fixture.Join, default));
+            Assert.Empty(refusedOutput.ToString());
+        }
+
+        using var output = new StringWriter(); using var error = new StringWriter();
+        Assert.Equal(0, await NativeJoinHook.RunAsync("claude", new StringReader(Hook("on-demand-1", new { name = RelayTools.DocSearch, arguments = new { query = "a" } })), output, error, fixture.Join, default));
+        using var emitted = JsonDocument.Parse(output.ToString());
+        var updated = emitted.RootElement.GetProperty("hookSpecificOutput").GetProperty("updatedInput");
+        Assert.True(OnDemandTools.TryTarget(updated, out var target, out var arguments));
+        Assert.Equal(RelayTools.DocSearch, target);
+
         fixture.Requests = 0;
-        Assert.False((await NativeJoinHook.InvokeAsync(fixture.Join, "claude", RelayTools.DocSection, stamped, default)).Ok);
-        Assert.False((await NativeJoinHook.InvokeAsync(fixture.Join, "claude", RelayTools.DocSearch, JsonSerializer.SerializeToElement(otherArguments), default)).Ok);
-        Assert.Empty(fixture.Business);
+        Assert.False((await NativeJoinHook.InvokeAsync(fixture.Join, "claude", RelayTools.DocSection, arguments, default)).Ok);
         Assert.Equal(0, fixture.Requests);
-        var result = await NativeJoinHook.InvokeAsync(fixture.Join, "claude", RelayTools.DocSearch, stamped, default);
+        Assert.Empty(fixture.Business);
+        var result = await NativeJoinHook.InvokeAsync(fixture.Join, "claude", RelayTools.DocSearch, arguments, default);
         Assert.True(result.Ok, result.Code);
         Assert.Equal("a", fixture.Business.Single().GetProperty("query").GetString());
     }

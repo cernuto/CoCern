@@ -48,8 +48,12 @@ internal static class OnDemandTools
     private static RelayTool? Find(Func<IReadOnlyList<RelayTool>> available, string name) =>
         available().FirstOrDefault(tool => string.Equals(tool.Name, name, StringComparison.Ordinal));
 
-    private static AdapterReply Unknown(string name) =>
-        new(false, "unknown_tool", ChatGuidance.ToolOff(name) is { } hint ? JsonSerializer.SerializeToElement(new Dictionary<string, string> { [ChatGuidance.HintField] = hint }) : null);
+    /// <summary>A listed catalog tool is pointed back at its own name; an on-demand one the profile hides gets <see cref="ChatGuidance.ToolOff"/>; an unknown name gets no hint.</summary>
+    private static AdapterReply Unknown(string name)
+    {
+        var hint = RelayToolCatalog.TryGet(name, out var known) && !known.OnDemand ? ChatGuidance.Listed(known.Name) : ChatGuidance.ToolOff(name);
+        return new(false, "unknown_tool", hint is not null ? JsonSerializer.SerializeToElement(new Dictionary<string, string> { [ChatGuidance.HintField] = hint }) : null);
+    }
 
     private static AdapterReply Invalid(string field) =>
         new(false, RelayErrorCodes.InvalidArguments, JsonSerializer.SerializeToElement(new { field }));
@@ -114,7 +118,8 @@ internal static class OnDemandTools
         /// <summary>Refuses a target outside <c>available</c> without calling anything; otherwise runs it through the chat's own call path under its name.</summary>
         internal Task<AdapterReply> RunAsync(JsonElement input, CancellationToken cancellationToken)
         {
-            if (!TryTarget(input, out var name, out var arguments)) return Task.FromResult(Invalid("name"));
+            if (!TryTarget(input, out var name, out var arguments))
+                return Task.FromResult(Invalid(input.ValueKind == JsonValueKind.Object && input.TryGetProperty("name", out var given) && given.ValueKind == JsonValueKind.String ? "arguments" : "name"));
             if (Find(available, name) is null) return Task.FromResult(Unknown(name));
             return call(name, arguments, cancellationToken);
         }

@@ -61,6 +61,9 @@ public static class ChatGuidance
         : known.AdministratorOnly ? AdministratorHint(known.Name)
         : $"{known.Name} is off for this chat. Ask Paul to allow it.";
 
+    /// <summary>The line for a listed (not on-demand) tool named through <c>tool_describe</c> or <c>tool_call</c>.</summary>
+    public static string Listed(string tool) => $"{tool} is listed. Call it directly, not through tool_call.";
+
     /// <summary>
     /// The startup line the hub sends. <paramref name="administrator"/> is the caller's credential, never the role the chat declared: declaring
     /// <c>manager</c> routes alerts and grants nothing. The tools listed are ones the hub has turned on.
