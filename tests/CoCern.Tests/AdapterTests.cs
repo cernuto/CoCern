@@ -98,7 +98,7 @@ public sealed class AdapterTests
         using var handler = new StubHandler((request, _) =>
         {
             requests.Add(request.RequestUri!.AbsolutePath);
-            return Task.FromResult(Json("{\"ok\":true,\"code\":\"ok\",\"dataJson\":\"{}\"}"));
+            return Task.FromResult(Json("{\"ok\":true,\"code\":\"ok\",\"dataJson\":\"{}\",\"version\":1}"));
         });
         using var client = new HttpClient(handler);
         var listed = new ModelContextProtocol.Server.McpServerPrimitiveCollection<ModelContextProtocol.Server.McpServerTool>();
