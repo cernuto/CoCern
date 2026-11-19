@@ -413,7 +413,7 @@ internal static class ControlAggregate
         if (session.RepositoryId != context.Repository) return Error(SessionDenied);
         var presence = registration.Presence;
         var stale = presence.BindingVersion < session.BindingVersion;
-        session.Register(stale ? new SessionPresence { ObservedAt = presence.ObservedAt, FreshUntil = presence.FreshUntil } : presence);
+        session.Register(stale ? new SessionPresence { ObservedAt = presence.ObservedAt, FreshUntil = presence.FreshUntil } : presence, registration.WakeProvider);
         return Ok(new { registered = !stale });
     }
 
@@ -466,7 +466,9 @@ internal static class ControlAggregate
                 if (!full) row.Remove(DirectoryEntry.BindingKey);
                 return (JsonNode)row;
             }).ToArray();
-        var tag = full ? null : ListSnapshot.Tag(new { kind = "workers", context.Repository, context.Caller.PrincipalId, context.Caller.IsAdministrator, hubIncarnation }, selected.Select(entry => entry.Id));
+        // The chat directory opts into snapshot validation. Existing full-list callers can still page by offset alone.
+        var pin = !full || context.Caller.IsInternal && context.Args.ContainsKey("snapshotTag");
+        var tag = pin ? ListSnapshot.Tag(new { kind = full ? "directory-workers" : "workers", context.Repository, context.Caller.PrincipalId, context.Caller.IsAdministrator, hubIncarnation }, selected.Select(entry => entry.Id)) : null;
         if (tag is not null && !ListSnapshot.Matches(context.Args, tag)) return Error("ListRestartRequired");
         var data = JsonNode.Parse(Page(workers, context.Args).DataJson)!.AsObject();
         if (tag is not null) { data["snapshotTag"] = tag; data["omittedCount"] = allWorkers.Count - workers.Length; }
@@ -489,7 +491,7 @@ internal static class ControlAggregate
         }
         var machinePage = data["machines"]!.AsArray();
         while (!FitsWire(Ok(data), RelayLimits.AggregateReplyBytes) && machinePage.Count > 0) { machinePage.RemoveAt(machinePage.Count - 1); data["machineSummariesTruncated"] = true; }
-        return full ? Ok(data) : ListSnapshot.Fit(data, workers, context.Args);
+        return tag is null ? Ok(data) : ListSnapshot.Fit(data, workers, context.Args);
     }
 
     private static bool KeepInWorkerList(JsonObject row, DateTimeOffset now)
@@ -660,17 +662,23 @@ internal static class ControlAggregate
             global.Paused = true;
             var sessions = global.Entries().Where(entry => entry.Entry is not null).Select(entry => entry.Id).ToArray();
             foreach (var id in sessions) global.RequestCancellation(id, "", context.Caller.PrincipalId, context.Now);
+            context.Hint = new CoordinationHint.Dispatch();
             return Ok(new { paused = true, cancellationRequested = true, cancellationSessions = sessions.Length });
         }
         if (command is "appoint_manager" or "clear_manager") return ManagerSelection.Apply(context);
         if (command == "register_resource") return RegisterResource(context);
         if (command == "close_sessions") return CloseSessionsByFilter(context);
         var state = new ControlState(context.State);
+        var wasPaused = state.Paused;
         if (command is "pause" or "stop") state.Paused = true;
         else if (command == "resume") state.Paused = false;
         else if (command != "cancel") return Error(UnknownCommand);
         var cancellation = command is "stop" or "cancel";
         if (cancellation) state.RequestCancellation(context.SessionId, Text(context.Args, "actionId"), context.Caller.PrincipalId, context.Now);
+        if (state.Paused != wasPaused || cancellation && string.IsNullOrEmpty(context.SessionId))
+            context.Hint = new CoordinationHint.Dispatch();
+        else if (cancellation)
+            context.Hint = new CoordinationHint.Session(context.SessionId, "control");
         return Ok(new { paused = state.Paused, cancellationRequested = cancellation });
     }
 

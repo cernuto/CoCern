@@ -165,7 +165,7 @@ public sealed record SessionClosed(string RepositoryId, string BoardId, string S
 /// (binding, its version and freshness, availability, machine, label, hub incarnation). Bind is not repeated on its own, so this is retried
 /// until it lands; the directory never lets an older binding replace a newer one or move a time back.
 /// </summary>
-public sealed record SessionRegistration(string RepositoryId, string SessionId, SessionPresence Presence) : IEffectMessage<SessionRegistration>
+public sealed record SessionRegistration(string RepositoryId, string SessionId, SessionPresence Presence, string? WakeProvider = null) : IEffectMessage<SessionRegistration>
 {
     public static string Operation => Operations.Register;
     public static string TargetKind => AggregateKinds.Control;
@@ -175,6 +175,7 @@ public sealed record SessionRegistration(string RepositoryId, string SessionId, 
     {
         var json = new JsonObject { ["repositoryId"] = RepositoryId, ["sessionId"] = SessionId };
         Presence.WriteTo(json);
+        if (WakeProvider is not null) json["wakeProvider"] = WakeProvider;
         return json;
     }
 
@@ -187,7 +188,7 @@ public sealed record SessionRegistration(string RepositoryId, string SessionId, 
         // never stale, and it cannot replace a binding or label.
         if (payload[SessionPresence.BindingKey] is not null || payload[SessionPresence.LabelKey] is not null) read.Number(SessionPresence.BindingVersionKey, minimum: 0);
         read.Date("observedAt"); read.Date("freshUntil");
-        return read.Result(new SessionRegistration(repository, session, SessionPresence.Read(read)));
+        return read.Result(new SessionRegistration(repository, session, SessionPresence.Read(read), read.OptionalText("wakeProvider")));
     }
 }
 

@@ -314,10 +314,26 @@ public sealed class NodeTests : IDisposable
         using var handler = RelayForwarder.CreateHandler(options);
         Assert.False(handler.AllowAutoRedirect);
         Assert.False(handler.UseCookies);
-        Assert.NotNull(handler.ServerCertificateCustomValidationCallback);
+        Assert.False(handler.UseProxy);
+        Assert.NotNull(handler.SslOptions.RemoteCertificateValidationCallback);
         using var plain = RelayForwarder.CreateHandler(new AdapterOptions("http://127.0.0.1:5271", "token"));
-        Assert.Null(plain.ServerCertificateCustomValidationCallback);
+        Assert.Null(plain.SslOptions.RemoteCertificateValidationCallback);
         Assert.Throws<AdapterConfigurationException>(() => new AdapterOptions("https://hub.example/", "token") { PinnedFingerprint = "not-a-fingerprint" });
+    }
+
+    [Fact]
+    public void Codex_wake_executable_must_belong_to_the_installed_desktop_package()
+    {
+        var apps = Path.Combine(Path.GetTempPath(), "Program Files", "WindowsApps");
+        const string package = "OpenAI.Codex_26.1111.2228.0_x64__2p2nqsd0c76g0";
+        string Executable(string root, string identity) => Path.Combine(root, identity, "app", "resources", "codex.exe");
+        Assert.True(CodexLocator.IsDesktopExecutable(apps, Executable(apps, package)));
+        Assert.True(CodexLocator.SupportsTargetedWake(Executable(apps, package)));
+        Assert.True(CodexLocator.SupportsTargetedWake(Executable(apps, "OpenAI.Codex_26.1111.9664.0_x64__2p2nqsd0c76g0")));
+        Assert.False(CodexLocator.SupportsTargetedWake(Executable(apps, "OpenAI.Codex_26.1111.2229.0_x64__2p2nqsd0c76g0")));
+        Assert.False(CodexLocator.IsDesktopExecutable(apps, Executable(Path.GetTempPath(), package)));
+        Assert.False(CodexLocator.IsDesktopExecutable(apps, Executable(apps, "OpenAI.Codex_26.1111.2228.0_x64__other")));
+        Assert.False(CodexLocator.IsDesktopExecutable(apps, Path.Combine(apps, package, "codex.exe")));
     }
 
     [Fact]

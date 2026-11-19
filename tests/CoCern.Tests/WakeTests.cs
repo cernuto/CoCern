@@ -302,12 +302,103 @@ public sealed class WakeTests
         Assert.Throws<AdapterConfigurationException>(() => WakeConfiguration.Load(path));
     }
 
+    [Fact]
+    public void File_routes_suspend_missing_or_ambiguous_enrollments_until_repaired()
+    {
+        using var fixture = new Fixture();
+        fixture.PrepareEnrollment();
+        var second = fixture.Route with { SessionFile = Path.ChangeExtension(fixture.Route.SessionFile, ".second"), ThreadId = "00000000-0000-0000-0000-000000000002" };
+        var config = fixture.Configuration with { Routes = [fixture.Route, second] };
+        var path = Path.Combine(Path.GetDirectoryName(config.StatePath)!, "watcher.json");
+        File.WriteAllText(path, JsonSerializer.Serialize(config, JsonSerializerOptions.Web));
+        var loaded = WakeConfiguration.Load(path);
+        Assert.Equal(fixture.Route, Assert.Single(loaded.ReadTargets(fixture.Dispatcher)).Route);
+
+        File.Copy(fixture.Route.SessionFile, second.SessionFile);
+        Assert.Empty(loaded.ReadTargets(fixture.Dispatcher));
+        File.WriteAllText(second.SessionFile, """{"sessionId":"replacement","sessionToken":"replacement-secret"}""");
+        Assert.Equal(2, loaded.ReadTargets(fixture.Dispatcher).Count);
+        File.Delete(fixture.Route.SessionFile);
+        Assert.Equal(second, Assert.Single(loaded.ReadTargets(fixture.Dispatcher)).Route);
+        File.WriteAllText(second.SessionFile, "{");
+        Assert.Empty(loaded.ReadTargets(fixture.Dispatcher));
+    }
+
     [Theory]
     [InlineData(0, "Queued message 11111111-1111-1111-1111-111111111111 for thread 00000000-0000-0000-0000-000000000001.", true)]
     [InlineData(0, "success", false)]
+    [InlineData(0, "Queued message 11111111-1111-1111-1111-111111111111 for thread 00000000-0000-0000-0000-000000000002.", false)]
+    [InlineData(1, "Queued message 11111111-1111-1111-1111-111111111111 for thread 00000000-0000-0000-0000-000000000001.", false)]
     public void Only_exact_success_receipt_confirms_queued_notification(int exitCode, string output, bool expected)
     {
-        Assert.Equal(expected, CodexWakeDispatcher.HasQueuedReceipt(exitCode, output, "00000000-0000-0000-0000-000000000001"));
+        const string thread = "00000000-0000-0000-0000-000000000001";
+        var wakes = new List<Guid>();
+        Assert.Equal(expected, CodexWakeDispatcher.CompleteQueue(exitCode, output, "", thread, wakes.Add));
+        Assert.Equal(expected ? new[] { Guid.Parse(thread) } : Array.Empty<Guid>(), wakes);
+    }
+
+    [Fact]
+    public void Desktop_wake_uses_the_package_targeted_Windows_launcher()
+    {
+        var launcher = CodexDesktopWake.CreateLauncher();
+        Assert.Equal(Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"), launcher.FileName);
+        Assert.False(launcher.UseShellExecute);
+        Assert.True(launcher.CreateNoWindow);
+        Assert.Contains("-NoProfile", launcher.ArgumentList);
+        Assert.Contains("-NonInteractive", launcher.ArgumentList);
+        var command = launcher.ArgumentList[^1];
+        Assert.Contains("TargetApplicationPackageFamilyName = 'OpenAI.Codex_2p2nqsd0c76g0'", command);
+        Assert.Contains("$launcher::LaunchUriAsync", command);
+        Assert.True(launcher.RedirectStandardInput);
+        Assert.Contains("[Console]::ReadLine()", command);
+        Assert.Contains("[guid]::ParseExact($line, 'D')", command);
+        Assert.Contains("'codex://threads/wake/' + $thread.ToString('D')", command);
+    }
+
+    [SkippableTheory]
+    [InlineData("valid", true)]
+    [InlineData("missing", false)]
+    [InlineData("unterminated", false)]
+    [InlineData("natural-eof", true)]
+    [InlineData("oversized-stdout", false)]
+    [InlineData("oversized-stderr", false)]
+    public async Task Windows_queue_snapshots_bounded_receipt_when_another_writer_stays_open(string scenario, bool expected)
+    {
+        Skip.IfNot(OperatingSystem.IsWindows());
+        var thread = Guid.NewGuid().ToString("D");
+        var receipt = $"Queued message {Guid.NewGuid():D} for thread {thread}.";
+        var manyLines = $"for /L %i in (1,1,600) do @echo {new string('x', 60)}";
+        var command = scenario switch
+        {
+            "valid" => $"echo {receipt}",
+            "missing" => "echo no receipt",
+            "unterminated" or "natural-eof" => $"<nul set /p \"={receipt}\"&exit /b 0",
+            "oversized-stdout" => $"({manyLines}) & echo {receipt}",
+            "oversized-stderr" => $"({manyLines}) 1>&2 & echo {receipt}",
+            _ => throw new ArgumentOutOfRangeException(nameof(scenario))
+        };
+        using var output = new CodexWakeDispatcher.QueueOutputPipe();
+        using var errors = new CodexWakeDispatcher.QueueOutputPipe();
+        var start = new System.Diagnostics.ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "cmd.exe"))
+        {
+            UseShellExecute = false, CreateNoWindow = true, StandardOutputHandle = output.Writer, StandardErrorHandle = errors.Writer,
+            Arguments = "/d /q /c " + command
+        };
+        using var process = System.Diagnostics.Process.Start(start)!;
+        if (scenario == "natural-eof")
+        {
+            output.Writer.Dispose();
+            errors.Writer.Dispose();
+        }
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var exited = CancellationTokenSource.CreateLinkedTokenSource(deadline.Token);
+        var stdout = output.CaptureAsync(exited.Token, deadline.Token, completeLines: true);
+        var stderr = errors.CaptureAsync(exited.Token, deadline.Token, completeLines: false);
+        await process.WaitForExitAsync(deadline.Token);
+        exited.Cancel();
+        // All other scenarios keep both parent writers open, just as inherited handles can remain open.
+        Assert.Equal(0, process.ExitCode);
+        Assert.Equal(expected, CodexWakeDispatcher.CompleteQueue(process.ExitCode, await stdout, await stderr, thread, _ => { }));
     }
 
     [Fact]

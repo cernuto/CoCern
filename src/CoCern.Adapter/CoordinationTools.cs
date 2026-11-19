@@ -350,7 +350,7 @@ internal sealed class ChatCalls(RelayForwarder forwarder, SessionHints? hints, S
         arguments = WithActingSession(tool, arguments);
         AdapterReply? originalReply = null;
         var reply = tool == RelayTools.CheckInbox
-            ? await InboxWait.CheckAsync(_forwarder, arguments, InboxWait.PollInterval, cancellationToken)
+            ? await InboxWait.CheckAsync(_forwarder, arguments, InboxWait.PollInterval, cancellationToken, hints)
             : await ConditionalRead.ForwardAsync(_forwarder, tool, arguments, cancellationToken, value => originalReply = value);
         if (!reply.Ok) return reply;
         Learn(tool, arguments, reply, suppliedToken);

@@ -312,7 +312,7 @@ public sealed class LocalChatWake : IAsyncDisposable
     {
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(ct, stopping.Token);
         var ending = lifetime.Token;
-        var active = new Dictionary<string, (string Session, CancellationTokenSource Stop, Task Task)>();
+        var active = new Dictionary<string, (SessionHandle Handle, CancellationTokenSource Stop, Task Task)>();
         // Chats whose watcher another adapter holds: when to try again (Environment.TickCount64), and how many tries in a row have missed. Not retried every pass.
         var held = new Dictionary<string, (long Due, int Misses)>(StringComparer.Ordinal);
         using var sessionsWatch = WatchSessions();
@@ -340,8 +340,9 @@ public sealed class LocalChatWake : IAsyncDisposable
                         .Where(group => group.Count() == 1 || group.All(x => x.NativeBindingKey is null)).SelectMany(group => group)
                         .Where(x => !NativeJoinBinding.IsJoining(joining, x.Chat!.ThreadId, anyChat: false)).ToArray();
                     var ended = false;
+                    // A native dispatcher pins the complete handle. A rename or binding refresh can replace it without changing the session ID.
                     foreach (var gone in active.Keys.Where(key => active[key].Task.IsCompleted ||
-                        !targets.Any(x => x.Chat!.ThreadId == key && x.SessionId == active[key].Session) && !NativeJoinBinding.IsJoining(joining, key, anyChat: true)).ToArray())
+                        !targets.Contains(active[key].Handle) && !NativeJoinBinding.IsJoining(joining, key, anyChat: true)).ToArray())
                     { var previous = active[gone]; ended |= previous.Task.IsCompleted; previous.Stop.Cancel(); await previous.Task; previous.Stop.Dispose(); active.Remove(gone); }
                     foreach (var gone in held.Keys.Where(thread => !targets.Any(x => x.Chat!.ThreadId == thread) && !NativeJoinBinding.IsJoining(joining, thread, anyChat: true)).ToArray()) held.Remove(gone);
                     var noCodex = false;
@@ -365,7 +366,7 @@ public sealed class LocalChatWake : IAsyncDisposable
                         held.Remove(thread);
                         var stop = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
                         var task = WatchAsync(handle, codex, state, snapshot, stop.Token);
-                        active[thread] = (handle.SessionId, stop, task);
+                        active[thread] = (handle, stop, task);
                         // A watcher that ends is restarted by a pass soon after, as often as the short interval allows and no more.
                         _ = task.ContinueWith(_ => Task.Delay(BusyPass, ending).ContinueWith(_ => changed.Writer.TryWrite(true), TaskScheduler.Default),
                             CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);

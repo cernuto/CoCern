@@ -42,6 +42,8 @@ public sealed record DashboardSnapshot
     public DatabaseMetrics Database { get; init; } = new();
     public DashboardLogEntry[] Logs { get; init; } = [];
     public DashboardTrafficEvent[] Traffic { get; init; } = [];
+    public DateTimeOffset? TrafficObservedAt { get; init; }
+    public bool TrafficTruncated { get; init; }
     /// <summary>Boards with standing preferences: lines, grants, pending proposals and recent changes. Read-only.</summary>
     public DashboardStanding[] Standing { get; init; } = [];
     public bool StandingTruncated { get; init; }
@@ -312,6 +314,10 @@ public sealed record DashboardSession
     public int? UnreadMessages { get; init; }
     public int? PendingEffects { get; init; }
     public DateTimeOffset? LastActivityAt { get; init; }
+    /// <summary>Earliest retained successful foreground MCP call with a verified existing session in its repository.</summary>
+    public DateTimeOffset? FirstMcpCallAt { get; init; }
+    /// <summary>Expiry of the direct chat route's node announcement, independent of IDE binding freshness.</summary>
+    public DateTimeOffset? RouteFreshUntil { get; init; }
 }
 
 /// <summary>Bounded, retained successful direct-message call metadata. Does not contain message bodies or task-thread messages.</summary>
@@ -322,6 +328,8 @@ public sealed record DashboardInteractions
     public DashboardInteractionEdge[] Edges { get; init; } = [];
     public bool Truncated { get; init; }
 }
+
+public sealed record DashboardSendPulse(string SourceSessionId, string TargetSessionId, DateTimeOffset At);
 
 public sealed record DashboardInteractionEdge
 {

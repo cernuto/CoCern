@@ -20,7 +20,7 @@ public sealed record WakeRuntime(AdapterOptions Options, string StatePath, strin
     public Func<HttpMessageHandler>? HubHandler { get; init; }
     internal static readonly TimeSpan DefaultInterval = TimeSpan.FromSeconds(15);
     internal static readonly TimeSpan DefaultHintedInterval = TimeSpan.FromSeconds(60);
-    internal static readonly TimeSpan DefaultIdleInterval = TimeSpan.FromMinutes(5);
+    internal static readonly TimeSpan DefaultIdleInterval = TimeSpan.FromMinutes(RelayLimits.CodexWakeIdleMinutes);
     /// <summary>
     /// The fallback pass when no hint arrives. Unset, it is <see cref="DefaultInterval"/>, lengthened to <see cref="DefaultHintedInterval"/> while
     /// hints are working, or to <see cref="DefaultIdleInterval"/> for a route with no pending work. A value set here is used as it is,
@@ -43,63 +43,76 @@ public sealed record WakeRuntime(AdapterOptions Options, string StatePath, strin
 /// <summary>Tells a running watcher that its targets may have changed. Pulses never queue up: one pending pulse is enough.</summary>
 public sealed class WakeNudge
 {
-    internal readonly Channel<bool> Changes = Channel.CreateBounded<bool>(new BoundedChannelOptions(1) { FullMode = BoundedChannelFullMode.DropWrite });
+    private readonly Channel<bool> _changes = Channel.CreateBounded<bool>(new BoundedChannelOptions(1) { FullMode = BoundedChannelFullMode.DropWrite });
+    private readonly Dictionary<string, long> _lastHint = new(StringComparer.Ordinal);
+    private static readonly TimeSpan BatchWindow = TimeSpan.FromMilliseconds(500);
     private readonly object _gate = new();
-    private readonly HashSet<string> _sessions = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _sessions = new(StringComparer.Ordinal);
     private bool _all;
 
     public void Pulse() => Pulse(null);
 
     /// <summary>A session hint dirties only that route; a target-list change dirties the whole inventory.</summary>
-    internal void Pulse(string? sessionId)
+    internal void Pulse(string? sessionId, string reason = "session-hint")
     {
         lock (_gate)
         {
             if (sessionId is null) _all = true;
-            else _sessions.Add(sessionId);
+            else if (!_sessions.TryAdd(sessionId, reason))
+            {
+                if (reason == "session-hint" || _sessions[sessionId] == reason) return;
+                _sessions[sessionId] = reason;
+            }
         }
-        Changes.Writer.TryWrite(true);
+        _changes.Writer.TryWrite(true);
     }
 
-    /// <summary>Null requests a full pass. Session IDs survive channel coalescing, including hints for different routes.</summary>
-    internal HashSet<string>? Take()
+    /// <summary>Release the first hint for each route immediately and batch subsequent hints for that route. Inventory and control changes wake immediately.</summary>
+    internal async Task<Dictionary<string, string>?> WaitAsync(CancellationToken cancellationToken)
     {
-        lock (_gate)
+        while (true)
         {
-            var pending = _all ? null : new HashSet<string>(_sessions, StringComparer.Ordinal);
-            _all = false;
-            _sessions.Clear();
-            return pending;
+            cancellationToken.ThrowIfCancellationRequested();
+            var next = Timeout.InfiniteTimeSpan;
+            lock (_gate)
+            {
+                if (_all)
+                {
+                    _all = false;
+                    _sessions.Clear();
+                    return null;
+                }
+                var now = System.Diagnostics.Stopwatch.GetTimestamp();
+                foreach (var key in _lastHint.Where(pair => System.Diagnostics.Stopwatch.GetElapsedTime(pair.Value, now) >= BatchWindow).Select(pair => pair.Key).ToArray())
+                    _lastHint.Remove(key);
+                Dictionary<string, string>? ready = null;
+                foreach (var (sessionId, reason) in _sessions)
+                {
+                    if (reason == "session-hint" && _lastHint.TryGetValue(sessionId, out var previous))
+                    {
+                        var remaining = BatchWindow - System.Diagnostics.Stopwatch.GetElapsedTime(previous, now);
+                        if (next == Timeout.InfiniteTimeSpan || remaining < next) next = remaining;
+                        continue;
+                    }
+                    (ready ??= new(StringComparer.Ordinal)).Add(sessionId, reason);
+                    if (reason == "session-hint") _lastHint[sessionId] = now;
+                }
+                if (ready is not null)
+                {
+                    foreach (var sessionId in ready.Keys) _sessions.Remove(sessionId);
+                    return ready;
+                }
+            }
+            using var wait = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            wait.CancelAfter(next);
+            try { await _changes.Reader.ReadAsync(wait.Token); }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { }
         }
-    }
-}
-
-/// <summary>
-/// Waits after a hint until hints stop for a quiet gap, or until a cap since the wait began, then drops the hints that came meanwhile. A
-/// burst of messages then costs one reconcile pass instead of one per message, and a steady stream still gets a pass at least every cap.
-/// </summary>
-internal static class HintCoalescer
-{
-    public static async Task WaitAsync(ChannelReader<bool> hints, TimeSpan quiet, TimeSpan limit, CancellationToken cancellationToken)
-    {
-        var started = System.Diagnostics.Stopwatch.StartNew();
-        while (limit - started.Elapsed is var left && left > TimeSpan.Zero)
-        {
-            using var gap = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            gap.CancelAfter(left < quiet ? left : quiet);
-            try { await hints.ReadAsync(gap.Token); }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { break; }
-        }
-        while (hints.TryRead(out _)) { }
     }
 }
 
 public static class WakeWatcher
 {
-    /// <summary>How long hints must stop before a pass runs: a lone message is read about this soon after it arrives.</summary>
-    internal static readonly TimeSpan HintQuiet = TimeSpan.FromMilliseconds(500);
-    /// <summary>The longest a stream of hints can hold a pass back.</summary>
-    internal static readonly TimeSpan HintCoalesceLimit = TimeSpan.FromSeconds(3);
 
     /// <summary>Watches every enrolled route until stopped, queueing one fixed inbox-check prompt per new message batch into its Codex chat.</summary>
     public static Task RunAsync(WakeConfiguration config, CancellationToken cancellationToken) =>
@@ -117,15 +130,7 @@ public static class WakeWatcher
     internal static async Task<string> RunAsync(WakeConfiguration config, IWakeDispatcher dispatcher, bool exitWhenQueued, TimeSpan? timeout, CancellationToken cancellationToken, HttpMessageHandler? handler = null, TimeProvider? clock = null)
     {
         var runtime = new WakeRuntime(config.AdapterOptions(), config.StatePath, config.StopFile, config.RelayUrl) { Limits = config.ResolvedLimits() };
-        var handles = config.Routes.Distinct().ToDictionary(route => route, WakeConfiguration.ReadSession);
-        Task<IReadOnlyList<WakeTarget>> Targets(CancellationToken _)
-        {
-            foreach (var route in config.Routes)
-                try { handles[route] = WakeConfiguration.ReadSession(route); }
-                catch (AdapterConfigurationException) { /* A handle being replaced stays suspended until its complete replacement is readable. */ }
-            return Task.FromResult<IReadOnlyList<WakeTarget>>(config.Routes.Select(route => new WakeTarget(route, handles[route], dispatcher)).ToArray());
-        }
-        return await RunAsync(runtime, Targets,
+        return await RunAsync(runtime, _ => Task.FromResult(config.ReadTargets(dispatcher)),
             exitWhenQueued, timeout, cancellationToken, handler, clock);
     }
 
@@ -143,7 +148,6 @@ public static class WakeWatcher
         // The reconciler reads only the relay URL and stop file from its configuration.
         var settings = new WakeConfiguration(runtime.RelayUrl, "", "", runtime.StatePath, runtime.StopFile, []);
         var changes = runtime.Nudge ?? new WakeNudge();
-        var changed = changes.Changes;
         var watches = new Dictionary<string, Watch>(StringComparer.Ordinal);
         // Rejection applies only to this exact private handle, not every future handle for the same chat or session ID.
         var rejected = new Dictionary<string, (string Repository, WakeSession Session)>(StringComparer.Ordinal);
@@ -157,8 +161,7 @@ public static class WakeWatcher
         var unreachable = new Dictionary<string, int>();
         var idleRoutes = new HashSet<string>(StringComparer.Ordinal);
         var lastRead = new Dictionary<string, long>(StringComparer.Ordinal);
-        var coverage = new InboxCoverage();
-        HashSet<string>? dirty = null;
+        Dictionary<string, string>? dirty = null;
         var timer = clock ?? TimeProvider.System;
         var fullPassAt = timer.GetTimestamp();
         // Route retries cannot move the independent full-recovery deadline, nor make idle neighbors poll at their pace.
@@ -214,9 +217,10 @@ public static class WakeWatcher
                     }
                     // A hint selects its route; a timer selects only due routes. New/replaced handles have no last read and run now.
                     // Full recovery is independent of both, so a stream of one session's hints cannot postpone its neighbors forever.
-                    if (!reconcileAll && !dirty!.Contains(target.Session.SessionId)
+                    if (!reconcileAll && !dirty!.ContainsKey(target.Session.SessionId)
                         && lastRead.TryGetValue(target.Session.SessionId, out var readAt) && timer.GetElapsedTime(readAt) < PollWait(target)) continue;
                     string status;
+                    InboxCoverage coverage;
                     using (var dispatch = runtime.TryEnterDispatch?.Invoke())
                     {
                         if (runtime.TryEnterDispatch is not null && dispatch is null)
@@ -227,8 +231,10 @@ public static class WakeWatcher
                             continue;
                         }
                         var subscribed = watches.TryGetValue(target.Session.SessionId, out var listening) && listening.Listening;
+                        coverage = listening?.Coverage ?? new InboxCoverage();
+                        var readReason = ReadReason(target.Session.SessionId, routeKey, subscribed, reconcileAll);
                         var reconciler = new WakeReconciler(settings, state, forwarder, target.Dispatcher, clock, coverage);
-                        status = await reconciler.ReconcileAsync(target.Route, target.Session, lifetime.Token);
+                        status = await reconciler.ReconcileAsync(target.Route, target.Session, lifetime.Token, readReason);
                         lastRead[target.Session.SessionId] = timer.GetTimestamp();
                         // An initial read before joining can race a missed hint; only a read made while listening proves quiet coverage.
                         if (status == "empty" && reconciler.CanWaitQuietly && subscribed && listening!.Listening) idleRoutes.Add(routeKey);
@@ -239,15 +245,20 @@ public static class WakeWatcher
                         Console.Error.WriteLine(WakeReconciler.IsRejection(status)
                             ? $"CoCern wake route {i + 1}: session rejected; waiting for this chat's replacement session handle. Reopen its CoCern session from that chat."
                             : $"CoCern wake route {i + 1}: {status}.");
-                    Record(routeKey, status);
                     if (WakeReconciler.IsRejection(status))
                     {
                         rejected[target.Session.SessionId] = (target.Route.RepositoryId, target.Session);
+                        lastStatus.Remove(routeKey);
+                        pace.Remove(routeKey);
+                        unreachable.Remove(routeKey);
+                        idleRoutes.Remove(routeKey);
+                        lastRead.Remove(target.Session.SessionId);
                         if (watches.Remove(target.Session.SessionId, out var refusedWatch)) await refusedWatch.Connection.DisposeAsync();
                         continue;
                     }
+                    Record(routeKey, status);
                     if (exitWhenQueued && status == "queued") return status;
-                    if (!watches.TryGetValue(target.Session.SessionId, out var watch)) watches[target.Session.SessionId] = watch = Watch.Create(options, runtime.HubHandler, target, changes, lifetime.Token);
+                    if (!watches.TryGetValue(target.Session.SessionId, out var watch)) watches[target.Session.SessionId] = watch = Watch.Create(options, runtime.HubHandler, target, coverage, changes, lifetime.Token);
                     watch.Target = target;
                     // A connection that started but never joined the session's group is retried too.
                     if (watch.Connection.State == HubConnectionState.Disconnected || (watch.Connection.State == HubConnectionState.Connected && !watch.Subscribed))
@@ -258,6 +269,8 @@ public static class WakeWatcher
                             connectTimeout.CancelAfter(TimeSpan.FromSeconds(2));
                             if (watch.Connection.State == HubConnectionState.Disconnected) await watch.Connection.StartAsync(connectTimeout.Token);
                             await watch.SubscribeAsync(connectTimeout.Token);
+                            // A change can land between the initial status read and the server adding this connection to its groups.
+                            changes.Pulse(target.Session.SessionId, "subscribed");
                         }
                         catch (Exception) { /* Reconcile on the next fixed fallback even when hints fail. */ }
                     }
@@ -276,9 +289,7 @@ public static class WakeWatcher
                 wait.CancelAfter(remaining > TimeSpan.Zero ? remaining : TimeSpan.FromMilliseconds(1));
                 try
                 {
-                    await changed.Reader.ReadAsync(wait.Token);
-                    await HintCoalescer.WaitAsync(changed.Reader, HintQuiet, HintCoalesceLimit, lifetime.Token);
-                    dirty = changes.Take();
+                    dirty = await changes.WaitAsync(wait.Token);
                 }
                 catch (OperationCanceledException) when (!lifetime.IsCancellationRequested) { dirty = new(StringComparer.Ordinal); }
             }
@@ -293,6 +304,17 @@ public static class WakeWatcher
         }
         cancellationToken.ThrowIfCancellationRequested();
         return File.Exists(runtime.StopFile) ? "stopped" : "timeout";
+
+        string ReadReason(string sessionId, string routeKey, bool subscribed, bool fullPass)
+        {
+            if (!lastRead.ContainsKey(sessionId)) return "initial";
+            if (dirty is null) return "targets";
+            if (dirty.TryGetValue(sessionId, out var reason)) return reason;
+            if (fullPass) return "recovery";
+            if (!subscribed) return "disconnected";
+            if (idleRoutes.Contains(routeKey)) return "recovery";
+            return lastStatus.GetValueOrDefault(routeKey) is "empty" or "queued" ? "pending" : "retry";
+        }
 
         TimeSpan PollWait(WakeTarget target)
         {
@@ -326,9 +348,10 @@ public static class WakeWatcher
     }
 
     /// <summary>One target's hint connection. The target is refreshed every pass, so a reconnect re-watches with the latest session.</summary>
-    private sealed class Watch(HubConnection connection, WakeTarget target)
+    private sealed class Watch(HubConnection connection, WakeTarget target, InboxCoverage coverage)
     {
         public HubConnection Connection { get; } = connection;
+        public InboxCoverage Coverage { get; } = coverage;
         public WakeTarget Target { get; set; } = target;
         // Bumped on every reconnect or close; the group was joined only while _joined equals it.
         private int _generation, _joined = -1;
@@ -343,18 +366,18 @@ public static class WakeWatcher
             Volatile.Write(ref _joined, generation);
         }
 
-        public static Watch Create(AdapterOptions options, Func<HttpMessageHandler>? hubHandler, WakeTarget target, WakeNudge changes, CancellationToken lifetime)
+        public static Watch Create(AdapterOptions options, Func<HttpMessageHandler>? hubHandler, WakeTarget target, InboxCoverage coverage, WakeNudge changes, CancellationToken lifetime)
         {
-            var watch = new Watch(RelayHubConnection.Create(options, hubHandler), target);
+            var watch = new Watch(RelayHubConnection.Create(options, hubHandler), target, coverage);
             var sessionId = target.Session.SessionId;
             watch.Connection.On<JsonElement>(HubEvents.CoordinationChanged, hint =>
             {
-                if (hint.ValueKind == JsonValueKind.Object && hint.TryGetProperty("sessionId", out var session) && session.ValueKind == JsonValueKind.String && session.GetString() == sessionId)
-                    changes.Pulse(sessionId);
+                if (RelayHubConnection.SessionHintReason(hint, sessionId, target.Route.RepositoryId) is { } reason)
+                    changes.Pulse(sessionId, reason);
             });
             // A lost channel also ends a long wait, so the short fallback takes over at once rather than after it.
-            watch.Connection.Reconnecting += _ => { Interlocked.Increment(ref watch._generation); changes.Pulse(sessionId); return Task.CompletedTask; };
-            watch.Connection.Closed += _ => { Interlocked.Increment(ref watch._generation); changes.Pulse(sessionId); return Task.CompletedTask; };
+            watch.Connection.Reconnecting += _ => { Interlocked.Increment(ref watch._generation); changes.Pulse(sessionId, "disconnected"); return Task.CompletedTask; };
+            watch.Connection.Closed += _ => { Interlocked.Increment(ref watch._generation); changes.Pulse(sessionId, "disconnected"); return Task.CompletedTask; };
             watch.Connection.Reconnected += async _ =>
             {
                 Interlocked.Increment(ref watch._generation);
@@ -363,7 +386,7 @@ public static class WakeWatcher
                     using var reconnectTimeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime);
                     reconnectTimeout.CancelAfter(TimeSpan.FromSeconds(5));
                     await watch.SubscribeAsync(reconnectTimeout.Token);
-                    changes.Pulse(sessionId);
+                    changes.Pulse(sessionId, "reconnect");
                 }
                 catch (Exception) { Console.Error.WriteLine("CoCern wake hints unavailable; fallback reconciliation remains active."); }
             };

@@ -30,7 +30,10 @@ public static class InboxWait
         _ => 0
     };
 
-    public static async Task<AdapterReply> CheckAsync(RelayForwarder forwarder, JsonElement arguments, TimeSpan pollInterval, CancellationToken cancellationToken)
+    public static Task<AdapterReply> CheckAsync(RelayForwarder forwarder, JsonElement arguments, TimeSpan pollInterval, CancellationToken cancellationToken) =>
+        CheckAsync(forwarder, arguments, pollInterval, cancellationToken, null);
+
+    internal static async Task<AdapterReply> CheckAsync(RelayForwarder forwarder, JsonElement arguments, TimeSpan pollInterval, CancellationToken cancellationToken, SessionHints? hints)
     {
         if (arguments.ValueKind != JsonValueKind.Object || !arguments.TryGetProperty("waitSeconds", out var wait))
             return await forwarder.ForwardAsync(RelayTools.CheckInbox, arguments, cancellationToken);
@@ -40,30 +43,43 @@ public static class InboxWait
         if (!forwarded.ContainsKey("seen") && (!forwarded.TryGetPropertyValue("backgroundCall", out var origin) || origin is not JsonValue originValue || !originValue.TryGetValue<bool>(out var background) || !background))
             forwarded["seen"] = true;
         var offeredRequest = JsonSerializer.SerializeToElement(forwarded);
+        var duration = TimeSpan.FromSeconds(Math.Clamp(WaitSeconds(wait), 0, MaxSeconds));
+        if (duration == TimeSpan.Zero)
+        {
+            var immediate = await ReadOfferedAsync();
+            if (immediate.Ok || immediate.Code is not ("hub_unavailable" or "hub_timeout")) return immediate;
+            // The offer could not be verified. Recover any mail still available without issuing another
+            // foreground read, updating seen state, or consuming an attention offer.
+            using var recovery = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            recovery.CancelAfter(PollMargin);
+            try
+            {
+                var mail = await forwarder.ForwardAsync(RelayTools.CheckInbox, BackgroundInboxRequest(), recovery.Token);
+                return mail.Ok ? Unverified(mail, immediate.Code) : immediate;
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { return immediate; }
+        }
         JsonObject? attentionRequest = null;
         if ((!arguments.TryGetProperty("attention", out var attention) || attention.ValueKind != JsonValueKind.False) &&
             arguments.TryGetProperty("sessionId", out var session) && session.ValueKind == JsonValueKind.String &&
             arguments.TryGetProperty("sessionToken", out var token) && token.ValueKind == JsonValueKind.String)
         {
-            // These polls only look for a wake, so one that answers unchanged has none: a wake would have ended this wait, and a new one changes the tag.
-            var status = new JsonObject { ["attentionDetail"] = true, ["backgroundCall"] = true, ["statusTag"] = "" };
+            // An unchanged status means no wake candidate appeared since the last poll.
+            attentionRequest = new JsonObject { ["attentionDetail"] = true, ["backgroundCall"] = true, ["statusTag"] = "" };
             foreach (var key in new[] { "repositoryId", "boardId", "sessionId", "sessionToken" })
-                if (forwarded.TryGetPropertyValue(key, out var value)) status[key] = value?.DeepClone();
-            attentionRequest = status;
+                if (forwarded.TryGetPropertyValue(key, out var value)) attentionRequest[key] = value?.DeepClone();
         }
-        // Polls remain internal even when they discover mail. Only the final ordinary read may mark the returned page seen.
-        forwarded["attention"] = false;
-        forwarded["backgroundCall"] = true;
-        forwarded["seen"] = false;
-        forwarded.Remove("seenMessageIds");
-        var request = JsonSerializer.SerializeToElement(forwarded);
-        var duration = TimeSpan.FromSeconds(Math.Clamp(WaitSeconds(wait), 0, MaxSeconds));
+        var request = BackgroundInboxRequest();
         // A monotonic clock, and no read for a remainder shorter than a timer tick: the wall clock and the delay timer disagree by a
         // millisecond or so, which otherwise left a sliver that looped through near-zero delays, reading the hub each time.
         var elapsed = System.Diagnostics.Stopwatch.StartNew();
+        await using var subscription = duration >= MinimumDelay ? hints?.OpenInboxWait(arguments) : null;
         AdapterReply? last = null;
         while (true)
         {
+            // Capture before the read: a change arriving while the hub answers must wake this exact wait.
+            var signal = subscription?.Observe();
+            var listening = signal is { Listening: true };
             // A poll may itself take up to the client's timeout; bound it by the wait, answering with the last empty inbox if it overruns.
             using var poll = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             var left = duration - elapsed.Elapsed;
@@ -86,27 +102,49 @@ public static class InboxWait
                         if (WakeReconciler.Attention(data).Wake is not null) return await FinishAsync(reply);
                         if (WakeReconciler.StatusTag(data) is { } tag) statusRequest["statusTag"] = tag;
                     }
+                    else listening = false; // A failed attention read has no absence-of-work proof.
                 }
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             { return last is null ? new(false, "hub_timeout") : Unverified(last, "inbox_wait_timeout", stale: true); }
             var remaining = duration - elapsed.Elapsed;
             if (remaining < MinimumDelay) return await FinishAsync(reply);
-            await Task.Delay(remaining < pollInterval ? remaining : pollInterval, cancellationToken);
+            var delay = listening || remaining < pollInterval ? remaining : pollInterval;
+            if (signal is { } watch)
+            {
+                try { await watch.Changed.WaitAsync(delay, cancellationToken); }
+                catch (TimeoutException) { /* Deadline or disconnected fallback. Read the durable state again. */ }
+            }
+            else await Task.Delay(delay, cancellationToken);
+        }
+
+        JsonElement BackgroundInboxRequest()
+        {
+            // The foreground payload was captured before this point. Internal reads must never mark mail seen or consume offers.
+            forwarded["attention"] = false;
+            forwarded["backgroundCall"] = true;
+            forwarded["seen"] = false;
+            forwarded.Remove("seenMessageIds");
+            return JsonSerializer.SerializeToElement(forwarded);
         }
 
         async Task<AdapterReply> FinishAsync(AdapterReply polled)
+        {
+            var final = await ReadOfferedAsync();
+            return final.Ok ? final : Unverified(polled, final.Code);
+        }
+
+        async Task<AdapterReply> ReadOfferedAsync()
         {
             using var completion = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             // Fifty seconds waiting + five seconds poll margin + two seconds completion stays below the client's sixty-second timeout.
             completion.CancelAfter(FinalReadBudget);
             try
             {
-                var final = await forwarder.ForwardAsync(RelayTools.CheckInbox, offeredRequest, completion.Token);
-                return final.Ok ? final : Unverified(polled, final.Code);
+                return await forwarder.ForwardAsync(RelayTools.CheckInbox, offeredRequest, completion.Token);
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-            { return Unverified(polled, "hub_timeout"); }
+            { return new(false, "hub_timeout"); }
         }
     }
 

@@ -91,11 +91,12 @@ internal static class EffectDelivery
     /// <summary>Letters and dots, and short: every message field name is one, and no secret, ID or time could pass for one.</summary>
     private static bool IsFieldName(string name) => name.Length is > 0 and <= RelayLimits.MaxLoggedFieldNameLength && name.All(c => char.IsAsciiLetter(c) || c == '.');
 
-    /// <summary>Whether a delivered raise stored a new item whose tier may wake a chat.</summary>
+    /// <summary>Whether a delivered raise created a top-tier item or promoted one to the top tier.</summary>
     public static bool UrgentRaise(JsonObject payload, RelayReply result)
     {
         var data = JsonNode.Parse(result.DataJson) as JsonObject;
-        if (data?["raised"] is not JsonValue raised || !raised.TryGetValue<bool>(out var isRaised) || !isRaised || data["refreshed"] is not JsonValue refreshed || !refreshed.TryGetValue<bool>(out var isRefresh) || isRefresh) return false;
+        if (data?["raised"] is not JsonValue raised || !raised.TryGetValue<bool>(out var isRaised) || !isRaised || data["refreshed"] is not JsonValue refreshed || !refreshed.TryGetValue<bool>(out var isRefresh)) return false;
+        if (isRefresh && data["wakeTierChanged"]?.GetValue<bool>() != true) return false;
         var blocking = payload["blocking"] is JsonValue flag && flag.TryGetValue<bool>(out var value) && value;
         return AttentionWeights.Wakes(AttentionWeights.Tier(JsonFields.Text(payload, "kind"), JsonFields.Text(payload, "blocker") is { Length: > 0 } blocker ? blocker : null, blocking));
     }

@@ -50,7 +50,7 @@ By default, the installed package keeps its database and hub credentials in `%LO
 
 ![CoCern interaction map with sessions around a central hub, permanent spokes and curved message connections](docs/assets/screenshots/session-map.jpg)
 
-Sessions sit around the CoCern hub, with permanent spokes and pulses that travel inward from the sender and outward to the recipient on newly observed sends. Curved lines show retained direct-message connections. Filter the map and select a chat or connection to inspect its metadata. A route or successful send does not prove a model is running or that a message was read.
+On the **Sessions** map, a successful direct send triggers a SignalR update and a pulse travels along the line from the sender to the recipient. Curved lines show retained message connections. Select a chat or line to inspect it. With reduced motion enabled, the active line lights up in place.
 
 ### See where coordination time goes
 
@@ -117,7 +117,7 @@ On the dashboard's **Connect** page, one button adds CoCern to each of these on 
 | --- | --- |
 | Claude Code | The Claude Code CLI and its IDE extensions. |
 | Claude desktop app | Shown only when it is installed. |
-| Codex | The Codex CLI, IDE extension and app. Codex is ChatGPT's coding agent. |
+| Codex | The Codex CLI, IDE extension and desktop app. |
 
 Reconnect the CoCern MCP server, or restart the app, after changing its connection so it loads the new settings. Existing settings files are backed up before modification. **Connect** preserves working entries and can update stale addresses, certificate pins, repository defaults and tool selections for this hub. Connection changes are available only from a browser on the hub's PC. Expand **App permissions** and select **Administrator tools** to request administrator tools for the connection; changing it shows which apps to connect again. Hub-selected per-chat profiles also determine the exposed tools without changing credential authority.
 
@@ -127,7 +127,7 @@ After a connect, the page lists that app's installation checks under it (adapter
 
 **Codex: connect and verify.** Normal setup keeps the standard connector usable and installs the CoCern workflow skill. Repair preserves the selected mode and disabled hooks. Native integration is staged separately; an existing native startup observation is labeled as startup verification rather than proof that tool calls succeeded. [Walk through the checks](docs/codex-connect.md).
 
-A cloud-hosted ChatGPT connector cannot reach the hub's loopback address. A reachable, authenticated HTTPS deployment requires separate setup; the local connection steps above cover Codex and Claude.
+CoCern runs on your PCs. Chats connect through a local adapter, and enrolled PCs reach the hub over pinned HTTPS on your LAN. Codex and Claude manage their own model connections.
 
 No browser? From an installed or published adapter folder, run `.\CoCern.Adapter.exe --connect`, or use `dotnet CoCern.Adapter.dll --connect` with a framework-dependent source build and its required runtime installed.
 
@@ -200,6 +200,8 @@ A chat can be woken when something needs it.
 
 With attention enabled (the default), direct messages from another session are eligible for an immediate wake unless sent with `wake: false`. Urgent attention can also wake a chat; blocked work held by a `human_decision` or `coordinator_hold` is not automatically urgent. Task-change notices and other nonurgent items wait for the chat's next reply or the default 10-minute idle hold. Tips never wake a chat. Wake delivery still depends on a working route; the node avoids waking busy chats and applies deduplication and rate limits.
 
+On supported Windows Codex desktop builds, CoCern queues the wake prompt for the intended chat, verifies the CLI receipt, then asks the running desktop app to pick it up. In eight idle-chat trials per release on one PC, median time from message storage to turn start fell from **2.02 s to 0.60 s**. Median time until the chat read the message from its inbox fell from **8.70 s to 7.06 s**. [Timing breakdown and individual trials](docs/audits/2026-11-19-codex-event-to-inbox.md#eight-fresh-idle-events-per-release).
+
 Retries are spread out. The wake watcher's 15-second pace, the node's retry and the hint channel's retry each vary by ±20%, so the adapters on one PC do not all retry at the same moment after a hub restart. A wake route whose status read cannot reach the hub backs off to 30 and then 60 seconds, and returns to 15 at the first read that gets an answer; a busy or paused chat keeps the 15-second pace.
 
 The directory and dashboard show whether a chat currently announces a wake path. A hub-local Claude waiter refreshes that presence through its reads, with a three-minute expiry. Reachability, a stored message and a successful queue operation do not establish that the model ran or read the message. If a recipient is unreachable, keep working; its mail remains queued for its next turn. See [wake behavior and reachability](docs/reference.md#other-pcs).
@@ -223,6 +225,7 @@ The **Database** page can schedule a full coordination reset for the next hub re
 | Page | Shows |
 | --- | --- |
 | Overview | Machines and sessions, live traffic and recent logs. |
+| Tasks | Live tasks for the selected repository and board. Changes arrive over SignalR, and the board catches up after a reconnect. |
 | Efficiency | Live traffic, watcher cadence, task-brief/excerpt savings and the saved baseline. |
 | Retained context | Browse and search saved collections, then open exact entry versions. |
 | Sessions | Each session in detail. **Close idle sessions** closes eligible idle chats; the automatic idle limit is 24 hours by default, unread mail can hold a chat for up to 7 days, and unresolved actions normally keep it open. Closing by label skips chats active in about the last 70 minutes. **Close session** closes one, optionally forcing it past unresolved actions. |

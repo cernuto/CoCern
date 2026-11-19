@@ -396,6 +396,12 @@ public static class RelayLimits
     /// judgment (the sweep, <c>close_sessions</c>, a full directory) waits this much longer than the idle time it is given.
     /// </summary>
     public const int AttentionActivityReportMinutes = 60;
+
+    /// <summary>Maximum normal interval between idle Codex watcher status reads while SignalR hints are connected.</summary>
+    public const int CodexWakeIdleMinutes = 5;
+
+    /// <summary>Lifetime of an authenticated idle watcher observation, including a minute for scheduling and reconnect.</summary>
+    public const int CodexWakeFreshMinutes = CodexWakeIdleMinutes + 1;
     /// <summary>Sessions whose last idle-hold wake the hub remembers for counting; past this the memory is cleared.</summary>
     public const int MaxHoldWakeSessions = 1_024;
     /// <summary>Seconds the prompt hook reuses its last answer.</summary>

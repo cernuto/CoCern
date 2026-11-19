@@ -51,7 +51,8 @@ public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
             request_tokens INTEGER,
             reply_tokens INTEGER,
             background_call INTEGER,
-            call_origin TEXT
+            call_origin TEXT,
+            watcher_read_reason TEXT
         );
         CREATE INDEX IF NOT EXISTS ix_activity_log_at ON activity_log(at_ticks);
         CREATE INDEX IF NOT EXISTS ix_activity_log_repository ON activity_log(repository_id, at_ticks);
@@ -79,7 +80,7 @@ public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
     /// Columns added to <c>activity_log</c> after schema 2 was first written. Schema 2 has not shipped, so they join it rather than a
     /// schema 3; a development database already at 2 gets them here, once, by checking <c>pragma table_info</c>.
     /// </summary>
-    private static readonly (string Column, string Type)[] LateActivityColumns = [("request_tokens", "INTEGER"), ("reply_tokens", "INTEGER"), ("background_call", "INTEGER"), ("call_origin", "TEXT")];
+    private static readonly (string Column, string Type)[] LateActivityColumns = [("request_tokens", "INTEGER"), ("reply_tokens", "INTEGER"), ("background_call", "INTEGER"), ("call_origin", "TEXT"), ("watcher_read_reason", "TEXT")];
     // Keep the original totals and primary key. Historical totals have zero classified counts, so their origin stays unknown.
     private static readonly string[] OriginDailyColumns = ["model_calls", "background_calls", "model_request_bytes", "background_request_bytes", "model_reply_bytes", "background_reply_bytes"];
 
@@ -94,6 +95,23 @@ public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
                 PRIMARY KEY (day, repository_id, tool, call_origin)
             );
             """, transaction)) origins.ExecuteNonQuery();
+        // Seed the pre-upgrade daily counts once. Their reasons were never recorded.
+        using (var exists = Command("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='activity_watcher_reason_daily';", transaction))
+        {
+            if (exists.ExecuteScalar() is null)
+            {
+                using var reasons = Command("""
+                    CREATE TABLE activity_watcher_reason_daily (
+                        day TEXT NOT NULL, repository_id TEXT NOT NULL, reason TEXT NOT NULL, calls INTEGER NOT NULL,
+                        PRIMARY KEY (day, repository_id, reason)
+                    );
+                    INSERT INTO activity_watcher_reason_daily(day, repository_id, reason, calls)
+                    SELECT day, repository_id, 'unknown', SUM(background_calls) FROM activity_daily
+                    WHERE kind = 'call' AND tool = 'get_status' AND background_calls > 0 GROUP BY day, repository_id;
+                    """, transaction);
+                reasons.ExecuteNonQuery();
+            }
+        }
         using (var background = Command("""
             CREATE TABLE IF NOT EXISTS activity_background_hourly (
                 at_ticks INTEGER NOT NULL, repository_id TEXT NOT NULL, session_id TEXT NOT NULL, role TEXT NOT NULL, tool TEXT NOT NULL,
@@ -107,6 +125,8 @@ public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
         // measured about 75 ms per session over a day of polling. This holds only the rows it is for, so polling adds nothing to it.
         using (var foreground = Command("CREATE INDEX IF NOT EXISTS ix_activity_log_session_foreground ON activity_log(repository_id, session_id, at_ticks DESC) WHERE kind = 'call' AND ok = 1 AND background_call = 0;", transaction))
             foreground.ExecuteNonQuery();
+        using (var verifiedCall = Command("CREATE INDEX IF NOT EXISTS ix_activity_log_mcp_verified ON activity_log(repository_id, session_id, at_ticks) WHERE kind='call' AND ok=1 AND background_call=0 AND call_origin='mcp' AND tool<>'session_open';", transaction))
+            verifiedCall.ExecuteNonQuery();
         void AddColumns(string table, IEnumerable<(string Column, string Type)> additions)
         {
             var existing = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -228,11 +248,11 @@ public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
             using var transaction = connection.BeginTransaction(deferred: false);
             using var insert = ActivityCommand("""
                 INSERT INTO activity_log(at_ticks, kind, repository_id, session_id, role, tool, ok, code, request_bytes, reply_bytes, duration_ms,
-                    input_tokens, output_tokens, request_id, target, content_hash, workflow_state, offer_target, request_tokens, reply_tokens, background_call, call_origin)
+                    input_tokens, output_tokens, request_id, target, content_hash, workflow_state, offer_target, request_tokens, reply_tokens, background_call, call_origin, watcher_read_reason)
                 VALUES ($at, $kind, $repository, $session, $role, $tool, $ok, $code, $requestBytes, $replyBytes, $duration,
-                    $input, $output, $request, $target, $hash, $state, $offer, $requestTokens, $replyTokens, $background, $origin);
+                    $input, $output, $request, $target, $hash, $state, $offer, $requestTokens, $replyTokens, $background, $origin, $reason);
                 """, transaction);
-            string[] names = ["$at", "$kind", "$repository", "$session", "$role", "$tool", "$ok", "$code", "$requestBytes", "$replyBytes", "$duration", "$input", "$output", "$request", "$target", "$hash", "$state", "$offer", "$requestTokens", "$replyTokens", "$background", "$origin"];
+            string[] names = ["$at", "$kind", "$repository", "$session", "$role", "$tool", "$ok", "$code", "$requestBytes", "$replyBytes", "$duration", "$input", "$output", "$request", "$target", "$hash", "$state", "$offer", "$requestTokens", "$replyTokens", "$background", "$origin", "$reason"];
             var parameters = names.Select(name => insert.Parameters.Add(new SqliteParameter { ParameterName = name })).ToArray();
             foreach (var item in batch)
             {
@@ -240,7 +260,7 @@ public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
                 [
                     item.Timestamp.UtcTicks, item.Kind, item.RepositoryId, item.SessionId, item.Role, item.Tool, item.Ok ? 1 : 0, item.Code,
                     item.RequestBytes, item.ReplyBytes, item.DurationMilliseconds, item.InputTokens, item.OutputTokens, item.RequestId, item.Target,
-                    item.ContentHash, item.WorkflowState, item.OfferTarget, item.RequestTokens, item.ReplyTokens, item.BackgroundCall is { } background ? (background ? 1 : 0) : null, item.CallOrigin
+                    item.ContentHash, item.WorkflowState, item.OfferTarget, item.RequestTokens, item.ReplyTokens, item.BackgroundCall is { } background ? (background ? 1 : 0) : null, item.CallOrigin, item.WatcherReadReason
                 ];
                 for (var index = 0; index < values.Length; index++) parameters[index].Value = values[index] ?? DBNull.Value;
                 insert.ExecuteNonQuery();
@@ -339,6 +359,13 @@ public sealed partial class SqliteStore : IActivitySink, IActivityCounterSource
             {
                 origins.ExecuteNonQuery();
             }
+            using (var reasons = RetentionCommand($"""
+                INSERT INTO activity_watcher_reason_daily(day, repository_id, reason, calls)
+                SELECT date((at_ticks - {UnixEpochTicks}) / 10000000, 'unixepoch'), repository_id, COALESCE(watcher_read_reason, 'unknown'), COUNT(*)
+                FROM activity_log WHERE {expired} AND kind = 'call' AND tool = 'get_status' AND background_call = 1
+                GROUP BY 1, 2, 3
+                ON CONFLICT(day, repository_id, reason) DO UPDATE SET calls = calls + excluded.calls;
+                """)) reasons.ExecuteNonQuery();
             int deleted;
             using (var delete = RetentionCommand($"DELETE FROM activity_log WHERE {expired};"))
             {

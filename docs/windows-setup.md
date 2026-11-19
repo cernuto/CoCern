@@ -25,7 +25,7 @@ Binary updates are installed into immutable package folders. Existing `data` and
 
 Setup prints its installed executable path under `%LOCALAPPDATA%\CoCern\packages` so you can run it again after removing the extracted download. Run that installed executable to open the same Host, Join and Repair menu.
 
-For a PC outside the LAN, see [Visual Studio dev tunnels](dev-tunnels.md). The normal private tunnel web URL needs additional authorization and uses a different TLS certificate; it is not a drop-in replacement for the pinned LAN URL.
+To add another PC, connect it to the hub’s LAN. On the hub, open **Connect → Add another PC** for the LAN address, certificate fingerprint and join code, then enter them in **Join another hub** on the second PC.
 
 ## For maintainers
 

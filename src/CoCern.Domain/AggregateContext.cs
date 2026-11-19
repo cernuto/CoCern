@@ -17,6 +17,7 @@ internal sealed class AggregateContext(JsonObject state, RelayCaller caller, str
     /// <summary>Peer identities resolved by the hub for a goal decision.</summary>
     public IReadOnlyList<VerifiedNativeParticipant>? GoalParticipants { get; init; } = caller.IsInternal ? caller.GoalParticipants : null;
     public List<DurableEffect> Effects { get; } = [];
+    internal CoordinationHint? Hint { get; set; }
     /// <summary>The aggregate's own key, such as a lock's resource ID.</summary>
     public string Key { get; init; } = "";
     /// <summary>Whether this hub runs standing orders (<c>Relay:Orders:Enabled</c>). Off, orders are neither written nor run.</summary>

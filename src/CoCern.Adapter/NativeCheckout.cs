@@ -7,10 +7,17 @@ namespace CoCern.Adapter;
 
 internal sealed record NativeCheckout(string Root, string? Common, string? Origin)
 {
-    internal static NativeCheckout Inspect(string cwd)
+    internal static string SigningRoot(string cwd)
     {
         if (!Path.IsPathFullyQualified(cwd) || cwd.Length > 32768 || cwd.Any(char.IsControl) ||
             CoordinationTools.NativeGitTopLevel(cwd) is not { } root) throw new IOException("The native event needs a verified Git checkout.");
+        return root;
+    }
+
+    internal static NativeCheckout Inspect(string cwd) => InspectRoot(SigningRoot(cwd));
+
+    internal static NativeCheckout InspectRoot(string root)
+    {
         var common = CoordinationTools.NativeGitRead(root, "rev-parse", "--path-format=absolute", "--git-common-dir");
         var origin = NativeGitOrigin.Canonical(CoordinationTools.NativeGitRead(root, "config", "--local", "--get-all", "remote.origin.url"));
         return new(root, common is not null && Path.IsPathFullyQualified(common) ? Path.TrimEndingDirectorySeparator(Path.GetFullPath(common)) : null, origin);

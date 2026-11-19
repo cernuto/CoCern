@@ -88,7 +88,11 @@ Within 24 hours, a retry in the original scope returns the first reply without r
 
 Background wake watchers suspend a handle rejected with `SessionDenied` or `SessionUnknown`, so a closed or reset session does not keep making failed status reads. Other chats continue to be watched. A replacement private handle resumes that chat's watcher; a background watcher never opens a session or replays a mutation to recover. Transient connection failures and paused dispatch still retry normally.
 
-Session hints are coalesced by session ID: a hint reconciles its affected routes without re-reading healthy, settled neighbors. Target-list changes request a full pass, and reconnecting or unhealthy routes remain eligible for immediate reconciliation. A periodic full pass still recovers missed hints and timed attention changes; incoming hints do not reset its deadline. Controls are read again immediately before a wake is dispatched.
+The first session hint wakes its route immediately. Further hints for that session within 500 milliseconds share a follow-up read. Other sessions stay independently responsive. Target-list changes request a full pass. Reconnection and periodic recovery catch changes that may have been missed. The adapter checks controls again before dispatch.
+
+On the coordination hub, `WatchSession` validates the repository and private session handle before joining the hashed session group and the shared dispatch group. Private mail, attention and timed eligibility changes wake the affected route. A change to hub-wide dispatch sends every subscribed dispatcher a content-free control hint. Each dispatcher reads its own authorized state. `WatchMachine` joins the authenticated machine's discovery group. A reconnect rejoins and reconciles immediately to cover a change that happened during subscription.
+
+The dashboard **Tasks** view subscribes to one authorized repository and board on a separate SignalR hub. A committed board revision prompts a paged delta read. The viewer advances its cursor only after receiving a complete revision, including removals. It reconciles after reconnect and periodically checks for a missed broadcast. Open dashboard telemetry views continue to use their own snapshot stream.
 
 Conditional detail status (`get_status` with `attentionDetail: true` and `statusTag`, initially an empty string) includes the current manager summary without administrator history. An unchanged response can therefore stay compact after managers have been appointed. Explicit `managerHistoryBefore`, `managerHistoryOnly`, or `managerActionsBefore` requests retain the full history path and never receive an unchanged status response. Authorization and current controls are checked before every validator match.
 
@@ -118,7 +122,7 @@ Successful aggregate mutations perform age-based replay, acknowledgment, and res
 
 **Spend fewer tokens.** Every model call re-reads the whole chat, so fewer calls matter most. `waitSeconds` and `ifNoneMatch` are handled by the adapter (agents always use it); a direct REST call ignores them.
 
-- Wait with `check_inbox` and `waitSeconds` (up to 50) instead of polling. Mail, urgent attention, or an eligible idle reminder ends the wait; the returning attention read offers one item. Internal polls consume no offers, and `attention: false` opts out of attention wakes.
+- Use `check_inbox` with `waitSeconds` (up to 50). Standard and native adapters subscribe to the chat's authenticated session hints and reread its durable state after joining or reconnecting. Polling covers a disconnected subscription. Mail, urgent attention, or an eligible idle reminder ends the wait. Only the final foreground read can mark the returned page seen or offer an attention item. Set `attention: false` to wait for mail alone.
 - Pass the `etag` from `task_get`, `get_status`, `worker_list`, `context_get` or `chat_directory` back as `ifNoneMatch`. An unchanged read returns only `{"unchanged":true,"etag":...}`.
 - Find task IDs with `search`, then read the needed `task_get` section. For a synchronized board, use `sinceRevision` and finish every page before saving its checkpoint. Reuse shared notes and cached documentation when the context will be needed again.
 - Acknowledge in your reply: `send_message` with `replyTo` also acknowledges that message if it is in your own inbox, and does nothing otherwise; list any others in `ackMessageIds`.
@@ -283,7 +287,7 @@ A board's approved instructions (lines) and active permissions (grants). Approve
 
 Also skipped: files over 256 KB (8 MB for OpenAPI), symlinks, malformed files, and files past the document or byte limit (until there is room again).
 
-**Sync.** The hub picks up new commits every 5 minutes, and `doc_sync` syncs now (once per 30 seconds). It reads committed files with `git show` only, never your working tree. It fetches and follows the branch on the remote, unless `Fetch` is `false` (the start script's setting): then it reads the local branch only and never fetches. If a sync can't be saved, searches keep the last saved commit. Searches answer from one in-memory index per repository, built at the first search and patched by each sync; `doc_section` loads only the file it reads.
+**Sync.** The hub picks up new commits every 5 minutes, and `doc_sync` syncs now (once per 30 seconds). It reads committed files with `git show` only, never your working tree. It follows the configured branch in the local clone. To index newer upstream commits, update that local branch using your normal Git workflow. If a sync can't be saved, searches keep the last saved commit. Searches answer from one in-memory index per repository, built at the first search and patched by each sync; `doc_section` loads only the file it reads.
 
 | Tool | What it does |
 | --- | --- |
@@ -304,6 +308,22 @@ Pins use the file's recorded `sourceCommit`, which can remain unchanged when oth
 Every tool call goes to the `activity_log` table: time, session, role, tool, result, sizes and duration, never arguments or reply text. Wakes and attention offers and answers are logged too, and so is each hub-internal message a grain refused for good (kind `effect_refused`, which should stay at zero). Logging never slows or fails a call. Raw rows are kept 30 days, then rolled up into `activity_daily`.
 
 Calls may report `callOrigin` as `mcp`, `claude-stop`, `claude-waiter`, `wake-watcher`, `node` or `dashboard`. Missing, invalid and future values remain `unknown`. This untrusted telemetry tag is independent of model/background classification and grants no authority or provider attestation; the hub removes it before aggregate or replay processing. `activity_log.call_origin` and the companion `activity_origin_daily` preserve per-origin call and byte totals through retention. Analytics exposes them in `tool_origin_traffic`; historical daily totals without an origin remain `unknown`. Existing `activity_daily` and `tool_traffic` totals are unchanged.
+
+Background `get_status` callers can also report `watcherReadReason`. The watcher distinguishes initial discovery, target changes, private and control hints, deadlines, subscription and reconnect catch-up, disconnected routes, recovery, pending work, retry and the final pre-dispatch check. Coalesced session hints keep their first cause. Missing and unrecognized reasons count as unknown. This read-only SQLite query counts both retained calls and earlier rollups for the repository bound to `$repo`.
+
+```sql
+SELECT reason, SUM(calls) AS calls
+FROM (
+    SELECT COALESCE(watcher_read_reason, 'unknown') AS reason, COUNT(*) AS calls
+    FROM activity_log
+    WHERE repository_id = $repo AND kind = 'call' AND tool = 'get_status' AND background_call = 1
+    GROUP BY 1
+    UNION ALL
+    SELECT reason, calls FROM activity_watcher_reason_daily WHERE repository_id = $repo
+)
+GROUP BY reason
+ORDER BY calls DESC;
+```
 
 | Counter | Definition |
 | --- | --- |
@@ -372,7 +392,7 @@ Fixed rules spot wasteful patterns. No AI runs in the hub.
 
 Every hour the hub copies the database into `data/analytics`, leaving out sessions, inboxes, credentials and replay caches, and converts it for DuckDB. Queries never touch the live database. One copy is kept, so expect about the database's size on disk.
 
-DuckDB needs its `sqlite` extension. The Windows x64 build is bundled in `extensions/duckdb` (signed, with SHA-256 sums) and unpacked beside the hub at build time, so nothing is downloaded. On other platforms the hub starts anyway, logs one warning, and `analytics_query` answers `AnalyticsUnavailable` until you install it: `dotnet CoCern.Host.dll --install-analytics-extension <folder> [platform]`, then set `Relay:Analytics:ExtensionDirectory` to that folder.
+DuckDB needs its `sqlite` extension. The Windows x64 build is bundled in `extensions/duckdb` (signed, with SHA-256 sums) and unpacked beside the hub at build time, so nothing is downloaded. For another platform, stage a matching signed extension from a local file with `dotnet CoCern.Host.dll --install-analytics-extension <folder> <platform> <local-extension-file>`, then set `Relay:Analytics:ExtensionDirectory` to that folder. The command accepts the raw extension or its `.gz` archive. Omit the file to use the copy bundled for a supported platform. When the extension is missing, the hub can still serve coordination requests and `analytics_query` returns `AnalyticsUnavailable`.
 
 ```json
 { "repositoryId": "cocern", "name": "tokens_per_task", "params": { "days": 7 } }
@@ -440,6 +460,8 @@ Adding the name costs 14 characters in the `analytics_query` forwarding schema, 
 
 ## Other PCs
 
+Use the hub's private LAN address or a hostname that resolves entirely to local addresses. CoCern accepts loopback, private IPv4, IPv4/IPv6 link-local and IPv6 unique-local addresses. The adapter connects directly to a validated address and checks the hub's saved HTTPS certificate fingerprint on enrolled PCs. Public addresses, mixed public/private DNS answers and HTTP redirects are refused.
+
 Each joined PC runs a small background program, the **node**. It joins the hub once, announces the PC's chat routes, and wakes its Codex chats when mail arrives. `chat_directory` also lists open registered sessions without a node, including hub-local chats; those rows have `reachable: false` until a direct route is announced or, for a Claude chat on the hub's own PC, until its Stop-hook waiter is reading the hub (its reads register the session as `waiting`, which makes it reachable for three minutes at a time; a `waiting` mark from before the hub's last restart does not count, so a restarted hub shows such a chat reachable only once its waiter reads again). Existing routes are enriched within about a minute. Nodes match chats that called CoCern within the last 7 days (a running Claude waiter keeps that match fresh).
 
 Directory rows are keyed by repository and session ID. A registered row without a route keeps its reported machine ID and has no invented provider. Registration does not prove a model is running. Closed sessions are removed; revoking a node removes its route, while an otherwise open registered session remains unreachable until normal closure or expiry. `truncated: true` also marks a source that is temporarily unavailable, so absence from an incomplete list does not establish closure.
@@ -494,9 +516,11 @@ An announcing supervised node includes optional `nodeBuild` with `productVersion
 
 **Codex chats** are woken by the node with `codex queue`: never mid-turn, at most one waiting wake per chat, at most one every 3 seconds and 20 per 10 minutes. If a wake's outcome is unknown (the dispatch failed or was cut off), that chat isn't woken again for 10 minutes, and that wake's messages are never sent twice. Codex gives the adapter no chat ID, so the node finds each chat from its transcript.
 
+On Windows desktop builds `26.1111.2228.0` and `26.1111.9664.0` (x64), CoCern follows a successful queue receipt with a local wake link addressed to the running Codex package. The link contains only the chat ID. Codex can then pick up the existing message immediately. Other builds, or a desktop that cannot accept the link, pick up the queued message on their usual schedule.
+
 **Claude Code chats** use the installed CoCern Stop hook to arm their waiter when a turn ends. A manual waiter uses `--await-inbox --chat <CLAUDE_CODE_SESSION_ID>` (see the README). The chat must first have joined CoCern on this PC through the waiter's connection. The waiter accepts either node enrollment or a private local connection, including on the hub's own PC, and follows the latest unambiguous private record of that chat's session. Exit codes: 0 mail arrived, 1 no usable connection or session for that chat, 2 timed out, 3 stopped. `--print-inbox` also prints each message once, and says how many earlier ones are not repeated; `--ack <id,id>` acknowledges them, then waits again. Run only one waiter per chat; its live reads maintain its announced reachability.
 
-A chat is **reachable** when its PC announced within the last 90 seconds of the hub's clock (either side, so a clock set back never keeps a silent PC live for long) and its wake path is running: the node's for Codex, the waiter for Claude. A hub-local Claude chat, which no node announces, is reachable while its own waiter's reads keep it `waiting` (the waiter reads about once a minute; two missed reads end it). `chat_directory` and the dashboard apply the same rule. A `send_message` to a session says `recipientReachable` with its receipt, and a `note` to keep working rather than wait when the recipient cannot be woken now; a message to a chat that is not reachable is stored and read at its next turn.
+For a node-managed chat, **reachable** means the node announced a working wake path within 90 seconds of the hub's clock. On the hub PC, an authenticated background read renews the local route for six minutes for a native Codex watcher or three minutes for a Claude waiter. Changing a chat's display label preserves that route. A successful inbox read alone does not establish one. The `send_message` receipt reports `recipientReachable`. The hub stores the message even when the chat has no confirmed wake route.
 
 `--wake <config>` and `--await-inbox <config>` also take a hand-written config; see `scripts/Start-CoCernWake.ps1`. Watch each chat with only one of them. For an `https://` `relayUrl`, give the hub certificate's SHA-256 `fingerprint` in the config (it wins over `COCERN_FINGERPRINT`); only that certificate is accepted.
 
@@ -595,9 +619,7 @@ Quiet successful background status reads roll up earlier than ordinary activity.
 | `Relay:DocCache:RootDepth` | 2 | Folder levels searched below each root (1 to 4). |
 | `Relay:DocCache:Repositories:N:Id` | | The repository. |
 | `…:ClonePath` | | Its local clone. |
-| `…:Branch`, `…:Remote` | `main`, `origin` | What to follow. |
-| `…:Fetch` | `true` | `false`: never fetch; read the local branch. |
-| `…:TokenFile` | | Read-only token for `git fetch`, sent only to the remote's own HTTPS URL. |
+| `…:Branch` | `main` | Local branch to index. |
 | `…:Patterns:M:Glob`, `…:Patterns:M:Spec` | `**/*.md`, `**/*.txt`, `**/*.json`, `**/*.yaml`, `**/*.yml` as `docs` | Files to read, and their spec name. |
 | `…:Exclude:M` | | More paths to leave out (`node_modules`, `bin`, `obj` and `.git` always are). |
 
@@ -648,7 +670,7 @@ $t = [Convert]::ToHexString([Security.Cryptography.RandomNumberGenerator]::GetBy
 
 Then give those chats `COCERN_TOKEN_FILE=data/worker-token`, or run `--connect --token-file data/worker-token`. Keep the file private.
 
-**OAuth (optional).** For remote clients with their own identity provider: `Relay:OAuth:Authority` (HTTPS issuer), `Relay:OAuth:Audience`, `Relay:OAuth:RequiredScopes:N` (default `relay`), `Relay:OAuth:Resource` (the public HTTPS `/mcp` address; publishes `/.well-known/oauth-protected-resource/mcp`) and `Relay:OAuth:Principals:N` (`Subject`, `PrincipalId`, `IsAdministrator`, `Repositories`). The hub doesn't issue tokens. This is how the ChatGPT chat app would connect; it has not been tested.
+**OAuth**. For LAN clients using a local identity provider, configure `Relay:OAuth:Authority` (local HTTPS issuer), `Relay:OAuth:Audience`, `Relay:OAuth:RequiredScopes:N` (default `relay`), `Relay:OAuth:Resource` (the local HTTPS hub resource) and `Relay:OAuth:Principals:N` (`Subject`, `PrincipalId`, `IsAdministrator`, `Repositories`). The hub publishes protected-resource metadata for `/mcp`. Issuer discovery and signing-key requests stay on loopback or your LAN.
 
 ## Dashboard
 
@@ -690,7 +712,7 @@ Noisiest tools groups each tool by its reported adapter path: model-facing, back
 | `/api/discovery/enroll`, `/api/discovery/announce` | Joining PCs (with discovery on). |
 | `/join/adapter.zip` | The adapter folder that Add another PC's command downloads. No token (it holds no secret); HTTPS, or this PC only; with discovery on. |
 | `/dashboard/` | The dashboard. |
-| `/scalar`, `/openapi/v1.json` | API reference. This PC only. |
+| `/scalar`, `/openapi/v1.json` | API reference on this PC. Scalar serves its interface from the hub, uses system fonts and sends API requests to the same origin. |
 | `/health` | Health check. |
 
 REST replies are `{ "ok": true, "code": "...", "dataJson": "{...}", "version": 1 }`; `dataJson` is a JSON string, so parse it again. Errors: 400 invalid or refused (bad arguments, or a refusal such as `ResourceUnknown` or `ClaimRequired`), 401 no valid token, 403 denied, 404 unknown tool or `NotFound`, 409 a conflict to resolve by reading again (such as `VersionConflict` or `Busy`), 413 too large. The `code` says exactly which. The stdio adapter returns the parsed `data` instead.
@@ -765,6 +787,6 @@ Beyond the unit and integration tests, `scripts/Smoke-CoCern.py` checks a real h
 - Discovery or the dashboard from a second physical PC or phone, through a real firewall.
 - The current Add another PC command on a real Windows PC. It changed after its last live run; tests compile its certificate pin and run it end to end in PowerShell 7 here, and in Windows PowerShell 5.1 only on Windows. Also the Claude desktop app's settings.
 - A real Codex chat woken by the node and found from its transcript.
-- Remote HTTPS with an external OAuth issuer, and the ChatGPT chat app.
+- LAN HTTPS with a separately configured local OAuth issuer.
 - Analytics loading the bundled extension on a real Windows hub.
 - Overall token savings.

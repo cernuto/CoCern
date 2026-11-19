@@ -86,8 +86,14 @@ public sealed class DashboardTests
         using var client = BrowserClient(host);
         var shell = await client.GetAsync("/dashboard/");
         Assert.Equal(HttpStatusCode.OK, shell.StatusCode);
+        Assert.True(shell.Headers.CacheControl?.NoCache);
         Assert.Contains("<base href=\"/dashboard/\"", await shell.Content.ReadAsStringAsync());
-        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/dashboard/sessions")).StatusCode);
+        using var deepLink = await client.GetAsync("/dashboard/sessions");
+        Assert.Equal(HttpStatusCode.OK, deepLink.StatusCode);
+        Assert.True(deepLink.Headers.CacheControl?.NoCache);
+        using var missingAsset = await client.GetAsync("/dashboard/_framework/missing-startup-file.wasm");
+        Assert.Equal(HttpStatusCode.NotFound, missingAsset.StatusCode);
+        Assert.True(missingAsset.Headers.CacheControl?.NoStore);
         Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/unrelated/deep-link")).StatusCode);
     }
 
@@ -111,6 +117,8 @@ public sealed class DashboardTests
             options.Headers["Origin"] = "https://localhost";
         }).Build();
         var frame = new TaskCompletionSource<CoCern.Contracts.Dashboard.DashboardSnapshot>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var sends = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        connection.On<CoCern.Contracts.Dashboard.DashboardSendPulse[]>("directSends", _ => { sends.TrySetResult(); });
         var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         connection.On<CoCern.Contracts.Dashboard.DashboardSnapshot>("snapshot", snapshot => frame.TrySetResult(snapshot));
         connection.Closed += _ => { closed.TrySetResult(); return Task.CompletedTask; };
@@ -119,8 +127,61 @@ public sealed class DashboardTests
         Assert.NotEmpty(observed.InstanceId);
         Assert.True((await connection.InvokeAsync<CoCern.Contracts.Dashboard.DashboardSnapshot>("GetSnapshot")).Revision >= observed.Revision);
         host.Services.GetRequiredService<IConfiguration>()[key] = value;
+        host.Services.GetRequiredService<CoCern.Host.Dashboard.DashboardConnections>().PublishSend(
+            new(Guid.NewGuid().ToString("N"), Guid.NewGuid().ToString("N"), DateTimeOffset.UtcNow));
         Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/dashboard/api/auth")).StatusCode);
         await closed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.False(sends.Task.IsCompleted);
+    }
+
+    [Fact]
+    public async Task Board_stream_targets_its_board_and_revokes_access_before_the_next_broadcast()
+    {
+        await using var host = OperatorHost();
+        using var client = BrowserClient(host);
+        using var login = await client.PostAsJsonAsync("/dashboard/api/login", new { token = RelayHostFixture.Token });
+        login.EnsureSuccessStatusCode();
+        var cookie = Assert.Single(login.Headers.GetValues("Set-Cookie")).Split(';')[0];
+        await using var connection = new HubConnectionBuilder().WithUrl("https://localhost/dashboard/hub/boards", options =>
+        {
+            options.Transports = HttpTransportType.LongPolling;
+            options.HttpMessageHandlerFactory = _ => host.Server.CreateHandler();
+            options.Headers["Cookie"] = cookie;
+            options.Headers["Origin"] = "https://localhost";
+        }).Build();
+        var hints = System.Threading.Channels.Channel.CreateUnbounded<long>();
+        var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        connection.On<long>("BoardChanged", revision => { hints.Writer.TryWrite(revision); });
+        connection.Closed += _ => { closed.TrySetResult(); return Task.CompletedTask; };
+        await connection.StartAsync();
+        await connection.InvokeAsync<string>("WatchBoard", "repo", "default");
+        var page = await connection.InvokeAsync<CoCern.Contracts.Dashboard.DashboardBoardPage>("ReadChanges", 0L, null, 0);
+        Assert.Empty(page.Items);
+        var boards = host.Services.GetRequiredService<CoCern.Host.Dashboard.DashboardBoardNotifier>();
+        await boards.BoardChangedAsync("repo", "other", 100, CancellationToken.None);
+        using var worker = host.AuthorizedClient();
+        var openedReply = await host.Call(worker, "session_open", new { repositoryId = "repo", requestId = "board-observer-session" });
+        using var session = JsonDocument.Parse(openedReply.GetProperty("dataJson").GetString()!);
+        var opened = session.RootElement;
+        async Task CreateTask(string id)
+        {
+            var reply = await host.Call(worker, "task_update", new
+            {
+                repositoryId = "repo", requestId = "create-" + id, taskId = id, expectedVersion = 0,
+                sessionId = opened.GetProperty("sessionId").GetString(), sessionToken = opened.GetProperty("sessionToken").GetString()
+            });
+            Assert.True(reply.GetProperty("ok").GetBoolean(), reply.GetProperty("code").GetString());
+        }
+        await CreateTask("seen");
+        var hint = await hints.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+        var delta = await connection.InvokeAsync<CoCern.Contracts.Dashboard.DashboardBoardPage>("ReadChanges", page.Revision, null, 0);
+        Assert.True(delta.Revision > page.Revision);
+        Assert.Equal(delta.Revision, hint);
+        Assert.Equal("seen", Assert.Single(delta.Items).TaskId);
+        host.Services.GetRequiredService<IConfiguration>()["Relay:Dashboard:ViewerPrincipalIds:0"] = "revoked";
+        await CreateTask("after-revocation");
+        await closed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.False(hints.Reader.TryRead(out _));
     }
 
     [Fact]

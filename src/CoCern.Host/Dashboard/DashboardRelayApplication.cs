@@ -7,7 +7,7 @@ using CoCern.Domain;
 
 namespace CoCern.Host.Dashboard;
 
-public sealed class DashboardRelayApplication(RelayApplication application, DashboardTrafficBuffer traffic, DashboardLogBuffer logs) : IRelayApplication
+public sealed class DashboardRelayApplication(RelayApplication application, DashboardTrafficBuffer traffic, DashboardLogBuffer logs, DashboardConnections connections) : IRelayApplication
 {
     public async Task<RelayReply> ExecuteAsync(RelayCaller caller, string tool, JsonElement arguments, CancellationToken cancellationToken = default)
     {
@@ -20,6 +20,13 @@ public sealed class DashboardRelayApplication(RelayApplication application, Dash
         {
             var result = await application.ExecuteAsync(caller, tool, arguments, cancellationToken);
             traffic.Response(tool, sessionId, correlationId, result.Code, Stopwatch.GetElapsedTime(started).TotalMilliseconds, caller.PrincipalId);
+            if (result.Ok && tool == RelayTools.SendMessage && connections.HasViewers
+                && Guid.TryParseExact(sessionId, "N", out _)
+                && (!arguments.TryGetProperty("taskId", out var task) || task.ValueKind == JsonValueKind.Null
+                    || (task.ValueKind == JsonValueKind.String && string.IsNullOrEmpty(task.GetString())))
+                && arguments.TryGetProperty("recipientSessionId", out var recipient) && recipient.ValueKind == JsonValueKind.String
+                && recipient.GetString() is { } target && Guid.TryParseExact(target, "N", out _))
+                connections.PublishSend(new(sessionId!, target, DateTimeOffset.UtcNow));
             if (!result.Ok) logs.ToolFailure(tool, result.Code, FailureField(result));
             return result;
         }

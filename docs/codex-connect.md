@@ -2,9 +2,11 @@
 
 Open **Connect** on the hub's PC, choose Codex, then open or resume a chat. A new connection uses the standard MCP connector. Native startup hooks and their review are not required for this path.
 
+Codex talks to the adapter on this PC. The adapter connects to the local hub or to the hub on your LAN. Codex uses its own provider and model settings.
+
 The packaged [CoCern workflow skill](../skills/cocern-workflow/SKILL.md) guides the agent through its session, tasks, claims and bounded inbox checks. Setup installs the owned skill at `~/.agents/skills/cocern-workflow/SKILL.md`; a customized skill is retained. Credentials and session handles are not pasted into setup or shared between chats.
 
-**Connected · standard connection** means the app configuration is installed. The chat must load the connector before it can use tools. A stale address, changed certificate or failed configuration remains visible and offers a connection update.
+**Configured · standard MCP** means the app configuration is installed. On **Connect → Verify a Codex chat**, copy the first request into the chat and select its session by label, repository and public ID. The hub reports the first retained successful foreground MCP call authenticated for that session. Startup, background watcher calls, and calls from a different session cannot satisfy this check. The direct wake indicator updates from the same session's current route announcement. An unconfirmed route can still make ordinary tool calls. A stale address, changed certificate or failed configuration remains visible and offers a connection update.
 
 Repair keeps a working standard connection in standard mode. It does not re-enable disabled native hooks, replace unrelated settings or treat the absence of optional native hooks as damage.
 

@@ -155,7 +155,7 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
     }
 
     /// <param name="busy">When given, collects the native chat IDs of bindings skipped because a writer held their lease (<see cref="DispatchSnapshot(string, out IReadOnlySet{string})"/>).</param>
-    private static IReadOnlyList<DispatchRecord> DispatchRecords(string folder, string? exact = null, ISet<string>? busy = null)
+    private static IReadOnlyList<DispatchRecord> DispatchRecords(string folder, string? exact = null, ISet<string>? busy = null, ChatLocation? chat = null)
     {
         var result = new List<DispatchRecord>();
         try
@@ -169,12 +169,12 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
             var reads = new List<StoredRecord>();
             foreach (var path in exact is null ? StateFiles(sessions, CheckoutFolder).Concat(StateFiles(sessions, ChatFolder)) : [exact])
             {
-                if (ReadRecord(folder, identity, path, out var held) is { } read) reads.Add(read);
+                if (ReadRecord(folder, identity, path, out var held, chat) is { } read) reads.Add(read);
                 // A join holds this lease now; its chat comes from the scope fields alone, which need no fence.
                 else if (held && busy is not null) busy.Add(TryPeek(path, folder, identity)?.NativeId ?? AnyChat);
             }
             // An older per-checkout binding is inert once its chat has any binding for that repository, with a session or not.
-            var adopted = exact is null ? ChatScopes(folder, identity, sessions, reads) : [];
+            var adopted = exact is null && reads.Any(read => !read.Record.PerChat) ? ChatScopes(folder, identity, sessions, reads) : [];
             // A session the hub already answered SessionUnknown for is neither dispatched nor polled again until the chat reopens it.
             result.AddRange(reads.Where(read => !read.Unknown && (read.Record.PerChat || !adopted.Contains(Scope(read.State)))).Select(read => read.Record));
         }
@@ -224,7 +224,7 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
 
     /// <summary>One binding's state with a verified current handle, read under its writer fence; null when it is busy, foreign, invalid or holds no session.</summary>
     /// <param name="busy">True when it was null because a writer (a join in progress) holds the lease: a sharing violation, not a refusal.</param>
-    private static StoredRecord? ReadRecord(string folder, string identity, string path, out bool busy)
+    private static StoredRecord? ReadRecord(string folder, string identity, string path, out bool busy, ChatLocation? chat = null)
     {
         busy = false;
         try
@@ -239,7 +239,9 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
             // A read-only observation verified the connection's identity once for all its records, and drops this snapshot when it returns. Anything
             // that acts on the record (a dispatch fence) checks the identity again at each step, as every binding does.
             var snapshot = new NativeJoinBinding(folder, state, identity, reader) { identityVerified = NodeState.Observing };
-            if (snapshot.CurrentHandle is not { } current || current.SessionId != id) return null;
+            // The binding's validated native scope can exclude other chats before reading their session handles.
+            if (chat is not null && !snapshot.MatchesClient(chat)) return null;
+            if (snapshot.OwnedHandle(id) is not { } current || current.SessionId != id) return null;
             return new(new(path, current, snapshot.Generation, File.GetLastWriteTimeUtc(path), state.Version == StateVersion), state, UnknownSession(path) == current.SessionId);
         }
         catch (IOException error) when ((error.HResult & 0xffff) is 32 or 33) { busy = true; return null; }
@@ -359,7 +361,7 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
         public IDisposable? TryAcquire(string thread)
         {
             if (expected.Chat?.ThreadId != thread) return null;
-            var matches = DispatchRecords(folder).Where(row => row.Handle.Chat == expected.Chat).Take(2).ToArray();
+            var matches = DispatchRecords(folder, chat: expected.Chat).Where(row => row.Handle.Chat == expected.Chat).Take(2).ToArray();
             if (matches.Length != 1 || matches[0].Handle != expected) return null;
             var path = matches[0].Path;
             FileStream? binding = null, handle = null;
@@ -595,7 +597,7 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
     /// authorized its repository for this credential, its session is probed before use, and any open it makes carries this checkout's evidence,
     /// which the hub resolves again (<c>CheckedNativeResolution</c>) and must find to be this same repository.</para>
     /// </summary>
-    internal static string? KnownRepository(string folder, string provider, string nativeId, string machineId, string checkout, JsonElement evidence)
+    internal static string? KnownRepository(string folder, string provider, string nativeId, string machineId, string checkout, Func<JsonElement> evidence)
     {
         try
         {
@@ -613,20 +615,26 @@ internal sealed class NativeJoinBinding : IAsyncDisposable
             catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException) { }
             static string? Field(JsonElement value, string name) =>
                 value.ValueKind == JsonValueKind.Object && value.TryGetProperty(name, out var field) && field.ValueKind == JsonValueKind.String ? field.GetString() : null;
-            bool SameRepository(JsonElement saved, string name) => Field(saved, name) is { } frozen && Field(evidence, name) == frozen;
-            var here = new HashSet<string>(StringComparer.Ordinal);
-            var related = new HashSet<string>(StringComparer.Ordinal);
+            var known = new HashSet<string>(StringComparer.Ordinal);
+            var otherCheckouts = new List<(string Repository, JsonElement Evidence)>();
             foreach (var path in StateFiles(sessions, ChatFolder).Concat(StateFiles(sessions, CheckoutFolder)))
             {
                 // Scope fields and frozen evidence only, read as the dispatch observation reads them; another credential's files never parse here.
                 if (TryPeek(path, folder, identity) is not { } state || state.Provider != provider || state.NativeId != nativeId || state.Machine != machineId) continue;
                 var anchor = Field(state.Arguments.GetProperty("nativeJoin"), "workspace");
                 if (spellings.Contains(state.Workspace) || state.Unrecorded is { } skipped && spellings.Contains(skipped) || anchor is not null && spellings.Contains(anchor))
-                    here.Add(state.Repository);
-                else if (state.Resolution is { } saved && (SameRepository(saved, "common") || SameRepository(saved, "origin")))
-                    related.Add(state.Repository);
+                    known.Add(state.Repository);
+                else if (state.Resolution is { } saved)
+                    otherCheckouts.Add((state.Repository, saved));
             }
-            var known = here.Count > 0 ? here : related;
+            if (known.Count == 0 && otherCheckouts.Count > 0)
+            {
+                var current = evidence();
+                bool Matches(JsonElement saved, string name) => Field(saved, name) is { } frozen && Field(current, name) == frozen;
+                foreach (var candidate in otherCheckouts)
+                    if (Matches(candidate.Evidence, "common") || Matches(candidate.Evidence, "origin"))
+                        known.Add(candidate.Repository);
+            }
             return known.Count == 1 && known.Single() is var repository && CoCern.Contracts.NativeGitOrigin.ValidRepositoryHint(repository) ? repository : null;
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or JsonException or KeyNotFoundException)

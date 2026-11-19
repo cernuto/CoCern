@@ -1,7 +1,7 @@
 <section class="activity-board @(Live ? "" : "board-paused")" aria-labelledby="board-heading">
     <div class="board-heading">
-        <div><h2 id="board-heading">Machines and sessions</h2><p>Select a session to inspect its activity and reported connection.</p></div>
-        <BbBadge Variant="BadgeVariant.Outline">@Snapshot.Sessions.Length sessions</BbBadge>
+        <div><h2 id="board-heading">Machines and sessions</h2>@if (Snapshot.SessionsTruncated) { <p>Showing @Snapshot.Sessions.Length of @Snapshot.Host.SessionCount sessions.</p> }</div>
+        <a href="sessions">View sessions →</a>
     </div>
     <div class="station-grid">
         @foreach (var machine in Stations)
@@ -32,9 +32,9 @@
                 <div class="station-sessions">
                     @foreach (var session in sessions)
                     {
-                        <BbButton Variant="ButtonVariant.Ghost" @key="session.SessionId" title="@(session.Reachable ? "Direct chat route available: the hub can wake this chat. This does not indicate whether a model is running." : "No direct chat route: the hub has no current wake route for this chat. MCP calls and inbox communication can still work.")" Class="@($"session-node {(SelectedId == session.SessionId ? "selected" : "")} {(IsPulsing(session.SessionId) ? "signal" : "")}")" aria-pressed="@(SelectedId == session.SessionId ? "true" : "false")" OnClick="() => OnSelect.InvokeAsync(session.SessionId)">
+                        <BbButton Variant="ButtonVariant.Ghost" @key="session.SessionId" title="Open session details" Class="@($"session-node {(IsPulsing(session.SessionId) ? "signal" : "")}")" OnClick="() => OnSelect.InvokeAsync(session.SessionId)">
                             <span class="session-avatar" aria-hidden="true">@SessionTokenLetters(session)</span>
-                            <span class="node-copy"><strong>@session.Label</strong><span>@(string.IsNullOrWhiteSpace(session.Provider) ? "Session" : session.Provider)</span></span>
+                            <span class="node-copy"><strong>@(string.IsNullOrWhiteSpace(session.Label) ? session.SessionId : session.Label)</strong><span>@(string.IsNullOrWhiteSpace(session.Provider) ? "Session" : session.Provider)</span></span>
                             <span class="node-meta">@TrafficNote(session)<span class="visually-hidden">, @(session.Reachable ? "direct chat route available" : "no direct chat route")</span></span>
                         </BbButton>
                     }
@@ -54,7 +54,6 @@
 
 @code {
     [Parameter, EditorRequired] public DashboardSnapshot Snapshot { get; set; } = new();
-    [Parameter] public string? SelectedId { get; set; }
     [Parameter] public EventCallback<string> OnSelect { get; set; }
     [Parameter] public DateTimeOffset Now { get; set; }
     [Parameter] public bool Live { get; set; }
@@ -77,12 +76,26 @@
 
     private string TrafficNote(DashboardSession session)
     {
-        var latest = Snapshot.Traffic.Where(entry => entry.SessionId == session.SessionId).MaxBy(entry => entry.Sequence);
-        if (latest is null) return session.LastActivityAt is null ? "No activity yet" : DashboardFormat.Ago(session.LastActivityAt, Now);
+        if (!latestBySession.TryGetValue(session.SessionId, out var latest)) return session.LastActivityAt is null ? "No activity yet" : DashboardFormat.Ago(session.LastActivityAt, Now);
         var kind = latest.Kind.ToLowerInvariant() switch { "request" => "Request", "response" => "Response", "push" => "Push", _ => "Event" };
         return $"{kind} {DashboardFormat.Ago(latest.Timestamp, Now).ToLowerInvariant()}";
     }
 
-    private DashboardStation[] Stations => DashboardStations.Build(Snapshot);
+    private DashboardSnapshot? indexedSnapshot;
+    private DashboardStation[] Stations = [];
+    private readonly Dictionary<string, DashboardTrafficEvent> latestBySession = new(StringComparer.Ordinal);
+
+    protected override void OnParametersSet()
+    {
+        if (ReferenceEquals(indexedSnapshot, Snapshot)) return;
+        indexedSnapshot = Snapshot;
+        Stations = DashboardStations.Build(Snapshot);
+        latestBySession.Clear();
+        foreach (var entry in Snapshot.Traffic)
+        {
+            if (entry.SessionId is { } id && (!latestBySession.TryGetValue(id, out var previous) || entry.Sequence > previous.Sequence))
+                latestBySession[id] = entry;
+        }
+    }
 }
 

@@ -9,6 +9,7 @@ using Orleans.Runtime;
 using CoCern.Contracts;
 using CoCern.Domain;
 using CoCern.Domain.Messages;
+using CoCern.Domain.State;
 using static CoCern.Domain.JsonFields;
 
 namespace CoCern.Core;
@@ -138,7 +139,7 @@ public interface IMachineDirectory
     Task<RelayReply> RevokeAsync(RelayCaller administrator, string machineId, CancellationToken ct);
 }
 
-public sealed class MachineDirectory(IGrainFactory grains, TimeProvider? clock = null) : IMachineDirectory
+public sealed class MachineDirectory(IGrainFactory grains, TimeProvider? clock = null, IMachineRevocationListener? listener = null) : IMachineDirectory
 {
     private static readonly TimeSpan CacheLifetime = TimeSpan.FromSeconds(30);
     private static readonly RelayCaller Internal = new("relay-discovery", false, [], true);
@@ -238,15 +239,25 @@ public sealed class MachineDirectory(IGrainFactory grains, TimeProvider? clock =
             anySource |= available;
             incomplete |= !complete;
             var open = workers.Select(item => Field(item, "sessionId")).OfType<string>().ToHashSet(StringComparer.Ordinal);
+            var localRoutes = workers.Where(worker => Field(worker, DirectoryEntry.LocalWakeProviderKey) is not null)
+                .ToDictionary(worker => Field(worker, "sessionId")!, worker => Field(worker, DirectoryEntry.LocalWakeProviderKey)!, StringComparer.Ordinal);
             foreach (var item in announced?["items"] as JsonArray ?? [])
-                if (Field(item, "repositoryId") == repository && Field(item, "relaySessionId") is { Length: > 0 } id && (!complete || open.Contains(id)) && seen.Add((repository, id))) items.Add(item!.DeepClone());
+                if (Field(item, "repositoryId") == repository && Field(item, "relaySessionId") is { Length: > 0 } id && (!complete || open.Contains(id)) && seen.Add((repository, id)))
+                {
+                    var route = item!.DeepClone();
+                    if (route["reachable"]?.GetValue<bool>() != true && localRoutes.TryGetValue(id, out var provider))
+                    {
+                        route["provider"] = provider;
+                        route["reachable"] = true;
+                    }
+                    items.Add(route);
+                }
             foreach (var worker in workers)
                 if (Field(worker, "sessionId") is { Length: > 0 } id && seen.Add((repository, id)))
                 {
-                    // No node announces a hub-local Claude chat; its own waiter's reads register it as waiting, and that waiter is its wake route.
-                    var waiting = Field(worker, "availability") == ToolRouter.WaitingAvailability && worker["stale"]?.GetValue<bool>() != true;
-                    var item = new JsonObject { ["repositoryId"] = repository, ["relaySessionId"] = id, ["label"] = Field(worker, "label") ?? "", ["reachable"] = waiting };
-                    if (waiting) item["provider"] = ChatProviders.Claude;
+                    var provider = Field(worker, DirectoryEntry.LocalWakeProviderKey);
+                    var item = new JsonObject { ["repositoryId"] = repository, ["relaySessionId"] = id, ["label"] = Field(worker, "label") ?? "", ["reachable"] = provider is not null };
+                    if (provider is not null) item["provider"] = provider;
                     if (Field(worker, "machineId") is { Length: > 0 } machineId) item["machineId"] = machineId;
                     items.Add(item);
                 }
@@ -263,7 +274,9 @@ public sealed class MachineDirectory(IGrainFactory grains, TimeProvider? clock =
     private async Task<(List<JsonObject> Workers, bool Complete, bool Available)> DirectoryWorkersAsync(string repository, string? hubIncarnation, CancellationToken ct)
     {
         var workers = new List<JsonObject>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
         var cursor = 0;
+        string? snapshotTag = null;
         var available = false;
         try
         {
@@ -273,16 +286,22 @@ public sealed class MachineDirectory(IGrainFactory grains, TimeProvider? clock =
                 // worker_list judges presence stale when it is from another incarnation than the one in its arguments; CallGuard stamps it on
                 // public calls, and this internal read must give it too or a hub-local waiter's fresh "waiting" presence reads as stale.
                 var args = new JsonObject { ["repositoryId"] = repository, ["cursor"] = cursor, ["limit"] = RelayLimits.MaxPageSize, ["includeStale"] = true };
+                args["snapshotTag"] = snapshotTag;
                 if (!string.IsNullOrEmpty(hubIncarnation)) args["hubIncarnation"] = hubIncarnation;
                 var found = await grains.GetGrain<IControlGrain>(AggregateKinds.ControlKey).ExecuteAsync(new RelayCaller(Internal.PrincipalId, false, [repository], true), RelayTools.WorkerList, args.ToJsonString());
                 if (!found.Ok || JsonNode.Parse(found.DataJson) is not JsonObject data || data["items"] is not JsonArray page) break;
                 available = true;
-                foreach (var item in page.OfType<JsonObject>())
+                var pageTag = data["snapshotTag"]?.GetValue<string>();
+                if (cursor == 0) snapshotTag = pageTag;
+                else if (pageTag != snapshotTag) break;
+                foreach (var row in page)
                 {
-                    if (item["sessionId"] is not JsonValue || item["repositoryId"]?.GetValue<string>() != repository) return (workers, false, available);
+                    if (row is not JsonObject item || item["sessionId"]?.GetValue<string>() is not { Length: > 0 } id ||
+                        item["repositoryId"]?.GetValue<string>() != repository || !seen.Add(id)) return (workers, false, available);
                     workers.Add(item);
                 }
-                if (data["nextCursor"] is null) return (workers, data["truncated"]?.GetValue<bool>() != true, available);
+                // Older grains supply no tag. Their multi-page result cannot prove an absent session closed.
+                if (data["nextCursor"] is null) return (workers, (cursor == 0 || snapshotTag is not null) && data["truncated"]?.GetValue<bool>() != true, available);
                 var next = data["nextCursor"]!.GetValue<int>();
                 if (next <= cursor || next >= RelayLimits.MaxRecords) break;
                 cursor = next;
@@ -305,13 +324,23 @@ public sealed class MachineDirectory(IGrainFactory grains, TimeProvider? clock =
 
     public async Task<RelayReply> RevokeAsync(RelayCaller administrator, string machineId, CancellationToken ct)
     {
-        try { return await CallAsync(administrator with { IsInternal = true }, DiscoveryOperations.Revoke, new() { ["machineId"] = machineId }, ct); }
+        ct.ThrowIfCancellationRequested();
+        if (!administrator.IsAdministrator) return Replies.Error(RelayErrorCodes.AdministratorRequired);
+        RelayReply? reply = null;
+        try
+        {
+            reply = await CallAsync(administrator with { IsInternal = true }, DiscoveryOperations.Revoke, new() { ["machineId"] = machineId }, CancellationToken.None);
+            return reply;
+        }
         finally
         {
-            // Bump after the call settles, then evict (even when it failed: a revocation that may have committed must not leave a usable cached credential).
-            // A validation that started before this point re-checks the counter after writing its entry and removes it.
-            Interlocked.Increment(ref revocations);
-            foreach (var entry in cache.Where(x => x.Value.Machine.MachineId == machineId)) cache.TryRemove(entry.Key, out _);
+            // A lost RPC response or failed storage acknowledgement can follow a durable revocation.
+            if (reply is null || reply.Ok || reply.Code == RelayErrorCodes.StorageFailure)
+            {
+                Interlocked.Increment(ref revocations);
+                foreach (var entry in cache.Where(x => x.Value.Machine.MachineId == machineId)) cache.TryRemove(entry.Key, out _);
+                listener?.MachineRevoked(machineId);
+            }
         }
     }
 

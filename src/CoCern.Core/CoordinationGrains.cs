@@ -28,6 +28,8 @@ public interface IAnomalyMonitorGrain : IRelayAggregateGrain;
 public abstract class CoordinationGrain(IPersistentState<StateEnvelope<CoordinationDocument>> persistent, IGrainFactory grains, IServiceProvider services) : Grain, IRelayAggregateGrain
 {
     private static readonly TimeSpan RedeliveryDelay = TimeSpan.FromSeconds(5);
+    private protected static readonly TimeSpan HintTimeout = TimeSpan.FromSeconds(2);
+    private protected StateEnvelope<CoordinationDocument> CommittedState => persistent.State;
     protected abstract string Kind { get; }
     private bool uncertainCommit;
     protected bool TryGetCommittedDocument(out CoordinationDocument document)
@@ -44,6 +46,7 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
 
     /// <summary><c>Relay:Board:ArchiveAfterDays</c>, or its default when the host registers no board options.</summary>
     private protected int ArchiveAfterDays => services.GetService<BoardOptions>()?.ArchiveAfterDays ?? RelayLimits.DefaultArchiveAfterDays;
+    private protected int AttentionHoldMinutes => services.GetService<AttentionOptions>() is { Enabled: true } options ? options.MaxHoldMinutes : 0;
 
     /// <summary>
     /// Runs this aggregate's own due checks before its outbox is delivered, committing what they change and raise. Returns false when
@@ -177,15 +180,9 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
             if (failure == EffectDelivery.Failure.DropAndCount) RecordRefused(effect, payload, result);
             // A message wakes its chat only with attention off; with it on, only top-tier items (and the idle hold) wake.
             if (effect.TargetKind == AggregateKinds.Session && effect.Operation == Operations.Deliver && attention is { Enabled: false }) RecordWake(effect.TargetKey, payload, result);
-            // Only a new top-tier attention item may wake its chat, so only that one counts as a wake and sends a hint.
+            // A newly urgent item counts as an immediate attention wake. The recipient publishes its own committed hints.
             var urgent = effect.TargetKind == AggregateKinds.Session && effect.Operation == Operations.AttentionRaise && result.Ok && EffectDelivery.UrgentRaise(payload, result);
             if (urgent) RecordWake(effect.TargetKey, payload, Replies.Ok(new { delivered = true }));
-            if (effect.TargetKind == AggregateKinds.Session && (effect.Operation == Operations.Deliver || urgent) && services.GetService<ICoordinationNotifier>() is { } notifier)
-            {
-                // Hints are best effort; the durable inbox remains authoritative.
-                try { await notifier.NotifyAsync(effect.TargetKey, urgent ? "attention:" + JsonFields.Text(JsonNode.Parse(result.DataJson)!.AsObject(), "itemId") : JsonFields.Text(payload, "messageId")); }
-                catch (Exception) { }
-            }
             candidate = Clone(persistent.State);
         }
         // A filtered dispatch (one operation or action) ran no due checks, so it must not clear them.
@@ -207,7 +204,8 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
 
     /// <summary>Applies an operation to this aggregate's working copy, with the hub's archive setting; every call and self-driven check goes through it.</summary>
     private protected RelayReply ApplyInternal(StateEnvelope<CoordinationDocument> candidate, RelayCaller caller, string operation, JsonObject args, DateTimeOffset now, bool ordersEnabled = false) =>
-        CoordinationStateMachine.Apply(candidate, Kind, this.GetPrimaryKeyString(), caller, operation, args, now, ordersEnabled, ArchiveAfterDays);
+        CoordinationStateMachine.Apply(candidate, Kind, this.GetPrimaryKeyString(), caller, operation, args, now, ordersEnabled, ArchiveAfterDays,
+            Kind == AggregateKinds.Session ? AttentionHoldMinutes : 0);
 
     /// <summary>
     /// A malformed effect is logged once per effect at Error level (<see cref="EffectDelivery.LogMalformed"/>). One that is retried is also
@@ -262,7 +260,7 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
     {
         var previous = persistent.State;
         persistent.State = candidate;
-        try { await persistent.WriteStateAsync(); return true; }
+        try { await persistent.WriteStateAsync(); }
         catch (Exception)
         {
             // Reload reconciles uncertain writes before any further operation or dependent effect.
@@ -273,6 +271,25 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
             finally { DeactivateOnIdle(); }
             return false;
         }
+        var hint = candidate.Value.TakeHint();
+        if (hint is not null && services.GetService<ICoordinationNotifier>() is { } notifier)
+        {
+            // Listener failure cannot change the outcome of a committed command. Recovery reads cover lost hints.
+            try
+            {
+                using var deadline = new CancellationTokenSource(HintTimeout);
+                await (hint switch
+                {
+                    CoordinationHint.Board board => notifier.BoardChangedAsync(board.RepositoryId, board.BoardId, board.Revision, deadline.Token),
+                    CoordinationHint.Dispatch => notifier.DispatchChangedAsync(deadline.Token),
+                    CoordinationHint.Session session => notifier.NotifyAsync(session.SessionId, session.EventId, deadline.Token),
+                    CoordinationHint.SessionClosed closed => notifier.SessionClosedAsync(closed.SessionId, deadline.Token),
+                    _ => Task.CompletedTask
+                }).WaitAsync(deadline.Token);
+            }
+            catch (Exception error) { services.GetService<ILogger<CoordinationGrain>>()?.LogWarning(error, "Post-commit coordination notification failed"); }
+        }
+        return true;
     }
 
     private protected static StateEnvelope<CoordinationDocument> Clone(StateEnvelope<CoordinationDocument> state) => new()
@@ -303,7 +320,35 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
 
 [GrainType("cocern.session")]
 public sealed class SessionGrain([PersistentState("session", "relay")] IPersistentState<StateEnvelope<CoordinationDocument>> state, IGrainFactory grains, IServiceProvider services) : CoordinationGrain(state, grains, services), ISessionGrain
-{ protected override string Kind => AggregateKinds.Session; }
+{
+    protected override string Kind => AggregateKinds.Session;
+
+    public override async Task OnActivateAsync(CancellationToken cancellationToken)
+    {
+        var candidate = Clone(CommittedState);
+        if (CoordinationStateMachine.RestoreAttentionDeadline(candidate, Now, AttentionHoldMinutes) && !await CommitAsync(candidate))
+            throw new InvalidOperationException("Could not restore the session attention deadline.");
+    }
+
+    private protected override async Task<bool> RunDueChecksAsync(StateEnvelope<CoordinationDocument> candidate, DateTimeOffset now, string workId)
+    {
+        bool Due(string kind) => candidate.DueWork.Any(work => work.Kind == kind && work.DueAt <= now && (workId.Length == 0 || workId == work.Id));
+        if (Due(DueWorkKinds.SessionClosedHint))
+        {
+            // A crash after committing the close or a failed cleanup retries this idempotent removal.
+            if (Services.GetService<ICoordinationNotifier>() is { } notifier)
+            {
+                using var deadline = new CancellationTokenSource(HintTimeout);
+                await notifier.SessionClosedAsync(this.GetPrimaryKeyString(), deadline.Token).WaitAsync(deadline.Token);
+            }
+            candidate.DueWork.RemoveAll(work => work.Kind == DueWorkKinds.SessionClosedHint);
+            return await CommitAsync(candidate);
+        }
+        if (!Due(DueWorkKinds.AttentionDeadline)) return true;
+        CoordinationStateMachine.AdvanceAttentionDeadline(candidate, this.GetPrimaryKeyString(), now, AttentionHoldMinutes);
+        return await CommitAsync(candidate);
+    }
+}
 
 [GrainType("cocern.board")]
 public sealed class TaskBoardGrain([PersistentState("board", "relay")] IPersistentState<StateEnvelope<CoordinationDocument>> state, IGrainFactory grains, IServiceProvider services) : CoordinationGrain(state, grains, services), ITaskBoardGrain
@@ -318,14 +363,17 @@ public sealed class TaskBoardGrain([PersistentState("board", "relay")] IPersiste
     /// </summary>
     private protected override async Task<bool> RunDueChecksAsync(StateEnvelope<CoordinationDocument> candidate, DateTimeOffset now, string workId)
     {
-        if (!candidate.DueWork.Any(x => x.Kind == DueWorkKinds.TaskArchive && x.DueAt <= now && (workId.Length == 0 || x.Id == workId))) return true;
+        bool Due(string kind) => candidate.DueWork.Any(x => x.Kind == kind && x.DueAt <= now && (workId.Length == 0 || x.Id == workId));
+        var archive = Due(DueWorkKinds.TaskArchive);
+        if (!archive && !Due(DueWorkKinds.Lease)) return true;
         var repository = JsonFields.Text(JsonNode.Parse(candidate.Value.Json)!.AsObject(), "repositoryId");
         if (repository.Length == 0) return true;
         var sweeper = new RelayCaller("relay-archive", false, [repository], true);
         // The board's own ID, so the attention closes it emits name this board and not the default one.
         var sweep = new TaskArchiveSweep(repository, BoardId(this.GetPrimaryKeyString()));
-        if (!ApplyInternal(candidate, sweeper, TaskArchiveSweep.Operation, sweep.ToJson(), now).Ok)
+        if (!ApplyInternal(candidate, sweeper, archive ? TaskArchiveSweep.Operation : Operations.TaskLeaseDeadline, sweep.ToJson(), now).Ok)
         {
+            if (!archive) return false;
             // A sweep the board refuses would otherwise stay due and run on every pump: try again after a backoff.
             candidate.DueWork.RemoveAll(x => x.Kind == DueWorkKinds.TaskArchive);
             candidate.DueWork.Add(new(DueWorkKinds.TaskArchiveRetry, DueWorkKinds.TaskArchive, now.AddMinutes(RelayLimits.ArchiveRetryMinutes)));

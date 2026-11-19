@@ -63,9 +63,9 @@ internal static class NativeStartupEvidence
             if (File.Exists(Path.Combine(binding.Folder, "stop")) || WakePath(binding.Folder, handle) is not { } path ||
                 !NodeState.IsPrivateFile(path) || new FileInfo(path).Length > 2048) return false;
             var saved = JsonSerializer.Deserialize<WakeReceipt>(File.ReadAllBytes(path));
-            // A healthy hinted watcher polls at least once a minute; a stale poll cannot establish readiness.
+            // An idle watcher with working hints uses the same observation lifetime as the hub's wake directory.
             if (saved is null || saved.SessionId != handle.SessionId || saved.Generation != binding.Generation ||
-                saved.VerifiedAt > DateTimeOffset.UtcNow.AddSeconds(5) || saved.VerifiedAt < DateTimeOffset.UtcNow.AddSeconds(-90)) return false;
+                saved.VerifiedAt > DateTimeOffset.UtcNow.AddSeconds(5) || saved.VerifiedAt < DateTimeOffset.UtcNow.AddMinutes(-RelayLimits.CodexWakeFreshMinutes)) return false;
             using var process = Process.GetProcessById(saved.ProcessId);
             return !process.HasExited && process.StartTime.ToUniversalTime() == saved.StartedAt;
         }
@@ -82,22 +82,17 @@ internal static class NativeStartupEvidence
             binding.NativeId, binding.Workspace, handle.RepositoryId, handle.SessionId, binding.Generation, DateTimeOffset.UtcNow)));
     }
 
-    // A genuine PreToolUse has already generated this stamp. Evidence is best-effort and may never join or repair a session.
-    internal static async Task RecordStampedAsync(NativeRegistration registration, NativeJoin join, NativeHookContext context, JsonElement updated, CancellationToken ct)
+    // The signer still holds the binding lease that produced this stamp. Evidence is best-effort and may never join or repair a session.
+    internal static void RecordStamped(NativeRegistration registration, NativeJoinBinding binding, NativeHookContext context, JsonElement updated, CancellationToken ct)
     {
         try
         {
-            if (registration.Provider != "codex" || context.Provider != "codex" || !registration.StillCurrent() ||
-                !Guid.TryParse(context.NativeId, out var nativeId) || !updated.TryGetProperty("_cocernNative", out var stamp) ||
-                ChatLocators.Text(stamp, "provider") != context.Provider || ChatLocators.Text(stamp, "nativeId") != nativeId.ToString("D") ||
-                ChatLocators.Text(stamp, "repositoryId") is not { } repository || ChatLocators.Text(stamp, "cwd") is not { } workspace ||
-                ChatLocators.Text(stamp, "generation") is not { } generation) return;
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            timeout.CancelAfter(TimeSpan.FromMilliseconds(250));
-            await using var binding = await NativeJoinBinding.AcquireAsync(join.PrivateFolder, "codex", nativeId.ToString("D"), Environment.MachineName,
-                repository, workspace, timeout.Token, existingOnly: true,
-                authenticate: candidate => candidate.Generation == generation && candidate.CurrentHandle is not null);
-            if (binding.Generation != generation || binding.CurrentHandle is not { } handle || !registration.StillCurrent()) return;
+            if (ct.IsCancellationRequested || registration.Provider != "codex" || context.Provider != "codex" || !registration.StillCurrent() ||
+                binding.Provider != context.Provider || !Guid.TryParse(context.NativeId, out var nativeId) || binding.NativeId != nativeId.ToString("D") ||
+                !updated.TryGetProperty("_cocernNative", out var stamp) || ChatLocators.Text(stamp, "provider") != binding.Provider ||
+                ChatLocators.Text(stamp, "nativeId") != binding.NativeId || ChatLocators.Text(stamp, "repositoryId") != binding.RepositoryId ||
+                ChatLocators.Text(stamp, "cwd") != binding.Workspace || ChatLocators.Text(stamp, "generation") != binding.Generation ||
+                binding.CurrentHandle is not { } handle || ct.IsCancellationRequested || !registration.StillCurrent()) return;
             NodeState.WritePrivately(PathFor(registration), JsonSerializer.SerializeToUtf8Bytes(new Receipt(registration.Definition, registration.Profile,
                 binding.NativeId, binding.Workspace, handle.RepositoryId, handle.SessionId, binding.Generation, DateTimeOffset.UtcNow)));
         }

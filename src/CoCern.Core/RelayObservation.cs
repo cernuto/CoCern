@@ -35,6 +35,8 @@ public sealed record RelayObservation
     public int SessionCount { get; init; }
     public DashboardMachine[] Machines { get; init; } = [];
     public DashboardSession[] Sessions { get; init; } = [];
+    /// <summary>Current sessions whose activity timestamps could not be sampled within the observation budget.</summary>
+    public string[] UnobservedActivitySessionIds { get; init; } = [];
     public bool SessionsTruncated { get; init; }
     public DashboardInteractions Interactions { get; init; } = new();
     /// <summary>The reports of the sessions in <see cref="Sessions"/>, read from the same rows; <see cref="SessionsTruncated"/> says some sessions were not read.</summary>

@@ -64,7 +64,7 @@ else
                                     <li><span class="readiness-marker" aria-hidden="true">@(client.Readiness is { HooksInstalled: true, SkillInstalled: true } ? "✓" : "1")</span><div><strong>Existing native setup</strong><small>@(client.Readiness is { HooksInstalled: true, SkillInstalled: true } ? "Native hooks and the CoCern workflow skill are installed." : "Native hooks are managed separately. Updating the connection does not install them.")</small></div></li>
                                     <li><span class="readiness-marker" aria-hidden="true">@(client.Readiness?.StartupObserved == true ? "✓" : "2")</span><div><strong>Review hooks and use CoCern</strong><small>@(client.Readiness?.StartupObserved == true ? "A genuine CoCern hook was received." : "In Codex, review the CoCern hooks if needed, then use a CoCern tool. This chat joins automatically on its first call.")</small></div></li>
                                     <li><span class="readiness-marker" aria-hidden="true">@(client.Readiness?.SessionVerified == true ? "✓" : "3")</span><div><strong>Verify the session</strong><small>@(client.Readiness?.SessionVerified == true ? "The native session and repository were verified with the hub." : "CoCern verifies the captured chat identity and resolves the repository automatically.")</small></div></li>
-                                    <li><span class="readiness-marker" aria-hidden="true">@(client.Readiness?.WakeReady == true ? "✓" : "4")</span><div><strong>Check the wake route</strong><small>@(client.Readiness?.WakeReady == true ? "The session can receive CoCern wake notifications." : "Keep Codex and the local CoCern node running so the session can receive attention.")</small></div></li>
+                                    <li><span class="readiness-marker" aria-hidden="true">@(client.Readiness?.WakeReady == true ? "✓" : "4")</span><div><strong>Startup wake check</strong><small>@(client.Readiness?.WakeReady == true ? "The startup check observed a wake route at the time shown below." : "Keep Codex and its CoCern watcher running to verify a route.")</small></div></li>
                                 </ol>
                                 @if (client.Readiness?.Detail is { Length: > 0 } detail)
                                 {
@@ -123,10 +123,17 @@ else
             </details>
         }
     </BbCard>
+    <BbCard role="region" Class="surface connect-view" aria-labelledby="codex-chat-check-heading">
+        <h2 id="codex-chat-check-heading">Verify a Codex chat</h2>
+        <CodexChatCheck Snapshot="@Snapshot" Fresh="@Fresh" Now="@Now" ConfigurationLabel="@ConfigurationLabel" />
+    </BbCard>
 }
 
 @code {
     [Parameter] public bool Compact { get; set; }
+    [Parameter] public DashboardSnapshot? Snapshot { get; set; }
+    [Parameter] public bool Fresh { get; set; }
+    [Parameter] public DateTimeOffset Now { get; set; }
     private DashboardConnectStatus? _status;
     private string? _busy;
     // The app whose installation checks _status carries: the last one connected here.
@@ -162,6 +169,18 @@ else
 
     private static bool IsStandardConnection(DashboardCodexReadiness? readiness) => readiness?.State == "standard";
 
+    private static bool IsConfigured(DashboardConnectClient client) => client.State is ConnectStates.Connected or ConnectStates.Added or ConnectStates.Updated;
+
+    private string ConfigurationLabel => _status?.Clients.FirstOrDefault(client => client.Id == ConnectClients.Codex) switch
+    {
+        null => "Unknown",
+        var client when IsConfigured(client) => "Configured",
+        { State: ConnectStates.OtherHub } => "Configured for another hub",
+        { State: ConnectStates.Outdated } => "Update required",
+        { State: ConnectStates.Available } => "Connect Codex above",
+        _ => "Needs attention"
+    };
+
     private static bool IsReady(DashboardConnectClient client) => (client.State is ConnectStates.Connected or ConnectStates.Added or ConnectStates.Updated) && client.Readiness?.State != "error" && (IsStandardConnection(client.Readiness) || client.Readiness is { HooksInstalled: true, SkillInstalled: true, StartupObserved: true, SessionVerified: true, WakeReady: true });
 
     private static bool NativeInstalled(DashboardCodexReadiness? readiness) => readiness is { HooksInstalled: true, SkillInstalled: true };
@@ -170,7 +189,7 @@ else
 
     private static string CodexConnectLabel(DashboardConnectClient client) => client.State == ConnectStates.Error ? "Try again" : NeedsConnectionUpdate(client) || client.State is ConnectStates.Connected or ConnectStates.Added or ConnectStates.Updated ? "Update connection" : "Connect Codex";
 
-    private static string CodexStatus(DashboardConnectClient client) => client.State == ConnectStates.Error || client.Readiness?.State == "error" ? "Needs attention" : NeedsConnectionUpdate(client) ? "Update required" : client.State == ConnectStates.Available ? "Connection required" : IsStandardConnection(client.Readiness) && IsReady(client) ? "Connected · standard connection" : IsReady(client) ? "Native startup verified" : !NativeInstalled(client.Readiness) ? "Native setup needs attention" : client.Readiness?.StartupObserved != true ? "Finish in Codex" : "Needs verification";
+    private static string CodexStatus(DashboardConnectClient client) => client.State == ConnectStates.Error || client.Readiness?.State == "error" ? "Needs attention" : NeedsConnectionUpdate(client) ? "Update required" : client.State == ConnectStates.Available ? "Connection required" : IsStandardConnection(client.Readiness) && IsReady(client) ? "Configured · standard MCP" : IsReady(client) ? "Native startup verified" : !NativeInstalled(client.Readiness) ? "Native setup needs attention" : client.Readiness?.StartupObserved != true ? "Finish in Codex" : "Needs verification";
 
     private static string CodexNextStep(DashboardConnectClient client) => client.State switch
     {

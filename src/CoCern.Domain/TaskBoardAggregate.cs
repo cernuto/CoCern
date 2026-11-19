@@ -72,6 +72,7 @@ internal static class TaskBoardAggregate
             case Operations.OrderFailed: return StandingOrders.OnFailed(context);
             case Operations.OrderWatchFailed: return StandingOrders.OnWatchFailed(context);
             case Operations.TaskArchive: return Sweep(context);
+            case Operations.TaskLeaseDeadline: return Ok(new { });
             case Operations.TaskUnclaim: return Unclaim(context, board);
             case Operations.SessionClosed: return Untarget(context, board);
         }
@@ -141,13 +142,18 @@ internal static class TaskBoardAggregate
         if (since > 0 && since < floor) return Error(DeltaRestartRequired, new { restartRequired = true, currentRevision = current, archiveFloor = floor, sinceRevision = 0 });
         // Tasks moved to the archive since the checkpoint come back as removals: { taskId, archived: true, changeRevision }. A reader from
         // 0 has seen nothing yet, so it gets only live tasks.
-        var removed = since == 0 ? Enumerable.Empty<(string Key, JsonNode Item)>() : (board.ArchivedTasksIfAny ?? new JsonObject())
-            .Select(x => (x.Key, Revision: TaskArchiving.Revision(x.Value))).Where(x => x.Revision > since && x.Revision > floor)
-            .Select(x => (x.Key, Item: (JsonNode)new JsonObject { ["taskId"] = x.Key, ["archived"] = true, ["changeRevision"] = x.Revision }));
-        var all = board.TaskMap.Select(x => (x.Key, Task: new BoardTask(x.Value!.AsObject()))).Where(x => x.Task.ChangeRevision > since).Select(x => (x.Key, Item: (JsonNode)Summary(x.Task)))
-            .Concat(removed).OrderBy(x => x.Key, StringComparer.Ordinal).Select(x => x.Item).ToArray();
+        var tasks = board.TaskMap;
+        var live = tasks.Select(x => (x.Key, Revision: new BoardTask(x.Value!.AsObject()).ChangeRevision, Archived: false))
+            .Where(x => x.Revision > since);
+        var removed = since == 0 || board.ArchivedTasksIfAny is not { } archived ? [] : archived
+            .Select(x => (x.Key, Revision: TaskArchiving.Revision(x.Value), Archived: true))
+            .Where(x => x.Revision > since && x.Revision > floor);
+        var all = live.Concat(removed).OrderBy(x => x.Key, StringComparer.Ordinal).ToArray();
         var limit = (int)Math.Clamp(Number(args, "limit", RelayLimits.DefaultPageSize), 1, RelayLimits.MaxPageSize);
-        var items = all.Skip((int)offset).Take(args.ContainsKey("partOffset") ? 1 : limit).Select(x => x.DeepClone()).ToList();
+        var items = all.Skip((int)offset).Take(args.ContainsKey("partOffset") ? 1 : limit)
+            .Select(x => (JsonNode)(x.Archived
+                ? new JsonObject { ["taskId"] = x.Key, ["archived"] = true, ["changeRevision"] = x.Revision }
+                : Summary(new BoardTask(tasks[x.Key]!.AsObject())))).ToList();
         RelayReply Reply() => Ok(new { items, snapshotRevision = current, nextCursor = offset + items.Count < all.Length ? (long?)(offset + items.Count) : null, truncated = offset + items.Count < all.Length, total = all.Length });
         while (items.Count > 1 && !FitsWire(Reply(), RelayLimits.AggregateReplyBytes)) items.RemoveAt(items.Count - 1);
         // A summary too large for any page comes back in pieces (partOffset), and the cursor still moves past it.

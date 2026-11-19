@@ -28,6 +28,7 @@ public partial class Dashboard : IAsyncDisposable
     private string View => Navigation.ToBaseRelativePath(Navigation.Uri).Split('?', '#')[0].Trim('/').ToLowerInvariant() switch
     {
         "sessions" => "sessions",
+        "tasks" => "tasks",
         "analytics" => "analytics",
         "analytics/test-effort" => "test-effort",
         "efficiency" => "efficiency",
@@ -40,10 +41,9 @@ public partial class Dashboard : IAsyncDisposable
         "manager" => "manager",
         _ => "overview"
     };
-    private string PageTitle => View switch { "sessions" => "Sessions", "analytics" => "Analytics", "test-effort" => "Test effort", "efficiency" => "Efficiency", "retained-context" => "Retained context", "sql" => "Database", "logs" => "Logs", "standing" => "Standing", "documents" => "Documents", "connect" => "Connect", "manager" => "Manager", _ => "Overview" };
+    private string PageTitle => View switch { "sessions" => "Sessions", "tasks" => "Tasks", "analytics" => "Analytics", "test-effort" => "Test effort", "efficiency" => "Efficiency", "retained-context" => "Retained context", "sql" => "Database", "logs" => "Logs", "standing" => "Standing", "documents" => "Documents", "connect" => "Connect", "manager" => "Manager", _ => "Overview" };
     private string? PageDescription => View switch
     {
-        "overview" => "Your coordination workspace, live across every connected PC.",
         "sessions" => "Follow active chats, routes and coordination traffic.",
         "sql" => "Storage health, record counts and hub maintenance.",
         "logs" => "Recent events from your coordination hub.",
@@ -53,7 +53,7 @@ public partial class Dashboard : IAsyncDisposable
         "test-effort" => "What test runs cost, from a precomputed file. Every number says whether it is measured or an estimate.",
         "standing" => "Instructions, access grants and pending proposals for each board.",
         "documents" => "Indexed files and document activity for each repository.",
-        "connect" => "Add CoCern to Claude and Codex, here and on your other PCs.",
+        "connect" => "Connect Claude and Codex on this PC or another PC on your LAN.",
         "manager" => "Choose the manager and control dispatch for a repository.",
         _ => null
     };

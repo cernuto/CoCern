@@ -88,6 +88,7 @@ public sealed partial class SqliteStore
             DELETE FROM activity_log;
             DELETE FROM activity_daily;
             DELETE FROM activity_origin_daily;
+            DELETE FROM activity_watcher_reason_daily;
             DELETE FROM hub_metadata WHERE name NOT IN ('service_id','incarnation_id');
             """, transaction))
             clear.ExecuteNonQuery();

@@ -35,11 +35,11 @@ public sealed class DocCacheTests(ITestOutputHelper output)
         var source = "# Exact\n\n" + string.Concat(Enumerable.Range(0, 64).Select(index => $"Rule {index}: retain exact identifiers, versions and source evidence before proceeding.\n"))
             + "\n```csharp\npublic static string Read(string[] values)\n{\n\tvar needlevalue = values[0] + \"🧭\";\n\treturn needlevalue;\n}\n```\n";
         var unrelated = "# Unrelated\n\n" + new string('x', 4_000) + "\n";
-        using var git = GitRepositories.Create(new() { ["docs/exact.md"] = source + unrelated });
-        using var other = GitRepositories.Create(new() { ["docs/exact.md"] = source.Replace("needlevalue", "foreignvalue", StringComparison.Ordinal) + unrelated });
+        using var git = GitCheckout.Create(new() { ["docs/exact.md"] = source + unrelated });
+        using var other = GitCheckout.Create(new() { ["docs/exact.md"] = source.Replace("needlevalue", "foreignvalue", StringComparison.Ordinal) + unrelated });
         await using var host = DocHost(git, settings: new()
         {
-            ["Relay:DocCache:Repositories:1:Id"] = "repo2", ["Relay:DocCache:Repositories:1:ClonePath"] = other.Clone
+            ["Relay:DocCache:Repositories:1:Id"] = "repo2", ["Relay:DocCache:Repositories:1:ClonePath"] = other.Work
         });
         using var worker = host.AuthorizedClient();
         await SyncAsync(host);
@@ -228,7 +228,7 @@ public sealed class DocCacheTests(ITestOutputHelper output)
     [Fact]
     public async Task Every_tool_checks_the_repository_scope_and_doc_sync_needs_an_administrator()
     {
-        using var git = GitRepositories.Create(new() { ["docs/a.md"] = "# Alpha\n\nText.\n" });
+        using var git = GitCheckout.Create(new() { ["docs/a.md"] = "# Alpha\n\nText.\n" });
         await using var host = DocHost(git);
         using var worker = host.AuthorizedClient();
         await SyncAsync(host);
@@ -242,59 +242,43 @@ public sealed class DocCacheTests(ITestOutputHelper output)
     /// <summary>Indexes the files in one document grain each, in a plain silo, and runs one fan-out search.</summary>
     private static DocHit[] Search(Dictionary<string, string> files, string query)
     {
-        using var git = GitRepositories.Create(files);
+        using var git = GitCheckout.Create(files);
         using var host = new RelayHostFixture(settings: new Dictionary<string, string?>
         {
             ["Relay:DocCache:Enabled"] = "true", ["Relay:DocCache:SyncMinutes"] = "0",
-            ["Relay:DocCache:Repositories:0:Id"] = "repo", ["Relay:DocCache:Repositories:0:ClonePath"] = git.Clone
+            ["Relay:DocCache:Repositories:0:Id"] = "repo", ["Relay:DocCache:Repositories:0:ClonePath"] = git.Work
         });
         host.Services.GetRequiredService<DocSyncRunner>().SyncAsync("repo", null, CancellationToken.None).GetAwaiter().GetResult();
         return host.Services.GetRequiredService<IGrainFactory>().GetGrain<IDocDirectoryGrain>("repo").SearchAsync(query, null, null, 5, TimeSpan.FromSeconds(30)).GetAwaiter().GetResult().Hits;
     }
 
     [Fact]
-    public async Task Fetch_never_recurses_into_submodules_and_sends_the_token_only_to_the_remote_url()
+    public async Task Sync_indexes_new_local_commits_with_legacy_fetch_and_token_settings()
     {
-        using var git = GitRepositories.Create(new() { ["docs/a.md"] = "# Alpha\n\nText.\n" });
-        var tokenFile = Path.Combine(Path.GetTempPath(), "cocern-doc-token-" + Guid.NewGuid().ToString("N"));
-        await File.WriteAllTextAsync(tokenFile, "read-only-secret\n");
-        try
+        using var git = GitCheckout.Create(new() { ["docs/a.md"] = "# Alpha\n\nInitial text.\n" });
+        git.SetOrigin("https://git.example.invalid/org/repo.git");
+        var watcher = new LocalGitOnly();
+        await using var host = DocHost(git, watcher, new()
         {
-            var watcher = new WatchingGit { FakeFetch = true };
-            await using var host = DocHost(git, watcher, new() { ["Relay:DocCache:Repositories:0:TokenFile"] = tokenFile });
-            var runner = host.Services.GetRequiredService<DocSyncRunner>();
-            // A local-path remote never gets the header.
-            await runner.SyncAsync("repo", null, CancellationToken.None);
-            var (arguments, environment) = watcher.Fetches.Last();
-            Assert.Contains("--no-recurse-submodules", arguments);
-            Assert.False(environment?.ContainsKey("GIT_CONFIG_COUNT") ?? false);
-            // An HTTPS remote gets it, scoped to that URL, and never on the command line.
-            git.SetCloneRemote("https://git.example.com/org/repo.git");
-            await runner.SyncAsync("repo", null, CancellationToken.None);
-            (arguments, environment) = watcher.Fetches.Last();
-            Assert.Equal(new[] { "fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "origin", "+refs/heads/main:refs/remotes/origin/main" }, arguments);
-            Assert.Equal("http.https://git.example.com/org/repo.git.extraHeader", environment!["GIT_CONFIG_KEY_0"]);
-            Assert.Equal("Authorization: Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes("x-access-token:read-only-secret")), environment["GIT_CONFIG_VALUE_0"]);
-            Assert.DoesNotContain(arguments, argument => argument.Contains("read-only-secret"));
-            // Remote URLs with credentials, and empty or oversized token files, send nothing.
-            git.SetCloneRemote("https://user:pass@git.example.com/org/repo.git");
-            await runner.SyncAsync("repo", null, CancellationToken.None);
-            Assert.False(watcher.Fetches.Last().Environment?.ContainsKey("GIT_CONFIG_COUNT") ?? false);
-            git.SetCloneRemote("https://git.example.com/org/repo.git");
-            foreach (var content in new[] { "  \n", new string('t', RelayLimits.MaxDocTokenFileBytes + 1) })
-            {
-                await File.WriteAllTextAsync(tokenFile, content);
-                await runner.SyncAsync("repo", null, CancellationToken.None);
-                Assert.False(watcher.Fetches.Last().Environment?.ContainsKey("GIT_CONFIG_COUNT") ?? false);
-            }
-        }
-        finally { File.Delete(tokenFile); }
+            ["Relay:DocCache:Repositories:0:Fetch"] = "true",
+            ["Relay:DocCache:Repositories:0:TokenFile"] = Path.Combine(git.Work, "absent-token-file")
+        });
+        var runner = host.Services.GetRequiredService<DocSyncRunner>();
+        Assert.Equal(git.Head(), (await runner.SyncAsync("repo", null, CancellationToken.None)).Commit);
+        git.Commit(new() { ["docs/a.md"] = "# Alpha\n\nUpdated local content.\n" });
+        var sync = await runner.SyncAsync("repo", null, CancellationToken.None);
+        Assert.Equal(git.Head(), sync.Commit);
+        Assert.False(sync.Fetched);
+        Assert.Equal(0, watcher.FetchAttempts);
+        using var worker = host.AuthorizedClient();
+        var hits = Hits(await Tool(worker, "doc_search", new { repositoryId = "repo", query = "Updated local content" }));
+        Assert.Equal(sync.Commit, Assert.Single(hits).GetProperty("sourceCommit").GetString());
     }
 
     [Fact]
     public async Task A_file_named_like_an_option_is_only_a_path_and_symlinks_are_skipped()
     {
-        using var git = GitRepositories.Create(new() { ["--output=x.md"] = "# Dash\n\nDash refunds.\n", ["docs/real.md"] = "# Real\n\nReal refunds.\n" });
+        using var git = GitCheckout.Create(new() { ["--output=x.md"] = "# Dash\n\nDash refunds.\n", ["docs/real.md"] = "# Real\n\nReal refunds.\n" });
         git.SymlinkAndCommit("docs/passwd.md", "/etc/passwd");
         git.SymlinkAndCommit("docs/link.md", "real.md");
         await using var host = DocHost(git);
@@ -305,7 +289,7 @@ public sealed class DocCacheTests(ITestOutputHelper output)
         Assert.Equal(new[] { "docs/link.md", "docs/passwd.md" }, view.Skipped);
         Assert.Equal(2, outcome.Skipped);
         Assert.Contains("Dash refunds", Data(await Tool(client, "doc_section", new { repositoryId = "repo", path = "--output=x.md", anchor = "dash" })).GetProperty("text").GetString());
-        Assert.False(File.Exists(Path.Combine(git.Clone, "x.md")));
+        Assert.False(File.Exists(Path.Combine(git.Work, "x.md")));
         Assert.Empty(Hits(await Tool(client, "doc_search", new { repositoryId = "repo", query = "root etc passwd" })));
         // A symlink added later is skipped by the incremental sync too.
         git.SymlinkAndCommit("docs/late.md", "real.md");
@@ -315,14 +299,14 @@ public sealed class DocCacheTests(ITestOutputHelper output)
     // ---- Helpers ----
 
     /// <param name="usageWrites">How often a directory writes its counted usage; the hub's default when null.</param>
-    private static RelayHostFixture DocHost(GitRepositories git, GitCli? cli = null, Dictionary<string, string?>? settings = null, string? databasePath = null, TimeSpan? usageWrites = null)
+    private static RelayHostFixture DocHost(GitCheckout git, GitCli? cli = null, Dictionary<string, string?>? settings = null, string? databasePath = null, TimeSpan? usageWrites = null)
     {
         var all = new Dictionary<string, string?>
         {
             ["Relay:Clients:1:Token"] = AdminToken, ["Relay:Clients:1:PrincipalId"] = "doc-admin", ["Relay:Clients:1:IsAdministrator"] = "true", ["Relay:Clients:1:Repositories:0"] = "repo",
             ["Relay:Clients:1:Repositories:1"] = "repo2",
             ["Relay:DocCache:Enabled"] = "true", ["Relay:DocCache:SyncMinutes"] = "0",
-            ["Relay:DocCache:Repositories:0:Id"] = "repo", ["Relay:DocCache:Repositories:0:ClonePath"] = git.Clone
+            ["Relay:DocCache:Repositories:0:Id"] = "repo", ["Relay:DocCache:Repositories:0:ClonePath"] = git.Work
         };
         foreach (var (key, value) in settings ?? []) all[key] = value;
         return new RelayHostFixture(databasePath, settings: all, configureServices: services =>
@@ -373,132 +357,55 @@ public sealed class DocCacheTests(ITestOutputHelper output)
         public Microsoft.Extensions.FileProviders.IFileProvider ContentRootFileProvider { get; set; } = null!;
     }
 
-    /// <summary>Watches git commands: counts concurrent fetches and shows, can hold fetches, and can slow every show or one path's.</summary>
-    private sealed class WatchingGit : GitCli
+    private sealed class LocalGitOnly : GitCli
     {
-        private int fetches, shows;
-        public int Commands;
-        private TaskCompletionSource? hold;
-        public int FetchesStarted;
-        public int PeakFetches;
-        public int PeakShows;
-        public TimeSpan ShowDelay { get; set; }
-        public string? SlowPath { get; init; }
-        public string? FailPath { get; set; }
-        /// <summary>Answer fetch as done without running it, so a remote URL that is never reached can still be checked.</summary>
-        public bool FakeFetch { get; init; }
-        public System.Collections.Concurrent.ConcurrentQueue<(IReadOnlyList<string> Arguments, IReadOnlyDictionary<string, string>? Environment)> Fetches { get; } = new();
-        public System.Collections.Concurrent.ConcurrentQueue<string> Shows { get; } = new();
-        public System.Collections.Concurrent.ConcurrentQueue<IReadOnlyList<string>> Arguments { get; } = new();
+        public int FetchAttempts;
 
-        public void HoldFetch() => hold = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        public void ReleaseFetch() => hold?.TrySetResult();
-
-        private TaskCompletionSource? slowHold;
-        /// <summary>Holds every read of <see cref="SlowPath"/> until <see cref="ReleaseSlow"/>, so a search's timeout passes however slow the machine is.</summary>
-        public void HoldSlow() => slowHold = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        public void ReleaseSlow() => slowHold?.TrySetResult();
-
-        public override async Task<GitResult> RunAsync(string directory, IReadOnlyList<string> arguments, int maxOutputBytes, IReadOnlyDictionary<string, string>? environment, CancellationToken cancellationToken)
+        public override Task<GitResult> RunAsync(string directory, IReadOnlyList<string> arguments, int maxOutputBytes, IReadOnlyDictionary<string, string>? environment, CancellationToken cancellationToken)
         {
-            Interlocked.Increment(ref Commands);
-            Arguments.Enqueue(arguments.ToArray());
-            if (arguments[0] == "fetch")
+            if (arguments.Contains("fetch", StringComparer.Ordinal))
             {
-                Interlocked.Increment(ref FetchesStarted);
-                Fetches.Enqueue((arguments.ToArray(), environment is null ? null : new Dictionary<string, string>(environment)));
-                if (FakeFetch) return new GitResult(0, [], false, "");
-                Max(ref PeakFetches, Interlocked.Increment(ref fetches));
-                try { if (hold is { } wait) await wait.Task; return await base.RunAsync(directory, arguments, maxOutputBytes, environment, cancellationToken); }
-                finally { Interlocked.Decrement(ref fetches); }
+                Interlocked.Increment(ref FetchAttempts);
+                throw new InvalidOperationException("Document indexing attempted a remote fetch.");
             }
-            if (arguments[0] == "show")
-            {
-                Shows.Enqueue(arguments[^1]);
-                if (FailPath is { } fail && arguments[^1].EndsWith(":" + fail, StringComparison.Ordinal)) throw new TimeoutException("git show ran too long.");
-                Max(ref PeakShows, Interlocked.Increment(ref shows));
-                try
-                {
-                    if (ShowDelay > TimeSpan.Zero && (SlowPath is null || arguments[^1].EndsWith(":" + SlowPath, StringComparison.Ordinal))) await Task.Delay(ShowDelay, cancellationToken);
-                    if (slowHold is { } slow && SlowPath is not null && arguments[^1].EndsWith(":" + SlowPath, StringComparison.Ordinal)) await slow.Task.WaitAsync(cancellationToken);
-                    return await base.RunAsync(directory, arguments, maxOutputBytes, environment, cancellationToken);
-                }
-                finally { Interlocked.Decrement(ref shows); }
-            }
-            return await base.RunAsync(directory, arguments, maxOutputBytes, environment, cancellationToken);
-        }
-
-        private static void Max(ref int target, int value)
-        {
-            for (var seen = Volatile.Read(ref target); value > seen; seen = Volatile.Read(ref target))
-                if (Interlocked.CompareExchange(ref target, value, seen) == seen) return;
+            return base.RunAsync(directory, arguments, maxOutputBytes, environment, cancellationToken);
         }
     }
 
-    /// <summary>
-    /// A temporary origin (bare), a work clone that commits and pushes, and the hub's clone. Everything is local: git fetches from a path,
-    /// with no network.
-    /// </summary>
-    private sealed class GitRepositories : IDisposable
+    private sealed class GitCheckout : IDisposable
     {
-        private readonly string root = Path.Combine(Path.GetTempPath(), "cocern-doc-" + Guid.NewGuid().ToString("N"));
-        private string Work => Path.Combine(root, "work");
-        private string Origin => Path.Combine(root, "origin.git");
-        public string Clone => Path.Combine(root, "clone");
+        public string Work { get; } = Path.Combine(Path.GetTempPath(), "cocern-doc-" + Guid.NewGuid().ToString("N"));
 
-        public static GitRepositories Create(Dictionary<string, string> files)
+        public static GitCheckout Create(Dictionary<string, string> files)
         {
-            var repositories = new GitRepositories();
-            Directory.CreateDirectory(repositories.Work);
-            Run(repositories.Work, "init", "-q", "-b", "main");
-            repositories.Write(files);
-            Run(repositories.Work, "add", "-A");
-            Run(repositories.Work, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "first");
-            Run(repositories.root, "clone", "-q", "--bare", repositories.Work, repositories.Origin);
-            Run(repositories.Work, "remote", "add", "origin", repositories.Origin);
-            Run(repositories.Work, "fetch", "-q", "origin");
-            Run(repositories.root, "clone", "-q", repositories.Origin, repositories.Clone);
-            return repositories;
+            var checkout = new GitCheckout();
+            Directory.CreateDirectory(checkout.Work);
+            Run(checkout.Work, "init", "-q", "-b", "main");
+            checkout.Commit(files);
+            return checkout;
         }
 
-        public string Head(string branch = "main") => Run(Work, "rev-parse", branch).Trim();
+        public string Head() => Run(Work, "rev-parse", "HEAD").Trim();
 
         public void Commit(Dictionary<string, string> files)
         {
             Write(files);
-            Push("change");
+            Run(Work, "add", "-A");
+            CommitIndex();
         }
 
         public void SymlinkAndCommit(string link, string target)
         {
-            var full = Path.Combine(Work, link);
-            Directory.CreateDirectory(Path.GetDirectoryName(full)!);
-            File.CreateSymbolicLink(full, target);
-            Push("symlink");
+            // The index stores a link as its target text in a mode-120000 blob.
+            Write(new() { [link] = target });
+            var blob = Run(Work, "hash-object", "-w", "--", link).Trim();
+            Run(Work, "update-index", "--add", "--cacheinfo", "120000", blob, link);
+            CommitIndex();
         }
 
-        public void SetCloneRemote(string url) => Run(Clone, "remote", "set-url", "origin", url);
+        public void SetOrigin(string url) => Run(Work, "remote", "add", "origin", url);
 
-        public void WriteInClone(string path, string text)
-        {
-            var full = Path.Combine(Clone, path);
-            Directory.CreateDirectory(Path.GetDirectoryName(full)!);
-            File.WriteAllText(full, text);
-        }
-
-        public void CommitInCloneOnly(string path, string text)
-        {
-            WriteInClone(path, text);
-            Run(Clone, "add", path);
-            Run(Clone, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "local only");
-        }
-
-        private void Push(string message)
-        {
-            Run(Work, "add", "-A");
-            Run(Work, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", message);
-            Run(Work, "push", "-q", "origin", "main");
-        }
+        private void CommitIndex() => Run(Work, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "fixture");
 
         private void Write(Dictionary<string, string> files)
         {
@@ -527,8 +434,8 @@ public sealed class DocCacheTests(ITestOutputHelper output)
         {
             try
             {
-                foreach (var file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)) File.SetAttributes(file, FileAttributes.Normal);
-                Directory.Delete(root, recursive: true);
+                foreach (var file in Directory.EnumerateFiles(Work, "*", SearchOption.AllDirectories)) File.SetAttributes(file, FileAttributes.Normal);
+                Directory.Delete(Work, recursive: true);
             }
             catch (IOException) { }
             catch (UnauthorizedAccessException) { }

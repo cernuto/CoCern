@@ -1,8 +1,8 @@
 <div class="connect-page">
     <p class="connect-download"><a href="/join/adapter.zip" download="CoCern.Adapter.zip">Download Windows adapter</a><span>ZIP package from this CoCern hub.</span></p>
-    <ConnectView @key="_installationRevision" />
+    <ConnectView @key="_installationRevision" Snapshot="@Snapshot" Fresh="@Fresh" Now="@Now" />
     <details class="surface connect-option">
-        <summary @onclick="OpenAddPc"><strong>Add another PC</strong><span>Connect chats on another machine.</span></summary>
+        <summary @onclick="OpenAddPc"><strong>Add another PC</strong><span>Connect chats on your LAN.</span></summary>
         @if (_addPcOpened)
         {
             <AddPcView />
@@ -19,6 +19,9 @@
 </div>
 
 @code {
+    [Parameter, EditorRequired] public DashboardSnapshot Snapshot { get; set; } = new();
+    [Parameter] public bool Fresh { get; set; }
+    [Parameter] public DateTimeOffset Now { get; set; }
     private int _installationRevision;
     private bool _addPcOpened;
     private bool _connectionHelpOpened;

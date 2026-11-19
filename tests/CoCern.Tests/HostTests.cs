@@ -4,6 +4,7 @@ using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Threading.Channels;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
@@ -97,27 +98,66 @@ public class HostTests
     [Fact]
     public async Task SignalRValidatesSessionHandleAndOnlySendsHintsToWatchedSession()
     {
-        await using var host = new RelayHostFixture();
+        const string adminToken = "coordination-subscription-test-admin-token";
+        await using var host = new RelayHostFixture(settings: new Dictionary<string, string?>
+        {
+            ["Relay:Clients:1:Token"] = adminToken,
+            ["Relay:Clients:1:PrincipalId"] = "test-admin",
+            ["Relay:Clients:1:Repositories:0"] = "repo",
+            ["Relay:Clients:1:IsAdministrator"] = "true"
+        });
         using var client = host.AuthorizedClient();
         var first = Data(await host.Call(client, "session_open", new { repositoryId = "repo", requestId = "a" }));
         var second = Data(await host.Call(client, "session_open", new { repositoryId = "repo", requestId = "b" }));
         await using var a = host.Hub();
         await using var b = host.Hub();
-        var aEvents = new System.Collections.Concurrent.ConcurrentQueue<JsonElement>();
-        var bEvent = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
-        a.On<JsonElement>("coordination.changed", hint => aEvents.Enqueue(hint));
-        b.On<JsonElement>("coordination.changed", hint => bEvent.TrySetResult(hint));
+        var aEvents = Channel.CreateUnbounded<JsonElement>();
+        var bEvents = Channel.CreateUnbounded<JsonElement>();
+        a.On<JsonElement>("coordination.changed", hint => { aEvents.Writer.TryWrite(hint); });
+        b.On<JsonElement>("coordination.changed", hint => { bEvents.Writer.TryWrite(hint); });
+        var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        b.Closed += _ => { closed.TrySetResult(); return Task.CompletedTask; };
         await a.StartAsync();
         await b.StartAsync();
-        await a.InvokeAsync("WatchSession", first.GetProperty("sessionId").GetString(), first.GetProperty("sessionToken").GetString(), "repo");
-        await Assert.ThrowsAsync<HubException>(() => a.InvokeAsync("WatchSession", second.GetProperty("sessionId").GetString(), first.GetProperty("sessionToken").GetString(), "repo"));
-        await b.InvokeAsync("WatchSession", second.GetProperty("sessionId").GetString(), second.GetProperty("sessionToken").GetString(), "repo");
-        await host.Services.GetRequiredService<ICoordinationNotifier>().NotifyAsync(second.GetProperty("sessionId").GetString()!, "hint-only");
-        var hint = await bEvent.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var firstId = first.GetProperty("sessionId").GetString()!;
+        var secondId = second.GetProperty("sessionId").GetString()!;
+        var notifier = host.Services.GetRequiredService<ICoordinationNotifier>();
+        using var admin = host.AuthorizedClient();
+        admin.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", adminToken);
+        await Assert.ThrowsAsync<HubException>(() => a.InvokeAsync("WatchSession", secondId, first.GetProperty("sessionToken").GetString(), "repo"));
+        await b.InvokeAsync("WatchSession", secondId, second.GetProperty("sessionToken").GetString(), "repo");
+        await Control("pause");
+        var control = await Next(bEvents);
+        Assert.Equal("control", control.GetProperty("kind").GetString());
+        Assert.Single(control.EnumerateObject());
+
+        await a.InvokeAsync("WatchSession", firstId, first.GetProperty("sessionToken").GetString(), "repo");
+        await notifier.NotifyAsync(secondId, "hint-only");
+        var hint = await Next(bEvents);
         Assert.Equal("hint-only", hint.GetProperty("eventId").GetString());
         Assert.DoesNotContain("sessionToken", hint.GetRawText());
-        await Task.Delay(200);
-        Assert.Empty(aEvents);
+        // This later message on A's connection also fences the two preceding sends: neither should have reached it.
+        await notifier.NotifyAsync(firstId, "first-only");
+        Assert.Equal("first-only", (await Next(aEvents)).GetProperty("eventId").GetString());
+
+        await Control("close_sessions", secondId);
+        await closed.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await b.StartAsync();
+        await Assert.ThrowsAsync<HubException>(() => b.InvokeAsync("WatchSession", secondId, second.GetProperty("sessionToken").GetString(), "repo"));
+        await Control("resume");
+        Assert.Equal("control", (await Next(aEvents)).GetProperty("kind").GetString());
+        await b.InvokeAsync("WatchSession", firstId, first.GetProperty("sessionToken").GetString(), "repo");
+        await notifier.NotifyAsync(firstId, "after-rejoin");
+        Assert.Equal("after-rejoin", (await Next(bEvents)).GetProperty("eventId").GetString());
+
+        static Task<JsonElement> Next(Channel<JsonElement> events) =>
+            events.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+
+        async Task Control(string command, string? targetSessionId = null)
+        {
+            var result = await host.Call(admin, RelayTools.ControlRequest, new { repositoryId = "repo", requestId = command, command, targetSessionId });
+            Assert.True(result.GetProperty("ok").GetBoolean(), result.GetRawText());
+        }
     }
 
     [Fact]

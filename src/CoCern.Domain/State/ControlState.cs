@@ -394,6 +394,9 @@ public sealed class DirectoryEntry(JsonObject json)
     public const string BindingVersionKey = SessionPresence.BindingVersionKey;
     public const string ObservedAtKey = SessionPresence.ObservedAtKey;
     public const string FreshUntilKey = SessionPresence.FreshUntilKey;
+    public const string LocalWakeProviderKey = "localWakeProvider";
+    public const string LocalWakeFreshUntilKey = "localWakeFreshUntil";
+    public const string LocalWakeIncarnationKey = "localWakeIncarnation";
     public const string AvailabilityKey = SessionPresence.AvailabilityKey;
     public const string ActiveAtKey = SessionRecord.ActiveAtKey;
 
@@ -407,7 +410,8 @@ public sealed class DirectoryEntry(JsonObject json)
         (SessionIdKey, null), (PrincipalIdKey, null), (RepositoryIdKey, null), (SessionTokenKey, null), (RoleKey, null), (HubIncarnationKey, null), (MachineIdKey, null),
         (LabelKey, null), (BindingKey, StateShape.Any), (BindingVersionKey, null), (ObservedAtKey, null), (FreshUntilKey, null), (AvailabilityKey, null), (ActiveAtKey, null),
         (NativeParticipant.Id, null), (NativeParticipant.Generation, null), (NativeParticipant.Request, null),
-        (OwnsWorkKey, null), (WorkSeqKey, null), (MailHeldAtKey, null));
+        (OwnsWorkKey, null), (WorkSeqKey, null), (MailHeldAtKey, null),
+        (LocalWakeProviderKey, null), (LocalWakeFreshUntilKey, null), (LocalWakeIncarnationKey, null));
 
     /// <summary>The keys that never leave the directory in a worker listing: the secret, the principal and the directory's own marks.</summary>
     private static readonly string[] Private = [SessionTokenKey, PrincipalIdKey, NativeParticipant.Id, NativeParticipant.Generation, NativeParticipant.Request, OwnsWorkKey, WorkSeqKey, MailHeldAtKey];
@@ -449,8 +453,16 @@ public sealed class DirectoryEntry(JsonObject json)
     /// Takes the session's registered <paramref name="presence"/>: each field it has replaces the entry's, except that its times
     /// (observed, fresh until) only ever move forward.
     /// </summary>
-    public void Register(SessionPresence presence)
+    public void Register(SessionPresence presence, string? wakeProvider = null)
     {
+        // Only the watcher's own registration renews this route. A label, bind or ordinary read cannot overwrite or extend it.
+        if (wakeProvider is ChatProviders.Codex or ChatProviders.Claude && presence.FreshUntil is { } until &&
+            until > Date(json, LocalWakeFreshUntilKey) && !string.IsNullOrEmpty(presence.HubIncarnation))
+        {
+            json[LocalWakeProviderKey] = wakeProvider;
+            json[LocalWakeFreshUntilKey] = until.ToString("O");
+            json[LocalWakeIncarnationKey] = presence.HubIncarnation;
+        }
         var reported = new JsonObject();
         presence.WriteTo(reported);
         foreach (var (property, value) in reported)
@@ -498,6 +510,10 @@ public sealed class DirectoryEntry(JsonObject json)
     {
         var copy = json.DeepClone().AsObject();
         foreach (var key in Private) copy.Remove(key);
+        if (Date(json, LocalWakeFreshUntilKey) <= now || Text(json, LocalWakeIncarnationKey) != hubIncarnation)
+            copy.Remove(LocalWakeProviderKey);
+        copy.Remove(LocalWakeFreshUntilKey);
+        copy.Remove(LocalWakeIncarnationKey);
         var stale = Date(copy, FreshUntilKey) <= now || Text(copy, HubIncarnationKey) != hubIncarnation;
         copy["stale"] = stale; copy.Remove(HubIncarnationKey);
         if (stale) copy[AvailabilityKey] = "unknown";

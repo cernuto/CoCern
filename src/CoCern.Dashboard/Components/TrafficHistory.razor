@@ -1,0 +1,85 @@
+<section class="surface traffic-history" aria-label="Hub traffic">
+    <header>
+        <h2>Hub traffic</h2>
+        @if (Truncated && Entries.Length == 0)
+        {
+            <span class="traffic-total">Traffic omitted from this snapshot</span>
+        }
+        else
+        {
+            <span class="traffic-total">@(_lastPartialBucket >= 0 ? "At least " : "")<strong>@_total</strong> @(_total == 1 ? "event" : "events") in the last minute</span>
+        }
+    </header>
+    <figure>
+        <div class="traffic-bars" role="img" aria-label="@ChartDescription">
+            @for (var i = 0; i < _counts.Length; i++)
+            {
+                var count = _counts[i];
+                <span class="traffic-bin @(i <= _lastPartialBucket ? "partial" : null)" aria-hidden="true">
+                    @if (count > 0)
+                    {
+                        <span class="traffic-bar" style="height: @(100 * count / _peak)%"></span>
+                    }
+                </span>
+            }
+        </div>
+        <figcaption>
+            <span>60 seconds earlier</span>
+            @if (_peak > 0)
+            {
+                <span>Peak @_peak / 2 s</span>
+            }
+            <span>@(Live ? "As of" : "Last snapshot") <time datetime="@ObservedAt.ToString("O")" title="@DashboardFormat.Timestamp(ObservedAt)">@ObservedAt.ToLocalTime().ToString("T")</time></span>
+        </figcaption>
+    </figure>
+    @if (_lastPartialBucket >= 0)
+    {
+        <p class="coverage-note"><span aria-hidden="true"></span>Hatching marks incomplete history.</p>
+    }
+</section>
+
+@code {
+    [Parameter, EditorRequired] public DashboardTrafficEvent[] Entries { get; set; } = [];
+    [Parameter, EditorRequired] public DateTimeOffset ObservedAt { get; set; }
+    [Parameter] public bool Live { get; set; }
+    [Parameter] public bool Truncated { get; set; }
+
+    private const int SecondsPerBucket = 2;
+    private readonly int[] _counts = new int[60 / SecondsPerBucket];
+    private int _total;
+    private int _peak;
+    private int _lastPartialBucket;
+
+    private string ChartDescription
+    {
+        get
+        {
+            if (Truncated && Entries.Length == 0) return "Traffic history unavailable in this snapshot.";
+            if (_peak == 0) return "No traffic events recorded in this minute.";
+            return $"Recorded events in two-second intervals. The busiest interval contains {_peak} {(_peak == 1 ? "event" : "events")}.";
+        }
+    }
+
+    protected override void OnParametersSet()
+    {
+        Array.Clear(_counts);
+        _total = 0;
+        _peak = 0;
+        _lastPartialBucket = Truncated && Entries.Length == 0 ? _counts.Length - 1 : -1;
+        var start = ObservedAt.UtcTicks >= TimeSpan.TicksPerMinute ? ObservedAt.ToUniversalTime().AddMinutes(-1) : DateTimeOffset.MinValue;
+        foreach (var entry in Entries)
+        {
+            if (entry.Timestamp < start || entry.Timestamp > ObservedAt) continue;
+            var bucket = BucketFor(entry.Timestamp, start);
+            _peak = Math.Max(_peak, ++_counts[bucket]);
+            _total++;
+        }
+
+        // The host returns its retained FIFO, with sequences starting at one.
+        if (Entries is [var oldest, ..] && oldest.Sequence > 1 && oldest.Timestamp >= start)
+            _lastPartialBucket = BucketFor(oldest.Timestamp, start);
+    }
+
+    private int BucketFor(DateTimeOffset timestamp, DateTimeOffset start) =>
+        (int)Math.Min((timestamp - start).Ticks / (TimeSpan.TicksPerSecond * SecondsPerBucket), _counts.Length - 1);
+}

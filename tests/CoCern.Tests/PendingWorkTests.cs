@@ -13,6 +13,62 @@ namespace CoCern.Tests;
 
 public sealed class PendingWorkTests
 {
+    [Fact]
+    public async Task A_session_hint_during_an_empty_read_releases_the_wait_for_the_committed_message()
+    {
+        await using var host = new RelayHostFixture();
+        using var client = host.AuthorizedClient();
+        var sender = await Open("sender");
+        var recipient = await Open("recipient");
+        var options = new AdapterOptions("https://localhost", RelayHostFixture.Token, signalR: true);
+        await using var hints = new SessionHints(options, _ => { }, host.Server.CreateHandler);
+        var repository = JsonSerializer.SerializeToElement(new { repositoryId = "repo" });
+        await hints.ObserveSessionAsync(repository, new(true, "Ok", recipient), CancellationToken.None);
+        using var http = new HttpClient(new AfterFirstRead(host.Server.CreateHandler(), async () =>
+        {
+            var sent = await host.Call(client, RelayTools.SendMessage, new
+            {
+                repositoryId = "repo", requestId = "racing-message", sessionId = sender.GetProperty("sessionId"),
+                sessionToken = sender.GetProperty("sessionToken"), recipientSessionId = recipient.GetProperty("sessionId"),
+                text = "Inbox race fixture", wake = false
+            });
+            Assert.True(sent.GetProperty("ok").GetBoolean(), sent.GetRawText());
+        }));
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var arguments = JsonSerializer.SerializeToElement(new
+        {
+            repositoryId = "repo", sessionId = recipient.GetProperty("sessionId"), sessionToken = recipient.GetProperty("sessionToken"),
+            attention = false, waitSeconds = 45
+        });
+        var result = await InboxWait.CheckAsync(new RelayForwarder(http, options), arguments, TimeSpan.FromSeconds(45), deadline.Token, hints);
+        Assert.True(result.Ok);
+        Assert.Equal("Inbox race fixture", Assert.Single(result.Data!.Value.GetProperty("items").EnumerateArray()).GetProperty("text").GetString());
+
+        async Task<JsonElement> Open(string id)
+        {
+            var reply = await host.Call(client, RelayTools.SessionOpen, new { repositoryId = "repo", requestId = id });
+            Assert.True(reply.GetProperty("ok").GetBoolean(), reply.GetRawText());
+            return JsonSerializer.Deserialize<JsonElement>(reply.GetProperty("dataJson").GetString()!);
+        }
+    }
+
+    // Commit the message after the first durable read sampled an empty inbox, before the adapter sees its response.
+    private sealed class AfterFirstRead(HttpMessageHandler inner, Func<Task> send) : DelegatingHandler(inner)
+    {
+        private bool _sent;
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            var response = await base.SendAsync(request, ct);
+            if (!_sent)
+            {
+                _sent = true;
+                await send();
+            }
+            return response;
+        }
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -20,17 +76,19 @@ public sealed class PendingWorkTests
     {
         using var handler = new InboxHandler(mail);
         using var http = new HttpClient(handler);
+        var args = new JsonObject { ["repositoryId"] = "repo", ["sessionId"] = "own", ["sessionToken"] = "synthetic-session", ["waitSeconds"] = 0 };
+        if (mail) { args["seen"] = false; args["attention"] = true; }
         var result = await InboxWait.CheckAsync(new RelayForwarder(http, new AdapterOptions("http://127.0.0.1:5271", "synthetic-token")),
-            JsonSerializer.SerializeToElement(new { repositoryId = "repo", sessionId = "own", sessionToken = "synthetic-session", waitSeconds = 0 }),
+            JsonSerializer.SerializeToElement(args),
             TimeSpan.FromMilliseconds(1), CancellationToken.None);
         Assert.True(result.Ok);
         Assert.Equal("T-1", result.Data!.Value.GetProperty("attention").GetProperty("scope").GetProperty("taskId").GetString());
-        Assert.Equal(2, handler.Calls.Count);
-        Assert.False(handler.Calls[0].GetProperty("attention").GetBoolean());
-        Assert.False(handler.Calls[0].GetProperty("seen").GetBoolean());
-        Assert.False(handler.Calls[1].TryGetProperty("attention", out _));
-        Assert.False(handler.Calls[1].TryGetProperty("backgroundCall", out _));
-        Assert.True(handler.Calls[1].GetProperty("seen").GetBoolean());
+        var read = Assert.Single(handler.Calls);
+        Assert.False(read.TryGetProperty("backgroundCall", out _));
+        Assert.False(read.TryGetProperty("waitSeconds", out _));
+        Assert.Equal(!mail, read.GetProperty("seen").GetBoolean());
+        Assert.Equal(mail, read.TryGetProperty("attention", out var attention));
+        if (mail) Assert.True(attention.GetBoolean());
     }
 
     [Fact]
@@ -46,7 +104,10 @@ public sealed class PendingWorkTests
         Assert.Single(data.GetProperty("items").EnumerateArray());
         Assert.Equal("unavailable", data.GetProperty("pendingWork").GetProperty("reason").GetString());
         Assert.Equal("hub_unavailable", data.GetProperty("pendingWork").GetProperty("code").GetString());
-        Assert.False(handler.Calls[0].GetProperty("seen").GetBoolean());
+        Assert.Equal(2, handler.Calls.Count);
+        Assert.True(handler.Calls[0].GetProperty("seen").GetBoolean());
+        Assert.False(handler.Calls[1].GetProperty("seen").GetBoolean());
+        Assert.True(handler.Calls[1].GetProperty("backgroundCall").GetBoolean());
     }
 
     [Fact]

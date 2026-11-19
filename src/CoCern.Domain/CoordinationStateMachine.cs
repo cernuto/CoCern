@@ -22,7 +22,7 @@ public static class CoordinationStateMachine
     /// <param name="ordersEnabled">Whether the hub runs standing orders; the grain passes its setting, so the domain stays free of configuration.</param>
     /// <param name="archiveAfterDays">Days after completion before a finished task is archived (<c>Relay:Board:ArchiveAfterDays</c>); 0 archives only when a board fills.</param>
     public static RelayReply Apply(StateEnvelope<CoordinationDocument> envelope, string kind, string key, RelayCaller caller, string operation, JsonObject arguments, DateTimeOffset now, bool ordersEnabled = false,
-        int archiveAfterDays = RelayLimits.DefaultArchiveAfterDays)
+        int archiveAfterDays = RelayLimits.DefaultArchiveAfterDays, int attentionHoldMinutes = 0)
     {
         if (ByteSize(arguments) > RelayLimits.MaxPayloadBytes) return Error(PayloadTooLarge);
         var repository = Text(arguments, "repositoryId");
@@ -83,6 +83,18 @@ public static class CoordinationStateMachine
         if (requestId.Length > 0 && IsMutation(operation) && Retention.IsBuried(state, requestKey, now)) return Error(RequestExpired, new { readCurrentState = true });
 
         var context = new AggregateContext(state, caller, operation, arguments, now) { Key = key, OrdersEnabled = ordersEnabled, ArchiveAfterDays = archiveAfterDays };
+        var priorBoardRevision = kind == AggregateKinds.Board ? new State.BoardState(state).TaskRevision : 0;
+        var closingOpenSession = kind == AggregateKinds.Session && operation == Operations.SessionExpire && new State.SessionState(state) is { Opened: true, Closed: false };
+        if (kind == AggregateKinds.Board && IsMutation(operation))
+        {
+            var board = new State.BoardState(state);
+            foreach (var timer in envelope.DueWork)
+            {
+                if (timer.Kind != DueWorkKinds.Lease || timer.DueAt > now || !timer.Id.StartsWith(DueWorkKinds.Lease + ":", StringComparison.Ordinal)) continue;
+                var task = board.Task(timer.Id[(DueWorkKinds.Lease.Length + 1)..]);
+                if (task is not null && task.LeaseUntil == timer.DueAt) board.MarkChanged(task);
+            }
+        }
         RelayReply result;
         try
         {
@@ -105,6 +117,9 @@ public static class CoordinationStateMachine
         if (kind == AggregateKinds.Board)
         {
             if (TaskBoardAggregate.ExceedsTaskCapacity(state)) return Error(TaskCapacityExceeded);
+            var board = new State.BoardState(state);
+            if (board.TaskRevision != priorBoardRevision)
+                context.Hint = new CoordinationHint.Board(repository, AggregateKinds.BoardOf(key) ?? AggregateKinds.DefaultBoard, board.TaskRevision);
             result = TaskBoardAggregate.FitTaskRead(state, operation, arguments, result);
         }
         // Leave room for application composition (session attachments and convenience outcomes).
@@ -119,16 +134,46 @@ public static class CoordinationStateMachine
             if (requests.Count >= RelayLimits.MaxRecords) Retention.Bury(state, Retention.MakeRoom(requests, now), now);
             requests[requestKey] = new JsonObject { ["fingerprint"] = fingerprint, ["code"] = result.Code, ["json"] = result.DataJson, ["version"] = result.Version, ["at"] = Retention.Stamp(now) };
         }
+        if (closingOpenSession && new State.SessionState(state).Closed)
+        {
+            context.Hint = new CoordinationHint.SessionClosed(key);
+            envelope.DueWork.Add(new(DueWorkKinds.SessionClosedHint, DueWorkKinds.SessionClosedHint, now));
+        }
         envelope.Value = new() { Json = state.ToJsonString() };
+        envelope.Value.QueueHint(context.Hint);
         // Nothing changes the state object after this point, so the commit's search indexing can read it instead of parsing again.
         envelope.Value.KeepParsed(state);
         // New effects deliver with this call's authority, and the aggregate's timers follow its new state.
         StampEffects(context.Effects, 0, caller);
         envelope.Effects.AddRange(context.Effects);
-        ScheduleLeases(envelope, state, kind == AggregateKinds.Board ? archiveAfterDays : 0, now);
+        // A board read may persist a migrated legacy revision or a read-side effect. It must leave due lease transitions to the pump.
+        if (kind != AggregateKinds.Board || IsMutation(operation))
+            ScheduleLeases(envelope, state, kind == AggregateKinds.Board ? archiveAfterDays : 0, now);
+        if (kind == AggregateKinds.Session && IsMutation(operation))
+            SessionAttention.ScheduleDeadline(envelope, new State.SessionState(state), now, attentionHoldMinutes);
         // Tasks this operation archived leave the board in this commit; storage writes them to the archive in the same transaction.
         envelope.QueueArchive(context.Archived);
         return result;
+    }
+
+    /// <summary>Consumes the clock transition once and schedules the next one in the same commit.</summary>
+    public static void AdvanceAttentionDeadline(StateEnvelope<CoordinationDocument> envelope, string sessionId, DateTimeOffset now, int holdMinutes)
+    {
+        var due = envelope.DueWork.First(work => work.Kind == DueWorkKinds.AttentionDeadline);
+        envelope.DueWork.Remove(due);
+        var state = new State.SessionState(JsonNode.Parse(envelope.Value.Json)!.AsObject());
+        SessionAttention.ScheduleDeadline(envelope, state, now, holdMinutes);
+        if (!state.Closed && holdMinutes > 0)
+            envelope.Value.QueueHint(new CoordinationHint.Session(sessionId, "deadline:" + due.DueAt.UtcTicks.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+    }
+
+    /// <summary>Arms an existing session after an upgrade or attention setting change, without rewriting an unchanged schedule.</summary>
+    public static bool RestoreAttentionDeadline(StateEnvelope<CoordinationDocument> envelope, DateTimeOffset now, int holdMinutes)
+    {
+        var previous = envelope.DueWork.FirstOrDefault(work => work.Kind == DueWorkKinds.AttentionDeadline);
+        var state = new State.SessionState(JsonNode.Parse(envelope.Value.Json)!.AsObject());
+        SessionAttention.ScheduleDeadline(envelope, state, now, holdMinutes);
+        return previous != envelope.DueWork.FirstOrDefault(work => work.Kind == DueWorkKinds.AttentionDeadline);
     }
 
     /// <summary>A retried request returns its original reply, unless its grant has since gone stale or its task may no longer run (the claim gate).</summary>

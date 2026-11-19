@@ -181,7 +181,7 @@ public static class HubCertificate
         .Where(i => i.OperationalStatus == OperationalStatus.Up && i.NetworkInterfaceType != NetworkInterfaceType.Loopback)
         .SelectMany(i => i.GetIPProperties().UnicastAddresses)
         .Select(a => a.Address)
-        .Where(a => a.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(a))
+        .Where(a => a.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(a) && LanTransport.IsLocalAddress(a))
         .Distinct();
 }
 
@@ -228,6 +228,15 @@ internal static class HubNetwork
     /// </summary>
     public static void Configure(IConfiguration configuration, IHostEnvironment environment, KestrelServerOptions options)
     {
+        options.ConfigureEndpointDefaults(listen => listen.Use(next => connection =>
+        {
+            if (connection.RemoteEndPoint is IPEndPoint peer && !LanTransport.IsLocalAddress(peer.Address))
+            {
+                connection.Abort();
+                return Task.CompletedTask;
+            }
+            return next(connection);
+        }));
         var network = Enabled(configuration);
         var localPort = configuration.GetValue("Relay:Local:HttpsPort", HubAddresses.LocalHttpsPort);
         if (!network && localPort == 0) return;

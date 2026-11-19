@@ -124,20 +124,28 @@ public sealed class DiscoveryGrainTests
         finally { await host.StopAsync(); }
     }
 
-    [Fact]
-    public async Task A_revocation_completing_during_a_validation_leaves_no_stale_cache_entry()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_revocation_completing_during_a_validation_leaves_no_stale_cache_entry(bool acknowledged)
     {
-        var grain = new GatedDiscoveryGrain();
+        var grain = new GatedDiscoveryGrain(acknowledged);
         var factory = DispatchProxy.Create<IGrainFactory, FakeGrainFactory>();
         ((FakeGrainFactory)(object)factory).Grain = grain;
-        var directory = new MachineDirectory(factory);
+        var observer = new RevocationObserver();
+        var directory = new MachineDirectory(factory, listener: observer);
+        Assert.Equal(RelayErrorCodes.AdministratorRequired, (await directory.RevokeAsync(Administrator with { IsAdministrator = false }, "pc-b", CancellationToken.None)).Code);
+        Assert.Empty(observer.Machines);
         // The revoke is in flight, the validation starts and the grain answers it as valid, then the revoke completes before the validation resumes.
         var revoke = directory.RevokeAsync(Administrator, "pc-a", CancellationToken.None);
         await grain.RevokeReached.Task.WaitAsync(TimeSpan.FromSeconds(10));
         var validate = directory.ValidateAsync("secret-a", CancellationToken.None);
         await grain.ValidateAnswered.Task.WaitAsync(TimeSpan.FromSeconds(10));
         grain.ReleaseRevoke.SetResult();
-        Assert.True((await revoke.WaitAsync(TimeSpan.FromSeconds(10))).Ok);
+        var result = await revoke.WaitAsync(TimeSpan.FromSeconds(10));
+        if (acknowledged) Assert.True(result.Ok);
+        else Assert.Equal(RelayErrorCodes.StorageFailure, result.Code);
+        Assert.Equal(["pc-a"], observer.Machines);
         grain.ReleaseValidate.SetResult();
         Assert.Equal("pc-a", (await validate.WaitAsync(TimeSpan.FromSeconds(10)))?.MachineId);
         // The racing call returned what the grain said, but nothing stale may remain cached.
@@ -145,7 +153,13 @@ public sealed class DiscoveryGrainTests
     }
 
     /// <summary>Answers validation from the state before the revoke, then holds the answer back until released.</summary>
-    private sealed class GatedDiscoveryGrain : IDiscoveryGrain
+    private sealed class RevocationObserver : IMachineRevocationListener
+    {
+        public List<string> Machines { get; } = [];
+        public void MachineRevoked(string machineId) => Machines.Add(machineId);
+    }
+
+    private sealed class GatedDiscoveryGrain(bool acknowledged) : IDiscoveryGrain
     {
         private bool revoked;
         public TaskCompletionSource RevokeReached { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -158,7 +172,7 @@ public sealed class DiscoveryGrainTests
             if (operation == DiscoveryOperations.Revoke)
             {
                 RevokeReached.SetResult(); await ReleaseRevoke.Task; revoked = true;
-                return Replies.Ok(new { revoked = true });
+                return acknowledged ? Replies.Ok(new { revoked = true }) : Replies.Error(RelayErrorCodes.StorageFailure);
             }
             Assert.Equal(DiscoveryOperations.Validate, operation);
             var answer = revoked ? Replies.Error("NotFound") : Replies.Ok(new { machineId = "pc-a", principalId = "machine:pc-a" });

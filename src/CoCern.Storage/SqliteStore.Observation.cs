@@ -122,7 +122,7 @@ public sealed partial class SqliteStore : IRelayObservationSource
             if (!open && closed.Contains(chat.SessionId)) continue;
             // The stored label is the hub's own and follows a rename through session_bind; the announced one is the node's copy, which can lag.
             if (open && session!.RepositoryId == chat.RepositoryId)
-                chat = session with { MachineId = chat.MachineId, MachineName = chat.MachineName, Provider = chat.Provider, IsMapped = chat.IsMapped, Reachable = chat.Reachable, Label = string.IsNullOrEmpty(session.Label) ? chat.Label : session.Label };
+                chat = session with { MachineId = chat.MachineId, MachineName = chat.MachineName, Provider = chat.Provider, IsMapped = chat.IsMapped, Reachable = chat.Reachable, RouteFreshUntil = chat.RouteFreshUntil, Label = string.IsNullOrEmpty(session.Label) ? chat.Label : session.Label };
             sessions.Add(chat.SessionId, chat);
         }
         foreach (var session in persisted.Values)
@@ -130,8 +130,9 @@ public sealed partial class SqliteStore : IRelayObservationSource
             if (sessions.Count >= MaximumSessions) { truncated = true; break; }
             sessions.TryAdd(session.SessionId, session);
         }
-        if (!await ProjectSessionActivityAsync(sessions, now, started, cancellationToken))
-            return null; // Retain the previous coherent observation and its timestamp rather than erase known last-call times.
+        var unobservedActivity = await ProjectSessionActivityAsync(sessions, now, incarnationId, started, cancellationToken);
+        if (unobservedActivity is null) return null;
+        truncated |= unobservedActivity.Length > 0;
         var quiet = now.AddMinutes(-RelayLimits.DefaultUnresponsiveMinutes);
         var waitingMail = mailboxes.Values.OfType<WaitingMail>().Where(mail => sessions.ContainsKey(mail.SessionId) && mail.Sent.Any(sent => sent < quiet)).Select(mail => mail with { Label = sessions[mail.SessionId].Label }).ToArray();
         if (!await ReadWaitingLastCallsAsync(waitingMail, started, cancellationToken)) return null;
@@ -147,7 +148,8 @@ public sealed partial class SqliteStore : IRelayObservationSource
         }
         // A report is shown under the label its session is shown under; one whose session did not make the bounded inventory goes with it.
         var waiting = reports.Values.OfType<WaitingReport>().Where(report => sessions.ContainsKey(report.SessionId)).Select(report => report with { Label = sessions[report.SessionId].Label }).ToArray();
-        return new() { SessionCount = sessionCount, Machines = machines.ToArray(), Sessions = sessions.Values.ToArray(), SessionsTruncated = truncated, Interactions = interactions, WaitingReports = waiting, WaitingMail = waitingMail, Warnings = warnings.ToArray() };
+        return new() { SessionCount = sessionCount, Machines = machines.ToArray(), Sessions = sessions.Values.ToArray(), SessionsTruncated = truncated,
+            UnobservedActivitySessionIds = unobservedActivity, Interactions = interactions, WaitingReports = waiting, WaitingMail = waitingMail, Warnings = warnings.ToArray() };
     }
 
     /// <summary>
@@ -176,31 +178,68 @@ public sealed partial class SqliteStore : IRelayObservationSource
         finally { _gate.Release(); }
     }
 
-    private async Task<bool> ProjectSessionActivityAsync(Dictionary<string, DashboardSession> sessions, DateTimeOffset now, long started, CancellationToken cancellationToken)
+    private async Task<string[]?> ProjectSessionActivityAsync(Dictionary<string, DashboardSession> sessions, DateTimeOffset now, string incarnationId, long started, CancellationToken cancellationToken)
     {
-        if (Stopwatch.GetElapsedTime(started) > ObservationBudget) return false;
-        if (sessions.Count == 0) return true;
-        if (!await _gate.WaitAsync(0, cancellationToken)) return false;
+        if (sessions.Count == 0) return [];
+        var ids = sessions.Keys.ToArray();
+        if (!await _gate.WaitAsync(0, cancellationToken)) return null;
         try
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            // One covering-index seek per bounded inventory row; never scan the retained activity history for each session.
-            using var command = Command("SELECT at_ticks FROM activity_log WHERE repository_id=$repository AND session_id=$session AND kind='call' AND ok=1 AND at_ticks <= $now ORDER BY at_ticks DESC LIMIT 1;");
+            // Reachability belongs to the current inventory even when there is no time left for the per-session timestamp queries.
+            ProjectLocalWakeRoutes(sessions, now, incarnationId);
+            if (Stopwatch.GetElapsedTime(started) > ObservationBudget) return ids;
+            // Each scalar is a covering-index seek. Background watchers and startup probes cannot verify an in-chat call.
+            using var command = Command("""
+                SELECT (SELECT at_ticks FROM activity_log WHERE repository_id=$repository AND session_id=$session AND kind='call' AND ok=1 AND at_ticks <= $now ORDER BY at_ticks DESC LIMIT 1),
+                       (SELECT at_ticks FROM activity_log WHERE repository_id=$repository AND session_id=$session AND kind='call' AND ok=1 AND background_call=0 AND call_origin='mcp' AND tool<>'session_open' AND at_ticks <= $now ORDER BY at_ticks LIMIT 1);
+                """);
             var repository = command.Parameters.AddWithValue("$repository", "");
             var sessionId = command.Parameters.AddWithValue("$session", "");
             command.Parameters.AddWithValue("$now", now.UtcTicks);
-            foreach (var entry in sessions.ToArray())
+            for (var index = 0; index < ids.Length; index++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                if (Stopwatch.GetElapsedTime(started) > ObservationBudget) return false;
-                repository.Value = entry.Value.RepositoryId;
-                sessionId.Value = entry.Value.SessionId;
-                if (command.ExecuteScalar() is long ticks)
-                    sessions[entry.Key] = entry.Value with { LastActivityAt = new DateTimeOffset(ticks, TimeSpan.Zero) };
+                if (Stopwatch.GetElapsedTime(started) > ObservationBudget) return ids[index..];
+                var session = sessions[ids[index]];
+                repository.Value = session.RepositoryId;
+                sessionId.Value = session.SessionId;
+                using var reader = command.ExecuteReader();
+                if (reader.Read() && !reader.IsDBNull(0))
+                    sessions[session.SessionId] = session with
+                    {
+                        LastActivityAt = new DateTimeOffset(reader.GetInt64(0), TimeSpan.Zero),
+                        FirstMcpCallAt = reader.IsDBNull(1) ? null : new DateTimeOffset(reader.GetInt64(1), TimeSpan.Zero)
+                    };
             }
-            return true;
+            return [];
         }
         finally { _gate.Release(); }
+    }
+
+    /// <summary>Read only route evidence for the bounded session inventory from the control directory.</summary>
+    private void ProjectLocalWakeRoutes(Dictionary<string, DashboardSession> sessions, DateTimeOffset now, string incarnationId)
+    {
+        using var command = Command($"""
+            SELECT entry.key, json_extract(entry.value, '$.{DirectoryEntry.LocalWakeProviderKey}'), json_extract(entry.value, '$.{DirectoryEntry.LocalWakeFreshUntilKey}')
+            FROM grain_state g, json_each(json_extract(g.payload, '$.Value.Json'), '$.{ControlState.SessionsKey}') entry
+            WHERE g.state_name='control' AND g.grain_type='cocern.control' AND g.grain_key=$key
+              AND json_extract(entry.value, '$.{DirectoryEntry.LocalWakeIncarnationKey}')=$incarnation
+              AND entry.key IN (SELECT value FROM json_each($ids));
+            """);
+        command.Parameters.AddWithValue("$key", AggregateKinds.ControlKey);
+        command.Parameters.AddWithValue("$incarnation", incarnationId);
+        command.Parameters.AddWithValue("$ids", JsonSerializer.Serialize(sessions.Keys));
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            if (reader.IsDBNull(1) || reader.IsDBNull(2) || !DateTimeOffset.TryParse(reader.GetString(2), out var until) || until <= now) continue;
+            var provider = reader.GetString(1);
+            if (provider is not (ChatProviders.Codex or ChatProviders.Claude)) continue;
+            var session = sessions[reader.GetString(0)];
+            if (!session.Reachable || session.RouteFreshUntil < until)
+                sessions[session.SessionId] = session with { Provider = provider, IsMapped = true, Reachable = true, RouteFreshUntil = until };
+        }
     }
 
     /// <summary>
@@ -353,7 +392,8 @@ public sealed partial class SqliteStore : IRelayObservationSource
                     SessionId = Safe(grainKey), RepositoryId = Text(chat, AnnouncedChat.RepositoryIdKey), Label = Text(chat, AnnouncedChat.LabelKey), Provider = provider,
                     MachineId = id, MachineName = name, IsMapped = provider.Length > 0 && !provider.Equals(ChatProviders.Unknown, StringComparison.OrdinalIgnoreCase),
                     Reachable = ReadModels.IsReachable(provider, Flag(chat, AnnouncedChat.WakeableKey), Flag(chat, AnnouncedChat.WaiterRunningKey), lastSeen, now),
-                    ReportedAt = lastSeen, FreshUntil = lastSeen?.Add(DiscoveryLimits.LivenessTimeout)
+                    ReportedAt = lastSeen, FreshUntil = lastSeen?.Add(DiscoveryLimits.LivenessTimeout),
+                    RouteFreshUntil = lastSeen?.Add(DiscoveryLimits.LivenessTimeout)
                 };
                 if (string.IsNullOrEmpty(session.SessionId)) continue;
                 var candidate = new ObservedChat(grainKey, session);

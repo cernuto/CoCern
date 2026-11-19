@@ -34,6 +34,7 @@ public static class DashboardEndpoints
         services.AddSingleton<DashboardCollector>();
         services.AddHostedService(provider => provider.GetRequiredService<DashboardCollector>());
         services.AddSingleton<DashboardConnections>();
+        services.AddSingleton<DashboardBoardNotifier>();
         services.AddSingleton(provider => new DashboardAnalytics(
             provider.GetService<IAnalyticsTool>() ?? (provider.GetService<IAnalyticsQueries>() is { } queries
                 ? new AnalyticsTool(queries, allowAdHocSql: false)
@@ -160,6 +161,8 @@ public static class DashboardEndpoints
             options.TransportMaxBufferSize = 256 * 1024;
             options.CloseOnAuthenticationExpiration = true;
         }).RequireAuthorization(DashboardSecurity.Policy);
+        app.MapHub<DashboardBoardHub>("/dashboard/hub/boards", options => options.CloseOnAuthenticationExpiration = true)
+            .RequireAuthorization(DashboardSecurity.Policy);
         return app;
     }
 
@@ -167,7 +170,8 @@ public static class DashboardEndpoints
     {
         app.Use(async (context, next) =>
         {
-            if (context.Request.Path.StartsWithSegments("/dashboard/api") || context.Request.Path.StartsWithSegments("/dashboard/hub"))
+            var path = context.Request.Path;
+            if (path.StartsWithSegments("/dashboard/api") || path.StartsWithSegments("/dashboard/hub"))
             {
                 context.Response.Headers.CacheControl = "no-store";
                 if (!DashboardSecurity.SecureTransport(context)) { context.Response.StatusCode = 403; return; }
@@ -179,6 +183,30 @@ public static class DashboardEndpoints
                     if (originRequired && !DashboardSecurity.SameOrigin(context)
                         || string.Equals(context.Request.Headers["Sec-Fetch-Site"], "cross-site", StringComparison.OrdinalIgnoreCase)) { context.Response.StatusCode = 403; return; }
                 }
+            }
+            else if (path.StartsWithSegments("/dashboard"))
+            {
+                // Run after static-file handlers set their headers, using the final status even when an error is written by the outer envelope.
+                context.Response.OnStarting(() =>
+                {
+                    var response = context.Response;
+                    if (response.StatusCode >= StatusCodes.Status400BadRequest)
+                    {
+                        // A cached missing WASM response keeps failing integrity checks even after the asset becomes available.
+                        response.Headers.CacheControl = "no-store";
+                        response.Headers.Remove("Expires");
+                    }
+                    else if (response.ContentType?.StartsWith("text/html", StringComparison.OrdinalIgnoreCase) == true
+                        || path.Equals("/dashboard/session-graph.css")
+                        || path.Equals("/dashboard/_framework/blazor.webassembly.js")
+                        || path.Equals("/dashboard/_framework/dotnet.js"))
+                    {
+                        // These stable URLs serve the current shell, graph styles and bundle loaders.
+                        response.Headers.CacheControl = "no-cache";
+                        response.Headers.Remove("Expires");
+                    }
+                    return Task.CompletedTask;
+                });
             }
             await next(context);
         });
