@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.AspNetCore.Http.Connections;
 using Microsoft.AspNetCore.SignalR.Client;
 using CoCern.Adapter.Node;
@@ -9,7 +10,7 @@ namespace CoCern.Adapter;
 internal static class RelayHubConnection
 {
 
-    /// <summary>Builds the connection. With <see cref="AdapterOptions.PinnedFingerprint"/> set, SignalR's own handler accepts only that certificate; <paramref name="handler"/> replaces it in tests.</summary>
+    /// <summary>Uses the adapter's LAN transport and optional certificate pin. Tests can supply an in-memory handler.</summary>
     public static HubConnection Create(AdapterOptions options, Func<HttpMessageHandler>? handler = null) => new HubConnectionBuilder()
         .WithUrl(new Uri(options.BaseUri, HubEvents.Path), connection =>
         {
@@ -17,10 +18,8 @@ internal static class RelayHubConnection
             connection.Transports = HttpTransportType.LongPolling;
             connection.HttpMessageHandlerFactory = original =>
             {
-                var inner = handler?.Invoke() ?? original;
-                if (handler is null && options.PinnedFingerprint is { } fingerprint && !Pin(inner, fingerprint))
-                    throw new InvalidOperationException("The hint channel cannot pin the hub certificate.");
-                DisableRedirects(inner);
+                original.Dispose();
+                var inner = handler?.Invoke() ?? RelayForwarder.CreateHandler(options);
                 return new PinnedOriginHandler(options.BaseUri, inner);
             };
             connection.TransportMaxBufferSize = RelayForwarder.MaxResponseBytes;
@@ -32,25 +31,27 @@ internal static class RelayHubConnection
     public static Task WatchSessionAsync(this HubConnection connection, string sessionId, string sessionToken, string repositoryId, CancellationToken cancellationToken) =>
         connection.InvokeAsync(HubEvents.WatchSession, sessionId, sessionToken, repositoryId, cancellationToken);
 
+    internal static string? SessionHintReason(JsonElement hint, string sessionId, string repositoryId)
+    {
+        if (hint.ValueKind != JsonValueKind.Object) return null;
+        if (hint.TryGetProperty("sessionId", out var session))
+        {
+            if (session.ValueKind != JsonValueKind.String || session.GetString() != sessionId) return null;
+            var eventId = hint.TryGetProperty("eventId", out var id) && id.ValueKind == JsonValueKind.String ? id.GetString() : null;
+            return eventId switch
+            {
+                "control" => "control-hint",
+                not null when eventId.StartsWith("deadline:", StringComparison.Ordinal) => "deadline",
+                _ => "session-hint"
+            };
+        }
+        return hint.TryGetProperty("kind", out var kind) && kind.ValueKind == JsonValueKind.String && kind.GetString() == "control"
+            && (!hint.TryGetProperty("repositoryId", out var repository) || repository.ValueKind == JsonValueKind.String && repository.GetString() == repositoryId)
+            ? "control-hint" : null;
+    }
+
     public static Task WatchMachineAsync(this HubConnection connection, CancellationToken cancellationToken) =>
         connection.InvokeAsync(HubEvents.WatchMachine, cancellationToken);
-
-    /// <summary>Sets the pinned-certificate check on every TLS-capable handler in the chain; false when there is none, so the caller fails closed.</summary>
-    private static bool Pin(HttpMessageHandler handler, string fingerprint)
-    {
-        var pinned = false;
-        if (handler is HttpClientHandler clientHandler) { clientHandler.ServerCertificateCustomValidationCallback = (_, certificate, _, _) => CertificateFingerprint.Matches(certificate, fingerprint); pinned = true; }
-        if (handler is SocketsHttpHandler socketsHandler) { socketsHandler.SslOptions.RemoteCertificateValidationCallback = (_, certificate, _, _) => CertificateFingerprint.Matches(certificate, fingerprint); pinned = true; }
-        if (handler is DelegatingHandler { InnerHandler: { } inner }) pinned |= Pin(inner, fingerprint);
-        return pinned;
-    }
-
-    private static void DisableRedirects(HttpMessageHandler handler)
-    {
-        if (handler is HttpClientHandler clientHandler) clientHandler.AllowAutoRedirect = false;
-        if (handler is SocketsHttpHandler socketsHandler) socketsHandler.AllowAutoRedirect = false;
-        if (handler is DelegatingHandler { InnerHandler: { } inner }) DisableRedirects(inner);
-    }
 }
 
 /// <summary>Rejects SignalR negotiation redirects before any credential-bearing request leaves the pinned origin.</summary>

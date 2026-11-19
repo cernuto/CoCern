@@ -11,7 +11,7 @@ public sealed class AdapterOptions
     public AdapterOptions(string url, string token, bool admin = false, bool signalR = false)
     {
         if (!TryParseOrigin(url, out var uri))
-            throw new AdapterConfigurationException("COCERN_URL must be a root HTTPS origin, or HTTP loopback origin, without credentials, query, or fragment.");
+            throw new AdapterConfigurationException("COCERN_URL must be a local or LAN HTTPS origin, or HTTP loopback origin, without a path, credentials, query, or fragment.");
 
         var normalized = token.Trim();
         if (string.IsNullOrWhiteSpace(normalized) || normalized.Length > 8192 || normalized.Any(c => !char.IsAsciiLetterOrDigit(c) && c is not '-' and not '_' and not '.' and not '~' and not '+' and not '/' and not '='))
@@ -55,9 +55,9 @@ public sealed class AdapterOptions
     /// <summary>True for a root HTTPS origin, or HTTP to a loopback host, without credentials, query or fragment.</summary>
     public static bool TryParseOrigin(string url, out Uri uri)
     {
-        if (!Uri.TryCreate(url, UriKind.Absolute, out uri!) ||
+        if (!Uri.TryCreate(url, UriKind.Absolute, out uri!) || !LanTransport.IsLocalDestination(uri) ||
             (uri.Scheme != Uri.UriSchemeHttps && (uri.Scheme != Uri.UriSchemeHttp || !uri.IsLoopback)) ||
-            !string.IsNullOrEmpty(uri.UserInfo) || !string.IsNullOrEmpty(uri.Query) ||
+            !string.IsNullOrEmpty(uri.Query) ||
             !string.IsNullOrEmpty(uri.Fragment) || uri.AbsolutePath != "/") return false;
         return true;
     }

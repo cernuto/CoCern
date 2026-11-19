@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
+using CoCern.Contracts;
 namespace CoCern.Setup;
 
 internal static class Program
@@ -130,7 +131,7 @@ internal static class SetupApplication
         var encodedSettings = JsonSerializer.Serialize(settings, Json);
         var settingsChanged = encodedSettings != originalSettings;
         if (settingsChanged) File.WriteAllText(settingsPath, encodedSettings);
-        using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(1) };
+        using var client = new HttpClient(LanTransport.CreateHandler()) { Timeout = TimeSpan.FromSeconds(1) };
         var url = settings.Environment["ASPNETCORE_URLS"].TrimEnd('/');
         if (!Uri.TryCreate(url, UriKind.Absolute, out var local) || !local.IsLoopback || local.Scheme != "http" || !string.IsNullOrEmpty(local.UserInfo) || !string.IsNullOrEmpty(local.Query) || !string.IsNullOrEmpty(local.Fragment)) throw new IOException("The host must use a loopback HTTP dashboard address.");
         var alive = false;

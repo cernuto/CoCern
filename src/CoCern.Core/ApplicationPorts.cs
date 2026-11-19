@@ -111,6 +111,14 @@ public sealed record ActivityEvent
         get => _callOrigin;
         init => _callOrigin = value is "mcp" or "claude-stop" or "claude-waiter" or "wake-watcher" or "node" or "dashboard" ? value : null;
     }
+
+    /// <summary>Reported cause of a background status read. Older clients and unrecognized values leave it unknown.</summary>
+    public string? WatcherReadReason
+    {
+        get;
+        init => field = value is "initial" or "targets" or "session-hint" or "control-hint" or "deadline" or "reconnect"
+            or "disconnected" or "recovery" or "pending" or "retry" or "subscribed" or "pre-dispatch" ? value : null;
+    }
 }
 
 /// <summary>Port implemented by storage: records telemetry without waiting. It never throws and drops events rather than slow a call.</summary>
@@ -289,4 +297,7 @@ public interface IDocSync
 public interface ICoordinationNotifier
 {
     Task NotifyAsync(string sessionId, string eventId, CancellationToken cancellationToken = default);
+    Task BoardChangedAsync(string repositoryId, string boardId, long revision, CancellationToken cancellationToken = default);
+    Task DispatchChangedAsync(CancellationToken cancellationToken = default);
+    Task SessionClosedAsync(string sessionId, CancellationToken cancellationToken = default);
 }

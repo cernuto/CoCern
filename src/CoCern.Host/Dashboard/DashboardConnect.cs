@@ -61,27 +61,22 @@ internal sealed class DashboardConnect(IConfiguration configuration, IHostEnviro
         var start = AdapterProcess(adapter, new[] { command, "--json", "--token-file", tokenFile }.Concat(hubArguments).Concat(RepositoryArguments()).Concat(arguments));
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(Timeout);
-        Process? process = null;
         try
         {
-            process = Process.Start(start) ?? throw new InvalidOperationException("The adapter could not start.");
-            // Both streams are drained together: an adapter writing a long error would otherwise block on a full pipe until the timeout.
-            var errors = process.StandardError.ReadToEndAsync(timeout.Token);
-            var output = await process.StandardOutput.ReadToEndAsync(timeout.Token);
-            await process.WaitForExitAsync(timeout.Token);
-            _ = await errors;
-            if (output.Trim().Length == 0 && process.ExitCode != 0)
+            var result = await Process.RunAndCaptureTextAsync(start, timeout.Token);
+            if (result.ExitStatus.Canceled)
+                return unavailable("The adapter did not complete the check. Check again before retrying a repair.");
+            var output = result.StandardOutput.Trim();
+            if (output.Length == 0 && result.ExitStatus.ExitCode != 0)
                 return unavailable("The adapter could not complete the check. Run the CoCern installer and choose Repair.");
-            using var reply = JsonDocument.Parse(output.Trim() is { Length: > 0 } text ? text : "{}");
+            using var reply = JsonDocument.Parse(output.Length > 0 ? output : "{}");
             if (reply.RootElement.TryGetProperty("error", out _)) return unavailable("The adapter reported a setup problem. Run the CoCern installer and choose Repair.");
             return reply.RootElement.Deserialize<T>(Web) ?? unavailable("The adapter returned no installation status. Try checking again.");
         }
         catch (Exception exception) when (exception is OperationCanceledException or JsonException or InvalidOperationException or System.ComponentModel.Win32Exception or IOException)
         {
-            try { process?.Kill(); } catch (Exception failure) when (failure is InvalidOperationException or System.ComponentModel.Win32Exception) { }
             return unavailable("The adapter did not complete the check. Check again before retrying a repair.");
         }
-        finally { process?.Dispose(); }
     }
 
     /// <summary>A published apphost uses its bundled runtime; framework-dependent DLLs retain the existing dotnet fallback.</summary>

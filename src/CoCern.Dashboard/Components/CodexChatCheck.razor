@@ -1,0 +1,68 @@
+@inject IJSRuntime JavaScript
+
+<div class="chat-check">
+    <dl class="verification"><div><dt>Connector on the hub PC</dt><dd>@ConfigurationLabel</dd></div></dl>
+    <label for="codex-verify-session">Session</label>
+    <select id="codex-verify-session" @bind="_selection">
+        <option value="">Choose the chat you want to verify</option>
+        @foreach (var chat in Candidates)
+        {
+            <option value="@SelectionKey(chat)">@DisplayName(chat) · @chat.RepositoryId · @chat.SessionId</option>
+        }
+    </select>
+    @if (Snapshot?.SessionsTruncated == true)
+    {
+        <p class="codex-readiness-detail">The hub returned a partial session list.</p>
+    }
+    @if (Selected is { } selected)
+    {
+        var firstCall = selected.FirstMcpCallAt;
+        var liveRoute = Fresh && selected.Reachable && selected.RouteFreshUntil > Now;
+        @if (!string.Equals(selected.Provider, "codex", StringComparison.OrdinalIgnoreCase))
+        {
+            <p class="codex-readiness-detail">The provider is unreported. Match this session’s public ID with the one from your chat.</p>
+        }
+        <dl class="verification">
+            <div><dt>First authenticated tool call</dt><dd>@(firstCall is { } at ? $"Verified · {DashboardFormat.Timestamp(at)}" : "Awaiting a call from this chat")</dd></div>
+            <div><dt>Direct wake route</dt><dd>@(!Fresh ? "Awaiting a fresh hub observation" : liveRoute ? "Confirmed" : "Unconfirmed")</dd></div>
+        </dl>
+        @if (Fresh && !liveRoute)
+        {
+            <p class="codex-readiness-detail">Keep this chat open with its local CoCern watcher running. A fresh route announcement updates this check automatically.</p>
+        }
+    }
+    else if (_selection.Length > 0)
+    {
+        <p class="codex-readiness-detail">The selected session is absent from the latest hub observation.</p>
+    }
+    @if (Selected?.FirstMcpCallAt is null)
+    {
+        <p class="codex-readiness-detail">Send this request in the chat you want to verify, then select its session above.</p>
+        <p class="request">@FirstRequest</p>
+        <BbButton Type="ButtonType.Button" Size="ButtonSize.Small" Variant="ButtonVariant.Outline" OnClick="CopyFirstRequestAsync">Copy first request</BbButton>
+        @if (_copyStatus is not null) { <span role="status">@_copyStatus</span> }
+    }
+</div>
+
+@code {
+    [Parameter] public DashboardSnapshot? Snapshot { get; set; }
+    [Parameter] public bool Fresh { get; set; }
+    [Parameter] public DateTimeOffset Now { get; set; }
+    [Parameter] public string ConfigurationLabel { get; set; } = "Unknown";
+
+    private const string FirstRequest = "Connect this Codex chat to CoCern for my current repository. Check your own inbox once with attention disabled and a limit of one. Leave messages unacknowledged. Tell me this session’s public ID or chat label so I can select it on Connect.";
+    private string _selection = "";
+    private string? _copyStatus;
+    private IEnumerable<DashboardSession> Candidates => (Snapshot?.Sessions ?? [])
+        .Where(s => string.IsNullOrWhiteSpace(s.Provider) || s.Provider.Equals("unknown", StringComparison.OrdinalIgnoreCase) || s.Provider.Equals("codex", StringComparison.OrdinalIgnoreCase))
+        .OrderBy(DisplayName, StringComparer.OrdinalIgnoreCase).ThenBy(s => s.SessionId, StringComparer.Ordinal);
+    private DashboardSession? Selected => _selection.Length == 0 ? null : Candidates.FirstOrDefault(s => SelectionKey(s) == _selection);
+    private static string SelectionKey(DashboardSession session) => $"{session.RepositoryId.Length}:{session.RepositoryId}{session.SessionId}";
+    private static string DisplayName(DashboardSession session) => string.IsNullOrWhiteSpace(session.Label) ? "Unnamed chat" : session.Label;
+
+    private async Task CopyFirstRequestAsync()
+    {
+        try { _copyStatus = await JavaScript.InvokeAsync<bool>("pkDashboard.copy", FirstRequest) ? "Copied" : "Select and copy the request above."; }
+        catch (JSException) { _copyStatus = "Select and copy the request above."; }
+    }
+}

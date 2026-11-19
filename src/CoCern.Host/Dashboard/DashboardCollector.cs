@@ -115,6 +115,18 @@ public sealed class DashboardCollector : BackgroundService
                 var observation = await source.ReadObservationAsync(now, application.IncarnationId, cancellationToken);
                 if (observation is not null)
                 {
+                    if (observation.UnobservedActivitySessionIds.Length > 0)
+                    {
+                        var missing = observation.UnobservedActivitySessionIds.ToHashSet(StringComparer.Ordinal);
+                        var priorActivity = previous.Sessions.Where(session => missing.Contains(session.SessionId))
+                            .ToDictionary(session => (session.RepositoryId, session.SessionId));
+                        observation = observation with
+                        {
+                            Sessions = observation.Sessions.Select(session => priorActivity.TryGetValue((session.RepositoryId, session.SessionId), out var prior)
+                                ? session with { LastActivityAt = prior.LastActivityAt, FirstMcpCallAt = prior.FirstMcpCallAt }
+                                : session).ToArray()
+                        };
+                    }
                     nextObservationAt = now + ObservationEvery;
                     (waitingReports, waitingMail, waitingReportsTruncated) = (observation.WaitingReports, observation.WaitingMail, observation.SessionsTruncated);
                     observation = observation with { Machines = await MarkAdaptersAsync(observation.Machines, now, cancellationToken) };
@@ -193,7 +205,11 @@ public sealed class DashboardCollector : BackgroundService
         // Token totals are counted once at startup and tip rule state is in memory, so this read is free.
         try { snapshot = snapshot with { Tokens = application.TokenSummary() }; }
         catch (Exception) { logs.CollectionFailed(); }
-        return Bound(snapshot with { Revision = previous.Revision + 1, Logs = logs.Snapshot(), Traffic = traffic.Snapshot(), DocCache = docCache?.Snapshot(now) ?? new() });
+        return Bound(snapshot with
+        {
+            Revision = previous.Revision + 1, Logs = logs.Snapshot(), Traffic = traffic.Snapshot(),
+            TrafficObservedAt = DateTimeOffset.UtcNow, TrafficTruncated = false, DocCache = docCache?.Snapshot(now) ?? new()
+        });
     }
 
     internal static DashboardSnapshot Bound(DashboardSnapshot snapshot)
@@ -278,8 +294,13 @@ public sealed class DashboardCollector : BackgroundService
         var machines = Trim(root.GetProperty("machines"));
         snapshot = snapshot with { Machines = snapshot.Machines[..machines] };
         if (bytes <= maximumBytes) return snapshot;
-        var traffic = Trim(root.GetProperty("traffic"));
-        snapshot = snapshot with { Traffic = snapshot.Traffic[..traffic] };
+        // Traffic is a FIFO. Keep the newest events and measure the entries actually removed.
+        var traffic = Trim(root.GetProperty("traffic"), fromStart: true);
+        if (traffic < snapshot.Traffic.Length)
+        {
+            if (!snapshot.TrafficTruncated) bytes--;
+            snapshot = snapshot with { Traffic = snapshot.Traffic[^traffic..], TrafficTruncated = true };
+        }
         if (bytes <= maximumBytes) return snapshot;
         if (!snapshot.Database.Truncated) bytes--;
         var tables = Trim(root.GetProperty("database").GetProperty("tables"));
@@ -304,12 +325,14 @@ public sealed class DashboardCollector : BackgroundService
             Database = new() { ObservedAt = snapshot.Database.ObservedAt, Truncated = true, Warning = warning }
         };
 
-        int Trim(JsonElement array)
+        int Trim(JsonElement array, bool fromStart = false)
         {
-            var count = array.GetArrayLength();
+            var length = array.GetArrayLength();
+            var count = length;
             while (bytes > maximumBytes && count > 0)
             {
-                bytes -= EncodedLength(array[count - 1]) + (count > 1 ? 1 : 0);
+                var index = fromStart ? length - count : count - 1;
+                bytes -= EncodedLength(array[index]) + (count > 1 ? 1 : 0);
                 count--;
             }
             return count;

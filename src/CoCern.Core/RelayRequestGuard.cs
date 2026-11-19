@@ -44,6 +44,7 @@ internal static class RelayRequestGuard
             }
             // Untrusted telemetry only; never part of native envelopes, replay or aggregate state.
             args.Remove("callOrigin");
+            args.Remove("watcherReadReason");
             if (args.ContainsKey(CheckedNativeResolution) || args.ContainsKey(ActingRepository)) return Replies.Error(InvalidArguments);
             // A preflight cannot be combined with any allocating or caller-controlled envelope.
             if (args.ContainsKey("nativePreflight"))

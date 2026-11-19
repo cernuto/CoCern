@@ -1,0 +1,69 @@
+.traffic-history {
+    padding: 16px 20px;
+}
+
+header, figcaption {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 4px 12px;
+}
+
+.traffic-total, figcaption, .coverage-note {
+    color: var(--muted-foreground);
+    font-size: .78rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.traffic-total strong {
+    color: var(--ink);
+    font-size: 1.35rem;
+    font-weight: 600;
+}
+
+figure {
+    margin: 14px 0 0;
+}
+
+.traffic-bars {
+    height: 76px;
+    display: grid;
+    grid-auto-columns: minmax(0, 1fr);
+    grid-auto-flow: column;
+    gap: 2px;
+    border-bottom: 1px solid var(--line);
+    background: linear-gradient(to top, transparent calc(50% - 1px), var(--line) 50%, transparent 50%);
+}
+
+.traffic-bin {
+    display: flex;
+    align-items: end;
+}
+
+.traffic-bar {
+    width: 100%;
+    min-height: 1px;
+    background: var(--primary);
+    border-radius: 2px 2px 0 0;
+}
+
+.partial, .coverage-note span {
+    background: repeating-linear-gradient(135deg, transparent 0 3px, var(--line) 3px 5px);
+}
+
+figcaption, .coverage-note {
+    margin-top: 6px;
+}
+
+.coverage-note span {
+    display: inline-block;
+    width: 12px;
+    height: 10px;
+    margin-inline-end: 4px;
+}
+
+@media (forced-colors: active) {
+    .traffic-bar { background: CanvasText; forced-color-adjust: none; }
+    .partial { border-top: 1px dashed CanvasText; }
+}

@@ -6,7 +6,7 @@
     }
     else
     {
-        <div class="inspector-title"><span class="provider-token" aria-hidden="true">@ProviderInitial</span><div><h3>@Session.Label</h3><p title="@Session.SessionId">@Session.Provider · #@ShortId(Session.SessionId)</p></div></div>
+        <div class="inspector-title"><span class="provider-token" aria-hidden="true">@ProviderInitial</span><div><h3>@(string.IsNullOrWhiteSpace(Session.Label) ? "Unnamed session" : Session.Label)</h3><p title="@Session.SessionId">@Session.Provider · #@ShortId(Session.SessionId)</p></div></div>
         <div class="tag-row">
             <BbBadge Variant="@(Session.Reachable ? BadgeVariant.SoftInfo : BadgeVariant.Secondary)" title="Whether the hub has a current direct route to wake this chat. MCP calls and inbox communication can still work without one. This does not indicate whether a model is running.">@(Session.Reachable ? "Direct chat route available" : "No direct chat route")</BbBadge>
             @if (Session.HasBindingReport is null)

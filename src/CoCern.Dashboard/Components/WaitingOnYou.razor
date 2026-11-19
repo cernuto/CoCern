@@ -6,6 +6,7 @@
     }
     @foreach (var group in new[] { (Rows: Waiting.Items, Maybe: false), (Rows: Waiting.Maybe, Maybe: true) })
     {
+        if (DecisionsOnly && group.Maybe) continue;
         @if (group.Maybe && (Waiting.MaybeCount > 0 || group.Rows.Length > 0))
         {
             <h3>Chat reports and follow-up <span class="muted">@Waiting.MaybeCount</span></h3>
@@ -41,6 +42,7 @@
 </section>
 @code {
     [Parameter] public DashboardWaiting Waiting { get; set; } = new();
+    [Parameter] public bool DecisionsOnly { get; set; }
     [Parameter] public DateTimeOffset Now { get; set; } = DateTimeOffset.UtcNow;
     [Parameter] public string HeadingId { get; set; } = "waiting-heading";
     [Parameter] public EventCallback<string> OnSelectSession { get; set; }

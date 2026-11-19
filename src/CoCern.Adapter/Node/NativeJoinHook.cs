@@ -120,7 +120,21 @@ internal static class NativeJoinHook
                 // A hook can precede discovery or follow a backend restart. Drain the bounded set of waiting
                 // backends within the existing hook budget; every backend must authenticate its own nonce.
                 // Only the endpoint consumes a successful exchange as registration proof; no answering chat ID is retained.
-                await registration.AnswerPendingAsync(ct, TimeSpan.FromMilliseconds(250));
+                var exchange = registration.AnswerPendingAsync(ct, TimeSpan.FromMilliseconds(250));
+                if (provider == "codex" && ChatLocators.Text(document.RootElement, "hook_event_name") == "PreToolUse" &&
+                    ChatLocators.Text(document.RootElement, "tool_name") == "mcp__cocern__check_inbox")
+                {
+                    // The registration listener and the established binding use separate leases. Prepare the binding
+                    // while the listener waits, but join and sign only after rechecking registration.
+                    async Task VerifyRegistrationAsync()
+                    {
+                        await exchange;
+                        if (!registration.StillCurrent()) throw new IOException(NativeRegistration.Refusal);
+                    }
+                    try { return await RunAsync(provider, new StringReader(text), output, error, join, ct, registration, VerifyRegistrationAsync); }
+                    finally { await exchange; }
+                }
+                await exchange;
             }
             if (!registration.StillCurrent()) return await Refuse();
             return await RunAsync(provider, new StringReader(text), output, error, join, ct, registration);
@@ -133,7 +147,8 @@ internal static class NativeJoinHook
         async Task<int> Refuse() { await error.WriteLineAsync("CoCern native capture could not be verified."); return 2; }
     }
 
-    internal static async Task<int> RunAsync(string provider, TextReader input, TextWriter output, TextWriter error, NativeJoin join, CancellationToken ct, NativeRegistration? registration = null)
+    internal static async Task<int> RunAsync(string provider, TextReader input, TextWriter output, TextWriter error, NativeJoin join, CancellationToken ct,
+        NativeRegistration? registration = null, Func<Task>? verifyRegistration = null)
     {
         var editGuardEnabled = NativeEditHook.Enabled;
         // Until a valid envelope proves this is unrelated, an opted-in edit hook cannot safely abstain on malformed input.
@@ -188,18 +203,14 @@ internal static class NativeJoinHook
                         if (ChatLocators.Text(root, "tool_use_id") is not { } callInvocation || !root.TryGetProperty("tool_input", out var wrapper) ||
                             !OnDemandTools.TryTarget(wrapper, out var target, out var inner) || !RelayToolCatalog.TryGet(target, out var entry) || !entry.OnDemand)
                             throw new ArgumentException("Invalid native invocation.");
-                        var stamped = await StampAsync(join, capture, target, callInvocation, inner, ct);
-                        if (provider == "codex" && registration is not null)
-                            await NativeStartupEvidence.RecordStampedAsync(registration, join, capture, stamped, ct);
+                        var stamped = await StampAsync(join, capture, target, callInvocation, inner, ct, registration: registration);
                         var call = JsonSerializer.SerializeToElement(new JsonObject { ["name"] = target, ["arguments"] = JsonNode.Parse(stamped.GetRawText()) });
                         await output.WriteLineAsync(WrapOutput(provider, call).GetRawText());
                         return 0;
                     }
                     if (ChatLocators.Text(root, "tool_use_id") is not { } invocation || !ValidInvocation(tool, invocation) ||
                         !root.TryGetProperty("tool_input", out var arguments)) throw new ArgumentException("Invalid native invocation.");
-                    var updated = await StampAsync(join, capture, tool, invocation, arguments, ct);
-                    if (provider == "codex" && registration is not null)
-                        await NativeStartupEvidence.RecordStampedAsync(registration, join, capture, updated, ct);
+                    var updated = await StampAsync(join, capture, tool, invocation, arguments, ct, verifyRegistration: verifyRegistration, registration: registration);
                     await output.WriteLineAsync(WrapOutput(provider, updated).GetRawText());
                     return 0;
                 default: return 0;
@@ -293,7 +304,8 @@ internal static class NativeJoinHook
     }
 
     internal static async Task<JsonElement> StampAsync(NativeJoin join, NativeHookContext capture, string tool, string invocation, JsonElement input, CancellationToken ct,
-        TimeProvider? clock = null, Func<string, CancellationToken, Task<string>>? resolveCheckout = null)
+        TimeProvider? clock = null, Func<string, CancellationToken, Task<string>>? resolveCheckout = null, Func<Task>? verifyRegistration = null,
+        NativeRegistration? registration = null)
     {
         if (!ValidInvocation(tool, invocation) || capture.Provider is not ("claude" or "codex")) throw new ArgumentException("Invalid native invocation.");
         var business = CloneArguments(input);
@@ -312,8 +324,11 @@ internal static class NativeJoinHook
             stamp["mac"] = Mac(binding, tool, business, unsigned);
             var result = JsonNode.Parse(business.GetRawText())!.AsObject();
             result["_cocernNative"] = stamp;
-            return JsonSerializer.SerializeToElement(result);
-        }, ct, resolveCheckout);
+            var updated = JsonSerializer.SerializeToElement(result);
+            if (capture.Provider == "codex" && registration is not null)
+                NativeStartupEvidence.RecordStamped(registration, binding, capture, updated, ct);
+            return updated;
+        }, ct, resolveCheckout, verifyRegistration);
     }
 
     internal static async Task<AdapterReply> InvokeAsync(NativeJoin join, string provider, string tool, JsonElement input, CancellationToken ct, TimeProvider? clock = null,

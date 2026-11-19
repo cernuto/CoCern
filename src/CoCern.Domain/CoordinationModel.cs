@@ -131,6 +131,11 @@ public sealed class CoordinationDocument
 {
     private string _json = "{}";
     private System.Text.Json.Nodes.JsonObject? _parsed;
+    // A single-use, post-commit hint. Clone/reload deliberately discard it; recovery reads cover a missed send.
+    private CoordinationHint? pendingHint;
+
+    internal void QueueHint(CoordinationHint? hint) => pendingHint = hint;
+    public CoordinationHint? TakeHint() => Interlocked.Exchange(ref pendingHint, null);
 
     public string Json { get => _json; set { _json = value; _parsed = null; } }
 
@@ -146,6 +151,14 @@ public sealed class CoordinationDocument
         _parsed = null;
         return parsed;
     }
+}
+
+public abstract record CoordinationHint
+{
+    public sealed record Board(string RepositoryId, string BoardId, long Revision) : CoordinationHint;
+    public sealed record Dispatch : CoordinationHint;
+    public sealed record SessionClosed(string SessionId) : CoordinationHint;
+    public sealed record Session(string SessionId, string EventId) : CoordinationHint;
 }
 
 /// <summary>The four coordination aggregates, plus the anomaly monitor. Each is a single-writer state machine keyed by a string.</summary>
@@ -191,6 +204,8 @@ public static class SessionRoles
 /// <summary>Kinds of an aggregate's own timers (due work), besides lease expiry.</summary>
 public static class DueWorkKinds
 {
+    public const string AttentionDeadline = "attention_deadline";
+    public const string SessionClosedHint = "session_closed_hint";
     /// <summary>A lease's end: the aggregate's own, or one task's (ID <c>lease:&lt;taskId&gt;</c>).</summary>
     public const string Lease = "lease";
 
@@ -302,6 +317,7 @@ public static class Operations
     public const string RestoreClaimForField = "restoreClaimFor";
     /// <summary>A board's due sweep: moves tasks finished longer than <c>Relay:Board:ArchiveAfterDays</c> to the archive (<see cref="Messages.TaskArchiveSweep"/>).</summary>
     public const string TaskArchive = "__task_archive";
+    public const string TaskLeaseDeadline = "__task_lease_deadline";
     /// <summary>Read-only: which of the given sessions in the repository the caller's principal opened.</summary>
     public const string SessionOwners = "__session_owners";
     /// <summary>Read-only, sent to the control directory: which of the given session IDs are open in this repository, whoever opened them.</summary>

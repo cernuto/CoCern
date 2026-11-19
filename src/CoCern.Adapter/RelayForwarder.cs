@@ -62,9 +62,9 @@ public sealed class RelayForwarder(HttpClient client, AdapterOptions options, st
     /// <summary>The same transport for a verified native chat's own calls, which may also forward the one tool only that surface lists.</summary>
     internal RelayForwarder ForNativeCalls(string origin) => new(client, options, origin, nativeSurface: true, surface: surface);
 
-    public static HttpClientHandler CreateHandler() => new() { AllowAutoRedirect = false, UseCookies = false };
+    public static SocketsHttpHandler CreateHandler() => LanTransport.CreateHandler();
     /// <summary>The pinned handler when the options carry a certificate fingerprint, otherwise the plain one.</summary>
-    public static HttpClientHandler CreateHandler(AdapterOptions options) => options.PinnedFingerprint is { } fingerprint ? PinnedCertificate.CreateHandler(fingerprint) : CreateHandler();
+    public static SocketsHttpHandler CreateHandler(AdapterOptions options) => options.PinnedFingerprint is { } fingerprint ? PinnedCertificate.CreateHandler(fingerprint) : CreateHandler();
 
     // Uses this transport's closed connection options; callers cannot substitute an unrelated authentication claim.
     internal bool MatchesNativeBinding(NativeJoinBinding binding) => binding.MatchesConnection(options);
@@ -190,9 +190,9 @@ public sealed class RelayForwarder(HttpClient client, AdapterOptions options, st
             // Only a failure to open the connection proves no request bytes left.
             var neverSent = !headersRead && e.HttpRequestError is HttpRequestError.ConnectionError or HttpRequestError.NameResolutionError
                 or HttpRequestError.SecureConnectionError or HttpRequestError.ProxyTunnelError;
-            return Unreachable(tool, request, neverSent);
+            return Unreachable(tool, e, neverSent);
         }
-        catch (IOException) { return Unreachable(tool, request, neverSent: false); }
+        catch (IOException e) { return Unreachable(tool, e, neverSent: false); }
         catch (JsonException) { return WithDelivery(tool, new(false, "invalid_hub_reply"), ChatGuidance.Uncertain); }
         catch (InvalidOperationException) { return WithDelivery(tool, new(false, "invalid_hub_reply"), ChatGuidance.Uncertain); }
         finally
@@ -230,9 +230,9 @@ public sealed class RelayForwarder(HttpClient client, AdapterOptions options, st
     }
 
     /// <summary>The hub could not be reached or the connection broke. A changed hub identity fails the handshake, before anything is sent.</summary>
-    private AdapterReply Unreachable(string tool, HttpRequestMessage request, bool neverSent)
+    private AdapterReply Unreachable(string tool, Exception error, bool neverSent)
     {
-        var changed = request.Options.TryGetValue(PinnedCertificate.IdentityMismatch, out var mismatch) && mismatch;
+        var changed = error.GetBaseException() is HubCertificateMismatchException;
         return WithDelivery(tool, ConnectionFailure(changed ? "hub_identity_changed" : "hub_unavailable"), changed || neverSent ? ChatGuidance.NotApplied : ChatGuidance.Uncertain);
     }
 
@@ -277,11 +277,12 @@ public sealed class RelayForwarder(HttpClient client, AdapterOptions options, st
     }
 
     /// <summary>Stamps reported origin at the adapter boundary; this field grants no permission and changes no call behavior.</summary>
-    internal static JsonElement WithOrigin(JsonElement arguments, bool background)
+    internal static JsonElement WithOrigin(JsonElement arguments, bool background, string? watcherReadReason = null)
     {
         if (arguments.ValueKind != JsonValueKind.Object) return arguments;
         var values = System.Text.Json.Nodes.JsonNode.Parse(arguments.GetRawText())!.AsObject();
         values["backgroundCall"] = background;
+        if (watcherReadReason is not null) values["watcherReadReason"] = watcherReadReason;
         return JsonSerializer.SerializeToElement(values);
     }
 

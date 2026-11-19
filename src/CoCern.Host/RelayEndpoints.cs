@@ -50,10 +50,17 @@ public static class RelayEndpoints
         app.MapRelayDashboard();
         app.MapConnectionDiagnostics();
         app.MapFallbackToFile("/dashboard/{*path:nonfile}", "dashboard/index.html");
-        app.MapHub<CoordinationHub>("/" + HubEvents.Path).RequireAuthorization();
+        app.MapHub<CoordinationHub>("/" + HubEvents.Path, options => options.CloseOnAuthenticationExpiration = true).RequireAuthorization();
         app.MapMcp("/mcp").RequireAuthorization();
         app.MapOpenApi();
-        app.MapScalarApiReference("/scalar", options => options.WithTitle("CoCern coordination API"));
+        app.MapScalarApiReference("/scalar", options => options
+            .WithTitle("CoCern coordination API")
+            .DisableDefaultFonts()
+            .DisableTelemetry()
+            .DisableAgent()
+            .DisableMcp()
+            .HideDeveloperTools()
+            .HideClientButton());
         app.MapProtectedResourceMetadata();
         return app;
     }
@@ -61,13 +68,16 @@ public static class RelayEndpoints
     /// <summary>The API reference describes every route, so only this PC may read it; without a network listener, in-process or pipe connections are local too.</summary>
     private static void UseLocalApiReference(this WebApplication app) => app.Use((context, next) =>
     {
-        if ((context.Request.Path.StartsWithSegments("/openapi") || context.Request.Path.StartsWithSegments("/scalar"))
+        var isScalar = context.Request.Path.StartsWithSegments("/scalar");
+        if ((context.Request.Path.StartsWithSegments("/openapi") || isScalar)
             && !HubLocalRequest.IsLocal(context)
             && !(context.Connection.RemoteIpAddress is null && context.RequestServices.GetService<HubListener>()?.Https is null))
         {
             context.Response.StatusCode = StatusCodes.Status404NotFound;
             return Task.CompletedTask;
         }
+        if (isScalar)
+            context.Response.Headers.ContentSecurityPolicy = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; worker-src 'self' blob:; object-src 'none'; form-action 'self'; base-uri 'self'";
         return next(context);
     });
 

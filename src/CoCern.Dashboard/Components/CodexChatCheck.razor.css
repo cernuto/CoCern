@@ -1,0 +1,8 @@
+.chat-check { display: grid; justify-items: start; gap: .5rem; padding-bottom: .75rem; }
+label { font-weight: 600; }
+select { width: min(100%, 34rem); min-width: 0; padding: .45rem; color: var(--foreground); background: var(--card); border: 1px solid var(--input); border-radius: .4rem; }
+.request { margin: 0; padding: .65rem .85rem; border-inline-start: 2px solid var(--primary); }
+.verification { margin: .25rem 0; display: grid; gap: .5rem; }
+.verification div { display: flex; flex-wrap: wrap; gap: .25rem .7rem; }
+dt { font-weight: 600; }
+dd { margin: 0; color: var(--muted-foreground); }

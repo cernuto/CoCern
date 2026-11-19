@@ -6,6 +6,8 @@ using CoCern.Adapter.Setup;
 using CoCern.Contracts;
 using CoCern.Core;
 using CoCern.Domain;
+using CoCern.Domain.Messages;
+using CoCern.Domain.State;
 using Orleans;
 using Xunit;
 
@@ -61,6 +63,24 @@ public sealed class MinorFixTests : IDisposable
         Assert.Equal(2, session["binding"]!["v"]!.GetValue<int>());
         Assert.Equal(Now, DateTimeOffset.Parse(session["freshUntil"]!.GetValue<string>()));
         Assert.Equal(Now.AddMinutes(5), DateTimeOffset.Parse(session["activeAt"]!.GetValue<string>()));
+    }
+
+    [Fact]
+    public void Renaming_an_idle_Codex_chat_preserves_its_watcher_until_its_own_heartbeat_expires()
+    {
+        var control = Directory(("s1", Now));
+        var until = Now.AddMinutes(RelayLimits.CodexWakeFreshMinutes);
+        var heartbeat = new SessionPresence { HubIncarnation = "hub", ObservedAt = Now, FreshUntil = until, Availability = "waiting" };
+        Assert.True(Apply(control, "control", Operations.Register, new SessionRegistration("repo", "s1", heartbeat, ChatProviders.Codex).ToJson()).Ok);
+        var rename = heartbeat with { Label = "Receiver", BindingVersion = 3, Availability = "unknown", FreshUntil = Now.AddHours(1) };
+        Assert.True(Apply(control, "control", Operations.Register, new SessionRegistration("repo", "s1", rename).ToJson()).Ok);
+        var entry = new ControlState(State(control)).Entry("s1")!;
+        var worker = entry.Worker(Now.AddMinutes(RelayLimits.CodexWakeIdleMinutes), "hub");
+        Assert.Equal("Receiver", worker["label"]!.GetValue<string>());
+        Assert.Equal("unknown", worker["availability"]!.GetValue<string>());
+        Assert.Equal(ChatProviders.Codex, worker[DirectoryEntry.LocalWakeProviderKey]!.GetValue<string>());
+        Assert.Null(entry.Worker(until, "hub")[DirectoryEntry.LocalWakeProviderKey]);
+        Assert.Null(entry.Worker(Now, "replacement-hub")[DirectoryEntry.LocalWakeProviderKey]);
     }
 
     [Fact]

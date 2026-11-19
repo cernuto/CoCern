@@ -1,0 +1,50 @@
+<section class="surface task-board" aria-label="Task board">
+    <form class="board-picker" @onsubmit="OpenBoard" @onsubmit:preventDefault>
+        <div>
+            <label for="task-board-repository">Repository</label>
+            <BbInput Type="InputType.Text" Id="task-board-repository" Value="@repository" ValueChanged="SetRepository" UpdateTiming="UpdateTiming.Immediate" maxlength="256" />
+        </div>
+        <div>
+            <label for="task-board-id">Board</label>
+            <BbInput Type="InputType.Text" Id="task-board-id" Value="@board" ValueChanged="@(value => board = value ?? string.Empty)" UpdateTiming="UpdateTiming.Immediate" maxlength="256" />
+        </div>
+        <BbButton Type="ButtonType.Submit" Variant="ButtonVariant.Default" Disabled="@(!CanOpen)">Open board</BbButton>
+    </form>
+    @if (selected is { } scope)
+    {
+        <DashboardTaskList @key="scope" Repository="@scope.Repository" Board="@scope.Board" />
+    }
+    else
+    {
+        <p class="close-sessions-note">Choose a repository and board to see its tasks.</p>
+    }
+</section>
+
+@code {
+    [Parameter] public string? DefaultRepository { get; set; }
+    private string repository = "";
+    private string board = "default";
+    private bool repositoryEdited;
+    private (string Repository, string Board)? selected;
+    private bool CanOpen => !string.IsNullOrWhiteSpace(repository) && !string.IsNullOrWhiteSpace(board);
+
+    protected override void OnParametersSet()
+    {
+        // The first dashboard snapshot may precede discovery of its first repository.
+        if (repositoryEdited || selected.HasValue || string.IsNullOrWhiteSpace(DefaultRepository)) return;
+        repository = DefaultRepository;
+        OpenBoard();
+    }
+
+    private void SetRepository(string? value)
+    {
+        repositoryEdited = true;
+        repository = value ?? "";
+    }
+
+    private void OpenBoard()
+    {
+        if (CanOpen)
+            selected = (repository.Trim(), board.Trim());
+    }
+}

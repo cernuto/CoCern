@@ -50,9 +50,7 @@ $settings = @{
     # This administrator may open the dashboard; the hub prints a one-time sign-in link for it.
     Relay__Dashboard__ViewerPrincipalIds__0 = [Environment]::UserName
 }
-# The doc cache syncs committed docs from git. Out of the box it follows the checkout this script runs from, on its current branch,
-# with the default patterns. It reads local commits only (git show), never the working tree, and never fetches: Fetch=false leaves
-# this clone's remote-tracking refs alone.
+# Index committed documents from the current branch of this checkout.
 function Get-DocRepositorySettings([string]$Root) {
     if ($NoDocs -or [Environment]::GetEnvironmentVariable('Relay__DocCache__Repositories__0__Id', 'Process')) { return @{} }
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) { return @{} }
@@ -70,7 +68,6 @@ function Get-DocRepositorySettings([string]$Root) {
         Relay__DocCache__Repositories__0__Id = $RepositoryId
         Relay__DocCache__Repositories__0__ClonePath = $Root
         Relay__DocCache__Repositories__0__Branch = $branch
-        Relay__DocCache__Repositories__0__Fetch = 'false'
     }
 }
 $docSettings = Get-DocRepositorySettings ([IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..')))

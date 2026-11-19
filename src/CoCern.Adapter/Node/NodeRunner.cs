@@ -18,7 +18,7 @@ internal sealed class NodeTransport
     public Func<Uri, CancellationToken, Task<string>> ProbeFingerprint { get; init; } = PinnedCertificate.ProbeAsync;
     /// <summary>The HTTP handler for a pinned fingerprint (null for loopback HTTP); the callback receives the fingerprint of any certificate it refuses.</summary>
     public Func<string?, Action<string>, HttpMessageHandler> CreateHandler { get; init; } = (fingerprint, mismatch) => fingerprint is null ? RelayForwarder.CreateHandler() : PinnedCertificate.CreateHandler(fingerprint, mismatch);
-    /// <summary>Replaces the hint channel's handler; null keeps SignalR's own handler, pinned to the same fingerprint.</summary>
+    /// <summary>Replaces the hint channel's LAN transport in tests. Production uses the same certificate pin as the HTTP client.</summary>
     public Func<HttpMessageHandler>? HubHandler { get; init; }
     /// <summary>Replaces the chat list; null (production) reads the session handles in the node folder and maps them with <see cref="Locators"/>.</summary>
     public Func<CancellationToken, Task<JsonArray>>? Chats { get; init; }

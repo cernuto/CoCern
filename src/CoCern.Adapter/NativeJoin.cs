@@ -21,6 +21,7 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
     internal static AdapterOptions BackgroundOptions(AdapterOptions connection) => new(connection.BaseUri.AbsoluteUri, connection.Token, signalR: connection.SignalR)
         { PinnedFingerprint = connection.PinnedFingerprint };
     private readonly ConcurrentDictionary<string, (string Session, SessionHints Keeper)> hints = new();
+    private readonly SessionHints inboxWaitHints = new(options);
     internal TimeSpan Budget { get; init; } = TimeSpan.FromSeconds(15);
     internal Func<string, string, string?> RootProof { get; init; } = (cwd, root) => ProtectedCheckoutRoot.ProveOrNull(cwd, root);
 
@@ -156,7 +157,7 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
     }
 
     internal async Task<JsonElement> WithEstablishedSigningBindingAsync(NativeHookContext context, Func<NativeJoinBinding, JsonElement> sign,
-        CancellationToken ct, Func<string, CancellationToken, Task<string>>? resolveCheckout = null)
+        CancellationToken ct, Func<string, CancellationToken, Task<string>>? resolveCheckout = null, Func<Task>? verifyRegistration = null)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct, stopping.Token);
         timeout.CancelAfter(Budget);
@@ -167,13 +168,16 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
             if (context.Provider is not ("claude" or "codex") || context.NativeId is not { Length: 32 or 36 } ||
                 !Guid.TryParseExact(context.NativeId, context.NativeId.Length == 32 ? "N" : "D", out var id)) throw new Refused("native_capture_required");
             var workspace = resolveCheckout is null
-                ? await Task.Run(() => NativeCheckout.Inspect(context.Cwd).Root, cancel).WaitAsync(cancel)
+                ? await Task.Run(() => NativeCheckout.SigningRoot(context.Cwd), cancel).WaitAsync(cancel)
                 : await resolveCheckout(context.Cwd, cancel);
             var scope = CredentialScope();
             var directory = IntentDir(scope);
-            SafeDirectory(directory, true);
             var intent = new Intent(context.Provider, id.ToString("D"), workspace);
             var name = NativeCheckout.Hash(JsonSerializer.Serialize(intent));
+            var stripe = Path.Combine(directory, name[..2] + ".lock");
+            var existingOnly = verifyRegistration is not null && File.Exists(stripe);
+            if (!existingOnly && verifyRegistration is not null) await verifyRegistration();
+            SafeDirectory(directory, !existingOnly);
             Func<string, CancellationToken, Task<string>>? knownCheckout = resolveCheckout is null ? null : (_, _) => Task.FromResult(workspace);
             for (var mayJoin = true; ; mayJoin = false)
             {
@@ -181,10 +185,21 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
                 {
                     // The stripe stays held through established lookup and MAC issuance. Missing
                     // state alone permits the genuine hook to join; corrupt or ambiguous state does not.
-                    await using var membership = await NativeJoinBinding.LockAsync(Path.Combine(directory, name[..2] + ".lock"), cancel);
+                    await using var membership = await NativeJoinBinding.LockAsync(stripe, cancel, existingOnly);
                     if (CredentialScope() != scope) throw new Refused("native_private_connection_required");
                     await using var binding = await NativeJoinBinding.AcquireEstablishedAsync(folder, context.Provider, id.ToString("D"),
                         Environment.MachineName, workspace, cancel, resolveCheckout: knownCheckout);
+                    if (verifyRegistration is not null)
+                    {
+                        await verifyRegistration();
+                        // Recheck the original event directory after the exchange. A worktree move during
+                        // preparation must not turn a lease on the previous checkout into a stamp.
+                        var current = resolveCheckout is null
+                            ? await Task.Run(() => NativeCheckout.SigningRoot(context.Cwd), cancel).WaitAsync(cancel)
+                            : await resolveCheckout(context.Cwd, cancel);
+                        if (current != workspace) throw new IOException("The native event checkout changed while preparing the inbox call.");
+                        if (CredentialScope() != scope) throw new Refused("native_private_connection_required");
+                    }
                     cancel.ThrowIfCancellationRequested();
                     return sign(binding);
                 }
@@ -192,6 +207,7 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
                 {
                     // Release the stripe before EnsureBound takes the same lease. The outer deadline
                     // covers initial lookup, a single bounded join and the final signing lookup.
+                    if (verifyRegistration is not null) await verifyRegistration();
                     if (CredentialScope() != scope) throw new Refused("native_private_connection_required");
                     await EnsureBoundAsync(context, null, cancel);
                 }
@@ -209,9 +225,12 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
         cancel.ThrowIfCancellationRequested();
         if (context.Provider is not ("claude" or "codex") || context.NativeId is not { Length: 32 or 36 } ||
             !Guid.TryParseExact(context.NativeId, context.NativeId.Length == 32 ? "N" : "D", out var id)) throw new Refused("native_capture_required");
-        var checkout = await Task.Run(() => NativeCheckout.Inspect(context.Cwd), cancel).WaitAsync(cancel);
-        var evidence = checkout.Preflight(options.BaseUri.IsLoopback, options.Repository);
-        var intent = new Intent(context.Provider, id.ToString("D"), checkout.Root);
+        var root = await Task.Run(() => NativeCheckout.SigningRoot(context.Cwd), cancel).WaitAsync(cancel);
+        if (options.Repository is { Length: > 0 } configuredRepository && !CoCern.Contracts.NativeGitOrigin.ValidRepositoryHint(configuredRepository))
+            throw new IOException("The configured repository ID is invalid.");
+        NativeCheckout? checkout = null;
+        JsonElement Preflight(string? repository) => (checkout ??= NativeCheckout.InspectRoot(root)).Preflight(options.BaseUri.IsLoopback, repository);
+        var intent = new Intent(context.Provider, id.ToString("D"), root);
         var scope = CredentialScope();
         var directory = IntentDir(scope);
         SafeDirectory(directory, true);
@@ -244,24 +263,24 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
                 // carries this checkout's evidence, naming that repository, which the hub resolves and authorizes again (CheckedNativeResolution).
                 // Only a chat with no binding here asks the hub's preflight which repository its checkout is.
                 string repo;
-                var opening = evidence;
-                if (NativeJoinBinding.KnownRepository(folder, intent.Provider, intent.NativeId, Environment.MachineName, checkout.Root,
-                    evidence.GetProperty("nativePreflight")) is { } known)
+                var openingHint = options.Repository;
+                if (NativeJoinBinding.KnownRepository(folder, intent.Provider, intent.NativeId, Environment.MachineName, root,
+                    () => Preflight(options.Repository).GetProperty("nativePreflight")) is { } known)
                 {
                     repo = known;
-                    opening = checkout.Preflight(options.BaseUri.IsLoopback, known);
+                    openingHint = known;
                 }
                 else
                 {
-                    var resolution = await forwarder.ForwardAsync(RelayTools.SessionOpen, evidence, cancel);
+                    var resolution = await forwarder.ForwardAsync(RelayTools.SessionOpen, Preflight(openingHint), cancel);
                     // A process-wide repository hint (COCERN_REPOSITORY, e.g. one Connect wrote for another repository) confines the hub to that
                     // repository's clone, so a checkout of a different repository is refused. The checkout's own evidence is the truth for a native
                     // chat: ask once more without the hint, and open with that evidence. The hub still resolves it and checks the credential's access.
                     if (!resolution.Ok && resolution.Code == RelayErrorCodes.RepositoryDenied && options.Repository is not null)
                     {
-                        var bare = checkout.Preflight(options.BaseUri.IsLoopback, null);
+                        var bare = Preflight(null);
                         var retried = await forwarder.ForwardAsync(RelayTools.SessionOpen, bare, cancel);
-                        if (retried.Ok) (resolution, opening) = (retried, bare);
+                        if (retried.Ok) { resolution = retried; openingHint = null; }
                     }
                     if (!resolution.Ok) throw new Refused(resolution.Code);
                     if (resolution.Code != "Ok" || resolution.Version is null || resolution.Data is not { } data ||
@@ -275,7 +294,7 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
                     intent = intent with { Repository = repo };
                     NodeState.WritePrivately(path, JsonSerializer.SerializeToUtf8Bytes(intent));
                 }
-                await using var binding = await NativeJoinBinding.AcquireAsync(folder, intent.Provider, intent.NativeId, Environment.MachineName, repo, checkout.Root, cancel);
+                await using var binding = await NativeJoinBinding.AcquireAsync(folder, intent.Provider, intent.NativeId, Environment.MachineName, repo, root, cancel);
                 if (!forwarder.MatchesNativeBinding(binding)) throw new Refused("native_private_connection_required");
                 if (expectedGeneration is not null && binding.Generation != expectedGeneration) throw new Refused("native_stamp_invalid");
                 var handle = binding.CurrentHandle;
@@ -301,8 +320,8 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
                 if (handle is null || binding.Moved)
                 {
                     var handoff = SessionHandoff.ForFolder(folder, client);
-                    var protectedRoot = await ProtectedRootAsync(context.Cwd, checkout.Root, cancel);
-                    var opened = await handoff.OpenNativeJoinAsync(binding, forwarder, cancel, context.DisplayTitle, opening.GetProperty("nativePreflight"), protectedRoot);
+                    var protectedRoot = await ProtectedRootAsync(context.Cwd, root, cancel);
+                    var opened = await handoff.OpenNativeJoinAsync(binding, forwarder, cancel, context.DisplayTitle, Preflight(openingHint).GetProperty("nativePreflight"), protectedRoot);
                     if (!opened.Completed) throw new Refused(opened.Code);
                     handle = binding.CurrentHandle ?? throw new Refused("native_handle_unverified");
                 }
@@ -466,7 +485,8 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
             if (fileCheck) payload["requestId"] = invocation;
             var arguments = RelayForwarder.WithOrigin(JsonSerializer.SerializeToElement(payload), background: false);
             if (tool == RelayTools.ControlRequest) arguments = CoordinationTools.WithOwnSession(arguments, handle.SessionId);
-            var reply = tool == RelayTools.CheckInbox ? await InboxWait.CheckAsync(modelCalls, arguments, InboxWait.PollInterval, ct) :
+            var reply = tool == RelayTools.CheckInbox ? await InboxWait.CheckAsync(modelCalls, arguments, InboxWait.PollInterval, ct,
+                hints.Values.FirstOrDefault(entry => entry.Session == handle.SessionId).Keeper ?? inboxWaitHints) :
                 await ConditionalRead.ForwardAsync(modelCalls, tool, arguments, ct);
             if (reply.Ok && tool == RelayTools.SessionLabelSet)
                 await RecordLabelAsync(context, handle, reply, expectedGeneration, ct);
@@ -510,6 +530,7 @@ internal sealed class NativeJoin(string folder, AdapterOptions options, RelayFor
     {
         await stopping.CancelAsync();
         foreach (var entry in hints.Values) await entry.Keeper.DisposeAsync();
+        await inboxWaitHints.DisposeAsync();
         stopping.Dispose();
     }
 }

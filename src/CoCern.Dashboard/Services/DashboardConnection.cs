@@ -14,13 +14,13 @@ public sealed class DashboardConnection(HttpClient http, NavigationManager navig
 {
     private CancellationTokenSource? _connectionLifetime;
     private Task? _runner;
-    private readonly HashSet<string> _activitySessions = [];
+    private readonly Dictionary<string, DateTimeOffset> _pulseUntilBySession = new(StringComparer.Ordinal);
     private readonly Stopwatch _elapsed = Stopwatch.StartNew();
     private readonly DashboardObservationClock _observations = new();
-    private DateTimeOffset _pulseAt;
     private bool _disposed;
 
     public event Action? Changed;
+    public event Action<DashboardSendPulse[]>? DirectSends;
     public DashboardSnapshot? Snapshot { get; private set; }
     public DashboardLinkState State { get; private set; } = DashboardLinkState.Connecting;
     public bool Authenticated { get; private set; }
@@ -41,7 +41,7 @@ public sealed class DashboardConnection(HttpClient http, NavigationManager navig
     }
 
     public bool IsPulsing(string sessionId, DateTimeOffset now) =>
-        State == DashboardLinkState.Live && now - _pulseAt < TimeSpan.FromMilliseconds(1400) && _activitySessions.Contains(sessionId);
+        State == DashboardLinkState.Live && _pulseUntilBySession.TryGetValue(sessionId, out var until) && now < until;
 
     public Task<bool> LoginAsync(string token, bool rememberBrowser = false) => PostLoginAsync(new DashboardLoginRequest { Token = token, RememberBrowser = rememberBrowser }, "This credential does not have dashboard access.");
 
@@ -155,6 +155,7 @@ public sealed class DashboardConnection(HttpClient http, NavigationManager navig
                 var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
                 hub.Closed += _ => { closed.TrySetResult(); return Task.CompletedTask; };
                 using var subscription = hub.On<DashboardSnapshot>("snapshot", AcceptSnapshot);
+                using var sends = hub.On<DashboardSendPulse[]>("directSends", batch => DirectSends?.Invoke(batch));
                 await hub.StartAsync(cancellationToken);
                 AcceptSnapshot(await hub.InvokeAsync<DashboardSnapshot>("GetSnapshot", cancellationToken));
                 State = DashboardLinkState.Live;
@@ -172,7 +173,7 @@ public sealed class DashboardConnection(HttpClient http, NavigationManager navig
             }
             if (cancellationToken.IsCancellationRequested) return;
             State = DashboardLinkState.Reconnecting;
-            _activitySessions.Clear();
+            _pulseUntilBySession.Clear();
             Notice = "Connection interrupted. Retrying automatically…";
             Changed?.Invoke();
             try { await Task.Delay(TimeSpan.FromSeconds(3), cancellationToken); }
@@ -183,22 +184,25 @@ public sealed class DashboardConnection(HttpClient http, NavigationManager navig
     private void AcceptSnapshot(DashboardSnapshot incoming)
     {
         if (!_observations.Accept(incoming.InstanceId, incoming.Revision, incoming.ObservedAt, _elapsed.Elapsed)) return;
-        _activitySessions.Clear();
+        var received = DateTimeOffset.UtcNow;
+        var pulseUntil = received.AddMilliseconds(1400);
         if (Snapshot is { } previous && previous.InstanceId == incoming.InstanceId)
         {
+            foreach (var sessionId in _pulseUntilBySession.Where(pair => pair.Value <= received).Select(pair => pair.Key).ToArray())
+                _pulseUntilBySession.Remove(sessionId);
             var priorActivity = previous.Sessions.ToDictionary(session => session.SessionId, session => session.LastActivityAt);
             foreach (var session in incoming.Sessions)
             {
                 if (session.LastActivityAt is { } activity && priorActivity.TryGetValue(session.SessionId, out var prior) && (prior is null || activity > prior))
-                    _activitySessions.Add(session.SessionId);
+                    _pulseUntilBySession[session.SessionId] = pulseUntil;
             }
             var latestTraffic = previous.Traffic.Select(entry => entry.Sequence).DefaultIfEmpty().Max();
             foreach (var entry in incoming.Traffic.Where(entry => entry.Sequence > latestTraffic && entry.SessionId is not null))
-                _activitySessions.Add(entry.SessionId!);
+                _pulseUntilBySession[entry.SessionId!] = pulseUntil;
         }
+        else _pulseUntilBySession.Clear();
         Snapshot = incoming;
-        ReceivedAt = DateTimeOffset.UtcNow;
-        _pulseAt = ReceivedAt.Value;
+        ReceivedAt = received;
         Changed?.Invoke();
     }
 
@@ -209,7 +213,7 @@ public sealed class DashboardConnection(HttpClient http, NavigationManager navig
         Snapshot = null;
         ReceivedAt = null;
         _observations.Reset();
-        _activitySessions.Clear();
+        _pulseUntilBySession.Clear();
         State = DashboardLinkState.SignIn;
         Notice = _signInNotice;
         _signInNotice = null;

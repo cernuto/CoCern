@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
+using CoCern.Contracts;
 using CoCern.Core;
 using CoCern.Domain;
 
@@ -101,15 +102,19 @@ public static class RelayAuthentication
         var authority = configuration["Relay:OAuth:Authority"];
         var audience = configuration["Relay:OAuth:Audience"];
         var oauth = !string.IsNullOrWhiteSpace(authority);
-        if (!oauth && clients.Length == 0) throw new InvalidOperationException("Configure relay clients or an external OAuth issuer before starting.");
-        if (oauth && (!Uri.TryCreate(authority, UriKind.Absolute, out var issuer) || issuer.Scheme != "https" || issuer.UserInfo.Length != 0 || issuer.Query.Length != 0 || issuer.Fragment.Length != 0 || string.IsNullOrWhiteSpace(audience)))
-            throw new InvalidOperationException("OAuth requires an HTTPS authority and an audience.");
+        if (!oauth && clients.Length == 0) throw new InvalidOperationException("Configure relay clients or a LAN OAuth issuer before starting.");
+        if (oauth && (!LocalHttpsUrl(authority) || string.IsNullOrWhiteSpace(audience)))
+            throw new InvalidOperationException("OAuth requires a LAN HTTPS authority and an audience.");
         var resource = configuration["Relay:OAuth:Resource"];
-        if (resource is not null && (!Uri.TryCreate(resource, UriKind.Absolute, out var resourceUri) || resourceUri.Scheme != "https" || resourceUri.UserInfo.Length != 0 || resourceUri.Query.Length != 0 || resourceUri.Fragment.Length != 0))
-            throw new InvalidOperationException("OAuth resource must be a public HTTPS URL without credentials, query or fragment.");
+        if (resource is not null && !LocalHttpsUrl(resource))
+            throw new InvalidOperationException("OAuth resource must be a LAN HTTPS URL without credentials, query or fragment.");
         var scopes = configuration.GetSection("Relay:OAuth:RequiredScopes").Get<string[]>() ?? ["relay"];
         if (oauth && (scopes.Length == 0 || scopes.Any(string.IsNullOrWhiteSpace))) throw new InvalidOperationException("OAuth requires nonempty resource scopes.");
     }
+
+    private static bool LocalHttpsUrl(string? value) =>
+        Uri.TryCreate(value, UriKind.Absolute, out var uri) && uri.Scheme == Uri.UriSchemeHttps &&
+        uri.UserInfo.Length == 0 && uri.Query.Length == 0 && uri.Fragment.Length == 0 && LanTransport.IsLocalDestination(uri);
 
     private static void ConfigureJwt(JwtBearerOptions options, IConfiguration configuration)
     {
@@ -121,6 +126,7 @@ public static class RelayAuthentication
         options.Audience = audience;
         options.MapInboundClaims = false;
         options.RequireHttpsMetadata = true;
+        options.BackchannelHttpHandler = LanTransport.CreateHandler();
         options.IncludeErrorDetails = false;
         options.TokenValidationParameters = new TokenValidationParameters { ValidateIssuer = true, ValidateAudience = true, ValidateLifetime = true, ValidateIssuerSigningKey = true, RequireSignedTokens = true, RequireExpirationTime = true, ClockSkew = TimeSpan.FromSeconds(30) };
         options.Events = new JwtBearerEvents

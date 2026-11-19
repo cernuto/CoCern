@@ -51,7 +51,7 @@ public sealed class DashboardConnections(IHubContext<DashboardHub> hub, Dashboar
             if (viewers.Count >= 64) return false;
             viewer = new Viewer(context, CancellationTokenSource.CreateLinkedTokenSource(context.ConnectionAborted, lifetime.ApplicationStopping));
             if (!viewers.TryAdd(context.ConnectionId, viewer)) { viewer.Cancellation.Dispose(); return false; }
-            viewer.Frames.Writer.TryWrite(initial);
+            viewer.Publish(initial);
             if (viewerAvailable.CurrentCount == 0) viewerAvailable.Release();
         }
         _ = SendAsync(viewer);
@@ -71,19 +71,32 @@ public sealed class DashboardConnections(IHubContext<DashboardHub> hub, Dashboar
     public void Publish(DashboardSnapshot snapshot)
     {
         foreach (var viewer in viewers.Values)
-            viewer.Frames.Writer.TryWrite(snapshot);
+            viewer.Publish(snapshot);
+    }
+
+    public void PublishSend(DashboardSendPulse pulse)
+    {
+        foreach (var viewer in viewers.Values)
+            viewer.Publish(pulse);
     }
 
     private async Task SendAsync(Viewer viewer)
     {
         try
         {
-            await foreach (var snapshot in viewer.Frames.Reader.ReadAllAsync(viewer.Cancellation.Token))
+            await foreach (var _ in viewer.Ready.Reader.ReadAllAsync(viewer.Cancellation.Token))
             {
                 if (!security.IsValid(viewer.Context.User, DateTimeOffset.UtcNow)) break;
                 using var timeout = CancellationTokenSource.CreateLinkedTokenSource(viewer.Cancellation.Token);
                 timeout.CancelAfter(TimeSpan.FromSeconds(5));
-                await hub.Clients.Client(viewer.Context.ConnectionId).SendAsync("snapshot", snapshot, timeout.Token);
+                var client = hub.Clients.Client(viewer.Context.ConnectionId);
+                var (snapshot, sends) = viewer.TakePending();
+                if (snapshot is not null) await client.SendAsync("snapshot", snapshot, timeout.Token);
+                if (sends.Length > 0)
+                {
+                    if (!security.IsValid(viewer.Context.User, DateTimeOffset.UtcNow)) break;
+                    await client.SendAsync("directSends", sends, timeout.Token);
+                }
             }
         }
         catch (Exception) { /* Transport failure is isolated from relay work and never exported as raw text. */ }
@@ -97,7 +110,39 @@ public sealed class DashboardConnections(IHubContext<DashboardHub> hub, Dashboar
 
     private sealed record Viewer(HubCallerContext Context, CancellationTokenSource Cancellation)
     {
-        public Channel<DashboardSnapshot> Frames { get; } = Channel.CreateBounded<DashboardSnapshot>(new BoundedChannelOptions(1) { FullMode = BoundedChannelFullMode.DropOldest, SingleReader = true, SingleWriter = false });
+        public Channel<bool> Ready { get; } = Channel.CreateBounded<bool>(new BoundedChannelOptions(1) { FullMode = BoundedChannelFullMode.DropWrite, SingleReader = true, SingleWriter = false });
+        private readonly object gate = new();
+        private DashboardSnapshot? pendingSnapshot;
+        private readonly Queue<DashboardSendPulse> sends = new();
+
+        public void Publish(DashboardSnapshot snapshot)
+        {
+            lock (gate) pendingSnapshot = snapshot;
+            Ready.Writer.TryWrite(true);
+        }
+
+        public void Publish(DashboardSendPulse pulse)
+        {
+            lock (gate)
+            {
+                if (sends.Count == 32) sends.Dequeue();
+                sends.Enqueue(pulse);
+            }
+            Ready.Writer.TryWrite(true);
+        }
+
+        public (DashboardSnapshot? Snapshot, DashboardSendPulse[] Sends) TakePending()
+        {
+            lock (gate)
+            {
+                var snapshot = pendingSnapshot;
+                pendingSnapshot = null;
+                var oldest = DateTimeOffset.UtcNow.AddSeconds(-2);
+                var recent = sends.Where(send => send.At >= oldest).ToArray();
+                sends.Clear();
+                return (snapshot, recent);
+            }
+        }
     }
 }
 

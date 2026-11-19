@@ -188,7 +188,7 @@ internal sealed class DocRepositoryRegistry
     private string? RegisteredAs(string path) => Volatile.Read(ref all).FirstOrDefault(repository => SamePath(repository.ClonePath, path))?.Id;
 
     private static DocRepository Discovered(string id, string path, string branch) =>
-        new(id, path, branch, "origin", DocFormats.DefaultPatterns.Select(glob => new DocPattern(glob, DocFormats.DefaultSpec)).ToArray(), [.. DocFormats.DefaultExcludes], null, Fetch: false);
+        new(id, path, branch, DocFormats.DefaultPatterns.Select(glob => new DocPattern(glob, DocFormats.DefaultSpec)).ToArray(), [.. DocFormats.DefaultExcludes]);
 
     /// <summary>The checked-out branch; null for a detached HEAD, a name unsafe in a ref, or git failing.</summary>
     private async Task<string?> BranchAsync(string path, CancellationToken cancellationToken)

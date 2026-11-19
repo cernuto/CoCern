@@ -1,0 +1,32 @@
+.task-board {
+    min-width: 0;
+    padding: clamp(16px, 3vw, 28px);
+}
+
+.board-picker {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) auto;
+    align-items: end;
+    gap: 12px;
+    margin-bottom: 24px;
+}
+
+.board-picker label,
+.task-board ::deep th small {
+    display: block;
+    color: var(--muted-foreground);
+    font-size: .8rem;
+    font-weight: 500;
+}
+
+.board-picker label { margin-bottom: 6px; }
+.task-board ::deep h2 { margin-bottom: 14px; overflow-wrap: anywhere; }
+.task-board ::deep table { width: 100%; table-layout: fixed; border-collapse: collapse; }
+.task-board ::deep th,
+.task-board ::deep td { text-align: start; vertical-align: top; overflow-wrap: anywhere; padding: 10px 6px; border-bottom: 1px solid var(--border); }
+.task-board ::deep thead th { color: var(--muted-foreground); font-size: .85rem; }
+.task-board ::deep th:first-child { width: 44%; }
+
+@media (max-width: 600px) {
+    .board-picker { grid-template-columns: 1fr; }
+}

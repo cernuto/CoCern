@@ -1,25 +1,10 @@
 @if (Compact)
 {
-    <section class="dispatch-strip" aria-label="Dispatch controls">
-        <strong>Dispatch: @(Paused is true ? "Paused" : Paused is false ? "Running" : "Not yet read")</strong>
-        <span class="dispatch-repository">@(NeedsRepository ? "Choose a repository on Manager" : RepositoryId)</span>
-        <div class="dispatch-actions">
-            <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Outline" OnClick='() => DispatchAsync("pause")' Disabled="@(DispatchBusy || NeedsRepository)" AriaLabel="Pause dispatch">Pause</BbButton>
-            <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Outline" OnClick='() => DispatchAsync("stop")' Disabled="@(DispatchBusy || NeedsRepository)" AriaLabel="Request stop for all chats" title="Prevents new work and asks known chats to cancel; running tools and wake delivery continue.">Stop</BbButton>
-            <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Outline" OnClick='() => DispatchAsync("resume")' Disabled="@(DispatchBusy || NeedsRepository)" AriaLabel="Resume dispatch">Resume</BbButton>
-            <BbButton Href="manager" Variant="ButtonVariant.Ghost">Manager</BbButton>
-        </div>
-        @if (DispatchMessage is not null) { <p role="status">@DispatchMessage</p> }
-        @if (UnconfirmedDecision is not null)
-        {
-            <p role="status">A manager decision is unconfirmed. Open Manager to review its saved request and retry.</p>
-        }
-        @if (UnconfirmedDispatch is not null)
-        {
-            <p>Unconfirmed dispatch: @UnconfirmedDispatch.Command.</p>
-            <BbButton Type="ButtonType.Button" Variant="ButtonVariant.Outline" OnClick="RetryDispatchAsync" Disabled="@DispatchBusy">Retry dispatch</BbButton>
-        }
-    </section>
+    <a class="dispatch-link" href="manager" title="Open dispatch controls for @(NeedsRepository ? "a repository" : RepositoryId)">
+        @if (UnconfirmedDecision is not null || UnconfirmedDispatch is not null) { <span>Review unconfirmed request</span> }
+        else { <span>@(Paused is true ? "Dispatch paused" : Paused is false ? "Dispatch running" : "Dispatch controls")</span> }
+        <span aria-hidden="true">→</span>
+    </a>
 }
 else
 {

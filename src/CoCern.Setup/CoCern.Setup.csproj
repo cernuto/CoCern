@@ -1,4 +1,5 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup><OutputType>Exe</OutputType></PropertyGroup>
   <ItemGroup><InternalsVisibleTo Include="CoCern.Tests" /></ItemGroup>
+  <ItemGroup><ProjectReference Include="../CoCern.Contracts/CoCern.Contracts.csproj" /></ItemGroup>
 </Project>

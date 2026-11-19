@@ -18,6 +18,32 @@ namespace CoCern.Domain;
 /// </summary>
 internal static class SessionAttention
 {
+    /// <summary>Stores one timer for the next clock-driven change to this session's attention eligibility.</summary>
+    internal static void ScheduleDeadline(StateEnvelope<CoordinationDocument> envelope, SessionState state, DateTimeOffset now, int holdMinutes)
+    {
+        var previous = envelope.DueWork.FirstOrDefault(work => work.Kind == DueWorkKinds.AttentionDeadline);
+        envelope.DueWork.RemoveAll(work => work.Kind == DueWorkKinds.AttentionDeadline);
+        if (holdMinutes <= 0 || state.Closed || state.Attention.StoredItems is not { Count: > 0 } stored) return;
+        // An unrelated write arriving after the deadline must not consume the pump's outstanding notification.
+        var next = previous?.DueAt <= now ? previous.DueAt : (DateTimeOffset?)null;
+        var boundary = state.Attention.BoundaryAt;
+        void Consider(DateTimeOffset time)
+        {
+            if (time > now && (next is null || time < next)) next = time;
+        }
+        foreach (var item in AttentionScheduler.Items(stored))
+        {
+            if (item.Kind is AttentionKinds.Tip or AttentionKinds.StandingProposal || item.IsExpired(now)) continue;
+            // An expiring higher-priority offer can uncover a different eligible wake.
+            Consider(item.ExpiresAt);
+            if (item.SnoozeUntil is { } until && until < item.ExpiresAt) Consider(until);
+            if (item.IsSnoozed(now)) continue;
+            var since = boundary is { } at && at > item.CreatedAt ? at : item.CreatedAt;
+            var hold = since.AddMinutes(holdMinutes);
+            if (!AttentionWeights.Wakes(item.Tier) && hold < item.ExpiresAt) Consider(hold);
+        }
+        if (next is { } due) envelope.DueWork.Add(new(DueWorkKinds.AttentionDeadline, DueWorkKinds.AttentionDeadline, due));
+    }
     /// <summary>
     /// An outbox's raise (<see cref="AttentionRaise"/>): adds an item, or refreshes the open one with the same key. An older source revision
     /// than one already seen is ignored.
@@ -41,7 +67,13 @@ internal static class SessionAttention
     private static RelayReply Raise(AggregateContext context, AttentionContent item)
     {
         var state = new SessionState(context.State);
-        return state.Closed ? Error(SessionUnknown, new { expired = true }) : Add(state, item, context.Now);
+        if (state.Closed) return Error(SessionUnknown, new { expired = true });
+        var result = Add(state, item, context.Now);
+        if (result.Ok && item.Kind is not (AttentionKinds.Tip or AttentionKinds.StandingProposal)
+            && JsonNode.Parse(result.DataJson) is JsonObject data && data["raised"]?.GetValue<bool>() == true
+            && (data["refreshed"]?.GetValue<bool>() == false || data["wakeTierChanged"]?.GetValue<bool>() == true))
+            context.Hint = new CoordinationHint.Session(context.Key, "attention:" + Text(data, "itemId"));
+        return result;
     }
 
     private static RelayReply Close(AggregateContext context, AttentionSelection selection)
@@ -102,11 +134,18 @@ internal static class SessionAttention
         var id = existing?.Id ?? "a-" + (queue.Seq + 1);
         var stored = existing?.Item ?? QueuedItem.New(id, now);
         var item = new QueuedItem(stored);
+        bool WakeTier() => AttentionWeights.Wakes(AttentionWeights.Tier(kind, Text(stored, QueuedItem.BlockerKey), item.Blocking));
+        var wasUrgent = existing is not null && WakeTier();
         item.SetContent(content);
         if (revision > 0) item.Revision = revision;
         item.UpdatedAt = now;
         item.ExpiresAt = now.AddDays(Math.Clamp(raised.ExpiryDays ?? RelayLimits.DefaultAttentionExpiryDays, 1, RelayLimits.MaxAttentionExpiryDays));
-        if (existing is not null) return Ok(new { raised = true, itemId = id, refreshed = true });
+        if (existing is not null)
+        {
+            // A blocker or blocking flag can change the wake tier without changing the item's identity.
+            if (wasUrgent != WakeTier()) return Ok(new { raised = true, itemId = id, refreshed = true, wakeTierChanged = true });
+            return Ok(new { raised = true, itemId = id, refreshed = true });
+        }
 
         queue.Seq += 1;
         items[id] = stored;

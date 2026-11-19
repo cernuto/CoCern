@@ -342,6 +342,7 @@ internal static class SessionAggregate
         // The sender is told instead.
         if (inbox.Count >= RelayLimits.MaxRecords) return Undelivered(context, state, message, Ok(new { delivered = false, full = true }), "full");
         inbox.Add(message);
+        context.Hint = new CoordinationHint.Session(context.Key, id);
         PeerReplyWaits.Delivered(context, delivery);
         // With attention on, the dispatcher passes the item lifetime: a message that may wake its chat is then an info item.
         var infoDays = (int)Math.Min(delivery.AttentionExpiryDays ?? 0, int.MaxValue);

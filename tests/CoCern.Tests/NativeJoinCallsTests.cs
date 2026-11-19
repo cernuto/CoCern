@@ -549,6 +549,7 @@ public sealed class NativeJoinCallsTests
         Assert.True(File.Exists(pending));
         _ = await NativeJoinHook.StampAsync(runtime, context, RelayTools.GetStatus, "online-first", JsonSerializer.SerializeToElement(new { }), default);
         var actual = new TaskCompletionSource<WakeTarget>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var rearmed = new TaskCompletionSource<WakeTarget>(TaskCreationOptions.RunContinuationsAsynchronously);
         var poll = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var reconciled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var profile = Directory.CreateDirectory(Path.Combine(scope.Root, "profile")).FullName;
@@ -558,7 +559,7 @@ public sealed class NativeJoinCallsTests
             create: connection => new LocalChatWake(connection, new NodeTransport { CodexExecutable = () => "fixture-codex", Locators = [] },
                 async (runtime, target, ct) =>
                 {
-                    actual.TrySetResult(target);
+                    if (!actual.TrySetResult(target)) rearmed.TrySetResult(target);
                     try
                     {
                         await poll.Task.WaitAsync(ct);
@@ -590,6 +591,14 @@ public sealed class NativeJoinCallsTests
             Assert.True(NativeStartupEvidence.HasLiveLocalWake(binding, handle));
         Assert.DoesNotContain(scope.Options.Token, File.ReadAllText(receipt));
         Assert.DoesNotContain(captured.Session.SessionToken, File.ReadAllText(receipt));
+        wake.Observe(RelayTools.SessionLabelSet, JsonSerializer.SerializeToElement(new
+        {
+            repositoryId = handle.RepositoryId, sessionId = handle.SessionId, sessionToken = handle.SessionToken, label = "Renamed receiver"
+        }), new AdapterReply(true, "Ok", JsonSerializer.SerializeToElement(new { sessionId = handle.SessionId }), 1));
+        var renamed = await rearmed.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(captured.Session, renamed.Session);
+        using (var lease = Assert.IsAssignableFrom<IWakeDispatchFence>(renamed.Dispatcher).TryAcquire(context.NativeId))
+            Assert.NotNull(lease);
         stop.Cancel(); await Task.WhenAll(resumed, watching).WaitAsync(TimeSpan.FromSeconds(5));
         Assert.False(File.Exists(receipt));
     }

@@ -1,5 +1,6 @@
 @page "/"
 @page "/sessions"
+@page "/tasks"
 @page "/analytics"
 @page "/analytics/test-effort"
 @page "/efficiency"
@@ -25,11 +26,12 @@ else
     <div class="dashboard-shell" @onkeydown="HandleShellKeyDown">
         <a class="skip-link" href="@SkipToContentHref" @onclick="SkipToContentAsync" @onclick:preventDefault="true">Skip to content</a>
         <aside class="app-sidebar @(_navigationOpen ? "navigation-open" : null)" aria-label="Workspace">
-            <a class="brand" href="./"><span class="relay-mark" aria-hidden="true"><img src="cocern-logo.png" alt="" /></span><span>CoCern<small>@WorkspaceLabel</small></span></a>
-            <div class="sidebar-section-label">Workspace</div>
+            <a class="brand" href="./"><span class="relay-mark" aria-hidden="true"><img src="cocern-logo.png" alt="" /></span><span>CoCern</span></a>
             <nav id="workspace-navigation" class="main-nav" aria-label="Dashboard" @onclick="CloseNavigation">
                 <NavLink href="" Match="NavLinkMatch.All"><Icon Name="overview" />Overview</NavLink>
                 <NavLink href="sessions"><Icon Name="sessions" />Sessions</NavLink>
+                <NavLink href="tasks"><Icon Name="documents" />Tasks</NavLink>
+                <span class="sidebar-section-label">Monitor</span>
                 <NavLink href="analytics"><svg class="icon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M4 20V10M12 20V4M20 20v-7" /></svg>Analytics</NavLink>
                 <NavLink href="efficiency"><Icon Name="overview" />Efficiency</NavLink>
                 <NavLink href="retained-context"><Icon Name="documents" />Retained context</NavLink>
@@ -42,7 +44,6 @@ else
                 <NavLink href="connect"><Icon Name="plug" />Connect</NavLink>
             </nav>
             <div class="sidebar-footer">
-                <span class="sidebar-hub-label"><span class="status-dot @(IsLive ? "teal" : "amber")"></span>@(Connection.Snapshot?.Host.Name ?? "Coordination hub")</span>
                 <small>CoCern @(Connection.Snapshot?.Host.Version)</small>
             </div>
         </aside>
@@ -52,7 +53,7 @@ else
                     <BbButton Variant="ButtonVariant.Ghost" Size="ButtonSize.Icon" Class="navigation-toggle" OnClick="ToggleNavigation" AriaLabel="Toggle navigation" aria-controls="workspace-navigation" aria-expanded="@(_navigationOpen ? "true" : "false")">
                         <ChildContent><svg class="icon" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16" /></svg></ChildContent>
                     </BbButton>
-                    <img class="mobile-brand" src="cocern-logo.png" alt="CoCern" /><span class="breadcrumb-workspace">Workspace</span><span class="breadcrumb-divider" aria-hidden="true">/</span><strong>@PageTitle</strong>
+                    <img class="mobile-brand" src="cocern-logo.png" alt="CoCern" /><span class="hub-name">@(Connection.Snapshot?.Host.Name ?? "CoCern")</span>
                 </div>
                 <div class="header-actions">
                     <span class="connection-chip @(IsLive ? "live" : "waiting")" role="status"><span class="status-dot"></span>@ConnectionLabel</span>
@@ -86,6 +87,7 @@ else
                 </div>
             </header>
         <main id="main" class="dashboard-main" tabindex="-1">
+            <div class="page-intro @(View == "manager" ? "manager-intro" : null)">
             <div class="page-heading">
                 <div><h1>@PageTitle</h1>@if (PageDescription is { } description) { <p>@description</p> }</div>
                 @if (View != "connect")
@@ -93,35 +95,30 @@ else
                     <span class="last-observed" title="@DashboardFormat.Timestamp(Connection.Snapshot?.ObservedAt)">Updated @DashboardFormat.Ago(Connection.Snapshot?.ObservedAt, _now).ToLowerInvariant()</span>
                 }
             </div>
-            @if (!string.IsNullOrWhiteSpace(Connection.Notice))
-            {
-                <BbAlert Class="connection-notice" role="status"><BbAlertDescription>@Connection.Notice</BbAlertDescription></BbAlert>
-            }
             @if (View != "connect")
             {
                 <ManagerControl Compact="@(View != "manager")" Sessions="@(Connection.Snapshot?.Sessions ?? [])" DefaultRepositoryId="@(Connection.Snapshot?.Sessions.FirstOrDefault()?.RepositoryId)" />
             }
+            </div>
+            @if (!string.IsNullOrWhiteSpace(Connection.Notice))
+            {
+                <BbAlert Class="connection-notice" role="status"><BbAlertDescription>@Connection.Notice</BbAlertDescription></BbAlert>
+            }
             @if (Connection.Snapshot is { } snapshot)
             {
-                @if (View == "overview")
-                {
-                <section class="relay-summary" aria-label="Relay summary">
-                    <div class="host-summary"><span class="host-symbol" aria-hidden="true"><Icon Name="machine" Size="20" /></span><span><strong>@snapshot.Host.Name</strong><small>CoCern @snapshot.Host.Version</small></span></div>
-                    <div class="summary-stat"><strong>@snapshot.Host.MachineCount</strong><span title="Nodes recorded in this hub's discovery inventory; this is not a count of active PCs.">@(snapshot.Host.MachineCount == 1 ? "Enrolled node" : "Enrolled nodes")</span></div>
-                    <div class="summary-stat"><strong>@snapshot.Host.SessionCount</strong><span>@(snapshot.Host.SessionCount == 1 ? "Session" : "Sessions")</span></div>
-                    <div class="summary-stat"><strong>@snapshot.Host.ReachableCount</strong><span title="Sessions with a current direct wake route. MCP calls and inbox communication can still work without one; this is not a count of running models.">@(snapshot.Host.ReachableCount == 1 ? "Direct chat route" : "Direct chat routes")</span></div>
-                </section>
-                }
-                @if (snapshot.SessionsTruncated && View is "overview" or "sessions")
+                @if (snapshot.SessionsTruncated && View == "sessions")
                 {
                     <p class="limit-note">Showing @snapshot.Sessions.Length of @snapshot.Host.SessionCount sessions.</p>
                 }
-                @if (View is "overview" or "sessions")
+                @if (View == "sessions")
                 {
                     <div class="surface waiting-surface"><WaitingOnYou Waiting="@snapshot.Waiting" Now="@_now" OnSelectSession="OpenWaitingSession" OnOpenStanding="OpenStanding" /></div>
                 }
                 @switch (View)
                 {
+                    case "tasks":
+                        <TaskBoardView DefaultRepository="@(snapshot.Sessions.FirstOrDefault(session => !string.IsNullOrWhiteSpace(session.RepositoryId))?.RepositoryId)" />
+                        break;
                     case "manager":
                         break;
                     case "analytics":
@@ -137,7 +134,7 @@ else
                         <RetainedContextView Snapshot="@snapshot" />
                         break;
                     case "connect":
-                        <ConnectPage />
+                        <ConnectPage Snapshot="@snapshot" Fresh="@(IsLive && Connection.ObservationsFresh)" Now="@Connection.ObservationNow" />
                         break;
                     case "documents":
                         <DocCacheView Cache="@snapshot.DocCache" Now="@_now" />
@@ -157,13 +154,20 @@ else
                         <StandingView Boards="@snapshot.Standing" Truncated="@snapshot.StandingTruncated" Tokens="@snapshot.Tokens" Now="@_now" />
                         break;
                     default:
-                        <ConnectView Compact />
-                        <div class="overview-layout">
-                            <div class="overview-board"><ActivityBoard Snapshot="@snapshot" SelectedId="@_selectedId" OnSelect="SelectSession" Now="@_now" Live="@IsLive" IsPulsing="Pulse" /></div>
-                            <div class="overview-inspector"><SessionInspector Session="@SelectedSession" Logs="@snapshot.Logs" Now="@_now" /></div>
-                            <div class="overview-traffic"><TrafficLane Entries="@snapshot.Traffic" Sessions="@snapshot.Sessions" SelectedSession="@SelectedSession" InstanceId="@snapshot.InstanceId" Now="@_now" Live="@IsLive" /></div>
+                        <div class="overview-live">
+                            <TrafficHistory Entries="@snapshot.Traffic" ObservedAt="@(snapshot.TrafficObservedAt ?? snapshot.ObservedAt)" Truncated="@snapshot.TrafficTruncated" Live="@IsLive" />
+                            <dl class="hub-totals" aria-label="Hub totals">
+                                <div><dt>Enrolled nodes</dt><dd>@snapshot.Host.MachineCount</dd></div>
+                                <div><dt>Sessions</dt><dd>@snapshot.Host.SessionCount</dd></div>
+                                <div><dt title="Sessions the hub can wake directly">Direct chat routes</dt><dd>@snapshot.Host.ReachableCount</dd></div>
+                            </dl>
                         </div>
-                        <LogView Entries="@snapshot.Logs" Compact />
+                        @if (snapshot.Waiting.Count > 0 || snapshot.Waiting.Items.Length > 0 || snapshot.Waiting.Truncated)
+                        {
+                            <div class="surface waiting-surface"><WaitingOnYou DecisionsOnly Waiting="@snapshot.Waiting" Now="@_now" OnSelectSession="OpenWaitingSession" OnOpenStanding="OpenStanding" /></div>
+                        }
+                        <ActivityBoard Snapshot="@snapshot" OnSelect="OpenWaitingSession" Now="@_now" Live="@IsLive" IsPulsing="Pulse" />
+                        <ConnectView Compact />
                         break;
                 }
                 <footer class="app-footer"><span>Signed in as @Connection.PrincipalId</span><span>Hub started @DashboardFormat.Timestamp(snapshot.Host.StartedAt)</span></footer>
@@ -180,6 +184,5 @@ else
 
 
 @code {
-    private string WorkspaceLabel => "Coordination workspace";
     private int NoticeCount => (Connection.Snapshot?.Warnings.Length ?? 0) + (Connection.Snapshot?.Waiting.Count ?? 0) + (Connection.Snapshot?.Waiting.MaybeCount ?? 0);
 }

@@ -105,7 +105,6 @@ class Hub:
             "Relay__DocCache__Repositories__0__Id": REPO,
             "Relay__DocCache__Repositories__0__ClonePath": str(self.docs),
             "Relay__DocCache__Repositories__0__Branch": "main",
-            "Relay__DocCache__Repositories__0__Fetch": "false",
         })
         self.log_path = work / "host.log"
         self.process = None

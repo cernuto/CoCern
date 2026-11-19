@@ -19,6 +19,49 @@ public sealed class ConnectionFailureTests
     private const string UnavailableMessage = "Can't reach the hub. Check that it is running and try again.";
 
     [Fact]
+    public void CoCern_accepts_local_peers_and_rejects_public_or_unspecified_addresses()
+    {
+        foreach (var literal in new[] { "127.0.0.1", "::1", "10.1.2.3", "172.31.255.255", "192.168.1.2", "169.254.2.1", "fe80::1", "fd12::1", "::ffff:192.168.1.2" })
+            Assert.True(LanTransport.IsLocalAddress(IPAddress.Parse(literal)), literal);
+        foreach (var literal in new[] { "0.0.0.0", "::", "172.32.0.1", "203.0.113.5", "::ffff:203.0.113.5", "ff02::1", "2001:db8::1" })
+        {
+            var address = IPAddress.Parse(literal);
+            Assert.False(LanTransport.IsLocalAddress(address), literal);
+            Assert.False(AdapterOptions.TryParseOrigin(new UriBuilder("https", address.ToString()).Uri.AbsoluteUri, out _));
+        }
+        Assert.True(AdapterOptions.TryParseOrigin("https://hub.office.lan/", out _));
+        Assert.False(AdapterOptions.TryParseOrigin("http://192.168.1.2/", out _));
+    }
+
+    [Fact]
+    public async Task Hub_DNS_must_be_entirely_local_and_the_socket_uses_the_checked_answer()
+    {
+        await using var hub = new TlsHub();
+        var hubUrl = new UriBuilder(hub.Url) { Host = "hub.invalid" }.Uri;
+        Assert.True(AdapterOptions.TryParseOrigin(hubUrl.AbsoluteUri, out var target));
+        var publicAddress = IPAddress.Parse("203.0.113.5");
+        IPAddress[] answer = [IPAddress.Loopback, publicAddress];
+        var resolutions = 0;
+        using var handler = LanTransport.CreateHandler((host, _) =>
+        {
+            Assert.Equal(target.Host, host);
+            resolutions++;
+            return Task.FromResult(answer);
+        });
+        var fingerprint = CertificateFingerprint.Of(hub.Certificate);
+        handler.SslOptions.RemoteCertificateValidationCallback = (_, certificate, _, _) => CertificateFingerprint.Matches(certificate, fingerprint);
+        using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(5) };
+        await Assert.ThrowsAsync<HttpRequestException>(() => client.GetAsync(target));
+        Assert.Equal(0, hub.ReceivedHttpRequests);
+
+        answer = [IPAddress.Loopback];
+        using var response = await client.GetAsync(target);
+        Assert.True(response.IsSuccessStatusCode);
+        Assert.Equal(2, resolutions);
+        Assert.Equal(1, hub.ReceivedHttpRequests);
+    }
+
+    [Fact]
     public async Task Pinned_identity_refusal_never_sends_HTTP_and_cannot_taint_another_request()
     {
         await using var hub = new TlsHub();

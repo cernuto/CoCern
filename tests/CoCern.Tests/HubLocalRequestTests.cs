@@ -96,7 +96,7 @@ public sealed class HubLocalRequestTests
         Directory.CreateDirectory(Path.Combine(checkout, ".git"));
         try
         {
-            var repository = new DocRepository("repo", checkout, "main", "origin", [], [], null);
+            var repository = new DocRepository("repo", checkout, "main", [], []);
             var registry = new DocRepositoryRegistry(new DocCacheSettings(true, 30, 30, 100, [repository]), new CheckoutGit(checkout),
                 NullLogger<DocRepositoryRegistry>.Instance, new HttpContextAccessor { HttpContext = context });
             var caller = new RelayCaller("remote-node", false, ["repo"]);

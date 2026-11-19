@@ -72,8 +72,11 @@ internal sealed class ToolRouter(Aggregates aggregates, ClaimComposer claims, Se
     private void RegisterWaiter(RelayCall call)
     {
         var now = DateTimeOffset.UtcNow;
-        var presence = new SessionPresence { HubIncarnation = Text(call.Args, "hubIncarnation"), ObservedAt = now, FreshUntil = now + WaiterFreshness, Availability = WaitingAvailability };
-        var registration = new SessionRegistration(Text(call.Args, "repositoryId"), call.ActingSessionId ?? "", presence).ToJson();
+        var codex = call.CallOrigin == "wake-watcher";
+        // An idle Codex watcher can go five minutes between reads. Allow a minute for scheduling and reconnect.
+        var freshness = codex ? TimeSpan.FromMinutes(RelayLimits.CodexWakeFreshMinutes) : WaiterFreshness;
+        var presence = new SessionPresence { HubIncarnation = Text(call.Args, "hubIncarnation"), ObservedAt = now, FreshUntil = now + freshness, Availability = WaitingAvailability };
+        var registration = new SessionRegistration(Text(call.Args, "repositoryId"), call.ActingSessionId ?? "", presence, codex ? ChatProviders.Codex : ChatProviders.Claude).ToJson();
         Advisory.Run(() => aggregates.Control(call.Caller, Operations.Register, registration));
     }
 

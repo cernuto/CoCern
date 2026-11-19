@@ -1,0 +1,21 @@
+<h2>@Repository / @Board</h2>
+@if (notice is not null)
+{
+    <p role="status">@notice</p>
+}
+else if (rows.Count == 0)
+{
+    <p>No tasks on this board.</p>
+}
+else
+{
+    <table aria-label="@($"Tasks on {Repository} / {Board}")">
+        <thead><tr><th scope="col">Task</th><th scope="col">State</th><th scope="col">Owner</th></tr></thead>
+        <tbody>
+            @foreach (var row in rows.Values)
+            {
+                <tr @key="row.TaskId"><th scope="row">@row.TaskId <small>Version @row.Version</small></th><td>@(row.WorkflowState ?? "Unreported")</td><td>@ClaimLabel(row)</td></tr>
+            }
+        </tbody>
+    </table>
+}

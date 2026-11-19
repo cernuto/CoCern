@@ -45,7 +45,7 @@ public sealed record WakeConfiguration(string RelayUrl, string TokenFile, string
                     !Guid.TryParseExact(route.ThreadId, "D", out var thread) || thread == Guid.Empty ||
                     !string.Equals(thread.ToString("D"), route.ThreadId, StringComparison.Ordinal) || !threads.Add(route.ThreadId)) throw new JsonException();
                 RequirePath(route.SessionFile);
-                if (!sessions.Add(ReadSession(route).SessionId)) throw new JsonException();
+                if (TryReadSession(route) is { } session && !sessions.Add(session.SessionId)) throw new JsonException();
             }
             return config;
         }
@@ -72,6 +72,23 @@ public sealed record WakeConfiguration(string RelayUrl, string TokenFile, string
     {
         PinnedFingerprint = CoCern.Adapter.AdapterOptions.ParseFingerprint(RelayUrl, Fingerprint ?? Environment.GetEnvironmentVariable("COCERN_FINGERPRINT"))
     };
+    internal IReadOnlyList<WakeTarget> ReadTargets(IWakeDispatcher dispatcher)
+    {
+        var targets = new List<WakeTarget>(Routes.Length);
+        foreach (var route in Routes)
+            if (TryReadSession(route) is { } session)
+                targets.Add(new WakeTarget(route, session, dispatcher));
+        // If two enrollment files rotate to the same session, suspend both until each session has a unique destination.
+        return targets.GroupBy(target => target.Session.SessionId, StringComparer.Ordinal)
+            .Where(group => group.Count() == 1).Select(group => group.First()).ToArray();
+    }
+
+    private static WakeSession? TryReadSession(WakeRoute route)
+    {
+        try { return ReadSession(route); }
+        catch (AdapterConfigurationException) { return null; }
+    }
+
     public static WakeSession ReadSession(WakeRoute route)
     {
         try

@@ -1,3 +1,4 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <!-- The shared protocol vocabulary: tool catalog, error codes and wire limits. No package dependencies. -->
+  <ItemGroup><InternalsVisibleTo Include="CoCern.Tests" /></ItemGroup>
 </Project>
