@@ -1,0 +1,16 @@
+@ChildContent
+
+@code {
+    [Parameter, EditorRequired] public long Revision { get; set; }
+    [Parameter, EditorRequired] public RenderFragment ChildContent { get; set; } = default!;
+    private long? _previousRevision;
+    private bool _changed;
+
+    protected override void OnParametersSet()
+    {
+        _changed = Revision != _previousRevision;
+        _previousRevision = Revision;
+    }
+
+    protected override bool ShouldRender() => _changed;
+}

@@ -1,7 +1,10 @@
 @implements IDisposable
 @inject DashboardConnection Connection
+@using System.Numerics
+@using System.Text
 
 <section class="surface session-graph" aria-labelledby="session-graph-heading">
+    <SessionMapRegion Revision="@_mapRevision">
     <div class="section-heading"><h2 id="session-graph-heading">Session interactions</h2><BbBadge Variant="BadgeVariant.Secondary">@Sessions.Length sessions</BbBadge></div>
     <p class="graph-intro">Follow messages between sessions over the retained last 24 hours. Select a station or connection to inspect it.</p>
     <div class="graph-controls">
@@ -22,7 +25,24 @@
     else
     {
         <div class="@($"graph-viewport {(_size > 920 ? "graph-expanded-inventory" : "")}")" tabindex="0" role="region" aria-label="Scrollable session interaction map">
-            <svg class="graph-canvas" viewBox="@($"0 0 {_size} {_size}")" width="@_size" height="@_size" style="@($"--graph-size: {_size}px")" aria-label="Sessions and directed direct-message calls">
+            <div class="graph-stage" style="@($"--graph-size: {_size}px")">
+            @if (_pulses.Count > 0)
+            {
+                <div class="graph-pulses" aria-hidden="true">
+                    @foreach (var pulse in _pulses)
+                    {
+                        @if (_positions.TryGetValue(pulse.SourceId, out var sender) && _positions.TryGetValue(pulse.TargetId, out var recipient))
+                        {
+                            var flight = pulse.Project(sender, recipient, _size);
+                            <div @key="pulse.Id">
+                                <span class="graph-live-send" data-source="@pulse.SourceId" data-target="@pulse.TargetId" style="@flight.Stops"></span>
+                                <svg class="graph-live-route" viewBox="@($"0 0 {_size} {_size}")"><path d="@flight.Path" /></svg>
+                            </div>
+                        }
+                    }
+                </div>
+            }
+            <svg class="graph-canvas" viewBox="@($"0 0 {_size} {_size}")" width="@_size" height="@_size" aria-label="Sessions and directed direct-message calls">
                 <defs><marker id="session-message-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" /></marker></defs>
                 <g class="graph-contours" aria-hidden="true">
                     @foreach (var radius in new[] { 105, 165, 225 })
@@ -42,16 +62,6 @@
                     <path @key="item.Key" class="graph-edge @EdgeClass(item.Edge)" style="@EdgeWeight(item.Edge)" d="@item.Path" marker-end="url(#session-message-arrow)" />
                     <path class="graph-edge-hit" d="@item.Path" @onclick="() => SelectEdge(item.Edge)"><title>@EdgeTitle(item.Edge)</title></path>
                 }
-                <g class="graph-pulses" aria-hidden="true">
-                    @foreach (var pulse in _pulses)
-                    {
-                        @if (_nodes.FirstOrDefault(node => node.Session.SessionId == pulse.SourceId) is { } sender
-                            && _nodes.FirstOrDefault(node => node.Session.SessionId == pulse.TargetId) is { } recipient)
-                        {
-                            <path @key="pulse.Id" class="graph-live-send" data-source="@pulse.SourceId" data-target="@pulse.TargetId" pathLength="100" d="@EdgePath(sender, recipient)" />
-                        }
-                    }
-                </g>
                 <foreignObject x="@(_size / 2 - 90)" y="@(_size / 2 - 62)" width="180" height="124">
                     <div class="graph-hub" role="img" aria-label="CoCern message hub"><strong>CoCern</strong><span>Message hub</span></div>
                 </foreignObject>
@@ -72,6 +82,7 @@
                     </foreignObject>
                 }
             </svg>
+            </div>
         </div>
         <div class="graph-mobile-stations" role="group" aria-label="Sessions in the interaction map">
             @foreach (var node in _nodes)
@@ -91,18 +102,19 @@
         {
             <div class="graph-current"><strong>@Label(focused.Session)</strong><span>@NodeCounts(focused.Session.SessionId)</span><span class="graph-route-status">@(focused.Session.Reachable ? "Direct chat route available" : "No current direct chat route")</span></div>
         }
-        @if (_visibleEdges.Length > 0)
-        {
-            <div class="graph-recent">
-                <div class="graph-recent-heading"><h3>Recent connections</h3><span>Latest successful send on each route</span></div>
-                @foreach (var item in _visibleEdges.OrderByDescending(item => item.Edge.LastInteractionAt).ThenBy(item => item.Key, StringComparer.Ordinal).Take(6))
-                {
-                    <BbButton @key="item.Key" Variant="ButtonVariant.Ghost" Class="@($"graph-recent-row {(IsRecent(item.Key) ? "recent" : "")}")" OnClick="() => SelectEdge(item.Edge)">
-                        <span class="graph-feed-dot" aria-hidden="true"></span><span class="graph-feed-route">@SessionLabel(item.Edge.SourceSessionId) <span aria-label="to">→</span> @SessionLabel(item.Edge.TargetSessionId)</span><span class="graph-feed-count">@item.Edge.CallCount sends</span><time datetime="@item.Edge.LastInteractionAt.ToString("O")" title="@DashboardFormat.Timestamp(item.Edge.LastInteractionAt)">@DashboardFormat.Ago(item.Edge.LastInteractionAt, Now)</time>
-                    </BbButton>
-                }
-            </div>
-        }
+    }
+    </SessionMapRegion>
+    @if (_recentEdges.Length > 0)
+    {
+        <div class="graph-recent">
+            <div class="graph-recent-heading"><h3>Recent connections</h3><span>Latest successful send on each route</span></div>
+            @foreach (var item in _recentEdges)
+            {
+                <BbButton @key="item.Key" Variant="ButtonVariant.Ghost" Class="@($"graph-recent-row {(IsRecent(item.Key) ? "recent" : "")}")" OnClick="() => SelectEdge(item.Edge)">
+                    <span class="graph-feed-dot" aria-hidden="true"></span><span class="graph-feed-route">@SessionLabel(item.Edge.SourceSessionId) <span aria-label="to">→</span> @SessionLabel(item.Edge.TargetSessionId)</span><span class="graph-feed-count">@item.Edge.CallCount sends</span><time datetime="@item.Edge.LastInteractionAt.ToString("O")" title="@DashboardFormat.Timestamp(item.Edge.LastInteractionAt)">@DashboardFormat.Ago(item.Edge.LastInteractionAt, Now)</time>
+                </BbButton>
+            }
+        </div>
     }
     @if (Interactions.ObservedAt is null)
     {
@@ -122,12 +134,19 @@
     }
     @if (_visibleEdges.Length > 0)
     {
-        <details class="graph-connections"><summary>Connection details (@_visibleEdges.Length)</summary><div>
-            @foreach (var item in _visibleEdges)
+        <details class="graph-connections" open="@_showConnections"><summary @onclick="() => _showConnections = !_showConnections" @onclick:preventDefault>Connection details (@_visibleEdges.Length)</summary>
+            @if (_showConnections)
             {
-                <BbButton Variant="ButtonVariant.Outline" Class="graph-connection" OnClick="() => SelectEdge(item.Edge)"><span>@SessionLabel(item.Edge.SourceSessionId) → @SessionLabel(item.Edge.TargetSessionId)</span><small>@item.Edge.CallCount sends · @Duration(item.Edge) hub call</small></BbButton>
+                <SessionMapRegion Revision="@_mapRevision">
+                <div>
+                    @foreach (var item in _visibleEdges)
+                    {
+                        <BbButton @key="item.Key" Variant="ButtonVariant.Outline" Class="graph-connection" OnClick="() => SelectEdge(item.Edge)"><span>@SessionLabel(item.Edge.SourceSessionId) → @SessionLabel(item.Edge.TargetSessionId)</span><small>@item.Edge.CallCount sends · @Duration(item.Edge) hub call</small></BbButton>
+                    }
+                </div>
+                </SessionMapRegion>
             }
-        </div></details>
+        </details>
     }
     <p class="graph-footnote">Spokes connect sessions to the hub. A pulse follows each live direct send from sender to recipient. Counts include successful send calls and retries. Task-thread messages are excluded.</p>
     @if (Interactions.Truncated || Truncated || Sessions.Length > 200)
@@ -155,7 +174,14 @@
     private int _size = 920;
     private string? _focusedId;
     private Node[] _nodes = [];
+    private Dictionary<string, Node> _positions = new(StringComparer.Ordinal);
     private EdgeView[] _visibleEdges = [];
+    private EdgeView[] _recentEdges = [];
+    private long _mapRevision;
+    private DashboardSession[]? _previousSessions;
+    private DashboardInteractionEdge[]? _previousEdges;
+    private string? _previousSelectedId;
+    private bool _showConnections;
     private readonly List<SendPulse> _pulses = [];
     private long _nextPulseId;
     private Dictionary<string, DashboardSession> _sessions = new(StringComparer.Ordinal);
@@ -163,24 +189,42 @@
     private string Query { get => _query; set { _query = value; BuildLayout(); } }
     private bool FocusSelected { get => _focusSelected; set { _focusSelected = value; BuildLayout(); } }
     private int VisibleLimit { get => _visibleLimit; set { _visibleLimit = value; BuildLayout(); } }
-    private DashboardInteractionEdge? SelectedEdge => _visibleEdges.Select(item => item.Edge).FirstOrDefault(edge => EdgeKey(edge) == _selectedEdgeKey);
+    private DashboardInteractionEdge? SelectedEdge => _selectedEdgeKey is null ? null : _visibleEdges.FirstOrDefault(item => item.Key == _selectedEdgeKey)?.Edge;
 
     protected override void OnParametersSet()
     {
-        _pulses.RemoveAll(pulse => pulse.ExpiresAt <= DateTimeOffset.UtcNow);
-        _sessions = Sessions.Take(200).DistinctBy(session => session.SessionId).ToDictionary(session => session.SessionId, StringComparer.Ordinal);
-        _counts = new(StringComparer.Ordinal);
-        foreach (var edge in Interactions.Edges.Take(300))
+        var now = DateTimeOffset.UtcNow;
+        var expired = _pulses.RemoveAll(pulse => pulse.ExpiresAt <= now);
+        if (expired > 0) _mapRevision++;
+        var sessionsChanged = !ReferenceEquals(Sessions, _previousSessions);
+        var edgesChanged = !ReferenceEquals(Interactions.Edges, _previousEdges);
+        if (sessionsChanged)
         {
-            var source = _counts.GetValueOrDefault(edge.SourceSessionId);
-            _counts[edge.SourceSessionId] = (source.Sent + edge.CallCount, source.Received);
-            var target = _counts.GetValueOrDefault(edge.TargetSessionId);
-            _counts[edge.TargetSessionId] = (target.Sent, target.Received + edge.CallCount);
+            _sessions = Sessions.Take(200).DistinctBy(session => session.SessionId).ToDictionary(session => session.SessionId, StringComparer.Ordinal);
+            _previousSessions = Sessions;
         }
-        BuildLayout();
+        if (edgesChanged)
+        {
+            _counts.Clear();
+            foreach (var edge in Interactions.Edges.Take(300))
+            {
+                var source = _counts.GetValueOrDefault(edge.SourceSessionId);
+                _counts[edge.SourceSessionId] = (source.Sent + edge.CallCount, source.Received);
+                var target = _counts.GetValueOrDefault(edge.TargetSessionId);
+                _counts[edge.TargetSessionId] = (target.Sent, target.Received + edge.CallCount);
+            }
+            _previousEdges = Interactions.Edges;
+        }
+        if (sessionsChanged || edgesChanged || SelectedId != _previousSelectedId)
+            BuildLayout();
+        else if (expired > 0 && PulsesAffectLayout)
+            BuildLayout(onlyIfMembershipChanged: true);
+        _previousSelectedId = SelectedId;
     }
 
-    private void BuildLayout()
+    private bool PulsesAffectLayout => (_focusSelected && SelectedId is not null) || _nodes.Length < _matchingSessionCount;
+
+    private void BuildLayout(bool onlyIfMembershipChanged = false)
     {
         var neighbors = new HashSet<string>(StringComparer.Ordinal);
         if (_focusSelected && SelectedId is not null)
@@ -203,7 +247,19 @@
         _focusedId = visible.FirstOrDefault(session => session.SessionId == SelectedId)?.SessionId
             ?? visible.FirstOrDefault(session => session.SessionId == _focusedId)?.SessionId
             ?? visible.FirstOrDefault()?.SessionId;
+        if (onlyIfMembershipChanged && visible.Length == _nodes.Length && visible.All(session => _positions.ContainsKey(session.SessionId)))
+            return;
+
+        _mapRevision++;
         var satellites = visible.OrderBy(session => session.SessionId, StringComparer.Ordinal).ToArray();
+        if (satellites.Length == _nodes.Length)
+        {
+            // A priority change replaces just the vacated stations; active routes keep their coordinates.
+            var members = visible.ToDictionary(session => session.SessionId, StringComparer.Ordinal);
+            var entrants = new Queue<DashboardSession>(satellites.Where(session => !_positions.ContainsKey(session.SessionId)));
+            for (var slot = 0; slot < satellites.Length; slot++)
+                satellites[slot] = members.TryGetValue(_nodes[slot].Session.SessionId, out var retained) ? retained : entrants.Dequeue();
+        }
         var placed = new List<(DashboardSession Session, int Ring, int Slot, int Count)>();
         var offset = 0;
         for (var ring = 0; offset < satellites.Length; ring++)
@@ -222,9 +278,10 @@
             nodes.Add(new(station.Session, _size / 2 + (int)Math.Round(Math.Cos(angle) * radius), _size / 2 + (int)Math.Round(Math.Sin(angle) * radius)));
         }
         _nodes = nodes.ToArray();
-        var positions = _nodes.ToDictionary(node => node.Session.SessionId, StringComparer.Ordinal);
-        _visibleEdges = Interactions.Edges.Take(300).Where(edge => positions.ContainsKey(edge.SourceSessionId) && positions.ContainsKey(edge.TargetSessionId))
-            .Select(edge => new EdgeView(edge, EdgeKey(edge), EdgePath(positions[edge.SourceSessionId], positions[edge.TargetSessionId]))).ToArray();
+        _positions = _nodes.ToDictionary(node => node.Session.SessionId, StringComparer.Ordinal);
+        _visibleEdges = Interactions.Edges.Take(300).Where(edge => _positions.ContainsKey(edge.SourceSessionId) && _positions.ContainsKey(edge.TargetSessionId))
+            .Select(edge => new EdgeView(edge, EdgeKey(edge), CurveBetween(_positions[edge.SourceSessionId], _positions[edge.TargetSessionId]).Path)).ToArray();
+        _recentEdges = _visibleEdges.OrderByDescending(item => item.Edge.LastInteractionAt).ThenBy(item => item.Key, StringComparer.Ordinal).Take(6).ToArray();
     }
 
     protected override void OnInitialized() => Connection.DirectSends += OnDirectSends;
@@ -233,16 +290,19 @@
     private void OnDirectSends(DashboardSendPulse[] sends) => _ = InvokeAsync(() =>
     {
         var now = DateTimeOffset.UtcNow;
-        _pulses.RemoveAll(pulse => pulse.ExpiresAt <= now);
+        var expired = _pulses.RemoveAll(pulse => pulse.ExpiresAt <= now);
         foreach (var send in sends)
             _pulses.Add(new(++_nextPulseId, send.SourceSessionId + "\0" + send.TargetSessionId, send.SourceSessionId, send.TargetSessionId, now.AddSeconds(2)));
-        if (_pulses.Count > 32) _pulses.RemoveRange(0, _pulses.Count - 32);
-        BuildLayout();
+        var trimmed = _pulses.Count > 32;
+        if (trimmed) _pulses.RemoveRange(0, _pulses.Count - 32);
+        if (PulsesAffectLayout && (expired > 0 || trimmed || sends.Any(send => !_positions.ContainsKey(send.SourceSessionId) || !_positions.ContainsKey(send.TargetSessionId))))
+            BuildLayout(onlyIfMembershipChanged: true);
+        _mapRevision++;
         StateHasChanged();
     });
 
-    private async Task SelectNode(string id) { _selectedEdgeKey = null; await OnSelect.InvokeAsync(id); }
-    private async Task SelectEdge(DashboardInteractionEdge edge) { _selectedEdgeKey = EdgeKey(edge); await OnSelect.InvokeAsync(edge.SourceSessionId); }
+    private async Task SelectNode(string id) { _selectedEdgeKey = null; _mapRevision++; await OnSelect.InvokeAsync(id); }
+    private async Task SelectEdge(DashboardInteractionEdge edge) { _selectedEdgeKey = EdgeKey(edge); _mapRevision++; await OnSelect.InvokeAsync(edge.SourceSessionId); }
     private bool IsRecent(string key) => _pulses.Any(pulse => pulse.EdgeKey == key);
     private string EdgeClass(DashboardInteractionEdge edge) => EdgeKey(edge) == _selectedEdgeKey ? "chosen" : IsRecent(EdgeKey(edge)) ? "recent" : edge.SourceSessionId == _focusedId || edge.TargetSessionId == _focusedId ? "connected" : "unrelated";
     private static string EdgeWeight(DashboardInteractionEdge edge) => FormattableString.Invariant($"--edge-weight: {1 + Math.Min(1.8, Math.Log2(1d + Math.Max(0, edge.CallCount)) / 5):0.##}");
@@ -275,18 +335,85 @@
     }
     private static string EdgeKey(DashboardInteractionEdge edge) => edge.SourceSessionId + "\0" + edge.TargetSessionId;
     private static string Duration(DashboardInteractionEdge edge) => edge.MeanHubDurationMilliseconds is { } duration ? $"{duration.ToString("0.##", CultureInfo.CurrentCulture)} ms ({edge.MeasuredCallCount} measured)" : "Not measured";
-    private static string EdgePath(Node source, Node target)
+    private static SendCurve CurveBetween(Node source, Node target)
     {
-        const int sourceRadius = 36;
-        if (source == target) return FormattableString.Invariant($"M {source.X - 22} {source.Y - sourceRadius + 8} C {source.X - 95} {source.Y - 110}, {source.X + 95} {source.Y - 110}, {source.X + 22} {source.Y - sourceRadius + 8}");
-        double dx = target.X - source.X, dy = target.Y - source.Y;
-        var length = Math.Sqrt(dx * dx + dy * dy);
-        const int targetRadius = 36;
-        var sx = source.X + dx / length * sourceRadius; var sy = source.Y + dy / length * sourceRadius;
-        var tx = target.X - dx / length * targetRadius; var ty = target.Y - dy / length * targetRadius;
-        return FormattableString.Invariant($"M {sx} {sy} Q {(sx + tx) / 2 - dy / length * 32} {(sy + ty) / 2 + dx / length * 32}, {tx} {ty}");
+        var from = new Vector2(source.X, source.Y);
+        var to = new Vector2(target.X, target.Y);
+        if (from == to)
+            return new(from + new Vector2(-22, -28), from + new Vector2(-95, -110), from + new Vector2(95, -110), from + new Vector2(22, -28));
+
+        var direction = Vector2.Normalize(to - from);
+        var start = from + 36 * direction;
+        var end = to - 36 * direction;
+        var bend = (start + end) / 2 + 32 * new Vector2(-direction.Y, direction.X);
+        // The quadratic route has this equivalent cubic representation, shared with the self-loop.
+        return new(start, Vector2.Lerp(start, bend, 2f / 3), Vector2.Lerp(end, bend, 2f / 3), end);
+    }
+
+    private readonly record struct SendCurve(Vector2 Start, Vector2 Control1, Vector2 Control2, Vector2 End)
+    {
+        public string Path => FormattableString.Invariant($"M {Start.X:0.###} {Start.Y:0.###} C {Control1.X:0.###} {Control1.Y:0.###}, {Control2.X:0.###} {Control2.Y:0.###}, {End.X:0.###} {End.Y:0.###}");
+
+        public string TransformStops(int size)
+        {
+            const int samples = 64;
+            const int stops = 20;
+            Span<float> distance = stackalloc float[samples + 1];
+            distance[0] = 0;
+            var previous = Start;
+            for (var index = 1; index <= samples; index++)
+            {
+                var point = PointAt((float)index / samples);
+                distance[index] = distance[index - 1] + Vector2.Distance(previous, point);
+                previous = point;
+            }
+
+            var css = new StringBuilder();
+            css.Append(CultureInfo.InvariantCulture, $"--flight-length:{distance[samples] * 12 / size:0.####}cqw;");
+            var upper = 1;
+            var previousAngle = 0d;
+            for (var step = 0; step <= stops; step++)
+            {
+                // Equal distances along the curve give the segment a steady speed through tight turns.
+                var target = distance[samples] * ((float)step / stops);
+                while (upper < samples && distance[upper] < target) upper++;
+                var span = distance[upper] - distance[upper - 1];
+                var fraction = span > 0 ? (target - distance[upper - 1]) / span : 0;
+                var t = (upper - 1 + fraction) / samples;
+                var s = 1 - t;
+                var point = PointAt(t);
+                var tangent = s * s * (Control1 - Start) + 2 * s * t * (Control2 - Control1) + t * t * (End - Control2);
+                var angle = Math.Atan2(tangent.Y, tangent.X) * 180 / Math.PI;
+                if (step > 0) angle = previousAngle + Math.IEEERemainder(angle - previousAngle, 360);
+                css.Append(CultureInfo.InvariantCulture, $"--flight-{step}:translate3d({point.X * 100 / size:0.####}cqw,{point.Y * 100 / size:0.####}cqw,0) rotate({angle:0.###}deg) translateX(-50%);");
+                previousAngle = angle;
+            }
+            return css.ToString();
+        }
+
+        private Vector2 PointAt(float t)
+        {
+            var s = 1 - t;
+            return s * s * s * Start + 3 * s * s * t * Control1 + 3 * s * t * t * Control2 + t * t * t * End;
+        }
     }
     private sealed record Node(DashboardSession Session, int X, int Y);
     private sealed record EdgeView(DashboardInteractionEdge Edge, string Key, string Path);
-    private sealed record SendPulse(long Id, string EdgeKey, string SourceId, string TargetId, DateTimeOffset ExpiresAt);
+    private sealed record SendPulse(long Id, string EdgeKey, string SourceId, string TargetId, DateTimeOffset ExpiresAt)
+    {
+        private (int, int, int, int, int) _geometry;
+        private (string Path, string Stops) _flight;
+
+        public (string Path, string Stops) Project(Node source, Node target, int size)
+        {
+            var geometry = (source.X, source.Y, target.X, target.Y, size);
+            if (geometry != _geometry)
+            {
+                var curve = CurveBetween(source, target);
+                _flight = (curve.Path, curve.TransformStops(size));
+                _geometry = geometry;
+            }
+            return _flight;
+        }
+    }
 }
