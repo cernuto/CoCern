@@ -1,3 +1,7 @@
+@{
+    _rendered = CurrentView;
+    var visibleEvents = GetVisibleEvents();
+}
 <section class="surface traffic-lane @(Live ? "" : "traffic-disconnected")" aria-labelledby="traffic-heading">
     <div class="section-heading">
         <div><h2 id="traffic-heading">Traffic</h2><p>@TrafficDescription</p></div>
@@ -9,7 +13,7 @@
             <BbButton Variant="ButtonVariant.Outline" Class="traffic-pause" aria-pressed="@(_paused ? "true" : "false")" OnClick="TogglePause">@(_paused ? "Resume" : "Pause")</BbButton>
         </div>
     </div>
-    <div class="traffic-legend"><span><i class="traffic-key request" aria-hidden="true"></i>Request</span><span><i class="traffic-key response" aria-hidden="true"></i>Response</span><span><i class="traffic-key push" aria-hidden="true"></i>Push</span><span><i class="traffic-key error" aria-hidden="true"></i>Error</span><span class="traffic-count">@VisibleEvents.Length shown</span></div>
+    <div class="traffic-legend"><span><i class="traffic-key request" aria-hidden="true"></i>Request</span><span><i class="traffic-key response" aria-hidden="true"></i>Response</span><span><i class="traffic-key push" aria-hidden="true"></i>Push</span><span><i class="traffic-key error" aria-hidden="true"></i>Error</span><span class="traffic-count">@visibleEvents.Length shown</span></div>
     @if (_sessionOnly && SelectedSession is not null)
     {
         <p class="traffic-scope">Following @SelectedSession.Label</p>
@@ -19,26 +23,28 @@
             <caption class="visually-hidden">Tool traffic through the hub, newest first. Select an event to inspect its metadata.</caption>
             <thead><tr><th scope="col">No.</th><th scope="col">Time</th><th scope="col">Source</th><th scope="col">Destination</th><th scope="col">Type</th><th scope="col">Info</th></tr></thead>
             <tbody>
-                @foreach (var entry in VisibleEvents)
+                @foreach (var entry in visibleEvents)
                 {
                     var inspecting = _selectedSequence == entry.Sequence;
-                    <tr class="traffic-event @KindClass(entry.Kind) @(IsError(entry) ? "traffic-error" : "") @(IsNew(entry.Sequence) ? "traffic-arrival" : "") @(inspecting ? "inspecting" : "")" data-sequence="@entry.Sequence" @key="entry.Sequence" @onclick="() => Inspect(entry.Sequence)">
+                    var isError = IsError(entry);
+                    var kindLabel = KindLabel(entry.Kind);
+                    <tr class="traffic-event @KindClass(entry.Kind) @(isError ? "traffic-error" : "") @(IsNew(entry.Sequence) ? "traffic-arrival" : "") @(inspecting ? "inspecting" : "")" data-sequence="@entry.Sequence" @key="entry.Sequence" @onclick="() => Inspect(entry.Sequence)">
                         <td class="traffic-sequence">@entry.Sequence</td>
                         <td class="traffic-time"><time title="@DashboardFormat.Timestamp(entry.Timestamp)">@entry.Timestamp.ToLocalTime().ToString("HH:mm:ss.fff")</time></td>
                         <td class="traffic-endpoint" title="@EndpointTitle(entry, true)">@TrafficSource(entry)</td>
                         <td class="traffic-endpoint" title="@EndpointTitle(entry, false)">@TrafficDestination(entry)</td>
-                        <td class="traffic-kind"><BbBadge Variant="@(IsError(entry) ? BadgeVariant.SoftDestructive : BadgeVariant.Outline)">@KindLabel(entry.Kind)</BbBadge></td>
-                        <td class="traffic-info"><span @onclick:stopPropagation="true"><BbButton Variant="ButtonVariant.Ghost" Class="traffic-inspect" aria-expanded="@(inspecting ? "true" : "false")" aria-controls="traffic-selected-event" AriaLabel="@($"Inspect {KindLabel(entry.Kind).ToLowerInvariant()} {entry.Name}, event {entry.Sequence}")" OnClick="() => Inspect(entry.Sequence)">@EventInfo(entry)</BbButton></span></td>
+                        <td class="traffic-kind"><div class="bb:inline-flex bb:items-center bb:rounded-full bb:border bb:px-2.5 bb:py-0.5 bb:text-xs bb:font-semibold @(isError ? "bb:border-transparent bb:bg-destructive/10 bb:text-destructive" : "bb:text-foreground")">@kindLabel</div></td>
+                        <td class="traffic-info"><button type="button" class="traffic-inspect bb:transition-colors bb:hover:bg-accent bb:hover:text-accent-foreground" aria-expanded="@(inspecting ? "true" : "false")" aria-controls="traffic-selected-event" aria-label="@($"Inspect {kindLabel.ToLowerInvariant()} {entry.Name}, event {entry.Sequence}")" @onclick="() => Inspect(entry.Sequence)" @onclick:stopPropagation>@EventInfo(entry)</button></td>
                     </tr>
                 }
             </tbody>
         </table>
-        @if (VisibleEvents.Length == 0)
+        @if (visibleEvents.Length == 0)
         {
             <p class="empty-copy">@(_sessionOnly ? "No recent traffic for this session." : "No recent traffic.")</p>
         }
     </div>
-    @if (SelectedEvent is { } selected)
+    @if (_selectedSequence is { } sequence && visibleEvents.FirstOrDefault(entry => entry.Sequence == sequence) is { } selected)
     {
         <div class="traffic-event-detail" id="traffic-selected-event" role="region" aria-label="Selected traffic event">
             <div class="traffic-detail-heading"><h3>Event @selected.Sequence · @KindLabel(selected.Kind)</h3><BbButton Variant="ButtonVariant.Outline" Size="ButtonSize.Small" OnClick="() => Inspect(selected.Sequence)" AriaLabel="Close event details">Close</BbButton></div>
@@ -71,6 +77,8 @@
     [Parameter] public bool Live { get; set; }
 
     private DashboardTrafficEvent[] _window = [];
+    private DashboardTrafficEvent[]? _windowSource;
+    private TrafficView _rendered;
     private readonly HashSet<long> _newEvents = [];
     private DateTimeOffset _arrivalAt;
     private string? _instanceId;
@@ -80,14 +88,21 @@
     private bool _paused;
     private bool _sessionOnly;
     private string TrafficDescription => !Live ? "Waiting for the hub. Showing the last traffic seen." : _paused ? "Paused." : "Requests, responses and pushes as they happen.";
-    private DashboardTrafficEvent[] VisibleEvents => _sessionOnly && SelectedSession is not null ? _window.Where(entry => entry.SessionId == SelectedSession.SessionId).ToArray() : _window;
-    private DashboardTrafficEvent? SelectedEvent => VisibleEvents.FirstOrDefault(entry => entry.Sequence == _selectedSequence);
+    private DashboardTrafficEvent[] GetVisibleEvents() => _sessionOnly && SelectedSession is not null ? _window.Where(entry => entry.SessionId == SelectedSession.SessionId).ToArray() : _window;
+
+    // Row timestamps are absolute. A clock tick only changes this view when an arrival highlight expires.
+    private bool ShowArrivals => Live && !_paused && _newEvents.Count > 0 && Now - _arrivalAt < TimeSpan.FromSeconds(1.5);
+    private readonly record struct TrafficView(DashboardTrafficEvent[] Window, DashboardSession[] Sessions,
+        DashboardSession? SelectedSession, long? SelectedSequence, bool Paused, bool SessionOnly, bool Live, bool ShowArrivals);
+    private TrafficView CurrentView => new(_window, Sessions, SelectedSession, _selectedSequence, _paused, _sessionOnly, Live, ShowArrivals);
+    protected override bool ShouldRender() => CurrentView != _rendered;
 
     protected override void OnParametersSet()
     {
         if (_instanceId != InstanceId)
         {
             _instanceId = InstanceId;
+            _windowSource = null;
             _latestSequence = 0;
             _paused = false;
             _selectedSequence = null;
@@ -104,6 +119,7 @@
 
     private void UpdateWindow()
     {
+        if (ReferenceEquals(_windowSource, Entries)) return;
         var latest = Entries.OrderByDescending(entry => entry.Sequence).Take(120).ToArray();
         var lastSequence = latest.FirstOrDefault()?.Sequence ?? 0;
         if (lastSequence != _latestSequence)
@@ -115,9 +131,10 @@
             _arrivalAt = DateTimeOffset.UtcNow;
         }
         _window = latest;
+        _windowSource = Entries;
     }
 
-    private bool IsNew(long sequence) => Live && !_paused && Now - _arrivalAt < TimeSpan.FromSeconds(1.5) && _newEvents.Contains(sequence);
+    private bool IsNew(long sequence) => _rendered.ShowArrivals && _newEvents.Contains(sequence);
     private void Pause() => _paused = true;
     private void PauseForScrollKey(KeyboardEventArgs key)
     {

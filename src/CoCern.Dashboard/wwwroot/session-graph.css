@@ -43,7 +43,8 @@
 .graph-viewport { overflow: auto; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); background: var(--map-ground); scrollbar-color: var(--border) var(--map-ground); }
 .graph-expanded-inventory { max-height: 880px; }
 .graph-viewport:focus-visible { outline: 2px solid var(--ring); outline-offset: -3px; }
-.graph-canvas { display: block; width: max(100%, var(--graph-size)); height: auto; }
+.graph-stage { position: relative; isolation: isolate; container-type: inline-size; width: max(100%, var(--graph-size)); }
+.graph-canvas { position: relative; display: block; width: 100%; height: auto; }
 .graph-canvas marker path { fill: context-stroke; }
 .graph-contours { fill: none; stroke: var(--muted-foreground); stroke-width: .7; stroke-dasharray: 2 7; opacity: .16; pointer-events: none; }
 .graph-spokes { fill: none; pointer-events: none; }
@@ -55,12 +56,31 @@
 .graph-edge.connected { stroke: var(--muted-foreground); opacity: .2; }
 .graph-edge.recent { stroke: var(--map-cyan); opacity: .34; }
 .graph-edge.chosen { stroke: var(--map-amber); stroke-width: 3; opacity: 1; }
-.graph-pulses { pointer-events: none; }
-.graph-live-send { fill: none; stroke: var(--map-cyan); stroke-width: 3; stroke-linecap: round; stroke-dasharray: 12 108; animation: graph-send-flight 1.2s linear both; }
+.graph-pulses { position: absolute; z-index: 1; inset: 0; pointer-events: none; overflow: clip; }
+.graph-live-route { display: none; position: absolute; inset: 0; width: 100%; height: 100%; fill: none; stroke: var(--map-cyan); stroke-width: 3; opacity: .8; }
+.graph-live-send { position: absolute; top: -2px; left: 0; width: clamp(12px, var(--flight-length), 64px); height: 4px; border-radius: 2px; background: var(--map-cyan); transform-origin: left center; animation: graph-send-flight 1.2s linear both; }
 @keyframes graph-send-flight {
-    0% { stroke-dashoffset: 12; opacity: 0; }
-    10%, 90% { opacity: 1; }
-    100% { stroke-dashoffset: -100; opacity: 0; }
+    0% { transform: var(--flight-0); opacity: 0; }
+    5% { transform: var(--flight-1); }
+    10% { transform: var(--flight-2); opacity: 1; }
+    15% { transform: var(--flight-3); }
+    20% { transform: var(--flight-4); }
+    25% { transform: var(--flight-5); }
+    30% { transform: var(--flight-6); }
+    35% { transform: var(--flight-7); }
+    40% { transform: var(--flight-8); }
+    45% { transform: var(--flight-9); }
+    50% { transform: var(--flight-10); }
+    55% { transform: var(--flight-11); }
+    60% { transform: var(--flight-12); }
+    65% { transform: var(--flight-13); }
+    70% { transform: var(--flight-14); }
+    75% { transform: var(--flight-15); }
+    80% { transform: var(--flight-16); }
+    85% { transform: var(--flight-17); }
+    90% { transform: var(--flight-18); opacity: 1; }
+    95% { transform: var(--flight-19); }
+    100% { transform: var(--flight-20); opacity: 0; }
 }
 .graph-edge-hit { fill: none; stroke: transparent; stroke-width: 16; cursor: pointer; }
 .graph-edge-hit:hover { stroke: var(--map-amber); stroke-opacity: .2; }
@@ -122,8 +142,8 @@
 @media (max-width: 600px) { .graph-controls { padding: 0 14px; } .graph-key { padding-left: 14px; } .graph-intro, .graph-view-summary, .graph-subset-note, .graph-footnote, .graph-sampled { margin-left: 14px; margin-right: 14px; } .graph-viewport { max-height: 430px; } }
 @media (max-width: 700px) {
     .graph-viewport { max-height: none; }
-    .graph-canvas { width: 100%; }
-    .graph-expanded-inventory .graph-canvas { min-width: calc(var(--graph-size) * .5); }
+    .graph-stage { width: 100%; }
+    .graph-expanded-inventory .graph-stage { min-width: calc(var(--graph-size) * .5); }
     .graph-canvas .graph-node :is(strong, small, .graph-node-id) { display: none; }
     .graph-canvas .graph-node .graph-orb { font-size: 22px; }
     .graph-mobile-stations { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px 8px; padding: 24px 14px; background: var(--map-ground); border-block: 1px solid var(--border); }
@@ -133,7 +153,9 @@
     .graph-recent-row time { grid-column: 3; grid-row: 1 / span 2; }
 }
 @media (prefers-reduced-motion: reduce) {
-    .graph-live-send { animation: none; stroke-dasharray: none; opacity: .8; }
+    .graph-live-send { display: none; animation: none; }
+    .graph-live-route { display: block; }
     .session-graph .graph-node .graph-orb { transition: none; }
 }
-:root[data-motion="off"] .graph-live-send { animation: none; stroke-dasharray: none; opacity: .8; }
+:root[data-motion="off"] .graph-live-send { display: none; animation: none; }
+:root[data-motion="off"] .graph-live-route { display: block; }
