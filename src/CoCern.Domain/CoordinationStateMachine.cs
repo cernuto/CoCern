@@ -29,7 +29,7 @@ public static class CoordinationStateMachine
         if (!caller.MayAccess(repository)) return Error(RepositoryDenied);
         if (Operations.IsInternal(operation) && !caller.IsInternal) return Error(InternalOnly);
         // Replays must retain the caller's current authority before exposing an administrator's stored control result.
-        if (operation is RelayTools.ControlRequest or Operations.AnswerHumanBlocker && !caller.IsAdministrator) return Error(AdministratorRequired);
+        if (operation is RelayTools.ControlRequest or Operations.AnswerHumanBlocker or Operations.ResendHumanAnswer && !caller.IsAdministrator) return Error(AdministratorRequired);
         var state = JsonNode.Parse(envelope.Value.Json)!.AsObject();
         if (operation is RelayTools.SessionOpen or RelayTools.SessionBind && ByteSize(arguments["binding"]) > MaxBindingBytes) return Error(PayloadTooLarge);
         if (kind != AggregateKinds.Control)

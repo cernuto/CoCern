@@ -11,6 +11,8 @@ using Microsoft.Extensions.DependencyInjection;
 using Orleans;
 using Orleans.Runtime;
 using CoCern.Core;
+using CoCern.Contracts;
+using CoCern.Contracts.Dashboard;
 using CoCern.Domain;
 using CoCern.Storage;
 using CoCern.Host.Dashboard;
@@ -132,6 +134,58 @@ public sealed class DashboardTests
         Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/dashboard/api/auth")).StatusCode);
         await closed.Task.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.False(sends.Task.IsCompleted);
+    }
+
+    [Fact]
+    public async Task Dashboard_replays_the_recorded_answer_after_its_owner_closes()
+    {
+        await using var host = OperatorHost();
+        using var client = BrowserClient(host);
+        using var login = await client.PostAsJsonAsync("/dashboard/api/login", new { token = RelayHostFixture.Token });
+        login.EnsureSuccessStatusCode();
+        using var worker = host.AuthorizedClient();
+        var opened = await host.Call(worker, "session_open", new { repositoryId = "repo", requestId = "open-owner" });
+        using var session = JsonDocument.Parse(opened.GetProperty("dataJson").GetString()!);
+        var sessionId = session.RootElement.GetProperty("sessionId").GetString()!;
+        var sessionToken = session.RootElement.GetProperty("sessionToken").GetString()!;
+        const string taskId = "dashboard-choice";
+        var create = await host.Call(worker, "task_update", new { repositoryId = "repo", requestId = "create", sessionId, sessionToken, taskId, expectedVersion = 0 });
+        var claim = await host.Call(worker, "task_claim", new { repositoryId = "repo", requestId = "claim", sessionId, sessionToken, taskId, expectedVersion = create.GetProperty("version").GetInt64() });
+        var workflow = JsonNode.Parse("""
+            {"state":"blocked","packet":{"goal":"choose layout","target":"dashboard","authorityRef":"test","restoration":"none","stopCondition":"answered"},
+             "criteria":[{"id":"choice","description":"layout selected","result":"not_run"}],
+             "blockers":[{"kind":"human_decision","id":"layout","summary":"Which layout?","recheckCondition":"Resume work","options":["Wide","Narrow"],"recommendedOption":"Wide"}]}
+            """);
+        var blocked = await host.Call(worker, "task_update", new { repositoryId = "repo", requestId = "block", sessionId, sessionToken, taskId, expectedVersion = claim.GetProperty("version").GetInt64(), workflow });
+        var answer = new DashboardHumanAnswer("repo", "default", taskId, blocked.GetProperty("version").GetInt64(), "layout", "Narrow", Guid.NewGuid().ToString("N"), sessionId);
+        const string route = "/dashboard/api/waiting/answer";
+        using var first = await client.PostAsJsonAsync(route, answer);
+        first.EnsureSuccessStatusCode();
+        var receipt = await first.Content.ReadFromJsonAsync<DashboardHumanAnswerResult>();
+        Assert.Equal(answer.TaskVersion + 1, receipt!.TaskVersion);
+        // An answer recorded before delivery tracking has this exact payload order in its stored fingerprint.
+        var originalArgs = new JsonObject
+        {
+            ["repositoryId"] = "repo", ["boardId"] = "default", ["taskId"] = taskId, ["expectedVersion"] = answer.TaskVersion,
+            ["blockerId"] = "layout", ["option"] = "Narrow", ["requestId"] = answer.RequestId, ["expectedOwner"] = sessionId
+        };
+        var board = host.Services.GetRequiredService<IGrainFactory>().GetGrain<ITaskBoardGrain>(AggregateKinds.BoardKey("repo", "default"));
+        var original = await board.ExecuteAsync(new RelayCaller("test-user", true, ["repo"], IsInternal: true), Operations.AnswerHumanBlocker, originalArgs.ToJsonString());
+        Assert.True(original.Ok, original.Code);
+        Assert.Equal(receipt.TaskVersion, original.Version);
+        using var close = await client.PostAsJsonAsync("/dashboard/api/sessions/close", new { repositoryId = "repo", targetSessionId = sessionId, force = true });
+        close.EnsureSuccessStatusCode();
+        Assert.Equal(1, (await close.Content.ReadFromJsonAsync<DashboardCloseSessionsResult>())!.Closed);
+
+        using var replay = await client.PostAsJsonAsync(route, answer);
+        replay.EnsureSuccessStatusCode();
+        Assert.Equal(receipt, await replay.Content.ReadFromJsonAsync<DashboardHumanAnswerResult>());
+        using var conflict = await client.PostAsJsonAsync(route, answer with { Option = "Wide" });
+        Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
+        Assert.Equal(RelayErrorCodes.RequestConflict, (await conflict.Content.ReadFromJsonAsync<DashboardHumanAnswerResult>())!.Code);
+        using var fresh = await client.PostAsJsonAsync(route, answer with { RequestId = Guid.NewGuid().ToString("N") });
+        Assert.Equal(HttpStatusCode.Conflict, fresh.StatusCode);
+        Assert.Equal(RelayErrorCodes.SessionUnknown, (await fresh.Content.ReadFromJsonAsync<DashboardHumanAnswerResult>())!.Code);
     }
 
     [Fact]

@@ -229,6 +229,10 @@ public static class DueWorkKinds
 public static class Operations
 {
     public const string AnswerHumanBlocker = "__answer_human_blocker";
+    public const string ResendHumanAnswer = "__resend_human_answer";
+    public const string HumanAnswerDeliveryFailed = "__human_answer_delivery_failed";
+    public const string ReturnUnreadHumanAnswers = "__return_unread_human_answers";
+    public const string HumanDecisionOwnerRefusalField = "__humanDecisionOwnerRefusal";
     /// <summary>Initializes a session from its record (<see cref="Messages.SessionOpen"/>).</summary>
     public const string Open = "__open";
     /// <summary>The hub checks the session handle a call presents, and reads the session's record (<see cref="Messages.SessionVerify"/>).</summary>

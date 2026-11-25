@@ -29,7 +29,7 @@
                             }
                             else if (!string.IsNullOrEmpty(item.Label)) { <strong>@item.Label</strong> }
                         </div>
-                        @if (item.Decisions.Length == 0 || item.Decisions[0].Question != item.Text)
+                        @if (ShowItemText(item))
                         {
                             <p class="waiting-text">@item.Text</p>
                         }
@@ -41,8 +41,18 @@
                                 @if ((decision.Answer ?? RecordedOption(item, decision)) is { } answer)
                                 {
                                     <p>Recorded answer: @answer</p>
+                                    @if (decision.DeliveryFailure is { } failure)
+                                    {
+                                        <p role="status">@DeliveryFailureText(failure)</p>
+                                        @if (!string.IsNullOrEmpty(decision.ResendSessionId))
+                                        {
+                                            <button type="button" disabled="@sending" @onclick="() => AnswerAsync(item, decision, null)">Resend recorded answer to @decision.ResendSessionId</button>
+                                        }
+                                        @if (string.IsNullOrEmpty(decision.ResendSessionId) || failure is "closed" or "unknown" or "unread")
+                                        { <p class="muted">If the recipient is unavailable, retarget the blocked task to an open chat.</p> }
+                                    }
                                 }
-                                else
+                                else if (decision.Options.Length > 0)
                                 {
                                     @foreach (var option in decision.Options)
                                     {
@@ -90,10 +100,21 @@
         .Where(entry => entry.Key.Repository == item.RepositoryId && entry.Key.Board == item.BoardId && entry.Key.Task == item.TaskId)
         .Select(entry => entry.Value.Version).Append(item.TaskVersion).Max();
 
-    private async Task AnswerAsync(DashboardWaitingItem item, DashboardHumanDecision decision, string option)
+    private static string DeliveryFailureText(string failure) => failure switch
+    {
+        "full" => "The chat’s inbox was full. Resend when it has room.",
+        "unread" => "The chat closed before reading this answer.",
+        "closed" => "The chat closed before this answer arrived.",
+        _ => "The receiving chat could not be found."
+    };
+
+    private async Task AnswerAsync(DashboardWaitingItem item, DashboardHumanDecision decision, string? option)
     {
         if (sending) return;
-        var request = new DashboardHumanAnswer(item.RepositoryId, item.BoardId, item.TaskId, CurrentVersion(item), decision.BlockerId, option, "", item.SessionId);
+        var resend = option is null;
+        var recipient = resend ? decision.ResendSessionId : item.SessionId;
+        if (string.IsNullOrEmpty(recipient)) return;
+        var request = new DashboardHumanAnswer(item.RepositoryId, item.BoardId, item.TaskId, CurrentVersion(item), decision.BlockerId, option ?? "", "", recipient);
         if (pending is null || pending with { RequestId = "" } != request)
             pending = request with { RequestId = Guid.NewGuid().ToString("N") };
         sending = true;
@@ -104,18 +125,22 @@
                 answerStatus = "The dashboard connection is unavailable.";
                 return;
             }
-            using var response = await http.PostAsJsonAsync("api/waiting/answer", pending);
+            using var response = await http.PostAsJsonAsync(resend ? "api/waiting/resend" : "api/waiting/answer", pending);
             DashboardHumanAnswerResult? result = null;
             if (response.StatusCode is System.Net.HttpStatusCode.OK or System.Net.HttpStatusCode.Conflict)
             {
                 try { result = await response.Content.ReadFromJsonAsync<DashboardHumanAnswerResult>(); }
                 catch (Exception error) when (error is System.Text.Json.JsonException or NotSupportedException) { }
             }
-            if (response.StatusCode == System.Net.HttpStatusCode.OK)
+            if (response.StatusCode == System.Net.HttpStatusCode.OK && option is not null)
                 recorded[(item.RepositoryId, item.BoardId, item.TaskId, decision.BlockerId)] = (option, result?.TaskVersion ?? pending.TaskVersion + 1);
             answerStatus = response.StatusCode switch
             {
+                System.Net.HttpStatusCode.OK when resend => $"Queued the recorded answer for {recipient}.",
                 System.Net.HttpStatusCode.OK => $"Recorded the answer for {item.TaskId} and queued it for the owning chat.",
+                System.Net.HttpStatusCode.Conflict when resend && result?.Code == CoCern.Contracts.RelayErrorCodes.SessionUnknown =>
+                    $"Retarget {item.TaskId} to an open chat to resend its recorded answer.",
+                System.Net.HttpStatusCode.Conflict when resend => "The task changed. Review its current owner and delivery status before resending.",
                 System.Net.HttpStatusCode.Conflict when result?.Code == CoCern.Contracts.RelayErrorCodes.SessionUnknown =>
                     $"The chat that owns {item.TaskId} has closed, so the answer was not recorded. Give the task to an open chat, then answer.",
                 System.Net.HttpStatusCode.Conflict => "The task changed. Review the current question before answering.",
@@ -125,10 +150,12 @@
         }
         catch (Exception error) when (error is HttpRequestException or OperationCanceledException)
         {
-            answerStatus = "The answer could not be confirmed. Retrying the same choice will reuse this request.";
+            answerStatus = "The delivery request could not be confirmed. Retrying it will reuse the same request.";
         }
         finally { sending = false; }
     }
+
+    private static bool ShowItemText(DashboardWaitingItem item) => !item.Decisions.Any(decision => decision.Question == item.Text);
 
     private static string KindLabel(string kind) => kind switch
     {

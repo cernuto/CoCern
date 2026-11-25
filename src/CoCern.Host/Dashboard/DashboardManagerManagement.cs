@@ -82,34 +82,60 @@ public static class DashboardManagerManagement
         return Project(reply);
     }
 
-    internal static async Task<IResult> AnswerHumanBlockerAsync(HttpContext context, IGrainFactory grains, RepositoryCatalog repositories)
+    internal static Task<IResult> AnswerHumanBlockerAsync(HttpContext context, IGrainFactory grains, RepositoryCatalog repositories) =>
+        SubmitHumanDecisionAsync(context, grains, repositories, resend: false);
+
+    internal static Task<IResult> ResendHumanAnswerAsync(HttpContext context, IGrainFactory grains, RepositoryCatalog repositories) =>
+        SubmitHumanDecisionAsync(context, grains, repositories, resend: true);
+
+    private static async Task<IResult> SubmitHumanDecisionAsync(HttpContext context, IGrainFactory grains, RepositoryCatalog repositories, bool resend)
     {
         if (Viewer(context) is not { } principal || !DashboardSecurity.SameOrigin(context)) return Results.StatusCode(403);
         var (body, failure) = await BodyAsync<DashboardHumanAnswer>(context);
         if (failure is not null) return failure;
         if (body is null || !Identity(body.RepositoryId) || !Identity(body.BoardId) || !Identity(body.TaskId) || !Identity(body.BlockerId)
-            || !Identity(body.Option) || !Identity(body.SessionId) || body.TaskVersion < 1 || !Guid.TryParseExact(body.RequestId, "N", out _))
+            || (resend ? !string.IsNullOrEmpty(body.Option) : !Identity(body.Option)) || !Identity(body.SessionId) || body.TaskVersion < 1 || !Guid.TryParseExact(body.RequestId, "N", out _))
             return Results.BadRequest(new DashboardHumanAnswerResult(false, RelayErrorCodes.InvalidArguments));
         if (repositories.Find(body.RepositoryId) is not { } repository) return Results.StatusCode(403);
         var caller = new RelayCaller(principal, true, [repository], IsInternal: true);
-        // A human blocker outlives its chat, and the board does not hear of an owner that closed. An answer nobody would receive is refused
-        // before it is recorded, since a recorded answer cannot be given again.
-        var open = await grains.GetGrain<IControlGrain>(AggregateKinds.ControlKey).ExecuteAsync(caller, SessionsOpenQuery.Operation,
-            new SessionsOpenQuery(repository, [body.SessionId]).ToJson().ToJsonString());
-        if (!open.Ok) return Results.Json(new DashboardHumanAnswerResult(false, open.Code), statusCode: ToolResults.Status(open));
-        using (var sessions = JsonDocument.Parse(open.DataJson))
-        {
-            if (!sessions.RootElement.TryGetProperty("open", out var ids) || ids.ValueKind != JsonValueKind.Array || ids.GetArrayLength() == 0)
-                return Results.Json(new DashboardHumanAnswerResult(false, RelayErrorCodes.SessionUnknown), statusCode: StatusCodes.Status409Conflict);
-        }
         var args = new JsonObject
         {
             ["repositoryId"] = repository, ["boardId"] = body.BoardId, ["taskId"] = body.TaskId, ["expectedVersion"] = body.TaskVersion,
-            ["blockerId"] = body.BlockerId, ["option"] = body.Option, ["requestId"] = body.RequestId, ["expectedOwner"] = body.SessionId
+            ["blockerId"] = body.BlockerId
         };
-        var board = grains.GetGrain<ITaskBoardGrain>(AggregateKinds.BoardKey(repository, body.BoardId));
-        var reply = await board.ExecuteAsync(caller, Operations.AnswerHumanBlocker, args.ToJsonString());
-        return Results.Json(new DashboardHumanAnswerResult(reply.Ok, reply.Code, reply.Ok ? reply.Version : null), statusCode: ToolResults.Status(reply));
+        // Stored request fingerprints include property order. Preserve the original answer payload on retries across upgrades.
+        if (!resend) args["option"] = body.Option;
+        args["requestId"] = body.RequestId;
+        args["expectedOwner"] = body.SessionId;
+        return await ExecuteHumanDecisionAsync(grains, caller, resend ? Operations.ResendHumanAnswer : Operations.AnswerHumanBlocker, args);
+    }
+
+    private static async Task<IResult> ExecuteHumanDecisionAsync(IGrainFactory grains, RelayCaller caller, string operation, JsonObject args)
+    {
+        var repository = args["repositoryId"]!.GetValue<string>();
+        var owner = args["expectedOwner"]!.GetValue<string>();
+        var board = grains.GetGrain<ITaskBoardGrain>(AggregateKinds.BoardKey(repository, args["boardId"]!.GetValue<string>()));
+        // The board checks the request receipt before consulting this transient refusal. A committed decision
+        // stays replayable when its owner closes or the task changes hands.
+        const string checkOwner = "HumanDecisionOwnerCheckRequired";
+        args[Operations.HumanDecisionOwnerRefusalField] = checkOwner;
+        var reply = await board.ExecuteAsync(caller, operation, args.ToJsonString());
+        if (reply.Code == checkOwner)
+        {
+            var open = await grains.GetGrain<IControlGrain>(AggregateKinds.ControlKey).ExecuteAsync(caller, SessionsOpenQuery.Operation,
+                new SessionsOpenQuery(repository, [owner]).ToJson().ToJsonString());
+            if (open.Ok)
+            {
+                using var sessions = JsonDocument.Parse(open.DataJson);
+                if (sessions.RootElement.TryGetProperty("open", out var ids) && ids.ValueKind == JsonValueKind.Array
+                    && ids.EnumerateArray().Any(id => id.GetString() == owner)) args.Remove(Operations.HumanDecisionOwnerRefusalField);
+                else args[Operations.HumanDecisionOwnerRefusalField] = RelayErrorCodes.SessionUnknown;
+            }
+            else args[Operations.HumanDecisionOwnerRefusalField] = open.Code;
+            reply = await board.ExecuteAsync(caller, operation, args.ToJsonString());
+        }
+        var status = reply.Code == RelayErrorCodes.SessionUnknown ? StatusCodes.Status409Conflict : ToolResults.Status(reply);
+        return Results.Json(new DashboardHumanAnswerResult(reply.Ok, reply.Code, reply.Ok ? reply.Version : null), statusCode: status);
     }
 
     private static string? Viewer(HttpContext context) => DashboardSecurity.SecureTransport(context) && context.User.Identity?.IsAuthenticated == true

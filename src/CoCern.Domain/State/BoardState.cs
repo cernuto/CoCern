@@ -136,6 +136,7 @@ public sealed class BoardTask(JsonObject json)
     /// <summary>When the hub saw this task take a <c>human_decision</c> blocker; <see cref="UpdatedAtKey"/> resets on any evidence update, so it cannot say.</summary>
     public const string HumanSinceKey = "humanSince";
     public const string HumanAnswersKey = "humanAnswers";
+    public const string HumanAnswerDeliveriesKey = "humanAnswerDeliveries";
     /// <summary>The same for a <c>coordinator_hold</c>, so a hold's age never shortens a later human blocker's time on the list.</summary>
     public const string HoldSinceKey = "holdSince";
     /// <summary>When the task left the board; only the archived copy holds it.</summary>
@@ -234,16 +235,28 @@ public sealed class BoardTask(JsonObject json)
         if (json[HumanAnswersKey] is JsonObject answers)
         {
             var prior = Workflow?.BlockerList;
-            var current = new WorkflowRecord(workflow).BlockerList;
+            var replacement = new WorkflowRecord(workflow);
+            var current = replacement.BlockerList;
             foreach (var id in answers.Select(pair => pair.Key).ToArray())
             {
                 JsonObject? Find(JsonArray? list) => list?.OfType<JsonObject>().FirstOrDefault(item => Text(item, WorkflowBlocker.IdKey) == id);
-                if (Find(current) is not { } blocker || !JsonNode.DeepEquals(Find(prior), blocker)) answers.Remove(id);
+                if (Find(current) is not { } blocker || !JsonNode.DeepEquals(Find(prior), blocker))
+                {
+                    answers.Remove(id);
+                    (json[HumanAnswerDeliveriesKey] as JsonObject)?.Remove(id);
+                }
+                else if (Workflow?.TargetSessionId != replacement.TargetSessionId && json[HumanAnswerDeliveriesKey]?[id] is JsonObject delivery)
+                    delivery["retargeted"] = true;
             }
             if (answers.Count == 0) json.Remove(HumanAnswersKey);
+            if (json[HumanAnswerDeliveriesKey] is JsonObject { Count: 0 }) json.Remove(HumanAnswerDeliveriesKey);
         }
         json[WorkflowKey] = workflow.DeepClone();
     }
+
+    /// <summary>A recorded answer follows its owner unless the workflow explicitly retargeted that same question after it was answered.</summary>
+    public static string HumanAnswerRecipient(JsonObject attempt, string? target, string? owner) =>
+        attempt["retargeted"]?.GetValue<bool>() == true && !string.IsNullOrEmpty(target) ? target : owner ?? "";
 
     /// <summary>The action records by action ID, created empty when the task has none.</summary>
     public JsonObject Actions => ObjectAt(json, ActionsKey);

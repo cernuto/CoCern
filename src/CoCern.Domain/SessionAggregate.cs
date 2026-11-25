@@ -54,6 +54,7 @@ internal static class SessionAggregate
             case Operations.SessionExpire: return Expire(context);
             case Operations.SessionTargetWatch: return WatchTarget(context);
             case Operations.Deliver: return Deliver(context);
+            case Operations.ReturnUnreadHumanAnswers: return ReturnUnreadHumanAnswers(context);
             case Operations.SessionWork: return Work(context);
             case Operations.AttentionRaise: return SessionAttention.Raise(context);
             case Operations.AttentionSuggest: return SessionAttention.Suggest(context);
@@ -283,21 +284,63 @@ internal static class SessionAggregate
     /// <summary>
     /// Unread direct messages a closing session would drop with its inbox go back to their senders as <c>delivery.failed</c>
     /// (<c>unread</c>), so no sender waits for an answer that will never come. At most <see cref="RelayLimits.MaxMessagesReturnedOnClose"/>,
-    /// oldest first; the rest are dropped with the inbox.
+    /// oldest first. Additional human answers return to their task boards in bounded batches.
     /// </summary>
     private static void ReturnUnread(AggregateContext context, SessionState state)
     {
         var returned = 0;
+        var deferred = new JsonArray();
         foreach (var stored in state.Unread)
         {
-            if (returned == RelayLimits.MaxMessagesReturnedOnClose) break;
-            if (InboxMessage.Decode(stored).TryGet(out var message, out _) && ReturnToSender(context, state, message, "unread")) returned++;
+            if (returned == RelayLimits.MaxMessagesReturnedOnClose && Text(stored, InboxMessage.KindKey) != InboxMessage.HumanAnswerKind) continue;
+            if (!InboxMessage.Decode(stored).TryGet(out var message, out _)) continue;
+            if (returned < RelayLimits.MaxMessagesReturnedOnClose)
+            {
+                if (ReturnToSender(context, state, message, "unread")) returned++;
+            }
+            else if (message.BoardId is { Length: > 0 } board && message.TaskId is { Length: > 0 } task)
+                deferred.Add(new JsonObject { ["boardId"] = board, ["taskId"] = task, ["messageId"] = message.MessageId });
         }
+        if (deferred.Count == 0) return;
+        context.State[PendingAnswerReturnsKey] = deferred;
+        ScheduleAnswerReturns(context);
     }
+
+    private const string PendingAnswerReturnsKey = "pendingHumanAnswerReturns";
+
+    // A forced close may clear an entire inbox. Keep only the coordinates needed for the excess
+    // answer returns and commit each bounded batch of board notifications with its removal.
+    private static RelayReply ReturnUnreadHumanAnswers(AggregateContext context)
+    {
+        if (context.State[PendingAnswerReturnsKey] is not JsonArray pending) return Ok(new { });
+        var count = Math.Min(pending.Count, RelayLimits.MaxMessagesReturnedOnClose);
+        for (var index = 0; index < count; index++)
+        {
+            var item = pending[^1]!.AsObject();
+            ReportHumanAnswerFailure(context, Text(item, "boardId"), Text(item, "taskId"), Text(item, "messageId"), "unread");
+            pending.RemoveAt(pending.Count - 1);
+        }
+        if (pending.Count == 0) context.State.Remove(PendingAnswerReturnsKey);
+        else ScheduleAnswerReturns(context);
+        return Ok(new { });
+    }
+
+    private static void ScheduleAnswerReturns(AggregateContext context) =>
+        context.Emit(AggregateKinds.Session, context.Key, Operations.ReturnUnreadHumanAnswers, new JsonObject { ["repositoryId"] = context.Repository });
+
+    private static void ReportHumanAnswerFailure(AggregateContext context, string boardId, string taskId, string messageId, string reason) =>
+        context.Emit(AggregateKinds.Board, AggregateKinds.BoardKey(context.Repository, boardId), Operations.HumanAnswerDeliveryFailed,
+            new JsonObject { ["repositoryId"] = context.Repository, ["boardId"] = boardId, ["taskId"] = taskId,
+                ["messageId"] = messageId, ["recipient"] = context.Key, ["reason"] = reason });
 
     /// <summary>Sends <paramref name="message"/>'s sender the notice for <paramref name="reason"/>; false when it has no sender session or is itself a notice.</summary>
     private static bool ReturnToSender(AggregateContext context, SessionState state, InboxMessage message, string reason)
     {
+        if (message.Kind == InboxMessage.HumanAnswerKind && message.BoardId is { Length: > 0 } boardId && message.TaskId is { Length: > 0 } taskId)
+        {
+            ReportHumanAnswerFailure(context, boardId, taskId, message.MessageId, reason);
+            return true;
+        }
         if (message.SenderSessionId is not { Length: > 0 } sender || message.Kind == InboxMessage.UndeliveredKind) return false;
         var id = message.MessageId;
         var recipient = state.SessionId is { Length: > 0 } self ? self : context.Key;
