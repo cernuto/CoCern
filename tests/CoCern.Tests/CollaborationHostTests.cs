@@ -62,9 +62,15 @@ public sealed class CollaborationHostTests
         Assert.Equal(1, task.GetProperty("version").GetInt32());
         Assert.Equal(incident.summary, Assert.Single(task.GetProperty("messages").EnumerateArray()).GetProperty("text").GetString());
         Assert.False(task.GetProperty("workflow").TryGetProperty("targetSessionId", out _));
-        var inbox = Data(await host.Call(client, "check_inbox", new { repositoryId = "repo", sessionId = target,
-            sessionToken = recipient.GetProperty("sessionToken").GetString(), waitSeconds = 5, attention = false }));
-        Assert.Contains(inbox.GetProperty("items").EnumerateArray(), item => item.GetRawText().Contains(taskId!, StringComparison.Ordinal));
+        // The REST read returns the current inbox. Delivery from the board outbox is asynchronous.
+        var inboxArgs = new { repositoryId = "repo", sessionId = target, sessionToken = recipient.GetProperty("sessionToken").GetString(), attention = false };
+        var inbox = Data(await host.Call(client, "check_inbox", inboxArgs));
+        for (var retry = 0; inbox.GetProperty("items").GetArrayLength() == 0 && retry < 40; retry++)
+        {
+            await Task.Delay(100);
+            inbox = Data(await host.Call(client, "check_inbox", inboxArgs));
+        }
+        Assert.Equal(taskId, Assert.Single(inbox.GetProperty("items").EnumerateArray()).GetProperty("taskId").GetString());
     }
 
     [Fact]
