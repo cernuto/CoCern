@@ -124,7 +124,7 @@ public abstract class CoordinationGrain(IPersistentState<StateEnvelope<Coordinat
             try
             {
                 if (Kind == AggregateKinds.Session && effect.TargetKind == AggregateKinds.Session && (effect.Operation == Operations.Deliver || Operations.IsAttention(effect.Operation)
-                    || effect.Operation is EventWaitAggregate.DueOperation or EventWaitSources.WatchOperation or EventWaitSources.UnwatchOperation or EventWaitSources.LifecycleOperation)
+                    || effect.Operation is Operations.ReturnUnreadHumanAnswers or EventWaitAggregate.DueOperation or EventWaitSources.WatchOperation or EventWaitSources.UnwatchOperation or EventWaitSources.LifecycleOperation)
                     && GrainContext is not null && effect.TargetKey == this.GetPrimaryKeyString())
                 {
                     // A non-reentrant grain cannot await an RPC to itself. Commit its inbox entry

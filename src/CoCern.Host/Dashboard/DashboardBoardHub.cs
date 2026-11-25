@@ -41,10 +41,11 @@ internal sealed class DashboardBoardHub(DashboardBoardNotifier boards, IRelayApp
                 Scalar(item, "state"), item.TryGetProperty("archived", out var archived) && archived.GetBoolean(), leaseUntil,
                 Scalar(item, "title"), Scalar(item, "milestone"), Scalar(item, "updatedBy"),
                 DateTimeOffset.TryParse(Scalar(item, "updatedAt"), out var updated) ? updated : null,
-                Scalar(item, "blockerKind"), Scalar(item, "blocker"), Scalar(item, "target"), Scalar(item, "parentTaskId"),
+                Scalar(item, "blockerKind"), Scalar(item, "blocker"), Scalar(item, "humanAnswerRecipient") ?? Scalar(item, "target"), Scalar(item, "parentTaskId"),
                 item.TryGetProperty("review", out var review) && review.ValueKind == JsonValueKind.Object
                     ? new(Scalar(review, "commit")!, review.TryGetProperty("pullRequest", out var pr) && pr.ValueKind == JsonValueKind.Number ? pr.GetInt32() : null,
-                        Scalar(review, "branch")!, Scalar(review, "reviewer")!, Scalar(review, "conclusion")!) : null);
+                        Scalar(review, "branch")!, Scalar(review, "reviewer")!, Scalar(review, "conclusion")!) : null,
+                item.TryGetProperty("humanDecisionsAnswered", out var answered) && answered.GetBoolean());
         }).ToArray();
         boards.AuthorizedScope(Context);
         return new(page.GetProperty("snapshotRevision").GetInt64(),

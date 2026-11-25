@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using CoCern.Contracts;
 using CoCern.Domain.State;
 
 namespace CoCern.Domain;
@@ -46,8 +47,21 @@ internal static class TaskDashboardSummary
     internal static JsonObject Row(BoardState board, BoardTask task)
     {
         var workflow = task.Workflow;
-        var blocker = workflow?.BlockerList?.OfType<JsonObject>().FirstOrDefault(b => String(b["kind"]) == "human_decision")
-            ?? workflow?.BlockerList?.OfType<JsonObject>().FirstOrDefault();
+        var blockers = workflow?.BlockerList?.OfType<JsonObject>();
+        var decisions = blockers?.Where(b => String(b[WorkflowBlocker.KindKey]) == BlockerKinds.HumanDecision)
+            .Select(b => WaitingList.HumanDecision(b, task.Json[BoardTask.HumanAnswersKey] as JsonObject)).ToArray() ?? [];
+        var unanswered = decisions.FirstOrDefault(decision => decision.Answer is null);
+        var human = unanswered ?? decisions.FirstOrDefault();
+        var blocker = blockers?.FirstOrDefault();
+        var allAnswered = human is not null && unanswered is null;
+        string? humanAnswerRecipient = null;
+        if (allAnswered)
+        {
+            var deliveries = task.Json[BoardTask.HumanAnswerDeliveriesKey] as JsonObject;
+            humanAnswerRecipient = decisions.Select(decision => deliveries?[decision.BlockerId]).OfType<JsonObject>()
+                .Select(attempt => BoardTask.HumanAnswerRecipient(attempt, workflow?.TargetSessionId, task.Owner))
+                .FirstOrDefault(recipient => recipient != task.Owner) ?? task.Owner;
+        }
         var reports = task.ReportsIfAny?.OfType<JsonObject>();
         var latest = reports?.LastOrDefault();
         var message = task.MessagesIfAny?.OfType<JsonObject>().LastOrDefault();
@@ -68,8 +82,10 @@ internal static class TaskDashboardSummary
             ["leaseUntil"] = task.Json["leaseUntil"]?.DeepClone(), ["pendingActions"] = TaskActions.HasUnresolved(task),
             ["state"] = workflow?.State, ["title"] = Clip(String(task.FactsIfAny?["title"]) ?? workflow?.Packet?.Goal, 256),
             ["milestone"] = Clip(milestone, 320), ["updatedBy"] = Actor(latest) ?? String(task.Json["updatedBy"]),
-            ["updatedAt"] = latest?["at"]?.DeepClone() ?? task.Json["updatedAt"]?.DeepClone(), ["blockerKind"] = blocker?["kind"]?.DeepClone(),
-            ["blocker"] = Clip(String(blocker?["summary"]), 320), ["target"] = workflow?.TargetSessionId,
+            ["updatedAt"] = latest?["at"]?.DeepClone() ?? task.Json["updatedAt"]?.DeepClone(),
+            ["blockerKind"] = human is null ? String(blocker?["kind"]) : BlockerKinds.HumanDecision,
+            ["blocker"] = Clip(human?.Question ?? String(blocker?["summary"]), 320), ["target"] = workflow?.TargetSessionId,
+            ["humanDecisionsAnswered"] = allAnswered, ["humanAnswerRecipient"] = humanAnswerRecipient,
             ["parentTaskId"] = ParentOf(board, task), ["review"] = review
         };
     }

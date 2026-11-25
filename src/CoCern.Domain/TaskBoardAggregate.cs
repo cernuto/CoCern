@@ -75,6 +75,7 @@ internal static class TaskBoardAggregate
             case Operations.TaskLeaseDeadline: return Ok(new { });
             case Operations.TaskUnclaim: return Unclaim(context, board);
             case Operations.SessionClosed: return Untarget(context, board);
+            case Operations.HumanAnswerDeliveryFailed: return HumanAnswerDeliveryFailed(context, board.Task(taskId));
         }
         if (taskId.Length == 0) return Error(InvalidArguments, new { required = "taskId" });
         if (board.Task(taskId) is not { } task)
@@ -100,6 +101,7 @@ internal static class TaskBoardAggregate
             RelayTools.ActionReport or RelayTools.TaskUpdate => Update(context, task),
             RelayTools.SendMessage => SendTaskMessage(context, task),
             Operations.AnswerHumanBlocker => AnswerHumanBlocker(context, task),
+            Operations.ResendHumanAnswer => ResendHumanAnswer(context, task),
             _ => Error(UnknownTool)
         };
     }
@@ -570,8 +572,12 @@ internal static class TaskBoardAggregate
         return Ok(new { messageId = new TaskMessage(task.Messages.Last()!.AsObject()).MessageId }, version);
     }
 
+    private static RelayReply? HumanDecisionOwnerRefusal(JsonObject args) =>
+        Text(args, Operations.HumanDecisionOwnerRefusalField) is { Length: > 0 } code ? Error(code) : null;
+
     private static RelayReply AnswerHumanBlocker(AggregateContext context, BoardTask task)
     {
+        if (HumanDecisionOwnerRefusal(context.Args) is { } refusal) return refusal;
         if (!ExpectedVersionMatches(context.Args, task.Version)) return VersionConflict(task.Version);
         var id = Text(context.Args, "blockerId");
         var option = Text(context.Args, "option");
@@ -587,7 +593,7 @@ internal static class TaskBoardAggregate
             || task.Json[BoardTask.HumanAnswersKey]?[id] is not null) return VersionConflict(task.Version);
         if (task.Messages.Count >= MaxConversation) return Error(CapacityExceeded);
         var version = task.Version + 1;
-        var text = $"Dashboard answer to {id} ({blocker.Summary}): {option}";
+        var text = HumanAnswerText(blocker, option);
         var entry = TaskMessage.Create(Guid.NewGuid().ToString("N"), task.TaskId, text, InboxMessage.HumanAnswerKind, null, context.Caller.PrincipalId, "", context.Now, version);
         if (CheckReadable(entry.Json) is { } unreadable) return unreadable;
         task.Messages.Add(entry.Json);
@@ -595,12 +601,84 @@ internal static class TaskBoardAggregate
         task.UpdatedAt = context.Now;
         task.UpdatedBy = context.Caller.PrincipalId;
         task.Version = version;
-        context.Send(task.Owner, new MessageDelivery(new InboxMessage
-        {
-            MessageId = entry.MessageId, RepositoryId = context.Repository, Kind = InboxMessage.HumanAnswerKind, TaskId = task.TaskId,
-            BoardId = Text(context.Args, "boardId", "default"), TaskVersion = version, Author = context.Caller.PrincipalId, Text = text, SentAt = context.Now
-        }));
+        QueueHumanAnswer(context, task, id, task.Owner, entry.MessageId, text, context.Caller.PrincipalId);
         return Ok(new { taskId = task.TaskId, messageId = entry.MessageId }, version);
+    }
+
+    private static void QueueHumanAnswer(AggregateContext context, BoardTask task, string blockerId, string recipient, string messageId, string text, string author)
+    {
+        var attempt = ObjectAt(ObjectAt(task.Json, BoardTask.HumanAnswerDeliveriesKey), blockerId);
+        attempt["messageId"] = messageId;
+        attempt["recipient"] = recipient;
+        attempt["author"] = author;
+        attempt.Remove("failure");
+        context.Send(recipient, new MessageDelivery(new InboxMessage
+        {
+            MessageId = messageId, RepositoryId = context.Repository, Kind = InboxMessage.HumanAnswerKind, TaskId = task.TaskId,
+            BoardId = Text(context.Args, "boardId", "default"), TaskVersion = task.Version, Author = author, Text = text, SentAt = context.Now
+        }));
+    }
+
+    private static RelayReply HumanAnswerDeliveryFailed(AggregateContext context, BoardTask? task)
+    {
+        // An old outbox may reach a board after reassignment, resend, a replacement question, or archival.
+        if (task is null) return Ok(new { });
+        var reason = Text(context.Args, "reason");
+        if (reason is not ("closed" or "unknown" or "full" or "unread")) return Error(InvalidArguments);
+        var messageId = Text(context.Args, "messageId");
+        var recipient = Text(context.Args, "recipient");
+        var deliveries = task.Json[BoardTask.HumanAnswerDeliveriesKey] as JsonObject;
+        var attempt = deliveries?.Select(pair => pair.Value).OfType<JsonObject>().FirstOrDefault(item =>
+            Text(item, "messageId") == messageId && Text(item, "recipient") == recipient)
+            ?? LegacyHumanAnswerAttempt(task, messageId, recipient);
+        if (attempt is null || attempt["failure"] is not null) return Ok(new { });
+        attempt["failure"] = reason;
+        task.Version++;
+        return Ok(new { taskId = task.TaskId }, task.Version);
+    }
+
+    private static string HumanAnswerText(WorkflowBlocker blocker, string answer) => $"Dashboard answer to {blocker.Id} ({blocker.Summary}): {answer}";
+
+    // An answer already in an outbox at upgrade has no attempt record. Its ID must name the most
+    // recent conversation entry for exactly one still-active recorded choice before we attach a failure.
+    private static JsonObject? LegacyHumanAnswerAttempt(BoardTask task, string messageId, string recipient)
+    {
+        if (task.Workflow is not { State: WorkflowStates.Blocked, BlockerList: { } blockers } || task.Json[BoardTask.HumanAnswersKey] is not JsonObject answers)
+            return null;
+        var saved = task.Messages.OfType<JsonObject>().Where(entry => Text(entry, TaskMessage.KindKey) == InboxMessage.HumanAnswerKind
+            && Text(entry, TaskMessage.SessionIdKey).Length == 0).ToArray();
+        var original = saved.FirstOrDefault(entry => Text(entry, TaskMessage.MessageIdKey) == messageId);
+        if (original is null) return null;
+        var text = Text(original, TaskMessage.TextKey);
+        if (saved.Last(entry => Text(entry, TaskMessage.TextKey) == text) != original) return null;
+        var matches = blockers.OfType<JsonObject>().Select(item => new WorkflowBlocker(item)).Where(blocker =>
+            blocker.Kind == BlockerKinds.HumanDecision && answers[blocker.Id] is JsonValue value && value.TryGetValue<string>(out var answer)
+            && blocker.Options.Contains(answer, StringComparer.Ordinal) && HumanAnswerText(blocker, answer) == text).Take(2).ToArray();
+        if (matches.Length != 1 || task.Json[BoardTask.HumanAnswerDeliveriesKey]?[matches[0].Id] is not null) return null;
+        var attempt = new JsonObject { ["messageId"] = messageId, ["recipient"] = recipient, ["author"] = Text(original, TaskMessage.AuthorKey) };
+        ObjectAt(task.Json, BoardTask.HumanAnswerDeliveriesKey)[matches[0].Id] = attempt;
+        return attempt;
+    }
+
+    private static RelayReply ResendHumanAnswer(AggregateContext context, BoardTask task)
+    {
+        if (!ExpectedVersionMatches(context.Args, task.Version)) return VersionConflict(task.Version);
+        var id = Text(context.Args, "blockerId");
+        var workflow = task.Workflow;
+        var question = workflow?.BlockerList?.OfType<JsonObject>().FirstOrDefault(item => Text(item, WorkflowBlocker.IdKey) == id);
+        if (workflow?.State != WorkflowStates.Blocked || question is null || task.Json[BoardTask.HumanAnswersKey]?[id] is not JsonValue answer
+            || task.Json[BoardTask.HumanAnswerDeliveriesKey]?[id] is not JsonObject attempt || attempt["failure"] is null)
+            return VersionConflict(task.Version);
+        var recipient = BoardTask.HumanAnswerRecipient(attempt, workflow.TargetSessionId, task.Owner);
+        if (recipient.Length == 0 || recipient != Text(context.Args, "expectedOwner")) return VersionConflict(task.Version);
+        if (HumanDecisionOwnerRefusal(context.Args) is { } refusal) return refusal;
+        var messageId = Guid.NewGuid().ToString("N");
+        var text = HumanAnswerText(new WorkflowBlocker(question), answer.GetValue<string>());
+        task.Version++;
+        task.UpdatedAt = context.Now;
+        task.UpdatedBy = context.Caller.PrincipalId;
+        QueueHumanAnswer(context, task, id, recipient, messageId, text, Text(attempt, "author"));
+        return Ok(new { taskId = task.TaskId, messageId }, task.Version);
     }
 
     /// <summary>

@@ -180,7 +180,7 @@ public static class WaitingList
     /// </summary>
     /// <exception cref="JsonException">The blockers are not JSON.</exception>
     public static WaitingBlocker? Blocker(string boardKey, string taskId, string? owner, string? humanSince, string? holdSince, string? updatedAt, string blockersJson,
-        long taskVersion = 0, string? answersJson = null)
+        long taskVersion = 0, string? answersJson = null, string? deliveriesJson = null, string? target = null)
     {
         using var document = JsonDocument.Parse(blockersJson, Options);
         if (document.RootElement.ValueKind != JsonValueKind.Array) return null;
@@ -190,27 +190,40 @@ public static class WaitingList
         var summary = human ?? Summary(BlockerKinds.CoordinatorHold);
         if (summary is null) return null;
         var (repository, board) = BoardReadModels.BoardAddress(boardKey);
-        using var answers = JsonDocument.Parse(answersJson ?? "{}", Options);
+        var answers = JsonNode.Parse(answersJson ?? "{}", documentOptions: Options) as JsonObject;
+        var deliveries = deliveriesJson is null ? null : JsonNode.Parse(deliveriesJson, documentOptions: Options) as JsonObject;
         var decisions = new List<DashboardHumanDecision>();
-        var questions = 0;
         foreach (var blocker in blockers.Where(blocker => Text(blocker, WorkflowBlocker.KindKey) == BlockerKinds.HumanDecision))
         {
-            questions++;
-            if (!blocker.TryGetProperty(WorkflowBlocker.OptionsKey, out var options) || options.ValueKind != JsonValueKind.Array) continue;
             var json = JsonObject.Create(blocker)!;
-            if (!TaskWorkflow.ValidDecisionOptions(json)) continue;
-            var decision = new WorkflowBlocker(json);
-            var answer = answers.RootElement.ValueKind == JsonValueKind.Object && answers.RootElement.TryGetProperty(decision.Id, out var recorded) && recorded.ValueKind == JsonValueKind.String
-                ? DashboardText.Safe(recorded.GetString()!) : null;
-            decisions.Add(new(decision.Id, decision.Summary, decision.RecheckCondition, decision.Options, decision.RecommendedOption, answer));
+            var decision = HumanDecision(json, answers);
+            if (decision.Answer is not null && deliveries?[decision.BlockerId] is JsonObject attempt
+                && TaskDashboardSummary.String(attempt["failure"]) is "closed" or "unknown" or "full" or "unread")
+            {
+                var recipient = BoardTask.HumanAnswerRecipient(attempt, target, owner);
+                decision = decision with { DeliveryFailure = TaskDashboardSummary.String(attempt["failure"]), ResendSessionId = recipient == DashboardText.Safe(recipient) ? recipient : null };
+            }
+            decisions.Add(decision);
         }
+        var unanswered = decisions.FirstOrDefault(decision => decision.Answer is null);
         return new()
         {
-            RepositoryId = repository, BoardId = board, TaskId = taskId, OwnerSessionId = owner ?? "", Human = human is not null, Summary = summary,
+            RepositoryId = repository, BoardId = board, TaskId = taskId, OwnerSessionId = owner ?? "", Human = human is not null, Summary = unanswered?.Question ?? summary,
             Since = Moment(human is not null ? humanSince : holdSince) ?? Moment(updatedAt), TaskVersion = taskVersion, Decisions = decisions.ToArray(),
             // A question with no choices, or one still open, keeps the task waiting on a person.
-            Answered = questions > 0 && decisions.Count == questions && decisions.All(decision => decision.Answer is not null)
+            Answered = decisions.Count > 0 && unanswered is null
         };
+    }
+
+    internal static DashboardHumanDecision HumanDecision(JsonObject blocker, JsonObject? answers)
+    {
+        var decision = new WorkflowBlocker(blocker);
+        if (blocker[WorkflowBlocker.OptionsKey] is not JsonArray || !TaskWorkflow.ValidDecisionOptions(blocker))
+            return new(DashboardText.Safe(decision.Id), DashboardText.Safe(decision.Summary), DashboardText.Safe(decision.RecheckCondition), [], "", null);
+        var options = decision.Options;
+        var answer = answers?[decision.Id] is JsonValue recorded && recorded.TryGetValue<string>(out var label)
+            && options.Contains(label, StringComparer.Ordinal) ? label : null;
+        return new(decision.Id, decision.Summary, decision.RecheckCondition, options, decision.RecommendedOption, answer);
     }
 
     /// <summary>

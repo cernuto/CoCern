@@ -31,7 +31,11 @@ public partial class DashboardTaskList : ComponentBase, IAsyncDisposable
 
     private string NextActor(DashboardBoardRow row)
     {
-        if (row.BlockerKind == "human_decision") return "Paul";
+        if (row.BlockerKind == "human_decision")
+        {
+            if (!row.HumanDecisionsAnswered) return "Paul";
+            return string.IsNullOrEmpty(row.NextActor) ? "—" : SessionLabel(row.NextActor);
+        }
         if (row.WorkflowState is "completed" or "blocked") return "—";
         if (row.LeaseUntil is { } until && until > sampledAt + sampleAge.Elapsed && !string.IsNullOrEmpty(row.Owner)) return SessionLabel(row.Owner);
         return string.IsNullOrWhiteSpace(row.NextActor) ? "—" : SessionLabel(row.NextActor);

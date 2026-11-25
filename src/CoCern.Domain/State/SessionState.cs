@@ -41,6 +41,7 @@ public sealed class SessionState(JsonObject json)
     public const string WaitingForKey = "waitingFor";
     public const string TurnPhaseKey = "turnPhase";
     public const string TurnObservedAtKey = "turnObservedAt";
+    public const string PendingAnswerReturnsKey = "pendingHumanAnswerReturns";
     public const string EventWaitsKey = "eventWaits";
     public const string EventWaitOwnerWatchesKey = "eventWaitOwnerWatches";
     public const string EventWaitOwnerClosureOutcomeKey = "eventWaitOwnerClosureOutcome";
@@ -58,6 +59,7 @@ public sealed class SessionState(JsonObject json)
         (StandingSeenKey, StateShape.Map(null)), (TargetBoardsKey, StateShape.Map(BoardWatches.EntryShape)), (WorkBoardsKey, StateShape.Map(BoardWatches.EntryShape)),
         (WorkKey, WorkLedger.Shape), (WorkReportedKey, WorkReport.Shape), (WaitingForKey, WaitingMark.Shape),
         (TurnPhaseKey, null), (TurnObservedAtKey, null),
+        (PendingAnswerReturnsKey, StateShape.Object(("boardId", null), ("taskId", null), ("messageId", null))),
         (EventWaitsKey, StateShape.Map(StateShape.Any)), (EventWaitOwnerWatchesKey, StateShape.Map(StateShape.Any)),
         (EventWaitOwnerClosureOutcomeKey, null), (EventWaitRetirement.Key, StateShape.Map(null)),
         (PeerReplyWaits.Key, StateShape.Map(StateShape.Any)), (PeerReplyWaits.SequenceKey, null),

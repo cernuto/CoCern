@@ -26,14 +26,62 @@ public sealed class WaitingOnYouTests
     private const string Repository = AggregateHub.Repository;
     private const string AdminToken = "waiting-on-you-fixture-admin";
 
-    // ---- The report on ack ----
-
     [Fact]
-    public void Dashboard_choice_requires_the_displayed_version_and_records_one_answer_on_replay()
+    public void Waiting_and_task_rows_keep_every_open_question_until_all_choices_are_answered()
     {
-        var hub = new AggregateHub();
-        var chat = Opened(hub);
-        var taskId = "choice";
+        var task = BoardTask.Create("decide");
+        var board = new BoardState(new JsonObject());
+        var workflow = JsonNode.Parse("""
+            {"state":"blocked","blockers":[
+                {"kind":"human_decision","id":"layout","summary":"Which layout?","recheckCondition":"Resume design","options":["Wide","Narrow"],"recommendedOption":"Wide"},
+                {"kind":"human_decision","id":"notes","summary":"Which notes should we publish?","recheckCondition":"Share the approved notes"},
+                {"kind":"human_decision","id":"color","summary":"Which color?","recheckCondition":"Resume styling","options":["Blue","Green"],"recommendedOption":"Blue"}]}
+            """)!.AsObject();
+        task.SetWorkflow(workflow);
+        task.Owner = "owning-chat";
+        var answers = new JsonObject { ["layout"] = "Narrow" };
+        task.Json[BoardTask.HumanAnswersKey] = answers;
+
+        WaitingBlocker Waiting() => WaitingList.Blocker(AggregateHub.BoardKey, task.TaskId, task.Owner, null, null, null,
+            task.Workflow!.BlockerList!.ToJsonString(), task.Version, answers.ToJsonString())!;
+        var mixed = Waiting();
+        Assert.False(mixed.Answered);
+        Assert.Collection(mixed.Decisions, first => Assert.Equal("Narrow", first.Answer), freeText =>
+        {
+            Assert.Equal("Which notes should we publish?", freeText.Question);
+            Assert.Equal("Share the approved notes", freeText.RecheckCondition);
+            Assert.Empty(freeText.Options);
+            Assert.Null(freeText.Answer);
+        }, last => Assert.Null(last.Answer));
+        Assert.Equal(mixed.Decisions[1].Question, mixed.Summary);
+        var row = TaskDashboardSummary.Row(board, task);
+        Assert.Equal(mixed.Summary, row["blocker"]!.GetValue<string>());
+        Assert.False(row["humanDecisionsAnswered"]!.GetValue<bool>());
+
+        // Resolving the free-text question in chat removes it from the workflow. The other choice still needs Paul.
+        workflow["blockers"]!.AsArray().RemoveAt(1);
+        task.SetWorkflow(workflow);
+        Assert.Equal("Which color?", Waiting().Summary);
+        Assert.False(TaskDashboardSummary.Row(board, task)["humanDecisionsAnswered"]!.GetValue<bool>());
+        answers["color"] = "Green";
+        Assert.True(Waiting().Answered);
+        var answered = TaskDashboardSummary.Row(board, task);
+        Assert.True(answered["humanDecisionsAnswered"]!.GetValue<bool>());
+        Assert.Equal("owning-chat", answered["humanAnswerRecipient"]!.GetValue<string>());
+        Assert.Equal("", answered["target"]!.GetValue<string>());
+
+        // One of several recorded answers has a delivery attempt and must follow an explicit retarget.
+        task.Json[BoardTask.HumanAnswerDeliveriesKey] = new JsonObject { ["color"] = new JsonObject { ["recipient"] = task.Owner, ["failure"] = "closed" } };
+        workflow["targetSessionId"] = "replacement-chat";
+        task.SetWorkflow(workflow);
+        Assert.Equal("replacement-chat", TaskDashboardSummary.Row(board, task)["humanAnswerRecipient"]!.GetValue<string>());
+        workflow.Remove("targetSessionId");
+        task.SetWorkflow(workflow);
+        Assert.Equal(task.Owner, TaskDashboardSummary.Row(board, task)["humanAnswerRecipient"]!.GetValue<string>());
+    }
+
+    private static (RelayReply Claim, RelayReply Blocked) BlockChoice(AggregateHub hub, Chat chat, string taskId)
+    {
         var create = hub.Board(RelayTools.TaskUpdate, new() { ["taskId"] = taskId, ["expectedVersion"] = 0, ["sessionId"] = chat.Id }, T0);
         Assert.True(create.Ok, create.Code);
         var claim = hub.Board(RelayTools.TaskClaim, new() { ["taskId"] = taskId, ["expectedVersion"] = create.Version, ["sessionId"] = chat.Id }, T0);
@@ -45,6 +93,16 @@ public sealed class WaitingOnYouTests
             """);
         var blocked = hub.Board(RelayTools.TaskUpdate, new() { ["taskId"] = taskId, ["sessionId"] = chat.Id, ["expectedVersion"] = claim.Version, ["workflow"] = workflow }, T0);
         Assert.True(blocked.Ok, blocked.Code);
+        return (claim, blocked);
+    }
+
+    [Fact]
+    public void Dashboard_choice_requires_the_displayed_version_and_records_one_answer_on_replay()
+    {
+        var hub = new AggregateHub();
+        var chat = Opened(hub);
+        const string taskId = "choice";
+        var (claim, blocked) = BlockChoice(hub, chat, taskId);
         var spoof = new JsonObject { ["taskId"] = taskId, ["kind"] = "human_answer", ["text"] = "Narrow", ["sessionId"] = chat.Id };
         Assert.Equal(RelayErrorCodes.InvalidArguments, hub.Board(RelayTools.SendMessage, spoof, T0).Code);
         var args = new JsonObject { ["taskId"] = taskId, ["blockerId"] = "layout", ["option"] = "Narrow", ["expectedVersion"] = blocked.Version, ["requestId"] = "viewer-choice" };
@@ -68,6 +126,92 @@ public sealed class WaitingOnYouTests
         Assert.Equal("Narrow", Assert.Single(waiting!.Decisions).Answer);
         hub.DeliverAll(T0);
         Assert.Single(hub.Inbox(chat, T0), item => item["kind"]?.ToString() == "human_answer" && item["text"]!.ToString().Contains("Narrow", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Closed_owner_returns_the_recorded_answer_and_retargeted_delivery_replays_once()
+    {
+        var hub = new AggregateHub();
+        var original = Opened(hub);
+        var replacement = hub.Open("replacement", T0);
+        const string taskId = "choice";
+        var (_, blocked) = BlockChoice(hub, original, taskId);
+        var viewer = AggregateHub.Admin with { IsInternal = true };
+        var answer = hub.Board(Operations.AnswerHumanBlocker, new() { ["taskId"] = taskId, ["blockerId"] = "layout", ["option"] = "Narrow",
+            ["expectedVersion"] = blocked.Version, ["expectedOwner"] = original.Id }, T0, viewer);
+        Assert.True(answer.Ok, answer.Code);
+        BoardTask ReadTask() => new BoardState(hub.State(AggregateKinds.Board, AggregateHub.BoardKey)).Task(taskId)!;
+
+        // A pre-upgrade board already wrote the answer and its outbox, before delivery attempts were tracked.
+        var legacy = hub.State(AggregateKinds.Board, AggregateHub.BoardKey);
+        new BoardState(legacy).Task(taskId)!.Json.Remove(BoardTask.HumanAnswerDeliveriesKey);
+        hub.Of(AggregateKinds.Board, AggregateHub.BoardKey).Value.Json = legacy.ToJsonString();
+        var close = hub.Apply(AggregateKinds.Session, original.Id, Operations.SessionExpire,
+            new() { ["sessionId"] = original.Id, ["closeSeq"] = 1, ["force"] = true, ["requestedBy"] = "admin" }, viewer, T0);
+        Assert.True(close.Ok, close.Code);
+        var delivery = Assert.Single(hub.Queued.Where(effect => effect.Operation == Operations.Deliver && effect.TargetKey == original.Id
+            && JsonNode.Parse(effect.PayloadJson)?["kind"]?.ToString() == "human_answer"));
+        Assert.True(hub.Deliver(delivery, T0).Ok);
+        var failure = Assert.Single(hub.Queued.Where(effect => effect.Operation == Operations.HumanAnswerDeliveryFailed));
+        Assert.True(hub.Deliver(failure, T0).Ok);
+        var task = ReadTask();
+        Assert.Equal("closed", task.Json[BoardTask.HumanAnswerDeliveriesKey]!["layout"]!["failure"]!.ToString());
+        Assert.Equal("Narrow", task.Json[BoardTask.HumanAnswersKey]!["layout"]!.ToString());
+
+        // An administrator repairs the still-blocked packet after its former owner's lease passes.
+        var now = T0.AddSeconds(RelayLimits.MaxLeaseSeconds + 1);
+        var workflow = task.Workflow!.Json.DeepClone().AsObject();
+        workflow[WorkflowRecord.TargetSessionIdKey] = replacement.Id;
+        var retarget = hub.Board(RelayTools.TaskUpdate, new() { ["taskId"] = taskId, ["sessionId"] = replacement.Id, ["expectedVersion"] = task.Version, ["workflow"] = workflow }, now, viewer);
+        Assert.True(retarget.Ok, retarget.Code);
+        task = ReadTask();
+        var waiting = WaitingList.Blocker(AggregateHub.BoardKey, taskId, task.Owner, null, null, null, task.Workflow!.BlockerList!.ToJsonString(),
+            task.Version, task.Json[BoardTask.HumanAnswersKey]!.ToJsonString(), task.Json[BoardTask.HumanAnswerDeliveriesKey]!.ToJsonString(), task.Workflow.TargetSessionId);
+        var decision = Assert.Single(waiting!.Decisions);
+        Assert.Equal("closed", decision.DeliveryFailure);
+        Assert.Empty(BoardTask.Shape.Undeclared(task.Json));
+        Assert.Equal(replacement.Id, decision.ResendSessionId);
+        var resend = new JsonObject { ["requestId"] = "resend", ["taskId"] = taskId, ["blockerId"] = "layout", ["expectedVersion"] = task.Version, ["expectedOwner"] = original.Id };
+        Assert.Equal(RelayErrorCodes.VersionConflict, hub.Board(Operations.ResendHumanAnswer, resend, now, viewer).Code);
+        resend["expectedOwner"] = replacement.Id;
+        Assert.Equal(RelayErrorCodes.InternalOnly, hub.Board(Operations.ResendHumanAnswer, resend, now, AggregateHub.Admin).Code);
+        var sent = hub.Board(Operations.ResendHumanAnswer, resend, now, viewer);
+        Assert.True(sent.Ok, sent.Code);
+        Assert.Equal(RelayErrorCodes.AdministratorRequired, hub.Board(Operations.ResendHumanAnswer, resend, now, viewer with { IsAdministrator = false }).Code);
+        Assert.Equal(sent.DataJson, hub.Board(Operations.ResendHumanAnswer, resend, now, viewer).DataJson);
+        Assert.True(hub.Deliver(failure, now).Ok);
+        hub.DeliverAll(now);
+        Assert.Single(hub.Inbox(replacement, now), item => item["kind"]?.ToString() == "human_answer" && item["text"]!.ToString().Contains("Narrow", StringComparison.Ordinal));
+        Assert.Single(ReadTask().Messages);
+        Assert.Null(ReadTask().Json[BoardTask.HumanAnswerDeliveriesKey]!["layout"]!["failure"]);
+    }
+
+    [Fact]
+    public void Closing_a_chat_returns_unread_answers_beyond_the_notice_limit()
+    {
+        var hub = new AggregateHub();
+        var chat = Opened(hub);
+        var session = hub.State(AggregateKinds.Session, chat.Id);
+        var inbox = new SessionState(session).Inbox;
+        var total = RelayLimits.MaxMessagesReturnedOnClose + 2;
+        for (var index = 0; index < total; index++)
+            inbox.Add(new() { MessageId = $"answer-{index}", RepositoryId = AggregateHub.Repository, BoardId = "default", TaskId = $"task-{index}", Kind = "human_answer" });
+        hub.Of(AggregateKinds.Session, chat.Id).Value.Json = session.ToJsonString();
+        var close = hub.Apply(AggregateKinds.Session, chat.Id, Operations.SessionExpire,
+            new() { ["sessionId"] = chat.Id, ["closeSeq"] = 1, ["force"] = true, ["requestedBy"] = "admin" }, AggregateHub.Admin with { IsInternal = true }, T0);
+        Assert.True(close.Ok, close.Code);
+        var continuation = Assert.Single(hub.Queued.Where(effect => effect.Operation == Operations.ReturnUnreadHumanAnswers));
+        Assert.Equal(RelayLimits.MaxMessagesReturnedOnClose, hub.Queued.Count(effect => effect.Operation == Operations.HumanAnswerDeliveryFailed));
+        var closed = hub.State(AggregateKinds.Session, chat.Id);
+        Assert.Empty(new SessionState(closed).Unread);
+        Assert.Empty(SessionState.Shape.Undeclared(closed));
+        Assert.True(hub.Deliver(continuation, T0).Ok);
+        Assert.True(hub.Deliver(continuation, T0).Ok);
+        var returns = hub.Queued.Where(effect => effect.Operation == Operations.HumanAnswerDeliveryFailed).Select(effect => JsonNode.Parse(effect.PayloadJson)!).ToArray();
+        Assert.Equal(total, returns.Length);
+        Assert.Equal(total, returns.Select(item => item["messageId"]!.ToString()).Distinct().Count());
+        Assert.All(returns, item => Assert.Equal("unread", item["reason"]!.ToString()));
+        Assert.DoesNotContain(hub.Queued, effect => effect.Operation == Operations.ReturnUnreadHumanAnswers);
     }
 
     private static RelayReply Ack(AggregateHub hub, Chat chat, JsonNode? waitingFor, DateTimeOffset at, string? requestId = null)
